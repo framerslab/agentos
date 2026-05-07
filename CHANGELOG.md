@@ -1,3 +1,8 @@
+## <small>0.6.20 (2026-05-07)</small>
+
+* Merge branch 'master' of https://github.com/framersai/agentos ([0089554](https://github.com/framersai/agentos/commit/0089554))
+* fix(orchestration): empty-output fallback in executeGmi when iter limit hits ([899d715](https://github.com/framersai/agentos/commit/899d715))
+
 ## <small>0.6.19 (2026-05-07)</small>
 
 * Merge branch 'master' of https://github.com/framersai/agentos ([38a708e](https://github.com/framersai/agentos/commit/38a708e))
