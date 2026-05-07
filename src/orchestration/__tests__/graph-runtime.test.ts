@@ -1340,4 +1340,62 @@ describe('GraphRuntime', () => {
     );
     expect(visitedIds).toEqual(['a', 'b', 'verifier']);
   });
+
+  // ── Telemetry forwarding through parallel + sequential branches ───────────
+  //
+  // The runtime emits `node_end` events from six different code paths
+  // (parallel-branch resolver, sequential, retry, interrupt, error, resume).
+  // Each path forwards `result.metadata` into the event's `telemetry` field
+  // so per-node iteration / tool-call counters reach streamGraph consumers
+  // identically regardless of execution mode. This test pins the parallel
+  // path specifically — the sequential path is exercised across most other
+  // tests in this suite.
+
+  it('forwards result.metadata as node_end.telemetry for both branches in a parallel batch', async () => {
+    const store = new InMemoryCheckpointStore();
+    const executeMock = vi.fn().mockImplementation(
+      async (node: GraphNode): Promise<NodeExecutionResult> => ({
+        success: true,
+        output: `${node.id}-done`,
+        // Per-node telemetry varies by branch so we can verify each event
+        // carries the metadata of its own node, not a shared/empty value.
+        metadata: node.id === 'left'
+          ? { iterations: 3, toolCalls: 2, toolErrors: 0, iterationsExhausted: false }
+          : node.id === 'right'
+            ? { iterations: 5, toolCalls: 4, toolErrors: 1, iterationsExhausted: true }
+            : { iterations: 1, toolCalls: 0, toolErrors: 0, iterationsExhausted: false },
+      }),
+    );
+
+    const runtime = new GraphRuntime({
+      checkpointStore: store,
+      nodeExecutor: makeExecutorWithMock(executeMock),
+      // No expansion handler / reevaluation — keeps the parallel batch intact
+      // so left+right resolve via the parallel branch resolver.
+    });
+
+    const graph = makeParallelJoinGraph(
+      'g-parallel-telemetry',
+      makeNode('left'),
+      makeNode('right'),
+      makeNode('join'),
+    );
+
+    const nodeEnds: Record<string, unknown> = {};
+    for await (const event of runtime.stream(graph, {})) {
+      if (event.type === 'node_end') {
+        nodeEnds[event.nodeId] = (event as { telemetry?: unknown }).telemetry;
+      }
+    }
+
+    expect(nodeEnds.left).toEqual({
+      iterations: 3, toolCalls: 2, toolErrors: 0, iterationsExhausted: false,
+    });
+    expect(nodeEnds.right).toEqual({
+      iterations: 5, toolCalls: 4, toolErrors: 1, iterationsExhausted: true,
+    });
+    expect(nodeEnds.join).toEqual({
+      iterations: 1, toolCalls: 0, toolErrors: 0, iterationsExhausted: false,
+    });
+  });
 });

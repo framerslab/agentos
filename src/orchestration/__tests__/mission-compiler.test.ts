@@ -373,6 +373,15 @@ describe('MissionCompiler.compile()', () => {
       { goal: 'Compare the top three vector databases by recall and latency', expected: 'research', why: 'compare/research' },
       { goal: '', expected: 'research', why: 'empty goal defaults to research' },
       { goal: '   \n\t  ', expected: 'research', why: 'whitespace defaults to research' },
+
+      // Conservative prefix-only matching — these compound goals could go
+      // either way semantically, so they fall through to research and the
+      // author is expected to set `plannerConfig.style` explicitly if they
+      // want creative or qa behaviour.
+      { goal: 'Research X and write a poem about it', expected: 'research', why: 'compound: research prefix wins, no mid-string matching' },
+      { goal: 'Research how to write a great tagline', expected: 'research', why: 'mid-string "write a" must NOT trigger creative — would misclassify research-about-creativity' },
+      { goal: 'Find articles about composing music', expected: 'research', why: 'mid-string "composing" must NOT trigger creative' },
+      { goal: 'Summarize the article that says "what is the meaning of life"', expected: 'qa', why: 'leading "summarize" wins (qa prefix), even though the goal is structurally research-y' },
     ];
 
     for (const { goal, expected, why } of cases) {

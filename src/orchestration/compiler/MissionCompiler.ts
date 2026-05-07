@@ -345,6 +345,13 @@ export class MissionCompiler {
    *                  "compose", "draft a", "design a", "imagine".
    *   - `research` — everything else (default).
    *
+   * The classifier is intentionally **prefix-only** — matching creative
+   * verbs anywhere in the goal would misclassify research-shaped phrasing
+   * like "Research how to write a tagline" or "Find articles about
+   * composing music" as creative. Compound goals like "Research X and
+   * write a poem about it" therefore fall through to research; authors
+   * with compound goals should set `plannerConfig.style` explicitly.
+   *
    * Public so callers can ask the classifier directly without compiling a
    * mission, and so tests can exercise the matrix of goal patterns without
    * round-tripping through the whole compile() pipeline.
