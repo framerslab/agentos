@@ -65,6 +65,12 @@ export interface NodeExecutionResult {
   }>;
   /** When `true`, the runtime must suspend and await human resolution. */
   interrupt?: boolean;
+  /**
+   * Optional per-executor telemetry surfaced on the `node_end` event.
+   * Populated today by the GMI executor (iteration / tool-call counters);
+   * other executors leave it undefined.
+   */
+  metadata?: import('../events/GraphEvent.js').NodeTelemetry;
 }
 
 // ---------------------------------------------------------------------------
@@ -640,6 +646,7 @@ export class NodeExecutor {
       const toolResults: Array<{ name: string; content: string }> = [];
       const toolErrors: Array<{ name: string; error: string }> = [];
       let iterationsExhausted = false;
+      let iterations = 0;
 
       for await (const event of this.deps.loopController.execute(
         {
@@ -651,6 +658,8 @@ export class NodeExecutor {
       )) {
         if (event.type === 'text_delta') {
           accumulatedText += event.content;
+        } else if (event.type === 'loop_complete') {
+          iterations = event.totalIterations;
         } else if (event.type === 'tool_result' && event.result?.success) {
           const out = event.result.output;
           const content: string = typeof out === 'string'
@@ -669,6 +678,7 @@ export class NodeExecutor {
           toolErrors.push({ name: event.toolName, error: String(event.error).slice(0, PER_ERROR_CAP) });
         } else if (event.type === 'max_iterations_reached') {
           iterationsExhausted = true;
+          iterations = event.iteration;
         }
       }
 
@@ -710,7 +720,16 @@ export class NodeExecutor {
         accumulatedText = lines.join('\n').trimEnd();
       }
 
-      return { success: true, output: accumulatedText };
+      return {
+        success: true,
+        output: accumulatedText,
+        metadata: {
+          iterations,
+          toolCalls: toolResults.length,
+          toolErrors: toolErrors.length,
+          iterationsExhausted,
+        },
+      };
     } catch (err) {
       return {
         success: false,

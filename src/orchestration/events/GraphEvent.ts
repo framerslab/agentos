@@ -32,6 +32,24 @@ export type MissionExpansionTrigger =
   | 'supervisor_manage'
   | 'planner_reeval';
 
+/**
+ * Optional per-node telemetry attached to `node_end` events. Populated by
+ * executors that have meaningful internal activity worth surfacing — today
+ * the GMI executor reports the ReAct-loop iteration count, the number of
+ * tool calls and errors observed, and whether the iteration cap was hit.
+ * Other executors omit `telemetry` entirely.
+ */
+export interface NodeTelemetry {
+  /** Number of internal LLM iterations the node ran (GMI/ReAct loop). */
+  iterations?: number;
+  /** Successful tool result events observed during execution. */
+  toolCalls?: number;
+  /** Failed tool calls observed during execution. */
+  toolErrors?: number;
+  /** True when the loop hit `maxIterations` without a natural termination. */
+  iterationsExhausted?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // GraphEvent discriminated union
 // ---------------------------------------------------------------------------
@@ -52,8 +70,17 @@ export type GraphEvent =
   /**
    * Emitted after a node's executor returns successfully.
    * `durationMs` is wall-clock time from `node_start` to `node_end`.
+   * `telemetry` carries optional per-executor diagnostic counters — populated
+   * today by the GMI executor (iteration count, tool calls, tool errors,
+   * whether the iteration cap was hit). Other executors leave it undefined.
    */
-  | { type: 'node_end'; nodeId: string; output: unknown; durationMs: number }
+  | {
+      type: 'node_end';
+      nodeId: string;
+      output: unknown;
+      durationMs: number;
+      telemetry?: NodeTelemetry;
+    }
 
   /** Emitted when the executor resolves a routing condition and moves to the next node. */
   | { type: 'edge_transition'; sourceId: string; targetId: string; edgeType: string }

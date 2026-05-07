@@ -317,7 +317,7 @@ export class GraphRuntime {
 
             // Check for interrupt / error in the parallel branch.
             if (result.interrupt) {
-              events.push({ type: 'node_end', nodeId, output: result.output, durationMs });
+              events.push({ type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata });
               const terminationEvents: GraphEvent[] = [
                 { type: 'interrupt', nodeId, reason: 'human_approval' },
               ];
@@ -338,7 +338,7 @@ export class GraphRuntime {
               return { nodeId, events, branchState, earlyTermination: { type: 'error' as const, events: terminationEvents } };
             }
 
-            events.push({ type: 'node_end', nodeId, output: result.output, durationMs });
+            events.push({ type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata });
             completedNodes.push(nodeId);
 
             // Edge routing for this parallel branch.
@@ -584,7 +584,7 @@ export class GraphRuntime {
 
         // ── Human interrupt ───────────────────────────────────────────────────
         if (result.interrupt) {
-          yield { type: 'node_end', nodeId, output: result.output, durationMs };
+          yield { type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata };
           yield { type: 'interrupt', nodeId, reason: 'human_approval' };
           // Persist so the run can be resumed later.
           const checkpointId = await this.saveCheckpoint(
@@ -638,7 +638,7 @@ export class GraphRuntime {
           return;
         }
 
-        yield { type: 'node_end', nodeId, output: result.output, durationMs };
+        yield { type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata };
 
         completedNodes.push(nodeId);
 
@@ -908,7 +908,7 @@ export class GraphRuntime {
         }
 
         if (result.interrupt) {
-          yield { type: 'node_end', nodeId, output: result.output, durationMs };
+          yield { type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata };
           yield { type: 'interrupt', nodeId, reason: 'human_approval' };
           const checkpointId = await this.saveCheckpoint(
             activeGraph,
@@ -961,7 +961,7 @@ export class GraphRuntime {
           return;
         }
 
-        yield { type: 'node_end', nodeId, output: result.output, durationMs };
+        yield { type: 'node_end', nodeId, output: result.output, durationMs, telemetry: result.metadata };
         completedNodes.push(nodeId);
 
         const expansionRequests = [...(result.expansionRequests ?? [])];

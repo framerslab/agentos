@@ -527,4 +527,96 @@ describe('NodeExecutor', () => {
     expect(output.length).toBeLessThan(20000);
     expect(output).toContain('[fallback truncated]');
   });
+
+  // -------------------------------------------------------------------------
+  // Test 15 — GMI executor populates per-node telemetry (iteration count,
+  // tool calls, tool errors, iterationsExhausted) so the runtime can surface
+  // it on `node_end` events for mission report telemetry.
+  // -------------------------------------------------------------------------
+  it('returns iteration / tool-call telemetry as result.metadata', async () => {
+    const mockLoopController = {
+      async *execute(_config: unknown, _context: unknown) {
+        yield { type: 'text_delta' as const, content: 'thinking' };
+        yield {
+          type: 'tool_result' as const,
+          toolName: 'web_search',
+          result: { id: 'tc1', name: 'web_search', success: true, output: 'urls' },
+        };
+        yield {
+          type: 'tool_result' as const,
+          toolName: 'image_search',
+          result: { id: 'tc2', name: 'image_search', success: true, output: 'images' },
+        };
+        yield { type: 'tool_error' as const, toolName: 'web_scrape', error: 'timeout' };
+        yield { type: 'loop_complete' as const, totalIterations: 3 };
+      },
+    };
+
+    async function* mockProviderCall() {
+      return { responseText: '', toolCalls: [], finishReason: 'stop' };
+    }
+
+    const executor = new NodeExecutor({
+      loopController: mockLoopController as any,
+      providerCall: () => mockProviderCall(),
+    });
+
+    const node: GraphNode = {
+      id: 'gather-info',
+      type: 'gmi',
+      executorConfig: { type: 'gmi', instructions: 'Research', maxInternalIterations: 5 },
+      executionMode: 'single_turn',
+      effectClass: 'pure',
+      checkpoint: 'none',
+    };
+
+    const result = await executor.execute(node, {} as Partial<GraphState>);
+
+    expect(result.success).toBe(true);
+    expect(result.metadata).toEqual({
+      iterations: 3,
+      toolCalls: 2,
+      toolErrors: 1,
+      iterationsExhausted: false,
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 16 — Telemetry marks iterationsExhausted=true when the loop hits
+  // max_iterations_reached (so mission reports can show users that the
+  // budget capped, not that the model finished naturally).
+  // -------------------------------------------------------------------------
+  it('marks iterationsExhausted in telemetry when max_iterations_reached fires', async () => {
+    const mockLoopController = {
+      async *execute(_config: unknown, _context: unknown) {
+        yield { type: 'text_delta' as const, content: 'partial' };
+        yield { type: 'max_iterations_reached' as const, iteration: 4 };
+      },
+    };
+
+    async function* mockProviderCall() {
+      return { responseText: '', toolCalls: [], finishReason: 'stop' };
+    }
+
+    const executor = new NodeExecutor({
+      loopController: mockLoopController as any,
+      providerCall: () => mockProviderCall(),
+    });
+
+    const node: GraphNode = {
+      id: 'gather-info',
+      type: 'gmi',
+      executorConfig: { type: 'gmi', instructions: 'Research', maxInternalIterations: 4 },
+      executionMode: 'single_turn',
+      effectClass: 'pure',
+      checkpoint: 'none',
+    };
+
+    const result = await executor.execute(node, {} as Partial<GraphState>);
+
+    expect(result.metadata).toMatchObject({
+      iterations: 4,
+      iterationsExhausted: true,
+    });
+  });
 });
