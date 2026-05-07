@@ -1,3 +1,8 @@
+## <small>0.6.25 (2026-05-07)</small>
+
+* Merge branch 'master' of https://github.com/framersai/agentos ([860467b](https://github.com/framersai/agentos/commit/860467b))
+* feat(orchestration): auto-classify goals to plan templates + harden fallback ([d81d47d](https://github.com/framersai/agentos/commit/d81d47d))
+
 ## <small>0.6.24 (2026-05-07)</small>
 
 * Merge branch 'master' of https://github.com/framersai/agentos ([0e93a58](https://github.com/framersai/agentos/commit/0e93a58))

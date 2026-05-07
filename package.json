@@ -1,6 +1,6 @@
 {
   "name": "@framers/agentos",
-  "version": "0.6.24",
+  "version": "0.6.25",
   "description": "AgentOS — open-source TypeScript runtime for autonomous AI agents. Unified graph orchestration, cognitive memory, runtime tool generation, multi-tier guardrails, voice pipeline, and 21 LLM providers.",
   "homepage": "https://agentos.sh",
   "repository": {
