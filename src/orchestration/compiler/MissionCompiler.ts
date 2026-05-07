@@ -319,7 +319,7 @@ export class MissionCompiler {
    * tool-heavy phases more iteration budget than reasoning-only phases.
    */
   private static generateStubPlan(config: MissionConfig): SimplePlan {
-    const style = config.plannerConfig.style ?? 'research';
+    const style = config.plannerConfig.style ?? MissionCompiler.classifyGoal(config.goalTemplate);
     if (style !== 'research' && style !== 'qa' && style !== 'creative') {
       throw new Error(
         `Unknown plannerConfig.style "${style}". Supported values: 'research', 'qa', 'creative'.`,
@@ -329,6 +329,72 @@ export class MissionCompiler {
     if (style === 'qa') return MissionCompiler.generateQaPlan(goalBlock);
     if (style === 'creative') return MissionCompiler.generateCreativePlan(goalBlock);
     return MissionCompiler.generateResearchPlan(goalBlock);
+  }
+
+  /**
+   * Auto-classify a goal template into the most appropriate plan template.
+   * Used when `plannerConfig.style` is not set explicitly. Pure keyword/regex
+   * matching — no LLM call. Returns `'research'` for ambiguous or empty
+   * goals to preserve the prior default behaviour.
+   *
+   * Detection rules:
+   *   - `qa`       — question-shaped goals starting with "what is", "why does",
+   *                  "how do I", "explain", "define", or short trailing-?
+   *                  questions where a research+refine pipeline is overkill.
+   *   - `creative` — artifact-producing goals starting with "write a",
+   *                  "compose", "draft a", "design a", "imagine".
+   *   - `research` — everything else (default).
+   *
+   * Public so callers can ask the classifier directly without compiling a
+   * mission, and so tests can exercise the matrix of goal patterns without
+   * round-tripping through the whole compile() pipeline.
+   */
+  static classifyGoal(goalTemplate: string): 'research' | 'qa' | 'creative' {
+    const goal = String(goalTemplate ?? '').trim();
+    if (goal.length === 0) return 'research';
+    const lower = goal.toLowerCase();
+
+    // QA: explicit question phrasing or short trailing-? questions.
+    const qaPrefixes = [
+      /^what\s+(is|are|was|were|does|do|did|will|would|should)\b/,
+      /^why\s+(is|are|was|were|does|do|did|should|would)\b/,
+      /^how\s+(do|does|did|can|should|would|to)\s+(i|you|we)?\b/,
+      /^how\s+to\b/,
+      /^when\s+(is|are|does|do|did|should|would)\b/,
+      /^who\s+(is|are|was|were|does|do|did)\b/,
+      /^where\s+(is|are|was|were|does|do|did)\b/,
+      /^(explain|define|describe|summari[sz]e|clarify)\b/,
+      /^is\s+\w/,
+      /^are\s+\w/,
+      /^does\s+\w/,
+      /^do\s+\w/,
+      /^can\s+\w/,
+      /^should\s+\w/,
+      /^will\s+\w/,
+    ];
+    if (qaPrefixes.some((rx) => rx.test(lower))) return 'qa';
+
+    // Creative: artifact-producing verbs at the start of the goal. Evaluated
+    // BEFORE the trailing-`?` qa guard so a creative goal ending in a
+    // question mark (e.g. `Write a haiku about morning fog?`) still routes
+    // to `creative` rather than collapsing into qa.
+    const creativePrefixes = [
+      /^write\s+(a|an|the|some)\s+\w/,
+      /^compose\b/,
+      /^draft\s+(a|an|the)\s+\w/,
+      /^design\s+(a|an|the)\s+\w/,
+      /^imagine\b/,
+      /^invent\b/,
+      /^pen\s+(a|an|the)\b/,
+      /^craft\s+(a|an|the)\s+\w/,
+    ];
+    if (creativePrefixes.some((rx) => rx.test(lower))) return 'creative';
+
+    // Short trailing-question form ≤120 chars — last-resort qa heuristic
+    // for terse questions that didn't match the explicit prefix list.
+    if (lower.endsWith('?') && lower.length <= 120) return 'qa';
+
+    return 'research';
   }
 
   /**

@@ -687,6 +687,14 @@ export class NodeExecutor {
       // of an empty string. Successful results take priority; if there are only
       // errors, surface those so the user can see what went wrong.
       if (!accumulatedText.trim() && (toolResults.length > 0 || toolErrors.length > 0)) {
+        // Tool names come from a registry but third-party extensions can in
+        // principle register names containing newlines, backticks, or other
+        // markdown-breaking characters. The fallback string is consumed both
+        // as plain conversation context and rendered into mission report
+        // markdown — sanitising defensively keeps a malformed tool name from
+        // breaking either path. Cap to 80 chars to bound pathological names.
+        const safeToolName = (raw: string): string =>
+          String(raw).replace(/[`\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim().slice(0, 80) || 'unnamed-tool';
         const header = iterationsExhausted
           ? '[max_iterations_reached before final summary; surfacing raw tool activity]'
           : '[no text response from model; surfacing raw tool activity]';
@@ -709,11 +717,11 @@ export class NodeExecutor {
           return true;
         };
         for (const r of toolResults) {
-          if (!pushChunk([`Tool: ${r.name}`, 'Result:', r.content, ''])) break;
+          if (!pushChunk([`Tool: ${safeToolName(r.name)}`, 'Result:', r.content, ''])) break;
         }
         if (!truncated) {
           for (const e of toolErrors) {
-            if (!pushChunk([`Tool: ${e.name}`, `Error: ${e.error}`, ''])) break;
+            if (!pushChunk([`Tool: ${safeToolName(e.name)}`, `Error: ${e.error}`, ''])) break;
           }
         }
         if (truncated) lines.push('[fallback truncated]');

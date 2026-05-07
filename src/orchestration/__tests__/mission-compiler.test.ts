@@ -348,4 +348,61 @@ describe('MissionCompiler.compile()', () => {
       }).toThrow(/style/i);
     });
   });
+
+  describe('classifyGoal — auto-detect the right style template from the goal text', () => {
+    const cases: Array<{ goal: string; expected: 'research' | 'qa' | 'creative'; why: string }> = [
+      // QA indicators
+      { goal: 'What is the difference between TCP and UDP?', expected: 'qa', why: 'leading "what is"' },
+      { goal: 'Why does Postgres use MVCC?', expected: 'qa', why: 'leading "why does"' },
+      { goal: 'How do I parse a date in JavaScript?', expected: 'qa', why: 'leading "how do I"' },
+      { goal: 'Explain Kubernetes pod scheduling', expected: 'qa', why: 'leading "explain"' },
+      { goal: 'Define eventual consistency', expected: 'qa', why: 'leading "define"' },
+      { goal: 'Is Redis suitable for primary storage?', expected: 'qa', why: 'short question ending with ?' },
+
+      // Creative indicators
+      { goal: 'Write a haiku about the first day of spring', expected: 'creative', why: 'write a + creative form' },
+      { goal: 'Write a haiku about morning fog?', expected: 'creative', why: 'creative prefix beats trailing-? qa heuristic' },
+      { goal: 'Compose a short jingle for a coffee brand', expected: 'creative', why: 'compose' },
+      { goal: 'Design a minimalist logo for a fintech startup', expected: 'creative', why: 'design a' },
+      { goal: 'Draft a press release for the v2 launch', expected: 'creative', why: 'draft a' },
+      { goal: 'Imagine an alternate ending where the protagonist refuses', expected: 'creative', why: 'imagine' },
+
+      // Research (default) — goals that DON'T match qa/creative cues
+      { goal: 'Research current Reddit-friendly meme formats and produce a karma-optimized posting plan', expected: 'research', why: 'starts with research' },
+      { goal: 'Find the highest-engagement subreddits for tech content', expected: 'research', why: 'find/research-flavored' },
+      { goal: 'Compare the top three vector databases by recall and latency', expected: 'research', why: 'compare/research' },
+      { goal: '', expected: 'research', why: 'empty goal defaults to research' },
+      { goal: '   \n\t  ', expected: 'research', why: 'whitespace defaults to research' },
+    ];
+
+    for (const { goal, expected, why } of cases) {
+      it(`classifies "${goal.slice(0, 60)}${goal.length > 60 ? '…' : ''}" → ${expected} (${why})`, () => {
+        expect(MissionCompiler.classifyGoal(goal)).toBe(expected);
+      });
+    }
+
+    it('uses classifyGoal when plannerConfig.style is undefined (default behavior)', () => {
+      const ir = MissionCompiler.compile(makeBaseConfig({
+        goalTemplate: 'What is the airspeed velocity of an unladen swallow?',
+        plannerConfig: { strategy: 'linear', maxSteps: 4 },
+      }));
+      const ids = ir.nodes.map((n) => n.id);
+      // Without auto-classification we'd see gather-info; with it we see qa template.
+      expect(ids).toContain('research-quick');
+      expect(ids).toContain('answer');
+      expect(ids).not.toContain('gather-info');
+    });
+
+    it('explicit plannerConfig.style overrides auto-classification', () => {
+      // A QA-shaped goal but the author explicitly picked research.
+      const ir = MissionCompiler.compile(makeBaseConfig({
+        goalTemplate: 'What is the deal with React server components?',
+        plannerConfig: { strategy: 'linear', maxSteps: 4, style: 'research' },
+      }));
+      const ids = ir.nodes.map((n) => n.id);
+      expect(ids).toContain('gather-info');
+      expect(ids).toContain('refine-output');
+      expect(ids).not.toContain('research-quick');
+    });
+  });
 });

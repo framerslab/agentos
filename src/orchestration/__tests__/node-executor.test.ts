@@ -529,7 +529,102 @@ describe('NodeExecutor', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Test 15 — GMI executor populates per-node telemetry (iteration count,
+  // Test 15 — GMI fallback handles non-serializable tool outputs (BigInt)
+  // without crashing. JSON.stringify throws TypeError on BigInt; the executor
+  // must catch and fall back to String(out).
+  // -------------------------------------------------------------------------
+  it('serialises BigInt and other non-JSON-safe tool outputs via String() fallback', async () => {
+    const mockLoopController = {
+      async *execute(_config: unknown, _context: unknown) {
+        yield {
+          type: 'tool_result' as const,
+          toolName: 'count_rows',
+          result: { id: 'tc1', name: 'count_rows', success: true, output: 9007199254740993n },
+        };
+        yield { type: 'max_iterations_reached' as const, iteration: 4 };
+      },
+    };
+
+    async function* mockProviderCall() {
+      return { responseText: '', toolCalls: [], finishReason: 'stop' };
+    }
+
+    const executor = new NodeExecutor({
+      loopController: mockLoopController as any,
+      providerCall: () => mockProviderCall(),
+    });
+
+    const node: GraphNode = {
+      id: 'gather-info',
+      type: 'gmi',
+      executorConfig: { type: 'gmi', instructions: 'Count rows', maxInternalIterations: 4 },
+      executionMode: 'single_turn',
+      effectClass: 'pure',
+      checkpoint: 'none',
+    };
+
+    const result = await executor.execute(node, {} as Partial<GraphState>);
+
+    expect(result.success).toBe(true);
+    const output = String(result.output ?? '');
+    // Fallback fired and serialised the BigInt safely.
+    expect(output).toContain('count_rows');
+    expect(output).toContain('9007199254740993');
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 16 — GMI fallback sanitises tool names so a registry tool with weird
+  // chars (newlines, backticks, control chars) can't break the markdown
+  // structure when the host renders the fallback as a code block in a report.
+  // -------------------------------------------------------------------------
+  it('sanitises tool names with newlines/backticks before interpolating into the fallback', async () => {
+    const mockLoopController = {
+      async *execute(_config: unknown, _context: unknown) {
+        yield {
+          type: 'tool_result' as const,
+          toolName: 'evil`tool\n# fake-heading',
+          result: { id: 'tc1', name: 'evil`tool\n# fake-heading', success: true, output: 'data' },
+        };
+        yield { type: 'max_iterations_reached' as const, iteration: 4 };
+      },
+    };
+
+    async function* mockProviderCall() {
+      return { responseText: '', toolCalls: [], finishReason: 'stop' };
+    }
+
+    const executor = new NodeExecutor({
+      loopController: mockLoopController as any,
+      providerCall: () => mockProviderCall(),
+    });
+
+    const node: GraphNode = {
+      id: 'gather-info',
+      type: 'gmi',
+      executorConfig: { type: 'gmi', instructions: 'Run', maxInternalIterations: 4 },
+      executionMode: 'single_turn',
+      effectClass: 'pure',
+      checkpoint: 'none',
+    };
+
+    const result = await executor.execute(node, {} as Partial<GraphState>);
+
+    const output = String(result.output ?? '');
+    // The sanitiser must strip newlines and backticks from the tool name
+    // since they would break a markdown code-fence rendering of the report.
+    // The `Tool: ` line should be a single line with no backticks; the
+    // raw `# fake-heading` text is fine mid-line (markdown headings only
+    // fire at the start of a line).
+    const toolLines = output.split('\n').filter((l) => l.startsWith('Tool: '));
+    expect(toolLines).toHaveLength(1);
+    expect(toolLines[0]).not.toContain('`');
+    // The dangerous case (newline-promoted heading) is structurally
+    // impossible after sanitising newlines.
+    expect(output.match(/^# fake-heading/m)).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 17 — GMI executor populates per-node telemetry (iteration count,
   // tool calls, tool errors, iterationsExhausted) so the runtime can surface
   // it on `node_end` events for mission report telemetry.
   // -------------------------------------------------------------------------
@@ -582,7 +677,7 @@ describe('NodeExecutor', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Test 16 — Telemetry marks iterationsExhausted=true when the loop hits
+  // Test 18 — Telemetry marks iterationsExhausted=true when the loop hits
   // max_iterations_reached (so mission reports can show users that the
   // budget capped, not that the model finished naturally).
   // -------------------------------------------------------------------------
