@@ -71,6 +71,20 @@ export interface MissionConfig {
      * less research-shaped graph for non-research goals.
      */
     style?: 'research' | 'qa' | 'creative';
+    /**
+     * Pre-generated plan that bypasses both `style` template selection and
+     * the goal classifier. When set, the compiler validates the plan shape
+     * (non-empty, unique step ids, known actions, valid phases) and uses
+     * the steps directly to build the graph. Intended for callers that
+     * generate plans externally — e.g. wunderland's opt-in
+     * `planner.style: 'llm'` mode that asks an LLM to decompose the goal
+     * into steps at YAML compile time.
+     *
+     * Validation is intentionally strict: invalid plans throw at compile
+     * time rather than producing a partially-correct graph that fails
+     * mid-execution.
+     */
+    plan?: SimplePlan;
   };
   /**
    * Optional mission-level policy overrides.
@@ -319,6 +333,14 @@ export class MissionCompiler {
    * tool-heavy phases more iteration budget than reasoning-only phases.
    */
   private static generateStubPlan(config: MissionConfig): SimplePlan {
+    // A pre-generated plan (e.g. from wunderland's LLM-driven planner)
+    // takes precedence over both `style` and the goal classifier. Validate
+    // strictly so a malformed plan fails at compile time rather than
+    // mid-execution.
+    if (config.plannerConfig.plan) {
+      MissionCompiler.validateInjectedPlan(config.plannerConfig.plan);
+      return config.plannerConfig.plan;
+    }
     const style = config.plannerConfig.style ?? MissionCompiler.classifyGoal(config.goalTemplate);
     if (style !== 'research' && style !== 'qa' && style !== 'creative') {
       throw new Error(
@@ -329,6 +351,58 @@ export class MissionCompiler {
     if (style === 'qa') return MissionCompiler.generateQaPlan(goalBlock);
     if (style === 'creative') return MissionCompiler.generateCreativePlan(goalBlock);
     return MissionCompiler.generateResearchPlan(goalBlock);
+  }
+
+  /**
+   * Validate a pre-generated `SimplePlan` against the same shape rules the
+   * built-in stub templates respect:
+   *   - at least one step
+   *   - unique step ids
+   *   - known actions (`reasoning`, `tool_call`, `human_input`, `validation`)
+   *   - valid phases (`gather`, `process`, `validate`, `deliver`)
+   *
+   * Throws an Error with a human-readable reason on the first violation;
+   * the caller (`generateStubPlan`) propagates that to the user.
+   */
+  private static validateInjectedPlan(plan: SimplePlan): void {
+    if (!plan || !Array.isArray(plan.steps) || plan.steps.length === 0) {
+      throw new Error('Injected plannerConfig.plan must contain at least one step (got empty plan).');
+    }
+    const knownActions = new Set(['reasoning', 'tool_call', 'human_input', 'validation']);
+    const knownPhases = new Set(['gather', 'process', 'validate', 'deliver']);
+    const seenIds = new Set<string>();
+    for (const step of plan.steps) {
+      if (!step.id || typeof step.id !== 'string') {
+        throw new Error('Injected plannerConfig.plan: every step must have a non-empty string id.');
+      }
+      if (seenIds.has(step.id)) {
+        throw new Error(`Injected plannerConfig.plan: step ids must be unique — duplicate "${step.id}".`);
+      }
+      seenIds.add(step.id);
+      if (!knownActions.has(String(step.action))) {
+        throw new Error(
+          `Injected plannerConfig.plan: step "${step.id}" has unknown action "${step.action}". ` +
+          `Allowed: ${[...knownActions].join(', ')}.`,
+        );
+      }
+      if (!knownPhases.has(String(step.phase))) {
+        throw new Error(
+          `Injected plannerConfig.plan: step "${step.id}" has unknown phase "${step.phase}". ` +
+          `Allowed: ${[...knownPhases].join(', ')}.`,
+        );
+      }
+      // Tool-call steps need a registered tool name — without it `stepToNode`
+      // would fall back to the literal string `'unknown'` which never matches
+      // a real tool, so the failure is much clearer when caught here.
+      if (String(step.action) === 'tool_call') {
+        const toolName = (step as { toolName?: unknown }).toolName;
+        if (typeof toolName !== 'string' || toolName.trim().length === 0) {
+          throw new Error(
+            `Injected plannerConfig.plan: step "${step.id}" with action "tool_call" must include a non-empty toolName.`,
+          );
+        }
+      }
+    }
   }
 
   /**

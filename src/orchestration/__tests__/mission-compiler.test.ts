@@ -414,4 +414,115 @@ describe('MissionCompiler.compile()', () => {
       expect(ids).not.toContain('research-quick');
     });
   });
+
+  describe('plannerConfig.plan — pre-generated plan injection (LLM-driven planner support)', () => {
+    it('uses the provided plan and skips stub generation when plan is set', () => {
+      const ir = MissionCompiler.compile(makeBaseConfig({
+        plannerConfig: {
+          strategy: 'linear',
+          maxSteps: 4,
+          plan: {
+            steps: [
+              { id: 'custom-research', action: 'reasoning', description: 'Custom research step', phase: 'gather', maxIterations: 5 },
+              { id: 'custom-deliver', action: 'reasoning', description: 'Custom deliver step', phase: 'deliver', maxIterations: 2 },
+            ],
+          },
+        },
+      }));
+      const ids = ir.nodes.map((n) => n.id);
+      expect(ids).toContain('custom-research');
+      expect(ids).toContain('custom-deliver');
+      // The default research-template node ids must NOT appear when a plan is injected.
+      expect(ids).not.toContain('gather-info');
+      expect(ids).not.toContain('refine-output');
+    });
+
+    it('rejects an injected plan with zero steps', () => {
+      expect(() => MissionCompiler.compile(makeBaseConfig({
+        plannerConfig: {
+          strategy: 'linear',
+          maxSteps: 4,
+          plan: { steps: [] },
+        },
+      }))).toThrow(/at least one step|empty/i);
+    });
+
+    it('rejects an injected plan whose step uses an unknown action', () => {
+      expect(() => MissionCompiler.compile(makeBaseConfig({
+        plannerConfig: {
+          strategy: 'linear',
+          maxSteps: 4,
+          plan: {
+            steps: [
+              { id: 'weird', action: 'launch-rocket' as any, description: 'x', phase: 'gather' },
+            ],
+          },
+        },
+      }))).toThrow(/action|unknown/i);
+    });
+
+    it('rejects an injected plan whose tool_call step is missing a toolName', () => {
+      expect(() => MissionCompiler.compile(makeBaseConfig({
+        plannerConfig: {
+          strategy: 'linear',
+          maxSteps: 4,
+          plan: {
+            steps: [
+              { id: 'fetch', action: 'tool_call', description: 'fetch something', phase: 'gather' },
+            ],
+          },
+        },
+      }))).toThrow(/toolName|tool_call/i);
+    });
+
+    it('rejects an injected plan whose step has a duplicate id', () => {
+      expect(() => MissionCompiler.compile(makeBaseConfig({
+        plannerConfig: {
+          strategy: 'linear',
+          maxSteps: 4,
+          plan: {
+            steps: [
+              { id: 'dup', action: 'reasoning', description: 'a', phase: 'gather' },
+              { id: 'dup', action: 'reasoning', description: 'b', phase: 'deliver' },
+            ],
+          },
+        },
+      }))).toThrow(/duplicate|unique|id/i);
+    });
+
+    it('rejects an injected plan whose step uses an unknown phase', () => {
+      expect(() => MissionCompiler.compile(makeBaseConfig({
+        plannerConfig: {
+          strategy: 'linear',
+          maxSteps: 4,
+          plan: {
+            steps: [
+              { id: 'a', action: 'reasoning', description: 'x', phase: 'wat' as any },
+            ],
+          },
+        },
+      }))).toThrow(/phase/i);
+    });
+
+    it('takes precedence over plannerConfig.style when both are set', () => {
+      const ir = MissionCompiler.compile(makeBaseConfig({
+        plannerConfig: {
+          strategy: 'linear',
+          maxSteps: 4,
+          style: 'qa', // would normally produce research-quick + answer
+          plan: {
+            steps: [
+              { id: 'plan-only-1', action: 'reasoning', description: 'first', phase: 'gather' },
+              { id: 'plan-only-2', action: 'reasoning', description: 'second', phase: 'deliver' },
+            ],
+          },
+        },
+      }));
+      const ids = ir.nodes.map((n) => n.id);
+      expect(ids).toContain('plan-only-1');
+      expect(ids).toContain('plan-only-2');
+      expect(ids).not.toContain('research-quick');
+      expect(ids).not.toContain('answer');
+    });
+  });
 });
