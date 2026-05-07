@@ -1,3 +1,8 @@
+## <small>0.6.19 (2026-05-07)</small>
+
+* Merge branch 'master' of https://github.com/framersai/agentos ([38a708e](https://github.com/framersai/agentos/commit/38a708e))
+* fix(orchestration): multi-query gather + refine-output step in stub planner ([bf90d40](https://github.com/framersai/agentos/commit/bf90d40))
+
 ## <small>0.6.18 (2026-05-07)</small>
 
 * fix(orchestration): goal-aware, phase-distinct stub mission planner ([b6f4007](https://github.com/framersai/agentos/commit/b6f4007))
