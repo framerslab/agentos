@@ -1,3 +1,8 @@
+## <small>0.6.21 (2026-05-07)</small>
+
+* Merge branch 'master' of https://github.com/framersai/agentos ([5c2e0bb](https://github.com/framersai/agentos/commit/5c2e0bb))
+* feat(orchestration): make image_search firing imperative for visual goals ([0e9d91f](https://github.com/framersai/agentos/commit/0e9d91f))
+
 ## <small>0.6.20 (2026-05-07)</small>
 
 * Merge branch 'master' of https://github.com/framersai/agentos ([0089554](https://github.com/framersai/agentos/commit/0089554))
