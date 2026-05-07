@@ -1,3 +1,8 @@
+## <small>0.6.27 (2026-05-07)</small>
+
+* Merge branch 'master' of https://github.com/framersai/agentos ([052ee28](https://github.com/framersai/agentos/commit/052ee28))
+* feat(events): NodeTelemetry adds optional token usage + cost fields ([a72f20c](https://github.com/framersai/agentos/commit/a72f20c))
+
 ## <small>0.6.26 (2026-05-07)</small>
 
 * feat(orchestration): plannerConfig.plan accepts pre-generated SimplePlan ([0723be6](https://github.com/framersai/agentos/commit/0723be6))
