@@ -15,6 +15,8 @@ Start from a prompt, brief, URL, or scenario JSON draft; compile or ground it in
 
 ## Two world-model paths: the visual one and the structured one
 
+![Two world-model paths: native/visual outputs pixels; structured/LLM-based outputs typed JSON state](/img/diagrams/paracosm-world-model-split.svg)
+
 The world-model literature ([Xing 2025](https://arxiv.org/abs/2507.05169), [ACM CSUR 2025 survey](https://dl.acm.org/doi/full/10.1145/3746449), [Yang et al 2026](https://openreview.net/forum?id=XmYCERErcD)) has converged on a clean split between two ways AI systems represent how a slice of reality changes over time:
 
 **1. Native / visual world models.** Output is pixels or spatial latents the system generates from scratch. The model learns a compressed predictive representation of the physical world directly from video, sensor data, or simulator output, and rolls it forward by predicting the next frame or scene. Sora, Genie 3, and World Labs Marble are the visual cohort; LeCun's JEPA / AMI Labs work is the predictive-representation cohort. Output you can watch on a screen. Cost is in compute, training data, and the model never having a typed handle on "what just happened."
@@ -173,7 +175,9 @@ The dashboard's living-swarm grid streams the same shape every turn via the SSE 
 
 ## What it does
 
-Paracosm runs two leaders through the same scenario in parallel and makes their divergence measurable. Each turn has nine stages:
+Paracosm runs two leaders through the same scenario in parallel and makes their divergence measurable. Each turn has nine stages, alternating between LLM reasoning (HEXACO-prompted, divergent) and a deterministic kernel (seeded, replayable):
+
+![Per-turn 9-stage flow with LLM and deterministic lanes](/img/diagrams/paracosm-turn-flow.svg)
 
 | Stage | Kind | Responsibility |
 |-------|------|----------------|
@@ -187,7 +191,9 @@ Paracosm runs two leaders through the same scenario in parallel and makes their 
 | Memory | det. | Short-term consolidates, stances drift |
 | Personality drift | det. | HEXACO traits shift under three forces |
 
-Two runs on the same seed produce identical deterministic stages. The LLM stages diverge because every prompt carries the leader's HEXACO profile and the accumulated state it shaped. The asymmetry is the entire point.
+Two runs on the same seed produce identical deterministic stages. The LLM stages diverge because every prompt carries the leader's HEXACO profile and the accumulated state it shaped. The asymmetry is the entire point — and it shows up in the final-state metrics:
+
+![Same Mars Genesis seed, Visionary vs Engineer leader, divergent trajectories and metrics](/img/diagrams/paracosm-divergence.svg)
 
 ## How HEXACO drives decisions
 
