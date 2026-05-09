@@ -326,6 +326,48 @@ describe('PostgresVectorStore', () => {
     });
   });
 
+  describe('scanByMetadata()', () => {
+    it('returns filtered documents with metadata, text, and embeddings', async () => {
+      store = new PostgresVectorStore(makeConfig());
+      await store.initialize();
+      resetMocks();
+
+      nextQueryResult = {
+        rows: [
+          {
+            id: 'expired',
+            embedding: '[1,0,0,0]',
+            metadata_json: { status: 'expired', timestamp: '2026-01-01T00:00:00.000Z' },
+            text_content: 'old doc',
+          },
+          {
+            id: 'fresh',
+            embedding: '[0,1,0,0]',
+            metadata_json: { status: 'fresh', timestamp: '2026-04-21T00:00:00.000Z' },
+            text_content: 'fresh doc',
+          },
+        ],
+        rowCount: 2,
+      };
+
+      const result = await store.scanByMetadata?.('my_docs', {
+        filter: { status: 'expired' },
+        includeMetadata: true,
+        includeTextContent: true,
+        includeEmbedding: true,
+      });
+
+      expect(lastQuery().sql).toContain('SELECT id, embedding::text, metadata_json, text_content');
+      expect(result?.documents.map((doc) => doc.id)).toEqual(['expired']);
+      expect(result?.documents[0]?.textContent).toBe('old doc');
+      expect(result?.documents[0]?.metadata).toEqual({
+        status: 'expired',
+        timestamp: '2026-01-01T00:00:00.000Z',
+      });
+      expect(result?.documents[0]?.embedding).toEqual([1, 0, 0, 0]);
+    });
+  });
+
   // =========================================================================
   // hybridSearch()
   // =========================================================================

@@ -67,7 +67,7 @@ import {
   resolveMemoryRetrievalPolicy,
 } from './policy.js';
 import type { MemoryRetrievalPolicy } from './policy.js';
-import type { RetrievedChunk } from '../../query-router/types.js';
+import type { RetrievedChunk } from '../../../orchestration/pipeline/query/types.js';
 import type { HybridSearcher, HybridResult } from '../search/HybridSearcher.js';
 import type { RaptorTree, RaptorResult } from '../raptor/RaptorTree.js';
 import type { HydeRetriever } from '../HydeRetriever.js';
@@ -228,9 +228,10 @@ export interface UnifiedRetrieverDeps {
  * across ALL available sources in parallel, merges results via RRF,
  * reranks, and feeds back into cognitive memory.
  *
- * This is the single entry point for ALL retrieval in AgentOS. It replaces
- * the need to call RetrievalAugmentor, QueryDispatcher, CognitiveMemoryManager,
- * and MultimodalIndexer separately.
+ * This is AgentOS's canonical plan-based retrieval orchestrator. Hosts can
+ * use it to replace separate calls to RetrievalAugmentor, QueryDispatcher,
+ * CognitiveMemoryManager, and MultimodalIndexer when they opt into the
+ * unified retrieval path.
  *
  * All source queries are executed with `Promise.allSettled` so partial
  * failures degrade gracefully — a failed GraphRAG query does not prevent

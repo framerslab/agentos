@@ -58,6 +58,7 @@ vi.mock('node:child_process', () => ({
 function createMockIndexer(): MultimodalIndexer & {
   indexImage: Mock;
   indexAudio: Mock;
+  indexText: Mock;
 } {
   return {
     indexImage: vi.fn(async () => ({
@@ -68,11 +69,16 @@ function createMockIndexer(): MultimodalIndexer & {
       id: 'rag-audio-001',
       transcript: 'Welcome to the machine learning podcast episode 42.',
     })),
+    indexText: vi.fn(async () => ({
+      id: 'rag-text-001',
+      text: 'Hello World This is a test document',
+    })),
     search: vi.fn(async () => []),
     createMemoryBridge: vi.fn(),
   } as unknown as MultimodalIndexer & {
     indexImage: Mock;
     indexAudio: Mock;
+    indexText: Mock;
   };
 }
 
@@ -308,11 +314,26 @@ describe('MultimodalMemoryBridge', () => {
 
     const result = await bridge.ingestPDF(pdfBuffer, {
       source: 'test-document',
+      collection: 'pdf-knowledge',
     });
 
     expect(result.contentType).toBe('pdf');
     expect(result.extractedText).toContain('Hello World');
     expect(result.extractedText).toContain('test document');
+    expect(indexer.indexText).toHaveBeenCalledTimes(1);
+    expect(indexer.indexText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Hello World'),
+        collection: 'pdf-knowledge',
+        metadata: expect.objectContaining({
+          source: 'test-document',
+          sourceModality: 'pdf',
+          chunkIndex: 0,
+          chunkCount: 1,
+        }),
+      }),
+    );
+    expect(result.ragDocumentIds).toEqual(['rag-text-001']);
 
     // Memory encoding with semantic type (factual content)
     expect(memoryManager.encode).toHaveBeenCalledWith(

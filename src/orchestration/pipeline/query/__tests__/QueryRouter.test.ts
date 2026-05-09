@@ -31,7 +31,7 @@ vi.mock('node:fs', async () => {
   };
 });
 
-import { generateText } from '../../api/generateText.js';
+import { generateText } from '../../../../api/generateText.js';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import type {
   QueryRouterConfig as PublicQueryRouterConfig,
@@ -40,7 +40,7 @@ import type {
   QueryRouterRetrievalMode,
   QueryRouterRuntimeMode,
   QueryRouterToggleableRuntimeMode,
-} from '../../index.js';
+} from '../../../../index.js';
 import { QueryRouter } from '../QueryRouter.js';
 import type { QueryResult, ClassificationResult } from '../types.js';
 
@@ -812,6 +812,81 @@ describe('QueryRouter', () => {
 
     // No UnifiedRetriever attached, so plan-based path is not exercised
     expect(result.recommendations).toBeUndefined();
+  });
+
+  it('route() reuses cached results for repeated identical queries when cacheResults is enabled', async () => {
+    const router = createRouter({ cacheResults: true });
+
+    mockGenerateText
+      .mockResolvedValueOnce(planClassifierResponse(1))
+      .mockResolvedValueOnce(generatorResponse('The Starter plan costs $19/month.'));
+
+    await router.init();
+
+    const first = await router.route('How much does it cost?');
+    const second = await router.route('How much does it cost?');
+
+    expect(first.answer).toBe('The Starter plan costs $19/month.');
+    expect(second).toEqual(first);
+    expect(mockGenerateText).toHaveBeenCalledTimes(2);
+  });
+
+  it('route() clears cached results when indexed corpus chunks change', async () => {
+    const router = createRouter({ cacheResults: true });
+
+    mockGenerateText
+      .mockResolvedValueOnce(planClassifierResponse(1))
+      .mockResolvedValueOnce(generatorResponse('The Starter plan costs $19/month.'))
+      .mockResolvedValueOnce(planClassifierResponse(1))
+      .mockResolvedValueOnce(generatorResponse('The Starter plan still costs $19/month.'));
+
+    await router.init();
+
+    const first = await router.route('How much does it cost?');
+
+    await (router as any).syncIndexedCorpusChunks([
+      {
+        heading: 'Pricing Addendum',
+        content: 'Cached query results must be invalidated after corpus changes.',
+        sourcePath: '/docs/pricing-addendum.md',
+      },
+    ]);
+
+    const second = await router.route('How much does it cost?');
+
+    expect(first.answer).toBe('The Starter plan costs $19/month.');
+    expect(second.answer).toBe('The Starter plan still costs $19/month.');
+    expect(mockGenerateText).toHaveBeenCalledTimes(4);
+  });
+
+  it('route() populates grounding when verifyCitations is enabled and embeddings are available', async () => {
+    const router = createRouter({ verifyCitations: true, cacheResults: false });
+
+    mockGenerateText
+      .mockResolvedValueOnce(planClassifierResponse(1))
+      .mockResolvedValueOnce(generatorResponse('The Starter plan costs $19/month.'));
+
+    await router.init();
+
+    (router as any).embeddingManager = {
+      generateEmbeddings: vi.fn().mockImplementation(async ({ texts }: { texts: string[] }) => ({
+        embeddings: texts.map((text) => {
+          const normalized = text.toLowerCase();
+          if (normalized.includes('starter') || normalized.includes('19/month') || normalized.includes('$19')) {
+            return [1, 0];
+          }
+          return [0, 1];
+        }),
+      })),
+    };
+
+    const result = await router.route('What does the Starter plan start at?');
+
+    expect(result.sources.length).toBeGreaterThan(0);
+    expect(result.grounding).toBeDefined();
+    expect(result.grounding?.totalClaims).toBeGreaterThan(0);
+    expect(result.grounding?.supportedCount).toBeGreaterThan(0);
+    expect(result.grounding?.claims[0]?.verdict).toBe('supported');
   });
 
   // -------------------------------------------------------------------------

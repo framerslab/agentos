@@ -1,6 +1,6 @@
 # Pinecone Backend
 
-The Pinecone backend stores embeddings in [Pinecone](https://www.pinecone.io/), a fully managed vector database. This is the simplest backend to set up — no infrastructure to manage — but has limitations compared to self-hosted options.
+The Pinecone backend stores embeddings in [Pinecone](https://www.pinecone.io/), a fully managed vector database. Pinecone remains fully supported, but it is the optional managed-cloud path rather than the default production recommendation. If you want the recommended open-source production backend, use Qdrant.
 
 ## Prerequisites
 
@@ -34,6 +34,7 @@ await store.initialize();
 |---|---|---|---|
 | `apiKey` | `string` | **required** | Pinecone API key |
 | `indexHost` | `string` | **required** | Data Plane URL for your index (from Pinecone console) |
+| `apiVersion` | `string` | `'2026-04'` | Explicit Pinecone API version header used on data-plane requests |
 | `namespace` | `string` | `''` | Default namespace; collections map to namespaces |
 | `defaultDimension` | `number` | `1536` | Embedding dimensions (must match the index) |
 
@@ -85,6 +86,12 @@ const results = await store.query('my-namespace', embedding, {
 
 Metadata values must be string, number, boolean, or string arrays. Complex objects are JSON-stringified before storage.
 
+Lifecycle-sensitive metadata operations are also supported:
+
+- `scanByMetadata()` uses Pinecone's `fetch_by_metadata` endpoint for filtered iteration
+- `delete(..., { filter })` uses Pinecone's metadata-delete path
+- transient `429` / `5xx` failures on query, upsert, scan, and delete are retried with capped exponential backoff
+
 ## Limitations
 
 ### No hybrid search
@@ -106,6 +113,8 @@ Pinecone limits upserts to 100 vectors per request. AgentOS handles this automat
 ### No `deleteAll` count
 
 `delete({ deleteAll: true })` returns `deletedCount: -1` because Pinecone's API does not report how many vectors were deleted in a bulk operation.
+
+`delete(..., { filter })` also returns `deletedCount: -1` for the same reason: Pinecone accepts the delete-by-filter request but does not return an exact deleted-row count.
 
 ## Migration FROM Pinecone to self-hosted backends
 
@@ -150,4 +159,4 @@ Self-hosted alternatives for comparison:
 | **Qdrant (Docker)** | 10M+ | Cost of your VM (~$5-20) | Built-in BM25, quantization |
 | **Qdrant Cloud** | 1M+ | ~$25+ | Managed Qdrant, auto-scaling |
 
-Pinecone is the easiest to start with but becomes expensive at scale. For production agents processing large knowledge bases, self-hosted Postgres or Qdrant offer better cost efficiency and more features (hybrid search, knowledge graph).
+Pinecone is the easiest managed path to start with but becomes expensive at scale. For production agents processing large knowledge bases, Postgres or Qdrant usually offer better cost efficiency and more features, and Qdrant is the default OSS production recommendation.

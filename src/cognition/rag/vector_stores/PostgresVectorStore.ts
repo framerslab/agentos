@@ -23,6 +23,8 @@ import type {
   RetrievedVectorDocument,
   QueryOptions,
   QueryResult,
+  MetadataScanOptions,
+  MetadataScanResult,
   UpsertOptions,
   UpsertResult,
   DeleteOptions,
@@ -30,6 +32,7 @@ import type {
   CreateCollectionOptions,
   MetadataFilter,
   MetadataFieldCondition,
+  MetadataScalarValue,
   MetadataValue,
 } from '../IVectorStore.js';
 
@@ -345,6 +348,55 @@ export class PostgresVectorStore implements IVectorStore {
     };
   }
 
+  async scanByMetadata(
+    collectionName: string,
+    options?: MetadataScanOptions,
+  ): Promise<MetadataScanResult> {
+    await this._ensureInit();
+    const table = this._t(collectionName);
+    const limit = Math.max(1, options?.limit ?? 100);
+
+    const result = await this.pool.query(
+      `SELECT id, embedding::text, metadata_json, text_content
+       FROM ${table}
+       ORDER BY updated_at ASC NULLS FIRST, created_at ASC
+       LIMIT $1`,
+      [Math.max(limit * 10, limit)],
+    );
+
+    const documents: RetrievedVectorDocument[] = [];
+    for (const row of result.rows) {
+      const metadata = row.metadata_json ?? undefined;
+      if (options?.filter && !this._matchesFilter(metadata, options.filter)) {
+        continue;
+      }
+
+      const scannedDoc: RetrievedVectorDocument = {
+        id: row.id,
+        embedding: options?.includeEmbedding ? this._parseVectorString(row.embedding) : [],
+        similarityScore: 1,
+      };
+
+      if (options?.includeMetadata !== false && metadata) {
+        scannedDoc.metadata = metadata;
+      }
+      if (options?.includeTextContent && row.text_content) {
+        scannedDoc.textContent = row.text_content;
+      }
+
+      documents.push(scannedDoc);
+      if (documents.length >= limit) break;
+    }
+
+    return {
+      documents,
+      stats: {
+        totalCandidates: result.rowCount ?? 0,
+        returnedCount: documents.length,
+      },
+    };
+  }
+
   // =========================================================================
   // Hybrid Search (Dense + Lexical with RRF)
   // =========================================================================
@@ -543,23 +595,23 @@ export class PostgresVectorStore implements IVectorStore {
         idx++;
       }
       if (cond.$gt !== undefined) {
-        conditions.push(`(${path})::numeric > $${idx}`);
-        params.push(cond.$gt);
+        conditions.push(typeof cond.$gt === 'number' ? `(${path})::numeric > $${idx}` : `${path} > $${idx}`);
+        params.push(typeof cond.$gt === 'number' ? cond.$gt : String(cond.$gt));
         idx++;
       }
       if (cond.$gte !== undefined) {
-        conditions.push(`(${path})::numeric >= $${idx}`);
-        params.push(cond.$gte);
+        conditions.push(typeof cond.$gte === 'number' ? `(${path})::numeric >= $${idx}` : `${path} >= $${idx}`);
+        params.push(typeof cond.$gte === 'number' ? cond.$gte : String(cond.$gte));
         idx++;
       }
       if (cond.$lt !== undefined) {
-        conditions.push(`(${path})::numeric < $${idx}`);
-        params.push(cond.$lt);
+        conditions.push(typeof cond.$lt === 'number' ? `(${path})::numeric < $${idx}` : `${path} < $${idx}`);
+        params.push(typeof cond.$lt === 'number' ? cond.$lt : String(cond.$lt));
         idx++;
       }
       if (cond.$lte !== undefined) {
-        conditions.push(`(${path})::numeric <= $${idx}`);
-        params.push(cond.$lte);
+        conditions.push(typeof cond.$lte === 'number' ? `(${path})::numeric <= $${idx}` : `${path} <= $${idx}`);
+        params.push(typeof cond.$lte === 'number' ? cond.$lte : String(cond.$lte));
         idx++;
       }
       if (cond.$in !== undefined && Array.isArray(cond.$in)) {
@@ -581,5 +633,100 @@ export class PostgresVectorStore implements IVectorStore {
       clause: conditions.length > 0 ? conditions.join(' AND ') : '',
       filterParams: params,
     };
+  }
+
+  private _matchesFilter(
+    metadata: Record<string, MetadataValue> | undefined,
+    filter: MetadataFilter,
+  ): boolean {
+    if (!metadata) {
+      for (const key in filter) {
+        const condition = filter[key];
+        if (typeof condition === 'object' && condition !== null && (condition as MetadataFieldCondition).$exists === false) {
+          continue;
+        }
+        return false;
+      }
+      return true;
+    }
+
+    for (const key in filter) {
+      const docValue = metadata[key];
+      const filterValue = filter[key];
+
+      if (typeof filterValue === 'object' && filterValue !== null) {
+        if (!this._evaluateCondition(docValue, filterValue as MetadataFieldCondition)) {
+          return false;
+        }
+      } else if (Array.isArray(docValue)) {
+        if (!docValue.includes(filterValue as MetadataScalarValue)) {
+          return false;
+        }
+      } else if (docValue !== filterValue) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  private _evaluateCondition(
+    docValue: MetadataValue | undefined,
+    condition: MetadataFieldCondition,
+  ): boolean {
+    if (condition.$exists !== undefined) {
+      return condition.$exists === (docValue !== undefined);
+    }
+    if (docValue === undefined) return false;
+
+    if (condition.$eq !== undefined && docValue !== condition.$eq) return false;
+    if (condition.$ne !== undefined && docValue === condition.$ne) return false;
+
+    if (typeof docValue === 'number') {
+      if (typeof condition.$gt === 'number' && !(docValue > condition.$gt)) return false;
+      if (typeof condition.$gte === 'number' && !(docValue >= condition.$gte)) return false;
+      if (typeof condition.$lt === 'number' && !(docValue < condition.$lt)) return false;
+      if (typeof condition.$lte === 'number' && !(docValue <= condition.$lte)) return false;
+    } else if (typeof docValue === 'string') {
+      if (condition.$gt !== undefined && !(docValue > String(condition.$gt))) return false;
+      if (condition.$gte !== undefined && !(docValue >= String(condition.$gte))) return false;
+      if (condition.$lt !== undefined && !(docValue < String(condition.$lt))) return false;
+      if (condition.$lte !== undefined && !(docValue <= String(condition.$lte))) return false;
+    }
+
+    if (condition.$in !== undefined) {
+      if (!Array.isArray(condition.$in)) return false;
+      if (Array.isArray(docValue)) {
+        if (!docValue.some(value => condition.$in!.includes(value as MetadataScalarValue))) return false;
+      } else if (!condition.$in.includes(docValue as MetadataScalarValue)) {
+        return false;
+      }
+    }
+
+    if (condition.$nin !== undefined) {
+      if (!Array.isArray(condition.$nin)) return false;
+      if (Array.isArray(docValue)) {
+        if (docValue.some(value => condition.$nin!.includes(value as MetadataScalarValue))) return false;
+      } else if (condition.$nin.includes(docValue as MetadataScalarValue)) {
+        return false;
+      }
+    }
+
+    if (Array.isArray(docValue)) {
+      if (condition.$contains !== undefined && !docValue.includes(condition.$contains as MetadataScalarValue)) return false;
+      if (condition.$all !== undefined) {
+        if (!Array.isArray(condition.$all) || !condition.$all.every(value => docValue.includes(value))) return false;
+      }
+    } else if (typeof docValue === 'string' && condition.$contains !== undefined && typeof condition.$contains === 'string') {
+      if (!docValue.includes(condition.$contains)) return false;
+    }
+
+    if (condition.$textSearch !== undefined) {
+      if (typeof docValue !== 'string' || !docValue.toLowerCase().includes(condition.$textSearch.toLowerCase())) {
+        return false;
+      }
+    }
+
+    return true;
   }
 }

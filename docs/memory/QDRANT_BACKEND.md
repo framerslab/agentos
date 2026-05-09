@@ -1,6 +1,6 @@
 # Qdrant Backend
 
-The Qdrant backend stores embeddings in [Qdrant](https://qdrant.tech/), a purpose-built vector database with built-in BM25 sparse vectors for hybrid search. Non-vector data (knowledge graph, document metadata) lives in a sidecar SQLite file alongside Qdrant.
+The Qdrant backend stores embeddings in [Qdrant](https://qdrant.tech/), a purpose-built vector database with built-in BM25 sparse vectors for hybrid search. Non-vector data (knowledge graph, document metadata) lives in a sidecar SQLite file alongside Qdrant. Qdrant is the default OSS production recommendation for AgentOS.
 
 ## Prerequisites
 
@@ -78,6 +78,10 @@ const results = await store.hybridSearch(
 
 **Client-side weighted fusion**: Runs two separate queries (dense + BM25) and merges results in the application with weighted reciprocal rank fusion. Use when the server doesn't support parameterized RRF.
 
+## Lifecycle-friendly metadata scans
+
+Qdrant also supports `scanByMetadata()` in the AgentOS vector-store contract. That allows `MemoryLifecycleManager` to enumerate retention/decay candidates by payload filter instead of relying on placeholder discovery logic.
+
 ## Collection-per-agent isolation
 
 Each agent (or tenant) gets its own Qdrant collection:
@@ -93,7 +97,7 @@ Collections are fully isolated. Deleting one agent's collection does not affect 
 
 Qdrant is a vector database — it stores embeddings and payload metadata. Non-vector data that the memory system needs (knowledge graph nodes/edges, consolidation logs, retrieval feedback, conversation history) lives in a **sidecar SQLite file**.
 
-The sidecar is the same `SqliteBrain` used by the default SQLite backend, minus the embedding column (which lives in Qdrant). This means:
+The sidecar is the same `Brain` used by the default SQLite backend, minus the embedding column (which lives in Qdrant). This means:
 
 - Knowledge graph queries (entity lookup, relation traversal) stay fast (local SQLite).
 - Vector queries go through Qdrant's optimized HNSW index.

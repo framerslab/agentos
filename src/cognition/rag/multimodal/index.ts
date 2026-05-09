@@ -50,6 +50,8 @@ export type {
   ImageIndexResult,
   AudioIndexOptions,
   AudioIndexResult,
+  TextIndexOptions,
+  TextIndexResult,
   MultimodalSearchOptions,
   MultimodalSearchResult,
   IVisionProvider,

@@ -249,6 +249,28 @@ describe('MultimodalIndexer', () => {
   // Audio indexing
   // -------------------------------------------------------------------------
 
+  it('should index text by embedding and storing it with text modality metadata', async () => {
+    const result = await (indexer as any).indexText({
+      text: 'Quarterly revenue increased 18 percent.',
+      metadata: { source: 'pdf', sourceModality: 'pdf' },
+      collection: 'documents',
+    });
+
+    expect(embeddingManager.generateEmbeddings).toHaveBeenCalledWith({
+      texts: ['Quarterly revenue increased 18 percent.'],
+    });
+
+    expect(vectorStore.upsert).toHaveBeenCalledTimes(1);
+    const [collection, docs] = vectorStore.upsert.mock.calls[0] as any;
+    expect(collection).toBe('documents');
+    expect(docs).toHaveLength(1);
+    expect(docs[0].textContent).toBe('Quarterly revenue increased 18 percent.');
+    expect(docs[0].metadata.modality).toBe('text');
+    expect(docs[0].metadata.sourceModality).toBe('pdf');
+    expect(result.id).toBeTruthy();
+    expect(result.text).toBe('Quarterly revenue increased 18 percent.');
+  });
+
   it('should index audio by transcribing and embedding', async () => {
     const audioBuffer = Buffer.from('fake audio data');
     const result = await indexer.indexAudio({

@@ -38,6 +38,7 @@ import { QueryDispatcher } from './QueryDispatcher.js';
 import { QueryGenerator } from './QueryGenerator.js';
 import { TopicExtractor } from './TopicExtractor.js';
 import { KeywordFallback } from './KeywordFallback.js';
+import { CitationVerifier } from '../../../cognition/rag/citation/CitationVerifier.js';
 import {
   DEFAULT_QUERY_ROUTER_CONFIG,
   DEFAULT_STRATEGY_CONFIG,
@@ -63,13 +64,14 @@ import type {
   SourceCitation,
   TopicEntry,
 } from './types.js';
+import type { VerifiedResponse, VerificationSource } from '../../../cognition/rag/citation/types.js';
 
 // RAG module types — imported as types to keep the dependency graph light.
 // The actual classes are dynamically imported in init() to stay optional.
-import type { EmbeddingManager } from '../rag/EmbeddingManager.js';
-import type { VectorStoreManager } from '../rag/VectorStoreManager.js';
-import type { AIModelProviderManager } from '../core/llm/providers/AIModelProviderManager.js';
-import type { VectorDocument } from '../core/vector-store/IVectorStore.js';
+import type { EmbeddingManager } from '../../../cognition/rag/EmbeddingManager.js';
+import type { VectorStoreManager } from '../../../cognition/rag/VectorStoreManager.js';
+import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager.js';
+import type { VectorDocument } from '../../../core/vector-store/IVectorStore.js';
 
 // ============================================================================
 // Configuration
@@ -207,7 +209,7 @@ export class QueryRouter {
    * planning.
    */
   private capabilityDiscoveryEngine:
-    import('../discovery/CapabilityDiscoveryEngine.js').CapabilityDiscoveryEngine | null = null;
+    import('../../../cognition/discovery/CapabilityDiscoveryEngine.js').CapabilityDiscoveryEngine | null = null;
 
   /** Tier-routing dispatcher. */
   private dispatcher: QueryDispatcher | null = null;
@@ -217,6 +219,9 @@ export class QueryRouter {
 
   /** Accumulated lifecycle events for observability. */
   private events: QueryRouterEventUnion[] = [];
+
+  /** In-memory cache for completed route() results. */
+  private routeResultCache = new Map<string, QueryResult>();
 
   /** Whether init() has been called successfully. */
   private initialized = false;
@@ -246,7 +251,7 @@ export class QueryRouter {
    *
    * @see setUnifiedRetriever
    */
-  private unifiedRetriever: import('../rag/unified/UnifiedRetriever.js').UnifiedRetriever | null = null;
+  private unifiedRetriever: import('../../../cognition/rag/unified/UnifiedRetriever.js').UnifiedRetriever | null = null;
 
   /**
    * The data source ID used for corpus embeddings in the vector store.
@@ -301,9 +306,10 @@ export class QueryRouter {
    * ```
    */
   setUnifiedRetriever(
-    retriever: import('../rag/unified/UnifiedRetriever.js').UnifiedRetriever | null,
+    retriever: import('../../../cognition/rag/unified/UnifiedRetriever.js').UnifiedRetriever | null,
   ): void {
     this.unifiedRetriever = retriever;
+    this.clearRouteResultCache();
   }
 
   /**
@@ -311,7 +317,7 @@ export class QueryRouter {
    *
    * @returns The UnifiedRetriever instance, or `null`.
    */
-  getUnifiedRetriever(): import('../rag/unified/UnifiedRetriever.js').UnifiedRetriever | null {
+  getUnifiedRetriever(): import('../../../cognition/rag/unified/UnifiedRetriever.js').UnifiedRetriever | null {
     return this.unifiedRetriever;
   }
 
@@ -341,12 +347,13 @@ export class QueryRouter {
    * ```
    */
   setCapabilityDiscoveryEngine(
-    engine: import('../discovery/CapabilityDiscoveryEngine.js').CapabilityDiscoveryEngine | null,
+    engine: import('../../../cognition/discovery/CapabilityDiscoveryEngine.js').CapabilityDiscoveryEngine | null,
   ): void {
     this.capabilityDiscoveryEngine = engine;
     if (this.classifier) {
       this.classifier.setCapabilityDiscoveryEngine(engine);
     }
+    this.clearRouteResultCache();
   }
 
   // ==========================================================================
@@ -621,6 +628,22 @@ export class QueryRouter {
     this.ensureInitialized();
 
     const routeStart = Date.now();
+    const trimmedHistory = this.trimConversationHistory(conversationHistory);
+    const cacheKey = this.buildRouteCacheKey(query, trimmedHistory, options);
+
+    if (this.config.cacheResults !== false) {
+      const cached = this.routeResultCache.get(cacheKey);
+      if (cached) {
+        const cachedResult = this.cloneQueryResult(cached);
+        this.emit({
+          type: 'route:complete',
+          result: cachedResult,
+          durationMs: Date.now() - routeStart,
+          timestamp: Date.now(),
+        });
+        return cachedResult;
+      }
+    }
 
     // --- Phase 1: Classification ---
     const classifyStart = Date.now();
@@ -630,7 +653,6 @@ export class QueryRouter {
       timestamp: classifyStart,
     });
 
-    const trimmedHistory = this.trimConversationHistory(conversationHistory);
     const [classification, executionPlan] = await this.classifier!.classifyWithPlan(
       query,
       trimmedHistory,
@@ -771,6 +793,11 @@ export class QueryRouter {
           }
         : undefined;
 
+    const grounding = await this.verifyGeneratedCitations(
+      generateResult.answer,
+      retrieval.chunks,
+    );
+
     const result: QueryResult = {
       answer: generateResult.answer,
       classification,
@@ -779,8 +806,13 @@ export class QueryRouter {
       durationMs: totalDuration,
       tiersUsed,
       fallbacksUsed,
+      grounding,
       recommendations,
     };
+
+    if (this.config.cacheResults !== false) {
+      this.routeResultCache.set(cacheKey, this.cloneQueryResult(result));
+    }
 
     // Log recommendations in verbose mode for observability
     if (result.recommendations) {
@@ -840,6 +872,7 @@ export class QueryRouter {
     this.corpus = [];
     this.topics = [];
     this.events = [];
+    this.clearRouteResultCache();
     this.initialized = false;
   }
 
@@ -1151,9 +1184,9 @@ export class QueryRouter {
         { EmbeddingManager: EmbeddingManagerClass },
         { VectorStoreManager: VectorStoreManagerClass },
       ] = await Promise.all([
-        import('../core/llm/providers/AIModelProviderManager.js'),
-        import('../rag/EmbeddingManager.js'),
-        import('../rag/VectorStoreManager.js'),
+        import('../../../core/llm/providers/AIModelProviderManager.js'),
+        import('../../../cognition/rag/EmbeddingManager.js'),
+        import('../../../cognition/rag/VectorStoreManager.js'),
       ]);
 
       // --- 1. Initialise the AI model provider manager ---
@@ -1348,6 +1381,8 @@ export class QueryRouter {
     if (this.classifier) {
       this.classifier = this.createClassifier(topicExtractor.formatForPrompt(this.topics));
     }
+
+    this.clearRouteResultCache();
   }
 
   private createClassifier(topicList: string): QueryClassifier {
@@ -1373,6 +1408,68 @@ export class QueryRouter {
     conversationHistory?: ConversationMessage[],
   ): ConversationMessage[] | undefined {
     return conversationHistory?.slice(-this.config.conversationWindowSize);
+  }
+
+  private buildRouteCacheKey(
+    query: string,
+    conversationHistory?: ConversationMessage[],
+    options?: QueryRouterRequestOptions,
+  ): string {
+    return JSON.stringify({
+      query,
+      conversationHistory: conversationHistory ?? null,
+      excludedCapabilityIds: [...(options?.excludedCapabilityIds ?? [])].sort(),
+      hasUnifiedRetriever: Boolean(this.unifiedRetriever),
+      verifyCitations: this.config.verifyCitations === true,
+    });
+  }
+
+  private clearRouteResultCache(): void {
+    this.routeResultCache.clear();
+  }
+
+  private cloneQueryResult(result: QueryResult): QueryResult {
+    if (typeof structuredClone === 'function') {
+      return structuredClone(result);
+    }
+    return JSON.parse(JSON.stringify(result)) as QueryResult;
+  }
+
+  private async verifyGeneratedCitations(
+    answer: string,
+    chunks: RetrievedChunk[],
+  ): Promise<VerifiedResponse | undefined> {
+    if (this.config.verifyCitations !== true) {
+      return undefined;
+    }
+
+    if (!this.embeddingManager || chunks.length === 0) {
+      return undefined;
+    }
+
+    const sources: VerificationSource[] = chunks
+      .filter((chunk) => chunk.content.trim().length > 0)
+      .map((chunk) => ({
+        content: chunk.content,
+        title: chunk.heading,
+        url: chunk.sourcePath,
+      }));
+
+    if (sources.length === 0) {
+      return undefined;
+    }
+
+    try {
+      const verifier = new CitationVerifier({
+        embedFn: async (texts: string[]) => {
+          const result = await this.embeddingManager!.generateEmbeddings({ texts });
+          return result.embeddings;
+        },
+      });
+      return await verifier.verify(answer, sources);
+    } catch {
+      return undefined;
+    }
   }
 
   private async indexAdditionalCorpusChunks(chunks: CorpusChunk[]): Promise<void> {

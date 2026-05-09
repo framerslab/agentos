@@ -28,11 +28,11 @@ AgentOS memory ships as three concentric API tiers. Each tier wraps the one belo
    │
 ┌──▼──────────────────────────────────────────────────────────────────┐
 │                    Memory Facade Layer                              │
-│  await Memory.create({ path: './brain.sqlite' })                   │
+│  await Memory.createSqlite({ path: './brain.sqlite' })                   │
 │  (remember, recall, ingest, export, import, consolidate, tools)    │
 │                                                                     │
 │  Composes:                                                          │
-│    SqliteBrain → SqliteKnowledgeGraph → SqliteMemoryGraph           │
+│    Brain → SqlKnowledgeGraph → SqlMemoryGraph           │
 │    LoaderRegistry → FolderScanner → ChunkingEngine                  │
 │    RetrievalFeedbackSignal → ConsolidationLoop                      │
 │    I/O exporters/importers (JSON, Markdown, Obsidian, SQLite, etc.) │
@@ -56,7 +56,7 @@ The `Memory` class is the primary standalone entry point. It wires together ever
 ```ts
 import { Memory } from '@framers/agentos';
 
-const mem = await Memory.create({
+const mem = await Memory.createSqlite({
   path: './brain.sqlite',
   graph: true,
   selfImprove: true,
@@ -84,9 +84,9 @@ Rehydration (`archive.rehydrate(traceId)`) returns the original content on deman
 
 | Step | Subsystem Created | Purpose |
 |------|-------------------|---------|
-| 1 | `await SqliteBrain.open(path)` | Single brain connection, schema bootstrap, storage feature bundle |
-| 2 | `SqliteKnowledgeGraph(brain)` | Entity and relationship store for knowledge graph |
-| 3 | `SqliteMemoryGraph(brain)` | Memory association graph with spreading activation |
+| 1 | `await Brain.openSqlite(path)` | Single brain connection, schema bootstrap, storage feature bundle |
+| 2 | `SqlKnowledgeGraph(brain)` | Entity and relationship store for knowledge graph |
+| 3 | `SqlMemoryGraph(brain)` | Memory association graph with spreading activation |
 | 4 | `LoaderRegistry()` | File-type detection and document parsing |
 | 5 | `FolderScanner(registry)` | Recursive directory walking with glob filters |
 | 6 | `ChunkingEngine()` | Four chunking strategies (fixed, semantic, hierarchical, layout) |
@@ -102,7 +102,7 @@ Input (text / file / URL / folder)
   │
   ▼
 ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│  LoaderRegistry  │───▶│  ChunkingEngine  │───▶│  SqliteBrain     │
+│  LoaderRegistry  │───▶│  ChunkingEngine  │───▶│  Brain     │
 │  (parse to text) │    │  (split chunks)  │    │  (store traces)  │
 └──────────────────┘    └──────────────────┘    └────────┬─────────┘
                                                          │
@@ -150,6 +150,9 @@ The `CognitiveMemoryManager` adds personality-modulated cognition on top of the 
 // 6. checkProspective  → Check time/event/context triggers
 // 7. runConsolidation  → Periodic background sweep
 ```
+
+Lifecycle note: the retention/decay sweep is now operational on the built-in
+vector stores that support `scanByMetadata()`, rather than being placeholder-only.
 
 Key additions over the standalone `Memory` facade:
 
@@ -222,9 +225,9 @@ Key differentiators:
 |------|--------|
 | `memory/facade/Memory.ts` | Standalone Memory facade |
 | `memory/facade/types.ts` | Public API types |
-| `memory/store/SqliteBrain.ts` | SQLite connection manager (12-table DDL) |
-| `memory/store/SqliteKnowledgeGraph.ts` | IKnowledgeGraph over SQLite |
-| `memory/store/SqliteMemoryGraph.ts` | IMemoryGraph with spreading activation |
+| `memory/store/Brain.ts` | SQLite connection manager (12-table DDL) |
+| `memory/store/SqlKnowledgeGraph.ts` | IKnowledgeGraph over SQLite |
+| `memory/store/SqlMemoryGraph.ts` | IMemoryGraph with spreading activation |
 | `memory/ingestion/` | LoaderRegistry, FolderScanner, ChunkingEngine, loaders |
 | `memory/feedback/RetrievalFeedbackSignal.ts` | Used/ignored detection |
 | `memory/consolidation/ConsolidationLoop.ts` | 6-step consolidation pipeline |

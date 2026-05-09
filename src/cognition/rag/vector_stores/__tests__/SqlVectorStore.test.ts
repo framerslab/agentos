@@ -206,4 +206,86 @@ describe('SqlVectorStore HNSW integration', () => {
       title: 'alpha beta doc',
     });
   });
+
+  it('scanByMetadata returns filtered documents with text content', async () => {
+    const config: SqlVectorStoreConfig = {
+      id: 'sql-vector-store-test',
+      type: 'sql',
+      hnswThreshold: Infinity,
+    };
+
+    await store.initialize(config);
+    await store.createCollection('scan', 2, { overwriteIfExists: true });
+    await store.upsert('scan', [
+      {
+        id: 'expired',
+        embedding: [1, 0],
+        textContent: 'old document',
+        metadata: {
+          status: 'expired',
+          timestamp: '2026-01-01T00:00:00.000Z',
+        },
+      },
+      {
+        id: 'fresh',
+        embedding: [0, 1],
+        textContent: 'fresh document',
+        metadata: {
+          status: 'fresh',
+          timestamp: '2026-04-21T00:00:00.000Z',
+        },
+      },
+    ]);
+
+    const result = await store.scanByMetadata?.('scan', {
+      filter: { status: 'expired' },
+      includeMetadata: true,
+      includeTextContent: true,
+      includeEmbedding: true,
+    });
+
+    expect(result?.documents.map((doc) => doc.id)).toEqual(['expired']);
+    expect(result?.documents[0]?.textContent).toBe('old document');
+    expect(result?.documents[0]?.metadata).toEqual({
+      status: 'expired',
+      timestamp: '2026-01-01T00:00:00.000Z',
+    });
+    expect(result?.documents[0]?.embedding).toEqual([1, 0]);
+  });
+
+  it('scanByMetadata supports ISO timestamp range filters', async () => {
+    const config: SqlVectorStoreConfig = {
+      id: 'sql-vector-store-test',
+      type: 'sql',
+      hnswThreshold: Infinity,
+    };
+
+    await store.initialize(config);
+    await store.createCollection('scan-timestamps', 2, { overwriteIfExists: true });
+    await store.upsert('scan-timestamps', [
+      {
+        id: 'expired',
+        embedding: [1, 0],
+        textContent: 'old document',
+        metadata: {
+          timestamp: '2024-01-01T00:00:00.000Z',
+        },
+      },
+      {
+        id: 'fresh',
+        embedding: [0, 1],
+        textContent: 'fresh document',
+        metadata: {
+          timestamp: '2026-04-21T00:00:00.000Z',
+        },
+      },
+    ]);
+
+    const result = await store.scanByMetadata?.('scan-timestamps', {
+      filter: { timestamp: { $lt: '2025-01-01T00:00:00.000Z' } },
+      includeMetadata: true,
+    });
+
+    expect(result?.documents.map((doc) => doc.id)).toEqual(['expired']);
+  });
 });

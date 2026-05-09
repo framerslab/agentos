@@ -223,6 +223,11 @@ Consolidation is a periodic background process (like sleep in humans) that:
 - **Resolves** contradictions between traces
 - **Transfers** high-importance episodic memories to semantic store
 
+Runtime note: lifecycle retention/decay sweeps are operational on the built-in
+vector stores that implement `scanByMetadata()` (`InMemory`, `SQL`,
+`Postgres`, `Hnswlib`, `Qdrant`, `Neo4j`, and `Pinecone`). Providers without
+metadata-scan support still need adapter work for full lifecycle parity.
+
 ```typescript
 const memory = new CognitiveMemoryManager({
   consolidation: {
@@ -442,7 +447,7 @@ const verbatim = await manager.rehydrate('mt_trace_abc123');
 // verbatim → "The ancient dragon Vex attacked the village of Millhaven at dawn..."
 ```
 
-The archive uses the same `@framers/sql-storage-adapter` `StorageAdapter` contract as `SqliteBrain`. When shared, soul exports bundle one file. The `rehydrate_memory` LLM tool is opt-in via `MemoryToolsExtension({ includeRehydrate: true })`.
+The archive uses the same `@framers/sql-storage-adapter` `StorageAdapter` contract as `Brain`. When shared, soul exports bundle one file. The `rehydrate_memory` LLM tool is opt-in via `MemoryToolsExtension({ includeRehydrate: true })`.
 
 Retention is usage-aware: if a trace has been rehydrated recently, the consolidation sweep keeps it regardless of age. Default retention: 365 days.
 

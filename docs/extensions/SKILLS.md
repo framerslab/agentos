@@ -50,9 +50,9 @@ console.log(snapshot.prompt);
 ## Curated registry (optional)
 
 - `@framers/agentos-skills-registry` — catalog SDK with typed query helpers and snapshot factories
-- `@framers/agentos-skills` — 69 curated SKILL.md files + registry.json
+- `@framers/agentos-skills` — 88 curated SKILL.md files + registry.json
 
-The curated content currently includes **69 skills** spanning developer tools, productivity, information, communication, memory, social media, and voice. See `@framers/agentos-skills/registry.json` for the canonical list.
+The curated content currently includes **88 skills** spanning developer tools, productivity, information, communication, memory, social media, and voice. See `@framers/agentos-skills/registry.json` for the canonical list.
 
 `@framers/agentos-skills-registry` supports two usage modes:
 
@@ -66,5 +66,5 @@ Agents can discover curated skills via the **Capability Discovery Engine** (`@fr
 Skills are discoverable at runtime via:
 
 - `@framers/agentos/skills` — the engine that exposes `skills_list`, `skills_read`, `skills_enable`, `skills_status`, and `skills_install` tools via `SkillRegistry`.
-- `@framers/agentos-skills` — the content package (69 SKILL.md files + registry.json).
+- `@framers/agentos-skills` — the content package (88 SKILL.md files + registry.json).
 - `@framers/agentos-skills-registry` — catalog SDK with typed query helpers and snapshot factories.

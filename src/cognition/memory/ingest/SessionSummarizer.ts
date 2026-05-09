@@ -176,8 +176,8 @@ export class SessionSummarizer {
    * Summarize a single session. Returns cached result if available,
    * otherwise calls the LLM and writes to cache.
    *
-   * @param sessionKey — a stable identifier for the session (e.g. `${caseId}:${sessionId}`).
-   *                    Used only for logging; the cache key is content-addressed.
+   * @param _sessionKey — a stable identifier for the session (e.g. `${caseId}:${sessionId}`).
+   *                     Used only for logging; the cache key is content-addressed.
    * @param sessionText — the raw text of the session (all turns concatenated).
    */
   async summarize(_sessionKey: string, sessionText: string): Promise<string> {

@@ -16,12 +16,12 @@
  * - Event system: Discriminated union of lifecycle events for observability
  */
 
-import type { IVectorStore } from '../core/vector-store/IVectorStore.js';
+import type { IVectorStore } from '../../../core/vector-store/IVectorStore.js';
 import type {
   SkillRecommendation,
   ToolRecommendation,
   ExtensionRecommendation,
-} from '../rag/unified/types.js';
+} from '../../../cognition/rag/unified/types.js';
 
 // ============================================================================
 // QUERY TIER
@@ -297,10 +297,12 @@ export interface QueryResult {
   fallbacksUsed: string[];
 
   /**
-   * Citation verification results. Populated when deep research runs
-   * or when `verifyCitations` is explicitly requested in config or query options.
+   * Citation verification results produced by the router when
+   * `verifyCitations` is enabled and verification can run.
+   *
+   * Hosts may also attach their own grounding metadata to this field.
    */
-  grounding?: import('../rag/citation/types.js').VerifiedResponse;
+  grounding?: import('../../../cognition/rag/citation/types.js').VerifiedResponse;
 
   /**
    * Recommended skills, tools, and extensions based on query analysis.
@@ -492,6 +494,11 @@ export interface QueryRouterConfig {
 
   /**
    * Whether to cache query results.
+   *
+   * When enabled, `route()` caches completed `QueryResult` objects in memory
+   * and reuses them for identical query/history/request-option inputs until
+   * router state changes (for example corpus refresh or retriever swap).
+   *
    * @default true
    */
   cacheResults?: boolean;
@@ -524,9 +531,13 @@ export interface QueryRouterConfig {
   ) => Promise<RetrievedChunk[]>;
 
   /**
-   * Enable automatic citation verification on deep research responses.
-   * When true, moderate-depth queries also verify citations.
-   * Default: false (only deep research verifies automatically).
+   * Enable post-generation citation verification when the router has an active
+   * embedding path and retrieved source chunks.
+   *
+   * When enabled, `route()` runs `CitationVerifier` over the generated answer
+   * and retrieved sources, then attaches the result to `QueryResult.grounding`.
+   * If embeddings are unavailable or no sources were retrieved, verification is
+   * skipped gracefully.
    */
   verifyCitations?: boolean;
 

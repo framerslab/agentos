@@ -1,3 +1,5 @@
+> **Live run**: see the QueryRouter initialize a 1,720-chunk corpus across 50 topics and 333 sources on the [agentos.sh demo gallery](https://agentos.sh/#live-demo). Source: [`examples/query-router.mjs`](https://github.com/framersai/agentos/blob/master/examples/query-router.mjs).
+
 AgentOS includes a `QueryRouter` that turns one user question into a three-stage pipeline:
 
 1. classify the query into tier `0` through `3`
@@ -9,8 +11,17 @@ AgentOS includes a `QueryRouter` that turns one user question into a three-stage
 - Tier classification uses an LLM prompt with corpus topics, recent conversation history, and optional tool names.
 - The router embeds local markdown docs into an in-memory vector store when an embedding provider is available.
 - If embeddings are unavailable or vector search fails, the router falls back to keyword search automatically.
+- `cacheResults` now backs an in-memory `route()` result cache and is enabled by default.
+- `verifyCitations: true` now runs post-generation citation verification when retrieved chunks and embeddings are available.
 - Result metadata includes `tiersUsed` and `fallbacksUsed`.
 - Lifecycle events cover classification, retrieval, research, generation, and route completion.
+
+## Execution Paths
+
+- Default path: `route()` classifies the query, then dispatches retrieval through the legacy `QueryDispatcher`.
+- Opt-in path: if a host calls `setUnifiedRetriever(...)`, `route()` switches to plan-aware retrieval through `UnifiedRetriever`.
+
+This matters because `UnifiedRetriever` is implemented and usable today, but it is not the default QueryRouter/runtime retrieval path yet.
 
 ## Current Limitations
 
@@ -84,16 +95,16 @@ console.log(router.getCorpusStats()); // graph/deepResearch/rerank runtime modes
 
 ## Bundled Platform Knowledge
 
-The QueryRouter ships with **244 pre-built knowledge entries** that cover the entire AgentOS platform surface. These entries are auto-loaded at startup and merged into the corpus alongside your project docs — no configuration required.
+The QueryRouter ships with **260 pre-built knowledge entries** that cover the entire AgentOS platform surface. These entries are auto-loaded at startup and merged into the corpus alongside your project docs — no configuration required.
 
 ### What's Included
 
 | Category | Count | Examples |
 |----------|-------|---------|
-| **Tools** | 105 | All channel adapters, productivity tools, orchestration tools |
-| **Skills** | 80 | Every curated skill from the skills registry |
-| **FAQ** | 30 | "How do I add voice?", "What models are supported?", "Does AgentOS support streaming?" |
-| **API** | 14 | generateText(), streamText(), agent(), agency(), embedText(), generateImage() |
+| **Tools** | 110 | All channel adapters, productivity tools, orchestration tools |
+| **Skills** | 82 | Every curated skill from the skills registry |
+| **FAQ** | 38 | "How do I add voice?", "What models are supported?", "Does AgentOS support streaming?" |
+| **API** | 15 | generateText(), streamText(), agent(), agency(), embedText(), generateImage() |
 | **Troubleshooting** | 15 | Missing API keys, model not found, embedding init failures |
 
 ### How It Works
@@ -154,6 +165,8 @@ This regenerates `knowledge/platform-corpus.json` from the current tool manifest
 - `githubRepos` optionally enables non-blocking GitHub corpus indexing after `init()`. Newly indexed repo chunks are merged back into the live corpus, keyword fallback, classifier topics, and the vector index when embeddings are active.
 - `deepResearchEnabled` controls whether the tier-3 research branch is attempted; the default core implementation is a local-corpus heuristic, and hosts can still inject a real web-backed implementation.
 - `onClassification` and `onRetrieval` are hooks for consumers that want lightweight runtime integration without reading the full event stream.
+- `cacheResults` controls an in-memory cache of completed `route()` results. QueryRouter clears that cache when indexed corpus chunks change and when retrieval-planning dependencies such as `UnifiedRetriever` or the capability-discovery engine are swapped.
+- `verifyCitations` enables post-generation `CitationVerifier` runs against the retrieved chunks for a route. When verification runs successfully, the result is attached to `QueryResult.grounding`; if embeddings are unavailable or no chunks were retrieved, verification is skipped gracefully.
 - `router.getCorpusStats()` returns a `QueryRouterCorpusStats` snapshot with configured path count, loaded chunk/topic/source counts, live bundled platform-knowledge category counts, whether retrieval is running in `vector+keyword-fallback` or `keyword-only` mode, the embedding health field `embeddingStatus`, and the runtime-truth fields `graphRuntimeMode`, `rerankRuntimeMode`, and `deepResearchRuntimeMode`.
 - `embeddingStatus: 'active'` means the vector index initialized successfully, `'disabled-no-key'` means init stayed keyword-only because no embedding credential was available, and `'failed-init'` means embedding bootstrap was attempted but failed and the router fell back to keyword-only mode.
 - `graphRuntimeMode: 'heuristic'` means the built-in same-document / heading-overlap expansion is active; `'active'` is reserved for a future wired graph expansion service or a host-injected hook.
@@ -166,6 +179,7 @@ This regenerates `knowledge/platform-corpus.json` from the current tool manifest
 
 - `classification`: the final classification result
 - `sources`: citations built from retrieved chunks
+- `grounding`: optional `VerifiedResponse` from post-generation citation verification
 - `recommendations`: optional skill/tool/extension suggestions inferred during plan-aware classification
 - `tiersUsed`: the tiers actually exercised after fallbacks
 - `fallbacksUsed`: retrieval/classification fallback strategy names such as `keyword-fallback` or `research-skip`

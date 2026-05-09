@@ -248,17 +248,9 @@ export const hitl = {
    * self-reported confidence falls below `confidenceThreshold`, the decision is
    * delegated to a fallback handler (default: {@link hitl.autoReject}).
    *
-   * @param config - LLM judge configuration.
-   * @param config.model - LLM model to use. Defaults to `'gpt-4o-mini'`.
-   * @param config.provider - LLM provider. Defaults to `'openai'`.
-   * @param config.criteria - Custom evaluation criteria/rubric. Defaults to
-   *   `'Evaluate whether this action is safe, relevant, and appropriate.'`.
-   * @param config.confidenceThreshold - Confidence threshold in the range 0–1.
-   *   Below this value the decision is escalated to the fallback handler. Defaults
-   *   to `0.7`.
-   * @param config.fallback - Handler invoked when confidence is below threshold or
-   *   the LLM call fails. Defaults to `hitl.autoReject('LLM judge confidence too low')`.
-   * @param config.apiKey - API key override forwarded to the LLM provider.
+   * @param config - LLM judge configuration including optional `model`,
+   *   `provider`, `criteria`, `confidenceThreshold`, `fallback`, and `apiKey`
+   *   overrides.
    * @returns A {@link HitlHandler} that auto-decides via LLM.
    *
    * @example

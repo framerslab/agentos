@@ -1,17 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryLifecycleManager } from '../MemoryLifecycleManager';
 import { IMemoryLifecycleManager, GMIResolverFunction } from '../IMemoryLifecycleManager';
-import { MemoryLifecycleManagerConfig, MemoryLifecyclePolicy, PolicyAction } from '../../../../core/config/MemoryLifecycleManagerConfiguration';
-import { IVectorStoreManager } from '../../../../core/vector-store/IVectorStoreManager';
-import { IVectorStore } from '../../../../core/vector-store/IVectorStore';
+import { MemoryLifecycleManagerConfig, MemoryLifecyclePolicy, PolicyAction } from '../../../../../core/config/MemoryLifecycleManagerConfiguration';
+import { IVectorStoreManager } from '../../../../../core/vector-store/IVectorStoreManager';
+import { IVectorStore } from '../../../../../core/vector-store/IVectorStore';
 import { IUtilityAI, SummarizationOptions } from '../../../../nlp/ai_utilities/IUtilityAI';
-import { IGMI, LifecycleAction, LifecycleActionResponse, MemoryLifecycleEvent } from '../../../../cognitive_substrate/IGMI';
+import { IGMI, LifecycleAction, LifecycleActionResponse, MemoryLifecycleEvent } from '../../../../substrate/IGMI';
 
 // --- Mock Dependencies ---
-const mockVectorStore: IVectorStore = {
+const mockVectorStore: IVectorStore & { scanByMetadata?: ReturnType<typeof vi.fn> } = {
   initialize: vi.fn().mockResolvedValue(undefined),
   upsert: vi.fn().mockResolvedValue({ upsertedCount: 0, upsertedIds: [] }),
   query: vi.fn().mockResolvedValue({ documents: [] }),
+  scanByMetadata: vi.fn().mockResolvedValue({ documents: [] }),
   delete: vi.fn().mockResolvedValue({ deletedCount: 1 }), // Mock successful delete
   checkHealth: vi.fn().mockResolvedValue({ isHealthy: true }),
   shutdown: vi.fn().mockResolvedValue(undefined),
@@ -175,6 +176,41 @@ describe('MemoryLifecycleManager', () => {
     expect(result.actionTaken).toBe('NO_ACTION_TAKEN');
     expect(result.details).toContain("Item within retention period");
     expect(mockVectorStore.delete).not.toHaveBeenCalledWith('test-collection', [newItemContext.itemId]);
+  });
+
+  it('enforcePolicies should discover lifecycle candidates through metadata scan and delete them', async () => {
+    const expiredTimestamp = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString();
+    mockVectorStore.scanByMetadata?.mockResolvedValueOnce({
+      documents: [
+        {
+          id: 'scan-old-001',
+          similarityScore: 1,
+          metadata: {
+            category: 'general_log',
+            timestamp: expiredTimestamp,
+          },
+          textContent: 'old lifecycle-managed content',
+        },
+      ],
+    });
+
+    const report = await mlm.enforcePolicies({ policyIds: [deletePolicy.policyId] });
+
+    expect(mockVectorStore.scanByMetadata).toHaveBeenCalledWith(
+      'test-collection',
+      expect.objectContaining({
+        includeMetadata: true,
+        includeTextContent: true,
+        filter: expect.objectContaining({
+          category: { $in: ['conversation_history', 'general_log'] },
+          timestamp: { $lt: expect.any(String) },
+        }),
+      }),
+    );
+    expect(mockVectorStore.delete).toHaveBeenCalledWith('test-collection', ['scan-old-001']);
+    expect(report.itemsScanned).toBe(1);
+    expect(report.itemsAffected).toBe(1);
+    expect(report.policyResults?.[deletePolicy.policyId]?.actionsTaken?.delete).toBe(1);
   });
 
 

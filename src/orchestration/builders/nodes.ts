@@ -81,13 +81,8 @@ export function toolNode(toolName: string, config?: {
  * Creates a human-in-the-loop node that suspends execution until a human
  * (or automated surrogate) provides a decision.
  *
- * @param config.prompt - Message displayed to the human operator.
- * @param config.timeout - Maximum wall-clock milliseconds before the node is aborted or handled by `onTimeout`.
- * @param config.autoAccept - Auto-accept without human input. Useful for testing/dev.
- * @param config.autoReject - Auto-reject without human input. Pass a string to include a rejection reason.
- * @param config.judge - Delegate to an LLM judge instead of a human. When the judge's confidence
- *   falls below `confidenceThreshold`, the node falls through to a normal human interrupt.
- * @param config.onTimeout - Behaviour when timeout expires: `'accept'`, `'reject'`, or `'error'` (default).
+ * @param config - Human-node configuration. Includes the human-facing `prompt`,
+ *   optional timeout/auto-resolution behavior, and optional LLM-judge settings.
  * @param policies - Optional per-node policy overrides.
  */
 export function humanNode(config: {

@@ -271,6 +271,40 @@ describe('HnswlibVectorStore', () => {
     });
   });
 
+  describe('scanByMetadata', () => {
+    it('returns filtered documents with metadata and text content', async () => {
+      await store.upsert('scan-col', [
+        makeDoc('doc1', [0.1, 0.2, 0.3], { status: 'expired' }, 'old content'),
+        makeDoc('doc2', [0.4, 0.5, 0.6], { status: 'fresh' }, 'fresh content'),
+      ]);
+
+      const result = await store.scanByMetadata?.('scan-col', {
+        filter: { status: 'expired' },
+        includeMetadata: true,
+        includeTextContent: true,
+      });
+
+      expect(result?.documents).toHaveLength(1);
+      expect(result?.documents[0].id).toBe('doc1');
+      expect(result?.documents[0].metadata).toEqual({ status: 'expired' });
+      expect(result?.documents[0].textContent).toBe('old content');
+    });
+
+    it('supports ISO timestamp range filters during metadata scan', async () => {
+      await store.upsert('scan-col', [
+        makeDoc('doc-old', [0.1, 0.2, 0.3], { timestamp: '2024-01-01T00:00:00.000Z' }, 'old content'),
+        makeDoc('doc-new', [0.4, 0.5, 0.6], { timestamp: '2026-04-21T00:00:00.000Z' }, 'fresh content'),
+      ]);
+
+      const result = await store.scanByMetadata?.('scan-col', {
+        filter: { timestamp: { $lt: '2025-01-01T00:00:00.000Z' } },
+        includeMetadata: true,
+      });
+
+      expect(result?.documents.map((doc) => doc.id)).toEqual(['doc-old']);
+    });
+  });
+
   // ===========================================================================
   // Metadata Filtering
   // ===========================================================================

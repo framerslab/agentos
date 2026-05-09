@@ -21,7 +21,7 @@ import type {
   ToolExecutionResult,
   ToolExecutionContext,
   JSONSchemaObject,
-} from '../core/tools/ITool.js';
+} from '../../core/tools/ITool.js';
 import type { RecordMutationInput } from './PersonalityMutationStore.js';
 import { resolveSelfImprovementSessionKey } from './sessionScope.js';
 
@@ -218,7 +218,7 @@ export class AdaptPersonalityTool
    * Apply a personality trait mutation within session budget constraints.
    *
    * @param args - The trait, delta, and reasoning for the mutation.
-   * @param _context - Tool execution context (unused but required by ITool).
+   * @param context - Tool execution context.
    * @returns A {@link ToolExecutionResult} wrapping the mutation outcome.
    */
   async execute(

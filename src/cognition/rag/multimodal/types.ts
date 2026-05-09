@@ -119,6 +119,32 @@ export interface AudioIndexOptions {
   language?: string;
 }
 
+/**
+ * Options for indexing plain text into the multimodal vector store.
+ *
+ * This is primarily used by higher-level orchestrators like the
+ * {@link MultimodalMemoryBridge} when extracted text from PDFs or other
+ * rich content should land in the same multimodal retrieval pipeline.
+ */
+export interface TextIndexOptions {
+  /**
+   * Text to embed and store.
+   */
+  text: string;
+
+  /**
+   * Optional metadata to attach to the indexed document.
+   * Stored alongside the embedding for filtering during search.
+   */
+  metadata?: Record<string, unknown>;
+
+  /**
+   * Vector store collection to index into.
+   * @default 'multimodal'
+   */
+  collection?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Indexing results
 // ---------------------------------------------------------------------------
@@ -145,6 +171,16 @@ export interface AudioIndexResult {
   id: string;
   /** STT-generated transcript of the audio. */
   transcript: string;
+}
+
+/**
+ * Result of indexing plain text into the vector store.
+ */
+export interface TextIndexResult {
+  /** Unique document ID in the vector store. */
+  id: string;
+  /** Indexed text content after normalization. */
+  text: string;
 }
 
 // ---------------------------------------------------------------------------

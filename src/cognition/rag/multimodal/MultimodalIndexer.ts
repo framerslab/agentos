@@ -38,20 +38,22 @@
 
 import type { IEmbeddingManager, EmbeddingRequest } from '../IEmbeddingManager.js';
 import type { IVectorStore, VectorDocument, MetadataValue } from '../IVectorStore.js';
-import { uuidv4 } from '../../core/utils/uuid.js';
+import { uuidv4 } from '../../../core/utils/uuid.js';
 import type {
   ContentModality,
   ImageIndexOptions,
   ImageIndexResult,
   AudioIndexOptions,
   AudioIndexResult,
+  TextIndexOptions,
+  TextIndexResult,
   MultimodalSearchOptions,
   MultimodalSearchResult,
   IVisionProvider,
   ISpeechToTextProvider,
   MultimodalIndexerConfig,
 } from './types.js';
-import type { VisionPipeline } from '../../vision/VisionPipeline.js';
+import type { VisionPipeline } from '../../../io/vision/VisionPipeline.js';
 import type { HydeRetriever } from '../HydeRetriever.js';
 
 // ---------------------------------------------------------------------------
@@ -447,6 +449,68 @@ export class MultimodalIndexer {
     return {
       id: docId,
       transcript,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Text indexing
+  // -------------------------------------------------------------------------
+
+  /**
+   * Index plain text by embedding and storing it directly.
+   *
+   * This is used when higher-level multimodal pipelines already have text
+   * extracted from rich content, such as PDF pages or OCR output, and need
+   * to place that text into the multimodal vector store without going through
+   * a vision or STT provider.
+   *
+   * @param opts - Text, metadata, and collection options.
+   * @returns The document ID and normalized indexed text.
+   *
+   * @throws {Error} If the text is empty after trimming.
+   * @throws {Error} If embedding generation or vector store upsert fails.
+   */
+  async indexText(opts: TextIndexOptions): Promise<TextIndexResult> {
+    const text = opts.text.trim();
+    if (!text) {
+      throw new Error('MultimodalIndexer: cannot index empty text.');
+    }
+
+    const collection = opts.collection ?? this._config.defaultCollection;
+    const docId = uuidv4();
+
+    const embeddingRequest: EmbeddingRequest = {
+      texts: [text],
+    };
+    const embeddingResponse = await this._embeddingManager.generateEmbeddings(embeddingRequest);
+
+    if (
+      !embeddingResponse.embeddings ||
+      embeddingResponse.embeddings.length === 0 ||
+      embeddingResponse.embeddings[0].length === 0
+    ) {
+      throw new Error(
+        'MultimodalIndexer: embedding generation returned empty result for text.'
+      );
+    }
+
+    const metadata: Record<string, MetadataValue> = {
+      modality: 'text' as MetadataValue,
+      ...(opts.metadata as Record<string, MetadataValue> | undefined),
+    };
+
+    const document: VectorDocument = {
+      id: docId,
+      embedding: embeddingResponse.embeddings[0],
+      textContent: text,
+      metadata,
+    };
+
+    await this._vectorStore.upsert(collection, [document]);
+
+    return {
+      id: docId,
+      text,
     };
   }
 

@@ -21,6 +21,8 @@ import type {
   RetrievedVectorDocument,
   QueryOptions,
   QueryResult,
+  MetadataScanOptions,
+  MetadataScanResult,
   UpsertOptions,
   UpsertResult,
   DeleteOptions,
@@ -31,7 +33,7 @@ import type {
   MetadataScalarValue,
   MetadataValue,
 } from '../IVectorStore.js';
-import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
+import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
 
 /**
  * Configuration for HnswlibVectorStore
@@ -779,6 +781,59 @@ export class HnswlibVectorStore implements IVectorStore {
     };
   }
 
+  async scanByMetadata(
+    collectionName: string,
+    options?: MetadataScanOptions,
+  ): Promise<MetadataScanResult> {
+    this.ensureInitialized();
+
+    const collection = await this.getExistingCollection(collectionName);
+    if (!collection) {
+      return {
+        documents: [],
+        stats: { totalCandidates: 0, returnedCount: 0 },
+      };
+    }
+
+    const limit = Math.max(1, options?.limit ?? 100);
+    const documents: RetrievedVectorDocument[] = [];
+
+    for (const [docId, docData] of collection.metadata) {
+      if (options?.filter && !this.matchesFilter(docData.metadata, options.filter)) {
+        continue;
+      }
+
+      const label = collection.idToLabel.get(docId);
+      const embedding = options?.includeEmbedding && label !== undefined
+        ? collection.index.getPoint(label)
+        : [];
+
+      const scannedDoc: RetrievedVectorDocument = {
+        id: docId,
+        embedding: Array.isArray(embedding) ? embedding : [],
+        similarityScore: 1,
+      };
+
+      if (options?.includeMetadata !== false && docData.metadata) {
+        scannedDoc.metadata = docData.metadata;
+      }
+      if (options?.includeTextContent && docData.textContent) {
+        scannedDoc.textContent = docData.textContent;
+      }
+
+      documents.push(scannedDoc);
+      if (documents.length >= limit) break;
+    }
+
+    return {
+      documents,
+      stats: {
+        totalCandidates: collection.metadata.size,
+        returnedCount: documents.length,
+      },
+    };
+  }
+
   async delete(
     collectionName: string,
     ids?: string[],
@@ -958,16 +1013,40 @@ export class HnswlibVectorStore implements IVectorStore {
       if (fieldCondition.$ne !== undefined && value === fieldCondition.$ne) return false;
 
       if (fieldCondition.$gt !== undefined) {
-        if (typeof value !== 'number' || value <= (fieldCondition.$gt as number)) return false;
+        if (typeof value === 'number') {
+          if (typeof fieldCondition.$gt !== 'number' || value <= fieldCondition.$gt) return false;
+        } else if (typeof value === 'string') {
+          if (value <= String(fieldCondition.$gt)) return false;
+        } else {
+          return false;
+        }
       }
       if (fieldCondition.$gte !== undefined) {
-        if (typeof value !== 'number' || value < (fieldCondition.$gte as number)) return false;
+        if (typeof value === 'number') {
+          if (typeof fieldCondition.$gte !== 'number' || value < fieldCondition.$gte) return false;
+        } else if (typeof value === 'string') {
+          if (value < String(fieldCondition.$gte)) return false;
+        } else {
+          return false;
+        }
       }
       if (fieldCondition.$lt !== undefined) {
-        if (typeof value !== 'number' || value >= (fieldCondition.$lt as number)) return false;
+        if (typeof value === 'number') {
+          if (typeof fieldCondition.$lt !== 'number' || value >= fieldCondition.$lt) return false;
+        } else if (typeof value === 'string') {
+          if (value >= String(fieldCondition.$lt)) return false;
+        } else {
+          return false;
+        }
       }
       if (fieldCondition.$lte !== undefined) {
-        if (typeof value !== 'number' || value > (fieldCondition.$lte as number)) return false;
+        if (typeof value === 'number') {
+          if (typeof fieldCondition.$lte !== 'number' || value > fieldCondition.$lte) return false;
+        } else if (typeof value === 'string') {
+          if (value > String(fieldCondition.$lte)) return false;
+        } else {
+          return false;
+        }
       }
 
       if (fieldCondition.$in !== undefined) {

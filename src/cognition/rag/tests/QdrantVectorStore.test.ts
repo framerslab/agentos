@@ -115,6 +115,38 @@ describe('QdrantVectorStore', () => {
         }
       }
 
+      // Scroll API
+      if (String(url).includes('/collections/test-col/points/scroll') && init?.method === 'POST') {
+        return jsonResponse({
+          result: {
+            points: [
+              {
+                id: 'doc-expired',
+                payload: {
+                  __text: 'Expired memory',
+                  tag: 'a',
+                  category: 'episodic',
+                  timestamp: '2024-01-01T00:00:00.000Z',
+                },
+                vector: { dense: [0.4, 0.5, 0.6] },
+              },
+              {
+                id: 'doc-fresh',
+                payload: {
+                  __text: 'Fresh memory',
+                  tag: 'b',
+                  category: 'semantic',
+                  timestamp: '2026-04-20T00:00:00.000Z',
+                },
+                vector: { dense: [0.7, 0.8, 0.9] },
+              },
+            ],
+            next_page_offset: null,
+          },
+          time: 0.01,
+        });
+      }
+
       // Delete points
       if (String(url).includes('/points/delete') && init?.method === 'POST') {
         return jsonResponse({ result: { operation_id: 2 } });
@@ -203,5 +235,40 @@ describe('QdrantVectorStore', () => {
     await store.delete('test-col', ['doc1']);
     const del = calls.find((c) => c.url.includes('/points/delete') && c.init?.method === 'POST');
     expect(del).toBeTruthy();
+  });
+
+  it('scanByMetadata scrolls filtered points with text, metadata, and embeddings', async () => {
+    expect(store.scanByMetadata).toBeTypeOf('function');
+
+    const result = await store.scanByMetadata?.('test-col', {
+      filter: {
+        category: 'episodic',
+        timestamp: { $lt: '2025-01-01T00:00:00.000Z' },
+      },
+      includeMetadata: true,
+      includeTextContent: true,
+      includeEmbedding: true,
+      limit: 10,
+    });
+
+    expect(result?.documents).toHaveLength(1);
+    expect(result?.documents[0]).toMatchObject({
+      id: 'doc-expired',
+      textContent: 'Expired memory',
+      metadata: {
+        tag: 'a',
+        category: 'episodic',
+        timestamp: '2024-01-01T00:00:00.000Z',
+      },
+      embedding: [0.4, 0.5, 0.6],
+      similarityScore: 1,
+    });
+
+    const scrollCall = calls.find((c) => c.url.includes('/points/scroll') && c.init?.method === 'POST');
+    expect(scrollCall).toBeTruthy();
+    const body = scrollCall?.init?.body ? JSON.parse(String(scrollCall.init.body)) : {};
+    expect(body.limit).toBe(10);
+    expect(body.with_payload).toBe(true);
+    expect(body.with_vector).toBe(true);
   });
 });

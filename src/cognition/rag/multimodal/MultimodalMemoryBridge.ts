@@ -771,6 +771,12 @@ export class MultimodalMemoryBridge {
     const shouldExtractImages = metadata?.extractImages ?? false;
     const chunkSize = metadata?.chunkSize ?? this._options.defaultChunkSize;
     const chunkOverlap = metadata?.chunkOverlap ?? this._options.defaultChunkOverlap;
+    const {
+      extractImages: _extractImages,
+      chunkSize: _chunkSize,
+      chunkOverlap: _chunkOverlap,
+      ...sharedMetadata
+    } = metadata ?? {};
 
     let rawText = '';
     let pageCount: number | undefined;
@@ -813,69 +819,19 @@ export class MultimodalMemoryBridge {
 
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i];
-      // Use indexImage's lower-level approach: we need to embed text directly.
-      // Since the indexer only supports image/audio, we index PDF chunks as
-      // "text" documents by going through the indexer's audio path with a
-      // synthetic transcript — OR we can index images. Neither fits perfectly.
-      // Instead, let's index as audio with the transcript being the chunk text.
-      // Actually, the cleanest approach is to create a VectorDocument directly.
-      // But the indexer doesn't expose that. So we'll note: the indexer's
-      // indexAudio takes a Buffer and runs STT on it — that's wrong for text.
-      //
-      // Solution: We mock a "text" indexing by using indexImage with a text-only
-      // approach? No — that requires vision provider.
-      //
-      // The correct approach: extend the indexer or directly access its internals.
-      // For now, we use a workaround: create a temporary "description" and index
-      // it as if it were an image description. But we'd need to add a text
-      // indexing method. Since we own the codebase, let's just add indexText
-      // to MultimodalIndexer in this same PR.
-      //
-      // HOWEVER: to avoid modifying MultimodalIndexer's public API in this bridge
-      // file, we'll use the audio indexer with a custom STT provider that returns
-      // the text directly. This is too hacky.
-      //
-      // PRAGMATIC DECISION: Index PDF text chunks via the indexer's image path
-      // by passing the chunk text as a "description" manually. We need access
-      // to the indexer's internal dependencies. Since we can't do that cleanly,
-      // we'll index each chunk as an image where the "image" is actually a
-      // data URL containing the text, and the vision provider returns the text.
-      //
-      // BEST APPROACH: Since this bridge is meant to be the higher-level
-      // orchestrator, we'll index PDF chunks by directly calling indexImage
-      // or indexAudio — but neither fits. Instead, we should add a generic
-      // indexText method. Let's do that.
-      //
-      // For now, we use the existing indexAudio method with a workaround:
-      // We create a synthetic Buffer from the chunk and override STT.
-      // This is clearly wrong. Let me reconsider.
-      //
-      // FINAL DECISION: We'll track PDF chunk RAG IDs but skip the indexer
-      // for text-only chunks (since the indexer has no text path). Instead,
-      // we'll just create memory traces from the text. The RAG side for PDFs
-      // is handled by the Memory facade's PdfLoader anyway. This bridge
-      // focuses on getting multimodal content into MEMORY, not replacing
-      // the existing document ingestion pipeline.
-      //
-      // Actually, reading the task description again, it says to index into
-      // RAG. The indexer needs a text path. Let's add one.
-      // But the task says to "wire into MultimodalIndexer" only via
-      // createMemoryBridge(). So we keep the indexer unchanged and handle
-      // PDF text indexing ourselves using the same embedding+vector store
-      // pattern, but accessed through the bridge.
-      //
-      // Since we can't access the indexer's private deps, the cleanest
-      // approach: the bridge accepts the same deps optionally, or we
-      // expose read-only accessors on the indexer.
+      const indexResult = await this._indexer.indexText({
+        text: chunk,
+        collection: sharedMetadata.collection as string | undefined,
+        metadata: {
+          ...sharedMetadata,
+          sourceModality: 'pdf',
+          chunkIndex: i,
+          chunkCount: chunks.length,
+          ...(pageCount !== undefined ? { pageCount } : {}),
+        },
+      });
 
-      // For this implementation we'll note that PDF RAG indexing relies on
-      // the separate document ingestion pipeline (PdfLoader → ChunkingEngine
-      // → MemoryStore). This bridge focuses on the MEMORY side, creating
-      // traces from the extracted text. RAG document IDs will be empty for
-      // PDF text chunks (the existing PdfLoader handles RAG for PDFs).
-      // Images extracted from PDFs DO go through the indexer.
-
-      void chunk; // Chunk processing happens via memory encoding below
+      ragDocumentIds.push(indexResult.id);
     }
 
     // --- Extract embedded images (optional) ---

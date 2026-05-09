@@ -23,9 +23,9 @@ import {
   MemoryLifecycleManagerConfig,
   MemoryLifecyclePolicy,
   PolicyAction as ConfigPolicyActionDetails, // Renamed to avoid conflict in this file
-} from '../../../core/config/MemoryLifecycleManagerConfiguration';
-import { IVectorStoreManager } from '../../../core/vector-store/IVectorStoreManager';
-import { IVectorStore, MetadataFilter } from '../../../core/vector-store/IVectorStore';
+} from '../../../../core/config/MemoryLifecycleManagerConfiguration';
+import { IVectorStoreManager } from '../../../../core/vector-store/IVectorStoreManager';
+import { IVectorStore, MetadataFilter } from '../../../../core/vector-store/IVectorStore';
 import { IUtilityAI, SummarizationOptions } from '../../../nlp/ai_utilities/IUtilityAI';
 import { RagMemoryCategory } from '../../../rag/IRetrievalAugmentor';
 import { GMIError, GMIErrorCode } from '@framers/agentos/core/utils/errors';
@@ -33,7 +33,7 @@ import {
   MemoryLifecycleEvent,
   LifecycleAction,
   LifecycleActionResponse,
-} from '../../../cognitive_substrate/IGMI';
+} from '../../../substrate/IGMI';
 // import * as path from 'path'; // Only if dealing with file paths for archiveTargetId
 
 /**
@@ -303,7 +303,7 @@ export class MemoryLifecycleManager implements IMemoryLifecycleManager {
 
     for (const dsId of dsIdsToScan) {
       try {
-        await this.vectorStoreManager.getStoreForDataSource(dsId); // Validate data source exists
+        const { store, collectionName } = await this.vectorStoreManager.getStoreForDataSource(dsId);
         const combinedFilter: MetadataFilter = { ...(policy.appliesTo.metadataFilter || {}) };
 
         // Apply category filter (assuming 'category' metadata field)
@@ -327,7 +327,43 @@ export class MemoryLifecycleManager implements IMemoryLifecycleManager {
         if (policy.retentionDays && policy.retentionDays > 0) {
           const cutoffDate = new Date(Date.now() - policy.retentionDays * 24 * 60 * 60 * 1000);
           // Ensure the filter for timestamp is compatible with how store handles date comparisons
-          combinedFilter[timestampField] = { $lt: cutoffDate.toISOString() as any };
+          combinedFilter[timestampField] = { $lt: cutoffDate.toISOString() };
+        }
+
+        if (Object.keys(combinedFilter).length === 0) {
+             console.warn(`MemoryLifecycleManager (${this.managerId}): Policy '${policy.policyId}' has no effective filters (age, category, metadata). Scanning all items is not feasible. Skipping candidate search for this policy on this data source.`);
+             continue;
+        }
+
+        if (typeof store.scanByMetadata === 'function') {
+            const scanResult = await store.scanByMetadata(collectionName, {
+                filter: combinedFilter,
+                includeMetadata: true,
+                includeTextContent: true,
+            });
+
+            for (const doc of scanResult.documents) {
+                const metadata = (doc.metadata || {}) as Record<string, any>;
+                const rawTimestamp = metadata[timestampField];
+                const timestamp = typeof rawTimestamp === 'string' || rawTimestamp instanceof Date
+                    ? new Date(rawTimestamp)
+                    : undefined;
+
+                allCandidateItems.push({
+                    id: doc.id,
+                    dataSourceId: dsId,
+                    collectionName,
+                    gmiOwnerId: typeof metadata[gmiOwnerField] === 'string' ? metadata[gmiOwnerField] : undefined,
+                    personaOwnerId: typeof metadata[personaOwnerField] === 'string' ? metadata[personaOwnerField] : undefined,
+                    category: typeof metadata.category === 'string' ? metadata.category as RagMemoryCategory : undefined,
+                    timestamp: timestamp && !Number.isNaN(timestamp.getTime()) ? timestamp : undefined,
+                    metadata,
+                    textContent: doc.textContent,
+                    contentSummary: typeof metadata.contentSummary === 'string' ? metadata.contentSummary : undefined,
+                    vectorStoreRef: store,
+                });
+            }
+            continue;
         }
 
         // How to query without an embedding for lifecycle purposes?
@@ -357,7 +393,7 @@ export class MemoryLifecycleManager implements IMemoryLifecycleManager {
         this.addTraceToReport(undefined, undefined, policy.policyId, undefined, `Error processing DS '${dsId}': ${error.message}`);
       }
     }
-    return allCandidateItems; // Will be empty due to current placeholder logic above
+    return allCandidateItems; // Supported stores populate this via scanByMetadata(); unsupported stores fall back to the warnings above.
   }
 
   private async negotiateAndDetermineAction(candidate: LifecycleCandidateItem, policy: MemoryLifecyclePolicy): Promise<LifecycleAction | null> {
@@ -723,5 +759,3 @@ export class MemoryLifecycleManager implements IMemoryLifecycleManager {
       }
   }
 }
-
-

@@ -21,7 +21,7 @@ import type {
   ToolExecutionResult,
   ToolExecutionContext,
   JSONSchemaObject,
-} from '../core/tools/ITool.js';
+} from '../../core/tools/ITool.js';
 import { resolveSelfImprovementSessionKey } from './sessionScope.js';
 
 // ============================================================================
@@ -188,7 +188,7 @@ export class ManageSkillsTool implements ITool<ManageSkillsInput> {
    * Execute the requested skill management action.
    *
    * @param args - Action type and associated parameters.
-   * @param _context - Tool execution context (unused but required by ITool).
+   * @param context - Tool execution context.
    * @returns A {@link ToolExecutionResult} wrapping the action outcome.
    */
   async execute(
