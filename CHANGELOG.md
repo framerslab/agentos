@@ -1,3 +1,7 @@
+## <small>0.6.29 (2026-05-09)</small>
+
+* fix(image): respect caller-pinned model on mature/private-adult routing ([00baef3](https://github.com/framersai/agentos/commit/00baef3))
+
 ## <small>0.6.28 (2026-05-09)</small>
 
 * fix(memory-reflector): tighten type-classification prompt for 'remember X' inputs ([d6067e3](https://github.com/framersai/agentos/commit/d6067e3))
