@@ -302,26 +302,52 @@ export async function generateImage(opts: GenerateImageOptions): Promise<Generat
       // `'face-consistency'` from the presence of a reference image so
       // character portraits keep the right face instead of drifting.
       if (opts.policyTier && (opts.policyTier === 'mature' || opts.policyTier === 'private-adult')) {
-        const { PolicyAwareImageRouter } = await import('../media/images/PolicyAwareImageRouter.js');
-        const { createUncensoredModelCatalog } = await import('../core/llm/routing/UncensoredModelCatalog.js');
-        const imageRouter = new PolicyAwareImageRouter(createUncensoredModelCatalog());
-        const inferredCaps =
-          opts.capabilities
-          ?? (opts.referenceImageUrl ? ['face-consistency'] : undefined);
-        const pref = imageRouter.getPreferredProvider(
-          opts.policyTier as 'mature' | 'private-adult',
-          inferredCaps,
-        );
-        if (pref) {
-          providerId = pref.providerId;
-          modelId = pref.modelId;
+        // Caller-pin precedence: when a caller explicitly passes
+        // `provider` and/or `model` for a mature-tier generate, that
+        // resolution carries information the agentos catalog can't
+        // (specifically: pinned version SHAs for community Replicate
+        // models that 422 on the modern endpoint, and face-anchor
+        // models the catalog flags as broken). Re-running the router
+        // here would silently discard the substitution. Same fix
+        // shape as editImage.ts.
+        const callerPinnedModel =
+          (typeof opts.model === 'string' && opts.model.length > 0)
+          || (typeof opts.provider === 'string' && opts.provider.length > 0);
+
+        // Always set disableSafetyChecker for Replicate on mature+
+        // tiers, regardless of which model the caller pinned —
+        // load-bearing for uncensored prompts to render. Caller's
+        // existing explicit setting wins (allows opt-out).
+        const existingReplicate =
+          (opts.providerOptions?.replicate as Record<string, unknown>) ?? undefined;
+        if (
+          existingReplicate === undefined
+          || typeof existingReplicate.disableSafetyChecker === 'undefined'
+        ) {
           opts.providerOptions = {
             ...opts.providerOptions,
             replicate: {
-              ...((opts.providerOptions?.replicate as Record<string, unknown>) ?? {}),
+              ...(existingReplicate ?? {}),
               disableSafetyChecker: true,
             },
           };
+        }
+
+        if (!callerPinnedModel) {
+          const { PolicyAwareImageRouter } = await import('../media/images/PolicyAwareImageRouter.js');
+          const { createUncensoredModelCatalog } = await import('../core/llm/routing/UncensoredModelCatalog.js');
+          const imageRouter = new PolicyAwareImageRouter(createUncensoredModelCatalog());
+          const inferredCaps =
+            opts.capabilities
+            ?? (opts.referenceImageUrl ? ['face-consistency'] : undefined);
+          const pref = imageRouter.getPreferredProvider(
+            opts.policyTier as 'mature' | 'private-adult',
+            inferredCaps,
+          );
+          if (pref) {
+            providerId = pref.providerId;
+            modelId = pref.modelId;
+          }
         }
       }
 

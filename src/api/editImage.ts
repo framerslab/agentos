@@ -191,27 +191,34 @@ export async function editImage(opts: EditImageOptions): Promise<EditImageResult
         opts.policyTier
         && (opts.policyTier === 'mature' || opts.policyTier === 'private-adult')
       ) {
-        const { PolicyAwareImageRouter } = await import(
-          '../media/images/PolicyAwareImageRouter.js'
-        );
-        const { createUncensoredModelCatalog } = await import(
-          '../core/llm/routing/UncensoredModelCatalog.js'
-        );
-        const imageRouter = new PolicyAwareImageRouter(createUncensoredModelCatalog());
-        // When the caller didn't pin a capability, default to img2img so
-        // the catalog never picks a txt2img-only model for an edit call.
-        const capabilities = opts.capabilities ?? ['img2img'];
-        const pref = imageRouter.getPreferredProvider(
-          opts.policyTier as 'mature' | 'private-adult',
-          capabilities,
-        );
-        if (pref) {
-          providerId = pref.providerId;
-          modelId = pref.modelId;
-          const existingReplicate =
-            (effectiveProviderOptions as Record<string, unknown> | undefined)?.replicate as
-              | Record<string, unknown>
-              | undefined;
+        // Caller-pin precedence: when a caller explicitly passes
+        // `provider` and/or `model` for a mature-tier edit, that
+        // resolution carries information the agentos catalog can't
+        // (specifically: pinned version SHAs for community Replicate
+        // models that 422 on the modern endpoint without a version,
+        // and face-anchor models the catalog flags as broken). The
+        // wilds-ai image-jobs layer relies on this — it substitutes
+        // `lucataco/ip-adapter-faceid-sdxl` (a known-broken catalog
+        // entry) with `zsxkib/pulid` plus a pinned version SHA before
+        // calling editImage. Re-running the router here would silently
+        // discard that substitution and revert to the broken slug.
+        const callerPinnedModel =
+          (typeof opts.model === 'string' && opts.model.length > 0)
+          || (typeof opts.provider === 'string' && opts.provider.length > 0);
+
+        // Always set disableSafetyChecker for Replicate on mature+
+        // tiers, regardless of which model the caller pinned. This is
+        // load-bearing for uncensored prompts to render — Replicate's
+        // default NSFW filter vetoes them otherwise. Caller's existing
+        // explicit setting wins (allows opt-out for test surfaces).
+        const existingReplicate =
+          (effectiveProviderOptions as Record<string, unknown> | undefined)?.replicate as
+            | Record<string, unknown>
+            | undefined;
+        if (
+          existingReplicate === undefined
+          || typeof existingReplicate.disableSafetyChecker === 'undefined'
+        ) {
           effectiveProviderOptions = {
             ...(effectiveProviderOptions ?? {}),
             replicate: {
@@ -219,6 +226,27 @@ export async function editImage(opts: EditImageOptions): Promise<EditImageResult
               disableSafetyChecker: true,
             },
           } as ImageProviderOptionBag;
+        }
+
+        if (!callerPinnedModel) {
+          const { PolicyAwareImageRouter } = await import(
+            '../media/images/PolicyAwareImageRouter.js'
+          );
+          const { createUncensoredModelCatalog } = await import(
+            '../core/llm/routing/UncensoredModelCatalog.js'
+          );
+          const imageRouter = new PolicyAwareImageRouter(createUncensoredModelCatalog());
+          // When the caller didn't pin a capability, default to img2img so
+          // the catalog never picks a txt2img-only model for an edit call.
+          const capabilities = opts.capabilities ?? ['img2img'];
+          const pref = imageRouter.getPreferredProvider(
+            opts.policyTier as 'mature' | 'private-adult',
+            capabilities,
+          );
+          if (pref) {
+            providerId = pref.providerId;
+            modelId = pref.modelId;
+          }
         }
       }
 
