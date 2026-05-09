@@ -133,8 +133,6 @@ const publicationManifest = [
     sidebar: false,
   }),
   extraDoc('docs/architecture/tool-permissions.md', 'architecture/tool-permissions.md', 'Tool Permissions & Security Tiers', 'Architecture', 6),
-  extraDoc('docs/architecture/extension-loading.md', 'architecture/extension-loading.md', 'Extension Loading', 'Architecture', 7),
-  extraDoc('docs/architecture/skills-engine.md', 'architecture/skills-engine.md', 'Skills Engine', 'Architecture', 8),
   siteDoc('architecture/skills-vs-tools-vs-extensions.md', 'architecture/skills-vs-tools-vs-extensions.md', 'Skills vs Tools vs Extensions', 'Architecture', 8.5),
   agentosDoc('OBSERVABILITY.md', 'architecture/observability.md', 'Observability (OpenTelemetry)', 'Architecture', 9),
   agentosDoc('LOGGING.md', 'architecture/logging.md', 'Logging (Pino + OpenTelemetry)', 'Architecture', 10),

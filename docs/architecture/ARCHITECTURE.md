@@ -10,8 +10,6 @@ For specific subsystem deep-dives, see:
 - [Sandbox & Security](./sandbox-security.md)
 - [CLI Subprocess](./cli-subprocess.md)
 - [Tool Permissions](./tool-permissions.md)
-- [Extension Loading](./extension-loading.md)
-- [Skills Engine](./skills-engine.md)
 - [Provenance & Immutability](../features/provenance-immutability.md)
 
 ---
