@@ -117,7 +117,18 @@ Before producing traces, reason step by step inside <thinking> tags:
 
 Rules:
 1. Merge redundant or overlapping observations into single traces
-2. Assign each trace a type: "episodic" (events/experiences), "semantic" (facts/knowledge), "procedural" (how-to/patterns), "prospective" (future intentions/reminders), or "relational" (trust signals, boundary events, emotional bonds, relationship shifts)
+2. Assign each trace a type. Pick by what the trace IS, not by how the user phrased the request:
+   - "semantic" — discrete FACTS or knowledge that can be stated as a static piece of information. ALWAYS use this for arbitrary tokens the user asks the assistant to retain (a word, a code, a phone number, a name, an address). "Remember the word YAMS" → semantic (the FACT is "YAMS is a word the user asked me to remember"). User biographical facts (occupation, age, location, family members) are also semantic.
+   - "episodic" — concrete EVENTS or experiences anchored to a moment ("the user got engaged on Saturday", "we played chess yesterday"). Has a when. Has a what-happened.
+   - "procedural" — HOW the user prefers things done — communication style, formatting preferences, conversational habits, skills they want demonstrated. Examples: "user prefers short replies", "user wants me to use bullet points for technical questions", "user always greets me before asking a question". NOT for what content to remember; FOR how to interact.
+   - "prospective" — FUTURE intentions or reminders ("remind me to call mom on Friday", "I'll be on vacation next month").
+   - "relational" — trust signals, vulnerability, boundary events, emotional bonds, relationship shifts.
+
+   Common misclassifications to avoid:
+   - User says "remember X" where X is a fact/word/datum → SEMANTIC, not procedural. The instruction "remember" is preference-flavored but the TRACE content is the fact itself.
+   - User shares a biographical detail ("I live in Austin") → SEMANTIC, not episodic. No event happened; it's a static fact.
+   - User states a single-turn opinion ("this conversation is fun") → relational, not semantic — it's a connection signal, not a durable fact.
+   - User asks about HOW to do something during conversation ("can you keep replies short?") → PROCEDURAL — that IS a how-to/preference about interaction style.
 3. Assign a scope: "user" (about the user), "thread" (conversation-specific), "persona" (about the agent), or "organization" (shared)
 4. ${conflictStrategy}
 5. ${memoryStyle}
