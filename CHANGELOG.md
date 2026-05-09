@@ -1,3 +1,9 @@
+## <small>0.6.28 (2026-05-09)</small>
+
+* fix(memory-reflector): tighten type-classification prompt for 'remember X' inputs ([d6067e3](https://github.com/framersai/agentos/commit/d6067e3))
+* docs(memory): embed SVG diagrams in HEXACO + cognitive memory; reorder Memory sidebar by logical flo ([a9a7bb2](https://github.com/framersai/agentos/commit/a9a7bb2))
+* docs(paracosm): embed world-model split, turn-flow, and divergence SVGs ([5fc71cd](https://github.com/framersai/agentos/commit/5fc71cd))
+
 ## <small>0.6.27 (2026-05-07)</small>
 
 * Merge branch 'master' of https://github.com/framersai/agentos ([052ee28](https://github.com/framersai/agentos/commit/052ee28))
