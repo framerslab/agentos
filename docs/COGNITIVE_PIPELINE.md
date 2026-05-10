@@ -26,27 +26,30 @@ Each stage is a router. Each router is an LLM-as-judge that classifies its input
 
 ## Architecture
 
-```
-   Content                Query                     Query
-      │                     │                         │
-      ▼                     ▼                         ▼
- ┌──────────┐         ┌──────────────┐          ┌────────────┐
- │ Ingest   │         │  Memory      │          │  Read      │
- │ Router   │         │  Router      │          │  Router    │
- │          │         │  (incl.      │          │            │
- │ stages   │         │   Adaptive   │          │ stages     │
- │ ingest   │         │   self-cal.) │          │ read       │
- └──────────┘         └──────────────┘          └────────────┘
-      │                     │                         │
-      ▼                     ▼                         ▼
-  Memory state         Retrieved traces          Final answer
-                                                       │
-                                                       ▼
-                                              ┌──────────────────┐
-                                              │ Output guardrails│
-                                              │ (separate; safety│
-                                              │ + policy)        │
-                                              └──────────────────┘
+```mermaid
+flowchart TB
+    Content["Content"]:::input
+    Query1["Query"]:::input
+    Query2["Query"]:::input
+
+    Ingest["IngestRouter<br/><i>stages ingest</i>"]:::process
+    Memory["MemoryRouter<br/><i>incl. Adaptive self-calibration</i>"]:::process
+    Read["ReadRouter<br/><i>stages read</i>"]:::process
+
+    State["Memory state"]:::data
+    Traces["Retrieved traces"]:::data
+    Answer["Final answer"]:::output
+    Guard["Output guardrails<br/><i>separate · safety + policy</i>"]:::external
+
+    Content --> Ingest --> State
+    Query1 --> Memory --> Traces
+    Query2 --> Read --> Answer --> Guard
+
+    classDef input fill:#cffafe,stroke:#0891b2,color:#0e7490
+    classDef process fill:#eef2ff,stroke:#6366f1,color:#3730a3
+    classDef data fill:#fef3c7,stroke:#f59e0b,color:#92400e
+    classDef output fill:#dcfce7,stroke:#10b981,color:#047857
+    classDef external fill:#f3e8ff,stroke:#8b5cf6,color:#5b21b6
 ```
 
 The cognitive pipeline is the three orchestrator stages on the left. Output guardrails on the right are a separate primitive ([Guardrails Architecture](./GUARDRAILS_ARCHITECTURE.md)) that runs after the pipeline finishes.

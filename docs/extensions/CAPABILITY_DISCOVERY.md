@@ -27,23 +27,28 @@ Agents also get a meta-tool (`discover_capabilities`, ~80 tokens in tool list) f
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────┐
-│          CapabilityDiscoveryEngine            │
-│               (orchestrator)                  │
-└────────────┬──────────┬──────────┬───────────┘
-             │          │          │
-             ▼          ▼          ▼
-      ┌────────────┐ ┌──────────┐ ┌──────────────────┐
-      │ Capability │ │Capability│ │CapabilityContext- │
-      │   Index    │ │  Graph   │ │   Assembler       │
-      └─────┬──────┘ └──────────┘ └──────────────────┘
-            │
-            ▼
-      ┌────────────┐  ┌──────────────────┐  ┌──────────────────┐
-      │ Embedding  │  │  ManifestScanner │  │DiscoverCapabili- │
-      │  Strategy  │  │ (CAPABILITY.yaml)│  │  tiesTool (meta) │
-      └────────────┘  └──────────────────┘  └──────────────────┘
+```mermaid
+flowchart TB
+    Engine["CapabilityDiscoveryEngine<br/><i>orchestrator</i>"]:::process
+
+    Index["CapabilityIndex"]:::data
+    Graph["CapabilityGraph"]:::data
+    Assembler["CapabilityContextAssembler"]:::process
+
+    Embed["EmbeddingStrategy"]:::external
+    Scanner["ManifestScanner<br/><i>CAPABILITY.yaml</i>"]:::external
+    Tool["DiscoverCapabilitiesTool<br/><i>meta</i>"]:::external
+
+    Engine --> Index
+    Engine --> Graph
+    Engine --> Assembler
+    Index --> Embed
+    Index --> Scanner
+    Index --> Tool
+
+    classDef process fill:#eef2ff,stroke:#6366f1,color:#3730a3
+    classDef data fill:#fef3c7,stroke:#f59e0b,color:#92400e
+    classDef external fill:#f3e8ff,stroke:#8b5cf6,color:#5b21b6
 ```
 
 **Per-turn data flow:**

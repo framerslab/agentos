@@ -8,6 +8,8 @@ Most agent SDKs hand you a function call. You pass a system prompt and a list of
 
 A **Generalized Mind Instance** — GMI — is the thing that exists between those calls. It owns a persona, a working memory, a cognitive memory layer that decays the way human memory decays, a sentiment tracker that follows the user's mood across turns, a metaprompt executor that assembles the system prompt fresh each turn from the current state, and a reasoning trace that keeps the last several hundred decision steps. When you `agent({...})` you are constructing one of these. When you call `.session(id).send(...)` you are addressing it.
 
+![GMI architecture: a thin coordinator class that delegates per-turn work to four close collaborators (ConversationHistoryManager, CognitiveMemoryBridge, SentimentTracker, MetapromptExecutor) and seven injected services (WorkingMemory, PromptEngine, ToolOrchestrator, LLMProviderManager, UtilityAI, CognitiveMemoryManager, optional RetrievalAugmentor). The GMI core itself owns persona, current mood, user context, task context, and reasoning trace, but never does retrieval, generation, or tool dispatch directly.](/img/diagrams/gmi-architecture.svg)
+
 This page is an honest tour of the abstraction. Most descriptions of GMIs you'll see — including the concentric-ring diagram on [agentos.sh](https://agentos.sh) — are presentation. The presentation is useful but it isn't the architecture. The architecture is a delegation pattern: a coordinator class with a dozen specialized collaborators, each owning one concern. Below is what's actually in the source tree at [`packages/agentos/src/cognitive_substrate/GMI.ts`](https://github.com/framersai/agentos/blob/master/src/cognitive_substrate/GMI.ts).
 
 ## The shortest useful example
