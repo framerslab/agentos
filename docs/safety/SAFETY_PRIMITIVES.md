@@ -1,62 +1,42 @@
+---
+description: "Six operational safety primitives that wrap every AgentOS LLM call: killswitch, cost guard, circuit breaker, stuck detection, action audit log. Prevent runaway loops, money fires, and zombie agents — independently or as one guard chain via wrapLLMCallback()."
+keywords: [agent safety, llm circuit breaker, cost guard, stuck detector, agent killswitch, runaway agent, ai cost cap, agentos safety, operational guardrails]
+---
+
 # Safety Primitives
 
-Operational safety guards that prevent runaway agent loops, excessive spending, and stuck behavior. These are distinct from [Guardrails](./GUARDRAILS_USAGE.md) which handle content safety (toxicity, PII, prompt injection) and **folder-level filesystem permissions**.
+> "An ounce of prevention is worth a pound of cure."
+> — Benjamin Franklin, 1736
 
-:::tip Related Safety Systems
-- **[Guardrails](./GUARDRAILS_USAGE.md)** - Content filtering, PII redaction, and **folder-level permissions** for filesystem access
-- **Safety Primitives** (this page) - Circuit breakers, cost guards, stuck detection, and tool execution timeouts
-:::
+An autonomous agent with LLM access can burn $93 overnight retrying the same failed action 800 times. I have the receipts. A flaky vendor API, a misconfigured retry policy, an output guardrail that silently rejected every attempt — any one of those turns an overnight crawler into a money furnace. The fixes for each are obvious in isolation. The fix for *the class of failure* is a stack of small, independent primitives that wrap every LLM and tool call.
 
-## The Problem
+Six primitives ship in AgentOS. Each is opt-in. Each is stateless across processes (Redis-backed persistence is optional). Each has a default that's safe enough to ship without tuning. Wire them all together via `wrapLLMCallback()` and you get one guard chain that turns *"agent silently runs up a bill"* into *"agent gets paused at $5 with a clear reason in the audit log"*.
 
-An autonomous agent with LLM access can burn $93 overnight retrying the same failed action 800 times. Without circuit breakers, a flaky API turns your agent into a money furnace. Without stuck detection, it happily generates the same broken output forever. Safety primitives provide 6 independent layers of defense that compose together into a single guard chain.
+These are operational guards — they don't read message content. For content-level safety (toxicity, PII, prompt injection, folder-level filesystem permissions) see [Guardrails](./GUARDRAILS_USAGE.md).
 
-## Architecture
+## The chain
 
-```
-Incoming LLM / Tool call
-        |
-        v
-+-------------------+
-| 1. SafetyEngine   |  Killswitches: per-agent pause/stop, network emergency halt
-|    canAct()       |  Rate limits: post, comment, vote, dm, browse, proposal
-+-------------------+
-        |
-        v
-+-------------------+
-| 2. CostGuard      |  Session cap ($1), daily cap ($5), per-operation cap ($0.50)
-|    canAfford()    |
-+-------------------+
-        |
-        v
-+-------------------+
-| 3. CircuitBreaker  |  Three-state: closed -> open -> half-open -> closed
-|    execute()      |  Opens after N failures in window, cools down, probes
-+-------------------+
-        |
-        v
-   [Execute the actual LLM call or tool invocation]
-        |
-        v
-+-------------------+
-| 4. CostGuard      |  Record actual token cost from usage metadata
-|    recordCost()   |
-+-------------------+
-        |
-        v
-+-------------------+
-| 5. StuckDetector   |  Detects repeated_output, repeated_error, oscillating
-|    recordOutput() |  Uses fast djb2 hashing, no crypto overhead
-+-------------------+
-        |
-        v
-+-------------------+
-| 6. ActionAuditLog  |  Ring buffer + optional persistence adapter
-|    log()          |  Every action gets a trail entry with outcome + duration
-+-------------------+
+```mermaid
+flowchart TB
+    Inv["Incoming LLM / Tool call"]:::input
+    SE["1 · SafetyEngine · <tt>canAct()</tt><br/><i>Killswitches (per-agent + emergency network halt)<br/>Rate limits: post · comment · vote · dm · browse · proposal</i>"]:::warning
+    CG1["2 · CostGuard · <tt>canAfford()</tt><br/><i>Session cap ($1) · daily cap ($5) · per-op cap ($0.50)</i>"]:::warning
+    CB["3 · CircuitBreaker · <tt>execute()</tt><br/><i>closed → open → half-open · opens after N failures · cools down · probes</i>"]:::warning
+    Exec["Actual LLM call or tool invocation"]:::process
+    CG2["4 · CostGuard · <tt>recordCost()</tt><br/><i>Records actual token cost from usage metadata</i>"]:::data
+    SD["5 · StuckDetector · <tt>recordOutput()</tt><br/><i>Detects repeated_output · repeated_error · oscillating · fast djb2 hashing</i>"]:::warning
+    AL["6 · ActionAuditLog · <tt>log()</tt><br/><i>Ring buffer + optional persistence · every action gets a trail entry</i>"]:::output
+
+    Inv --> SE --> CG1 --> CB --> Exec --> CG2 --> SD --> AL
+
+    classDef input fill:#cffafe,stroke:#0891b2,color:#0e7490
+    classDef process fill:#eef2ff,stroke:#6366f1,color:#3730a3
+    classDef warning fill:#fee2e2,stroke:#f43f5e,color:#9f1239
+    classDef data fill:#fef3c7,stroke:#f59e0b,color:#92400e
+    classDef output fill:#dcfce7,stroke:#10b981,color:#047857
 ```
 
-All six layers are independent. You can use any subset, or wire them all together in a single guard chain via `wrapLLMCallback()`.
+All six layers are independent. Use any subset. Wire them all into one chain via `wrapLLMCallback()`.
 
 ## CircuitBreaker
 

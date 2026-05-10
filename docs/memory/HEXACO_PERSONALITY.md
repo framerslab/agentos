@@ -1,7 +1,8 @@
 ---
 title: "HEXACO Personality"
 sidebar_position: 1.5
-description: "How HEXACO trait vectors shape encoding, working-memory capacity, retrieval bias, prompt formatting, observer/reflector behavior, and runtime self-modification across the AgentOS memory system."
+description: "How HEXACO trait vectors shape encoding, working-memory capacity, retrieval bias, prompt formatting, observer/reflector behavior, and runtime self-modification across the AgentOS memory system. Six trait dimensions, opt-in, character-driven simulation ready."
+keywords: [hexaco personality llm, ai agent personality, agent trait modeling, persona overlay, character ai consistency, big five vs hexaco, ashton lee 2007, agentos persona, trait-modulated retrieval, roleplay agent]
 ---
 
 # HEXACO Personality
