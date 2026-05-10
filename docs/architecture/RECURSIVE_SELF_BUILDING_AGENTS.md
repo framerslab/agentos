@@ -162,37 +162,20 @@ However, several critical gaps exist:
 
 The most powerful aspect of this setup is **recursive self-improvement**:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                 Recursive Self-Improvement Loop                  │
-│                                                                  │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  1. Identify limitation in current capabilities         │    │
-│  │     "I can't process images well"                       │    │
-│  └─────────────────────┬───────────────────────────────────┘    │
-│                        ▼                                         │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  2. Search for solutions                                │    │
-│  │     "How to add vision capability to AI agents"         │    │
-│  └─────────────────────┬───────────────────────────────────┘    │
-│                        ▼                                         │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  3. Write code to implement solution                    │    │
-│  │     pip install openai; integrate vision API            │    │
-│  └─────────────────────┬───────────────────────────────────┘    │
-│                        ▼                                         │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  4. Test and validate                                   │    │
-│  │     Run tests, verify image processing works            │    │
-│  └─────────────────────┬───────────────────────────────────┘    │
-│                        ▼                                         │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  5. Integrate into self                                 │    │
-│  │     Register new tool, update persona                   │    │
-│  └─────────────────────┬───────────────────────────────────┘    │
-│                        │                                         │
-│                        └─────────────► Loop back to 1            │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    S1["1. Identify limitation in current capabilities<br/><i>I can't process images well</i>"]:::process
+    S2["2. Search for solutions<br/><i>How to add vision capability to AI agents</i>"]:::process
+    S3["3. Write code to implement<br/><i>pip install openai; integrate vision API</i>"]:::data
+    S4["4. Test and validate<br/><i>Run tests, verify image processing works</i>"]:::data
+    S5["5. Integrate into self<br/><i>Register new tool, update persona</i>"]:::output
+
+    S1 --> S2 --> S3 --> S4 --> S5
+    S5 -. loop back .-> S1
+
+    classDef process fill:#eef2ff,stroke:#6366f1,color:#3730a3
+    classDef data fill:#fef3c7,stroke:#f59e0b,color:#92400e
+    classDef output fill:#dcfce7,stroke:#10b981,color:#047857
 ```
 
 **This is the key insight**: With CLI + Web, an agent can:
