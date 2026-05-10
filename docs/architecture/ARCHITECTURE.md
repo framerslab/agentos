@@ -40,122 +40,36 @@ The `src/` tree is organized into 26 domain-specific top-level modules. Only fou
 
 - **AgentOSOrchestrator** coordinates requests, delegating to `TurnExecutionPipeline` (pre-LLM preparation), `GMIChunkTransformer` (stream mapping), and `ExternalToolResultHandler` (tool-result continuation).
 
-```
-src/
-├── agents/                  # Agent definitions + multi-agent collectives
-│   ├── definitions/         # Agent type definitions
-│   └── agency/              # Multi-agent coordination (AgencyRegistry, etc.)
-│
-├── api/                     # Public API surface (AgentOS, high-level helpers)
-│   ├── runtime/             # Orchestrator collaborators, tool adapters, provider defaults
-│   └── types/               # AgentOSInput, AgentOSResponse, etc.
-│
-├── channels/                # Channel adapters + telephony + social posting
-│   ├── adapters/            # Platform-specific adapters (Discord, Slack, etc.)
-│   ├── telephony/           # Voice call providers (Twilio, Vonage, etc.)
-│   └── social-posting/      # Social media post management
-│
-├── cognitive_substrate/     # GMI + extracted collaborators
-│   ├── personas/            # Persona definitions + loader (JSON + SOUL.md via SoulLoader)
-│   ├── persona_overlays/    # PersonaOverlayManager
-│   ├── ConversationHistoryManager.ts
-│   ├── CognitiveMemoryBridge.ts
-│   ├── SentimentTracker.ts
-│   └── MetapromptExecutor.ts
-│
-├── core/                    # Infrastructure (11 dirs)
-│   ├── config/              # Configuration types
-│   ├── conversation/        # ConversationManager
-│   ├── embeddings/          # IEmbeddingManager (shared interface)
-│   ├── llm/                 # LLM providers, routing
-│   ├── logging/             # Logger abstraction
-│   ├── rate-limiting/       # Rate limiter
-│   ├── storage/             # IStorageAdapter
-│   ├── streaming/           # StreamingManager
-│   ├── tools/               # ITool, ToolOrchestrator
-│   ├── utils/               # Shared helpers
-│   └── vector-store/        # IVectorStore, IVectorStoreManager (shared interfaces)
-│
-├── discovery/               # Capability discovery engine (tiered semantic search)
-│
-├── emergent/                # Emergent capabilities (self-improvement)
-│
-├── evaluation/              # Eval framework + observability
-│   └── observability/       # OpenTelemetry tracing & metrics
-│
-├── extensions/              # Extension system
-│
-├── hearing/                 # Listening: STT providers, VAD, silence detection
-│
-├── marketplace/             # Agent marketplace + workspace
-│   ├── store/               # Marketplace listings & search
-│   └── workspace/           # Per-agent workspace helpers
-│
-├── media/                   # Creative generation (images, video, music, SFX)
-│   ├── audio/               # Music + SFX generation
-│   ├── images/              # Image generation (DALL-E, Stability, etc.)
-│   └── video/               # Video generation & analysis
-│
-├── memory/                  # Cognitive memory system
-│   ├── core/                # Shared memory types, decay, working-memory helpers
-│   ├── io/facade/           # Standalone Memory API (remember/recall)
-│   ├── io/tools/            # MemoryAdd/Search/Update/Delete/Merge tools
-│   ├── mechanisms/          # Neuroscience-grounded cognitive mechanisms
-│   ├── pipeline/            # Consolidation, context, lifecycle, observation
-│   └── retrieval/           # Brain, graphs, feedback, prospective memory
-│
-├── nlp/                     # NLP processing
-│   ├── ai_utilities/        # AI utility helpers (LLM-backed summarization, etc.)
-│   ├── language/            # Language detection & translation
-│   ├── tokenizers/          # Tokenizer implementations
-│   ├── stemmers/            # Stemmer implementations
-│   └── ...                  # normalizers, lemmatizers, filters
-│
-├── orchestration/           # DAG workflow engine + planner + HITL
-│   ├── planner/             # PlanningEngine, ReAct loops
-│   ├── hitl/                # Human-in-the-loop approval
-│   ├── workflows/           # Workflow definitions & execution
-│   ├── turn-planner/        # TurnPlanner + telemetry
-│   ├── ir/                  # Intermediate representation
-│   ├── compiler/            # Graph compiler
-│   ├── runtime/             # Workflow runtime
-│   ├── checkpoint/          # Checkpoint/restore
-│   └── events/              # Event bus
-│
-├── provenance/              # Content provenance + blockchain anchoring
-│
-├── query-router/            # Query classification + routing
-│
-├── rag/                     # Retrieval-augmented generation
-│   ├── vector-search/       # HNSW sidecar, Postgres, etc.
-│   ├── vector_stores/       # Vector store implementations
-│   ├── chunking/            # Document chunking strategies
-│   ├── reranking/           # Reranking models
-│   ├── unified/             # Unified retriever
-│   └── graphrag/            # Graph-augmented retrieval
-│
-├── safety/                  # Guardrails + runtime safety
-│   ├── guardrails/          # IGuardrailService, ParallelGuardrailDispatcher
-│   └── runtime/             # CircuitBreaker, CostGuard, StuckDetector, etc.
-│
-├── sandbox/                 # Sandboxed execution + subprocess
-│   ├── executor/            # Sandboxed code execution
-│   └── subprocess/          # CLISubprocessBridge, CLIRegistry
-│
-├── skills/                  # SKILL.md loader (content lives in agentos-skills)
-│
-├── speech/                  # Speaking: TTS providers, resolver, session
-│
-├── structured/              # Structured output + prompt routing
-│   ├── output/              # StructuredOutputManager, JSON schema
-│   └── prompting/           # Prompt routing & construction
-│
-├── types/                   # Shared types (auth)
-│
-├── vision/                  # Seeing: OCR, scene detection, image analysis
-│
-└── voice-pipeline/          # Real-time voice conversation orchestrator
-```
+All paths below are under `packages/agentos/src/`.
+
+| Module | Subdirs | Purpose |
+| --- | --- | --- |
+| `agents/` | `definitions/` · `agency/` | Agent type definitions and multi-agent coordination (`AgencyRegistry`) |
+| `api/` | `runtime/` · `types/` | Public API surface — `AgentOS`, `generateText`, `streamText`, `agent`, `agency`, orchestrator collaborators, provider defaults |
+| `channels/` | `adapters/` · `telephony/` · `social-posting/` | Platform adapters (Discord, Slack), voice-call providers (Twilio, Vonage), social-post management |
+| `cognitive_substrate/` | `personas/` · `persona_overlays/` | The GMI itself plus `ConversationHistoryManager`, `CognitiveMemoryBridge`, `SentimentTracker`, `MetapromptExecutor`, and persona loaders (JSON + `SOUL.md` via `SoulLoader`) |
+| `core/` | `config/` · `conversation/` · `embeddings/` · `llm/` · `logging/` · `rate-limiting/` · `storage/` · `streaming/` · `tools/` · `utils/` · `vector-store/` | Foundational infrastructure: shared interfaces, the `IStorageAdapter`, the `StreamingManager`, the `ITool` / `ToolOrchestrator`, embedding and vector-store abstractions |
+| `discovery/` | — | Capability-discovery engine (tiered semantic search) |
+| `emergent/` | — | Runtime tool forging and self-improvement (`forge_tool`, `EmergentCapabilityEngine`, `EmergentJudge`) |
+| `evaluation/` | `observability/` | Eval framework + OpenTelemetry tracing and metrics |
+| `extensions/` | — | Extension system: `ExtensionPack`, descriptor kinds, activation lifecycle |
+| `hearing/` | — | Listening surface: STT providers, VAD, silence detection |
+| `marketplace/` | `store/` · `workspace/` | Agent-marketplace listings + per-agent workspace helpers |
+| `media/` | `audio/` · `images/` · `video/` | Creative generation: image (DALL-E, Stability), video, music, SFX |
+| `memory/` | `core/` · `io/facade/` · `io/tools/` · `mechanisms/` · `pipeline/` · `retrieval/` | Cognitive memory system: encoding/decay, the Memory API, memory tools, neuroscience-grounded mechanisms, consolidation, retrieval brain |
+| `nlp/` | `ai_utilities/` · `language/` · `tokenizers/` · `stemmers/` · normalizers · lemmatizers · filters | NLP processing — LLM-backed summarization, language detection, tokenizers |
+| `orchestration/` | `planner/` · `hitl/` · `workflows/` · `turn-planner/` · `ir/` · `compiler/` · `runtime/` · `checkpoint/` · `events/` | DAG workflow engine, `PlanningEngine` (ReAct loops), human-in-the-loop, IR/compiler, event bus |
+| `provenance/` | — | Content provenance + blockchain anchoring |
+| `query-router/` | — | Query classification + routing |
+| `rag/` | `vector-search/` · `vector_stores/` · `chunking/` · `reranking/` · `unified/` · `graphrag/` | Retrieval-augmented generation: HNSW sidecar, vector-store implementations, chunking strategies, reranking, graph-augmented retrieval |
+| `safety/` | `guardrails/` · `runtime/` | Guardrails (`IGuardrailService`, `ParallelGuardrailDispatcher`) and runtime safety (`CircuitBreaker`, `CostGuard`, `StuckDetector`) |
+| `sandbox/` | `executor/` · `subprocess/` | Sandboxed code execution (`node:vm`) and `CLISubprocessBridge` / `CLIRegistry` |
+| `skills/` | — | `SKILL.md` loader (content lives in `agentos-skills`) |
+| `speech/` | — | Speaking surface: TTS providers, resolver, session |
+| `structured/` | `output/` · `prompting/` | Structured output (`StructuredOutputManager`, JSON schema) + prompt routing |
+| `types/` | — | Shared types (auth) |
+| `vision/` | — | Seeing surface: OCR, scene detection, image analysis |
+| `voice-pipeline/` | — | Real-time voice-conversation orchestrator |
 
 ### Architecture Layers
 
@@ -207,30 +121,15 @@ GMI is what an agent actually *is* between turns: persona, working memory, mood,
 
 ### GMI Lifecycle
 
-```
-┌──────────┐     initialize()     ┌──────────┐
-│  (new)   │ ──────────────────> │   IDLE   │
-└──────────┘                      └────┬─────┘
-                                       │ initialize(persona, config)
-                                       v
-                                 ┌──────────┐
-                                 │  READY   │ <─────────────────────┐
-                                 └────┬─────┘                       │
-                                      │ processTurnStream()         │
-                                      v                             │
-                                ┌────────────┐   turn complete  ┌───┴──────┐
-                                │ PROCESSING │ ──────────────> │  READY   │
-                                └─────┬──────┘                  └──────────┘
-                                      │ tool call
-                                      v
-                             ┌─────────────────────┐
-                             │ AWAITING_TOOL_RESULT │
-                             └─────────┬───────────┘
-                                       │ tool result received
-                                       v
-                                ┌────────────┐
-                                │ PROCESSING │ (continues LLM turn)
-                                └────────────┘
+```mermaid
+stateDiagram-v2
+    [*] --> NEW: constructor
+    NEW --> IDLE: bind dependencies
+    IDLE --> READY: initialize(persona, config)
+    READY --> PROCESSING: processTurnStream()
+    PROCESSING --> AWAITING_TOOL_RESULT: tool call
+    AWAITING_TOOL_RESULT --> PROCESSING: tool result received
+    PROCESSING --> READY: turn complete
 ```
 
 ### Initialization
@@ -553,33 +452,21 @@ For preset persona definitions, see `packages/wunderland/presets/`.
 
 The prompt is assembled in a specific order, with each section receiving a token budget allocation:
 
-```
-┌──────────────────────────────────────────┐
-│  1. System Instruction                   │  Fixed: persona systemPrompt
-│     Base persona system prompt           │
-├──────────────────────────────────────────┤
-│  2. Persona Overlays                     │  Variable: active overlays
-│     Runtime modifications                │
-├──────────────────────────────────────────┤
-│  3. Memory Context                       │  Budget: ~20% of available tokens
-│     MemoryPromptAssembler output         │
-│     (6 sections: episodic, semantic,     │
-│      procedural, prospective, graph,     │
-│      working memory)                     │
-├──────────────────────────────────────────┤
-│  4. RAG Context                          │  Budget: ~15% of available tokens
-│     Retrieved document chunks            │
-│     (when RAG is enabled)                │
-├──────────────────────────────────────────┤
-│  5. Tool Schemas                         │  Budget: ~10% or discovery tier
-│     Available tools for LLM             │
-│     (or capability discovery results)    │
-├──────────────────────────────────────────┤
-│  6. Conversation History                 │  Budget: remaining tokens
-│     Managed by ConversationHistory-      │
-│     Manager with overflow strategy:      │
-│     truncate | summarize | hybrid        │
-└──────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    P1["1 · System Instruction<br/><i>fixed · persona systemPrompt</i>"]:::input
+    P2["2 · Persona Overlays<br/><i>variable · active overlays</i>"]:::input
+    P3["3 · Memory Context<br/><i>~20% budget · 6 sections from MemoryPromptAssembler</i>"]:::process
+    P4["4 · RAG Context<br/><i>~15% budget · retrieved document chunks</i>"]:::process
+    P5["5 · Tool Schemas<br/><i>~10% budget or discovery tier</i>"]:::process
+    P6["6 · Conversation History<br/><i>remaining tokens · truncate / summarize / hybrid overflow</i>"]:::process
+    LLM["LLM prompt"]:::output
+
+    P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> LLM
+
+    classDef input fill:#cffafe,stroke:#0891b2,color:#0e7490
+    classDef process fill:#eef2ff,stroke:#6366f1,color:#3730a3
+    classDef output fill:#dcfce7,stroke:#10b981,color:#047857
 ```
 
 ### Token Budget Strategy
@@ -650,45 +537,65 @@ Four memory types (Tulving's taxonomy) across four ownership scopes:
 
 ### Architecture
 
-```
-CognitiveMemoryManager (orchestrator)
-  ├── EncodingModel         -- HEXACO traits -> encoding weights, flashbulb memories
-  ├── DecayModel            -- Ebbinghaus curve, spaced repetition, interference
-  ├── CognitiveWorkingMemory -- Baddeley's slot model (7+-2, personality-modulated)
-  ├── MemoryStore           -- IVectorStore + IKnowledgeGraph unified persistence
-  ├── MemoryPromptAssembler -- Token-budgeted 6-section prompt assembly
-  ├── IMemoryGraph          -- Graphology adapter with 8 edge types
-  ├── SpreadingActivation   -- Anderson's ACT-R BFS with Hebbian learning
-  ├── MemoryObserver        -- Personality-biased background note extraction
-  ├── MemoryReflector       -- LLM-driven consolidation of notes into long-term traces
-  ├── ProspectiveMemoryManager -- Time/event/context-triggered future intentions
-  └── ConsolidationPipeline -- 5-step periodic maintenance
+```mermaid
+flowchart TB
+    CM["CognitiveMemoryManager<br/><i>orchestrator</i>"]:::process
+    E["EncodingModel<br/><i>HEXACO weights · flashbulb</i>"]:::process
+    D["DecayModel<br/><i>Ebbinghaus · spaced rep · interference</i>"]:::process
+    W["CognitiveWorkingMemory<br/><i>Baddeley 7±2 · personality-modulated</i>"]:::process
+    M["MemoryStore<br/><i>IVectorStore + IKnowledgeGraph</i>"]:::data
+    P["MemoryPromptAssembler<br/><i>6-section token-budgeted assembly</i>"]:::process
+    G["IMemoryGraph<br/><i>Graphology · 8 edge types</i>"]:::data
+    SA["SpreadingActivation<br/><i>Anderson ACT-R · Hebbian</i>"]:::process
+    O["MemoryObserver<br/><i>personality-biased note extraction</i>"]:::process
+    R["MemoryReflector<br/><i>LLM consolidates notes → traces</i>"]:::process
+    Pr["ProspectiveMemoryManager<br/><i>time / event / context triggers</i>"]:::process
+    Co["ConsolidationPipeline<br/><i>5-step periodic maintenance</i>"]:::process
+
+    CM --> E
+    CM --> D
+    CM --> W
+    CM --> M
+    CM --> P
+    CM --> G
+    CM --> SA
+    CM --> O
+    CM --> R
+    CM --> Pr
+    CM --> Co
+
+    classDef process fill:#eef2ff,stroke:#6366f1,color:#3730a3
+    classDef data fill:#fef3c7,stroke:#f59e0b,color:#92400e
 ```
 
 ### Cognitive Pipeline (per-message smart orchestration)
 
 Above the storage substrate sits an LLM-as-judge orchestration layer that picks strategy per message at three pipeline boundaries. Each stage is its own router primitive — independently shippable, independently testable, composable via the `CognitivePipeline` facade. This is **smart orchestration, not safety guardrails** — orchestration picks strategies, guardrails enforce safety/policy at the output stage. They live in different packages on purpose.
 
-```
-   Content                 Query                    Query
-      │                      │                       │
-      ▼                      ▼                       ▼
-  ┌─────────┐          ┌─────────────┐         ┌─────────────┐
-  │ Ingest  │          │   Memory    │         │    Read     │
-  │ Router  │          │   Router    │         │   Router    │
-  │ (input) │          │  (recall)   │         │   (read)    │
-  └─────────┘          └─────────────┘         └─────────────┘
-      │                      │                       │
-      ▼                      ▼                       ▼
-  Memory state          Retrieved traces         Final answer
-                                                       │
-                                                       ▼
-                                              ┌──────────────┐
-                                              │ core/        │
-                                              │ guardrails   │
-                                              │ (output      │
-                                              │  validation) │
-                                              └──────────────┘
+```mermaid
+flowchart TB
+    Content["Content"]:::input
+    Q1["Query"]:::input
+    Q2["Query"]:::input
+
+    Ingest["IngestRouter<br/><i>input stage</i>"]:::process
+    Memory["MemoryRouter<br/><i>recall stage</i>"]:::process
+    Read["ReadRouter<br/><i>read stage</i>"]:::process
+
+    State["Memory state"]:::data
+    Traces["Retrieved traces"]:::data
+    Answer["Final answer"]:::output
+    Guard["core/guardrails<br/><i>output validation</i>"]:::external
+
+    Content --> Ingest --> State
+    Q1 --> Memory --> Traces
+    Q2 --> Read --> Answer --> Guard
+
+    classDef input fill:#cffafe,stroke:#0891b2,color:#0e7490
+    classDef process fill:#eef2ff,stroke:#6366f1,color:#3730a3
+    classDef data fill:#fef3c7,stroke:#f59e0b,color:#92400e
+    classDef output fill:#dcfce7,stroke:#10b981,color:#047857
+    classDef external fill:#f3e8ff,stroke:#8b5cf6,color:#5b21b6
 ```
 
 Every router has the same internal structure: a classifier (LLM-as-judge that maps input to a category/intent token), a pure `select*` function (category + routing table + budget policy → strategy decision), a dispatcher (registry of executors per strategy), and three shipping presets calibrated from LongMemEval-S Phase B N=500 measurements.
