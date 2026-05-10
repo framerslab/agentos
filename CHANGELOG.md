@@ -1,3 +1,7 @@
+## <small>0.7.2 (2026-05-10)</small>
+
+* feat(api): policy-aware fallback chain for content_policy refusals ([99131c4](https://github.com/framersai/agentos/commit/99131c4))
+
 ## <small>0.7.1 (2026-05-10)</small>
 
 * fix(exports): expose ./memory/* wildcard for backward-compat deep imports ([ee250db](https://github.com/framersai/agentos/commit/ee250db))
