@@ -1,3 +1,8 @@
+## <small>0.7.3 (2026-05-10)</small>
+
+* Merge branch 'master' of https://github.com/framersai/agentos ([207253e](https://github.com/framersai/agentos/commit/207253e))
+* feat(personas): add SoulLoader for SOUL.md per-agent identity files (OpenClaw / aaronjmars-soul.md c ([fa5e0aa](https://github.com/framersai/agentos/commit/fa5e0aa))
+
 ## <small>0.7.2 (2026-05-10)</small>
 
 * feat(api): policy-aware fallback chain for content_policy refusals ([99131c4](https://github.com/framersai/agentos/commit/99131c4))
