@@ -7,9 +7,7 @@ keywords: [agent communication bus, multi-agent messaging, pub/sub agents, agent
 
 > **Live run**: side-by-side code + captured bus traffic (delegation + handoff between two GMIs) on the [agentos.sh demo gallery](https://agentos.sh/#live-demo). Source: [`examples/agent-communication-bus.mjs`](https://github.com/framersai/agentos/blob/master/examples/agent-communication-bus.mjs).
 
-Two agents in the same agency need to talk. They share a memory layer, they share a runtime, they share the same set of tools — but the moment one of them wants to *hand off* a task, or *ask* for a result, or *publish* an event the others might care about, you need a bus. Not a shared mutable object. Not a global emitter that drops messages on a hot path. A real message bus with routing rules, subscription filters, retry on failure, and a replayable history of who said what to whom.
-
-The Agent Communication Bus is that bus. Six message patterns, three internal layers, one API.
+The `AgentCommunicationBus` is the inter-agent messaging primitive for AgentOS agencies. Agents in the same agency share a memory layer, a runtime, and a tool catalog, but cross-agent task transfer, query/response, and topic-based publishing require explicit routing. The bus provides routing rules, subscription filters, retry-on-failure semantics, and a replayable message history. It supports six message patterns over three internal layers, exposed via one API.
 
 | Pattern | Use it for |
 | --- | --- |

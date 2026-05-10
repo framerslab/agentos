@@ -16,11 +16,9 @@ keywords:
 
 # Cognitive Pipeline
 
-> *"The most important thing in communication is hearing what isn't said."* — Peter Drucker
+The Cognitive Pipeline routes each incoming message through a chain of small classifier calls and dispatches to the cheapest retrieval + reader strategy that handles its category. It does not block, refuse, or validate output. Content-level safety is a separate primitive — see [Guardrails Architecture](./GUARDRAILS_ARCHITECTURE.md).
 
-Most agent memory pipelines retrieve on every query. They embed the input, run a vector search, stuff the top-K into context, call the reader. Same path every time, whether the user asked "what's my project ID" or "hey."
-
-That's expensive on the easy questions and underpowered on the hard ones. The pipeline this page describes routes each message through a chain of small classifier calls and picks the cheapest strategy that handles it. It is not safety guardrails — it does not block, refuse, or validate output. Safety lives in [Guardrails Architecture](./GUARDRAILS_ARCHITECTURE.md).
+Most memory libraries retrieve on every query. They embed the input, run a vector search, stuff the top-K into context, call the reader. Same path every time, regardless of whether the query is a memory-relevant question or "hey there." That is expensive on easy queries and underpowered on hard ones. The Cognitive Pipeline replaces the single-path retrieval with three sequential routers (ingest, recall, read), each picking a strategy from a registered routing table.
 
 ## What it actually does
 

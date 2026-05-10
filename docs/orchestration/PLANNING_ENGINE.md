@@ -5,12 +5,9 @@ keywords: [agent planning engine, react planning, tree of thoughts, llm task dec
 
 # AgentOS Planning Engine
 
-> "Plans are worthless. Planning is everything."
-> — Dwight D. Eisenhower
+`PlanningEngine` is the multi-step task orchestrator for AgentOS agents. A single LLM call answers a single question; a multi-step task (research across sources, draft, critique, revise) requires goal-state retention across turns, step-by-step decomposition, intermediate result inspection, and conditional advance/backtrack logic. `PlanningEngine` provides that loop.
 
-A single LLM call answers a single question. The moment you want an agent that researches across five sources, drafts a section, critiques its own draft, then revises — you need a thing that holds the goal in working memory across turns, decomposes it, runs steps, watches what came back, decides whether to advance or backtrack. That thing is `PlanningEngine`.
-
-Three collaborators compose into the engine: a **Plan Generator** that turns a goal into a multi-step plan (ReAct or Tree-of-Thoughts), a **Task Decomposer** that breaks each step further when needed (Least-to-Most prompting), and a **Self-Reflector** that critiques the plan after execution and proposes revisions (Reflexion). Underneath sits an **Execution Engine** that runs steps, checkpoints state, rolls back on failure, and ships an autonomous-loop variant that replans and retries until a budget is hit. Below that, three external systems the engine reaches into: LLM Provider Manager, the tool catalog, and the RAG system.
+Three collaborators compose into the engine: a **Plan Generator** that converts a goal into a multi-step plan (ReAct or Tree-of-Thoughts), a **Task Decomposer** that further decomposes steps when needed (Least-to-Most prompting), and a **Self-Reflector** that critiques results after execution and proposes revisions (Reflexion). The **Execution Engine** runs steps, checkpoints state, rolls back on failure, and ships an autonomous-loop variant that replans and retries until a budget cap is reached. Three external systems are addressable from the engine: the LLM Provider Manager, the tool catalog, and the RAG system.
 
 ## Architecture
 

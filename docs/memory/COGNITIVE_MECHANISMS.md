@@ -16,11 +16,9 @@ keywords:
 
 # Cognitive Mechanisms — Package Implementation Guide
 
-> *"Memory is not a passive recorder, but an active constructor."* — Daniel Schacter
+This page is the implementation map for the eight cognitive mechanisms layered on AgentOS memory: reconsolidation, retrieval-induced forgetting, involuntary recall, metacognitive feeling-of-knowing, temporal gist, schema encoding, source-confidence decay, and emotion regulation. Each mechanism is a pure function with a single mutation responsibility on a `MemoryTrace`. The `CognitiveMechanismsEngine` binds them to three lifecycle hook points (access, retrieval, consolidation) on `MemoryStore` and `MemoryPromptAssembler`.
 
-This page is the wiring map for the cognitive mechanisms that turn AgentOS memory from a vector store into something that behaves more like remembering. Each mechanism is a pure function with one job — drift a trace toward current mood, suppress its competitors after a retrieval, compress verbatim text into gist, weight a source-of-truth confidence. The engine bolts them onto three hook points (access, retrieval, consolidation) on the `MemoryStore` and `MemoryPromptAssembler`. Everything else is bookkeeping.
-
-If you want the theory and citations, read [Cognitive Memory](./COGNITIVE_MEMORY.md) first. This file tells you which `.ts` to open when something's off.
+For the conceptual model and academic citations, see [Cognitive Memory](./COGNITIVE_MEMORY.md). This page documents the source-tree layout, hook contracts, mechanism APIs, and HEXACO modulation wiring.
 
 ## File Structure
 

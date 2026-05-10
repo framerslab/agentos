@@ -16,13 +16,9 @@ keywords:
 
 # SQL Storage Quickstart
 
-> *"Premature standardization is the root of all integration pain. Late standardization is the root of all migration pain. Pick one."* — adapted from Knuth (probably not what he meant)
+`@framers/sql-storage-adapter` is the storage layer used by every AgentOS persistence path (cognitive memory, agency memory, SQL storage archive). It exposes one `createDatabase()` factory that returns a uniform `StorageAdapter` interface backed by `better-sqlite3`, `sql.js`, IndexedDB, Capacitor SQLite, Postgres, or Supabase. Application code is identical across all six. The runtime auto-detects the right backend per environment, or picks it explicitly via the `type` option.
 
-I shipped four versions of the same agent before I admitted what was wrong. Dev ran on `better-sqlite3`. Production ran on Postgres because the dev SQLite file kept getting wiped by a watch loop nobody could find. The mobile build ran on Capacitor SQLite because the iOS sandbox rejected node bindings. And the browser playground ran on `sql.js` over IndexedDB because Safari extension contexts don't ship a filesystem. Four codepaths, four ways to fail, one shared schema none of them agreed on.
-
-`@framers/sql-storage-adapter` is the answer to "what if your storage code didn't care which of those four was underneath it." One `createDatabase()` call, six concrete backends, identical `.run() / .get() / .all() / .exec()` semantics. The same agent code drives every one of them. The runtime picks the right adapter based on what's available in the environment.
-
-This page is the integration guide.
+This page covers the public API: how to pick a backend, the `StorageAdapter` contract, cloud backups, cross-backend migrations, and how AgentOS memory subsystems consume it.
 
 ## What you get
 
@@ -56,7 +52,7 @@ Swap `type: 'sqlite'` for `type: 'postgres'` with a Postgres URL, redeploy, the 
 
 ## Picking the right backend
 
-The mistake I see most often is shipping `better-sqlite3` to production for "simplicity" and watching it lose data on the first multi-process deploy. Here's the actual decision tree:
+Backend selection guidance:
 
 - **Single-process Node service on a single machine** → `better-sqlite3`. Microsecond reads, WAL mode handles concurrent connections inside the process. Avoid for any setup where two processes ever write to the same file simultaneously.
 - **Multi-instance Node service, real users** → `postgres`. The driver pools connections, schema migrations cross instances cleanly, and Postgres FTS via [`PostgresFts`](https://github.com/framersai/agentos/blob/master/packages/sql-storage-adapter/src/fts/PostgresFts.ts) outranks SQLite FTS5 on anything past a few hundred MB.

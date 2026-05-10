@@ -5,12 +5,9 @@ keywords: [agent safety, llm circuit breaker, cost guard, stuck detector, agent 
 
 # Safety Primitives
 
-> "An ounce of prevention is worth a pound of cure."
-> — Benjamin Franklin, 1736
+Autonomous agents with LLM access can incur unbounded cost when a vendor API flakes, a retry policy misfires, or an output guardrail silently rejects every attempt. AgentOS ships six small, independent primitives that wrap every LLM and tool call to bound the failure modes that cause runaway spend, stuck loops, and zombie agents.
 
-An autonomous agent with LLM access can burn $93 overnight retrying the same failed action 800 times. I have the receipts. A flaky vendor API, a misconfigured retry policy, an output guardrail that silently rejected every attempt — any one of those turns an overnight crawler into a money furnace. The fixes for each are obvious in isolation. The fix for *the class of failure* is a stack of small, independent primitives that wrap every LLM and tool call.
-
-Six primitives ship in AgentOS. Each is opt-in. Each is stateless across processes (Redis-backed persistence is optional). Each has a default that's safe enough to ship without tuning. Wire them all together via `wrapLLMCallback()` and you get one guard chain that turns *"agent silently runs up a bill"* into *"agent gets paused at $5 with a clear reason in the audit log"*.
+Each primitive is opt-in, has a safe default, and works standalone or composed. Composing all six via `wrapLLMCallback()` produces one guard chain that converts silent overspend into a paused agent with an audit-log entry naming the trip condition.
 
 These are operational guards — they don't read message content. For content-level safety (toxicity, PII, prompt injection, folder-level filesystem permissions) see [Guardrails](./GUARDRAILS_USAGE.md).
 

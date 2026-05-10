@@ -5,16 +5,11 @@ keywords: [agentos architecture, ai agent runtime architecture, agent framework 
 
 # System Architecture
 
-> "I suppose it is tempting, if the only tool you have is a hammer, to treat everything as if it were a nail."
-> — Abraham Maslow, *The Psychology of Science*, 1966
+AgentOS organizes the runtime around long-running agent state rather than around a single turn loop. Cross-session conversations, parallel agent instances with independent personality and memory, conditional tool execution, human-in-the-loop approval, and a memory layer that distinguishes verified user input from model-generated content are first-class subsystems with their own modules.
 
-The shape of an agent runtime tells you what its authors thought the hard problems were. A turn-loop SDK exposes retries, structured output, and connector configuration as its top-level modules — that's a vote on what its authors kept debugging. Other runtimes lean on evaluation harnesses, on message routing, on context-window plumbing. Pick a runtime by its module names and you're picking by its scar tissue.
+The 26 top-level modules documented below are predominantly state-management subsystems. The turn loop itself is one component among them, not the central abstraction.
 
-The scar set I started with was different. Hours-long conversations across sessions. Two copies of an agent talking to two users at once with personalities and moods that don't bleed between them. Tool calls that should sometimes run, sometimes not, sometimes need a human to nod first. A memory layer that knows the difference between a fact someone told me last Tuesday and a fact I'm pretty sure the model made up in the last ten seconds.
-
-The 26 top-level modules below are mostly subsystems for managing that state. The turn loop is in there — it's a small piece in the middle.
-
-This page is the map. For the *what* of any subsystem — what each piece is, who owns its lifecycle, where the source lives — read on. For deep-dives into individual concerns, jump out from the table of contents below.
+This page is the system map. For the *what* of each subsystem — components, lifecycle ownership, source-tree location — read on. For deep-dives into individual concerns, follow the table of contents.
 
 For specific subsystem deep-dives, see:
 - [Sandbox & Security](./sandbox-security.md)
