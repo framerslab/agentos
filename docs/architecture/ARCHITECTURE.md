@@ -12,6 +12,8 @@ For specific subsystem deep-dives, see:
 - [Tool Permissions](./tool-permissions.md)
 - [Provenance & Immutability](../features/provenance-immutability.md)
 
+![AgentOS layered architecture: API surface, orchestration, GMI cognitive engine, safety guardrails alongside tools and extensions, memory and RAG, LLM providers, and perception with channel adapters](/img/diagrams/system-architecture-layers.svg)
+
 ---
 
 ## Source Directory Layout
@@ -147,38 +149,17 @@ src/
 
 ### Architecture Layers
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  API Layer                                                  │
-│  generateText · streamText · agent · agency · generateImage │
-├─────────────────────────────────────────────────────────────┤
-│  Orchestration                                              │
-│  workflow() · mission() · AgentGraph · HITL · checkpointing │
-├─────────────────────────────────────────────────────────────┤
-│  GMI (Generalized Mind Instance)                            │
-│  ConversationHistory · CognitiveMemory · Sentiment · Persona│
-├──────────────────────┬──────────────────────────────────────┤
-│  Safety & Guardrails │  Tools & Extensions                  │
-│  5-tier security     │  110 extensions, 88 skills           │
-│  PII · toxicity      │  CLI executor, web search            │
-│  grounding guard     │  capability discovery                │
-├──────────────────────┴──────────────────────────────────────┤
-│  Memory & RAG                                               │
-│  4-tier memory · 8 core cognitive mechanisms + optional drift │
-│  7 vector backends · HyDE · GraphRAG · hybrid retrieval     │
-├─────────────────────────────────────────────────────────────┤
-│  LLM Providers (11 direct + OpenRouter fan-out)             │
-│  OpenAI · Anthropic · Gemini · Ollama · Groq · Mistral      │
-│  Together · xAI · OpenRouter · Claude Code CLI · Gemini CLI │
-│  + automatic fallback chains                                │
-├─────────────────────────────────────────────────────────────┤
-│  Perception                                                 │
-│  Vision (OCR) · Hearing (STT/VAD) · Speech (TTS)           │
-│  12 messaging adapters · telephony (Twilio/Telnyx/Plivo)   │
-└─────────────────────────────────────────────────────────────┘
-```
+The diagram at the top of this page is the canonical layered view. From top to bottom:
 
-The following diagram shows how a typical request flows through these layers:
+1. **API surface** — `generateText` / `streamText` / `agent` / `agency` / `generateImage`, plus the `AgentOS` lifecycle facade.
+2. **Orchestration** — DAG runtime, `workflow()`, `mission()`, `AgentGraph`, HITL, checkpointing, planning engine.
+3. **GMI** — per-mind state: `ConversationHistory`, `CognitiveMemoryBridge`, `SentimentTracker`, `MetapromptExecutor`, persona overlays.
+4. **Safety & Guardrails** alongside **Tools & Extensions** — 5-tier security (PII, toxicity, grounding, circuit breakers, cost guard) and the 110-extension / 88-skill catalog with capability discovery and runtime tool forging.
+5. **Memory & RAG** — 4-tier cognitive memory, 8 mechanisms (Ebbinghaus decay, retrieval-induced forgetting, …), 7 vector backends, HyDE, GraphRAG, hybrid retrieval, `CitationVerifier`.
+6. **LLM providers** — 11 direct providers + OpenRouter fan-out with automatic fallback chains.
+7. **Perception & channels** — vision (OCR), hearing (STT, VAD), speech (TTS, voice pipeline), 12 messaging adapters, telephony.
+
+The diagram above the prose shows how a typical request enters at layer 1 and traverses downward.
 
 ### API Surface Contract
 
