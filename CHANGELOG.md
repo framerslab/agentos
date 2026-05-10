@@ -1,3 +1,16 @@
+## <small>0.7.6 (2026-05-10)</small>
+
+* fix(lint): replace require() with static import in soul loader; drop unused eslint-disable directive ([3fa2311](https://github.com/framersai/agentos/commit/3fa2311))
+* docs(agent-communication): bus hero SVG; replace ASCII three-layer stack ([217877c](https://github.com/framersai/agentos/commit/217877c))
+* docs(ecosystem): convert ASCII stack to themed Mermaid ([6bdfdec](https://github.com/framersai/agentos/commit/6bdfdec))
+* docs(emergent-capabilities): forge-loop hero SVG; replace ASCII flow ([e86d805](https://github.com/framersai/agentos/commit/e86d805))
+* docs(memory): convert end-to-end 3-lane ASCII to themed Mermaid (ingest · recall · read) ([0f2e7aa](https://github.com/framersai/agentos/commit/0f2e7aa))
+* docs(memory): convert ingest pipeline to themed Mermaid; flatten 12-table grid to a clean table ([2dd286e](https://github.com/framersai/agentos/commit/2dd286e))
+* docs(memory): three-tier hero SVG; replace ASCII stack ([d958d5a](https://github.com/framersai/agentos/commit/d958d5a))
+* docs(planning-engine): hero SVG; replace ASCII stack ([9604490](https://github.com/framersai/agentos/commit/9604490))
+* docs(recursive-self-building): convert ASCII loop to themed Mermaid ([70ba126](https://github.com/framersai/agentos/commit/70ba126))
+* docs(telephony): convert ASCII media-stream pipeline to themed Mermaid ([f41bf15](https://github.com/framersai/agentos/commit/f41bf15))
+
 ## <small>0.7.5 (2026-05-10)</small>
 
 * feat(personas): wire SoulLoader into agent() factory — `soul: 'path' | { content } | { path }` short ([159efe7](https://github.com/framersai/agentos/commit/159efe7))
