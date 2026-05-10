@@ -1,3 +1,11 @@
+## <small>0.7.1 (2026-05-10)</small>
+
+* fix(exports): expose ./memory/* wildcard for backward-compat deep imports ([ee250db](https://github.com/framersai/agentos/commit/ee250db))
+* docs: hoist diagrams to top of cognitive-memory, hexaco, and paracosm pages ([64d45fc](https://github.com/framersai/agentos/commit/64d45fc))
+* docs: regroup guides hierarchy into 20 sections (Concepts, Cognitive Pipeline, Personas, Tools, Capa ([b8cc09e](https://github.com/framersai/agentos/commit/b8cc09e))
+* docs: remove backward-compat hedging from public docs and JSDoc ([db7588f](https://github.com/framersai/agentos/commit/db7588f))
+* docs(architecture): system-architecture hero SVG; replace ASCII layered stack ([23ef7ad](https://github.com/framersai/agentos/commit/23ef7ad))
+
 ## 0.7.0 (2026-05-09)
 
 * fix(kernel): apply codemod-driven import path fixes to 32 previously skip-worktree files ([5b019b0](https://github.com/framersai/agentos/commit/5b019b0))
