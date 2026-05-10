@@ -511,6 +511,20 @@ function buildGuideSidebar() {
 
       if (categoryIndex) {
         category.link = { type: 'doc', id: docIdFromDest(categoryIndex.dest) };
+      } else {
+        // Fall back to a generated section index so the breadcrumb for
+        // pages inside this category is a clickable landing page rather
+        // than inert text.
+        category.link = {
+          type: 'generated-index',
+          slug: `/category/${section
+            .toLowerCase()
+            .replace(/&/g, 'and')
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/(^-|-$)/g, '')}`,
+          title: section,
+          description: `All ${section} pages in the AgentOS documentation.`,
+        };
       }
 
       return category;
