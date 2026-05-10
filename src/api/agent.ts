@@ -201,6 +201,38 @@ export interface AgentOptions extends BaseAgentConfig {
    * Use this for prompt caching support with Anthropic.
    */
   systemBlocks?: import('./generateText.js').SystemContentBlock[];
+  /**
+   * Per-agent identity loaded from a SOUL.md workspace (the OpenClaw / aaronjmars-soul.md
+   * convention). Three forms are accepted:
+   *
+   * - **Workspace path** — points at a directory containing SOUL.md and optional
+   *   companion files (STYLE.md, IDENTITY.md, AGENTS.md, MEMORY.md, examples/):
+   *   ```ts
+   *   agent({ provider: 'anthropic', soul: '~/.agentos/agents/aria' });
+   *   ```
+   *
+   * - **Direct file path** — points at a single SOUL.md file:
+   *   ```ts
+   *   agent({ provider: 'anthropic', soul: './personas/aria.soul.md' });
+   *   ```
+   *
+   * - **Inline content** — pass the soul markdown directly (useful for tests and
+   *   ephemeral agents):
+   *   ```ts
+   *   agent({ provider: 'anthropic', soul: { content: SOUL_MARKDOWN_STRING } });
+   *   ```
+   *
+   * Loading semantics: at agent boot the runtime reads SOUL.md, parses YAML
+   * frontmatter into an `IPersonaDefinition` (HEXACO traits, voice, mood,
+   * hardLimits), and injects the markdown body as the FIRST system message —
+   * before `instructions`, `chainOfThought`, `personality`, or `skills`. STYLE.md
+   * is appended as a second system message when present.
+   *
+   * @see {@link loadSoul} in `@framers/agentos/cognition/substrate/personas/SoulLoader`
+   * for the loader implementation and full SOUL.md format spec.
+   * @see https://github.com/aaronjmars/soul.md for the cross-framework convention.
+   */
+  soul?: string | { content: string } | { path: string };
 }
 
 /**
@@ -428,6 +460,18 @@ function buildPersonalityDescription(
 function buildSystemPrompt(opts: AgentOptions): string | undefined {
   const sections: string[] = [];
 
+  // SOUL.md content first — the agent's identity comes before everything else.
+  // See `loadSoul` in cognition/substrate/personas/SoulLoader.
+  if (opts.soul) {
+    const loaded = loadSoulFromOption(opts.soul);
+    if (loaded?.soulContent) {
+      sections.push(loaded.soulContent);
+    }
+    if (loaded?.styleContent) {
+      sections.push(`## Style\n\n${loaded.styleContent}`);
+    }
+  }
+
   if (opts.instructions?.trim()) {
     sections.push(opts.instructions.trim());
   }
@@ -453,6 +497,42 @@ function buildSystemPrompt(opts: AgentOptions): string | undefined {
   }
 
   return sections.length > 0 ? sections.join('\n\n') : undefined;
+}
+
+/**
+ * Resolve an `AgentOptions.soul` value (string path | { content } | { path })
+ * into a `LoadedSoul`. Returns null on failure so the agent can still boot
+ * (the soul is additive, not load-blocking).
+ */
+function loadSoulFromOption(
+  soul: NonNullable<AgentOptions['soul']>,
+): import('../cognition/substrate/personas/SoulLoader.js').LoadedSoul | null {
+  try {
+    // Lazy require to avoid circular imports at module-eval time.
+    const loader = require('../cognition/substrate/personas/SoulLoader.js') as {
+      loadSoulSync: typeof import('../cognition/substrate/personas/SoulLoader.js').loadSoulSync;
+      parseSoul: typeof import('../cognition/substrate/personas/SoulLoader.js').parseSoul;
+    };
+    if (typeof soul === 'string') {
+      return loader.loadSoulSync({ source: soul });
+    }
+    if ('content' in soul) {
+      return loader.parseSoul(soul.content);
+    }
+    if ('path' in soul) {
+      return loader.loadSoulSync({ source: soul.path });
+    }
+    return null;
+  } catch (err) {
+    // Non-fatal: missing soul file is logged once, agent boots without it.
+    if (process.env.NODE_ENV !== 'production') {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[@framers/agentos] Failed to load soul: ${(err as Error).message}. Agent will boot without SOUL.md identity.`,
+      );
+    }
+    return null;
+  }
 }
 
 /**

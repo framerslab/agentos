@@ -52,6 +52,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { readFileSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import matter from 'gray-matter';
 import type { IPersonaDefinition } from './IPersonaDefinition.js';
@@ -224,6 +225,84 @@ export async function loadSoul(options: SoulLoaderOptions): Promise<LoadedSoul> 
 }
 
 /**
+ * Synchronous variant of `loadSoul` for use in sync agent factory code paths.
+ * Behaves identically but blocks on file I/O. Prefer the async `loadSoul` for
+ * application code; reserve `loadSoulSync` for boot-time wiring where async
+ * is awkward (e.g., inside a non-async `agent({ soul: '...' })` factory).
+ */
+export function loadSoulSync(options: SoulLoaderOptions): LoadedSoul {
+  const requireSoul = options.requireSoul ?? true;
+  const resolvedSource = expandHome(options.source);
+
+  let stats;
+  try {
+    stats = statSync(resolvedSource);
+  } catch {
+    throw new Error(`Soul source does not exist: ${resolvedSource}`);
+  }
+
+  let workspaceDir: string;
+  let soulPath: string;
+
+  if (stats.isDirectory()) {
+    workspaceDir = resolvedSource;
+    soulPath = path.join(workspaceDir, 'SOUL.md');
+  } else {
+    workspaceDir = path.dirname(resolvedSource);
+    soulPath = resolvedSource;
+  }
+
+  let soulRaw: string | null = null;
+  try {
+    soulRaw = readFileSync(soulPath, 'utf-8');
+  } catch {
+    if (requireSoul) {
+      throw new Error(`SOUL.md not found at ${soulPath}`);
+    }
+  }
+
+  const parsed = soulRaw ? matter(soulRaw) : { data: {}, content: '' };
+  const frontmatter = parsed.data as SoulFrontmatter;
+  const soulContent = parsed.content.trim();
+
+  const styleContent = readOptionalSync(path.join(workspaceDir, 'STYLE.md'));
+  const identityContent = readOptionalSync(path.join(workspaceDir, 'IDENTITY.md'));
+  const agentsContent = readOptionalSync(path.join(workspaceDir, 'AGENTS.md'));
+  const memoryContent = readOptionalSync(path.join(workspaceDir, 'MEMORY.md'));
+
+  const personaDefinition = frontmatterToPersona(frontmatter, soulContent, styleContent);
+
+  return {
+    personaDefinition,
+    soulContent,
+    styleContent,
+    identityContent,
+    agentsContent,
+    memoryContent,
+    workspaceDir,
+    frontmatter,
+  };
+}
+
+/**
+ * Parse an inline soul markdown string (with optional YAML frontmatter) and
+ * return the same `LoadedSoul` shape. Useful when the soul content is supplied
+ * in code rather than from disk (tests, ephemeral agents, dynamically-built
+ * personas).
+ */
+export function parseSoul(soulMarkdown: string): LoadedSoul {
+  const parsed = matter(soulMarkdown);
+  const frontmatter = parsed.data as SoulFrontmatter;
+  const soulContent = parsed.content.trim();
+  return {
+    personaDefinition: frontmatterToPersona(frontmatter, soulContent),
+    soulContent,
+    workspaceDir: '',
+    frontmatter,
+  };
+}
+
+/**
  * Convert SoulFrontmatter + markdown body into an IPersonaDefinition that
  * the existing PersonaOverlayManager and persona overlays can consume.
  */
@@ -346,6 +425,18 @@ async function readOptional(filepath: string): Promise<string | undefined> {
   try {
     const content = await fs.readFile(filepath, 'utf-8');
     return content.trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Sync companion to `readOptional`. Used by `loadSoulSync` when blocking I/O
+ * is acceptable (boot-time agent factory wiring).
+ */
+function readOptionalSync(filepath: string): string | undefined {
+  try {
+    return readFileSync(filepath, 'utf-8').trim();
   } catch {
     return undefined;
   }
