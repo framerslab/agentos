@@ -63,8 +63,10 @@ export default {
       writerOpts: {
         headerMaxLength: 500,
         transform: (commit, context) => {
+          // conventional-changelog-writer@8 freezes commit objects, so
+          // we must return a new object instead of mutating in place.
           if (commit.hash && typeof commit.hash === 'string') {
-            commit.shortHash = commit.hash.substring(0, 7);
+            return { ...commit, shortHash: commit.hash.substring(0, 7) };
           }
           return commit;
         },
