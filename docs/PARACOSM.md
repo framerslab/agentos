@@ -316,6 +316,6 @@ Narrow via `e.type` for per-event intellisense on `e.data`. Validate the envelop
 
 - [Emergent Capabilities](/features/emergent-capabilities): the forge + judge machinery underlying `forge_tool`
 - [HEXACO Personality](/features/cognitive-memory): trait model, mutation system, persona overlays
-- [Cognitive Memory Guide](/features/cognitive-memory-guide): the memory pipeline colonists use as chat agents
+- [Cognitive Memory](/features/cognitive-memory): the memory pipeline colonists use as chat agents
 - [Inside Mars Genesis (blog)](https://agentos.sh/blog/inside-mars-genesis-ai-colony-simulation): full case study with the two-leader-one-seed comparison
 - [Paracosm 2026 Overview (blog)](https://agentos.sh/blog/paracosm-2026-overview): structured-world-model framing

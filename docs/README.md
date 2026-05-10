@@ -51,8 +51,7 @@
 
 #### Memory & Storage
 
-- [**Cognitive Memory Guide**](./memory/COGNITIVE_MEMORY_GUIDE.md) — Working memory, encoding, retrieval, consolidation, prospective memory
-- [**Cognitive Memory System**](./memory/COGNITIVE_MEMORY.md) — Personality-modulated memory with Ebbinghaus decay, Baddeley's working memory, spreading activation, and HEXACO-driven encoding
+- [**Cognitive Memory**](./memory/COGNITIVE_MEMORY.md) — Personality-modulated memory with Ebbinghaus decay, Baddeley's working memory, spreading activation, HEXACO-driven encoding, and the consolidation loop
 - [**RAG Memory Configuration**](./memory/RAG_MEMORY_CONFIGURATION.md) — Vector storage and retrieval setup
 - [**SQL Storage Quickstart**](./getting-started/SQL_STORAGE_QUICKSTART.md) — Database integration guide
 - [**Client-Side Storage**](./memory/CLIENT_SIDE_STORAGE.md) — Browser-based persistence

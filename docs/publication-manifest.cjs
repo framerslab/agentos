@@ -182,7 +182,6 @@ const publicationManifest = [
   agentosDoc('WORKING_MEMORY.md', 'features/working-memory.md', 'Working Memory', 'Memory', 6),
 
   // How to use it
-  agentosDoc('COGNITIVE_MEMORY_GUIDE.md', 'features/cognitive-memory-guide.md', 'Cognitive Memory Guide', 'Memory', 7),
   agentosDoc('MEMORY_AUTO_INGEST.md', 'features/memory-auto-ingest.md', 'Memory Auto-Ingest', 'Memory', 8),
   agentosDoc('MEMORY_TOOLS.md', 'features/memory-tools.md', 'Agent Memory Tools', 'Memory', 9),
   agentosDoc('MEMORY_IMPORT_EXPORT.md', 'features/memory-import-export.md', 'Memory Import/Export', 'Memory', 10),

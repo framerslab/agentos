@@ -748,7 +748,7 @@ Every public entrypoint has TSDoc; type-checked via `pnpm exec tsc --noEmit`.
 
 ## Further Reading
 
-- [Memory Architecture Overview](./memory/MEMORY_ARCHITECTURE.md) — the three architectural layers in detail
+- [Memory Architecture](./memory/MEMORY_ARCHITECTURE.md) — the three concentric API tiers (Memory Facade · AgentCognitiveMemory · CLI/Host), archive write-ahead model, subsystem wiring, competitor comparison
 - [Cognitive Memory](./memory/COGNITIVE_MEMORY.md) — full primary-source citations for every cognitive-science model used
 - [Cognitive Pipeline](./COGNITIVE_PIPELINE.md) — the classifier-driven dispatch composition
 - [Ingest Router](./INGEST_ROUTER.md), [Memory Router](./MEMORY_ROUTER.md), [Read Router](./READ_ROUTER.md) — per-stage primitives
