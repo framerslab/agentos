@@ -450,6 +450,11 @@
       "default": "./dist/cognition/memory/retrieval/typed-network/index.js",
       "types": "./dist/cognition/memory/retrieval/typed-network/index.d.ts"
     },
+    "./memory/*": {
+      "import": "./dist/cognition/memory/*.js",
+      "default": "./dist/cognition/memory/*.js",
+      "types": "./dist/cognition/memory/*.d.ts"
+    },
     "./nlp": {
       "import": "./dist/cognition/nlp/index.js",
       "default": "./dist/cognition/nlp/index.js",
