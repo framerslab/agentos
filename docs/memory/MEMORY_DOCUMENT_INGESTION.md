@@ -12,20 +12,22 @@ description: 'Ingest PDFs, DOCX, HTML, Markdown, CSV, JSON, YAML, text, and URLs
 
 The ingestion pipeline transforms files and URLs into chunked, searchable memory traces stored in the agent's `brain.sqlite`:
 
-```
-Source (file / directory / URL)
-  │
-  ▼
-┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│  LoaderRegistry  │────▶│  ChunkingEngine  │────▶│  Brain     │
-│  (format detect) │     │  (split + index) │     │  (store traces)  │
-└──────────────────┘     └──────────────────┘     └──────────────────┘
-        │                                                │
-        ▼                                                ▼
-┌──────────────────┐                            ┌──────────────────┐
-│ MultimodalAggr.  │                            │  FTS5 + Graph    │
-│ (image captions) │                            │  (search index)  │
-└──────────────────┘                            └──────────────────┘
+```mermaid
+flowchart LR
+    Source["Source<br/><i>file · directory · URL</i>"]:::input
+    Loader["LoaderRegistry<br/><i>format detect</i>"]:::process
+    Chunker["ChunkingEngine<br/><i>split + index</i>"]:::process
+    Brain["Brain<br/><i>store traces</i>"]:::data
+    Multi["MultimodalAggregator<br/><i>image captions</i>"]:::process
+    Index["FTS5 + Graph<br/><i>search index</i>"]:::data
+
+    Source --> Loader --> Chunker --> Brain
+    Loader --> Multi
+    Brain --> Index
+
+    classDef input fill:#cffafe,stroke:#0891b2,color:#0e7490
+    classDef process fill:#eef2ff,stroke:#6366f1,color:#3730a3
+    classDef data fill:#fef3c7,stroke:#f59e0b,color:#92400e
 ```
 
 ### Quick Start

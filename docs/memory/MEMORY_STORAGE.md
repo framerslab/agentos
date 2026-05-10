@@ -31,24 +31,16 @@ The `Brain` class manages a single WAL-mode SQLite database that contains all me
 
 ## 12-Table Schema
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         brain.sqlite                             │
-├──────────────────┬──────────────────┬───────────────────────────┤
-│  Memory Traces   │  Knowledge Graph │  Document Ingestion       │
-│  ──────────────  │  ──────────────  │  ──────────────           │
-│  memory_traces   │  knowledge_nodes │  documents                │
-│  memory_traces_  │  knowledge_edges │  document_chunks          │
-│    fts (FTS5)    │                  │  document_images          │
-├──────────────────┼──────────────────┼───────────────────────────┤
-│  Conversations   │  Maintenance     │  Meta / Archive           │
-│  ──────────────  │  ──────────────  │  ──────────────           │
-│  conversations   │  consolidation_  │  brain_meta               │
-│  messages        │    log           │  archived_traces          │
-│                  │  retrieval_      │  archive_access_log       │
-│                  │    feedback      │                           │
-└──────────────────┴──────────────────┴───────────────────────────┘
-```
+All 12 tables live in a single `brain.sqlite` file, grouped into six categories:
+
+| Category | Tables |
+|---|---|
+| **Memory Traces** | `memory_traces` · `memory_traces_fts` (FTS5) |
+| **Knowledge Graph** | `knowledge_nodes` · `knowledge_edges` |
+| **Document Ingestion** | `documents` · `document_chunks` · `document_images` |
+| **Conversations** | `conversations` · `messages` |
+| **Maintenance** | `consolidation_log` · `retrieval_feedback` |
+| **Meta / Archive** | `brain_meta` · `archived_traces` · `archive_access_log` |
 
 ### Table Details
 
