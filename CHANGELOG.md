@@ -1,3 +1,8 @@
+## <small>0.9.1 (2026-05-10)</small>
+
+* feat(badges): auto-update tests badge from a JSON endpoint ([037ffdace138906c58eacf302d48a97f29c5a107](https://github.com/framersai/agentos/commit/037ffdace138906c58eacf302d48a97f29c5a107))
+* docs: RAG section consolidation 7→05 - fold reranker-chain + deep-research into rag-memory; update manifest ([41769a5ce4e6aafffb206f51e1c261257bec50f3](https://github.com/framersai/agentos/commit/41769a5ce4e6aafffb206f51e1c261257bec50f3))
+
 ## 0.9.0 (2026-05-10)
 
 * fix(docs-sidebar): generate category-index links for sections without an index doc — makes breadcrumbs clickable ([80681ae4f856a3b20fac220cdc32a85eed25f42c](https://github.com/framersai/agentos/commit/80681ae4f856a3b20fac220cdc32a85eed25f42c))
