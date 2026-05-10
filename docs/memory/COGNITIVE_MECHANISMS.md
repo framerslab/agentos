@@ -1,4 +1,26 @@
+---
+title: Cognitive Mechanisms
+description: How AgentOS implements reconsolidation, retrieval-induced forgetting, temporal gist, schema encoding, source-confidence decay, and emotion regulation
+keywords:
+  - cognitive mechanisms
+  - memory reconsolidation
+  - retrieval induced forgetting
+  - temporal gist
+  - schema encoding
+  - emotion regulation
+  - source confidence decay
+  - feeling of knowing
+  - hexaco modulation
+  - perspective encoding
+---
+
 # Cognitive Mechanisms — Package Implementation Guide
+
+> *"Memory is not a passive recorder, but an active constructor."* — Daniel Schacter
+
+This page is the wiring map for the cognitive mechanisms that turn AgentOS memory from a vector store into something that behaves more like remembering. Each mechanism is a pure function with one job — drift a trace toward current mood, suppress its competitors after a retrieval, compress verbatim text into gist, weight a source-of-truth confidence. The engine bolts them onto three hook points (access, retrieval, consolidation) on the `MemoryStore` and `MemoryPromptAssembler`. Everything else is bookkeeping.
+
+If you want the theory and citations, read [Cognitive Memory](./COGNITIVE_MEMORY.md) first. This file tells you which `.ts` to open when something's off.
 
 ## File Structure
 

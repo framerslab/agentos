@@ -1,4 +1,23 @@
+---
+title: Agency API
+description: High-level multi-agent factory for AgentOS — coordinate a roster of sub-agents under graph, sequential, parallel, or debate orchestration
+keywords:
+  - agency api
+  - multi agent orchestration
+  - agent roster
+  - sequential strategy
+  - parallel strategy
+  - graph strategy
+  - debate strategy
+  - emergent agent creation
+  - human in the loop
+  - agency memory
+  - structured zod output
+---
+
 # Agency API
+
+> *"None of us is as smart as all of us."* — Ken Blanchard
 
 > **Live runs**: side-by-side code + captured output for both the `graph` strategy (research → writer ‖ illustrator → reviewer DAG) and the `sequential` strategy with streaming + HITL approval are on the [agentos.sh demo gallery](https://agentos.sh/#live-demo). Source: [`examples/agency-graph.mjs`](https://github.com/framersai/agentos/blob/master/examples/agency-graph.mjs), [`examples/agency-streaming.mjs`](https://github.com/framersai/agentos/blob/master/examples/agency-streaming.mjs).
 

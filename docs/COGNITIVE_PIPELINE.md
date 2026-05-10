@@ -1,12 +1,30 @@
+---
+title: Cognitive Pipeline
+description: Per-message LLM-as-judge routing for AgentOS — ingest, recall, read stages with one classifier call per query
+keywords:
+  - cognitive pipeline
+  - agent memory routing
+  - llm as judge
+  - per-message routing
+  - memory or not gate
+  - reader tier dispatch
+  - longmemeval
+  - locomo
+  - agentos pipeline
+  - retrieval routing
+---
+
 # Cognitive Pipeline
 
-Smart per-message orchestration in agentos. Composes the LLM-as-judge stages of the agentos pipeline into one orchestrator: ingest, recall, read. Each stage is independent and shippable on its own; this primitive ties them together.
+> *"The most important thing in communication is hearing what isn't said."* — Peter Drucker
 
-**This is not safety guardrails.** Cognitive Pipeline picks strategies (which architecture per ingest, which retrieval per recall, which reader per read). It does not block, refuse, or validate output. Safety/policy concerns live in [`core/guardrails`](./GUARDRAILS_ARCHITECTURE.md), `agentos-ext-grounding-guard`, `agentos-ext-topicality`, and `agentos-ext-pii-redaction` — see [Guardrails Architecture](./GUARDRAILS_ARCHITECTURE.md) for that side of the system.
+Most agent memory pipelines retrieve on every query. They embed the input, run a vector search, stuff the top-K into context, call the reader. Same path every time, whether the user asked "what's my project ID" or "hey."
+
+That's expensive on the easy questions and underpowered on the hard ones. The pipeline this page describes routes each message through a chain of small classifier calls and picks the cheapest strategy that handles it. It is not safety guardrails — it does not block, refuse, or validate output. Safety lives in [Guardrails Architecture](./GUARDRAILS_ARCHITECTURE.md).
 
 ## What it actually does
 
-Every message that flows through an agentos agent goes through a chain of decisions. Each decision is a small `gpt-5-mini`-style classifier call that picks the best strategy for that specific message. The novel piece for query-time is that the **first decision is whether memory should be touched at all** (most memory libraries skip this step and retrieve on every query).
+Every message goes through a chain of decisions. Each decision is a small `gpt-5-mini`-style classifier call that picks the best strategy for that specific message. The novel piece for query-time is that the **first decision is whether memory should be touched at all**. Most memory libraries skip this step and retrieve on every query, which means they pay full embedding+rerank+reader cost on "hey there."
 
 For incoming content:
 
@@ -74,7 +92,7 @@ Total LLM calls: 1 classifier (recall) + 1 classifier (read) + 1 backend retriev
 
 ## What you get from using it
 
-1. **Per-message-adaptive cost**: every question gets the cheapest backend that handles its category well. The same agent serves $0.018/correct on simple lookups and $0.04/correct on multi-session synthesis — the heavy machinery only runs when it earns its cost.
+1. **Per-message-adaptive cost.** Every question gets the cheapest backend that handles its category well. The same agent serves $0.018/correct on simple lookups and $0.04/correct on multi-session synthesis. The heavy machinery only runs when it earns its cost.
 
 2. **No benchmark gaming**: the routing decisions are made by classifiers that read the actual question, not by static `if/else` heuristics that overfit to one benchmark. Same orchestrator works on LongMemEval, LOCOMO, BEAM, internal workloads.
 
