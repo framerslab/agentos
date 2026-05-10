@@ -46,7 +46,29 @@ export default {
           { type: 'ci', section: 'CI/CD', hidden: true },
           { type: 'build', section: 'Build', hidden: true },
         ]
-      }
+      },
+      // Parser tweaks to keep the changelog clean:
+      //   - referenceActions: []  → don't auto-link "closes #N" style refs.
+      //     We don't use GitHub issues for closing tickets in commit
+      //     messages; the historical parser used to misread hyphenated
+      //     words like "high-level" as "hi#level" issue references.
+      //   - issuePrefixes: []  → disable the "#N" reference scanner entirely.
+      parserOpts: {
+        noteKeywords: ['BREAKING CHANGE', 'BREAKING CHANGES', 'BREAKING'],
+        referenceActions: [],
+        issuePrefixes: [],
+      },
+      // Writer tweaks: don't silently truncate long commit subjects.
+      // The default writer caps `header` at 100 chars and slices mid-word.
+      writerOpts: {
+        headerMaxLength: 500,
+        transform: (commit, context) => {
+          if (commit.hash && typeof commit.hash === 'string') {
+            commit.shortHash = commit.hash.substring(0, 7);
+          }
+          return commit;
+        },
+      },
     }],
 
     // Update CHANGELOG.md

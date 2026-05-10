@@ -73,7 +73,7 @@
 
 * fix(kernel): apply codemod-driven import path fixes to 32 previously skip-worktree files ([5b019b0](https://github.com/framersai/agentos/commit/5b019b0))
 * merge: integrate origin/master 0.6.30 release ([55206de](https://github.com/framersai/agentos/commit/55206de))
-* feat!: kernel restructure into 7 parent dirs (api, core, orchestration, cognition, io, extensions, s ([ecd868f](https://github.com/framersai/agentos/commit/ecd868f))
+* feat!: kernel restructure into 7 parent dirs (api, core, orchestration, cognition, io, extensions, safety) ([ecd868f](https://github.com/framersai/agentos/commit/ecd868f))
 * docs: remove dead links to nonexistent extension-loading.md and skills-engine.md ([e11d2c2](https://github.com/framersai/agentos/commit/e11d2c2))
 * kernel: add 16 deprecation aliases + barrel index.ts files + new exports map ([07d4dd0](https://github.com/framersai/agentos/commit/07d4dd0))
 * kernel: add seven parent-dir READMEs as new layout scaffolding ([62e8f40](https://github.com/framersai/agentos/commit/62e8f40))
@@ -154,7 +154,7 @@ paths before 0.8.0 (where the aliases will be removed).
 ## <small>0.6.18 (2026-05-07)</small>
 
 * fix(orchestration): goal-aware, phase-distinct stub mission planner ([b6f4007](https://github.com/framersai/agentos/commit/b6f4007))
-* docs(memory): add high-level 'how it connects' summary near top of overview ([92b80b3](https://github.com/framersai/agentos/commit/92b80b3)), closes [hi#level](https://github.com/hi/issues/level)
+* docs(memory): add high-level 'how it connects' summary near top of overview ([92b80b3](https://github.com/framersai/agentos/commit/92b80b3))
 
 ## <small>0.6.17 (2026-05-06)</small>
 

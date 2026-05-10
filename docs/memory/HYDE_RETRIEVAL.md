@@ -6,10 +6,27 @@ produce a plausible answer, then embeds *that* answer for vector search. The
 hypothesis is semantically closer to actual stored documents than a question is,
 yielding better recall.
 
+**HyDE is opt-in (`enabled: false` by default).** It is not a free win. The
+AgentOS benchmark numbers tell the full story:
+
+- **LongMemEval-S (115K tokens, 50 sessions)**: HyDE *hurts*. The headline 85.6%
+  configuration runs with HyDE **off**; enabling it drops the score to 83.3%
+  (-1.9 points). At single-session scale the extra LLM call adds latency and
+  the hypothesis-generated embedding drifts away from the high-precision target
+  passage.
+- **LongMemEval-M (1.5M tokens, 500 sessions)**: HyDE *helps*. The 70.2%
+  configuration uses HyDE-augmented BM25 + dense retrieval; disabling it drops
+  the score to 69.2% (-1.0 point, within noise but consistently worse).
+
+Rule of thumb: turn HyDE on when the haystack is too big for the answer model's
+context window and you need recall improvements on multi-hop / synthesis
+questions. Leave it off for single-session and tight-latency paths. See
+[`agentos-bench`](https://github.com/framersai/agentos-bench) for the full
+ablation table.
+
 Based on:
-- Gao et al. 2023 "Precise Zero-Shot Dense Retrieval without Relevance Labels"
-- Lei et al. 2025 "Never Come Up Empty: Adaptive HyDE Retrieval for Improving
-  LLM Developer Support"
+- Gao et al. (2022). [*Precise Zero-Shot Dense Retrieval without Relevance Labels.*](https://arxiv.org/abs/2212.10496) arXiv:2212.10496.
+- Lei et al. (2025). [*Never Come Up Empty: Adaptive HyDE Retrieval for Improving LLM Developer Support.*](https://arxiv.org/abs/2507.16754) arXiv:2507.16754.
 
 ## How It Works
 

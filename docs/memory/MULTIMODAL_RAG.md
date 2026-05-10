@@ -115,7 +115,7 @@ It mounts multimodal routes under `/multimodal/*`:
 - `GET /multimodal/assets/:assetId/content` (only if payload is stored)
 - `DELETE /multimodal/assets/:assetId`
 
-See `BACKEND_API.md` for request/response examples and deployment notes.
+See the [Backend API guide](/architecture/backend-api) for request/response examples and deployment notes.
 
 ## Offline Embeddings (Optional)
 
@@ -179,35 +179,36 @@ This keeps the base retrieval system consistent while still allowing richer moda
 
 ### Retrieval-augmented generation foundations
 
-- Lewis, P., Perez, E., Piktus, A., Petroni, F., Karpukhin, V., Goyal, N., Küttler, H., Lewis, M., Yih, W.-t., Rocktäschel, T., Riedel, S., & Kiela, D. (2020). *Retrieval-augmented generation for knowledge-intensive NLP tasks.* NeurIPS 2020. — Original RAG paper. [arXiv:2005.11401](https://arxiv.org/abs/2005.11401)
-- Karpukhin, V., Oguz, B., Min, S., Lewis, P., Wu, L., Edunov, S., Chen, D., & Yih, W.-t. (2020). *Dense passage retrieval for open-domain question answering.* EMNLP 2020. — Bi-encoder dense retrieval (the cosine-similarity layer in this pipeline). [arXiv:2004.04906](https://arxiv.org/abs/2004.04906)
+- Lewis, P., Perez, E., Piktus, A., Petroni, F., Karpukhin, V., Goyal, N., Küttler, H., Lewis, M., Yih, W.-t., Rocktäschel, T., Riedel, S., & Kiela, D. (2020). [*Retrieval-augmented generation for knowledge-intensive NLP tasks.*](https://arxiv.org/abs/2005.11401) NeurIPS 2020. — Original RAG paper.
+- Karpukhin, V., Oguz, B., Min, S., Lewis, P., Wu, L., Edunov, S., Chen, D., & Yih, W.-t. (2020). [*Dense passage retrieval for open-domain question answering.*](https://arxiv.org/abs/2004.04906) EMNLP 2020. — Bi-encoder dense retrieval (the cosine-similarity layer in this pipeline).
 
 ### Hybrid retrieval (dense + sparse + reranker)
 
-- Robertson, S., & Zaragoza, H. (2009). *The probabilistic relevance framework: BM25 and beyond.* *Foundations and Trends in Information Retrieval*, 3(4), 333–389. — BM25 reference (the sparse arm of hybrid retrieval). [DOI](https://doi.org/10.1561/1500000019)
-- Cormack, G. V., Clarke, C. L. A., & Buettcher, S. (2009). *Reciprocal rank fusion outperforms Condorcet and individual rank learning methods.* SIGIR 2009. — RRF for fusing dense + sparse rankings. [ACM DL](https://dl.acm.org/doi/10.1145/1571941.1572114)
-- Nogueira, R., & Cho, K. (2019). *Passage re-ranking with BERT.* arXiv preprint. — Cross-encoder reranking principle behind the Cohere / Transformers.js rerank stage. [arXiv:1901.04704](https://arxiv.org/abs/1901.04704)
+- Robertson, S., & Zaragoza, H. (2009). [*The probabilistic relevance framework: BM25 and beyond.*](https://doi.org/10.1561/1500000019) *Foundations and Trends in Information Retrieval*, 3(4), 333–389. — BM25 reference (the sparse arm of hybrid retrieval).
+- Cormack, G. V., Clarke, C. L. A., & Buettcher, S. (2009). [*Reciprocal rank fusion outperforms Condorcet and individual rank learning methods.*](https://dl.acm.org/doi/10.1145/1571941.1572114) SIGIR 2009. — RRF for fusing dense + sparse rankings.
+- Nogueira, R., & Cho, K. (2019). [*Passage re-ranking with BERT.*](https://arxiv.org/abs/1901.04704) arXiv preprint. — Cross-encoder reranking principle behind the Cohere / Transformers.js rerank stage.
 
 ### Hypothetical document expansion
 
-- Gao, L., Ma, X., Lin, J., & Callan, J. (2022). *Precise zero-shot dense retrieval without relevance labels.* arXiv preprint. — HyDE retrieval. [arXiv:2212.10496](https://arxiv.org/abs/2212.10496)
+- Gao, L., Ma, X., Lin, J., & Callan, J. (2022). [*Precise zero-shot dense retrieval without relevance labels.*](https://arxiv.org/abs/2212.10496) arXiv preprint. — HyDE retrieval, the foundation of the hypothetical-document expansion path.
+- Lei, F., et al. (2025). [*Never come up empty: Adaptive HyDE retrieval for improving LLM developer support.*](https://arxiv.org/abs/2507.16754) arXiv preprint. — Adaptive HyDE thresholding on a 3M-post Stack Overflow corpus; informs the adaptive thresholding in [`MemoryHydeRetriever`](https://github.com/framersai/agentos/blob/master/src/memory/retrieval/hyde/MemoryHydeRetriever.ts).
 
 ### Graph-augmented retrieval
 
-- Edge, D., Trinh, H., Cheng, N., Bradley, J., Chao, A., Mody, A., Truitt, S., & Larson, J. (2024). *From local to global: A graph RAG approach to query-focused summarization.* arXiv preprint. — Microsoft GraphRAG; community detection + summarization for multi-hop reasoning. [arXiv:2404.16130](https://arxiv.org/abs/2404.16130)
-- Blondel, V. D., Guillaume, J.-L., Lambiotte, R., & Lefebvre, E. (2008). *Fast unfolding of communities in large networks.* *Journal of Statistical Mechanics: Theory and Experiment*, 10, P10008. — Louvain algorithm used by `GraphRAGEngine` for community detection. [arXiv:0803.0476](https://arxiv.org/abs/0803.0476)
+- Edge, D., Trinh, H., Cheng, N., Bradley, J., Chao, A., Mody, A., Truitt, S., & Larson, J. (2024). [*From local to global: A graph RAG approach to query-focused summarization.*](https://arxiv.org/abs/2404.16130) arXiv preprint. — Microsoft GraphRAG; community detection + summarization for multi-hop reasoning.
+- Blondel, V. D., Guillaume, J.-L., Lambiotte, R., & Lefebvre, E. (2008). [*Fast unfolding of communities in large networks.*](https://arxiv.org/abs/0803.0476) *Journal of Statistical Mechanics: Theory and Experiment*, 10, P10008. — Louvain algorithm used by [`GraphRAGEngine`](https://github.com/framersai/agentos/blob/master/src/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) for community detection.
 
 ### Multimodal embeddings
 
-- Radford, A., Kim, J. W., Hallacy, C., Ramesh, A., Goh, G., Agarwal, S., Sastry, G., Askell, A., Mishkin, P., Clark, J., Krueger, G., & Sutskever, I. (2021). *Learning transferable visual models from natural language supervision.* ICML 2021. — CLIP, the foundation for image-text joint embeddings used in vision retrieval. [arXiv:2103.00020](https://arxiv.org/abs/2103.00020)
-- Wu, Y., Chen, K., Zhang, T., Hui, Y., Berg-Kirkpatrick, T., & Dubnov, S. (2023). *Large-scale contrastive language-audio pretraining with feature fusion and keyword-to-caption augmentation.* ICASSP 2023. — CLAP audio-text embeddings — referenced as `Xenova/clap-htsat-unfused` for the audio retrieval path. [arXiv:2211.06687](https://arxiv.org/abs/2211.06687)
+- Radford, A., Kim, J. W., Hallacy, C., Ramesh, A., Goh, G., Agarwal, S., Sastry, G., Askell, A., Mishkin, P., Clark, J., Krueger, G., & Sutskever, I. (2021). [*Learning transferable visual models from natural language supervision.*](https://arxiv.org/abs/2103.00020) ICML 2021. — CLIP, the foundation for image-text joint embeddings used in vision retrieval.
+- Wu, Y., Chen, K., Zhang, T., Hui, Y., Berg-Kirkpatrick, T., & Dubnov, S. (2023). [*Large-scale contrastive language-audio pretraining with feature fusion and keyword-to-caption augmentation.*](https://arxiv.org/abs/2211.06687) ICASSP 2023. — CLAP audio-text embeddings — referenced as `Xenova/clap-htsat-unfused` for the audio retrieval path.
 
 ### Vector indexing
 
-- Malkov, Y. A., & Yashunin, D. A. (2020). *Efficient and robust approximate nearest neighbor search using hierarchical navigable small world graphs.* *IEEE Transactions on Pattern Analysis and Machine Intelligence*, 42(4), 824–836. — HNSW algorithm behind the `HnswlibVectorStore` backend. [arXiv:1603.09320](https://arxiv.org/abs/1603.09320)
+- Malkov, Y. A., & Yashunin, D. A. (2020). [*Efficient and robust approximate nearest neighbor search using hierarchical navigable small world graphs.*](https://arxiv.org/abs/1603.09320) *IEEE Transactions on Pattern Analysis and Machine Intelligence*, 42(4), 824–836. — HNSW algorithm behind the `HnswlibVectorStore` backend.
 
 ### Implementation references
 
-- `packages/agentos/src/rag/` — vector stores, embeddings, fusion, reranking, GraphRAG
-- `packages/agentos/src/memory/retrieval/hyde/MemoryHydeRetriever.ts` — HyDE for memory-specific recall
-- `packages/agentos/src/memory/retrieval/graph/graphrag/GraphRAGEngine.ts` — Microsoft GraphRAG-style implementation
+- [`packages/agentos/src/rag/`](https://github.com/framersai/agentos/tree/master/src/rag) — vector stores, embeddings, fusion, reranking, GraphRAG
+- [`packages/agentos/src/memory/retrieval/hyde/MemoryHydeRetriever.ts`](https://github.com/framersai/agentos/blob/master/src/memory/retrieval/hyde/MemoryHydeRetriever.ts) — HyDE for memory-specific recall
+- [`packages/agentos/src/memory/retrieval/graph/graphrag/GraphRAGEngine.ts`](https://github.com/framersai/agentos/blob/master/src/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) — Microsoft GraphRAG-style implementation
