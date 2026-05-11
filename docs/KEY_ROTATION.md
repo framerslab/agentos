@@ -58,7 +58,7 @@ Every AgentOS provider that accepts an API key supports rotation:
 
 ## Implementation
 
-The key pool is implemented in `src/core/providers/`:
+The key pool is implemented in [`src/core/providers/`](https://github.com/framersai/agentos/tree/master/src/core/providers):
 
 - `ApiKeyPool.ts` — Weighted round-robin with exhaustion cooldown
 - `ApiKeyPoolRegistry.ts` — Singleton pools keyed by env var name

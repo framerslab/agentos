@@ -743,7 +743,7 @@ For readers who want to trace the architecture into code:
 |---|---|
 | Memory facade | `packages/agentos/src/memory/io/facade/Memory.ts` |
 | Brain (SQLite + Postgres + adapter entry points) | `packages/agentos/src/memory/retrieval/store/Brain.ts` |
-| Storage adapter (cross-platform substrate) | `packages/sql-storage-adapter/src/` ([repo](https://github.com/framersai/sql-storage-adapter)) |
+| Storage adapter (cross-platform substrate) | [`packages/sql-storage-adapter/src/`](https://github.com/framersai/sql-storage-adapter/tree/master/src/) ([repo](https://github.com/framersai/sql-storage-adapter)) |
 | SQL Dialect / FTS abstraction / BLOB codec | `packages/sql-storage-adapter/src/dialect/`, `src/fts/`, `src/blob/` |
 | Cognitive memory orchestrator | `packages/agentos/src/memory/CognitiveMemoryManager.ts` |
 | Encoding model | `packages/agentos/src/memory/core/encoding/EncodingModel.ts` |

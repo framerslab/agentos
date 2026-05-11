@@ -536,9 +536,9 @@ The HEXACO frontmatter (`hexaco: { honestyHumility, emotionality, ... }`) flows 
 
 Runnable examples in the package source:
 
-- `packages/agentos/examples/high-level-api.mjs`
-- `packages/agentos/examples/generate-image.mjs`
-- `packages/agentos/examples/agentos-config-tools.mjs`
+- [`packages/agentos/examples/high-level-api.mjs`](https://github.com/framersai/agentos/blob/master/examples/high-level-api.mjs)
+- [`packages/agentos/examples/generate-image.mjs`](https://github.com/framersai/agentos/blob/master/examples/generate-image.mjs)
+- [`packages/agentos/examples/agentos-config-tools.mjs`](https://github.com/framersai/agentos/blob/master/examples/agentos-config-tools.mjs)
 
 ## Full runtime: `AgentOS`
 

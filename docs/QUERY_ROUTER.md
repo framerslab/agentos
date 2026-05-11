@@ -82,7 +82,7 @@ mode.
 
 ## Example
 
-Runnable source: `packages/agentos/examples/query-router.mjs`
+Runnable source: [`packages/agentos/examples/query-router.mjs`](https://github.com/framersai/agentos/blob/master/examples/query-router.mjs)
 
 ```ts
 import { QueryRouter } from '@framers/agentos';
@@ -109,7 +109,7 @@ await router.close();
 
 ### Host-Injected Runtime Example
 
-Runnable source: `packages/agentos/examples/query-router-host-hooks.mjs`
+Runnable source: [`packages/agentos/examples/query-router-host-hooks.mjs`](https://github.com/framersai/agentos/blob/master/examples/query-router-host-hooks.mjs)
 
 ```ts
 const router = new QueryRouter({

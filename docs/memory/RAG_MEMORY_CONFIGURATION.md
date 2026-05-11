@@ -923,13 +923,13 @@ Setting `minDepthToInject: "moderate"` means queries classified as `quick` are a
 | File                                                                                                      | Purpose                      |
 | --------------------------------------------------------------------------------------------------------- | ---------------------------- |
 | `packages/wunderland/src/runtime/research-classifier.ts`                                                  | LLM-as-judge classifier      |
-| `packages/agentos-extensions/registry/curated/research/deep-research/src/engine/DeepResearchTool.ts`      | ITool wrapper for the engine |
-| `packages/agentos-extensions/registry/curated/research/deep-research/src/engine/DeepResearchEngine.ts`    | Core research pipeline       |
-| `packages/agentos-extensions/registry/curated/research/deep-research/src/engine/ResearchBudgetTracker.ts` | Budget enforcement           |
-| `packages/agentos-extensions/registry/curated/research/deep-research/src/engine/types.ts`                 | Type definitions             |
-| `packages/agentos-extensions/registry/curated/research/deep-research/src/tools/investigate.ts`            | researchInvestigate tool     |
-| `packages/agentos-extensions/registry/curated/research/deep-research/src/tools/academic.ts`               | researchAcademic tool        |
-| `packages/agentos-extensions/registry/curated/research/deep-research/src/tools/aggregate.ts`              | researchAggregate tool       |
+| [`packages/agentos-extensions/registry/curated/research/deep-research/src/engine/DeepResearchTool.ts`](https://github.com/framersai/agentos-extensions/blob/master/registry/curated/research/deep-research/src/engine/DeepResearchTool.ts)      | ITool wrapper for the engine |
+| [`packages/agentos-extensions/registry/curated/research/deep-research/src/engine/DeepResearchEngine.ts`](https://github.com/framersai/agentos-extensions/blob/master/registry/curated/research/deep-research/src/engine/DeepResearchEngine.ts)    | Core research pipeline       |
+| [`packages/agentos-extensions/registry/curated/research/deep-research/src/engine/ResearchBudgetTracker.ts`](https://github.com/framersai/agentos-extensions/blob/master/registry/curated/research/deep-research/src/engine/ResearchBudgetTracker.ts) | Budget enforcement           |
+| [`packages/agentos-extensions/registry/curated/research/deep-research/src/engine/types.ts`](https://github.com/framersai/agentos-extensions/blob/master/registry/curated/research/deep-research/src/engine/types.ts)                 | Type definitions             |
+| [`packages/agentos-extensions/registry/curated/research/deep-research/src/tools/investigate.ts`](https://github.com/framersai/agentos-extensions/blob/master/registry/curated/research/deep-research/src/tools/investigate.ts)            | researchInvestigate tool     |
+| [`packages/agentos-extensions/registry/curated/research/deep-research/src/tools/academic.ts`](https://github.com/framersai/agentos-extensions/blob/master/registry/curated/research/deep-research/src/tools/academic.ts)               | researchAcademic tool        |
+| [`packages/agentos-extensions/registry/curated/research/deep-research/src/tools/aggregate.ts`](https://github.com/framersai/agentos-extensions/blob/master/registry/curated/research/deep-research/src/tools/aggregate.ts)              | researchAggregate tool       |
 
 ### Related
 

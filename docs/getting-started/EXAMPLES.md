@@ -625,7 +625,7 @@ await publishPost('How vector databases enable semantic search in AI application
 Direct `AgentOS` initialization with runtime-configured tools via
 `createTestAgentOSConfig({ tools })`.
 
-Runnable source: `packages/agentos/examples/agentos-config-tools.mjs`
+Runnable source: [`packages/agentos/examples/agentos-config-tools.mjs`](https://github.com/framersai/agentos/blob/master/examples/agentos-config-tools.mjs)
 
 ```typescript
 import { AgentOS } from '@framers/agentos';
@@ -723,7 +723,7 @@ console.log(await stream.text);
 console.log(await stream.agentCalls);
 ```
 
-Runnable source: `packages/agentos/examples/agency-streaming.mjs`
+Runnable source: [`packages/agentos/examples/agency-streaming.mjs`](https://github.com/framersai/agentos/blob/master/examples/agency-streaming.mjs)
 
 ---
 
@@ -758,7 +758,7 @@ console.log(result.sources);
 await router.close();
 ```
 
-Runnable source: `packages/agentos/examples/query-router.mjs`
+Runnable source: [`packages/agentos/examples/query-router.mjs`](https://github.com/framersai/agentos/blob/master/examples/query-router.mjs)
 
 ---
 
@@ -786,7 +786,7 @@ await router.init();
 console.log(router.getCorpusStats()); // runtime modes become active
 ```
 
-Runnable source: `packages/agentos/examples/query-router-host-hooks.mjs`
+Runnable source: [`packages/agentos/examples/query-router-host-hooks.mjs`](https://github.com/framersai/agentos/blob/master/examples/query-router-host-hooks.mjs)
 
 ---
 

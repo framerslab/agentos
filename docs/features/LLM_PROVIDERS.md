@@ -472,7 +472,7 @@ class MyProvider implements IProvider {
 }
 ```
 
-Look at any class under `src/core/llm/providers/implementations/` for a
+Look at any class under [`src/core/llm/providers/implementations/`](https://github.com/framersai/agentos/tree/master/src/core/llm/providers/implementations) for a
 complete reference — the OpenAI and Anthropic providers are the most fully
 exercised paths.
 

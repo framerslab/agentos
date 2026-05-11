@@ -35,7 +35,7 @@ The `src/` tree is organized into 26 domain-specific top-level modules. Only fou
 
 - **AgentOSOrchestrator** coordinates requests, delegating to `TurnExecutionPipeline` (pre-LLM preparation), `GMIChunkTransformer` (stream mapping), and `ExternalToolResultHandler` (tool-result continuation).
 
-All paths below are under `packages/agentos/src/`.
+All paths below are under [`packages/agentos/src/`](https://github.com/framersai/agentos/tree/master/src/).
 
 | Module | Subdirs | Purpose |
 | --- | --- | --- |
@@ -360,7 +360,7 @@ Each guardrail service can also configure timeouts via `config.timeoutMs`. If a 
 
 ### Built-in Guardrail Packs
 
-Six built-in packs ship from `packages/agentos-extensions/registry/curated/safety/`:
+Six built-in packs ship from [`packages/agentos-extensions/registry/curated/safety/`](https://github.com/framersai/agentos-extensions/tree/master/registry/curated/safety):
 
 - `pii-redaction` — sanitizer; redacts personally identifiable information before tokens leave the runtime
 - `ml-classifiers` — toxicity / hate-speech / harm classification via on-device ONNX models
@@ -753,7 +753,7 @@ For configuration details, see [RAG Memory Configuration](../memory/RAG_MEMORY_C
 
 ### Agency System
 
-The agency system enables multi-agent coordination across six strategies (defined in `AgencyStrategy` in `src/api/types.ts`):
+The agency system enables multi-agent coordination across six strategies (defined in `AgencyStrategy` in [`src/api/types.ts`](https://github.com/framersai/agentos/blob/master/src/api/types.ts)):
 
 | Strategy | Behavior |
 |---|---|
@@ -764,7 +764,7 @@ The agency system enables multi-agent coordination across six strategies (define
 | `hierarchical` | A coordinator agent delegates to sub-agents and synthesizes their results |
 | `graph` | Explicit DAG via `dependsOn` on each sub-agent; runs roots first, then dependents |
 
-Coordination state lives in three classes under `src/agents/agency/`:
+Coordination state lives in three classes under [`src/agents/agency/`](https://github.com/framersai/agentos/tree/master/src/agents/agency):
 
 - [`AgencyRegistry`](https://github.com/framersai/agentos/blob/master/src/agents/agency/AgencyRegistry.ts) — tracks active agencies and the GMIs they contain
 - [`AgencyMemoryManager`](https://github.com/framersai/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts) — shared memory across the agency's GMIs (separate from each GMI's private cognitive memory)
