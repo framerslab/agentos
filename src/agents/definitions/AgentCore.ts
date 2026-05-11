@@ -231,7 +231,7 @@ export abstract class AgentCore implements IAgent {
   /** @inheritdoc */
   public readonly description: string;
   /** @inheritdoc */
-  public readonly agentConfig: AgentConfig;
+  public agentConfig: AgentConfig;
 
   /**
    * An instance of the `IPromptEngine` used for constructing prompts.
@@ -440,11 +440,9 @@ export abstract class AgentCore implements IAgent {
         return;
     }
     if (config) {
-      // Deep merge might be preferable for complex configurations.
-      // For now, Object.assign provides a shallow merge, overriding top-level properties.
-      // This is generally fine if `AgentConfig` is structured and `config` provides overrides.
-      Object.assign(this.agentConfig, config);
-      // console.log(`Agent '${this.name}' (ID: ${this.id}) re-configured during initialization.`);
+      // Shallow-merge override. Replace the field rather than mutating
+      // in place so the assignment respects the public field contract.
+      this.agentConfig = { ...this.agentConfig, ...config };
     }
     this.isInitialized = true;
     // console.log(`Agent '${this.name}' (ID: ${this.id}) initialized. Config:`, this.agentConfig);

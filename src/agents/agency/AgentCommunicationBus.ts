@@ -831,12 +831,17 @@ export class AgentCommunicationBus implements IAgentCommunicationBus {
   }
 
   private updateAvgDeliveryTime(newTime: number): void {
-    const total = this.stats.totalMessagesDelivered;
-    if (total === 0) {
+    // totalMessagesDelivered is incremented AFTER this method runs (see
+    // deliverMessage), so `previousTotal` is the count of deliveries
+    // already folded into the running average. Old formula treated
+    // `total` as the current count and produced wrong averages from the
+    // second delivery onward.
+    const previousTotal = this.stats.totalMessagesDelivered;
+    if (previousTotal === 0) {
       this.stats.avgDeliveryTimeMs = newTime;
     } else {
       this.stats.avgDeliveryTimeMs =
-        (this.stats.avgDeliveryTimeMs * (total - 1) + newTime) / total;
+        (this.stats.avgDeliveryTimeMs * previousTotal + newTime) / (previousTotal + 1);
     }
   }
 }

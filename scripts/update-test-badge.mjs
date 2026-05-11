@@ -9,9 +9,10 @@
  *
  * Counting strategy: grep test-signature lines instead of executing the
  * suite. Faster (sub-second vs minutes) and avoids needing API keys / DB
- * fixtures in the release job. Trades some precision (counts `.skip` /
- * `.todo` too) for speed; the badge label is "tests" rather than "tests
- * passed" to keep the claim honest.
+ * fixtures in the release job. The regex's negative lookahead excludes
+ * `.skip`, `.todo`, and `.fails` modifiers so only active tests count.
+ * The badge label is "tests" rather than "tests passed" because we
+ * don't actually run the suite — we just count what's defined.
  *
  * Usage: node scripts/update-test-badge.mjs
  */
