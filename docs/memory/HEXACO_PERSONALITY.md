@@ -278,6 +278,8 @@ This is heuristic-only (no LLM calls) and is the right choice when you want long
 
 Source: [`packages/agentos/src/memory/mechanisms/PersonaDriftMechanism.ts`](https://github.com/framersai/agentos/blob/master/src/memory/mechanisms/PersonaDriftMechanism.ts).
 
+For the rest of the runtime adaptation surface — mood, inferred user skill, task complexity, working-memory imprints, and the metaprompt loop that drives them between turns — see [Adaptive Prompt Intelligence](/features/adaptive-prompt-intelligence). The trait-drift mechanisms above are the persistent-state slice of the same broader adaptation story.
+
 ---
 
 ## Configuration reference

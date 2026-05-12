@@ -591,6 +591,7 @@ await exportToolAsSkillPack(forgedTool, './skills/slugify');
 
 ## Related
 
+- [Adaptive Prompt Intelligence](/features/adaptive-prompt-intelligence) -- the per-turn metaprompt loop that runs on state-mutating triggers, with the `adapt_personality` tool, `PersonaDriftMechanism`, and concrete cost numbers
 - [Adaptive vs. Emergent Intelligence](https://agentos.sh/blog/adaptive-vs-emergent) -- how adaptive and emergent behavior differ in the AgentOS architecture
 - [Self-Improving Agents](/features/self-improving-agents) -- broader patterns for agents that improve over time
 - [Recursive Self-Building](/features/recursive-self-building) -- recursive tool creation and agent spawning

@@ -484,6 +484,8 @@ MetapromptExecutor includes pre-built handlers for common situations:
 - **Engagement boost** -- When the conversation stalls
 - **Trait adjustment** -- Periodic self-reflection that adjusts persona parameters within bounds
 
+See [Adaptive Prompt Intelligence](../features/adaptive-prompt-intelligence) for the full guide: the three trigger types, the five preset templates, the state surfaces metaprompts mutate, and concrete cost numbers.
+
 ---
 
 ## Memory System
