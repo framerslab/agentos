@@ -198,7 +198,7 @@ The moment a real production deployment surfaces a hard question — *why does m
 - [Adaptive Prompt Intelligence](/features/adaptive-prompt-intelligence) — the per-turn metaprompt loop the `MetapromptExecutor` runs, trigger types, presets, state surfaces, and cost numbers
 - [Skills vs Tools vs Extensions](/architecture/skills-vs-tools-vs-extensions) — when each capability system applies
 - [Emergent Capabilities](/features/emergent-capabilities) — runtime tool forging and `spawn_specialist` for multi-agent gap-filling
-- [Sandbox & Security](/architecture/sandbox-security) — how guardrails actually intercept tool calls and generation
+- [Guardrails](/features/guardrails) — how guardrails actually intercept tool calls and generation
 - [LLM Providers](/architecture/llm-providers) — the eleven provider implementations and the OpenRouter fan-out
 
 ---

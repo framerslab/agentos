@@ -2,15 +2,6 @@
 
 Three authoring APIs. One compiled intermediate representation. A single runtime that executes every graph with streaming, checkpointing, guardrails, memory, and capability discovery built in.
 
-See `/architecture/runtime-status-matrix` for the canonical shipped vs partial status across orchestration, retrieval, extension loading, and placeholder backend surfaces.
-
-> Runtime status note:
-> The compiled IR, builders, checkpointing, and base graph runtime are real and usable today.
-> Some advanced routing/execution paths are still partial in the shared runtime:
-> discovery edges currently fall back when capability discovery is not wired,
-> personality edges still use default branch behavior unless a trait source is injected,
-> and `extension` / `subgraph` execution requires a bridge runtime rather than the bare [`NodeExecutor`](https://github.com/framersai/agentos/blob/master/src/orchestration/runtime/NodeExecutor.ts).
-
 ## Architecture
 
 Every orchestration surface in AgentOS — [`AgentGraph`](https://github.com/framersai/agentos/blob/master/src/orchestration/builders/AgentGraph.ts), `workflow()`, and `mission()` — compiles to the same [`CompiledExecutionGraph`](https://github.com/framersai/agentos/blob/master/src/orchestration/ir/types.ts) IR. The [`GraphRuntime`](https://github.com/framersai/agentos/blob/master/src/orchestration/runtime/GraphRuntime.ts) executes that IR regardless of which API produced it.

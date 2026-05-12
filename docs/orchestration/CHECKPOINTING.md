@@ -1,10 +1,6 @@
 # Checkpointing and Time-Travel
 
-The AgentOS Unified Orchestration Layer has built-in support for checkpoints, resume after failure, and time-travel debugging via the [`ICheckpointStore`](https://github.com/framersai/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts) interface.
-
-> Status note:
-> [`InMemoryCheckpointStore`](https://github.com/framersai/agentos/blob/master/src/orchestration/checkpoint/InMemoryCheckpointStore.ts) is implemented and used by default.
-> `InMemoryCheckpointStore` is still planned, not shipped in this package yet.
+The AgentOS Unified Orchestration Layer has built-in support for checkpoints, resume after failure, and time-travel debugging via the [`ICheckpointStore`](https://github.com/framersai/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts) interface. [`InMemoryCheckpointStore`](https://github.com/framersai/agentos/blob/master/src/orchestration/checkpoint/InMemoryCheckpointStore.ts) is the default implementation; swap in a persistent store by passing your own implementation to `compile({ checkpointStore })`.
 
 ## ICheckpointStore
 

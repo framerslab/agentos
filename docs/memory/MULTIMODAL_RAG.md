@@ -115,7 +115,7 @@ It mounts multimodal routes under `/multimodal/*`:
 - `GET /multimodal/assets/:assetId/content` (only if payload is stored)
 - `DELETE /multimodal/assets/:assetId`
 
-See the [Backend API guide](/architecture/backend-api) for request/response examples and deployment notes.
+See the [`@framers/agentos-ext-http-api` package](https://github.com/framersai/agentos-ext-http-api) for request/response examples and deployment notes — the routes wired here ([`createAgentOSRagRouter`](https://github.com/framersai/agentos-ext-http-api/blob/master/src/rag/rag.routes.ts)) are the same ones the `voice-chat-assistant` backend mounts.
 
 ## Offline Embeddings (Optional)
 
