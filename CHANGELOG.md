@@ -1,3 +1,7 @@
+## <small>0.9.7 (2026-05-12)</small>
+
+* fix(build): remove broken stub paths for graphology / hnswlib in tsconfig ([ab31bacfbd13a2c228a2f8865f43dd193cf2c1b7](https://github.com/framersai/agentos/commit/ab31bacfbd13a2c228a2f8865f43dd193cf2c1b7))
+
 ## <small>0.9.6 (2026-05-12)</small>
 
 * fix(memory): robust graphology import + preserve migration errors ([307822942dbd8dfd52cee231546697a2cccbb7af](https://github.com/framersai/agentos/commit/307822942dbd8dfd52cee231546697a2cccbb7af))
