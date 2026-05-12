@@ -1,3 +1,11 @@
+## <small>0.9.5 (2026-05-12)</small>
+
+* fix(pii-redaction): correct broken link to provenance-immutability page ([ce4611b3f0ef0e914432c9fef512ce59c63aebba](https://github.com/framersai/agentos/commit/ce4611b3f0ef0e914432c9fef512ce59c63aebba))
+* docs(adaptive-intelligence): full guide on per-turn metaprompting and state-driven re-personalization ([85b01b64cc729488105972fe439c662c1e80e700](https://github.com/framersai/agentos/commit/85b01b64cc729488105972fe439c662c1e80e700))
+* docs(examples): fix Ex16 emergent — ForgeToolMetaTool/AdaptPersonalityTool are classes requiring constructor args, not ITool instances; ToolOrchestrator auto-wires them when emergent.enabled=true (caught by CodeRabbit review) ([f8714ad1c9b2367aab0b562520dee655ea255ef6](https://github.com/framersai/agentos/commit/f8714ad1c9b2367aab0b562520dee655ea255ef6))
+* docs(hitl): consolidated HITL guide rewrite — 5 triggers + 6 handlers + workflow human step + runtime manager; move to Guardrails section; cross-links ([606aaa7088ff60f73bfdfbb40d195a8e1942f072](https://github.com/framersai/agentos/commit/606aaa7088ff60f73bfdfbb40d195a8e1942f072))
+* docs(pii-redaction): full guide on the PII redaction pack with HIPAA / PHI scrubbing section ([578795e541cb3d3152b32852f9aea30f2b6dcab6](https://github.com/framersai/agentos/commit/578795e541cb3d3152b32852f9aea30f2b6dcab6))
+
 ## <small>0.9.4 (2026-05-11)</small>
 
 * fix(runtime): make sql-storage-adapter peer truly optional; opt-in github indexing; fix provider/key priority mismatch in QueryRouter ([92543bdceb5836e963f931af97e0716e3a4e290b](https://github.com/framersai/agentos/commit/92543bdceb5836e963f931af97e0716e3a4e290b))
