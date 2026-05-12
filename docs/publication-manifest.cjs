@@ -167,7 +167,6 @@ const publicationManifest = [
   agentosDoc('AGENT_GRAPH.md', 'features/agent-graph.md', 'AgentGraph', 'Orchestration', 5),
   agentosDoc('CHECKPOINTING.md', 'features/checkpointing.md', 'Checkpointing and Time-Travel', 'Orchestration', 6),
   agentosDoc('PLANNING_ENGINE.md', 'features/planning-engine.md', 'Planning Engine', 'Orchestration', 7),
-  agentosDoc('HUMAN_IN_THE_LOOP.md', 'features/human-in-the-loop.md', 'Human-in-the-Loop', 'Orchestration', 8),
   agentosDoc('COGNITIVE_PIPELINE.md', 'features/cognitive-pipeline.md', 'Cognitive Pipeline (Smart Per-Message Orchestration)', 'Cognitive Pipeline', 9),
 
   // Overview (start here)
@@ -217,6 +216,7 @@ const publicationManifest = [
 
   agentosDoc('GUARDRAILS_USAGE.md', 'features/guardrails.md', 'Guardrails', 'Guardrails & Safety', 1),
   staticDoc('features/guardrails-architecture.md', 'features/guardrails-architecture.md', 'Guardrails Architecture', 'Guardrails & Safety', 1.5),
+  agentosDoc('HUMAN_IN_THE_LOOP.md', 'features/human-in-the-loop.md', 'Human-in-the-Loop (HITL)', 'Guardrails & Safety', 1.8),
   agentosDoc('CREATING_GUARDRAILS.md', 'features/creating-guardrails.md', 'Creating Custom Guardrails', 'Guardrails & Safety', 2),
   agentosDoc('SAFETY_PRIMITIVES.md', 'features/safety-primitives.md', 'Safety Primitives', 'Guardrails & Safety', 3),
 

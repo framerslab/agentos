@@ -1,686 +1,464 @@
-# Human-in-the-Loop (HITL) Guide
-
-## Overview
-
-The Human-in-the-Loop (HITL) system in AgentOS enables structured collaboration between AI agents and human operators. This ensures human oversight for critical decisions while maintaining efficient autonomous operation.
-
-## Why HITL?
-
-Modern AI agents are powerful but not infallible. HITL provides:
-
-1. **Safety**: Human approval for high-risk actions
-2. **Quality**: Human review of important outputs
-3. **Adaptability**: Human input for ambiguous situations
-4. **Learning**: Feedback loops for continuous improvement
-
-## Core Concepts
-
-### Request Types
-
-| Type | Purpose | Example |
-|------|---------|---------|
-| **Approval** | Authorize high-risk actions | "Delete 5000 user records?" |
-| **Clarification** | Resolve ambiguity | "Which report format do you prefer?" |
-| **Edit** | Review and modify outputs | "Please review this email draft" |
-| **Escalation** | Transfer control to human | "I'm uncertain how to proceed" |
-| **Checkpoint** | Progress review points | "Phase 1 complete, continue?" |
-
-### Severity Levels
-
-```typescript
-type ActionSeverity = 'low' | 'medium' | 'high' | 'critical';
-```
-
-- **Low**: Informational, auto-approve after timeout OK
-- **Medium**: Important, requires attention within hours
-- **High**: Significant risk, requires prompt attention
-- **Critical**: Urgent, immediate human response required
-
-## Quick Start
-
-### 1. Initialize the Manager
-
-```typescript
-import { HumanInteractionManager } from '@framers/agentos/planning/hitl';
-
-const hitlManager = new HumanInteractionManager({
-  // Default timeout: 5 minutes
-  defaultTimeoutMs: 300000,
-  
-  // Auto-reject timed-out requests (optional)
-  autoRejectOnTimeout: false,
-  
-  // Notification handler (required for production)
-  notificationHandler: async (notification) => {
-    // Send to Slack, email, or UI
-    await notifyHuman(notification);
-  },
-});
-```
-
-### 2. Request Approval
-
-```typescript
-// Before a risky action
-const decision = await hitlManager.requestApproval({
-  actionId: 'batch-delete-001',
-  description: 'Delete all inactive accounts older than 2 years',
-  severity: 'critical',
-  category: 'data_modification',
-  agentId: 'cleanup-agent',
-  context: {
-    accountCount: 5000,
-    criteria: 'inactive > 2 years',
-    estimatedStorage: '50GB',
-  },
-  reversible: false,
-  potentialConsequences: [
-    'Permanent data loss',
-    'User complaints if accounts are needed',
-  ],
-  alternatives: [
-    {
-      alternativeId: 'archive',
-      description: 'Archive instead of delete',
-      tradeoffs: 'Uses storage but preserves data',
-    },
-  ],
-});
-
-if (decision.approved) {
-  await executeDeletion();
-} else {
-  console.log(`Rejected: ${decision.rejectionReason}`);
-  if (decision.selectedAlternativeId === 'archive') {
-    await executeArchive();
-  }
-}
-```
-
-### 3. Request Clarification
-
-```typescript
-const response = await hitlManager.requestClarification({
-  requestId: 'clarify-format-001',
-  question: 'Which output format should I use for the quarterly report?',
-  context: 'Generating Q4 2024 financial report',
-  agentId: 'report-agent',
-  clarificationType: 'preference',
-  options: [
-    { optionId: 'pdf', label: 'PDF Document' },
-    { optionId: 'excel', label: 'Excel Spreadsheet' },
-    { optionId: 'slides', label: 'PowerPoint Presentation' },
-  ],
-  allowFreeform: true,
-});
-
-const format = response.selectedOptionId || response.freeformResponse;
-await generateReport(format);
-```
-
-### 4. Handle Escalations
-
-```typescript
-// When agent is uncertain
-const decision = await hitlManager.escalate({
-  escalationId: 'esc-001',
-  reason: 'low_confidence',
-  explanation: 'Multiple conflicting data sources found',
-  agentId: 'research-agent',
-  currentState: { step: 3, progress: 0.4 },
-  attemptedActions: [
-    'Queried primary database',
-    'Checked secondary source',
-    'Cross-referenced external API',
-  ],
-  recommendations: [
-    'Manual verification of source reliability',
-    'Contact domain expert',
-    'Use most recent source only',
-  ],
-  urgency: 'high',
-});
-
-switch (decision.type) {
-  case 'human_takeover':
-    // Human will handle directly
-    break;
-  case 'agent_continue':
-    // Continue with human guidance
-    await continueWithGuidance(decision.guidance);
-    break;
-  case 'abort':
-    // Stop the task
-    await abortTask(decision.reason);
-    break;
-  case 'delegate':
-    // Hand off to another agent
-    await handoffTo(decision.targetAgentId, decision.instructions);
-    break;
-}
-```
-
-### 5. Workflow Checkpoints
-
-```typescript
-// During long-running workflows
-const checkpointDecision = await hitlManager.checkpoint({
-  checkpointId: 'cp-phase-1',
-  workflowId: 'migration-workflow',
-  currentPhase: 'Data Validation',
-  progress: 0.5,
-  completedWork: [
-    'Exported 50,000 records',
-    'Validated schema compatibility',
-  ],
-  upcomingWork: [
-    'Transform data formats',
-    'Import to new system',
-    'Verify integrity',
-  ],
-  issues: ['3 records have invalid dates'],
-});
-
-if (checkpointDecision.decision === 'continue') {
-  await continueWorkflow();
-} else if (checkpointDecision.decision === 'modify') {
-  // Apply modifications
-  if (checkpointDecision.modifications?.skipSteps) {
-    await skipSteps(checkpointDecision.modifications.skipSteps);
-  }
-}
-```
-
-### 6. Collect Feedback
-
-```typescript
-// Record human feedback for learning
-await hitlManager.recordFeedback({
-  feedbackId: 'fb-001',
-  agentId: 'writer-agent',
-  feedbackType: 'correction',
-  aspect: 'style',
-  content: 'The tone was too formal. Use more casual language for this audience.',
-  importance: 4,
-  context: { taskType: 'social-media-post' },
-  providedBy: 'marketing-lead',
-});
-
-// Query feedback history
-const feedbackHistory = await hitlManager.getFeedbackHistory('writer-agent', {
-  type: 'correction',
-  limit: 10,
-});
-```
-
-## Notification Handlers
-
-### Slack Integration
-
-```typescript
-const slackHandler = async (notification) => {
-  const urgencyEmoji = {
-    critical: '🚨',
-    high: '⚠️',
-    medium: '📋',
-    low: 'ℹ️',
-  };
-
-  await slack.chat.postMessage({
-    channel: '#agent-approvals',
-    text: `${urgencyEmoji[notification.urgency]} ${notification.summary}`,
-    blocks: [
-      {
-        type: 'section',
-        text: { type: 'mrkdwn', text: notification.summary },
-      },
-      {
-        type: 'actions',
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'Review' },
-            url: notification.actionUrl,
-          },
-        ],
-      },
-    ],
-  });
-};
-```
-
-### Email Integration
-
-```typescript
-const emailHandler = async (notification) => {
-  await sendEmail({
-    to: 'approvals@company.com',
-    subject: `[${notification.urgency.toUpperCase()}] Agent Request: ${notification.type}`,
-    html: `
-      <h2>${notification.summary}</h2>
-      <p>Agent: ${notification.agentId}</p>
-      <p>Expires: ${notification.expiresAt?.toLocaleString() || 'No expiry'}</p>
-      <a href="${notification.actionUrl}">Take Action</a>
-    `,
-  });
-};
-```
-
-## API Reference
-
-### REST Endpoints
-
-```
-GET    /api/agentos/hitl/approvals              # List pending approvals
-POST   /api/agentos/hitl/approvals              # Create approval request
-POST   /api/agentos/hitl/approvals/:id/approve  # Approve action
-POST   /api/agentos/hitl/approvals/:id/reject   # Reject action
-
-GET    /api/agentos/hitl/clarifications         # List clarifications
-POST   /api/agentos/hitl/clarifications         # Request clarification
-POST   /api/agentos/hitl/clarifications/:id/respond  # Submit response
-
-GET    /api/agentos/hitl/escalations            # List escalations
-POST   /api/agentos/hitl/escalations            # Create escalation
-POST   /api/agentos/hitl/escalations/:id/resolve  # Resolve escalation
-
-GET    /api/agentos/hitl/feedback               # Get feedback history
-POST   /api/agentos/hitl/feedback               # Submit feedback
-
-GET    /api/agentos/hitl/stats                  # Get HITL statistics
-```
-
-### Statistics
-
-```typescript
-const stats = hitlManager.getStatistics();
-// {
-//   totalApprovalRequests: 150,
-//   approvalRate: 0.87,           // 87% approved
-//   totalClarifications: 45,
-//   avgResponseTimeMs: 180000,    // 3 minutes average
-//   totalEscalations: 12,
-//   escalationsByReason: {
-//     low_confidence: 8,
-//     safety_concern: 2,
-//     ethical_concern: 2,
-//   },
-//   pendingRequests: 3,
-//   timedOutRequests: 5,
-// }
-```
-
-## Best Practices
-
-### 1. Right-Size Approval Requirements
-
-Don't require approval for everything:
-
-```typescript
-// ✅ Good: Critical actions need approval
-if (actionImpact === 'critical' || !isReversible) {
-  await hitlManager.requestApproval(action);
-}
-
-// ❌ Bad: Approving trivial actions
-await hitlManager.requestApproval({
-  description: 'Send a thank you email',
-  severity: 'low', // Don't require approval for this
-});
-```
-
-### 2. Provide Rich Context
-
-Help humans make informed decisions:
-
-```typescript
-// ✅ Good: Rich context
-{
-  description: 'Update pricing for 50 products',
-  context: {
-    productCount: 50,
-    averageChange: '+5%',
-    affectedRevenue: '$500,000/month',
-    competitorComparison: 'Still 10% below market',
-    customerImpact: 'Existing contracts unaffected',
-  },
-  potentialConsequences: [
-    'May affect conversion rates',
-    'Requires website update',
-  ],
-}
-
-// ❌ Bad: Minimal context
-{
-  description: 'Change prices',
-  context: {},
-}
-```
-
-### 3. Set Appropriate Timeouts
-
-Match timeout to urgency and human availability:
-
-```typescript
-// Critical: Short timeout
-requestApproval({ severity: 'critical', timeoutMs: 60000 }); // 1 min
-
-// Standard: Reasonable timeout
-requestApproval({ severity: 'medium', timeoutMs: 3600000 }); // 1 hour
-
-// Low priority: Longer timeout
-requestApproval({ severity: 'low', timeoutMs: 86400000 }); // 24 hours
-```
-
-### 4. Use Feedback for Learning
-
-Connect feedback to agent improvement:
-
-```typescript
-// Collect feedback
-await hitlManager.recordFeedback({
-  agentId: 'writer-agent',
-  feedbackType: 'correction',
-  aspect: 'accuracy',
-  content: 'Statistics were outdated',
-});
-
-// Use feedback in prompts
-const recentFeedback = await hitlManager.getFeedbackHistory(agentId, {
-  type: 'correction',
-  limit: 5,
-});
-
-const systemPrompt = `
-Previous corrections:
-${recentFeedback.map(f => `- ${f.content}`).join('\n')}
-Please avoid these issues.
-`;
-```
-
-## LLM-as-Judge Handlers
-
-### `hitl.llmJudge()` — Agency-Level
-
-The `hitl.llmJudge()` factory creates an HITL handler that delegates approval
-decisions to an LLM. The LLM evaluates the `ApprovalRequest` against a rubric
-and returns a structured `{ approved, confidence, reasoning }` response. When
-the confidence score falls below the threshold, the decision is escalated to a
-fallback handler.
+---
+title: Human-in-the-Loop (HITL)
+description: Five approval triggers, six handler factories (cli, slack, webhook, llmJudge, autoApprove, autoReject), the workflow human step, and the runtime HumanInteractionManager. Pause AgentOS agent runs at any lifecycle event for human review.
+keywords:
+  - human in the loop
+  - hitl
+  - ai approval workflow
+  - llm judge approval
+  - agent safety gates
+  - agency hitl
+  - workflow human step
+  - approval handler
+  - slack approval bot
+  - cli approval
+  - agentos hitl
+  - approval request decision
+  - hitl timeout policy
+---
+
+# Human-in-the-Loop (HITL)
+
+Pause an agent run at specific lifecycle events, route the pending action to a human (or an LLM judge, or both), and resume with an approve / reject / modify decision. AgentOS exposes HITL on three integration surfaces — agency-level config, workflow / graph nodes, and a runtime manager — all converging on the same `ApprovalRequest → handler → ApprovalDecision` contract.
+
+![Three-lane HITL architecture: Agency HitlConfig with 5 triggers and 6 handlers, Workflow human step with autoAccept/autoReject/judge modes, and the runtime HumanInteractionManager with severity-aware PendingAction + escalation surface. All three converge on the ApprovalRequest → handler → ApprovalDecision → guardrail-override contract.](/img/diagrams/human-in-the-loop.svg)
+
+## What HITL is in AgentOS
+
+Three places HITL plugs in:
+
+| Layer | Primitive | Source | Use when |
+|---|---|---|---|
+| **Agency / agent** | [`HitlConfig`](https://github.com/framersai/agentos/blob/master/src/api/types.ts) on `agency({ hitl: {...} })` or `agent({ hitl: {...} })` | [`src/api/types.ts`](https://github.com/framersai/agentos/blob/master/src/api/types.ts) | The host runs a multi-agent agency and wants declarative gates at specific lifecycle events (a tool name, the final return, a strategy override). |
+| **Workflow / graph** | `step({ human: { prompt, autoAccept?, autoReject?, judge? } })` | [`src/orchestration/builders/WorkflowBuilder.ts`](https://github.com/framersai/agentos/blob/master/src/orchestration/builders/WorkflowBuilder.ts) + [`src/orchestration/ir/types.ts`](https://github.com/framersai/agentos/blob/master/src/orchestration/ir/types.ts) | The host owns an explicit DAG and wants a typed human node that suspends the graph until a decision payload arrives. |
+| **Runtime** | [`HumanInteractionManager`](https://github.com/framersai/agentos/blob/master/src/orchestration/hitl/HumanInteractionManager.ts) implementing [`IHumanInteractionManager`](https://github.com/framersai/agentos/blob/master/src/orchestration/hitl/IHumanInteractionManager.ts) | [`src/orchestration/hitl/`](https://github.com/framersai/agentos/tree/master/src/orchestration/hitl) | A subsystem (planner, custom orchestrator, evaluator) needs severity-aware approval with clarification, edit, and escalation flows in addition to approve/reject. |
+
+The agency-level surface is what most apps need. Reach for workflow nodes when you're already authoring a graph. Reach for the runtime manager when you need the full clarification/edit/escalation vocabulary outside of an `agency()` run.
+
+## Five approval triggers
+
+`HitlConfig.approvals` is the declarative trigger surface. Every field is optional — present a field, get a pause at that lifecycle event:
 
 ```typescript
 import { agency, hitl } from '@framers/agentos';
 
 const guarded = agency({
-  model: 'openai:gpt-4o',
   agents: { worker: { instructions: 'Execute tasks.' } },
   hitl: {
-    approvals: { beforeTool: ['delete-file', 'send-email'] },
-    handler: hitl.llmJudge({
-      model: 'gpt-4o-mini',
-      provider: 'openai',
-      criteria: 'Is this action safe, reversible, and aligned with the user intent?',
-      confidenceThreshold: 0.8,
-      fallback: hitl.cli(), // uncertain decisions go to human
-    }),
+    approvals: {
+      beforeTool: ['delete-file', 'send-email'],
+      beforeAgent: ['billing-specialist'],
+      beforeEmergent: true,
+      beforeReturn: true,
+      beforeStrategyOverride: true,
+    },
+    handler: hitl.cli(),
   },
 });
 ```
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `model` | `string` | `'gpt-4o-mini'` | LLM model for evaluation |
-| `provider` | `string` | `'openai'` | LLM provider |
-| `criteria` | `string` | `'Evaluate whether this action is safe, relevant, and appropriate.'` | Custom rubric |
-| `confidenceThreshold` | `number` | `0.7` | Below this, delegate to fallback |
-| `fallback` | `HitlHandler` | `hitl.autoReject(...)` | Handler for low-confidence decisions |
-| `apiKey` | `string` | - | API key override |
+| Trigger | Pauses before | Typical use |
+|---|---|---|
+| `beforeTool: string[]` | Any tool whose name appears in the list | Destructive or high-cost tool calls (`delete-file`, `send-email`, `purchase`). |
+| `beforeAgent: string[]` | Any agent in the agency whose name appears in the list | Specialists that should only run after human go-ahead (`billing-agent`, `legal-review`). |
+| `beforeEmergent: boolean` | Runtime synthesis of a new specialist via `spawn_specialist` | Production agencies that allow emergent capabilities but require approval before the roster grows. |
+| `beforeReturn: boolean` | The final answer leaves the agency | Customer-facing channels where the last response gets a human or judge review. |
+| `beforeStrategyOverride: boolean` | The orchestrator wants to switch execution strategies mid-run | Adaptive agencies whose strategy drift should be reviewed before it happens. |
 
-### `humanNode` Options — Graph-Level
+Source: [`HitlConfig.approvals` in `src/api/types.ts`](https://github.com/framersai/agentos/blob/master/src/api/types.ts).
 
-In the AgentGraph builder, `humanNode()` now supports automated resolution
-strategies that bypass the default human interrupt:
+## Six handler factories
+
+The `hitl` namespace exports six ready-to-use handler factories. Each returns a `HitlHandler` (an async function taking `ApprovalRequest` and resolving to `ApprovalDecision`), so you compose them by wrapping in your own function when you need logging, fallback chains, or conditional routing.
+
+Source: [`src/api/hitl.ts`](https://github.com/framersai/agentos/blob/master/src/api/hitl.ts).
+
+### `hitl.cli()`
+
+Interactive terminal prompt. Reads from `process.stdin`. Use locally and in interactive scripts; **not safe for CI or serverless**.
 
 ```typescript
-import { humanNode } from '@framers/agentos/orchestration/builders/nodes';
-
-// Auto-accept (useful for tests/CI)
-humanNode({ prompt: 'Approve?', autoAccept: true });
-
-// Auto-reject with reason
-humanNode({ prompt: 'Approve?', autoReject: 'Blocked by policy' });
-
-// LLM judge with fallthrough to human interrupt
-humanNode({
-  prompt: 'Should we publish this content?',
-  judge: {
-    model: 'gpt-4o-mini',
-    criteria: 'Is the content appropriate and factually accurate?',
-    confidenceThreshold: 0.8,
-  },
-});
-
-// Auto-accept on timeout instead of erroring
-humanNode({
-  prompt: 'Approve deployment?',
-  timeout: 30_000,
-  onTimeout: 'accept', // 'accept' | 'reject' | 'error'
-});
+handler: hitl.cli();
 ```
 
-**`humanNode` options:**
+### `hitl.autoApprove()`
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `prompt` | `string` | (required) | Message shown to the human operator |
-| `timeout` | `number` | - | Max milliseconds before timeout handling |
-| `autoAccept` | `boolean` | `false` | Auto-accept without human input |
-| `autoReject` | `boolean \| string` | `false` | Auto-reject; string value is the reason |
-| `judge.model` | `string` | `'gpt-4o-mini'` | LLM model for the judge |
-| `judge.provider` | `string` | `'openai'` | LLM provider |
-| `judge.criteria` | `string` | `'Is this action safe, relevant, and appropriate?'` | Evaluation criteria |
-| `judge.confidenceThreshold` | `number` | `0.7` | Below this, fall through to human interrupt |
-| `onTimeout` | `'accept' \| 'reject' \| 'error'` | `'error'` | Behaviour when timeout expires |
-
-### Example: Automated Testing Pipeline
-
-Use LLM judge to gate quality without blocking CI:
+Approves every request immediately. Use in tests and CI.
 
 ```typescript
-import { AgentGraph, humanNode, gmiNode } from '@framers/agentos';
+handler: hitl.autoApprove();
+```
 
-const graph = new AgentGraph('test-pipeline');
+### `hitl.autoReject(reason?)`
 
-const generate = gmiNode({ instructions: 'Generate a product description.' });
-const review = humanNode({
-  prompt: 'Review the generated content for accuracy.',
-  judge: {
-    model: 'gpt-4o-mini',
-    criteria: 'Is this factually accurate, well-written, and free of hallucinations?',
-    confidenceThreshold: 0.85,
-  },
-  timeout: 10_000,
-  onTimeout: 'reject', // safety default: reject if judge hangs
+Rejects every request. Use for dry-run mode where you want to confirm which actions *would* fire without permitting any.
+
+```typescript
+handler: hitl.autoReject('dry-run mode — no side effects permitted');
+```
+
+### `hitl.webhook(url)`
+
+POSTs the `ApprovalRequest` as JSON to your endpoint and reads back an `ApprovalDecision`. Non-2xx is treated as rejection with the status code as the reason. Use this when you have an in-house approval service.
+
+```typescript
+handler: hitl.webhook('https://approvals.example.com/decide');
+```
+
+### `hitl.slack({ channel, token })`
+
+Posts a notification to a Slack channel and **auto-approves** in the current shipping. Reaction-polling (`:white_check_mark:` / `:x:`) is a planned future enhancement. Use it today as an audit trail; gate it behind another handler if you need to wait on reactions.
+
+```typescript
+handler: hitl.slack({ channel: '#approvals', token: process.env.SLACK_BOT_TOKEN! });
+```
+
+### `hitl.llmJudge({ ... })`
+
+Delegates the decision to a model. The judge replies with a structured `{approved, confidence, reasoning}` JSON object; if `confidence < confidenceThreshold` (default `0.7`), the request falls through to a `fallback` handler.
+
+```typescript
+handler: hitl.llmJudge({
+  model: 'gpt-4o-mini',
+  criteria: 'Approve unless the action would delete data, send messages externally, or spend more than $1.',
+  confidenceThreshold: 0.8,
+  fallback: hitl.cli(),
 });
-const publish = gmiNode({ instructions: 'Format and publish the content.' });
-
-graph.addNode(generate);
-graph.addNode(review);
-graph.addNode(publish);
-graph.addEdge(generate.id, review.id);
-graph.addEdge(review.id, publish.id);
 ```
 
-## Troubleshooting
+This is the recommended production default for agencies where most actions are low-risk: a cheap judge auto-handles the easy majority, the human only sees what the judge isn't confident about.
 
-### Requests Timing Out
+## The `ApprovalRequest` / `ApprovalDecision` contract
 
-1. Check notification handler is working
-2. Verify human operators are receiving notifications
-3. Adjust timeout values based on response patterns
-4. Enable `autoRejectOnTimeout` for non-critical requests
+Source: [`ApprovalRequest` + `ApprovalDecision` in `src/api/types.ts`](https://github.com/framersai/agentos/blob/master/src/api/types.ts).
 
-### Missing Responses
+Every handler receives this:
 
-1. Check `getPendingRequests()` for stuck requests
-2. Implement monitoring for pending request age
-3. Set up alerts for escalations that haven't been resolved
-
-### Performance Issues
-
-1. Batch related approvals when possible
-2. Use appropriate severity levels to prioritize
-3. Consider pre-approved action patterns for common cases
-
-## Guardrail Override
-
-The guardrail override system adds a post-approval safety net to the HITL
-pipeline. Even after a tool call is approved -- whether by auto-approve, an
-LLM judge, or a human operator -- the configured guardrails run a final check
-against the tool call arguments. If any guardrail returns `action: 'block'`,
-the approval is overridden and the tool call is denied.
-
-### Flow
-
-```
-Tool call -> HITL handler -> approved?
-  YES -> Guardrail check (if enabled)
-    -> Guardrail PASS -> execute tool
-    -> Guardrail BLOCK -> DENY (override HITL approval)
-  NO -> deny tool
+```typescript
+interface ApprovalRequest {
+  id: string;
+  type: 'tool' | 'agent' | 'emergent' | 'output' | 'strategy-override';
+  agent: string;             // name of the agent that triggered the pause
+  action: string;            // short label (tool/agent name)
+  description: string;
+  details: Record<string, unknown>; // structured args / config
+  context: {
+    agentCalls: AgentCallRecord[];
+    totalTokens: number;
+    totalCostUSD: number;
+    elapsedMs: number;
+  };
+}
 ```
 
-### Why?
+…and must resolve to this:
 
-Auto-approve mode is convenient for development and CI, but it creates a
-blind spot: destructive commands like `rm -rf /`, `kill -9`, or `DROP TABLE`
-pass through without review. The guardrail override catches these patterns
-even in fully autonomous mode.
+```typescript
+interface ApprovalDecision {
+  approved: boolean;
+  reason?: string;
+  modifications?: {
+    toolArgs?: unknown;     // overridden tool arguments
+    output?: string;        // overridden final text
+    instructions?: string;  // appended to the system prompt
+  };
+}
+```
 
-### Configuration
+When `approved: true` and `modifications` are set, the orchestrator merges them over the original action before proceeding. This is the path for "approve but with these changes" — the human edits tool args, the LLM judge rewrites the final answer, the webhook returns a sanitized version.
 
-#### Agency-level (API)
+## Timeout policy
+
+```typescript
+hitl: {
+  approvals: { beforeTool: ['delete-file'] },
+  handler: hitl.webhook('https://approvals.example.com/decide'),
+  timeoutMs: 60_000,
+  onTimeout: 'reject',
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `timeoutMs` | `30_000` | Maximum wall-clock milliseconds the handler may take. |
+| `onTimeout: 'reject'` | (default) | Treat timeout as denied — action blocked. |
+| `onTimeout: 'approve'` | — | Treat timeout as approved — action proceeds. Use sparingly. |
+| `onTimeout: 'error'` | — | Throw and halt the run. Use for hard SLAs where neither approve nor reject is acceptable on timeout. |
+
+## Guardrail-override post-approval safety net
+
+A handler that returns `approved: true` doesn't bypass content safety. After approval, the orchestrator runs the guardrails in `postApprovalGuardrails` against the tool call (or output) and vetoes the approval if any guardrail returns `action: 'block'`. This catches the case where a human (or LLM judge) approves something the runtime's automated guards know is destructive.
+
+```typescript
+hitl: {
+  approvals: { beforeTool: ['delete-file'] },
+  handler: hitl.llmJudge({ /* ... */ }),
+  guardrailOverride: true,                            // default
+  postApprovalGuardrails: ['pii-redaction', 'code-safety'], // default
+}
+```
+
+Set `guardrailOverride: false` to disable the safety net and give the handler full autonomy. Default `true` is the right setting for production.
+
+## Workflow `human` step
+
+For typed-graph workflows, the `human` step suspends the graph until a decision payload arrives. The runtime checkpoints state before suspending so resumption is exact.
+
+Source: [`step({ human })` in `WorkflowBuilder.ts`](https://github.com/framersai/agentos/blob/master/src/orchestration/builders/WorkflowBuilder.ts), node IR in [`src/orchestration/ir/types.ts`](https://github.com/framersai/agentos/blob/master/src/orchestration/ir/types.ts).
+
+```typescript
+import { workflow } from '@framers/agentos/orchestration';
+import { z } from 'zod';
+
+const reviewPipeline = workflow('review-pipeline')
+  .input(z.object({ draft: z.string() }))
+  .returns(z.object({ approvedDraft: z.string() }))
+
+  // ... earlier GMI/tool steps that produce `result.draft` ...
+
+  .step('human-review', {
+    human: {
+      prompt: 'Approve the draft, or paste an edited version.',
+      autoAccept: false,
+      autoReject: false,
+      judge: {
+        model: 'gpt-4o-mini',
+        criteria: 'Approve unless the draft contains unverified claims or PII.',
+        confidenceThreshold: 0.8,
+      },
+    },
+    effectClass: 'human',
+    outputAs: 'approvedDraft',
+  })
+  .compile({ deps: { /* host deps */ } });
+```
+
+Resolution modes (mutually exclusive — pick one):
+
+| Mode | Behaviour |
+|---|---|
+| `autoAccept: true` | Resolve immediately as approved. Use in tests. |
+| `autoReject: true` or `'reason string'` | Resolve immediately as rejected. Use for dry-run pipelines. |
+| `judge: { ... }` | Route the decision through an LLM judge. Below `confidenceThreshold`, fall through to the normal human interrupt. |
+| (none of the above) | Suspend the graph and emit an approval event. The host wakes the workflow with the decision payload. |
+
+The `effectClass: 'human'` annotation is read by the workflow planner — it pessimistically schedules around human steps so the rest of the graph can advance maximally in parallel before stopping at the gate.
+
+## Runtime `HumanInteractionManager`
+
+Source: [`src/orchestration/hitl/HumanInteractionManager.ts`](https://github.com/framersai/agentos/blob/master/src/orchestration/hitl/HumanInteractionManager.ts) + interface [`IHumanInteractionManager`](https://github.com/framersai/agentos/blob/master/src/orchestration/hitl/IHumanInteractionManager.ts).
+
+This is the richer surface used by the planner and custom orchestrators. It speaks four interaction modes plus checkpoints and feedback ingestion:
+
+```typescript
+interface IHumanInteractionManager {
+  requestApproval(action: PendingAction): Promise<ApprovalDecision>;
+  requestClarification(request: ClarificationRequest): Promise<ClarificationResponse>;
+  requestEdit(draft: DraftOutput): Promise<EditedOutput>;
+  escalate(context: EscalationContext): Promise<EscalationDecision>;
+  // ...checkpoint submission, feedback ingestion, status queries
+}
+```
+
+`PendingAction` carries the dimensions a high-stakes approval needs: a severity level, a category, whether the action is reversible, potential consequences, and an estimated cost.
+
+```typescript
+type ActionSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+interface PendingAction {
+  actionId: string;
+  description: string;
+  severity: ActionSeverity;
+  category?: 'data_modification' | 'external_api' | 'financial'
+           | 'communication'    | 'system'        | 'other';
+  agentId: string;
+  context: Record<string, unknown>;
+  potentialConsequences?: string[];
+  reversible: boolean;
+  estimatedCost?: { amount: number; currency: string };
+  alternatives?: AlternativeAction[];
+  requestedAt: Date;
+  timeoutMs?: number;
+}
+```
+
+Escalation reasons (`EscalationReason`) cover the situations the agent should not decide unilaterally:
+
+```typescript
+type EscalationReason =
+  | 'low_confidence'         | 'repeated_failures'
+  | 'ethical_concern'        | 'out_of_scope'
+  | 'resource_limit'         | 'conflicting_instructions'
+  | 'safety_concern'         | 'user_requested'
+  | 'policy_violation'       | 'unknown_territory';
+```
+
+…and escalation decisions return one of:
+
+```typescript
+type EscalationDecision =
+  | { type: 'human_takeover'; instructions?: string }
+  | { type: 'agent_continue'; guidance: string; adjustedParameters?: Record<string, unknown> }
+  | { type: 'abort'; reason: string }
+  | { type: 'delegate'; targetAgentId: string; instructions: string };
+```
+
+Wire a notification handler (`HITLNotificationHandler`) to surface new pending actions to whatever channel hosts your humans — a UI queue, a Slack channel, a PagerDuty incident, etc.
+
+## Worked example — CLI handler (local dev)
 
 ```typescript
 import { agency, hitl } from '@framers/agentos';
 
-const myAgency = agency({
-  model: 'openai:gpt-4o',
-  agents: { worker: { instructions: 'Execute tasks.' } },
+const writer = agency({
+  provider: 'openai',
+  model: 'gpt-4o-mini',
+  agents: {
+    drafter: { instructions: 'Draft a paragraph based on the user input.' },
+  },
   hitl: {
-    approvals: { beforeTool: ['shell_execute'] },
-    handler: hitl.autoApprove(),
+    approvals: { beforeReturn: true },
+    handler: hitl.cli(),
+    timeoutMs: 60_000,
+    onTimeout: 'reject',
+  },
+});
 
-    // Guardrail override is ON by default.
+const result = await writer.generate('Why AgentOS uses cognitive memory.');
+console.log(result.text);
+```
+
+Running from a terminal pauses before the draft is returned and prints:
+
+```
+[APPROVAL NEEDED] Final output for return to caller
+Agent: drafter | Action: return
+Type: output
+Approve? (y/n):
+```
+
+Approve and the draft returns. Reject and the run ends with the timeout policy applied.
+
+## Worked example — LLM judge with CLI fallback (production default)
+
+```typescript
+import { agency, hitl } from '@framers/agentos';
+
+const guarded = agency({
+  provider: 'openai',
+  model: 'gpt-4o-mini',
+  agents: {
+    worker: {
+      instructions: 'Execute requested tasks using the available tools.',
+      // ...tools, etc.
+    },
+  },
+  hitl: {
+    approvals: {
+      beforeTool: ['delete-file', 'send-email'],
+      beforeReturn: true,
+    },
+    handler: hitl.llmJudge({
+      model: 'gpt-4o-mini',
+      criteria: 'Approve unless the action would delete user data, send a message externally, or spend more than $1.',
+      confidenceThreshold: 0.8,
+      fallback: hitl.cli(),
+    }),
     guardrailOverride: true,
-
-    // Default guardrails: ['pii-redaction', 'code-safety']
     postApprovalGuardrails: ['pii-redaction', 'code-safety'],
   },
 });
 ```
 
-#### Graph-level (humanNode)
+Routing pattern: cheap judge handles low-risk approvals; the human only sees calls the judge can't confidently decide.
+
+## Worked example — Slack notification
 
 ```typescript
-import { humanNode } from '@framers/agentos/orchestration/builders/nodes';
+import { agency, hitl } from '@framers/agentos';
 
-humanNode({
-  prompt: 'Deploy to production?',
-  autoAccept: true,
-  guardrailOverride: true, // even though auto-accepted, guardrails can block
-});
-```
-
-#### CLI
-
-```bash
-# Disable the post-approval safety net (full autonomy)
-wunderland chat --no-guardrail-override
-```
-
-#### agent.config.json
-
-```json
-{
-  "hitl": {
-    "mode": "auto-approve",
-    "guardrailOverride": false
-  }
-}
-```
-
-### Example: Auto-approve with guardrail catching `rm -rf`
-
-```typescript
-const myAgency = agency({
-  agents: { worker: { instructions: 'Execute shell commands.' } },
+const teamAgency = agency({
+  provider: 'openai',
+  model: 'gpt-4o-mini',
+  agents: { worker: { instructions: 'Run the requested operation.' } },
   hitl: {
-    approvals: { beforeTool: ['shell_execute'] },
-    handler: hitl.autoApprove(), // approves everything
-    // But guardrails catch destructive patterns:
-    guardrailOverride: true,
-    postApprovalGuardrails: ['code-safety'],
-  },
-  on: {
-    guardrailHitlOverride: (event) => {
-      console.warn(
-        `[Safety] Guardrail "${event.guardrailId}" blocked tool "${event.toolName}": ${event.reason}`
-      );
-    },
+    approvals: { beforeTool: ['publish-blog-post'] },
+    handler: hitl.slack({
+      channel: '#approvals',
+      token: process.env.SLACK_BOT_TOKEN!,
+    }),
   },
 });
-
-// This tool call will be auto-approved by HITL, then blocked by code-safety:
-// [Guardrail] Overrode HITL approval for tool "shell_execute" -- code-safety: detected rm -rf pattern
 ```
 
-### Built-in Guardrails
-
-| ID | Description |
-|---|---|
-| `code-safety` | Blocks destructive shell commands (`rm -rf`, `kill -9`, `DROP TABLE`, `mkfs`, `dd`, `format`, `shutdown`, etc.) |
-| `pii-redaction` | Blocks payloads containing unredacted SSNs or credit card numbers |
-
-### Disabling the Override
-
-Set `guardrailOverride: false` in the HITL config or pass `--no-guardrail-override`
-on the CLI. This gives full autonomy to the HITL handler's decision with no
-post-approval checks.
-
-### Events
-
-When a guardrail overrides an HITL approval, the `guardrailHitlOverride`
-callback fires:
+The current Slack handler posts a formatted approval message to the channel and auto-approves after notifying. Reaction polling (`:white_check_mark:` / `:x:`) is planned; until then, treat Slack as an audit trail and combine it with a gating handler if you need to *wait* on the team:
 
 ```typescript
-interface GuardrailHitlOverrideEvent {
-  guardrailId: string; // e.g., 'code-safety'
-  reason: string;      // e.g., 'detected destructive pattern: rm\\s+-rf\\s+\\/'
-  toolName: string;    // e.g., 'shell_execute'
-  timestamp: number;
-}
+import type { HitlHandler } from '@framers/agentos';
+
+const slackThenWebhook: HitlHandler = async (request) => {
+  await hitl.slack({ channel: '#approvals', token: process.env.SLACK_BOT_TOKEN! })(request);
+  return hitl.webhook('https://approvals.internal/decide')(request);
+};
 ```
+
+## Worked example — workflow `human` step
+
+```typescript
+import { workflow } from '@framers/agentos/orchestration';
+import { z } from 'zod';
+
+const draftThenReview = workflow('draft-then-review')
+  .input(z.object({ topic: z.string() }))
+  .returns(z.object({ finalDraft: z.string() }))
+  .step('draft', { gmi: { instructions: 'Draft a 2-paragraph post on {{topic}}.' } })
+  .step('review', {
+    human: {
+      prompt: 'Approve the draft (y) or paste an edited version.',
+      autoAccept: false,
+      judge: {
+        model: 'gpt-4o-mini',
+        criteria: 'Approve unless the draft contains unverified claims, PII, or marketing fluff.',
+        confidenceThreshold: 0.8,
+      },
+    },
+    effectClass: 'human',
+    outputAs: 'finalDraft',
+  })
+  .compile({ deps: { /* host-provided runtime deps */ } });
+```
+
+For agencies that already use the higher-level `agency({ hitl: { approvals: { beforeReturn: true } } })`, prefer the agency-level surface — `workflow().step({ human })` is for explicit DAGs that mix LLM, non-LLM, and human nodes.
+
+## Pitfalls
+
+**`hitl.cli()` hangs in non-interactive environments.** It reads from `process.stdin`. In CI, serverless, or any environment without a TTY, the handler never resolves and the `onTimeout` policy fires after `timeoutMs`. Use `hitl.autoApprove()` in CI and `hitl.cli()` only locally.
+
+**`hitl.slack(...)` auto-approves after notifying.** The current shipping behavior does NOT block on a reaction. Use it for audit, or wrap it in a webhook for blocking approval.
+
+**`beforeEmergent: true` requires emergent to be enabled.** Setting `beforeEmergent: true` without `emergent: { enabled: true }` on the agency does nothing — there's no emergent path to gate. Pair the two.
+
+**`postApprovalGuardrails` defaults to `['pii-redaction', 'code-safety']`.** If the guardrail packs aren't loaded into your runtime, the post-approval check silently passes. Verify the packs are wired (`@framers/agentos-extensions`) when you depend on the override.
+
+**Workflow `human` step resolution modes are mutually exclusive.** Setting both `autoAccept: true` and `judge: {...}` resolves to whichever the runtime evaluates first (currently `autoAccept`). Pick one mode per node.
 
 ## FAQ
 
-### Can guardrails override HITL approvals?
+**Does `beforeReturn` block streaming?** Yes — when `beforeReturn: true`, the agency's `stream.finalTextStream` does not emit until the handler resolves. `stream.textStream` (raw live chunks) continues unaffected.
 
-Yes. When `guardrailOverride` is enabled (the default), guardrails run a
-post-approval check on every approved tool call. If any guardrail detects a
-destructive pattern, the approval is vetoed and the tool call is denied.
-This applies regardless of how the approval was made -- auto-approve, LLM
-judge, or human operator.
+**Can a handler modify the action without rejecting it?** Yes. Return `{ approved: true, modifications: { toolArgs: { ... } } }` and the orchestrator merges those over the original tool arguments before invocation. Same for `output` (overrides the final text) and `instructions` (injected into the system prompt).
 
-The flow is: HITL approves -> guardrails check -> execute (or block).
+**Do agency callbacks (`approvalRequested`, `approvalDecided`) fire for workflow `human` steps?** No — those callbacks are on `AgencyCallbacks` and only fire for `HitlConfig`-driven pauses. Workflow `human` nodes emit graph events instead. Subscribe via `workflow.compile({ on: { ... } })`.
 
-To disable this behavior, set `guardrailOverride: false` in the HITL
-config or pass `--no-guardrail-override` on the CLI.
+**Can the LLM judge see the full agent call history?** Yes. `ApprovalRequest.context.agentCalls` is the full record so far. The judge prompt receives it as part of the input.
 
-## Related Documentation
+## See also
 
-- [Planning Engine](./PLANNING_ENGINE.md) - Autonomous goal pursuit
-- [Agent Communication](./AGENT_COMMUNICATION.md) - Inter-agent messaging
-- [Architecture](./ARCHITECTURE.md) - Full system overview
-
-
+- [Guardrails Usage](./GUARDRAILS_USAGE.md) — the post-approval guardrail safety net.
+- [Agency API](../orchestration/AGENCY_API.md) — full `agency()` reference, including the `HitlConfig` field.
+- [`workflow()` DSL](../orchestration/WORKFLOW_DSL.md) — typed-graph authoring with `human` steps.
+- [Emergent Capabilities](../architecture/EMERGENT_CAPABILITIES.md) — how `beforeEmergent` gates `spawn_specialist`.
+- [Streaming Semantics](../architecture/STREAMING_SEMANTICS.md) — how `beforeReturn` interacts with the streaming surfaces.
+- [`src/api/hitl.ts`](https://github.com/framersai/agentos/blob/master/src/api/hitl.ts) — source for the six handler factories.
+- [`src/api/types.ts`](https://github.com/framersai/agentos/blob/master/src/api/types.ts) — `HitlConfig`, `ApprovalRequest`, `ApprovalDecision`.
+- [`src/orchestration/hitl/`](https://github.com/framersai/agentos/tree/master/src/orchestration/hitl) — runtime `HumanInteractionManager`.

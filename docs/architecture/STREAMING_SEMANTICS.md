@@ -21,7 +21,7 @@ Use the right one for the job:
     - final agency-level `agent-end`
 - `text`
   - Finalized scalar text after output guardrails, parsing, usage normalization,
-    and `beforeReturn` HITL approval.
+    and `beforeReturn` HITL approval. See [Human-in-the-Loop](/features/human-in-the-loop) for the full HITL surface.
 - `finalTextStream`
   - Finalized-text iterable.
   - Emits only the post-processing-approved text once it is actually finalized.
