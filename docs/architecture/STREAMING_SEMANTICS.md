@@ -1,8 +1,8 @@
 # Streaming Semantics
 
-AgentOS now exposes multiple streaming surfaces on `agency().stream(...)` because
-"what is happening right now" and "what is finally approved" are not always the
-same thing.
+`agency().stream(...)` exposes multiple streaming surfaces because "what is
+happening right now" and "what is finally approved" are not always the same
+thing.
 
 Use the right one for the job:
 
