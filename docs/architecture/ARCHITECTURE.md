@@ -14,7 +14,9 @@ This page is the system map. For the *what* of each subsystem — components, li
 For specific subsystem deep-dives, see:
 - [Provenance & Immutability](../features/provenance-immutability.md)
 
-![AgentOS layered architecture: API surface, orchestration, GMI cognitive engine, safety guardrails alongside tools and extensions, memory and RAG, LLM providers, and perception with channel adapters](/img/diagrams/system-architecture-layers.svg)
+![AgentOS layered architecture: seven cooperating layers from caller-facing API (generateText, streamText, agent, agency, mission) through cognitive substrate (GMI coordinator, PersonaOverlayManager, SentimentTracker, MetapromptExecutor), memory and RAG (4-tier memory, 8 cognitive mechanisms, HyDE, GraphRAG, 7 vector backends), tools and capabilities (100+ extension packs, 88 SKILL.md modules, runtime tool forging), guardrails and HITL (PII redaction, ML classifiers, NLI grounding, 5 approval triggers), orchestration (workflow, mission, AgentGraph, checkpointing), down to I/O and providers (voice pipeline, channels, media generation, 21 LLM providers, OpenRouter fanout).](/img/diagrams/system-architecture.svg)
+
+Each layer above corresponds to a section below. The mapping is one-to-one: layer 1 → [API Surface Contract](#api-surface-contract), layer 2 → [GMI](#gmi-generalized-mind-instance), layer 3 → [Memory System](#memory-system), layer 4 → [Tools, Skills, Extensions](#tools-skills--extensions), layer 5 → [Safety & Guardrails](#safety--guardrails), layer 6 → [Orchestration](#orchestration), layer 7 → [Perception & Channels](#perception--channels). The component pills inside each layer in the diagram are the same class and function names you'll see in the subsystem write-ups.
 
 ---
 
