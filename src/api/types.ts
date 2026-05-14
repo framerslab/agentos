@@ -1394,22 +1394,54 @@ export interface BaseAgentConfig {
 
 /**
  * Configuration for the auto-citation-verification hook on `agent()`.
+ *
+ * Two wiring modes:
+ *
+ * 1. **Auto-wire via `retrievalAugmentor`** (preferred for any agent already
+ *    using RAG): pass an `IRetrievalAugmentor` and the verifier derives both
+ *    `embedFn` and `retrieve` from it. The verifier reuses the augmentor's
+ *    embedding model and retrieves through `retrieveContext()` so the
+ *    sources scored against generated claims are exactly the same sources
+ *    the agent saw at prompt-construction time.
+ *
+ * 2. **Manual wiring** (for non-augmentor pipelines or testing): supply
+ *    `embedFn` and `retrieve` directly.
+ *
+ * When `retrievalAugmentor` is provided, the explicit `embedFn` and
+ * `retrieve` fields are ignored.
  */
 export interface VerifyCitationsConfig {
   /**
-   * Batch embedding function used by the verifier to score each atomic
-   * claim against each retrieved source via cosine similarity.
+   * If set, the verifier auto-derives `embedFn` (via
+   * `retrievalAugmentor.embedTexts`) and `retrieve` (via
+   * `retrievalAugmentor.retrieveContext`). This is the recommended path for
+   * any agent already using RAG, because it guarantees the embeddings used
+   * to score claims match the embeddings used to retrieve sources.
    */
-  embedFn: (texts: string[]) => Promise<number[][]>;
+  retrievalAugmentor?: import('../cognition/rag/IRetrievalAugmentor.js').IRetrievalAugmentor;
+
+  /**
+   * Batch embedding function used by the verifier to score each atomic
+   * claim against each retrieved source via cosine similarity. Required
+   * unless `retrievalAugmentor` is set.
+   */
+  embedFn?: (texts: string[]) => Promise<number[][]>;
 
   /**
    * Function the agent calls before each generation to fetch the sources
    * the response will be verified against. Typically wraps your vector
-   * store or retrieval pipeline.
+   * store or retrieval pipeline. Required unless `retrievalAugmentor` is set.
    */
-  retrieve: (
+  retrieve?: (
     query: string,
   ) => Promise<Array<import('../cognition/rag/citation/types.js').VerificationSource>>;
+
+  /**
+   * Optional retrieval options forwarded to `retrievalAugmentor.retrieveContext`
+   * (topK, strategy, target data sources, etc.). Ignored when `retrieve` is
+   * supplied directly.
+   */
+  retrievalOptions?: import('../cognition/rag/IRetrievalAugmentor.js').RagRetrievalOptions;
 
   /**
    * Optional cosine similarity threshold above which a claim counts as

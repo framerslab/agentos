@@ -271,6 +271,15 @@ export interface IRetrievalAugmentor {
     options?: RagRetrievalOptions,
   ): Promise<RagRetrievalResult>;
 
+  /**
+   * Batch-embed a list of texts using the same embedding model the augmentor
+   * uses for retrieval. Exposed so consumers (e.g. {@link CitationVerifier}
+   * via the agent-level `verifyCitations: { retrievalAugmentor }` shortcut)
+   * can share a single embedding pipeline rather than wiring an embedder
+   * twice with potentially-divergent model configs.
+   */
+  embedTexts(texts: string[]): Promise<number[][]>;
+
   deleteDocuments(
     documentIds: string[],
     dataSourceId?: string,

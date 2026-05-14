@@ -526,10 +526,51 @@ async function runCitationVerification(
   config: VerifyCitationsConfig,
 ): Promise<import('../cognition/rag/citation/types.js').VerifiedResponse | undefined> {
   try {
-    const sources = await config.retrieve(userText);
+    // Resolve wiring: `retrievalAugmentor` shortcut takes precedence and
+    // auto-derives both retrieve + embedFn. Otherwise fall back to the
+    // explicit hooks. We require at least one valid combination; if neither
+    // is provided we no-op (verification is a check, not a gate, so a
+    // missing config should not fail the response).
+    const augmentor = config.retrievalAugmentor;
+
+    const retrieve = augmentor
+      ? async (query: string) => {
+          const result = await augmentor.retrieveContext(query, config.retrievalOptions);
+          // Convert RagRetrievedChunk -> VerificationSource. The verifier only
+          // looks at content/title/url; metadata + score are dropped (they
+          // do not feed cosine similarity).
+          return (result.retrievedChunks ?? []).map((chunk) => ({
+            content: chunk.content,
+            title:
+              typeof chunk.metadata?.title === 'string'
+                ? (chunk.metadata.title as string)
+                : undefined,
+            url:
+              chunk.source ??
+              (typeof chunk.metadata?.url === 'string'
+                ? (chunk.metadata.url as string)
+                : undefined),
+          }));
+        }
+      : config.retrieve;
+
+    const embedFn = augmentor
+      ? (texts: string[]) => augmentor.embedTexts(texts)
+      : config.embedFn;
+
+    if (!retrieve || !embedFn) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn(
+          '[@framers/agentos] verifyCitations missing both retrievalAugmentor and explicit retrieve/embedFn. Skipping verification.',
+        );
+      }
+      return undefined;
+    }
+
+    const sources = await retrieve(userText);
     if (!sources || sources.length === 0) return undefined;
     const verifier = new CitationVerifier({
-      embedFn: config.embedFn,
+      embedFn,
       supportThreshold: config.supportThreshold,
       unverifiableThreshold: config.unverifiableThreshold,
       nliFn: config.nliFn,

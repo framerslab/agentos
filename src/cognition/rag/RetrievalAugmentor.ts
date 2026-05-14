@@ -745,6 +745,19 @@ export class RetrievalAugmentor implements IRetrievalAugmentor {
   /**
    * @inheritdoc
    */
+  /**
+   * Batch-embed arbitrary texts with the augmentor's embedding pipeline.
+   * Exposed so consumers (e.g. `CitationVerifier` wired through the agent's
+   * `verifyCitations: { retrievalAugmentor }` shortcut) can share the same
+   * embedder rather than configuring a second one with a different model.
+   */
+  public async embedTexts(texts: string[]): Promise<number[][]> {
+    this.ensureInitialized();
+    if (texts.length === 0) return [];
+    const response = await this.embeddingManager.generateEmbeddings({ texts });
+    return response.embeddings;
+  }
+
   public async retrieveContext(
     queryText: string,
     options?: RagRetrievalOptions,
