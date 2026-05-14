@@ -672,6 +672,36 @@ export class MemoryStore {
   }
 
   /**
+   * Re-upsert a trace's metadata to the vector store using the cached
+   * embedding. Used by consolidation when a mutation to the in-memory
+   * trace (e.g. `provenance.contradictedBy`, `provenance.lastVerifiedAt`)
+   * needs to survive a process restart without paying for re-embedding.
+   *
+   * No-ops silently when the trace or its embedding is not cached; the
+   * caller should `getTrace` first or accept that an uncached trace will
+   * not be durably updated.
+   */
+  async persistTraceMetadata(traceId: string): Promise<void> {
+    const trace = this.traceCache.get(traceId);
+    const embedding = this.embeddingCache.get(traceId);
+    if (!trace || !embedding) return;
+
+    const collection = collectionName(this.config.collectionPrefix, trace.scope, trace.scopeId);
+    const doc: VectorDocument = {
+      id: trace.id,
+      textContent: trace.content,
+      embedding,
+      metadata: traceToMetadata(trace),
+    };
+    try {
+      await this.config.vectorStore.upsert(collection, [doc]);
+    } catch {
+      // Best-effort persistence — the in-memory mutation already
+      // happened, so a vector-store failure should not kill the caller.
+    }
+  }
+
+  /**
    * Soft-delete a trace.
    */
   async softDelete(traceId: string): Promise<void> {

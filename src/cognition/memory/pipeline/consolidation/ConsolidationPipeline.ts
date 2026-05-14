@@ -432,6 +432,12 @@ export class ConsolidationPipeline {
           const loser = trace.createdAt > other.createdAt ? other : trace;
           const winner = loser === trace ? other : trace;
           recordContradiction(winner, loser);
+          // Persist the winner's updated audit trail before the loser is
+          // dropped. The loser keeps its symmetric record in-memory; the
+          // softDelete also writes the deletion to SQL so future loads see
+          // both sides of the contradiction.
+          await this.config.store.persistTraceMetadata(winner.id);
+          await this.config.store.persistTraceMetadata(loser.id);
           await this.config.store.softDelete(loser.id);
           resolved++;
         } else {
@@ -440,6 +446,8 @@ export class ConsolidationPipeline {
             const loser = trace.provenance.confidence < other.provenance.confidence ? trace : other;
             const winner = loser === trace ? other : trace;
             recordContradiction(winner, loser);
+            await this.config.store.persistTraceMetadata(winner.id);
+            await this.config.store.persistTraceMetadata(loser.id);
             await this.config.store.softDelete(loser.id);
             resolved++;
           }
