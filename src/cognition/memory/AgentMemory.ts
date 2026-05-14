@@ -45,6 +45,7 @@ import type {
   ObservationPipelineStats,
   CognitiveMemorySnapshot,
   MemoryTypeStats,
+  TrustCapability,
 } from './core/types.js';
 import type { PADState, CognitiveMemoryConfig } from './core/config.js';
 import type { ICognitiveMemoryManager } from './CognitiveMemoryManager.js';
@@ -92,6 +93,12 @@ export interface SearchOptions {
   tags?: string[];
   /** Minimum confidence. Default: 0. */
   minConfidence?: number;
+  /**
+   * Restrict results to traces whose trust policy permits the listed
+   * capability (or all of them when given an array). Use when the recall
+   * is going into an auth-sensitive prompt or a fact-claim assertion.
+   */
+  usableFor?: TrustCapability | TrustCapability[];
   /** Shared retrieval policy surface. */
   policy?: MemoryRetrievalPolicy;
 }
@@ -247,6 +254,7 @@ export class AgentMemory {
       types: options?.types,
       tags: options?.tags,
       minConfidence: options?.minConfidence,
+      usableFor: options?.usableFor,
       policy: options?.policy,
     });
     return {

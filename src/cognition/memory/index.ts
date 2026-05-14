@@ -21,6 +21,8 @@ export type {
   MemoryScope,
   MemorySourceType,
   MemoryProvenance,
+  MemoryTrustPolicy,
+  TrustCapability,
   EmotionalContext,
   ContentFeatures,
   MemoryTrace,
@@ -35,6 +37,7 @@ export type {
   AssembledMemoryContext,
   MemoryHealthReport,
 } from './core/types.js';
+export { DEFAULT_TRUST_POLICY_BY_SOURCE, canUseFor } from './core/types.js';
 
 // --- Configuration ---
 export type {

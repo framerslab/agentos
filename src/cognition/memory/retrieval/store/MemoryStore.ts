@@ -110,11 +110,25 @@ function traceToMetadata(trace: MemoryTrace): Record<string, any> {
     verificationCount: trace.provenance.verificationCount ?? 0,
     lastVerifiedAt: trace.provenance.lastVerifiedAt,
     contradictedBy: trace.provenance.contradictedBy,
+    // Trust policy. Persisted as a JSON-serialised string because the
+    // vector-store metadata layer cannot represent nested objects with
+    // mixed types portably across backends (Pinecone, Qdrant, Postgres).
+    // Read back via metadataToTracePartial.
+    policyJson: trace.policy ? JSON.stringify(trace.policy) : undefined,
     createdAt: trace.createdAt,
     isActive: trace.isActive ? 1 : 0,
     tags: trace.tags.join(','),
     entities: trace.entities.join(','),
   };
+}
+
+/** Parse a JSON string and return `undefined` on any failure. */
+function safeParseJson<T>(raw: string): T | undefined {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return undefined;
+  }
 }
 
 function metadataToTracePartial(metadata: Record<string, any>): Partial<MemoryTrace> {
@@ -146,6 +160,9 @@ function metadataToTracePartial(metadata: Record<string, any>): Partial<MemoryTr
         : undefined,
       sourceTimestamp: metadata.createdAt as number,
     },
+    policy: typeof metadata.policyJson === 'string'
+      ? safeParseJson<import('../../core/types.js').MemoryTrustPolicy>(metadata.policyJson)
+      : undefined,
     createdAt: metadata.createdAt as number,
     isActive: metadata.isActive === 1,
     tags: typeof metadata.tags === 'string' ? metadata.tags.split(',').filter(Boolean) : [],

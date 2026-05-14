@@ -23,6 +23,7 @@ import type {
   MemoryHealthReport,
   ContentFeatures,
 } from './core/types.js';
+import { DEFAULT_TRUST_POLICY_BY_SOURCE, canUseFor } from './core/types.js';
 import type { CognitiveMemoryConfig, PADState, HexacoTraits } from './core/config.js';
 import {
   DEFAULT_ENCODING_CONFIG,
@@ -580,6 +581,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     const emotionalContext = buildEmotionalContext(mood, gmiMood, options.contentSentiment);
 
     // Create trace
+    const resolvedSourceType = options.sourceType ?? 'user_statement';
     const trace: MemoryTrace = {
       id: generateTraceId(),
       type: options.type ?? 'episodic',
@@ -589,11 +591,16 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       entities: options.entities ?? [],
       tags: options.tags ?? [],
       provenance: {
-        sourceType: options.sourceType ?? 'user_statement',
+        sourceType: resolvedSourceType,
         sourceTimestamp: now,
         confidence: 0.8,
         verificationCount: 0,
       },
+      // Stamp trust policy from the source-type defaults table so callers
+      // can immediately gate `usableForAuthorization` / `usableForFactClaim`
+      // checks without writing a policy manually. Callers can mutate the
+      // returned trace if they need a tighter policy.
+      policy: { ...DEFAULT_TRUST_POLICY_BY_SOURCE[resolvedSourceType] },
       emotionalContext,
       encodingStrength: encoding.initialStrength,
       stability: encoding.stability,
@@ -725,6 +732,25 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         topK: effectiveTopK,
       },
     );
+
+    // --- Trust-policy capability filter ---
+    // When the caller requested specific capabilities (e.g. `usableFor:
+    // 'authorization'`), drop traces whose policy doesn't permit them or
+    // whose `requiresReverificationAfterMs` window has expired. Filtering
+    // post-store rather than pre-store keeps the policy logic out of the
+    // vector layer at the cost of trimming results after the topK cut.
+    if (options.usableFor !== undefined) {
+      const required = Array.isArray(options.usableFor) ? options.usableFor : [options.usableFor];
+      const allowed: typeof scored = [];
+      const now = Date.now();
+      for (const trace of scored) {
+        if (required.every((cap) => canUseFor(trace, cap, now))) {
+          allowed.push(trace);
+        }
+      }
+      scored.length = 0;
+      scored.push(...allowed);
+    }
 
     // --- Batch 2: Spreading activation ---
     if (this.graph && scored.length > 0) {

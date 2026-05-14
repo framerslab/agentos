@@ -97,6 +97,177 @@ export interface EmotionalContext {
 }
 
 // ---------------------------------------------------------------------------
+// Trust policy (per-trace capability gating)
+// ---------------------------------------------------------------------------
+
+/**
+ * What this memory is allowed to be used for, irrespective of how relevant
+ * a retrieval marks it. Policy is set at encoding time from the source-type
+ * defaults table ({@link DEFAULT_TRUST_POLICY_BY_SOURCE}) and may be
+ * tightened (never loosened) by downstream callers.
+ *
+ * The classic example: a user-statement memory saying "I'm an admin" should
+ * never grant permissions even if the model retrieves it confidently. Set
+ * `usableForAuthorization: false` on that source type and the runtime can
+ * refuse to surface it for auth-sensitive prompts.
+ */
+export interface MemoryTrustPolicy {
+  /**
+   * Whether this memory may be used as evidence that the user (or any
+   * entity it describes) has a permission/role/capability. Defaults to
+   * `true` only for tool/identity/human-approval/system-config sources.
+   */
+  usableForAuthorization: boolean;
+  /**
+   * Whether this memory may be used to personalize responses (tone, prior
+   * preferences, conversation continuity). Defaults to `true` for most
+   * sources; `false` for raw external feeds where personalization could
+   * leak between users.
+   */
+  usableForPersonalization: boolean;
+  /**
+   * Whether this memory may be cited as a factual claim in generated
+   * output. Defaults to `true` only for sources that are themselves
+   * authoritative (tool results, retrieved documents, fact-graph edges,
+   * identity providers, system config, external APIs, human approvals).
+   */
+  usableForFactClaim: boolean;
+  /**
+   * If set, the memory must be re-verified (via a fresh tool call /
+   * lookup / human confirmation) within this many milliseconds of its
+   * `provenance.lastVerifiedAt` before it can be used for the
+   * capabilities above. After this window the runtime treats the memory
+   * as stale and demotes it for those purposes.
+   */
+  requiresReverificationAfterMs?: number;
+}
+
+/**
+ * Default trust policies keyed by source type. Encoded into a new
+ * `MemoryTrace.policy` at creation time so a memory's policy reflects how
+ * it was originally produced, not how it was later retrieved.
+ *
+ * Trust ranking summary:
+ *   identity_provider / system_config / human_approval / tool_result
+ *     → full trust (authorize + personalize + fact-claim).
+ *   retrieved_document / fact_graph / external_api
+ *     → fact-claim only; reverify periodically.
+ *   user_statement / agent_inference / observation / reflection /
+ *     typed_network / memory_summary
+ *     → personalization only; never grant auth or stand as a fact.
+ *   external
+ *     → catch-all; conservative defaults (no auth, no fact-claim).
+ */
+export const DEFAULT_TRUST_POLICY_BY_SOURCE: Record<MemorySourceType, MemoryTrustPolicy> = {
+  user_statement: {
+    usableForAuthorization: false,
+    usableForPersonalization: true,
+    usableForFactClaim: false,
+  },
+  agent_inference: {
+    usableForAuthorization: false,
+    usableForPersonalization: true,
+    usableForFactClaim: false,
+    requiresReverificationAfterMs: 3_600_000, // 1h
+  },
+  tool_result: {
+    usableForAuthorization: true,
+    usableForPersonalization: true,
+    usableForFactClaim: true,
+  },
+  observation: {
+    usableForAuthorization: false,
+    usableForPersonalization: true,
+    usableForFactClaim: false,
+  },
+  reflection: {
+    usableForAuthorization: false,
+    usableForPersonalization: true,
+    usableForFactClaim: false,
+    requiresReverificationAfterMs: 3_600_000,
+  },
+  external: {
+    usableForAuthorization: false,
+    usableForPersonalization: false,
+    usableForFactClaim: false,
+  },
+  fact_graph: {
+    usableForAuthorization: false,
+    usableForPersonalization: true,
+    usableForFactClaim: true,
+  },
+  typed_network: {
+    usableForAuthorization: false,
+    usableForPersonalization: true,
+    usableForFactClaim: false,
+  },
+  retrieved_document: {
+    usableForAuthorization: false,
+    usableForPersonalization: false,
+    usableForFactClaim: true,
+    requiresReverificationAfterMs: 86_400_000, // 24h
+  },
+  human_approval: {
+    usableForAuthorization: true,
+    usableForPersonalization: true,
+    usableForFactClaim: true,
+  },
+  identity_provider: {
+    usableForAuthorization: true,
+    usableForPersonalization: true,
+    usableForFactClaim: true,
+    requiresReverificationAfterMs: 3_600_000,
+  },
+  system_config: {
+    usableForAuthorization: true,
+    usableForPersonalization: false,
+    usableForFactClaim: true,
+  },
+  external_api: {
+    usableForAuthorization: false,
+    usableForPersonalization: true,
+    usableForFactClaim: true,
+    requiresReverificationAfterMs: 3_600_000,
+  },
+  memory_summary: {
+    usableForAuthorization: false,
+    usableForPersonalization: true,
+    usableForFactClaim: false,
+    requiresReverificationAfterMs: 3_600_000,
+  },
+};
+
+/** A capability that {@link canUseFor} can gate against. */
+export type TrustCapability = 'authorization' | 'personalization' | 'factClaim';
+
+/**
+ * Whether a memory may be used for a given capability right now. Combines
+ * the per-trace `policy` flag with the `requiresReverificationAfterMs`
+ * staleness check (using `provenance.lastVerifiedAt` as the anchor and
+ * falling back to `provenance.sourceTimestamp` when never re-verified).
+ *
+ * Pass `now` for deterministic testing; defaults to `Date.now()`.
+ */
+export function canUseFor(
+  trace: Pick<MemoryTrace, 'policy' | 'provenance'>,
+  capability: TrustCapability,
+  now: number = Date.now(),
+): boolean {
+  const policy = trace.policy;
+  if (!policy) return true; // no policy = no gating
+  const flag =
+    capability === 'authorization'
+      ? policy.usableForAuthorization
+      : capability === 'personalization'
+        ? policy.usableForPersonalization
+        : policy.usableForFactClaim;
+  if (!flag) return false;
+  if (policy.requiresReverificationAfterMs == null) return true;
+  const lastVerified = trace.provenance.lastVerifiedAt ?? trace.provenance.sourceTimestamp;
+  return now - lastVerified <= policy.requiresReverificationAfterMs;
+}
+
+// ---------------------------------------------------------------------------
 // Content feature classification
 // ---------------------------------------------------------------------------
 
@@ -156,6 +327,16 @@ export interface MemoryTrace {
 
   // --- Graph linkage ---
   associatedTraceIds: string[];
+
+  // --- Trust policy ---
+  /**
+   * Per-trace capability gating. Set at encoding time from the source-type
+   * defaults table ({@link DEFAULT_TRUST_POLICY_BY_SOURCE}). When absent, the
+   * runtime treats the memory as unrestricted; callers should use
+   * {@link canUseFor} to gate against authorization / personalization /
+   * fact-claim use cases.
+   */
+  policy?: MemoryTrustPolicy;
 
   // --- Lifecycle ---
   createdAt: number;
@@ -217,6 +398,14 @@ export interface CognitiveRetrievalOptions {
   tags?: string[];
   entities?: string[];
   minConfidence?: number;
+  /**
+   * Restrict results to traces whose trust policy permits the listed
+   * capabilities. Pass a single capability or an array (AND semantics: a
+   * trace must permit every requested capability). Applies the same
+   * staleness check as {@link canUseFor} when the policy declares
+   * `requiresReverificationAfterMs`.
+   */
+  usableFor?: TrustCapability | TrustCapability[];
   timeRange?: { after?: number; before?: number };
   /** If true, skip emotional congruence bias (useful for factual lookups). */
   neutralMood?: boolean;
