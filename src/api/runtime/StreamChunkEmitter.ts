@@ -142,6 +142,7 @@ export class StreamChunkEmitter {
           error: data.error,
           updatedConversationContext: data.updatedConversationContext,
           activePersonaDetails: data.activePersonaDetails,
+          ragSources: data.ragSources,
         } as AgentOSFinalResponseChunk;
         break;
       case AgentOSResponseChunkType.WORKFLOW_UPDATE:

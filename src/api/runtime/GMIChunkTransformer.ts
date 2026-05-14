@@ -236,6 +236,7 @@ export class GMIChunkTransformer {
           error: gmiOutput.error,
           updatedConversationContext: conversationContext.toJSON(),
           activePersonaDetails: snapshotPersonaDetails(gmi.getPersona?.()),
+          ragSources: gmiOutput.ragSources,
         },
       );
       this.activeStreamContexts.delete(agentOSStreamId);
@@ -361,6 +362,27 @@ export class GMIChunkTransformer {
         // Marker chunk emitted at end-of-stream. Do not surface to clients.
         // The real final response is the AsyncGenerator return value (GMIOutput).
         break;
+      case GMIOutputChunkType.RAG_SOURCES_AVAILABLE: {
+        const content = gmiChunk.content as
+          | { ragSources?: import('../../cognition/rag/IRetrievalAugmentor.js').RagRetrievedChunk[] }
+          | undefined;
+        const ragSources = content?.ragSources;
+        if (Array.isArray(ragSources) && ragSources.length > 0) {
+          // Surface as METADATA_UPDATE so consumers (output guardrails, UI source
+          // panels, telemetry) can pick up retrieved chunks before the model
+          // emits text deltas. Grounding guardrails subscribe to this update to
+          // verify subsequent claims against the same sources the LLM saw.
+          await this.chunks.pushChunk(
+            agentOSStreamId,
+            AgentOSResponseChunkType.METADATA_UPDATE,
+            gmiInstanceIdForChunks,
+            personaId,
+            false,
+            { updates: { ragSources } },
+          );
+        }
+        break;
+      }
       case GMIOutputChunkType.USAGE_UPDATE:
         console.log(
           `AgentOSOrchestrator: UsageUpdate from GMI on stream ${agentOSStreamId}:`,

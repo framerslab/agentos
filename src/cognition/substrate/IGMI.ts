@@ -261,6 +261,13 @@ export enum GMIOutputChunkType {
   USAGE_UPDATE = 'usage_update',
   LATENCY_REPORT = 'latency_report',
   UI_COMMAND = 'ui_command',
+  /**
+   * Emitted after a successful RAG retrieval during a turn so downstream
+   * consumers (guardrails, grounding verification, UI source panels) can
+   * see the retrieved chunks before the LLM call produces text deltas.
+   * The chunk content is `{ ragSources: RagRetrievedChunk[] }`.
+   */
+  RAG_SOURCES_AVAILABLE = 'rag_sources_available',
 }
 
 /**
@@ -337,6 +344,13 @@ export interface GMIOutput {
     usage?: CostAggregator;
     reasoningTrace?: ReasoningTraceEntry[]; // Included for final consolidated trace
     error?: { code: string; message: string; details?: any };
+    /**
+     * Retrieved RAG chunks for the turn, populated when the GMI performed a
+     * RAG retrieval. Threaded into the FINAL_RESPONSE chunk so client code and
+     * the output-guardrail layer (Grounding Guard, Citation Verifier) can
+     * verify generated claims against the same sources the model saw.
+     */
+    ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
 }
 
 

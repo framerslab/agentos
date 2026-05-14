@@ -1037,6 +1037,7 @@ export class AgentOSOrchestrator {
             ? conversationContext.toJSON()
             : undefined,
           activePersonaDetails: snapshotPersonaDetails(gmi?.getPersona?.()),
+          ragSources: finalGMIStateForResponse.ragSources,
         }
       );
       await this.dependencies.streamingManager.closeStream(agentOSStreamId, 'Processing complete.');

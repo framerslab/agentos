@@ -406,6 +406,13 @@ export class ParallelGuardrailDispatcher {
     // -- Per-service rate limiting for streaming evaluation -------------
     const streamingEvaluationCounts = new Map<string, number>();
 
+    // -- Live RAG-source state (updated from stream chunks) -----------------
+    // The GMI emits retrieved chunks as a METADATA_UPDATE early in the turn
+    // (right after retrieval, before the LLM call). The FINAL_RESPONSE chunk
+    // also carries the same sources. Track them here so per-chunk
+    // evaluateOutput calls see the live state, not just the initial option.
+    let currentRagSources = options.ragSources;
+
     // -- Main stream loop ----------------------------------------------
     for await (const chunk of stream) {
       let currentChunk = chunk;
@@ -414,6 +421,22 @@ export class ParallelGuardrailDispatcher {
       if (!inputMetadataApplied && serializedInputEvaluations.length > 0) {
         currentChunk = withGuardrailMetadata(currentChunk, { input: serializedInputEvaluations });
         inputMetadataApplied = true;
+      }
+
+      // Sniff RAG sources off the stream so subsequent claim grounding runs
+      // against the same chunks the LLM saw. METADATA_UPDATE.updates.ragSources
+      // arrives before TEXT_DELTA; FINAL_RESPONSE.ragSources arrives at the end
+      // and acts as a defensive fallback.
+      if (chunk.type === AgentOSResponseChunkType.METADATA_UPDATE) {
+        const meta = (chunk as any).updates as { ragSources?: unknown } | undefined;
+        if (meta && Array.isArray(meta.ragSources) && meta.ragSources.length > 0) {
+          currentRagSources = meta.ragSources as typeof currentRagSources;
+        }
+      } else if (chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE) {
+        const finalRag = (chunk as any).ragSources;
+        if (Array.isArray(finalRag) && finalRag.length > 0) {
+          currentRagSources = finalRag as typeof currentRagSources;
+        }
       }
 
       // ---------------------------------------------------------------
@@ -440,7 +463,7 @@ export class ParallelGuardrailDispatcher {
 
           const timeoutMs = svc.config?.timeoutMs;
           const evaluation = await callWithTimeout(
-            () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: options.ragSources }),
+            () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
             timeoutMs,
           );
 
@@ -481,7 +504,7 @@ export class ParallelGuardrailDispatcher {
 
             const timeoutMs = svc.config?.timeoutMs;
             return callWithTimeout(
-              () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: options.ragSources }),
+              () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
               timeoutMs,
             ).then((evaluation) => {
               streamingEvaluationCounts.set(svcId, currentCount + 1);
@@ -545,7 +568,7 @@ export class ParallelGuardrailDispatcher {
 
           const timeoutMs = svc.config?.timeoutMs;
           const evaluation = await callWithTimeout(
-            () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: options.ragSources }),
+            () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
             timeoutMs,
           );
 
@@ -589,7 +612,7 @@ export class ParallelGuardrailDispatcher {
 
             const timeoutMs = svc.config?.timeoutMs;
             return callWithTimeout(
-              () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: options.ragSources }),
+              () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
               timeoutMs,
             ).then((evaluation) => ({ evaluation, registrationIndex }));
           });

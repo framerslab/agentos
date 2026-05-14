@@ -669,6 +669,7 @@ export class GMI implements IGMI {
       // -------------------------------------------------------------------
       let safetyBreak = 0;
       const maxToolLoopIterations = this.config.maxToolLoopIterations ?? 5;
+      let lastRagSources: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[] | undefined;
       main_processing_loop: while (safetyBreak < maxToolLoopIterations) {
         safetyBreak++;
         let augmentedContextFromRAG = "";
@@ -704,7 +705,22 @@ export class GMI implements IGMI {
             };
             const ragResult = await this.retrievalAugmentor.retrieveContext(currentQueryForRag, retrievalOptions);
             augmentedContextFromRAG = ragResult.augmentedContext;
-            this.addTraceEntry(ReasoningEntryType.RAG_QUERY_RESULT, 'RAG context retrieved.', { length: augmentedContextFromRAG.length });
+            lastRagSources = ragResult.retrievedChunks;
+            this.addTraceEntry(ReasoningEntryType.RAG_QUERY_RESULT, 'RAG context retrieved.', {
+              length: augmentedContextFromRAG.length,
+              chunkCount: ragResult.retrievedChunks?.length ?? 0,
+            });
+            // Emit the retrieved chunks to the stream so streaming output guardrails
+            // (e.g. Grounding Guard) can verify each generated TEXT_DELTA against the
+            // same sources the LLM is about to see. The chunk also reaches client
+            // consumers who want to display source attribution alongside the response.
+            if (ragResult.retrievedChunks && ragResult.retrievedChunks.length > 0) {
+              yield this.createOutputChunk(
+                turnInput.interactionId,
+                GMIOutputChunkType.RAG_SOURCES_AVAILABLE,
+                { ragSources: ragResult.retrievedChunks },
+              );
+            }
           }
         }
 
@@ -983,6 +999,7 @@ export class GMI implements IGMI {
         uiCommands: aggregatedUiCommands.length > 0 ? aggregatedUiCommands : undefined, // Assuming GMI can populate these
         usage: aggregatedUsage,
         error: lastErrorForOutput,
+        ragSources: lastRagSources,
       };
       return finalTurnOutput; // Return the aggregated output
 
