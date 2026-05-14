@@ -58,7 +58,7 @@ importers:
         version: 6.0.1
       openredaction:
         specifier: ^1.1.2
-        version: 1.1.2(mammoth@1.12.0)(pdf-parse@1.1.4)
+        version: 1.1.2(mammoth@1.12.0)(pdf-parse@1.1.4)(tesseract.js@7.0.0)
       pg:
         specifier: ^8.20.0
         version: 8.20.0
@@ -92,10 +92,10 @@ importers:
         version: 9.39.4
       '@framers/agentos-extensions-registry':
         specifier: ^0.18.0
-        version: 0.18.0(@aws-sdk/client-polly@3.1045.0)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(mammoth@1.12.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(request@2.88.2)(typescript@5.9.3)(vosk@0.3.39)
+        version: 0.18.0(@aws-sdk/client-polly@3.1045.0)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(mammoth@1.12.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(vosk@0.3.39)
       '@framers/sql-storage-adapter':
-        specifier: ^0.6.4
-        version: 0.6.4(better-sqlite3@12.9.0)(pg@8.20.0)
+        specifier: ^0.6.5
+        version: 0.6.5(better-sqlite3@12.9.0)(pg@8.20.0)
       '@opentelemetry/context-async-hooks':
         specifier: ^2.0.1
         version: 2.7.1(@opentelemetry/api@1.9.1)
@@ -1406,8 +1406,8 @@ packages:
   '@framers/agentos-skills@1.0.0':
     resolution: {integrity: sha512-vMcMjizMmrWWGWJ4S61ymNoRTkisZRhVUpHt0RD0yeA720hhhbQrYAY2GOE31M/w8EGxYeAB/ELxwyeRMpcpKw==}
 
-  '@framers/sql-storage-adapter@0.6.4':
-    resolution: {integrity: sha512-EBpkQvA1urluVCApU2yMAVpoi03NkB2VX3bu/qfbrDGk3b7PgHLhF5h0PBnt5hSRQcaGHPL05iBFx61xC/b73w==}
+  '@framers/sql-storage-adapter@0.6.5':
+    resolution: {integrity: sha512-cMcvL3xEELyP+OxcRE1PjqHjYfa6e5ntX66ZRgQUW7A/XlU/UvYxW02pByZ6vpnv+kCCfr+Z+WORUTZFIjw3Ng==}
     peerDependencies:
       '@aws-sdk/client-s3': ^3.0.0
       '@capacitor-community/sqlite': ^6.0.0
@@ -2634,9 +2634,6 @@ packages:
   '@types/natural@5.1.5':
     resolution: {integrity: sha512-HE6F0/q4YBRWpbqua2waJck4IBY/HLWGFLrdbkD9sMSdufyCCuTe3Gy5N4kn8/8XFhz6L/mm9RLs/kJTiT3tcg==}
 
-  '@types/node@10.17.60':
-    resolution: {integrity: sha512-F0KIgDJfy2nA3zMLmWGKxcH2ZVEtCZXHHdOQs2gSaQ27+lNeEfGxzkIw90aXswATX7AZ33tahPbzy6KAfUreVw==}
-
   '@types/node@14.18.63':
     resolution: {integrity: sha512-fAtCfv4jJg+ExtXhvCkCqUKZ+4ok/JQk01qDKhL5BDDoS3AxKXhV5/MAVUZyQnSEd2GT92fkgZl0pz0Q0AzcIQ==}
 
@@ -2817,10 +2814,6 @@ packages:
         optional: true
       link-preview-js:
         optional: true
-
-  '@whiskeysockets/libsignal-node@https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/1c30d7d7e76a3b0aa120b04dc6a26f5a12dccf67':
-    resolution: {tarball: https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/1c30d7d7e76a3b0aa120b04dc6a26f5a12dccf67}
-    version: 2.0.1
 
   '@xmldom/xmldom@0.8.13':
     resolution: {integrity: sha512-KRYzxepc14G/CEpEGc3Yn+JKaAeT63smlDr+vjB8jRfgTBBI9wRj/nkQEO+ucV8p8I9bfKLWp37uHgFrbntPvw==}
@@ -5108,6 +5101,10 @@ packages:
   libqp@2.1.1:
     resolution: {integrity: sha512-0Wd+GPz1O134cP62YU2GTOPNA7Qgl09XwCqM5zpBv87ERCXdfDtyKXvV7c9U22yWJh44QZqBocFnXN11K96qow==}
 
+  libsignal@https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7:
+    resolution: {tarball: https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7}
+    version: 6.0.0
+
   lie@3.3.0:
     resolution: {integrity: sha512-UaiMJzeWRlEujzAuw5LokY1L5ecNQYZKfmyZ9L7wDHb/p5etKaxXhohBcrw0EYby+G/NA52vRSN4N39dxHAIwQ==}
 
@@ -5217,9 +5214,6 @@ packages:
 
   lodash@4.18.1:
     resolution: {integrity: sha512-dMInicTPVE8d1e5otfwmmjlxkZoUpiVLwyeTdUsi/Caj/gfzzblBcCE5sRHV/AsjuCmxWrte2TNGSYuCeCq+0Q==}
-
-  long@4.0.0:
-    resolution: {integrity: sha512-XsP+KhQif4bjX1kbuSiySJFNAehNxgLb6hPRGJ9QsUr8ajHkuXGdrHmFUTUUXhDwVX2R5bY4JNZEwbUiMhV+MA==}
 
   long@5.3.2:
     resolution: {integrity: sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA==}
@@ -6269,10 +6263,6 @@ packages:
   proto3-json-serializer@2.0.2:
     resolution: {integrity: sha512-SAzp/O4Yh02jGdRc+uIrGoe87dkN/XtwxfZ4ZyafJHymd79ozp5VG5nyZ7ygqPM5+cpLDjjGnYFUkngonyDPOQ==}
     engines: {node: '>=14.0.0'}
-
-  protobufjs@6.8.8:
-    resolution: {integrity: sha512-AAmHtD5pXgZfi7GMpllpO3q1Xw1OYldr+dMUlAnffGTAhqkg72WdmSY71uKBF/JuyiKs8psYbtKrhi0ASCD8qw==}
-    hasBin: true
 
   protobufjs@7.5.7:
     resolution: {integrity: sha512-NGnrxS/nLKUo5nkbVQxlC71sB4hdfImdYIbFeSCidxtwATx0AHRPcANSLd0q5Bb2BkoSWo2iisQhGg5/r+ihbA==}
@@ -9150,11 +9140,11 @@ snapshots:
       onnxruntime-node: 1.21.0
     optional: true
 
-  '@framers/agentos-ext-pii-redaction@0.2.0(mammoth@1.12.0)(pdf-parse@1.1.4)':
+  '@framers/agentos-ext-pii-redaction@0.2.0(mammoth@1.12.0)(pdf-parse@1.1.4)(tesseract.js@7.0.0)':
     optionalDependencies:
       '@huggingface/transformers': 3.8.1
       compromise: 14.15.0
-      openredaction: 1.1.2(mammoth@1.12.0)(pdf-parse@1.1.4)
+      openredaction: 1.1.2(mammoth@1.12.0)(pdf-parse@1.1.4)(tesseract.js@7.0.0)
     transitivePeerDependencies:
       - mammoth
       - pdf-parse
@@ -9295,7 +9285,7 @@ snapshots:
   '@framers/agentos-ext-widget-generator@1.0.0':
     optional: true
 
-  '@framers/agentos-extensions-registry@0.18.0(@aws-sdk/client-polly@3.1045.0)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(mammoth@1.12.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(request@2.88.2)(typescript@5.9.3)(vosk@0.3.39)':
+  '@framers/agentos-extensions-registry@0.18.0(@aws-sdk/client-polly@3.1045.0)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(mammoth@1.12.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(vosk@0.3.39)':
     optionalDependencies:
       '@framers/agentos-ext-agent-delegation': 0.1.0
       '@framers/agentos-ext-amazon-polly': 0.2.0(@aws-sdk/client-polly@3.1045.0)
@@ -9378,7 +9368,7 @@ snapshots:
       '@framers/agentos-ext-notifications': 0.1.0
       '@framers/agentos-ext-omdb': 1.0.0
       '@framers/agentos-ext-openwakeword': 0.2.0(onnxruntime-node@1.21.0)
-      '@framers/agentos-ext-pii-redaction': 0.2.0(mammoth@1.12.0)(pdf-parse@1.1.4)
+      '@framers/agentos-ext-pii-redaction': 0.2.0(mammoth@1.12.0)(pdf-parse@1.1.4)(tesseract.js@7.0.0)
       '@framers/agentos-ext-piper': 0.2.0
       '@framers/agentos-ext-porcupine': 0.2.0(@picovoice/porcupine-node@3.0.6)
       '@framers/agentos-ext-stealth-browser': 1.0.0
@@ -9431,7 +9421,7 @@ snapshots:
   '@framers/agentos-skills@1.0.0':
     optional: true
 
-  '@framers/sql-storage-adapter@0.6.4(better-sqlite3@12.9.0)(pg@8.20.0)':
+  '@framers/sql-storage-adapter@0.6.5(better-sqlite3@12.9.0)(pg@8.20.0)':
     dependencies:
       sql.js: 1.14.1
     optionalDependencies:
@@ -10955,9 +10945,6 @@ snapshots:
     dependencies:
       '@types/node': 20.19.40
 
-  '@types/node@10.17.60':
-    optional: true
-
   '@types/node@14.18.63':
     optional: true
 
@@ -11233,7 +11220,7 @@ snapshots:
       '@hapi/boom': 9.1.4
       async-mutex: 0.5.0
       axios: 1.16.0
-      libsignal: '@whiskeysockets/libsignal-node@https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/1c30d7d7e76a3b0aa120b04dc6a26f5a12dccf67'
+      libsignal: https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7
       music-metadata: 11.12.3
       pino: 9.14.0
       protobufjs: 7.5.7
@@ -11244,12 +11231,6 @@ snapshots:
       - debug
       - supports-color
       - utf-8-validate
-    optional: true
-
-  '@whiskeysockets/libsignal-node@https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/1c30d7d7e76a3b0aa120b04dc6a26f5a12dccf67':
-    dependencies:
-      curve25519-js: 0.0.4
-      protobufjs: 6.8.8
     optional: true
 
   '@xmldom/xmldom@0.8.13': {}
@@ -14249,6 +14230,12 @@ snapshots:
   libqp@2.1.1:
     optional: true
 
+  libsignal@https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7:
+    dependencies:
+      curve25519-js: 0.0.4
+      protobufjs: 7.5.7
+    optional: true
+
   lie@3.3.0:
     dependencies:
       immediate: 3.0.6
@@ -14357,9 +14344,6 @@ snapshots:
   lodash.uniqby@4.7.0: {}
 
   lodash@4.18.1: {}
-
-  long@4.0.0:
-    optional: true
 
   long@5.3.2:
     optional: true
@@ -14976,10 +14960,11 @@ snapshots:
 
   opencollective-postinstall@2.0.3: {}
 
-  openredaction@1.1.2(mammoth@1.12.0)(pdf-parse@1.1.4):
+  openredaction@1.1.2(mammoth@1.12.0)(pdf-parse@1.1.4)(tesseract.js@7.0.0):
     optionalDependencies:
       mammoth: 1.12.0
       pdf-parse: 1.1.4
+      tesseract.js: 7.0.0
 
   openssl-wrapper@0.3.4:
     optional: true
@@ -15469,23 +15454,6 @@ snapshots:
   proto3-json-serializer@2.0.2:
     dependencies:
       protobufjs: 7.5.7
-    optional: true
-
-  protobufjs@6.8.8:
-    dependencies:
-      '@protobufjs/aspromise': 1.1.2
-      '@protobufjs/base64': 1.1.2
-      '@protobufjs/codegen': 2.0.5
-      '@protobufjs/eventemitter': 1.1.0
-      '@protobufjs/fetch': 1.1.0
-      '@protobufjs/float': 1.0.2
-      '@protobufjs/inquire': 1.1.1
-      '@protobufjs/path': 1.1.2
-      '@protobufjs/pool': 1.1.0
-      '@protobufjs/utf8': 1.1.1
-      '@types/long': 4.0.2
-      '@types/node': 10.17.60
-      long: 4.0.0
     optional: true
 
   protobufjs@7.5.7:
