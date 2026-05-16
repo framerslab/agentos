@@ -28,7 +28,7 @@
  * @see ../../cognitive_substrate/IGMI.ts for GMI-related types like ToolCallRequest, ToolCallResult, UserContext.
  */
 
-import { uuidv4 } from '@framers/agentos/core/utils/uuid';
+import { uuidv4 } from '../utils/uuid.js';
 import { IToolOrchestrator, ToolDefinitionForLLM } from './IToolOrchestrator';
 import { ITool, JSONSchemaObject, ToolExecutionResult, ToolExecutionContext } from './ITool';
 import {
@@ -39,7 +39,7 @@ import {
 import { ToolExecutor, ToolExecutionRequestDetails } from './ToolExecutor';
 import { ToolOrchestratorConfig } from '../../config/ToolOrchestratorConfig';
 import { ToolCallResult, UserContext } from '../../cognition/substrate/IGMI';
-import { GMIError, GMIErrorCode, createGMIErrorFromError } from '@framers/agentos/core/utils/errors';
+import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../utils/errors.js';
 import type {
   ActionSeverity,
   IHumanInteractionManager,

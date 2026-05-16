@@ -103,8 +103,8 @@ import {
   StreamId,
 } from '../core/streaming/StreamingManager';
 // IStreamClient and StreamClientId reserved for streaming integration
-import { GMIError, GMIErrorCode } from '@framers/agentos/core/utils/errors';
-import { uuidv4 } from '@framers/agentos/core/utils/uuid';
+import { GMIError, GMIErrorCode } from '../core/utils/errors.js';
+import { uuidv4 } from '../core/utils/uuid.js';
 import { ILogger } from '../logging/ILogger';
 import { createLogger } from '../logging/loggerFactory';
 import {

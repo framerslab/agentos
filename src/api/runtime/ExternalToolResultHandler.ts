@@ -31,7 +31,7 @@ import type {
   ToolCallRequest,
   ToolResultPayload,
 } from '../../cognition/substrate/IGMI';
-import { GMIError, GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
 import { normalizeUsage, snapshotPersonaDetails } from '../../orchestration/turn-planner/helpers';
 import {
   withAgentOSSpan,

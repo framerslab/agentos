@@ -30,7 +30,7 @@ import type { IUtilityAI } from '../../cognition/nlp/ai_utilities/IUtilityAI.js'
 import type { IPromptEngineUtilityAI } from '../llm/IPromptEngine.js';
 
 // Utility for error handling
-import { GMIError, GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIError, GMIErrorCode } from '../utils/errors.js';
 
 /**
  * Environment-based configuration interface.

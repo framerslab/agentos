@@ -9,7 +9,7 @@ import { IProvider, ChatMessage, ModelCompletionResponse } from '../../../core/l
 import { IUtilityAI, ParseJsonOptions, SummarizationOptions } from '../../nlp/ai_utilities/IUtilityAI';
 import { IToolOrchestrator } from '../../../core/tools/IToolOrchestrator';
 import { IRetrievalAugmentor } from '../../rag/IRetrievalAugmentor';
-import { GMIError, GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
 
 // --- Mock Dependencies ---
 const mockWorkingMemory: IWorkingMemory = {

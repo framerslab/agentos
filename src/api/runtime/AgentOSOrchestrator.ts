@@ -39,7 +39,7 @@ import { ConversationContext } from '../../core/conversation/ConversationContext
 import { MessageRole } from '../../core/conversation/ConversationMessage';
 // IToolOrchestrator — referenced via AgentOSOrchestratorDependencies
 // uuidv4 — now used by GMIChunkTransformer
-import { GMIError, GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
 import { type StreamId } from '../../core/streaming/StreamingManager';
 import { normalizeUsage, snapshotPersonaDetails } from '../../orchestration/turn-planner/helpers';
 import type { WorkflowProgressUpdate } from '../../orchestration/workflows/WorkflowTypes';

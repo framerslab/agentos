@@ -55,7 +55,7 @@ import { AgencyRegistry } from '../../agents/agency/AgencyRegistry';
 
 import type { AgentOSInput } from '../types/AgentOSInput';
 import { AgentOSServiceError } from '../errors';
-import { GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIErrorCode } from '../../core/utils/errors.js';
 
 /**
  * Dependencies injected into the WorkflowFacade at construction time.

@@ -1,4 +1,4 @@
-import { GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIErrorCode } from '../../core/utils/errors.js';
 import type { UserContext } from '../../cognition/substrate/IGMI';
 
 import type { ToolDefinitionForLLM } from '../../core/tools/IToolOrchestrator';

@@ -8,7 +8,7 @@ import type {
 } from '../types/AgentOSExternalToolRequest';
 import type { AgentOSResponse } from '../types/AgentOSResponse';
 import type { AgentOSToolResultInput } from '../types/AgentOSToolResult';
-import { GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIErrorCode } from '../../core/utils/errors.js';
 import {
   buildScopedExternalToolContextParts,
   executeExternalToolFromRegistry,

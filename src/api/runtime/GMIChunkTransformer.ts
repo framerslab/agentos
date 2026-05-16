@@ -32,10 +32,10 @@ import {
   GMIInteractionType,
   GMIOutputChunkType,
 } from '../../cognition/substrate/IGMI';
-import { GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIErrorCode } from '../../core/utils/errors.js';
 import { normalizeUsage, snapshotPersonaDetails } from '../../orchestration/turn-planner/helpers';
 import { withAgentOSSpan } from '../../safety/evaluation/observability/otel';
-import { uuidv4 } from '@framers/agentos/core/utils/uuid';
+import { uuidv4 } from '../../core/utils/uuid.js';
 import type { ITurnPlanner, TurnPlan } from '../../orchestration/turn-planner/TurnPlanner';
 import { CapabilityContextAssembler } from '../../cognition/discovery/CapabilityContextAssembler.js';
 import { filterCapabilityDiscoveryResultByDisabledSkills } from './selfImprovementRuntime.js';

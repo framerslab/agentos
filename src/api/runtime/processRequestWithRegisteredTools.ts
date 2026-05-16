@@ -3,7 +3,7 @@ import type { ToolExecutionContext } from '../../core/tools/ITool';
 import type { IAgentOS } from '../interfaces/IAgentOS';
 import type { AgentOSInput } from '../types/AgentOSInput';
 import { AgentOSServiceError } from '../errors';
-import { GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIErrorCode } from '../../core/utils/errors.js';
 import {
   buildScopedExternalToolContextParts,
   executeExternalToolFromRegistry,

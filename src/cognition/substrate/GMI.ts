@@ -56,7 +56,7 @@ import { IToolOrchestrator } from '../../core/tools/IToolOrchestrator';
 
 import { ToolExecutionRequestDetails } from '../../core/tools/ToolExecutor';
 import { ConversationMessage } from '../../core/conversation/ConversationMessage';
-import { GMIError, GMIErrorCode, createGMIErrorFromError } from '@framers/agentos/core/utils/errors';
+import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../core/utils/errors.js';
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import type { AssembledMemoryContext } from '../memory/core/types.js';
 import { ConversationHistoryManager } from './ConversationHistoryManager';

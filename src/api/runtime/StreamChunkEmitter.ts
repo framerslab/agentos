@@ -17,7 +17,7 @@ import {
   type AgentOSMetadataUpdateChunk,
   type AgentOSWorkflowUpdateChunk,
 } from '../types/AgentOSResponse';
-import { GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIErrorCode } from '../../core/utils/errors.js';
 import { normalizeUsage } from '../../orchestration/turn-planner/helpers';
 import {
   getActiveTraceMetadata,

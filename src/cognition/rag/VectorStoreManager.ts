@@ -35,7 +35,7 @@ import { QdrantVectorStore } from './vector_stores/QdrantVectorStore';
 import { PineconeVectorStore } from './vector_stores/PineconeVectorStore';
 // Import other IVectorStore implementations as they are created, e.g.:
 // import { WeaviateVectorStore } from './vector_stores/WeaviateVectorStore';
-import { GMIError, GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
 import { uuidv4 } from '../../core/utils/uuid';
 
 /**

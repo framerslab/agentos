@@ -30,7 +30,7 @@ import { XAIProvider, XAIProviderConfig } from './implementations/XAIProvider';
 import { GeminiProvider, GeminiProviderConfig } from './implementations/GeminiProvider';
 import { ClaudeCodeProvider, ClaudeCodeProviderConfig } from './implementations/ClaudeCodeProvider';
 import { GeminiCLIProvider, GeminiCLIProviderConfig } from './implementations/GeminiCLIProvider';
-import { GMIError, GMIErrorCode, createGMIErrorFromError } from '@framers/agentos/core/utils/errors'; // Corrected import path
+import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../utils/errors.js'; // Corrected import path
 
 /**
  * Configuration for a single AI model provider entry within the manager.

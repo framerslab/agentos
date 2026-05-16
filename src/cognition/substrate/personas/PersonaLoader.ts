@@ -15,7 +15,7 @@ import * as path from 'path';
 import { uuidv4 } from '../../../core/utils/uuid';
 import { IPersonaDefinition } from './IPersonaDefinition';
 import { IPersonaLoader, PersonaLoaderConfig } from './IPersonaLoader';
-import { GMIError, GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
 import { mergeMetapromptPresets } from './metaprompt_presets.js';
 
 /**

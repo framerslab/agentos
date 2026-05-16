@@ -12,8 +12,8 @@
 
 import { ConversationMessage, MessageRole, createConversationMessage, MessageMetadata } from './ConversationMessage';
 import { IUtilityAI, SummarizationOptions } from '../../cognition/nlp/ai_utilities/IUtilityAI';
-import { uuidv4 } from '@framers/agentos/core/utils/uuid';
-import { GMIError, GMIErrorCode } from '@framers/agentos/core/utils/errors'; // Corrected path
+import { uuidv4 } from '../utils/uuid.js';
+import { GMIError, GMIErrorCode } from '../utils/errors.js'; // Corrected path
 
 // Constants for summarization logic
 const DEFAULT_MAX_HISTORY_MESSAGES = 100;

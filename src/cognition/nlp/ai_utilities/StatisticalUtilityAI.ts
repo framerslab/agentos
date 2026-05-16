@@ -21,7 +21,7 @@ import {
   TextNormalizationOptions, NGramOptions, ReadabilityOptions, ReadabilityResult,
 } from './IUtilityAI';
 import * as natural from 'natural';
-import { GMIError, GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
 import { detectLanguageTrigram } from './trigram-language-profiles';
 
 const NATURAL_STEMMER_LANGUAGE_KEYS: Record<string, string> = {

@@ -13,12 +13,12 @@
 
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
-import { uuidv4 } from '@framers/agentos/core/utils/uuid';
+import { uuidv4 } from '../utils/uuid.js';
 
 import { ITool, JSONSchemaObject, ToolExecutionResult, ToolExecutionContext } from './ITool';
 import { ToolCallRequest, UserContext } from '../../cognition/substrate/IGMI';
 import type { IAuthService, ISubscriptionService } from '../types/auth';
-import { GMIError, GMIErrorCode, createGMIErrorFromError } from '@framers/agentos/core/utils/errors';
+import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../utils/errors.js';
 import { ExtensionRegistry, EXTENSION_KIND_TOOL, ToolDescriptor } from '../../extensions';
 
 type AjvValidationError = {

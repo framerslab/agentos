@@ -12,7 +12,7 @@
  * @see ../core/vector-store/IVectorStore.ts and ../rag/IVectorStoreManager.ts
  */
 
-import { uuidv4 } from '@framers/agentos/core/utils/uuid';
+import { uuidv4 } from '../../../../core/utils/uuid.js';
 import {
   IMemoryLifecycleManager,
   GMIResolverFunction,
@@ -28,7 +28,7 @@ import { IVectorStoreManager } from '../../../../core/vector-store/IVectorStoreM
 import { IVectorStore, MetadataFilter } from '../../../../core/vector-store/IVectorStore';
 import { IUtilityAI, SummarizationOptions } from '../../../nlp/ai_utilities/IUtilityAI';
 import { RagMemoryCategory } from '../../../rag/IRetrievalAugmentor';
-import { GMIError, GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIError, GMIErrorCode } from '../../../../core/utils/errors.js';
 import {
   MemoryLifecycleEvent,
   LifecycleAction,

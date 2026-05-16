@@ -7,7 +7,7 @@
 
 import type { IStreamClient, StreamClientId } from './IStreamClient';
 import type { AgentOSResponse } from '../../api/types/AgentOSResponse';
-import { uuidv4 } from '@framers/agentos/core/utils/uuid';
+import { uuidv4 } from '../utils/uuid.js';
 
 /**
  * Acts as an IStreamClient to bridge push-based data flow from StreamingManager

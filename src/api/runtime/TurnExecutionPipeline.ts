@@ -33,7 +33,7 @@ import type {
   GMITurnInput,
 } from '../../cognition/substrate/IGMI';
 import { GMIInteractionType } from '../../cognition/substrate/IGMI';
-import { GMIError, GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
 import { withAgentOSSpan } from '../../safety/evaluation/observability/otel';
 import type { TurnPlan } from '../../orchestration/turn-planner/TurnPlanner';
 import {

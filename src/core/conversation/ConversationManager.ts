@@ -14,8 +14,8 @@
 import { ConversationContext, ConversationContextConfig } from './ConversationContext';
 import { ConversationMessage as InternalConversationMessage, MessageRole, createConversationMessage } from './ConversationMessage';
 import { IUtilityAI } from '../../cognition/nlp/ai_utilities/IUtilityAI';
-import { uuidv4 } from '@framers/agentos/core/utils/uuid';
-import { GMIError, GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { uuidv4 } from '../utils/uuid.js';
+import { GMIError, GMIErrorCode } from '../utils/errors.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 
 /**

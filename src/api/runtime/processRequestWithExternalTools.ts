@@ -8,7 +8,7 @@ import {
 import type { IAgentOS } from '../interfaces/IAgentOS';
 import type { ToolCallRequest } from '../../cognition/substrate/IGMI';
 import { AgentOSServiceError } from '../errors';
-import { GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIErrorCode } from '../../core/utils/errors.js';
 
 export interface AgentOSExternalToolHandlerContext {
   agentos: Pick<IAgentOS, 'handleToolResult'> &

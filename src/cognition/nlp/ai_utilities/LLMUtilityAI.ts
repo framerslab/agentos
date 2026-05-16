@@ -32,7 +32,7 @@ import { AIModelProviderManager } from '../../../core/llm/providers/AIModelProvi
 import { ModelCompletionOptions, ChatMessage } from '../../../core/llm/providers/IProvider';
 import { IPromptEngineUtilityAI, ModelTargetInfo } from '../../../core/llm/IPromptEngine';
 import { ConversationMessage as Message, MessageRole } from '../../../core/conversation/ConversationMessage';
-import { GMIError, GMIErrorCode } from '@framers/agentos/core/utils/errors';
+import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
 import { uuidv4 } from '../../../core/utils/uuid';
 import Ajv from 'ajv';
 

@@ -4,7 +4,7 @@
  * @module AgentOS/Agency
  */
 
-import { uuidv4 } from '@framers/agentos/core/utils/uuid';
+import { uuidv4 } from '../../core/utils/uuid.js';
 
 import type { ILogger } from '../../logging/ILogger';
 import type {
