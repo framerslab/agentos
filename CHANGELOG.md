@@ -1,3 +1,7 @@
+## <small>0.9.14 (2026-05-17)</small>
+
+* fix(imports): add .js extension to 2 CodeRabbit-flagged ESM imports ([baf933a01ed7807db132cc3c1ed19bb857f52b68](https://github.com/framersai/agentos/commit/baf933a01ed7807db132cc3c1ed19bb857f52b68))
+
 ## <small>0.9.13 (2026-05-17)</small>
 
 * fix(providers): lift @ts-nocheck on Gemini + OpenRouter ([1511241dd383f8c6247eca4e5774dbab41270a16](https://github.com/framersai/agentos/commit/1511241dd383f8c6247eca4e5774dbab41270a16))
