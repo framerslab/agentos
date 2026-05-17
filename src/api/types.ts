@@ -1282,10 +1282,31 @@ export interface BaseAgentConfig {
    * every `generate()`, `stream()`, and `session.send()` invocation.
    *
    * Caps tail spend when a model misbehaves and yaps past the intended
-   * output size — without it, calls fall back to the provider default
-   * (OpenAI 4096, Anthropic 4096-8192). Set to ~2× the agent's typical
-   * response size so normal calls finish naturally and only runaway
-   * generations hit the cap. Omit to use the provider default.
+   * output size. Omit to use the provider default — AnthropicProvider
+   * defaults to 16000 (set 2026-05-17; was 4096), OpenAIProvider
+   * defaults to 4096, GeminiProvider defaults to 8192. Set to ~2× the
+   * agent's typical response size so normal calls finish naturally
+   * and only runaway generations hit the cap.
+   *
+   * @example
+   * ```ts
+   * // Cap a roleplay agent at 1024 — short turns, fast feedback.
+   * const companion = agent({
+   *   provider: 'anthropic',
+   *   model: 'claude-sonnet-4-6',
+   *   instructions: 'Reply in character. 2-3 sentences.',
+   *   maxTokens: 1024,
+   * });
+   *
+   * // Tool-use agent emitting verbose JSON — go big so structured
+   * // output doesn't truncate mid-token. Opus 4.7 supports 32000.
+   * const codegen = agent({
+   *   provider: 'anthropic',
+   *   model: 'claude-opus-4-7',
+   *   tools: { GenerateCode, RunTests, JudgeOutput },
+   *   maxTokens: 16000,
+   * });
+   * ```
    */
   maxTokens?: number;
   /**
