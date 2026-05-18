@@ -1,3 +1,9 @@
+## <small>0.9.17 (2026-05-18)</small>
+
+* fix(lock): refresh pnpm-lock for sql-storage-adapter@0.6.6 + extensions-registry@0.18.2 ([a0ef7b20841889351ac688a3e97cb6168fd2096d](https://github.com/framersai/agentos/commit/a0ef7b20841889351ac688a3e97cb6168fd2096d))
+* build: add prepare script that builds dist if missing ([7a313a41585c6c2dd18a7ad8cd82bfe2a0bb5dff](https://github.com/framersai/agentos/commit/7a313a41585c6c2dd18a7ad8cd82bfe2a0bb5dff))
+* chore(deps): bump @framers/sql-storage-adapter to ^0.6.6 + extensions-registry devDep to ^0.18.2 ([56eba590fb4affcbd306a0d1f9b592db6800c0be](https://github.com/framersai/agentos/commit/56eba590fb4affcbd306a0d1f9b592db6800c0be))
+
 ## <small>0.9.16 (2026-05-17)</small>
 
 * fix: move @framers/sql-storage-adapter from peer to dependencies ([7fb0c46de25fc9f03e824c9bf6b2662efbc7d4be](https://github.com/framersai/agentos/commit/7fb0c46de25fc9f03e824c9bf6b2662efbc7d4be))
