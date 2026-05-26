@@ -326,6 +326,76 @@ describe('PostgresVectorStore', () => {
     });
   });
 
+  describe('fetchByIds()', () => {
+    it('fetches rows by primary key without similarity ordering', async () => {
+      store = new PostgresVectorStore(makeConfig());
+      await store.initialize();
+      resetMocks();
+
+      queryResultQueue.push({
+        rows: [
+          { id: 'doc-1', embedding: '[0.1,0.2,0.3,0.4]', metadata_json: { topic: 'a' }, text_content: 'content a' },
+          { id: 'doc-2', embedding: '[0.5,0.6,0.7,0.8]', metadata_json: { topic: 'b' }, text_content: 'content b' },
+        ],
+        rowCount: 2,
+      });
+
+      const docs = await store.fetchByIds('my_docs', ['doc-1', 'doc-2'], {
+        includeMetadata: true,
+        includeTextContent: true,
+      });
+
+      const select = queryCalls.find(c => c.sql.includes('SELECT') && c.sql.includes('my_docs'));
+      expect(select).toBeDefined();
+      // Primary-key fetch: id = ANY($1::text[]) — no cosine operator, no ORDER BY.
+      expect(select!.sql).toMatch(/id = ANY\(\$1::text\[\]\)/);
+      expect(select!.sql).not.toMatch(/<=>/);
+      expect(select!.sql).not.toMatch(/ORDER BY/);
+      expect(select!.params![0]).toEqual(['doc-1', 'doc-2']);
+
+      expect(docs.length).toBe(2);
+      expect(docs[0].id).toBe('doc-1');
+      // similarityScore is 0 — fetchByIds doesn't rank, the sentinel value
+      // tells callers not to interpret it as a real cosine number.
+      expect(docs[0].similarityScore).toBe(0);
+      expect(docs[0].metadata).toEqual({ topic: 'a' });
+      expect(docs[0].textContent).toBe('content a');
+    });
+
+    it('returns [] for empty id list without hitting the DB', async () => {
+      store = new PostgresVectorStore(makeConfig());
+      await store.initialize();
+      resetMocks();
+
+      const docs = await store.fetchByIds('my_docs', []);
+
+      expect(docs).toEqual([]);
+      // No SELECT fired — empty id list short-circuits.
+      expect(queryCalls.find(c => c.sql.includes('SELECT') && c.sql.includes('my_docs'))).toBeUndefined();
+    });
+
+    it('omits metadata + textContent when options disable them', async () => {
+      store = new PostgresVectorStore(makeConfig());
+      await store.initialize();
+      resetMocks();
+
+      queryResultQueue.push({
+        rows: [
+          { id: 'doc-1', embedding: '[0.1,0.2,0.3,0.4]', metadata_json: { topic: 'a' }, text_content: 'content a' },
+        ],
+        rowCount: 1,
+      });
+
+      const docs = await store.fetchByIds('my_docs', ['doc-1'], {
+        includeMetadata: false,
+        includeTextContent: false,
+      });
+
+      expect(docs[0].metadata).toBeUndefined();
+      expect(docs[0].textContent).toBeUndefined();
+    });
+  });
+
   describe('scanByMetadata()', () => {
     it('returns filtered documents with metadata, text, and embeddings', async () => {
       store = new PostgresVectorStore(makeConfig());

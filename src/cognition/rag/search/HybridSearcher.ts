@@ -217,15 +217,60 @@ export class HybridSearcher {
     ]);
 
     // 3. Fuse results
+    let results: HybridResult[];
     switch (this.config.fusionMethod) {
       case 'weighted-sum':
-        return this.fuseWeightedSum(denseResult.documents, sparseResults, topK);
+        results = this.fuseWeightedSum(denseResult.documents, sparseResults, topK);
+        break;
       case 'interleave':
-        return this.fuseInterleave(denseResult.documents, sparseResults, topK);
+        results = this.fuseInterleave(denseResult.documents, sparseResults, topK);
+        break;
       case 'rrf':
       default:
-        return this.fuseRRF(denseResult.documents, sparseResults, topK);
+        results = this.fuseRRF(denseResult.documents, sparseResults, topK);
+        break;
     }
+
+    // 4. Hydrate sparse-only winners by primary key. BM25 results carry no
+    //    `textContent`, so a winner that came in on the sparse leg only
+    //    would be returned text-content-less. A second similarity query
+    //    would return the next-K dense rows (not the specific BM25 ids),
+    //    so PK fetch is the only correct hydration path. Store types that
+    //    don't implement `fetchByIds` keep the legacy "no textContent on
+    //    sparse-only winners" behaviour.
+    return this.hydrateSparseOnly(results, collectionName);
+  }
+
+  /**
+   * Fill in `textContent` (and `metadata` when missing) for results that
+   * came in on the sparse leg only by issuing a primary-key fetch to the
+   * vector store. If the store doesn't implement `fetchByIds`, results
+   * pass through unchanged.
+   */
+  private async hydrateSparseOnly(
+    results: HybridResult[],
+    collectionName: string,
+  ): Promise<HybridResult[]> {
+    if (!this.vectorStore.fetchByIds) return results;
+    const needs = results.filter((r) => r.textContent === undefined);
+    if (needs.length === 0) return results;
+
+    const hydrated = await this.vectorStore.fetchByIds(
+      collectionName,
+      needs.map((r) => r.id),
+      { includeMetadata: true, includeTextContent: true },
+    );
+    const byId = new Map(hydrated.map((d) => [d.id, d]));
+    for (const r of results) {
+      if (r.textContent !== undefined) continue;
+      const h = byId.get(r.id);
+      if (!h) continue;
+      if (h.textContent !== undefined) r.textContent = h.textContent;
+      if (r.metadata === undefined && h.metadata !== undefined) {
+        r.metadata = h.metadata as Record<string, unknown>;
+      }
+    }
+    return results;
   }
 
   /**

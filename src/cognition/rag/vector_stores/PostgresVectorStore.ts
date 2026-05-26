@@ -348,6 +348,48 @@ export class PostgresVectorStore implements IVectorStore {
     };
   }
 
+  /**
+   * Fetch rows by primary key without similarity ranking. Used by
+   * `HybridSearcher` to hydrate sparse-only RRF winners — a second
+   * similarity query would return the next-K dense rows, not the
+   * specific BM25 winners, and would misattribute rows under the
+   * wrong fused-score position.
+   *
+   * Returns an empty array for an empty id list without firing SQL.
+   * `similarityScore` is set to 0 as a sentinel.
+   */
+  async fetchByIds(
+    collectionName: string,
+    ids: string[],
+    options?: { includeMetadata?: boolean; includeTextContent?: boolean },
+  ): Promise<RetrievedVectorDocument[]> {
+    if (ids.length === 0) return [];
+    await this._ensureInit();
+    const table = this._t(collectionName);
+
+    const sql = `
+      SELECT id, embedding::text, metadata_json, text_content
+      FROM ${table}
+      WHERE id = ANY($1::text[])
+    `;
+    const result = await this.pool.query(sql, [ids]);
+
+    return result.rows.map((row: any) => {
+      const doc: RetrievedVectorDocument = {
+        id: row.id,
+        similarityScore: 0,
+        embedding: [],
+      };
+      if (options?.includeMetadata !== false && row.metadata_json) {
+        doc.metadata = row.metadata_json;
+      }
+      if (options?.includeTextContent !== false && row.text_content) {
+        doc.textContent = row.text_content;
+      }
+      return doc;
+    });
+  }
+
   async scanByMetadata(
     collectionName: string,
     options?: MetadataScanOptions,

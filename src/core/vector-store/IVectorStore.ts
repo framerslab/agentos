@@ -323,6 +323,38 @@ export interface IVectorStore {
   ): Promise<MetadataScanResult>;
 
   /**
+   * Optional: Fetch documents by their primary IDs without similarity ranking.
+   *
+   * Used by callers like `HybridSearcher` to hydrate documents that were
+   * ranked by a sparse / lexical index but missed the dense top-K — a
+   * primary-key fetch is the only correct hydration path here because a
+   * second similarity query would surface the next-K dense rows instead
+   * of the specific BM25 winners, misattributing rows under the wrong
+   * fused-score position.
+   *
+   * Stores that cannot do efficient PK fetches (e.g. some sparse-only or
+   * remote indexes) may leave this unimplemented; callers must then choose
+   * whether to drop sparse-only winners or fall back to text-content-missing
+   * results.
+   *
+   * The returned `RetrievedVectorDocument.similarityScore` is set to 0 as
+   * a sentinel — callers that try to rank these by `similarityScore` will
+   * get an obvious "no similarity" signal rather than a stale cosine number.
+   *
+   * @async
+   * @param {string} collectionName - The collection to fetch from.
+   * @param {string[]} ids - Document IDs to fetch. Empty array returns [].
+   * @param {object} [options] - Optional inclusion flags (default both true).
+   * @returns {Promise<RetrievedVectorDocument[]>} Hydrated documents in
+   *   implementation-defined order (callers should not rely on ordering).
+   */
+  fetchByIds?(
+    collectionName: string,
+    ids: string[],
+    options?: { includeMetadata?: boolean; includeTextContent?: boolean },
+  ): Promise<RetrievedVectorDocument[]>;
+
+  /**
    * Optional: Hybrid retrieval combining dense vector similarity with lexical search.
    *
    * This is typically implemented using a store-native full-text index (e.g., SQLite FTS5),

@@ -193,6 +193,89 @@ describe('HybridSearcher', () => {
     });
   });
 
+  describe('sparse-only hydration via fetchByIds', () => {
+    it('hydrates BM25-only winners by primary key when the store supports fetchByIds', async () => {
+      // Dense returns nothing — every fusion winner comes from BM25 only.
+      // Sparse winners carry no textContent in the BM25 index payload, so
+      // HybridSearcher must hydrate via fetchByIds before returning.
+      const denseResults: QueryResult = { documents: [] };
+      const vectorStore = createMockVectorStore(denseResults);
+      const fetchByIds = vi.fn(async (_coll: string, ids: string[]) =>
+        ids.map((id) => ({
+          id,
+          embedding: [],
+          similarityScore: 0,
+          textContent: `payload for ${id}`,
+          metadata: { source: `${id}.md` },
+        })),
+      );
+      (vectorStore as IVectorStore & { fetchByIds: typeof fetchByIds }).fetchByIds = fetchByIds;
+
+      const searcher = new HybridSearcher(vectorStore, embeddingManager, bm25Index, {
+        fusionMethod: 'rrf',
+      });
+      const results = await searcher.search('error TS2304', 'test-collection', 5);
+
+      // doc-A appears in sparse for "error TS2304" — should be hydrated.
+      const docA = results.find((r) => r.id === 'doc-A');
+      expect(docA).toBeDefined();
+      expect(docA!.textContent).toBe('payload for doc-A');
+
+      // fetchByIds was called with the sparse-only ids.
+      expect(fetchByIds).toHaveBeenCalledTimes(1);
+      const fetchedIds = (fetchByIds.mock.calls as unknown as Array<[string, string[]]>)[0][1];
+      expect(fetchedIds).toContain('doc-A');
+    });
+
+    it('skips fetchByIds when every winner already has textContent', async () => {
+      // Dense covers every BM25 winner (here: doc-A and doc-C both come back
+      // on the dense leg with textContent), so the post-fusion hydration
+      // pass has nothing to do.
+      const denseResults: QueryResult = {
+        documents: [
+          { id: 'doc-A', embedding: [], textContent: 'TS error', similarityScore: 0.9, metadata: {} },
+          { id: 'doc-C', embedding: [], textContent: 'Fix TS error', similarityScore: 0.8, metadata: {} },
+        ],
+      };
+      // Use a BM25 index that only contains the docs covered by dense so
+      // there are no sparse-only winners.
+      const narrowBm25 = new BM25Index();
+      narrowBm25.addDocuments([
+        { id: 'doc-A', text: 'TypeScript compiler error TS2304' },
+        { id: 'doc-C', text: 'Fix error TS2304 type declarations' },
+      ]);
+      const vectorStore = createMockVectorStore(denseResults);
+      const fetchByIds = vi.fn(async () => []);
+      (vectorStore as IVectorStore & { fetchByIds: typeof fetchByIds }).fetchByIds = fetchByIds;
+
+      const searcher = new HybridSearcher(vectorStore, embeddingManager, narrowBm25, {
+        fusionMethod: 'rrf',
+      });
+      await searcher.search('error TS2304', 'test-collection', 5);
+
+      expect(fetchByIds).not.toHaveBeenCalled();
+    });
+
+    it('leaves sparse-only winners textContent-less when the store lacks fetchByIds', async () => {
+      // Vector store does NOT implement fetchByIds — sparse-only winners
+      // stay text-content-less. They are not dropped (RRF position still
+      // matters for downstream rerankers); callers receive them with
+      // textContent: undefined.
+      const denseResults: QueryResult = { documents: [] };
+      const vectorStore = createMockVectorStore(denseResults);
+      // explicitly NOT set fetchByIds
+
+      const searcher = new HybridSearcher(vectorStore, embeddingManager, bm25Index, {
+        fusionMethod: 'rrf',
+      });
+      const results = await searcher.search('error TS2304', 'test-collection', 5);
+
+      const docA = results.find((r) => r.id === 'doc-A');
+      expect(docA).toBeDefined();
+      expect(docA!.textContent).toBeUndefined();
+    });
+  });
+
   describe('error handling', () => {
     it('throws when embedding generation fails', async () => {
       const failingManager = createMockEmbeddingManager();
