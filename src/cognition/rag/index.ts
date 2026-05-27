@@ -157,6 +157,7 @@ export { InMemoryVectorStore } from './vector_stores/InMemoryVectorStore.js';
 export { SqlVectorStore, type SqlVectorStoreConfig } from './vector_stores/SqlVectorStore.js';
 export { HnswlibVectorStore, type HnswlibVectorStoreConfig } from './vector_stores/HnswlibVectorStore.js';
 export { QdrantVectorStore, type QdrantVectorStoreConfig } from './vector_stores/QdrantVectorStore.js';
+export { PostgresVectorStore, type PostgresVectorStoreConfig } from './vector_stores/PostgresVectorStore.js';
 
 // ============================================================================
 // GraphRAG

@@ -21,5 +21,8 @@ export { QdrantVectorStore, type QdrantVectorStoreConfig } from './QdrantVectorS
 // Neo4j vector store (native vector indexes via neo4j-driver)
 export { Neo4jVectorStore, type Neo4jVectorStoreConfig } from './Neo4jVectorStore.js';
 
+// Postgres vector store (pgvector + tsvector hybrid search via single SQL CTE)
+export { PostgresVectorStore, type PostgresVectorStoreConfig } from './PostgresVectorStore.js';
+
 
 
