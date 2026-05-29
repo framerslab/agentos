@@ -10,7 +10,7 @@ import {
   canUseFor,
   type MemoryTrace,
   type MemoryTrustPolicy,
-} from './types.js';
+} from '../types.js';
 
 function traceWith(
   partial: Omit<Partial<MemoryTrace>, 'provenance'> & {

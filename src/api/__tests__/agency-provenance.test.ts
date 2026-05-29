@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { createAgencyProvenanceRecorder } from './agency-provenance.js';
+import { createAgencyProvenanceRecorder } from '../agency-provenance.js';
 
 describe('createAgencyProvenanceRecorder', () => {
   it('records each callback into the trail in order', () => {

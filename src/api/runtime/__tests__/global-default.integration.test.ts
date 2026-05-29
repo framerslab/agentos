@@ -6,8 +6,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { setDefaultProvider, clearDefaultProvider } from './global-default.js';
-import { resolveModelOption, resolveProvider } from '../model.js';
+import { setDefaultProvider, clearDefaultProvider } from '../global-default.js';
+import { resolveModelOption, resolveProvider } from '../../model.js';
 
 const KEYS_TO_RESTORE = [
   'OPENAI_API_KEY',

@@ -8,7 +8,7 @@ import {
   setDefaultProvider,
   getDefaultProvider,
   clearDefaultProvider,
-} from './global-default.js';
+} from '../global-default.js';
 
 describe('global default provider registry', () => {
   beforeEach(() => {

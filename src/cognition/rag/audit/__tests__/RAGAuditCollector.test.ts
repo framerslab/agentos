@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { RAGAuditCollector, RAGOperationHandle } from './RAGAuditCollector.js';
-import type { RAGAuditTrail, RAGOperationEntry } from './RAGAuditTypes.js';
+import { RAGAuditCollector, RAGOperationHandle } from '../RAGAuditCollector.js';
+import type { RAGAuditTrail, RAGOperationEntry } from '../RAGAuditTypes.js';
 
 describe('RAGOperationHandle', () => {
   let completedEntry: RAGOperationEntry | undefined;

@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { mergeMetadataFilters, scopeToMetadataFilter } from './scopeFilter.js';
+import { mergeMetadataFilters, scopeToMetadataFilter } from '../scopeFilter.js';
 
 describe('scopeToMetadataFilter', () => {
   it('returns the default status filter when scope is empty', () => {

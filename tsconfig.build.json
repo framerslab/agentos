@@ -23,14 +23,10 @@
   ],
   "exclude": [
     "src/memory_lifecycle/**/*",
-    "src/rag/tests/**/*",
     "src/server/**/*",
     "src/server_integration/**/*",
     "src/server_utils/**/*",
     "src/examples/**/*",
-    "src/tests/**/*",
-    "src/cognitive_substrate/tests/**/*",
-    "src/core/ai_utilities/tests/**/*",
     "**/*.test.ts",
     "**/*.spec.ts",
     "**/__tests__/**"

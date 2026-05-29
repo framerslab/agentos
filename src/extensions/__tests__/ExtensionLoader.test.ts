@@ -3,8 +3,8 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ExtensionLoader } from './ExtensionLoader';
-import { ExtensionManager } from './ExtensionManager';
+import { ExtensionLoader } from '../ExtensionLoader';
+import { ExtensionManager } from '../ExtensionManager';
 
 describe('ExtensionLoader', () => {
   let loader: ExtensionLoader;

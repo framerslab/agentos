@@ -10,7 +10,7 @@ import {
   clearProviderPriority,
   getProviderPriority,
   setProviderPriority,
-} from './provider-priority.js';
+} from '../provider-priority.js';
 
 describe('provider-priority registry', () => {
   afterEach(() => clearProviderPriority());

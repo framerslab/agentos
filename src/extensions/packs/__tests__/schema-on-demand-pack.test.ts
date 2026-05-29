@@ -4,9 +4,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 
-import { ExtensionManager } from '../ExtensionManager';
-import { EXTENSION_KIND_TOOL } from '../types';
-import { createSchemaOnDemandPack } from './schema-on-demand-pack';
+import { ExtensionManager } from '../../ExtensionManager';
+import { EXTENSION_KIND_TOOL } from '../../types';
+import { createSchemaOnDemandPack } from '../schema-on-demand-pack';
 
 // AgentOS keeps the extensions registry bundle as an optional dependency. For unit tests,
 // use a small virtual mock so schema-on-demand behavior is deterministic.

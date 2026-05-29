@@ -6,11 +6,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { autoDetectProvider } from './provider-defaults.js';
+import { autoDetectProvider } from '../provider-defaults.js';
 import {
   clearProviderPriority,
   setProviderPriority,
-} from './provider-priority.js';
+} from '../provider-priority.js';
 
 const ENV_KEYS = [
   'OPENROUTER_API_KEY',
