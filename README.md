@@ -6,7 +6,7 @@
 
 <br />
 
-# **AgentOS** · TypeScript AI Agent Runtime
+# **AgentOS** · TypeScript AI Agent Framework
 
 **Agents that remember, forge their own tools, and survive long-running sessions.** Persistent cognitive memory, optional HEXACO personality, multi-agent orchestration, and one dispatch interface across 11 LLM providers. Apache-2.0.
 
@@ -27,7 +27,7 @@
 
 ---
 
-AgentOS is an open-source TypeScript runtime for AI agents that **remember, adapt, and write their own tools**.
+AgentOS is an open-source TypeScript framework for AI agents that **remember, adapt, and write their own tools**.
 
 - **85.6% on [LongMemEval-S](https://github.com/framersai/agentos-bench/blob/master/results/LEADERBOARD.md)** at $0.0090 per correct answer (gpt-4o reader): +1.4 points over Mastra OM gpt-4o (84.23%), 0.4 behind Emergence.ai's 86% closed-source SOTA.
 - **70.2% on LongMemEval-M** (1.5M-token haystacks, 500 sessions per question): the only open-source library on the public record above 65% on M with publicly reproducible methodology.

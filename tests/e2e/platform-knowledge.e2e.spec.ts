@@ -178,7 +178,7 @@ describe('Platform Knowledge — e2e', () => {
 
     // Generator mock
     mockGenerateText.mockResolvedValueOnce({
-      text: 'AgentOS supports 21 LLM providers including OpenAI, Anthropic, Google, and Ollama.',
+      text: 'AgentOS supports 11 LLM providers including OpenAI, Anthropic, Google, and Ollama.',
       provider: 'openai',
       model: 'gpt-4o-mini',
       usage: { promptTokens: 150, completionTokens: 40, totalTokens: 190 },

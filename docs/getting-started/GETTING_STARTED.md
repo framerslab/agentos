@@ -181,7 +181,7 @@ flowchart LR
 ```
 
 - **Agent** — the runtime loop. Receives input, calls the LLM, executes tool calls, retrieves memory, returns a response. `agent()` and `agency()` are the two factories that build one.
-- **LLM** — the language model. AgentOS routes through 21 provider adapters; the agent does not care which one you pick.
+- **LLM** — the language model. AgentOS routes through 11 provider adapters; the agent does not care which one you pick.
 - **Memory** — what survives across turns and sessions. Working memory (short-term scratchpad) plus cognitive memory (episodic, semantic, procedural traces with Ebbinghaus decay, retrieval-induced forgetting, and reconsolidation).
 - **Tools** — functions the agent can invoke when the LLM decides it needs one. Pre-registered tools work the same way runtime-generated tools do once approved by the LLM judge.
 
