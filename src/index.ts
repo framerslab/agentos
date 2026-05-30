@@ -343,4 +343,15 @@ export type {
 } from './api/runtime/usageLedger.js';
 // JSON extraction (centralized LLM output parsing)
 export { extractJson } from './safety/validation/extractJson.js';
+// Global LLM usage observer (host-side cost telemetry hook). Hosts
+// register a single callback at boot; every generateText / generateObject
+// / streamText / streamObject call fires it once with the resolved
+// provider / model / usage / source so downstream cost + billing
+// systems don't need per-callsite wrappers.
+export {
+  setGlobalLlmObserver,
+  getGlobalLlmObserver,
+  fireLlmUsageObserver,
+} from './api/observers.js';
+export type { LlmUsageEvent, LlmUsageObserver } from './api/observers.js';
 // CI retrigger
