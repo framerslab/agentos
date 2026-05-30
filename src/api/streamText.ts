@@ -365,7 +365,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           })),
           maxRoundtrips: opts.maxSteps ?? 5,
           callModel: async (msgs) => {
-            const r = await provider.generateCompletion(resolved.modelId, msgs as any, {
+            // provider is guaranteed non-undefined by the `if (!provider) throw`
+            // guard above; the closure just loses TS's flow-narrowing.
+            const r = await provider!.generateCompletion(resolved.modelId, msgs as any, {
               temperature: opts.temperature,
               maxTokens: opts.maxTokens,
             } as any);
