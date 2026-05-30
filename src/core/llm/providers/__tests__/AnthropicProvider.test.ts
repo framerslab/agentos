@@ -159,7 +159,7 @@ describe('AnthropicProvider', () => {
   // -------------------------------------------------------------------------
 
   describe('max_tokens enforcement', () => {
-    it('always includes max_tokens in the request payload (defaults to 4096)', async () => {
+    it('always includes max_tokens in the request payload (defaults to the model output ceiling)', async () => {
       fetchMock.mockResolvedValueOnce(mockJsonResponse(makeAnthropicResponse()));
 
       // Do NOT pass maxTokens in options
@@ -168,8 +168,9 @@ describe('AnthropicProvider', () => {
       ], {});
 
       const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
-      // max_tokens MUST be present — Anthropic rejects requests without it
-      expect(requestBody.max_tokens).toBe(4096);
+      // max_tokens MUST be present — Anthropic rejects requests without it.
+      // Default is the model's configured output ceiling (16000 for Sonnet).
+      expect(requestBody.max_tokens).toBe(16000);
     });
 
     it('respects caller-provided maxTokens', async () => {
@@ -569,6 +570,45 @@ describe('AnthropicProvider', () => {
       expect(toolResultMsg.role).toBe('user');
       expect(toolResultMsg.content[0].type).toBe('tool_result');
       expect(toolResultMsg.content[0].tool_use_id).toBe('call_1');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Multi-key pool rotation + failover
+  // -------------------------------------------------------------------------
+
+  describe('multi-key rotation + failover', () => {
+    function rateLimitedResponse(): Response {
+      return {
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+        headers: new Headers({ 'retry-after': '0' }),
+        json: () => Promise.resolve({ error: { type: 'rate_limit_error', message: 'slow down' } }),
+        body: null,
+      } as unknown as Response;
+    }
+
+    it('rotates to the next key on a 429 retry instead of hammering the rate-limited key', async () => {
+      const p = new AnthropicProvider();
+      await p.initialize({ apiKey: 'key1,key2', maxRetries: 3 });
+
+      fetchMock.mockResolvedValueOnce(rateLimitedResponse());
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeAnthropicResponse()));
+
+      await p.generateCompletion(
+        'claude-sonnet-4-20250514',
+        [{ role: 'user', content: 'Hi' }],
+        {},
+      );
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const firstKey = fetchMock.mock.calls[0][1].headers['x-api-key'];
+      const secondKey = fetchMock.mock.calls[1][1].headers['x-api-key'];
+      expect(firstKey).toBe('key1');
+      // The retry must fail over to the OTHER key — the rate-limited key is
+      // marked exhausted and skipped, not retried on the same throttled key.
+      expect(secondKey).toBe('key2');
     });
   });
 });

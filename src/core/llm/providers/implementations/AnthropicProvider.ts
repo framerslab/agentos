@@ -1282,7 +1282,6 @@ export class AnthropicProvider implements IProvider {
     body: Record<string, unknown>,
   ): Promise<T> {
     const url = `${this.config.baseURL}${endpoint}`;
-    const headers = this.buildHeaders();
 
     let lastError: Error = new AnthropicProviderError(
       'Request failed after all retries.',
@@ -1290,6 +1289,10 @@ export class AnthropicProvider implements IProvider {
     );
 
     for (let attempt = 0; attempt < this.config.maxRetries!; attempt++) {
+      // Rotate the key per attempt so a retry after a 429 fails over to a
+      // different key from the pool instead of hammering the throttled one.
+      const apiKey = this.nextApiKey();
+      const headers = this.buildHeaders(apiKey);
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), this.config.requestTimeout);
 
@@ -1330,9 +1333,11 @@ export class AnthropicProvider implements IProvider {
             throw new AnthropicProviderError(errorMessage, 'API_CLIENT_ERROR', response.status, errorType, errorData);
           }
 
-          // Rate limit — respect Retry-After header
+          // Rate limit — take this key out of rotation (quota cooldown) so the
+          // next attempt fails over to a different key, then respect Retry-After.
           if (response.status === 429) {
             lastError = new AnthropicProviderError(errorMessage, 'RATE_LIMIT_EXCEEDED', 429, errorType, errorData);
+            this.keyPool?.markExhausted(apiKey);
             const retryAfter = response.headers.get('retry-after');
             const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : (2 ** attempt) * 1000;
             await new Promise(resolve => setTimeout(resolve, retryAfterMs));
@@ -1390,7 +1395,8 @@ export class AnthropicProvider implements IProvider {
     body: Record<string, unknown>,
   ): Promise<ReadableStream<Uint8Array>> {
     const url = `${this.config.baseURL}${endpoint}`;
-    const headers = this.buildHeaders();
+    const apiKey = this.nextApiKey();
+    const headers = this.buildHeaders(apiKey);
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.config.requestTimeout);
@@ -1407,6 +1413,11 @@ export class AnthropicProvider implements IProvider {
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({})) as Partial<AnthropicAPIError>;
         const errorMessage = errorData.error?.message || `HTTP ${response.status}: ${response.statusText}`;
+        // A throttled key should not be reused by the next stream/request —
+        // mark it for cooldown so the pool fails over.
+        if (response.status === 429) {
+          this.keyPool?.markExhausted(apiKey);
+        }
         throw new AnthropicProviderError(
           errorMessage,
           'STREAM_CONNECTION_FAILED',
@@ -1443,9 +1454,20 @@ export class AnthropicProvider implements IProvider {
    * @returns {Record<string, string>} Request headers.
    * @private
    */
-  private buildHeaders(): Record<string, string> {
+  /**
+   * Resolve the next API key. With a multi-key pool this is a weighted
+   * round-robin that skips keys currently in quota cooldown; with a single
+   * key it returns that key. Call this once PER ATTEMPT (not once per
+   * request) so a retry after a 429 fails over to a different key rather
+   * than reusing the throttled one.
+   */
+  private nextApiKey(): string {
+    return this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey;
+  }
+
+  private buildHeaders(apiKey: string): Record<string, string> {
     return {
-      'x-api-key': this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey,
+      'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
       'User-Agent': 'AgentOS/1.0 (AnthropicProvider)',
     };
