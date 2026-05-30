@@ -1,3 +1,14 @@
+## <small>0.9.27 (2026-05-30)</small>
+
+* fix(tools): non-null provider assertion in streamText shim loop ([09d031ace322b4868f933b77621f31829f1885e4](https://github.com/framersai/agentos/commit/09d031ace322b4868f933b77621f31829f1885e4))
+* feat(tools): buffered prompt-emulated tool loop ([49184f6fc60219e6f34b8858c7f42c56d9761e42](https://github.com/framersai/agentos/commit/49184f6fc60219e6f34b8858c7f42c56d9761e42))
+* feat(tools): prompt-emulated tool schema renderer ([590f74f8ebdebf1e1a0e32314b8875d036a46082](https://github.com/framersai/agentos/commit/590f74f8ebdebf1e1a0e32314b8875d036a46082))
+* feat(tools): prompt-emulated tool-call parser ([fd030fac877c09ac838933b986aab3e2dac5fa3a](https://github.com/framersai/agentos/commit/fd030fac877c09ac838933b986aab3e2dac5fa3a))
+* feat(tools): streamText auto reactive fallback for tool-incapable models ([6dd2c58b1234e4133737f73f79a7b0a2424d428b](https://github.com/framersai/agentos/commit/6dd2c58b1234e4133737f73f79a7b0a2424d428b))
+* feat(tools): tool-emulation activation + response formatter ([db2fb17a87cd0bbdea6ec309f88b26ac3c3f7de1](https://github.com/framersai/agentos/commit/db2fb17a87cd0bbdea6ec309f88b26ac3c3f7de1))
+* feat(tools): toolMode prompt shim in streamText (buffer hops, replay final) ([6c96ff689f4bec0fa1d59b7cf4415070a82be4c4](https://github.com/framersai/agentos/commit/6c96ff689f4bec0fa1d59b7cf4415070a82be4c4))
+* feat(tools): toolMode shim path in generateText (prompt + auto reactive fallback) ([2c7935876a54b5653ac1badc597a87defd28210d](https://github.com/framersai/agentos/commit/2c7935876a54b5653ac1badc597a87defd28210d))
+
 ## <small>0.9.26 (2026-05-30)</small>
 
 * fix(api): re-export setGlobalLlmObserver from package main ([9036539f19dffa37154cb71cf91acd91b8ced3ad](https://github.com/framersai/agentos/commit/9036539f19dffa37154cb71cf91acd91b8ced3ad))
