@@ -44,7 +44,27 @@ describe('estimateMaxTokensForZodSchema', () => {
     expect(nestedBudget).toBeGreaterThanOrEqual(1024);
   });
 
-  it('clamps to the maximum (8192) for very large schemas', () => {
+  it('sizes the budget from a string field\'s .max() so large-output schemas do not truncate', () => {
+    // Regression: z.string() was treated as a flat ~30-token leaf regardless
+    // of .max(), so a `source: z.string().max(80_000)` field (designed for
+    // ~20K tokens of generated code) auto-estimated to the 512 floor and the
+    // provider truncated the JSON mid-string. The estimate must scale with the
+    // declared max length.
+    const big = z.object({
+      source: z.string().max(80_000),
+      rationale: z.string().max(500),
+    });
+    const small = z.object({
+      source: z.string().max(2_000),
+      rationale: z.string().max(500),
+    });
+    const bigBudget = estimateMaxTokensForZodSchema(big);
+    const smallBudget = estimateMaxTokensForZodSchema(small);
+    expect(bigBudget).toBeGreaterThan(smallBudget);
+    expect(bigBudget).toBeGreaterThanOrEqual(16_000);
+  });
+
+  it('clamps to the maximum (32000) for very large schemas', () => {
     // Build a wide schema with many fields and deeply nested arrays so the
     // raw walk well exceeds the 8192 cap.
     const wide = z.object({
@@ -52,7 +72,7 @@ describe('estimateMaxTokensForZodSchema', () => {
       b: z.array(z.array(z.array(z.object({ x: z.string(), y: z.string(), z: z.string() })))),
       c: z.array(z.array(z.array(z.object({ x: z.string(), y: z.string(), z: z.string() })))),
     });
-    expect(estimateMaxTokensForZodSchema(wide)).toBe(8192);
+    expect(estimateMaxTokensForZodSchema(wide)).toBe(32000);
   });
 
   it('unwraps optional / nullable / default wrappers', () => {
@@ -107,6 +127,6 @@ describe('estimateMaxTokensForZodSchema', () => {
     expect(() => estimateMaxTokensForZodSchema(cyclic)).not.toThrow();
     const tokens = estimateMaxTokensForZodSchema(cyclic);
     expect(tokens).toBeGreaterThanOrEqual(512);
-    expect(tokens).toBeLessThanOrEqual(8192);
+    expect(tokens).toBeLessThanOrEqual(32000);
   });
 });
