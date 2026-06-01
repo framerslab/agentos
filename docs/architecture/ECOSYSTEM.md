@@ -14,7 +14,7 @@ npm install @framers/agentos
 ```
 
 [![npm](https://img.shields.io/npm/v/@framers/agentos?logo=npm&color=cb3837)](https://www.npmjs.com/package/@framers/agentos)
-[![GitHub](https://img.shields.io/github/stars/framersai/agentos?style=social)](https://github.com/framerslab/agentos)
+[![GitHub](https://img.shields.io/github/stars/framerslab/agentos?style=social)](https://github.com/framerslab/agentos)
 
 ---
 
@@ -26,7 +26,7 @@ npm install @framers/sql-storage-adapter
 ```
 
 [![npm](https://img.shields.io/npm/v/@framers/sql-storage-adapter?logo=npm&color=cb3837)](https://www.npmjs.com/package/@framers/sql-storage-adapter)
-[![GitHub](https://img.shields.io/github/stars/framersai/sql-storage-adapter?style=social)](https://github.com/framerslab/sql-storage-adapter)
+[![GitHub](https://img.shields.io/github/stars/framerslab/sql-storage-adapter?style=social)](https://github.com/framerslab/sql-storage-adapter)
 
 **Features:**
 - SQLite (better-sqlite3, sql.js for browser)
@@ -44,7 +44,7 @@ npm install @framers/agentos-extensions-registry
 ```
 
 [![npm](https://img.shields.io/npm/v/@framers/agentos-extensions-registry?logo=npm&color=cb3837)](https://www.npmjs.com/package/@framers/agentos-extensions-registry)
-[![GitHub](https://img.shields.io/github/stars/framersai/agentos-extensions?style=social)](https://github.com/framerslab/agentos-extensions)
+[![GitHub](https://img.shields.io/github/stars/framerslab/agentos-extensions?style=social)](https://github.com/framerslab/agentos-extensions)
 
 ```typescript
 import { createCuratedManifest } from '@framers/agentos-extensions-registry';
@@ -130,7 +130,7 @@ npm install paracosm
 ```
 
 [![npm](https://img.shields.io/npm/v/paracosm?logo=npm&color=cb3837)](https://www.npmjs.com/package/paracosm)
-[![GitHub](https://img.shields.io/github/stars/framersai/paracosm?style=social)](https://github.com/framerslab/paracosm)
+[![GitHub](https://img.shields.io/github/stars/framerslab/paracosm?style=social)](https://github.com/framerslab/paracosm)
 
 **Features:**
 - Universal [`RunArtifact`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts) schema at `paracosm/schema` covering turn-loop civilization sims, batch-trajectory digital twins, and batch-point forecasts

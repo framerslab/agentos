@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@framers/agentos"><img src="https://img.shields.io/npm/v/@framers/agentos?logo=npm&color=cb3837" alt="npm"></a>
-  <a href="https://github.com/framerslab/agentos"><img src="https://img.shields.io/github/stars/framersai/agentos?style=social" alt="GitHub stars"></a>
+  <a href="https://github.com/framerslab/agentos"><img src="https://img.shields.io/github/stars/framerslab/agentos?style=social" alt="GitHub stars"></a>
   <a href="https://agentos.sh"><img src="https://img.shields.io/badge/docs-agentos.sh-00d4ff" alt="Documentation"></a>
 </p>
 
@@ -104,7 +104,7 @@
 | Resource    | Link                                                                   |
 | ----------- | ---------------------------------------------------------------------- |
 | Website     | [agentos.sh](https://agentos.sh)                                       |
-| GitHub      | [framersai/agentos](https://github.com/framerslab/agentos)              |
+| GitHub      | [framerslab/agentos](https://github.com/framerslab/agentos)              |
 | npm         | [@framers/agentos](https://www.npmjs.com/package/@framers/agentos)     |
 | Issues      | [GitHub Issues](https://github.com/framerslab/agentos/issues)           |
 | Discussions | [GitHub Discussions](https://github.com/framerslab/agentos/discussions) |

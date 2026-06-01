@@ -23,14 +23,14 @@ AgentOS integrates with the [SQL Storage Adapter](https://github.com/framerslab/
 
 | Surface | Repo | Path |
 |---|---|---|
-| [`createDatabase()`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/database.ts) | `framersai/sql-storage-adapter` | `src/core/database.ts` |
-| [`StorageAdapter` contract](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/index.ts) | `framersai/sql-storage-adapter` | `src/core/contracts/index.ts` |
-| [`postgresAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/adapters/postgresAdapter.ts) | `framersai/sql-storage-adapter` | `src/adapters/postgresAdapter.ts` |
-| [`betterSqliteAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/adapters/betterSqliteAdapter.ts) | `framersai/sql-storage-adapter` | `src/adapters/betterSqliteAdapter.ts` |
-| [`sqlJsAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/adapters/sqlJsAdapter.ts) | `framersai/sql-storage-adapter` | `src/adapters/sqlJsAdapter.ts` |
-| [`capacitorSqliteAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/adapters/capacitorSqliteAdapter.ts) | `framersai/sql-storage-adapter` | `src/adapters/capacitorSqliteAdapter.ts` |
-| [`indexedDbAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/adapters/indexedDbAdapter.ts) | `framersai/sql-storage-adapter` | `src/adapters/indexedDbAdapter.ts` |
-| [`supabase` adapter](https://github.com/framerslab/sql-storage-adapter/blob/master/src/adapters/supabase.ts) | `framersai/sql-storage-adapter` | `src/adapters/supabase.ts` |
-| [Adapter tree (all backends)](https://github.com/framerslab/sql-storage-adapter/tree/master/src/adapters) | `framersai/sql-storage-adapter` | `src/adapters/` |
+| [`createDatabase()`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/database.ts) | `framerslab/sql-storage-adapter` | `src/core/database.ts` |
+| [`StorageAdapter` contract](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/index.ts) | `framerslab/sql-storage-adapter` | `src/core/contracts/index.ts` |
+| [`postgresAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/adapters/postgresAdapter.ts) | `framerslab/sql-storage-adapter` | `src/adapters/postgresAdapter.ts` |
+| [`betterSqliteAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/adapters/betterSqliteAdapter.ts) | `framerslab/sql-storage-adapter` | `src/adapters/betterSqliteAdapter.ts` |
+| [`sqlJsAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/adapters/sqlJsAdapter.ts) | `framerslab/sql-storage-adapter` | `src/adapters/sqlJsAdapter.ts` |
+| [`capacitorSqliteAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/adapters/capacitorSqliteAdapter.ts) | `framerslab/sql-storage-adapter` | `src/adapters/capacitorSqliteAdapter.ts` |
+| [`indexedDbAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/adapters/indexedDbAdapter.ts) | `framerslab/sql-storage-adapter` | `src/adapters/indexedDbAdapter.ts` |
+| [`supabase` adapter](https://github.com/framerslab/sql-storage-adapter/blob/master/src/adapters/supabase.ts) | `framerslab/sql-storage-adapter` | `src/adapters/supabase.ts` |
+| [Adapter tree (all backends)](https://github.com/framerslab/sql-storage-adapter/tree/master/src/adapters) | `framerslab/sql-storage-adapter` | `src/adapters/` |
 
 

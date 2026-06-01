@@ -10,7 +10,7 @@
  */
 export default {
   branches: ['master'],
-  repositoryUrl: 'https://github.com/framersai/agentos',
+  repositoryUrl: 'https://github.com/framerslab/agentos',
   tagFormat: 'v${version}',
   plugins: [
     // Analyze commits to determine release type

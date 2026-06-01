@@ -1,7 +1,7 @@
 <div align="center">
 
 <a href="https://agentos.sh">
-  <img src="https://raw.githubusercontent.com/framersai/agentos/master/assets/agentos-primary-no-tagline-transparent-2x.png" alt="AgentOS: TypeScript AI Agent Framework with Cognitive Memory" height="100" />
+  <img src="https://raw.githubusercontent.com/framerslab/agentos/master/assets/agentos-primary-no-tagline-transparent-2x.png" alt="AgentOS: TypeScript AI Agent Framework with Cognitive Memory" height="100" />
 </a>
 
 <br />
@@ -11,9 +11,9 @@
 **Agents that remember, forge their own tools, and survive long-running sessions.** Persistent cognitive memory, optional HEXACO personality, multi-agent orchestration, and one dispatch interface across 11 LLM providers. Apache-2.0.
 
 [![npm](https://img.shields.io/npm/v/@framers/agentos?style=flat-square&logo=npm&color=cb3837)](https://www.npmjs.com/package/@framers/agentos)
-[![CI](https://img.shields.io/github/actions/workflow/status/framersai/agentos/ci.yml?branch=master&style=flat-square&logo=github&label=CI)](https://github.com/framerslab/agentos/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/framersai/agentos/master/.github/badges/tests.json&style=flat-square&logo=vitest&logoColor=white)](https://github.com/framerslab/agentos/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/framersai/agentos/graph/badge.svg)](https://codecov.io/gh/framersai/agentos)
+[![CI](https://img.shields.io/github/actions/workflow/status/framerslab/agentos/ci.yml?branch=master&style=flat-square&logo=github&label=CI)](https://github.com/framerslab/agentos/actions/workflows/ci.yml)
+[![tests](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/framerslab/agentos/master/.github/badges/tests.json&style=flat-square&logo=vitest&logoColor=white)](https://github.com/framerslab/agentos/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/framerslab/agentos/graph/badge.svg)](https://codecov.io/gh/framerslab/agentos)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4+-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue?style=flat-square)](https://opensource.org/licenses/Apache-2.0)
 [![LongMemEval-S](https://img.shields.io/badge/LongMemEval--S-85.6%25-2ea043?style=flat-square)](https://docs.agentos.sh/blog/2026/04/27/longmemeval-s-83-with-semantic-embedder)
@@ -41,8 +41,8 @@ AgentOS is an open-source TypeScript framework for AI agents that **remember, ad
 <div align="center">
 
 <picture>
-  <source srcset="https://raw.githubusercontent.com/framersai/agentos/master/assets/agentos-forge-demo.webp" type="image/webp" />
-  <img src="https://raw.githubusercontent.com/framersai/agentos/master/assets/agentos-forge-demo.gif"
+  <source srcset="https://raw.githubusercontent.com/framerslab/agentos/master/assets/agentos-forge-demo.webp" type="image/webp" />
+  <img src="https://raw.githubusercontent.com/framerslab/agentos/master/assets/agentos-forge-demo.gif"
        alt="Three AgentOS agents with distinct HEXACO personalities collaborate on a code review, forge a new tool at runtime once they hit a gap their static toolkit can't cover, the LLM judge approves the spec, and all three invoke it on the next turn."
        width="900" />
 </picture>
@@ -483,11 +483,11 @@ pnpm install && pnpm build && pnpm test
 <div align="center">
 
 <a href="https://agentos.sh">
-  <img src="https://raw.githubusercontent.com/framersai/agentos/master/assets/agentos-primary-transparent-2x.png" alt="AgentOS" height="40" />
+  <img src="https://raw.githubusercontent.com/framerslab/agentos/master/assets/agentos-primary-transparent-2x.png" alt="AgentOS" height="40" />
 </a>
 &nbsp;&nbsp;&nbsp;
 <a href="https://frame.dev">
-  <img src="https://raw.githubusercontent.com/framersai/agentos/master/assets/frame-logo-green-no-tagline.svg" alt="Frame.dev" height="40" />
+  <img src="https://raw.githubusercontent.com/framerslab/agentos/master/assets/frame-logo-green-no-tagline.svg" alt="Frame.dev" height="40" />
 </a>
 
 **Built by [Frame](https://frame.dev) * [Wilds.ai](https://wilds.ai)**
