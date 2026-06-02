@@ -267,7 +267,7 @@ Stages 2 and 3 reuse the Stage 1 classification, so the full pipeline costs **on
 
 | Category | Highlights |
 |---|---|
-| **LLM Providers** | 16: OpenAI, Anthropic, Gemini, Groq, Ollama, OpenRouter, Together, Mistral, xAI, Claude/Gemini CLI, + 5 image/video |
+| **LLM Providers** | 11 (9 API-key + 2 local CLI): OpenAI, Anthropic, Gemini, Groq, Ollama, OpenRouter, Together, Mistral, xAI, Claude CLI, Gemini CLI. Plus image/video/audio generation providers. |
 | **Cognitive Memory** | 8 mechanisms: reconsolidation, retrieval-induced forgetting, involuntary recall, FOK, gist extraction, schema encoding, source decay, emotion regulation |
 | **HEXACO Personality** | 6 traits modulate memory, retrieval bias, response style |
 | **RAG Pipeline** | 7 vector backends * 4 retrieval strategies * GraphRAG * HyDE * Cohere rerank-v3.5 |

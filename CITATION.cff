@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use AgentOS in your work, please cite it using this metadata."
+title: AgentOS
+abstract: "An Apache-2.0 TypeScript AI agent runtime: persistent cognitive memory, optional HEXACO personality, multi-agent orchestration, runtime tool forging, multimodal RAG, and one dispatch interface across 11 LLM providers."
+type: software
+authors:
+  - given-names: Johnny
+    family-names: Dunn
+repository-code: "https://github.com/framerslab/agentos"
+url: "https://agentos.sh"
+license: Apache-2.0
+keywords:
+  - ai-agents
+  - llm
+  - typescript
+  - cognitive-memory
+  - rag
+  - multi-agent
