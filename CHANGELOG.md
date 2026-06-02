@@ -1,3 +1,8 @@
+## <small>0.9.33 (2026-06-02)</small>
+
+* fix(voice): clamp Aura text chunking to max chars; per-format duration + opus mime ([a57263dfef1e8fc4dfc68f3739465d4629d62ee1](https://github.com/framerslab/agentos/commit/a57263dfef1e8fc4dfc68f3739465d4629d62ee1))
+* docs: add contribution, provider, sponsorship, and maintainer governance ([6b783084d9a82650679eba7a2523fa622101793f](https://github.com/framerslab/agentos/commit/6b783084d9a82650679eba7a2523fa622101793f))
+
 ## <small>0.9.32 (2026-06-02)</small>
 
 * Merge remote-tracking branch 'origin/master' ([85240a30dc136be1da679bc45a722efb09d07b95](https://github.com/framerslab/agentos/commit/85240a30dc136be1da679bc45a722efb09d07b95))
