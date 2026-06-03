@@ -51,7 +51,7 @@ vi.mock('node:fs/promises', () => {
   };
 });
 
-vi.mock('../../../api/generateText.js', () => {
+vi.mock('../../../../api/generateText.js', () => {
   const holder = { generateText: vi.fn() };
   return {
     generateText: (...args: unknown[]) => holder.generateText(...args),

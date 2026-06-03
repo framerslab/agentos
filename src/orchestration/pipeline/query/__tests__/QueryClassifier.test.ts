@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ConversationMessage, QueryTier } from '../types.js';
 import { QueryClassifier } from '../QueryClassifier.js';
 
-vi.mock('../../api/generateText.js', () => ({
+vi.mock('../../../../api/generateText.js', () => ({
   generateText: vi.fn(),
 }));
 

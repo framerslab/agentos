@@ -30,7 +30,7 @@ import type { ConversationMessage, QueryTier } from '../types.js';
 // Mock generateText
 // ============================================================================
 
-vi.mock('../../api/generateText.js', () => ({
+vi.mock('../../../../api/generateText.js', () => ({
   generateText: vi.fn(),
 }));
 

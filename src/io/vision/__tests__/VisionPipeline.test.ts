@@ -140,7 +140,7 @@ vi.mock('@huggingface/transformers', () => {
 // src/vision/), which resolves to src/api/generateText.js. From this test
 // file's location (src/vision/__tests__/) the equivalent relative path is
 // two levels up.
-vi.mock('../../api/generateText.js', () => {
+vi.mock('../../../api/generateText.js', () => {
   return {
     generateText: (...args: any[]) => mockGenerateText(...args),
   };

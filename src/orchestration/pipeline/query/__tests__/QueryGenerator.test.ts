@@ -22,7 +22,7 @@ const hoisted = vi.hoisted(() => ({
   generateText: vi.fn(),
 }));
 
-vi.mock('../../api/generateText.js', () => ({
+vi.mock('../../../../api/generateText.js', () => ({
   generateText: hoisted.generateText,
 }));
 

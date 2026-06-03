@@ -23,7 +23,7 @@ import { LLMVisionProvider } from '../providers/LLMVisionProvider.js';
 
 let mockGenerateText: any;
 
-vi.mock('../../api/generateText.js', () => {
+vi.mock('../../../api/generateText.js', () => {
   return {
     generateText: (...args: any[]) => mockGenerateText(...args),
   };

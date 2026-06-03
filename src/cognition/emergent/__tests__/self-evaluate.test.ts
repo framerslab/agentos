@@ -20,7 +20,7 @@ import { generateText } from '../../../api/generateText.js';
 // Mock generateText
 // ---------------------------------------------------------------------------
 
-vi.mock('../../api/generateText.js', () => ({
+vi.mock('../../../api/generateText.js', () => ({
   generateText: vi.fn().mockResolvedValue({
     text: JSON.stringify({
       relevance: 0.9,

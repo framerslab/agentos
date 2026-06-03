@@ -15,7 +15,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // Mocks — must be declared before any module imports that depend on them
 // ---------------------------------------------------------------------------
 
-vi.mock('../../api/generateText.js', () => ({
+vi.mock('../../../../api/generateText.js', () => ({
   generateText: vi.fn(),
 }));
 
