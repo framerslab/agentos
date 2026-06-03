@@ -38,6 +38,7 @@ async function _getOs(): Promise<typeof import('node:os')> {
 }
 
 import type { MemoryTrace } from '../../core/types.js';
+import type { CompileResult } from '../../../substrate/memory/wiki/types.js';
 import type { ITool } from '../../../../core/tools/ITool.js';
 import type {
   MemoryConfig,
@@ -855,6 +856,56 @@ export class Memory {
     return rows.map((row) => this._buildTrace(row));
   }
 
+  /** Optional markdown wiki store + compiler, attached by the agent at boot. */
+  private _wiki?: {
+    store: {
+      index: (o?: { force?: boolean }) => Promise<unknown>;
+      readMetaWatermark: () => Promise<string | null>;
+      writeMetaWatermark: (iso: string) => Promise<void>;
+    };
+    compiler: {
+      compile: (input: {
+        traces: MemoryTrace[];
+        reason: 'consolidation' | 'session-end' | 'explicit';
+      }) => Promise<CompileResult>;
+    };
+  };
+
+  /**
+   * Attach a markdown wiki store + compiler. Called by the agent at boot once
+   * the memory/ workspace directory is known. Idempotent (last call wins).
+   */
+  attachWiki(wiki: NonNullable<Memory['_wiki']>): void {
+    this._wiki = wiki;
+  }
+
+  /**
+   * Compile recent (non-wiki) traces into the markdown wiki, then re-index.
+   * Reads the wiki's watermark, folds every trace created since into pages, and
+   * advances the watermark. No-op when no wiki is attached.
+   *
+   * @param opts.reason - What triggered this compile (telemetry + compiler hint).
+   */
+  async compileWiki(opts?: {
+    reason?: 'consolidation' | 'session-end' | 'explicit';
+  }): Promise<CompileResult> {
+    await this._initPromise;
+    const empty: CompileResult = { pagesWritten: [], tracesConsumed: 0, conflicts: [] };
+    if (!this._wiki) return empty;
+
+    const reason = opts?.reason ?? 'explicit';
+    const watermarkIso = await this._wiki.store.readMetaWatermark();
+    const sinceMs = watermarkIso ? Date.parse(watermarkIso) : 0;
+    const traces = await this.recentTraces(sinceMs, { limit: 500 });
+
+    const result = await this._wiki.compiler.compile({ traces, reason });
+    if (result.pagesWritten.length > 0) {
+      await this._wiki.store.index();
+    }
+    await this._wiki.store.writeMetaWatermark(new Date(Date.now()).toISOString());
+    return result;
+  }
+
   // =========================================================================
   // Document ingestion
   // =========================================================================
@@ -1090,7 +1141,11 @@ export class Memory {
       );
     }
 
-    return this._consolidationLoop.run(this._config.consolidation);
+    const consolidation = await this._consolidationLoop.run(this._config.consolidation);
+    if (this._wiki) {
+      await this.compileWiki({ reason: 'consolidation' });
+    }
+    return consolidation;
   }
 
   /**

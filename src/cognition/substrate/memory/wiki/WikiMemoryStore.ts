@@ -175,6 +175,18 @@ export class WikiMemoryStore {
     return this.index({ force: true });
   }
 
+  /** Read the last-compile watermark (ISO8601) from `.meta/index.json`. */
+  async readMetaWatermark(): Promise<string | null> {
+    return (await this.readMeta()).lastCompiledAt;
+  }
+
+  /** Advance the last-compile watermark in `.meta/index.json`. */
+  async writeMetaWatermark(iso: string): Promise<void> {
+    const meta = await this.readMeta();
+    meta.lastCompiledAt = iso;
+    await this.writeMeta(meta);
+  }
+
   protected get _agentId(): string {
     return this.agentId;
   }
