@@ -537,5 +537,6 @@ console.log('Best matches:', results.map(r => r.metadata.path));
 
 - [Image Generation](./IMAGE_GENERATION.md) — Generate images from text
 - [Image Editing](./IMAGE_EDITING.md) — Edit, upscale, and variate images
+- [Image Segmentation](./IMAGE_SEGMENTATION.md) — Pixel masks via SAM2 / GroundedSAM
 - [Multimodal RAG](./MULTIMODAL_RAG.md) — Image + audio retrieval-augmented generation
 - [High-Level API](./HIGH_LEVEL_API.md) — Full API reference

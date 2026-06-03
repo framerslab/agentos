@@ -207,7 +207,9 @@ const anime = await editImage({
 
 ## Inpainting
 
-Edit specific regions of an image using a mask:
+Edit specific regions of an image using a mask. Masks can be generated
+automatically with [Image Segmentation](./IMAGE_SEGMENTATION.md) (`maskToEditMask`)
+instead of hand-painted:
 
 ```typescript
 import { editImage } from '@framers/agentos';
