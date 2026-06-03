@@ -1,3 +1,15 @@
+## <small>0.9.34 (2026-06-03)</small>
+
+* docs: add SUPPORT and CITATION, correct LLM provider count to 11 ([56e9a207a6117b75a4f4b678816843ed315d5a51](https://github.com/framerslab/agentos/commit/56e9a207a6117b75a4f4b678816843ed315d5a51))
+* docs: link all project guides from the README ([3c52eb8bf5c76bf5c8fc3f7773c51b5d4d6fe16b](https://github.com/framerslab/agentos/commit/3c52eb8bf5c76bf5c8fc3f7773c51b5d4d6fe16b))
+* docs: list Frame's Deepgram Startup Program membership in Sponsors ([7dd673917a1d11a4f41e3646dcde4d8737a1103c](https://github.com/framerslab/agentos/commit/7dd673917a1d11a4f41e3646dcde4d8737a1103c))
+* docs: note Frame's Deepgram Startup Program membership in footer ([70508aa0999113091155226d74b6a41b5d3a5aa6](https://github.com/framerslab/agentos/commit/70508aa0999113091155226d74b6a41b5d3a5aa6))
+* docs: retitle Sponsors section to Startups & Partnerships ([cd17cd20ba13125c6f7e9a6d7f2a8b6032f2b8ab](https://github.com/framerslab/agentos/commit/cd17cd20ba13125c6f7e9a6d7f2a8b6032f2b8ab))
+* docs: tabulate Startups & Partnerships with Deepgram logo, drop footer dup ([b3ecee4906e6277ad23cadbd472c4c9884012d68](https://github.com/framerslab/agentos/commit/b3ecee4906e6277ad23cadbd472c4c9884012d68))
+* feat(memory): add non-destructive memory dir migration ([333825cec9b9e6f3bb7d2341a74848c918133845](https://github.com/framerslab/agentos/commit/333825cec9b9e6f3bb7d2341a74848c918133845))
+* feat(memory): add soul memory wiki types ([f5e4fc61a8dd8733a8a6b744ef8ab3ecf6fffec0](https://github.com/framerslab/agentos/commit/f5e4fc61a8dd8733a8a6b744ef8ab3ecf6fffec0))
+* feat(memory): add wiki page codec and catalog renderer ([4ca0bee944ff79233134b86bcb08b6c2db46c432](https://github.com/framerslab/agentos/commit/4ca0bee944ff79233134b86bcb08b6c2db46c432))
+
 ## <small>0.9.33 (2026-06-02)</small>
 
 * fix(voice): clamp Aura text chunking to max chars; per-format duration + opus mime ([a57263dfef1e8fc4dfc68f3739465d4629d62ee1](https://github.com/framerslab/agentos/commit/a57263dfef1e8fc4dfc68f3739465d4629d62ee1))
