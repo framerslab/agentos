@@ -601,7 +601,7 @@ async function runCitationVerification(
   }
 }
 
-function loadSoulFromOption(
+export function loadSoulFromOption(
   soul: NonNullable<AgentOptions['soul']>,
 ): import('../cognition/substrate/personas/SoulLoader.js').LoadedSoul | null {
   try {
