@@ -462,7 +462,7 @@ function buildPersonalityDescription(
   return `## Personality & Communication Style\n\n${lines.join('\n')}`;
 }
 
-function buildSystemPrompt(opts: AgentOptions): string | undefined {
+export function buildSystemPrompt(opts: AgentOptions): string | undefined {
   const sections: string[] = [];
 
   // SOUL.md content first — the agent's identity comes before everything else.
@@ -474,6 +474,16 @@ function buildSystemPrompt(opts: AgentOptions): string | undefined {
     }
     if (loaded?.styleContent) {
       sections.push(`## Style\n\n${loaded.styleContent}`);
+    }
+    // The memory wiki's index.md catalog. The agent reads it to know what it
+    // remembers, then pulls full pages via the read_memory_page tool.
+    if (loaded?.wikiIndex?.trim()) {
+      sections.push(
+        '## Long-Term Memory (index)\n\n' +
+          'You maintain a memory wiki. This is its index. ' +
+          'Use the `read_memory_page` tool to open any page by id.\n\n' +
+          loaded.wikiIndex.trim(),
+      );
     }
   }
 
