@@ -45,7 +45,7 @@ describe('ReplicateSegmentationProvider', () => {
     for (const modelId of ['sam2', 'owner/', '/name', 'a/b/c']) {
       await expect(
         provider.segment({ modelId, image, mode: 'automatic' }),
-      ).rejects.toMatchObject({ code: 'invalid_request' });
+      ).rejects.toMatchObject({ name: 'SegmentationProviderError', code: 'invalid_request' });
     }
     expect(mockFetch).not.toHaveBeenCalled();
   });
