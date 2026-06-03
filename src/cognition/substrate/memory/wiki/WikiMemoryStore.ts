@@ -1,8 +1,9 @@
 /** @fileoverview Markdown-first wiki store: owns memory/, indexes pages into the memory store. */
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import { parsePage, serializePage, renderCatalog } from './WikiPageCodec.js';
-import type { WikiPage, MetaIndex } from './types.js';
+import type { WikiPage, MetaIndex, IndexResult } from './types.js';
 
 /** The slice of the Memory facade the store depends on (injected for testability). */
 export interface MemoryIndexPort {
@@ -113,7 +114,67 @@ export class WikiMemoryStore {
     await fs.writeFile(path.join(metaDir, 'index.json'), JSON.stringify(meta, null, 2));
   }
 
-  // index() / rebuildIndex() added in Task 5.
+  /** Incremental: re-embed only pages whose body hash changed since the last index. */
+  async index(opts?: { force?: boolean }): Promise<IndexResult> {
+    const pages = await this.load();
+    const meta = await this.readMeta();
+    const result: IndexResult = { indexed: [], skipped: [], removed: [] };
+
+    for (const page of pages) {
+      const hash = createHash('sha256').update(page.body).digest('hex');
+      const prior = meta.pages[page.id];
+      if (!opts?.force && prior && prior.hash === hash) {
+        result.skipped.push(page.id);
+        continue;
+      }
+      // Remove prior traces for this page before re-embedding.
+      if (prior) {
+        for (const id of prior.traceIds) {
+          await this._port.forget(id);
+          result.removed.push(id);
+        }
+      }
+      const traceIds: string[] = [];
+      for (const chunk of this._port.chunk(page.body)) {
+        const trace = await this._port.remember(chunk.text, {
+          type: page.type === 'log' ? 'episodic' : 'semantic',
+          scope: 'persona',
+          scopeId: this._agentId,
+          tags: ['wiki', `page:${page.id}`],
+          entities: page.links,
+        });
+        traceIds.push(trace.id);
+      }
+      meta.pages[page.id] = { hash, traceIds };
+      result.indexed.push(page.id);
+    }
+
+    // Drop meta entries for deleted pages.
+    const liveIds = new Set(pages.map((p) => p.id));
+    for (const id of Object.keys(meta.pages)) {
+      if (!liveIds.has(id)) {
+        for (const t of meta.pages[id].traceIds) {
+          await this._port.forget(t);
+          result.removed.push(t);
+        }
+        delete meta.pages[id];
+      }
+    }
+
+    await this.writeMeta(meta);
+    return result;
+  }
+
+  /** Full rebuild: clear the meta map and re-embed everything. */
+  async rebuildIndex(): Promise<IndexResult> {
+    const meta = await this.readMeta();
+    for (const entry of Object.values(meta.pages)) {
+      for (const t of entry.traceIds) await this._port.forget(t);
+    }
+    await this.writeMeta({ lastCompiledAt: meta.lastCompiledAt, pages: {} });
+    return this.index({ force: true });
+  }
+
   protected get _agentId(): string {
     return this.agentId;
   }
