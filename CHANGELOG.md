@@ -1,3 +1,8 @@
+## <small>0.9.39 (2026-06-04)</small>
+
+* test: repoint root-level test imports to the reorganized src layout ([ae98e2570edeeabc07e955a869d36b70d80bb507](https://github.com/framerslab/agentos/commit/ae98e2570edeeabc07e955a869d36b70d80bb507))
+* fix(query-router): load platform-corpus from the correct depth after the src reorg ([d6a65bf4552157c548c979d61b0ca873d71464ac](https://github.com/framerslab/agentos/commit/d6a65bf4552157c548c979d61b0ca873d71464ac))
+
 ## <small>0.9.38 (2026-06-04)</small>
 
 * test: skip sibling-sourced corpus and catalog assertions in standalone CI ([b216a67a4e9d5f2c8fd8f20895f50506c519e025](https://github.com/framerslab/agentos/commit/b216a67a4e9d5f2c8fd8f20895f50506c519e025))
