@@ -1,3 +1,11 @@
+## <small>0.9.37 (2026-06-04)</small>
+
+* fix(agent): stop double-counting session/agent usage when the ledger is enabled; repair knowledge-corpus paths + generate it for tests; fix voice-pipeline mock constructor ([6622d455f9fd74a4f26ef53fead7ee19a3658ee3](https://github.com/framerslab/agentos/commit/6622d455f9fd74a4f26ef53fead7ee19a3658ee3))
+* test: correct generateText vi.mock paths so the mock applies (query/vision/emergent/video) ([829f989e4545280e0bf798da6c92176155306141](https://github.com/framerslab/agentos/commit/829f989e4545280e0bf798da6c92176155306141))
+* test: fix stale audio exclude paths and guard monorepo-root docs-alignment tests for standalone CI ([b7cf9dd8e7c3421cb4273cfae8290f214b38645b](https://github.com/framerslab/agentos/commit/b7cf9dd8e7c3421cb4273cfae8290f214b38645b))
+* test: fix stale io-reorg vi.mock paths (media/video, hearing, voice-pipeline, otel) and stale CLI model-id assertions ([aeb5b0f25ba72140596198b2ab060d8e803fcf85](https://github.com/framerslab/agentos/commit/aeb5b0f25ba72140596198b2ab060d8e803fcf85))
+* build: allow native dep build scripts in CI (better-sqlite3, sharp, bcrypt, tesseract.js) ([e92b6ccb12da61ed395a334aa110bfb140874aba](https://github.com/framerslab/agentos/commit/e92b6ccb12da61ed395a334aa110bfb140874aba))
+
 ## <small>0.9.36 (2026-06-03)</small>
 
 * test: externalize sharp in vitest so the native module loads in CI ([5d439a9f5bb4b47d8ab1c0500ff4b90b4038a097](https://github.com/framerslab/agentos/commit/5d439a9f5bb4b47d8ab1c0500ff4b90b4038a097))
