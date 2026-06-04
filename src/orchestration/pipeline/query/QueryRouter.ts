@@ -1053,10 +1053,12 @@ export class QueryRouter {
    */
   private loadPlatformKnowledge(): CorpusChunk[] {
     const candidates = [
-      // Published package layout: knowledge/ sits next to dist/
-      join(MODULE_DIR, '../../knowledge/platform-corpus.json'),
-      // Source layout: knowledge/ sits at package root, src/ is one level down
+      // Current layout: this module sits at {src,dist}/orchestration/pipeline/query/,
+      // so the package-root knowledge/ directory is four levels up.
+      join(MODULE_DIR, '../../../../knowledge/platform-corpus.json'),
+      // Legacy shallower layouts, kept as fallbacks.
       join(MODULE_DIR, '../../../knowledge/platform-corpus.json'),
+      join(MODULE_DIR, '../../knowledge/platform-corpus.json'),
     ];
 
     for (const corpusPath of candidates) {
