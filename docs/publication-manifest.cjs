@@ -33,6 +33,7 @@ const SECTION_ORDER = [
   'Benchmarks',
   'Paracosm',
   'Wunderland',
+  'Contributing',
 ];
 
 function entry(config) {
@@ -360,6 +361,8 @@ const publicationManifest = [
   siteDoc('wunderland/index.md', 'wunderland/index.md', 'Wunderland — Getting Started', 'Wunderland', 1, {
     categoryIndex: true,
   }),
+
+  agentosDoc('contributing/new-provider.md', 'contributing/new-provider.md', 'Adding an LLM Provider', 'Contributing', 1),
 ];
 
 function resolvePublicationSourcePath(monoRoot, entryConfig) {

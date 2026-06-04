@@ -33,7 +33,7 @@ AgentOS is an open-source TypeScript framework for AI agents that **remember, ad
 - **70.2% on LongMemEval-M** (1.5M-token haystacks, 500 sessions per question): the only open-source library on the public record above 65% on M with publicly reproducible methodology.
 - **Runtime tool forging.** An agent writes a TypeScript function with a Zod schema, an LLM judge approves it, and it runs in a hardened `node:vm` sandbox before joining the catalog for the rest of the session. Multi-agent teams spawn judge-reviewed specialists the same way.
 - **Persistent [cognitive memory](https://docs.agentos.sh/features/cognitive-memory)** with 8 neuroscience-backed mechanisms: Ebbinghaus decay, retrieval-induced forgetting, reconsolidation, and source-confidence decay, grounded in published cognitive-science literature.
-- **Optional [HEXACO personality](https://docs.agentos.sh/features/hexaco-personality)**, [six multi-agent orchestration strategies](https://docs.agentos.sh/features/multi-agent-collaboration), [streaming guardrails](https://docs.agentos.sh/features/guardrails-architecture), and a [voice pipeline](https://docs.agentos.sh/features/voice-pipeline), all on one dispatch interface across **11 LLM providers** (9 API-key + 2 local CLI; OpenRouter fans out to 200+ models).
+- **Optional [HEXACO personality](https://docs.agentos.sh/features/hexaco-personality)**, [six multi-agent orchestration strategies](https://docs.agentos.sh/features/agency-collaboration), [streaming guardrails](https://docs.agentos.sh/features/guardrails-architecture), and a [voice pipeline](https://docs.agentos.sh/features/voice-pipeline), all on one dispatch interface across **11 LLM providers** (9 API-key + 2 local CLI; OpenRouter fans out to 200+ models).
 - **[100+ first-party extensions](https://www.npmjs.com/package/@framers/agentos-extensions)** and **[88 curated `SKILL.md` skills](https://www.npmjs.com/package/@framers/agentos-skills)** auto-discover at startup; forged tools promote into skills via `SkillExporter`. **Apache-2.0.**
 
 ---
@@ -71,7 +71,7 @@ const tutor = agent({
 });
 
 // Provider auto-detected from env when `provider` is omitted. Full default-model
-// table for every supported provider: https://docs.agentos.sh/features/llm-providers
+// table for every supported provider: https://docs.agentos.sh/architecture/llm-providers
 
 const session = tutor.session('student-1');
 await session.send('Explain recursion with an analogy.');
@@ -300,7 +300,7 @@ const team = agency({
 const result = await team.generate('Compare TCP vs UDP for game networking.');
 ```
 
-Strategies: `sequential` * `parallel` * `debate` * `review-loop` * `hierarchical` * `graph`. With `strategy: 'hierarchical'` + `emergent: { enabled: true }`, the manager LLM gets a `spawn_specialist` tool that mints new sub-agents at runtime when the static roster doesn't cover a sub-task. `agency()` is for single-request multi-agent coordination: for long-running world simulations or per-turn parallel agent loops, build your own orchestration with `agent()` + the lower-level primitives. [Multi-agent docs ->](https://docs.agentos.sh/features/multi-agent) * [Hierarchical + emergent ->](https://docs.agentos.sh/architecture/emergent-agency-system) * [Scope guide ->](https://docs.agentos.sh/orchestration/agency-api#scope-when-to-reach-for-agency)
+Strategies: `sequential` * `parallel` * `debate` * `review-loop` * `hierarchical` * `graph`. With `strategy: 'hierarchical'` + `emergent: { enabled: true }`, the manager LLM gets a `spawn_specialist` tool that mints new sub-agents at runtime when the static roster doesn't cover a sub-task. `agency()` is for single-request multi-agent coordination: for long-running world simulations or per-turn parallel agent loops, build your own orchestration with `agent()` + the lower-level primitives. [Multi-agent docs ->](https://docs.agentos.sh/features/agency-api) * [Hierarchical + emergent ->](https://docs.agentos.sh/architecture/emergent-agency-system) * [Scope guide ->](https://docs.agentos.sh/features/agency-api#scope-when-to-reach-for-agency)
 
 ---
 
@@ -454,7 +454,7 @@ const longform = await writer.generate('Draft a 4-page whitepaper.', {
 - **[Benchmarks](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md)**: benchmark tables, 95% confidence intervals, methodology audit
 - **[Architecture](https://docs.agentos.sh/architecture/system-architecture)**: system design, layer breakdown
 - **[Cognitive Memory](https://docs.agentos.sh/features/cognitive-memory)**: 8 mechanisms with 30+ APA citations
-- **[RAG Configuration](https://docs.agentos.sh/features/rag-memory-configuration)**: vector stores, embeddings, sources
+- **[RAG Configuration](https://docs.agentos.sh/features/rag-memory)**: vector stores, embeddings, sources
 - **[Guardrails](https://docs.agentos.sh/features/guardrails-architecture)**: 5 tiers, 6 packs
 - **[Voice Pipeline](https://docs.agentos.sh/features/voice-pipeline)**: TTS, STT, telephony
 - **[Blog](https://docs.agentos.sh/blog)**: engineering posts, benchmark publications, transparency audits
