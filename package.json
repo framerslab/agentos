@@ -35,6 +35,11 @@
       "default": "./dist/api/agency.js",
       "types": "./dist/api/agency.d.ts"
     },
+    "./api/souledAgent": {
+      "import": "./dist/api/souledAgent.js",
+      "default": "./dist/api/souledAgent.js",
+      "types": "./dist/api/souledAgent.d.ts"
+    },
     "./api/generateText": {
       "import": "./dist/api/generateText.js",
       "default": "./dist/api/generateText.js",

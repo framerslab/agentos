@@ -56,6 +56,8 @@ export {
 // --- Agent & Agency ---
 export { agent } from './agent.js';
 export { agency } from './agency.js';
+export { souledAgent } from './souledAgent.js';
+export type { SouledAgentOptions, SouledAgent } from './souledAgent.js';
 export { exportAgent } from './exportAgent.js';
 
 // --- Model routing ---
