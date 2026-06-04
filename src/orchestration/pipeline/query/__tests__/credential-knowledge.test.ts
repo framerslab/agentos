@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { KeywordFallback } from '../KeywordFallback.js';
 
@@ -18,12 +18,29 @@ import { KeywordFallback } from '../KeywordFallback.js';
 // Corpus loading
 // ---------------------------------------------------------------------------
 
-/** Path to the bundled platform knowledge corpus. */
-const corpusPath = resolve(__dirname, '../../../knowledge/platform-corpus.json');
+/**
+ * Candidate paths for the bundled platform knowledge corpus. This test lives at
+ * `src/orchestration/pipeline/query/__tests__/`, so the package-root `knowledge/`
+ * directory is five levels up. The shallower entries are kept as fallbacks for the
+ * published `dist/` layout. A direct `readFileSync` on the wrong path throws ENOENT
+ * at import time, which collapses the whole file to a "0 test" suite — hence the
+ * `existsSync` probe and the `describe.skip` guard below.
+ */
+const CORPUS_CANDIDATES = [
+  resolve(__dirname, '../../../../../knowledge/platform-corpus.json'),
+  resolve(__dirname, '../../../../knowledge/platform-corpus.json'),
+  resolve(__dirname, '../../../knowledge/platform-corpus.json'),
+];
 
-/** Parsed platform corpus entries. */
+/** Resolved corpus path, or null when the generated corpus is unavailable. */
+const corpusPath = CORPUS_CANDIDATES.find((p) => existsSync(p)) ?? null;
+
+/** Parsed platform corpus entries (empty when the corpus is unavailable). */
 const corpus: Array<{ id: string; heading: string; content: string; category: string }> =
-  JSON.parse(readFileSync(corpusPath, 'utf-8'));
+  corpusPath ? JSON.parse(readFileSync(corpusPath, 'utf-8')) : [];
+
+/** Run the suite only when the generated corpus is present. */
+const describeIfCorpus = corpusPath ? describe : describe.skip;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -46,7 +63,7 @@ function toChunks() {
 // Tests — FAQ entry existence
 // ---------------------------------------------------------------------------
 
-describe('Credential setup knowledge in platform corpus', () => {
+describeIfCorpus('Credential setup knowledge in platform corpus', () => {
   it('contains Gmail setup FAQ', () => {
     const gmail = corpus.find((e) => e.id === 'faq:setup-gmail');
     expect(gmail).toBeDefined();
