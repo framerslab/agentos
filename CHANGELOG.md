@@ -1,3 +1,8 @@
+## <small>0.9.40 (2026-06-04)</small>
+
+* fix(agency): mark the optional ws dynamic import with @vite-ignore ([c7f64e737942d771917cdd6fcfa13d1f8a678d44](https://github.com/framerslab/agentos/commit/c7f64e737942d771917cdd6fcfa13d1f8a678d44))
+* test: fix standalone-CI test infra after the src reorg ([027613a04e750a4b70a955d8ec9e566ba2d58a8c](https://github.com/framerslab/agentos/commit/027613a04e750a4b70a955d8ec9e566ba2d58a8c))
+
 ## <small>0.9.39 (2026-06-04)</small>
 
 * test: repoint root-level test imports to the reorganized src layout ([ae98e2570edeeabc07e955a869d36b70d80bb507](https://github.com/framerslab/agentos/commit/ae98e2570edeeabc07e955a869d36b70d80bb507))
