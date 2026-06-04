@@ -1,4 +1,4 @@
-# Soul Files — Per-Agent Identity in Markdown
+# Soul Files & the Markdown Memory Wiki
 
 AgentOS supports a markdown-based identity convention for agents, modeled after
 the OpenClaw workspace pattern and the [aaronjmars/soul.md](https://github.com/aaronjmars/soul.md)
@@ -6,6 +6,8 @@ spec. Identity, voice, procedural rules, and long-term memory all live in plain
 markdown files inside a per-agent workspace directory. The runtime loads them at
 boot, parses YAML frontmatter into structured [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts) fields, and
 injects the prose as system messages.
+
+The `memory/` directory is the agent's **LLM wiki**: a markdown knowledge base the agent reads and rewrites itself (the "LLM keeps a wiki" pattern). Markdown is the source of truth and the vector/graph index is rebuilt from it; [`souledAgent()`](https://docs.agentos.sh/getting-started/high-level-api) wires it end to end. Full detail in [The `memory/` Wiki](#the-memory-wiki) below.
 
 ![Soul file anatomy: six-file workspace (SOUL.md required, STYLE/IDENTITY/AGENTS/MEMORY/examples optional) loads at boot into structured persona fields and a prose system prelude, resolving per-turn to a persona card, behavioral rules, persistent memory, and output calibration](/img/diagrams/soul-files-anatomy.svg)
 
@@ -35,9 +37,9 @@ Don't mix them.
 
 ## The `memory/` Wiki
 
-Long-term memory is a directory of markdown pages: a wiki the agent compiles from
-what it learns and reads back on demand. It is the source of truth, and the vector
-and graph index is rebuilt from it.
+Long-term memory is a directory of markdown pages: the **LLM wiki**. It is a knowledge
+base the agent compiles from what it learns and reads back on demand. Markdown is the
+source of truth, and the vector and graph index is rebuilt from it.
 
 ```
 <agent-id>/memory/
