@@ -1,3 +1,10 @@
+## <small>0.9.42 (2026-06-04)</small>
+
+* feat(providers): default to Claude Sonnet 4.6; add Opus 4.8 to the catalog and temperature handling ([80f3bec76b965b9f4b534f76ce3761338d0c3b43](https://github.com/framerslab/agentos/commit/80f3bec76b965b9f4b534f76ce3761338d0c3b43))
+* docs: publish the image-segmentation feature guide ([93e9358bffb289ac7d0c1ff8465ca5f22338abad](https://github.com/framerslab/agentos/commit/93e9358bffb289ac7d0c1ff8465ca5f22338abad))
+* docs: streamline README (trim reference-depth from citation, tuning, whitepaper, methodology) ([3c820477e69908ab9c65dc46e1b9290ea4a7f5e7](https://github.com/framerslab/agentos/commit/3c820477e69908ab9c65dc46e1b9290ea4a7f5e7))
+* Merge remote-tracking branch 'origin/master' ([bbd335f0c8f57e5cc58feece316f13a0c1d61172](https://github.com/framerslab/agentos/commit/bbd335f0c8f57e5cc58feece316f13a0c1d61172))
+
 ## <small>0.9.41 (2026-06-04)</small>
 
 * Merge remote-tracking branch 'origin/master' ([0f86bfad0d9776dfc055aa0688301990f697dd0e](https://github.com/framerslab/agentos/commit/0f86bfad0d9776dfc055aa0688301990f697dd0e))
