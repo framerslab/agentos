@@ -131,7 +131,7 @@ When a vector is supplied, the kernel weights retrieval, specialist routing, and
 
 ### Soul Files (per-agent identity in markdown)
 
-Identity, voice, hard limits, and HEXACO scores can live in a `SOUL.md` workspace alongside companion files (`STYLE.md`, `IDENTITY.md`, `AGENTS.md`, `MEMORY.md`, `examples/`). The runtime parses YAML frontmatter into structured config and injects the markdown body as the first system message: before instructions, skills, or chain-of-thought. Compatible with the [aaronjmars/soul.md](https://github.com/aaronjmars/soul.md) and OpenClaw conventions.
+Identity, voice, hard limits, and HEXACO scores can live in a `SOUL.md` workspace alongside companion files (`STYLE.md`, `IDENTITY.md`, `AGENTS.md`, `memory/`, `examples/`). The runtime parses YAML frontmatter into structured config and injects the markdown body as the first system message: before instructions, skills, or chain-of-thought. Compatible with the [aaronjmars/soul.md](https://github.com/aaronjmars/soul.md) and OpenClaw conventions.
 
 ```ts
 // Workspace path: loads SOUL.md + companion files from the directory
@@ -147,7 +147,15 @@ const ephemeral = agent({
 });
 ```
 
-The HEXACO frontmatter in `SOUL.md` flows into the same `PersonaDriftMechanism` and `PersonaOverlayManager` machinery as the inline `personality:` config above: the two paths produce identical runtime behavior. See [docs/SOUL_FILES.md](./docs/SOUL_FILES.md) for the full 6-file workspace spec.
+The HEXACO frontmatter in `SOUL.md` flows into the same `PersonaDriftMechanism` and `PersonaOverlayManager` machinery as the inline `personality:` config above: the two paths produce identical runtime behavior. See [docs/SOUL_FILES.md](./docs/SOUL_FILES.md) for the full workspace spec, including the `memory/` wiki.
+
+`memory/` is a markdown wiki (an `index.md` catalog plus `entities/`, `concepts/`, and `log/` pages) that is the agent's long-term memory: markdown is the source of truth, and the vector/graph index is rebuilt from it. [`souledAgent()`](./docs/getting-started/HIGH_LEVEL_API.md) wires it end to end in one call: the agent reads `index.md` from its prelude, opens pages with the `read_memory_page` tool, and folds new conversation back into pages on consolidation.
+
+```ts
+import { souledAgent } from '@framers/agentos';
+
+const aria = await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents/aria' });
+```
 
 ---
 

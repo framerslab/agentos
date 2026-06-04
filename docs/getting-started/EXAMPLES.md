@@ -753,7 +753,7 @@ Workspace layout (per agent):
 ├── STYLE.md      # voice, syntax, vocabulary patterns (optional)
 ├── IDENTITY.md   # display card: name, role, agent-ID (optional)
 ├── AGENTS.md     # procedural rules (optional)
-├── MEMORY.md     # long-term facts (auto-managed)
+├── memory/       # long-term memory wiki: index.md + entities/ + concepts/ + log/ (auto-managed)
 └── examples/     # good-outputs.md + bad-outputs.md (optional)
 ```
 
@@ -816,6 +816,23 @@ const reply = await aria.generate('I need help with my invoice.');
 ```
 
 The HEXACO frontmatter flows into the same `PersonaDriftMechanism` and [`PersonaOverlayManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/persona_overlays/PersonaOverlayManager.ts) as inline `personality:` config — both paths produce identical runtime behavior. See [SOUL_FILES.md](../SOUL_FILES.md) for the full 6-file workspace spec.
+
+For an agent whose long-term memory **is** its `memory/` wiki, use `souledAgent()` instead of `agent()`. It injects `memory/index.md` into the prelude, adds the `read_memory_page` tool, and folds new conversation into entity/concept pages:
+
+```typescript
+import { souledAgent } from '@framers/agentos';
+
+const aria = await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents/aria' });
+
+const reply = await aria.generate('I need help with my invoice.');
+
+// Fold this session's conversation into the wiki mid-session
+// (also runs automatically on close()):
+await aria.memory?.compileWiki();
+await aria.close();
+```
+
+See [High-Level API](./HIGH_LEVEL_API.md) for the full `souledAgent()` reference.
 
 ---
 

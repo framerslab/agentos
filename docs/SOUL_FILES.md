@@ -50,8 +50,10 @@ and graph index is rebuilt from it.
 
 Pages are markdown with YAML frontmatter and `[[wikilinks]]`. The agent reads
 `index.md` from its prelude, then opens any page with the `read_memory_page` tool.
-On the consolidation tick and at session end, the LLM folds new traces into pages,
-merging rather than clobbering human edits; git versions every change.
+The LLM folds new conversation into pages when memory consolidates: a
+[`souledAgent`](getting-started/HIGH_LEVEL_API.md) runs this on the agent's `close()`,
+and `agent.memory.compileWiki()` triggers it mid-session. Merges integrate new facts
+rather than clobbering human edits; git versions every change.
 
 A legacy single-file `MEMORY.md` auto-migrates into `memory/index.md` on first load
 and is left untouched on disk.
