@@ -1,3 +1,7 @@
+## <small>0.9.47 (2026-06-06)</small>
+
+* fix(generateText): forward requestTimeout on planning + prompt-shim completion paths ([b6d9c64ace5d9d45ddfcecd6f76de0a060163da3](https://github.com/framerslab/agentos/commit/b6d9c64ace5d9d45ddfcecd6f76de0a060163da3))
+
 ## <small>0.9.46 (2026-06-05)</small>
 
 * fix(anthropic): bound the response-body read in makeApiRequest ([c815c20115c7f271529226e17525c226d42e6085](https://github.com/framerslab/agentos/commit/c815c20115c7f271529226e17525c226d42e6085))
