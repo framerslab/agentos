@@ -1,3 +1,8 @@
+## <small>0.9.53 (2026-06-08)</small>
+
+* Merge branch 'master' of https://github.com/framerslab/agentos ([8ed77a09cd58b79eef9a6c67297a0eb792886224](https://github.com/framerslab/agentos/commit/8ed77a09cd58b79eef9a6c67297a0eb792886224))
+* feat(agent): thread extended-thinking budget through generateText + native tool loop ([cc42b7c533c58b086e60ff531d60a312b10977df](https://github.com/framerslab/agentos/commit/cc42b7c533c58b086e60ff531d60a312b10977df))
+
 ## <small>0.9.52 (2026-06-08)</small>
 
 * fix(anthropic): replay thinking only on the latest assistant turn (bound tool-loop payload) ([c5d1e09d2416340704c13fddfeb4be64892fa345](https://github.com/framerslab/agentos/commit/c5d1e09d2416340704c13fddfeb4be64892fa345))
