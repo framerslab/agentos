@@ -58,6 +58,17 @@ export type MessageContent = string | Array<MessageContentPart>;
  * Represents a single message in a conversation, conforming to a structure
  * widely adopted by chat-based LLM APIs.
  */
+/**
+ * An Anthropic extended-thinking block, captured from a response and replayed
+ * verbatim on the next tool-loop turn. `signature` (standard) and `data`
+ * (redacted) are opaque, provider-issued tokens that MUST be replayed exactly,
+ * in order — never strip, reorder, or regenerate them, or the Messages API
+ * rejects the turn.
+ */
+export type ThinkingBlock =
+  | { type: 'thinking'; thinking: string; signature: string }
+  | { type: 'redacted_thinking'; data: string };
+
 export interface ChatMessage {
   /** The role of the entity sending the message. */
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -76,6 +87,15 @@ export interface ChatMessage {
       arguments: string;
     };
   }>;
+  /**
+   * Anthropic extended-thinking blocks emitted on this assistant turn.
+   * Captured from the response and replayed verbatim (signatures intact) on
+   * the next tool-loop turn — Anthropic 400s a tool turn whose prior thinking
+   * blocks aren't replayed. Present ONLY when the request enabled extended
+   * thinking; undefined on every non-thinking turn (the existing path is
+   * unchanged).
+   */
+  thinkingBlocks?: ThinkingBlock[];
 }
 
 // ... (rest of IProvider.ts remains the same as provided by user initially)

@@ -47,7 +47,7 @@ import { IWorkingMemory } from './memory/IWorkingMemory';
 import { IPromptEngine, PromptExecutionContext, PromptComponents, PromptEngineResult, ModelTargetInfo } from '../../core/llm/IPromptEngine';
 import { IRetrievalAugmentor, RagRetrievalOptions, RagDocumentInput, RagIngestionOptions, RagMemoryCategory } from '../rag/IRetrievalAugmentor';
 
-import { ChatMessage, ModelCompletionOptions } from '../../core/llm/providers/IProvider';
+import { ChatMessage, ModelCompletionOptions, ThinkingBlock } from '../../core/llm/providers/IProvider';
 
 import { AIModelProviderManager } from '../../core/llm/providers/AIModelProviderManager';
 import { IUtilityAI, SummarizationOptions } from '../nlp/ai_utilities/IUtilityAI';
@@ -875,6 +875,12 @@ export class GMI implements IGMI {
 
         let currentIterationTextResponse = "";
         let currentIterationToolCallRequests: ToolCallRequest[] = [];
+        // Extended-thinking blocks emitted this iteration (Opus 4.7/4.8 with
+        // thinking enabled). Captured from the final chunk + stored on the
+        // assistant turn so the next tool turn replays them verbatim, which
+        // Anthropic requires. Empty for every non-thinking turn, so the stored
+        // turn is unchanged on the normal path.
+        let currentIterationThinkingBlocks: ThinkingBlock[] = [];
 
         let textDeltaEmitted = false;
         for await (const chunk of provider.generateCompletionStream(modelTargetInfo.modelId, promptEngineResult.prompt as ChatMessage[], llmOptions)) {
@@ -892,6 +898,11 @@ export class GMI implements IGMI {
 
           // Handle fully formed tool_calls if present in the chunk's message
           const choice = chunk.choices?.[0];
+          // Capture extended-thinking blocks from the final chunk so they ride
+          // the assistant turn into history (replayed verbatim next tool turn).
+          if (choice?.message?.thinkingBlocks?.length) {
+            currentIterationThinkingBlocks = choice.message.thinkingBlocks;
+          }
           if (choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
             currentIterationToolCallRequests = choice.message.tool_calls.map((tc: any) => ({ // tc is from IProvider.ChatMessage.tool_calls
                 id: tc.id || `toolcall-${uuidv4()}`, // Ensure ID
@@ -943,6 +954,7 @@ export class GMI implements IGMI {
                 function: { name: tc.name, arguments: JSON.stringify(tc.arguments) }
               }))
             : undefined,
+          ...(currentIterationThinkingBlocks.length > 0 && { thinkingBlocks: currentIterationThinkingBlocks }),
         });
 
         if (currentIterationToolCallRequests.length > 0) {

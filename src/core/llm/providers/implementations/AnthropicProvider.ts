@@ -22,6 +22,7 @@
 import {
   IProvider,
   ChatMessage,
+  ThinkingBlock,
   MessageContentPart,
   ModelCompletionOptions,
   ModelCompletionResponse,
@@ -129,9 +130,15 @@ export function modelSupportsTemperature(modelId: string): boolean {
 
 /** A single content block in an Anthropic message (text, tool_use, or tool_result). */
 interface AnthropicContentBlock {
-  type: 'text' | 'tool_use' | 'tool_result' | 'image';
+  type: 'text' | 'tool_use' | 'tool_result' | 'image' | 'thinking' | 'redacted_thinking';
   /** Present when type === 'text'. */
   text?: string;
+  /** Present when type === 'thinking' — the reasoning text. */
+  thinking?: string;
+  /** Present when type === 'thinking' — opaque replay signature; preserve verbatim. */
+  signature?: string;
+  /** Present when type === 'redacted_thinking' — encrypted reasoning blob; preserve verbatim. */
+  data?: string;
   /** Present when type === 'tool_use'. */
   id?: string;
   name?: string;
@@ -196,9 +203,11 @@ interface AnthropicStreamContentBlockDelta {
   type: 'content_block_delta';
   index: number;
   delta: {
-    type: 'text_delta' | 'input_json_delta';
+    type: 'text_delta' | 'input_json_delta' | 'thinking_delta' | 'signature_delta';
     text?: string;
     partial_json?: string;
+    thinking?: string;
+    signature?: string;
   };
 }
 
@@ -542,6 +551,13 @@ export class AnthropicProvider implements IProvider {
     let outputTokens = 0;
     /** Map from content block index → tool call accumulator */
     const toolCallAccum: Map<number, { id: string; name: string; argsJson: string }> = new Map();
+    /**
+     * Map from content block index → accumulating thinking block. Standard
+     * thinking accumulates text + signature across deltas; redacted thinking
+     * arrives whole in content_block_start. Assembled in index order on the
+     * final chunk so the agent loop can replay them verbatim.
+     */
+    const thinkingAccum: Map<number, ThinkingBlock> = new Map();
 
     const abortHandler = () => { /* consumer checks abortSignal each iteration */ };
     abortSignal?.addEventListener('abort', abortHandler, { once: true });
@@ -576,6 +592,19 @@ export class AnthropicProvider implements IProvider {
                 id: event.content_block.id ?? `call_${Date.now()}_${event.index}`,
                 name: event.content_block.name ?? 'unknown',
                 argsJson: '',
+              });
+            } else if (event.content_block.type === 'thinking') {
+              // Standard thinking: text + signature accumulate across deltas.
+              thinkingAccum.set(event.index, {
+                type: 'thinking',
+                thinking: event.content_block.thinking ?? '',
+                signature: event.content_block.signature ?? '',
+              });
+            } else if (event.content_block.type === 'redacted_thinking') {
+              // Redacted thinking arrives whole — capture the blob verbatim.
+              thinkingAccum.set(event.index, {
+                type: 'redacted_thinking',
+                data: event.content_block.data ?? '',
               });
             }
             break;
@@ -626,6 +655,23 @@ export class AnthropicProvider implements IProvider {
                   }],
                 };
               }
+            } else if (
+              event.delta.type === 'thinking_delta' &&
+              typeof event.delta.thinking === 'string'
+            ) {
+              // Internal reasoning — accumulated, not surfaced as a text delta.
+              const accum = thinkingAccum.get(event.index);
+              if (accum && accum.type === 'thinking') {
+                accum.thinking += event.delta.thinking;
+              }
+            } else if (
+              event.delta.type === 'signature_delta' &&
+              typeof event.delta.signature === 'string'
+            ) {
+              const accum = thinkingAccum.get(event.index);
+              if (accum && accum.type === 'thinking') {
+                accum.signature += event.delta.signature;
+              }
             }
             break;
           }
@@ -638,6 +684,12 @@ export class AnthropicProvider implements IProvider {
             // Assemble final tool_calls array from accumulated blocks
             const toolCalls = this.assembleToolCalls(toolCallAccum);
             const hasToolCalls = toolCalls.length > 0;
+
+            // Assemble thinking blocks in content-block index order so they
+            // replay in the exact sequence the model emitted them.
+            const thinkingBlocks: ThinkingBlock[] = Array.from(thinkingAccum.entries())
+              .sort((a, b) => a[0] - b[0])
+              .map(([, block]) => block);
 
             const usage: ModelUsage = {
               promptTokens: inputTokens,
@@ -657,6 +709,7 @@ export class AnthropicProvider implements IProvider {
                   role: 'assistant',
                   content: accumulatedContent || null,
                   ...(hasToolCalls && { tool_calls: toolCalls }),
+                  ...(thinkingBlocks.length > 0 && { thinkingBlocks }),
                 },
                 finishReason: stopReason,
               }],
@@ -974,7 +1027,17 @@ export class AnthropicProvider implements IProvider {
     // --- Assistant with tool_calls ---
     if (msg.role === 'assistant' && msg.tool_calls?.length) {
       const content: AnthropicContentBlock[] = [];
-      // Include any text content first
+      // Thinking blocks MUST come first — Anthropic requires the assistant
+      // turn's reasoning (verbatim, signatures intact) to precede its text and
+      // tool_use blocks when extended thinking is in play.
+      for (const tb of msg.thinkingBlocks ?? []) {
+        content.push(
+          tb.type === 'thinking'
+            ? { type: 'thinking', thinking: tb.thinking, signature: tb.signature }
+            : { type: 'redacted_thinking', data: tb.data },
+        );
+      }
+      // Include any text content next
       if (typeof msg.content === 'string' && msg.content) {
         content.push({ type: 'text', text: msg.content });
       }
@@ -1141,6 +1204,24 @@ export class AnthropicProvider implements IProvider {
         },
       }));
 
+    // Collect extended-thinking blocks (Opus 4.7/4.8 with thinking enabled).
+    // Captured so the agent loop can replay them verbatim on the next tool
+    // turn — Anthropic requires it. Empty on every non-thinking response, so
+    // the assistant message below carries no `thinkingBlocks` field then.
+    const thinkingBlocks = apiResponse.content.flatMap((block): ThinkingBlock[] => {
+      if (
+        block.type === 'thinking' &&
+        typeof block.thinking === 'string' &&
+        typeof block.signature === 'string'
+      ) {
+        return [{ type: 'thinking', thinking: block.thinking, signature: block.signature }];
+      }
+      if (block.type === 'redacted_thinking' && typeof block.data === 'string') {
+        return [{ type: 'redacted_thinking', data: block.data }];
+      }
+      return [];
+    });
+
     // Schema-driven structured output: if the request set a forced tool
     // for structured output, find the matching tool_use block and surface
     // its input as JSON-string content. This keeps result.text uniform
@@ -1179,6 +1260,7 @@ export class AnthropicProvider implements IProvider {
         role: 'assistant',
         content: fullText || null,
         ...(hasToolCalls && { tool_calls: toolCalls }),
+        ...(thinkingBlocks.length > 0 && { thinkingBlocks }),
       },
       finishReason,
     };
@@ -1363,7 +1445,7 @@ export class AnthropicProvider implements IProvider {
         // race guarantees the await resolves within requestTimeout + 500ms.
         const fetchPromise = fetch(url, {
           method,
-          headers: { ...headers, 'Content-Type': 'application/json', connection: 'close' },
+          headers: { ...headers, ...this.thinkingBetaHeaders(body), 'Content-Type': 'application/json', connection: 'close' },
           body: JSON.stringify(body),
           signal: controller.signal,
         });
@@ -1491,7 +1573,7 @@ export class AnthropicProvider implements IProvider {
     try {
       const response = await fetch(url, {
         method: 'POST',
-        headers: { ...headers, 'Content-Type': 'application/json' },
+        headers: { ...headers, ...this.thinkingBetaHeaders(body), 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         signal: controller.signal,
       });
@@ -1558,6 +1640,39 @@ export class AnthropicProvider implements IProvider {
       'anthropic-version': '2023-06-01',
       'User-Agent': 'AgentOS/1.0 (AnthropicProvider)',
     };
+  }
+
+  /**
+   * The `anthropic-beta` header for interleaved extended thinking, returned
+   * only when this request actually uses thinking — either it enables it
+   * outbound (`thinking` in the body) or it replays captured thinking blocks
+   * from a prior assistant turn. Empty otherwise, so non-thinking traffic is
+   * byte-for-byte unchanged.
+   */
+  private thinkingBetaHeaders(body: Record<string, unknown>): Record<string, string> {
+    return this.payloadUsesThinking(body)
+      ? { 'anthropic-beta': 'interleaved-thinking-2025-05-14' }
+      : {};
+  }
+
+  /** True when the request enables extended thinking or replays thinking blocks. */
+  private payloadUsesThinking(body: Record<string, unknown>): boolean {
+    if (body.thinking != null) return true;
+    const messages = body.messages;
+    if (!Array.isArray(messages)) return false;
+    return messages.some(m => {
+      const content = (m as { content?: unknown }).content;
+      return (
+        Array.isArray(content) &&
+        content.some(
+          b =>
+            b != null &&
+            typeof b === 'object' &&
+            ((b as { type?: unknown }).type === 'thinking' ||
+              (b as { type?: unknown }).type === 'redacted_thinking'),
+        )
+      );
+    });
   }
 
   // -------------------------------------------------------------------------

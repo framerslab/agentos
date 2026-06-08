@@ -349,6 +349,123 @@ describe('AnthropicProvider', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Thinking-block capture (B1) — round-trip substrate for the agent loop
+  // -------------------------------------------------------------------------
+
+  describe('thinking-block capture', () => {
+    it('captures thinking blocks (with signature) onto the assistant message', async () => {
+      fetchMock.mockResolvedValueOnce(
+        mockJsonResponse(
+          makeAnthropicResponse({
+            content: [
+              { type: 'thinking', thinking: 'Let me reason about this.', signature: 'sig-abc123' },
+              { type: 'text', text: 'The answer is 42.' },
+            ],
+          }),
+        ),
+      );
+
+      const res = await provider.generateCompletion(
+        'claude-opus-4-8',
+        [{ role: 'user', content: 'Hi' }],
+        {},
+      );
+
+      const msg = res.choices[0].message;
+      // The signature MUST survive verbatim — it's replayed on the next turn.
+      expect(msg.thinkingBlocks).toEqual([
+        { type: 'thinking', thinking: 'Let me reason about this.', signature: 'sig-abc123' },
+      ]);
+      expect(msg.content).toBe('The answer is 42.');
+    });
+
+    it('omits thinkingBlocks when the response has none (non-thinking path unchanged)', async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeAnthropicResponse()));
+      const res = await provider.generateCompletion(
+        'claude-sonnet-4-6',
+        [{ role: 'user', content: 'Hi' }],
+        {},
+      );
+      expect(res.choices[0].message.thinkingBlocks).toBeUndefined();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Thinking-block replay (B2) — round-trip back into the tool loop
+  // -------------------------------------------------------------------------
+
+  describe('thinking-block replay', () => {
+    it('replays thinking blocks FIRST in the assistant turn, before text + tool_use', async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeAnthropicResponse()));
+
+      await provider.generateCompletion(
+        'claude-opus-4-8',
+        [
+          { role: 'user', content: 'Solve it' },
+          {
+            role: 'assistant',
+            content: 'Working on it',
+            thinkingBlocks: [{ type: 'thinking', thinking: 'step 1', signature: 'sig-1' }],
+            tool_calls: [
+              { id: 'tc1', type: 'function', function: { name: 'calc', arguments: '{}' } },
+            ],
+          },
+          { role: 'tool', tool_call_id: 'tc1', content: '42' },
+        ],
+        {},
+      );
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      const assistantMsg = requestBody.messages.find((m: any) => m.role === 'assistant');
+      // Anthropic requires thinking → text → tool_use ordering, verbatim.
+      expect(assistantMsg.content[0]).toEqual({
+        type: 'thinking',
+        thinking: 'step 1',
+        signature: 'sig-1',
+      });
+      expect(assistantMsg.content.map((b: any) => b.type)).toEqual(['thinking', 'text', 'tool_use']);
+    });
+
+    it('sets the interleaved-thinking beta header when replaying thinking blocks', async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeAnthropicResponse()));
+      await provider.generateCompletion(
+        'claude-opus-4-8',
+        [
+          {
+            role: 'assistant',
+            content: null,
+            thinkingBlocks: [{ type: 'thinking', thinking: 't', signature: 's' }],
+            tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'f', arguments: '{}' } }],
+          },
+          { role: 'tool', tool_call_id: 'tc1', content: 'r' },
+        ],
+        {},
+      );
+      expect(fetchMock.mock.calls[0][1].headers['anthropic-beta']).toBe(
+        'interleaved-thinking-2025-05-14',
+      );
+    });
+
+    it('sets the beta header when extended thinking is enabled outbound', async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeAnthropicResponse()));
+      await provider.generateCompletion(
+        'claude-opus-4-8',
+        [{ role: 'user', content: 'Hi' }],
+        { thinking: { budgetTokens: 4000 } },
+      );
+      expect(fetchMock.mock.calls[0][1].headers['anthropic-beta']).toBe(
+        'interleaved-thinking-2025-05-14',
+      );
+    });
+
+    it('omits the beta header when no thinking is in play', async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeAnthropicResponse()));
+      await provider.generateCompletion('claude-sonnet-4-6', [{ role: 'user', content: 'Hi' }], {});
+      expect(fetchMock.mock.calls[0][1].headers['anthropic-beta']).toBeUndefined();
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // max_tokens enforcement
   // -------------------------------------------------------------------------
 
@@ -630,6 +747,70 @@ describe('AnthropicProvider', () => {
       expect(finalChunk!.usage).toBeDefined();
       expect(finalChunk!.usage!.promptTokens).toBe(10);
       expect(finalChunk!.usage!.completionTokens).toBe(5);
+    });
+
+    it('accumulates streamed thinking blocks (text + signature) onto the final chunk', async () => {
+      const sseEvents = [
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_think","type":"message","role":"assistant","content":[],"model":"claude-opus-4-8","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":6,"output_tokens":0}}}',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me "}}',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"reason."}}',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-xyz"}}',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Answer"}}',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}',
+        'event: message_stop\ndata: {"type":"message_stop"}',
+      ];
+
+      const stream = createSseStream(sseEvents);
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers(),
+        body: stream,
+      });
+
+      const chunks: any[] = [];
+      for await (const chunk of provider.generateCompletionStream(
+        'claude-opus-4-8',
+        [{ role: 'user', content: 'Hi' }],
+        {},
+      )) {
+        chunks.push(chunk);
+      }
+
+      const finalChunk = chunks.find(c => c.isFinal);
+      expect(finalChunk).toBeDefined();
+      // Streamed thinking text + signature assembled verbatim onto the message.
+      expect(finalChunk!.choices[0].message.thinkingBlocks).toEqual([
+        { type: 'thinking', thinking: 'Let me reason.', signature: 'sig-xyz' },
+      ]);
+      expect(finalChunk!.choices[0].message.content).toBe('Answer');
+    });
+
+    it('streams redacted_thinking blocks verbatim (data preserved)', async () => {
+      const sseEvents = [
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_red","type":"message","role":"assistant","content":[],"model":"claude-opus-4-8","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":6,"output_tokens":0}}}',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"ENC-blob-123"}}',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hi"}}',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}',
+        'event: message_stop\ndata: {"type":"message_stop"}',
+      ];
+      const stream = createSseStream(sseEvents);
+      fetchMock.mockResolvedValueOnce({ ok: true, status: 200, statusText: 'OK', headers: new Headers(), body: stream });
+      const chunks: any[] = [];
+      for await (const chunk of provider.generateCompletionStream('claude-opus-4-8', [{ role: 'user', content: 'Hi' }], {})) {
+        chunks.push(chunk);
+      }
+      const finalChunk = chunks.find(c => c.isFinal);
+      expect(finalChunk!.choices[0].message.thinkingBlocks).toEqual([
+        { type: 'redacted_thinking', data: 'ENC-blob-123' },
+      ]);
     });
 
     it('parses streaming tool_use events with input_json_delta', async () => {
