@@ -1,3 +1,7 @@
+## <small>0.9.50 (2026-06-08)</small>
+
+* fix(generateText): pin gpt-4o-mini on the OpenRouter fallback link ([95d2abda7f63c151a3c7be237f72374cd1f888d4](https://github.com/framerslab/agentos/commit/95d2abda7f63c151a3c7be237f72374cd1f888d4))
+
 ## <small>0.9.49 (2026-06-08)</small>
 
 * feat(anthropic): pass extended-thinking budget through to reasoning-default models ([57e747290a6eca8c9e41b04e917bd5d4f4ddf252](https://github.com/framerslab/agentos/commit/57e747290a6eca8c9e41b04e917bd5d4f4ddf252))
