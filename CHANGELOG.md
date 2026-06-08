@@ -1,3 +1,7 @@
+## <small>0.9.52 (2026-06-08)</small>
+
+* fix(anthropic): replay thinking only on the latest assistant turn (bound tool-loop payload) ([c5d1e09d2416340704c13fddfeb4be64892fa345](https://github.com/framerslab/agentos/commit/c5d1e09d2416340704c13fddfeb4be64892fa345))
+
 ## <small>0.9.51 (2026-06-08)</small>
 
 * feat(anthropic): preserve extended-thinking blocks across the agent tool loop ([0aece1e5480ee0a08d7ea1cea633a0f79315f452](https://github.com/framerslab/agentos/commit/0aece1e5480ee0a08d7ea1cea633a0f79315f452))
