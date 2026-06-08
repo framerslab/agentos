@@ -24,7 +24,7 @@ vi.mock('../../model.js', () => ({
   createProviderManager: hoisted.createProviderManager,
 }));
 
-import { generateText } from '../generateText.js';
+import { generateText, buildFallbackChain } from '../generateText.js';
 import { clearRecordedAgentOSUsage, getRecordedAgentOSUsage } from '../usageLedger.js';
 
 describe('generateText', () => {
@@ -490,5 +490,25 @@ describe('generateText', () => {
         }
       }
     });
+  });
+});
+
+describe('buildFallbackChain — OpenRouter link pins a cheap model', () => {
+  it('gives the OpenRouter fallback entry an explicit cheap model, not the gpt-4o default', () => {
+    const originalKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = 'test-or-key';
+    try {
+      const chain = buildFallbackChain('anthropic');
+      const orEntry = chain.find((e) => e.provider === 'openrouter');
+      expect(orEntry).toBeDefined();
+      // A model-less OpenRouter entry silently defaults to the expensive
+      // `openai/gpt-4o` in the OpenRouter provider, which made failover
+      // traffic the #1 LLM cost in prod (2026-06-07). Pin a cheap
+      // last-resort model so failover never lands on gpt-4o.
+      expect(orEntry?.model).toBe('openai/gpt-4o-mini');
+    } finally {
+      if (originalKey === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = originalKey;
+    }
   });
 });

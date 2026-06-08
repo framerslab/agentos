@@ -894,7 +894,14 @@ export function buildFallbackChain(
     chain.push({ provider: 'anthropic', model: 'claude-haiku-4-5-20251001' });
   }
   if (process.env.OPENROUTER_API_KEY && excludeProvider !== 'openrouter') {
-    chain.push({ provider: 'openrouter' });
+    // Pin a cheap last-resort model. A model-less OpenRouter entry defaults
+    // to `openai/gpt-4o` (the OpenRouter provider's `defaultModel`), so
+    // failover traffic silently lands on the priciest sensible model — that
+    // made `openrouter/openai/gpt-4o` the #1 LLM cost in wilds prod
+    // (2026-06-07, ~half the LLM bill). gpt-4o-mini is ~16x cheaper, same
+    // family (structured-output safe), and routes around an OpenAI-direct
+    // outage that already knocked the `openai` link above out.
+    chain.push({ provider: 'openrouter', model: 'openai/gpt-4o-mini' });
   }
   if (process.env.GEMINI_API_KEY && excludeProvider !== 'gemini') {
     chain.push({ provider: 'gemini' });
