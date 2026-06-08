@@ -300,6 +300,55 @@ describe('AnthropicProvider', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Extended thinking (reasoning budget)
+  // -------------------------------------------------------------------------
+
+  describe('extended thinking', () => {
+    it('sends a thinking block, raises max_tokens, and drops top_p/temperature for opus-4-8', async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeAnthropicResponse()));
+
+      await provider.generateCompletion(
+        'claude-opus-4-8',
+        [{ role: 'user', content: 'Hi' }],
+        { thinking: { budgetTokens: 8000 }, maxTokens: 4000, topP: 0.9 },
+      );
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(requestBody.thinking).toEqual({ type: 'enabled', budget_tokens: 8000 });
+      expect(requestBody.max_tokens).toBe(8000 + 8192);
+      // Extended thinking is incompatible with sampling controls — both dropped.
+      expect(requestBody.top_p).toBeUndefined();
+      expect(requestBody.temperature).toBeUndefined();
+    });
+
+    it('omits the thinking block for a non-reasoning model even when a budget is passed', async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeAnthropicResponse()));
+
+      await provider.generateCompletion(
+        'claude-sonnet-4-6',
+        [{ role: 'user', content: 'Hi' }],
+        { thinking: { budgetTokens: 8000 } },
+      );
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(requestBody.thinking).toBeUndefined();
+    });
+
+    it('omits the thinking block when no budget is requested', async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeAnthropicResponse()));
+
+      await provider.generateCompletion(
+        'claude-opus-4-8',
+        [{ role: 'user', content: 'Hi' }],
+        {},
+      );
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(requestBody.thinking).toBeUndefined();
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // max_tokens enforcement
   // -------------------------------------------------------------------------
 

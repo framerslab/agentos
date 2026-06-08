@@ -33,6 +33,7 @@ import {
 } from '../IProvider';
 import { AnthropicProviderError } from '../errors/AnthropicProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
+import { resolveThinkingPayload } from '../model-thinking.js';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -891,6 +892,25 @@ export class AnthropicProvider implements IProvider {
     }
     if (options.topP !== undefined) payload.top_p = options.topP;
     if (options.stopSequences?.length) payload.stop_sequences = options.stopSequences;
+
+    // --- Extended thinking (reasoning-default Claude models) ---
+    // When a caller passes a thinking budget and the model supports it
+    // (Opus 4.7/4.8), send the `thinking` block and raise max_tokens
+    // above the budget (Anthropic requires max_tokens > budget_tokens).
+    // Extended thinking is incompatible with temperature/top_p, so drop
+    // both. resolveThinkingPayload returns null for non-thinking models
+    // or when no budget is set, leaving the request untouched.
+    const thinkingResolved = resolveThinkingPayload(
+      modelId,
+      options.thinking,
+      payload.max_tokens as number,
+    );
+    if (thinkingResolved) {
+      payload.thinking = thinkingResolved.thinking;
+      payload.max_tokens = thinkingResolved.maxTokens;
+      delete payload.temperature;
+      delete payload.top_p;
+    }
 
     // --- Tool definitions ---
     const tools = this.convertToolDefs(options.tools);
