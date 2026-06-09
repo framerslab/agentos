@@ -133,12 +133,13 @@ export interface ModelCompletionOptions {
    */
   requestTimeout?: number;
   /**
-   * Anthropic extended-thinking budget. When set on a reasoning-default
+   * Anthropic extended-thinking switch. When set on a reasoning-default
    * Claude model (Opus 4.7/4.8), the provider sends
-   * `thinking: { type: 'enabled', budget_tokens }` and raises max_tokens
-   * above the budget. Providers/models that don't support it ignore the
-   * field. Single-shot calls only — preserving thinking blocks across an
-   * agent tool loop is a separate concern.
+   * `thinking: { type: 'adaptive' }` — the only form this family accepts;
+   * the budget number is not sent and max_tokens passes through unchanged.
+   * Providers/models that don't support it ignore the field. Single-shot
+   * calls only — preserving thinking blocks across an agent tool loop is
+   * a separate concern.
    */
   thinking?: { budgetTokens: number };
   /**

@@ -297,9 +297,10 @@ export interface GenerateTextOptions {
   /** Hard cap on output tokens. Provider-dependent default applies when omitted. */
   maxTokens?: number;
   /**
-   * Extended-thinking budget forwarded to thinking-capable models (Opus
-   * 4.7/4.8). When set, the provider emits reasoning blocks and floors
-   * `maxTokens` at `budgetTokens + 8192`. Omitted = thinking off (provider
+   * Extended-thinking switch forwarded to thinking-capable models (Opus
+   * 4.7/4.8). Any positive `budgetTokens` enables adaptive thinking — the
+   * only form this family accepts; the number itself is not sent and
+   * `maxTokens` passes through unchanged. Omitted = thinking off (provider
    * default behavior). Has no effect on models that do not support thinking.
    */
   thinking?: { budgetTokens: number };
@@ -1355,10 +1356,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 tools: toolSchemas,
                 temperature: opts.temperature,
                 maxTokens: opts.maxTokens,
-                // Forward the extended-thinking budget so thinking-capable
+                // Forward the extended-thinking switch so thinking-capable
                 // models (Opus 4.7/4.8) emit reasoning blocks; the provider's
-                // resolveThinkingPayload decides applicability + floors
-                // maxTokens. Omitted callers keep the default (thinking off).
+                // resolveThinkingPayload decides applicability and emits the
+                // adaptive form. Omitted callers keep the default (thinking off).
                 ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
                 // Forward caller toolChoice so orchestrators can force tool_use
                 // (e.g. ai-codegen); models narrate under tool_choice: 'auto'.
