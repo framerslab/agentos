@@ -1,3 +1,8 @@
+## <small>0.9.54 (2026-06-09)</small>
+
+* Merge branch 'master' of https://github.com/framerslab/agentos ([41ae7af7757c21543ba5ce790cc26c97da49f56d](https://github.com/framerslab/agentos/commit/41ae7af7757c21543ba5ce790cc26c97da49f56d))
+* fix(anthropic): clamp forced tool_choice to auto when extended thinking is enabled ([76bc015ceb4aa1d62f84fc6987d514f6f6060020](https://github.com/framerslab/agentos/commit/76bc015ceb4aa1d62f84fc6987d514f6f6060020))
+
 ## <small>0.9.53 (2026-06-08)</small>
 
 * Merge branch 'master' of https://github.com/framerslab/agentos ([8ed77a09cd58b79eef9a6c67297a0eb792886224](https://github.com/framerslab/agentos/commit/8ed77a09cd58b79eef9a6c67297a0eb792886224))
