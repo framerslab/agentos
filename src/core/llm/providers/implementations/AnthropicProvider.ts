@@ -113,10 +113,12 @@ export interface AnthropicProviderConfig {
 /**
  * Whether the given Claude model id accepts the `temperature` parameter.
  *
- * Anthropic deprecated `temperature` on reasoning-default models. Opus 4.7
- * (extended-thinking by default) rejects requests that include it with
- * HTTP 400 "`temperature` is deprecated for this model." Every earlier
- * Claude model (Opus ≤ 4.6, Sonnet, Haiku) still accepts it.
+ * Anthropic deprecated `temperature` on reasoning-default models. Opus 4.7,
+ * Opus 4.8, and Fable 5 (extended-thinking by default) reject requests that
+ * include it with HTTP 400 "`temperature` is deprecated for this model."
+ * Every earlier Claude model (Opus ≤ 4.6, Sonnet, Haiku) still accepts it.
+ * The same family also rejects `top_p` / `top_k`, so {@link buildRequestPayload}
+ * gates `top_p` on this predicate too.
  *
  * Deny-by-explicit-family, allow-by-default: keeps older models
  * producing deterministic output and lets new, non-reasoning Claude
@@ -130,10 +132,11 @@ export interface AnthropicProviderConfig {
  *   model, `true` otherwise.
  */
 export function modelSupportsTemperature(modelId: string): boolean {
-  // Claude Opus 4.7 / 4.8 and any dated variant — reasoning-default models
-  // that reject `temperature`. Future reasoning-first siblings (5.x) get
-  // added here as Anthropic releases them.
-  return !/^claude-opus-4-(7|8)\b/i.test(modelId);
+  // Claude Opus 4.7 / 4.8, Fable 5, and any dated variant — reasoning-default
+  // models that reject `temperature` (and `top_p` / `top_k`). Future
+  // reasoning-first siblings get added here as Anthropic releases them, in
+  // lockstep with modelSupportsThinking.
+  return !/^claude-(opus-4-(7|8)|fable-5)\b/i.test(modelId);
 }
 
 // ---------------------------------------------------------------------------
@@ -267,9 +270,22 @@ type AnthropicStreamEvent =
  * getModelInfo for callers that want to size requests. It is informational —
  * NOT the per-request default: when a caller omits `maxTokens`, the request
  * falls back to `config.defaultMaxTokens`, not this value. Anthropic specs:
- * Sonnet 4.x = 64K output, Opus 4.x = 32K.
+ * Fable 5 = 128K output / 1M context, Sonnet 4.x = 64K output, Opus 4.x = 32K.
  */
 const ANTHROPIC_MODELS: ModelInfo[] = [
+  {
+    modelId: 'claude-fable-5',
+    providerId: 'anthropic',
+    displayName: 'Claude Fable 5',
+    description: "Anthropic's most capable widely released model, for the most demanding reasoning and long-horizon agentic work.",
+    capabilities: ['chat', 'tool_use', 'vision_input'],
+    contextWindowSize: 1000000,
+    outputTokenLimit: 128000,
+    pricePer1MTokensInput: 10,
+    pricePer1MTokensOutput: 50,
+    supportsStreaming: true,
+    status: 'active',
+  },
   {
     modelId: 'claude-opus-4-8',
     providerId: 'anthropic',
@@ -1216,7 +1232,14 @@ export class AnthropicProvider implements IProvider {
     ) {
       payload.temperature = options.temperature;
     }
-    if (options.topP !== undefined) payload.top_p = options.topP;
+    // top_p is rejected by the same reasoning-default family that rejects
+    // temperature (Opus 4.7/4.8, Fable 5) with HTTP 400. Gate it on the same
+    // predicate so a caller passing topP without a thinking budget — the path
+    // that otherwise skips the thinking-reconciliation drop below — doesn't
+    // 400 the request.
+    if (options.topP !== undefined && modelSupportsTemperature(modelId)) {
+      payload.top_p = options.topP;
+    }
     if (options.stopSequences?.length) payload.stop_sequences = options.stopSequences;
 
     // --- Extended thinking (reasoning-default Claude models) ---

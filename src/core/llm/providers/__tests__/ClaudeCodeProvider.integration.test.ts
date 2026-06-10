@@ -103,10 +103,10 @@ describe.skipIf(SKIP)('ClaudeCodeProvider integration', () => {
     expect((health.details as any).cliVersion).toBeDefined();
   });
 
-  it('listAvailableModels() returns 3 Claude models', async () => {
+  it('listAvailableModels() returns 4 Claude models', async () => {
     if (!provider) return;
     const models = await provider.listAvailableModels();
-    expect(models).toHaveLength(3);
+    expect(models).toHaveLength(4);
     expect(models.every(m => m.pricePer1MTokensInput === 0)).toBe(true);
   });
 });

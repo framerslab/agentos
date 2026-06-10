@@ -2,10 +2,12 @@ import { describe, it, expect } from 'vitest';
 import { modelSupportsThinking, resolveThinkingPayload } from '../model-thinking';
 
 describe('modelSupportsThinking', () => {
-  it('is true for the reasoning-default Opus 4.7 / 4.8 family (incl. dated variants)', () => {
+  it('is true for the reasoning-default Opus 4.7 / 4.8 family and Fable 5 (incl. dated variants)', () => {
     expect(modelSupportsThinking('claude-opus-4-8')).toBe(true);
     expect(modelSupportsThinking('claude-opus-4-7')).toBe(true);
     expect(modelSupportsThinking('claude-opus-4-8-20260501')).toBe(true);
+    expect(modelSupportsThinking('claude-fable-5')).toBe(true);
+    expect(modelSupportsThinking('claude-fable-5-20260609')).toBe(true);
   });
 
   it('is false for sonnet, haiku, and pre-4.7 opus', () => {

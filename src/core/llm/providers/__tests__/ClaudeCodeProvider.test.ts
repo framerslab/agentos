@@ -204,8 +204,9 @@ describe('ClaudeCodeProvider', () => {
 
     it('returns the static Claude model catalog', async () => {
       const models = await provider.listAvailableModels();
-      expect(models.length).toBe(3);
+      expect(models.length).toBe(4);
       const ids = models.map(m => m.modelId);
+      expect(ids).toContain('claude-fable-5');
       expect(ids).toContain('claude-opus-4-20250514');
       expect(ids).toContain('claude-sonnet-4-20250514');
       expect(ids).toContain('claude-haiku-4-5-20251001');

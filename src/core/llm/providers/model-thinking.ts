@@ -2,11 +2,14 @@
  * @fileoverview Extended-thinking helpers for the Anthropic
  * reasoning-default Claude models.
  *
- * The Opus 4.7 / 4.8 family reasons by default and accepts ONLY the
- * adaptive thinking form on the Messages API: `thinking: { type:
+ * The Opus 4.7 / 4.8 family and Fable 5 reason by default and accept ONLY
+ * the adaptive thinking form on the Messages API: `thinking: { type:
  * 'adaptive' }`. The older manual form `thinking: { type: 'enabled',
  * budget_tokens }` is removed on this family and returns a 400
- * ('"thinking.type.enabled" is not supported for this model'). Depth is
+ * ('"thinking.type.enabled" is not supported for this model'). Fable 5 adds
+ * one more constraint — an explicit `thinking: { type: 'disabled' }` also
+ * 400s — but the provider only ever emits the adaptive form (or nothing),
+ * never `disabled`, so that path is never hit. Depth is
  * controlled by `output_config.effort`, not a token budget, so the
  * caller-facing `{ budgetTokens }` option acts as the on-switch and the
  * number itself is not sent. {@link AnthropicProvider} sends the block
@@ -25,16 +28,16 @@
  * `thinking` parameter.
  *
  * Allow-by-explicit-family: only the reasoning-default Opus 4.7 / 4.8
- * line (and their dated variants like `claude-opus-4-8-20260501`) accept
- * it; every other Claude model ignores or rejects it. Future
- * reasoning-first siblings (5.x) get added to the regex as Anthropic
- * releases them, in lockstep with `modelSupportsTemperature`.
+ * line and Fable 5 (and their dated variants like
+ * `claude-opus-4-8-20260501`) accept it; every other Claude model ignores
+ * or rejects it. Future reasoning-first siblings get added to the regex as
+ * Anthropic releases them, in lockstep with `modelSupportsTemperature`.
  *
  * @param modelId Anthropic-side model id.
  * @returns `true` when Anthropic accepts a `thinking` block for this model.
  */
 export function modelSupportsThinking(modelId: string): boolean {
-  return /^claude-opus-4-(7|8)\b/i.test(modelId);
+  return /^claude-(opus-4-(7|8)|fable-5)\b/i.test(modelId);
 }
 
 /** The resolved extended-thinking payload plus the max_tokens to send. */

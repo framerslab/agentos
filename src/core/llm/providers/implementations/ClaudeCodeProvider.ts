@@ -49,6 +49,20 @@ export interface ClaudeCodeProviderConfig {
  */
 const CLAUDE_CODE_MODELS: ModelInfo[] = [
   {
+    modelId: 'claude-fable-5',
+    providerId: 'claude-code-cli',
+    displayName: 'Claude Fable 5',
+    description: 'Most capable Claude model — demanding reasoning and long-horizon agentic work',
+    capabilities: ['chat', 'vision_input', 'tool_use'],
+    contextWindowSize: 1_000_000,
+    inputTokenLimit: 1_000_000,
+    outputTokenLimit: 128_000,
+    pricePer1MTokensInput: 0,
+    pricePer1MTokensOutput: 0,
+    supportsStreaming: true,
+    isDefaultModel: false,
+  },
+  {
     modelId: 'claude-opus-4-20250514',
     providerId: 'claude-code-cli',
     displayName: 'Claude Opus 4',

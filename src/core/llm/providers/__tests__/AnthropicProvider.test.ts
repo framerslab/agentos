@@ -412,6 +412,35 @@ describe('AnthropicProvider', () => {
       expect(requestBody.temperature).toBeUndefined();
     });
 
+    it('drops top_p and temperature for fable-5 even without a thinking budget', async () => {
+      fetchMock.mockResolvedValueOnce(mockSseResponse(makeAnthropicResponse()));
+
+      await provider.generateCompletion(
+        'claude-fable-5',
+        [{ role: 'user', content: 'Hi' }],
+        { temperature: 0.7, topP: 0.9, maxTokens: 4000 },
+      );
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      // Fable 5 rejects sampling controls (HTTP 400) just like Opus 4.7/4.8 —
+      // and unlike the thinking path, this drop must hold with no budget set.
+      expect(requestBody.temperature).toBeUndefined();
+      expect(requestBody.top_p).toBeUndefined();
+    });
+
+    it('sends adaptive thinking for fable-5 when a budget is passed', async () => {
+      fetchMock.mockResolvedValueOnce(mockSseResponse(makeAnthropicResponse()));
+
+      await provider.generateCompletion(
+        'claude-fable-5',
+        [{ role: 'user', content: 'Hi' }],
+        { thinking: { budgetTokens: 8000 }, maxTokens: 4000 },
+      );
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(requestBody.thinking).toEqual({ type: 'adaptive' });
+    });
+
     it('omits the thinking block for a non-reasoning model even when a budget is passed', async () => {
       fetchMock.mockResolvedValueOnce(mockSseResponse(makeAnthropicResponse()));
 
@@ -1077,6 +1106,18 @@ describe('AnthropicProvider', () => {
       expect(ids).toContain('claude-sonnet-4-20250514');
       expect(ids).toContain('claude-opus-4-20250514');
       expect(ids).toContain('claude-haiku-4-5-20251001');
+    });
+
+    it('lists claude-fable-5 with 1M context and $10/$50 pricing', async () => {
+      const fable = (await provider.listAvailableModels()).find(
+        m => m.modelId === 'claude-fable-5',
+      );
+      expect(fable).toBeDefined();
+      expect(fable!.contextWindowSize).toBe(1000000);
+      expect(fable!.outputTokenLimit).toBe(128000);
+      expect(fable!.pricePer1MTokensInput).toBe(10);
+      expect(fable!.pricePer1MTokensOutput).toBe(50);
+      expect(fable!.capabilities).toContain('vision_input');
     });
 
     it('filters models by capability', async () => {

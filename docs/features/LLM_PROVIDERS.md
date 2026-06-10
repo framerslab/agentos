@@ -293,9 +293,12 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 | Model | Context | Vision | Tool Calling | Notes |
 |-------|---------|--------|-------------|-------|
-| `claude-opus-4-20250514` | 200K | Yes | Yes | Most capable |
-| `claude-sonnet-4-5-20250929` | 200K | Yes | Yes | Best value |
-| `claude-haiku-3-5-20241022` | 200K | Yes | Yes | Fastest |
+| `claude-fable-5` | 1M | Yes | Yes | Most capable ($10/$50 per MTok) |
+| `claude-opus-4-8` | 1M | Yes | Yes | Best for agents and coding |
+| `claude-sonnet-4-6` | 1M | Yes | Yes | Best value |
+| `claude-haiku-4-5-20251001` | 200K | Yes | Yes | Fastest |
+
+Reasoning-default models (`claude-fable-5`, `claude-opus-4-8`, `claude-opus-4-7`) reject `temperature` and `top_p` with HTTP 400; the provider drops both automatically for these models and sends adaptive thinking when a thinking budget is requested.
 
 ### Google Gemini
 
