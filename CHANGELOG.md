@@ -1,3 +1,7 @@
+## <small>0.9.57 (2026-06-10)</small>
+
+* feat: add Claude Fable 5 model support ([d486b247d4c34c14ccdb5eb5b7d678b51628b085](https://github.com/framerslab/agentos/commit/d486b247d4c34c14ccdb5eb5b7d678b51628b085))
+
 ## <small>0.9.56 (2026-06-09)</small>
 
 * fix(anthropic): stream completions so the idle watchdog bounds mid-body stalls ([67e6de047d93c6ef6396a939090cbd72d3e5534a](https://github.com/framerslab/agentos/commit/67e6de047d93c6ef6396a939090cbd72d3e5534a))
