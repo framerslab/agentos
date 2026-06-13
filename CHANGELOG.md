@@ -1,3 +1,8 @@
+## <small>0.9.61 (2026-06-13)</small>
+
+* Merge branch 'master' of https://github.com/framerslab/agentos ([4a2b1bd3da9ee6624b19a420770f519a2c4d34a0](https://github.com/framerslab/agentos/commit/4a2b1bd3da9ee6624b19a420770f519a2c4d34a0))
+* fix(anthropic): attach auto prompt-cache marker to last system block ([7102367c5af064c535dd86064281e5485f526c9e](https://github.com/framerslab/agentos/commit/7102367c5af064c535dd86064281e5485f526c9e))
+
 ## <small>0.9.60 (2026-06-12)</small>
 
 * fix(anthropic): stream generator declares and captures the cache token counts ([4910b3580148ed3dd57ac1cff6208aaa591c4845](https://github.com/framerslab/agentos/commit/4910b3580148ed3dd57ac1cff6208aaa591c4845))
