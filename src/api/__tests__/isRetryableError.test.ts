@@ -25,7 +25,7 @@ describe('isRetryableError', () => {
 
   it("matches Anthropic's 'credit balance is too low' billing message without an httpStatus field", () => {
     // Regression guard. Production audit 2026-05-20 (session
-    // 3l-63NAZOz1- / cockteased) caught AnthropicProviderError
+    // 3l-63NAZOz1- / redacted-world) caught AnthropicProviderError
     // "Your credit balance is too low to access the Anthropic API.
     // Please go to Plans & Billing to upgrade or purchase credits."
     // The typed AnthropicProviderError carries httpStatus 402 so the
