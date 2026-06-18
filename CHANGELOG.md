@@ -1,3 +1,10 @@
+## <small>0.9.64 (2026-06-18)</small>
+
+* fix(extensions): prevent shell injection in npm install/search ([b0a5ab4a43871945f8161e7131fc92e6db7418c9](https://github.com/framerslab/agentos/commit/b0a5ab4a43871945f8161e7131fc92e6db7418c9))
+* fix(guardrails): add fail-closed posture so an erroring guard can block ([42ee4328e009f77e849db0ffc2f87d8e9df2368e](https://github.com/framerslab/agentos/commit/42ee4328e009f77e849db0ffc2f87d8e9df2368e))
+* Merge branch 'master' of https://github.com/framerslab/agentos ([0ea9f9062f3ef460fbd33ea726297e0d05b6e0cd](https://github.com/framerslab/agentos/commit/0ea9f9062f3ef460fbd33ea726297e0d05b6e0cd))
+* chore(test): redact private world slug from isRetryableError comment ([795938c95c33c8461ca6c1463b28db3403bb08c5](https://github.com/framerslab/agentos/commit/795938c95c33c8461ca6c1463b28db3403bb08c5))
+
 ## <small>0.9.63 (2026-06-14)</small>
 
 * Merge branch 'master' of https://github.com/framerslab/agentos ([d83682383b435bbfd047217b64716e4c3833e091](https://github.com/framerslab/agentos/commit/d83682383b435bbfd047217b64716e4c3833e091))
