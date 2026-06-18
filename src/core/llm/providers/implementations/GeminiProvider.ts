@@ -339,7 +339,7 @@ export class GeminiProvider implements IProvider {
     const payload = this.buildRequestPayload(modelId, messages, options);
     // Gemini uses model-scoped endpoints: /models/{model}:generateContent
     const endpoint = `/models/${modelId}:generateContent`;
-    const apiResponse = await this.makeApiRequest<GeminiResponse>(endpoint, payload);
+    const apiResponse = await this.makeApiRequest<GeminiResponse>(endpoint, payload, options.requestTimeout);
 
     return this.mapResponseToCompletion(apiResponse, modelId);
   }
@@ -383,7 +383,7 @@ export class GeminiProvider implements IProvider {
 
     // Streaming endpoint uses ?alt=sse and the API key query param
     const endpoint = `/models/${modelId}:streamGenerateContent`;
-    const stream = await this.makeStreamRequest(endpoint, payload);
+    const stream = await this.makeStreamRequest(endpoint, payload, options.requestTimeout);
 
     // Accumulators for building the complete response
     let accumulatedContent = '';
@@ -1093,6 +1093,7 @@ export class GeminiProvider implements IProvider {
   private async makeApiRequest<T>(
     endpoint: string,
     body: Record<string, unknown>,
+    requestTimeoutOverride?: number,
   ): Promise<T> {
     // API key is passed as query parameter — Gemini's auth convention
     const url = `${this.config.baseURL}${endpoint}?key=${this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey}`;
@@ -1106,9 +1107,16 @@ export class GeminiProvider implements IProvider {
       'MAX_RETRIES_REACHED',
     );
 
+    // CR8: honor a per-call requestTimeout override (e.g. long codegen) over
+    // the provider default; only Anthropic read this before.
+    const effectiveTimeout =
+      typeof requestTimeoutOverride === 'number' && requestTimeoutOverride > 0
+        ? requestTimeoutOverride
+        : this.config.requestTimeout;
+
     for (let attempt = 0; attempt < this.config.maxRetries!; attempt++) {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), this.config.requestTimeout);
+      const timeoutId = setTimeout(() => controller.abort(), effectiveTimeout);
 
       try {
         const response = await fetch(url, {
@@ -1180,7 +1188,7 @@ export class GeminiProvider implements IProvider {
           lastError = error;
         } else if (error instanceof Error && error.name === 'AbortError') {
           lastError = new GeminiProviderError(
-            `Request timed out after ${this.config.requestTimeout}ms.`,
+            `Request timed out after ${effectiveTimeout}ms.`,
             'REQUEST_TIMEOUT',
           );
         } else {
@@ -1214,6 +1222,7 @@ export class GeminiProvider implements IProvider {
   private async makeStreamRequest(
     endpoint: string,
     body: Record<string, unknown>,
+    requestTimeoutOverride?: number,
   ): Promise<ReadableStream<Uint8Array>> {
     // Both alt=sse and key= are query params
     const url = `${this.config.baseURL}${endpoint}?alt=sse&key=${this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey}`;
@@ -1223,7 +1232,12 @@ export class GeminiProvider implements IProvider {
     };
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.config.requestTimeout);
+    // CR8: honor a per-call requestTimeout override over the provider default.
+    const effectiveTimeout =
+      typeof requestTimeoutOverride === 'number' && requestTimeoutOverride > 0
+        ? requestTimeoutOverride
+        : this.config.requestTimeout;
+    const timeoutId = setTimeout(() => controller.abort(), effectiveTimeout);
 
     try {
       const response = await fetch(url, {
