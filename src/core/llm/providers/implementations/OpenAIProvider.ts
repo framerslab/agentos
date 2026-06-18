@@ -1,4 +1,3 @@
-// @ts-nocheck
 // File: backend/agentos/core/llm/providers/implementations/OpenAIProvider.ts
 
 /**
@@ -40,6 +39,98 @@ import { clampMaxOutputTokens } from '../model-output-limits.js';
 // Assuming a fetch-like interface is available globally or polyfilled (e.g., node-fetch)
 // For Node.js, ensure 'node-fetch' is a dependency or use Node's built-in fetch from v18+.
 // import fetch, { RequestInit, Response as FetchResponse, AbortController } from 'node-fetch'; // Example for Node
+
+/**
+ * Minimal structural types for the subset of OpenAI REST responses this provider
+ * consumes, defined from the fields the mapping code accesses (the API returns a
+ * superset). Previously the whole file was `@ts-nocheck`, which silently masked
+ * this missing namespace and the unguarded `choices` access in the mappers.
+ */
+// eslint-disable-next-line @typescript-eslint/no-namespace
+namespace OpenAIAPITypes {
+  export interface Usage {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  }
+  /** Complete tool call as returned on a non-streaming message. */
+  export interface ToolCall {
+    id: string;
+    type: 'function';
+    function: { name: string; arguments: string };
+  }
+  /** Partial tool call as returned on a streaming delta. */
+  export interface ToolCallDelta {
+    index: number;
+    id?: string;
+    type?: 'function';
+    function?: { name?: string; arguments?: string };
+  }
+  export interface ChatMessage {
+    role: string;
+    content: string | null;
+    tool_calls?: ToolCall[];
+  }
+  export interface ChatChoice {
+    index: number;
+    message: ChatMessage;
+    finish_reason: string | null;
+    logprobs?: unknown;
+  }
+  export interface ChatCompletionResponse {
+    id: string;
+    object: string;
+    created: number;
+    model: string;
+    choices: ChatChoice[];
+    usage?: Usage;
+  }
+  export interface StreamDelta {
+    role?: string;
+    content?: string | null;
+    tool_calls?: ToolCallDelta[];
+  }
+  export interface StreamChoice {
+    index: number;
+    delta: StreamDelta;
+    finish_reason: string | null;
+    logprobs?: unknown;
+  }
+  export interface ChatCompletionStreamResponse {
+    id: string;
+    object: string;
+    created: number;
+    model: string;
+    // Optional: the trailing usage-only chunk (stream_options.include_usage)
+    // carries an empty/absent choices array.
+    choices?: StreamChoice[];
+    usage?: Usage;
+  }
+  export interface ModelAPIObject {
+    id: string;
+    object?: string;
+    created?: number;
+    owned_by?: string;
+  }
+  export interface ListModelsResponse {
+    object?: string;
+    data: ModelAPIObject[];
+  }
+  export interface EmbeddingItem {
+    object?: string;
+    index: number;
+    embedding: number[];
+  }
+  export interface EmbeddingResponse {
+    object?: string;
+    model: string;
+    data: EmbeddingItem[];
+    usage: Usage;
+  }
+  export interface APIErrorResponse {
+    error?: { message?: string; type?: string; code?: string };
+  }
+}
 
 /**
  * Configuration specific to the OpenAIProvider.
@@ -400,7 +491,7 @@ export class OpenAIProvider implements IProvider {
       embeddingDimension: apiModel.id.includes('embedding-3-large') ? 3072 :
                           apiModel.id.includes('embedding-3-small') ? 1536 :
                           apiModel.id.includes('ada-002') ? 1536 : undefined,
-      lastUpdated: new Date(apiModel.created * 1000).toISOString(),
+      lastUpdated: new Date((apiModel.created ?? 0) * 1000).toISOString(),
       status: 'active', // OpenAI doesn't directly provide status in this list, assume active.
     };
   }
@@ -722,16 +813,15 @@ export class OpenAIProvider implements IProvider {
   private mapApiToCompletionResponse(
     apiResponse: OpenAIAPITypes.ChatCompletionResponse
   ): ModelCompletionResponse {
-    const _choice = apiResponse.choices[0]; // Assuming N=1; kept for reference
     return {
       id: apiResponse.id,
       object: apiResponse.object,
       created: apiResponse.created,
       modelId: apiResponse.model,
-      choices: apiResponse.choices.map(c => ({
+      choices: (apiResponse.choices ?? []).map(c => ({
         index: c.index,
         message: {
-          role: c.message.role,
+          role: c.message.role as ModelCompletionChoice['message']['role'],
           content: c.message.content,
           tool_calls: c.message.tool_calls,
         },
@@ -752,7 +842,7 @@ export class OpenAIProvider implements IProvider {
         apiChunk: OpenAIAPITypes.ChatCompletionStreamResponse,
         accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }>
     ): ModelCompletionResponse {
-        const choice = apiChunk.choices[0];
+        const choice = apiChunk.choices?.[0];
         let responseTextDelta: string | undefined;
         let toolCallsDeltas: ModelCompletionResponse['toolCallsDeltas'];
         let finalUsage: ModelUsage | undefined;
@@ -772,6 +862,19 @@ export class OpenAIProvider implements IProvider {
                 choices: [],
                 isFinal: true,
                 usage: usageOnlyUsage,
+            };
+        }
+
+        // After the usage-only sentinel above, a healthy chunk always carries a
+        // choice. Guard defensively so the non-optional accesses below
+        // (choice.index, choice.delta.role) can't crash on a malformed chunk.
+        if (!choice) {
+            return {
+                id: apiChunk.id,
+                object: apiChunk.object,
+                created: apiChunk.created,
+                modelId: apiChunk.model,
+                choices: [],
             };
         }
 
@@ -820,7 +923,7 @@ export class OpenAIProvider implements IProvider {
         const responseChoice: ModelCompletionChoice = {
             index: choice.index,
             message: {
-                role: choice.delta.role || 'assistant', // Role usually comes once or is 'assistant'
+                role: (choice.delta.role || 'assistant') as ModelCompletionChoice['message']['role'], // Role usually comes once or is 'assistant'
                 content: responseTextDelta || null, // Content is delta
                  // For final chunk, assemble complete tool_calls
                 tool_calls: isFinal ? Array.from(accumulatedToolCalls.values()).map(accTc => ({
