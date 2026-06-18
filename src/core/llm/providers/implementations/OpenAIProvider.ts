@@ -187,6 +187,19 @@ type _OpenAIAPIErrorResponse = {
  * @returns `true` when the model needs `max_completion_tokens`.
  */
 export function modelRequiresMaxCompletionTokens(modelId: string): boolean {
+  return isOpenAIReasoningModel(modelId);
+}
+
+/**
+ * Whether `modelId` is an OpenAI reasoning model — the o1/o3/o4 series or the
+ * GPT-5 family. These models reject custom sampling params (`temperature`,
+ * `top_p`) with HTTP 400 in addition to requiring `max_completion_tokens`;
+ * they run only at their fixed defaults. Single source of truth for the
+ * o-series/gpt-5 detection used by both the param guards.
+ *
+ * @param modelId Provider-side model identifier (e.g. `'o3'`, `'gpt-5.4-mini'`).
+ */
+export function isOpenAIReasoningModel(modelId: string): boolean {
   // o1 / o3 / o4 reasoning models, plus GPT-5 family.
   return /^(o\d|gpt-5)/i.test(modelId);
 }
@@ -651,8 +664,13 @@ export class OpenAIProvider implements IProvider {
       payload.stream_options = { include_usage: true };
     }
 
-    if (options.temperature !== undefined) payload.temperature = options.temperature;
-    if (options.topP !== undefined) payload.top_p = options.topP;
+    // Reasoning models (o-series, GPT-5) reject custom sampling params with an
+    // HTTP 400 — they run only at their fixed defaults. Omit temperature/top_p
+    // for them, mirroring the max_tokens → max_completion_tokens switch below.
+    if (!isOpenAIReasoningModel(modelId)) {
+      if (options.temperature !== undefined) payload.temperature = options.temperature;
+      if (options.topP !== undefined) payload.top_p = options.topP;
+    }
     if (options.maxTokens !== undefined) {
       // Clamp to the model's real output ceiling first: a request sized for
       // a flagship model (e.g. 32000 for Claude Opus) is rejected by gpt-4o
