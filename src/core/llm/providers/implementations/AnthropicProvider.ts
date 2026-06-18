@@ -965,8 +965,11 @@ export class AnthropicProvider implements IProvider {
           }
 
           case 'message_delta': {
-            // Contains stop_reason and final output token count
-            outputTokens += event.usage?.output_tokens ?? 0;
+            // Anthropic reports the CUMULATIVE output total in each
+            // message_delta — latest wins. Summing successive deltas (`+=`)
+            // double-counts output tokens and over-reports billing. Mirrors the
+            // streamMessagesToResponse path.
+            outputTokens = event.usage?.output_tokens ?? outputTokens;
             const stopReason = this.mapStopReason(event.delta.stop_reason);
 
             // Assemble final tool_calls array from accumulated blocks
