@@ -76,25 +76,53 @@ const ACTION_SEVERITY: Record<GuardrailAction, number> = {
  * @param timeoutMs - Maximum milliseconds to wait (undefined = no limit)
  * @returns The evaluation result, or `null` on timeout / error
  */
+/** Synthetic BLOCK returned when a fail-closed guardrail throws or times out. */
+function guardrailErrorBlock(reason: string): GuardrailEvaluationResult {
+  return {
+    action: GuardrailAction.BLOCK,
+    reason,
+    reasonCode: 'GUARDRAIL_ERROR',
+    metadata: { failClosed: true },
+  };
+}
+
+const GUARDRAIL_TIMEOUT = Symbol('guardrail-timeout');
+
 async function callWithTimeout(
   fn: () => Promise<GuardrailEvaluationResult | null>,
   timeoutMs?: number,
+  failClosed?: boolean,
 ): Promise<GuardrailEvaluationResult | null> {
   try {
     if (!timeoutMs || timeoutMs <= 0) {
       return await fn();
     }
 
-    // Race the evaluation against a timeout sentinel
+    // Race the evaluation against a timeout sentinel — kept distinct from a
+    // guard that legitimately resolves `null` (= ALLOW), so a timeout can be
+    // handled per the fail-closed policy.
     const result = await Promise.race([
       fn(),
-      new Promise<null>((resolve) => {
-        setTimeout(() => resolve(null), timeoutMs);
+      new Promise<typeof GUARDRAIL_TIMEOUT>((resolve) => {
+        setTimeout(() => resolve(GUARDRAIL_TIMEOUT), timeoutMs);
       }),
     ]);
 
+    if (result === GUARDRAIL_TIMEOUT) {
+      if (failClosed) {
+        console.warn('[AgentOS][Guardrails] callWithTimeout: guardrail timed out, failing CLOSED (block).');
+        return guardrailErrorBlock('Guardrail evaluation timed out');
+      }
+      console.warn('[AgentOS][Guardrails] callWithTimeout: guardrail timed out, failing open.');
+      return null;
+    }
+
     return result;
   } catch (error) {
+    if (failClosed) {
+      console.warn('[AgentOS][Guardrails] callWithTimeout: guardrail threw, failing CLOSED (block).', error);
+      return guardrailErrorBlock('Guardrail evaluation threw an error');
+    }
     console.warn('[AgentOS][Guardrails] callWithTimeout: guardrail threw, failing open.', error);
     return null;
   }
@@ -235,6 +263,7 @@ export class ParallelGuardrailDispatcher {
       const evaluation = await callWithTimeout(
         () => svc.evaluateInput!({ context, input: sanitizedInput }),
         timeoutMs,
+        svc.config?.failClosed,
       );
 
       if (!evaluation) {
@@ -272,6 +301,7 @@ export class ParallelGuardrailDispatcher {
           return callWithTimeout(
             () => svc.evaluateInput!({ context, input: sanitizedInput }),
             timeoutMs,
+            svc.config?.failClosed,
           );
         }),
       );
@@ -465,6 +495,7 @@ export class ParallelGuardrailDispatcher {
           const evaluation = await callWithTimeout(
             () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
             timeoutMs,
+            svc.config?.failClosed,
           );
 
           streamingEvaluationCounts.set(svcId, currentCount + 1);
@@ -506,6 +537,7 @@ export class ParallelGuardrailDispatcher {
             return callWithTimeout(
               () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
               timeoutMs,
+              svc.config?.failClosed,
             ).then((evaluation) => {
               streamingEvaluationCounts.set(svcId, currentCount + 1);
               return { evaluation, registrationIndex, svcId };
@@ -570,6 +602,7 @@ export class ParallelGuardrailDispatcher {
           const evaluation = await callWithTimeout(
             () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
             timeoutMs,
+            svc.config?.failClosed,
           );
 
           if (!evaluation) {
@@ -614,6 +647,7 @@ export class ParallelGuardrailDispatcher {
             return callWithTimeout(
               () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
               timeoutMs,
+              svc.config?.failClosed,
             ).then((evaluation) => ({ evaluation, registrationIndex }));
           });
 

@@ -286,6 +286,19 @@ export interface GuardrailConfig {
   timeoutMs?: number;
 
   /**
+   * Error/timeout posture for this guardrail.
+   *
+   * When `false` (default), a guardrail that throws or times out is skipped
+   * (fail-open) and contributes nothing to the result — so unsafe content can
+   * pass if the guard errors. When `true`, a throw or timeout instead yields a
+   * synthetic BLOCK (fail-closed) so an erroring safety-critical guardrail
+   * never silently lets content through.
+   *
+   * @default false (fail-open — preserves prior behavior)
+   */
+  failClosed?: boolean;
+
+  /**
    * Streaming evaluation mode.
    *
    * - `'per-chunk'` — evaluate every TEXT_DELTA individually (default behavior).
