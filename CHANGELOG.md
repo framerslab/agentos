@@ -1,3 +1,7 @@
+## <small>0.9.71 (2026-06-18)</small>
+
+* fix(safety): LLMJudge fails closed on evaluation error instead of neutral 0.5 ([048288e3d43dc5a3e8743e2798c56fd893de4fe2](https://github.com/framerslab/agentos/commit/048288e3d43dc5a3e8743e2798c56fd893de4fe2))
+
 ## <small>0.9.70 (2026-06-18)</small>
 
 * fix(providers): correct Anthropic output/context limits and clamp max_tokens to the ceiling ([007ca667815eb11dd564b2ca9ac7f98eedf096bc](https://github.com/framerslab/agentos/commit/007ca667815eb11dd564b2ca9ac7f98eedf096bc))
