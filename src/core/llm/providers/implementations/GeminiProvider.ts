@@ -498,6 +498,17 @@ export class GeminiProvider implements IProvider {
       const hasToolCalls = toolCalls.length > 0;
       const usage = this.mapUsage(lastUsage, modelId);
 
+      // Surface a content-policy block (SAFETY/RECITATION with no content) as a
+      // thrown content_filter error — same as the non-streaming path — so the
+      // policy-aware fallback can engage instead of silently yielding an empty
+      // success chunk. The catch below re-throws content_filter so it propagates.
+      if (this.mapFinishReason(lastFinishReason) === 'content_filter' && !accumulatedContent && !hasToolCalls) {
+        throw new GeminiProviderError(
+          `Gemini blocked the response (finishReason: ${lastFinishReason ?? 'unknown'}); no content returned.`,
+          'content_filter',
+        );
+      }
+
       yield {
         id: responseId,
         object: 'chat.completion.chunk',
@@ -517,6 +528,11 @@ export class GeminiProvider implements IProvider {
       };
 
     } catch (streamError: unknown) {
+      // A content-policy block must PROPAGATE (not become a generic error
+      // chunk) so the caller / fallback chain can act on code 'content_filter'.
+      if (streamError instanceof GeminiProviderError && streamError.code === 'content_filter') {
+        throw streamError;
+      }
       const message = streamError instanceof Error
         ? streamError.message
         : 'Gemini stream processing error';
