@@ -1,3 +1,9 @@
+## <small>0.9.69 (2026-06-18)</small>
+
+* fix(providers): also surface Gemini SAFETY blocks in the streaming path ([22d3e9397ae07fe727e95b31f425ef663916ff6e](https://github.com/framerslab/agentos/commit/22d3e9397ae07fe727e95b31f425ef663916ff6e))
+* fix(providers): stop double-counting Anthropic streaming output tokens ([229374f5c25e483f7aaa366514c376240a645bde](https://github.com/framerslab/agentos/commit/229374f5c25e483f7aaa366514c376240a645bde))
+* fix(providers): surface Gemini SAFETY blocks as content-policy errors so fallback engages ([8929e154a6837ef80830a9d83bce4576d9e1a0e7](https://github.com/framerslab/agentos/commit/8929e154a6837ef80830a9d83bce4576d9e1a0e7))
+
 ## <small>0.9.68 (2026-06-18)</small>
 
 * fix(providers): honor per-call requestTimeout in Ollama + OpenRouter ([a3d13dcaf059cfe77582cd18ba724ceb9f894064](https://github.com/framerslab/agentos/commit/a3d13dcaf059cfe77582cd18ba724ceb9f894064))
