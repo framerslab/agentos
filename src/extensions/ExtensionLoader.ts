@@ -7,10 +7,23 @@ import { ExtensionManager } from './ExtensionManager';
 import { ExtensionPack } from './manifest';
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+/**
+ * npm package-name grammar (the install-relevant subset of npm's
+ * validate-npm-package-name). A name that passes contains no shell
+ * metacharacters by construction, so a registry-supplied name can never be
+ * interpreted by a shell. Exported for direct testing of the install guard.
+ */
+export function isValidNpmPackageName(name: string): boolean {
+  if (typeof name !== 'string' || name.length === 0 || name.length > 214) {
+    return false;
+  }
+  return /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/.test(name);
+}
 
 /**
  * Configuration for extension loading
@@ -239,7 +252,14 @@ export class ExtensionLoader {
    * Install extension from npm
    */
   private async installFromNpm(packageName: string): Promise<void> {
-    const { stderr } = await execAsync(`npm install ${packageName}`);
+    // Reject names with shell metacharacters AND use argv form (no shell), so
+    // a registry-supplied name can never be interpreted as a command.
+    if (!isValidNpmPackageName(packageName)) {
+      throw new Error(
+        `Refusing to install invalid npm package name: ${JSON.stringify(packageName)}`,
+      );
+    }
+    const { stderr } = await execFileAsync('npm', ['install', packageName]);
     if (stderr && !stderr.includes('WARN')) {
       throw new Error(`Failed to install ${packageName}: ${stderr}`);
     }
@@ -285,11 +305,17 @@ export class ExtensionLoader {
    */
   async searchNpmExtensions(query?: string): Promise<ExtensionMetadata[]> {
     try {
-      const searchQuery = query 
+      const searchQuery = query
         ? `${this.config.extensionScope} ${query}`
         : `${this.config.extensionScope}/agentos-`;
-      
-      const { stdout } = await execAsync(`npm search ${searchQuery} --json`);
+
+      // argv form (no shell): split into terms exactly as the shell would have,
+      // so a caller-supplied query can't inject a command (CR2 sibling of installFromNpm).
+      const { stdout } = await execFileAsync('npm', [
+        'search',
+        ...searchQuery.split(/\s+/).filter(Boolean),
+        '--json',
+      ]);
       const results = JSON.parse(stdout);
       
       return results.map((pkg: any) => ({

