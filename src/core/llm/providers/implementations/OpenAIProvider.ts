@@ -454,7 +454,9 @@ export class OpenAIProvider implements IProvider {
       '/chat/completions',
       'POST',
       apiKey,
-      requestBody
+      requestBody,
+      false,
+      options.requestTimeout
     );
 
     return this.mapApiToCompletionResponse(apiResponse);
@@ -476,7 +478,8 @@ export class OpenAIProvider implements IProvider {
       'POST',
       apiKey,
       requestBody,
-      true // Indicate streaming response is expected
+      true, // Indicate streaming response is expected
+      options.requestTimeout
     )) as ReadableStream<Uint8Array>;
 
     // Accumulators for streaming tool calls
@@ -930,21 +933,24 @@ export class OpenAIProvider implements IProvider {
     method: 'GET' | 'POST',
     apiKey: string,
     body?: Record<string, unknown>,
-    expectStream?: false
+    expectStream?: false,
+    requestTimeoutOverride?: number
   ): Promise<T>;
   private async makeApiRequest(
     endpoint: string,
     method: 'GET' | 'POST',
     apiKey: string,
     body: Record<string, unknown> | undefined,
-    expectStream: true
+    expectStream: true,
+    requestTimeoutOverride?: number
   ): Promise<ReadableStream<Uint8Array>>;
   private async makeApiRequest<T = unknown>(
     endpoint: string,
     method: 'GET' | 'POST',
     apiKey: string,
     body?: Record<string, unknown>,
-    expectStream: boolean = false
+    expectStream: boolean = false,
+    requestTimeoutOverride?: number
   ): Promise<T | ReadableStream<Uint8Array>> {
     const url = `${this.config.baseURL}${endpoint}`;
     const headers: Record<string, string> = {
@@ -963,7 +969,13 @@ export class OpenAIProvider implements IProvider {
 
     for (let attempt = 0; attempt < this.config.maxRetries!; attempt++) {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), this.config.requestTimeout);
+      // CR8: honor a per-call requestTimeout override (e.g. long codegen) over
+      // the provider's default; only Anthropic read this before.
+      const effectiveTimeout =
+        typeof requestTimeoutOverride === 'number' && requestTimeoutOverride > 0
+          ? requestTimeoutOverride
+          : this.config.requestTimeout;
+      const timeoutId = setTimeout(() => controller.abort(), effectiveTimeout);
 
       try {
         const requestOptions: RequestInit = {
@@ -1017,7 +1029,7 @@ export class OpenAIProvider implements IProvider {
              if (error.code === 'API_CLIENT_ERROR') throw error;
              lastError = error;
         } else if (error instanceof Error && error.name === 'AbortError') {
-          lastError = new OpenAIProviderError(`Request timed out after ${this.config.requestTimeout}ms.`, 'REQUEST_TIMEOUT', undefined, undefined, undefined, error);
+          lastError = new OpenAIProviderError(`Request timed out after ${effectiveTimeout}ms.`, 'REQUEST_TIMEOUT', undefined, undefined, undefined, error);
         } else {
           lastError = new OpenAIProviderError(error instanceof Error ? error.message : 'Network or unknown error', 'NETWORK_ERROR', undefined, undefined, undefined, error);
         }
