@@ -169,6 +169,20 @@ function policyForStatus(status: number | null): ErrorPolicy {
 }
 
 /**
+ * A 4xx that reflects a bad request rather than provider health — the provider
+ * is up and answering; the CALLER's request was wrong (malformed body, unknown
+ * model, unprocessable params). These must not count toward the breaker, or a
+ * caller bug would disable a healthy provider (and would inflate the streak a
+ * later transient 5xx then trips on). Account-level (401/402/403), request
+ * timeout (408), and rate-limit (429) are deliberately excluded — those DO
+ * warrant failover and keep their own policies.
+ */
+function isNonHealthClientError(status: number | null): boolean {
+  if (status === null || status < 400 || status >= 500) return false;
+  return status !== 401 && status !== 402 && status !== 403 && status !== 408 && status !== 429;
+}
+
+/**
  * Per-process registry of provider health. Construct once per agentos
  * runtime; the module-level `globalLLMProviderHealth` singleton is
  * what the in-tree router code uses. Tests instantiate their own
@@ -212,6 +226,10 @@ export class LLMProviderHealthRegistry {
    */
   recordFailure(providerId: string, error: unknown): void {
     const status = classifyErrorStatus(error);
+    // A client-error 4xx (bad request / unknown model / unprocessable) is the
+    // caller's fault, not a provider-health signal — ignore it entirely so it
+    // neither trips the breaker nor inflates the streak.
+    if (isNonHealthClientError(status)) return;
     const policy = policyForStatus(status);
     const record = this.records.get(providerId) ?? this.makeRecord();
     record.failureCount += 1;
