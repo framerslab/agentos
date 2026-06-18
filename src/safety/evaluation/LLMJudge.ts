@@ -25,6 +25,13 @@ export interface LLMJudgeConfig {
   temperature?: number;
   /** Custom system prompt for the judge */
   systemPrompt?: string;
+  /**
+   * Score returned when evaluation fails (provider error, parse failure).
+   * Defaults to 0 (fail-closed) so a judge used as a safety gate does not pass
+   * on infrastructure failure — matching EmergentJudge. Set to 0.5 to restore
+   * the prior neutral-on-error behavior for non-gating quality scoring.
+   */
+  errorScore?: number;
 }
 
 /**
@@ -130,6 +137,7 @@ export class LLMJudge {
   private readonly providerId?: string;
   private readonly temperature: number;
   private readonly systemPrompt: string;
+  private readonly errorScore: number;
 
   constructor(config: LLMJudgeConfig) {
     this.llmProvider = config.llmProvider;
@@ -137,6 +145,7 @@ export class LLMJudge {
     this.providerId = config.providerId;
     this.temperature = config.temperature ?? 0.1;
     this.systemPrompt = config.systemPrompt || DEFAULT_JUDGE_PROMPT;
+    this.errorScore = config.errorScore ?? 0;
   }
 
   /**
@@ -201,9 +210,11 @@ Please evaluate the ACTUAL OUTPUT against the criteria and provide your judgment
         confidence: result.confidence ?? 0.5,
       };
     } catch (error: any) {
-      // Return neutral score on error
+      // Fail closed: an errored judge has no signal, so return the configured
+      // errorScore (default 0) rather than a misleading neutral 0.5 that would
+      // let a `score >= threshold` safety gate pass on infrastructure failure.
       return {
-        score: 0.5,
+        score: this.errorScore,
         criteriaScores: {},
         reasoning: `Evaluation error: ${error.message}`,
         feedback: ['Unable to complete evaluation'],
