@@ -75,7 +75,9 @@ describe('OllamaProvider multimodal message mapping', () => {
             images: ['Zm9vYmFy'],
           }),
         ],
-      })
+      }),
+      // CR8: per-call requestTimeout is now threaded as the axios request config.
+      expect.objectContaining({ timeout: expect.any(Number) }),
     );
   });
 });

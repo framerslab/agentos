@@ -287,7 +287,8 @@ export class OpenRouterProvider implements IProvider {
     const apiResponseData = await this.makeApiRequest<OpenRouterChatCompletionAPIResponse>(
       '/chat/completions',
       'POST',
-      this.config.requestTimeout,
+      // CR8: honor a per-call requestTimeout override over the provider default.
+      options.requestTimeout ?? this.config.requestTimeout,
       payload
     );
     return this.mapApiToCompletionResponse(apiResponseData, modelId);
@@ -334,7 +335,8 @@ export class OpenRouterProvider implements IProvider {
     const stream = await this.makeApiRequest<NodeJS.ReadableStream>(
       '/chat/completions',
       'POST',
-      this.config.streamRequestTimeout,
+      // CR8: honor a per-call requestTimeout override over the stream default.
+      options.requestTimeout ?? this.config.streamRequestTimeout,
       payload,
       true
     );

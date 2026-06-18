@@ -370,7 +370,8 @@ export class OllamaProvider implements IProvider {
     };
 
     try {
-      const response = await this.client.post('/chat', payload);
+      // CR8: honor a per-call requestTimeout override over the client default.
+      const response = await this.client.post('/chat', payload, { timeout: options.requestTimeout ?? this.config.requestTimeout });
       const data = response.data as OllamaChatResponseChunk;
 
       if (data.error) {
@@ -454,7 +455,8 @@ export class OllamaProvider implements IProvider {
 
     let responseStream;
     try {
-      responseStream = await this.client.post('/chat', payload, { responseType: 'stream' });
+      // CR8: honor a per-call requestTimeout override over the client default.
+      responseStream = await this.client.post('/chat', payload, { responseType: 'stream', timeout: options.requestTimeout ?? this.config.requestTimeout });
     } catch (error: unknown) {
       const axiosError = error as AxiosError;
       const status = axiosError.response?.status;
