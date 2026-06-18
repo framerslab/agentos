@@ -1,3 +1,8 @@
+## <small>0.9.67 (2026-06-18)</small>
+
+* fix(providers): honor per-call requestTimeout in GeminiProvider ([143853c17fc9767371db80ec8ccec16132272558](https://github.com/framerslab/agentos/commit/143853c17fc9767371db80ec8ccec16132272558))
+* fix(providers): honor per-call requestTimeout in OpenAIProvider ([28e7433b034544d69dff1bff80dda81dc6a44389](https://github.com/framerslab/agentos/commit/28e7433b034544d69dff1bff80dda81dc6a44389))
+
 ## <small>0.9.66 (2026-06-18)</small>
 
 * fix(providers): omit temperature/top_p for OpenAI reasoning models ([115943c11a6a5ce4d8977e7b4e61fe8f93b6b4a3](https://github.com/framerslab/agentos/commit/115943c11a6a5ce4d8977e7b4e61fe8f93b6b4a3))
