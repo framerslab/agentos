@@ -1,3 +1,8 @@
+## <small>0.9.65 (2026-06-18)</small>
+
+* fix(memory): refuse empty embeddings in MemoryStore to prevent silent recall corruption ([40ff5e7655b80d3ac67cb75bfc7bc8897bf3e9d4](https://github.com/framerslab/agentos/commit/40ff5e7655b80d3ac67cb75bfc7bc8897bf3e9d4))
+* fix(memory): trigger observation and reflection on message/note count so durable memory extracts in chat ([62583a7f6834fedabc62fb2a42d02e266b862e68](https://github.com/framerslab/agentos/commit/62583a7f6834fedabc62fb2a42d02e266b862e68))
+
 ## <small>0.9.64 (2026-06-18)</small>
 
 * fix(extensions): prevent shell injection in npm install/search ([b0a5ab4a43871945f8161e7131fc92e6db7418c9](https://github.com/framerslab/agentos/commit/b0a5ab4a43871945f8161e7131fc92e6db7418c9))
