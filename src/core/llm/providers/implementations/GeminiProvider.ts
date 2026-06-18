@@ -944,6 +944,18 @@ export class GeminiProvider implements IProvider {
     const finishReason = this.mapFinishReason(candidate?.finishReason ?? null);
     const usage = this.mapUsage(apiResponse.usageMetadata, modelId);
 
+    // A SAFETY / RECITATION block returns no content with finishReason
+    // 'content_filter'. Surface it as a content-policy error (code
+    // 'content_filter', recognized by isContentPolicyRefusal) so the
+    // policy-aware fallback chain can engage an uncensored model. Returning an
+    // empty 200 here stranded the caller — the fallback could never fire.
+    if (finishReason === 'content_filter' && !fullText && !hasToolCalls) {
+      throw new GeminiProviderError(
+        `Gemini blocked the response (finishReason: ${candidate?.finishReason ?? 'unknown'}); no content returned.`,
+        'content_filter',
+      );
+    }
+
     const choice: ModelCompletionChoice = {
       index: 0,
       message: {

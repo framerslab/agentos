@@ -386,8 +386,11 @@ describe('GeminiProvider', () => {
     });
 
     it('maps SAFETY to "content_filter"', async () => {
+      // Partial text present so this exercises the finishReason mapping; the
+      // empty-content SAFETY case now throws a content-policy error (see
+      // GeminiProvider.safety.test.ts) so the fallback chain can engage.
       fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse({
-        candidates: [{ content: { role: 'model', parts: [{ text: '' }] }, finishReason: 'SAFETY' }],
+        candidates: [{ content: { role: 'model', parts: [{ text: 'partial output' }] }, finishReason: 'SAFETY' }],
       })));
 
       const result = await provider.generateCompletion('gemini-2.5-flash', [
@@ -399,7 +402,7 @@ describe('GeminiProvider', () => {
 
     it('maps RECITATION to "content_filter"', async () => {
       fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse({
-        candidates: [{ content: { role: 'model', parts: [{ text: '' }] }, finishReason: 'RECITATION' }],
+        candidates: [{ content: { role: 'model', parts: [{ text: 'partial output' }] }, finishReason: 'RECITATION' }],
       })));
 
       const result = await provider.generateCompletion('gemini-2.5-flash', [
