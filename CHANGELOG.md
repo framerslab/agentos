@@ -1,3 +1,7 @@
+## <small>0.9.70 (2026-06-18)</small>
+
+* fix(providers): correct Anthropic output/context limits and clamp max_tokens to the ceiling ([007ca667815eb11dd564b2ca9ac7f98eedf096bc](https://github.com/framerslab/agentos/commit/007ca667815eb11dd564b2ca9ac7f98eedf096bc))
+
 ## <small>0.9.69 (2026-06-18)</small>
 
 * fix(providers): also surface Gemini SAFETY blocks in the streaming path ([22d3e9397ae07fe727e95b31f425ef663916ff6e](https://github.com/framerslab/agentos/commit/22d3e9397ae07fe727e95b31f425ef663916ff6e))
