@@ -276,8 +276,10 @@ type AnthropicStreamEvent =
  * `outputTokenLimit` is the model's real max output ceiling, surfaced via
  * getModelInfo for callers that want to size requests. It is informational —
  * NOT the per-request default: when a caller omits `maxTokens`, the request
- * falls back to `config.defaultMaxTokens`, not this value. Anthropic specs:
- * Fable 5 = 128K output / 1M context, Sonnet 4.x = 64K output, Opus 4.x = 32K.
+ * falls back to `config.defaultMaxTokens`, not this value — but a per-call
+ * `maxTokens` IS clamped to it via {@link clampAnthropicMaxTokens}. Anthropic
+ * specs: Fable 5 = 128K output / 1M context, Opus 4.x = 128K output / 1M
+ * context, Sonnet 4.x = 64K output / 1M context, Haiku 4.5 = 64K output / 200K.
  */
 const ANTHROPIC_MODELS: ModelInfo[] = [
   {
@@ -299,8 +301,8 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
     displayName: 'Claude Opus 4.8',
     description: 'Most intelligent model for agents and coding.',
     capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 200000,
-    outputTokenLimit: 32000,
+    contextWindowSize: 1000000,
+    outputTokenLimit: 128000,
     pricePer1MTokensInput: 5,
     pricePer1MTokensOutput: 25,
     supportsStreaming: true,
@@ -312,8 +314,8 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
     displayName: 'Claude Opus 4.7',
     description: 'Prior Opus generation.',
     capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 200000,
-    outputTokenLimit: 32000,
+    contextWindowSize: 1000000,
+    outputTokenLimit: 128000,
     pricePer1MTokensInput: 5,
     pricePer1MTokensOutput: 25,
     supportsStreaming: true,
@@ -325,8 +327,8 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
     displayName: 'Claude Opus 4.6',
     description: 'Previous-generation Opus with same pricing as 4.7.',
     capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 200000,
-    outputTokenLimit: 32000,
+    contextWindowSize: 1000000,
+    outputTokenLimit: 128000,
     pricePer1MTokensInput: 5,
     pricePer1MTokensOutput: 25,
     supportsStreaming: true,
@@ -338,7 +340,7 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
     displayName: 'Claude Sonnet 4.6',
     description: 'Optimal balance of intelligence, cost, and speed.',
     capabilities: ['chat', 'tool_use', 'vision_input'],
-    contextWindowSize: 200000,
+    contextWindowSize: 1000000,
     outputTokenLimit: 64000,
     pricePer1MTokensInput: 3,
     pricePer1MTokensOutput: 15,
@@ -365,7 +367,7 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
     description: 'Fastest, most cost-efficient model for lightweight tasks.',
     capabilities: ['chat', 'tool_use', 'vision_input'],
     contextWindowSize: 200000,
-    outputTokenLimit: 8192,
+    outputTokenLimit: 64000,
     pricePer1MTokensInput: 1,
     pricePer1MTokensOutput: 5,
     supportsStreaming: true,
@@ -400,6 +402,23 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
     status: 'active',
   },
 ];
+
+/**
+ * Clamp a requested `max_tokens` to the target model's real output ceiling from
+ * {@link ANTHROPIC_MODELS}. Anthropic returns HTTP 400 when `max_tokens` exceeds
+ * a model's output limit, so a truncation-retry that escalates `max_tokens`
+ * (e.g. to 64000) would otherwise convert a recoverable truncation into a fatal
+ * request on a lower-ceiling model. Exact id match wins; otherwise a dated
+ * variant (`claude-opus-4-7-20260501`) or bare alias (`claude-haiku-4-5`) is
+ * matched by prefix. Unknown models pass through unchanged (no catalog ceiling).
+ */
+export function clampAnthropicMaxTokens(modelId: string, requested: number): number {
+  const entry =
+    ANTHROPIC_MODELS.find((m) => m.modelId === modelId) ??
+    ANTHROPIC_MODELS.find((m) => modelId.startsWith(m.modelId) || m.modelId.startsWith(modelId));
+  const ceiling = entry?.outputTokenLimit;
+  return typeof ceiling === 'number' && ceiling > 0 ? Math.min(requested, ceiling) : requested;
+}
 
 // ---------------------------------------------------------------------------
 // Provider implementation
@@ -1241,7 +1260,12 @@ export class AnthropicProvider implements IProvider {
     const payload: Record<string, unknown> = {
       model: modelId,
       // max_tokens is REQUIRED by Anthropic — enforce a sane default
-      max_tokens: options.maxTokens ?? this.config.defaultMaxTokens ?? 4096,
+      // Clamp to the model's real output ceiling so an escalated truncation-retry
+      // (max_tokens → 64000) is reshaped to the model's limit instead of 400ing.
+      max_tokens: clampAnthropicMaxTokens(
+        modelId,
+        options.maxTokens ?? this.config.defaultMaxTokens ?? 4096,
+      ),
       messages: anthropicMessages,
       stream,
     };
