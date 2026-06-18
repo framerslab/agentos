@@ -23,6 +23,17 @@ export interface BufferedMessage {
 export interface ObservationBufferConfig {
   /** Token threshold before observer should be triggered. @default 30_000 */
   activationThresholdTokens: number;
+  /**
+   * Message-count threshold before the observer should be triggered.
+   *
+   * Conversational turns are far too small (~100-300 tokens) to ever reach the
+   * token threshold, so without this the observer never fires in chat and
+   * durable memory is never extracted. Activation is
+   * `pendingTokens >= activationThresholdTokens OR pendingMessages >= activationThresholdMessages`,
+   * so batch ingestion of large single messages still fires on tokens while
+   * chat fires on message count. @default 20
+   */
+  activationThresholdMessages: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +59,7 @@ export class ObservationBuffer {
   constructor(config?: Partial<ObservationBufferConfig>) {
     this.config = {
       activationThresholdTokens: config?.activationThresholdTokens ?? 30_000,
+      activationThresholdMessages: config?.activationThresholdMessages ?? 20,
     };
   }
 
@@ -67,9 +79,18 @@ export class ObservationBuffer {
     return this.shouldActivate();
   }
 
-  /** Whether accumulated tokens since last drain exceed the threshold. */
+  /**
+   * Whether accumulated tokens OR messages since the last drain exceed their
+   * thresholds. The message-count path is what makes the observer fire in chat,
+   * where turns are far too small to ever reach the token threshold.
+   */
   shouldActivate(): boolean {
-    return (this.totalTokens - this.drainedTokens) >= this.config.activationThresholdTokens;
+    const pendingTokens = this.totalTokens - this.drainedTokens;
+    const pendingMessages = this.messages.length - this.drainCursor;
+    return (
+      pendingTokens >= this.config.activationThresholdTokens ||
+      pendingMessages >= this.config.activationThresholdMessages
+    );
   }
 
   /**

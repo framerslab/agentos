@@ -186,6 +186,8 @@ export class MemoryReflector {
   private traits: HexacoTraits;
   private llmInvoker?: (systemPrompt: string, userPrompt: string) => Promise<string>;
   private config: ReflectorConfig;
+  /** Accumulated-note count that triggers reflection in conversational use. */
+  private activationThresholdNotes: number;
 
   constructor(
     traits: HexacoTraits,
@@ -197,6 +199,7 @@ export class MemoryReflector {
       modelId: config?.modelId,
       llmInvoker: config?.llmInvoker,
     };
+    this.activationThresholdNotes = config?.activationThresholdNotes ?? 6;
     this.llmInvoker = config?.llmInvoker;
   }
 
@@ -213,8 +216,13 @@ export class MemoryReflector {
     return this.reflect();
   }
 
-  /** Whether accumulated notes exceed the reflection threshold. */
+  /**
+   * Whether accumulated notes exceed the reflection threshold by token count
+   * OR by note count. The note-count path is what makes consolidation run in
+   * chat, where note tokens never reach the token threshold.
+   */
   shouldActivate(): boolean {
+    if (this.pendingNotes.length >= this.activationThresholdNotes) return true;
     const totalTokens = this.pendingNotes.reduce(
       (sum, note) => sum + Math.ceil(note.content.length / 4),
       0,

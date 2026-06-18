@@ -130,6 +130,7 @@ export class MemoryObserver {
     this.llmInvoker = config?.llmInvoker;
     this.buffer = new ObservationBuffer({
       activationThresholdTokens: this.config.activationThresholdTokens,
+      activationThresholdMessages: config?.activationThresholdMessages,
     });
 
     // Default thresholds for compression and reflection tiers.

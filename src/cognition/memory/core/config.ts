@@ -63,6 +63,12 @@ export interface DecayConfig {
 export interface ObserverConfig {
   /** Token threshold before observer activates. @default 30_000 */
   activationThresholdTokens: number;
+  /**
+   * Message-count threshold before the observer activates. Fires the observer
+   * in conversational use, where turns are far too small to ever reach the
+   * token threshold. Activation is `tokens OR messages`. @default 20
+   */
+  activationThresholdMessages?: number;
   /** LLM model ID for observation extraction (per-persona). */
   modelId?: string;
   /** LLM invoker function. */
@@ -72,6 +78,12 @@ export interface ObserverConfig {
 export interface ReflectorConfig {
   /** Token threshold for notes before reflection triggers. @default 40_000 */
   activationThresholdTokens: number;
+  /**
+   * Accumulated-note-count threshold before reflection triggers. Fires
+   * consolidation in conversational use, where note tokens never reach the
+   * token threshold. Activation is `tokens OR notes`. @default 6
+   */
+  activationThresholdNotes?: number;
   /** LLM model ID for reflection/consolidation (per-persona). */
   modelId?: string;
   /** LLM invoker function. */
