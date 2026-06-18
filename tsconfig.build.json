@@ -14,7 +14,7 @@
     "allowSyntheticDefaultImports": true,
     "emitDeclarationOnly": false,
     "skipLibCheck": true,
-    "noEmitOnError": false
+    "noEmitOnError": true
   },
   "include": [
     "src/**/*.ts",

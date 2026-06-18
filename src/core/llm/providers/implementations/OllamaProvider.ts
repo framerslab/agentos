@@ -162,7 +162,6 @@ const extractBase64ImagePayload = (url: string): string | null => {
   return payload.length > 0 ? payload : null;
 };
 
-// @ts-nocheck
 /**
  * Represents a model listed by Ollama's /api/tags endpoint.
  */
