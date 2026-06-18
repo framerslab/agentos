@@ -1,3 +1,7 @@
+## <small>0.9.72 (2026-06-18)</small>
+
+* fix(safety): circuit breaker ignores client-error 4xx instead of tripping on them ([6f5baf7a1f96494aad16f9447a98a4b9764d1f21](https://github.com/framerslab/agentos/commit/6f5baf7a1f96494aad16f9447a98a4b9764d1f21))
+
 ## <small>0.9.71 (2026-06-18)</small>
 
 * fix(safety): LLMJudge fails closed on evaluation error instead of neutral 0.5 ([048288e3d43dc5a3e8743e2798c56fd893de4fe2](https://github.com/framerslab/agentos/commit/048288e3d43dc5a3e8743e2798c56fd893de4fe2))
