@@ -1,3 +1,7 @@
+## <small>0.9.68 (2026-06-18)</small>
+
+* fix(providers): honor per-call requestTimeout in Ollama + OpenRouter ([a3d13dcaf059cfe77582cd18ba724ceb9f894064](https://github.com/framerslab/agentos/commit/a3d13dcaf059cfe77582cd18ba724ceb9f894064))
+
 ## <small>0.9.67 (2026-06-18)</small>
 
 * fix(providers): honor per-call requestTimeout in GeminiProvider ([143853c17fc9767371db80ec8ccec16132272558](https://github.com/framerslab/agentos/commit/143853c17fc9767371db80ec8ccec16132272558))
