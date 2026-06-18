@@ -1,3 +1,7 @@
+## <small>0.9.66 (2026-06-18)</small>
+
+* fix(providers): omit temperature/top_p for OpenAI reasoning models ([115943c11a6a5ce4d8977e7b4e61fe8f93b6b4a3](https://github.com/framerslab/agentos/commit/115943c11a6a5ce4d8977e7b4e61fe8f93b6b4a3))
+
 ## <small>0.9.65 (2026-06-18)</small>
 
 * fix(memory): refuse empty embeddings in MemoryStore to prevent silent recall corruption ([40ff5e7655b80d3ac67cb75bfc7bc8897bf3e9d4](https://github.com/framerslab/agentos/commit/40ff5e7655b80d3ac67cb75bfc7bc8897bf3e9d4))
