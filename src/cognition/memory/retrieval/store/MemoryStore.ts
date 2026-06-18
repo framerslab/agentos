@@ -48,6 +48,25 @@ import {
 import { spreadActivation } from '../graph/SpreadingActivation.js';
 
 // ---------------------------------------------------------------------------
+// Embedding guard (CR4)
+// ---------------------------------------------------------------------------
+
+/**
+ * A usable embedding is a non-empty numeric vector.
+ *
+ * The embedding manager returns `[]` for any text it fails to embed (a
+ * per-text fallback rather than a thrown error). Persisting or querying with
+ * such a zero-length vector silently corrupts recall: the vector-store
+ * collection dimension collapses to 0, and cosine similarity against an empty
+ * vector degenerates to meaningless scores. MemoryStore therefore refuses an
+ * unusable embedding everywhere it touches the vector store instead of writing
+ * or searching with garbage.
+ */
+export function isUsableEmbedding(embedding: number[] | undefined): embedding is number[] {
+  return Array.isArray(embedding) && embedding.length > 0;
+}
+
+// ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
@@ -235,6 +254,14 @@ export class MemoryStore {
       texts: trace.content,
     });
     const embedding = embeddingResponse.embeddings[0];
+    if (!isUsableEmbedding(embedding)) {
+      // CR4: the embedding manager failed to embed this content (returned []).
+      // Refuse rather than persisting a zero-vector that silently corrupts recall.
+      throw new Error(
+        `MemoryStore.store: refusing to persist an empty embedding vector for trace ${trace.id} ` +
+          `(the embedding manager returned no vector for its content); a zero-vector would corrupt recall.`,
+      );
+    }
 
     try {
       const exists = this.config.vectorStore.collectionExists
@@ -383,6 +410,17 @@ export class MemoryStore {
       texts: queryText,
     });
     const queryEmbedding = embeddingResponse.embeddings[0];
+    if (!isUsableEmbedding(queryEmbedding)) {
+      // CR4: the embedding manager failed to embed the query (returned []).
+      // Degrade to no results rather than issuing a corrupt similarity search —
+      // an empty query vector yields meaningless scores or dimension errors,
+      // and some vector backends return arbitrary neighbours instead of failing.
+      console.warn(
+        'MemoryStore.query: embedding manager returned an empty query vector; ' +
+          'returning no results rather than issuing a corrupt similarity search.',
+      );
+      return { scored: [], partial: [], timings: { vectorSearchMs: 0, scoringMs: 0 } };
+    }
 
     // Build metadata filter
     const metadataFilter: Record<string, any> = { isActive: { $eq: 1 } };
@@ -573,16 +611,24 @@ export class MemoryStore {
           texts: trace.content,
         });
         embedding = embeddingResponse.embeddings[0];
-        this.embeddingCache.set(trace.id, embedding);
+        // CR4: only cache a usable vector — caching [] would poison every future
+        // access (a cache hit skips re-embedding, so the empty vector would stick).
+        if (isUsableEmbedding(embedding)) {
+          this.embeddingCache.set(trace.id, embedding);
+        }
       }
-      await this.config.vectorStore.upsert(collection, [
-        {
-          id: trace.id,
-          textContent: trace.content,
-          embedding,
-          metadata: traceToMetadata(trace),
-        },
-      ]);
+      // CR4: skip this best-effort metadata refresh rather than upserting a
+      // zero-vector that would corrupt the stored trace's recall.
+      if (isUsableEmbedding(embedding)) {
+        await this.config.vectorStore.upsert(collection, [
+          {
+            id: trace.id,
+            textContent: trace.content,
+            embedding,
+            metadata: traceToMetadata(trace),
+          },
+        ]);
+      }
     } catch {
       // Non-critical update
     }
