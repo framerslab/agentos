@@ -1,3 +1,7 @@
+## <small>0.9.74 (2026-06-19)</small>
+
+* feat(providers): forward output_config.effort to effort-capable models ([864ae2198d11d90c2f07a6dfd94822a37b199ad4](https://github.com/framerslab/agentos/commit/864ae2198d11d90c2f07a6dfd94822a37b199ad4))
+
 ## <small>0.9.73 (2026-06-18)</small>
 
 * fix(providers): drop OllamaProvider's needless @ts-nocheck and enforce noEmitOnError (CR7) ([1340e7d2392f93bc0440ff33e932167066f8d34b](https://github.com/framerslab/agentos/commit/1340e7d2392f93bc0440ff33e932167066f8d34b))
