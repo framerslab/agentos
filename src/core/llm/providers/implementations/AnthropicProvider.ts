@@ -36,6 +36,7 @@ import { AnthropicProviderError } from '../errors/AnthropicProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
 import { resolveThinkingPayload } from '../model-thinking.js';
 import { modelSupportsForcedToolChoice } from '../model-forced-tool-choice.js';
+import { modelSupportsEffort, isEffortLevel } from '../model-effort.js';
 
 // Re-export so callers that already reach for Anthropic model-capability
 // predicates (modelSupportsTemperature lives here too) find this one next to
@@ -1316,6 +1317,16 @@ export class AnthropicProvider implements IProvider {
       payload.max_tokens = thinkingResolved.maxTokens;
       delete payload.temperature;
       delete payload.top_p;
+    }
+
+    // --- Effort (output_config.effort) ---
+    // Reasoning depth + token-spend control on effort-capable Claude models
+    // (Opus 4.5+/Sonnet 4.6/Fable/Mythos). Independent of thinking + tool_choice
+    // — it rides on output_config. Dropped on unsupported models OR invalid
+    // values so an out-of-range effort can never 400 the request.
+    if (options.effort && isEffortLevel(options.effort) && modelSupportsEffort(modelId)) {
+      const oc = (payload.output_config as Record<string, unknown> | undefined) ?? {};
+      payload.output_config = { ...oc, effort: options.effort };
     }
 
     // --- Tool definitions ---

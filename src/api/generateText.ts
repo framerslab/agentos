@@ -314,6 +314,13 @@ export interface GenerateTextOptions {
    * default behavior). Has no effect on models that do not support thinking.
    */
   thinking?: { budgetTokens: number };
+  /**
+   * Reasoning depth / token-spend control forwarded to effort-capable models
+   * (Opus 4.5+, Sonnet 4.6, Fable/Mythos 5) as `output_config.effort`
+   * (low|medium|high|xhigh|max). Independent of `thinking` and tool_choice; the
+   * provider drops it on unsupported models or invalid values.
+   */
+  effort?: string;
   /** Override the API key instead of reading from environment variables. */
   apiKey?: string;
   /** Override the provider base URL (useful for local proxies or Ollama). */
@@ -1281,6 +1288,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               // thinking-capable models stay consistent across tool modes;
               // the provider decides applicability. Omitted = thinking off.
               ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
+              // Forward reasoning effort the same way; provider drops it on
+              // unsupported models/values.
+              ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
               // Forward per-call requestTimeout so the prompt-tool-calling shim
               // (toolMode:'prompt') honors the caller's timeout like the native
               // step loop already does. Without it, a stalled provider call on
@@ -1373,6 +1383,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 // resolveThinkingPayload decides applicability and emits the
                 // adaptive form. Omitted callers keep the default (thinking off).
                 ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
+                // Forward reasoning effort (output_config.effort) the same way;
+                // the provider drops it on unsupported models/values.
+                ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
                 // Forward caller toolChoice so orchestrators can force tool_use
                 // (e.g. ai-codegen); models narrate under tool_choice: 'auto'.
                 ...(opts.toolChoice !== undefined ? { toolChoice: opts.toolChoice } : {}),

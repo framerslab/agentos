@@ -700,6 +700,10 @@ export function agent(opts: AgentOptions): Agent {
     // generate / stream / session call (both spread baseOpts). Unset means
     // thinking stays off; the provider ignores it on unsupported models.
     thinking: opts.thinking,
+    // Reasoning-effort control forwarded the same way as thinking (both spread
+    // into baseOpts -> every generate/stream/session call). Unset -> provider
+    // default; the provider ignores it on models that don't support effort.
+    effort: opts.effort,
     chainOfThought: opts.chainOfThought ?? true,
     apiKey: opts.apiKey,
     baseUrl: opts.baseUrl,

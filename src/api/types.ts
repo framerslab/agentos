@@ -1329,6 +1329,13 @@ export interface BaseAgentConfig {
    */
   thinking?: { budgetTokens: number };
   /**
+   * Reasoning-effort control forwarded to every generate/stream/session call.
+   * On effort-capable Claude models (Opus 4.5+, Sonnet 4.6, Fable/Mythos 5) the
+   * provider sends `output_config.effort` (low|medium|high|xhigh|max).
+   * Independent of `thinking`; ignored on unsupported models/values.
+   */
+  effort?: string;
+  /**
    * Memory configuration.
    * - `true` — enable in-memory conversation history with default settings.
    * - `false` — disable memory; every call is stateless.

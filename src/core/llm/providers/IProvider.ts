@@ -143,6 +143,13 @@ export interface ModelCompletionOptions {
    */
   thinking?: { budgetTokens: number };
   /**
+   * Reasoning-effort control. On effort-capable Claude models (Opus 4.5+,
+   * Sonnet 4.6, Fable/Mythos 5) the provider sends `output_config.effort`
+   * (low|medium|high|xhigh|max). Independent of `thinking` and tool_choice;
+   * dropped on unsupported models or invalid values.
+   */
+  effort?: string;
+  /**
    * Positive values penalize new tokens based on whether they appear in the text so far,
    * increasing the model's likelihood to talk about new topics.
    */
