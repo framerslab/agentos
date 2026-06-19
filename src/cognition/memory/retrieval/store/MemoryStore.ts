@@ -190,11 +190,54 @@ function metadataToTracePartial(metadata: Record<string, any>): Partial<MemoryTr
   };
 }
 
+/** A row of the Brain's durable `memory_traces` table. */
+interface MemoryTraceRow {
+  id: string;
+  type: string;
+  scope: string;
+  content: string;
+  /** BLOB (little-endian Float32 bytes), or null for legacy rows. */
+  embedding: unknown;
+  strength: number;
+  created_at: number;
+  last_accessed: number;
+  retrieval_count: number;
+  tags: string | null;
+  emotions: string | null;
+  metadata: string | null;
+}
+
+/**
+ * Serialise an embedding to the Brain's documented BLOB format (raw
+ * little-endian Float32 bytes). Symmetric with {@link blobToEmbedding}.
+ */
+function embeddingToBlob(embedding: number[]): Buffer {
+  const f32 = Float32Array.from(embedding);
+  return Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength);
+}
+
+/**
+ * Decode a Brain `embedding` BLOB back into a number[]. Returns null for an
+ * absent/empty/malformed blob (e.g. a legacy row persisted before durable
+ * embeddings, which stored null). Accepts the Buffer/Uint8Array shape every
+ * SQL backend returns for a BLOB/bytea column.
+ */
+function blobToEmbedding(blob: unknown): number[] | null {
+  if (blob == null) return null;
+  let bytes: Uint8Array | null = null;
+  if (blob instanceof Uint8Array) bytes = blob; // Buffer extends Uint8Array
+  else if (blob instanceof ArrayBuffer) bytes = new Uint8Array(blob);
+  if (!bytes || bytes.byteLength === 0 || bytes.byteLength % 4 !== 0) return null;
+  return Array.from(new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4));
+}
+
 // ---------------------------------------------------------------------------
 // MemoryStore
 // ---------------------------------------------------------------------------
 
 export class MemoryStore {
+  /** Max traces hydrated from the Brain per instance (most-recent first); bounds the per-request load. */
+  private static readonly HYDRATION_LIMIT = 1000;
   private config: MemoryStoreConfig;
   private decay: DecayConfig;
   /** Cache of full MemoryTrace objects by ID. */
@@ -212,6 +255,8 @@ export class MemoryStore {
    * the durable backing store that survives process restarts.
    */
   private brain: import('./Brain.js').Brain | null = null;
+  /** Whether {@link MemoryStore.ensureHydratedFromBrain} has already run for this instance. */
+  private brainHydrated = false;
 
   constructor(config: MemoryStoreConfig) {
     this.config = config;
@@ -236,6 +281,109 @@ export class MemoryStore {
    */
   getBrain(): import('./Brain.js').Brain | null {
     return this.brain;
+  }
+
+  /**
+   * Hydrate the in-memory vector store + scope registry from the attached
+   * Brain on first use. The Brain is the durable backing store, but the vector
+   * index is per-instance and starts cold — without this, a host that opens a
+   * fresh MemoryStore per request (e.g. wilds' per-request companion facade)
+   * queries an empty index and recall returns nothing even though the Brain
+   * holds the user's full history. Runs at most once per instance and is
+   * best-effort: a SQL/schema error must never break the query path.
+   */
+  private async ensureHydratedFromBrain(): Promise<void> {
+    if (this.brainHydrated || !this.brain) return;
+    this.brainHydrated = true; // set first: a failure must not retry on every query
+    try {
+      // Bound the per-instance load: a fresh facade (and on request-scoped
+      // hosts, every request) hydrates, so we cap at the most-recent traces to
+      // keep the SQL read + vector upserts bounded for very long-lived scopes.
+      // A process-level facade cache (so hydration runs once, not per request)
+      // is the follow-up optimisation; the cap keeps the un-cached path safe.
+      const rows = await this.brain.all<MemoryTraceRow>(
+        `SELECT id, type, scope, content, embedding, strength, created_at,
+                last_accessed, retrieval_count, tags, emotions, metadata
+           FROM memory_traces
+          WHERE brain_id = ? AND deleted = 0
+          ORDER BY created_at DESC
+          LIMIT ?`,
+        [this.brain.brainId, MemoryStore.HYDRATION_LIMIT],
+      );
+      for (const row of rows) {
+        if (this.traceCache.has(row.id)) continue; // already loaded this lifetime
+        const embedding = blobToEmbedding(row.embedding);
+        // Legacy rows (persisted before durable embeddings) stored null and are
+        // skipped — they become recallable once re-mentioned + re-stored.
+        if (embedding == null || !isUsableEmbedding(embedding)) continue;
+        const trace = this.rowToTrace(row);
+        const collection = collectionName(this.config.collectionPrefix, trace.scope, trace.scopeId);
+        try {
+          const exists = this.config.vectorStore.collectionExists
+            ? await this.config.vectorStore.collectionExists(collection)
+            : true;
+          if (!exists) {
+            await this.config.vectorStore.createCollection?.(
+              collection,
+              this.config.embeddingDimension ?? embedding.length,
+              { overwriteIfExists: false },
+            );
+          }
+        } catch {
+          // Provider auto-creates the collection or does not expose existence checks.
+        }
+        await this.config.vectorStore.upsert(collection, [
+          { id: trace.id, textContent: trace.content, embedding, metadata: traceToMetadata(trace) },
+        ]);
+        this.traceCache.set(trace.id, trace);
+        this.embeddingCache.set(trace.id, embedding);
+        this.registerScope(trace.scope, trace.scopeId);
+      }
+    } catch {
+      // Best-effort: durable hydration must never throw into recall.
+    }
+  }
+
+  /** Reconstruct a MemoryTrace from a durable Brain row (inverse of the store() write-through). */
+  private rowToTrace(row: MemoryTraceRow): MemoryTrace {
+    const meta = (row.metadata ? safeParseJson<Record<string, any>>(row.metadata) : undefined) ?? {};
+    const emotions =
+      (row.emotions ? safeParseJson<MemoryTrace['emotionalContext']>(row.emotions) : undefined) ?? {
+        valence: 0,
+        arousal: 0,
+        dominance: 0,
+        intensity: 0,
+        gmiMood: '',
+      };
+    const tags = (row.tags ? safeParseJson<string[]>(row.tags) : undefined) ?? [];
+    return {
+      id: row.id,
+      type: row.type as MemoryType,
+      scope: row.scope as MemoryScope,
+      scopeId: typeof meta.scopeId === 'string' ? meta.scopeId : '',
+      content: row.content,
+      entities: Array.isArray(meta.entities) ? (meta.entities as string[]) : [],
+      tags,
+      provenance: meta.provenance ?? {
+        sourceType: 'system',
+        sourceTimestamp: row.created_at,
+        confidence: 0.5,
+        verificationCount: 0,
+      },
+      emotionalContext: emotions,
+      encodingStrength: row.strength,
+      stability: typeof meta.stability === 'number' ? meta.stability : 0.5,
+      retrievalCount: row.retrieval_count ?? 0,
+      lastAccessedAt: row.last_accessed ?? row.created_at,
+      accessCount: 0,
+      reinforcementInterval: 3_600_000,
+      associatedTraceIds: Array.isArray(meta.associatedTraceIds) ? (meta.associatedTraceIds as string[]) : [],
+      createdAt: row.created_at,
+      updatedAt: row.created_at,
+      isActive: true,
+      importance: typeof meta.importance === 'number' ? meta.importance : undefined,
+      structuredData: meta.structuredData,
+    } as MemoryTrace;
   }
 
   // =========================================================================
@@ -348,7 +496,7 @@ export class MemoryStore {
             trace.type,
             trace.scope,
             trace.content,
-            null, // embedding managed by vector store, not SQL
+            embeddingToBlob(embedding), // durable so recall survives a fresh instance (see ensureHydratedFromBrain)
             trace.encodingStrength,
             trace.createdAt,
             trace.lastAccessedAt,
@@ -398,6 +546,11 @@ export class MemoryStore {
   }> {
     const now = Date.now();
     const topK = options.topK ?? 20;
+
+    // Cold-start durability: load durable traces from the attached Brain into
+    // the in-memory index (+ scope registry) before the first query, so recall
+    // survives a fresh MemoryStore instance (e.g. a new request-scoped facade).
+    await this.ensureHydratedFromBrain();
 
     // Determine which collections to search
     const scopes = options.scopes?.length ? options.scopes : this.getKnownScopes();
@@ -663,6 +816,7 @@ export class MemoryStore {
    * topK) and does not guarantee completeness.
    */
   async getByScope(scope: MemoryScope, scopeId: string, type?: MemoryType): Promise<MemoryTrace[]> {
+    await this.ensureHydratedFromBrain();
     // Return from cache + filter
     const results: MemoryTrace[] = [];
     for (const trace of this.traceCache.values()) {
