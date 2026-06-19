@@ -1,3 +1,7 @@
+## <small>0.9.75 (2026-06-19)</small>
+
+* fix(memory): hydrate MemoryStore from durable Brain so recall survives a fresh instance ([cd36ec9d3460b30e51e12ab3bdc83de2f12e56bd](https://github.com/framerslab/agentos/commit/cd36ec9d3460b30e51e12ab3bdc83de2f12e56bd))
+
 ## <small>0.9.74 (2026-06-19)</small>
 
 * feat(providers): forward output_config.effort to effort-capable models ([864ae2198d11d90c2f07a6dfd94822a37b199ad4](https://github.com/framerslab/agentos/commit/864ae2198d11d90c2f07a6dfd94822a37b199ad4))
