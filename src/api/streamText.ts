@@ -372,6 +372,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             const r = await provider!.generateCompletion(resolved.modelId, msgs as any, {
               temperature: opts.temperature,
               maxTokens: opts.maxTokens,
+              ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
+              ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
+              ...(opts.presencePenalty !== undefined ? { presencePenalty: opts.presencePenalty } : {}),
             } as any);
             const cc = r.choices?.[0]?.message?.content;
             return {
@@ -441,6 +444,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             tools: toolSchemas,
             temperature: opts.temperature,
             maxTokens: opts.maxTokens,
+            // Mirror generateText: forward the sampling controls so a
+            // streaming caller's topP / frequency / presence penalties
+            // actually reach the provider instead of being silently
+            // dropped. Anthropic ignores the penalties at the provider
+            // layer (no-op); OpenAI / OpenRouter honor them.
+            ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
+            ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
+            ...(opts.presencePenalty !== undefined ? { presencePenalty: opts.presencePenalty } : {}),
           } as any
         );
 
