@@ -1,3 +1,8 @@
+## <small>0.9.76 (2026-06-20)</small>
+
+* fix(api): forward topP + frequency/presence penalties from generateText ([530bdf341d8662854562531f2b0b8aae9ca9e736](https://github.com/framerslab/agentos/commit/530bdf341d8662854562531f2b0b8aae9ca9e736))
+* style(providers): de-dash model-effort doc comments (no-dash rule) ([fda71f838f496a2f30ae4c2528efd8460d24b103](https://github.com/framerslab/agentos/commit/fda71f838f496a2f30ae4c2528efd8460d24b103))
+
 ## <small>0.9.75 (2026-06-19)</small>
 
 * fix(memory): hydrate MemoryStore from durable Brain so recall survives a fresh instance ([cd36ec9d3460b30e51e12ab3bdc83de2f12e56bd](https://github.com/framerslab/agentos/commit/cd36ec9d3460b30e51e12ab3bdc83de2f12e56bd))
