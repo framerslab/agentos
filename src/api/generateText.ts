@@ -304,6 +304,20 @@ export interface GenerateTextOptions {
   toolMode?: ToolMode;
   /** Sampling temperature forwarded to the provider (0-2 for most providers). */
   temperature?: number;
+  /** Nucleus sampling top-p forwarded to the provider. */
+  topP?: number;
+  /**
+   * Frequency penalty forwarded to the provider (OpenAI / OpenRouter range
+   * -2..2). Reduces verbatim token repetition. Anthropic has no equivalent and
+   * the provider drops it, so it's a no-op on Claude models.
+   */
+  frequencyPenalty?: number;
+  /**
+   * Presence penalty forwarded to the provider (OpenAI / OpenRouter range
+   * -2..2). Nudges the model toward new topics. Anthropic has no equivalent and
+   * the provider drops it, so it's a no-op on Claude models.
+   */
+  presencePenalty?: number;
   /** Hard cap on output tokens. Provider-dependent default applies when omitted. */
   maxTokens?: number;
   /**
@@ -1283,6 +1297,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           callModel: async (msgs) => {
             const r = await provider.generateCompletion(resolved.modelId, msgs as any, {
               temperature: opts.temperature,
+              ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
+              ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
+              ...(opts.presencePenalty !== undefined ? { presencePenalty: opts.presencePenalty } : {}),
               maxTokens: opts.maxTokens,
               // Forward the extended-thinking budget on the shim path too so
               // thinking-capable models stay consistent across tool modes;
@@ -1377,6 +1394,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               {
                 tools: toolSchemas,
                 temperature: opts.temperature,
+                ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
+                ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
+                ...(opts.presencePenalty !== undefined ? { presencePenalty: opts.presencePenalty } : {}),
                 maxTokens: opts.maxTokens,
                 // Forward the extended-thinking switch so thinking-capable
                 // models (Opus 4.7/4.8) emit reasoning blocks; the provider's
