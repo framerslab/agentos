@@ -1,3 +1,8 @@
+## <small>0.9.77 (2026-06-20)</small>
+
+* Merge branch 'master' of https://github.com/framerslab/agentos ([12bcb71c454259785e6029232dc5ab9fe0d91fc3](https://github.com/framerslab/agentos/commit/12bcb71c454259785e6029232dc5ab9fe0d91fc3))
+* fix(api): forward topP/frequency/presence penalties in streamText (parity with generateText) ([1756145d9c16db0d44ce3f6e9e0aae08f3b1f57e](https://github.com/framerslab/agentos/commit/1756145d9c16db0d44ce3f6e9e0aae08f3b1f57e))
+
 ## <small>0.9.76 (2026-06-20)</small>
 
 * fix(api): forward topP + frequency/presence penalties from generateText ([530bdf341d8662854562531f2b0b8aae9ca9e736](https://github.com/framerslab/agentos/commit/530bdf341d8662854562531f2b0b8aae9ca9e736))
