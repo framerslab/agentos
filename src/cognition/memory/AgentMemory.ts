@@ -199,6 +199,10 @@ export class AgentMemory {
       tags?: string[];
       entities?: string[];
       importance?: number;
+      /** Live PAD mood for mood-congruent encoding. Omitted → neutral (no bias). */
+      currentMood?: PADState;
+      /** Content sentiment for the emotional-context tag. Omitted → falls back to `importance` (today's behavior). */
+      contentSentiment?: number;
       /**
        * Set when encoding a subjective trace produced by
        * {@link PerspectiveObserver}. Threads the source-event identifiers into
@@ -220,14 +224,14 @@ export class AgentMemory {
             entities: options?.entities,
             importance: options?.importance,
           })
-        : await this.manager!.encode(content, NEUTRAL_MOOD, 'neutral', {
+        : await this.manager!.encode(content, options?.currentMood ?? NEUTRAL_MOOD, 'neutral', {
             type: options?.type ?? 'episodic',
             scope: options?.scope ?? 'thread',
             scopeId: options?.scopeId,
             sourceType: options?.sourceType ?? 'user_statement',
             tags: options?.tags,
             entities: options?.entities,
-            contentSentiment: options?.importance,
+            contentSentiment: options?.contentSentiment ?? options?.importance,
             perspectiveSource: options?.perspectiveSource,
           });
       return { trace, success: true };
