@@ -283,12 +283,17 @@ export class AgentMemory {
   async observe(
     role: 'user' | 'assistant' | 'system' | 'tool',
     content: string,
+    options?: { currentMood?: PADState; contentSentiment?: number },
   ): Promise<ObservationNote[] | null> {
     this.ensureReady();
     if (!this.manager) {
       this.throwUnsupportedForStandalone('observe');
     }
-    return this.manager.observe?.(role, content, NEUTRAL_MOOD) ?? null;
+    return (
+      this.manager.observe?.(role, content, options?.currentMood ?? NEUTRAL_MOOD, {
+        contentSentiment: options?.contentSentiment,
+      }) ?? null
+    );
   }
 
   /**
