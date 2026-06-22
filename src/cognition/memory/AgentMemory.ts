@@ -101,6 +101,8 @@ export interface SearchOptions {
   usableFor?: TrustCapability | TrustCapability[];
   /** Shared retrieval policy surface. */
   policy?: MemoryRetrievalPolicy;
+  /** Live PAD mood for mood-congruent recall ranking. Omitted → neutral (no bias). */
+  currentMood?: PADState;
 }
 
 type StandaloneMemoryBackend = Pick<
@@ -249,7 +251,7 @@ export class AgentMemory {
       return this.recallFromStandalone(query, options);
     }
 
-    const result = await this.manager!.retrieve(query, NEUTRAL_MOOD, {
+    const result = await this.manager!.retrieve(query, options?.currentMood ?? NEUTRAL_MOOD, {
       topK: options?.limit ?? 10,
       types: options?.types,
       tags: options?.tags,
