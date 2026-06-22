@@ -1,3 +1,11 @@
+## <small>0.9.78 (2026-06-22)</small>
+
+* fix(memory): accept optional currentMood on AgentMemory.getContext ([7ed3e8a3683f38d964edb35f5522168b4693e9c2](https://github.com/framerslab/agentos/commit/7ed3e8a3683f38d964edb35f5522168b4693e9c2))
+* fix(memory): accept optional currentMood on AgentMemory.recall ([2190b3f9a8959149f2a131387ca87201f5f1a401](https://github.com/framerslab/agentos/commit/2190b3f9a8959149f2a131387ca87201f5f1a401))
+* fix(memory): forward contentSentiment through CognitiveMemoryManager.observe ([7206c4491c0635805fde93096396ff1f3c38e9c0](https://github.com/framerslab/agentos/commit/7206c4491c0635805fde93096396ff1f3c38e9c0))
+* fix(memory): thread currentMood + contentSentiment through AgentMemory.observe ([279a3927a7c4aa4e7ed946566c0c09f925ea88fd](https://github.com/framerslab/agentos/commit/279a3927a7c4aa4e7ed946566c0c09f925ea88fd))
+* fix(memory): thread optional currentMood through AgentMemory.remember ([93b5235a1ce28947efc556d087e06d7b99702c58](https://github.com/framerslab/agentos/commit/93b5235a1ce28947efc556d087e06d7b99702c58))
+
 ## <small>0.9.77 (2026-06-20)</small>
 
 * Merge branch 'master' of https://github.com/framerslab/agentos ([12bcb71c454259785e6029232dc5ab9fe0d91fc3](https://github.com/framerslab/agentos/commit/12bcb71c454259785e6029232dc5ab9fe0d91fc3))
