@@ -140,7 +140,8 @@ export interface ICognitiveMemoryManager {
   observe?(
     role: 'user' | 'assistant' | 'system' | 'tool',
     content: string,
-    mood?: PADState
+    mood?: PADState,
+    options?: { contentSentiment?: number }
   ): Promise<ObservationNote[] | null>;
 
   /** Check prospective memory triggers (Batch 2). */
@@ -1100,7 +1101,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
   async observe(
     role: 'user' | 'assistant' | 'system' | 'tool',
     content: string,
-    mood?: PADState
+    mood?: PADState,
+    options?: { contentSentiment?: number }
   ): Promise<ObservationNote[] | null> {
     if (!this.observer) return null;
 
@@ -1124,6 +1126,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
               sourceType: traceData.provenance.sourceType,
               tags: traceData.tags,
               entities: traceData.entities,
+              contentSentiment: options?.contentSentiment,
             }
           );
         }
