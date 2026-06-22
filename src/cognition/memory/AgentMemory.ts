@@ -303,13 +303,17 @@ export class AgentMemory {
    */
   async getContext(
     query: string,
-    options?: { tokenBudget?: number },
+    options?: { tokenBudget?: number; currentMood?: PADState },
   ): Promise<AssembledMemoryContext> {
     this.ensureReady();
     if (!this.manager) {
       this.throwUnsupportedForStandalone('getContext');
     }
-    return this.manager.assembleForPrompt(query, options?.tokenBudget ?? 2000, NEUTRAL_MOOD);
+    return this.manager.assembleForPrompt(
+      query,
+      options?.tokenBudget ?? 2000,
+      options?.currentMood ?? NEUTRAL_MOOD,
+    );
   }
 
   /**
