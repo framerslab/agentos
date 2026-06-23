@@ -607,7 +607,7 @@ export class OpenRouterProvider implements IProvider {
           };
         }
         const finalMessage: ChatMessage = {
-          role: choice.delta?.role || accumulatedToolCalls.size > 0 ? 'assistant' : (choice.message?.role || 'assistant'),
+          role: choice.delta?.role || (accumulatedToolCalls.size > 0 ? 'assistant' : (choice.message?.role || 'assistant')),
           content: responseTextDelta || (choice.message?.content || null),
           tool_calls: Array.from(accumulatedToolCalls.values())
             .filter(tc => tc.id && tc.function?.name)
