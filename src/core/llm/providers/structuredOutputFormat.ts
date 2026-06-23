@@ -11,6 +11,7 @@
  *   - anthropic  → forced tool_use (single tool with input_schema, tool_choice forced)
  *   - gemini     → generationConfig.responseMimeType + responseSchema
  *   - openrouter → degrades to json_object (OpenRouter has no schema enforcement)
+ *   - requesty   → degrades to json_object (aggregator; no cross-upstream schema enforcement)
  *
  * @module agentos/core/llm/providers/structuredOutputFormat
  */
@@ -94,8 +95,9 @@ export function buildResponseFormat(
         _gemini: { responseSchema: jsonSchema },
       };
     case 'openrouter':
+    case 'requesty':
     default:
-      // OpenRouter and unknown providers: best-effort json_object. The
+      // OpenRouter, Requesty, and unknown providers: best-effort json_object. The
       // model is asked to return JSON but the schema is not enforced
       // by the provider. Caller-side Zod validation still runs and
       // throws on invalid output rather than retrying.
