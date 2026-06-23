@@ -49,6 +49,13 @@ export interface ProspectiveMemoryItem {
   createdAt: number;
   /** Source trace ID (if linked to a memory trace). */
   sourceTraceId?: string;
+  /**
+   * Optional visibility/restriction rank (higher = more restricted). When set,
+   * the item is withheld from {@link ProspectiveMemoryManager.check} whenever
+   * the caller's `maxTierRank` is lower. Generic: callers map their own tier
+   * system (e.g. content policy tiers) to a numeric rank.
+   */
+  tierRank?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -100,11 +107,28 @@ export class ProspectiveMemoryManager {
     events?: string[];
     queryText?: string;
     queryEmbedding?: number[];
+    /**
+     * Optional visibility ceiling. Items whose `tierRank` is greater than this
+     * are withheld (not fired, not marked triggered) so they remain eligible
+     * on a later turn at a higher ceiling. Omitted / non-finite → no gating.
+     */
+    maxTierRank?: number;
   }): Promise<ProspectiveMemoryItem[]> {
     const now = context.now ?? Date.now();
     const triggered: ProspectiveMemoryItem[] = [];
 
     for (const item of this.items.values()) {
+      // Withhold items above the caller's visibility ceiling BEFORE trigger
+      // evaluation, so a withheld item is never consumed (its `triggered` flag
+      // stays false) and can still fire later when the ceiling is raised.
+      if (
+        Number.isFinite(item.tierRank) &&
+        Number.isFinite(context.maxTierRank) &&
+        (item.tierRank as number) > (context.maxTierRank as number)
+      ) {
+        continue;
+      }
+
       if (item.triggered && !item.recurring) continue;
 
       let shouldFire = false;
