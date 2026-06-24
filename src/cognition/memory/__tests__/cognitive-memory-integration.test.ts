@@ -243,4 +243,57 @@ describe('Cognitive Memory — full pipeline integration', () => {
 
     await standalone.shutdown();
   });
+
+  // ── tierRank gate (2026-06-23): maxTierRank threads to prospective assembly ──
+  it('assembleForPrompt withholds prospective alerts above maxTierRank', async () => {
+    const p = manager.getProspective()!;
+    await p.register({
+      content: 'standard reminder',
+      triggerType: 'time_based',
+      triggerAt: 1,
+      importance: 0.9,
+      recurring: false,
+      tierRank: 1,
+    });
+    await p.register({
+      content: 'mature reminder',
+      triggerType: 'time_based',
+      triggerAt: 1,
+      importance: 0.9,
+      recurring: false,
+      tierRank: 2,
+    });
+
+    const out = await manager.assembleForPrompt(
+      'anything',
+      2000,
+      { valence: 0, arousal: 0, dominance: 0 },
+      { maxTierRank: 1 },
+    );
+    expect(out.contextText).toContain('standard reminder');
+    expect(out.contextText).not.toContain('mature reminder');
+  });
+
+  it('snapshot round-trip preserves prospective tierRank (export + import)', async () => {
+    const unique = 'keep rank roundtrip probe';
+    await manager.getProspective()!.register({
+      content: unique,
+      triggerType: 'time_based',
+      triggerAt: 1,
+      importance: 0.5,
+      recurring: false,
+      tierRank: 2,
+    });
+
+    const snap = await memory.exportSnapshot();
+    expect(snap.prospectiveItems.find((x) => x.content === unique)?.tierRank).toBe(2);
+
+    await memory.importSnapshot(snap);
+    const matches = manager
+      .getProspective()!
+      .getActive()
+      .filter((x) => x.content === unique);
+    expect(matches.length).toBeGreaterThanOrEqual(2); // original + re-imported copy
+    expect(matches.every((x) => x.tierRank === 2)).toBe(true); // import carried tierRank
+  });
 });

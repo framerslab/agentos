@@ -977,6 +977,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       const triggered = await this.prospective.check({
         queryText: query,
         queryEmbedding,
+        maxTierRank: options.maxTierRank,
       });
       for (const item of triggered) {
         prospectiveAlerts.push(`[${item.triggerType}] ${item.content}`);

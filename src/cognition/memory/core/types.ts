@@ -410,6 +410,13 @@ export interface CognitiveRetrievalOptions {
   /** If true, skip emotional congruence bias (useful for factual lookups). */
   neutralMood?: boolean;
   /**
+   * Optional visibility ceiling for prospective alerts. Items registered with a
+   * `tierRank` greater than this are withheld from the assembled "Reminders"
+   * section. Used only for prospective gating in `assembleForPrompt`;
+   * `retrieve` ignores it.
+   */
+  maxTierRank?: number;
+  /**
    * Enable HyDE (Hypothetical Document Embedding) for memory retrieval.
    *
    * When `true` and a HyDE retriever is configured on the memory manager,
@@ -638,7 +645,7 @@ export interface CognitiveMemorySnapshot {
   /** Graph edges between traces. */
   graphEdges: Array<{ sourceId: string; targetId: string; type: string; weight: number; createdAt: number }>;
   /** Active prospective memory items. */
-  prospectiveItems: Array<{ id: string; content: string; triggerType: string; importance: number; triggered: boolean; createdAt: number }>;
+  prospectiveItems: Array<{ id: string; content: string; triggerType: string; importance: number; triggered: boolean; createdAt: number; tierRank?: number }>;
   /** Snapshot metadata for import validation. */
   metadata: {
     exportedAt: number;

@@ -307,7 +307,7 @@ export class AgentMemory {
    */
   async getContext(
     query: string,
-    options?: { tokenBudget?: number; currentMood?: PADState },
+    options?: { tokenBudget?: number; currentMood?: PADState; maxTierRank?: number },
   ): Promise<AssembledMemoryContext> {
     this.ensureReady();
     if (!this.manager) {
@@ -317,6 +317,7 @@ export class AgentMemory {
       query,
       options?.tokenBudget ?? 2000,
       options?.currentMood ?? NEUTRAL_MOOD,
+      { maxTierRank: options?.maxTierRank },
     );
   }
 
@@ -792,6 +793,7 @@ export class AgentMemory {
         importance: p.importance,
         triggered: p.triggered,
         createdAt: p.createdAt,
+        tierRank: p.tierRank,
       })),
       metadata: {
         exportedAt: Date.now(),
@@ -848,6 +850,7 @@ export class AgentMemory {
             triggerType: item.triggerType as any,
             importance: item.importance,
             recurring: false,
+            tierRank: item.tierRank,
           });
         } catch {
           // Non-critical
