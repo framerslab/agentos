@@ -1,3 +1,9 @@
+## <small>0.9.79 (2026-06-24)</small>
+
+* fix(memory): gate prospective items by optional tierRank in check() ([66dea18b7b7f8eea9b94c99f6538023778704ce8](https://github.com/framerslab/agentos/commit/66dea18b7b7f8eea9b94c99f6538023778704ce8))
+* fix(memory): thread maxTierRank to prospective assembly + carry tierRank in snapshots ([8bb62885c15af2a678a93cbea130619d38a5a688](https://github.com/framerslab/agentos/commit/8bb62885c15af2a678a93cbea130619d38a5a688))
+* docs: add NVIDIA Inception member badge to README ([8f62962005ab5b04f675ec554ce991afa86e6006](https://github.com/framerslab/agentos/commit/8f62962005ab5b04f675ec554ce991afa86e6006))
+
 ## <small>0.9.78 (2026-06-22)</small>
 
 * fix(memory): accept optional currentMood on AgentMemory.getContext ([7ed3e8a3683f38d964edb35f5522168b4693e9c2](https://github.com/framerslab/agentos/commit/7ed3e8a3683f38d964edb35f5522168b4693e9c2))
