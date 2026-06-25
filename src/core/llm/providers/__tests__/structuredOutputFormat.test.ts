@@ -34,18 +34,29 @@ describe('buildResponseFormat', () => {
     expect(typeof (r as any).tool.input_schema.properties).toBe('object');
   });
 
-  it('anthropic: a top-level discriminated union still yields input_schema.type:"object"', () => {
-    // Anthropic's tool input_schema requires a top-level `type`; without it the
-    // Messages API rejects the tool with
-    // "tools.0.custom.input_schema.type: Field required". lowerZodToJsonSchema
-    // returns `{}` for shapes it does not model (e.g. a bare discriminated
-    // union), so the anthropic adapter must guarantee an object schema.
+  it('anthropic: a top-level discriminated union is merged into a flat object (Anthropic forbids top-level anyOf)', () => {
+    // Anthropic's tool input_schema must be a JSON Schema object and REJECTS a
+    // top-level anyOf/oneOf/allOf ("input_schema does not support … at the top
+    // level"). A discriminated union is therefore merged into one object:
+    // discriminant enum + variant fields optional, only always-required fields
+    // in `required`. The caller's Zod schema re-validates the exact variant.
     const union = z.discriminatedUnion('kind', [
       z.object({ kind: z.literal('freeform'), action: z.string() }),
       z.object({ kind: z.literal('choice'), index: z.number() }),
     ]);
     const r = buildResponseFormat({ provider: 'anthropic', schema: union, schemaName: 'PersonaAction' });
-    expect((r as any).tool.input_schema.type).toBe('object');
+    const inputSchema = (r as any).tool.input_schema;
+    expect(inputSchema.type).toBe('object');
+    // No top-level union keyword — that was the Anthropic 400 source.
+    expect(inputSchema.anyOf).toBeUndefined();
+    expect(inputSchema.oneOf).toBeUndefined();
+    expect(inputSchema.allOf).toBeUndefined();
+    // Discriminant enum unions every variant's literal.
+    expect(inputSchema.properties.kind).toEqual({ enum: ['freeform', 'choice'] });
+    // Variant-specific fields are present and optional; only `kind` is required.
+    expect(inputSchema.properties.action).toEqual({ type: 'string' });
+    expect(inputSchema.properties.index).toEqual({ type: 'number' });
+    expect(inputSchema.required).toEqual(['kind']);
   });
 
   it('gemini returns json_object with _gemini.responseSchema populated', () => {
