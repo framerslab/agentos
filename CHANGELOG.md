@@ -1,3 +1,7 @@
+## <small>0.9.83 (2026-06-25)</small>
+
+* fix(llm): merge top-level union input_schema into one object for Anthropic tools ([3c45c3233898e400194da57ce1e4bf680554b12a](https://github.com/framerslab/agentos/commit/3c45c3233898e400194da57ce1e4bf680554b12a))
+
 ## <small>0.9.82 (2026-06-25)</small>
 
 * fix(llm): lower discriminated unions, literals, and records in SchemaLowering ([5b173c63a8b3fcbd22c0fb3a8c5617a524e7233c](https://github.com/framerslab/agentos/commit/5b173c63a8b3fcbd22c0fb3a8c5617a524e7233c))
