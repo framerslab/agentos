@@ -1,3 +1,7 @@
+## <small>0.9.82 (2026-06-25)</small>
+
+* fix(llm): lower discriminated unions, literals, and records in SchemaLowering ([5b173c63a8b3fcbd22c0fb3a8c5617a524e7233c](https://github.com/framerslab/agentos/commit/5b173c63a8b3fcbd22c0fb3a8c5617a524e7233c))
+
 ## <small>0.9.81 (2026-06-25)</small>
 
 * fix(llm): ensure Anthropic structured-output input_schema has a top-level type ([e7f42b144b8b1855cfb75e9b50fa13599b7e6f7a](https://github.com/framerslab/agentos/commit/e7f42b144b8b1855cfb75e9b50fa13599b7e6f7a))
