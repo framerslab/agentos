@@ -150,6 +150,11 @@ export interface ICognitiveMemoryManager {
     events?: string[];
     queryText?: string;
     queryEmbedding?: number[];
+    /**
+     * Policy-tier ceiling: drop prospective items whose `tierRank` exceeds it,
+     * matching the assembly path. Forwarded to `prospective.check`.
+     */
+    maxTierRank?: number;
   }): Promise<ProspectiveMemoryItem[]>;
 
   /** Register a new prospective reminder/intention. */
@@ -1181,6 +1186,12 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     events?: string[];
     queryText?: string;
     queryEmbedding?: number[];
+    /**
+     * Policy-tier ceiling forwarded to `prospective.check`, so the direct
+     * prospective-check path gates by session tier exactly like the assembly
+     * path (`assembleForPrompt`) already does.
+     */
+    maxTierRank?: number;
   }): Promise<ProspectiveMemoryItem[]> {
     if (!this.prospective) return [];
     return this.prospective.check(context);
