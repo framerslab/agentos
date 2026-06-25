@@ -1,3 +1,7 @@
+## <small>0.9.80 (2026-06-25)</small>
+
+* fix(memory): forward maxTierRank through checkProspective context ([295e0837418a7ab03469f4bcdb776bd2e1b7d2e6](https://github.com/framerslab/agentos/commit/295e0837418a7ab03469f4bcdb776bd2e1b7d2e6))
+
 ## <small>0.9.79 (2026-06-24)</small>
 
 * fix(memory): gate prospective items by optional tierRank in check() ([66dea18b7b7f8eea9b94c99f6538023778704ce8](https://github.com/framerslab/agentos/commit/66dea18b7b7f8eea9b94c99f6538023778704ce8))
