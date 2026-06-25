@@ -28,6 +28,26 @@ describe('buildResponseFormat', () => {
     expect(typeof (r as any).tool.input_schema).toBe('object');
   });
 
+  it('anthropic: object schema input_schema carries a top-level type:"object" (no regression)', () => {
+    const r = buildResponseFormat({ provider: 'anthropic', schema, schemaName: 'X' });
+    expect((r as any).tool.input_schema.type).toBe('object');
+    expect(typeof (r as any).tool.input_schema.properties).toBe('object');
+  });
+
+  it('anthropic: a top-level discriminated union still yields input_schema.type:"object"', () => {
+    // Anthropic's tool input_schema requires a top-level `type`; without it the
+    // Messages API rejects the tool with
+    // "tools.0.custom.input_schema.type: Field required". lowerZodToJsonSchema
+    // returns `{}` for shapes it does not model (e.g. a bare discriminated
+    // union), so the anthropic adapter must guarantee an object schema.
+    const union = z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('freeform'), action: z.string() }),
+      z.object({ kind: z.literal('choice'), index: z.number() }),
+    ]);
+    const r = buildResponseFormat({ provider: 'anthropic', schema: union, schemaName: 'PersonaAction' });
+    expect((r as any).tool.input_schema.type).toBe('object');
+  });
+
   it('gemini returns json_object with _gemini.responseSchema populated', () => {
     const r = buildResponseFormat({ provider: 'gemini', schema, schemaName: 'X' });
     expect((r as any).type).toBe('json_object');

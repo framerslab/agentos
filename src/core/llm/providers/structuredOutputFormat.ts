@@ -49,6 +49,29 @@ function sanitizeName(name: string): string {
 }
 
 /**
+ * Anthropic requires every tool's `input_schema` to be a JSON Schema object
+ * with a top-level `type`. {@link lowerZodToJsonSchema} returns `{}` for
+ * top-level shapes it does not model (e.g. a bare `z.discriminatedUnion`),
+ * which the Anthropic Messages API rejects with
+ * `tools.0.custom.input_schema.type: Field required`. Inject `type: 'object'`
+ * when the lowered schema has no top-level `type`; pass schemas that already
+ * declare a `type` through unchanged, so this is a no-op for the common
+ * object-schema case (mirrors the `?? { type: 'object' }` fallback the regular
+ * tool-conversion path in AnthropicProvider already applies).
+ */
+function ensureAnthropicObjectSchema(jsonSchema: unknown): Record<string, unknown> {
+  if (jsonSchema && typeof jsonSchema === 'object' && 'type' in jsonSchema) {
+    return jsonSchema as Record<string, unknown>;
+  }
+  return {
+    type: 'object',
+    ...(jsonSchema && typeof jsonSchema === 'object'
+      ? (jsonSchema as Record<string, unknown>)
+      : {}),
+  };
+}
+
+/**
  * Build a provider-specific structured-output payload from a Zod schema.
  *
  * @param input - Provider id, Zod schema, schema display name.
@@ -85,7 +108,10 @@ export function buildResponseFormat(
     case 'anthropic':
       return {
         _agentosUseToolForStructuredOutput: true,
-        tool: { name: schemaName, input_schema: jsonSchema },
+        tool: {
+          name: schemaName,
+          input_schema: ensureAnthropicObjectSchema(jsonSchema),
+        },
       };
     case 'gemini':
     case 'gemini-cli':
