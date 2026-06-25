@@ -1,3 +1,7 @@
+## <small>0.9.81 (2026-06-25)</small>
+
+* fix(llm): ensure Anthropic structured-output input_schema has a top-level type ([e7f42b144b8b1855cfb75e9b50fa13599b7e6f7a](https://github.com/framerslab/agentos/commit/e7f42b144b8b1855cfb75e9b50fa13599b7e6f7a))
+
 ## <small>0.9.80 (2026-06-25)</small>
 
 * fix(memory): forward maxTierRank through checkProspective context ([295e0837418a7ab03469f4bcdb776bd2e1b7d2e6](https://github.com/framerslab/agentos/commit/295e0837418a7ab03469f4bcdb776bd2e1b7d2e6))
