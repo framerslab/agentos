@@ -102,6 +102,37 @@ export function lowerZodToJsonSchema(schema: ZodType): Record<string, unknown> {
       // Unwrap; defaults are runtime concerns, not JSON Schema concerns for our use case.
       return lowerZodToJsonSchema(def.innerType as ZodType);
 
+    case 'union': {
+      // z.union AND z.discriminatedUnion both surface as `union` in Zod v4 (the
+      // discriminated variant only adds `_def.discriminator`). Lower each option
+      // and expose them via `anyOf`. The result intentionally has no top-level
+      // `type`: the Anthropic structured-output adapter injects `{ type: 'object' }`
+      // (its tool input_schema requires a type), and OpenAI strict mode declines a
+      // typeless root (`canUseStrictJsonSchema`) and degrades to json_object — so a
+      // typeless `anyOf` is safe across providers while still giving the model the
+      // real variant shapes (previously a union lowered to `{}`, leaving the model
+      // unguided and structured output validation failing).
+      const options = (def.options as ZodType[] | undefined) ?? [];
+      return { anyOf: options.map((opt) => lowerZodToJsonSchema(opt)) };
+    }
+
+    case 'literal': {
+      // Zod v4: def.values is an array of allowed literal constants (a literal may
+      // carry more than one). Model it as a single-value enum so discriminants in a
+      // discriminated union read correctly.
+      const values = (def.values as unknown[] | undefined) ?? [];
+      return { enum: values };
+    }
+
+    case 'record': {
+      // Open-ended string-keyed map → JSON Schema object whose value shape is
+      // described by additionalProperties.
+      return {
+        type: 'object',
+        additionalProperties: lowerZodToJsonSchema(def.valueType as ZodType),
+      };
+    }
+
     default:
       // Unknown / unsupported Zod type — return empty schema (treat as untyped).
       return {};
