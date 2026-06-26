@@ -1,3 +1,7 @@
+## <small>0.9.84 (2026-06-26)</small>
+
+* fix(anthropic-provider): retry transient throttles by default + jitter the backoff ([2f58810a5f49f82ce37368ff0e58fd5b2f22c6bc](https://github.com/framerslab/agentos/commit/2f58810a5f49f82ce37368ff0e58fd5b2f22c6bc))
+
 ## <small>0.9.83 (2026-06-25)</small>
 
 * fix(llm): merge top-level union input_schema into one object for Anthropic tools ([3c45c3233898e400194da57ce1e4bf680554b12a](https://github.com/framerslab/agentos/commit/3c45c3233898e400194da57ce1e4bf680554b12a))
