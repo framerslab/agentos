@@ -333,54 +333,64 @@ export class RequestyProvider implements IProvider {
       ...(options.customModelParams || {}),
     };
 
-    const stream = await this.makeApiRequest<NodeJS.ReadableStream>(
-      '/chat/completions',
-      'POST',
-      // CR8: honor a per-call requestTimeout override over the stream default.
-      options.requestTimeout ?? this.config.streamRequestTimeout,
-      payload,
-      true
-    );
-
-    const accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }> = new Map();
-
     const abortSignal = options.abortSignal;
     if (abortSignal?.aborted) {
       yield { id: `requesty-abort-${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), modelId, choices: [], error: { message: 'Stream aborted prior to first chunk', type: 'abort' }, isFinal: true };
       return;
     }
+
+    const accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }> = new Map();
     const abortHandler = () => { /* passive; loop logic handles emission */ };
     abortSignal?.addEventListener('abort', abortHandler, { once: true });
 
-    for await (const rawChunk of this.parseSseStream(stream)) {
-      if (abortSignal?.aborted) {
-        yield { id: `requesty-abort-${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), modelId, choices: [], error: { message: 'Stream aborted by caller', type: 'abort' }, isFinal: true };
-        break;
-      }
-      if (rawChunk.startsWith('data: ') && rawChunk.includes('[DONE]')) {
-        const doneData = rawChunk.substring('data: '.length).trim();
-        if (doneData === '[DONE]') break;
-      }
-      if (rawChunk === 'data: [DONE]') {
-        break;
-      }
+    try {
+      const stream = await this.makeApiRequest<NodeJS.ReadableStream>(
+        '/chat/completions',
+        'POST',
+        // CR8: honor a per-call requestTimeout override over the stream default.
+        options.requestTimeout ?? this.config.streamRequestTimeout,
+        payload,
+        true
+      );
 
-      if (rawChunk.startsWith('data: ')) {
-        const jsonData = rawChunk.substring('data: '.length);
-        try {
-          const apiChunk = JSON.parse(jsonData) as RequestyChatCompletionAPIResponse;
-          yield this.mapApiToStreamChunkResponse(apiChunk, modelId, accumulatedToolCalls);
-          // Don't break on finish_reason: with stream_options.include_usage,
-          // Requesty (like OpenAI) emits a trailing usage-only chunk AFTER
-          // the finish_reason chunk and BEFORE [DONE]. Breaking here would
-          // skip the usage chunk and zero out the caller's token totals. The
-          // [DONE] marker check above is the right termination signal.
-        } catch (error: unknown) {
-          console.warn('RequestyProvider: Failed to parse stream chunk JSON, skipping chunk. Data:', jsonData, 'Error:', error);
+      for await (const rawChunk of this.parseSseStream(stream)) {
+        if (abortSignal?.aborted) {
+          yield { id: `requesty-abort-${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), modelId, choices: [], error: { message: 'Stream aborted by caller', type: 'abort' }, isFinal: true };
+          break;
+        }
+        if (rawChunk.startsWith('data: ') && rawChunk.includes('[DONE]')) {
+          const doneData = rawChunk.substring('data: '.length).trim();
+          if (doneData === '[DONE]') break;
+        }
+        if (rawChunk === 'data: [DONE]') {
+          break;
+        }
+
+        if (rawChunk.startsWith('data: ')) {
+          const jsonData = rawChunk.substring('data: '.length);
+          try {
+            const apiChunk = JSON.parse(jsonData) as RequestyChatCompletionAPIResponse;
+            yield this.mapApiToStreamChunkResponse(apiChunk, modelId, accumulatedToolCalls);
+            // Don't break on finish_reason: with stream_options.include_usage,
+            // Requesty (like OpenAI) emits a trailing usage-only chunk AFTER
+            // the finish_reason chunk and BEFORE [DONE]. Breaking here would
+            // skip the usage chunk and zero out the caller's token totals. The
+            // [DONE] marker check above is the right termination signal.
+          } catch (error: unknown) {
+            console.warn('RequestyProvider: Failed to parse stream chunk JSON, skipping chunk. Data:', jsonData, 'Error:', error);
+          }
         }
       }
+    } catch (error: unknown) {
+      // Provider contract (IProvider) requires a terminal isFinal:true chunk
+      // even on error. If request setup or SSE iteration throws, surface it as
+      // a final error chunk instead of letting the generator throw.
+      const message = error instanceof Error ? error.message : String(error);
+      yield { id: `requesty-error-${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), modelId, choices: [], error: { message, type: 'api_error' }, isFinal: true };
+      return;
+    } finally {
+      abortSignal?.removeEventListener('abort', abortHandler);
     }
-    abortSignal?.removeEventListener('abort', abortHandler);
   }
 
   public async generateEmbeddings(
@@ -403,13 +413,9 @@ export class RequestyProvider implements IProvider {
       input: texts,
       ...(options?.encodingFormat && { encoding_format: options.encodingFormat }),
       ...(options?.dimensions && { dimensions: options.dimensions }),
+      ...(options?.inputType && { input_type: options.inputType }),
       ...(options?.customModelParams || {}),
     };
-    if (options?.inputType && payload.customModelParams && typeof payload.customModelParams === 'object') {
-      (payload.customModelParams as Record<string, unknown>).input_type = options.inputType;
-    } else if (options?.inputType) {
-      payload.customModelParams = { input_type: options.inputType };
-    }
 
     const apiResponseData = await this.makeApiRequest<RequestyEmbeddingAPIResponse>(
       '/embeddings',
@@ -703,7 +709,7 @@ export class RequestyProvider implements IProvider {
         'API_REQUEST_FAILED',
         statusCode,
         errorType,
-        { requestEndpoint: endpoint, requestBodyPreview: body ? JSON.stringify(body).substring(0, 200) + '...' : undefined, responseData: errorData, underlyingError: error }
+        { requestEndpoint: endpoint, requestBodyKeys: body ? Object.keys(body) : undefined, responseData: errorData, underlyingError: error }
       );
     }
   }

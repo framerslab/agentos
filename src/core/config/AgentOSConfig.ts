@@ -98,6 +98,7 @@ export function validateEnvironmentConfig(env: Partial<EnvironmentConfig>): Conf
     !env.OPENAI_API_KEY &&
     !env.ANTHROPIC_API_KEY &&
     !env.OPENROUTER_API_KEY &&
+    !env.REQUESTY_API_KEY &&
     !env.OLLAMA_BASE_URL
   ) {
     warnings.push('No LLM provider API keys configured. AgentOS will have limited functionality.');
@@ -242,9 +243,9 @@ function createModelProviderManagerConfig(env: EnvironmentConfig): AIModelProvid
       config: {
         apiKey: env.REQUESTY_API_KEY,
         baseURL: 'https://router.requesty.ai/v1',
-        defaultModel: 'openai/gpt-4o',
-        maxRetries: 3,
-        timeout: 60000,
+        defaultModelId: 'openai/gpt-4o',
+        requestTimeout: 60000,
+        streamRequestTimeout: 180000,
       },
     });
   }
