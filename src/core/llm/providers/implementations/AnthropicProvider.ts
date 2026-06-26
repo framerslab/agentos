@@ -37,6 +37,7 @@ import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
 import { resolveThinkingPayload } from '../model-thinking.js';
 import { modelSupportsForcedToolChoice } from '../model-forced-tool-choice.js';
 import { modelSupportsEffort, isEffortLevel } from '../model-effort.js';
+import { computeRetryBackoffMs } from './retry-backoff.js';
 
 // Re-export so callers that already reach for Anthropic model-capability
 // predicates (modelSupportsTemperature lives here too) find this one next to
@@ -482,7 +483,11 @@ export class AnthropicProvider implements IProvider {
 
     this.config = {
       baseURL: 'https://api.anthropic.com',
-      maxRetries: 1,
+      // Total attempts (NOT retries-on-top): 1 meant a single shot with the
+      // whole retryable-error path (429 / 5xx / 529 overloaded / network) as
+      // dead code. 3 matches the OpenAI + Gemini providers and lets the
+      // equal-jitter backoff below actually ride out a transient throttle.
+      maxRetries: 3,
       requestTimeout: 90000,
       // 4096 was Anthropic's per-call max in the Claude 2 era and
       // is way too small for modern Claude 4 tool-use traffic — Opus
@@ -612,7 +617,7 @@ export class AnthropicProvider implements IProvider {
         if (!this.isRetryableStreamError(lastError) || attempt === attempts - 1) {
           throw lastError;
         }
-        await new Promise(resolve => setTimeout(resolve, (2 ** attempt) * 1000));
+        await new Promise(resolve => setTimeout(resolve, computeRetryBackoffMs(attempt)));
       }
     }
     throw lastError;
@@ -1904,7 +1909,8 @@ export class AnthropicProvider implements IProvider {
             lastError = new AnthropicProviderError(errorMessage, 'RATE_LIMIT_EXCEEDED', 429, errorType, errorData);
             this.keyPool?.markExhausted(apiKey);
             const retryAfter = response.headers.get('retry-after');
-            const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : (2 ** attempt) * 1000;
+            // Retry-After is authoritative when present; otherwise jittered backoff.
+            const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : computeRetryBackoffMs(attempt);
             await new Promise(resolve => setTimeout(resolve, retryAfterMs));
             continue;
           }
@@ -1912,7 +1918,7 @@ export class AnthropicProvider implements IProvider {
           // Retryable server errors (5xx)
           if (response.status >= 500) {
             lastError = new AnthropicProviderError(errorMessage, 'API_SERVER_ERROR', response.status, errorType, errorData);
-            await new Promise(resolve => setTimeout(resolve, (2 ** attempt) * 1000));
+            await new Promise(resolve => setTimeout(resolve, computeRetryBackoffMs(attempt)));
             continue;
           }
 
@@ -1965,7 +1971,7 @@ export class AnthropicProvider implements IProvider {
         }
 
         if (attempt === this.config.maxRetries! - 1) break;
-        const delay = Math.min(30000, (1000 * (2 ** attempt)) + Math.random() * 1000);
+        const delay = computeRetryBackoffMs(attempt);
         console.warn(`[AnthropicProvider] Retry ${attempt + 1}/${this.config.maxRetries! - 1} in ${(delay / 1000).toFixed(1)}s`);
         await new Promise(resolve => setTimeout(resolve, delay));
       }

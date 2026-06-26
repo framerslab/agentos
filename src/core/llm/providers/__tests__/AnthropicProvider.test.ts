@@ -177,12 +177,16 @@ describe('AnthropicProvider', () => {
 
   describe('per-call requestTimeout override', () => {
     it('aborts at the per-call requestTimeout instead of the 90s default', async () => {
+      // maxRetries:1 isolates the timeout-abort assertion from the default (3)
+      // retry loop — a hung fetch otherwise retries 3× and outlasts this window.
+      const tp = new AnthropicProvider();
+      await tp.initialize({ apiKey: 'test-anthropic-key', maxRetries: 1 });
       vi.useFakeTimers();
       try {
         // fetch never settles — only a timeout can end the call.
         fetchMock.mockReturnValue(new Promise<Response>(() => {}));
 
-        const p = provider.generateCompletion(
+        const p = tp.generateCompletion(
           'claude-sonnet-4-20250514',
           [{ role: 'user', content: 'Hi' }],
           { requestTimeout: 1000 },
@@ -205,6 +209,11 @@ describe('AnthropicProvider', () => {
     });
 
     it('aborts when the response BODY stalls after headers arrive (not just the connection)', async () => {
+      // maxRetries:1 keeps this a single deterministic body-read timeout — with
+      // the default 3 the stall retries 3× and the jittered backoffs could push
+      // final rejection past the advance window (flaky).
+      const tp = new AnthropicProvider();
+      await tp.initialize({ apiKey: 'test-anthropic-key', maxRetries: 1 });
       vi.useFakeTimers();
       try {
         // fetch() resolves (headers arrive) but response.json() — the body
@@ -218,7 +227,7 @@ describe('AnthropicProvider', () => {
           json: () => new Promise<never>(() => {}),
         } as unknown as Response);
 
-        const p = provider.generateCompletion(
+        const p = tp.generateCompletion(
           'claude-sonnet-4-20250514',
           [{ role: 'user', content: 'Hi' }],
           { requestTimeout: 1000 },
