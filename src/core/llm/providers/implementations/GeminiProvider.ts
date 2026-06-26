@@ -34,6 +34,7 @@ import {
 } from '../IProvider';
 import { GeminiProviderError } from '../errors/GeminiProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
+import { computeRetryBackoffMs } from './retry-backoff.js';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -1181,7 +1182,8 @@ export class GeminiProvider implements IProvider {
               errorData,
             );
             const retryAfter = response.headers.get('retry-after');
-            const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : (2 ** attempt) * 1000;
+            // Retry-After is authoritative when present; otherwise jittered backoff.
+            const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : computeRetryBackoffMs(attempt);
             await new Promise(resolve => setTimeout(resolve, retryAfterMs));
             continue;
           }
@@ -1195,7 +1197,7 @@ export class GeminiProvider implements IProvider {
               errorStatus,
               errorData,
             );
-            await new Promise(resolve => setTimeout(resolve, (2 ** attempt) * 1000));
+            await new Promise(resolve => setTimeout(resolve, computeRetryBackoffMs(attempt)));
             continue;
           }
 
@@ -1227,7 +1229,7 @@ export class GeminiProvider implements IProvider {
         }
 
         if (attempt === this.config.maxRetries! - 1) break;
-        const delay = Math.min(30000, (1000 * (2 ** attempt)) + Math.random() * 1000);
+        const delay = computeRetryBackoffMs(attempt);
         console.warn(`[GeminiProvider] Retry ${attempt + 1}/${this.config.maxRetries! - 1} in ${(delay / 1000).toFixed(1)}s`);
         await new Promise(resolve => setTimeout(resolve, delay));
       }

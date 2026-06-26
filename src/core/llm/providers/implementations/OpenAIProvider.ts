@@ -36,6 +36,7 @@ import { OpenAIProviderError } from '../errors/OpenAIProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
 import { toOpenAiResponseFormat } from './openai-response-format-guard';
 import { clampMaxOutputTokens } from '../model-output-limits.js';
+import { computeRetryBackoffMs } from './retry-backoff.js';
 // Assuming a fetch-like interface is available globally or polyfilled (e.g., node-fetch)
 // For Node.js, ensure 'node-fetch' is a dependency or use Node's built-in fetch from v18+.
 // import fetch, { RequestInit, Response as FetchResponse, AbortController } from 'node-fetch'; // Example for Node
@@ -1106,13 +1107,14 @@ export class OpenAIProvider implements IProvider {
           if (response.status === 429) { // Rate limit
             lastError = new OpenAIProviderError(errorMessage, 'RATE_LIMIT_EXCEEDED', errorCode || undefined, errorType, response.status, errorData);
             const retryAfter = response.headers.get('retry-after'); // seconds
-            const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : (2 ** attempt) * 1000;
+            // Retry-After is authoritative when present; otherwise jittered backoff.
+            const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : computeRetryBackoffMs(attempt);
             await new Promise(resolve => setTimeout(resolve, retryAfterMs));
             continue; // Retry
           }
           // Other retryable server errors
           if (response.status >= 500) {
-            await new Promise(resolve => setTimeout(resolve, (2 ** attempt) * 1000)); // Exponential backoff
+            await new Promise(resolve => setTimeout(resolve, computeRetryBackoffMs(attempt))); // jittered exponential backoff
             continue; // Retry
           }
           throw lastError; // If not explicitly handled for retry, throw
@@ -1140,8 +1142,8 @@ export class OpenAIProvider implements IProvider {
         if (attempt === this.config.maxRetries! - 1) {
           break; // Last attempt failed, break to throw lastError
         }
-        // Exponential backoff for retries not handled by 429
-        const delay = Math.min(30000, (1000 * (2 ** attempt)) + Math.random() * 1000); // Add jitter
+        // Equal-jitter exponential backoff for retries not handled by 429
+        const delay = computeRetryBackoffMs(attempt);
         // Keep retry logs concise — network errors are common and the stack trace is noise
         const isNetwork = lastError instanceof OpenAIProviderError && lastError.code === 'NETWORK_ERROR';
         const shortMsg = isNetwork ? 'Network unreachable' : lastError.message;
