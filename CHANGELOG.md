@@ -1,3 +1,11 @@
+## <small>0.9.87 (2026-06-27)</small>
+
+* Merge branch 'master' of https://github.com/framerslab/agentos ([2d080c46aff3870b34940c87a67dc83505856f8b](https://github.com/framerslab/agentos/commit/2d080c46aff3870b34940c87a67dc83505856f8b))
+* feat(api): forward effort through generateObject to generateText ([6569b72438a8599bfe3308ed9a3b870daa2e9e61](https://github.com/framerslab/agentos/commit/6569b72438a8599bfe3308ed9a3b870daa2e9e61))
+* feat(api): surface per-hop fallback events on generate results ([214b852e0356f3a9b558fa7ca71817c93bdc220b](https://github.com/framerslab/agentos/commit/214b852e0356f3a9b558fa7ca71817c93bdc220b))
+* feat(providers): map effort to OpenAI reasoning_effort for reasoning models ([d9035a24fd6aae516fa75f5e67cd5a87ba324bb9](https://github.com/framerslab/agentos/commit/d9035a24fd6aae516fa75f5e67cd5a87ba324bb9))
+* fix(api): preserve explicit fallback chain across recursion ([3c2a3af6273b3111b276860220ce1f7fc614eac9](https://github.com/framerslab/agentos/commit/3c2a3af6273b3111b276860220ce1f7fc614eac9))
+
 ## <small>0.9.86 (2026-06-27)</small>
 
 * Merge branch 'master' of https://github.com/framerslab/agentos ([d2395af21600030f6d1dc044c04e6ad8401863e8](https://github.com/framerslab/agentos/commit/d2395af21600030f6d1dc044c04e6ad8401863e8))
