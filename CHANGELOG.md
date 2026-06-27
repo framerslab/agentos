@@ -1,3 +1,8 @@
+## <small>0.9.86 (2026-06-27)</small>
+
+* Merge branch 'master' of https://github.com/framerslab/agentos ([d2395af21600030f6d1dc044c04e6ad8401863e8](https://github.com/framerslab/agentos/commit/d2395af21600030f6d1dc044c04e6ad8401863e8))
+* feat(providers): add gpt-5.5 to the OpenAI model catalog ([bba43f067f9bc471f3641878098d987e7c9a35fe](https://github.com/framerslab/agentos/commit/bba43f067f9bc471f3641878098d987e7c9a35fe))
+
 ## <small>0.9.85 (2026-06-26)</small>
 
 * fix(providers): publish the jittered OpenAI + Gemini retry backoff ([dd57d1165d825fee49a31921054a3b2dad52b05b](https://github.com/framerslab/agentos/commit/dd57d1165d825fee49a31921054a3b2dad52b05b))
