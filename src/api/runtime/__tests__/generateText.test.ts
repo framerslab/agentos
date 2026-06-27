@@ -570,6 +570,47 @@ describe('generateText', () => {
     }
   });
 
+  it('reports fallback.fired = false on a clean primary success', async () => {
+    globalLLMProviderHealth.reset();
+    hoisted.generateCompletion.mockResolvedValueOnce({
+      modelId: 'gpt-4.1-mini',
+      usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
+      choices: [{ message: { role: 'assistant', content: 'clean' }, finishReason: 'stop' }],
+    });
+
+    const result = await generateText({ model: 'openai:gpt-4.1-mini', prompt: 'hi' });
+
+    expect(result.text).toBe('clean');
+    expect(result.fallback?.fired).toBe(false);
+    expect(result.fallback?.finalProvider).toBe('openai');
+    expect(result.fallback?.hops).toEqual([{ provider: 'openai', model: 'gpt-4.1-mini', ok: true }]);
+  });
+
+  it('reports fallback.fired = true with a hop trail when a fallback provider wins', async () => {
+    globalLLMProviderHealth.reset();
+    hoisted.generateCompletion
+      .mockRejectedValueOnce(new Error('429 rate limit exceeded'))
+      .mockResolvedValueOnce({
+        modelId: 'gpt-4.1-mini',
+        usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
+        choices: [{ message: { role: 'assistant', content: 'fallback reply' }, finishReason: 'stop' }],
+      });
+
+    process.env.ANTHROPIC_API_KEY = 'test-anthropic-key';
+    try {
+      const result = await generateText({ model: 'openai:gpt-4o', prompt: 'hi' });
+      expect(result.text).toBe('fallback reply');
+      expect(result.fallback?.fired).toBe(true);
+      // primary (failed) + the winning fallback hop
+      expect(result.fallback?.hops.length).toBeGreaterThanOrEqual(2);
+      expect(result.fallback?.hops[0]?.ok).toBe(false);
+      expect(result.fallback?.hops.at(-1)?.ok).toBe(true);
+    } finally {
+      delete process.env.ANTHROPIC_API_KEY;
+      globalLLMProviderHealth.reset();
+    }
+  });
+
   // Policy-aware fallback: when policyTier is mature/private-adult AND
   // the primary refuses on a content_policy_violation, the auto-built
   // chain should include the uncensored Hermes 3 prefix and the

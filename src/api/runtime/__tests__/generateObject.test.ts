@@ -31,6 +31,7 @@ vi.mock('../../model.js', () => ({
 }));
 
 import { generateObject, ObjectGenerationError } from '../generateObject.js';
+import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -97,6 +98,43 @@ describe('generateObject', () => {
     const callArgs = hoisted.generateCompletion.mock.calls[0];
     const providerOptions = callArgs[2] as { effort?: string };
     expect(providerOptions.effort).toBe('max');
+  });
+
+  it('surfaces fallback.fired when the underlying generateText fell back', async () => {
+    globalLLMProviderHealth.reset();
+    hoisted.generateCompletion
+      .mockRejectedValueOnce(new Error('429 rate limit exceeded'))
+      .mockResolvedValueOnce(mockResponse('{"name": "Alice", "age": 28}'));
+
+    process.env.ANTHROPIC_API_KEY = 'test-anthropic-key';
+    try {
+      const result = await generateObject({ schema: personSchema, prompt: 'Extract person info' });
+      expect(result.object).toEqual({ name: 'Alice', age: 28 });
+      expect(result.fallback?.fired).toBe(true);
+    } finally {
+      delete process.env.ANTHROPIC_API_KEY;
+      globalLLMProviderHealth.reset();
+    }
+  });
+
+  it('keeps fallback.fired = true across retries even when the final attempt recovers on the primary', async () => {
+    globalLLMProviderHealth.reset();
+    hoisted.generateCompletion
+      .mockRejectedValueOnce(new Error('429 rate limit exceeded')) // attempt 0 primary fails -> falls back
+      .mockResolvedValueOnce(mockResponse('{"name": "NoAge"}')) // attempt 0 fallback: Zod-invalid (missing age)
+      .mockResolvedValueOnce(mockResponse('{"name": "Alice", "age": 28}')); // attempt 1 primary: valid
+
+    process.env.ANTHROPIC_API_KEY = 'test-anthropic-key';
+    try {
+      const result = await generateObject({ schema: personSchema, prompt: 'x' });
+      expect(result.object).toEqual({ name: 'Alice', age: 28 });
+      // Attempt 0 fell back (degraded) before attempt 1 recovered on the
+      // primary; the degradation must stay visible to the caller.
+      expect(result.fallback?.fired).toBe(true);
+    } finally {
+      delete process.env.ANTHROPIC_API_KEY;
+      globalLLMProviderHealth.reset();
+    }
   });
 
   it('propagates cacheReadTokens + cacheCreationTokens from the provider', async () => {

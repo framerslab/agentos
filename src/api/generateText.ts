@@ -550,6 +550,25 @@ export interface GenerateTextResult {
    * @see {@link import('./types.js').VerifyCitationsConfig}
    */
   grounding?: import('../cognition/rag/citation/types.js').VerifiedResponse;
+  /**
+   * Per-hop provider fallback trail. `fired` is true when any non-primary
+   * provider produced — or was tried for — the result, so callers can flag a
+   * degraded run even when the final attempt recovered on the primary.
+   * `undefined` only on legacy code paths that predate the field.
+   */
+  fallback?: FallbackSignal;
+}
+
+/** @see {@link GenerateTextResult.fallback} */
+export interface FallbackSignal {
+  /** True when a non-primary provider was used or tried for this result. */
+  fired: boolean;
+  /** Provider that produced the returned result. */
+  finalProvider: string;
+  /** Model that produced the returned result. */
+  finalModel: string;
+  /** Ordered trail of every provider hop attempted, in order. */
+  hops: Array<{ provider: string; model?: string; ok: boolean }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1688,7 +1707,15 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
     if (metricProviderId) {
       globalLLMProviderHealth.recordSuccess(metricProviderId);
     }
-    return successResult;
+    return {
+      ...successResult,
+      fallback: {
+        fired: false,
+        finalProvider: successResult.provider,
+        finalModel: successResult.model,
+        hops: [{ provider: successResult.provider, model: successResult.model, ok: true }],
+      },
+    };
   } catch (error) {
     // Record the primary attempt as a failure on the health registry
     // BEFORE walking the fallback chain. Subsequent calls in this
@@ -1700,6 +1727,13 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
     if (metricProviderId && !(error instanceof LLMProviderCircuitOpenError)) {
       globalLLMProviderHealth.recordFailure(metricProviderId, error);
     }
+    // Capture the failed primary for the fallback trail before the loop below
+    // reassigns metricProviderId / metricModelId to the winning fallback.
+    const primaryProviderId = metricProviderId;
+    const primaryModelId = metricModelId;
+    const fallbackHops: FallbackSignal['hops'] = [
+      { provider: primaryProviderId ?? 'unknown', model: primaryModelId, ok: false },
+    ];
     // ── Fallback chain ────────────────────────────────────────────────
     // Resolve fallback chain: caller-supplied wins, undefined triggers
     // auto-build from env keys, empty array explicitly opts out.
@@ -1781,9 +1815,23 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           metricUsage = fallbackResult.usage;
           metricProviderId = fallbackResult.provider;
           metricModelId = fallbackResult.model;
-          return fallbackResult;
+          fallbackHops.push(
+            ...(fallbackResult.fallback?.hops ?? [
+              { provider: fallbackResult.provider, model: fallbackResult.model, ok: true },
+            ]),
+          );
+          return {
+            ...fallbackResult,
+            fallback: {
+              fired: true,
+              finalProvider: fallbackResult.provider,
+              finalModel: fallbackResult.model,
+              hops: fallbackHops,
+            },
+          };
         } catch (fbError) {
           lastError = fbError;
+          fallbackHops.push({ provider: fb.provider, model: fb.model, ok: false });
         }
       }
       // All fallbacks exhausted: fall through to throw

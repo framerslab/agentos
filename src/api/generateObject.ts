@@ -265,6 +265,14 @@ export interface GenerateObjectResult<T> {
 
   /** Resolved model identifier used for the run. */
   model: string;
+
+  /**
+   * Provider-fallback trail aggregated across all attempts. `fired` is true
+   * when any attempt used or tried a non-primary provider — including a
+   * fallback on a failed attempt that a later attempt recovered from on the
+   * primary. Callers use this to flag a degraded run.
+   */
+  fallback?: import('./generateText.js').FallbackSignal;
 }
 
 // ---------------------------------------------------------------------------
@@ -573,6 +581,12 @@ export async function generateObject<T extends ZodType>(
   // instead of re-truncating with the same budget (see the retry loop below).
   let currentMaxTokens = opts.maxTokens ?? estimateMaxTokensForZodSchema(opts.schema);
 
+  // Accumulate the provider-fallback signal across every attempt so a fallback
+  // that fired on a failed attempt is still reported even when a later attempt
+  // recovers on the primary.
+  let anyFallbackFired = false;
+  const accumulatedFallbackHops: import('./generateText.js').FallbackSignal['hops'] = [];
+
   // Attempt generation up to 1 + maxRetries times (initial + retries)
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const result = await generateText({
@@ -610,6 +624,10 @@ export async function generateObject<T extends ZodType>(
     if (typeof result.usage.costUSD === 'number') {
       totalUsage.costUSD = (totalUsage.costUSD ?? 0) + result.usage.costUSD;
     }
+
+    // Accumulate the fallback trail across attempts (see anyFallbackFired above).
+    if (result.fallback?.fired) anyFallbackFired = true;
+    if (result.fallback?.hops?.length) accumulatedFallbackHops.push(...result.fallback.hops);
     // Prompt-cache metrics. generateText propagates these from the
     // provider layer (Anthropic's cache_read_input_tokens /
     // cache_creation_input_tokens); without this accumulation every
@@ -682,6 +700,14 @@ export async function generateObject<T extends ZodType>(
         finishReason: result.finishReason,
         provider: result.provider,
         model: result.model,
+        fallback: {
+          fired: anyFallbackFired,
+          finalProvider: result.provider,
+          finalModel: result.model,
+          hops: accumulatedFallbackHops.length
+            ? accumulatedFallbackHops
+            : [{ provider: result.provider, model: result.model, ok: true }],
+        },
       };
     }
 
