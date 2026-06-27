@@ -26,6 +26,9 @@ vi.mock('../../model.js', () => ({
 
 import { generateText, buildFallbackChain } from '../generateText.js';
 import { clearRecordedAgentOSUsage, getRecordedAgentOSUsage } from '../usageLedger.js';
+import { resolveModelOption, resolveProvider } from '../../model.js';
+import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
+import type { Mock } from 'vitest';
 
 describe('generateText', () => {
   beforeEach(() => {
@@ -503,6 +506,67 @@ describe('generateText', () => {
       ).rejects.toThrow('429');
     } finally {
       delete process.env.ANTHROPIC_API_KEY;
+    }
+  });
+
+  it('preserves the explicit chain on recursion — never falls into the default cheap chain (gpt-4o-mini)', async () => {
+    // Echo the requested provider/model so each hop's identity is observable
+    // (the default mock pins every hop to gpt-4.1-mini, hiding which model won).
+    (resolveModelOption as unknown as Mock).mockImplementation(
+      (opts: { provider?: string; model?: string }) => ({
+        providerId: opts?.provider ?? 'openai',
+        modelId: opts?.model ?? 'gpt-4.1-mini',
+      }),
+    );
+    (resolveProvider as unknown as Mock).mockImplementation((providerId: string, modelId: string) => ({
+      providerId,
+      modelId,
+      apiKey: 'test-key',
+    }));
+    globalLLMProviderHealth.reset();
+    try {
+      // Only the openrouter frontier entry succeeds; the primary and the openai
+      // gpt-5.5 hop both throw retryably. If the recursion rebuilt the default
+      // cheap chain (the pre-fix bug), an openai/gpt-4o-mini hop would be tried
+      // before openrouter:openai/gpt-5.5.
+      hoisted.generateCompletion.mockImplementation(async (modelId: string) => {
+        if (modelId === 'openai/gpt-5.5') {
+          return {
+            modelId,
+            usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
+            choices: [{ message: { role: 'assistant', content: 'frontier reply' }, finishReason: 'stop' }],
+          };
+        }
+        throw new Error('429 rate limit exceeded');
+      });
+
+      const result = await generateText({
+        provider: 'anthropic',
+        model: 'claude-primary',
+        prompt: 'hello',
+        fallbackProviders: [
+          { provider: 'openai', model: 'gpt-5.5' },
+          { provider: 'openrouter', model: 'openai/gpt-5.5' },
+        ],
+      });
+
+      expect(result.text).toBe('frontier reply');
+      expect(result.model).toBe('openai/gpt-5.5');
+      const requestedModels = (hoisted.generateCompletion.mock.calls as unknown[][]).map((c) => c[0]);
+      expect(requestedModels).not.toContain('gpt-4o-mini');
+      expect(requestedModels).not.toContain('openai/gpt-4o-mini');
+    } finally {
+      // Restore the fixed resolvers so later tests see the default behavior.
+      (resolveModelOption as unknown as Mock).mockImplementation(() => ({
+        providerId: 'openai',
+        modelId: 'gpt-4.1-mini',
+      }));
+      (resolveProvider as unknown as Mock).mockImplementation(() => ({
+        providerId: 'openai',
+        modelId: 'gpt-4.1-mini',
+        apiKey: 'test-key',
+      }));
+      globalLLMProviderHealth.reset();
     }
   });
 

@@ -1750,8 +1750,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             attempt,
           });
           opts.onFallback?.(lastErr, fb.provider);
-          // Build a new options object targeting the fallback provider,
-          // stripping the fallbackProviders to prevent recursive fallback.
+          // Build a new options object targeting the fallback provider.
           const fallbackResult = await generateText({
             ...opts,
             provider: fb.provider,
@@ -1760,7 +1759,14 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             // fallback provider rather than the primary's overrides.
             apiKey: undefined,
             baseUrl: undefined,
-            fallbackProviders: undefined,
+            // Preserve the REMAINING explicit chain (entries AFTER the current
+            // fb; `attempt` is 1-indexed so slice(attempt) drops fb and all
+            // already-tried entries). This stops the recursion from rebuilding
+            // the default cheap chain (which includes gpt-4o-mini) when a
+            // fallback hop also fails — so an explicit frontier-only chain
+            // (e.g. codegen's [gpt-5.5, openrouter:gpt-5.5]) is honored
+            // end-to-end. The final entry passes [] -> explicit opt-out -> throw.
+            fallbackProviders: effectiveFallbacks.slice(attempt),
             onFallback: undefined,
           });
           fallbackLogger.info('provider fallback succeeded', {
