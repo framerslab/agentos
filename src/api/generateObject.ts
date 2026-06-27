@@ -228,6 +228,15 @@ export interface GenerateObjectOptions<T extends ZodType> {
    * failover for chat / narration traffic.
    */
   requestTimeout?: number;
+
+  /**
+   * Reasoning-depth / token-spend control, forwarded to
+   * {@link import('./generateText.js').GenerateTextOptions.effort}. On
+   * effort-capable models the provider emits it as `output_config.effort`
+   * (Anthropic) or `reasoning_effort` (OpenAI o-series / GPT-5). Dropped on
+   * models that don't support it.
+   */
+  effort?: string;
 }
 
 /**
@@ -587,6 +596,10 @@ export async function generateObject<T extends ZodType>(
       // large-output structured-output callers (codegen TSX) get a longer
       // abort window than the provider default.
       requestTimeout: opts.requestTimeout,
+      // Forward reasoning effort so reasoning-capable models (gpt-5.x ->
+      // reasoning_effort, effort-capable Claude -> output_config.effort) run at
+      // the requested depth instead of their default.
+      effort: opts.effort,
       _responseFormat: responseFormat,
     });
 

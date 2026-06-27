@@ -83,6 +83,22 @@ describe('generateObject', () => {
     expect(result.usage.totalTokens).toBe(15);
   });
 
+  it('forwards effort through generateText to the provider options', async () => {
+    hoisted.generateCompletion.mockResolvedValue(mockResponse('{"name": "Alice", "age": 28}'));
+
+    await generateObject({
+      schema: personSchema,
+      prompt: 'Extract person info',
+      effort: 'max',
+    });
+
+    // generateText calls provider.generateCompletion(modelId, messages, options);
+    // without the generateObject -> generateText effort forward, options.effort is undefined.
+    const callArgs = hoisted.generateCompletion.mock.calls[0];
+    const providerOptions = callArgs[2] as { effort?: string };
+    expect(providerOptions.effort).toBe('max');
+  });
+
   it('propagates cacheReadTokens + cacheCreationTokens from the provider', async () => {
     // Anthropic provider surfaces cache_read_input_tokens +
     // cache_creation_input_tokens on every cached call; generateText
