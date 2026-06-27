@@ -1,3 +1,9 @@
+## <small>0.9.85 (2026-06-26)</small>
+
+* fix(providers): publish the jittered OpenAI + Gemini retry backoff ([dd57d1165d825fee49a31921054a3b2dad52b05b](https://github.com/framerslab/agentos/commit/dd57d1165d825fee49a31921054a3b2dad52b05b))
+* fix(openai-provider,gemini-provider): jitter the retry backoff to break lockstep retries ([6666b685b85907b26cd0e97dfb311fd016ec5c44](https://github.com/framerslab/agentos/commit/6666b685b85907b26cd0e97dfb311fd016ec5c44))
+* Merge branch 'master' of https://github.com/framerslab/agentos ([2eee5f05dda2cb7937465c9cb45b8b74f5e8badf](https://github.com/framerslab/agentos/commit/2eee5f05dda2cb7937465c9cb45b8b74f5e8badf))
+
 ## <small>0.9.84 (2026-06-26)</small>
 
 * fix(anthropic-provider): retry transient throttles by default + jitter the backoff ([2f58810a5f49f82ce37368ff0e58fd5b2f22c6bc](https://github.com/framerslab/agentos/commit/2f58810a5f49f82ce37368ff0e58fd5b2f22c6bc))
