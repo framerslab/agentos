@@ -314,7 +314,11 @@ export class OpenAIProvider implements IProvider {
   // Input: cost for prompt tokens. Output: cost for completion tokens.
   // For embedding models, 'input' is total tokens.
   private readonly modelPricing: Record<string, { input: number; output: number }> = {
-    // GPT-5.4 family (current flagship and siblings, Mar 2026)
+    // GPT-5.5 family (current flagship, Jun 2026 — $5 / $30 per 1M tokens, a 2x
+    // increase over gpt-5.4; verified against OpenAI's published pricing 2026-06-27)
+    'gpt-5.5': { input: 0.005, output: 0.03 },
+    'gpt-5.5-pro': { input: 0.03, output: 0.18 },
+    // GPT-5.4 family (previous flagship and siblings, Mar 2026)
     'gpt-5.4': { input: 0.0025, output: 0.015 },
     'gpt-5.4-mini': { input: 0.00075, output: 0.0045 },
     'gpt-5.4-nano': { input: 0.0002, output: 0.00125 },

@@ -13,6 +13,8 @@ describe('isOpenAIReasoningModel', () => {
     expect(isOpenAIReasoningModel('o3')).toBe(true);
     expect(isOpenAIReasoningModel('o1-mini')).toBe(true);
     expect(isOpenAIReasoningModel('o4-mini')).toBe(true);
+    expect(isOpenAIReasoningModel('gpt-5.5')).toBe(true);
+    expect(isOpenAIReasoningModel('gpt-5.5-pro')).toBe(true);
     expect(isOpenAIReasoningModel('gpt-5.4')).toBe(true);
     expect(isOpenAIReasoningModel('gpt-5-mini')).toBe(true);
     expect(isOpenAIReasoningModel('gpt-4o')).toBe(false);
