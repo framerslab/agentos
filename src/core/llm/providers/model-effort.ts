@@ -31,3 +31,22 @@ export function modelSupportsEffort(modelId: string): boolean {
 export function isEffortLevel(v: unknown): v is EffortLevel {
   return typeof v === 'string' && (EFFORT_LEVELS as readonly string[]).includes(v);
 }
+
+/**
+ * OpenAI reasoning models (o-series, GPT-5 family) take `reasoning_effort`
+ * (none|low|medium|high|xhigh) — the OpenAI analogue of Anthropic's
+ * `output_config.effort`. This maps the agentos effort scale onto it; `max`
+ * clamps to `xhigh`, the GPT-5.x ceiling (there is no higher OpenAI tier).
+ * Returns undefined for unknown / empty / non-string values so the request
+ * payload omits `reasoning_effort` entirely (the model then runs at its default).
+ */
+const OPENAI_REASONING_EFFORT: Record<EffortLevel, string> = {
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  xhigh: 'xhigh',
+  max: 'xhigh',
+};
+export function mapEffortToOpenAiReasoningEffort(effort: unknown): string | undefined {
+  return isEffortLevel(effort) ? OPENAI_REASONING_EFFORT[effort] : undefined;
+}

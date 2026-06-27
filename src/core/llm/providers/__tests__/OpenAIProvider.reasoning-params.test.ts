@@ -50,3 +50,30 @@ describe('OpenAIProvider — reasoning-model sampling-param guard', () => {
     expect(payload.top_p).toBe(0.9);
   });
 });
+
+describe('OpenAIProvider — reasoning_effort mapping', () => {
+  let provider: OpenAIProvider;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    provider = new OpenAIProvider();
+  });
+
+  const build = (model: string, options: unknown): Record<string, unknown> =>
+    (provider as unknown as {
+      buildChatCompletionPayload: (m: string, msgs: ChatMessage[], o: unknown, s: boolean) => Record<string, unknown>;
+    }).buildChatCompletionPayload(model, messages, options, false);
+
+  it('sets reasoning_effort for a gpt-5 reasoning model, mapping max -> xhigh', () => {
+    expect(build('gpt-5.5', { effort: 'max' }).reasoning_effort).toBe('xhigh');
+    expect(build('o3', { effort: 'high' }).reasoning_effort).toBe('high');
+  });
+
+  it('omits reasoning_effort for legacy chat models even when effort is given', () => {
+    expect(build('gpt-4o', { effort: 'max' }).reasoning_effort).toBeUndefined();
+  });
+
+  it('omits reasoning_effort for a reasoning model when no effort is given', () => {
+    expect(build('gpt-5.5', {}).reasoning_effort).toBeUndefined();
+  });
+});

@@ -36,6 +36,7 @@ import { OpenAIProviderError } from '../errors/OpenAIProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
 import { toOpenAiResponseFormat } from './openai-response-format-guard';
 import { clampMaxOutputTokens } from '../model-output-limits.js';
+import { mapEffortToOpenAiReasoningEffort } from '../model-effort.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
 // Assuming a fetch-like interface is available globally or polyfilled (e.g., node-fetch)
 // For Node.js, ensure 'node-fetch' is a dependency or use Node's built-in fetch from v18+.
@@ -769,6 +770,14 @@ export class OpenAIProvider implements IProvider {
     if (!isOpenAIReasoningModel(modelId)) {
       if (options.temperature !== undefined) payload.temperature = options.temperature;
       if (options.topP !== undefined) payload.top_p = options.topP;
+    } else {
+      // Reasoning models (o-series, GPT-5) take `reasoning_effort`
+      // (none|low|medium|high|xhigh) in place of the sampling params they
+      // reject. Map the agentos effort scale onto it so `effort: 'max'` actually
+      // drives gpt-5.x at its xhigh ceiling instead of being silently dropped.
+      // customModelParams (below) can still override.
+      const reasoningEffort = mapEffortToOpenAiReasoningEffort(options.effort);
+      if (reasoningEffort !== undefined) payload.reasoning_effort = reasoningEffort;
     }
     if (options.maxTokens !== undefined) {
       // Clamp to the model's real output ceiling first: a request sized for

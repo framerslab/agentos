@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { modelSupportsEffort, isEffortLevel, EFFORT_LEVELS } from '../model-effort.js';
+import {
+  modelSupportsEffort,
+  isEffortLevel,
+  EFFORT_LEVELS,
+  mapEffortToOpenAiReasoningEffort,
+} from '../model-effort.js';
 
 describe('modelSupportsEffort', () => {
   it('accepts Opus 4.5-4.8, Sonnet 4.6, Fable/Mythos 5 (bare + provider-prefixed)', () => {
@@ -34,5 +39,22 @@ describe('isEffortLevel', () => {
   it('validates the five levels and rejects everything else', () => {
     for (const e of EFFORT_LEVELS) expect(isEffortLevel(e)).toBe(true);
     for (const e of ['ultra', '', 5, null, undefined, {}]) expect(isEffortLevel(e)).toBe(false);
+  });
+});
+
+describe('mapEffortToOpenAiReasoningEffort', () => {
+  it('maps the agentos effort scale to OpenAI reasoning_effort; max -> xhigh', () => {
+    expect(mapEffortToOpenAiReasoningEffort('low')).toBe('low');
+    expect(mapEffortToOpenAiReasoningEffort('medium')).toBe('medium');
+    expect(mapEffortToOpenAiReasoningEffort('high')).toBe('high');
+    expect(mapEffortToOpenAiReasoningEffort('xhigh')).toBe('xhigh');
+    // xhigh is gpt-5.x's ceiling, so `max` clamps to it (NOT `high`).
+    expect(mapEffortToOpenAiReasoningEffort('max')).toBe('xhigh');
+  });
+
+  it('returns undefined for unknown / empty / non-string values', () => {
+    for (const v of ['ultra', '', 5, null, undefined, {}]) {
+      expect(mapEffortToOpenAiReasoningEffort(v)).toBeUndefined();
+    }
   });
 });
