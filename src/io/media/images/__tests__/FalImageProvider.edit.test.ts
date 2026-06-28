@@ -83,6 +83,34 @@ describe('FalImageProvider — editImage', () => {
     ).rejects.toThrow('not initialized');
   });
 
+  it('polls + fetches the status_url/response_url Fal returns (multi-segment edit model)', async () => {
+    // Regression: reconstructing `${base}/${model}/requests/${id}/status` 405s for
+    // multi-segment edit-model slugs (e.g. fal-ai/flux-pro/kontext/max), which broke
+    // every companion selfie + outfit preview. Fal returns the correct status_url /
+    // response_url on submit — use them instead of reconstructing.
+    const statusUrl = 'https://queue.fal.run/fal-ai/flux-pro/requests/req_xyz/status';
+    const responseUrl = 'https://queue.fal.run/fal-ai/flux-pro/requests/req_xyz';
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ request_id: 'req_xyz', status_url: statusUrl, response_url: responseUrl }),
+        text: async () => '',
+      })
+      .mockResolvedValueOnce(mockStatus())
+      .mockResolvedValueOnce(mockResult());
+
+    await provider.editImage({
+      modelId: 'fal-ai/flux-pro/kontext/max',
+      image: Buffer.from('fake'),
+      prompt: 'selfie',
+    });
+
+    // 2nd fetch = poll, 3rd = result — both must use Fal's returned URLs, not the
+    // reconstructed `${base}/fal-ai/flux-pro/kontext/max/requests/...` (which 405s).
+    expect(mockFetch.mock.calls[1][0]).toBe(statusUrl);
+    expect(mockFetch.mock.calls[2][0]).toBe(responseUrl);
+  });
+
   describe('listAvailableModels', () => {
     it('returns at least 7 models with descriptions', async () => {
       const models = await provider.listAvailableModels();

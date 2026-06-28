@@ -98,6 +98,15 @@ export interface FalImageProviderConfig {
 interface FalSubmitResponse {
   /** Unique request ID for polling. */
   request_id: string;
+  /**
+   * Absolute status-polling URL Fal returns on submit. Authoritative over a
+   * reconstructed `${base}/${model}/requests/${id}/status` path: multi-segment
+   * model slugs (e.g. image-to-image edit endpoints) reconstruct to an invalid
+   * route and 405. Always prefer this when present.
+   */
+  status_url?: string;
+  /** Absolute result URL Fal returns on submit. Authoritative over a reconstructed path (same 405 reason as `status_url`). */
+  response_url?: string;
 }
 
 /**
@@ -332,13 +341,13 @@ export class FalImageProvider implements IImageProvider {
     }
 
     // Step 1: Submit to the queue
-    const requestId = await this._submitTask(model, body);
+    const { requestId, statusUrl, responseUrl } = await this._submitTask(model, body);
 
-    // Step 2: Poll until complete
-    await this._pollStatus(model, requestId);
+    // Step 2: Poll until complete (use the URLs Fal returns, not reconstructed paths)
+    await this._pollStatus(model, requestId, statusUrl);
 
     // Step 3: Fetch the result
-    const result = await this._fetchResult(model, requestId);
+    const result = await this._fetchResult(model, requestId, responseUrl);
 
     if (!result.images || result.images.length === 0) {
       throw new Error('Fal.ai generation completed but returned no images.');
@@ -415,9 +424,9 @@ export class FalImageProvider implements IImageProvider {
     if (request.seed !== undefined) body.seed = request.seed;
     if (request.n) body.num_images = request.n;
 
-    const requestId = await this._submitTask(model, body);
-    await this._pollStatus(model, requestId);
-    const result = await this._fetchResult(model, requestId);
+    const { requestId, statusUrl, responseUrl } = await this._submitTask(model, body);
+    await this._pollStatus(model, requestId, statusUrl);
+    const result = await this._fetchResult(model, requestId, responseUrl);
 
     if (!result.images || result.images.length === 0) {
       throw new Error('Fal.ai edit completed but returned no images.');
@@ -464,7 +473,10 @@ export class FalImageProvider implements IImageProvider {
    * @throws {Error} If the submission request fails.
    * @internal
    */
-  private async _submitTask(model: string, body: Record<string, unknown>): Promise<string> {
+  private async _submitTask(
+    model: string,
+    body: Record<string, unknown>
+  ): Promise<{ requestId: string; statusUrl?: string; responseUrl?: string }> {
     const url = `${this._config.baseURL}/${model}`;
 
     const response = await fetch(url, {
@@ -486,7 +498,7 @@ export class FalImageProvider implements IImageProvider {
       throw new Error('Fal.ai submission response missing request_id.');
     }
 
-    return data.request_id;
+    return { requestId: data.request_id, statusUrl: data.status_url, responseUrl: data.response_url };
   }
 
   /**
@@ -498,11 +510,11 @@ export class FalImageProvider implements IImageProvider {
    * @throws {Error} If the generation fails or times out.
    * @internal
    */
-  private async _pollStatus(model: string, requestId: string): Promise<void> {
+  private async _pollStatus(model: string, requestId: string, statusUrl?: string): Promise<void> {
     const startedAt = Date.now();
 
     while (Date.now() - startedAt < this._config.timeoutMs) {
-      const url = `${this._config.baseURL}/${model}/requests/${requestId}/status`;
+      const url = statusUrl ?? `${this._config.baseURL}/${model}/requests/${requestId}/status`;
 
       const response = await fetch(url, {
         headers: {
@@ -546,8 +558,8 @@ export class FalImageProvider implements IImageProvider {
    * @throws {Error} If the result fetch fails.
    * @internal
    */
-  private async _fetchResult(model: string, requestId: string): Promise<FalResultResponse> {
-    const url = `${this._config.baseURL}/${model}/requests/${requestId}`;
+  private async _fetchResult(model: string, requestId: string, responseUrl?: string): Promise<FalResultResponse> {
+    const url = responseUrl ?? `${this._config.baseURL}/${model}/requests/${requestId}`;
 
     const response = await fetch(url, {
       headers: {
