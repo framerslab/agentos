@@ -1,3 +1,7 @@
+## <small>0.9.88 (2026-06-28)</small>
+
+* fix(fal): use the status_url/response_url Fal returns for queue polling ([cf3b89a3c83c241555d5f80b2760e0c8ca0b71ab](https://github.com/framerslab/agentos/commit/cf3b89a3c83c241555d5f80b2760e0c8ca0b71ab))
+
 ## <small>0.9.87 (2026-06-27)</small>
 
 * Merge branch 'master' of https://github.com/framerslab/agentos ([2d080c46aff3870b34940c87a67dc83505856f8b](https://github.com/framerslab/agentos/commit/2d080c46aff3870b34940c87a67dc83505856f8b))
