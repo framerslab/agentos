@@ -161,18 +161,33 @@ export function scoreAndRankTraces(
 export function detectPartiallyRetrieved(
   candidates: CandidateTrace[],
   now: number,
+  scoringContext?: ScoringContext,
 ): PartiallyRetrievedTrace[] {
-  return candidates
+  // #16: when a non-neutral mood is supplied, weight FOK confidence by emotional
+  // congruence and sort desc so mood-congruent tip-of-tongue cues surface first.
+  // Absent context / neutralMood / zero-valence mood → byte-identical (factor 1.0,
+  // no sort): the qualify gate below is unchanged.
+  const moodActive =
+    !!scoringContext && !scoringContext.neutralMood && scoringContext.currentMood.valence !== 0;
+  const partials = candidates
     .filter(({ trace, vectorSimilarity }) => {
       const strength = computeCurrentStrength(trace, now);
       return vectorSimilarity > 0.6 && (strength < 0.3 || trace.provenance.confidence < 0.4);
     })
-    .map(({ trace, vectorSimilarity }) => ({
-      traceId: trace.id,
-      confidence: Math.min(trace.provenance.confidence, vectorSimilarity * 0.5),
-      partialContent: trace.content.length > 100
-        ? trace.content.substring(0, 100) + '...'
-        : trace.content,
-      suggestedCues: trace.tags.slice(0, 3),
-    }));
+    .map(({ trace, vectorSimilarity }) => {
+      const base = Math.min(trace.provenance.confidence, vectorSimilarity * 0.5);
+      const factor = moodActive
+        ? computeEmotionalCongruence(scoringContext!.currentMood, trace.emotionalContext.valence)
+        : 1.0;
+      return {
+        traceId: trace.id,
+        confidence: Math.min(1.0, base * factor),
+        partialContent: trace.content.length > 100
+          ? trace.content.substring(0, 100) + '...'
+          : trace.content,
+        suggestedCues: trace.tags.slice(0, 3),
+      };
+    });
+  if (moodActive) partials.sort((a, b) => b.confidence - a.confidence);
+  return partials;
 }

@@ -710,7 +710,7 @@ export class MemoryStore {
 
     const scoringStart = Date.now();
     const scored = scoreAndRankTraces(allCandidates, scoringContext).slice(0, topK);
-    const partial = detectPartiallyRetrieved(allCandidates, now);
+    const partial = detectPartiallyRetrieved(allCandidates, now, scoringContext);
     const scoringMs = Date.now() - scoringStart;
 
     // Cognitive mechanisms: RIF + FOK
