@@ -3,7 +3,8 @@
  *
  * `output_config.effort` (low|medium|high|xhigh|max) controls reasoning depth
  * and overall token spend. Supported on Fable 5 / Mythos 5, Opus 4.5/4.6/4.7/4.8,
- * and Sonnet 4.6; Sonnet 4.5, Haiku 4.5, and older models 400 on it. It is
+ * Sonnet 5, and Sonnet 4.6 (Sonnet 5 is the first Sonnet tier with `xhigh`);
+ * Sonnet 4.5, Haiku 4.5, and older models 400 on it. It is
  * INDEPENDENT of the extended-thinking block and of tool_choice; it rides on
  * `output_config` and is emitted whenever the caller passes an effort level and
  * the model supports it. Kept pure (no provider/SDK import) like
@@ -17,14 +18,14 @@ export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 /**
  * Whether the given Claude model id accepts `output_config.effort`.
  *
- * Allow-by-explicit-family: Opus 4.5/4.6/4.7/4.8, Sonnet 4.6, and Fable/Mythos 5.
+ * Allow-by-explicit-family: Opus 4.5/4.6/4.7/4.8, Sonnet 5, Sonnet 4.6, and Fable/Mythos 5.
  * Matches both the bare (`claude-opus-4-8`) and provider-prefixed
  * (`anthropic/claude-opus-4-8`) forms, with no `^` anchor.
  *
  * @param modelId Anthropic-side model id.
  */
 export function modelSupportsEffort(modelId: string): boolean {
-  return /claude-(opus-4-(5|6|7|8)|sonnet-4-6|fable-5|mythos-5)/i.test(modelId);
+  return /claude-(opus-4-(5|6|7|8)|sonnet-(4-6|5)|fable-5|mythos-5)/i.test(modelId);
 }
 
 /** Whether a value is a valid effort level. */

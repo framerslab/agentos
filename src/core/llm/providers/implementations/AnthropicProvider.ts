@@ -123,9 +123,9 @@ export interface AnthropicProviderConfig {
  * Whether the given Claude model id accepts the `temperature` parameter.
  *
  * Anthropic deprecated `temperature` on reasoning-default models. Opus 4.7,
- * Opus 4.8, and Fable 5 (extended-thinking by default) reject requests that
- * include it with HTTP 400 "`temperature` is deprecated for this model."
- * Every earlier Claude model (Opus ≤ 4.6, Sonnet, Haiku) still accepts it.
+ * Opus 4.8, Sonnet 5, and Fable 5 (extended-thinking by default) reject requests
+ * that include it with HTTP 400 "`temperature` is deprecated for this model."
+ * Every earlier Claude model (Opus ≤ 4.6, Sonnet 4.6 and earlier, Haiku) still accepts it.
  * The same family also rejects `top_p` / `top_k`, so {@link buildRequestPayload}
  * gates `top_p` on this predicate too.
  *
@@ -141,11 +141,11 @@ export interface AnthropicProviderConfig {
  *   model, `true` otherwise.
  */
 export function modelSupportsTemperature(modelId: string): boolean {
-  // Claude Opus 4.7 / 4.8, Fable 5, and any dated variant — reasoning-default
+  // Claude Opus 4.7 / 4.8, Sonnet 5, Fable 5, and any dated variant — reasoning-default
   // models that reject `temperature` (and `top_p` / `top_k`). Future
   // reasoning-first siblings get added here as Anthropic releases them, in
   // lockstep with modelSupportsThinking.
-  return !/^claude-(opus-4-(7|8)|fable-5)\b/i.test(modelId);
+  return !/^claude-(opus-4-(7|8)|sonnet-5|fable-5)\b/i.test(modelId);
 }
 
 // ---------------------------------------------------------------------------

@@ -816,6 +816,22 @@ describe('AnthropicProvider', () => {
       expect(body.temperature).toBeUndefined();
     });
 
+    it('OMITS temperature for claude-sonnet-5 even when caller passes it', async () => {
+      // Sonnet 5 joined the reasoning-default family (adaptive thinking on by
+      // default, full effort range incl. xhigh). Like Opus 4.7/4.8 it rejects
+      // temperature/top_p with HTTP 400, so the provider must drop it. Sonnet
+      // 4.6 (above) still KEEPS temperature — the sonnet-5 deny does not leak.
+      fetchMock.mockResolvedValueOnce(mockSseResponse(makeAnthropicResponse()));
+      await provider.generateCompletion(
+        'claude-sonnet-5',
+        [{ role: 'user', content: 'Hi' }],
+        { temperature: 0.5, topP: 0.9 },
+      );
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.temperature).toBeUndefined();
+      expect(body.top_p).toBeUndefined();
+    });
+
     it('passes temperature unchanged when model is not a reasoning-default family', async () => {
       fetchMock.mockResolvedValueOnce(mockSseResponse(makeAnthropicResponse()));
       await provider.generateCompletion(

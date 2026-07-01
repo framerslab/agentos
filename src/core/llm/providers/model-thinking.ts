@@ -28,7 +28,7 @@
  * `thinking` parameter.
  *
  * Allow-by-explicit-family: only the reasoning-default Opus 4.7 / 4.8
- * line and Fable 5 (and their dated variants like
+ * line, Sonnet 5, and Fable 5 (and their dated variants like
  * `claude-opus-4-8-20260501`) accept it; every other Claude model ignores
  * or rejects it. Future reasoning-first siblings get added to the regex as
  * Anthropic releases them, in lockstep with `modelSupportsTemperature`.
@@ -37,7 +37,7 @@
  * @returns `true` when Anthropic accepts a `thinking` block for this model.
  */
 export function modelSupportsThinking(modelId: string): boolean {
-  return /^claude-(opus-4-(7|8)|fable-5)\b/i.test(modelId);
+  return /^claude-(opus-4-(7|8)|sonnet-5|fable-5)\b/i.test(modelId);
 }
 
 /** The resolved extended-thinking payload plus the max_tokens to send. */

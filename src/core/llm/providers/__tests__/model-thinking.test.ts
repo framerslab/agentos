@@ -2,16 +2,19 @@ import { describe, it, expect } from 'vitest';
 import { modelSupportsThinking, resolveThinkingPayload } from '../model-thinking';
 
 describe('modelSupportsThinking', () => {
-  it('is true for the reasoning-default Opus 4.7 / 4.8 family and Fable 5 (incl. dated variants)', () => {
+  it('is true for the reasoning-default Opus 4.7 / 4.8 family, Sonnet 5, and Fable 5 (incl. dated variants)', () => {
     expect(modelSupportsThinking('claude-opus-4-8')).toBe(true);
     expect(modelSupportsThinking('claude-opus-4-7')).toBe(true);
     expect(modelSupportsThinking('claude-opus-4-8-20260501')).toBe(true);
+    expect(modelSupportsThinking('claude-sonnet-5')).toBe(true);
+    expect(modelSupportsThinking('claude-sonnet-5-20260101')).toBe(true);
     expect(modelSupportsThinking('claude-fable-5')).toBe(true);
     expect(modelSupportsThinking('claude-fable-5-20260609')).toBe(true);
   });
 
-  it('is false for sonnet, haiku, and pre-4.7 opus', () => {
+  it('is false for Sonnet 4.6 and earlier, haiku, and pre-4.7 opus', () => {
     expect(modelSupportsThinking('claude-sonnet-4-6')).toBe(false);
+    expect(modelSupportsThinking('claude-sonnet-4-5')).toBe(false);
     expect(modelSupportsThinking('claude-haiku-4-5')).toBe(false);
     expect(modelSupportsThinking('claude-opus-4-6')).toBe(false);
   });
@@ -41,8 +44,9 @@ describe('resolveThinkingPayload', () => {
     expect(resolveThinkingPayload('claude-opus-4-8', { budgetTokens: 8000 }, 32000)!.maxTokens).toBe(32000);
   });
 
-  it('emits adaptive for dated variants and opus-4-7 too', () => {
+  it('emits adaptive for dated variants, opus-4-7, and sonnet-5 too', () => {
     expect(resolveThinkingPayload('claude-opus-4-7', { budgetTokens: 1 }, 16000)!.thinking).toEqual({ type: 'adaptive' });
     expect(resolveThinkingPayload('claude-opus-4-8-20260501', { budgetTokens: 200 }, 16000)!.thinking).toEqual({ type: 'adaptive' });
+    expect(resolveThinkingPayload('claude-sonnet-5', { budgetTokens: 8000 }, 16000)!.thinking).toEqual({ type: 'adaptive' });
   });
 });

@@ -7,13 +7,15 @@ import {
 } from '../model-effort.js';
 
 describe('modelSupportsEffort', () => {
-  it('accepts Opus 4.5-4.8, Sonnet 4.6, Fable/Mythos 5 (bare + provider-prefixed)', () => {
+  it('accepts Opus 4.5-4.8, Sonnet 5, Sonnet 4.6, Fable/Mythos 5 (bare + provider-prefixed)', () => {
     for (const m of [
       'claude-opus-4-5',
       'claude-opus-4-6',
       'claude-opus-4-7',
       'claude-opus-4-8',
       'anthropic/claude-opus-4-8',
+      'claude-sonnet-5',
+      'anthropic/claude-sonnet-5',
       'claude-sonnet-4-6',
       'claude-fable-5',
       'claude-mythos-5',
@@ -22,7 +24,7 @@ describe('modelSupportsEffort', () => {
     }
   });
 
-  it('rejects Sonnet 4.5, Haiku 4.5, Opus 4.1, and non-Anthropic ids', () => {
+  it('rejects Sonnet 4.5, Haiku 4.5, Opus 4.1, and non-Anthropic ids (sonnet-5 alt does not leak into sonnet-4-5)', () => {
     for (const m of [
       'claude-sonnet-4-5',
       'claude-haiku-4-5',
