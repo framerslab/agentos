@@ -1,3 +1,7 @@
+## <small>0.9.91 (2026-07-01)</small>
+
+* feat(providers): recognize claude-sonnet-5 capabilities ([966e8c04a27598435f12f2c6afce382c964a8529](https://github.com/framerslab/agentos/commit/966e8c04a27598435f12f2c6afce382c964a8529))
+
 ## <small>0.9.90 (2026-07-01)</small>
 
 * Merge branch 'master' of https://github.com/framerslab/agentos ([29d5d3108ae38b3620b2d6b1fbd6529ce4318a99](https://github.com/framerslab/agentos/commit/29d5d3108ae38b3620b2d6b1fbd6529ce4318a99))
