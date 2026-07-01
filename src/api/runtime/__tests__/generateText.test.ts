@@ -570,6 +570,68 @@ describe('generateText', () => {
     }
   });
 
+  it('applies a fallback entry effort per-hop — fallback runs at its effort, primary stays untouched', async () => {
+    (resolveModelOption as unknown as Mock).mockImplementation(
+      (opts: { provider?: string; model?: string }) => ({
+        providerId: opts?.provider ?? 'openai',
+        modelId: opts?.model ?? 'gpt-4.1-mini',
+      }),
+    );
+    (resolveProvider as unknown as Mock).mockImplementation((providerId: string, modelId: string) => ({
+      providerId,
+      modelId,
+      apiKey: 'test-key',
+    }));
+    globalLLMProviderHealth.reset();
+    try {
+      // Primary (claude-primary) throws retryably; only the gpt-5.5 fallback
+      // succeeds. The chain sets effort ONLY on the fallback entry and the call
+      // passes NO call-level effort — so the primary must stay dormant (no effort
+      // forwarded) while the fallback runs at its own 'max'.
+      hoisted.generateCompletion.mockImplementation(async (modelId: string) => {
+        if (modelId === 'gpt-5.5') {
+          return {
+            modelId,
+            usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
+            choices: [{ message: { role: 'assistant', content: 'frontier reply' }, finishReason: 'stop' }],
+          };
+        }
+        throw new Error('429 rate limit exceeded');
+      });
+
+      const result = await generateText({
+        provider: 'anthropic',
+        model: 'claude-primary',
+        prompt: 'hello',
+        // NO call-level effort on purpose — proves per-hop effort does not leak
+        // to the primary.
+        fallbackProviders: [{ provider: 'openai', model: 'gpt-5.5', effort: 'max' }],
+      });
+
+      expect(result.text).toBe('frontier reply');
+      expect(result.model).toBe('gpt-5.5');
+
+      const calls = hoisted.generateCompletion.mock.calls as unknown[][];
+      const optsFor = (modelId: string) =>
+        (calls.find((c) => c[0] === modelId)?.[2] ?? {}) as { effort?: string };
+      // The fallback hop ran at the entry's effort.
+      expect(optsFor('gpt-5.5').effort).toBe('max');
+      // The primary hop was NOT bumped — per-hop effort must never leak upward.
+      expect(optsFor('claude-primary').effort).toBeUndefined();
+    } finally {
+      (resolveModelOption as unknown as Mock).mockImplementation(() => ({
+        providerId: 'openai',
+        modelId: 'gpt-4.1-mini',
+      }));
+      (resolveProvider as unknown as Mock).mockImplementation(() => ({
+        providerId: 'openai',
+        modelId: 'gpt-4.1-mini',
+        apiKey: 'test-key',
+      }));
+      globalLLMProviderHealth.reset();
+    }
+  });
+
   it('reports fallback.fired = false on a clean primary success', async () => {
     globalLLMProviderHealth.reset();
     hoisted.generateCompletion.mockResolvedValueOnce({

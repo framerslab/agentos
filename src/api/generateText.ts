@@ -214,6 +214,15 @@ export interface FallbackProviderEntry {
   provider: string;
   /** Model identifier override. When omitted, the provider's default text model is used. */
   model?: string;
+  /**
+   * Per-hop reasoning depth applied ONLY when THIS entry serves the call,
+   * forwarded as `output_config.effort` (Anthropic) / `reasoning_effort`
+   * (OpenAI). Lets a chain run a fallback at a different depth than the primary
+   * — e.g. a gpt-5.5 frontier fallback at `'max'` while the primary keeps its
+   * own (or no) effort, so arming the chain is dormant for the primary call.
+   * Omitted -> the hop inherits the call-level `effort`.
+   */
+  effort?: string;
 }
 
 /**
@@ -1789,6 +1798,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             ...opts,
             provider: fb.provider,
             model: fb.model,
+            // Per-hop effort: when this fallback entry sets `effort`, it
+            // overrides the call-level effort for THIS hop only (the spread
+            // above carries opts.effort; an entry without `effort` inherits it).
+            // Lets an explicit chain run the fallback at a higher depth than the
+            // primary without changing the primary call's effort.
+            ...(fb.effort !== undefined ? { effort: fb.effort } : {}),
             // Clear explicit keys/URLs so resolution uses env vars for the
             // fallback provider rather than the primary's overrides.
             apiKey: undefined,
