@@ -30,6 +30,7 @@ import { XAIProvider, XAIProviderConfig } from './implementations/XAIProvider';
 import { GeminiProvider, GeminiProviderConfig } from './implementations/GeminiProvider';
 import { ClaudeCodeProvider, ClaudeCodeProviderConfig } from './implementations/ClaudeCodeProvider';
 import { GeminiCLIProvider, GeminiCLIProviderConfig } from './implementations/GeminiCLIProvider';
+import { LiteLLMProvider, LiteLLMProviderConfig } from './implementations/LiteLLMProvider';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../utils/errors.js'; // Corrected import path
 
 /**
@@ -152,6 +153,9 @@ export class AIModelProviderManager {
             break;
           case 'gemini-cli':
             providerInstance = new GeminiCLIProvider();
+            break;
+          case 'litellm':
+            providerInstance = new LiteLLMProvider();
             break;
           default:
             console.warn(`AIModelProviderManager: Unknown provider ID '${providerEntry.providerId}'. Skipping.`);
