@@ -1,3 +1,8 @@
+## <small>0.9.90 (2026-07-01)</small>
+
+* Merge branch 'master' of https://github.com/framerslab/agentos ([29d5d3108ae38b3620b2d6b1fbd6529ce4318a99](https://github.com/framerslab/agentos/commit/29d5d3108ae38b3620b2d6b1fbd6529ce4318a99))
+* feat(api): per-hop effort on FallbackProviderEntry ([edcfc7992a9e243757afc95529d27b37e4cbe15e](https://github.com/framerslab/agentos/commit/edcfc7992a9e243757afc95529d27b37e4cbe15e))
+
 ## <small>0.9.89 (2026-06-30)</small>
 
 * Merge branch 'master' of https://github.com/framerslab/agentos ([73bba0eed57923567029fb356b11a5146e3f2e45](https://github.com/framerslab/agentos/commit/73bba0eed57923567029fb356b11a5146e3f2e45))
