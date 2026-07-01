@@ -1,3 +1,8 @@
+## <small>0.9.89 (2026-06-30)</small>
+
+* Merge branch 'master' of https://github.com/framerslab/agentos ([73bba0eed57923567029fb356b11a5146e3f2e45](https://github.com/framerslab/agentos/commit/73bba0eed57923567029fb356b11a5146e3f2e45))
+* feat(memory): mood-congruent partial-retrieval (FOK) cues ([33addeaeabc6432bb008847df56bfeb05bcc70fe](https://github.com/framerslab/agentos/commit/33addeaeabc6432bb008847df56bfeb05bcc70fe))
+
 ## <small>0.9.88 (2026-06-28)</small>
 
 * fix(fal): use the status_url/response_url Fal returns for queue polling ([cf3b89a3c83c241555d5f80b2760e0c8ca0b71ab](https://github.com/framerslab/agentos/commit/cf3b89a3c83c241555d5f80b2760e0c8ca0b71ab))
