@@ -1,9 +1,10 @@
-// File: backend/agentos/core/llm/providers/implementations/OpenRouterProvider.ts
+// File: backend/agentos/core/llm/providers/implementations/RequestyProvider.ts
 /**
- * @fileoverview Implements the IProvider interface for OpenRouter, a service that
- * provides access to a wide variety of LLMs from different providers through a unified API.
- * This provider handles routing requests to the specified models via OpenRouter.
- * @module backend/agentos/core/llm/providers/implementations/OpenRouterProvider
+ * @fileoverview Implements the IProvider interface for Requesty, an OpenAI-compatible
+ * LLM gateway that provides access to a wide variety of LLMs from different providers
+ * through a unified API. This provider handles routing requests to the specified models
+ * via Requesty.
+ * @module backend/agentos/core/llm/providers/implementations/RequestyProvider
  * @implements {IProvider}
  */
 
@@ -19,15 +20,15 @@ import {
   ProviderEmbeddingResponse,
   ModelCompletionChoice,
 } from '../IProvider';
-import { OpenRouterProviderError } from '../errors/OpenRouterProviderError';
+import { RequestyProviderError } from '../errors/RequestyProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 
 /**
- * Configuration specific to the OpenRouterProvider.
+ * Configuration specific to the RequestyProvider.
  */
-export interface OpenRouterProviderConfig {
+export interface RequestyProviderConfig {
   apiKey: string;
   baseURL?: string;
   defaultModelId?: string;
@@ -37,7 +38,7 @@ export interface OpenRouterProviderConfig {
   streamRequestTimeout?: number;
 }
 
-interface OpenRouterChatChoice {
+interface RequestyChatChoice {
   index: number;
   message?: {
     role: ChatMessage['role'];
@@ -58,12 +59,12 @@ interface OpenRouterChatChoice {
   logprobs?: unknown;
 }
 
-interface OpenRouterChatCompletionAPIResponse {
+interface RequestyChatCompletionAPIResponse {
   id: string;
   object: string;
   created: number;
   model: string;
-  choices: OpenRouterChatChoice[];
+  choices: RequestyChatChoice[];
   usage?: {
     prompt_tokens: number;
     completion_tokens: number;
@@ -72,7 +73,7 @@ interface OpenRouterChatCompletionAPIResponse {
   };
 }
 
-interface OpenRouterEmbeddingAPIResponse {
+interface RequestyEmbeddingAPIResponse {
   object: 'list';
   data: Array<{
     object: 'embedding';
@@ -86,7 +87,7 @@ interface OpenRouterEmbeddingAPIResponse {
   };
 }
 
-interface OpenRouterModelAPIObject {
+interface RequestyModelAPIObject {
   id: string;
   name: string;
   description: string;
@@ -108,35 +109,35 @@ interface OpenRouterModelAPIObject {
   };
 }
 
-interface OpenRouterListModelsAPIResponse {
-  data: OpenRouterModelAPIObject[];
+interface RequestyListModelsAPIResponse {
+  data: RequestyModelAPIObject[];
 }
 
-export class OpenRouterProvider implements IProvider {
-  public readonly providerId: string = 'openrouter';
+export class RequestyProvider implements IProvider {
+  public readonly providerId: string = 'requesty';
   public isInitialized: boolean = false;
   public defaultModelId?: string;
 
   // Corrected: Changed type of this.config to satisfy the Readonly<Required<...>> assignment by providing defaults
-  private config!: Readonly<Required<Omit<OpenRouterProviderConfig, 'defaultModelId' | 'siteUrl' | 'appName' | 'baseURL' | 'requestTimeout' | 'streamRequestTimeout'>> & OpenRouterProviderConfig>;
+  private config!: Readonly<Required<Omit<RequestyProviderConfig, 'defaultModelId' | 'siteUrl' | 'appName' | 'baseURL' | 'requestTimeout' | 'streamRequestTimeout'>> & RequestyProviderConfig>;
   private keyPool: ApiKeyPool | null = null;
   private client!: AxiosInstance;
   private readonly availableModelsCache: Map<string, ModelInfo> = new Map();
 
   constructor() {}
 
-  public async initialize(config: OpenRouterProviderConfig): Promise<void> {
+  public async initialize(config: RequestyProviderConfig): Promise<void> {
     if (!config.apiKey) {
-      throw new OpenRouterProviderError(
-        'OpenRouter API key (apiKey) is required for initialization.',
+      throw new RequestyProviderError(
+        'Requesty API key (apiKey) is required for initialization.',
         'INIT_FAILED_MISSING_API_KEY'
       );
     }
-    // Corrected: Ensure all properties of Required<OpenRouterProviderConfig> are present
+    // Corrected: Ensure all properties of Required<RequestyProviderConfig> are present
     // by providing defaults for optional fields before freezing.
     this.config = Object.freeze({
       apiKey: config.apiKey,
-      baseURL: config.baseURL || 'https://openrouter.ai/api/v1',
+      baseURL: config.baseURL || 'https://router.requesty.ai/v1',
       defaultModelId: config.defaultModelId, // Can be undefined, but this.defaultModelId will store it
       siteUrl: config.siteUrl, // Can be undefined
       appName: config.appName, // Can be undefined
@@ -149,7 +150,7 @@ export class OpenRouterProvider implements IProvider {
     const headers: Record<string, string> = {
       'Authorization': `Bearer ${this.keyPool.next()}`,
       'Content-Type': 'application/json',
-      'User-Agent': `AgentOS/1.0 (OpenRouterProvider; ${this.config.appName || 'UnknownApp'})`,
+      'User-Agent': `AgentOS/1.0 (RequestyProvider; ${this.config.appName || 'UnknownApp'})`,
     };
     if (this.config.siteUrl) {
       headers['HTTP-Referer'] = this.config.siteUrl;
@@ -166,15 +167,15 @@ export class OpenRouterProvider implements IProvider {
     try {
       await this.refreshAvailableModels();
       this.isInitialized = true;
-      console.log(`OpenRouterProvider initialized. Default Model: ${this.defaultModelId || 'Not set'}. Found ${this.availableModelsCache.size} models via OpenRouter.`);
+      console.log(`RequestyProvider initialized. Default Model: ${this.defaultModelId || 'Not set'}. Found ${this.availableModelsCache.size} models via Requesty.`);
     } catch (error: unknown) {
       this.isInitialized = false;
-      const initError = error instanceof OpenRouterProviderError ? error :
+      const initError = error instanceof RequestyProviderError ? error :
         createGMIErrorFromError( // Corrected: use imported createGMIErrorFromError
           error instanceof Error ? error : new Error(String(error)),
           GMIErrorCode.LLM_PROVIDER_ERROR, // Corrected: use imported GMIErrorCode
           { providerId: this.providerId },
-          `OpenRouterProvider failed to initialize: ${error instanceof Error ? error.message : String(error)}`
+          `RequestyProvider failed to initialize: ${error instanceof Error ? error.message : String(error)}`
         );
       console.error(initError.message, initError.details || initError);
       throw initError;
@@ -182,7 +183,7 @@ export class OpenRouterProvider implements IProvider {
   }
 
   private async refreshAvailableModels(): Promise<void> {
-    const responseData = await this.makeApiRequest<OpenRouterListModelsAPIResponse>(
+    const responseData = await this.makeApiRequest<RequestyListModelsAPIResponse>(
       '/models',
       'GET',
       this.config.requestTimeout
@@ -190,16 +191,16 @@ export class OpenRouterProvider implements IProvider {
 
     this.availableModelsCache.clear();
     if (responseData && Array.isArray(responseData.data)) {
-      responseData.data.forEach((apiModel: OpenRouterModelAPIObject) => {
+      responseData.data.forEach((apiModel: RequestyModelAPIObject) => {
         const modelInfo = this.mapApiToModelInfo(apiModel);
         this.availableModelsCache.set(modelInfo.modelId, modelInfo);
       });
     } else {
-      console.warn("OpenRouterProvider: Received no model data or malformed response from /models endpoint.");
+      console.warn("RequestyProvider: Received no model data or malformed response from /models endpoint.");
     }
   }
 
-  private mapApiToModelInfo(apiModel: OpenRouterModelAPIObject): ModelInfo {
+  private mapApiToModelInfo(apiModel: RequestyModelAPIObject): ModelInfo {
     const capabilities: ModelInfo['capabilities'] = ['chat', 'completion'];
     if (apiModel.architecture?.modality === 'multimodal') {
       capabilities.push('vision_input');
@@ -234,14 +235,14 @@ export class OpenRouterProvider implements IProvider {
 
   private ensureInitialized(): void {
     if (!this.isInitialized) {
-      throw new OpenRouterProviderError(
-        'OpenRouterProvider is not initialized. Please call the initialize() method first.',
+      throw new RequestyProviderError(
+        'RequestyProvider is not initialized. Please call the initialize() method first.',
         'PROVIDER_NOT_INITIALIZED'
       );
     }
   }
 
-  private mapToOpenRouterMessages(messages: ChatMessage[]): Array<Partial<ChatMessage>> {
+  private mapToRequestyMessages(messages: ChatMessage[]): Array<Partial<ChatMessage>> {
     return messages.map(msg => {
       const mappedMsg: Partial<ChatMessage> = { role: msg.role, content: msg.content };
       if (msg.name) mappedMsg.name = msg.name;
@@ -257,16 +258,16 @@ export class OpenRouterProvider implements IProvider {
     options: ModelCompletionOptions
   ): Promise<ModelCompletionResponse> {
     this.ensureInitialized();
-    const openRouterMessages = this.mapToOpenRouterMessages(messages);
+    const requestyMessages = this.mapToRequestyMessages(messages);
 
     const payload: Record<string, unknown> = {
       model: modelId,
-      messages: openRouterMessages,
+      messages: requestyMessages,
       stream: false,
       ...(options.temperature !== undefined && { temperature: options.temperature }),
       ...(options.topP !== undefined && { top_p: options.topP }),
-      // OpenRouter reserves credits up to max_tokens at request time. When the
-      // caller doesn't specify a limit, OR falls back to the model's full output
+      // Requesty reserves credits up to max_tokens at request time. When the
+      // caller doesn't specify a limit, it falls back to the model's full output
       // capacity (e.g. 64000 for claude-haiku-4-5), which causes 402 credit-required
       // errors on accounts without enough buffer. Default to 4096 — the same value
       // AnthropicProvider uses — so short prompts succeed without explicit tuning.
@@ -284,7 +285,7 @@ export class OpenRouterProvider implements IProvider {
       ...(options.customModelParams || {}),
     };
 
-    const apiResponseData = await this.makeApiRequest<OpenRouterChatCompletionAPIResponse>(
+    const apiResponseData = await this.makeApiRequest<RequestyChatCompletionAPIResponse>(
       '/chat/completions',
       'POST',
       // CR8: honor a per-call requestTimeout override over the provider default.
@@ -300,21 +301,21 @@ export class OpenRouterProvider implements IProvider {
     options: ModelCompletionOptions
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     this.ensureInitialized();
-    const openRouterMessages = this.mapToOpenRouterMessages(messages);
+    const requestyMessages = this.mapToRequestyMessages(messages);
 
     const payload: Record<string, unknown> = {
       model: modelId,
-      messages: openRouterMessages,
+      messages: requestyMessages,
       stream: true,
-      // OpenRouter follows the OpenAI streaming convention: usage is omitted
+      // Requesty follows the OpenAI streaming convention: usage is omitted
       // unless stream_options.include_usage is set, in which case a trailing
       // usage-only chunk arrives before [DONE]. Without this flag,
       // streamText({...}).usage resolves to all zeros even on success.
       stream_options: { include_usage: true },
       ...(options.temperature !== undefined && { temperature: options.temperature }),
       ...(options.topP !== undefined && { top_p: options.topP }),
-      // OpenRouter reserves credits up to max_tokens at request time. When the
-      // caller doesn't specify a limit, OR falls back to the model's full output
+      // Requesty reserves credits up to max_tokens at request time. When the
+      // caller doesn't specify a limit, it falls back to the model's full output
       // capacity (e.g. 64000 for claude-haiku-4-5), which causes 402 credit-required
       // errors on accounts without enough buffer. Default to 4096 — the same value
       // AnthropicProvider uses — so short prompts succeed without explicit tuning.
@@ -332,54 +333,64 @@ export class OpenRouterProvider implements IProvider {
       ...(options.customModelParams || {}),
     };
 
-    const stream = await this.makeApiRequest<NodeJS.ReadableStream>(
-      '/chat/completions',
-      'POST',
-      // CR8: honor a per-call requestTimeout override over the stream default.
-      options.requestTimeout ?? this.config.streamRequestTimeout,
-      payload,
-      true
-    );
-
-    const accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }> = new Map();
-
     const abortSignal = options.abortSignal;
     if (abortSignal?.aborted) {
-      yield { id: `openrouter-abort-${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), modelId, choices: [], error: { message: 'Stream aborted prior to first chunk', type: 'abort' }, isFinal: true };
+      yield { id: `requesty-abort-${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), modelId, choices: [], error: { message: 'Stream aborted prior to first chunk', type: 'abort' }, isFinal: true };
       return;
     }
+
+    const accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }> = new Map();
     const abortHandler = () => { /* passive; loop logic handles emission */ };
     abortSignal?.addEventListener('abort', abortHandler, { once: true });
 
-    for await (const rawChunk of this.parseSseStream(stream)) {
-      if (abortSignal?.aborted) {
-        yield { id: `openrouter-abort-${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), modelId, choices: [], error: { message: 'Stream aborted by caller', type: 'abort' }, isFinal: true };
-        break;
-      }
-      if (rawChunk.startsWith('data: ') && rawChunk.includes('[DONE]')) {
-        const doneData = rawChunk.substring('data: '.length).trim();
-        if (doneData === '[DONE]') break;
-      }
-      if (rawChunk === 'data: [DONE]') {
-        break;
-      }
+    try {
+      const stream = await this.makeApiRequest<NodeJS.ReadableStream>(
+        '/chat/completions',
+        'POST',
+        // CR8: honor a per-call requestTimeout override over the stream default.
+        options.requestTimeout ?? this.config.streamRequestTimeout,
+        payload,
+        true
+      );
 
-      if (rawChunk.startsWith('data: ')) {
-        const jsonData = rawChunk.substring('data: '.length);
-        try {
-          const apiChunk = JSON.parse(jsonData) as OpenRouterChatCompletionAPIResponse;
-          yield this.mapApiToStreamChunkResponse(apiChunk, modelId, accumulatedToolCalls);
-          // Don't break on finish_reason: with stream_options.include_usage,
-          // OpenRouter (like OpenAI) emits a trailing usage-only chunk AFTER
-          // the finish_reason chunk and BEFORE [DONE]. Breaking here would
-          // skip the usage chunk and zero out the caller's token totals. The
-          // [DONE] marker check above is the right termination signal.
-        } catch (error: unknown) {
-          console.warn('OpenRouterProvider: Failed to parse stream chunk JSON, skipping chunk. Data:', jsonData, 'Error:', error);
+      for await (const rawChunk of this.parseSseStream(stream)) {
+        if (abortSignal?.aborted) {
+          yield { id: `requesty-abort-${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), modelId, choices: [], error: { message: 'Stream aborted by caller', type: 'abort' }, isFinal: true };
+          break;
+        }
+        if (rawChunk.startsWith('data: ') && rawChunk.includes('[DONE]')) {
+          const doneData = rawChunk.substring('data: '.length).trim();
+          if (doneData === '[DONE]') break;
+        }
+        if (rawChunk === 'data: [DONE]') {
+          break;
+        }
+
+        if (rawChunk.startsWith('data: ')) {
+          const jsonData = rawChunk.substring('data: '.length);
+          try {
+            const apiChunk = JSON.parse(jsonData) as RequestyChatCompletionAPIResponse;
+            yield this.mapApiToStreamChunkResponse(apiChunk, modelId, accumulatedToolCalls);
+            // Don't break on finish_reason: with stream_options.include_usage,
+            // Requesty (like OpenAI) emits a trailing usage-only chunk AFTER
+            // the finish_reason chunk and BEFORE [DONE]. Breaking here would
+            // skip the usage chunk and zero out the caller's token totals. The
+            // [DONE] marker check above is the right termination signal.
+          } catch (error: unknown) {
+            console.warn('RequestyProvider: Failed to parse stream chunk JSON, skipping chunk. Data:', jsonData, 'Error:', error);
+          }
         }
       }
+    } catch (error: unknown) {
+      // Provider contract (IProvider) requires a terminal isFinal:true chunk
+      // even on error. If request setup or SSE iteration throws, surface it as
+      // a final error chunk instead of letting the generator throw.
+      const message = error instanceof Error ? error.message : String(error);
+      yield { id: `requesty-error-${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), modelId, choices: [], error: { message, type: 'api_error' }, isFinal: true };
+      return;
+    } finally {
+      abortSignal?.removeEventListener('abort', abortHandler);
     }
-    abortSignal?.removeEventListener('abort', abortHandler);
   }
 
   public async generateEmbeddings(
@@ -389,12 +400,12 @@ export class OpenRouterProvider implements IProvider {
   ): Promise<ProviderEmbeddingResponse> {
     this.ensureInitialized();
     if (!texts || texts.length === 0) {
-      throw new OpenRouterProviderError('Input texts array cannot be empty for generating embeddings.', 'EMBEDDING_NO_INPUT');
+      throw new RequestyProviderError('Input texts array cannot be empty for generating embeddings.', 'EMBEDDING_NO_INPUT');
     }
 
     const modelInfo = await this.getModelInfo(modelId);
     if (modelInfo && !modelInfo.capabilities.includes('embeddings')) {
-      console.warn(`OpenRouterProvider: Model '${modelId}' is not explicitly listed with embedding capabilities. Attempting anyway.`);
+      console.warn(`RequestyProvider: Model '${modelId}' is not explicitly listed with embedding capabilities. Attempting anyway.`);
     }
 
     const payload: Record<string, unknown> = {
@@ -402,15 +413,11 @@ export class OpenRouterProvider implements IProvider {
       input: texts,
       ...(options?.encodingFormat && { encoding_format: options.encodingFormat }),
       ...(options?.dimensions && { dimensions: options.dimensions }),
+      ...(options?.inputType && { input_type: options.inputType }),
       ...(options?.customModelParams || {}),
     };
-    if (options?.inputType && payload.customModelParams && typeof payload.customModelParams === 'object') {
-      (payload.customModelParams as Record<string, unknown>).input_type = options.inputType;
-    } else if (options?.inputType) {
-      payload.customModelParams = { input_type: options.inputType };
-    }
 
-    const apiResponseData = await this.makeApiRequest<OpenRouterEmbeddingAPIResponse>(
+    const apiResponseData = await this.makeApiRequest<RequestyEmbeddingAPIResponse>(
       '/embeddings',
       'POST',
       this.config.requestTimeout,
@@ -438,7 +445,7 @@ export class OpenRouterProvider implements IProvider {
       try {
         await this.refreshAvailableModels();
       } catch (refreshError) {
-        console.warn("OpenRouterProvider: Failed to refresh models during listAvailableModels call after finding empty cache:", refreshError);
+        console.warn("RequestyProvider: Failed to refresh models during listAvailableModels call after finding empty cache:", refreshError);
       }
     }
     const models = Array.from(this.availableModelsCache.values());
@@ -452,10 +459,10 @@ export class OpenRouterProvider implements IProvider {
     this.ensureInitialized();
     if (!this.availableModelsCache.has(modelId)) {
       try {
-        console.log(`OpenRouterProvider: Model ${modelId} not in cache. Refreshing model list.`);
+        console.log(`RequestyProvider: Model ${modelId} not in cache. Refreshing model list.`);
         await this.refreshAvailableModels();
       } catch (error) {
-        console.warn(`OpenRouterProvider: Failed to refresh models list while trying to get info for ${modelId}:`, error);
+        console.warn(`RequestyProvider: Failed to refresh models list while trying to get info for ${modelId}:`, error);
       }
     }
     return this.availableModelsCache.get(modelId);
@@ -463,17 +470,17 @@ export class OpenRouterProvider implements IProvider {
 
   public async checkHealth(): Promise<{ isHealthy: boolean; details?: unknown }> {
     if (!this.client) {
-      return { isHealthy: false, details: { message: "OpenRouterProvider not initialized (HTTP client missing)."}};
+      return { isHealthy: false, details: { message: "RequestyProvider not initialized (HTTP client missing)."}};
     }
     try {
       await this.client.get('/models', { timeout: Math.min(this.config.requestTimeout || 10000, 10000) });
-      return { isHealthy: true, details: { message: "Successfully connected to OpenRouter /models endpoint." } };
+      return { isHealthy: true, details: { message: "Successfully connected to Requesty /models endpoint." } };
     } catch (error: unknown) {
       const err = error as AxiosError;
       return {
         isHealthy: false,
         details: {
-          message: `OpenRouter health check failed: ${err.message}`,
+          message: `Requesty health check failed: ${err.message}`,
           status: err.response?.status,
           responseData: err.response?.data,
         },
@@ -484,16 +491,16 @@ export class OpenRouterProvider implements IProvider {
   public async shutdown(): Promise<void> {
     this.isInitialized = false;
     this.availableModelsCache.clear();
-    console.log('OpenRouterProvider shutdown: Instance marked as uninitialized and cache cleared.');
+    console.log('RequestyProvider shutdown: Instance marked as uninitialized and cache cleared.');
   }
 
   private mapApiToCompletionResponse(
-    apiResponse: OpenRouterChatCompletionAPIResponse,
+    apiResponse: RequestyChatCompletionAPIResponse,
     requestedModelId: string
   ): ModelCompletionResponse {
     const choice = apiResponse.choices[0];
     if (!choice) {
-      throw new OpenRouterProviderError("Received empty choices array from OpenRouter.", "API_RESPONSE_MALFORMED", undefined, undefined, { responseId: apiResponse.id });
+      throw new RequestyProviderError("Received empty choices array from Requesty.", "API_RESPONSE_MALFORMED", undefined, undefined, { responseId: apiResponse.id });
     }
 
     const usage: ModelUsage | undefined = apiResponse.usage ? {
@@ -523,13 +530,13 @@ export class OpenRouterProvider implements IProvider {
   }
 
   private mapApiToStreamChunkResponse(
-      apiChunk: OpenRouterChatCompletionAPIResponse,
+      apiChunk: RequestyChatCompletionAPIResponse,
       requestedModelId: string,
       accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }>
   ): ModelCompletionResponse {
       const choice = apiChunk.choices[0];
 
-      // With stream_options.include_usage, OpenRouter (like OpenAI) emits a
+      // With stream_options.include_usage, Requesty (like OpenAI) emits a
       // trailing chunk with an empty choices array and a populated usage
       // object. Recognize it as a final usage-only chunk so callers see real
       // token totals after the stream resolves. Without this, the empty-choices
@@ -675,7 +682,7 @@ export class OpenRouterProvider implements IProvider {
     } catch (error: unknown) {
       let statusCode: number | undefined;
       let errorData: any;
-      let errorMessage = 'Unknown OpenRouter API error';
+      let errorMessage = 'Unknown Requesty API error';
       let errorType = 'UNKNOWN_API_ERROR';
 
       if (axios.isAxiosError(error)) {
@@ -695,14 +702,14 @@ export class OpenRouterProvider implements IProvider {
 
       // Prefix the status code into the message so downstream retry/fallback
       // logic (e.g. isRetryableError, which greps for \b402\b) can route on it
-      // even when the OR API body provides a friendlier description.
+      // even when the Requesty API body provides a friendlier description.
       const decoratedMessage = statusCode ? `[${statusCode}] ${errorMessage}` : errorMessage;
-      throw new OpenRouterProviderError(
+      throw new RequestyProviderError(
         decoratedMessage,
         'API_REQUEST_FAILED',
         statusCode,
         errorType,
-        { requestEndpoint: endpoint, requestBodyPreview: body ? JSON.stringify(body).substring(0, 200) + '...' : undefined, responseData: errorData, underlyingError: error }
+        { requestEndpoint: endpoint, requestBodyKeys: body ? Object.keys(body) : undefined, responseData: errorData, underlyingError: error }
       );
     }
   }
@@ -727,10 +734,10 @@ export class OpenRouterProvider implements IProvider {
         yield buffer.trim();
       }
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : "OpenRouter stream parsing/reading error";
-      console.error("OpenRouterProvider: Error reading or parsing SSE stream:", message, error);
-      if (error instanceof OpenRouterProviderError) throw error;
-      throw new OpenRouterProviderError(message, 'STREAM_PARSING_ERROR', undefined, undefined, error);
+      const message = error instanceof Error ? error.message : "Requesty stream parsing/reading error";
+      console.error("RequestyProvider: Error reading or parsing SSE stream:", message, error);
+      if (error instanceof RequestyProviderError) throw error;
+      throw new RequestyProviderError(message, 'STREAM_PARSING_ERROR', undefined, undefined, error);
     } finally {
       if (typeof readableStream.destroy === 'function') {
         readableStream.destroy();
@@ -740,4 +747,3 @@ export class OpenRouterProvider implements IProvider {
     }
   }
 }
-

@@ -49,6 +49,7 @@ export interface EnvironmentConfig {
   OPENAI_API_KEY?: string;
   ANTHROPIC_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
+  REQUESTY_API_KEY?: string;
   SERPER_API_KEY?: string;
   OLLAMA_BASE_URL?: string;
 
@@ -97,6 +98,7 @@ export function validateEnvironmentConfig(env: Partial<EnvironmentConfig>): Conf
     !env.OPENAI_API_KEY &&
     !env.ANTHROPIC_API_KEY &&
     !env.OPENROUTER_API_KEY &&
+    !env.REQUESTY_API_KEY &&
     !env.OLLAMA_BASE_URL
   ) {
     warnings.push('No LLM provider API keys configured. AgentOS will have limited functionality.');
@@ -128,6 +130,7 @@ export function getEnvironmentConfig(): EnvironmentConfig {
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
     OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
+    REQUESTY_API_KEY: process.env.REQUESTY_API_KEY,
     OLLAMA_BASE_URL: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
     LEMONSQUEEZY_API_KEY: process.env.LEMONSQUEEZY_API_KEY,
     LEMONSQUEEZY_WEBHOOK_SECRET: process.env.LEMONSQUEEZY_WEBHOOK_SECRET,
@@ -227,6 +230,22 @@ function createModelProviderManagerConfig(env: EnvironmentConfig): AIModelProvid
         defaultModel: 'openai/gpt-4o',
         maxRetries: 3,
         timeout: 60000,
+      },
+    });
+  }
+
+  // Requesty Provider (OpenAI-compatible LLM gateway)
+  if (env.REQUESTY_API_KEY) {
+    providers.push({
+      providerId: 'requesty',
+      enabled: true,
+      isDefault: !env.OPENAI_API_KEY && !env.OPENROUTER_API_KEY, // Default to Requesty if OpenAI/OpenRouter not available
+      config: {
+        apiKey: env.REQUESTY_API_KEY,
+        baseURL: 'https://router.requesty.ai/v1',
+        defaultModelId: 'openai/gpt-4o',
+        requestTimeout: 60000,
+        streamRequestTimeout: 180000,
       },
     });
   }
