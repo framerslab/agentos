@@ -14,18 +14,24 @@ export {
   type SocialPostStatus,
   type SocialPostPlatformResult,
   type CreateDraftInput,
-} from './SocialPostManager';
+} from "./SocialPostManager";
 
 // Platform-specific content adaptation
 export {
   ContentAdaptationEngine,
   type PlatformConstraints,
   type AdaptedContent,
-} from './ContentAdaptationEngine';
+} from "./ContentAdaptationEngine";
 
 // Shared HTTP base class for channel service implementations
 export {
   SocialAbstractService,
   type SocialRequestOptions,
   type SocialServiceConfig,
-} from './SocialAbstractService';
+} from "./SocialAbstractService";
+
+export {
+  XquikSocialPostingService,
+  type XquikPublishInput,
+  type XquikSocialPostingConfig,
+} from "./XquikSocialPostingService";
