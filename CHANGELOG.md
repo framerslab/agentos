@@ -1,3 +1,7 @@
+## <small>0.9.94 (2026-07-02)</small>
+
+* fix(orchestration): lower zod tuples to fixed-length arrays in schema lowering ([209267bfe9102719604fd3d1f93d3b131edb37e1](https://github.com/framerslab/agentos/commit/209267bfe9102719604fd3d1f93d3b131edb37e1))
+
 ## <small>0.9.93 (2026-07-02)</small>
 
 * perf(cognition): run assembleForPrompt pre-assembly stages concurrently ([8bcc5e8912552cd2f2f6fefb20d8c7e6ca9d2357](https://github.com/framerslab/agentos/commit/8bcc5e8912552cd2f2f6fefb20d8c7e6ca9d2357))
