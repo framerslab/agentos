@@ -224,7 +224,12 @@ function createModelProviderManagerConfig(env: EnvironmentConfig): AIModelProvid
       config: {
         apiKey: env.OPENROUTER_API_KEY,
         baseURL: 'https://openrouter.ai/api/v1',
-        defaultModel: 'openai/gpt-4o',
+        // Mini, deliberately: any model-less OpenRouter resolution (bare
+        // chain entries, null-router fallthroughs) lands on this default,
+        // and 'openai/gpt-4o' made that silent path the top LLM spend
+        // twice (2026-06-07, 2026-07-02). Callers that want a stronger
+        // model must name it explicitly.
+        defaultModel: 'openai/gpt-4o-mini',
         maxRetries: 3,
         timeout: 60000,
       },
