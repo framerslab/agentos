@@ -133,6 +133,37 @@ export function lowerZodToJsonSchema(schema: ZodType): Record<string, unknown> {
       };
     }
 
+    case 'tuple': {
+      // Zod v4: def.items is the array of member schemas; def.rest is the
+      // optional rest-element schema. Lowered as a fixed-length array rather
+      // than draft-2020 `prefixItems` because OpenAI strict structured
+      // outputs rejects any node without a `type` key AND does not support
+      // `prefixItems` — a tuple previously fell through to `{}` here, which
+      // made the WHOLE schema unusable in strict mode ("schema must have a
+      // 'type' key" on the tuple path). Positional member types collapse
+      // into `items` (deduped anyOf when heterogeneous); exact arity rides
+      // minItems/maxItems (no maxItems when a rest element exists). This is
+      // deliberately looser than true tuple validation — the caller's Zod
+      // schema still validates the parsed output, so correctness holds; the
+      // JSON schema only needs to guide the model.
+      const members = ((def.items as ZodType[] | undefined) ?? []).map((m) =>
+        lowerZodToJsonSchema(m),
+      );
+      const rest = def.rest ? lowerZodToJsonSchema(def.rest as ZodType) : undefined;
+      const candidates = [...members, ...(rest ? [rest] : [])];
+      const unique = candidates.filter(
+        (c, i) => candidates.findIndex((o) => JSON.stringify(o) === JSON.stringify(c)) === i,
+      );
+      const items =
+        unique.length === 0 ? {} : unique.length === 1 ? unique[0] : { anyOf: unique };
+      return {
+        type: 'array',
+        items,
+        minItems: members.length,
+        ...(rest ? {} : { maxItems: members.length }),
+      };
+    }
+
     default:
       // Unknown / unsupported Zod type — return empty schema (treat as untyped).
       return {};

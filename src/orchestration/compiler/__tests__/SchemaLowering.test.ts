@@ -49,3 +49,42 @@ describe('lowerZodToJsonSchema — union / literal / record (structured-output g
     });
   });
 });
+
+describe('lowerZodToJsonSchema — tuples (OpenAI strict-mode gap)', () => {
+  // A ZodTuple previously fell through to `{}` (no `type` key), which made any
+  // schema containing one unusable under OpenAI strict structured outputs
+  // ("schema must have a 'type' key" — the wilds DungeonLayoutSchema
+  // `spawnPos: z.tuple([number, number, number])` path, 2026-07-02).
+  it('lowers a homogeneous tuple to a fixed-length typed array', () => {
+    expect(lowerZodToJsonSchema(z.tuple([z.number(), z.number(), z.number()]))).toEqual({
+      type: 'array',
+      items: { type: 'number' },
+      minItems: 3,
+      maxItems: 3,
+    });
+  });
+
+  it('lowers a heterogeneous tuple to a deduped anyOf items array', () => {
+    expect(lowerZodToJsonSchema(z.tuple([z.string(), z.number(), z.string()]))).toEqual({
+      type: 'array',
+      items: { anyOf: [{ type: 'string' }, { type: 'number' }] },
+      minItems: 3,
+      maxItems: 3,
+    });
+  });
+
+  it('drops maxItems when the tuple has a rest element', () => {
+    expect(lowerZodToJsonSchema(z.tuple([z.string()]).rest(z.number()))).toEqual({
+      type: 'array',
+      items: { anyOf: [{ type: 'string' }, { type: 'number' }] },
+      minItems: 1,
+    });
+  });
+
+  it('a tuple nested inside an object no longer produces a typeless node', () => {
+    const lowered = lowerZodToJsonSchema(
+      z.object({ spawnPos: z.tuple([z.number(), z.number(), z.number()]) }),
+    ) as { properties: { spawnPos: Record<string, unknown> } };
+    expect(lowered.properties.spawnPos.type).toBe('array');
+  });
+});
