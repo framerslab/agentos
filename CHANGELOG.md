@@ -1,3 +1,7 @@
+## <small>0.9.92 (2026-07-02)</small>
+
+* fix(config): default the OpenRouter provider to gpt-4o-mini ([c35f8035a37ac51622f4d0fc441bcafa508b5fbd](https://github.com/framerslab/agentos/commit/c35f8035a37ac51622f4d0fc441bcafa508b5fbd))
+
 ## <small>0.9.91 (2026-07-01)</small>
 
 * feat(providers): recognize claude-sonnet-5 capabilities ([966e8c04a27598435f12f2c6afce382c964a8529](https://github.com/framerslab/agentos/commit/966e8c04a27598435f12f2c6afce382c964a8529))
