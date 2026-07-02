@@ -48,6 +48,24 @@ type XquikCreateTweetResponse =
   | XquikCreateTweetSuccess
   | XquikCreateTweetPending;
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+const isXquikCreateTweetSuccess = (
+  response: unknown,
+): response is XquikCreateTweetSuccess =>
+  isRecord(response) &&
+  response.success === true &&
+  typeof response.tweetId === "string";
+
+const isXquikCreateTweetPending = (
+  response: unknown,
+): response is XquikCreateTweetPending =>
+  isRecord(response) &&
+  response.error === "x_write_unconfirmed" &&
+  response.status === "pending_confirmation" &&
+  typeof response.writeActionId === "string";
+
 export class XquikSocialPostingService extends SocialAbstractService {
   private readonly account: string;
   private readonly apiKey: string;
@@ -66,7 +84,7 @@ export class XquikSocialPostingService extends SocialAbstractService {
     input: XquikPublishInput,
     options: SocialRequestOptions = {},
   ): Promise<SocialPostPlatformResult> {
-    const response = await this.fetchJson<XquikCreateTweetResponse>(
+    const response = await this.fetchJson<unknown>(
       `${this.baseUrl}/api/v1/x/tweets`,
       {
         body: JSON.stringify(this.createRequestBody(input)),
@@ -79,7 +97,7 @@ export class XquikSocialPostingService extends SocialAbstractService {
       options,
     );
 
-    if ("success" in response && response.success) {
+    if (isXquikCreateTweetSuccess(response)) {
       return {
         platform: this.platform,
         postId: response.tweetId,
@@ -87,6 +105,10 @@ export class XquikSocialPostingService extends SocialAbstractService {
         status: "success",
         url: `https://x.com/i/web/status/${response.tweetId}`,
       };
+    }
+
+    if (!isXquikCreateTweetPending(response)) {
+      throw new Error("Unexpected Xquik create tweet response.");
     }
 
     return {
