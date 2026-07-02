@@ -951,43 +951,66 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
   ): Promise<AssembledMemoryContext> {
     this.ensureInitialized();
 
-    // Retrieve relevant memories
-    const result = await this.retrieve(query, mood, options);
+    // The three pre-assembly stages that hit a backend — retrieval (vector
+    // search + rerank), the persistent-memory read, and the prospective
+    // trigger check (query embed + cue match) — are mutually independent,
+    // so they run concurrently instead of stacking their latencies on every
+    // turn. Only the graph-association walk below is a real data dependency
+    // (it seeds from the retrieved trace ids), so it alone waits on
+    // retrieval. The auxiliary stages never reject: each degrades to its
+    // empty value so a rejected retrieval is the only fatal path (unchanged)
+    // and no auxiliary promise is left to reject unhandled behind it.
+    const retrievePromise = this.retrieve(query, mood, options);
 
-    // Get working memory state
-    const wmText = this.workingMemory.formatForPrompt();
-
-    let persistentMemoryText: string | undefined;
-    if (this.config.persistentMemory) {
-      try {
-        const text = await this.config.persistentMemory.read();
-        const trimmed = typeof text === 'string' ? text.trim() : '';
-        persistentMemoryText = trimmed.length > 0 ? trimmed : undefined;
-      } catch {
-        /* non-critical */
-      }
-    }
+    const persistentPromise: Promise<string | undefined> = this.config.persistentMemory
+      ? Promise.resolve()
+          .then(() => this.config.persistentMemory!.read())
+          .then((text) => {
+            const trimmed = typeof text === 'string' ? text.trim() : '';
+            return trimmed.length > 0 ? trimmed : undefined;
+          })
+          .catch(() => undefined /* non-critical */)
+      : Promise.resolve(undefined);
 
     // --- Batch 2: Check prospective memory ---
-    const prospectiveAlerts: string[] = [];
-    if (this.prospective) {
-      let queryEmbedding: number[] | undefined;
-      try {
-        const resp = await this.config.embeddingManager.generateEmbeddings({ texts: query });
-        queryEmbedding = resp.embeddings[0];
-      } catch {
-        /* non-critical */
-      }
+    // Best-effort like the other auxiliary stages: a throwing prospective
+    // backend degrades to "no alerts" instead of failing the whole turn's
+    // assembly (pre-2026-07 the check ran unguarded and was fatal).
+    const prospectivePromise: Promise<string[]> = this.prospective
+      ? (async () => {
+          const alerts: string[] = [];
+          try {
+            let queryEmbedding: number[] | undefined;
+            try {
+              const resp = await this.config.embeddingManager.generateEmbeddings({ texts: query });
+              queryEmbedding = resp.embeddings[0];
+            } catch {
+              /* non-critical — check falls back to text-only cue matching */
+            }
+            const triggered = await this.prospective!.check({
+              queryText: query,
+              queryEmbedding,
+              maxTierRank: options.maxTierRank,
+            });
+            for (const item of triggered) {
+              alerts.push(`[${item.triggerType}] ${item.content}`);
+            }
+          } catch {
+            /* non-critical */
+          }
+          return alerts;
+        })()
+      : Promise.resolve([]);
 
-      const triggered = await this.prospective.check({
-        queryText: query,
-        queryEmbedding,
-        maxTierRank: options.maxTierRank,
-      });
-      for (const item of triggered) {
-        prospectiveAlerts.push(`[${item.triggerType}] ${item.content}`);
-      }
-    }
+    const [result, persistentMemoryText, prospectiveAlerts] = await Promise.all([
+      retrievePromise,
+      persistentPromise,
+      prospectivePromise,
+    ]);
+
+    // Get working memory state (sync; after retrieval so it reflects the
+    // focus/decay updates retrieval just applied — same order as before).
+    const wmText = this.workingMemory.formatForPrompt();
 
     // --- Batch 2: Graph associations ---
     const graphContext: string[] = [];
