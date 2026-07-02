@@ -1,3 +1,7 @@
+## <small>0.9.93 (2026-07-02)</small>
+
+* perf(cognition): run assembleForPrompt pre-assembly stages concurrently ([8bcc5e8912552cd2f2f6fefb20d8c7e6ca9d2357](https://github.com/framerslab/agentos/commit/8bcc5e8912552cd2f2f6fefb20d8c7e6ca9d2357))
+
 ## <small>0.9.92 (2026-07-02)</small>
 
 * fix(config): default the OpenRouter provider to gpt-4o-mini ([c35f8035a37ac51622f4d0fc441bcafa508b5fbd](https://github.com/framerslab/agentos/commit/c35f8035a37ac51622f4d0fc441bcafa508b5fbd))
