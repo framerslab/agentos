@@ -1,3 +1,7 @@
+## <small>0.9.98 (2026-07-03)</small>
+
+* perf(avatar): generate expression and emote sheets with bounded concurrency ([9052559d81f2a1c3e7e1dfa54b612d5fb96f0751](https://github.com/framerslab/agentos/commit/9052559d81f2a1c3e7e1dfa54b612d5fb96f0751))
+
 ## <small>0.9.97 (2026-07-03)</small>
 
 * Merge branch 'master' of https://github.com/framerslab/agentos ([1928e823c9279918b17b941d0382d075fd05d95f](https://github.com/framerslab/agentos/commit/1928e823c9279918b17b941d0382d075fd05d95f))
