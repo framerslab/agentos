@@ -1,3 +1,8 @@
+## <small>0.9.96 (2026-07-03)</small>
+
+* Merge branch 'master' of https://github.com/framerslab/agentos ([96f0f7e9e4bbffb3f6366cab408bf7960b4b7c3d](https://github.com/framerslab/agentos/commit/96f0f7e9e4bbffb3f6366cab408bf7960b4b7c3d))
+* fix(images): model-aware Fal mappings for FLUX.2 and Kontext endpoints ([8e1e856f4d0d00d2039dc821d2ea01a2f6fb8841](https://github.com/framerslab/agentos/commit/8e1e856f4d0d00d2039dc821d2ea01a2f6fb8841))
+
 ## <small>0.9.95 (2026-07-03)</small>
 
 * fix(images): model-correct reference and version routing for Replicate and Fal providers ([7d21f67e1a4fff0903dfa2e1fd577a822a8512a2](https://github.com/framerslab/agentos/commit/7d21f67e1a4fff0903dfa2e1fd577a822a8512a2))
