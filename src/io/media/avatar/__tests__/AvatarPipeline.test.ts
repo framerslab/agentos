@@ -191,6 +191,34 @@ describe('AvatarPipeline', () => {
       expect(generateImage).toHaveBeenCalledTimes(7);
     });
 
+    it('generates the expression images concurrently, not one-at-a-time', async () => {
+      // Track how many generateImage calls overlap. A sequential loop can
+      // never exceed 1 in flight; the bounded-parallel version overlaps.
+      let inFlight = 0;
+      let maxInFlight = 0;
+      generateImage.mockImplementation(async () => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        inFlight--;
+        return 'https://images.test/expr.png';
+      });
+
+      const result = await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'face_embedding', 'expression_sheet'],
+        }),
+      );
+
+      // The 6 non-neutral expressions must run in parallel.
+      expect(maxInFlight).toBeGreaterThanOrEqual(2);
+      // All emotions still present, none dropped by the concurrency change.
+      const sheet = result.identityPackage.anchors.expressionSheet!;
+      for (const emotion of AVATAR_EMOTIONS) {
+        expect(sheet[emotion]).toBeDefined();
+      }
+    });
+
     it('records drift scores for each expression', async () => {
       const result = await pipeline.generate(
         makeRequest({
@@ -235,11 +263,15 @@ describe('AvatarPipeline', () => {
         }),
       );
 
-      // The first expression (happy) should have been regenerated
-      const happyJob = result.jobs.find((j) => j.label === 'expression:happy');
-      expect(happyJob).toBeDefined();
-      expect(happyJob!.attempts).toBe(3); // 2 failed + 1 passed
-      expect(happyJob!.status).toBe('completed');
+      // The first two drift comparisons fail, so exactly two expressions are
+      // regenerated once. Expression images render concurrently, so WHICH two
+      // retry is not deterministic — assert the aggregate rather than a single
+      // emotion's attempt count. 1 portrait + 6 expressions + 2 retries = 9.
+      expect(generateImage).toHaveBeenCalledTimes(9);
+      const expressionJobs = result.jobs.filter((j) => j.stage === 'expression_sheet');
+      const totalAttempts = expressionJobs.reduce((sum, j) => sum + (j.attempts ?? 0), 0);
+      expect(totalAttempts).toBe(8); // 6 base attempts + 2 regenerations
+      expect(expressionJobs.every((j) => j.status === 'completed')).toBe(true);
     });
 
     it('records rejected labels when all attempts drift too far', async () => {
