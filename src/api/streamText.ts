@@ -375,6 +375,11 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
               ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
               ...(opts.presencePenalty !== undefined ? { presencePenalty: opts.presencePenalty } : {}),
+              // Forward provider-specific top-level payload params (e.g.
+              // OpenRouter provider-routing preferences) on the shim path too.
+              ...(opts.customModelParams !== undefined
+                ? { customModelParams: opts.customModelParams }
+                : {}),
             } as any);
             const cc = r.choices?.[0]?.message?.content;
             return {
@@ -452,6 +457,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
             ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
             ...(opts.presencePenalty !== undefined ? { presencePenalty: opts.presencePenalty } : {}),
+            // Forward provider-specific top-level payload params (e.g.
+            // OpenRouter provider-routing preferences); providers spread
+            // them onto the streaming request body.
+            ...(opts.customModelParams !== undefined
+              ? { customModelParams: opts.customModelParams }
+              : {}),
           } as any
         );
 

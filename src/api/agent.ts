@@ -704,6 +704,10 @@ export function agent(opts: AgentOptions): Agent {
     // into baseOpts -> every generate/stream/session call). Unset -> provider
     // default; the provider ignores it on models that don't support effort.
     effort: opts.effort,
+    // Provider-specific top-level payload params (e.g. OpenRouter
+    // provider-routing preferences) forwarded to every generate / stream /
+    // session call this agent makes. Unset adds no payload keys.
+    customModelParams: opts.customModelParams,
     chainOfThought: opts.chainOfThought ?? true,
     apiKey: opts.apiKey,
     baseUrl: opts.baseUrl,

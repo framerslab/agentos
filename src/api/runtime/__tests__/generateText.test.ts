@@ -190,6 +190,41 @@ describe('generateText', () => {
     expect(hoisted.generateCompletion.mock.calls[0]?.[2]).not.toHaveProperty('thinking');
   });
 
+  it('forwards customModelParams to the provider completion options', async () => {
+    // Provider implementations spread customModelParams onto the request
+    // payload (OpenRouter/OpenAI/Anthropic all honor it) — it is the
+    // documented escape hatch for provider-specific top-level params such as
+    // OpenRouter provider-routing preferences. The helper layer must forward
+    // it verbatim or the escape hatch is unreachable from the public API.
+    hoisted.generateCompletion.mockResolvedValue({
+      modelId: 'gpt-4.1-mini',
+      usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
+      choices: [{ message: { role: 'assistant', content: 'done' }, finishReason: 'stop' }],
+    });
+
+    await generateText({
+      model: 'openai:gpt-4.1-mini',
+      prompt: 'hi',
+      customModelParams: { provider: { sort: 'throughput' } },
+    });
+
+    expect(hoisted.generateCompletion.mock.calls[0]?.[2]?.customModelParams).toEqual({
+      provider: { sort: 'throughput' },
+    });
+  });
+
+  it('omits customModelParams from provider options when not configured', async () => {
+    hoisted.generateCompletion.mockResolvedValue({
+      modelId: 'gpt-4.1-mini',
+      usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
+      choices: [{ message: { role: 'assistant', content: 'done' }, finishReason: 'stop' }],
+    });
+
+    await generateText({ model: 'openai:gpt-4.1-mini', prompt: 'hi' });
+
+    expect(hoisted.generateCompletion.mock.calls[0]?.[2]).not.toHaveProperty('customModelParams');
+  });
+
   it('replays the prior assistant turn thinking blocks when continuing a tool loop', async () => {
     // Anthropic 400s if the most-recent assistant tool_use turn is replayed
     // without its thinking blocks while extended thinking is enabled. The

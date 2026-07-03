@@ -1336,6 +1336,18 @@ export interface BaseAgentConfig {
    */
   effort?: string;
   /**
+   * Provider-specific TOP-LEVEL request-payload parameters forwarded verbatim
+   * on every generate/stream/session call via
+   * `ModelCompletionOptions.customModelParams`. Providers spread these onto
+   * the outgoing request body — the escape hatch for params the typed options
+   * don't model, e.g. OpenRouter provider-routing preferences:
+   *
+   * ```ts
+   * customModelParams: { provider: { sort: 'throughput' } }
+   * ```
+   */
+  customModelParams?: Record<string, unknown>;
+  /**
    * Memory configuration.
    * - `true` — enable in-memory conversation history with default settings.
    * - `false` — disable memory; every call is stateless.

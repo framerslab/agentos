@@ -344,6 +344,22 @@ export interface GenerateTextOptions {
    * provider drops it on unsupported models or invalid values.
    */
   effort?: string;
+  /**
+   * Provider-specific TOP-LEVEL request-payload parameters, forwarded
+   * verbatim into `ModelCompletionOptions.customModelParams`. Provider
+   * implementations spread these onto the outgoing request body (OpenRouter /
+   * OpenAI / Anthropic / Ollama all honor it), so this is the escape hatch
+   * for params the typed options don't model — e.g. OpenRouter
+   * provider-routing preferences:
+   *
+   * ```ts
+   * customModelParams: { provider: { sort: 'throughput' } }
+   * ```
+   *
+   * Keys collide last-wins with the typed fields at the provider layer, so
+   * only pass params the target provider understands.
+   */
+  customModelParams?: Record<string, unknown>;
   /** Override the API key instead of reading from environment variables. */
   apiKey?: string;
   /** Override the provider base URL (useful for local proxies or Ollama). */
@@ -1336,6 +1352,11 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               // Forward reasoning effort the same way; provider drops it on
               // unsupported models/values.
               ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
+              // Forward provider-specific top-level payload params (e.g.
+              // OpenRouter provider-routing preferences) on the shim path too.
+              ...(opts.customModelParams !== undefined
+                ? { customModelParams: opts.customModelParams }
+                : {}),
               // Forward per-call requestTimeout so the prompt-tool-calling shim
               // (toolMode:'prompt') honors the caller's timeout like the native
               // step loop already does. Without it, a stalled provider call on
@@ -1434,6 +1455,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 // Forward reasoning effort (output_config.effort) the same way;
                 // the provider drops it on unsupported models/values.
                 ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
+                // Forward provider-specific top-level payload params (e.g.
+                // OpenRouter provider-routing preferences); providers spread
+                // them onto the request body.
+                ...(opts.customModelParams !== undefined
+                  ? { customModelParams: opts.customModelParams }
+                  : {}),
                 // Forward caller toolChoice so orchestrators can force tool_use
                 // (e.g. ai-codegen); models narrate under tool_choice: 'auto'.
                 ...(opts.toolChoice !== undefined ? { toolChoice: opts.toolChoice } : {}),
