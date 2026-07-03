@@ -1,3 +1,7 @@
+## <small>0.9.95 (2026-07-03)</small>
+
+* fix(images): model-correct reference and version routing for Replicate and Fal providers ([7d21f67e1a4fff0903dfa2e1fd577a822a8512a2](https://github.com/framerslab/agentos/commit/7d21f67e1a4fff0903dfa2e1fd577a822a8512a2))
+
 ## <small>0.9.94 (2026-07-02)</small>
 
 * fix(orchestration): lower zod tuples to fixed-length arrays in schema lowering ([209267bfe9102719604fd3d1f93d3b131edb37e1](https://github.com/framerslab/agentos/commit/209267bfe9102719604fd3d1f93d3b131edb37e1))
