@@ -119,4 +119,41 @@ describe('FalImageProvider — editImage', () => {
       expect(models.every(m => !!m.description)).toBe(true);
     });
   });
+
+  describe('failure detail', () => {
+    it('includes the provider error payload when a request FAILS', async () => {
+      mockFetch
+        .mockResolvedValueOnce(mockSubmit())
+        .mockResolvedValueOnce(mockStatus('FAILED'))
+        // Best-effort detail fetch against the response endpoint.
+        .mockResolvedValueOnce({
+          ok: false,
+          json: async () => ({}),
+          text: async () => '{"detail":"NSFW content detected in image"}',
+        });
+
+      await expect(
+        provider.editImage({
+          modelId: 'fal-ai/flux/dev/image-to-image',
+          image: Buffer.from('fake-image'),
+          prompt: 'edit it',
+        }),
+      ).rejects.toThrow(/NSFW content detected/);
+    });
+
+    it('falls back to the bare message when the detail fetch itself fails', async () => {
+      mockFetch
+        .mockResolvedValueOnce(mockSubmit())
+        .mockResolvedValueOnce(mockStatus('FAILED'))
+        .mockRejectedValueOnce(new Error('network down'));
+
+      await expect(
+        provider.editImage({
+          modelId: 'fal-ai/flux/dev/image-to-image',
+          image: Buffer.from('fake-image'),
+          prompt: 'edit it',
+        }),
+      ).rejects.toThrow(/image generation failed for request req_123/);
+    });
+  });
 });

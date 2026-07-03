@@ -14,6 +14,16 @@ import {
 } from '../IImageProvider.js';
 import { ApiKeyPool } from '../../../../core/providers/ApiKeyPool.js';
 
+/**
+ * Pinned version for the strict-consistency Pulid auto-route. zsxkib/pulid
+ * is a Replicate COMMUNITY model: calling it bare (owner/name) on the modern
+ * /models endpoint returns 422 "Invalid version or not permitted", so the
+ * auto-route must carry an inline version to take the legacy /predictions
+ * endpoint. Face-anchored SDXL: face from main_face_image, rest from prompt.
+ */
+const PULID_PINNED_MODEL =
+  'zsxkib/pulid:43d309c37ab4e62361e5e29b8e9e867fb2dcbcec77ae91206a8d95ac5dd451a0';
+
 export interface ReplicateImageProviderConfig {
   apiKey: string;
   baseURL?: string;
@@ -150,9 +160,14 @@ export class ReplicateImageProvider implements IImageProvider {
     // Resolve model ID with auto-routing for consistency and ControlNet
     let modelId = request.modelId || this.defaultModelId || 'black-forest-labs/flux-schnell';
 
-    // Auto-select Pulid for strict consistency when no model explicitly set
+    // Auto-select Pulid for strict consistency when no model explicitly set.
+    // The version is pinned inline: zsxkib/pulid is a community model, and
+    // the modern /models/{owner}/{name}/predictions endpoint returns 422
+    // "Invalid version or not permitted" for community models called
+    // without a version. The inline owner/name:SHA form routes through the
+    // legacy /predictions endpoint below, which honors the pin.
     if (refUrl && consistencyMode === 'strict' && !request.modelId) {
-      modelId = 'zsxkib/pulid';
+      modelId = PULID_PINNED_MODEL;
     }
 
     // Auto-route by controlType when controlImage is set and no model specified
@@ -169,6 +184,20 @@ export class ReplicateImageProvider implements IImageProvider {
     if (refUrl) {
       if (modelId.includes('pulid')) {
         input.main_face_image = refUrl;
+      } else if (modelId.includes('flux-2')) {
+        // Flux 2 family (flux-2-pro / flux-2-max / flux-2-flex) takes an
+        // input_images ARRAY (max 8) for reference-anchored generation and
+        // rejects the SDXL-style image/image_strength pair with a 422.
+        // Respect a caller-provided array (providerOptions.input) verbatim.
+        if (input.input_images === undefined) {
+          input.input_images = [refUrl];
+        }
+      } else if (modelId.includes('kontext')) {
+        // Kontext editing models take input_image (singular) and reject
+        // unknown image/image_strength fields.
+        if (input.input_image === undefined) {
+          input.input_image = refUrl;
+        }
       } else if (modelId.includes('flux-redux')) {
         input.image = refUrl;
       } else {
@@ -182,9 +211,22 @@ export class ReplicateImageProvider implements IImageProvider {
       input.control_image = providerOptions.controlImage;
     }
 
-    // Dual-endpoint routing: version-hash models use legacy /predictions,
-    // plain owner/name models use modern /models/.../predictions
+    // Dual-endpoint routing, mirroring editImage:
+    //
+    //   A) modelId contains a colon (owner/name:SHA) → legacy /predictions
+    //      with the SHA in body.version.
+    //   B) providerOptions.extraBody.version is set → the caller pinned a
+    //      community-model version out-of-band. Also use the legacy
+    //      endpoint so Replicate honors the pin. Before this branch
+    //      existed, generateImage silently DROPPED the out-of-band pin on
+    //      the modern endpoint and community models 422'd ("Invalid
+    //      version or not permitted") — editImage already handled this.
+    //   C) Otherwise → official model, modern /models/.../predictions.
     const hasVersionHash = modelId.includes(':');
+    const generateExtraBodyVersion =
+      typeof (providerOptions?.extraBody as Record<string, unknown> | undefined)?.version === 'string'
+        ? ((providerOptions?.extraBody as Record<string, unknown>).version as string)
+        : undefined;
     const waitSeconds = providerOptions?.wait ?? 60;
     let prediction: ReplicatePrediction;
 
@@ -194,6 +236,16 @@ export class ReplicateImageProvider implements IImageProvider {
       if (providerOptions?.webhook) body.webhook = providerOptions.webhook;
       if (providerOptions?.webhookEventsFilter) body.webhook_events_filter = providerOptions.webhookEventsFilter;
       if (providerOptions?.extraBody) Object.assign(body, providerOptions.extraBody);
+      prediction = await this.createPrediction(body, waitSeconds);
+    } else if (generateExtraBodyVersion) {
+      // Legacy endpoint with the out-of-band version pin. Merge the rest
+      // of extraBody (minus version, already placed) so webhook overrides
+      // etc. keep working.
+      const body: Record<string, unknown> = { version: generateExtraBodyVersion, input };
+      if (providerOptions?.webhook) body.webhook = providerOptions.webhook;
+      if (providerOptions?.webhookEventsFilter) body.webhook_events_filter = providerOptions.webhookEventsFilter;
+      const { version: _v, ...restExtraBody } = (providerOptions?.extraBody ?? {}) as Record<string, unknown>;
+      Object.assign(body, restExtraBody);
       prediction = await this.createPrediction(body, waitSeconds);
     } else {
       // Modern endpoint: POST /models/{owner}/{name}/predictions with { input }
@@ -287,6 +339,19 @@ export class ReplicateImageProvider implements IImageProvider {
     }
 
     const model = request.modelId || defaultModel;
+
+    // Kontext editing models (flux-kontext-pro/-max/-dev) take input_image
+    // (singular) and 422 on the SDXL-style image/strength fields. Re-map the
+    // auto-added source image unless the caller already supplied
+    // input_image via providerOptions.input. flux-fill (the mask branch)
+    // is NOT kontext-named and keeps image+mask untouched.
+    if (model.includes('kontext')) {
+      if (input.input_image === undefined && input.image !== undefined) {
+        input.input_image = input.image;
+      }
+      delete input.image;
+      delete input.strength;
+    }
     const waitSeconds = providerOptions?.wait ?? 60;
 
     // Dual-endpoint routing, mirroring generateImage.

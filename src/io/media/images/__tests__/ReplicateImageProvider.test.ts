@@ -228,6 +228,62 @@ describe('ReplicateImageProvider', () => {
       const requestUrl = mockFetch.mock.calls[0][0] as string;
       expect(requestUrl).toContain('stability-ai/sdxl');
     });
+
+    it('re-maps the source image to input_image for Kontext models', async () => {
+      mockFetch.mockResolvedValueOnce(
+        mockPredictionResponse(['https://example.com/edited.png'])
+      );
+
+      await provider.editImage({
+        modelId: 'black-forest-labs/flux-kontext-max',
+        image: Buffer.from('fake-image'),
+        prompt: 'swap the outfit',
+        strength: 0.7,
+      });
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      // Kontext takes input_image (singular) and 422s on image/strength.
+      expect(body.input.input_image).toContain('data:image/png;base64,');
+      expect(body.input.image).toBeUndefined();
+      expect(body.input.strength).toBeUndefined();
+    });
+
+    it('respects a caller-provided input_image for Kontext models', async () => {
+      mockFetch.mockResolvedValueOnce(
+        mockPredictionResponse(['https://example.com/edited.png'])
+      );
+
+      await provider.editImage({
+        modelId: 'black-forest-labs/flux-kontext-pro',
+        image: Buffer.from('fake-image'),
+        prompt: 'swap the outfit',
+        providerOptions: {
+          replicate: { input: { input_image: 'https://ref.test/base.png' } },
+        },
+      });
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.input.input_image).toBe('https://ref.test/base.png');
+      expect(body.input.image).toBeUndefined();
+    });
+
+    it('keeps image + mask untouched for flux-fill inpainting', async () => {
+      mockFetch.mockResolvedValueOnce(
+        mockPredictionResponse(['https://example.com/edited.png'])
+      );
+
+      await provider.editImage({
+        modelId: '',
+        image: Buffer.from('fake-image'),
+        prompt: 'fill the gap',
+        mask: Buffer.from('fake-mask'),
+      });
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.input.image).toContain('data:image/png;base64,');
+      expect(body.input.mask).toContain('data:image/png;base64,');
+      expect(body.input.input_image).toBeUndefined();
+    });
   });
 
   describe('upscaleImage', () => {

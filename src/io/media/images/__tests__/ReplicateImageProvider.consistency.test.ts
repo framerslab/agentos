@@ -17,7 +17,7 @@ describe('ReplicateImageProvider — Character Consistency', () => {
     await provider.initialize({ apiKey: 'test-key' });
   });
 
-  it('auto-selects Pulid when consistencyMode is strict and no model specified', async () => {
+  it('auto-selects version-pinned Pulid when consistencyMode is strict and no model specified', async () => {
     mockFetch.mockResolvedValueOnce(mockSuccess());
 
     await provider.generateImage({
@@ -26,8 +26,15 @@ describe('ReplicateImageProvider — Character Consistency', () => {
       consistencyMode: 'strict',
     });
 
-    const [url] = mockFetch.mock.calls[0];
-    expect(url).toContain('zsxkib/pulid');
+    // Community model: the auto-route must carry an inline version and take
+    // the LEGACY /predictions endpoint — the modern /models endpoint 422s
+    // for unversioned community models.
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toContain('/predictions');
+    expect(url).not.toContain('/models/');
+    const body = JSON.parse(init.body);
+    expect(body.version).toContain('zsxkib/pulid:');
+    expect(body.input.main_face_image).toBe('https://ref.test/face.png');
   });
 
   it('maps referenceImageUrl to main_face_image for Pulid models', async () => {
@@ -125,5 +132,73 @@ describe('ReplicateImageProvider — Character Consistency', () => {
     expect(body.input.main_face_image).toBeUndefined();
     expect(body.input.image).toBeUndefined();
     expect(body.input.image_strength).toBeUndefined();
+  });
+
+  it('maps referenceImageUrl to input_images array for Flux 2 models', async () => {
+    mockFetch.mockResolvedValueOnce(mockSuccess());
+
+    await provider.generateImage({
+      modelId: 'black-forest-labs/flux-2-pro',
+      prompt: 'portrait',
+      referenceImageUrl: 'https://ref.test/face.png',
+      consistencyMode: 'strict',
+    });
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.input.input_images).toEqual(['https://ref.test/face.png']);
+    // Flux 2 rejects the SDXL-style pair with a 422 — must not be emitted.
+    expect(body.input.image).toBeUndefined();
+    expect(body.input.image_strength).toBeUndefined();
+  });
+
+  it('respects a caller-provided input_images array for Flux 2 models', async () => {
+    mockFetch.mockResolvedValueOnce(mockSuccess());
+
+    await provider.generateImage({
+      modelId: 'black-forest-labs/flux-2-max',
+      prompt: 'portrait',
+      referenceImageUrl: 'https://ref.test/face.png',
+      providerOptions: {
+        replicate: { input: { input_images: ['https://ref.test/a.png', 'https://ref.test/b.png'] } },
+      },
+    });
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.input.input_images).toEqual(['https://ref.test/a.png', 'https://ref.test/b.png']);
+  });
+
+  it('maps referenceImageUrl to input_image for Kontext models on generate', async () => {
+    mockFetch.mockResolvedValueOnce(mockSuccess());
+
+    await provider.generateImage({
+      modelId: 'black-forest-labs/flux-kontext-max',
+      prompt: 'restyle',
+      referenceImageUrl: 'https://ref.test/base.png',
+    });
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.input.input_image).toBe('https://ref.test/base.png');
+    expect(body.input.image).toBeUndefined();
+    expect(body.input.image_strength).toBeUndefined();
+  });
+
+  it('honors providerOptions.extraBody.version on generate via the legacy endpoint', async () => {
+    mockFetch.mockResolvedValueOnce(mockSuccess());
+
+    await provider.generateImage({
+      modelId: 'zsxkib/pulid',
+      prompt: 'portrait',
+      referenceImageUrl: 'https://ref.test/face.png',
+      providerOptions: {
+        replicate: { extraBody: { version: 'abc123def456' } },
+      },
+    });
+
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toContain('/predictions');
+    expect(url).not.toContain('/models/');
+    const body = JSON.parse(init.body);
+    expect(body.version).toBe('abc123def456');
+    expect(body.input.main_face_image).toBe('https://ref.test/face.png');
   });
 });

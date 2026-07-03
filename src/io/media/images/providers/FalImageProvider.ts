@@ -534,7 +534,23 @@ export class FalImageProvider implements IImageProvider {
       }
 
       if (data.status === 'FAILED') {
-        throw new Error(`Fal.ai image generation failed for request ${requestId}.`);
+        // Surface the provider's failure detail (safety refusal, invalid
+        // input, ...) instead of a bare request id. Callers classify
+        // refusals from the error text — a detail-less message made every
+        // Fal failure look identical and unclassifiable. Best-effort: the
+        // response endpoint carries the error payload for failed requests.
+        let detail = '';
+        try {
+          const resultUrl = `${this._config.baseURL}/${model}/requests/${requestId}`;
+          const resultResponse = await fetch(resultUrl, {
+            headers: { Authorization: `Key ${this.keyPool.next()}` },
+          });
+          const bodyText = await resultResponse.text();
+          if (bodyText) detail = `: ${bodyText.slice(0, 500)}`;
+        } catch {
+          // Detail fetch is best-effort; fall through to the bare message.
+        }
+        throw new Error(`Fal.ai image generation failed for request ${requestId}${detail}`);
       }
 
       // 'IN_QUEUE' or 'IN_PROGRESS' — wait before next poll
