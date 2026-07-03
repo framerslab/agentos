@@ -1,3 +1,8 @@
+## <small>0.9.97 (2026-07-03)</small>
+
+* Merge branch 'master' of https://github.com/framerslab/agentos ([1928e823c9279918b17b941d0382d075fd05d95f](https://github.com/framerslab/agentos/commit/1928e823c9279918b17b941d0382d075fd05d95f))
+* feat(api): forward customModelParams from generateText/streamText/agent to providers ([32041aa1e58834ca6a9a8a4e761de5d4aed602db](https://github.com/framerslab/agentos/commit/32041aa1e58834ca6a9a8a4e761de5d4aed602db))
+
 ## <small>0.9.96 (2026-07-03)</small>
 
 * Merge branch 'master' of https://github.com/framerslab/agentos ([96f0f7e9e4bbffb3f6366cab408bf7960b4b7c3d](https://github.com/framerslab/agentos/commit/96f0f7e9e4bbffb3f6366cab408bf7960b4b7c3d))
