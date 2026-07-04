@@ -125,6 +125,24 @@ export class AvatarPipeline {
   }
 
   /**
+   * Fire the caller's `onJobComplete` hook for a settled job. Await inside a
+   * try/catch so a throwing callback can neither abort the pipeline nor
+   * reorder subsequent jobs in the same worker lane; the job records on the
+   * final result remain the authoritative outcome.
+   */
+  private async notifyJobComplete(
+    request: AvatarGenerationRequest,
+    job: AvatarGenerationJob,
+  ): Promise<void> {
+    if (!request.onJobComplete) return;
+    try {
+      await request.onJobComplete(job);
+    } catch {
+      // Caller-side persistence is best-effort; swallow and continue.
+    }
+  }
+
+  /**
    * Execute the avatar generation pipeline.
    *
    * @param request - Generation request with identity, stages, and config.
@@ -176,6 +194,7 @@ export class AvatarPipeline {
       }
       job.durationMs = Date.now() - jobStart;
       jobs.push(job);
+      await this.notifyJobComplete(request, job);
     }
 
     // -----------------------------------------------------------------------
@@ -196,6 +215,7 @@ export class AvatarPipeline {
       }
       job.durationMs = Date.now() - jobStart;
       jobs.push(job);
+      await this.notifyJobComplete(request, job);
     }
 
     // -----------------------------------------------------------------------
@@ -290,6 +310,7 @@ export class AvatarPipeline {
 
         job.durationMs = Date.now() - jobStart;
         jobs.push(job);
+        await this.notifyJobComplete(request, job);
       });
     }
 
@@ -321,6 +342,7 @@ export class AvatarPipeline {
 
         job.durationMs = Date.now() - jobStart;
         jobs.push(job);
+        await this.notifyJobComplete(request, job);
       });
     }
 
@@ -354,6 +376,7 @@ export class AvatarPipeline {
 
       job.durationMs = Date.now() - jobStart;
       jobs.push(job);
+      await this.notifyJobComplete(request, job);
     }
 
     // -----------------------------------------------------------------------

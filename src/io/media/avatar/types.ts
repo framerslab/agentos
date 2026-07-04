@@ -71,6 +71,16 @@ export interface AvatarGenerationRequest {
     neutralPortrait?: string;
     faceEmbedding?: number[];
   };
+  /**
+   * Invoked after each pipeline job settles (completed or failed), before the
+   * next job in the same worker lane starts. Lets callers persist per-emotion
+   * results incrementally instead of waiting for the whole sheet — e.g. a UI
+   * polling for expression images can render each one as it lands. Callback
+   * errors are swallowed; the job records on the final result stay
+   * authoritative. Jobs from concurrent lanes may invoke this interleaved, so
+   * callers that mutate shared state must serialize their own writes.
+   */
+  onJobComplete?: (job: AvatarGenerationJob) => void | Promise<void>;
 }
 
 /** Tracking record for a single pipeline job. */

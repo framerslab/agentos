@@ -462,4 +462,47 @@ describe('AvatarPipeline', () => {
       expect(result.jobs[1].error).toBe('API timeout');
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Incremental job-completion callback
+  // -------------------------------------------------------------------------
+
+  describe('onJobComplete callback', () => {
+    it('fires once per settled job with the job record', async () => {
+      const seen: Array<{ stage: string; label: string; status: string }> = [];
+      const result = await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'face_embedding', 'expression_sheet'],
+          onJobComplete: (job) => {
+            seen.push({ stage: job.stage, label: job.label, status: job.status });
+          },
+        }),
+      );
+
+      expect(seen).toHaveLength(result.jobs.length);
+      // Every non-neutral expression surfaced through the callback, each
+      // settled as completed (neutral reuses the portrait — no job).
+      const expressionLabels = seen
+        .filter((j) => j.stage === 'expression_sheet')
+        .map((j) => j.label);
+      for (const emotion of AVATAR_EMOTIONS.filter((e) => e !== 'neutral')) {
+        expect(expressionLabels).toContain(`expression:${emotion}`);
+      }
+      expect(seen.every((j) => j.status === 'completed')).toBe(true);
+    });
+
+    it('swallows callback errors without failing jobs or the pipeline', async () => {
+      const result = await pipeline.generate(
+        makeRequest({
+          stages: ['neutral_portrait', 'expression_sheet'],
+          onJobComplete: () => {
+            throw new Error('caller persistence exploded');
+          },
+        }),
+      );
+
+      expect(result.jobs.every((j) => j.status === 'completed')).toBe(true);
+      expect(result.identityPackage.anchors.neutralPortrait).toBeTruthy();
+    });
+  });
 });
