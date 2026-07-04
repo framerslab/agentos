@@ -1,3 +1,7 @@
+## <small>0.9.99 (2026-07-04)</small>
+
+* fix(openrouter): preserve serving-provider attribution on completions ([418f427c9c48fbb6e156d5cf921f1e162cf61e3f](https://github.com/framerslab/agentos/commit/418f427c9c48fbb6e156d5cf921f1e162cf61e3f))
+
 ## <small>0.9.98 (2026-07-03)</small>
 
 * perf(avatar): generate expression and emote sheets with bounded concurrency ([9052559d81f2a1c3e7e1dfa54b612d5fb96f0751](https://github.com/framerslab/agentos/commit/9052559d81f2a1c3e7e1dfa54b612d5fb96f0751))
