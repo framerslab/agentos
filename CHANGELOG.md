@@ -1,3 +1,7 @@
+## <small>0.9.100 (2026-07-04)</small>
+
+* feat(avatar): per-job completion callback for incremental persistence ([be80816657dfd54c6ea8f03e7a36c9da859f3042](https://github.com/framerslab/agentos/commit/be80816657dfd54c6ea8f03e7a36c9da859f3042))
+
 ## <small>0.9.99 (2026-07-04)</small>
 
 * fix(openrouter): preserve serving-provider attribution on completions ([418f427c9c48fbb6e156d5cf921f1e162cf61e3f](https://github.com/framerslab/agentos/commit/418f427c9c48fbb6e156d5cf921f1e162cf61e3f))
