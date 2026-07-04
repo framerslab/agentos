@@ -225,6 +225,36 @@ describe('generateText', () => {
     expect(hoisted.generateCompletion.mock.calls[0]?.[2]).not.toHaveProperty('customModelParams');
   });
 
+  it('surfaces the serving provider reported by aggregator completions', async () => {
+    // OpenRouter reports which upstream host served each completion
+    // (`provider: 'Groq'` in the body → `servingProvider` on the mapped
+    // ModelCompletionResponse). Latency attribution is impossible without
+    // it — identical model + token counts vary 3-5x by serving host — so
+    // the result must carry it through verbatim.
+    hoisted.generateCompletion.mockResolvedValue({
+      modelId: 'meta-llama/llama-3.3-70b-instruct',
+      servingProvider: 'Groq',
+      usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
+      choices: [{ message: { role: 'assistant', content: 'done' }, finishReason: 'stop' }],
+    });
+
+    const result = await generateText({ model: 'openrouter:meta-llama/llama-3.3-70b-instruct', prompt: 'hi' });
+
+    expect(result.servingProvider).toBe('Groq');
+  });
+
+  it('leaves servingProvider undefined when the completion omits it', async () => {
+    hoisted.generateCompletion.mockResolvedValue({
+      modelId: 'gpt-4.1-mini',
+      usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
+      choices: [{ message: { role: 'assistant', content: 'done' }, finishReason: 'stop' }],
+    });
+
+    const result = await generateText({ model: 'openai:gpt-4.1-mini', prompt: 'hi' });
+
+    expect(result.servingProvider).toBeUndefined();
+  });
+
   it('replays the prior assistant turn thinking blocks when continuing a tool loop', async () => {
     // Anthropic 400s if the most-recent assistant tool_use turn is replayed
     // without its thinking blocks while extended thinking is enabled. The

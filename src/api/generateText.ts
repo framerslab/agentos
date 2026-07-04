@@ -533,6 +533,15 @@ export interface GenerateTextResult {
   provider: string;
   /** Resolved model identifier used for the run. */
   model: string;
+  /**
+   * Upstream host that actually served the request when `provider` is an
+   * aggregator/router (OpenRouter reports e.g. `'Groq'` or `'DeepInfra'`
+   * per completion). Undefined for direct providers, for aggregators that
+   * omit it, and on the prompt-shim tool path. Latency attribution:
+   * identical model + token counts vary 3-5x in wall-clock by serving
+   * host, so telemetry needs this to interpret durations.
+   */
+  servingProvider?: string;
   /** Final assistant text after all agentic steps have completed. */
   text: string;
   /** Aggregated token usage across all steps. */
@@ -1405,6 +1414,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         return await runShim();
       }
 
+      // Serving-host attribution from the most recent step's completion
+      // (aggregators like OpenRouter report which upstream host served the
+      // call). Carried onto the result so callers can attribute latency.
+      let lastServingProvider: string | undefined;
       try {
       for (let step = 0; step < maxSteps; step++) {
         // --- onBeforeGeneration hook ---
@@ -1481,6 +1494,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           }
         );
 
+        if (typeof response.servingProvider === 'string' && response.servingProvider.length > 0) {
+          lastServingProvider = response.servingProvider;
+        }
         if (response.usage) {
           totalUsage.promptTokens += response.usage.promptTokens ?? 0;
           totalUsage.completionTokens += response.usage.completionTokens ?? 0;
@@ -1565,6 +1581,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           return {
             provider: resolved.providerId,
             model: resolved.modelId,
+            ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
             text: textContent,
             usage: totalUsage,
             toolCalls: allToolCalls,
@@ -1698,6 +1715,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         return {
           provider: resolved.providerId,
           model: resolved.modelId,
+          ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
           text: textContent,
           usage: totalUsage,
           toolCalls: allToolCalls,

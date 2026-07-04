@@ -242,6 +242,14 @@ export interface ModelCompletionResponse {
   created: number;
   /** Resolved model identifier actually used (may differ from requested if routing / aliasing applied). */
   modelId: string;
+  /**
+   * Upstream host that actually served the request when the provider is an
+   * aggregator/router (e.g. OpenRouter returns `provider: 'Groq'` in the
+   * completion body). Undefined for direct providers and on aggregators
+   * that omit it. Latency telemetry: identical model + token counts can be
+   * 4s on Groq vs 10s+ on a price-biased host, so attribution needs this.
+   */
+  servingProvider?: string;
   /** One or more choices; for multi‑choice inference some providers return >1. */
   choices: ModelCompletionChoice[];
   /** Token usage & optional cost metrics (present on final chunk; may be partial/omitted on deltas). */

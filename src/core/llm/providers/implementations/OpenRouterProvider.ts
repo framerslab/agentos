@@ -63,6 +63,11 @@ interface OpenRouterChatCompletionAPIResponse {
   object: string;
   created: number;
   model: string;
+  /**
+   * Upstream host that served this completion (e.g. 'Groq', 'DeepInfra').
+   * OpenRouter includes it on both non-stream responses and stream chunks.
+   */
+  provider?: string;
   choices: OpenRouterChatChoice[];
   usage?: {
     prompt_tokens: number;
@@ -508,9 +513,13 @@ export class OpenRouterProvider implements IProvider {
       object: apiResponse.object,
       created: apiResponse.created,
       modelId: apiResponse.model || requestedModelId,
+      // Serving-host attribution (Groq vs DeepInfra etc.) — load-bearing for
+      // latency telemetry since provider routing prefs (customModelParams
+      // `provider.sort`) change which host serves the same model.
+      ...(apiResponse.provider ? { servingProvider: apiResponse.provider } : {}),
       choices: apiResponse.choices.map(c => ({
         index: c.index,
-        message: { 
+        message: {
           role: c.message!.role,
           content: c.message!.content,
           tool_calls: c.message!.tool_calls,
@@ -540,6 +549,7 @@ export class OpenRouterProvider implements IProvider {
           object: apiChunk.object,
           created: apiChunk.created,
           modelId: apiChunk.model || requestedModelId,
+          ...(apiChunk.provider ? { servingProvider: apiChunk.provider } : {}),
           choices: [],
           isFinal: true,
           usage: {
@@ -648,6 +658,7 @@ export class OpenRouterProvider implements IProvider {
         object: apiChunk.object,
         created: apiChunk.created,
         modelId: apiChunk.model || requestedModelId,
+        ...(apiChunk.provider ? { servingProvider: apiChunk.provider } : {}),
         choices: finalChoices,
         responseTextDelta: isFinal ? undefined : responseTextDelta,
         toolCallsDeltas: isFinal ? undefined : toolCallsDeltas,
