@@ -340,14 +340,60 @@ describe('AnthropicProvider automatic prompt caching', () => {
     expect(system[0].cache_control).toEqual({ type: 'ephemeral' });
   });
 
-  it('under thinking with no system at all, keeps the top-level auto marker', async () => {
+  it('under thinking, also pins a moving breakpoint on the last cacheable message block', async () => {
+    // Agent-loop shape: growing history is the dominant uncached spend once
+    // the system prefix caches. The tail marker gives each step incremental
+    // prefix reads (the thinking-strip only mutates the last two turns, so
+    // the older history stays byte-stable between calls).
+    const payload = await buildPayload(
+      [
+        { role: 'system', content: 'Loop system prompt.' },
+        { role: 'user', content: 'build the bundle' },
+        {
+          role: 'assistant',
+          content: 'Working on it.',
+          tool_calls: [
+            { id: 'tc_1', type: 'function', function: { name: 'ApplyPatch', arguments: '{"a":1}' } },
+          ],
+          thinkingBlocks: [{ type: 'thinking', thinking: 'plan…', signature: 'sig' }],
+        },
+        { role: 'tool', tool_call_id: 'tc_1', content: 'patch applied' },
+      ],
+      { thinking: { budgetTokens: 1 } },
+      'claude-opus-4-8',
+    );
+    expect(payload.cache_control).toBeUndefined();
+    const messages = payload.messages as Array<{ role: string; content: unknown }>;
+    const last = messages[messages.length - 1];
+    const lastBlocks = last.content as Array<{ type: string; cache_control?: unknown }>;
+    // Tool-result tail carries the moving breakpoint…
+    expect(lastBlocks[lastBlocks.length - 1].type).toBe('tool_result');
+    expect(lastBlocks[lastBlocks.length - 1].cache_control).toEqual({ type: 'ephemeral' });
+    // …earlier messages are untouched, and thinking blocks are never marked.
+    // (System was extracted to payload.system, so payload.messages is
+    // [user, assistant, tool_result-user] — the assistant sits at index 1.)
+    const assistant = messages[1].content as Array<{ type: string; cache_control?: unknown }>;
+    for (const block of assistant) expect(block.cache_control).toBeUndefined();
+    // Two breakpoints total (system pin + message tail) — well under the API cap of 4.
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    expect(system.filter((b) => b.cache_control).length).toBe(1);
+  });
+
+  it('under thinking with no system at all, pins the breakpoint on the last message block instead', async () => {
     const payload = await buildPayload(
       [{ role: 'user', content: 'hi' }],
       { thinking: { budgetTokens: 1 } },
       'claude-opus-4-8',
     );
-    expect(payload.cache_control).toEqual({ type: 'ephemeral' });
+    // The top-level moving marker is a no-op under thinking, so the tail
+    // block-level marker is the only working placement.
+    expect(payload.cache_control).toBeUndefined();
     expect(payload.system).toBeUndefined();
+    const messages = payload.messages as Array<{ role: string; content: unknown }>;
+    const blocks = messages[0].content as Array<{ type: string; text: string; cache_control?: unknown }>;
+    expect(Array.isArray(blocks)).toBe(true);
+    expect(blocks[blocks.length - 1].cache_control).toEqual({ type: 'ephemeral' });
+    expect(blocks[blocks.length - 1].text).toBe('hi');
   });
 
   it('under thinking, stands down entirely when the caller placed an explicit breakpoint', async () => {
@@ -369,6 +415,16 @@ describe('AnthropicProvider automatic prompt caching', () => {
     const system = payload.system as Array<{ cache_control?: unknown }>;
     expect(system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
     expect(system[1].cache_control).toBeUndefined();
+    // Full stand-down: the caller owns placement — no auto message-tail marker either.
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content;
+    if (Array.isArray(lastContent)) {
+      for (const block of lastContent as Array<{ cache_control?: unknown }>) {
+        expect(block.cache_control).toBeUndefined();
+      }
+    } else {
+      expect(typeof lastContent).toBe('string');
+    }
   });
 
   it('stands down when the caller placed an explicit breakpoint, preserving its 1h TTL', async () => {

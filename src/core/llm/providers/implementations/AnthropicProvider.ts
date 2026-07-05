@@ -1442,19 +1442,45 @@ export class AnthropicProvider implements IProvider {
     if (autoCacheEnv !== '0' && autoCacheEnv !== 'false' && payload.cache_control === undefined) {
       const explicitBreakpoints = systemBlocks.filter(b => b.cache_control).length;
       if (explicitBreakpoints === 0) {
-        if (payload.thinking !== undefined && firstSystemMsgBlockEnd > 0) {
+        if (payload.thinking !== undefined) {
           // Extended thinking: the request-level auto marker measurably
           // produces ZERO cache creation on thinking-enabled calls
           // (2026-07: 900+ agent-loop calls, ~12M prompt tokens/day,
-          // 0.000 hit rate). Pin an explicit block-level breakpoint to
-          // the last block of the FIRST system message instead — the
-          // primary system prompt precedes the thinking-bearing
-          // messages so it caches normally, and hook-appended per-turn
-          // system context (memory recall) stays outside the cached
-          // prefix. System is re-emitted as a block array so the marker
-          // reaches the wire.
-          systemBlocks[firstSystemMsgBlockEnd - 1].cache_control = { type: 'ephemeral' };
-          payload.system = systemBlocks;
+          // 0.000 hit rate). Place explicit block-level breakpoints
+          // instead:
+          //
+          //  1. On the last block of the FIRST system message — the
+          //     primary system prompt precedes the thinking-bearing
+          //     messages so it caches normally, and hook-appended
+          //     per-turn system context (memory recall) stays outside
+          //     the cached prefix. System is re-emitted as a block
+          //     array so the marker reaches the wire.
+          //  2. On the last cacheable block of the FINAL message — the
+          //     moving multi-turn breakpoint. Agent loops re-send the
+          //     whole growing history every step; without this each
+          //     step re-pays it at full input price. The provider
+          //     strips thinking from all-but-the-last assistant turn,
+          //     which only mutates the last two turns between calls —
+          //     older history stays byte-stable, so each step reads the
+          //     prefix cached two steps earlier and writes only the
+          //     fresh tail.
+          //
+          // Two breakpoints total, under the API cap of 4.
+          let placed = false;
+          if (firstSystemMsgBlockEnd > 0) {
+            systemBlocks[firstSystemMsgBlockEnd - 1].cache_control = { type: 'ephemeral' };
+            payload.system = systemBlocks;
+            placed = true;
+          }
+          if (this.markLastCacheableMessageBlock(anthropicMessages)) {
+            placed = true;
+          }
+          if (!placed) {
+            // Degenerate request (no system, no markable message block):
+            // fall back to the top-level marker rather than sending
+            // nothing at all.
+            payload.cache_control = { type: 'ephemeral' };
+          }
         } else {
           payload.cache_control = { type: 'ephemeral' };
         }
@@ -1462,6 +1488,46 @@ export class AnthropicProvider implements IProvider {
     }
 
     return payload;
+  }
+
+  /**
+   * Pin an ephemeral cache breakpoint on the last cacheable content block of
+   * the final message, converting a plain-string content to a single text
+   * block when needed so the marker can reach the wire.
+   *
+   * Only the FINAL message is considered — in agent loops that is always the
+   * newest user / tool_result turn, which is exactly where the moving
+   * multi-turn breakpoint belongs. Thinking / redacted_thinking blocks cannot
+   * carry `cache_control` and are skipped.
+   *
+   * @param anthropicMessages - Messages already converted to Anthropic wire format.
+   * @returns True when a marker was placed.
+   * @private
+   */
+  private markLastCacheableMessageBlock(
+    anthropicMessages: Array<Record<string, unknown>>,
+  ): boolean {
+    if (anthropicMessages.length === 0) return false;
+    const last = anthropicMessages[anthropicMessages.length - 1];
+    const content = last.content;
+    if (typeof content === 'string') {
+      if (!content) return false;
+      last.content = [
+        { type: 'text', text: content, cache_control: { type: 'ephemeral' } },
+      ];
+      return true;
+    }
+    if (Array.isArray(content)) {
+      const CACHEABLE = new Set(['text', 'image', 'tool_use', 'tool_result', 'document', 'search_result']);
+      for (let i = content.length - 1; i >= 0; i--) {
+        const block = content[i] as Record<string, unknown>;
+        if (block && typeof block === 'object' && CACHEABLE.has(block.type as string)) {
+          block.cache_control = { type: 'ephemeral' };
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   /**
