@@ -1,3 +1,7 @@
+## <small>0.9.102 (2026-07-05)</small>
+
+* fix(observability): fallback durationMs spans the whole call, not just the winning hop ([8b11e7034263f8687a281414ca678740208126a0](https://github.com/framerslab/agentos/commit/8b11e7034263f8687a281414ca678740208126a0))
+
 ## <small>0.9.101 (2026-07-05)</small>
 
 * feat(observability): latency + serving-host fields on the LLM usage observer ([cff5aff0c9ab315e6a818c1209edfa69ac4c66ff](https://github.com/framerslab/agentos/commit/cff5aff0c9ab315e6a818c1209edfa69ac4c66ff))
