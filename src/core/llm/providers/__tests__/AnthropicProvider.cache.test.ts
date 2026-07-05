@@ -247,6 +247,7 @@ describe('AnthropicProvider automatic prompt caching', () => {
   async function buildPayload(
     messages: Array<Record<string, unknown>>,
     options: Record<string, unknown> = {},
+    modelId: string = 'claude-sonnet-4-6',
   ): Promise<Record<string, unknown>> {
     const provider = new AnthropicProvider();
     await provider.initialize({ apiKey: 'test-anthropic-key' });
@@ -257,7 +258,7 @@ describe('AnthropicProvider automatic prompt caching', () => {
         options: unknown,
         stream: boolean,
       ) => Record<string, unknown>;
-    }).buildRequestPayload('claude-sonnet-4-6', messages, options, false);
+    }).buildRequestPayload(modelId, messages, options, false);
   }
 
   it('sets a top-level cache_control by default and leaves system untouched', async () => {
@@ -282,6 +283,92 @@ describe('AnthropicProvider automatic prompt caching', () => {
       { role: 'user', content: 'hi' },
     ]);
     expect(payload.cache_control).toBeUndefined();
+  });
+
+  /**
+   * Extended thinking: the request-level auto marker measurably produces
+   * ZERO cache creation on thinking-enabled calls (2026-07: 900+ codegen
+   * agent-loop calls, ~12M prompt tokens/day, 0.000 hit rate). Under
+   * thinking the auto-cache pins an explicit block-level breakpoint to the
+   * last block of the FIRST system message instead — the primary system
+   * prompt precedes the thinking-bearing messages so it caches normally,
+   * while hook-appended per-turn system context (memory recall) stays
+   * OUTSIDE the cached prefix.
+   */
+  it('under thinking, pins the breakpoint to the last block of the first system message', async () => {
+    const payload = await buildPayload(
+      [
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'Primary system part A' },
+            { type: 'text', text: 'Primary system part B' },
+          ],
+        },
+        { role: 'system', content: 'Per-turn recall appended by memory hooks' },
+        { role: 'user', content: 'hi' },
+      ],
+      { thinking: { budgetTokens: 1 } },
+      'claude-opus-4-8',
+    );
+    expect(payload.thinking).toBeDefined();
+    // No top-level moving marker — it is a no-op under thinking.
+    expect(payload.cache_control).toBeUndefined();
+    const system = payload.system as Array<{ text: string; cache_control?: unknown }>;
+    expect(Array.isArray(system)).toBe(true);
+    expect(system).toHaveLength(3);
+    expect(system[0].cache_control).toBeUndefined();
+    // Breakpoint on the last block of the FIRST system message…
+    expect(system[1].cache_control).toEqual({ type: 'ephemeral' });
+    // …and the volatile recall block stays outside the cached prefix.
+    expect(system[2].cache_control).toBeUndefined();
+  });
+
+  it('under thinking with a string system, marks its single block', async () => {
+    const payload = await buildPayload(
+      [
+        { role: 'system', content: 'A stable string system prompt.' },
+        { role: 'user', content: 'hi' },
+      ],
+      { thinking: { budgetTokens: 1 } },
+      'claude-opus-4-8',
+    );
+    expect(payload.cache_control).toBeUndefined();
+    const system = payload.system as Array<{ text: string; cache_control?: unknown }>;
+    expect(Array.isArray(system)).toBe(true);
+    expect(system).toHaveLength(1);
+    expect(system[0].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('under thinking with no system at all, keeps the top-level auto marker', async () => {
+    const payload = await buildPayload(
+      [{ role: 'user', content: 'hi' }],
+      { thinking: { budgetTokens: 1 } },
+      'claude-opus-4-8',
+    );
+    expect(payload.cache_control).toEqual({ type: 'ephemeral' });
+    expect(payload.system).toBeUndefined();
+  });
+
+  it('under thinking, stands down entirely when the caller placed an explicit breakpoint', async () => {
+    const payload = await buildPayload(
+      [
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'Stable prefix', cache_control: { type: 'ephemeral', ttl: '1h' } },
+            { type: 'text', text: 'Volatile tail' },
+          ],
+        },
+        { role: 'user', content: 'hi' },
+      ],
+      { thinking: { budgetTokens: 1 } },
+      'claude-opus-4-8',
+    );
+    expect(payload.cache_control).toBeUndefined();
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    expect(system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    expect(system[1].cache_control).toBeUndefined();
   });
 
   it('stands down when the caller placed an explicit breakpoint, preserving its 1h TTL', async () => {

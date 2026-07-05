@@ -59,11 +59,27 @@ export function applyMemoryProvider(
           new Promise<null>((resolve) => setTimeout(() => resolve(null), MEMORY_TIMEOUT_MS)),
         ]);
         if (memCtx && 'contextText' in memCtx && memCtx.contextText) {
+          // Insert AFTER the leading system message(s), never at index 0.
+          // Providers derive the prompt-cache key from the request prefix
+          // in order, so a per-turn recall block prepended at the front
+          // rewrites the prefix on every call — a cache-marked system
+          // prompt gets WRITTEN fresh each turn (cache-write premium) but
+          // never read back (hit rate 0). Placed after the caller's system
+          // content, recall keeps system authority while the cacheable
+          // prefix stays byte-stable across turns.
+          let insertAt = 0;
+          while (
+            insertAt < ctx.messages.length &&
+            ctx.messages[insertAt].role === 'system'
+          ) {
+            insertAt += 1;
+          }
           nextCtx = {
             ...ctx,
             messages: [
+              ...ctx.messages.slice(0, insertAt),
               { role: 'system' as const, content: memCtx.contextText },
-              ...ctx.messages,
+              ...ctx.messages.slice(insertAt),
             ],
           };
         }

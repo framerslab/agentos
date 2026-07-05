@@ -55,6 +55,59 @@ describe('applyMemoryProvider', () => {
     });
   });
 
+  it('inserts memory context AFTER a leading system message so cached prefixes stay stable', async () => {
+    const provider = createMockProvider();
+    const baseOpts = { provider: 'anthropic', model: 'claude-sonnet-4-6' };
+    const result = applyMemoryProvider(baseOpts as any, provider, 'hello');
+
+    // The caller's system content carries a cache breakpoint on its stable
+    // prefix. Recall text must land AFTER it — a prepend at index 0 rewrites
+    // the provider-side cache prefix every turn (write every call, read 0).
+    const systemMsg = {
+      role: 'system',
+      content: [
+        { type: 'text', text: 'Stable prefix', cache_control: { type: 'ephemeral', ttl: '1h' } },
+        { type: 'text', text: 'Volatile tail' },
+      ],
+    };
+    const ctx = {
+      messages: [systemMsg, { role: 'user', content: 'hello' }],
+    };
+    const next = await result.onBeforeGeneration!(ctx as any);
+
+    expect((next as any).messages).toHaveLength(3);
+    expect((next as any).messages[0]).toBe(systemMsg);
+    expect((next as any).messages[1]).toEqual({
+      role: 'system',
+      content: 'Memory block',
+    });
+    expect((next as any).messages[2]).toEqual({ role: 'user', content: 'hello' });
+  });
+
+  it('inserts memory context after ALL consecutive leading system messages', async () => {
+    const provider = createMockProvider();
+    const baseOpts = { provider: 'anthropic', model: 'claude-sonnet-4-6' };
+    const result = applyMemoryProvider(baseOpts as any, provider, 'hello');
+
+    const ctx = {
+      messages: [
+        { role: 'system', content: 'Primary instructions' },
+        { role: 'system', content: 'Secondary instructions' },
+        { role: 'user', content: 'hello' },
+      ],
+    };
+    const next = await result.onBeforeGeneration!(ctx as any);
+
+    expect((next as any).messages).toHaveLength(4);
+    expect((next as any).messages[0].content).toBe('Primary instructions');
+    expect((next as any).messages[1].content).toBe('Secondary instructions');
+    expect((next as any).messages[2]).toEqual({
+      role: 'system',
+      content: 'Memory block',
+    });
+    expect((next as any).messages[3].role).toBe('user');
+  });
+
   it('skips prepend when getContext returns null', async () => {
     const provider = createMockProvider({
       getContext: vi.fn().mockResolvedValue(null),

@@ -1224,9 +1224,16 @@ export class AnthropicProvider implements IProvider {
     type SystemBlock = { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } };
     const systemBlocks: SystemBlock[] = [];
     const conversationMessages: ChatMessage[] = [];
+    // Index one past the last block contributed by the FIRST system message
+    // that produced any blocks — i.e. the caller's primary system prompt.
+    // Consumed by the thinking-mode auto-cache below so the pinned
+    // breakpoint covers only the primary system, never hook-appended
+    // per-turn system context (e.g. memory recall).
+    let firstSystemMsgBlockEnd = 0;
 
     for (const msg of messages) {
       if (msg.role === 'system') {
+        const blocksBefore = systemBlocks.length;
         if (typeof msg.content === 'string') {
           if (msg.content) systemBlocks.push({ type: 'text', text: msg.content });
         } else if (Array.isArray(msg.content)) {
@@ -1239,6 +1246,9 @@ export class AnthropicProvider implements IProvider {
               systemBlocks.push(block);
             }
           }
+        }
+        if (firstSystemMsgBlockEnd === 0 && systemBlocks.length > blocksBefore) {
+          firstSystemMsgBlockEnd = systemBlocks.length;
         }
       } else {
         conversationMessages.push(msg);
@@ -1432,7 +1442,22 @@ export class AnthropicProvider implements IProvider {
     if (autoCacheEnv !== '0' && autoCacheEnv !== 'false' && payload.cache_control === undefined) {
       const explicitBreakpoints = systemBlocks.filter(b => b.cache_control).length;
       if (explicitBreakpoints === 0) {
-        payload.cache_control = { type: 'ephemeral' };
+        if (payload.thinking !== undefined && firstSystemMsgBlockEnd > 0) {
+          // Extended thinking: the request-level auto marker measurably
+          // produces ZERO cache creation on thinking-enabled calls
+          // (2026-07: 900+ agent-loop calls, ~12M prompt tokens/day,
+          // 0.000 hit rate). Pin an explicit block-level breakpoint to
+          // the last block of the FIRST system message instead — the
+          // primary system prompt precedes the thinking-bearing
+          // messages so it caches normally, and hook-appended per-turn
+          // system context (memory recall) stays outside the cached
+          // prefix. System is re-emitted as a block array so the marker
+          // reaches the wire.
+          systemBlocks[firstSystemMsgBlockEnd - 1].cache_control = { type: 'ephemeral' };
+          payload.system = systemBlocks;
+        } else {
+          payload.cache_control = { type: 'ephemeral' };
+        }
       }
     }
 
