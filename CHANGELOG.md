@@ -1,3 +1,8 @@
+## <small>0.9.103 (2026-07-05)</small>
+
+* Merge branch 'master' of https://github.com/framerslab/agentos ([1da867e6df737c1f5475bd5a4f67e8f5b9439bc1](https://github.com/framerslab/agentos/commit/1da867e6df737c1f5475bd5a4f67e8f5b9439bc1))
+* fix(llm): keep prompt-cache prefixes stable under memory hooks and extended thinking ([d0cd86171f0ae58f637db674bb28f73c01125e4a](https://github.com/framerslab/agentos/commit/d0cd86171f0ae58f637db674bb28f73c01125e4a))
+
 ## <small>0.9.102 (2026-07-05)</small>
 
 * fix(observability): fallback durationMs spans the whole call, not just the winning hop ([8b11e7034263f8687a281414ca678740208126a0](https://github.com/framerslab/agentos/commit/8b11e7034263f8687a281414ca678740208126a0))
