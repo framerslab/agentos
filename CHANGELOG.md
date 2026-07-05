@@ -1,3 +1,7 @@
+## <small>0.9.101 (2026-07-05)</small>
+
+* feat(observability): latency + serving-host fields on the LLM usage observer ([cff5aff0c9ab315e6a818c1209edfa69ac4c66ff](https://github.com/framerslab/agentos/commit/cff5aff0c9ab315e6a818c1209edfa69ac4c66ff))
+
 ## <small>0.9.100 (2026-07-04)</small>
 
 * feat(avatar): per-job completion callback for incremental persistence ([be80816657dfd54c6ea8f03e7a36c9da859f3042](https://github.com/framerslab/agentos/commit/be80816657dfd54c6ea8f03e7a36c9da859f3042))
