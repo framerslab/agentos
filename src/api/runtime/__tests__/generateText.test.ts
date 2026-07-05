@@ -25,6 +25,8 @@ vi.mock('../../model.js', () => ({
 }));
 
 import { generateText, buildFallbackChain } from '../generateText.js';
+import { setGlobalLlmObserver } from '../../observers.js';
+import type { LlmUsageEvent } from '../../observers.js';
 import { clearRecordedAgentOSUsage, getRecordedAgentOSUsage } from '../usageLedger.js';
 import { resolveModelOption, resolveProvider } from '../../model.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
@@ -733,6 +735,50 @@ describe('generateText', () => {
       expect(result.fallback?.hops[0]?.ok).toBe(false);
       expect(result.fallback?.hops.at(-1)?.ok).toBe(true);
     } finally {
+      delete process.env.ANTHROPIC_API_KEY;
+      globalLLMProviderHealth.reset();
+    }
+  });
+
+  it('fires ONE usage observer on a fallback whose durationMs spans the failed primary', async () => {
+    // Regression (Codex 2026-07-05): before the __rootStartedAt threading the
+    // winning recursive hop fired the observer with its OWN start, so a slow
+    // fallback turn reported only the fallback leg's time and read as fast.
+    globalLLMProviderHealth.reset();
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const HOP_MS = 40;
+    hoisted.generateCompletion
+      .mockImplementationOnce(async () => {
+        await sleep(HOP_MS);
+        throw new Error('429 rate limit exceeded');
+      })
+      .mockImplementationOnce(async () => {
+        await sleep(HOP_MS);
+        return {
+          modelId: 'gpt-4.1-mini',
+          usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
+          choices: [{ message: { role: 'assistant', content: 'fallback reply' }, finishReason: 'stop' }],
+        };
+      });
+
+    const events: LlmUsageEvent[] = [];
+    setGlobalLlmObserver((e) => {
+      events.push(e);
+    });
+    process.env.ANTHROPIC_API_KEY = 'test-anthropic-key';
+    try {
+      const result = await generateText({ model: 'openai:gpt-4o', prompt: 'hi' });
+      expect(result.text).toBe('fallback reply');
+      // generateText fires exactly ONE observer event on a fallback — the
+      // winning hop's — and never a duplicate from the outer call.
+      expect(events).toHaveLength(1);
+      // durationMs must span BOTH the failed primary (HOP_MS) and the winning
+      // fallback (HOP_MS). Lower bound leaves margin below the 2*HOP_MS nominal;
+      // scheduling jitter only adds time. Pre-fix this was ~HOP_MS (fallback
+      // leg only) and would fail this assertion.
+      expect(events[0].durationMs).toBeGreaterThanOrEqual(HOP_MS * 1.75);
+    } finally {
+      setGlobalLlmObserver(null);
       delete process.env.ANTHROPIC_API_KEY;
       globalLLMProviderHealth.reset();
     }

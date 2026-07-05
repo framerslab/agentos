@@ -454,6 +454,16 @@ export interface GenerateTextOptions {
    */
   source?: string;
   /**
+   * Internal — DO NOT set from application code. The outermost call's
+   * `Date.now()` start, threaded into the provider-fallback recursion so
+   * the winning hop's usage-observer `durationMs` reports true end-to-end
+   * wall-clock (spanning failed primary attempts) rather than only its own
+   * leg. Absent on a top-level call, where it defaults to that call's start.
+   *
+   * @internal
+   */
+  __rootStartedAt?: number;
+  /**
    * Optional model router for intelligent provider/model selection.
    * When provided, the router's `selectModel()` is called before provider
    * resolution.  The router result overrides `model`/`provider`.
@@ -1136,6 +1146,18 @@ function buildHelperToolExecutionContext(
  */
 export async function generateText(opts: GenerateTextOptions): Promise<GenerateTextResult> {
   const startedAt = Date.now();
+  // Root-of-call start for observer `durationMs`. On a provider-fallback the
+  // primary attempt fails and generateText recurses (below) targeting the
+  // fallback provider; the WINNING recursive call fires the single usage
+  // observer and returns straight up, so the outer call never fires its own.
+  // Without threading, that event's durationMs would time only the winning
+  // hop and hide the failed-primary wait — making a slow fallback turn read
+  // as fast, exactly the case a latency dashboard must surface. Inherit the
+  // outermost start (passed as the internal `__rootStartedAt`) so the fired
+  // durationMs is true end-to-end wall-clock. Internal-only; not part of the
+  // public GenerateTextOptions surface.
+  const rootStartedAt =
+    typeof opts.__rootStartedAt === 'number' ? opts.__rootStartedAt : startedAt;
   let metricStatus: 'ok' | 'error' = 'ok';
   let metricUsage: TokenUsage | undefined;
   let metricProviderId: string | undefined;
@@ -1392,7 +1414,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           source: opts.source,
           finishReason: loopResult.finishReason,
           surface: 'generateText',
-          durationMs: Date.now() - startedAt,
+          durationMs: Date.now() - rootStartedAt,
         });
         return {
           provider: resolved.providerId,
@@ -1578,7 +1600,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             source: opts.source,
             finishReason: choice.finishReason ?? 'stop',
             surface: 'generateText',
-            durationMs: Date.now() - startedAt,
+            durationMs: Date.now() - rootStartedAt,
             ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
           });
           return {
@@ -1714,7 +1736,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           source: opts.source,
           finishReason: choice.finishReason ?? 'stop',
           surface: 'generateText',
-          durationMs: Date.now() - startedAt,
+          durationMs: Date.now() - rootStartedAt,
           ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
         });
         return {
@@ -1749,7 +1771,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         source: opts.source,
         finishReason: 'tool-calls',
         surface: 'generateText',
-        durationMs: Date.now() - startedAt,
+        durationMs: Date.now() - rootStartedAt,
         ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
       });
       return {
@@ -1850,6 +1872,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             ...opts,
             provider: fb.provider,
             model: fb.model,
+            // Carry the outermost call's start so the winning hop's usage
+            // observer reports true end-to-end durationMs (spanning this
+            // failed primary + every fallback hop), not just its own leg.
+            __rootStartedAt: rootStartedAt,
             // Per-hop effort: when this fallback entry sets `effort`, it
             // overrides the call-level effort for THIS hop only (the spread
             // above carries opts.effort; an entry without `effort` inherits it).
@@ -1932,7 +1958,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       // Helper-level usage persistence is best-effort and should not break generation.
     }
     recordAgentOSTurnMetrics({
-      durationMs: Date.now() - startedAt,
+      durationMs: Date.now() - rootStartedAt,
       status: metricStatus,
       usage: toTurnMetricUsage(metricUsage),
     });

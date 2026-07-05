@@ -80,6 +80,15 @@ export interface LlmUsageEvent {
    * surface entry (post-option parse, pre-routing) to the moment the
    * observer fires. For streaming surfaces this spans the full stream —
    * first byte through final chunk — not just time-to-first-token.
+   *
+   * Fallback semantics: on a provider-fallback, `generateText` fires ONE
+   * event (from the winning hop) whose `durationMs` is threaded to span the
+   * whole call — failed primary attempts included — so a slow fallback turn
+   * reads as slow. `streamText` instead fires one event per hop: the inner
+   * hop event times that hop, and an aggregate outer event times the whole
+   * call. Either way `durationMs` is never less than the time the caller
+   * actually waited on the event that carries the final result.
+   *
    * Optional so hosts tolerate events from older agentos versions.
    */
   durationMs?: number;
