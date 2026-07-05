@@ -396,7 +396,18 @@ describe('AnthropicProvider automatic prompt caching', () => {
     expect(blocks[blocks.length - 1].text).toBe('hi');
   });
 
-  it('under thinking, stands down entirely when the caller placed an explicit breakpoint', async () => {
+  /**
+   * Caller system breakpoints must NOT cancel the moving message tail. In
+   * agent loops the growing history lives in the provider-facing message
+   * array the caller never sees, so the provider is the only layer that can
+   * pin the tail. Full stand-down on a caller SYSTEM marker left that
+   * history permanently uncached — measured 2026-07-05 at 15M+ full-price
+   * prompt tokens/day (avg 16-19K uncached tokens/step) while marker-free
+   * calls on the same image collapsed to ~2 uncached tokens/step. A caller
+   * 1h system TTL composed with a 5-min moving tail is valid API usage
+   * (stable prefix long TTL, moving tail short TTL).
+   */
+  it('under thinking, composes: caller system breakpoint preserved AND auto message-tail pinned', async () => {
     const payload = await buildPayload(
       [
         {
@@ -413,9 +424,70 @@ describe('AnthropicProvider automatic prompt caching', () => {
     );
     expect(payload.cache_control).toBeUndefined();
     const system = payload.system as Array<{ cache_control?: unknown }>;
+    // Caller owns the SYSTEM region: markers preserved verbatim, none added.
     expect(system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
     expect(system[1].cache_control).toBeUndefined();
-    // Full stand-down: the caller owns placement — no auto message-tail marker either.
+    // …but the moving tail still lands on the final message.
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content as Array<{
+      type: string;
+      text?: string;
+      cache_control?: unknown;
+    }>;
+    expect(Array.isArray(lastContent)).toBe(true);
+    expect(lastContent[lastContent.length - 1].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('under thinking, stands down entirely when the caller marked a MESSAGE block', async () => {
+    const payload = await buildPayload(
+      [
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'Stable prefix', cache_control: { type: 'ephemeral', ttl: '1h' } },
+          ],
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'shared few-shot context', cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: 'varying question' },
+          ],
+        },
+        { role: 'user', content: 'follow-up' },
+      ],
+      { thinking: { budgetTokens: 1 } },
+      'claude-opus-4-8',
+    );
+    // Caller owns the messages region: no auto tail on the final message.
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content;
+    if (Array.isArray(lastContent)) {
+      for (const block of lastContent as Array<{ cache_control?: unknown }>) {
+        expect(block.cache_control).toBeUndefined();
+      }
+    } else {
+      expect(typeof lastContent).toBe('string');
+    }
+  });
+
+  it('under thinking, skips the auto tail when caller markers already fill the API cap of 4', async () => {
+    const payload = await buildPayload(
+      [
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'p1', cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: 'p2', cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: 'p3', cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: 'p4', cache_control: { type: 'ephemeral' } },
+          ],
+        },
+        { role: 'user', content: 'hi' },
+      ],
+      { thinking: { budgetTokens: 1 } },
+      'claude-opus-4-8',
+    );
     const messages = payload.messages as Array<{ content: unknown }>;
     const lastContent = messages[messages.length - 1].content;
     if (Array.isArray(lastContent)) {

@@ -1428,20 +1428,36 @@ export class AnthropicProvider implements IProvider {
     // Per-turn pipelines and agent loops that re-send a stable prefix get cache
     // reads (0.1x input price) with zero caller changes.
     //
-    // Defers entirely to caller-placed breakpoints: when any system block
-    // already carries a `cache_control` marker (e.g. a `cacheBreakpoint` from
-    // generateText / generateObject — possibly with a non-default 1h TTL), the
-    // caller owns exactly what is cached and at which TTL. Adding a separate
-    // top-level (5-min) breakpoint alongside a caller's 1h breakpoint would mix
-    // TTLs in one request, so the auto-marker stands down whenever the caller
-    // has marked anything.
+    // Caller-placed breakpoints are composed with, not cancelled by, the auto
+    // path — but per REGION:
+    //
+    //  - SYSTEM markers (e.g. a `cacheBreakpoint` from generateText /
+    //    generateObject, possibly with a non-default 1h TTL): the caller owns
+    //    the system region — never restructure it or add markers there. Under
+    //    extended thinking the auto moving TAIL on the final message is still
+    //    pinned: in agent loops the growing history lives in the
+    //    provider-facing message array the caller never sees, so this layer is
+    //    the only one that can mark it. Full stand-down here left that history
+    //    permanently uncached — measured 2026-07-05 at 15M+ full-price prompt
+    //    tokens/day (avg 16-19K uncached tokens/step) while marker-free calls
+    //    on the same image collapsed to ~2 uncached tokens/step. A caller 1h
+    //    system TTL alongside a 5-min moving tail is valid API usage (stable
+    //    prefix long TTL, moving tail short TTL).
+    //
+    //  - MESSAGE markers: the caller owns the whole messages region — the auto
+    //    tail stands down entirely.
+    //
+    //  - Non-thinking requests keep the old semantics: any caller marker
+    //    stands the top-level auto marker down (it would cover the same
+    //    regions the caller already scoped).
     //
     // Callers that need it off (single-shot prompts where the cache-write
     // premium can't amortize) set AGENTOS_ANTHROPIC_AUTO_CACHE=0.
     const autoCacheEnv = process.env.AGENTOS_ANTHROPIC_AUTO_CACHE;
     if (autoCacheEnv !== '0' && autoCacheEnv !== 'false' && payload.cache_control === undefined) {
       const explicitBreakpoints = systemBlocks.filter(b => b.cache_control).length;
-      if (explicitBreakpoints === 0) {
+      const messageBreakpoints = this.countMessageCacheMarkers(anthropicMessages);
+      if (explicitBreakpoints === 0 && messageBreakpoints === 0) {
         if (payload.thinking !== undefined) {
           // Extended thinking: the request-level auto marker measurably
           // produces ZERO cache creation on thinking-enabled calls
@@ -1484,10 +1500,45 @@ export class AnthropicProvider implements IProvider {
         } else {
           payload.cache_control = { type: 'ephemeral' };
         }
+      } else if (
+        payload.thinking !== undefined &&
+        messageBreakpoints === 0 &&
+        explicitBreakpoints > 0 &&
+        explicitBreakpoints < 4
+      ) {
+        // Caller marked the system prefix only: keep their placement + TTL
+        // verbatim and pin just the moving message tail (the API cap is 4
+        // breakpoints per request — the tail adds one, so require headroom).
+        this.markLastCacheableMessageBlock(anthropicMessages);
       }
     }
 
     return payload;
+  }
+
+  /**
+   * Count caller-placed `cache_control` markers across message content blocks.
+   * Used to decide whether the caller owns the messages region (auto tail
+   * stands down) or only the system region (auto tail still composes).
+   *
+   * @param anthropicMessages - Messages already converted to Anthropic wire format.
+   * @returns Number of content blocks carrying a `cache_control` marker.
+   * @private
+   */
+  private countMessageCacheMarkers(
+    anthropicMessages: Array<Record<string, unknown>>,
+  ): number {
+    let count = 0;
+    for (const msg of anthropicMessages) {
+      const content = msg.content;
+      if (!Array.isArray(content)) continue;
+      for (const block of content) {
+        if (block && typeof block === 'object' && (block as Record<string, unknown>).cache_control) {
+          count++;
+        }
+      }
+    }
+    return count;
   }
 
   /**
@@ -1600,7 +1651,13 @@ export class AnthropicProvider implements IProvider {
       const anthropicContent: Array<Record<string, unknown>> = [];
       for (const part of msg.content as MessageContentPart[]) {
         if (part.type === 'text') {
-          anthropicContent.push({ type: 'text', text: (part as { text: string }).text });
+          const block: Record<string, unknown> = { type: 'text', text: (part as { text: string }).text };
+          // Preserve caller-placed cache breakpoints (shared-prefix /
+          // varying-suffix pattern) — rebuilding the block without them
+          // silently un-caches the caller's marked prefix.
+          const cc = (part as { cache_control?: unknown }).cache_control;
+          if (cc) block.cache_control = cc;
+          anthropicContent.push(block);
         } else if (part.type === 'image_url') {
           const url = (part as { image_url: { url: string } }).image_url.url;
           // Extract base64 data from data: URLs
