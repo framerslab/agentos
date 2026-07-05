@@ -1,3 +1,7 @@
+## <small>0.9.104 (2026-07-05)</small>
+
+* fix(llm): pin a moving cache breakpoint on the message tail under extended thinking ([a2033f2504f90a753bc2f5c49912f52b386ac97c](https://github.com/framerslab/agentos/commit/a2033f2504f90a753bc2f5c49912f52b386ac97c))
+
 ## <small>0.9.103 (2026-07-05)</small>
 
 * Merge branch 'master' of https://github.com/framerslab/agentos ([1da867e6df737c1f5475bd5a4f67e8f5b9439bc1](https://github.com/framerslab/agentos/commit/1da867e6df737c1f5475bd5a4f67e8f5b9439bc1))
