@@ -1392,6 +1392,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           source: opts.source,
           finishReason: loopResult.finishReason,
           surface: 'generateText',
+          durationMs: Date.now() - startedAt,
         });
         return {
           provider: resolved.providerId,
@@ -1577,6 +1578,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             source: opts.source,
             finishReason: choice.finishReason ?? 'stop',
             surface: 'generateText',
+            durationMs: Date.now() - startedAt,
+            ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
           });
           return {
             provider: resolved.providerId,
@@ -1711,6 +1714,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           source: opts.source,
           finishReason: choice.finishReason ?? 'stop',
           surface: 'generateText',
+          durationMs: Date.now() - startedAt,
+          ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
         });
         return {
           provider: resolved.providerId,
@@ -1744,6 +1749,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         source: opts.source,
         finishReason: 'tool-calls',
         surface: 'generateText',
+        durationMs: Date.now() - startedAt,
+        ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
       });
       return {
         provider: resolved.providerId,

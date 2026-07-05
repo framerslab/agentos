@@ -170,6 +170,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
   const parts: StreamPart[] = [];
   const allToolCalls: ToolCallRecord[] = [];
+  // Wall-clock of the FIRST StreamPart handed to the consumer (text or
+  // tool-call alike), stamped by the timing wrapper around `runStream`
+  // below. Read by the usage-observer fire in runStream's finally to
+  // report `ttfbMs`; stays undefined when the stream errors before
+  // producing any part.
+  let firstPartAt: number | undefined;
 
   async function* runStream(): AsyncGenerator<StreamPart> {
     const startedAt = Date.now();
@@ -942,12 +948,26 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           source: opts.source,
           finishReason: allToolCalls.length > 0 && !finalText ? 'tool-calls' : 'stop',
           surface: 'streamText',
+          durationMs: Date.now() - startedAt,
+          ...(firstPartAt !== undefined ? { ttfbMs: firstPartAt - startedAt } : {}),
         });
       }
     }
   }
 
-  const fullStreamIterable = runStream();
+  // Single timing chokepoint: stamp `firstPartAt` when the first part
+  // reaches the consumer instead of instrumenting every yield site
+  // inside runStream. The wrapper delegates verbatim otherwise, and
+  // runStream's finally (where the usage observer fires) still runs on
+  // generator completion because the wrapper drains it with for-await.
+  async function* runStreamTimed(): AsyncGenerator<StreamPart> {
+    for await (const part of runStream()) {
+      if (firstPartAt === undefined) firstPartAt = Date.now();
+      yield part;
+    }
+  }
+
+  const fullStreamIterable = runStreamTimed();
 
   const textStreamIterable: AsyncIterable<string> = {
     [Symbol.asyncIterator]() {

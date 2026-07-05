@@ -98,6 +98,33 @@ describe('fireLlmUsageObserver', () => {
     expect(obs.mock.calls[0][0].surface).toBe('streamText');
   });
 
+  it('forwards latency + serving-host fields when present', () => {
+    const obs = vi.fn();
+    setGlobalLlmObserver(obs);
+    fireLlmUsageObserver(
+      makeEvent({
+        surface: 'streamText',
+        durationMs: 8421,
+        ttfbMs: 612,
+        servingProvider: 'Groq',
+      }),
+    );
+    const seen = obs.mock.calls[0][0];
+    expect(seen.durationMs).toBe(8421);
+    expect(seen.ttfbMs).toBe(612);
+    expect(seen.servingProvider).toBe('Groq');
+  });
+
+  it('leaves latency fields undefined when the surface did not measure them', () => {
+    const obs = vi.fn();
+    setGlobalLlmObserver(obs);
+    fireLlmUsageObserver(makeEvent());
+    const seen = obs.mock.calls[0][0];
+    expect(seen.durationMs).toBeUndefined();
+    expect(seen.ttfbMs).toBeUndefined();
+    expect(seen.servingProvider).toBeUndefined();
+  });
+
   it('forwards cache-token fields when present on usage', () => {
     const obs = vi.fn();
     setGlobalLlmObserver(obs);

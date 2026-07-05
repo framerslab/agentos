@@ -75,6 +75,30 @@ export interface LlmUsageEvent {
     | 'streamObject'
     | 'embedText'
     | 'generateImage';
+  /**
+   * Wall-clock duration of the whole call in milliseconds, measured from
+   * surface entry (post-option parse, pre-routing) to the moment the
+   * observer fires. For streaming surfaces this spans the full stream —
+   * first byte through final chunk — not just time-to-first-token.
+   * Optional so hosts tolerate events from older agentos versions.
+   */
+  durationMs?: number;
+  /**
+   * Time-to-first-part for streaming surfaces, in milliseconds: surface
+   * entry to the first StreamPart yielded to the consumer (text or
+   * tool-call alike). Undefined on non-streaming surfaces and when the
+   * stream errored before producing any part. The latency triage
+   * counterpart to `durationMs` — a high ttfb with a short remainder
+   * points at routing/prefill; the inverse points at generation length.
+   */
+  ttfbMs?: number;
+  /**
+   * Upstream host that actually served the call when the provider is an
+   * aggregator (OpenRouter: Groq, DeepInfra, ...). Mirrors the
+   * `servingProvider` response telemetry; absent for direct providers
+   * and surfaces that don't track it.
+   */
+  servingProvider?: string;
 }
 
 /**
