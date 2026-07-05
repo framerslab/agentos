@@ -1,3 +1,7 @@
+## <small>0.9.105 (2026-07-05)</small>
+
+* fix(llm): compose caller system cache breakpoints with the auto message-tail marker ([4181eda5b15b3ae3b09278e12cfaa9e3ed0a507d](https://github.com/framerslab/agentos/commit/4181eda5b15b3ae3b09278e12cfaa9e3ed0a507d))
+
 ## <small>0.9.104 (2026-07-05)</small>
 
 * fix(llm): pin a moving cache breakpoint on the message tail under extended thinking ([a2033f2504f90a753bc2f5c49912f52b386ac97c](https://github.com/framerslab/agentos/commit/a2033f2504f90a753bc2f5c49912f52b386ac97c))
