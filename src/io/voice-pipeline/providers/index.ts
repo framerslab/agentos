@@ -32,6 +32,19 @@ export {
   chunkForAura,
 } from './DeepgramAuraBatchTTS.js';
 export { BatchTTSFallback } from './BatchTTSFallback.js';
+// Batch (one-shot) STT providers.
+export {
+  BatchSTTFallback,
+  EmptyTranscriptError,
+} from './BatchSTTFallback.js';
+export {
+  DeepgramPreRecordedBatchSTT,
+  type DeepgramPreRecordedBatchSTTConfig,
+} from './DeepgramPreRecordedBatchSTT.js';
+export {
+  OpenAIWhisperBatchSTT,
+  type OpenAIWhisperBatchSTTConfig,
+} from './OpenAIWhisperBatchSTT.js';
 export { OpenAIRealtimeTTS, type OpenAIRealtimeTTSConfig } from './OpenAIRealtimeTTS.js';
 export {
   StreamingSTTChain,

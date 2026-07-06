@@ -100,6 +100,9 @@
 // Consumers can import any interface or type alias directly from this barrel.
 export * from './types.js';
 
+// Canonical provider-family taxonomy (see provider-family.ts).
+export { ttsProviderFamily, type TtsProviderFamily } from './provider-family.js';
+
 // Concrete barge-in handler implementations
 export { HardCutBargeinHandler } from './HardCutBargeinHandler.js';
 export { SoftFadeBargeinHandler } from './SoftFadeBargeinHandler.js';
@@ -141,6 +144,16 @@ export {
   type TTSProviderSelectedEvent,
   type TTSProviderFailedEvent,
   type TTSProviderFailoverEvent,
+} from './providers/index.js';
+
+// Batch (one-shot) STT provider implementations.
+export {
+  BatchSTTFallback,
+  EmptyTranscriptError,
+  DeepgramPreRecordedBatchSTT,
+  type DeepgramPreRecordedBatchSTTConfig,
+  OpenAIWhisperBatchSTT,
+  type OpenAIWhisperBatchSTTConfig,
 } from './providers/index.js';
 
 // Resilience primitives

@@ -1012,6 +1012,53 @@ export interface IBatchTTS {
   synthesize(text: string, config?: BatchTTSConfig): Promise<BatchTTSResult>;
 }
 
+/**
+ * Configuration for a batch (one-shot) STT transcription request.
+ * Used by {@link IBatchSTT.transcribe} for pre-recorded audio (voice notes,
+ * uploaded clips).
+ */
+export interface BatchSTTConfig {
+  /** Source audio MIME type (e.g. 'audio/webm', 'audio/mp4'). Sent as the
+   *  request Content-Type / used to name the multipart part. @default 'audio/webm' */
+  mimeType?: string;
+  /** BCP-47 language hint (e.g. 'en'). @default 'en' */
+  language?: string;
+  /** Provider-specific model override (e.g. 'nova-3', 'whisper-1'). */
+  model?: string;
+  /** Pass-through options forwarded to the underlying provider SDK. */
+  providerOptions?: Record<string, unknown>;
+}
+
+/**
+ * Result of a batch STT transcription operation.
+ */
+export interface BatchSTTResult {
+  /** Recognized transcript text (trimmed). */
+  transcript: string;
+  /** Estimated source audio duration in milliseconds. */
+  durationMs: number;
+  /** Provider ID that served this request. */
+  provider: string;
+}
+
+/**
+ * Factory interface for batch (one-shot) speech-to-text providers.
+ *
+ * Unlike {@link IStreamingSTT} which recognizes audio incrementally over a live
+ * session, batch STT accepts a complete audio buffer and returns a finished
+ * transcript. Suitable for voice notes, uploaded clips, and offline
+ * transcription.
+ *
+ * A provider signals a silent clip by throwing `EmptyTranscriptError` (from the
+ * batch STT providers module) — a determinate result, not a provider failure.
+ */
+export interface IBatchSTT {
+  /** Unique, stable identifier for this provider (e.g. 'deepgram-prerecorded', 'openai-whisper'). */
+  readonly providerId: string;
+  /** Transcribe a complete audio buffer into text. */
+  transcribe(audio: Buffer, config?: BatchSTTConfig): Promise<BatchSTTResult>;
+}
+
 // ============================================================================
 // Section 7 -- Barge-in handling
 // ============================================================================
