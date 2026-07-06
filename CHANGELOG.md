@@ -1,3 +1,7 @@
+## <small>0.9.111 (2026-07-06)</small>
+
+* feat(voice): batch STT providers + canonical TTS provider family ([8b0d37d6eef9ff018b618691ce6ff5ca796bd9e9](https://github.com/framerslab/agentos/commit/8b0d37d6eef9ff018b618691ce6ff5ca796bd9e9))
+
 ## <small>0.9.110 (2026-07-06)</small>
 
 * feat(voice): optional TTS expressiveness surface — providers apply the subset they support ([5b76b5a3c128f3b230bba6a49e26df755d94290b](https://github.com/framerslab/agentos/commit/5b76b5a3c128f3b230bba6a49e26df755d94290b))
