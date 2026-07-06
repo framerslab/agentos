@@ -1,3 +1,7 @@
+## <small>0.9.112 (2026-07-06)</small>
+
+* feat(llm): Anthropic cache diagnostics — auto-threaded cache_miss_reason across agent loops ([f127baefb200583bddc147a2d9dac51eccf4dfa8](https://github.com/framerslab/agentos/commit/f127baefb200583bddc147a2d9dac51eccf4dfa8))
+
 ## <small>0.9.111 (2026-07-06)</small>
 
 * feat(voice): batch STT providers + canonical TTS provider family ([8b0d37d6eef9ff018b618691ce6ff5ca796bd9e9](https://github.com/framerslab/agentos/commit/8b0d37d6eef9ff018b618691ce6ff5ca796bd9e9))
