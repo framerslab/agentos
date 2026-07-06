@@ -253,6 +253,10 @@ export type {
   TokenUsage,
   SystemContentBlock,
 } from './api/generateText.js';
+export type {
+  CacheDiagnostics,
+  CacheMissReason,
+} from './core/llm/providers/IProvider.js';
 export { normalizeHostLLMPolicy } from './api/runtime/hostPolicy.js';
 export { streamText } from './api/streamText.js';
 export type { StreamTextResult, StreamPart } from './api/streamText.js';

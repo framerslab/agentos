@@ -150,6 +150,18 @@ export interface ModelCompletionOptions {
    */
   effort?: string;
   /**
+   * Anthropic prompt-cache diagnostics (beta `cache-diagnosis-2026-04-07`).
+   * When set, the provider sends `diagnostics: { previous_message_id }` plus
+   * the beta header, and the API compares this request against the referenced
+   * one to explain any cache miss. Pass `previousMessageId: null` on the first
+   * call of a conversation to opt in; thread the previous response's `id`
+   * (`msg_...`) on subsequent calls. The verdict comes back on
+   * {@link ModelCompletionResponse.cacheDiagnostics}. Anthropic-only —
+   * other providers ignore the field. Never affects request processing:
+   * diagnostics are best-effort observability.
+   */
+  cacheDiagnostics?: { previousMessageId: string | null };
+  /**
    * Positive values penalize new tokens based on whether they appear in the text so far,
    * increasing the model's likelihood to talk about new topics.
    */
@@ -206,6 +218,32 @@ export interface ModelCompletionOptions {
 }
 
 /**
+ * The first point of divergence between this request and the one referenced
+ * by `cacheDiagnostics.previousMessageId`, as reported by Anthropic's
+ * cache-diagnostics beta. `type` is one of the API's discriminants
+ * (`model_changed` | `system_changed` | `tools_changed` | `messages_changed`
+ * | `previous_message_not_found` | `unavailable`) — kept as an open string so
+ * new discriminants pass through without a library update. The `*_changed`
+ * types also carry `cacheMissedInputTokens`, an estimate of how many input
+ * tokens fell after the divergence point (magnitude indicator, not a billing
+ * number).
+ */
+export interface CacheMissReason {
+  type: string;
+  cacheMissedInputTokens?: number;
+}
+
+/**
+ * Cache-diagnostics verdict for one call. `cacheMissReason: null` means the
+ * comparison was still running when the response serialized (inconclusive —
+ * check the next turn). A populated reason identifies the earliest divergence;
+ * fix it first, later ones may be hidden behind it.
+ */
+export interface CacheDiagnostics {
+  cacheMissReason: CacheMissReason | null;
+}
+
+/**
  * Represents token usage information from a model call, including cost estimation.
  */
 export interface ModelUsage {
@@ -254,6 +292,15 @@ export interface ModelCompletionResponse {
   choices: ModelCompletionChoice[];
   /** Token usage & optional cost metrics (present on final chunk; may be partial/omitted on deltas). */
   usage?: ModelUsage;
+  /**
+   * Anthropic cache-diagnostics verdict (beta). Present only when the request
+   * opted in via {@link ModelCompletionOptions.cacheDiagnostics} AND the API
+   * returned a verdict. `null` = a comparison ran and found no divergence (or
+   * this was the opt-in first turn with nothing to compare). An object with
+   * `cacheMissReason` identifies the earliest divergence — see
+   * {@link CacheDiagnostics}.
+   */
+  cacheDiagnostics?: CacheDiagnostics | null;
   /** Unified error envelope; present ONLY if an error occurred for this request/chunk. */
   error?: {
     /** Human readable message suitable for UI display or logging. */

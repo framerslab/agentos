@@ -31,6 +31,7 @@ import {
   ModelUsage,
   ProviderEmbeddingOptions,
   ProviderEmbeddingResponse,
+  CacheDiagnostics,
 } from '../IProvider';
 import { AnthropicProviderError } from '../errors/AnthropicProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
@@ -191,6 +192,42 @@ interface AnthropicMessagesResponse {
     output_tokens: number;
     cache_creation_input_tokens?: number;
     cache_read_input_tokens?: number;
+  };
+  /**
+   * Cache-diagnostics verdict (beta `cache-diagnosis-2026-04-07`). Returned
+   * only when the request carried a `diagnostics` field. Absent = not
+   * requested; `null` = compared with no divergence (or first-turn opt-in);
+   * `{ cache_miss_reason: null }` = comparison still running;
+   * `{ cache_miss_reason: {...} }` = earliest divergence identified.
+   */
+  diagnostics?: {
+    cache_miss_reason: { type: string; cache_missed_input_tokens?: number } | null;
+  } | null;
+}
+
+/**
+ * Normalize the wire-format diagnostics object into the camelCased
+ * {@link CacheDiagnostics} surfaced on {@link ModelCompletionResponse}.
+ * Preserves the API's three requested-response states losslessly:
+ * `null` (compared, no divergence) stays `null`; `cache_miss_reason: null`
+ * (comparison pending) becomes `{ cacheMissReason: null }`; a populated
+ * reason maps field-for-field. Exported for tests.
+ */
+export function normalizeCacheDiagnostics(
+  diagnostics: AnthropicMessagesResponse['diagnostics'],
+): CacheDiagnostics | null {
+  if (diagnostics == null) return null;
+  const reason = diagnostics.cache_miss_reason;
+  return {
+    cacheMissReason:
+      reason == null
+        ? null
+        : {
+            type: reason.type,
+            ...(reason.cache_missed_input_tokens !== undefined && {
+              cacheMissedInputTokens: reason.cache_missed_input_tokens,
+            }),
+          },
   };
 }
 
@@ -726,6 +763,7 @@ export class AnthropicProvider implements IProvider {
     let outputTokens = 0;
     let cacheCreationTokens: number | undefined;
     let cacheReadTokens: number | undefined;
+    let diagnostics: AnthropicMessagesResponse['diagnostics'];
     let sawMessageDelta = false;
     const blocks = new Map<number, AccumBlock>();
 
@@ -745,6 +783,8 @@ export class AnthropicProvider implements IProvider {
           inputTokens = event.message.usage?.input_tokens ?? 0;
           cacheCreationTokens = event.message.usage?.cache_creation_input_tokens;
           cacheReadTokens = event.message.usage?.cache_read_input_tokens;
+          // Cache diagnostics ride message_start in streaming responses.
+          diagnostics = event.message.diagnostics;
           break;
         }
         case 'content_block_start': {
@@ -849,6 +889,7 @@ export class AnthropicProvider implements IProvider {
         ...(cacheCreationTokens !== undefined && { cache_creation_input_tokens: cacheCreationTokens }),
         ...(cacheReadTokens !== undefined && { cache_read_input_tokens: cacheReadTokens }),
       },
+      ...(diagnostics !== undefined && { diagnostics }),
     };
   }
 
@@ -1409,6 +1450,19 @@ export class AnthropicProvider implements IProvider {
       payload.output_config = { ...oc, effort: options.effort };
     }
 
+    // --- Cache diagnostics (beta cache-diagnosis-2026-04-07) ---
+    // Opt-in observability: the API compares this request against the one
+    // referenced by previous_message_id and reports where the prompt prefix
+    // diverged (cache_miss_reason on the response). `null` opts in on the
+    // first turn with nothing to compare. The matching beta header is added
+    // by betaHeaders() keyed off this payload field. Best-effort by API
+    // contract — diagnostics never block or fail the request.
+    if (options.cacheDiagnostics !== undefined) {
+      payload.diagnostics = {
+        previous_message_id: options.cacheDiagnostics.previousMessageId,
+      };
+    }
+
     // --- Tool definitions ---
     const tools = this.convertToolDefs(options.tools);
     if (tools.length > 0) {
@@ -1920,6 +1974,9 @@ export class AnthropicProvider implements IProvider {
       modelId: apiResponse.model,
       choices: [choice],
       usage,
+      ...(apiResponse.diagnostics !== undefined && {
+        cacheDiagnostics: normalizeCacheDiagnostics(apiResponse.diagnostics),
+      }),
     };
   }
 
@@ -2093,7 +2150,7 @@ export class AnthropicProvider implements IProvider {
         // race guarantees the await resolves within requestTimeout + 500ms.
         const fetchPromise = fetch(url, {
           method,
-          headers: { ...headers, ...this.thinkingBetaHeaders(body), 'Content-Type': 'application/json', connection: 'close' },
+          headers: { ...headers, ...this.betaHeaders(body), 'Content-Type': 'application/json', connection: 'close' },
           body: JSON.stringify(body),
           signal: controller.signal,
         });
@@ -2236,7 +2293,7 @@ export class AnthropicProvider implements IProvider {
       // guarantees the await ends even when the signal is ignored.
       const fetchPromise = fetch(url, {
         method: 'POST',
-        headers: { ...headers, ...this.thinkingBetaHeaders(body), 'Content-Type': 'application/json' },
+        headers: { ...headers, ...this.betaHeaders(body), 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         signal: controller.signal,
       });
@@ -2323,16 +2380,24 @@ export class AnthropicProvider implements IProvider {
   }
 
   /**
-   * The `anthropic-beta` header for interleaved extended thinking, returned
-   * only when this request actually uses thinking — either it enables it
-   * outbound (`thinking` in the body) or it replays captured thinking blocks
-   * from a prior assistant turn. Empty otherwise, so non-thinking traffic is
-   * byte-for-byte unchanged.
+   * The `anthropic-beta` header for every beta this request actually uses,
+   * comma-joined per the API convention. Currently:
+   *
+   * - `interleaved-thinking-2025-05-14` — when the request enables extended
+   *   thinking outbound (`thinking` in the body) or replays captured thinking
+   *   blocks from a prior assistant turn.
+   * - `cache-diagnosis-2026-04-07` — when the body carries a `diagnostics`
+   *   field (see {@link ModelCompletionOptions.cacheDiagnostics}); the header
+   *   must ride EVERY diagnosed turn or the next turn's lookup fails with
+   *   `previous_message_not_found`.
+   *
+   * Empty when no beta applies, so plain traffic is byte-for-byte unchanged.
    */
-  private thinkingBetaHeaders(body: Record<string, unknown>): Record<string, string> {
-    return this.payloadUsesThinking(body)
-      ? { 'anthropic-beta': 'interleaved-thinking-2025-05-14' }
-      : {};
+  private betaHeaders(body: Record<string, unknown>): Record<string, string> {
+    const betas: string[] = [];
+    if (this.payloadUsesThinking(body)) betas.push('interleaved-thinking-2025-05-14');
+    if (body.diagnostics !== undefined) betas.push('cache-diagnosis-2026-04-07');
+    return betas.length > 0 ? { 'anthropic-beta': betas.join(',') } : {};
   }
 
   /** True when the request enables extended thinking or replays thinking blocks. */

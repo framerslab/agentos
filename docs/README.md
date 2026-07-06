@@ -70,6 +70,7 @@
 - [**Capability Discovery Guide**](./extensions/DISCOVERY.md) — Three-tier semantic discovery, CAPABILITY.yaml, meta-tool
 - [**Capability Discovery**](./extensions/CAPABILITY_DISCOVERY.md) — Full architecture reference
 - [**Cost Optimization**](./safety/COST_OPTIMIZATION.md) — Token usage and API cost management
+- [**Cache Diagnostics**](./features/CACHE_DIAGNOSTICS.md) — Anthropic cache-miss root-causing: per-step `cache_miss_reason` via auto-threaded request comparison
 
 #### Extensions & Customization
 

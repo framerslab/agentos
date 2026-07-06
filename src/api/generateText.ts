@@ -56,6 +56,7 @@ import type { IModelRouter, ModelRouteParams } from '../core/llm/routing/IModelR
 import type {
   MessageContent,
   MessageContentPart,
+  CacheDiagnostics,
 } from '../core/llm/providers/IProvider.js';
 
 // Re-export multimodal types for downstream consumers
@@ -345,6 +346,19 @@ export interface GenerateTextOptions {
    */
   effort?: string;
   /**
+   * Enable Anthropic prompt-cache diagnostics (beta `cache-diagnosis-2026-04-07`)
+   * across the agentic loop. The loop auto-threads each step's response id into
+   * the next step's `diagnostics.previous_message_id`, so every step after the
+   * first carries a comparison verdict: `cacheMissReason: null` = prefix stable,
+   * a populated reason (`system_changed` / `tools_changed` / `messages_changed`
+   * / ...) = where the cached prefix diverged. Per-step verdicts surface on the
+   * {@link GenerationHookResult.cacheDiagnostics} hook field; the last step's
+   * verdict lands on {@link GenerateTextResult.cacheDiagnostics}. Anthropic-only
+   * (other providers ignore the option) and best-effort — diagnostics never
+   * block or fail a request.
+   */
+  cacheDiagnostics?: boolean;
+  /**
    * Provider-specific TOP-LEVEL request-payload parameters, forwarded
    * verbatim into `ModelCompletionOptions.customModelParams`. Provider
    * implementations spread these onto the outgoing request body (OpenRouter /
@@ -552,6 +566,15 @@ export interface GenerateTextResult {
    * host, so telemetry needs this to interpret durations.
    */
   servingProvider?: string;
+  /**
+   * Cache-diagnostics verdict from the LAST agentic step (Anthropic beta;
+   * present only when the run opted in via
+   * {@link GenerateTextOptions.cacheDiagnostics}). `null` = the last step's
+   * request matched its predecessor (prefix stable). A populated
+   * `cacheMissReason` names the earliest divergence. Per-step verdicts are
+   * available on the `onAfterGeneration` hook.
+   */
+  cacheDiagnostics?: CacheDiagnostics | null;
   /** Final assistant text after all agentic steps have completed. */
   text: string;
   /** Aggregated token usage across all steps. */
@@ -653,6 +676,14 @@ export interface GenerationHookResult {
   usage: TokenUsage;
   /** Current agentic step index (0-based). */
   step: number;
+  /**
+   * Cache-diagnostics verdict for THIS step (Anthropic beta; present only
+   * when the run opted in via {@link GenerateTextOptions.cacheDiagnostics}).
+   * `null` = this step's request matched the previous one (cached prefix
+   * stable). A populated `cacheMissReason` names the earliest divergence —
+   * log it: it is the direct answer to "why did this step miss the cache".
+   */
+  cacheDiagnostics?: CacheDiagnostics | null;
 }
 
 /**
@@ -1441,6 +1472,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       // (aggregators like OpenRouter report which upstream host served the
       // call). Carried onto the result so callers can attribute latency.
       let lastServingProvider: string | undefined;
+      // Cache-diagnostics threading (opts.cacheDiagnostics): each step passes
+      // the PREVIOUS step's provider message id so the API can compare the two
+      // requests and report where the cached prefix diverged. First step
+      // passes null (opt-in, nothing to compare yet).
+      let lastProviderMessageId: string | null = null;
+      let lastCacheDiagnostics: CacheDiagnostics | null | undefined;
       try {
       for (let step = 0; step < maxSteps; step++) {
         // --- onBeforeGeneration hook ---
@@ -1491,6 +1528,11 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 // Forward reasoning effort (output_config.effort) the same way;
                 // the provider drops it on unsupported models/values.
                 ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
+                // Cache diagnostics: thread the previous step's message id so
+                // the API explains any prefix divergence between loop steps.
+                ...(opts.cacheDiagnostics
+                  ? { cacheDiagnostics: { previousMessageId: lastProviderMessageId } }
+                  : {}),
                 // Forward provider-specific top-level payload params (e.g.
                 // OpenRouter provider-routing preferences); providers spread
                 // them onto the request body.
@@ -1519,6 +1561,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
 
         if (typeof response.servingProvider === 'string' && response.servingProvider.length > 0) {
           lastServingProvider = response.servingProvider;
+        }
+        if (opts.cacheDiagnostics) {
+          // Chain the id for the NEXT step's comparison; keep this step's
+          // verdict for the hook + final result.
+          lastProviderMessageId = typeof response.id === 'string' && response.id ? response.id : null;
+          lastCacheDiagnostics = response.cacheDiagnostics;
         }
         if (response.usage) {
           totalUsage.promptTokens += response.usage.promptTokens ?? 0;
@@ -1571,6 +1619,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               toolCalls: toolCallRecords,
               usage: stepUsage,
               step,
+              ...(response.cacheDiagnostics !== undefined
+                ? { cacheDiagnostics: response.cacheDiagnostics }
+                : {}),
             };
             const modified = await opts.onAfterGeneration(hookResult);
             if (modified) {
@@ -1607,6 +1658,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             provider: resolved.providerId,
             model: resolved.modelId,
             ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
+            ...(lastCacheDiagnostics !== undefined
+              ? { cacheDiagnostics: lastCacheDiagnostics }
+              : {}),
             text: textContent,
             usage: totalUsage,
             toolCalls: allToolCalls,
@@ -1743,6 +1797,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           provider: resolved.providerId,
           model: resolved.modelId,
           ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
+          ...(lastCacheDiagnostics !== undefined ? { cacheDiagnostics: lastCacheDiagnostics } : {}),
           text: textContent,
           usage: totalUsage,
           toolCalls: allToolCalls,
@@ -1782,6 +1837,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         toolCalls: allToolCalls,
         finishReason: 'tool-calls',
         plan: resolvedPlan,
+        ...(lastCacheDiagnostics !== undefined
+          ? { cacheDiagnostics: lastCacheDiagnostics }
+          : {}),
       };
     });
     // The primary attempt succeeded: let the registry know so its
