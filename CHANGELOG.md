@@ -1,3 +1,7 @@
+## <small>0.9.113 (2026-07-06)</small>
+
+* feat(llm): schema-enforced OpenRouter structured output, provider retry + key rotation, strict Anthropic tool schemas, refreshed uncensored catalog ([c2f1c2475943a469fdff1de78bccf3b98c784d89](https://github.com/framerslab/agentos/commit/c2f1c2475943a469fdff1de78bccf3b98c784d89))
+
 ## <small>0.9.112 (2026-07-06)</small>
 
 * feat(llm): Anthropic cache diagnostics — auto-threaded cache_miss_reason across agent loops ([f127baefb200583bddc147a2d9dac51eccf4dfa8](https://github.com/framerslab/agentos/commit/f127baefb200583bddc147a2d9dac51eccf4dfa8))
