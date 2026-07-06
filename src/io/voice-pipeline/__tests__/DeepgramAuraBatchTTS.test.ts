@@ -52,6 +52,32 @@ describe('DeepgramAuraBatchTTS', () => {
     expect(res.audio.byteLength).toBe(mockFetch.mock.calls.length);
   });
 
+  it('fires chunk requests concurrently and concatenates in chunk order', async () => {
+    const resolvers: Array<
+      (value: { ok: boolean; arrayBuffer: () => Promise<ArrayBuffer> }) => void
+    > = [];
+    mockFetch.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+
+    const long = 'Sentence one. '.repeat(200); // ~2800 chars -> 2 chunks
+    const pending = tts.synthesize(long, { voice: 'aura-2-arcas-en' });
+
+    // Both requests must be in flight BEFORE any response resolves —
+    // a sequential loop would have issued only the first call here.
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
+
+    // Resolve out of order; concatenated audio must stay in chunk order.
+    resolvers[1]({ ok: true, arrayBuffer: () => Promise.resolve(new Uint8Array([2]).buffer) });
+    resolvers[0]({ ok: true, arrayBuffer: () => Promise.resolve(new Uint8Array([1]).buffer) });
+
+    const res = await pending;
+    expect(Array.from(new Uint8Array(res.audio))).toEqual([1, 2]);
+  });
+
   it('throws a classified error on non-2xx', async () => {
     mockFetch.mockResolvedValue({
       ok: false,

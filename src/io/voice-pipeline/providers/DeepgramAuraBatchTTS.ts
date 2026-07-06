@@ -160,10 +160,12 @@ export class DeepgramAuraBatchTTS implements IBatchTTS, HealthyProvider {
     const encoding = format === 'mp3' ? 'mp3' : format === 'opus' ? 'opus' : 'linear16';
 
     const chunks = chunkForAura(text);
-    const buffers: Buffer[] = [];
-    for (const chunk of chunks) {
-      buffers.push(await this.synthesizeOne(chunk, voice, encoding));
-    }
+    // Chunks synthesize concurrently: Aura latency is per-request, so a
+    // multi-chunk narration otherwise pays N sequential round-trips.
+    // Promise.all preserves chunk order for the frame-based MP3 concat.
+    const buffers = await Promise.all(
+      chunks.map((chunk) => this.synthesizeOne(chunk, voice, encoding)),
+    );
 
     const audio = Buffer.concat(buffers);
     // Raw PCM (linear16) is uncompressed at sampleRate * 2 bytes/sec (16-bit);
