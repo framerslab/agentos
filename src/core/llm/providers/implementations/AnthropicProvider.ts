@@ -640,8 +640,11 @@ export class AnthropicProvider implements IProvider {
         | string
         | Array<{ type: string; text?: string }>
         | undefined;
+      // Bound both branches to the 256-char callsite-identity window the
+      // detector hashes — avoids handing a 15K-token system string to the
+      // detector on the string path just for it to slice internally.
       const systemPrefix = typeof system === 'string'
-        ? system
+        ? system.slice(0, 256)
         : Array.isArray(system)
           ? system.map((b) => b.text ?? '').join('\n').slice(0, 256)
           : '';
