@@ -141,7 +141,10 @@ export class LLMJudge {
 
   constructor(config: LLMJudgeConfig) {
     this.llmProvider = config.llmProvider;
-    this.modelId = config.modelId || 'gpt-4-turbo';
+    // Default judge model: cheap, current, structured-output-capable.
+    // gpt-4-turbo (the old default) is a deprecated 2024-era model —
+    // callers that never pinned modelId were silently judging on it.
+    this.modelId = config.modelId || 'gpt-4o-mini';
     this.providerId = config.providerId;
     this.temperature = config.temperature ?? 0.1;
     this.systemPrompt = config.systemPrompt || DEFAULT_JUDGE_PROMPT;

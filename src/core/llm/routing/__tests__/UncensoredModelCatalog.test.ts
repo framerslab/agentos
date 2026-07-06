@@ -17,34 +17,38 @@ describe('UncensoredModelCatalog', () => {
 
   describe('getTextModels', () => {
     it('returns all live text models with no filter', () => {
-      // Current catalog: hermes-3-405b, hermes-3-70b. Dolphin
-      // Mixtral / Dolphin 3.0 / MythoMax were all removed — see the
-      // TEXT_MODELS comments for each removal's rationale.
+      // Current catalog (2026-07-06 refresh): magnum-v4-72b,
+      // llama-3.3-70b-instruct, hermes-3-70b, llama-3.1-8b-instruct.
+      // hermes-3-405b was removed for continuity collapse (2026-06-28
+      // 3-arm prod eval); Dolphin Mixtral / Dolphin 3.0 / MythoMax were
+      // removed earlier — see the TEXT_MODELS comments.
       const models = catalog.getTextModels();
-      expect(models).toHaveLength(2);
+      expect(models).toHaveLength(4);
       expect(models.every((m) => m.modality === 'text')).toBe(true);
       expect(models.every((m) => m.providerId === 'openrouter')).toBe(true);
+      expect(models.map((m) => m.modelId)).toContain('anthracite-org/magnum-v4-72b');
+      expect(models.map((m) => m.modelId)).not.toContain('nousresearch/hermes-3-llama-3.1-405b');
     });
 
     it('filters by quality', () => {
-      // Both remaining entries (hermes-405b, hermes-70b) are `high`.
+      // High tier: magnum + llama-3.3-70b.
       const high = catalog.getTextModels({ quality: 'high' });
       expect(high).toHaveLength(2);
       expect(high.every((m) => m.quality === 'high')).toBe(true);
 
-      // Low-tier entries were removed; the filter still works but
-      // returns nothing.
+      // Low tier: the llama-3.1-8b last-resort link.
       const low = catalog.getTextModels({ quality: 'low' });
-      expect(low).toHaveLength(0);
+      expect(low).toHaveLength(1);
+      expect(low[0].modelId).toBe('meta-llama/llama-3.1-8b-instruct');
     });
 
     it('filters by contentPermissions', () => {
       const erotic = catalog.getTextModels({
         contentPermissions: ['erotic'],
       });
-      // Every curated text entry currently permits erotic content;
-      // the catalog exists precisely to route mature/private-adult
-      // traffic off the default censored chain.
+      // Only the genuinely-uncensored entries carry the erotic
+      // permission (magnum + hermes-70b); the stock Llama instruct
+      // links serve mature-but-not-explicit traffic.
       expect(erotic).toHaveLength(2);
       expect(erotic.every((m) => m.contentPermissions.includes('erotic'))).toBe(
         true,
@@ -56,7 +60,8 @@ describe('UncensoredModelCatalog', () => {
         quality: 'high',
         contentPermissions: ['erotic'],
       });
-      expect(highErotic).toHaveLength(2);
+      expect(highErotic).toHaveLength(1);
+      expect(highErotic[0].modelId).toBe('anthracite-org/magnum-v4-72b');
     });
   });
 
@@ -103,32 +108,42 @@ describe('UncensoredModelCatalog', () => {
       expect(catalog.getPreferredTextModel('standard')).toBeNull();
     });
 
-    it('returns highest-quality model for private-adult tier', () => {
+    it('returns the magnum primary for private-adult tier', () => {
       const model = catalog.getPreferredTextModel('private-adult');
       expect(model).not.toBeNull();
+      expect(model!.modelId).toBe('anthracite-org/magnum-v4-72b');
       expect(model!.quality).toBe('high');
       expect(model!.providerId).toBe('openrouter');
     });
 
-    it('returns a model for mature tier', () => {
+    it('returns the fast multi-provider llama-3.3-70b for mature tier', () => {
       const model = catalog.getPreferredTextModel('mature');
       expect(model).not.toBeNull();
+      expect(model!.modelId).toBe('meta-llama/llama-3.3-70b-instruct');
       expect(model!.quality).toBe('high');
     });
 
     it('respects contentIntent — erotic narrows to models with erotic permission', () => {
       const model = catalog.getPreferredTextModel('private-adult', 'erotic');
       expect(model).not.toBeNull();
+      expect(model!.modelId).toBe('anthracite-org/magnum-v4-72b');
       expect(model!.contentPermissions).toContain('erotic');
       expect(model!.quality).toBe('high');
     });
 
-    it('respects contentIntent — horror excludes toppy-m-7b', () => {
+    it('respects contentIntent — horror stays on a horror-permitted model', () => {
       const model = catalog.getPreferredTextModel('mature', 'horror');
       expect(model).not.toBeNull();
       expect(model!.contentPermissions).toContain('horror');
-      // toppy-m-7b does not support horror, so it should not be selected
-      expect(model!.modelId).not.toBe('undi95/toppy-m-7b');
+      expect(model!.modelId).toBe('meta-llama/llama-3.3-70b-instruct');
+    });
+
+    it('erotic intent on mature tier skips the non-erotic llama links', () => {
+      const model = catalog.getPreferredTextModel('mature', 'erotic');
+      expect(model).not.toBeNull();
+      // llama-3.3-70b leads the mature ranking but carries no erotic
+      // permission; the intent filter must drop it before ranking.
+      expect(model!.modelId).toBe('anthracite-org/magnum-v4-72b');
     });
   });
 

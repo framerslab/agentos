@@ -4,7 +4,8 @@
  *
  * Intentionally hand-rolled to avoid adding `zod-to-json-schema` as a dependency.
  * Handles the subset of Zod types used in node input/output schemas across the codebase:
- * z.string, z.number, z.boolean, z.null, z.object, z.array, z.enum, z.optional, z.default.
+ * z.string, z.number, z.boolean, z.null, z.object, z.array, z.enum, z.optional, z.default,
+ * z.nullable, z.union/z.discriminatedUnion, z.literal, z.record, z.tuple.
  *
  * Targets Zod v4 `_def` internals:
  * - Discriminant field: `_def.type` (string literal, e.g. `"string"`, `"object"`)
@@ -101,6 +102,31 @@ export function lowerZodToJsonSchema(schema: ZodType): Record<string, unknown> {
     case 'default':
       // Unwrap; defaults are runtime concerns, not JSON Schema concerns for our use case.
       return lowerZodToJsonSchema(def.innerType as ZodType);
+
+    case 'nullable': {
+      // z.foo().nullable() — lower the inner schema and widen it with null.
+      // A bare-primitive inner collapses into a JSON Schema type array
+      // (`{ type: ['string', 'null'] }`), which OpenAI strict mode accepts
+      // natively; composite inners (objects, arrays, enums, unions) ride an
+      // `anyOf` pair instead. Previously nullable fell through to `{}`
+      // (untyped), and OpenAI strict mode rejects any node without a `type`
+      // key — one `.nullable()` field anywhere in a schema 400'd the whole
+      // structured-output call. Note nullable is NOT optional: the field
+      // stays in the parent object's `required` array and the model must
+      // emit it (possibly as null) — exactly the OpenAI-recommended shape
+      // for strict-mode "optional-ish" fields.
+      const inner = lowerZodToJsonSchema(def.innerType as ZodType);
+      const innerKeys = Object.keys(inner);
+      if (innerKeys.length === 0) {
+        // Inner type itself is unsupported — stay untyped rather than
+        // inventing a shape; the strict-mode gate degrades the call.
+        return {};
+      }
+      if (innerKeys.length === 1 && typeof inner.type === 'string') {
+        return { type: [inner.type, 'null'] };
+      }
+      return { anyOf: [inner, { type: 'null' }] };
+    }
 
     case 'union': {
       // z.union AND z.discriminatedUnion both surface as `union` in Zod v4 (the

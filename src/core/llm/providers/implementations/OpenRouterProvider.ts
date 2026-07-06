@@ -151,8 +151,10 @@ export class OpenRouterProvider implements IProvider {
     this.keyPool = new ApiKeyPool(config.apiKey);
     this.defaultModelId = this.config.defaultModelId; // Store the potentially undefined value
 
+    // NOTE: no Authorization header here — the key is drawn from the pool
+    // PER ATTEMPT inside makeApiRequest, so a 429/402 on one key fails over
+    // to the next instead of reusing a throttled key baked at init.
     const headers: Record<string, string> = {
-      'Authorization': `Bearer ${this.keyPool.next()}`,
       'Content-Type': 'application/json',
       'User-Agent': `AgentOS/1.0 (OpenRouterProvider; ${this.config.appName || 'UnknownApp'})`,
     };
@@ -286,17 +288,88 @@ export class OpenRouterProvider implements IProvider {
       ...(options.tools !== undefined && { tools: options.tools }),
       ...(options.toolChoice !== undefined && { tool_choice: options.toolChoice }),
       ...(options.responseFormat?.type === 'json_object' && { response_format: { type: 'json_object' } }),
+      ...(options.responseFormat?.type === 'json_schema' && { response_format: options.responseFormat }),
       ...(options.customModelParams || {}),
     };
+    this.applySchemaRoutingPrefs(payload, options);
 
-    const apiResponseData = await this.makeApiRequest<OpenRouterChatCompletionAPIResponse>(
-      '/chat/completions',
-      'POST',
-      // CR8: honor a per-call requestTimeout override over the provider default.
-      options.requestTimeout ?? this.config.requestTimeout,
-      payload
-    );
+    let apiResponseData: OpenRouterChatCompletionAPIResponse;
+    try {
+      apiResponseData = await this.makeApiRequest<OpenRouterChatCompletionAPIResponse>(
+        '/chat/completions',
+        'POST',
+        // CR8: honor a per-call requestTimeout override over the provider default.
+        options.requestTimeout ?? this.config.requestTimeout,
+        payload
+      );
+    } catch (error: unknown) {
+      const degraded = this.degradeSchemaPayloadOnNoEndpoints(payload, error);
+      if (!degraded) throw error;
+      apiResponseData = await this.makeApiRequest<OpenRouterChatCompletionAPIResponse>(
+        '/chat/completions',
+        'POST',
+        options.requestTimeout ?? this.config.requestTimeout,
+        payload
+      );
+    }
     return this.mapApiToCompletionResponse(apiResponseData, modelId);
+  }
+
+  /**
+   * When the request carries a schema-enforced `response_format`
+   * (`json_schema`), restrict OpenRouter's routing to upstream hosts that
+   * actually support the requested parameters — otherwise a host that
+   * ignores `response_format` serves the call, returns prose, and the
+   * caller's Zod validation fails with nothing to retry on. Merges over any
+   * caller-supplied `provider` prefs (e.g. `provider.sort` latency routing
+   * via customModelParams) instead of clobbering them.
+   */
+  private applySchemaRoutingPrefs(
+    payload: Record<string, unknown>,
+    options: ModelCompletionOptions,
+  ): void {
+    if (options.responseFormat?.type !== 'json_schema') return;
+    const existing =
+      payload.provider && typeof payload.provider === 'object'
+        ? (payload.provider as Record<string, unknown>)
+        : {};
+    payload.provider = { ...existing, require_parameters: true };
+  }
+
+  /**
+   * One-shot degrade for schema-enforced calls: when OpenRouter reports
+   * that no endpoint can serve the request (404 "No endpoints found …" —
+   * typically because no host for the model supports `response_format`
+   * with `require_parameters` routing), swap the payload down to loose
+   * `json_object` mode and drop the routing restriction so the call still
+   * completes. Caller-side Zod validation remains the correctness
+   * backstop, exactly as before schema enforcement existed.
+   *
+   * @returns true when the payload was degraded and the caller should
+   *          retry once; false when the error is unrelated.
+   */
+  private degradeSchemaPayloadOnNoEndpoints(
+    payload: Record<string, unknown>,
+    error: unknown,
+  ): boolean {
+    const rf = payload.response_format as { type?: string } | undefined;
+    if (rf?.type !== 'json_schema') return false;
+    if (!(error instanceof OpenRouterProviderError)) return false;
+    const noEndpoints =
+      error.httpStatus === 404 && /no endpoints/i.test(error.message);
+    if (!noEndpoints) return false;
+
+    console.warn(
+      `OpenRouterProvider: no endpoint supports json_schema for model ` +
+        `'${String(payload.model)}' — degrading to json_object for this call.`,
+    );
+    payload.response_format = { type: 'json_object' };
+    const provider = payload.provider as Record<string, unknown> | undefined;
+    if (provider && typeof provider === 'object') {
+      delete provider.require_parameters;
+      if (Object.keys(provider).length === 0) delete payload.provider;
+    }
+    return true;
   }
 
   public async *generateCompletionStream(
@@ -334,17 +407,32 @@ export class OpenRouterProvider implements IProvider {
       ...(options.tools !== undefined && { tools: options.tools }),
       ...(options.toolChoice !== undefined && { tool_choice: options.toolChoice }),
       ...(options.responseFormat?.type === 'json_object' && { response_format: { type: 'json_object' } }),
+      ...(options.responseFormat?.type === 'json_schema' && { response_format: options.responseFormat }),
       ...(options.customModelParams || {}),
     };
+    this.applySchemaRoutingPrefs(payload, options);
 
-    const stream = await this.makeApiRequest<NodeJS.ReadableStream>(
-      '/chat/completions',
-      'POST',
-      // CR8: honor a per-call requestTimeout override over the stream default.
-      options.requestTimeout ?? this.config.streamRequestTimeout,
-      payload,
-      true
-    );
+    let stream: NodeJS.ReadableStream;
+    try {
+      stream = await this.makeApiRequest<NodeJS.ReadableStream>(
+        '/chat/completions',
+        'POST',
+        // CR8: honor a per-call requestTimeout override over the stream default.
+        options.requestTimeout ?? this.config.streamRequestTimeout,
+        payload,
+        true
+      );
+    } catch (error: unknown) {
+      const degraded = this.degradeSchemaPayloadOnNoEndpoints(payload, error);
+      if (!degraded) throw error;
+      stream = await this.makeApiRequest<NodeJS.ReadableStream>(
+        '/chat/completions',
+        'POST',
+        options.requestTimeout ?? this.config.streamRequestTimeout,
+        payload,
+        true
+      );
+    }
 
     const accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }> = new Map();
 
@@ -372,7 +460,34 @@ export class OpenRouterProvider implements IProvider {
       if (rawChunk.startsWith('data: ')) {
         const jsonData = rawChunk.substring('data: '.length);
         try {
-          const apiChunk = JSON.parse(jsonData) as OpenRouterChatCompletionAPIResponse;
+          const apiChunk = JSON.parse(jsonData) as OpenRouterChatCompletionAPIResponse & {
+            error?: { code?: number | string; message?: string; metadata?: unknown };
+          };
+          // OpenRouter reports upstream failures MID-STREAM as an SSE data
+          // event carrying an `error` object and no choices. Previously this
+          // fell into the empty-choices branch and surfaced as a generic
+          // "Stream chunk contained no choices" — the real upstream reason
+          // (provider outage, moderation, context overflow) was discarded,
+          // which made every mid-stream failure look identical to callers'
+          // retry/fallback routing. Surface the actual message + code and
+          // terminate the stream.
+          if (apiChunk.error && typeof apiChunk.error === 'object') {
+            const errMessage = apiChunk.error.message || 'OpenRouter mid-stream error';
+            const errCode = apiChunk.error.code;
+            yield {
+              id: apiChunk.id ?? `openrouter-error-${Date.now()}`,
+              object: 'chat.completion.chunk',
+              created: apiChunk.created ?? Math.floor(Date.now() / 1000),
+              modelId: apiChunk.model || modelId,
+              choices: [],
+              isFinal: true,
+              error: {
+                message: errCode !== undefined ? `[${errCode}] ${errMessage}` : errMessage,
+                type: 'upstream_error',
+              },
+            };
+            break;
+          }
           yield this.mapApiToStreamChunkResponse(apiChunk, modelId, accumulatedToolCalls);
           // Don't break on finish_reason: with stream_options.include_usage,
           // OpenRouter (like OpenAI) emits a trailing usage-only chunk AFTER
@@ -471,7 +586,15 @@ export class OpenRouterProvider implements IProvider {
       return { isHealthy: false, details: { message: "OpenRouterProvider not initialized (HTTP client missing)."}};
     }
     try {
-      await this.client.get('/models', { timeout: Math.min(this.config.requestTimeout || 10000, 10000) });
+      // Auth rides per-request since the key moved off the axios instance
+      // (per-attempt pool rotation) — /models is public today, but keep the
+      // health probe representative of real authenticated traffic.
+      await this.client.get('/models', {
+        timeout: Math.min(this.config.requestTimeout || 10000, 10000),
+        headers: {
+          Authorization: `Bearer ${this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey}`,
+        },
+      });
       return { isHealthy: true, details: { message: "Successfully connected to OpenRouter /models endpoint." } };
     } catch (error: unknown) {
       const err = error as AxiosError;
@@ -667,6 +790,27 @@ export class OpenRouterProvider implements IProvider {
       };
   }
 
+  /** Attempts per request: 1 initial + 2 retries on retryable failures. */
+  private static readonly MAX_REQUEST_ATTEMPTS = 3;
+  /** Ceiling for a single retry sleep (Retry-After or backoff), ms. */
+  private static readonly MAX_RETRY_SLEEP_MS = 15_000;
+
+  /**
+   * Executes one OpenRouter API request with per-attempt key rotation and
+   * bounded retry. Previously this was a single attempt with the API key
+   * baked into the axios instance at initialize() — a throttled or
+   * credit-exhausted key was reused forever and every transient 429/5xx/
+   * network blip surfaced straight to the caller as a final failure.
+   *
+   * Per attempt:
+   *  - the Authorization key is drawn fresh from the {@link ApiKeyPool}
+   *    (weighted round-robin, skips keys in cooldown);
+   *  - a 402/429 marks the CURRENT key exhausted so the next attempt (and
+   *    the next request) fails over to a different key;
+   *  - 408/429/5xx and transport-level failures (no HTTP response) retry
+   *    with the response's Retry-After when present (capped), else
+   *    jittered exponential backoff; 4xx request errors throw immediately.
+   */
   private async makeApiRequest<T = unknown>(
     endpoint: string,
     method: 'GET' | 'POST',
@@ -674,48 +818,94 @@ export class OpenRouterProvider implements IProvider {
     body?: Record<string, unknown>,
     expectStream: boolean = false
   ): Promise<T> {
-    try {
-      const response = await this.client.request<T>({
-        url: endpoint,
-        method,
-        data: body,
-        timeout: timeout,
-        responseType: expectStream ? 'stream' as ResponseType : 'json' as ResponseType,
-      });
-      return response.data;
-    } catch (error: unknown) {
-      let statusCode: number | undefined;
-      let errorData: any;
-      let errorMessage = 'Unknown OpenRouter API error';
-      let errorType = 'UNKNOWN_API_ERROR';
+    let lastError: OpenRouterProviderError | null = null;
 
-      if (axios.isAxiosError(error)) {
-        statusCode = error.response?.status;
-        errorData = error.response?.data;
-        if (errorData?.error && typeof errorData.error === 'object') {
-          errorMessage = errorData.error.message || errorMessage;
-          errorType = errorData.error.type || errorType;
-        } else if (typeof errorData === 'string') {
-          errorMessage = errorData;
-        } else if ((error as Error).message) {
-          errorMessage = (error as Error).message;
+    for (let attempt = 0; attempt < OpenRouterProvider.MAX_REQUEST_ATTEMPTS; attempt++) {
+      const apiKey = this.keyPool?.hasKeys ? this.keyPool.next() : this.config.apiKey;
+      try {
+        const response = await this.client.request<T>({
+          url: endpoint,
+          method,
+          data: body,
+          timeout: timeout,
+          headers: { Authorization: `Bearer ${apiKey}` },
+          responseType: expectStream ? 'stream' as ResponseType : 'json' as ResponseType,
+        });
+        return response.data;
+      } catch (error: unknown) {
+        let statusCode: number | undefined;
+        let errorData: any;
+        let errorMessage = 'Unknown OpenRouter API error';
+        let errorType = 'UNKNOWN_API_ERROR';
+        let retryAfterSec: number | undefined;
+        let transportFailure = false;
+
+        if (axios.isAxiosError(error)) {
+          statusCode = error.response?.status;
+          errorData = error.response?.data;
+          transportFailure = error.response === undefined;
+          const retryAfterRaw = error.response?.headers?.['retry-after'];
+          const parsedRetryAfter =
+            typeof retryAfterRaw === 'string' ? parseInt(retryAfterRaw, 10) : NaN;
+          if (Number.isFinite(parsedRetryAfter) && parsedRetryAfter > 0) {
+            retryAfterSec = parsedRetryAfter;
+          }
+          if (errorData?.error && typeof errorData.error === 'object') {
+            errorMessage = errorData.error.message || errorMessage;
+            errorType = errorData.error.type || errorType;
+          } else if (typeof errorData === 'string') {
+            errorMessage = errorData;
+          } else if ((error as Error).message) {
+            errorMessage = (error as Error).message;
+          }
+        } else if (error instanceof Error) {
+          errorMessage = error.message;
         }
-      } else if (error instanceof Error) {
-        errorMessage = error.message;
-      }
 
-      // Prefix the status code into the message so downstream retry/fallback
-      // logic (e.g. isRetryableError, which greps for \b402\b) can route on it
-      // even when the OR API body provides a friendlier description.
-      const decoratedMessage = statusCode ? `[${statusCode}] ${errorMessage}` : errorMessage;
-      throw new OpenRouterProviderError(
-        decoratedMessage,
-        'API_REQUEST_FAILED',
-        statusCode,
-        errorType,
-        { requestEndpoint: endpoint, requestBodyPreview: body ? JSON.stringify(body).substring(0, 200) + '...' : undefined, responseData: errorData, underlyingError: error }
-      );
+        // A throttled (429) or credit-exhausted (402) key must not be
+        // reused by the next attempt/request — cool it down in the pool.
+        if ((statusCode === 402 || statusCode === 429) && this.keyPool?.hasKeys) {
+          this.keyPool.markExhausted(apiKey);
+        }
+
+        // Prefix the status code into the message so downstream retry/fallback
+        // logic (e.g. isRetryableError, which greps for \b402\b) can route on it
+        // even when the OR API body provides a friendlier description.
+        const decoratedMessage = statusCode ? `[${statusCode}] ${errorMessage}` : errorMessage;
+        lastError = new OpenRouterProviderError(
+          decoratedMessage,
+          'API_REQUEST_FAILED',
+          statusCode,
+          errorType,
+          { requestEndpoint: endpoint, requestBodyPreview: body ? JSON.stringify(body).substring(0, 200) + '...' : undefined, responseData: errorData, underlyingError: error }
+        );
+
+        const retryable =
+          transportFailure ||
+          statusCode === 408 ||
+          statusCode === 429 ||
+          (typeof statusCode === 'number' && statusCode >= 500 && statusCode < 600);
+        if (!retryable || attempt === OpenRouterProvider.MAX_REQUEST_ATTEMPTS - 1) {
+          throw lastError;
+        }
+
+        const sleepMs = Math.min(
+          retryAfterSec !== undefined
+            ? retryAfterSec * 1000
+            : 300 * 2 ** attempt + Math.floor(Math.random() * 200),
+          OpenRouterProvider.MAX_RETRY_SLEEP_MS,
+        );
+        console.warn(
+          `OpenRouterProvider: attempt ${attempt + 1}/${OpenRouterProvider.MAX_REQUEST_ATTEMPTS} ` +
+            `failed (${decoratedMessage.substring(0, 160)}); retrying in ${sleepMs}ms.`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, sleepMs));
+      }
     }
+
+    // Unreachable in practice (the loop either returns or throws), but keeps
+    // the compiler + any future refactor honest.
+    throw lastError ?? new OpenRouterProviderError('OpenRouter request failed.', 'API_REQUEST_FAILED');
   }
 
   private async *parseSseStream(stream: NodeJS.ReadableStream): AsyncGenerator<string, void, undefined> {

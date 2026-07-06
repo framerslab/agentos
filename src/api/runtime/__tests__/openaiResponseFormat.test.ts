@@ -131,3 +131,90 @@ describe('buildOpenAIJsonSchemaResponseFormat', () => {
     expect((out2 as any).json_schema.name).toBe('response');
   });
 });
+
+describe('canUseStrictJsonSchema — recursive scan (nested-gap fix)', () => {
+  it('rejects a schema whose nested property is untyped `{}`', () => {
+    // Previously only the root was checked; a nested `{}` (unsupported Zod
+    // type) passed the gate and the API 400'd instead of degrading.
+    expect(canUseStrictJsonSchema({
+      type: 'object',
+      properties: { name: { type: 'string' }, mystery: {} },
+    })).toBe(false);
+  });
+
+  it('rejects a nested record shape (schema-valued additionalProperties)', () => {
+    expect(canUseStrictJsonSchema({
+      type: 'object',
+      properties: {
+        counters: { type: 'object', additionalProperties: { type: 'number' } },
+      },
+    })).toBe(false);
+  });
+
+  it('rejects an array whose items are untyped', () => {
+    expect(canUseStrictJsonSchema({
+      type: 'object',
+      properties: { list: { type: 'array', items: {} } },
+    })).toBe(false);
+  });
+
+  it('accepts nested unions whose every member is concrete', () => {
+    expect(canUseStrictJsonSchema({
+      type: 'object',
+      properties: {
+        result: {
+          anyOf: [
+            { type: 'object', properties: { kind: { enum: ['a'] }, x: { type: 'string' } } },
+            { type: 'object', properties: { kind: { enum: ['b'] }, y: { type: 'number' } } },
+          ],
+        },
+      },
+    })).toBe(true);
+  });
+
+  it('accepts nullable type arrays from the lowering (e.g. ["string","null"])', () => {
+    expect(canUseStrictJsonSchema({
+      type: 'object',
+      properties: { hint: { type: ['string', 'null'] } },
+    })).toBe(true);
+  });
+
+  it('rejects a union containing an untyped member', () => {
+    expect(canUseStrictJsonSchema({
+      type: 'object',
+      properties: { result: { anyOf: [{ type: 'string' }, {}] } },
+    })).toBe(false);
+  });
+});
+
+describe('makeStrictJsonSchema — union recursion (discriminatedUnion 400 fix)', () => {
+  it('recurses into anyOf members so object variants become strict', () => {
+    const out = makeStrictJsonSchema({
+      type: 'object',
+      properties: {
+        action: {
+          anyOf: [
+            { type: 'object', properties: { kind: { enum: ['move'] }, dir: { type: 'string' } } },
+            { type: 'object', properties: { kind: { enum: ['wait'] } } },
+          ],
+        },
+      },
+    }) as any;
+    const variants = out.properties.action.anyOf;
+    expect(variants[0].additionalProperties).toBe(false);
+    expect(variants[0].required).toEqual(['kind', 'dir']);
+    expect(variants[1].additionalProperties).toBe(false);
+    expect(variants[1].required).toEqual(['kind']);
+  });
+
+  it('recurses into oneOf members the same way', () => {
+    const out = makeStrictJsonSchema({
+      oneOf: [
+        { type: 'object', properties: { a: { type: 'string' } } },
+        { type: 'object', properties: { b: { type: 'number' } } },
+      ],
+    }) as any;
+    expect(out.oneOf[0].additionalProperties).toBe(false);
+    expect(out.oneOf[1].additionalProperties).toBe(false);
+  });
+});

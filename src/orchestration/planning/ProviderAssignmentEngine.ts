@@ -19,7 +19,7 @@ import type { ProviderStrategyConfig, NodeProviderAssignment, ExplicitAssignment
  */
 const DEFAULTS: Record<string, { text: string; cheap: string }> = {
   openai: { text: 'gpt-4o', cheap: 'gpt-4o-mini' },
-  anthropic: { text: 'claude-sonnet-4-20250514', cheap: 'claude-haiku-4-5-20251001' },
+  anthropic: { text: 'claude-sonnet-5', cheap: 'claude-haiku-4-5-20251001' },
   gemini: { text: 'gemini-2.5-flash', cheap: 'gemini-2.0-flash' },
   ollama: { text: 'llama3.2', cheap: 'llama3.2' },
   openrouter: { text: 'openai/gpt-4o', cheap: 'openai/gpt-4o-mini' },

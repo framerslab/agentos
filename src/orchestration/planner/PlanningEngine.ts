@@ -13,7 +13,7 @@
  *
  * const engine = new PlanningEngine({
  *   llmProvider: aiModelProviderManager,
- *   defaultModelId: 'gpt-4-turbo',
+ *   defaultModelId: 'gpt-4o',
  * });
  *
  * const plan = await engine.generatePlan('Build a web scraper', {
@@ -211,7 +211,9 @@ export class PlanningEngine implements IPlanningEngine {
    */
   constructor(config: PlanningEngineConfig) {
     this.llmProvider = config.llmProvider;
-    this.defaultModelId = config.defaultModelId ?? 'gpt-4-turbo';
+    // gpt-4-turbo (the old default) is a deprecated 2024-era model;
+    // plan decomposition needs a current mid-tier reasoning model.
+    this.defaultModelId = config.defaultModelId ?? 'gpt-4o';
     this.defaultProviderId = config.defaultProviderId;
     this.logger = config.logger;
     this.defaultOptions = {

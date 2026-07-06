@@ -552,6 +552,18 @@ export async function generateObject<T extends ZodType>(
       schema: effectiveSchema,
       schemaName: effectiveSchemaName ?? 'response',
     });
+  } else if (providerId === 'openrouter' && canUseStrictJsonSchema(jsonSchema)) {
+    // OpenRouter forwards the OpenAI-shaped response_format.json_schema
+    // payload to upstream hosts that support it; OpenRouterProvider pairs it
+    // with `provider: { require_parameters: true }` routing so only hosts
+    // that honour the schema are considered, and self-degrades to
+    // json_object when no host qualifies. Same strict-compat gate as the
+    // OpenAI branch — a schema that can't satisfy strict mode falls through
+    // to the loose json_object mode below. Previously EVERY OpenRouter
+    // structured call ran json_object with zero schema enforcement: the
+    // upstream host was free to return prose, Zod failed, and
+    // continuity-critical callers got null.
+    responseFormat = buildOpenAIJsonSchemaResponseFormat(jsonSchema, effectiveSchemaName);
   } else if (supportsJsonObjectMode) {
     responseFormat = { type: 'json_object' as const };
   }

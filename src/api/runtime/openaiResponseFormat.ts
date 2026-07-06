@@ -23,12 +23,62 @@
  * Returns true when the schema is concrete enough to be wrapped in OpenAI's
  * strict json_schema mode. A schema with no `type` and no `properties` is
  * treated as "unknown / untyped" and won't satisfy strict mode.
+ *
+ * The check is RECURSIVE: strict mode rejects the whole request when ANY
+ * reachable node is untyped (`{}` from an unsupported Zod type) or is a
+ * record-shaped object (strict demands `additionalProperties: false` on
+ * every object, so a schema-valued `additionalProperties` can never
+ * comply). Previously only the root was checked, so a nested `{}` slipped
+ * through and the API returned a 400 instead of the caller degrading to
+ * `json_object` mode.
  */
 export function canUseStrictJsonSchema(jsonSchema: Record<string, unknown> | undefined): boolean {
   if (!jsonSchema) return false;
   if (Object.keys(jsonSchema).length === 0) return false;
   // Strict mode demands an object root with declared properties.
-  return jsonSchema.type === 'object' && typeof jsonSchema.properties === 'object';
+  if (jsonSchema.type !== 'object' || typeof jsonSchema.properties !== 'object') return false;
+  return isStrictCompatibleNode(jsonSchema);
+}
+
+/**
+ * Recursive strict-compatibility scan. A node qualifies when it is a
+ * union whose every member qualifies, an enum / const, a type array
+ * (nullable lowering, e.g. `['string','null']`), or a typed node whose
+ * children (object properties / array items) all qualify. An empty `{}`
+ * node — the lowering fallback for unsupported Zod types — disqualifies
+ * the whole schema, as does a record-shaped object (see above).
+ */
+function isStrictCompatibleNode(node: unknown): boolean {
+  if (!node || typeof node !== 'object') return false;
+  const obj = node as Record<string, unknown>;
+
+  if (Array.isArray(obj.anyOf)) {
+    return obj.anyOf.length > 0 && obj.anyOf.every((v) => isStrictCompatibleNode(v));
+  }
+  if (Array.isArray(obj.oneOf)) {
+    return obj.oneOf.length > 0 && obj.oneOf.every((v) => isStrictCompatibleNode(v));
+  }
+  if (Array.isArray(obj.enum)) return obj.enum.length > 0;
+  if ('const' in obj) return true;
+  if (Array.isArray(obj.type)) {
+    return obj.type.length > 0 && obj.type.every((t) => typeof t === 'string');
+  }
+  if (typeof obj.type !== 'string') return false; // `{}` / unknown-shaped node
+
+  if (obj.type === 'object') {
+    if (obj.additionalProperties && typeof obj.additionalProperties === 'object') {
+      // Record shape — strict mode requires additionalProperties: false.
+      return false;
+    }
+    const props = obj.properties;
+    if (!props || typeof props !== 'object') return false;
+    return Object.values(props as Record<string, unknown>).every((v) => isStrictCompatibleNode(v));
+  }
+  if (obj.type === 'array') {
+    if (!obj.items || typeof obj.items !== 'object') return false;
+    return isStrictCompatibleNode(obj.items);
+  }
+  return true; // primitives: string / number / boolean / integer / null
 }
 
 /**
@@ -59,6 +109,18 @@ export function makeStrictJsonSchema(node: unknown): unknown {
 
   if (out.type === 'array' && out.items) {
     out.items = makeStrictJsonSchema(out.items);
+  }
+
+  // Union members must also comply — a discriminated union lowers to
+  // `anyOf` whose object variants each need `additionalProperties: false`
+  // + full `required`, or the API rejects the schema with a 400. This was
+  // the missing recursion that made every discriminatedUnion-rooted (or
+  // union-containing) schema fail strict mode.
+  if (Array.isArray(out.anyOf)) {
+    out.anyOf = (out.anyOf as unknown[]).map((v) => makeStrictJsonSchema(v));
+  }
+  if (Array.isArray(out.oneOf)) {
+    out.oneOf = (out.oneOf as unknown[]).map((v) => makeStrictJsonSchema(v));
   }
 
   return out;

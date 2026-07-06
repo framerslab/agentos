@@ -88,3 +88,44 @@ describe('lowerZodToJsonSchema — tuples (OpenAI strict-mode gap)', () => {
     expect(lowered.properties.spawnPos.type).toBe('array');
   });
 });
+
+describe('lowerZodToJsonSchema — nullable (OpenAI strict-mode gap)', () => {
+  // z.foo().nullable() previously fell through to `{}` (no `type` key) —
+  // one nullable field anywhere in a schema made OpenAI strict mode 400
+  // the whole structured-output call.
+  it('lowers a nullable primitive to a type array including null', () => {
+    expect(lowerZodToJsonSchema(z.string().nullable())).toEqual({
+      type: ['string', 'null'],
+    });
+    expect(lowerZodToJsonSchema(z.number().nullable())).toEqual({
+      type: ['number', 'null'],
+    });
+  });
+
+  it('lowers a nullable object to anyOf [object, null]', () => {
+    expect(lowerZodToJsonSchema(z.object({ a: z.string() }).nullable())).toEqual({
+      anyOf: [
+        { type: 'object', properties: { a: { type: 'string' } }, required: ['a'] },
+        { type: 'null' },
+      ],
+    });
+  });
+
+  it('lowers a nullable enum to anyOf [enum, null]', () => {
+    expect(lowerZodToJsonSchema(z.enum(['x', 'y']).nullable())).toEqual({
+      anyOf: [{ enum: ['x', 'y'] }, { type: 'null' }],
+    });
+  });
+
+  it('a nullable field stays REQUIRED on its parent (nullable is not optional)', () => {
+    expect(lowerZodToJsonSchema(z.object({ hint: z.string().nullable() }))).toEqual({
+      type: 'object',
+      properties: { hint: { type: ['string', 'null'] } },
+      required: ['hint'],
+    });
+  });
+
+  it('nullable of an unsupported inner type stays untyped `{}`', () => {
+    expect(lowerZodToJsonSchema(z.unknown().nullable())).toEqual({});
+  });
+});

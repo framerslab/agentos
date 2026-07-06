@@ -37,6 +37,7 @@ import { AnthropicProviderError } from '../errors/AnthropicProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
 import { resolveThinkingPayload } from '../model-thinking.js';
 import { modelSupportsForcedToolChoice } from '../model-forced-tool-choice.js';
+import { modelSupportsStrictToolUse } from '../model-strict-tool-use.js';
 import { modelSupportsEffort, isEffortLevel } from '../model-effort.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
 import { recordCacheUsage } from './cacheLeakDetector.js';
@@ -694,7 +695,16 @@ export class AnthropicProvider implements IProvider {
         if (!this.isRetryableStreamError(lastError) || attempt === attempts - 1) {
           throw lastError;
         }
-        await new Promise(resolve => setTimeout(resolve, computeRetryBackoffMs(attempt)));
+        // Honor the server's Retry-After when the failed attempt carried one
+        // (429s from makeStreamRequest stash it on error.details) — parity
+        // with the non-stream retry path. Fall back to jittered backoff.
+        const retryAfterSec = (lastError.details as { retryAfterSec?: number } | undefined)
+          ?.retryAfterSec;
+        const sleepMs =
+          typeof retryAfterSec === 'number' && Number.isFinite(retryAfterSec) && retryAfterSec > 0
+            ? retryAfterSec * 1000
+            : computeRetryBackoffMs(attempt);
+        await new Promise(resolve => setTimeout(resolve, sleepMs));
       }
     }
     throw lastError;
@@ -1497,7 +1507,20 @@ export class AnthropicProvider implements IProvider {
       // against a direct provider.generateCompletion call that
       // accidentally passes both responseFormat (structured-output
       // marker) and a tools array.
-      payload.tools = [{ name: sf.tool.name, input_schema: sf.tool.input_schema }];
+      // Guaranteed schema conformance where the model supports strict tool
+      // use (structured-outputs surface, 4.5+ generations): the API
+      // validates the tool input against input_schema server-side instead
+      // of best-effort adherence, so long/adversarial generations can no
+      // longer drift from the schema and fail the caller's Zod parse.
+      // Older models reject the unknown field ("tools.0.strict: Extra
+      // inputs are not permitted"), hence the capability gate. The
+      // matching `structured-outputs-2025-11-13` beta header is emitted by
+      // betaHeaders() whenever a payload's tools carry the flag.
+      payload.tools = [{
+        name: sf.tool.name,
+        input_schema: sf.tool.input_schema,
+        ...(modelSupportsStrictToolUse(modelId) ? { strict: true } : {}),
+      }];
       payload.tool_choice = { type: 'tool', name: sf.tool.name };
     }
 
@@ -2324,12 +2347,21 @@ export class AnthropicProvider implements IProvider {
         if (response.status === 429) {
           this.keyPool?.markExhausted(apiKey);
         }
+        // Carry the server's Retry-After (seconds) on the error so the
+        // stream retry loop (streamMessagesToResponse) can honor it — the
+        // non-stream path already does; without this the stream path
+        // re-hit a throttled endpoint on computed backoff and burned an
+        // attempt the server told us was doomed.
+        const retryAfterHeader = response.headers.get('retry-after');
+        const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : NaN;
         throw new AnthropicProviderError(
           errorMessage,
           'STREAM_CONNECTION_FAILED',
           response.status,
           errorData.error?.type,
-          errorData,
+          Number.isFinite(retryAfterSec) && retryAfterSec > 0
+            ? { ...errorData, retryAfterSec }
+            : errorData,
         );
       }
 
@@ -2390,6 +2422,9 @@ export class AnthropicProvider implements IProvider {
    *   field (see {@link ModelCompletionOptions.cacheDiagnostics}); the header
    *   must ride EVERY diagnosed turn or the next turn's lookup fails with
    *   `previous_message_not_found`.
+   * - `structured-outputs-2025-11-13` — when any tool definition in the body
+   *   carries `strict: true` (the forced structured-output tool on
+   *   strict-capable models; see modelSupportsStrictToolUse).
    *
    * Empty when no beta applies, so plain traffic is byte-for-byte unchanged.
    */
@@ -2397,7 +2432,19 @@ export class AnthropicProvider implements IProvider {
     const betas: string[] = [];
     if (this.payloadUsesThinking(body)) betas.push('interleaved-thinking-2025-05-14');
     if (body.diagnostics !== undefined) betas.push('cache-diagnosis-2026-04-07');
+    if (this.payloadUsesStrictTools(body)) betas.push('structured-outputs-2025-11-13');
     return betas.length > 0 ? { 'anthropic-beta': betas.join(',') } : {};
+  }
+
+  /** True when any tool definition in the request carries `strict: true`. */
+  private payloadUsesStrictTools(body: Record<string, unknown>): boolean {
+    const tools = body.tools;
+    return (
+      Array.isArray(tools) &&
+      tools.some(
+        t => t != null && typeof t === 'object' && (t as { strict?: unknown }).strict === true,
+      )
+    );
   }
 
   /** True when the request enables extended thinking or replays thinking blocks. */
