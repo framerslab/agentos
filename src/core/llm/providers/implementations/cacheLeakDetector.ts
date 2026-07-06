@@ -33,6 +33,8 @@
  * Kill switch: `AGENTOS_CACHE_LEAK_DETECTOR=0` (or `false`).
  */
 
+import { resolveCacheCapabilities } from '../model-cache-capabilities.js';
+
 export interface CacheUsageSample {
   /** Resolved model id the request ran on. */
   model: string;
@@ -62,9 +64,12 @@ export const __cacheLeakThresholds = {
   /** Total cache-write tokens before zero-read churn is worth a warning. */
   zeroReadCreateFloor: 50_000,
   /**
-   * Average uncached tokens/call before "nothing cached" is suspicious.
-   * 4096 = the largest per-model cacheable minimum (Opus 4.8 / Haiku 4.5),
-   * so anything above it COULD have cached on every current model.
+   * FALLBACK average uncached tokens/call before "nothing cached" is
+   * suspicious, used when the model id resolves no capabilities. The live
+   * threshold is the MODEL's own cacheable-prefix floor (4096/2048/1024 —
+   * see model-cache-capabilities.ts), so e.g. a Sonnet 4.6 callsite paying
+   * 3K uncached tokens/call with zero cache activity flags even though it
+   * sits under the Opus floor.
    */
   uncachedAvgFloor: 4_096,
   /** Bucket-map size cap; the map clears past it. */
@@ -116,6 +121,12 @@ export function recordCacheUsage(
 
     if (bucket.calls < T.minCalls) return;
 
+    // Per-model cacheable-prefix floor: prompts below it CANNOT cache, so
+    // "no cache activity" is only suspicious above the model's own floor.
+    const caps = resolveCacheCapabilities(sample.model);
+    if (!caps.supportsPromptCaching) return;
+    const unmarkedFloor = caps.minCacheablePrefixTokens || T.uncachedAvgFloor;
+
     if (!bucket.warnedZeroRead && bucket.reads === 0 && bucket.creates >= T.zeroReadCreateFloor) {
       bucket.warnedZeroRead = true;
       warn(
@@ -130,7 +141,7 @@ export function recordCacheUsage(
       !bucket.warnedUnmarked
       && bucket.creates === 0
       && bucket.reads === 0
-      && bucket.uncached / bucket.calls >= T.uncachedAvgFloor
+      && bucket.uncached / bucket.calls >= unmarkedFloor
     ) {
       bucket.warnedUnmarked = true;
       warn(

@@ -39,6 +39,7 @@ import { modelSupportsForcedToolChoice } from '../model-forced-tool-choice.js';
 import { modelSupportsEffort, isEffortLevel } from '../model-effort.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
 import { recordCacheUsage } from './cacheLeakDetector.js';
+import { resolveCacheCapabilities } from '../model-cache-capabilities.js';
 
 // Re-export so callers that already reach for Anthropic model-capability
 // predicates (modelSupportsTemperature lives here too) find this one next to
@@ -1295,18 +1296,43 @@ export class AnthropicProvider implements IProvider {
     }
 
     // --- Convert remaining messages to Anthropic format ---
-    // Anthropic only requires the MOST RECENT assistant turn's thinking blocks
-    // to be replayed when continuing a tool-use loop; earlier turns' thinking is
-    // optional and ignored. Strip thinking from all but the last assistant
-    // message so a long tool loop's (potentially large) thinking blocks don't
-    // accumulate on the wire as conversation history grows.
+    // Prior-turn thinking handling is MODEL-DYNAMIC, mirroring what the
+    // server does (see model-cache-capabilities.ts):
+    //
+    //  - Retaining models (Opus 4.5+, Sonnet 4.6+, Fable/Mythos): thinking
+    //    blocks from previous assistant turns are kept in context by the
+    //    server, participate in prompt caching, and are billed only when
+    //    shown — so they are passed back VERBATIM. The previous
+    //    unconditional client-side strip mutated the prior assistant turn's
+    //    bytes on EVERY agent-loop step, invalidating every previously
+    //    written cache entry: measured on prod 2026-07-06 as the full
+    //    history re-WRITTEN at the 1.25x cache-write premium every step and
+    //    read back never (create/read = 1.51; cache reads matched the
+    //    system prefix alone). Verbatim replay keeps older history
+    //    byte-stable so each step reads the prefix cached by the one before.
+    //
+    //  - Non-retaining models (older Opus/Sonnet, ALL Haiku): the server
+    //    strips prior thinking from context BEFORE caching, so client-side
+    //    stripping is cache-neutral there and saves the wire bytes — keep
+    //    the legacy strip for them.
+    //
+    // Env override (emergency use): AGENTOS_ANTHROPIC_STRIP_PRIOR_THINKING
+    // =1/true forces the strip everywhere; =0/false forces verbatim replay
+    // everywhere; unset -> per-model behavior above.
+    const stripEnv = process.env.AGENTOS_ANTHROPIC_STRIP_PRIOR_THINKING;
+    const stripPriorThinking =
+      stripEnv === '1' || stripEnv === 'true'
+        ? true
+        : stripEnv === '0' || stripEnv === 'false'
+          ? false
+          : !resolveCacheCapabilities(modelId).retainsPriorThinkingInContext;
     let lastAssistantIdx = -1;
     for (let i = 0; i < conversationMessages.length; i++) {
       if (conversationMessages[i].role === 'assistant') lastAssistantIdx = i;
     }
     const anthropicMessages = conversationMessages.map((msg, i) =>
       this.toAnthropicMessage(
-        msg.role === 'assistant' && i !== lastAssistantIdx && msg.thinkingBlocks
+        stripPriorThinking && msg.role === 'assistant' && i !== lastAssistantIdx && msg.thinkingBlocks
           ? { ...msg, thinkingBlocks: undefined }
           : msg,
       ),
@@ -1493,7 +1519,15 @@ export class AnthropicProvider implements IProvider {
     // Callers that need it off (single-shot prompts where the cache-write
     // premium can't amortize) set AGENTOS_ANTHROPIC_AUTO_CACHE=0.
     const autoCacheEnv = process.env.AGENTOS_ANTHROPIC_AUTO_CACHE;
-    if (autoCacheEnv !== '0' && autoCacheEnv !== 'false' && payload.cache_control === undefined) {
+    if (
+      autoCacheEnv !== '0'
+      && autoCacheEnv !== 'false'
+      && payload.cache_control === undefined
+      // Model-dynamic: stand the AUTO path down for ids without Anthropic
+      // prompt caching (a non-claude id routed here by a proxy config).
+      // Explicit caller markers above still pass through untouched.
+      && resolveCacheCapabilities(modelId).supportsPromptCaching
+    ) {
       const explicitBreakpoints = systemBlocks.filter(b => b.cache_control).length;
       const messageBreakpoints = this.countMessageCacheMarkers(anthropicMessages);
       if (explicitBreakpoints === 0 && messageBreakpoints === 0) {
@@ -1513,12 +1547,11 @@ export class AnthropicProvider implements IProvider {
           //  2. On the last cacheable block of the FINAL message — the
           //     moving multi-turn breakpoint. Agent loops re-send the
           //     whole growing history every step; without this each
-          //     step re-pays it at full input price. The provider
-          //     strips thinking from all-but-the-last assistant turn,
-          //     which only mutates the last two turns between calls —
-          //     older history stays byte-stable, so each step reads the
-          //     prefix cached two steps earlier and writes only the
-          //     fresh tail.
+          //     step re-pays it at full input price. Prior-turn thinking
+          //     blocks are passed back verbatim (see the preservation
+          //     note above the message conversion), so older history is
+          //     byte-stable between calls and each step reads the prefix
+          //     cached by the previous one, writing only the fresh tail.
           //
           // Two breakpoints total, under the API cap of 4.
           let placed = false;

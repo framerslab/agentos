@@ -471,6 +471,145 @@ describe('AnthropicProvider automatic prompt caching', () => {
     }
   });
 
+  /**
+   * Prior-turn thinking preservation. Anthropic's guidance: "always pass back
+   * all thinking blocks to the API for any multi-turn conversation" — on
+   * Opus 4.5+/Sonnet 4.6+ they are kept in context and participate in prompt
+   * caching. The old client-side strip mutated the previous assistant turn's
+   * bytes on every loop step, invalidating EVERY prior cache entry: measured
+   * on prod 2026-07-06 as the full history re-WRITTEN at 1.25x each step and
+   * read back never (create/read 1.51, history reads ~0).
+   */
+  it('keeps thinking blocks on ALL assistant turns by default (byte-stable cache prefix)', async () => {
+    const payload = await buildPayload(
+      [
+        { role: 'user', content: 'build the bundle' },
+        {
+          role: 'assistant',
+          content: 'step one',
+          thinkingBlocks: [{ type: 'thinking', thinking: 'plan-1', signature: 'sig-1' }],
+          tool_calls: [{ id: 'tc_1', type: 'function', function: { name: 'ApplyPatch', arguments: '{}' } }],
+        },
+        { role: 'tool', tool_call_id: 'tc_1', content: 'ok' },
+        {
+          role: 'assistant',
+          content: 'step two',
+          thinkingBlocks: [{ type: 'thinking', thinking: 'plan-2', signature: 'sig-2' }],
+          tool_calls: [{ id: 'tc_2', type: 'function', function: { name: 'ApplyPatch', arguments: '{}' } }],
+        },
+        { role: 'tool', tool_call_id: 'tc_2', content: 'ok' },
+      ],
+      { thinking: { budgetTokens: 1 } },
+      'claude-opus-4-8',
+    );
+    const messages = payload.messages as Array<{ role: string; content: Array<{ type: string; thinking?: string }> }>;
+    const assistants = messages.filter((m) => m.role === 'assistant');
+    expect(assistants).toHaveLength(2);
+    // BOTH assistant turns keep their thinking verbatim — the earlier turn's
+    // bytes must not change between loop steps or the cached prefix dies.
+    expect(assistants[0].content[0].type).toBe('thinking');
+    expect(assistants[0].content[0].thinking).toBe('plan-1');
+    expect(assistants[1].content[0].type).toBe('thinking');
+    expect(assistants[1].content[0].thinking).toBe('plan-2');
+  });
+
+  it('strips prior-turn thinking by default on models the SERVER strips (Haiku)', async () => {
+    // Haiku (all generations) discards prior thinking server-side before
+    // caching — client-side stripping is cache-neutral and saves wire bytes,
+    // so the dynamic default mirrors the server.
+    const payload = await buildPayload(
+      [
+        { role: 'user', content: 'go' },
+        {
+          role: 'assistant',
+          content: 'step one',
+          thinkingBlocks: [{ type: 'thinking', thinking: 'plan-1', signature: 'sig-1' }],
+          tool_calls: [{ id: 'tc_1', type: 'function', function: { name: 'X', arguments: '{}' } }],
+        },
+        { role: 'tool', tool_call_id: 'tc_1', content: 'ok' },
+        {
+          role: 'assistant',
+          content: 'step two',
+          thinkingBlocks: [{ type: 'thinking', thinking: 'plan-2', signature: 'sig-2' }],
+          tool_calls: [{ id: 'tc_2', type: 'function', function: { name: 'X', arguments: '{}' } }],
+        },
+        { role: 'tool', tool_call_id: 'tc_2', content: 'ok' },
+      ],
+      { thinking: { budgetTokens: 1 } },
+      'claude-haiku-4-5-20251001',
+    );
+    const messages = payload.messages as Array<{ role: string; content: Array<{ type: string }> }>;
+    const assistants = messages.filter((m) => m.role === 'assistant');
+    expect(assistants[0].content.some((b) => b.type === 'thinking')).toBe(false);
+    expect(assistants[1].content.some((b) => b.type === 'thinking')).toBe(true);
+  });
+
+  it('AGENTOS_ANTHROPIC_STRIP_PRIOR_THINKING=0 forces verbatim replay even on strip-models', async () => {
+    process.env.AGENTOS_ANTHROPIC_STRIP_PRIOR_THINKING = '0';
+    try {
+      const payload = await buildPayload(
+        [
+          { role: 'user', content: 'go' },
+          {
+            role: 'assistant',
+            content: 'step one',
+            thinkingBlocks: [{ type: 'thinking', thinking: 'plan-1', signature: 'sig-1' }],
+            tool_calls: [{ id: 'tc_1', type: 'function', function: { name: 'X', arguments: '{}' } }],
+          },
+          { role: 'tool', tool_call_id: 'tc_1', content: 'ok' },
+          {
+            role: 'assistant',
+            content: 'step two',
+            thinkingBlocks: [{ type: 'thinking', thinking: 'plan-2', signature: 'sig-2' }],
+            tool_calls: [{ id: 'tc_2', type: 'function', function: { name: 'X', arguments: '{}' } }],
+          },
+          { role: 'tool', tool_call_id: 'tc_2', content: 'ok' },
+        ],
+        { thinking: { budgetTokens: 1 } },
+        'claude-haiku-4-5-20251001',
+      );
+      const messages = payload.messages as Array<{ role: string; content: Array<{ type: string }> }>;
+      const assistants = messages.filter((m) => m.role === 'assistant');
+      expect(assistants[0].content.some((b) => b.type === 'thinking')).toBe(true);
+    } finally {
+      delete process.env.AGENTOS_ANTHROPIC_STRIP_PRIOR_THINKING;
+    }
+  });
+
+  it('AGENTOS_ANTHROPIC_STRIP_PRIOR_THINKING=1 restores the legacy strip', async () => {
+    process.env.AGENTOS_ANTHROPIC_STRIP_PRIOR_THINKING = '1';
+    try {
+      const payload = await buildPayload(
+        [
+          { role: 'user', content: 'build the bundle' },
+          {
+            role: 'assistant',
+            content: 'step one',
+            thinkingBlocks: [{ type: 'thinking', thinking: 'plan-1', signature: 'sig-1' }],
+            tool_calls: [{ id: 'tc_1', type: 'function', function: { name: 'ApplyPatch', arguments: '{}' } }],
+          },
+          { role: 'tool', tool_call_id: 'tc_1', content: 'ok' },
+          {
+            role: 'assistant',
+            content: 'step two',
+            thinkingBlocks: [{ type: 'thinking', thinking: 'plan-2', signature: 'sig-2' }],
+            tool_calls: [{ id: 'tc_2', type: 'function', function: { name: 'ApplyPatch', arguments: '{}' } }],
+          },
+          { role: 'tool', tool_call_id: 'tc_2', content: 'ok' },
+        ],
+        { thinking: { budgetTokens: 1 } },
+        'claude-opus-4-8',
+      );
+      const messages = payload.messages as Array<{ role: string; content: Array<{ type: string }> }>;
+      const assistants = messages.filter((m) => m.role === 'assistant');
+      // Legacy behavior: only the LAST assistant turn keeps thinking.
+      expect(assistants[0].content.some((b) => b.type === 'thinking')).toBe(false);
+      expect(assistants[1].content.some((b) => b.type === 'thinking')).toBe(true);
+    } finally {
+      delete process.env.AGENTOS_ANTHROPIC_STRIP_PRIOR_THINKING;
+    }
+  });
+
   it('under thinking, skips the auto tail when caller markers already fill the API cap of 4', async () => {
     const payload = await buildPayload(
       [
