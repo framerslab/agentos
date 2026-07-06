@@ -1,3 +1,7 @@
+## <small>0.9.107 (2026-07-06)</small>
+
+* perf(voice): synthesize aura batch chunks concurrently ([0f3187b9aa6637c9bd7a8800a0fc50c9e4112311](https://github.com/framerslab/agentos/commit/0f3187b9aa6637c9bd7a8800a0fc50c9e4112311))
+
 ## <small>0.9.106 (2026-07-06)</small>
 
 * feat(llm): cache-leak detector — warn once per callsite on zero-read and unmarked cache signatures ([dfd59e1add7259026e4c3e67ab35aeb80d05d169](https://github.com/framerslab/agentos/commit/dfd59e1add7259026e4c3e67ab35aeb80d05d169))
