@@ -294,7 +294,7 @@ describe('RetrievalAugmentor Reranking', () => {
   });
 
   it('maps shared retrieval policy to HyDE, reranking, and topK', async () => {
-    const mockPolicyHydeLlmCaller = vi.fn<[string, string], Promise<string>>().mockResolvedValue(
+    const mockPolicyHydeLlmCaller = vi.fn<(hypothetical: string, query: string) => Promise<string>>().mockResolvedValue(
       'Hypothetical answer about test content that matches stored documents.',
     ) as unknown as HydeLlmCaller;
     augmentor.setHydeLlmCaller(mockPolicyHydeLlmCaller);
@@ -364,7 +364,7 @@ describe('RetrievalAugmentor HyDE integration', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
 
-    mockHydeLlmCaller = vi.fn<[string, string], Promise<string>>().mockResolvedValue(
+    mockHydeLlmCaller = vi.fn<(hypothetical: string, query: string) => Promise<string>>().mockResolvedValue(
       'Hypothetical answer about test content that matches stored documents.',
     ) as unknown as HydeLlmCaller;
 

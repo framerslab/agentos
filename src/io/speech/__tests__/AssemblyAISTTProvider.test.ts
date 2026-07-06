@@ -171,7 +171,7 @@ describe('AssemblyAISTTProvider', () => {
 
     // Find the upload call by URL
     const uploadCall = mockFetch.mock.calls.find(
-      ([url]: [string]) => url === 'https://api.assemblyai.com/v2/upload'
+      ([url]) => url === 'https://api.assemblyai.com/v2/upload'
     ) as [string, RequestInit] | undefined;
 
     expect(uploadCall).toBeDefined();
@@ -195,7 +195,7 @@ describe('AssemblyAISTTProvider', () => {
 
     // Find the submit call by URL and method
     const submitCall = mockFetch.mock.calls.find(
-      ([url, init]: [string, RequestInit]) =>
+      ([url, init]) =>
         url === 'https://api.assemblyai.com/v2/transcript' && init?.method === 'POST'
     ) as [string, RequestInit] | undefined;
 

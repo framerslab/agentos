@@ -77,7 +77,7 @@ describe('AcousticEndpointDetector', () => {
    * AcousticEndpointDetector translates into a turn_complete event.
    */
   it('should emit turn_complete with reason "silence_timeout" after utteranceEndThresholdMs of silence', async () => {
-    const handler = vi.fn<[TurnCompleteEvent], void>();
+    const handler = vi.fn<(event: TurnCompleteEvent) => void>();
     detector.on('turn_complete', handler);
 
     const now = 1_000_000;
@@ -231,7 +231,7 @@ describe('AcousticEndpointDetector', () => {
    * representing the actual speech duration excluding trailing silence.
    */
   it('should include correct durationMs computed from speech_start to speech_end timestamps', async () => {
-    const handler = vi.fn<[TurnCompleteEvent], void>();
+    const handler = vi.fn<(event: TurnCompleteEvent) => void>();
     detector.on('turn_complete', handler);
 
     const now = 6_000_000;

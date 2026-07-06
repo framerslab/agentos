@@ -58,11 +58,11 @@ function makeDifferentVector(): number[] {
 
 function createMockFaceService(): IFaceEmbeddingService {
   return {
-    extractEmbedding: vi.fn<[string], Promise<FaceEmbedding>>().mockResolvedValue({
+    extractEmbedding: vi.fn<(imageUrl: string) => Promise<FaceEmbedding>>().mockResolvedValue({
       vector: makeSimilarVector(),
       confidence: 0.99,
     }),
-    compareFaces: vi.fn<[number[], number[], number?], FaceComparisonResult>().mockReturnValue({
+    compareFaces: vi.fn<(a: number[], b: number[], threshold?: number) => FaceComparisonResult>().mockReturnValue({
       similarity: 0.95,
       match: true,
     }),
@@ -71,7 +71,7 @@ function createMockFaceService(): IFaceEmbeddingService {
 
 function createMockImageGenerator(): ImageGeneratorFn {
   let counter = 0;
-  return vi.fn<Parameters<ImageGeneratorFn>, ReturnType<ImageGeneratorFn>>().mockImplementation(
+  return vi.fn<ImageGeneratorFn>().mockImplementation(
     async (_prompt, _options) => {
       counter++;
       return `https://images.test/generated-${counter}.png`;
