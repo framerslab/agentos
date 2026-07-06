@@ -92,4 +92,63 @@ describe('ElevenLabsBatchTTS', () => {
     const [, opts] = mockFetch.mock.calls[0];
     expect(opts.signal).toBeInstanceOf(AbortSignal);
   });
+
+  it('maps the first-class expressiveness field into voice_settings (speed included) and reports what it applied', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      arrayBuffer: () => Promise.resolve(Buffer.from('audio').buffer),
+    });
+
+    const result = await tts.synthesize('Test', {
+      expressiveness: { stability: 0.3, similarityBoost: 0.9, style: 0.6, speed: 1.15 },
+    });
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.voice_settings.stability).toBe(0.3);
+    expect(body.voice_settings.similarity_boost).toBe(0.9);
+    expect(body.voice_settings.style).toBe(0.6);
+    expect(body.voice_settings.speed).toBe(1.15);
+    expect(result.appliedExpressiveness).toEqual(
+      expect.arrayContaining(['stability', 'similarityBoost', 'style', 'speed'])
+    );
+  });
+
+  it('clamps expressiveness speed into the ElevenLabs-supported band (0.7-1.2)', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      arrayBuffer: () => Promise.resolve(Buffer.from('audio').buffer),
+    });
+
+    await tts.synthesize('Fast', { expressiveness: { speed: 1.5 } });
+    await tts.synthesize('Slow', { expressiveness: { speed: 0.4 } });
+
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).voice_settings.speed).toBe(1.2);
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body).voice_settings.speed).toBe(0.7);
+  });
+
+  it('prefers explicit top-level speed, then expressiveness, then providerOptions', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      arrayBuffer: () => Promise.resolve(Buffer.from('audio').buffer),
+    });
+
+    await tts.synthesize('A', {
+      speed: 1.1,
+      expressiveness: { speed: 0.9 },
+      providerOptions: { speed: 0.8 },
+    });
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).voice_settings.speed).toBe(1.1);
+  });
+
+  it('omits voice_settings.speed and reports nothing when no caller values are provided', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      arrayBuffer: () => Promise.resolve(Buffer.from('audio').buffer),
+    });
+
+    const result = await tts.synthesize('Plain');
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.voice_settings.speed).toBeUndefined();
+    expect(result.appliedExpressiveness).toBeUndefined();
+  });
 });

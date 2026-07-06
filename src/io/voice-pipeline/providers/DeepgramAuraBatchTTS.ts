@@ -157,6 +157,13 @@ export class DeepgramAuraBatchTTS implements IBatchTTS, HealthyProvider {
    * Synthesize complete text into audio via the Deepgram Aura speak API.
    * Splits text over 2000 chars into multiple requests and concatenates.
    *
+   * Expressiveness note: Deepgram Aura exposes NO prosody parameters
+   * (model + encoding only), so any {@link BatchTTSConfig.expressiveness}
+   * or providerOptions prosody knobs are deliberately ignored and
+   * `appliedExpressiveness` is never set on the result. Callers that need
+   * expressive rendering should compose speed client-side or route to a
+   * prosody-capable provider (ElevenLabs, OpenAI speed).
+   *
    * @param text - The text to synthesize.
    * @param config - Optional voice and format overrides.
    * @returns The synthesized audio buffer with metadata.

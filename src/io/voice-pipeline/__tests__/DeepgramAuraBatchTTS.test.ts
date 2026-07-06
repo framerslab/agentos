@@ -156,4 +156,21 @@ describe('DeepgramAuraBatchTTS', () => {
   it('chunkForAura returns a single chunk for short text', () => {
     expect(chunkForAura('short', 2000)).toEqual(['short']);
   });
+
+  it('ignores expressiveness entirely — Aura exposes no prosody parameters', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      arrayBuffer: () => Promise.resolve(Buffer.from('audio').buffer),
+    });
+
+    const result = await tts.synthesize('Steady', {
+      expressiveness: { stability: 0.1, similarityBoost: 0.2, style: 0.9, speed: 1.3 },
+    });
+
+    const url = String(mockFetch.mock.calls[0][0]);
+    expect(url).not.toMatch(/stability|similarity|style|speed/);
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body).toEqual({ text: 'Steady' });
+    expect(result.appliedExpressiveness).toBeUndefined();
+  });
 });

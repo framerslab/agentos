@@ -259,6 +259,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       voice: this.config.voice,
       format: this.config.format,
       providerOptions: this.config.ttsOptions,
+      expressiveness: this.config.ttsExpressiveness,
     });
 
     // Store references for use by wiring helpers and teardown

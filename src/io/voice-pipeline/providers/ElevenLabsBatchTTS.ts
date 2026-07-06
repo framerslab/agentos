@@ -136,7 +136,24 @@ export class ElevenLabsBatchTTS implements IBatchTTS, HealthyProvider {
    */
   async synthesize(text: string, config?: BatchTTSConfig): Promise<BatchTTSResult> {
     const voiceId = config?.voice ?? this.defaultVoiceId;
-    const opts = config?.providerOptions ?? {};
+    // First-class expressiveness wins over legacy providerOptions per knob;
+    // both use the same camelCase names so the merge is a plain spread.
+    const opts: Record<string, unknown> = {
+      ...(config?.providerOptions ?? {}),
+      ...(config?.expressiveness ?? {}),
+    };
+    // Top-level `speed` stays authoritative (pre-existing API), then the
+    // expressiveness/providerOptions merge. ElevenLabs accepts 0.7-1.2.
+    const rawSpeed = config?.speed ?? (opts.speed as number | undefined);
+    const speed =
+      typeof rawSpeed === 'number' && Number.isFinite(rawSpeed)
+        ? Math.min(1.2, Math.max(0.7, rawSpeed))
+        : undefined;
+    const applied: string[] = [];
+    for (const knob of ['stability', 'similarityBoost', 'style', 'useSpeakerBoost'] as const) {
+      if (opts[knob] != null) applied.push(knob);
+    }
+    if (speed != null) applied.push('speed');
 
     const doFetch = (key: string) =>
       fetch(`${this.baseUrl}/text-to-speech/${voiceId}`, {
@@ -154,6 +171,7 @@ export class ElevenLabsBatchTTS implements IBatchTTS, HealthyProvider {
             similarity_boost: (opts.similarityBoost as number) ?? 0.75,
             style: (opts.style as number) ?? 0.0,
             use_speaker_boost: (opts.useSpeakerBoost as boolean) ?? true,
+            ...(speed != null ? { speed } : {}),
           },
         }),
         signal: AbortSignal.timeout(SYNTHESIZE_TIMEOUT_MS),
@@ -180,6 +198,12 @@ export class ElevenLabsBatchTTS implements IBatchTTS, HealthyProvider {
     const audio = Buffer.from(await res.arrayBuffer());
     const durationMs = Math.round((audio.byteLength / BYTES_PER_SEC_MP3) * 1000);
 
-    return { audio, format: 'mp3', durationMs, provider: this.providerId };
+    return {
+      audio,
+      format: 'mp3',
+      durationMs,
+      provider: this.providerId,
+      ...(applied.length > 0 ? { appliedExpressiveness: applied } : {}),
+    };
   }
 }

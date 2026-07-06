@@ -155,7 +155,12 @@ class ElevenLabsStreamingTTSSession extends EventEmitter implements StreamingTTS
 
       this.ws.on('open', () => {
         // Send BOS (beginning of stream) message with generation settings
-        const opts: Record<string, unknown> = this.sessionConfig?.providerOptions ?? {};
+        // First-class expressiveness wins over legacy providerOptions per
+        // knob — same camelCase names, plain spread merge.
+        const opts: Record<string, unknown> = {
+          ...(this.sessionConfig?.providerOptions ?? {}),
+          ...(this.sessionConfig?.expressiveness ?? {}),
+        };
         this.ws!.send(
           JSON.stringify({
             text: ' ', // Initial space triggers the stream

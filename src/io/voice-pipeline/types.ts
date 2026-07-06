@@ -846,6 +846,12 @@ export interface StreamingTTSConfig {
    * Pass-through options forwarded to the underlying provider SDK.
    */
   providerOptions?: Record<string, unknown>;
+
+  /**
+   * Optional prosody controls. Streaming providers consume the subset
+   * they support and ignore the rest; see {@link TTSExpressiveness}.
+   */
+  expressiveness?: TTSExpressiveness;
 }
 
 /**
@@ -922,6 +928,34 @@ export interface IStreamingTTS {
  * Configuration for a batch (one-shot) TTS synthesis request.
  * Used by {@link IBatchTTS.synthesize} for non-streaming narration.
  */
+/**
+ * Optional prosody / expressiveness controls for TTS synthesis.
+ *
+ * Providers apply the SUBSET of knobs their API supports and silently
+ * ignore the rest — callers can pass one object regardless of which
+ * provider ends up serving the request:
+ * - ElevenLabs: stability, similarityBoost, style, useSpeakerBoost, speed.
+ * - OpenAI: speed only.
+ * - Deepgram Aura: none (no prosody parameters exist on the API).
+ *
+ * Batch providers report the knobs they actually consumed on
+ * {@link BatchTTSResult.appliedExpressiveness} so callers can avoid
+ * double-applying (e.g. a client-side playback-rate speed on top of a
+ * provider-rendered speed).
+ */
+export interface TTSExpressiveness {
+  /** Voice steadiness, 0-1. Lower is more variable/expressive. */
+  stability?: number;
+  /** How closely the voice tracks its reference, 0-1. */
+  similarityBoost?: number;
+  /** Style exaggeration, 0-1. */
+  style?: number;
+  /** Speaking-rate multiplier (provider-dependent range; ~0.7-1.2 on ElevenLabs, 0.25-4 on OpenAI). */
+  speed?: number;
+  /** ElevenLabs speaker-boost toggle. */
+  useSpeakerBoost?: boolean;
+}
+
 export interface BatchTTSConfig {
   /** Provider-specific voice identifier. */
   voice?: string;
@@ -931,6 +965,12 @@ export interface BatchTTSConfig {
   format?: 'mp3' | 'opus' | 'pcm';
   /** Playback speed multiplier (provider-dependent range, typically 0.25-4.0). */
   speed?: number;
+  /**
+   * Optional prosody controls. Providers consume the subset they support
+   * and ignore the rest; see {@link TTSExpressiveness}. A top-level
+   * `speed` takes precedence over `expressiveness.speed`.
+   */
+  expressiveness?: TTSExpressiveness;
   /** Pass-through options forwarded to the underlying provider SDK. */
   providerOptions?: Record<string, unknown>;
 }
@@ -947,6 +987,13 @@ export interface BatchTTSResult {
   durationMs: number;
   /** Provider ID that served this request. */
   provider: string;
+  /**
+   * Names of the {@link TTSExpressiveness} knobs the serving provider
+   * actually consumed from CALLER-provided values (silent provider
+   * defaults are not reported). Unset when the provider applied none —
+   * e.g. Deepgram Aura, which has no prosody parameters.
+   */
+  appliedExpressiveness?: string[];
 }
 
 /**
@@ -1264,6 +1311,13 @@ export interface VoicePipelineConfig {
    * Provider-level TTS options merged into `StreamingTTSConfig.providerOptions`.
    */
   ttsOptions?: Record<string, unknown>;
+
+  /**
+   * Optional prosody controls forwarded to the streaming TTS session as
+   * {@link StreamingTTSConfig.expressiveness}. Providers consume the
+   * subset they support (ElevenLabs: all knobs; Deepgram Aura: none).
+   */
+  ttsExpressiveness?: TTSExpressiveness;
 }
 
 /**

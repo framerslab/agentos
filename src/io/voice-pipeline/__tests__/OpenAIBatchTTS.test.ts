@@ -83,4 +83,44 @@ describe('OpenAIBatchTTS', () => {
     const [, opts] = mockFetch.mock.calls[0];
     expect(opts.signal).toBeInstanceOf(AbortSignal);
   });
+
+  it('honors expressiveness.speed when no top-level speed is set and reports it', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      arrayBuffer: () => Promise.resolve(Buffer.from('audio').buffer),
+    });
+
+    const result = await tts.synthesize('Quick', {
+      expressiveness: { speed: 1.25, stability: 0.2 },
+    });
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.speed).toBe(1.25);
+    // OpenAI has no prosody knobs beyond speed — only speed is reported.
+    expect(result.appliedExpressiveness).toEqual(['speed']);
+  });
+
+  it('keeps top-level speed authoritative over expressiveness.speed', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      arrayBuffer: () => Promise.resolve(Buffer.from('audio').buffer),
+    });
+
+    await tts.synthesize('Quick', { speed: 0.8, expressiveness: { speed: 1.25 } });
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).speed).toBe(0.8);
+  });
+
+  it('reports nothing when expressiveness carries only unsupported knobs', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      arrayBuffer: () => Promise.resolve(Buffer.from('audio').buffer),
+    });
+
+    const result = await tts.synthesize('Plain', {
+      expressiveness: { stability: 0.9, style: 0.4 },
+    });
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.speed).toBeUndefined();
+    expect(result.appliedExpressiveness).toBeUndefined();
+  });
 });

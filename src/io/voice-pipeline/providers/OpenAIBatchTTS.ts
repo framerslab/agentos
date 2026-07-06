@@ -136,7 +136,11 @@ export class OpenAIBatchTTS implements IBatchTTS, HealthyProvider {
       voice,
       response_format: format,
     };
-    if (config?.speed != null) body.speed = config.speed;
+    // Top-level speed stays authoritative; expressiveness.speed fills in
+    // when absent. Speed is the ONLY prosody knob OpenAI supports — the
+    // rest of TTSExpressiveness is ignored by design.
+    const speed = config?.speed ?? config?.expressiveness?.speed;
+    if (speed != null) body.speed = speed;
 
     const doFetch = (key: string) =>
       fetch(`${this.baseUrl}/audio/speech`, {
@@ -170,6 +174,12 @@ export class OpenAIBatchTTS implements IBatchTTS, HealthyProvider {
     const audio = Buffer.from(await res.arrayBuffer());
     const durationMs = Math.round((audio.byteLength / BYTES_PER_SEC_MP3) * 1000);
 
-    return { audio, format, durationMs, provider: this.providerId };
+    return {
+      audio,
+      format,
+      durationMs,
+      provider: this.providerId,
+      ...(speed != null ? { appliedExpressiveness: ['speed'] } : {}),
+    };
   }
 }
