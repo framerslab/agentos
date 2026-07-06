@@ -1,3 +1,8 @@
+## <small>0.9.109 (2026-07-06)</small>
+
+* feat(llm): model-dynamic prompt-cache capabilities in the Anthropic provider ([344078050246d554982f90ceb7a8eeee85ac8045](https://github.com/framerslab/agentos/commit/344078050246d554982f90ceb7a8eeee85ac8045))
+* chore(deps-dev): vitest 3.2.6 closes the UI-server file read advisory (#19) ([69dbdaff06850e622061239026bb95a3e3663590](https://github.com/framerslab/agentos/commit/69dbdaff06850e622061239026bb95a3e3663590))
+
 ## <small>0.9.108 (2026-07-06)</small>
 
 * perf(voice): bound aura chunk synthesis concurrency to avoid rate-limit bursts ([2a1430bcf6f7e10b3fa6b6839003a677f6b4eece](https://github.com/framerslab/agentos/commit/2a1430bcf6f7e10b3fa6b6839003a677f6b4eece))
