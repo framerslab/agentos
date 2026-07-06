@@ -1,3 +1,7 @@
+## <small>0.9.114 (2026-07-06)</small>
+
+* fix(llm): bound the leak-detector systemPrefix on the string path too ([ffed8639e5390c198e6625f532cd2e3ebe72b9ba](https://github.com/framerslab/agentos/commit/ffed8639e5390c198e6625f532cd2e3ebe72b9ba))
+
 ## <small>0.9.113 (2026-07-06)</small>
 
 * feat(llm): schema-enforced OpenRouter structured output, provider retry + key rotation, strict Anthropic tool schemas, refreshed uncensored catalog ([c2f1c2475943a469fdff1de78bccf3b98c784d89](https://github.com/framerslab/agentos/commit/c2f1c2475943a469fdff1de78bccf3b98c784d89))
