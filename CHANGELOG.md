@@ -1,3 +1,7 @@
+## <small>0.9.106 (2026-07-06)</small>
+
+* feat(llm): cache-leak detector — warn once per callsite on zero-read and unmarked cache signatures ([dfd59e1add7259026e4c3e67ab35aeb80d05d169](https://github.com/framerslab/agentos/commit/dfd59e1add7259026e4c3e67ab35aeb80d05d169))
+
 ## <small>0.9.105 (2026-07-05)</small>
 
 * fix(llm): compose caller system cache breakpoints with the auto message-tail marker ([4181eda5b15b3ae3b09278e12cfaa9e3ed0a507d](https://github.com/framerslab/agentos/commit/4181eda5b15b3ae3b09278e12cfaa9e3ed0a507d))
