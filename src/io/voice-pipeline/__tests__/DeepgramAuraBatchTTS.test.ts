@@ -78,6 +78,54 @@ describe('DeepgramAuraBatchTTS', () => {
     expect(Array.from(new Uint8Array(res.audio))).toEqual([1, 2]);
   });
 
+  it('bounds concurrency: never more than 4 requests in flight, order preserved', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    let pendingResolvers: Array<() => void> = [];
+    mockFetch.mockImplementation(
+      () =>
+        new Promise<{ ok: boolean; arrayBuffer: () => Promise<ArrayBuffer> }>((resolve) => {
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          const callIndex = mockFetch.mock.calls.length - 1;
+          pendingResolvers.push(() => {
+            inFlight -= 1;
+            resolve({
+              ok: true,
+              arrayBuffer: () => Promise.resolve(new Uint8Array([callIndex & 0xff]).buffer),
+            });
+          });
+        }),
+    );
+
+    // 'x' has no sentence/space boundary, so chunkForAura hard-cuts at 2000
+    // chars — 20 chunks here, well over the concurrency cap of 4.
+    const long = 'x'.repeat(2000 * 20);
+    let done = false;
+    const pending = tts.synthesize(long, { voice: 'aura-2-arcas-en' }).then((r) => {
+      done = true;
+      return r;
+    });
+
+    // Drain until the whole run settles: release everything currently in
+    // flight, yield so freed workers can pull their next chunk, repeat. This
+    // is settle-driven (not "queue momentarily empty") so a worker that
+    // re-fetches after a wave can't strand `pending`. Every observation of
+    // inFlight must respect the cap.
+    for (let guard = 0; guard < 500 && !done; guard++) {
+      expect(inFlight).toBeLessThanOrEqual(4);
+      const wave = pendingResolvers;
+      pendingResolvers = [];
+      wave.forEach((r) => r());
+      // Let the freed workers finish arrayBuffer() + loop + re-fetch.
+      for (let t = 0; t < 4; t++) await Promise.resolve();
+    }
+    await pending;
+    expect(done).toBe(true); // never stranded
+    expect(peak).toBeLessThanOrEqual(4); // cap held
+    expect(peak).toBeGreaterThan(1); // and it did run concurrently
+  });
+
   it('throws a classified error on non-2xx', async () => {
     mockFetch.mockResolvedValue({
       ok: false,

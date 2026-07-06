@@ -31,6 +31,14 @@ const BASE_URL = 'https://api.deepgram.com/v1';
 const DEFAULT_VOICE = 'aura-2-thalia-en';
 /** Aura hard limit: 2000 characters per `/v1/speak` request. */
 const MAX_CHARS = 2000;
+/**
+ * Cap on simultaneous chunk requests. Chunks synthesize concurrently for
+ * latency, but an unbounded fan-out on a very long input would burst many
+ * calls through the shared key pool at once and trip Deepgram's rate limit
+ * (misread as quota exhaustion → keys cooled down). 4 keeps typical
+ * narration fully parallel while bounding the worst case.
+ */
+const MAX_SYNTHESIZE_CONCURRENCY = 4;
 /** Per-request synthesize timeout; caps a hung upstream so the chain can fail over. */
 const SYNTHESIZE_TIMEOUT_MS = 60_000;
 /** Approx MP3 bytes/sec at Aura's default bitrate — used only for a duration estimate. */
@@ -161,11 +169,23 @@ export class DeepgramAuraBatchTTS implements IBatchTTS, HealthyProvider {
 
     const chunks = chunkForAura(text);
     // Chunks synthesize concurrently: Aura latency is per-request, so a
-    // multi-chunk narration otherwise pays N sequential round-trips.
-    // Promise.all preserves chunk order for the frame-based MP3 concat.
-    const buffers = await Promise.all(
-      chunks.map((chunk) => this.synthesizeOne(chunk, voice, encoding)),
+    // multi-chunk narration otherwise pays N sequential round-trips. The
+    // fan-out is BOUNDED (MAX_SYNTHESIZE_CONCURRENCY) so a pathologically long
+    // input can't burst dozens of simultaneous Deepgram calls through the
+    // shared key pool and trip its rate-limit failover. A shared cursor hands
+    // each worker the next chunk index and writes results in place, so the
+    // concatenation order matches the input order for the frame-based MP3.
+    const buffers: Buffer[] = new Array(chunks.length);
+    let cursor = 0;
+    const workers = Array.from(
+      { length: Math.min(MAX_SYNTHESIZE_CONCURRENCY, chunks.length) },
+      async () => {
+        for (let i = cursor++; i < chunks.length; i = cursor++) {
+          buffers[i] = await this.synthesizeOne(chunks[i], voice, encoding);
+        }
+      },
     );
+    await Promise.all(workers);
 
     const audio = Buffer.concat(buffers);
     // Raw PCM (linear16) is uncompressed at sampleRate * 2 bytes/sec (16-bit);
