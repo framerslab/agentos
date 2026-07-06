@@ -1,3 +1,7 @@
+## <small>0.9.108 (2026-07-06)</small>
+
+* perf(voice): bound aura chunk synthesis concurrency to avoid rate-limit bursts ([2a1430bcf6f7e10b3fa6b6839003a677f6b4eece](https://github.com/framerslab/agentos/commit/2a1430bcf6f7e10b3fa6b6839003a677f6b4eece))
+
 ## <small>0.9.107 (2026-07-06)</small>
 
 * perf(voice): synthesize aura batch chunks concurrently ([0f3187b9aa6637c9bd7a8800a0fc50c9e4112311](https://github.com/framerslab/agentos/commit/0f3187b9aa6637c9bd7a8800a0fc50c9e4112311))
