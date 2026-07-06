@@ -829,7 +829,7 @@ describe('GraphRuntime', () => {
     expect(events).not.toContain('error');
     expect(events[events.length - 1]).toBe('run_end');
     // Node 'b' should have run.
-    expect(executeMock.mock.calls.some(([n]: [GraphNode]) => n.id === 'b')).toBe(true);
+    expect(executeMock.mock.calls.some(([n]) => n.id === 'b')).toBe(true);
   });
 
   // ── 13. Retry policy exhausts retries then fails ──────────────────────────
@@ -858,12 +858,12 @@ describe('GraphRuntime', () => {
     }
 
     // Node 'a' should have been called 2 times total (initial + 1 retry).
-    const aCalls = executeMock.mock.calls.filter(([n]: [GraphNode]) => n.id === 'a');
+    const aCalls = executeMock.mock.calls.filter(([n]) => n.id === 'a');
     expect(aCalls).toHaveLength(2);
     // Run should end with error.
     expect(events).toContain('error');
     // Node 'b' should NOT have run.
-    expect(executeMock.mock.calls.some(([n]: [GraphNode]) => n.id === 'b')).toBe(false);
+    expect(executeMock.mock.calls.some(([n]) => n.id === 'b')).toBe(false);
   });
 
   it('applies retry policy when resuming from a checkpoint', async () => {
@@ -939,7 +939,7 @@ describe('GraphRuntime', () => {
       events.push(event.type);
     }
 
-    const aCalls = executeMock.mock.calls.filter(([n]: [GraphNode]) => n.id === 'a');
+    const aCalls = executeMock.mock.calls.filter(([n]) => n.id === 'a');
     expect(aCalls).toHaveLength(1);
     expect(events).toContain('error');
   });

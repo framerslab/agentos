@@ -37,18 +37,18 @@ function createMockConfig(overrides?: Partial<ProvenanceSystemConfig>): Provenan
 }
 
 function createMockProvider(overrides?: Partial<AnchorProvider>): AnchorProvider & {
-  publishMock: Mock<[AnchorRecord], Promise<AnchorProviderResult>>;
-  verifyMock: Mock<[AnchorRecord], Promise<boolean>>;
-  disposeMock: Mock<[], Promise<void>>;
+  publishMock: Mock<(anchor: AnchorRecord) => Promise<AnchorProviderResult>>;
+  verifyMock: Mock<(anchor: AnchorRecord) => Promise<boolean>>;
+  disposeMock: Mock<() => Promise<void>>;
 } {
-  const publishMock = vi.fn<[AnchorRecord], Promise<AnchorProviderResult>>().mockResolvedValue({
+  const publishMock = vi.fn<(anchor: AnchorRecord) => Promise<AnchorProviderResult>>().mockResolvedValue({
     providerId: 'mock',
     success: true,
     externalRef: 'mock-ref-12345',
     publishedAt: new Date().toISOString(),
   });
-  const verifyMock = vi.fn<[AnchorRecord], Promise<boolean>>().mockResolvedValue(true);
-  const disposeMock = vi.fn<[], Promise<void>>().mockResolvedValue(undefined);
+  const verifyMock = vi.fn<(anchor: AnchorRecord) => Promise<boolean>>().mockResolvedValue(true);
+  const disposeMock = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
 
   return {
     id: 'mock',

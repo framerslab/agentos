@@ -36,6 +36,14 @@ export default defineConfig({
     ],
   },
   test: {
+    // Vitest 3 reads dep-externalization from test.server.deps (the root
+    // server.deps block above is the Vite-level home Vitest 1 read).
+    // Keep both so native C++ addons stay untransformed across majors.
+    server: {
+      deps: {
+        external: ['better-sqlite3', 'sharp'],
+      },
+    },
     globals: true,
     environment: 'node',
     testTimeout: 120000, // 2 minutes — Memory facade tests take 45s+ for SQLite ops

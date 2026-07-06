@@ -101,7 +101,7 @@ function createMockContext(
       } satisfies LoopOutput;
     },
 
-    executeTool: vi.fn<[LoopToolCallRequest], Promise<LoopToolCallResult>>().mockImplementation(
+    executeTool: vi.fn<(tc: LoopToolCallRequest) => Promise<LoopToolCallResult>>().mockImplementation(
       async (tc) => ({
         id: tc.id,
         name: tc.name,
