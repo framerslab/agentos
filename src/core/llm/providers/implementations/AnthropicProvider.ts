@@ -38,6 +38,7 @@ import { resolveThinkingPayload } from '../model-thinking.js';
 import { modelSupportsForcedToolChoice } from '../model-forced-tool-choice.js';
 import { modelSupportsEffort, isEffortLevel } from '../model-effort.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
+import { recordCacheUsage } from './cacheLeakDetector.js';
 
 // Re-export so callers that already reach for Anthropic model-capability
 // predicates (modelSupportsTemperature lives here too) find this one next to
@@ -564,6 +565,7 @@ export class AnthropicProvider implements IProvider {
         payload,
         options.requestTimeout,
       );
+      this.recordCacheLeakSample(modelId, payload, apiResponse);
       return this.mapResponseToCompletion(apiResponse, structuredOutputName);
     }
 
@@ -576,7 +578,44 @@ export class AnthropicProvider implements IProvider {
     // let the caller (or the retry loop below) recover in seconds.
     const payload = this.buildRequestPayload(modelId, messages, options, true);
     const apiResponse = await this.streamMessagesToResponse(payload, options.requestTimeout);
+    this.recordCacheLeakSample(modelId, payload, apiResponse);
     return this.mapResponseToCompletion(apiResponse, structuredOutputName);
+  }
+
+  /**
+   * Feed one request's cache usage to the leak detector (see
+   * cacheLeakDetector.ts — warns once per callsite on the zero-read /
+   * unmarked pathological signatures). The callsite identity is the first
+   * 256 chars of the system prompt, read from the just-built payload so it
+   * reflects what actually went to the wire. Fail-open by construction.
+   *
+   * @private
+   */
+  private recordCacheLeakSample(
+    modelId: string,
+    payload: Record<string, unknown>,
+    apiResponse: AnthropicMessagesResponse,
+  ): void {
+    try {
+      const system = payload.system as
+        | string
+        | Array<{ type: string; text?: string }>
+        | undefined;
+      const systemPrefix = typeof system === 'string'
+        ? system
+        : Array.isArray(system)
+          ? system.map((b) => b.text ?? '').join('\n').slice(0, 256)
+          : '';
+      recordCacheUsage({
+        model: modelId,
+        systemPrefix,
+        uncachedInputTokens: apiResponse.usage?.input_tokens ?? 0,
+        cacheReadTokens: apiResponse.usage?.cache_read_input_tokens ?? 0,
+        cacheCreationTokens: apiResponse.usage?.cache_creation_input_tokens ?? 0,
+      });
+    } catch {
+      // Telemetry must never break a request.
+    }
   }
 
   /**
