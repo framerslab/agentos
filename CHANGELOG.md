@@ -1,3 +1,7 @@
+## <small>0.9.110 (2026-07-06)</small>
+
+* feat(voice): optional TTS expressiveness surface — providers apply the subset they support ([5b76b5a3c128f3b230bba6a49e26df755d94290b](https://github.com/framerslab/agentos/commit/5b76b5a3c128f3b230bba6a49e26df755d94290b))
+
 ## <small>0.9.109 (2026-07-06)</small>
 
 * feat(llm): model-dynamic prompt-cache capabilities in the Anthropic provider ([344078050246d554982f90ceb7a8eeee85ac8045](https://github.com/framerslab/agentos/commit/344078050246d554982f90ceb7a8eeee85ac8045))
