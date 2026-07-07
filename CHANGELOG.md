@@ -1,3 +1,7 @@
+## <small>0.9.116 (2026-07-07)</small>
+
+* fix(llm): stamp additionalProperties:false onto strict Anthropic tool schemas ([b404ccf68b5c76bf751efad40cb77b9d877ff9da](https://github.com/framerslab/agentos/commit/b404ccf68b5c76bf751efad40cb77b9d877ff9da))
+
 ## <small>0.9.115 (2026-07-07)</small>
 
 * fix(llm): gate Anthropic strict tool use on input-schema compatibility ([2dd433b87f8a89ac564668501978c8c67fb1b20e](https://github.com/framerslab/agentos/commit/2dd433b87f8a89ac564668501978c8c67fb1b20e))
