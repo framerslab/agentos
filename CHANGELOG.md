@@ -1,3 +1,7 @@
+## <small>0.9.117 (2026-07-07)</small>
+
+* fix(llm): strip strict-unsupported constraint keywords from Anthropic tool schemas ([16890da62c1a93a4de752d836de590fd47ad6af7](https://github.com/framerslab/agentos/commit/16890da62c1a93a4de752d836de590fd47ad6af7))
+
 ## <small>0.9.116 (2026-07-07)</small>
 
 * fix(llm): stamp additionalProperties:false onto strict Anthropic tool schemas ([b404ccf68b5c76bf751efad40cb77b9d877ff9da](https://github.com/framerslab/agentos/commit/b404ccf68b5c76bf751efad40cb77b9d877ff9da))
