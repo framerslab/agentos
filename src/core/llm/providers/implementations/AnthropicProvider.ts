@@ -37,7 +37,10 @@ import { AnthropicProviderError } from '../errors/AnthropicProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
 import { resolveThinkingPayload } from '../model-thinking.js';
 import { modelSupportsForcedToolChoice } from '../model-forced-tool-choice.js';
-import { modelSupportsStrictToolUse } from '../model-strict-tool-use.js';
+import {
+  modelSupportsStrictToolUse,
+  toolInputSchemaSupportsStrict,
+} from '../model-strict-tool-use.js';
 import { modelSupportsEffort, isEffortLevel } from '../model-effort.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
 import { recordCacheUsage } from './cacheLeakDetector.js';
@@ -1519,10 +1522,26 @@ export class AnthropicProvider implements IProvider {
       // inputs are not permitted"), hence the capability gate. The
       // matching `structured-outputs-2025-11-13` beta header is emitted by
       // betaHeaders() whenever a payload's tools carry the flag.
+      //
+      // TWO gates, both required. The schema-shape gate
+      // (toolInputSchemaSupportsStrict) exists because strict mode rejects
+      // any object node whose `additionalProperties` is present and not
+      // exactly `false` — which is how `z.record(...)` lowers, so a
+      // record-bearing schema under `strict: true` 400s deterministically
+      // on every attempt ("tools.0.custom: For 'object' type,
+      // 'additionalProperties' must be explicitly set to false"; 77
+      // provider rejections across four codegen tools the day strict
+      // shipped without it). Such schemas degrade to the non-strict forced
+      // tool — best-effort adherence + caller-side Zod validation, the
+      // pre-strict behavior — mirroring the canUseStrictJsonSchema gate on
+      // the OpenAI / OpenRouter strict paths.
       payload.tools = [{
         name: sf.tool.name,
         input_schema: sf.tool.input_schema,
-        ...(modelSupportsStrictToolUse(modelId) ? { strict: true } : {}),
+        ...(modelSupportsStrictToolUse(modelId) &&
+        toolInputSchemaSupportsStrict(sf.tool.input_schema)
+          ? { strict: true }
+          : {}),
       }];
       payload.tool_choice = { type: 'tool', name: sf.tool.name };
     }

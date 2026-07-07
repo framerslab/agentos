@@ -1380,6 +1380,74 @@ describe('AnthropicProvider', () => {
       expect(result.choices[0].message.content).toBe('{"x":2}');
     });
 
+    it('stamps strict:true on the structured-output tool for a strict-compatible schema', async () => {
+      const msg = makeAnthropicResponse({
+        content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { x: 2 } }],
+        stop_reason: 'tool_use',
+      });
+      fetchMock.mockResolvedValueOnce(mockSseResponse(msg));
+
+      await provider.generateCompletion(
+        'claude-opus-4-8',
+        [{ role: 'user', content: 'Hi' }],
+        {
+          responseFormat: {
+            _agentosUseToolForStructuredOutput: true,
+            tool: {
+              name: 'emit',
+              input_schema: {
+                type: 'object',
+                properties: { x: { type: 'number' } },
+                required: ['x'],
+              },
+            },
+          } as never,
+        },
+      );
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(requestBody.tools[0].strict).toBe(true);
+      expect(requestBody.tool_choice).toEqual({ type: 'tool', name: 'emit' });
+    });
+
+    it('omits strict for a record-bearing input_schema (degrades to the non-strict forced tool)', async () => {
+      // z.record(...) lowers to a schema-valued additionalProperties, which
+      // strict mode rejects at the API ("'additionalProperties' must be
+      // explicitly set to false") — deterministically, on every retry. The
+      // forced tool must still ride, just without the strict flag.
+      const msg = makeAnthropicResponse({
+        content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { config: { a: 'b' } } }],
+        stop_reason: 'tool_use',
+      });
+      fetchMock.mockResolvedValueOnce(mockSseResponse(msg));
+
+      await provider.generateCompletion(
+        'claude-opus-4-8',
+        [{ role: 'user', content: 'Hi' }],
+        {
+          responseFormat: {
+            _agentosUseToolForStructuredOutput: true,
+            tool: {
+              name: 'emit',
+              input_schema: {
+                type: 'object',
+                properties: {
+                  config: { type: 'object', additionalProperties: { type: 'string' } },
+                },
+                required: ['config'],
+              },
+            },
+          } as never,
+        },
+      );
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(requestBody.tools[0].strict).toBeUndefined();
+      // The forced tool itself is unchanged — only the strict flag is gated.
+      expect(requestBody.tools[0].name).toBe('emit');
+      expect(requestBody.tool_choice).toEqual({ type: 'tool', name: 'emit' });
+    });
+
     it('aborts a mid-body stall after streamIdleTimeoutMs instead of hanging', async () => {
       const idleProvider = new AnthropicProvider();
       await idleProvider.initialize({ apiKey: 'k', streamIdleTimeoutMs: 40 });

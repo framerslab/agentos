@@ -47,3 +47,73 @@ export function modelSupportsStrictToolUse(modelId: string): boolean {
     modelId,
   );
 }
+
+/**
+ * Whether a lowered tool `input_schema` can carry `strict: true` without the
+ * Anthropic API rejecting the whole request.
+ *
+ * The structured-outputs validator requires that any `object` node which
+ * DECLARES `additionalProperties` declares it as exactly `false`
+ * (`tools.N.custom: For 'object' type, 'additionalProperties' must be
+ * explicitly set to false`). An ABSENT `additionalProperties` is accepted —
+ * but a schema-valued one, which is how `z.record(...)` lowers (dynamic keys
+ * are the point, so it can never be `false`), 400s deterministically on
+ * every attempt.
+ *
+ * This is the schema-shape half of the strict gate; model capability
+ * ({@link modelSupportsStrictToolUse}) is the other half, and
+ * AnthropicProvider stamps `strict: true` only when BOTH hold. Without the
+ * shape half, every record-bearing generateObject schema (component trees,
+ * mechanics compositions, dungeon layouts) failed 100% at the provider the
+ * day strict tools shipped — the schema can never satisfy strict mode, so
+ * the only sound move is degrading that call to the non-strict forced tool
+ * (best-effort adherence + caller-side Zod validation, the pre-strict
+ * behavior). Mirrors how the OpenAI / OpenRouter strict paths gate on
+ * `canUseStrictJsonSchema` before opting a schema into strict mode.
+ *
+ * The walk visits only positions that hold subschemas (`properties` /
+ * `patternProperties` / `$defs` / `definitions` VALUES, `items`,
+ * `anyOf` / `oneOf` / `allOf` members) — a FIELD literally named
+ * `additionalProperties` inside `properties` must not trip the check.
+ *
+ * @param inputSchema Lowered JSON Schema destined for `tool.input_schema`.
+ * @returns `true` when no reachable node carries a non-`false`
+ *   `additionalProperties`; `false` otherwise (caller must omit `strict`).
+ */
+export function toolInputSchemaSupportsStrict(inputSchema: unknown): boolean {
+  return nodeSupportsStrict(inputSchema, 0);
+}
+
+/** Defensive recursion bound — lowered schemas are shallow trees; anything
+ *  deeper is malformed and must not stack-overflow the request path. */
+const MAX_STRICT_SCAN_DEPTH = 64;
+
+function nodeSupportsStrict(node: unknown, depth: number): boolean {
+  if (depth > MAX_STRICT_SCAN_DEPTH) return false;
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return true;
+  const schema = node as Record<string, unknown>;
+  if ('additionalProperties' in schema && schema.additionalProperties !== false) {
+    return false;
+  }
+  for (const key of ['properties', 'patternProperties', '$defs', 'definitions'] as const) {
+    const map = schema[key];
+    if (map && typeof map === 'object' && !Array.isArray(map)) {
+      for (const sub of Object.values(map as Record<string, unknown>)) {
+        if (!nodeSupportsStrict(sub, depth + 1)) return false;
+      }
+    }
+  }
+  const items = schema.items;
+  if (Array.isArray(items)) {
+    for (const sub of items) if (!nodeSupportsStrict(sub, depth + 1)) return false;
+  } else if (items && typeof items === 'object') {
+    if (!nodeSupportsStrict(items, depth + 1)) return false;
+  }
+  for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
+    const members = schema[key];
+    if (Array.isArray(members)) {
+      for (const sub of members) if (!nodeSupportsStrict(sub, depth + 1)) return false;
+    }
+  }
+  return true;
+}
