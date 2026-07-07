@@ -40,6 +40,7 @@ import { modelSupportsForcedToolChoice } from '../model-forced-tool-choice.js';
 import {
   modelSupportsStrictToolUse,
   toolInputSchemaSupportsStrict,
+  toolInputSchemaWithExplicitNoExtraProps,
 } from '../model-strict-tool-use.js';
 import { modelSupportsEffort, isEffortLevel } from '../model-effort.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
@@ -1535,13 +1536,25 @@ export class AnthropicProvider implements IProvider {
       // tool — best-effort adherence + caller-side Zod validation, the
       // pre-strict behavior — mirroring the canUseStrictJsonSchema gate on
       // the OpenAI / OpenRouter strict paths.
+      //
+      // The gates alone are NOT sufficient: the validator ALSO requires
+      // `additionalProperties: false` PRESENT on every object node
+      // (live-API verified 2026-07-07 — the key absent 400s identically,
+      // nested nodes included; optional properties left out of `required`
+      // are accepted). Zod-lowered schemas omit the key, so the eligible
+      // path sends a stamped COPY of the schema: the wire payload is
+      // strict-valid while the caller's schema object is never mutated.
+      const strictEligible =
+        modelSupportsStrictToolUse(modelId) &&
+        toolInputSchemaSupportsStrict(sf.tool.input_schema);
       payload.tools = [{
         name: sf.tool.name,
-        input_schema: sf.tool.input_schema,
-        ...(modelSupportsStrictToolUse(modelId) &&
-        toolInputSchemaSupportsStrict(sf.tool.input_schema)
-          ? { strict: true }
-          : {}),
+        input_schema: strictEligible
+          ? (toolInputSchemaWithExplicitNoExtraProps(
+              sf.tool.input_schema,
+            ) as Record<string, unknown>)
+          : sf.tool.input_schema,
+        ...(strictEligible ? { strict: true } : {}),
       }];
       payload.tool_choice = { type: 'tool', name: sf.tool.name };
     }

@@ -1407,7 +1407,46 @@ describe('AnthropicProvider', () => {
 
       const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
       expect(requestBody.tools[0].strict).toBe(true);
+      // The wire schema is the STAMPED copy: strict mode requires
+      // additionalProperties:false PRESENT on every object node (absent
+      // 400s at the API), and zod-lowered schemas omit it.
+      expect(requestBody.tools[0].input_schema.additionalProperties).toBe(false);
       expect(requestBody.tool_choice).toEqual({ type: 'tool', name: 'emit' });
+    });
+
+    it('stamps additionalProperties:false onto NESTED object nodes of the strict payload', async () => {
+      const msg = makeAnthropicResponse({
+        content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: { inner: { z: 1 } } }],
+        stop_reason: 'tool_use',
+      });
+      fetchMock.mockResolvedValueOnce(mockSseResponse(msg));
+
+      await provider.generateCompletion(
+        'claude-opus-4-8',
+        [{ role: 'user', content: 'Hi' }],
+        {
+          responseFormat: {
+            _agentosUseToolForStructuredOutput: true,
+            tool: {
+              name: 'emit',
+              input_schema: {
+                type: 'object',
+                properties: {
+                  inner: { type: 'object', properties: { z: { type: 'number' } }, required: ['z'] },
+                },
+                required: ['inner'],
+              },
+            },
+          } as never,
+        },
+      );
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(requestBody.tools[0].strict).toBe(true);
+      expect(requestBody.tools[0].input_schema.additionalProperties).toBe(false);
+      expect(requestBody.tools[0].input_schema.properties.inner.additionalProperties).toBe(false);
+      // required is untouched — Anthropic strict accepts optional properties.
+      expect(requestBody.tools[0].input_schema.required).toEqual(['inner']);
     });
 
     it('omits strict for a record-bearing input_schema (degrades to the non-strict forced tool)', async () => {

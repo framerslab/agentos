@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import {
   modelSupportsStrictToolUse,
   toolInputSchemaSupportsStrict,
+  toolInputSchemaWithExplicitNoExtraProps,
 } from '../model-strict-tool-use';
 
 describe('modelSupportsStrictToolUse', () => {
@@ -129,5 +130,64 @@ describe('toolInputSchemaSupportsStrict (schema-shape half of the strict gate)',
       node = child;
     }
     expect(toolInputSchemaSupportsStrict(root)).toBe(false);
+  });
+});
+
+describe('toolInputSchemaWithExplicitNoExtraProps (strict-payload rewrite)', () => {
+  it('stamps additionalProperties:false on the root and every nested object node', () => {
+    const out = toolInputSchemaWithExplicitNoExtraProps({
+      type: 'object',
+      properties: {
+        inner: { type: 'object', properties: { z: { type: 'number' } }, required: ['z'] },
+      },
+      required: ['inner'],
+    }) as Record<string, any>;
+    expect(out.additionalProperties).toBe(false);
+    expect(out.properties.inner.additionalProperties).toBe(false);
+    // required is untouched — Anthropic strict accepts optional properties
+    // (live-API verified 2026-07-07); force-requiring would corrupt
+    // `.optional()` semantics.
+    expect(out.required).toEqual(['inner']);
+    expect(out.properties.inner.required).toEqual(['z']);
+  });
+
+  it('covers array items, tuple items, union members, and definitions values', () => {
+    const obj = { type: 'object', properties: { z: { type: 'number' } } };
+    const out = toolInputSchemaWithExplicitNoExtraProps({
+      type: 'object',
+      properties: {
+        list: { type: 'array', items: obj },
+        tuple: { type: 'array', items: [obj, { type: 'string' }] },
+        variant: { anyOf: [{ type: 'string' }, obj] },
+      },
+      definitions: { Def: obj },
+    }) as Record<string, any>;
+    expect(out.properties.list.items.additionalProperties).toBe(false);
+    expect(out.properties.tuple.items[0].additionalProperties).toBe(false);
+    expect(out.properties.variant.anyOf[1].additionalProperties).toBe(false);
+    expect(out.definitions.Def.additionalProperties).toBe(false);
+    // non-object members stay untouched
+    expect('additionalProperties' in out.properties.tuple.items[1]).toBe(false);
+    expect('additionalProperties' in out.properties.variant.anyOf[0]).toBe(false);
+  });
+
+  it('leaves an explicit additionalProperties untouched and never mutates its input', () => {
+    const input = {
+      type: 'object',
+      properties: { x: { type: 'object', properties: {}, additionalProperties: false } },
+    } as Record<string, any>;
+    const snapshot = JSON.parse(JSON.stringify(input));
+    const out = toolInputSchemaWithExplicitNoExtraProps(input) as Record<string, any>;
+    expect(out.properties.x.additionalProperties).toBe(false);
+    expect(out.additionalProperties).toBe(false);
+    // the caller's schema object is never written to
+    expect(input).toEqual(snapshot);
+    expect('additionalProperties' in input).toBe(false);
+  });
+
+  it('passes non-object inputs through unchanged', () => {
+    expect(toolInputSchemaWithExplicitNoExtraProps(undefined)).toBeUndefined();
+    expect(toolInputSchemaWithExplicitNoExtraProps(null)).toBeNull();
+    expect(toolInputSchemaWithExplicitNoExtraProps('x')).toBe('x');
   });
 });

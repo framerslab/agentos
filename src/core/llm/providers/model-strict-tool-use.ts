@@ -52,13 +52,16 @@ export function modelSupportsStrictToolUse(modelId: string): boolean {
  * Whether a lowered tool `input_schema` can carry `strict: true` without the
  * Anthropic API rejecting the whole request.
  *
- * The structured-outputs validator requires that any `object` node which
- * DECLARES `additionalProperties` declares it as exactly `false`
- * (`tools.N.custom: For 'object' type, 'additionalProperties' must be
- * explicitly set to false`). An ABSENT `additionalProperties` is accepted —
- * but a schema-valued one, which is how `z.record(...)` lowers (dynamic keys
- * are the point, so it can never be `false`), 400s deterministically on
- * every attempt.
+ * The structured-outputs validator requires `additionalProperties` to be
+ * PRESENT and exactly `false` on every `object` node (`tools.N.custom: For
+ * 'object' type, 'additionalProperties' must be explicitly set to false` —
+ * live-API verified 2026-07-07: the key ABSENT is rejected too, nested
+ * nodes included). An absent key is REWRITABLE — the provider stamps it via
+ * {@link toolInputSchemaWithExplicitNoExtraProps} before sending — but a
+ * schema-valued one, which is how `z.record(...)` lowers (dynamic keys are
+ * the point, so it can never be `false`), can never satisfy strict mode and
+ * 400s deterministically on every attempt. So this check answers "can the
+ * schema BE MADE strict", not "is it strict-ready as-lowered".
  *
  * This is the schema-shape half of the strict gate; model capability
  * ({@link modelSupportsStrictToolUse}) is the other half, and
@@ -116,4 +119,72 @@ function nodeSupportsStrict(node: unknown, depth: number): boolean {
     }
   }
   return true;
+}
+
+
+/**
+ * Rewrite a strict-compatible `input_schema` so every reachable object node
+ * carries `additionalProperties: false` EXPLICITLY.
+ *
+ * The structured-outputs validator does not merely reject schema-valued
+ * `additionalProperties` — it requires the key PRESENT and `false` on every
+ * `object` node ("For 'object' type, 'additionalProperties' must be
+ * explicitly set to false"; live-API verified 2026-07-07: a root OR nested
+ * object node with the key absent 400s, while an optional property left out
+ * of `required` is accepted). Zod object schemas lower WITHOUT the key, so
+ * the capability + shape gates alone still 400'd every zod-lowered
+ * structured-output call — the strict stamp needs this rewrite, not just
+ * the {@link toolInputSchemaSupportsStrict} shape check.
+ *
+ * Pure + non-mutating: returns a structural copy; the input schema object
+ * is never written to. Positions walked mirror the shape check
+ * (`properties` / `patternProperties` / `$defs` / `definitions` values,
+ * `items` — single or tuple form — and `anyOf` / `oneOf` / `allOf`
+ * members). Only nodes that read as object schemas (`type: 'object'`, an
+ * `'object'` member of a type array, or a `properties` map) get the stamp.
+ * `required` is deliberately untouched: Anthropic strict accepts optional
+ * properties — unlike OpenAI's json_schema mode, force-requiring them here
+ * would corrupt `.optional()` semantics.
+ *
+ * Callers gate on {@link toolInputSchemaSupportsStrict} FIRST: a node with
+ * a present, non-`false` `additionalProperties` (a lowered `z.record`) can
+ * never satisfy strict mode, so the whole schema degrades to the
+ * non-strict forced tool instead of being rewritten.
+ *
+ * @param inputSchema Lowered JSON Schema destined for `tool.input_schema`.
+ * @returns A copy with `additionalProperties: false` stamped on every
+ *   reachable object node that lacks it.
+ */
+export function toolInputSchemaWithExplicitNoExtraProps(inputSchema: unknown): unknown {
+  return stampNoExtraProps(inputSchema, 0);
+}
+
+function stampNoExtraProps(node: unknown, depth: number): unknown {
+  if (depth > MAX_STRICT_SCAN_DEPTH) return node;
+  if (!node || typeof node !== 'object') return node;
+  if (Array.isArray(node)) return node.map(sub => stampNoExtraProps(sub, depth + 1));
+  const out: Record<string, unknown> = { ...(node as Record<string, unknown>) };
+  const typeIsObject =
+    out.type === 'object' ||
+    (Array.isArray(out.type) && (out.type as unknown[]).includes('object')) ||
+    (out.properties != null && typeof out.properties === 'object');
+  if (typeIsObject && !('additionalProperties' in out)) {
+    out.additionalProperties = false;
+  }
+  for (const key of ['properties', 'patternProperties', '$defs', 'definitions'] as const) {
+    const map = out[key];
+    if (map && typeof map === 'object' && !Array.isArray(map)) {
+      const next: Record<string, unknown> = {};
+      for (const [k, sub] of Object.entries(map as Record<string, unknown>)) {
+        next[k] = stampNoExtraProps(sub, depth + 1);
+      }
+      out[key] = next;
+    }
+  }
+  if (out.items !== undefined) out.items = stampNoExtraProps(out.items, depth + 1);
+  for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
+    const members = out[key];
+    if (Array.isArray(members)) out[key] = members.map(sub => stampNoExtraProps(sub, depth + 1));
+  }
+  return out;
 }
