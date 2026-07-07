@@ -1432,7 +1432,8 @@ describe('AnthropicProvider', () => {
               input_schema: {
                 type: 'object',
                 properties: {
-                  inner: { type: 'object', properties: { z: { type: 'number' } }, required: ['z'] },
+                  inner: { type: 'object', properties: { z: { type: 'number', minimum: 0 } }, required: ['z'] },
+                  list: { type: 'array', maxItems: 25, items: { type: 'string' } },
                 },
                 required: ['inner'],
               },
@@ -1447,6 +1448,11 @@ describe('AnthropicProvider', () => {
       expect(requestBody.tools[0].input_schema.properties.inner.additionalProperties).toBe(false);
       // required is untouched — Anthropic strict accepts optional properties.
       expect(requestBody.tools[0].input_schema.required).toEqual(['inner']);
+      // Rejected constraint keywords are stripped from the wire payload
+      // (strict 400s on them: "For 'array' type, property 'maxItems' is
+      // not supported"); Zod re-validates caller-side.
+      expect('maxItems' in requestBody.tools[0].input_schema.properties.list).toBe(false);
+      expect('minimum' in requestBody.tools[0].input_schema.properties.inner.properties.z).toBe(false);
     });
 
     it('omits strict for a record-bearing input_schema (degrades to the non-strict forced tool)', async () => {

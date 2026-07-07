@@ -190,4 +190,57 @@ describe('toolInputSchemaWithExplicitNoExtraProps (strict-payload rewrite)', () 
     expect(toolInputSchemaWithExplicitNoExtraProps(null)).toBeNull();
     expect(toolInputSchemaWithExplicitNoExtraProps('x')).toBe('x');
   });
+
+  it('strips the constraint keywords the strict validator rejects (live-API mapped 2026-07-07)', () => {
+    const out = toolInputSchemaWithExplicitNoExtraProps({
+      type: 'object',
+      properties: {
+        files: { type: 'array', maxItems: 25, uniqueItems: true, minItems: 1, items: { type: 'string' } },
+        score: { type: 'number', minimum: 0, maximum: 10, exclusiveMinimum: 0, exclusiveMaximum: 11, multipleOf: 1 },
+        meta: { type: 'object', properties: {}, minProperties: 0, maxProperties: 5 },
+      },
+      required: ['files'],
+    }) as Record<string, any>;
+    // rejected keywords gone…
+    expect('maxItems' in out.properties.files).toBe(false);
+    expect('uniqueItems' in out.properties.files).toBe(false);
+    for (const kw of ['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf']) {
+      expect(kw in out.properties.score).toBe(false);
+    }
+    expect('minProperties' in out.properties.meta).toBe(false);
+    expect('maxProperties' in out.properties.meta).toBe(false);
+    // …accepted keywords kept (minItems IS supported, unlike maxItems)
+    expect(out.properties.files.minItems).toBe(1);
+    expect(out.properties.meta.additionalProperties).toBe(false);
+  });
+
+  it('keeps accepted keywords: enum, const, pattern, lengths, format, default', () => {
+    const out = toolInputSchemaWithExplicitNoExtraProps({
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['a', 'b'] },
+        tag: { const: 'fixed' },
+        name: { type: 'string', minLength: 1, maxLength: 50, pattern: '^[a-z]+$' },
+        url: { type: 'string', format: 'uri', default: 'x' },
+      },
+      required: ['kind'],
+    }) as Record<string, any>;
+    expect(out.properties.kind.enum).toEqual(['a', 'b']);
+    expect(out.properties.tag.const).toBe('fixed');
+    expect(out.properties.name.minLength).toBe(1);
+    expect(out.properties.name.maxLength).toBe(50);
+    expect(out.properties.name.pattern).toBe('^[a-z]+$');
+    expect(out.properties.url.format).toBe('uri');
+    expect(out.properties.url.default).toBe('x');
+  });
+
+  it('does not strip a FIELD literally named after a rejected keyword', () => {
+    // properties-map KEYS are field names, not schema keywords.
+    const out = toolInputSchemaWithExplicitNoExtraProps({
+      type: 'object',
+      properties: { maximum: { type: 'string' }, maxItems: { type: 'number' } },
+    }) as Record<string, any>;
+    expect(out.properties.maximum).toEqual({ type: 'string' });
+    expect(out.properties.maxItems).toEqual({ type: 'number' });
+  });
 });

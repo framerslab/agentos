@@ -1544,6 +1544,10 @@ export class AnthropicProvider implements IProvider {
       // are accepted). Zod-lowered schemas omit the key, so the eligible
       // path sends a stamped COPY of the schema: the wire payload is
       // strict-valid while the caller's schema object is never mutated.
+      // The copy also STRIPS constraint keywords the validator rejects
+      // (maxItems / uniqueItems / number bounds / object property counts —
+      // live-API mapped 2026-07-07); Zod re-validates caller-side, so the
+      // constraints are still enforced after parse.
       const strictEligible =
         modelSupportsStrictToolUse(modelId) &&
         toolInputSchemaSupportsStrict(sf.tool.input_schema);

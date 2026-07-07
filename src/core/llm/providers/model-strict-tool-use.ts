@@ -136,6 +136,10 @@ function nodeSupportsStrict(node: unknown, depth: number): boolean {
  * structured-output call — the strict stamp needs this rewrite, not just
  * the {@link toolInputSchemaSupportsStrict} shape check.
  *
+ * The same walk STRIPS constraint keywords the strict validator rejects
+ * (see {@link STRICT_UNSUPPORTED_KEYWORDS}) — stamping alone still 400'd
+ * every schema whose Zod lowering carried e.g. an array `.max(...)`.
+ *
  * Pure + non-mutating: returns a structural copy; the input schema object
  * is never written to. Positions walked mirror the shape check
  * (`properties` / `patternProperties` / `$defs` / `definitions` values,
@@ -159,11 +163,45 @@ export function toolInputSchemaWithExplicitNoExtraProps(inputSchema: unknown): u
   return stampNoExtraProps(inputSchema, 0);
 }
 
+/**
+ * Constraint keywords the structured-outputs strict validator REJECTS with
+ * `tools.N.custom: For '<type>' type, property '<kw>' is not supported` —
+ * mapped empirically against the live API (2026-07-07, one probe per
+ * keyword): arrays reject `maxItems` + `uniqueItems` (while `minItems` is
+ * ACCEPTED); numbers reject `minimum` / `maximum` / `exclusiveMinimum` /
+ * `multipleOf` (exclusiveMaximum stripped by symmetry); objects reject
+ * `minProperties` / `maxProperties`. Accepted and therefore KEPT: `enum`,
+ * `const`, `pattern`, `minLength` / `maxLength`, `minItems`, `format`,
+ * `default`, `description`. Zod lowerings emit the rejected keywords from
+ * everyday builders (`.max(25)` on an array → `maxItems`), so without the
+ * strip a strict-stamped schema 400s at request time and the call degrades
+ * through retry/fallback to prose — the "Failed to extract valid JSON"
+ * lottery structured output exists to prevent. Stripping is lossless for
+ * callers: generateObject re-validates the parsed object against the
+ * original Zod schema, so the constraints are still enforced caller-side;
+ * only API-side enforcement of those bounds is forgone (structure remains
+ * guaranteed).
+ */
+const STRICT_UNSUPPORTED_KEYWORDS = [
+  'maxItems',
+  'uniqueItems',
+  'minimum',
+  'maximum',
+  'exclusiveMinimum',
+  'exclusiveMaximum',
+  'multipleOf',
+  'minProperties',
+  'maxProperties',
+] as const;
+
 function stampNoExtraProps(node: unknown, depth: number): unknown {
   if (depth > MAX_STRICT_SCAN_DEPTH) return node;
   if (!node || typeof node !== 'object') return node;
   if (Array.isArray(node)) return node.map(sub => stampNoExtraProps(sub, depth + 1));
   const out: Record<string, unknown> = { ...(node as Record<string, unknown>) };
+  for (const kw of STRICT_UNSUPPORTED_KEYWORDS) {
+    if (kw in out) delete out[kw];
+  }
   const typeIsObject =
     out.type === 'object' ||
     (Array.isArray(out.type) && (out.type as unknown[]).includes('object')) ||
