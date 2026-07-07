@@ -1,3 +1,7 @@
+## <small>0.9.115 (2026-07-07)</small>
+
+* fix(llm): gate Anthropic strict tool use on input-schema compatibility ([2dd433b87f8a89ac564668501978c8c67fb1b20e](https://github.com/framerslab/agentos/commit/2dd433b87f8a89ac564668501978c8c67fb1b20e))
+
 ## <small>0.9.114 (2026-07-06)</small>
 
 * fix(llm): bound the leak-detector systemPrefix on the string path too ([ffed8639e5390c198e6625f532cd2e3ebe72b9ba](https://github.com/framerslab/agentos/commit/ffed8639e5390c198e6625f532cd2e3ebe72b9ba))
