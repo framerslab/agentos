@@ -2505,8 +2505,15 @@ export class AnthropicProvider implements IProvider {
     message: string,
   ): void {
     if (status < 400 || status >= 500) return;
+    // Every structured-outputs strict-schema rejection is prefixed
+    // `tools.N.custom:` — the additionalProperties form (0.9.116), the
+    // constraint-keyword form (`property '<kw>' is not supported`, 0.9.117),
+    // AND the empty-schema form (`Empty schema ({}) … is not supported`,
+    // found 2026-07-08). Match the umbrella prefix so the tripwire catches
+    // the whole class, present and future, instead of a hand-maintained
+    // message list that already missed the empty-schema case.
     const strictRejection =
-      message.includes('additionalProperties') || /property '[^']+' is not supported/.test(message);
+      /tools\.\d+\.custom:/.test(message) || message.includes('additionalProperties');
     if (!strictRejection) return;
     try {
       console.warn(

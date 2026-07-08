@@ -93,10 +93,40 @@ export function toolInputSchemaSupportsStrict(inputSchema: unknown): boolean {
  *  deeper is malformed and must not stack-overflow the request path. */
 const MAX_STRICT_SCAN_DEPTH = 64;
 
+/**
+ * Whether a JSON-Schema object node declares a concrete type/shape, versus
+ * being an empty `{}` (or description-only) node that accepts ANY JSON. The
+ * Anthropic structured-outputs validator rejects the latter with "Empty
+ * schema ({}) that accepts any JSON value is not supported". Recognized
+ * type-defining keywords mirror {@link canUseStrictJsonSchema}'s node scan
+ * plus every subschema position this gate already walks.
+ */
+function nodeHasConcreteType(schema: Record<string, unknown>): boolean {
+  const CONCRETE_KEYWORDS = [
+    'type', 'enum', 'const', '$ref', 'anyOf', 'oneOf', 'allOf', 'not',
+    'properties', 'patternProperties', 'additionalProperties', 'items',
+    'prefixItems', 'contains', '$defs', 'definitions', 'if', 'then', 'else',
+    'dependentSchemas', 'unevaluatedProperties',
+  ] as const;
+  return CONCRETE_KEYWORDS.some((k) => k in schema);
+}
+
 function nodeSupportsStrict(node: unknown, depth: number): boolean {
   if (depth > MAX_STRICT_SCAN_DEPTH) return false;
   if (!node || typeof node !== 'object' || Array.isArray(node)) return true;
   const schema = node as Record<string, unknown>;
+  // Empty / any-JSON node (a `z.unknown()` / `z.any()` lowering to `{}` or a
+  // description-only object): Anthropic strict rejects it ("Empty schema ({})
+  // that accepts any JSON value is not supported. Please specify a concrete
+  // type" — live-verified 2026-07-08 on a GenerateComponentTree `tree:
+  // z.unknown()` field). The stamp transform also SKIPS it (it isn't
+  // type:object), so it can never be made strict — degrade the whole schema
+  // to the non-strict forced tool. Mirrors what canUseStrictJsonSchema
+  // already does for the OpenAI path (an untyped node disqualifies); the two
+  // gates were asymmetric until now.
+  if (!nodeHasConcreteType(schema)) {
+    return false;
+  }
   if ('additionalProperties' in schema && schema.additionalProperties !== false) {
     return false;
   }

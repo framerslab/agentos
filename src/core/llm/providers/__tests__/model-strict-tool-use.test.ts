@@ -293,3 +293,52 @@ describe('draft-2020 keyword completeness (2026-07-07 C1.1)', () => {
     expect(out.prefixItems[0].additionalProperties).toBe(false);
   });
 });
+
+
+describe('empty / any-JSON node rejection (2026-07-08)', () => {
+  it('a top-level empty {} node fails the gate', () => {
+    // A `z.unknown()` field lowers to `{}` — Anthropic strict rejects it.
+    expect(
+      toolInputSchemaSupportsStrict({
+        type: 'object',
+        properties: { tree: {} },
+      }),
+    ).toBe(false);
+  });
+
+  it('a description-only (still untyped) node fails the gate', () => {
+    expect(
+      toolInputSchemaSupportsStrict({
+        type: 'object',
+        properties: { blob: { description: 'anything goes' } },
+      }),
+    ).toBe(false);
+  });
+
+  it('an empty node hidden under items / anyOf fails the gate', () => {
+    expect(
+      toolInputSchemaSupportsStrict({ type: 'array', items: {} }),
+    ).toBe(false);
+    expect(
+      toolInputSchemaSupportsStrict({
+        type: 'object',
+        properties: { u: { anyOf: [{ type: 'string' }, {}] } },
+      }),
+    ).toBe(false);
+  });
+
+  it('concrete typed schemas still pass (no over-rejection)', () => {
+    expect(
+      toolInputSchemaSupportsStrict({
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          tags: { type: 'array', items: { type: 'string' } },
+          choice: { enum: ['a', 'b'] },
+          ref: { $ref: '#/$defs/x' },
+        },
+        $defs: { x: { type: 'number' } },
+      }),
+    ).toBe(true);
+  });
+});

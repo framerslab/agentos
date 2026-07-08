@@ -1574,6 +1574,34 @@ describe('AnthropicProvider', () => {
       }
     });
 
+    it('logs the strict-schema diagnostic on an empty-schema rejection too (2026-07-08)', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fetchMock.mockResolvedValueOnce(
+          mockJsonResponse(
+            {
+              error: {
+                type: 'invalid_request_error',
+                message:
+                  "tools.0.custom: Empty schema ({}) that accepts any JSON value is not supported. Please specify a concrete type.",
+              },
+            },
+            400,
+          ),
+        );
+        await expect(
+          provider.generateCompletion('claude-opus-4-8', [{ role: 'user', content: 'Hi' }], {}),
+        ).rejects.toThrow();
+        expect(
+          warnSpy.mock.calls.find(
+            (c) => typeof c[0] === 'string' && c[0].includes('strict-schema 4xx diagnostic'),
+          ),
+        ).toBeTruthy();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
     it('does NOT log the strict-schema diagnostic on unrelated 400s', async () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
