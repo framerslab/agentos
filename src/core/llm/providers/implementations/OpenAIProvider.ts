@@ -297,6 +297,39 @@ export function isOpenAIReasoningModel(modelId: string): boolean {
   return /^(o\d|gpt-5)/i.test(modelId);
 }
 
+/**
+ * Whether OpenAI rejects `reasoning_effort` sent ALONGSIDE function tools on
+ * the `/v1/chat/completions` endpoint for `modelId`. The GPT-5 family enforces
+ * this — "Function tools with reasoning_effort are not supported for gpt-5.5
+ * in /v1/chat/completions. Please use /v1/responses instead." (live-observed
+ * 2026-07-08 when the codegen frontier fallback chain routed a tool-carrying,
+ * effort:xhigh orchestrator turn to gpt-5.5, hard-erroring the whole build).
+ *
+ * agentos has no `/v1/responses` code path, so a tool-carrying reasoning call
+ * must DROP `reasoning_effort` (the model then reasons at its default depth)
+ * rather than 400 the entire request. Scoped to the GPT-5 family: the o-series
+ * (o1/o3/o4) still accepts `reasoning_effort` + tools on chat/completions, so
+ * dropping it there would be a needless reasoning-depth regression. Widen this
+ * predicate if a future o-series enforces the same Responses-API requirement.
+ *
+ * Proper long-term fix (separate, larger): add a `/v1/responses` request path
+ * and route reasoning + function-tool calls there, preserving both.
+ *
+ * @param modelId Provider-side model identifier (e.g. `'gpt-5.5'`).
+ */
+export function openAiRejectsReasoningEffortWithTools(modelId: string): boolean {
+  return /^gpt-5/i.test(modelId);
+}
+
+/**
+ * Whether the request carries function tools (present + non-empty). Used to
+ * decide whether the {@link openAiRejectsReasoningEffortWithTools} guard
+ * applies — reasoning_effort is only incompatible WITH tools.
+ */
+function requestHasFunctionTools(tools: unknown): boolean {
+  return Array.isArray(tools) ? tools.length > 0 : tools != null;
+}
+
 export class OpenAIProvider implements IProvider {
   /** @inheritdoc */
   public readonly providerId: string = 'openai';
@@ -776,8 +809,17 @@ export class OpenAIProvider implements IProvider {
       // reject. Map the agentos effort scale onto it so `effort: 'max'` actually
       // drives gpt-5.x at its xhigh ceiling instead of being silently dropped.
       // customModelParams (below) can still override.
+      // GPT-5 rejects `reasoning_effort` + function tools on chat/completions
+      // (it demands the Responses API, which agentos doesn't implement). When
+      // the request carries tools, DROP the effort param instead of 400ing —
+      // the model reasons at its default depth and the tool call succeeds.
       const reasoningEffort = mapEffortToOpenAiReasoningEffort(options.effort);
-      if (reasoningEffort !== undefined) payload.reasoning_effort = reasoningEffort;
+      const dropEffortForTools =
+        requestHasFunctionTools(options.tools) &&
+        openAiRejectsReasoningEffortWithTools(modelId);
+      if (reasoningEffort !== undefined && !dropEffortForTools) {
+        payload.reasoning_effort = reasoningEffort;
+      }
     }
     if (options.maxTokens !== undefined) {
       // Clamp to the model's real output ceiling first: a request sized for
