@@ -1,3 +1,7 @@
+## <small>0.9.120 (2026-07-08)</small>
+
+* fix(llm): degrade empty/any-JSON schema nodes to non-strict + widen the strict-rejection tripwire ([ea0c3f39218b4e87f456e44db3eb9a7475b545a3](https://github.com/framerslab/agentos/commit/ea0c3f39218b4e87f456e44db3eb9a7475b545a3))
+
 ## <small>0.9.119 (2026-07-08)</small>
 
 * feat(llm): surface the provider finish reason on streaming results ([eba6e6f520018bc9245d6a83d7721277adf62cfe](https://github.com/framerslab/agentos/commit/eba6e6f520018bc9245d6a83d7721277adf62cfe))
