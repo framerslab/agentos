@@ -1,3 +1,7 @@
+## <small>0.9.118 (2026-07-08)</small>
+
+* feat(llm): rebuild structured-output payloads per fallback leg ([fc23b578774942f991814cfd84d012bb2982bf43](https://github.com/framerslab/agentos/commit/fc23b578774942f991814cfd84d012bb2982bf43))
+
 ## <small>0.9.117 (2026-07-07)</small>
 
 * fix(llm): strip strict-unsupported constraint keywords from Anthropic tool schemas ([16890da62c1a93a4de752d836de590fd47ad6af7](https://github.com/framerslab/agentos/commit/16890da62c1a93a4de752d836de590fd47ad6af7))
