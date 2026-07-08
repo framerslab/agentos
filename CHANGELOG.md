@@ -1,3 +1,7 @@
+## <small>0.9.121 (2026-07-08)</small>
+
+* fix(llm): drop reasoning_effort when a GPT-5 request carries function tools ([ae41fa9f1ad7339bea337619a7a162937b48dac6](https://github.com/framerslab/agentos/commit/ae41fa9f1ad7339bea337619a7a162937b48dac6))
+
 ## <small>0.9.120 (2026-07-08)</small>
 
 * fix(llm): degrade empty/any-JSON schema nodes to non-strict + widen the strict-rejection tripwire ([ea0c3f39218b4e87f456e44db3eb9a7475b545a3](https://github.com/framerslab/agentos/commit/ea0c3f39218b4e87f456e44db3eb9a7475b545a3))
