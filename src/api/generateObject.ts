@@ -18,9 +18,8 @@ import type { Message, SystemContentBlock, TokenUsage } from './generateText.js'
 import { resolveModelOption } from './model.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { estimateMaxTokensForZodSchema } from './runtime/schemaTokenEstimate.js';
-import { canUseStrictJsonSchema, buildOpenAIJsonSchemaResponseFormat } from './runtime/openaiResponseFormat.js';
+import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
 import { buildResponseFormat } from '../core/llm/providers/structuredOutputFormat.js';
-import { modelSupportsForcedToolChoice } from '../core/llm/providers/model-forced-tool-choice.js';
 
 /**
  * Detect whether a Zod schema's outer type is `ZodArray`. We support
@@ -280,13 +279,6 @@ export interface GenerateObjectResult<T> {
 // ---------------------------------------------------------------------------
 
 /**
- * Set of provider identifiers known to support OpenAI-compatible
- * `response_format: { type: 'json_object' }` in their completion API.
- * This hint prevents the model from wrapping JSON in markdown fences.
- */
-const JSON_MODE_PROVIDERS = new Set(['openai', 'openrouter']);
-
-/**
  * Builds the schema-specific instruction text appended to every
  * generateObject call. Kept free of caller context so it can be composed
  * with either a plain string system prompt or a structured block array.
@@ -509,64 +501,49 @@ export async function generateObject<T extends ZodType>(
     opts.schemaDescription,
   );
 
-  // Detect provider-native JSON output paths. OpenAI gets the strongest
-  // guarantee via `response_format: json_schema` (strict mode, supported on
-  // gpt-4o-2024-08-06 and later) when the schema lowers cleanly.
-  // Anthropic routes through forced `tool_use` with the schema as
-  // `input_schema` — same gold-standard reliability tier as OpenAI strict
-  // mode. Gemini uses `responseSchema`. OpenAI-compatible providers that
-  // lack native structured output (OpenRouter, etc.) fall back to the
-  // looser `json_object` mode, which suppresses markdown fences but
-  // doesn't enforce the schema.
+  // Provider-native structured-output payload for the PRIMARY provider —
+  // built by the same shared function the fallback legs use, so the
+  // (provider, model, schema) -> payload logic lives exactly once. See
+  // runtime/responseFormatForProvider.ts for the per-provider behavior
+  // (OpenAI strict json_schema gate, Anthropic forced tool + Fable
+  // prompt-only degrade, Gemini responseSchema, OpenRouter strict gate,
+  // json_object fallbacks).
   const { providerId, modelId } = resolveModelOption(opts, 'text');
-  const useStrictJsonSchema = providerId === 'openai' && canUseStrictJsonSchema(jsonSchema);
-  const supportsJsonObjectMode = JSON_MODE_PROVIDERS.has(providerId);
-  let responseFormat: Record<string, unknown> | undefined;
-  if (useStrictJsonSchema) {
-    responseFormat = buildOpenAIJsonSchemaResponseFormat(jsonSchema, effectiveSchemaName);
-  } else if (providerId === 'anthropic') {
-    // Anthropic structured output is a FORCED tool_use (single tool with
-    // input_schema + tool_choice: { type: 'tool', name }) — the gold-standard
-    // reliability tier. But Claude Fable rejects a forced tool_choice at the
-    // API level ("tool_choice forces tool use is not compatible with this
-    // model"), so routing Fable through the forced tool 400s every call.
-    // Detect that and leave responseFormat undefined: the schema already
-    // rides in the system prompt (buildSchemaSystemPrompt above), and the
-    // result text is extractJson + safeParse'd in the retry loop below, so
-    // structured output gracefully degrades to the prompt-only JSON path on
-    // Fable instead of hard-failing. Sonnet / Opus / Haiku keep the forced
-    // tool. (Pre-2026-05-28 every provider fell through to prompt-only and
-    // complex .refine() schemas failed ~100% even with retries; the forced
-    // tool is still preferred wherever the model accepts it.)
-    if (modelSupportsForcedToolChoice(modelId)) {
-      responseFormat = buildResponseFormat({
-        provider: providerId,
-        schema: effectiveSchema,
-        schemaName: effectiveSchemaName ?? 'response',
-      });
-    }
-  } else if (providerId === 'gemini' || providerId === 'gemini-cli') {
-    // Gemini gets native responseSchema via the provider-specific helper.
+  let responseFormat = buildResponseFormatForProvider({
+    providerId,
+    modelId,
+    jsonSchema,
+    effectiveSchema,
+    schemaName: effectiveSchemaName,
+  });
+  if (providerId === 'gemini-cli') {
+    // gemini-cli primary: keep emitting the legacy Gemini marker so the
+    // primary path stays byte-stable this pass. GeminiCLIProvider never
+    // reads options.responseFormat (bridge options + text return only), so
+    // the marker is dead weight either way — the per-leg builder reports
+    // `undefined` honestly; remove this carve-out when the provider grows a
+    // responseFormat consumer.
     responseFormat = buildResponseFormat({
       provider: providerId,
       schema: effectiveSchema,
       schemaName: effectiveSchemaName ?? 'response',
     });
-  } else if (providerId === 'openrouter' && canUseStrictJsonSchema(jsonSchema)) {
-    // OpenRouter forwards the OpenAI-shaped response_format.json_schema
-    // payload to upstream hosts that support it; OpenRouterProvider pairs it
-    // with `provider: { require_parameters: true }` routing so only hosts
-    // that honour the schema are considered, and self-degrades to
-    // json_object when no host qualifies. Same strict-compat gate as the
-    // OpenAI branch — a schema that can't satisfy strict mode falls through
-    // to the loose json_object mode below. Previously EVERY OpenRouter
-    // structured call ran json_object with zero schema enforcement: the
-    // upstream host was free to return prose, Zod failed, and
-    // continuity-critical callers got null.
-    responseFormat = buildOpenAIJsonSchemaResponseFormat(jsonSchema, effectiveSchemaName);
-  } else if (supportsJsonObjectMode) {
-    responseFormat = { type: 'json_object' as const };
   }
+  // Per-leg rebuild callback: a fallback hop onto a foreign provider gets a
+  // payload shaped for THAT provider instead of the primary's (which the
+  // leg provider's guard would silently drop, running the leg with zero
+  // provider-side enforcement — the 2026-07-07 gpt-4o-mini freestyle bug).
+  const responseFormatBuilder = (
+    legProviderId: string,
+    legModelId: string,
+  ): Record<string, unknown> | undefined =>
+    buildResponseFormatForProvider({
+      providerId: legProviderId,
+      modelId: legModelId,
+      jsonSchema,
+      effectiveSchema,
+      schemaName: effectiveSchemaName,
+    });
 
   // Build the messages array, accumulating retry feedback as needed.
   const messages: Message[] = [];
@@ -627,6 +604,10 @@ export async function generateObject<T extends ZodType>(
       // the requested depth instead of their default.
       effort: opts.effort,
       _responseFormat: responseFormat,
+      // Fallback legs rebuild the payload for THEIR provider via this
+      // callback (see generateText's fallback loop) instead of inheriting
+      // the primary-shaped payload verbatim.
+      _responseFormatBuilder: responseFormatBuilder,
     });
 
     // Accumulate token usage across attempts

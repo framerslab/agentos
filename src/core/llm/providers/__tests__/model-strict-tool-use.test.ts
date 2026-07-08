@@ -244,3 +244,52 @@ describe('toolInputSchemaWithExplicitNoExtraProps (strict-payload rewrite)', () 
     expect(out.properties.maxItems).toEqual({ type: 'number' });
   });
 });
+
+describe('draft-2020 keyword completeness (2026-07-07 C1.1)', () => {
+  const record = { type: 'object', additionalProperties: { type: 'string' } };
+
+  it.each([
+    ['if', { type: 'object', properties: {}, if: record }],
+    ['then', { type: 'object', properties: {}, then: record }],
+    ['else', { type: 'object', properties: {}, else: record }],
+    ['not', { type: 'object', properties: {}, not: record }],
+    ['unevaluatedProperties', { type: 'object', properties: {}, unevaluatedProperties: record }],
+    ['contains', { type: 'array', items: { type: 'string' }, contains: record }],
+    ['prefixItems', { type: 'array', prefixItems: [record], items: { type: 'string' } }],
+    ['dependentSchemas', { type: 'object', properties: {}, dependentSchemas: { flag: record } }],
+  ] as const)('a record hidden under %s fails the gate', (_kw, schema) => {
+    expect(toolInputSchemaSupportsStrict(schema)).toBe(false);
+  });
+
+  it('stamps additionalProperties:false + strips rejected keywords inside the widened positions', () => {
+    const schema = {
+      type: 'object',
+      properties: { a: { type: 'string' } },
+      then: {
+        type: 'object',
+        properties: { b: { type: 'array', maxItems: 3, items: { type: 'string' } } },
+      },
+      dependentSchemas: {
+        a: { type: 'object', properties: { d: { type: 'number', minimum: 1 } } },
+      },
+    };
+    const out = toolInputSchemaWithExplicitNoExtraProps(schema) as Record<string, any>;
+    expect(out.then.additionalProperties).toBe(false);
+    expect(out.then.properties.b.maxItems).toBeUndefined();
+    expect(out.dependentSchemas.a.additionalProperties).toBe(false);
+    expect(out.dependentSchemas.a.properties.d.minimum).toBeUndefined();
+    // non-mutating: the input keeps its constraint keywords
+    expect(schema.then.properties.b.maxItems).toBe(3);
+    expect(schema.dependentSchemas.a.properties.d.minimum).toBe(1);
+  });
+
+  it('stamps inside prefixItems tuple members', () => {
+    const schema = {
+      type: 'array',
+      prefixItems: [{ type: 'object', properties: { c: { type: 'string' } } }],
+      items: { type: 'string' },
+    };
+    const out = toolInputSchemaWithExplicitNoExtraProps(schema) as Record<string, any>;
+    expect(out.prefixItems[0].additionalProperties).toBe(false);
+  });
+});

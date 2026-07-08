@@ -29,8 +29,35 @@ import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/
 import { createLogger } from '../core/logging/loggerFactory.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
+import { describeResponseFormatShape } from './runtime/responseFormatForProvider.js';
 
 const fallbackLogger = createLogger('fallback');
+
+/**
+ * Invoke a caller-supplied per-leg responseFormat builder without letting a
+ * builder bug kill a fallback that would otherwise succeed. Failure -> one
+ * WARN + `undefined` (the leg proceeds schema-in-prompt only, identical to
+ * the guarded-drop outcome — but explicit).
+ *
+ * @internal
+ */
+function safeBuildLegResponseFormat(
+  builder: NonNullable<GenerateTextOptions['_responseFormatBuilder']>,
+  providerId: string,
+  modelId: string,
+): Record<string, unknown> | undefined {
+  try {
+    return builder(providerId, modelId);
+  } catch (err) {
+    fallbackLogger.warn('responseFormat builder threw; leg proceeds without provider-native structured output', {
+      event: 'response_format_builder_failed',
+      fallbackProvider: providerId,
+      fallbackModel: modelId,
+      errorMessage: (err instanceof Error ? err.message : String(err)).slice(0, 200),
+    });
+    return undefined;
+  }
+}
 
 /**
  * Internal error type thrown when the provider-health registry reports
@@ -547,6 +574,19 @@ export interface GenerateTextOptions {
    * whatever shape is here.
    */
   _responseFormat?: { type: string } | Record<string, unknown>;
+  /**
+   * @internal Rebuilds the provider-native structured-output payload for a
+   * FALLBACK leg's provider. When absent, legs receive `_responseFormat`
+   * verbatim (legacy behavior — provider-side guards then drop foreign
+   * shapes, so the leg runs with zero provider enforcement). generateObject
+   * and AgentSession.send supply this; hand-rolled generateText callers are
+   * unaffected. `modelId` is `''` when the fallback entry omits `model`
+   * (the provider's default text model is resolved later).
+   */
+  _responseFormatBuilder?: (
+    providerId: string,
+    modelId: string,
+  ) => Record<string, unknown> | undefined;
 }
 
 /**
@@ -1914,6 +1954,14 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         }
         try {
           const lastErr = lastError instanceof Error ? lastError: new Error(String(lastError));
+          // Per-leg structured-output rebuild: when the caller supplied a
+          // builder, recompute the provider-native payload for THIS leg's
+          // provider (computed once here so the log line below and the
+          // recursion payload agree).
+          const hasResponseFormatBuilder = typeof opts._responseFormatBuilder === 'function';
+          const rebuiltResponseFormat = hasResponseFormatBuilder
+            ? safeBuildLegResponseFormat(opts._responseFormatBuilder!, fb.provider, fb.model ?? '')
+            : undefined;
           fallbackLogger.info('provider fallback triggered', {
             event: 'fallback_fired',
             api: 'generateText',
@@ -1923,6 +1971,11 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             errorType: lastErr.name,
             errorMessage: lastErr.message.slice(0, 200),
             attempt,
+            // Live signal that per-leg rebuild is active (2026-07-07 spec
+            // rollout verification): absent for legacy verbatim-carry callers.
+            ...(hasResponseFormatBuilder
+              ? { rebuiltResponseFormatType: describeResponseFormatShape(rebuiltResponseFormat) }
+              : {}),
           });
           opts.onFallback?.(lastErr, fb.provider);
           // Build a new options object targeting the fallback provider.
@@ -1930,6 +1983,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             ...opts,
             provider: fb.provider,
             model: fb.model,
+            // When a builder exists, ALWAYS override _responseFormat —
+            // including with an explicit `undefined` on builder failure or
+            // decline. Merely omitting the key would let the `...opts`
+            // spread above carry the STALE primary-shaped payload into the
+            // leg. Absent builder -> legacy verbatim carry.
+            ...(hasResponseFormatBuilder ? { _responseFormat: rebuiltResponseFormat } : {}),
             // Carry the outermost call's start so the winning hop's usage
             // observer reports true end-to-end durationMs (spanning this
             // failed primary + every fallback hop), not just its own leg.

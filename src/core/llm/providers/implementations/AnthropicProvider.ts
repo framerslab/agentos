@@ -2236,6 +2236,7 @@ export class AnthropicProvider implements IProvider {
           const errorData = await response.json().catch(() => ({})) as Partial<AnthropicAPIError>;
           const errorMessage = errorData.error?.message || `HTTP ${response.status}: ${response.statusText}`;
           const errorType = errorData.error?.type;
+          this.logStrictSchemaRejection(body, response.status, errorMessage);
 
           // Non-retryable client errors
           if (response.status === 401 || response.status === 403 || response.status === 400 || response.status === 404) {
@@ -2381,6 +2382,7 @@ export class AnthropicProvider implements IProvider {
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({})) as Partial<AnthropicAPIError>;
         const errorMessage = errorData.error?.message || `HTTP ${response.status}: ${response.statusText}`;
+        this.logStrictSchemaRejection(body, response.status, errorMessage);
         // A throttled key should not be reused by the next stream/request —
         // mark it for cooldown so the pool fails over.
         if (response.status === 429) {
@@ -2484,6 +2486,44 @@ export class AnthropicProvider implements IProvider {
         t => t != null && typeof t === 'object' && (t as { strict?: unknown }).strict === true,
       )
     );
+  }
+
+  /**
+   * Strict-schema rejection tripwire (2026-07-07): when a 4xx response
+   * carries the structured-outputs validator's schema rejection — the
+   * `additionalProperties` form (root-caused: absent keys, fixed by the
+   * stamped copy in 0.9.116) or the constraint-keyword form (`property
+   * '<kw>' is not supported`, mapped + stripped in 0.9.117) — dump the
+   * outbound tool schemas + `anthropic-beta` header + strict-stamp verdict
+   * so any future recurrence is a one-log root-cause instead of another
+   * inference chain. WARN once per request — these 4xx paths do not retry.
+   * Tool schemas are not secret; user message content never appears here.
+   */
+  private logStrictSchemaRejection(
+    body: Record<string, unknown>,
+    status: number,
+    message: string,
+  ): void {
+    if (status < 400 || status >= 500) return;
+    const strictRejection =
+      message.includes('additionalProperties') || /property '[^']+' is not supported/.test(message);
+    if (!strictRejection) return;
+    try {
+      console.warn(
+        '[AnthropicProvider] strict-schema 4xx diagnostic',
+        JSON.stringify({
+          event: 'anthropic_strict_schema_rejection',
+          status,
+          modelId: typeof body.model === 'string' ? body.model : String(body.model ?? ''),
+          betaHeader: this.betaHeaders(body)['anthropic-beta'] ?? '',
+          payloadUsesStrictTools: this.payloadUsesStrictTools(body),
+          message: message.slice(0, 300),
+          tools: body.tools ?? [],
+        }),
+      );
+    } catch {
+      /* diagnostics must never break the request path */
+    }
   }
 
   /** True when the request enables extended thinking or replays thinking blocks. */

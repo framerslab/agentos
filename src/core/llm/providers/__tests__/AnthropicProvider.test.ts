@@ -1493,6 +1493,111 @@ describe('AnthropicProvider', () => {
       expect(requestBody.tool_choice).toEqual({ type: 'tool', name: 'emit' });
     });
 
+    it('logs the strict-schema diagnostic on a 4xx additionalProperties rejection (tripwire, 2026-07-07)', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fetchMock.mockResolvedValueOnce(
+          mockJsonResponse(
+            {
+              error: {
+                type: 'invalid_request_error',
+                message:
+                  "tools.0.custom: For 'object' type, 'additionalProperties' must be explicitly set to false",
+              },
+            },
+            400,
+          ),
+        );
+
+        await expect(
+          provider.generateCompletion(
+            'claude-opus-4-8',
+            [{ role: 'user', content: 'Hi' }],
+            {
+              responseFormat: {
+                _agentosUseToolForStructuredOutput: true,
+                tool: {
+                  name: 'emit',
+                  input_schema: {
+                    type: 'object',
+                    properties: { title: { type: 'string' } },
+                    required: ['title'],
+                    additionalProperties: false,
+                  },
+                },
+              } as never,
+            },
+          ),
+        ).rejects.toThrow();
+
+        const diagCall = warnSpy.mock.calls.find(
+          (c) => typeof c[0] === 'string' && c[0].includes('strict-schema 4xx diagnostic'),
+        );
+        expect(diagCall).toBeTruthy();
+        const payload = JSON.parse(String(diagCall![1]));
+        expect(payload.event).toBe('anthropic_strict_schema_rejection');
+        expect(payload.status).toBe(400);
+        expect(payload.modelId).toContain('claude');
+        expect(typeof payload.payloadUsesStrictTools).toBe('boolean');
+        // The outbound tool schemas ride the diagnostic so the next
+        // occurrence is a one-log root-cause.
+        expect(JSON.stringify(payload.tools)).toContain('emit');
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('logs the strict-schema diagnostic on a constraint-keyword rejection too', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fetchMock.mockResolvedValueOnce(
+          mockJsonResponse(
+            {
+              error: {
+                type: 'invalid_request_error',
+                message: "tools.0.custom: For 'array' type, property 'maxItems' is not supported",
+              },
+            },
+            400,
+          ),
+        );
+        await expect(
+          provider.generateCompletion('claude-opus-4-8', [{ role: 'user', content: 'Hi' }], {}),
+        ).rejects.toThrow();
+        expect(
+          warnSpy.mock.calls.find(
+            (c) => typeof c[0] === 'string' && c[0].includes('strict-schema 4xx diagnostic'),
+          ),
+        ).toBeTruthy();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('does NOT log the strict-schema diagnostic on unrelated 400s', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fetchMock.mockResolvedValueOnce(
+          mockJsonResponse(
+            { error: { type: 'invalid_request_error', message: 'max_tokens too large' } },
+            400,
+          ),
+        );
+
+        await expect(
+          provider.generateCompletion('claude-opus-4-8', [{ role: 'user', content: 'Hi' }], {}),
+        ).rejects.toThrow();
+
+        expect(
+          warnSpy.mock.calls.find(
+            (c) => typeof c[0] === 'string' && c[0].includes('strict-schema 4xx diagnostic'),
+          ),
+        ).toBeUndefined();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
     it('aborts a mid-body stall after streamIdleTimeoutMs instead of hanging', async () => {
       const idleProvider = new AnthropicProvider();
       await idleProvider.initialize({ apiKey: 'k', streamIdleTimeoutMs: 40 });

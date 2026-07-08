@@ -641,7 +641,12 @@ describe('generateObject', () => {
       });
     });
 
-    it('keeps json_object payload for openrouter (regression check)', async () => {
+    it('upgrades openrouter to strict json_schema when the schema is strict-compatible (regression check)', async () => {
+      // Pre-0.9.113 this asserted json_object; the schema-enforced OpenRouter
+      // structured-output change routes strict-compatible schemas through the
+      // OpenAI-shaped json_schema payload (with require_parameters routing at
+      // the provider layer). Strict-INcompatible schemas (e.g. z.record) still
+      // degrade to json_object — covered by responseFormatForProvider.test.ts.
       const { resolveModelOption } = await import('../../model.js');
       vi.mocked(resolveModelOption).mockReturnValueOnce({
         providerId: 'openrouter',
@@ -659,7 +664,8 @@ describe('generateObject', () => {
       });
 
       const args = hoisted.generateCompletion.mock.calls[0][2];
-      expect(args.responseFormat).toEqual({ type: 'json_object' });
+      expect(args.responseFormat).toMatchObject({ type: 'json_schema' });
+      expect(args.responseFormat.json_schema.strict).toBe(true);
     });
   });
 
@@ -709,5 +715,77 @@ describe('generateObject', () => {
       const secondBudget = hoisted.generateCompletion.mock.calls[1][2].maxTokens as number;
       expect(secondBudget).toBe(firstBudget);
     });
+  });
+});
+
+describe('generateObject fallback-leg responseFormat rebuild (2026-07-07)', () => {
+  beforeEach(() => {
+    hoisted.generateCompletion.mockReset();
+    globalLLMProviderHealth.reset();
+  });
+
+  it('record schema, anthropic primary down -> openai leg gets json_object and output parses', async () => {
+    const { resolveModelOption, resolveProvider } = await import('../../model.js');
+    // Echo the requested provider/model through resolution so the anthropic
+    // primary and the openai leg each resolve as themselves.
+    vi.mocked(resolveModelOption).mockImplementation(
+      (opts: { provider?: string; model?: string }) => ({
+        providerId: opts?.provider ?? 'openai',
+        modelId: opts?.model ?? 'gpt-4o',
+      }),
+    );
+    vi.mocked(resolveProvider).mockImplementation(
+      (providerId: string, modelId: string) => ({
+        providerId,
+        modelId: modelId || 'default-model',
+        apiKey: 'test-key',
+      }),
+    );
+    try {
+      hoisted.generateCompletion.mockImplementation(async (modelId: string) => {
+        if (modelId === 'gpt-4o-mini') {
+          return mockResponse('{"palette": {"primary": "#aabbcc"}}');
+        }
+        throw new Error('503 overloaded');
+      });
+      // z.record lowers to a schema-valued additionalProperties -> fails the
+      // strict gate on the openai leg -> json_object degrade (the exact
+      // MechanicsComposition shape from the 2026-07-07 incident).
+      const schema = z.object({ palette: z.record(z.string(), z.string()) });
+
+      const result = await generateObject({
+        provider: 'anthropic',
+        model: 'claude-opus-4-8',
+        prompt: 'Compose',
+        schema,
+        fallbackProviders: [{ provider: 'openai', model: 'gpt-4o-mini' }],
+        maxRetries: 0,
+      });
+
+      expect(result.object).toEqual({ palette: { primary: '#aabbcc' } });
+      const calls = hoisted.generateCompletion.mock.calls as unknown[][];
+      // Primary call carried the anthropic forced-tool marker…
+      const primaryOptions = (calls.find((c) => c[0] === 'claude-opus-4-8')?.[2] ?? {}) as {
+        responseFormat?: Record<string, unknown>;
+      };
+      expect(primaryOptions.responseFormat?._agentosUseToolForStructuredOutput).toBe(true);
+      // …and the openai LEG was rebuilt to json_object (record schema fails
+      // the strict gate), NOT the verbatim anthropic marker.
+      const legOptions = (calls.find((c) => c[0] === 'gpt-4o-mini')?.[2] ?? {}) as {
+        responseFormat?: Record<string, unknown>;
+      };
+      expect(legOptions.responseFormat).toEqual({ type: 'json_object' });
+    } finally {
+      vi.mocked((await import('../../model.js')).resolveModelOption).mockImplementation(() => ({
+        providerId: 'openai',
+        modelId: 'gpt-4o',
+      }));
+      vi.mocked((await import('../../model.js')).resolveProvider).mockImplementation(() => ({
+        providerId: 'openai',
+        modelId: 'gpt-4o',
+        apiKey: 'test-key',
+      }));
+      globalLLMProviderHealth.reset();
+    }
   });
 });

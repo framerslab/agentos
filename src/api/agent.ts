@@ -22,6 +22,8 @@ import {
   type ToolCallHookInfo,
 } from './generateText.js';
 import { buildResponseFormat } from '../core/llm/providers/structuredOutputFormat.js';
+import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
+import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { ObjectGenerationError } from './generateObject.js';
 import { streamText, type StreamTextResult } from './streamText.js';
 import type { HostLLMPolicy } from './runtime/hostPolicy.js';
@@ -810,13 +812,30 @@ export function agent(opts: AgentOptions): Agent {
           // through to the provider via _responseFormat (see
           // generateText.ts:931 for the plumbing).
           let responseFormat: Record<string, unknown> | undefined;
+          let responseFormatBuilder: GenerateTextOptions['_responseFormatBuilder'];
           if (sendOpts?.responseSchema) {
             const providerId = resolveProviderForStructuredOutput(baseOpts);
+            const schema = sendOpts.responseSchema;
+            const schemaName = sendOpts.schemaName ?? 'response';
             responseFormat = buildResponseFormat({
               provider: providerId,
-              schema: sendOpts.responseSchema,
-              schemaName: sendOpts.schemaName ?? 'response',
+              schema,
+              schemaName,
             });
+            // Per-leg rebuild (same contract as generateObject): a fallback
+            // hop onto a foreign provider gets a payload shaped for THAT
+            // provider instead of this primary-shaped one, which the leg
+            // provider's guard would silently drop — leaving the leg with
+            // zero provider-side enforcement.
+            const jsonSchema = lowerZodToJsonSchema(schema);
+            responseFormatBuilder = (legProviderId, legModelId) =>
+              buildResponseFormatForProvider({
+                providerId: legProviderId,
+                modelId: legModelId,
+                jsonSchema,
+                effectiveSchema: schema,
+                schemaName,
+              });
           }
 
           // Schema-aware calls disable tools. Mixing native structured
@@ -849,6 +868,9 @@ export function agent(opts: AgentOptions): Agent {
                 source: 'agent.session.send',
               }),
               ...(responseFormat ? { _responseFormat: responseFormat } : {}),
+              ...(responseFormatBuilder
+                ? { _responseFormatBuilder: responseFormatBuilder }
+                : {}),
             },
             opts.memoryProvider,
             textForMemory,

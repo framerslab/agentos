@@ -75,8 +75,10 @@ export function modelSupportsStrictToolUse(modelId: string): boolean {
  * `canUseStrictJsonSchema` before opting a schema into strict mode.
  *
  * The walk visits only positions that hold subschemas (`properties` /
- * `patternProperties` / `$defs` / `definitions` VALUES, `items`,
- * `anyOf` / `oneOf` / `allOf` members) — a FIELD literally named
+ * `patternProperties` / `$defs` / `definitions` / `dependentSchemas` VALUES,
+ * `items` — single or tuple form — plus `prefixItems`, `anyOf` / `oneOf` /
+ * `allOf` members, and the single-schema positions `if` / `then` / `else` /
+ * `not` / `contains` / `unevaluatedProperties`) — a FIELD literally named
  * `additionalProperties` inside `properties` must not trip the check.
  *
  * @param inputSchema Lowered JSON Schema destined for `tool.input_schema`.
@@ -118,6 +120,26 @@ function nodeSupportsStrict(node: unknown, depth: number): boolean {
       for (const sub of members) if (!nodeSupportsStrict(sub, depth + 1)) return false;
     }
   }
+  // Draft-2020 completeness (2026-07-07): subschema positions agentos's own
+  // lowering never emits but a hand-authored input_schema can carry — a
+  // record hidden under any of these must fail the gate exactly like one
+  // under `properties`.
+  for (const key of ['if', 'then', 'else', 'not', 'contains', 'unevaluatedProperties'] as const) {
+    const sub = schema[key];
+    if (sub && typeof sub === 'object' && !Array.isArray(sub)) {
+      if (!nodeSupportsStrict(sub, depth + 1)) return false;
+    }
+  }
+  const prefixItems = schema.prefixItems;
+  if (Array.isArray(prefixItems)) {
+    for (const sub of prefixItems) if (!nodeSupportsStrict(sub, depth + 1)) return false;
+  }
+  const dependentSchemas = schema.dependentSchemas;
+  if (dependentSchemas && typeof dependentSchemas === 'object' && !Array.isArray(dependentSchemas)) {
+    for (const sub of Object.values(dependentSchemas as Record<string, unknown>)) {
+      if (!nodeSupportsStrict(sub, depth + 1)) return false;
+    }
+  }
   return true;
 }
 
@@ -142,9 +164,11 @@ function nodeSupportsStrict(node: unknown, depth: number): boolean {
  *
  * Pure + non-mutating: returns a structural copy; the input schema object
  * is never written to. Positions walked mirror the shape check
- * (`properties` / `patternProperties` / `$defs` / `definitions` values,
- * `items` — single or tuple form — and `anyOf` / `oneOf` / `allOf`
- * members). Only nodes that read as object schemas (`type: 'object'`, an
+ * (`properties` / `patternProperties` / `$defs` / `definitions` /
+ * `dependentSchemas` values, `items` — single or tuple form — plus
+ * `prefixItems`, `anyOf` / `oneOf` / `allOf` members, and `if` / `then` /
+ * `else` / `not` / `contains` / `unevaluatedProperties`). Only nodes that
+ * read as object schemas (`type: 'object'`, an
  * `'object'` member of a type array, or a `properties` map) get the stamp.
  * `required` is deliberately untouched: Anthropic strict accepts optional
  * properties — unlike OpenAI's json_schema mode, force-requiring them here
@@ -223,6 +247,25 @@ function stampNoExtraProps(node: unknown, depth: number): unknown {
   for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
     const members = out[key];
     if (Array.isArray(members)) out[key] = members.map(sub => stampNoExtraProps(sub, depth + 1));
+  }
+  // Draft-2020 completeness (2026-07-07) — mirror of the gate walk: stamp +
+  // strip inside conditional/tuple/dependency subschema positions too, so a
+  // strict-eligible schema carrying them cannot 400 on an unstamped node.
+  for (const key of ['if', 'then', 'else', 'not', 'contains', 'unevaluatedProperties'] as const) {
+    if (out[key] !== undefined && typeof out[key] === 'object') {
+      out[key] = stampNoExtraProps(out[key], depth + 1);
+    }
+  }
+  if (Array.isArray(out.prefixItems)) {
+    out.prefixItems = (out.prefixItems as unknown[]).map(sub => stampNoExtraProps(sub, depth + 1));
+  }
+  const dependentSchemas = out.dependentSchemas;
+  if (dependentSchemas && typeof dependentSchemas === 'object' && !Array.isArray(dependentSchemas)) {
+    const next: Record<string, unknown> = {};
+    for (const [k, sub] of Object.entries(dependentSchemas as Record<string, unknown>)) {
+      next[k] = stampNoExtraProps(sub, depth + 1);
+    }
+    out.dependentSchemas = next;
   }
   return out;
 }
