@@ -1,3 +1,7 @@
+## <small>0.9.119 (2026-07-08)</small>
+
+* feat(llm): surface the provider finish reason on streaming results ([eba6e6f520018bc9245d6a83d7721277adf62cfe](https://github.com/framerslab/agentos/commit/eba6e6f520018bc9245d6a83d7721277adf62cfe))
+
 ## <small>0.9.118 (2026-07-08)</small>
 
 * feat(llm): rebuild structured-output payloads per fallback leg ([fc23b578774942f991814cfd84d012bb2982bf43](https://github.com/framerslab/agentos/commit/fc23b578774942f991814cfd84d012bb2982bf43))
