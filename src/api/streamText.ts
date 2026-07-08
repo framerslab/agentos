@@ -60,6 +60,46 @@ export type StreamPart =
   | { type: 'error'; error: Error };
 
 /**
+ * Canonical finish-reason union for the streaming surface. Mirrors
+ * {@link GenerateTextResult.finishReason} so hosts can branch on one
+ * vocabulary regardless of which API produced the text.
+ */
+export type StreamFinishReason = 'stop' | 'length' | 'tool-calls' | 'error';
+
+/**
+ * Normalize a provider-reported finish reason onto the canonical
+ * {@link StreamFinishReason} union.
+ *
+ * Providers disagree on vocabulary: OpenAI-compatible hosts emit
+ * `length` / `tool_calls` / `stop`; Anthropic's adapter maps its raw
+ * `stop_reason` before it reaches this layer but raw `max_tokens` /
+ * `tool_use` / `end_turn` are accepted here too so a provider that
+ * skips that mapping still normalizes. Unknown strings and null/undefined
+ * degrade to `'stop'` — the pre-existing semantics of the streaming
+ * surface, which fabricated `'stop'` unconditionally.
+ */
+export function normalizeStreamFinishReason(
+  raw: string | null | undefined,
+): StreamFinishReason {
+  if (raw == null) return 'stop';
+  switch (raw.toLowerCase()) {
+    case 'length':
+    case 'max_tokens':
+    case 'model_length':
+      return 'length';
+    case 'tool-calls':
+    case 'tool_calls':
+    case 'tool_use':
+    case 'function_call':
+      return 'tool-calls';
+    case 'error':
+      return 'error';
+    default:
+      return 'stop';
+  }
+}
+
+/**
  * The object returned immediately by {@link streamText}.
  *
  * Consumers may iterate `textStream` for raw token deltas, `fullStream` for
@@ -90,6 +130,29 @@ export interface StreamTextResult {
   provider: Promise<string>;
   /** Resolves to the resolved model id once the stream has started. */
   model: Promise<string>;
+  /**
+   * Resolves to the reason the FINAL model step stopped emitting, on the
+   * same cadence as {@link usage} (when the stream completes):
+   *
+   * - `'stop'` — natural end of turn (or an unknown provider vocabulary).
+   * - `'length'` — the provider's output token cap cut the text off; the
+   *   assembled reply is TRUNCATED mid-thought. Hosts that persist or
+   *   cache streamed prose as canonical should branch on this before
+   *   doing so (wilds-ai narrator truncation guard, 2026-07-08).
+   * - `'tool-calls'` — the run ended with outstanding tool calls and no
+   *   final text (maxSteps exhaustion).
+   * - `'error'` — the stream emitted an `error` part.
+   *
+   * Historically the streaming surface discarded the provider's reason
+   * and fabricated `'stop'`; the provider layer always had it (final
+   * chunk `choices[0].finishReason`; Anthropic maps `max_tokens` →
+   * `length` in its adapter). Settled via the generator's cleanup on
+   * early abandonment too, so awaiting it after a partial consume does
+   * not hang — though like `text`/`usage` it is only meaningful after a
+   * full drain. The prompt-shim tool-emulation path reports `'stop'`
+   * (its internal calls do not thread per-step reasons).
+   */
+  finishReason: Promise<StreamFinishReason>;
 }
 
 function buildHelperToolExecutionContext(
@@ -146,6 +209,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
   let resolveToolCalls: (v: ToolCallRecord[]) => void;
   let resolveProviderId: (v: string) => void;
   let resolveModelId: (v: string) => void;
+  let resolveFinishReason: (v: StreamFinishReason) => void;
 
   const textPromise = new Promise<string>((r) => {
     resolveText = r;
@@ -167,6 +231,13 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
   const modelPromise = new Promise<string>((r) => {
     resolveModelId = r;
   });
+  // Finish reason of the FINAL step. Resolved at every terminal return
+  // path plus the generator's finally (belt-and-suspenders for early
+  // abandonment); Promise semantics make later settles no-ops, so the
+  // most specific settle wins.
+  const finishReasonPromise = new Promise<StreamFinishReason>((r) => {
+    resolveFinishReason = r;
+  });
 
   const parts: StreamPart[] = [];
   const allToolCalls: ToolCallRecord[] = [];
@@ -185,6 +256,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     let metricStatus: 'ok' | 'error' = 'ok';
     let recordedProviderId: string | undefined;
     let recordedModelId: string | undefined;
+    // Raw provider finish reason of the most recent step's final chunk.
+    // The LAST step's reason is the one that describes the assembled
+    // reply (earlier steps end on tool calls by construction).
+    let lastStepFinishReason: string | null = null;
 
     try {
       let { providerId, modelId } = resolveModelOption(opts, 'text');
@@ -495,6 +570,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               resolveText!(finalText);
               resolveUsage!(usage);
               resolveToolCalls!(allToolCalls);
+              resolveFinishReason!('error');
               return;
             }
 
@@ -534,6 +610,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
         const stepText = reconstructor.getFullText();
         const finalChunk = reconstructor.getFinalChunk();
+        // Capture the provider's reported reason for THIS step ending.
+        // Anthropic's adapter has already mapped its raw stop_reason
+        // (max_tokens → length); OpenAI-compatible providers report
+        // length/tool_calls/stop verbatim on the final chunk's choice.
+        {
+          const rawStepFinish = finalChunk?.choices?.[0]?.finishReason;
+          if (rawStepFinish != null) lastStepFinishReason = rawStepFinish;
+        }
         let streamedToolCalls = resolveDynamicToolCalls(
           finalChunk?.choices?.[0]?.message?.tool_calls ??
           reconstructor
@@ -595,12 +679,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         }
 
         if (!streamedToolCalls || streamedToolCalls.length === 0) {
-          rootSpan?.setAttribute('agentos.api.finish_reason', 'stop');
+          const stepFinish = normalizeStreamFinishReason(lastStepFinishReason);
+          rootSpan?.setAttribute('agentos.api.finish_reason', stepFinish);
           rootSpan?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
           attachUsageAttributes(rootSpan, usage);
           resolveText!(finalText);
           resolveUsage!(usage);
           resolveToolCalls!(allToolCalls);
+          resolveFinishReason!(stepFinish);
           return;
         }
 
@@ -759,6 +845,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       resolveText!(finalText);
       resolveUsage!(usage);
       resolveToolCalls!(allToolCalls);
+      // maxSteps exhausted. Outstanding tool calls with no final text is
+      // the classic 'tool-calls' ending; otherwise the last step's own
+      // reason describes the assembled reply.
+      resolveFinishReason!(
+        allToolCalls.length > 0 && !finalText
+          ? 'tool-calls'
+          : normalizeStreamFinishReason(lastStepFinishReason),
+      );
       // Primary streaming attempt succeeded: reset the failure streak
       // so a future transient error starts fresh. See
       // {@link LLMProviderHealthRegistry}.
@@ -789,6 +883,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       if (effectiveFallbacks.length && isRetryableError(error)) {
         let lastFallbackError: Error = error;
         let fallbackSucceeded = false;
+        let fallbackFinishReason: StreamFinishReason = 'stop';
         let attempt = 0;
 
         for (const fb of effectiveFallbacks) {
@@ -854,6 +949,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
             const fbToolCalls = await fallbackResult.toolCalls;
             allToolCalls.push(...fbToolCalls);
+            // The recursive fallback streamText computed its own reason;
+            // capture it while the result is in scope (drained above, so
+            // the promise is already settled).
+            fallbackFinishReason = await fallbackResult.finishReason;
 
             fallbackLogger.info('streaming provider fallback succeeded', {
               event: 'fallback_succeeded',
@@ -874,6 +973,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           resolveText!(finalText);
           resolveUsage!(usage);
           resolveToolCalls!(allToolCalls);
+          resolveFinishReason!(fallbackFinishReason);
         } else {
           fallbackLogger.warn('streaming provider fallbacks exhausted', {
             event: 'fallback_exhausted',
@@ -890,6 +990,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           resolveText!(finalText);
           resolveUsage!(usage);
           resolveToolCalls!(allToolCalls);
+          resolveFinishReason!('error');
         }
       } else {
         metricStatus = 'error';
@@ -899,6 +1000,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         resolveText!(finalText);
         resolveUsage!(usage);
         resolveToolCalls!(allToolCalls);
+        resolveFinishReason!('error');
       }
     } finally {
       // Belt-and-suspenders for the routing Promises: if the stream
@@ -908,6 +1010,18 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // consistent with successful resolution.
       resolveProviderId!(recordedProviderId ?? '');
       resolveModelId!(recordedModelId ?? '');
+      // Belt-and-suspenders like the routing Promises above: every
+      // normal terminal already settled finishReason with a specific
+      // value (Promise semantics make this a no-op there); this covers
+      // early consumer abandonment, thrown-before-terminal paths, and
+      // the prompt-shim delegation so awaiters never hang.
+      resolveFinishReason!(
+        metricStatus === 'error'
+          ? 'error'
+          : allToolCalls.length > 0 && !finalText
+            ? 'tool-calls'
+            : normalizeStreamFinishReason(lastStepFinishReason),
+      );
       rootSpan?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
       if (metricStatus === 'error') {
         rootSpan?.setAttribute('agentos.api.finish_reason', 'error');
@@ -946,7 +1060,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           model: recordedModelId ?? '',
           usage,
           source: opts.source,
-          finishReason: allToolCalls.length > 0 && !finalText ? 'tool-calls' : 'stop',
+          finishReason:
+            allToolCalls.length > 0 && !finalText
+              ? 'tool-calls'
+              : normalizeStreamFinishReason(lastStepFinishReason),
           surface: 'streamText',
           durationMs: Date.now() - startedAt,
           ...(firstPartAt !== undefined ? { ttfbMs: firstPartAt - startedAt } : {}),
@@ -992,5 +1109,6 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     toolCalls: toolCallsPromise,
     provider: providerPromise,
     model: modelPromise,
+    finishReason: finishReasonPromise,
   };
 }

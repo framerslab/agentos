@@ -258,8 +258,8 @@ export type {
   CacheMissReason,
 } from './core/llm/providers/IProvider.js';
 export { normalizeHostLLMPolicy } from './api/runtime/hostPolicy.js';
-export { streamText } from './api/streamText.js';
-export type { StreamTextResult, StreamPart } from './api/streamText.js';
+export { streamText, normalizeStreamFinishReason } from './api/streamText.js';
+export type { StreamTextResult, StreamPart, StreamFinishReason } from './api/streamText.js';
 export { agent } from './api/agent.js';
 export { souledAgent } from './api/souledAgent.js';
 export type { SouledAgentOptions, SouledAgent } from './api/souledAgent.js';
