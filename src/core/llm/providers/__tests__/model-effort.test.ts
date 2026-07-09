@@ -4,6 +4,8 @@ import {
   isEffortLevel,
   EFFORT_LEVELS,
   mapEffortToOpenAiReasoningEffort,
+  mapEffortToOpenAiResponsesEffort,
+  modelAcceptsXhighResponsesEffort,
 } from '../model-effort.js';
 
 describe('modelSupportsEffort', () => {
@@ -58,5 +60,35 @@ describe('mapEffortToOpenAiReasoningEffort', () => {
     for (const v of ['ultra', '', 5, null, undefined, {}]) {
       expect(mapEffortToOpenAiReasoningEffort(v)).toBeUndefined();
     }
+  });
+});
+
+describe('mapEffortToOpenAiResponsesEffort (model-aware /v1/responses effort)', () => {
+  it('allow-lists gpt-5.5 for xhigh (live-probed 2026-07-08)', () => {
+    expect(modelAcceptsXhighResponsesEffort('gpt-5.5')).toBe(true);
+    expect(modelAcceptsXhighResponsesEffort('gpt-5.5-pro')).toBe(true);
+    expect(modelAcceptsXhighResponsesEffort('gpt-5.4')).toBe(false);
+    expect(modelAcceptsXhighResponsesEffort('gpt-5-mini')).toBe(false);
+  });
+
+  it('passes xhigh through for gpt-5.5 (max -> xhigh, allow-listed)', () => {
+    expect(mapEffortToOpenAiResponsesEffort('gpt-5.5', 'max')).toBe('xhigh');
+    expect(mapEffortToOpenAiResponsesEffort('gpt-5.5', 'xhigh')).toBe('xhigh');
+  });
+
+  it('caps xhigh -> high for a non-allow-listed gpt-5 model', () => {
+    expect(mapEffortToOpenAiResponsesEffort('gpt-5.4', 'max')).toBe('high');
+    expect(mapEffortToOpenAiResponsesEffort('gpt-5-mini', 'xhigh')).toBe('high');
+  });
+
+  it('leaves low/medium/high untouched regardless of model', () => {
+    expect(mapEffortToOpenAiResponsesEffort('gpt-5.4', 'low')).toBe('low');
+    expect(mapEffortToOpenAiResponsesEffort('gpt-5.4', 'medium')).toBe('medium');
+    expect(mapEffortToOpenAiResponsesEffort('gpt-5.4', 'high')).toBe('high');
+  });
+
+  it('returns undefined for no/unknown effort', () => {
+    expect(mapEffortToOpenAiResponsesEffort('gpt-5.5', undefined)).toBeUndefined();
+    expect(mapEffortToOpenAiResponsesEffort('gpt-5.5', 'ultra')).toBeUndefined();
   });
 });
