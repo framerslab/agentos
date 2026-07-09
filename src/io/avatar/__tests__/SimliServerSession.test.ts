@@ -74,7 +74,7 @@ describe('createSimliServerSession', () => {
     });
     const first = JSON.parse(String(holder.ws!.sent[0]));
     expect(first).toEqual({ type: 'offer', sdp: 'offer-sdp' });
-    expect(holder.ws!.url).toContain('/compose/webrtc/peer_to_peer');
+    expect(holder.ws!.url).toContain('/compose/webrtc/p2p');
     expect(holder.ws!.url).toContain('st-1');
   });
 

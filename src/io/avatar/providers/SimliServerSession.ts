@@ -3,7 +3,9 @@
  *
  * Server-driven media path for Simli: Node owns the WebRTC peer connection
  * and drives the avatar over Simli's documented AsyncAPI websocket protocol
- * (`wss …/compose/webrtc/peer_to_peer`).
+ * (`wss …/compose/webrtc/p2p` — Simli renamed the address from
+ * `peer_to_peer`; their served asyncapi.yaml lagged the rename and the old
+ * path 403s every token, live-probed 2026-07-09).
  *
  * Protocol (verified 2026-07-08 against api.simli.ai/asyncapi.yaml):
  * - Session token rides the query string; optional `enableSFU=true` relays
@@ -185,7 +187,7 @@ export async function createSimliServerSession(
 
   const base = opts.wsBaseUrl ?? 'wss://api.simli.ai';
   const url =
-    `${base}/compose/webrtc/peer_to_peer?session_token=${encodeURIComponent(handle.sessionToken)}` +
+    `${base}/compose/webrtc/p2p?session_token=${encodeURIComponent(handle.sessionToken)}` +
     (opts.enableSFU ? '&enableSFU=true' : '');
   const ws = opts.wsFactory ? opts.wsFactory(url) : new WebSocket(url);
 
