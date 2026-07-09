@@ -1,3 +1,7 @@
+## <small>0.9.125 (2026-07-09)</small>
+
+* fix(sandbox): load execa lazily so CJS-interop consumers can load the sandbox modules ([6193100b8cd1bca6849234cb5666c489829f88c0](https://github.com/framerslab/agentos/commit/6193100b8cd1bca6849234cb5666c489829f88c0))
+
 ## <small>0.9.124 (2026-07-09)</small>
 
 * feat(avatar): realtime avatar seam with simli provider (client-delegated + server-driven) ([bef906ccbf508106f4d3d069636c8f92202b427f](https://github.com/framerslab/agentos/commit/bef906ccbf508106f4d3d069636c8f92202b427f))
