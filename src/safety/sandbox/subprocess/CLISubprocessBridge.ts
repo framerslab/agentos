@@ -27,7 +27,16 @@ import type { ResultPromise } from 'execa';
  */
 let execaModulePromise: Promise<typeof import('execa')> | undefined;
 function loadExeca(): Promise<typeof import('execa')> {
-  execaModulePromise ??= import('execa');
+  // Do NOT let a rejection stick. Node re-attempts a failed module
+  // *resolution* on the next import(), so memoizing the rejected promise
+  // would be stricter than the platform: one transient failure (a partial
+  // install, a racing package manager) would poison every later sandbox and
+  // CLI call for the lifetime of the process. Drop the cache on failure and
+  // rethrow, so the next caller retries exactly as a bare import() would.
+  execaModulePromise ??= import('execa').catch((err) => {
+    execaModulePromise = undefined;
+    throw err;
+  });
   return execaModulePromise;
 }
 import { CLISubprocessError } from './errors';
