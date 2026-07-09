@@ -131,6 +131,22 @@ export interface WebSocketStreamTransportConfig {
    * @example 16000
    */
   sampleRate: number;
+
+  /**
+   * Wire encoding of INBOUND binary audio frames.
+   *
+   * - `'float32'` (default) — each binary message is a serialized
+   *   `Float32Array` of samples in [-1, 1]. Legacy/back-compat behavior.
+   * - `'linear16'` — each binary message is raw signed 16-bit LE PCM
+   *   (`Int16Array` bytes). This is what browser capture worklets typically
+   *   send (and what Deepgram-style STT expects natively); samples are
+   *   converted to Float32 in [-1, 1] before the `'audio'` event fires.
+   *
+   * Pick the value that matches the remote client's actual wire format —
+   * decoding Int16 bytes as Float32 yields garbage samples that transcribe
+   * as silence.
+   */
+  inboundEncoding?: 'float32' | 'linear16';
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +227,9 @@ export class WebSocketStreamTransport extends EventEmitter implements IStreamTra
    */
   private readonly _sampleRate: number;
 
+  /** Wire encoding of inbound binary frames ('float32' legacy default). */
+  private readonly _inboundEncoding: 'float32' | 'linear16';
+
   // -------------------------------------------------------------------------
   // Constructor
   // -------------------------------------------------------------------------
@@ -230,6 +249,7 @@ export class WebSocketStreamTransport extends EventEmitter implements IStreamTra
     super();
     this._ws = ws;
     this._sampleRate = config.sampleRate;
+    this._inboundEncoding = config.inboundEncoding ?? 'float32';
     this.id = randomUUID();
 
     // Determine initial state from the socket's current ready-state value.
@@ -342,14 +362,25 @@ export class WebSocketStreamTransport extends EventEmitter implements IStreamTra
    * no further events are expected.
    */
   private _attachWsListeners(): void {
-    // `message` -- inbound data from the remote peer
-    this._ws.on('message', (data: Buffer | ArrayBuffer | string) => {
-      if (typeof data === 'string') {
+    // `message` -- inbound data from the remote peer.
+    //
+    // `ws` v8+ delivers BOTH text and binary frames as Buffers and signals the
+    // distinction via the second `isBinary` argument — a `typeof data ===
+    // 'string'` check alone silently routes every JSON control frame into the
+    // binary/audio path (garbage frames, and a RangeError when the JSON's
+    // byteLength isn't sample-aligned). Honor `isBinary` when the socket
+    // provides it; fall back to the typeof check for browser-style polyfills
+    // and mocks that deliver text as actual strings.
+    this._ws.on('message', (data: Buffer | ArrayBuffer | string, isBinary?: boolean) => {
+      const isText = typeof data === 'string' || isBinary === false;
+      if (isText) {
         // Text frame: parse as ClientTextMessage JSON and propagate as 'control'.
         // Malformed JSON emits an error but does NOT crash the transport,
         // allowing the session to recover from a single bad message.
+        const text =
+          typeof data === 'string' ? data : Buffer.from(data as ArrayBuffer).toString('utf-8');
         try {
-          const msg = JSON.parse(data) as ClientTextMessage;
+          const msg = JSON.parse(text) as ClientTextMessage;
           this.emit('message', msg);
         } catch (err) {
           this.emit(
@@ -360,7 +391,7 @@ export class WebSocketStreamTransport extends EventEmitter implements IStreamTra
           );
         }
       } else {
-        // Binary frame: interpret bytes as a Float32Array PCM sample buffer.
+        // Binary frame: decode per the configured inbound encoding.
         // The `ws` package delivers binary as a Node.js Buffer; browser-style
         // WebSocket polyfills may deliver an ArrayBuffer instead.
         let buffer: Buffer;
@@ -368,18 +399,35 @@ export class WebSocketStreamTransport extends EventEmitter implements IStreamTra
           buffer = data;
         } else {
           // ArrayBuffer (browser-style) -- wrap in a Node.js Buffer
-          buffer = Buffer.from(data);
+          buffer = Buffer.from(data as ArrayBuffer);
         }
 
-        // Create a Float32Array view over the underlying ArrayBuffer.
-        // We use byteOffset and byteLength to handle sliced Buffers correctly,
-        // since Buffer.from() may return a view into Node's internal pool
-        // rather than a fresh allocation.
-        const samples = new Float32Array(
-          buffer.buffer,
-          buffer.byteOffset,
-          buffer.byteLength / Float32Array.BYTES_PER_ELEMENT
-        );
+        // ALWAYS copy into a freshly allocated, aligned buffer before creating
+        // the typed-array view. `ws` hands out views into its internal receive
+        // pool: their byteOffset is arbitrary (a non-4-aligned offset makes
+        // `new Float32Array(buf, offset, n)` throw
+        // "RangeError: start offset of Float32Array should be a multiple of 4"
+        // — observed crashing live sessions), the pool memory may be reused
+        // after the handler returns, and a trailing partial sample would make
+        // the view length non-integral. The copy is a few KB per frame.
+        let samples: Float32Array;
+        if (this._inboundEncoding === 'linear16') {
+          // Raw signed 16-bit LE PCM (browser worklet wire) → Float32 [-1, 1].
+          const sampleCount = Math.floor(buffer.byteLength / 2);
+          samples = new Float32Array(sampleCount);
+          for (let i = 0; i < sampleCount; i++) {
+            samples[i] = buffer.readInt16LE(i * 2) / 32768;
+          }
+        } else {
+          const sampleCount = Math.floor(
+            buffer.byteLength / Float32Array.BYTES_PER_ELEMENT
+          );
+          const aligned = new ArrayBuffer(sampleCount * Float32Array.BYTES_PER_ELEMENT);
+          new Uint8Array(aligned).set(
+            buffer.subarray(0, sampleCount * Float32Array.BYTES_PER_ELEMENT)
+          );
+          samples = new Float32Array(aligned);
+        }
 
         const frame: AudioFrame = {
           samples,

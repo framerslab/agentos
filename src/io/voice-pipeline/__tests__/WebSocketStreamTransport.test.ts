@@ -117,6 +117,76 @@ describe('WebSocketStreamTransport', () => {
     expect(frame.samples[2]).toBeCloseTo(0.3);
   });
 
+  /**
+   * `ws` v8+ pools its receive buffers, so a binary frame's Buffer can sit at
+   * an arbitrary byteOffset. The old zero-copy Float32Array view threw
+   * "RangeError: start offset of Float32Array should be a multiple of 4" on
+   * non-aligned offsets (observed crashing live voice sessions as
+   * uncaughtExceptions). The decode must copy into an aligned buffer.
+   */
+  it('should decode a binary frame whose Buffer sits at a non-4-aligned pool offset', () => {
+    const listener = vi.fn();
+    transport.on('audio', listener);
+
+    // Simulate a pooled buffer: samples start 2 bytes into the backing store.
+    const samples = new Float32Array([0.25, -0.75]);
+    const backing = Buffer.alloc(2 + samples.byteLength);
+    Buffer.from(samples.buffer).copy(backing, 2);
+    const pooledView = backing.subarray(2); // byteOffset = 2 (not % 4)
+
+    expect(() => ws.emit('message', pooledView)).not.toThrow();
+    expect(listener).toHaveBeenCalledOnce();
+    const frame: AudioFrame = listener.mock.calls[0][0];
+    expect(frame.samples.length).toBe(2);
+    expect(frame.samples[0]).toBeCloseTo(0.25);
+    expect(frame.samples[1]).toBeCloseTo(-0.75);
+  });
+
+  // -------------------------------------------------------------------------
+  // Inbound binary -> 'audio' (linear16 wire)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Browser capture worklets send raw signed 16-bit LE PCM. With
+   * `inboundEncoding: 'linear16'` the transport must convert those bytes to
+   * Float32 samples in [-1, 1] — interpreting them as Float32 (the old
+   * behavior for every wire) yields garbage that transcribes as silence.
+   */
+  it('should decode Int16 PCM into Float32 samples when inboundEncoding is linear16', () => {
+    const t = new WebSocketStreamTransport(ws, {
+      sampleRate: 16_000,
+      inboundEncoding: 'linear16',
+    });
+    const listener = vi.fn();
+    t.on('audio', listener);
+
+    const pcm = new Int16Array([16384, -16384, 32767, -32768]);
+    ws.emit('message', Buffer.from(pcm.buffer));
+
+    expect(listener).toHaveBeenCalledOnce();
+    const frame: AudioFrame = listener.mock.calls[0][0];
+    expect(frame.samples).toBeInstanceOf(Float32Array);
+    expect(frame.samples.length).toBe(4);
+    expect(frame.samples[0]).toBeCloseTo(0.5);
+    expect(frame.samples[1]).toBeCloseTo(-0.5);
+    expect(frame.samples[2]).toBeCloseTo(1.0, 2);
+    expect(frame.samples[3]).toBeCloseTo(-1.0);
+  });
+
+  it('should truncate a trailing partial sample instead of throwing (linear16)', () => {
+    const t = new WebSocketStreamTransport(ws, {
+      sampleRate: 16_000,
+      inboundEncoding: 'linear16',
+    });
+    const listener = vi.fn();
+    t.on('audio', listener);
+
+    // 5 bytes = 2 full Int16 samples + 1 dangling byte
+    expect(() => ws.emit('message', Buffer.from([0, 64, 0, 192, 7]))).not.toThrow();
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener.mock.calls[0][0].samples.length).toBe(2);
+  });
+
   // -------------------------------------------------------------------------
   // Inbound text -> 'message'
   // -------------------------------------------------------------------------
@@ -130,6 +200,26 @@ describe('WebSocketStreamTransport', () => {
 
     expect(listener).toHaveBeenCalledOnce();
     expect(listener.mock.calls[0][0]).toEqual(payload);
+  });
+
+  /**
+   * `ws` v8+ delivers TEXT frames as Buffers with `isBinary === false` (never
+   * as strings). The old `typeof data === 'string'` check routed every JSON
+   * control frame into the binary/audio path as garbage samples. The
+   * transport must honor the `isBinary` flag when the socket provides it.
+   */
+  it('should route a Buffer text frame (ws v8 isBinary=false) to "message", not "audio"', () => {
+    const msgListener = vi.fn();
+    const audioListener = vi.fn();
+    transport.on('message', msgListener);
+    transport.on('audio', audioListener);
+
+    const payload = { type: 'barge_in', timestamp: 123 };
+    ws.emit('message', Buffer.from(JSON.stringify(payload), 'utf-8'), false);
+
+    expect(msgListener).toHaveBeenCalledOnce();
+    expect(msgListener.mock.calls[0][0]).toEqual(payload);
+    expect(audioListener).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------
