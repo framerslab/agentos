@@ -12,7 +12,23 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { execa } from 'execa';
+/**
+ * Lazily load execa on first use.
+ *
+ * execa@9 pulls import-only ESM dependencies (npm-run-path →
+ * unicorn-magic) that require-based CJS interop pipelines (for example
+ * tsx transpiling this module for a CommonJS consumer) cannot resolve at
+ * require time — a static import crashed such consumers with
+ * ERR_PACKAGE_PATH_NOT_EXPORTED before any sandbox code ran. A dynamic
+ * import keeps loading this module side-effect-free and resolves execa
+ * through the native ESM resolver, which handles those exports.
+ * Memoized so the import cost is paid once per process.
+ */
+let execaModulePromise: Promise<typeof import('execa')> | undefined;
+function loadExeca(): Promise<typeof import('execa')> {
+  execaModulePromise ??= import('execa');
+  return execaModulePromise;
+}
 import type { CLIDescriptor, CLIScanResult } from './types.js';
 
 /* ------------------------------------------------------------------ */
@@ -152,6 +168,7 @@ export class CLIRegistry {
     }
 
     try {
+      const { execa } = await loadExeca();
       const whichResult = await execa('which', [binaryName]);
       const binaryPath = whichResult.stdout.trim();
 

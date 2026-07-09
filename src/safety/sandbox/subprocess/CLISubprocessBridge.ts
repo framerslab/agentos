@@ -11,7 +11,25 @@
  * @see ClaudeCodeCLIBridge
  */
 
-import { execa, type ResultPromise } from 'execa';
+import type { ResultPromise } from 'execa';
+
+/**
+ * Lazily load execa on first use.
+ *
+ * execa@9 pulls import-only ESM dependencies (npm-run-path →
+ * unicorn-magic) that require-based CJS interop pipelines (for example
+ * tsx transpiling this module for a CommonJS consumer) cannot resolve at
+ * require time — a static import crashed such consumers with
+ * ERR_PACKAGE_PATH_NOT_EXPORTED before any sandbox code ran. A dynamic
+ * import keeps loading this module side-effect-free and resolves execa
+ * through the native ESM resolver, which handles those exports.
+ * Memoized so the import cost is paid once per process.
+ */
+let execaModulePromise: Promise<typeof import('execa')> | undefined;
+function loadExeca(): Promise<typeof import('execa')> {
+  execaModulePromise ??= import('execa');
+  return execaModulePromise;
+}
 import { CLISubprocessError } from './errors';
 import type {
   BridgeOptions,
@@ -135,6 +153,7 @@ export abstract class CLISubprocessBridge {
    */
   async checkBinaryInstalled(): Promise<InstallCheckResult> {
     try {
+      const { execa } = await loadExeca();
       const whichResult = await execa('which', [this.binaryName]);
       const binaryPath = whichResult.stdout.trim();
 
@@ -154,6 +173,7 @@ export abstract class CLISubprocessBridge {
   async checkAuthenticated(): Promise<boolean> {
     try {
       const { args, stdin } = this.buildAuthCheckArgs();
+      const { execa } = await loadExeca();
       await execa(this.binaryName, args, { input: stdin, timeout: 30_000 });
       return true;
     } catch {
@@ -175,6 +195,7 @@ export abstract class CLISubprocessBridge {
     const startMs = Date.now();
 
     try {
+      const { execa } = await loadExeca();
       const result = await execa(this.binaryName, args, {
         input: options.prompt,
         timeout: options.timeout ?? DEFAULT_TIMEOUT_MS,
@@ -203,6 +224,7 @@ export abstract class CLISubprocessBridge {
 
     let subprocess: ResultPromise;
     try {
+      const { execa } = await loadExeca();
       subprocess = execa(this.binaryName, args, {
         input: options.prompt,
         timeout: options.timeout ?? DEFAULT_TIMEOUT_MS,
