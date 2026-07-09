@@ -14,6 +14,8 @@ import { ElevenLabsStreamingTTS } from './providers/ElevenLabsStreamingTTS.js';
 import { DeepgramAuraStreamingTTS } from './providers/DeepgramAuraStreamingTTS.js';
 import { OpenAIRealtimeTTS } from './providers/OpenAIRealtimeTTS.js';
 import { ElevenLabsBatchTTS } from './providers/ElevenLabsBatchTTS.js';
+import { CartesiaStreamingTTS } from './providers/CartesiaStreamingTTS.js';
+import { HumeStreamingTTS } from './providers/HumeStreamingTTS.js';
 import { OpenAIBatchTTS } from './providers/OpenAIBatchTTS.js';
 import { StreamingSTTChain } from './providers/StreamingSTTChain.js';
 import { StreamingTTSChain } from './providers/StreamingTTSChain.js';
@@ -49,10 +51,12 @@ export interface VoiceProviderEnvConfig {
   /**
    * Which TTS vendor to prefer for first-try synthesis. `'deepgram'` (default)
    * ranks Deepgram Aura ahead of ElevenLabs; `'elevenlabs'` ranks ElevenLabs
-   * first (used for a paid-tier premium-voice opt-in). Either way the other
-   * vendors stay in the chain as automatic fallbacks.
+   * first (used for a paid-tier premium-voice opt-in); `'cartesia'` / `'hume'`
+   * promote those vendors' streaming providers to first-try when their keys
+   * are present. Either way the other vendors stay in the chain as automatic
+   * fallbacks.
    */
-  ttsPreference?: 'deepgram' | 'elevenlabs';
+  ttsPreference?: 'deepgram' | 'elevenlabs' | 'cartesia' | 'hume';
   /** Whether the STT chain keeps a ring buffer + re-routes mid-utterance.
    *  Default true — this is the whole point of the resilience work. */
   enableMidUtteranceFailover?: boolean;
@@ -80,11 +84,16 @@ export function createVoiceProvidersFromEnv(
     'DEEPGRAM_API_KEY',
     'ELEVENLABS_API_KEY',
     'OPENAI_API_KEY',
+    'CARTESIA_API_KEY',
+    'HUME_API_KEY',
   ];
 
   const deepgramKey = env['DEEPGRAM_API_KEY'];
   const elevenLabsKey = env['ELEVENLABS_API_KEY'];
   const openaiKey = env['OPENAI_API_KEY'];
+  const cartesiaKey = env['CARTESIA_API_KEY'];
+  const cartesiaVoiceId = env['CARTESIA_VOICE_ID'];
+  const humeKey = env['HUME_API_KEY'];
 
   const metrics = new VoiceMetricsReporter();
   const breaker = new CircuitBreaker({
@@ -132,6 +141,29 @@ export function createVoiceProvidersFromEnv(
     ttsProviders.push(
       new ElevenLabsBatchTTS({ apiKey: elevenLabsKey, priority: 80 }) as unknown as
         IStreamingTTS & HealthyProvider
+    );
+  }
+
+  // New alternates ride the STREAMING chain only (there is no batch chain
+  // here; batch consumers instantiate providers directly). A preference
+  // promotes the vendor ahead of Deepgram Aura's first-try slot (5).
+  if (cartesiaKey && cartesiaVoiceId) {
+    // Cartesia has no vendor-default voice — without a voice id the provider
+    // cannot synthesize, so it only joins the chain when one is configured.
+    ttsProviders.push(
+      new CartesiaStreamingTTS({
+        apiKey: cartesiaKey,
+        voiceId: cartesiaVoiceId,
+        priority: config.ttsPreference === 'cartesia' ? 4 : 12,
+      })
+    );
+  }
+  if (humeKey) {
+    ttsProviders.push(
+      new HumeStreamingTTS({
+        apiKey: humeKey,
+        priority: config.ttsPreference === 'hume' ? 4 : 14,
+      })
     );
   }
 

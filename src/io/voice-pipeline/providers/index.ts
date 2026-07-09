@@ -31,6 +31,24 @@ export {
   type DeepgramAuraBatchTTSConfig,
   chunkForAura,
 } from './DeepgramAuraBatchTTS.js';
+export {
+  CartesiaBatchTTS,
+  CARTESIA_VERSION,
+  type CartesiaBatchTTSConfig,
+} from './CartesiaBatchTTS.js';
+export {
+  CartesiaStreamingTTS,
+  type CartesiaStreamingTTSConfig,
+} from './CartesiaStreamingTTS.js';
+export {
+  HumeBatchTTS,
+  type HumeBatchTTSConfig,
+  type HumeVoiceRef,
+} from './HumeBatchTTS.js';
+export {
+  HumeStreamingTTS,
+  type HumeStreamingTTSConfig,
+} from './HumeStreamingTTS.js';
 export { BatchTTSFallback } from './BatchTTSFallback.js';
 // Batch (one-shot) STT providers.
 export {
