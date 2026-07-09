@@ -1,3 +1,7 @@
+## <small>0.9.127 (2026-07-09)</small>
+
+* fix(api): raise the default fallback chain to the gpt-5.5 quality floor ([9b6d501fc2b51de75be74e8fc297b20767847043](https://github.com/framerslab/agentos/commit/9b6d501fc2b51de75be74e8fc297b20767847043))
+
 ## <small>0.9.126 (2026-07-09)</small>
 
 * fix(sandbox): retry a failed execa import instead of caching the rejection ([2d05a017fb3dbe8c514cefc9c406872d71fbb920](https://github.com/framerslab/agentos/commit/2d05a017fb3dbe8c514cefc9c406872d71fbb920))
