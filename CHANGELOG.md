@@ -1,3 +1,7 @@
+## <small>0.9.126 (2026-07-09)</small>
+
+* fix(sandbox): retry a failed execa import instead of caching the rejection ([2d05a017fb3dbe8c514cefc9c406872d71fbb920](https://github.com/framerslab/agentos/commit/2d05a017fb3dbe8c514cefc9c406872d71fbb920))
+
 ## <small>0.9.125 (2026-07-09)</small>
 
 * fix(sandbox): load execa lazily so CJS-interop consumers can load the sandbox modules ([6193100b8cd1bca6849234cb5666c489829f88c0](https://github.com/framerslab/agentos/commit/6193100b8cd1bca6849234cb5666c489829f88c0))
