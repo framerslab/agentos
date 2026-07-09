@@ -1,3 +1,7 @@
+## <small>0.9.122 (2026-07-09)</small>
+
+* fix(voice): linear16 streaming Aura with WAV chunks, fail-fast Deepgram connects, linear16 inbound transport decode ([a2cb6c48a69a8f39a835090b57d847cff07f08e7](https://github.com/framerslab/agentos/commit/a2cb6c48a69a8f39a835090b57d847cff07f08e7))
+
 ## <small>0.9.121 (2026-07-08)</small>
 
 * fix(llm): drop reasoning_effort when a GPT-5 request carries function tools ([ae41fa9f1ad7339bea337619a7a162937b48dac6](https://github.com/framerslab/agentos/commit/ae41fa9f1ad7339bea337619a7a162937b48dac6))
