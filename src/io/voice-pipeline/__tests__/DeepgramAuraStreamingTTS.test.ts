@@ -48,7 +48,10 @@ vi.mock('ws', () => {
 });
 
 import { DeepgramAuraStreamingTTS } from '../providers/DeepgramAuraStreamingTTS.js';
-import { WebSocket as MockedWs } from 'ws';
+// Default import: the 'ws' types only expose WebSocket as the default export
+// under this tsconfig (TS2595 on a named import). vi.mock supplies the same
+// mock class for both the default and named bindings.
+import MockedWs from 'ws';
 
 const MockCtl = MockedWs as unknown as { nextBehavior: 'open' | 'reject-400' };
 
