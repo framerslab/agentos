@@ -1,3 +1,10 @@
+## <small>0.9.124 (2026-07-09)</small>
+
+* feat(avatar): realtime avatar seam with simli provider (client-delegated + server-driven) ([bef906ccbf508106f4d3d069636c8f92202b427f](https://github.com/framerslab/agentos/commit/bef906ccbf508106f4d3d069636c8f92202b427f))
+* feat(voice): cartesia batch + streaming tts providers ([e7436a24b884c600d09a8ddb1283a7833165829e](https://github.com/framerslab/agentos/commit/e7436a24b884c600d09a8ddb1283a7833165829e))
+* feat(voice): expressiveness instructions knob + cartesia/hume provider families ([03bbfcf038b90b2d491a15e09ffc19157c8c4299](https://github.com/framerslab/agentos/commit/03bbfcf038b90b2d491a15e09ffc19157c8c4299))
+* feat(voice): hume octave batch + streaming tts providers + env wiring ([158c5df8c2af4716429f106438de76e5e93fe1d3](https://github.com/framerslab/agentos/commit/158c5df8c2af4716429f106438de76e5e93fe1d3))
+
 ## <small>0.9.123 (2026-07-09)</small>
 
 * feat(llm): route gpt-5 reasoning + function-tool calls to the OpenAI Responses API ([bf48b943b8c6f4cf0cc09e426c838063810d02ef](https://github.com/framerslab/agentos/commit/bf48b943b8c6f4cf0cc09e426c838063810d02ef))
