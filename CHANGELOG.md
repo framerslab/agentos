@@ -1,3 +1,8 @@
+## <small>0.9.123 (2026-07-09)</small>
+
+* feat(llm): route gpt-5 reasoning + function-tool calls to the OpenAI Responses API ([bf48b943b8c6f4cf0cc09e426c838063810d02ef](https://github.com/framerslab/agentos/commit/bf48b943b8c6f4cf0cc09e426c838063810d02ef))
+* test(voice): default-import the ws mock to satisfy TS2595 under strict interop ([00b12b525e9a0279b387634c106ad99532ca7ccd](https://github.com/framerslab/agentos/commit/00b12b525e9a0279b387634c106ad99532ca7ccd))
+
 ## <small>0.9.122 (2026-07-09)</small>
 
 * fix(voice): linear16 streaming Aura with WAV chunks, fail-fast Deepgram connects, linear16 inbound transport decode ([a2cb6c48a69a8f39a835090b57d847cff07f08e7](https://github.com/framerslab/agentos/commit/a2cb6c48a69a8f39a835090b57d847cff07f08e7))
