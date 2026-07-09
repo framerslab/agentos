@@ -295,6 +295,11 @@
       "default": "./dist/io/media/images/index.js",
       "types": "./dist/io/media/images/index.d.ts"
     },
+    "./io/avatar": {
+      "import": "./dist/io/avatar/index.js",
+      "default": "./dist/io/avatar/index.js",
+      "types": "./dist/io/avatar/index.d.ts"
+    },
     "./io/media/avatar": {
       "import": "./dist/io/media/avatar/index.js",
       "default": "./dist/io/media/avatar/index.js",
