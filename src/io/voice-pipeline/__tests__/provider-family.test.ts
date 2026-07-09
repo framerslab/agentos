@@ -31,3 +31,14 @@ describe('ttsProviderFamily', () => {
     expect(ttsProviderFamily('some-new-vendor')).toBe('some-new-vendor');
   });
 });
+
+describe('cartesia + hume families', () => {
+  it('collapses cartesia provider ids', () => {
+    expect(ttsProviderFamily('cartesia-sonic')).toBe('cartesia');
+    expect(ttsProviderFamily('cartesia-sonic-stream')).toBe('cartesia');
+  });
+  it('collapses hume provider ids', () => {
+    expect(ttsProviderFamily('hume-octave')).toBe('hume');
+    expect(ttsProviderFamily('hume-octave-stream')).toBe('hume');
+  });
+});

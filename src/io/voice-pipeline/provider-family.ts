@@ -18,7 +18,13 @@
  */
 
 /** Coarse provider family. Unknown labels pass through verbatim. */
-export type TtsProviderFamily = 'deepgram' | 'openai' | 'elevenlabs' | (string & {});
+export type TtsProviderFamily =
+  | 'deepgram'
+  | 'openai'
+  | 'elevenlabs'
+  | 'cartesia'
+  | 'hume'
+  | (string & {});
 
 /**
  * Collapse a granular provider id (or an already-coarse routing label) to its
@@ -37,5 +43,7 @@ export function ttsProviderFamily(providerId: string): TtsProviderFamily {
   if (p.startsWith('deepgram')) return 'deepgram';
   if (p.startsWith('openai')) return 'openai';
   if (p.startsWith('elevenlabs')) return 'elevenlabs';
+  if (p.startsWith('cartesia')) return 'cartesia';
+  if (p.startsWith('hume')) return 'hume';
   return providerId;
 }

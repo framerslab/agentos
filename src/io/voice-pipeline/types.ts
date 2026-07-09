@@ -954,6 +954,14 @@ export interface TTSExpressiveness {
   speed?: number;
   /** ElevenLabs speaker-boost toggle. */
   useSpeakerBoost?: boolean;
+  /**
+   * Natural-language acting direction (e.g. "whisper, urgent, on the verge
+   * of tears"). Rendered only by providers with an instruction surface —
+   * Hume Octave maps it to `utterances[].description`. Providers without
+   * such a surface ignore it, and per the appliedExpressiveness contract it
+   * is reported ONLY when the serving provider actually consumed it.
+   */
+  instructions?: string;
 }
 
 export interface BatchTTSConfig {
