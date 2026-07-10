@@ -1,3 +1,8 @@
+## <small>0.9.131 (2026-07-10)</small>
+
+* fix(llm): abandoned streams settle every promise; strip covers /responses ([d531c47d136d36ea917f53f8cbcb9ac95bfe7023](https://github.com/framerslab/agentos/commit/d531c47d136d36ea917f53f8cbcb9ac95bfe7023))
+* fix(llm): diagnostics resolvers accept the adopted fallback promises ([c442249ab6a69b7ad81e9bfebd781c6484d5e365](https://github.com/framerslab/agentos/commit/c442249ab6a69b7ad81e9bfebd781c6484d5e365))
+
 ## <small>0.9.130 (2026-07-10)</small>
 
 * fix(llm): native providers no longer forward OpenRouter routing controls ([f9d88b1d0e7587979b3d1c5dccee0d96b776c680](https://github.com/framerslab/agentos/commit/f9d88b1d0e7587979b3d1c5dccee0d96b776c680))
