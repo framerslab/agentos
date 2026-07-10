@@ -131,8 +131,14 @@ export class PlivoSmsChannelAdapter extends BaseChannelAdapter<PlivoSmsAuthParam
         console.log(`[Plivo SMS] Connected (${data.name ?? this.authId}, ${this.phoneNumber})`);
         return;
       }
+      if (resp.status === 401 || resp.status === 403) {
+        throw new Error(`[Plivo SMS] Authentication failed (HTTP ${resp.status}) — check authId/authToken.`);
+      }
       console.warn(`[Plivo SMS] Account verification returned HTTP ${resp.status}.`);
     } catch (err) {
+      if (err instanceof Error && err.message.includes('Authentication failed')) {
+        throw err;
+      }
       console.warn(`[Plivo SMS] Account verification failed: ${err}`);
     }
     this.platformInfo = { provider: 'plivo', authId: this.authId, phoneNumber: this.phoneNumber };
@@ -215,7 +221,10 @@ export class PlivoSmsChannelAdapter extends BaseChannelAdapter<PlivoSmsAuthParam
       headers?: Record<string, string | string[] | undefined>;
     },
   ): void {
-    if (this.status !== 'connected') return;
+    if (this.status !== 'connected') {
+      console.warn('[Plivo SMS] Dropping inbound webhook — adapter not connected.');
+      return;
+    }
 
     if (this.verifySignatureEnabled && !this.isFromPlivo(body, meta)) {
       console.warn('[Plivo SMS] Dropping inbound webhook — signature missing or invalid.');
