@@ -1,3 +1,7 @@
+## <small>0.9.132 (2026-07-10)</small>
+
+* fix(openrouter): surface prompt-cache usage and env-default provider routing ([daf123ef466b6c7b41fc071c469187f22b15943d](https://github.com/framerslab/agentos/commit/daf123ef466b6c7b41fc071c469187f22b15943d))
+
 ## <small>0.9.131 (2026-07-10)</small>
 
 * fix(llm): abandoned streams settle every promise; strip covers /responses ([d531c47d136d36ea917f53f8cbcb9ac95bfe7023](https://github.com/framerslab/agentos/commit/d531c47d136d36ea917f53f8cbcb9ac95bfe7023))
