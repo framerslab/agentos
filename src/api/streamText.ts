@@ -293,6 +293,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     // generateText. The object form seeds the FIRST step with the caller's
     // prior-request message id (cross-request threading); `true` seeds null.
     // Each step then chains its own response id into the next step.
+    // True only after a step's FINAL chunk was observed. The finally must
+    // never echo the caller's SEED as this run's id (prompt-shim, fallback
+    // and error paths reach the finally without a native final chunk).
+    let sawFinalProviderChunk = false;
     let lastProviderMessageId: string | null =
       typeof opts.cacheDiagnostics === 'object' && opts.cacheDiagnostics !== null
         ? (opts.cacheDiagnostics.previousMessageId ?? null)
@@ -619,6 +623,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             }
 
             if (chunk.isFinal && opts.cacheDiagnostics) {
+              sawFinalProviderChunk = true;
               // Chain the id for the NEXT step's comparison; keep the
               // latest verdict for the result promise (the final step's
               // verdict describes the assembled reply).
@@ -1009,6 +1014,13 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // capture it while the result is in scope (drained above, so
             // the promise is already settled).
             fallbackFinishReason = await fallbackResult.finishReason;
+            if (opts.cacheDiagnostics) {
+              // Adopt the fallback run's verdict + thread key. Resolving with
+              // the child promises locks ours to follow them; the outer
+              // finally's later settle is then a no-op.
+              resolveCacheDiagnostics!(fallbackResult.cacheDiagnostics);
+              resolveProviderMessageId!(fallbackResult.providerMessageId);
+            }
 
             fallbackLogger.info('streaming provider fallback succeeded', {
               event: 'fallback_succeeded',
@@ -1064,6 +1076,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // threw), settle the Promises with whatever recorded ids exist
       // so awaiters don't hang forever. Empty strings keep the type
       // consistent with successful resolution.
+      // Abandonment belt-and-suspenders for the AGGREGATE promises too: a
+      // consumer that breaks out of the stream mid-flight must still be able
+      // to await text/usage/toolCalls without hanging. Values reflect what
+      // streamed before the abandonment; normal completions already settled
+      // these, making the calls no-ops (first settle wins).
+      resolveText!(finalText);
+      resolveUsage!(usage);
+      resolveToolCalls!(allToolCalls);
       resolveProviderId!(recordedProviderId ?? '');
       resolveModelId!(recordedModelId ?? '');
       // Belt-and-suspenders like the routing Promises above: every
@@ -1083,7 +1103,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // chunk) so awaiters never hang. When opted in, the id is the final
       // step's — the caller's thread key for the next request.
       resolveCacheDiagnostics!(opts.cacheDiagnostics ? lastCacheDiagnostics : null);
-      resolveProviderMessageId!(opts.cacheDiagnostics ? lastProviderMessageId : null);
+      resolveProviderMessageId!(
+        opts.cacheDiagnostics && sawFinalProviderChunk ? lastProviderMessageId : null,
+      );
       rootSpan?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
       if (metricStatus === 'error') {
         rootSpan?.setAttribute('agentos.api.finish_reason', 'error');
@@ -1158,6 +1180,22 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             if (done) return { value: undefined, done: true };
             if (value.type === 'text') return { value: value.text, done: false };
           }
+        },
+        // Early abandonment (for-await break / iterator.return()) must reach
+        // the generator so its finally runs and every deferred promise
+        // (text/usage/finishReason/cacheDiagnostics/providerMessageId)
+        // settles — a next()-only wrapper left them pending forever.
+        async return(value?: unknown) {
+          await inner.return?.(value as never);
+          return { value: undefined as never, done: true as const };
+        },
+        async throw(err?: unknown) {
+          if (inner.throw) {
+            await inner.throw(err);
+          } else {
+            await inner.return?.(undefined as never);
+          }
+          throw err;
         },
       };
     },

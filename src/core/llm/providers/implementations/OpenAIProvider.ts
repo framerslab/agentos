@@ -1007,8 +1007,14 @@ export class OpenAIProvider implements IProvider {
     // presence/frequency penalties + stop are intentionally OMITTED — reasoning
     // models don't meaningfully use them and the orchestrator sets none;
     // temperature/top_p omitted (reasoning models reject them). See spec §D3.
-    if (options.customModelParams) {
-      Object.assign(payload, options.customModelParams);
+    {
+      // Strip OpenRouter-only routing controls; see openrouter-only-params.
+      // The /responses body rejects unknown top-level fields just like
+      // /chat/completions.
+      const passthrough = stripOpenRouterOnlyParams(options.customModelParams);
+      if (passthrough) {
+        Object.assign(payload, passthrough);
+      }
     }
     return payload;
   }

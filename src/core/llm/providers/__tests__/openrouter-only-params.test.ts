@@ -116,6 +116,17 @@ describe('native providers strip OpenRouter-only params from their payloads', ()
     expect(payload.metadata).toEqual({ user_id: 'u1' });
   });
 
+  it('OpenAIProvider /responses builder strips the routing controls too', () => {
+    const payload = (openai as any).buildResponsesPayload('gpt-5.5', MESSAGES, {
+      customModelParams: { ...LEAKY_PARAMS },
+    }) as Record<string, unknown>;
+    expect(payload.provider).toBeUndefined();
+    expect(payload.models).toBeUndefined();
+    expect(payload.route).toBeUndefined();
+    expect(payload.transforms).toBeUndefined();
+    expect(payload.metadata).toEqual({ user_id: 'u1' });
+  });
+
   it('OpenAIProvider keeps custom params but never the routing controls', () => {
     const payload = (openai as any).buildChatCompletionPayload(
       'gpt-4o-mini',

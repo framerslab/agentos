@@ -109,6 +109,67 @@ describe('streamText cache diagnostics', () => {
     await expect(result.providerMessageId).resolves.toBe('msg_stream_final');
   });
 
+  it('settles the diagnostics promises when the consumer abandons textStream early', async () => {
+    hoisted.generateCompletionStream.mockImplementationOnce(async function* () {
+      yield {
+        id: 'msg_partial',
+        modelId: 'claude-opus-4-8',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'One' }, finishReason: null }],
+        responseTextDelta: 'One',
+      };
+      yield {
+        id: 'msg_stream_final',
+        modelId: 'claude-opus-4-8',
+        choices: [
+          { index: 0, message: { role: 'assistant', content: 'One Two' }, finishReason: 'stop' },
+        ],
+        responseTextDelta: ' Two',
+        isFinal: true,
+        usage: { promptTokens: 4, completionTokens: 3, totalTokens: 7 },
+        cacheDiagnostics: { cacheMissReason: null },
+      };
+    });
+
+    const result = await streamText({
+      model: 'anthropic:claude-opus-4-8',
+      prompt: 'abandon me',
+      cacheDiagnostics: { previousMessageId: 'msg_seed' },
+    });
+    for await (const chunk of result.textStream) {
+      void chunk;
+      break; // abandon after the first delta — the generator's finally must run
+    }
+
+    // No final chunk was observed before abandonment, so the id resolves null
+    // (never the caller's seed) and the verdict resolves null — but neither
+    // may hang, which is the defect this pins.
+    await expect(result.providerMessageId).resolves.toBeNull();
+    await expect(result.cacheDiagnostics).resolves.toBeNull();
+    await expect(result.usage).resolves.toBeTruthy();
+  });
+
+  it('never echoes the caller seed as the id when the stream errors before a final chunk', async () => {
+    hoisted.generateCompletionStream.mockImplementationOnce(async function* () {
+      yield {
+        id: 'msg_doomed',
+        modelId: 'claude-opus-4-8',
+        choices: [],
+        error: { message: 'boom mid-stream' },
+        isFinal: true,
+      };
+    });
+
+    const result = await streamText({
+      model: 'anthropic:claude-opus-4-8',
+      prompt: 'will error',
+      cacheDiagnostics: { previousMessageId: 'msg_seed' },
+    });
+    await drain(result.textStream).catch(() => undefined);
+
+    await expect(result.providerMessageId).resolves.toBeNull();
+    await expect(result.cacheDiagnostics).resolves.toBeNull();
+  });
+
   it('sends nothing to the provider and resolves null when not opted in', async () => {
     hoisted.generateCompletionStream.mockImplementationOnce(finalChunk());
 
