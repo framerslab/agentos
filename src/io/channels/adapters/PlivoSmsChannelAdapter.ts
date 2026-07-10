@@ -20,7 +20,7 @@
  * ```typescript
  * const sms = new PlivoSmsChannelAdapter();
  * await sms.initialize({
- *   platform: 'sms',
+ *   platform: 'plivo',
  *   credential: process.env.PLIVO_AUTH_TOKEN!, // Auth Token
  *   params: {
  *     authId: process.env.PLIVO_AUTH_ID!,
@@ -57,7 +57,7 @@ import type { RetryConfig } from './BaseChannelAdapter.js';
  * Capabilities: text. (MMS media is out of scope for this adapter.)
  */
 export class PlivoSmsChannelAdapter extends BaseChannelAdapter<PlivoSmsAuthParams> {
-  readonly platform: ChannelPlatform = 'sms';
+  readonly platform: ChannelPlatform = 'plivo';
   readonly displayName = 'Plivo SMS';
   readonly capabilities: readonly ChannelCapability[] = ['text'] as const;
 
@@ -233,7 +233,7 @@ export class PlivoSmsChannelAdapter extends BaseChannelAdapter<PlivoSmsAuthParam
 
     const channelMessage: ChannelMessage = {
       messageId: messageUuid,
-      platform: 'sms',
+      platform: 'plivo',
       conversationId: from,
       conversationType: 'direct',
       sender: { id: from },
@@ -245,7 +245,7 @@ export class PlivoSmsChannelAdapter extends BaseChannelAdapter<PlivoSmsAuthParam
 
     this.emit({
       type: 'message',
-      platform: 'sms',
+      platform: 'plivo',
       conversationId: from,
       timestamp: channelMessage.timestamp,
       data: channelMessage,

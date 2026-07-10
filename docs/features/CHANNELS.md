@@ -44,7 +44,8 @@ Channels are registered as `messaging-channel` extensions and managed by the
 | `imessage` | Chat | macOS only — no env vars |
 | `matrix` | Chat | `MATRIX_HOMESERVER_URL`, `MATRIX_ACCESS_TOKEN` |
 | `webchat` | Chat | `WEBCHAT_SECRET` (for webhook validation) |
-| `sms` | Messaging | `PLIVO_AUTH_ID`, `PLIVO_AUTH_TOKEN`, `PLIVO_PHONE` |
+| `sms` | Messaging | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE` |
+| `plivo` | Messaging | `PLIVO_AUTH_ID`, `PLIVO_AUTH_TOKEN`, `PLIVO_PHONE` |
 | `email` | Messaging | `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS` |
 | `line` | Chat | `LINE_CHANNEL_ACCESS_TOKEN`, `LINE_CHANNEL_SECRET` |
 | `zalo` | Chat | `ZALO_APP_ID`, `ZALO_APP_SECRET` |
@@ -286,9 +287,9 @@ router.registerAdapter(whatsapp);
 
 ---
 
-### SMS (Plivo)
+### Plivo (SMS)
 
-SMS is backed by [Plivo](https://www.plivo.com). Get your Auth ID and Auth Token from the Plivo console at [cx.plivo.com](https://cx.plivo.com), and use one of your Plivo numbers as the sender.
+Plivo is available as its own messaging channel for SMS. Get your Auth ID and Auth Token from the Plivo console at [cx.plivo.com](https://cx.plivo.com), and use one of your Plivo numbers as the sender.
 
 ```bash
 export PLIVO_AUTH_ID=your-auth-id
@@ -301,7 +302,7 @@ import { PlivoSmsChannelAdapter } from '@framers/agentos'; // src/io/channels/ad
 
 const sms = new PlivoSmsChannelAdapter();
 await sms.initialize({
-  platform: 'sms',
+  platform: 'plivo',
   credential: process.env.PLIVO_AUTH_TOKEN!, // Auth Token
   params: {
     authId: process.env.PLIVO_AUTH_ID!,

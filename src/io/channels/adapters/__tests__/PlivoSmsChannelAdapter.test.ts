@@ -63,7 +63,7 @@ async function connect(
   overrides: Record<string, string> = {},
 ): Promise<void> {
   await adapter.initialize({
-    platform: 'sms',
+    platform: 'plivo',
     credential: FIXTURE.authToken,
     params: {
       authId: 'test-auth-id',
@@ -149,7 +149,7 @@ describe('PlivoSmsChannelAdapter — inbound', () => {
     });
 
     expect(events).toHaveLength(1);
-    expect(events[0].platform).toBe('sms');
+    expect(events[0].platform).toBe('plivo');
     const msg = events[0].data as { conversationId: string; text: string };
     expect(msg.conversationId).toBe('+14150000001');
     expect(msg.text).toBe('test');
