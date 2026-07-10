@@ -1,3 +1,7 @@
+## <small>0.9.129 (2026-07-10)</small>
+
+* feat(llm): thread cache diagnostics across requests and through streaming ([80eaecbb7a251e8ef94f3ddd57a073409e8301e3](https://github.com/framerslab/agentos/commit/80eaecbb7a251e8ef94f3ddd57a073409e8301e3))
+
 ## <small>0.9.128 (2026-07-09)</small>
 
 * fix(io/avatar): Simli media socket address is /compose/webrtc/p2p ([bb00ebd52a3f0e51eb6248418b97223f76cf1cb4](https://github.com/framerslab/agentos/commit/bb00ebd52a3f0e51eb6248418b97223f76cf1cb4))
