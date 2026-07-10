@@ -32,6 +32,7 @@ import {
   ProviderEmbeddingOptions,
   ProviderEmbeddingResponse,
 } from '../IProvider';
+import { stripOpenRouterOnlyParams } from '../openrouter-only-params';
 import { GeminiProviderError } from '../errors/GeminiProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
@@ -774,11 +775,14 @@ export class GeminiProvider implements IProvider {
       payload.tools = [{ functionDeclarations: tools }];
     }
 
-    // Pass through custom model params (excluding ones we already handle)
+    // Pass through custom model params (excluding ones we already handle,
+    // and never OpenRouter's routing controls — Gemini 400s on unknown
+    // top-level names like `provider`; see openrouter-only-params).
     if (options.customModelParams) {
       const { topK, ...rest } = options.customModelParams;
-      if (Object.keys(rest).length > 0) {
-        Object.assign(payload, rest);
+      const passthrough = stripOpenRouterOnlyParams(rest);
+      if (passthrough) {
+        Object.assign(payload, passthrough);
       }
     }
 

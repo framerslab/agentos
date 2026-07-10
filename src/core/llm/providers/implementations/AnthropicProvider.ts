@@ -33,6 +33,7 @@ import {
   ProviderEmbeddingResponse,
   CacheDiagnostics,
 } from '../IProvider';
+import { stripOpenRouterOnlyParams } from '../openrouter-only-params';
 import { AnthropicProviderError } from '../errors/AnthropicProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
 import { resolveThinkingPayload } from '../model-thinking.js';
@@ -1610,9 +1611,14 @@ export class AnthropicProvider implements IProvider {
       }
     }
 
-    // Pass through any custom model params
-    if (options.customModelParams) {
-      Object.assign(payload, options.customModelParams);
+    // Pass through any custom model params — minus OpenRouter's routing
+    // controls, which only OpenRouter's body accepts (a fallback leg reuses
+    // the same params object across hosts; see openrouter-only-params).
+    {
+      const passthrough = stripOpenRouterOnlyParams(options.customModelParams);
+      if (passthrough) {
+        Object.assign(payload, passthrough);
+      }
     }
 
     // --- Automatic prompt caching ---
