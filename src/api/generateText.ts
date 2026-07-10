@@ -383,8 +383,14 @@ export interface GenerateTextOptions {
    * verdict lands on {@link GenerateTextResult.cacheDiagnostics}. Anthropic-only
    * (other providers ignore the option) and best-effort — diagnostics never
    * block or fail a request.
+   *
+   * The object form seeds the FIRST step's `previous_message_id` so a caller
+   * can thread across REQUESTS, not just across the steps of one call: pass
+   * the prior turn's {@link GenerateTextResult.providerMessageId} and the
+   * first step's verdict names any divergence from that turn's prompt.
+   * `true` keeps the in-call-only behavior (first step compares nothing).
    */
-  cacheDiagnostics?: boolean;
+  cacheDiagnostics?: boolean | { previousMessageId?: string | null };
   /**
    * Provider-specific TOP-LEVEL request-payload parameters, forwarded
    * verbatim into `ModelCompletionOptions.customModelParams`. Provider
@@ -615,6 +621,14 @@ export interface GenerateTextResult {
    * available on the `onAfterGeneration` hook.
    */
   cacheDiagnostics?: CacheDiagnostics | null;
+  /**
+   * Provider message id (`msg_...`) of the LAST agentic step; present only
+   * when the run opted in via {@link GenerateTextOptions.cacheDiagnostics}.
+   * Persist it and pass it back as the next request's
+   * `cacheDiagnostics.previousMessageId` to thread the comparison across
+   * turns. `null` when the provider reported no id.
+   */
+  providerMessageId?: string | null;
   /** Final assistant text after all agentic steps have completed. */
   text: string;
   /** Aggregated token usage across all steps. */
@@ -1517,9 +1531,14 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       let lastServingProvider: string | undefined;
       // Cache-diagnostics threading (opts.cacheDiagnostics): each step passes
       // the PREVIOUS step's provider message id so the API can compare the two
-      // requests and report where the cached prefix diverged. First step
-      // passes null (opt-in, nothing to compare yet).
-      let lastProviderMessageId: string | null = null;
+      // requests and report where the cached prefix diverged. The object
+      // form seeds the FIRST step with the caller's prior-request message id
+      // (cross-request threading); `true` seeds null (opt-in, nothing to
+      // compare yet) — in-call threading only.
+      let lastProviderMessageId: string | null =
+        typeof opts.cacheDiagnostics === 'object' && opts.cacheDiagnostics !== null
+          ? (opts.cacheDiagnostics.previousMessageId ?? null)
+          : null;
       let lastCacheDiagnostics: CacheDiagnostics | null | undefined;
       try {
       for (let step = 0; step < maxSteps; step++) {
@@ -1704,6 +1723,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             ...(lastCacheDiagnostics !== undefined
               ? { cacheDiagnostics: lastCacheDiagnostics }
               : {}),
+            ...(opts.cacheDiagnostics ? { providerMessageId: lastProviderMessageId } : {}),
             text: textContent,
             usage: totalUsage,
             toolCalls: allToolCalls,
@@ -1841,6 +1861,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           model: resolved.modelId,
           ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
           ...(lastCacheDiagnostics !== undefined ? { cacheDiagnostics: lastCacheDiagnostics } : {}),
+          ...(opts.cacheDiagnostics ? { providerMessageId: lastProviderMessageId } : {}),
           text: textContent,
           usage: totalUsage,
           toolCalls: allToolCalls,
@@ -1883,6 +1904,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         ...(lastCacheDiagnostics !== undefined
           ? { cacheDiagnostics: lastCacheDiagnostics }
           : {}),
+        ...(opts.cacheDiagnostics ? { providerMessageId: lastProviderMessageId } : {}),
       };
     });
     // The primary attempt succeeded: let the registry know so its

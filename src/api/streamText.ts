@@ -27,6 +27,7 @@ import {
   type ToolCallHookInfo,
   type ToolCallRecord,
 } from './generateText.js';
+import type { CacheDiagnostics } from '../core/llm/providers/IProvider.js';
 import type { ModelRouteParams } from '../core/llm/routing/IModelRouter.js';
 import { resolveDynamicToolCalls } from './runtime/dynamicToolCalling.js';
 import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
@@ -153,6 +154,23 @@ export interface StreamTextResult {
    * (its internal calls do not thread per-step reasons).
    */
   finishReason: Promise<StreamFinishReason>;
+  /**
+   * Cache-diagnostics verdict of the FINAL step (Anthropic beta; see
+   * {@link GenerateTextOptions.cacheDiagnostics}). Resolves when the stream
+   * completes: `null` when the run did not opt in, when the provider sent no
+   * verdict, or when the compared requests did not diverge; a populated
+   * `cacheMissReason` names the earliest divergence. Settled in the
+   * generator's cleanup too, so awaiting after early abandonment never hangs.
+   */
+  cacheDiagnostics: Promise<CacheDiagnostics | null>;
+  /**
+   * Provider message id (`msg_...`) of the FINAL step; `null` when the run
+   * did not opt into cache diagnostics or the provider sent no id. Persist it
+   * and pass it back as the next request's
+   * `cacheDiagnostics.previousMessageId` to thread the comparison across
+   * turns (the wilds-ai narrator threads it per session).
+   */
+  providerMessageId: Promise<string | null>;
 }
 
 function buildHelperToolExecutionContext(
@@ -238,6 +256,17 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
   const finishReasonPromise = new Promise<StreamFinishReason>((r) => {
     resolveFinishReason = r;
   });
+  // Cache-diagnostics verdict + provider message id of the FINAL step.
+  // Settled in the generator's finally (every terminal path, including
+  // early abandonment) so awaiters never hang; null when not opted in.
+  let resolveCacheDiagnostics: (v: CacheDiagnostics | null) => void;
+  let resolveProviderMessageId: (v: string | null) => void;
+  const cacheDiagnosticsPromise = new Promise<CacheDiagnostics | null>((r) => {
+    resolveCacheDiagnostics = r;
+  });
+  const providerMessageIdPromise = new Promise<string | null>((r) => {
+    resolveProviderMessageId = r;
+  });
 
   const parts: StreamPart[] = [];
   const allToolCalls: ToolCallRecord[] = [];
@@ -260,6 +289,15 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     // The LAST step's reason is the one that describes the assembled
     // reply (earlier steps end on tool calls by construction).
     let lastStepFinishReason: string | null = null;
+    // Cache-diagnostics threading (opts.cacheDiagnostics): mirrors
+    // generateText. The object form seeds the FIRST step with the caller's
+    // prior-request message id (cross-request threading); `true` seeds null.
+    // Each step then chains its own response id into the next step.
+    let lastProviderMessageId: string | null =
+      typeof opts.cacheDiagnostics === 'object' && opts.cacheDiagnostics !== null
+        ? (opts.cacheDiagnostics.previousMessageId ?? null)
+        : null;
+    let lastCacheDiagnostics: CacheDiagnostics | null = null;
 
     try {
       let { providerId, modelId } = resolveModelOption(opts, 'text');
@@ -538,6 +576,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
             ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
             ...(opts.presencePenalty !== undefined ? { presencePenalty: opts.presencePenalty } : {}),
+            // Cache-diagnostics opt-in (Anthropic beta): thread the previous
+            // request's message id — the caller's seed on step 1, the prior
+            // step's id after — so the verdict names any prefix divergence.
+            ...(opts.cacheDiagnostics
+              ? { cacheDiagnostics: { previousMessageId: lastProviderMessageId } }
+              : {}),
             // Forward provider-specific top-level payload params (e.g.
             // OpenRouter provider-routing preferences); providers spread
             // them onto the streaming request body.
@@ -572,6 +616,18 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               resolveToolCalls!(allToolCalls);
               resolveFinishReason!('error');
               return;
+            }
+
+            if (chunk.isFinal && opts.cacheDiagnostics) {
+              // Chain the id for the NEXT step's comparison; keep the
+              // latest verdict for the result promise (the final step's
+              // verdict describes the assembled reply).
+              const finalId = (chunk as { id?: unknown }).id;
+              lastProviderMessageId =
+                typeof finalId === 'string' && finalId ? finalId : null;
+              const verdict = (chunk as { cacheDiagnostics?: CacheDiagnostics | null })
+                .cacheDiagnostics;
+              lastCacheDiagnostics = verdict ?? null;
             }
 
             if (chunk.isFinal && chunk.usage) {
@@ -1022,6 +1078,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             ? 'tool-calls'
             : normalizeStreamFinishReason(lastStepFinishReason),
       );
+      // Same belt-and-suspenders: every path settles the diagnostics pair
+      // here (null when the run never opted in or never reached a final
+      // chunk) so awaiters never hang. When opted in, the id is the final
+      // step's — the caller's thread key for the next request.
+      resolveCacheDiagnostics!(opts.cacheDiagnostics ? lastCacheDiagnostics : null);
+      resolveProviderMessageId!(opts.cacheDiagnostics ? lastProviderMessageId : null);
       rootSpan?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
       if (metricStatus === 'error') {
         rootSpan?.setAttribute('agentos.api.finish_reason', 'error');
@@ -1110,5 +1172,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     provider: providerPromise,
     model: modelPromise,
     finishReason: finishReasonPromise,
+    cacheDiagnostics: cacheDiagnosticsPromise,
+    providerMessageId: providerMessageIdPromise,
   };
 }

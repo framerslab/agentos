@@ -955,6 +955,13 @@ export class AnthropicProvider implements IProvider {
     let outputTokens = 0;
     let cacheCreationTokens: number | undefined;
     let cacheReadTokens: number | undefined;
+    /**
+     * Cache-diagnostics verdict, delivered ONLY on message_start (no later
+     * SSE event repeats it). `undefined` = the API sent none (not opted in);
+     * `null` = compared, no divergence. Attached normalized to the final
+     * chunk beside `id` — the same place threading callers already read.
+     */
+    let streamDiagnostics: AnthropicMessagesResponse['diagnostics'] | undefined;
     /** Map from content block index → tool call accumulator */
     const toolCallAccum: Map<number, { id: string; name: string; argsJson: string }> = new Map();
     /**
@@ -993,6 +1000,9 @@ export class AnthropicProvider implements IProvider {
             // accumulate path at streamToCompletion does the same).
             cacheCreationTokens = event.message.usage?.cache_creation_input_tokens;
             cacheReadTokens = event.message.usage?.cache_read_input_tokens;
+            // Cache diagnostics ride message_start in streaming responses
+            // (mirrors the streamToCompletion aggregate path).
+            streamDiagnostics = event.message.diagnostics;
             break;
           }
 
@@ -1144,6 +1154,11 @@ export class AnthropicProvider implements IProvider {
                 finishReason: stopReason,
               }],
               usage,
+              // Normalized verdict beside `id`, the threading key — absent
+              // entirely when the API sent no diagnostics (not opted in).
+              ...(streamDiagnostics !== undefined && {
+                cacheDiagnostics: normalizeCacheDiagnostics(streamDiagnostics),
+              }),
               isFinal: true,
             };
             break;
