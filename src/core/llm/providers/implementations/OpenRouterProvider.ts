@@ -74,6 +74,75 @@ interface OpenRouterChatCompletionAPIResponse {
     completion_tokens: number;
     total_tokens: number;
     cost?: number;
+    /**
+     * Present when the request sets `usage: { include: true }` — prompt
+     * tokens served from the upstream host's prompt cache. 0 or absent on
+     * hosts without prompt-caching support.
+     */
+    prompt_tokens_details?: { cached_tokens?: number };
+  };
+}
+
+/**
+ * Default OpenRouter provider-routing preferences from the environment.
+ *
+ * `OPENROUTER_PROVIDER_ORDER` (comma-separated upstream host names, e.g.
+ * `Groq,DeepInfra`) pins an explicit host preference — tried in order with
+ * `allow_fallbacks: true` so an unavailable pin falls through to the rest of
+ * the pool. `OPENROUTER_PROVIDER_SORT` (`throughput` | `price` | `latency`)
+ * sets the routing sort, and acts as the tiebreak when both are set. Returns
+ * `undefined` when neither env is set so default routing stays
+ * byte-identical.
+ *
+ * Why this lives in the provider: routing consistency is a prerequisite for
+ * upstream prompt-cache hits (caches are per-host, so price-variance routing
+ * cold-misses even cache-capable hosts), and callers that resolve their
+ * provider through a router cannot gate `customModelParams` on "openrouter"
+ * themselves — every provider spreads those params onto its own payload, and
+ * non-OpenRouter APIs reject the unknown `provider` key. Caller-supplied
+ * `provider` preferences (via `customModelParams`) win field-by-field over
+ * these defaults.
+ */
+export function defaultOpenRouterProviderPrefs(
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, unknown> | undefined {
+  const sort = env.OPENROUTER_PROVIDER_SORT?.trim();
+  const orderRaw = env.OPENROUTER_PROVIDER_ORDER?.trim();
+  const order = orderRaw
+    ? orderRaw
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+  if (order.length > 0) {
+    return { order, allow_fallbacks: true, ...(sort ? { sort } : {}) };
+  }
+  if (sort) return { sort };
+  return undefined;
+}
+
+/**
+ * Map OpenRouter usage accounting onto the normalized {@link ModelUsage}
+ * shape. With `usage: { include: true }` on the request, OpenRouter reports
+ * `cost` and `prompt_tokens_details.cached_tokens` (prompt tokens served
+ * from the upstream host's prompt cache). The cached count is surfaced as
+ * `cacheReadInputTokens` — the same normalized field AnthropicProvider
+ * populates — so the api layer's `cacheReadTokens` accounting and every
+ * downstream cache log light up for OpenRouter turns without caller changes.
+ */
+export function mapOpenRouterUsage(
+  apiUsage: OpenRouterChatCompletionAPIResponse['usage'],
+): ModelUsage | undefined {
+  if (!apiUsage) return undefined;
+  const cachedTokens = apiUsage.prompt_tokens_details?.cached_tokens;
+  return {
+    promptTokens: apiUsage.prompt_tokens,
+    completionTokens: apiUsage.completion_tokens,
+    totalTokens: apiUsage.total_tokens,
+    costUSD: apiUsage.cost,
+    ...(typeof cachedTokens === 'number' && cachedTokens >= 0
+      ? { cacheReadInputTokens: cachedTokens }
+      : {}),
   };
 }
 
@@ -289,8 +358,14 @@ export class OpenRouterProvider implements IProvider {
       ...(options.toolChoice !== undefined && { tool_choice: options.toolChoice }),
       ...(options.responseFormat?.type === 'json_object' && { response_format: { type: 'json_object' } }),
       ...(options.responseFormat?.type === 'json_schema' && { response_format: options.responseFormat }),
+      // OpenRouter unified usage accounting: reports `cost` and
+      // `prompt_tokens_details.cached_tokens` on the response (trailing
+      // usage chunk on streams). Placed before the customModelParams spread
+      // so callers can override it.
+      usage: { include: true },
       ...(options.customModelParams || {}),
     };
+    this.applyDefaultProviderPrefs(payload);
     this.applySchemaRoutingPrefs(payload, options);
 
     let apiResponseData: OpenRouterChatCompletionAPIResponse;
@@ -313,6 +388,22 @@ export class OpenRouterProvider implements IProvider {
       );
     }
     return this.mapApiToCompletionResponse(apiResponseData, modelId);
+  }
+
+  /**
+   * Seed env-default provider-routing preferences (see
+   * {@link defaultOpenRouterProviderPrefs}) under any caller-supplied
+   * `provider` object — caller keys win field-by-field. Runs before
+   * {@link applySchemaRoutingPrefs} so `require_parameters` merges on top.
+   */
+  private applyDefaultProviderPrefs(payload: Record<string, unknown>): void {
+    const defaults = defaultOpenRouterProviderPrefs();
+    if (!defaults) return;
+    const existing =
+      payload.provider && typeof payload.provider === 'object'
+        ? (payload.provider as Record<string, unknown>)
+        : {};
+    payload.provider = { ...defaults, ...existing };
   }
 
   /**
@@ -408,8 +499,14 @@ export class OpenRouterProvider implements IProvider {
       ...(options.toolChoice !== undefined && { tool_choice: options.toolChoice }),
       ...(options.responseFormat?.type === 'json_object' && { response_format: { type: 'json_object' } }),
       ...(options.responseFormat?.type === 'json_schema' && { response_format: options.responseFormat }),
+      // OpenRouter unified usage accounting: reports `cost` and
+      // `prompt_tokens_details.cached_tokens` on the response (trailing
+      // usage chunk on streams). Placed before the customModelParams spread
+      // so callers can override it.
+      usage: { include: true },
       ...(options.customModelParams || {}),
     };
+    this.applyDefaultProviderPrefs(payload);
     this.applySchemaRoutingPrefs(payload, options);
 
     let stream: NodeJS.ReadableStream;
@@ -624,12 +721,7 @@ export class OpenRouterProvider implements IProvider {
       throw new OpenRouterProviderError("Received empty choices array from OpenRouter.", "API_RESPONSE_MALFORMED", undefined, undefined, { responseId: apiResponse.id });
     }
 
-    const usage: ModelUsage | undefined = apiResponse.usage ? {
-      promptTokens: apiResponse.usage.prompt_tokens,
-      completionTokens: apiResponse.usage.completion_tokens,
-      totalTokens: apiResponse.usage.total_tokens,
-      costUSD: apiResponse.usage.cost,
-    } : undefined;
+    const usage: ModelUsage | undefined = mapOpenRouterUsage(apiResponse.usage);
 
     return {
       id: apiResponse.id,
@@ -675,12 +767,7 @@ export class OpenRouterProvider implements IProvider {
           ...(apiChunk.provider ? { servingProvider: apiChunk.provider } : {}),
           choices: [],
           isFinal: true,
-          usage: {
-            promptTokens: apiChunk.usage.prompt_tokens,
-            completionTokens: apiChunk.usage.completion_tokens,
-            totalTokens: apiChunk.usage.total_tokens,
-            costUSD: apiChunk.usage.cost,
-          },
+          usage: mapOpenRouterUsage(apiChunk.usage),
         };
       }
 
