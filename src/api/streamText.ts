@@ -259,8 +259,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
   // Cache-diagnostics verdict + provider message id of the FINAL step.
   // Settled in the generator's finally (every terminal path, including
   // early abandonment) so awaiters never hang; null when not opted in.
-  let resolveCacheDiagnostics: (v: CacheDiagnostics | null) => void;
-  let resolveProviderMessageId: (v: string | null) => void;
+  // PromiseLike included: the fallback path adopts the child run's promises
+  // by resolving with them (resolve() unwraps thenables; first settle wins).
+  let resolveCacheDiagnostics: (
+    v: CacheDiagnostics | null | PromiseLike<CacheDiagnostics | null>,
+  ) => void;
+  let resolveProviderMessageId: (v: string | null | PromiseLike<string | null>) => void;
   const cacheDiagnosticsPromise = new Promise<CacheDiagnostics | null>((r) => {
     resolveCacheDiagnostics = r;
   });
