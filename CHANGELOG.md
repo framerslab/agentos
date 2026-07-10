@@ -1,3 +1,7 @@
+## <small>0.9.130 (2026-07-10)</small>
+
+* fix(llm): native providers no longer forward OpenRouter routing controls ([f9d88b1d0e7587979b3d1c5dccee0d96b776c680](https://github.com/framerslab/agentos/commit/f9d88b1d0e7587979b3d1c5dccee0d96b776c680))
+
 ## <small>0.9.129 (2026-07-10)</small>
 
 * feat(llm): thread cache diagnostics across requests and through streaming ([80eaecbb7a251e8ef94f3ddd57a073409e8301e3](https://github.com/framerslab/agentos/commit/80eaecbb7a251e8ef94f3ddd57a073409e8301e3))
