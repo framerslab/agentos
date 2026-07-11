@@ -1,3 +1,9 @@
+## <small>0.9.133 (2026-07-11)</small>
+
+* merge: synchronize agentos master ([04f66066e4fd15244ba41edcb73b605715e66a60](https://github.com/framerslab/agentos/commit/04f66066e4fd15244ba41edcb73b605715e66a60))
+* test(providers): cover responses and cache usage ([1c7c6977a2bf4336c87c7e764325459ff26e837d](https://github.com/framerslab/agentos/commit/1c7c6977a2bf4336c87c7e764325459ff26e837d))
+* feat(providers): align reasoning and streaming transports ([a8d80dc8eb3e4c1725f6ee6efd0f2e5f25ebb5b1](https://github.com/framerslab/agentos/commit/a8d80dc8eb3e4c1725f6ee6efd0f2e5f25ebb5b1))
+
 ## <small>0.9.132 (2026-07-10)</small>
 
 * fix(openrouter): surface prompt-cache usage and env-default provider routing ([daf123ef466b6c7b41fc071c469187f22b15943d](https://github.com/framerslab/agentos/commit/daf123ef466b6c7b41fc071c469187f22b15943d))
