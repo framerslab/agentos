@@ -155,6 +155,9 @@ interface DGResult {
  * Emits `transcript`, `speech_start`, `speech_end`, `error`, and `close` events
  * as required by the voice pipeline orchestrator.
  */
+/** How long to wait for the Deepgram WS upgrade before failing the connect. */
+const CONNECT_TIMEOUT_MS = 8_000;
+
 class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSession {
   private ws: WebSocket | null = null;
   private speechActive = false;
@@ -165,6 +168,18 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
     private readonly sessionConfig: StreamingSTTConfig
   ) {
     super();
+  }
+
+  /**
+   * Emit `'error'` only when a listener exists — an unlistened EventEmitter
+   * `'error'` throws and takes the whole process down as an uncaughtException.
+   */
+  private _emitErrorSafe(err: Error): void {
+    if (this.listenerCount('error') > 0) {
+      this.emit('error', err);
+    } else {
+      console.warn('[deepgram-streaming] session error (no listener attached):', err.message);
+    }
   }
 
   /**
@@ -206,24 +221,63 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
 
     const url = `${baseUrl}?${params.toString()}`;
 
+    // Failure paths settle the promise EXACTLY once and reject FIRST: the
+    // previous implementation ran `this.emit('error', err)` before
+    // `reject(err)` — with no 'error' listener attached at connect time the
+    // emit threw synchronously (Node EventEmitter contract), `reject` never
+    // executed, and the connect promise never settled, hanging the caller
+    // forever. Handshake rejections also capture the HTTP body now
+    // (`unexpected-response`) so the real Deepgram error is visible instead
+    // of the blind "Unexpected server response: NNN".
     return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        fail(new Error(`deepgram stt ws connect timed out after ${CONNECT_TIMEOUT_MS}ms`));
+      }, CONNECT_TIMEOUT_MS);
+      const fail = (err: Error): void => {
+        if (settled) {
+          this._emitErrorSafe(err);
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      };
+
       this.ws = new WebSocket(url, {
         headers: {
           Authorization: `Token ${this.config.apiKey}`,
         },
       });
 
-      this.ws.on('open', () => resolve());
-      this.ws.on('error', (err) => {
-        this.emit('error', err);
-        reject(err);
+      this.ws.on('unexpected-response', (_req, res) => {
+        let body = '';
+        res.on('data', (d: Buffer) => {
+          body += d.toString('utf-8');
+        });
+        res.on('end', () => {
+          fail(
+            new Error(
+              `deepgram stt ws rejected: HTTP ${res.statusCode}${body ? ` — ${body.slice(0, 300)}` : ''}`
+            )
+          );
+        });
       });
+
+      this.ws.on('open', () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      });
+      this.ws.on('error', (err) => fail(err as Error));
 
       this.ws.on('message', (data: Buffer | string) => {
         this._handleMessage(typeof data === 'string' ? data : data.toString('utf-8'));
       });
 
       this.ws.on('close', () => {
+        if (!settled) fail(new Error('deepgram stt ws closed before the upgrade completed'));
         this.closed = true;
         this.emit('close');
       });

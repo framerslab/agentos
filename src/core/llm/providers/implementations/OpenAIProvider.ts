@@ -36,7 +36,7 @@ import { OpenAIProviderError } from '../errors/OpenAIProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
 import { toOpenAiResponseFormat } from './openai-response-format-guard';
 import { clampMaxOutputTokens } from '../model-output-limits.js';
-import { mapEffortToOpenAiReasoningEffort } from '../model-effort.js';
+import { mapEffortToOpenAiReasoningEffort, mapEffortToOpenAiResponsesEffort } from '../model-effort.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
 // Assuming a fetch-like interface is available globally or polyfilled (e.g., node-fetch)
 // For Node.js, ensure 'node-fetch' is a dependency or use Node's built-in fetch from v18+.
@@ -131,6 +131,42 @@ namespace OpenAIAPITypes {
   }
   export interface APIErrorResponse {
     error?: { message?: string; type?: string; code?: string };
+  }
+
+  // --- /v1/responses (Responses API) — narrow read surface --------------
+  // Only the fields mapResponsesToCompletionResponse reads. Live-probed
+  // 2026-07-08 (gpt-5.5): output items carry `type`, message content is
+  // `output_text` parts, function_call items carry `call_id`/`name`/
+  // `arguments`, usage uses input_tokens/output_tokens, `created_at` +
+  // `status` + `incomplete_details` are top-level.
+  export interface ResponsesUsage {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+  }
+  export interface ResponsesOutputContentPart {
+    type: string; // 'output_text' | …
+    text?: string;
+  }
+  export interface ResponsesOutputItem {
+    type: string; // 'message' | 'function_call' | 'reasoning' | …
+    // message item
+    role?: string;
+    content?: ResponsesOutputContentPart[];
+    // function_call item
+    call_id?: string;
+    name?: string;
+    arguments?: string;
+  }
+  export interface ResponsesResponse {
+    id: string;
+    object?: string; // 'response'
+    created_at?: number;
+    model?: string;
+    status?: string; // 'completed' | 'incomplete' | …
+    output?: ResponsesOutputItem[];
+    usage?: ResponsesUsage;
+    incomplete_details?: { reason?: string } | null;
   }
 }
 
@@ -295,6 +331,66 @@ export function modelRequiresMaxCompletionTokens(modelId: string): boolean {
 export function isOpenAIReasoningModel(modelId: string): boolean {
   // o1 / o3 / o4 reasoning models, plus GPT-5 family.
   return /^(o\d|gpt-5)/i.test(modelId);
+}
+
+/**
+ * Whether OpenAI rejects `reasoning_effort` sent ALONGSIDE function tools on
+ * the `/v1/chat/completions` endpoint for `modelId`. The GPT-5 family enforces
+ * this — "Function tools with reasoning_effort are not supported for gpt-5.5
+ * in /v1/chat/completions. Please use /v1/responses instead." (live-observed
+ * 2026-07-08 when the codegen frontier fallback chain routed a tool-carrying,
+ * effort:xhigh orchestrator turn to gpt-5.5, hard-erroring the whole build).
+ *
+ * agentos has no `/v1/responses` code path, so a tool-carrying reasoning call
+ * must DROP `reasoning_effort` (the model then reasons at its default depth)
+ * rather than 400 the entire request. Scoped to the GPT-5 family: the o-series
+ * (o1/o3/o4) still accepts `reasoning_effort` + tools on chat/completions, so
+ * dropping it there would be a needless reasoning-depth regression. Widen this
+ * predicate if a future o-series enforces the same Responses-API requirement.
+ *
+ * Proper long-term fix (separate, larger): add a `/v1/responses` request path
+ * and route reasoning + function-tool calls there, preserving both.
+ *
+ * @param modelId Provider-side model identifier (e.g. `'gpt-5.5'`).
+ */
+export function openAiRejectsReasoningEffortWithTools(modelId: string): boolean {
+  return /^gpt-5/i.test(modelId);
+}
+
+/**
+ * Whether the request carries function tools (present + non-empty). Used to
+ * decide whether the {@link openAiRejectsReasoningEffortWithTools} guard
+ * applies — reasoning_effort is only incompatible WITH tools.
+ */
+function requestHasFunctionTools(tools: unknown): boolean {
+  return Array.isArray(tools) ? tools.length > 0 : tools != null;
+}
+
+/**
+ * Whether a NON-streaming call must use `/v1/responses` instead of
+ * `/v1/chat/completions`: a gpt-5 reasoning model carrying function tools AND a
+ * requested effort — the ONLY combination chat/completions 400s on
+ * ("Function tools with reasoning_effort are not supported … Please use
+ * /v1/responses instead") and the only case where the Responses path buys
+ * anything (preserved reasoning depth). Excludes, per the 2026-07-08 Codex
+ * review, requests that carry a `responseFormat` (the Responses path maps no
+ * structured output — those stay on chat/completions where R4 drops effort) or
+ * any non-string (multimodal) message content (the Responses input mapper is
+ * text-only). Every excluded case stays on chat/completions; R4's effort-drop
+ * remains the defense-in-depth floor there.
+ */
+export function shouldRouteToOpenAiResponsesApi(
+  modelId: string,
+  messages: ChatMessage[],
+  options: Pick<ModelCompletionOptions, 'tools' | 'effort' | 'responseFormat'>,
+): boolean {
+  return (
+    openAiRejectsReasoningEffortWithTools(modelId) &&
+    requestHasFunctionTools(options.tools) &&
+    mapEffortToOpenAiReasoningEffort(options.effort) !== undefined &&
+    options.responseFormat === undefined &&
+    messages.every((m) => typeof m.content === 'string' || m.content == null)
+  );
 }
 
 export class OpenAIProvider implements IProvider {
@@ -545,6 +641,22 @@ export class OpenAIProvider implements IProvider {
     this.ensureInitialized();
     const apiKey = await this.getApiKey(options.apiKeyOverride);
 
+    // GPT-5 rejects `reasoning_effort` + function tools on /chat/completions
+    // and demands /v1/responses. Route ONLY that exact case there (preserving
+    // BOTH reasoning depth and tools); everything else keeps the chat path.
+    if (shouldRouteToOpenAiResponsesApi(modelId, messages, options)) {
+      const responsesBody = this.buildResponsesPayload(modelId, messages, options);
+      const responsesApiResponse = await this.makeApiRequest<OpenAIAPITypes.ResponsesResponse>(
+        '/responses',
+        'POST',
+        apiKey,
+        responsesBody,
+        false,
+        options.requestTimeout
+      );
+      return this.mapResponsesToCompletionResponse(responsesApiResponse, modelId);
+    }
+
     const requestBody = this.buildChatCompletionPayload(modelId, messages, options, false);
 
     const apiResponse = await this.makeApiRequest<OpenAIAPITypes.ChatCompletionResponse>(
@@ -776,8 +888,17 @@ export class OpenAIProvider implements IProvider {
       // reject. Map the agentos effort scale onto it so `effort: 'max'` actually
       // drives gpt-5.x at its xhigh ceiling instead of being silently dropped.
       // customModelParams (below) can still override.
+      // GPT-5 rejects `reasoning_effort` + function tools on chat/completions
+      // (it demands the Responses API, which agentos doesn't implement). When
+      // the request carries tools, DROP the effort param instead of 400ing —
+      // the model reasons at its default depth and the tool call succeeds.
       const reasoningEffort = mapEffortToOpenAiReasoningEffort(options.effort);
-      if (reasoningEffort !== undefined) payload.reasoning_effort = reasoningEffort;
+      const dropEffortForTools =
+        requestHasFunctionTools(options.tools) &&
+        openAiRejectsReasoningEffortWithTools(modelId);
+      if (reasoningEffort !== undefined && !dropEffortForTools) {
+        payload.reasoning_effort = reasoningEffort;
+      }
     }
     if (options.maxTokens !== undefined) {
       // Clamp to the model's real output ceiling first: a request sized for
@@ -818,6 +939,176 @@ export class OpenAIProvider implements IProvider {
     }
 
     return payload;
+  }
+
+  /**
+   * Build a `/v1/responses` request body for a gpt-5 reasoning + function-tool
+   * call (the only case {@link shouldRouteToOpenAiResponsesApi} routes here).
+   * Preserves BOTH `reasoning.effort` and `tools`, which chat/completions
+   * rejects together. Text-only + no structured output by construction (the
+   * router excludes multimodal + responseFormat). Live-probed 2026-07-08.
+   * @private
+   */
+  private buildResponsesPayload(
+    modelId: string,
+    messages: ChatMessage[],
+    options: ModelCompletionOptions
+  ): Record<string, unknown> {
+    const input: Array<Record<string, unknown>> = [];
+    for (const m of messages) {
+      const text = typeof m.content === 'string' ? m.content : m.content == null ? '' : '';
+      if (m.role === 'tool') {
+        // Tool result → function_call_output paired by call_id.
+        input.push({ type: 'function_call_output', call_id: m.tool_call_id, output: text });
+        continue;
+      }
+      if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
+        // Optional assistant text first, then one function_call item per call.
+        if (text.length > 0) input.push({ role: 'assistant', content: text });
+        for (const tc of m.tool_calls) {
+          input.push({
+            type: 'function_call',
+            call_id: tc.id,
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+          });
+        }
+        continue;
+      }
+      // system / user / plain assistant. Drop an empty assistant turn (no text,
+      // no tool_calls carries nothing); keep empty system/user defensively.
+      if (m.role === 'assistant' && text.length === 0) continue;
+      input.push({ role: m.role, content: text });
+    }
+
+    const payload: Record<string, unknown> = {
+      model: modelId,
+      input,
+      tools: this.toResponsesTools(options.tools),
+      reasoning: { effort: mapEffortToOpenAiResponsesEffort(modelId, options.effort) },
+      store: false,
+    };
+    if (options.toolChoice !== undefined) {
+      payload.tool_choice = this.toResponsesToolChoice(options.toolChoice);
+    }
+    if (options.maxTokens !== undefined) {
+      payload.max_output_tokens = clampMaxOutputTokens(modelId, options.maxTokens) ?? options.maxTokens;
+    }
+    if (options.userId !== undefined) payload.safety_identifier = options.userId;
+    // presence/frequency penalties + stop are intentionally OMITTED — reasoning
+    // models don't meaningfully use them and the orchestrator sets none;
+    // temperature/top_p omitted (reasoning models reject them). See spec §D3.
+    if (options.customModelParams) {
+      Object.assign(payload, options.customModelParams);
+    }
+    return payload;
+  }
+
+  /** Reshape chat-completions function tools → the Responses flat tool shape. */
+  private toResponsesTools(tools: unknown): unknown {
+    if (!Array.isArray(tools)) return tools;
+    return tools.map((t) => {
+      const tool = t as { type?: string; function?: { name?: string; description?: string; parameters?: unknown }; name?: string };
+      if (tool?.type === 'function' && tool.function) {
+        return {
+          type: 'function',
+          name: tool.function.name,
+          description: tool.function.description,
+          parameters: tool.function.parameters,
+          strict: false,
+        };
+      }
+      return t; // already-flat or non-function tool: pass through
+    });
+  }
+
+  /** Map chat-completions tool_choice → the Responses tool_choice shape. */
+  private toResponsesToolChoice(toolChoice: unknown): unknown {
+    if (typeof toolChoice === 'string') return toolChoice; // 'auto' | 'required' | 'none'
+    const tc = toolChoice as { type?: string; function?: { name?: string } };
+    if (tc?.type === 'function' && tc.function?.name) {
+      return { type: 'function', name: tc.function.name };
+    }
+    return toolChoice;
+  }
+
+  /**
+   * Map a `/v1/responses` response into the same {@link ModelCompletionResponse}
+   * shape the rest of agentos consumes from chat/completions: assistant text
+   * from `output_text` message parts, tool calls from `function_call` items
+   * (call_id → id). A body with no usable output THROWS (→ fallback advances)
+   * rather than returning an empty success (Codex-Medium-2). @private
+   */
+  private mapResponsesToCompletionResponse(
+    apiResponse: OpenAIAPITypes.ResponsesResponse,
+    modelId: string
+  ): ModelCompletionResponse {
+    const output = apiResponse.output ?? [];
+    let assistantText = '';
+    const toolCalls: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> = [];
+    for (const item of output) {
+      if (item.type === 'message') {
+        for (const part of item.content ?? []) {
+          if (part.type === 'output_text' && typeof part.text === 'string') assistantText += part.text;
+        }
+      } else if (item.type === 'function_call') {
+        toolCalls.push({
+          id: item.call_id ?? '',
+          type: 'function',
+          function: { name: item.name ?? '', arguments: item.arguments ?? '' },
+        });
+      }
+      // reasoning + any other item type: ignored.
+    }
+
+    if (assistantText.length === 0 && toolCalls.length === 0) {
+      // Malformed / empty 2xx — throw so generateText's fallback advances
+      // instead of treating an empty turn as a successful result.
+      throw new OpenAIProviderError(
+        `OpenAI /responses returned no usable output (status: ${apiResponse.status ?? 'unknown'})`,
+        'INVALID_RESPONSE',
+        undefined,
+        undefined,
+        undefined,
+        apiResponse as unknown as Record<string, unknown>
+      );
+    }
+
+    const incompleteReason = apiResponse.incomplete_details?.reason;
+    const finishReason = toolCalls.length > 0
+      ? 'tool_calls'
+      : apiResponse.status === 'incomplete'
+        ? (incompleteReason === 'max_output_tokens' ? 'length'
+          : incompleteReason === 'content_filter' ? 'content_filter'
+          : 'stop')
+        : 'stop';
+
+    return {
+      id: apiResponse.id,
+      object: 'chat.completion',
+      created: apiResponse.created_at ?? Math.floor(Date.now() / 1000),
+      modelId: apiResponse.model ?? modelId,
+      choices: [{
+        index: 0,
+        message: {
+          role: 'assistant' as ModelCompletionChoice['message']['role'],
+          content: assistantText.length > 0 ? assistantText : null,
+          tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+        },
+        finishReason,
+        logprobs: null,
+      }],
+      usage: apiResponse.usage
+        ? this.calculateUsage(
+            {
+              prompt_tokens: apiResponse.usage.input_tokens,
+              completion_tokens: apiResponse.usage.output_tokens,
+              total_tokens: apiResponse.usage.total_tokens,
+            },
+            apiResponse.model ?? modelId
+          )
+        : undefined,
+    };
   }
 
   /**

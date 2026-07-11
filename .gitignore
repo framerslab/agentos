@@ -27,6 +27,7 @@ coverage/
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
+/:memory:
 
 # Internal planning content — never publish
 .superpowers/

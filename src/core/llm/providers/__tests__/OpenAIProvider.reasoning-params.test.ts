@@ -3,7 +3,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // Mock fetch so initialize()/any request never hits the network.
 vi.stubGlobal('fetch', vi.fn());
 
-import { OpenAIProvider, isOpenAIReasoningModel } from '../implementations/OpenAIProvider';
+import {
+  OpenAIProvider,
+  isOpenAIReasoningModel,
+  openAiRejectsReasoningEffortWithTools,
+} from '../implementations/OpenAIProvider';
 import type { ChatMessage } from '../IProvider';
 
 const messages: ChatMessage[] = [{ role: 'user', content: 'hi' }];
@@ -75,5 +79,50 @@ describe('OpenAIProvider — reasoning_effort mapping', () => {
 
   it('omits reasoning_effort for a reasoning model when no effort is given', () => {
     expect(build('gpt-5.5', {}).reasoning_effort).toBeUndefined();
+  });
+});
+
+
+describe('openAiRejectsReasoningEffortWithTools', () => {
+  it('is true for the gpt-5 family, false for o-series and legacy chat models', () => {
+    expect(openAiRejectsReasoningEffortWithTools('gpt-5.5')).toBe(true);
+    expect(openAiRejectsReasoningEffortWithTools('gpt-5.5-pro')).toBe(true);
+    expect(openAiRejectsReasoningEffortWithTools('gpt-5-mini')).toBe(true);
+    expect(openAiRejectsReasoningEffortWithTools('o3')).toBe(false);
+    expect(openAiRejectsReasoningEffortWithTools('gpt-4o')).toBe(false);
+  });
+});
+
+describe('OpenAIProvider — reasoning_effort + function tools (gpt-5 chat/completions 400 guard)', () => {
+  let provider: OpenAIProvider;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    provider = new OpenAIProvider();
+  });
+  const build = (model: string, options: unknown): Record<string, unknown> =>
+    (provider as unknown as {
+      buildChatCompletionPayload: (m: string, msgs: ChatMessage[], o: unknown, s: boolean) => Record<string, unknown>;
+    }).buildChatCompletionPayload(model, messages, options, false);
+
+  const TOOLS = [{ type: 'function', function: { name: 'emit', parameters: { type: 'object', properties: {} } } }];
+
+  it('DROPS reasoning_effort when a gpt-5 request carries function tools (would 400 otherwise)', () => {
+    const payload = build('gpt-5.5', { effort: 'max', tools: TOOLS });
+    expect(payload.reasoning_effort).toBeUndefined();
+    expect(payload.tools).toEqual(TOOLS); // tools still sent
+  });
+
+  it('KEEPS reasoning_effort for a gpt-5 request with NO tools', () => {
+    expect(build('gpt-5.5', { effort: 'max' }).reasoning_effort).toBe('xhigh');
+  });
+
+  it('KEEPS reasoning_effort for an o-series request WITH tools (o-series accepts the combo)', () => {
+    const payload = build('o3', { effort: 'high', tools: TOOLS });
+    expect(payload.reasoning_effort).toBe('high');
+    expect(payload.tools).toEqual(TOOLS);
+  });
+
+  it('ignores an empty tools array (no incompatibility to guard against)', () => {
+    expect(build('gpt-5.5', { effort: 'max', tools: [] }).reasoning_effort).toBe('xhigh');
   });
 });

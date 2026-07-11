@@ -51,3 +51,34 @@ const OPENAI_REASONING_EFFORT: Record<EffortLevel, string> = {
 export function mapEffortToOpenAiReasoningEffort(effort: unknown): string | undefined {
   return isEffortLevel(effort) ? OPENAI_REASONING_EFFORT[effort] : undefined;
 }
+
+/**
+ * Whether an OpenAI model accepts `reasoning.effort: 'xhigh'` on the
+ * `/v1/responses` endpoint. `minimal|low|medium|high` are universal across the
+ * GPT-5 family; `xhigh` is NOT — allow-list only the ids a live probe confirms.
+ *
+ * Live-probed 2026-07-08: `POST /v1/responses {model:'gpt-5.5', tools:[…],
+ * reasoning:{effort:'xhigh'}}` → HTTP 200 (status: completed). gpt-5.5 (and its
+ * point/`-pro` variants) accept it. The codegen frontier-fallback chain uses
+ * gpt-5.5 today; widen the allow-list only after probing the new id.
+ */
+export function modelAcceptsXhighResponsesEffort(modelId: string): boolean {
+  return /^gpt-5\.5/i.test(modelId);
+}
+
+/**
+ * Map the agentos effort scale onto OpenAI's `/v1/responses` `reasoning.effort`
+ * for `modelId`. Identical to {@link mapEffortToOpenAiReasoningEffort} EXCEPT it
+ * caps `xhigh` → `high` for any model NOT on
+ * {@link modelAcceptsXhighResponsesEffort} — a model-aware guard so a request
+ * for maximum depth degrades one step instead of 400ing the whole Responses
+ * call on a model that rejects `xhigh`.
+ */
+export function mapEffortToOpenAiResponsesEffort(
+  modelId: string,
+  effort: unknown,
+): string | undefined {
+  const base = mapEffortToOpenAiReasoningEffort(effort);
+  if (base === undefined) return undefined;
+  return base === 'xhigh' && !modelAcceptsXhighResponsesEffort(modelId) ? 'high' : base;
+}

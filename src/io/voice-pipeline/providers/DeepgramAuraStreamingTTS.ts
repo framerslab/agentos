@@ -39,8 +39,8 @@ import { VoicePipelineError } from '../VoicePipelineError.js';
 
 const DEFAULT_VOICE = 'aura-2-thalia-en';
 const DEFAULT_SAMPLE_RATE = 24_000;
-/** Approx MP3 bytes/sec at Aura's default bitrate — used only for a duration estimate. */
-const BYTES_PER_SEC_MP3 = 16_000;
+/** How long to wait for the Deepgram WS upgrade before failing the connect. */
+const CONNECT_TIMEOUT_MS = 8_000;
 
 async function defaultDeepgramTtsProbe(apiKey: string) {
   const start = Date.now();
@@ -67,11 +67,46 @@ export interface DeepgramAuraStreamingTTSConfig {
   healthProbe?: (apiKey: string) => Promise<{ ok: boolean; status: number; latencyMs: number }>;
 }
 
-/** Map the pipeline audio-format union to a Deepgram `encoding` value. */
-function toDeepgramEncoding(format: 'pcm' | 'mp3' | 'opus'): { encoding: string; format: 'pcm' | 'mp3' | 'opus' } {
-  if (format === 'opus') return { encoding: 'opus', format: 'opus' };
-  if (format === 'pcm') return { encoding: 'linear16', format: 'pcm' };
-  return { encoding: 'mp3', format: 'mp3' };
+/**
+ * Map the pipeline audio-format union to a Deepgram STREAMING `encoding` value.
+ *
+ * The `/v1/speak` WebSocket accepts ONLY raw encodings — Deepgram rejects the
+ * upgrade with `HTTP 400 UNSUPPORTED_AUDIO_FORMAT: encoding=mp3 is not
+ * supported for streaming requests, expected one of linear16, mulaw, alaw`
+ * (verified live 2026-07-08; mp3/opus are REST-only). So the wire is ALWAYS
+ * `linear16`; when the caller asked for a compressed container (mp3/opus) each
+ * emitted chunk is wrapped as a standalone WAV so browser consumers that
+ * decode chunks via `AudioContext.decodeAudioData()` keep working unchanged.
+ */
+function toDeepgramEncoding(format: 'pcm' | 'mp3' | 'opus'): {
+  encoding: string;
+  container: 'wav' | 'raw';
+} {
+  if (format === 'pcm') return { encoding: 'linear16', container: 'raw' };
+  return { encoding: 'linear16', container: 'wav' };
+}
+
+/**
+ * Wrap a raw 16-bit mono PCM buffer in a standalone RIFF/WAVE header so the
+ * chunk is independently decodable (`decodeAudioData` needs a container).
+ */
+function wrapWav(pcm: Buffer, sampleRate: number): Buffer {
+  const header = Buffer.alloc(44);
+  const byteRate = sampleRate * 2; // mono, 16-bit
+  header.write('RIFF', 0, 'ascii');
+  header.writeUInt32LE(36 + pcm.byteLength, 4);
+  header.write('WAVE', 8, 'ascii');
+  header.write('fmt ', 12, 'ascii');
+  header.writeUInt32LE(16, 16); // fmt chunk size
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(1, 22); // mono
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(2, 32); // block align
+  header.writeUInt16LE(16, 34); // bits/sample
+  header.write('data', 36, 'ascii');
+  header.writeUInt32LE(pcm.byteLength, 40);
+  return Buffer.concat([header, pcm]);
 }
 
 /**
@@ -85,7 +120,7 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
   private accumulatedText = '';
   private readonly voice: string;
   private readonly encoding: string;
-  private readonly format: 'pcm' | 'mp3' | 'opus';
+  private readonly container: 'wav' | 'raw';
   private readonly sampleRate: number;
 
   constructor(
@@ -96,11 +131,25 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
     this.voice = sessionConfig.voice ?? config.voice ?? DEFAULT_VOICE;
     const mapped = toDeepgramEncoding(sessionConfig.format ?? 'mp3');
     this.encoding = mapped.encoding;
-    this.format = mapped.format;
+    this.container = mapped.container;
     this.sampleRate = sessionConfig.sampleRate ?? DEFAULT_SAMPLE_RATE;
   }
 
-  /** Open the WebSocket. Deepgram needs no beginning-of-stream handshake. */
+  /**
+   * Open the WebSocket. Deepgram needs no beginning-of-stream handshake.
+   *
+   * Failure paths settle the returned promise EXACTLY once and reject FIRST:
+   * the previous implementation ran `this.emit('error', err)` before
+   * `reject(err)`, and at connect time no `'error'` listener exists yet, so
+   * the emit threw synchronously (Node EventEmitter contract), `reject` never
+   * executed, and the connect promise never settled — the caller (orchestrator
+   * `startSession`) awaited forever and the voice session became a silent
+   * zombie while the raw error surfaced only as a process-level
+   * `uncaughtException`. A handshake rejection now also captures the HTTP
+   * response body (`unexpected-response`), which carries Deepgram's actual
+   * error (e.g. UNSUPPORTED_AUDIO_FORMAT) instead of the blind
+   * "Unexpected server response: 400".
+   */
   async connect(): Promise<void> {
     const wsBase = this.config.baseUrl ?? 'wss://api.deepgram.com/v1/speak';
     const params = new URLSearchParams({ model: this.voice, encoding: this.encoding });
@@ -109,21 +158,66 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
     const url = `${wsBase}?${params.toString()}`;
 
     return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        fail(new Error(`deepgram aura ws connect timed out after ${CONNECT_TIMEOUT_MS}ms`));
+      }, CONNECT_TIMEOUT_MS);
+      const fail = (err: Error): void => {
+        if (settled) {
+          this._emitErrorSafe(err);
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      };
+
       this.ws = new WebSocket(url, {
         headers: { Authorization: `Token ${this.config.apiKey}` },
       });
 
-      this.ws.on('open', () => resolve());
-      this.ws.on('error', (err: Error) => {
-        this.emit('error', err);
-        reject(err);
+      // The server refused the upgrade (4xx/5xx). Read the response body —
+      // Deepgram names the offending parameter in it.
+      this.ws.on('unexpected-response', (_req, res) => {
+        let body = '';
+        res.on('data', (d: Buffer) => {
+          body += d.toString('utf-8');
+        });
+        res.on('end', () => {
+          fail(
+            new Error(
+              `deepgram aura ws rejected: HTTP ${res.statusCode}${body ? ` — ${body.slice(0, 300)}` : ''}`
+            )
+          );
+        });
       });
+
+      this.ws.on('open', () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      });
+      this.ws.on('error', (err: Error) => fail(err));
       this.ws.on('message', (data: Buffer, isBinary: boolean) => this._handleMessage(data, isBinary));
       this.ws.on('close', () => {
+        if (!settled) fail(new Error('deepgram aura ws closed before the upgrade completed'));
         this.closed = true;
         this.emit('close');
       });
     });
+  }
+
+  /**
+   * Emit `'error'` only when a listener exists — an unlistened EventEmitter
+   * `'error'` throws and takes the whole process down as an uncaughtException.
+   */
+  private _emitErrorSafe(err: Error): void {
+    if (this.listenerCount('error') > 0) {
+      this.emit('error', err);
+    } else {
+      console.warn('[deepgram-aura] session error (no listener attached):', err.message);
+    }
   }
 
   pushTokens(tokens: string): void {
@@ -175,14 +269,19 @@ class DeepgramAuraStreamingTTSSession extends EventEmitter implements StreamingT
 
   private _handleMessage(data: Buffer, isBinary: boolean): void {
     if (isBinary) {
-      const audioBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
-      // Raw PCM (linear16) is uncompressed at sampleRate * 2 bytes/sec (16-bit);
-      // mp3/opus are compressed, estimated at BYTES_PER_SEC_MP3.
-      const bytesPerSec = this.format === 'pcm' ? this.sampleRate * 2 : BYTES_PER_SEC_MP3;
-      const durationMs = Math.round((audioBuffer.byteLength / bytesPerSec) * 1000);
+      const pcmBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      // The wire is always linear16 (see toDeepgramEncoding): uncompressed
+      // 16-bit mono at sampleRate * 2 bytes/sec — duration derives from the
+      // RAW pcm bytes, before any container wrapping.
+      const durationMs = Math.round((pcmBuffer.byteLength / (this.sampleRate * 2)) * 1000);
+      // Compressed-container callers (mp3/opus) get each chunk wrapped as a
+      // standalone WAV so per-chunk `decodeAudioData()` consumers work
+      // unchanged; explicit 'pcm' callers get the raw samples.
+      const audioBuffer =
+        this.container === 'wav' ? wrapWav(pcmBuffer, this.sampleRate) : pcmBuffer;
       const chunk: EncodedAudioChunk = {
         audio: audioBuffer,
-        format: this.format,
+        format: 'pcm',
         sampleRate: this.sampleRate,
         durationMs,
         text: this.accumulatedText,

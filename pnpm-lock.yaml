@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@framers/sql-storage-adapter':
-        specifier: ^0.6.6
-        version: 0.6.6(better-sqlite3@12.9.0)(pg@8.20.0)
+        specifier: ^0.6.7
+        version: 0.6.7(better-sqlite3@12.9.0)(pg@8.20.0)
       '@opentelemetry/api':
         specifier: ^1.9.0
         version: 1.9.1
@@ -1406,8 +1406,8 @@ packages:
   '@framers/agentos-skills@1.0.0':
     resolution: {integrity: sha512-vMcMjizMmrWWGWJ4S61ymNoRTkisZRhVUpHt0RD0yeA720hhhbQrYAY2GOE31M/w8EGxYeAB/ELxwyeRMpcpKw==}
 
-  '@framers/sql-storage-adapter@0.6.6':
-    resolution: {integrity: sha512-ZY64jZ4GrS9b8AQLcPDdsQ+p3FdFn+l3XUrvCiAeXTAU7HCaYiMcoNvB7O++l7SjHNe9xc/NQufm7su24lXflA==}
+  '@framers/sql-storage-adapter@0.6.7':
+    resolution: {integrity: sha512-WDZz1yF8Or238oodXneW8M/JZjxbyJVEqXSBAOWeR3HxZaLBl1/aDES6gld4YnJrR1fZqwM4NtSwI7qN8ytE5Q==}
     peerDependencies:
       '@aws-sdk/client-s3': ^3.0.0
       '@capacitor-community/sqlite': ^6.0.0
@@ -9410,7 +9410,7 @@ snapshots:
   '@framers/agentos-skills@1.0.0':
     optional: true
 
-  '@framers/sql-storage-adapter@0.6.6(better-sqlite3@12.9.0)(pg@8.20.0)':
+  '@framers/sql-storage-adapter@0.6.7(better-sqlite3@12.9.0)(pg@8.20.0)':
     dependencies:
       sql.js: 1.14.1
     optionalDependencies:

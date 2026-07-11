@@ -14,19 +14,43 @@ vi.mock('ws', () => {
   class MockWebSocket extends EE {
     static OPEN = 1;
     static CLOSED = 3;
+    /** Per-test connect behavior; reset to 'open' after use. */
+    static nextBehavior: 'open' | 'reject-400' = 'open';
     readyState = 1;
     send = vi.fn();
     close = vi.fn();
+    url: string;
 
-    constructor() {
+    constructor(url?: string) {
       super();
-      process.nextTick(() => this.emit('open'));
+      this.url = String(url ?? '');
+      const behavior = MockWebSocket.nextBehavior;
+      process.nextTick(() => {
+        if (behavior === 'reject-400') {
+          const res = {
+            statusCode: 400,
+            on(event: string, cb: (arg?: unknown) => void) {
+              if (event === 'data') cb(Buffer.from('{"err_code":"BAD_REQUEST"}'));
+              if (event === 'end') cb();
+            },
+          };
+          this.emit('unexpected-response', {}, res);
+          return;
+        }
+        this.emit('open');
+      });
     }
   }
   return { default: MockWebSocket, WebSocket: MockWebSocket };
 });
 
 import { DeepgramStreamingSTT } from '../providers/DeepgramStreamingSTT.js';
+// Default import: the 'ws' types only expose WebSocket as the default export
+// under this tsconfig (TS2595 on a named import). vi.mock supplies the same
+// mock class for both the default and named bindings.
+import MockedWs from 'ws';
+
+const MockCtl = MockedWs as unknown as { nextBehavior: 'open' | 'reject-400' };
 
 describe('DeepgramStreamingSTT', () => {
   let stt: DeepgramStreamingSTT;
@@ -146,5 +170,18 @@ describe('DeepgramStreamingSTT', () => {
     expect(Buffer.isBuffer(sentBuffer)).toBe(true);
     // 4 samples * 2 bytes each = 8 bytes
     expect(sentBuffer.byteLength).toBe(8);
+  });
+
+  it('REJECTS startSession (never hangs) when the server refuses the upgrade, carrying the HTTP body', async () => {
+    // Regression: the old connect() ran emit('error') BEFORE reject() — with
+    // no 'error' listener attached yet the emit threw, reject never ran, and
+    // the promise never settled, hanging the orchestrator's startSession
+    // await forever (the silent zombie voice sessions observed in prod).
+    MockCtl.nextBehavior = 'reject-400';
+    try {
+      await expect(stt.startSession()).rejects.toThrow(/HTTP 400.*BAD_REQUEST/s);
+    } finally {
+      MockCtl.nextBehavior = 'open';
+    }
   });
 });
