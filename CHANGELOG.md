@@ -1,3 +1,7 @@
+## <small>0.9.135 (2026-07-11)</small>
+
+* fix(rag): enforce hybrid metadata filters ([641901f643c7672ff651cabf118b45301c8b08a7](https://github.com/framerslab/agentos/commit/641901f643c7672ff651cabf118b45301c8b08a7))
+
 ## <small>0.9.134 (2026-07-11)</small>
 
 * fix(storage): adopt serialized sqlite transactions ([b65deacd7be73b167ee388f58bdab59fa4e8d8e4](https://github.com/framerslab/agentos/commit/b65deacd7be73b167ee388f58bdab59fa4e8d8e4))
