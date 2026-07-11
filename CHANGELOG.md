@@ -1,3 +1,7 @@
+## <small>0.9.134 (2026-07-11)</small>
+
+* fix(storage): adopt serialized sqlite transactions ([b65deacd7be73b167ee388f58bdab59fa4e8d8e4](https://github.com/framerslab/agentos/commit/b65deacd7be73b167ee388f58bdab59fa4e8d8e4))
+
 ## <small>0.9.133 (2026-07-11)</small>
 
 * merge: synchronize agentos master ([04f66066e4fd15244ba41edcb73b605715e66a60](https://github.com/framerslab/agentos/commit/04f66066e4fd15244ba41edcb73b605715e66a60))
