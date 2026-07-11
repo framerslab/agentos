@@ -480,6 +480,51 @@ describe('PostgresVectorStore', () => {
       expect(result.documents.length).toBe(1);
       expect(result.documents[0].similarityScore).toBeCloseTo(0.025);
     });
+
+    it('filters dense and lexical candidates before ranking with stable parameter indexes', async () => {
+      store = new PostgresVectorStore(makeConfig());
+      await store.initialize();
+      resetMocks();
+
+      queryResultQueue.push({
+        rows: [{ name: 'my_docs', dimension: 4, metric: 'cosine' }],
+      });
+      queryResultQueue.push({ rows: [], rowCount: 0 });
+
+      await store.hybridSearch('my_docs', [0.1, 0.2, 0.3, 0.4], 'public docs', {
+        topK: 5,
+        rrfK: 60,
+        filter: {
+          visibility: { $eq: 'public' },
+          product: { $in: ['agentos', 'frame'] },
+        },
+      });
+
+      const hybridCall = queryCalls.find(c => c.sql.includes('WITH dense AS'));
+      expect(hybridCall).toBeDefined();
+
+      const denseEnd = hybridCall!.sql.indexOf('lexical AS');
+      const lexicalEnd = hybridCall!.sql.indexOf('fused AS');
+      const denseSql = hybridCall!.sql.slice(0, denseEnd);
+      const lexicalSql = hybridCall!.sql.slice(denseEnd, lexicalEnd);
+      const filterSql = "metadata_json->>'visibility' = $3 AND metadata_json->>'product' IN ($4, $5)";
+
+      expect(denseSql).toContain(`WHERE ${filterSql}`);
+      expect(lexicalSql).toContain(`AND ${filterSql}`);
+      expect(hybridCall!.sql.match(/LIMIT \$6/g)).toHaveLength(2);
+      expect(hybridCall!.sql).toContain('$7 + COALESCE(d.rank');
+      expect(hybridCall!.sql).toContain('LIMIT $8');
+      expect(hybridCall!.params).toEqual([
+        '[0.1,0.2,0.3,0.4]',
+        'public docs',
+        'public',
+        'agentos',
+        'frame',
+        15,
+        60,
+        5,
+      ]);
+    });
   });
 
   // =========================================================================
