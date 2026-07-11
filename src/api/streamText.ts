@@ -27,6 +27,7 @@ import {
   type ToolCallHookInfo,
   type ToolCallRecord,
 } from './generateText.js';
+import type { CacheDiagnostics } from '../core/llm/providers/IProvider.js';
 import type { ModelRouteParams } from '../core/llm/routing/IModelRouter.js';
 import { resolveDynamicToolCalls } from './runtime/dynamicToolCalling.js';
 import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
@@ -60,6 +61,46 @@ export type StreamPart =
   | { type: 'error'; error: Error };
 
 /**
+ * Canonical finish-reason union for the streaming surface. Mirrors
+ * {@link GenerateTextResult.finishReason} so hosts can branch on one
+ * vocabulary regardless of which API produced the text.
+ */
+export type StreamFinishReason = 'stop' | 'length' | 'tool-calls' | 'error';
+
+/**
+ * Normalize a provider-reported finish reason onto the canonical
+ * {@link StreamFinishReason} union.
+ *
+ * Providers disagree on vocabulary: OpenAI-compatible hosts emit
+ * `length` / `tool_calls` / `stop`; Anthropic's adapter maps its raw
+ * `stop_reason` before it reaches this layer but raw `max_tokens` /
+ * `tool_use` / `end_turn` are accepted here too so a provider that
+ * skips that mapping still normalizes. Unknown strings and null/undefined
+ * degrade to `'stop'` — the pre-existing semantics of the streaming
+ * surface, which fabricated `'stop'` unconditionally.
+ */
+export function normalizeStreamFinishReason(
+  raw: string | null | undefined,
+): StreamFinishReason {
+  if (raw == null) return 'stop';
+  switch (raw.toLowerCase()) {
+    case 'length':
+    case 'max_tokens':
+    case 'model_length':
+      return 'length';
+    case 'tool-calls':
+    case 'tool_calls':
+    case 'tool_use':
+    case 'function_call':
+      return 'tool-calls';
+    case 'error':
+      return 'error';
+    default:
+      return 'stop';
+  }
+}
+
+/**
  * The object returned immediately by {@link streamText}.
  *
  * Consumers may iterate `textStream` for raw token deltas, `fullStream` for
@@ -90,6 +131,46 @@ export interface StreamTextResult {
   provider: Promise<string>;
   /** Resolves to the resolved model id once the stream has started. */
   model: Promise<string>;
+  /**
+   * Resolves to the reason the FINAL model step stopped emitting, on the
+   * same cadence as {@link usage} (when the stream completes):
+   *
+   * - `'stop'` — natural end of turn (or an unknown provider vocabulary).
+   * - `'length'` — the provider's output token cap cut the text off; the
+   *   assembled reply is TRUNCATED mid-thought. Hosts that persist or
+   *   cache streamed prose as canonical should branch on this before
+   *   doing so (wilds-ai narrator truncation guard, 2026-07-08).
+   * - `'tool-calls'` — the run ended with outstanding tool calls and no
+   *   final text (maxSteps exhaustion).
+   * - `'error'` — the stream emitted an `error` part.
+   *
+   * Historically the streaming surface discarded the provider's reason
+   * and fabricated `'stop'`; the provider layer always had it (final
+   * chunk `choices[0].finishReason`; Anthropic maps `max_tokens` →
+   * `length` in its adapter). Settled via the generator's cleanup on
+   * early abandonment too, so awaiting it after a partial consume does
+   * not hang — though like `text`/`usage` it is only meaningful after a
+   * full drain. The prompt-shim tool-emulation path reports `'stop'`
+   * (its internal calls do not thread per-step reasons).
+   */
+  finishReason: Promise<StreamFinishReason>;
+  /**
+   * Cache-diagnostics verdict of the FINAL step (Anthropic beta; see
+   * {@link GenerateTextOptions.cacheDiagnostics}). Resolves when the stream
+   * completes: `null` when the run did not opt in, when the provider sent no
+   * verdict, or when the compared requests did not diverge; a populated
+   * `cacheMissReason` names the earliest divergence. Settled in the
+   * generator's cleanup too, so awaiting after early abandonment never hangs.
+   */
+  cacheDiagnostics: Promise<CacheDiagnostics | null>;
+  /**
+   * Provider message id (`msg_...`) of the FINAL step; `null` when the run
+   * did not opt into cache diagnostics or the provider sent no id. Persist it
+   * and pass it back as the next request's
+   * `cacheDiagnostics.previousMessageId` to thread the comparison across
+   * turns (the wilds-ai narrator threads it per session).
+   */
+  providerMessageId: Promise<string | null>;
 }
 
 function buildHelperToolExecutionContext(
@@ -146,6 +227,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
   let resolveToolCalls: (v: ToolCallRecord[]) => void;
   let resolveProviderId: (v: string) => void;
   let resolveModelId: (v: string) => void;
+  let resolveFinishReason: (v: StreamFinishReason) => void;
 
   const textPromise = new Promise<string>((r) => {
     resolveText = r;
@@ -167,6 +249,28 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
   const modelPromise = new Promise<string>((r) => {
     resolveModelId = r;
   });
+  // Finish reason of the FINAL step. Resolved at every terminal return
+  // path plus the generator's finally (belt-and-suspenders for early
+  // abandonment); Promise semantics make later settles no-ops, so the
+  // most specific settle wins.
+  const finishReasonPromise = new Promise<StreamFinishReason>((r) => {
+    resolveFinishReason = r;
+  });
+  // Cache-diagnostics verdict + provider message id of the FINAL step.
+  // Settled in the generator's finally (every terminal path, including
+  // early abandonment) so awaiters never hang; null when not opted in.
+  // PromiseLike included: the fallback path adopts the child run's promises
+  // by resolving with them (resolve() unwraps thenables; first settle wins).
+  let resolveCacheDiagnostics: (
+    v: CacheDiagnostics | null | PromiseLike<CacheDiagnostics | null>,
+  ) => void;
+  let resolveProviderMessageId: (v: string | null | PromiseLike<string | null>) => void;
+  const cacheDiagnosticsPromise = new Promise<CacheDiagnostics | null>((r) => {
+    resolveCacheDiagnostics = r;
+  });
+  const providerMessageIdPromise = new Promise<string | null>((r) => {
+    resolveProviderMessageId = r;
+  });
 
   const parts: StreamPart[] = [];
   const allToolCalls: ToolCallRecord[] = [];
@@ -185,6 +289,23 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     let metricStatus: 'ok' | 'error' = 'ok';
     let recordedProviderId: string | undefined;
     let recordedModelId: string | undefined;
+    // Raw provider finish reason of the most recent step's final chunk.
+    // The LAST step's reason is the one that describes the assembled
+    // reply (earlier steps end on tool calls by construction).
+    let lastStepFinishReason: string | null = null;
+    // Cache-diagnostics threading (opts.cacheDiagnostics): mirrors
+    // generateText. The object form seeds the FIRST step with the caller's
+    // prior-request message id (cross-request threading); `true` seeds null.
+    // Each step then chains its own response id into the next step.
+    // True only after a step's FINAL chunk was observed. The finally must
+    // never echo the caller's SEED as this run's id (prompt-shim, fallback
+    // and error paths reach the finally without a native final chunk).
+    let sawFinalProviderChunk = false;
+    let lastProviderMessageId: string | null =
+      typeof opts.cacheDiagnostics === 'object' && opts.cacheDiagnostics !== null
+        ? (opts.cacheDiagnostics.previousMessageId ?? null)
+        : null;
+    let lastCacheDiagnostics: CacheDiagnostics | null = null;
 
     try {
       let { providerId, modelId } = resolveModelOption(opts, 'text');
@@ -463,6 +584,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
             ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
             ...(opts.presencePenalty !== undefined ? { presencePenalty: opts.presencePenalty } : {}),
+            // Cache-diagnostics opt-in (Anthropic beta): thread the previous
+            // request's message id — the caller's seed on step 1, the prior
+            // step's id after — so the verdict names any prefix divergence.
+            ...(opts.cacheDiagnostics
+              ? { cacheDiagnostics: { previousMessageId: lastProviderMessageId } }
+              : {}),
             // Forward provider-specific top-level payload params (e.g.
             // OpenRouter provider-routing preferences); providers spread
             // them onto the streaming request body.
@@ -495,7 +622,21 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               resolveText!(finalText);
               resolveUsage!(usage);
               resolveToolCalls!(allToolCalls);
+              resolveFinishReason!('error');
               return;
+            }
+
+            if (chunk.isFinal && opts.cacheDiagnostics) {
+              sawFinalProviderChunk = true;
+              // Chain the id for the NEXT step's comparison; keep the
+              // latest verdict for the result promise (the final step's
+              // verdict describes the assembled reply).
+              const finalId = (chunk as { id?: unknown }).id;
+              lastProviderMessageId =
+                typeof finalId === 'string' && finalId ? finalId : null;
+              const verdict = (chunk as { cacheDiagnostics?: CacheDiagnostics | null })
+                .cacheDiagnostics;
+              lastCacheDiagnostics = verdict ?? null;
             }
 
             if (chunk.isFinal && chunk.usage) {
@@ -534,6 +675,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
         const stepText = reconstructor.getFullText();
         const finalChunk = reconstructor.getFinalChunk();
+        // Capture the provider's reported reason for THIS step ending.
+        // Anthropic's adapter has already mapped its raw stop_reason
+        // (max_tokens → length); OpenAI-compatible providers report
+        // length/tool_calls/stop verbatim on the final chunk's choice.
+        {
+          const rawStepFinish = finalChunk?.choices?.[0]?.finishReason;
+          if (rawStepFinish != null) lastStepFinishReason = rawStepFinish;
+        }
         let streamedToolCalls = resolveDynamicToolCalls(
           finalChunk?.choices?.[0]?.message?.tool_calls ??
           reconstructor
@@ -595,12 +744,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         }
 
         if (!streamedToolCalls || streamedToolCalls.length === 0) {
-          rootSpan?.setAttribute('agentos.api.finish_reason', 'stop');
+          const stepFinish = normalizeStreamFinishReason(lastStepFinishReason);
+          rootSpan?.setAttribute('agentos.api.finish_reason', stepFinish);
           rootSpan?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
           attachUsageAttributes(rootSpan, usage);
           resolveText!(finalText);
           resolveUsage!(usage);
           resolveToolCalls!(allToolCalls);
+          resolveFinishReason!(stepFinish);
           return;
         }
 
@@ -759,6 +910,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       resolveText!(finalText);
       resolveUsage!(usage);
       resolveToolCalls!(allToolCalls);
+      // maxSteps exhausted. Outstanding tool calls with no final text is
+      // the classic 'tool-calls' ending; otherwise the last step's own
+      // reason describes the assembled reply.
+      resolveFinishReason!(
+        allToolCalls.length > 0 && !finalText
+          ? 'tool-calls'
+          : normalizeStreamFinishReason(lastStepFinishReason),
+      );
       // Primary streaming attempt succeeded: reset the failure streak
       // so a future transient error starts fresh. See
       // {@link LLMProviderHealthRegistry}.
@@ -789,6 +948,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       if (effectiveFallbacks.length && isRetryableError(error)) {
         let lastFallbackError: Error = error;
         let fallbackSucceeded = false;
+        let fallbackFinishReason: StreamFinishReason = 'stop';
         let attempt = 0;
 
         for (const fb of effectiveFallbacks) {
@@ -854,6 +1014,17 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
             const fbToolCalls = await fallbackResult.toolCalls;
             allToolCalls.push(...fbToolCalls);
+            // The recursive fallback streamText computed its own reason;
+            // capture it while the result is in scope (drained above, so
+            // the promise is already settled).
+            fallbackFinishReason = await fallbackResult.finishReason;
+            if (opts.cacheDiagnostics) {
+              // Adopt the fallback run's verdict + thread key. Resolving with
+              // the child promises locks ours to follow them; the outer
+              // finally's later settle is then a no-op.
+              resolveCacheDiagnostics!(fallbackResult.cacheDiagnostics);
+              resolveProviderMessageId!(fallbackResult.providerMessageId);
+            }
 
             fallbackLogger.info('streaming provider fallback succeeded', {
               event: 'fallback_succeeded',
@@ -874,6 +1045,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           resolveText!(finalText);
           resolveUsage!(usage);
           resolveToolCalls!(allToolCalls);
+          resolveFinishReason!(fallbackFinishReason);
         } else {
           fallbackLogger.warn('streaming provider fallbacks exhausted', {
             event: 'fallback_exhausted',
@@ -890,6 +1062,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           resolveText!(finalText);
           resolveUsage!(usage);
           resolveToolCalls!(allToolCalls);
+          resolveFinishReason!('error');
         }
       } else {
         metricStatus = 'error';
@@ -899,6 +1072,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         resolveText!(finalText);
         resolveUsage!(usage);
         resolveToolCalls!(allToolCalls);
+        resolveFinishReason!('error');
       }
     } finally {
       // Belt-and-suspenders for the routing Promises: if the stream
@@ -906,8 +1080,36 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // threw), settle the Promises with whatever recorded ids exist
       // so awaiters don't hang forever. Empty strings keep the type
       // consistent with successful resolution.
+      // Abandonment belt-and-suspenders for the AGGREGATE promises too: a
+      // consumer that breaks out of the stream mid-flight must still be able
+      // to await text/usage/toolCalls without hanging. Values reflect what
+      // streamed before the abandonment; normal completions already settled
+      // these, making the calls no-ops (first settle wins).
+      resolveText!(finalText);
+      resolveUsage!(usage);
+      resolveToolCalls!(allToolCalls);
       resolveProviderId!(recordedProviderId ?? '');
       resolveModelId!(recordedModelId ?? '');
+      // Belt-and-suspenders like the routing Promises above: every
+      // normal terminal already settled finishReason with a specific
+      // value (Promise semantics make this a no-op there); this covers
+      // early consumer abandonment, thrown-before-terminal paths, and
+      // the prompt-shim delegation so awaiters never hang.
+      resolveFinishReason!(
+        metricStatus === 'error'
+          ? 'error'
+          : allToolCalls.length > 0 && !finalText
+            ? 'tool-calls'
+            : normalizeStreamFinishReason(lastStepFinishReason),
+      );
+      // Same belt-and-suspenders: every path settles the diagnostics pair
+      // here (null when the run never opted in or never reached a final
+      // chunk) so awaiters never hang. When opted in, the id is the final
+      // step's — the caller's thread key for the next request.
+      resolveCacheDiagnostics!(opts.cacheDiagnostics ? lastCacheDiagnostics : null);
+      resolveProviderMessageId!(
+        opts.cacheDiagnostics && sawFinalProviderChunk ? lastProviderMessageId : null,
+      );
       rootSpan?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
       if (metricStatus === 'error') {
         rootSpan?.setAttribute('agentos.api.finish_reason', 'error');
@@ -946,7 +1148,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           model: recordedModelId ?? '',
           usage,
           source: opts.source,
-          finishReason: allToolCalls.length > 0 && !finalText ? 'tool-calls' : 'stop',
+          finishReason:
+            allToolCalls.length > 0 && !finalText
+              ? 'tool-calls'
+              : normalizeStreamFinishReason(lastStepFinishReason),
           surface: 'streamText',
           durationMs: Date.now() - startedAt,
           ...(firstPartAt !== undefined ? { ttfbMs: firstPartAt - startedAt } : {}),
@@ -980,6 +1185,22 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             if (value.type === 'text') return { value: value.text, done: false };
           }
         },
+        // Early abandonment (for-await break / iterator.return()) must reach
+        // the generator so its finally runs and every deferred promise
+        // (text/usage/finishReason/cacheDiagnostics/providerMessageId)
+        // settles — a next()-only wrapper left them pending forever.
+        async return(value?: unknown) {
+          await inner.return?.(value as never);
+          return { value: undefined as never, done: true as const };
+        },
+        async throw(err?: unknown) {
+          if (inner.throw) {
+            await inner.throw(err);
+          } else {
+            await inner.return?.(undefined as never);
+          }
+          throw err;
+        },
       };
     },
   };
@@ -992,5 +1213,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     toolCalls: toolCallsPromise,
     provider: providerPromise,
     model: modelPromise,
+    finishReason: finishReasonPromise,
+    cacheDiagnostics: cacheDiagnosticsPromise,
+    providerMessageId: providerMessageIdPromise,
   };
 }

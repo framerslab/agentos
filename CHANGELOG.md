@@ -1,3 +1,64 @@
+## <small>0.9.132 (2026-07-10)</small>
+
+* fix(openrouter): surface prompt-cache usage and env-default provider routing ([daf123ef466b6c7b41fc071c469187f22b15943d](https://github.com/framerslab/agentos/commit/daf123ef466b6c7b41fc071c469187f22b15943d))
+
+## <small>0.9.131 (2026-07-10)</small>
+
+* fix(llm): abandoned streams settle every promise; strip covers /responses ([d531c47d136d36ea917f53f8cbcb9ac95bfe7023](https://github.com/framerslab/agentos/commit/d531c47d136d36ea917f53f8cbcb9ac95bfe7023))
+* fix(llm): diagnostics resolvers accept the adopted fallback promises ([c442249ab6a69b7ad81e9bfebd781c6484d5e365](https://github.com/framerslab/agentos/commit/c442249ab6a69b7ad81e9bfebd781c6484d5e365))
+
+## <small>0.9.130 (2026-07-10)</small>
+
+* fix(llm): native providers no longer forward OpenRouter routing controls ([f9d88b1d0e7587979b3d1c5dccee0d96b776c680](https://github.com/framerslab/agentos/commit/f9d88b1d0e7587979b3d1c5dccee0d96b776c680))
+
+## <small>0.9.129 (2026-07-10)</small>
+
+* feat(llm): thread cache diagnostics across requests and through streaming ([80eaecbb7a251e8ef94f3ddd57a073409e8301e3](https://github.com/framerslab/agentos/commit/80eaecbb7a251e8ef94f3ddd57a073409e8301e3))
+
+## <small>0.9.128 (2026-07-09)</small>
+
+* fix(io/avatar): Simli media socket address is /compose/webrtc/p2p ([bb00ebd52a3f0e51eb6248418b97223f76cf1cb4](https://github.com/framerslab/agentos/commit/bb00ebd52a3f0e51eb6248418b97223f76cf1cb4))
+
+## <small>0.9.127 (2026-07-09)</small>
+
+* fix(api): raise the default fallback chain to the gpt-5.5 quality floor ([9b6d501fc2b51de75be74e8fc297b20767847043](https://github.com/framerslab/agentos/commit/9b6d501fc2b51de75be74e8fc297b20767847043))
+
+## <small>0.9.126 (2026-07-09)</small>
+
+* fix(sandbox): retry a failed execa import instead of caching the rejection ([2d05a017fb3dbe8c514cefc9c406872d71fbb920](https://github.com/framerslab/agentos/commit/2d05a017fb3dbe8c514cefc9c406872d71fbb920))
+
+## <small>0.9.125 (2026-07-09)</small>
+
+* fix(sandbox): load execa lazily so CJS-interop consumers can load the sandbox modules ([6193100b8cd1bca6849234cb5666c489829f88c0](https://github.com/framerslab/agentos/commit/6193100b8cd1bca6849234cb5666c489829f88c0))
+
+## <small>0.9.124 (2026-07-09)</small>
+
+* feat(avatar): realtime avatar seam with simli provider (client-delegated + server-driven) ([bef906ccbf508106f4d3d069636c8f92202b427f](https://github.com/framerslab/agentos/commit/bef906ccbf508106f4d3d069636c8f92202b427f))
+* feat(voice): cartesia batch + streaming tts providers ([e7436a24b884c600d09a8ddb1283a7833165829e](https://github.com/framerslab/agentos/commit/e7436a24b884c600d09a8ddb1283a7833165829e))
+* feat(voice): expressiveness instructions knob + cartesia/hume provider families ([03bbfcf038b90b2d491a15e09ffc19157c8c4299](https://github.com/framerslab/agentos/commit/03bbfcf038b90b2d491a15e09ffc19157c8c4299))
+* feat(voice): hume octave batch + streaming tts providers + env wiring ([158c5df8c2af4716429f106438de76e5e93fe1d3](https://github.com/framerslab/agentos/commit/158c5df8c2af4716429f106438de76e5e93fe1d3))
+
+## <small>0.9.123 (2026-07-09)</small>
+
+* feat(llm): route gpt-5 reasoning + function-tool calls to the OpenAI Responses API ([bf48b943b8c6f4cf0cc09e426c838063810d02ef](https://github.com/framerslab/agentos/commit/bf48b943b8c6f4cf0cc09e426c838063810d02ef))
+* test(voice): default-import the ws mock to satisfy TS2595 under strict interop ([00b12b525e9a0279b387634c106ad99532ca7ccd](https://github.com/framerslab/agentos/commit/00b12b525e9a0279b387634c106ad99532ca7ccd))
+
+## <small>0.9.122 (2026-07-09)</small>
+
+* fix(voice): linear16 streaming Aura with WAV chunks, fail-fast Deepgram connects, linear16 inbound transport decode ([a2cb6c48a69a8f39a835090b57d847cff07f08e7](https://github.com/framerslab/agentos/commit/a2cb6c48a69a8f39a835090b57d847cff07f08e7))
+
+## <small>0.9.121 (2026-07-08)</small>
+
+* fix(llm): drop reasoning_effort when a GPT-5 request carries function tools ([ae41fa9f1ad7339bea337619a7a162937b48dac6](https://github.com/framerslab/agentos/commit/ae41fa9f1ad7339bea337619a7a162937b48dac6))
+
+## <small>0.9.120 (2026-07-08)</small>
+
+* fix(llm): degrade empty/any-JSON schema nodes to non-strict + widen the strict-rejection tripwire ([ea0c3f39218b4e87f456e44db3eb9a7475b545a3](https://github.com/framerslab/agentos/commit/ea0c3f39218b4e87f456e44db3eb9a7475b545a3))
+
+## <small>0.9.119 (2026-07-08)</small>
+
+* feat(llm): surface the provider finish reason on streaming results ([eba6e6f520018bc9245d6a83d7721277adf62cfe](https://github.com/framerslab/agentos/commit/eba6e6f520018bc9245d6a83d7721277adf62cfe))
+
 ## <small>0.9.118 (2026-07-08)</small>
 
 * feat(llm): rebuild structured-output payloads per fallback leg ([fc23b578774942f991814cfd84d012bb2982bf43](https://github.com/framerslab/agentos/commit/fc23b578774942f991814cfd84d012bb2982bf43))

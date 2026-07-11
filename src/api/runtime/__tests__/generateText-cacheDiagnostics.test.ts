@@ -138,3 +138,54 @@ it('sends no cacheDiagnostics option to the provider when not opted in', async (
   expect(hoisted.generateCompletion.mock.calls[0][2]?.cacheDiagnostics).toBeUndefined();
   expect(result.cacheDiagnostics).toBeUndefined();
 });
+
+it('seeds the FIRST step from the object form so cross-request threading works', async () => {
+  hoisted.generateCompletion
+    .mockResolvedValueOnce(toolStep('msg_step_1', null))
+    .mockResolvedValueOnce(textStep('msg_step_2', 'Done.', { cacheMissReason: null }));
+
+  const result = await generateText({
+    model: 'anthropic:claude-opus-4-8',
+    prompt: 'continue the story',
+    tools: [echo] as any,
+    maxSteps: 5,
+    cacheDiagnostics: { previousMessageId: 'msg_prior_turn' },
+  });
+
+  // Step 1 compares against the CALLER's previous request (last turn), not null.
+  expect(hoisted.generateCompletion.mock.calls[0][2]?.cacheDiagnostics).toEqual({
+    previousMessageId: 'msg_prior_turn',
+  });
+  // Step 2 chains within the loop as before.
+  expect(hoisted.generateCompletion.mock.calls[1][2]?.cacheDiagnostics).toEqual({
+    previousMessageId: 'msg_step_1',
+  });
+  expect(result.cacheDiagnostics).toEqual({ cacheMissReason: null });
+});
+
+it('exposes the last step\'s provider message id on the result for next-turn threading', async () => {
+  hoisted.generateCompletion
+    .mockResolvedValueOnce(toolStep('msg_step_1', null))
+    .mockResolvedValueOnce(textStep('msg_step_2', 'Done.', { cacheMissReason: null }));
+
+  const result = await generateText({
+    model: 'anthropic:claude-opus-4-8',
+    prompt: 'go',
+    tools: [echo] as any,
+    maxSteps: 5,
+    cacheDiagnostics: true,
+  });
+
+  expect(result.providerMessageId).toBe('msg_step_2');
+});
+
+it('leaves providerMessageId absent when diagnostics are not opted in', async () => {
+  hoisted.generateCompletion.mockResolvedValueOnce(textStep('msg_x', 'Plain.'));
+
+  const result = await generateText({
+    model: 'anthropic:claude-opus-4-8',
+    prompt: 'plain run',
+  });
+
+  expect(result.providerMessageId).toBeUndefined();
+});

@@ -108,3 +108,61 @@ describe('createVoiceProvidersFromEnv', () => {
     expect(tts.providers.map((p) => p.providerId)).not.toContain('deepgram-aura');
   });
 });
+
+describe('cartesia + hume env wiring', () => {
+  it('adds cartesia streaming when CARTESIA_API_KEY + voice id are present', () => {
+    const { tts } = createVoiceProvidersFromEnv({
+      env: { DEEPGRAM_API_KEY: 'd', CARTESIA_API_KEY: 'c', CARTESIA_VOICE_ID: 'v1' },
+    });
+    expect(tts.providers.map((p) => p.providerId)).toContain('cartesia-sonic-stream');
+  });
+
+  it('skips cartesia without a voice id (provider needs one)', () => {
+    const { tts } = createVoiceProvidersFromEnv({
+      env: { DEEPGRAM_API_KEY: 'd', CARTESIA_API_KEY: 'c' },
+    });
+    expect(tts.providers.map((p) => p.providerId)).not.toContain('cartesia-sonic-stream');
+  });
+
+  it('adds hume streaming when HUME_API_KEY is present', () => {
+    const { tts } = createVoiceProvidersFromEnv({
+      env: { DEEPGRAM_API_KEY: 'd', HUME_API_KEY: 'h' },
+    });
+    expect(tts.providers.map((p) => p.providerId)).toContain('hume-octave-stream');
+  });
+
+  it('key absence = absent from chain (no throw)', () => {
+    const { tts } = createVoiceProvidersFromEnv({ env: { DEEPGRAM_API_KEY: 'd' } });
+    const ids = tts.providers.map((p) => p.providerId);
+    expect(ids).not.toContain('cartesia-sonic-stream');
+    expect(ids).not.toContain('hume-octave-stream');
+  });
+
+  it("ttsPreference 'cartesia' promotes it to first-try", () => {
+    const { tts } = createVoiceProvidersFromEnv({
+      env: { DEEPGRAM_API_KEY: 'd', CARTESIA_API_KEY: 'c', CARTESIA_VOICE_ID: 'v1' },
+      ttsPreference: 'cartesia',
+    });
+    expect(tts.providers[0].providerId).toBe('cartesia-sonic-stream');
+  });
+
+  it("ttsPreference 'hume' promotes it to first-try", () => {
+    const { tts } = createVoiceProvidersFromEnv({
+      env: { DEEPGRAM_API_KEY: 'd', HUME_API_KEY: 'h' },
+      ttsPreference: 'hume',
+    });
+    expect(tts.providers[0].providerId).toBe('hume-octave-stream');
+  });
+
+  it('default incumbent ordering is unchanged when no new keys are set', () => {
+    const { tts } = createVoiceProvidersFromEnv({
+      env: { DEEPGRAM_API_KEY: 'd', ELEVENLABS_API_KEY: 'e', OPENAI_API_KEY: 'o' },
+    });
+    // Byte-identical incumbent chain head — the no-regression guard.
+    expect(tts.providers.slice(0, 3).map((p) => p.providerId)).toEqual([
+      'deepgram-aura',
+      'elevenlabs-streaming',
+      'openai-realtime',
+    ]);
+  });
+});

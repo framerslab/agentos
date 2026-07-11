@@ -383,8 +383,14 @@ export interface GenerateTextOptions {
    * verdict lands on {@link GenerateTextResult.cacheDiagnostics}. Anthropic-only
    * (other providers ignore the option) and best-effort — diagnostics never
    * block or fail a request.
+   *
+   * The object form seeds the FIRST step's `previous_message_id` so a caller
+   * can thread across REQUESTS, not just across the steps of one call: pass
+   * the prior turn's {@link GenerateTextResult.providerMessageId} and the
+   * first step's verdict names any divergence from that turn's prompt.
+   * `true` keeps the in-call-only behavior (first step compares nothing).
    */
-  cacheDiagnostics?: boolean;
+  cacheDiagnostics?: boolean | { previousMessageId?: string | null };
   /**
    * Provider-specific TOP-LEVEL request-payload parameters, forwarded
    * verbatim into `ModelCompletionOptions.customModelParams`. Provider
@@ -615,6 +621,14 @@ export interface GenerateTextResult {
    * available on the `onAfterGeneration` hook.
    */
   cacheDiagnostics?: CacheDiagnostics | null;
+  /**
+   * Provider message id (`msg_...`) of the LAST agentic step; present only
+   * when the run opted in via {@link GenerateTextOptions.cacheDiagnostics}.
+   * Persist it and pass it back as the next request's
+   * `cacheDiagnostics.previousMessageId` to thread the comparison across
+   * turns. `null` when the provider reported no id.
+   */
+  providerMessageId?: string | null;
   /** Final assistant text after all agentic steps have completed. */
   text: string;
   /** Aggregated token usage across all steps. */
@@ -1036,11 +1050,13 @@ export function isRetryableError(error: unknown): boolean {
  * and builds an ordered fallback chain.
  *
  * Each entry in the returned array contains a provider identifier and an
- * optional cheap model suitable for fallback use.  Providers are ordered by
- * general availability and cost-effectiveness:
- * 1. OpenAI (`gpt-4o-mini`)
+ * optional model suitable for fallback use.  Providers are ordered by
+ * general availability; the OpenAI legs pin `gpt-5.5` — the platform's
+ * quality floor for failover traffic. A primary-provider outage must not
+ * silently downgrade user-facing output to a mini-tier model:
+ * 1. OpenAI (`gpt-5.5`)
  * 2. Anthropic (`claude-haiku-4-5-20251001`)
- * 3. OpenRouter (default model)
+ * 3. OpenRouter (`openai/gpt-5.5`)
  * 4. Gemini (`gemini-2.5-flash`)
  *
  * @param excludeProvider - Provider to omit from the chain (typically the
@@ -1052,7 +1068,7 @@ export function isRetryableError(error: unknown): boolean {
  * ```ts
  * // Primary is anthropic: build fallback chain from remaining providers
  * const chain = buildFallbackChain('anthropic');
- * // => [{ provider: 'openai', model: 'gpt-4o-mini' }, { provider: 'openrouter' }, ...]
+ * // => [{ provider: 'openai', model: 'gpt-5.5' }, { provider: 'openrouter', model: 'openai/gpt-5.5' }, ...]
  * ```
  */
 export function buildFallbackChain(
@@ -1061,20 +1077,21 @@ export function buildFallbackChain(
   const chain: FallbackProviderEntry[] = [];
 
   if (process.env.OPENAI_API_KEY && excludeProvider !== 'openai') {
-    chain.push({ provider: 'openai', model: 'gpt-4o-mini' });
+    chain.push({ provider: 'openai', model: 'gpt-5.5' });
   }
   if (process.env.ANTHROPIC_API_KEY && excludeProvider !== 'anthropic') {
     chain.push({ provider: 'anthropic', model: 'claude-haiku-4-5-20251001' });
   }
   if (process.env.OPENROUTER_API_KEY && excludeProvider !== 'openrouter') {
-    // Pin a cheap last-resort model. A model-less OpenRouter entry defaults
-    // to `openai/gpt-4o` (the OpenRouter provider's `defaultModel`), so
-    // failover traffic silently lands on the priciest sensible model — that
+    // ALWAYS pin an explicit model here. A model-less OpenRouter entry
+    // defaults to the provider's `defaultModel`, so failover traffic
+    // silently lands on whatever that happens to be — an unpinned entry
     // made `openrouter/openai/gpt-4o` the #1 LLM cost in wilds prod
-    // (2026-06-07, ~half the LLM bill). gpt-4o-mini is ~16x cheaper, same
-    // family (structured-output safe), and routes around an OpenAI-direct
-    // outage that already knocked the `openai` link above out.
-    chain.push({ provider: 'openrouter', model: 'openai/gpt-4o-mini' });
+    // (2026-06-07, ~half the LLM bill). gpt-5.5 is the pinned quality
+    // floor (same family as the direct leg, structured-output safe) and
+    // routes around an OpenAI-direct outage that already knocked the
+    // `openai` link above out.
+    chain.push({ provider: 'openrouter', model: 'openai/gpt-5.5' });
   }
   if (process.env.GEMINI_API_KEY && excludeProvider !== 'gemini') {
     chain.push({ provider: 'gemini' });
@@ -1514,9 +1531,14 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       let lastServingProvider: string | undefined;
       // Cache-diagnostics threading (opts.cacheDiagnostics): each step passes
       // the PREVIOUS step's provider message id so the API can compare the two
-      // requests and report where the cached prefix diverged. First step
-      // passes null (opt-in, nothing to compare yet).
-      let lastProviderMessageId: string | null = null;
+      // requests and report where the cached prefix diverged. The object
+      // form seeds the FIRST step with the caller's prior-request message id
+      // (cross-request threading); `true` seeds null (opt-in, nothing to
+      // compare yet) — in-call threading only.
+      let lastProviderMessageId: string | null =
+        typeof opts.cacheDiagnostics === 'object' && opts.cacheDiagnostics !== null
+          ? (opts.cacheDiagnostics.previousMessageId ?? null)
+          : null;
       let lastCacheDiagnostics: CacheDiagnostics | null | undefined;
       try {
       for (let step = 0; step < maxSteps; step++) {
@@ -1701,6 +1723,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             ...(lastCacheDiagnostics !== undefined
               ? { cacheDiagnostics: lastCacheDiagnostics }
               : {}),
+            ...(opts.cacheDiagnostics ? { providerMessageId: lastProviderMessageId } : {}),
             text: textContent,
             usage: totalUsage,
             toolCalls: allToolCalls,
@@ -1838,6 +1861,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           model: resolved.modelId,
           ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
           ...(lastCacheDiagnostics !== undefined ? { cacheDiagnostics: lastCacheDiagnostics } : {}),
+          ...(opts.cacheDiagnostics ? { providerMessageId: lastProviderMessageId } : {}),
           text: textContent,
           usage: totalUsage,
           toolCalls: allToolCalls,
@@ -1880,6 +1904,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         ...(lastCacheDiagnostics !== undefined
           ? { cacheDiagnostics: lastCacheDiagnostics }
           : {}),
+        ...(opts.cacheDiagnostics ? { providerMessageId: lastProviderMessageId } : {}),
       };
     });
     // The primary attempt succeeded: let the registry know so its

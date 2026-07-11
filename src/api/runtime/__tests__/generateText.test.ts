@@ -576,7 +576,7 @@ describe('generateText', () => {
     }
   });
 
-  it('preserves the explicit chain on recursion — never falls into the default cheap chain (gpt-4o-mini)', async () => {
+  it('preserves the explicit chain on recursion — never rebuilds the default chain', async () => {
     // Echo the requested provider/model so each hop's identity is observable
     // (the default mock pins every hop to gpt-4.1-mini, hiding which model won).
     (resolveModelOption as unknown as Mock).mockImplementation(
@@ -594,8 +594,9 @@ describe('generateText', () => {
     try {
       // Only the openrouter frontier entry succeeds; the primary and the openai
       // gpt-5.5 hop both throw retryably. If the recursion rebuilt the default
-      // cheap chain (the pre-fix bug), an openai/gpt-4o-mini hop would be tried
-      // before openrouter:openai/gpt-5.5.
+      // chain (the pre-fix bug), the rebuild at the failed-openai hop would
+      // splice in the anthropic haiku leg — a model the EXPLICIT chain never
+      // names — before openrouter:openai/gpt-5.5.
       hoisted.generateCompletion.mockImplementation(async (modelId: string) => {
         if (modelId === 'openai/gpt-5.5') {
           return {
@@ -622,6 +623,10 @@ describe('generateText', () => {
       const requestedModels = (hoisted.generateCompletion.mock.calls as unknown[][]).map((c) => c[0]);
       expect(requestedModels).not.toContain('gpt-4o-mini');
       expect(requestedModels).not.toContain('openai/gpt-4o-mini');
+      // The default chain's anthropic leg — present in any rebuilt chain
+      // (the explicit chain has no anthropic entry), so its absence proves
+      // the explicit chain was preserved verbatim.
+      expect(requestedModels).not.toContain('claude-haiku-4-5-20251001');
     } finally {
       // Restore the fixed resolvers so later tests see the default behavior.
       (resolveModelOption as unknown as Mock).mockImplementation(() => ({
@@ -877,11 +882,12 @@ describe('buildFallbackChain — OpenRouter link pins a cheap model', () => {
       const chain = buildFallbackChain('anthropic');
       const orEntry = chain.find((e) => e.provider === 'openrouter');
       expect(orEntry).toBeDefined();
-      // A model-less OpenRouter entry silently defaults to the expensive
-      // `openai/gpt-4o` in the OpenRouter provider, which made failover
-      // traffic the #1 LLM cost in prod (2026-06-07). Pin a cheap
-      // last-resort model so failover never lands on gpt-4o.
-      expect(orEntry?.model).toBe('openai/gpt-4o-mini');
+      // A model-less OpenRouter entry silently defaults to the OpenRouter
+      // provider's defaultModel, which made failover traffic the #1 LLM
+      // cost in prod (2026-06-07). The entry must be PINNED — and pinned
+      // to the gpt-5.5 quality floor, so a primary outage neither lands
+      // on an unchosen model nor downgrades output to a mini tier.
+      expect(orEntry?.model).toBe('openai/gpt-5.5');
     } finally {
       if (originalKey === undefined) delete process.env.OPENROUTER_API_KEY;
       else process.env.OPENROUTER_API_KEY = originalKey;
