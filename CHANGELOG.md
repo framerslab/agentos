@@ -1,3 +1,10 @@
+## <small>0.9.137 (2026-07-12)</small>
+
+* feat(api): expose active extension http handlers from the AgentOS facade ([f18b12ac480c106159537b993863bcd465217106](https://github.com/framerslab/agentos/commit/f18b12ac480c106159537b993863bcd465217106))
+* feat(channels): enforce group policy in the inbound router path ([6a2e81d580f08ca5d9b3527a74568fad9963a49e](https://github.com/framerslab/agentos/commit/6a2e81d580f08ca5d9b3527a74568fad9963a49e))
+* feat(channels): group chat policy contract with pure evaluator (mention gating, owner-only, allow/deny, bot-loop protection) ([76292ccd22ba9c6b06f5d969b5a36c7b3da9a4c2](https://github.com/framerslab/agentos/commit/76292ccd22ba9c6b06f5d969b5a36c7b3da9a4c2))
+* feat(server): serve extension http handlers before 404 with config kill switch ([6b5a7a8564a0e83d9fcc335d6d3211f3c384c367](https://github.com/framerslab/agentos/commit/6b5a7a8564a0e83d9fcc335d6d3211f3c384c367))
+
 ## <small>0.9.136 (2026-07-12)</small>
 
 * fix(openrouter): validate provider sort env before shaping routing prefs ([aa98dea4275e2e018b6b400e62af95cf89b153fd](https://github.com/framerslab/agentos/commit/aa98dea4275e2e018b6b400e62af95cf89b153fd))
