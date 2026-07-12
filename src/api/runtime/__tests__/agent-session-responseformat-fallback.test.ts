@@ -94,4 +94,84 @@ describe('AgentSession.send responseSchema fallback rebuild (2026-07-07)', () =>
     expect(legOptions.responseFormat?.type).toBe('json_schema');
     expect(legOptions.responseFormat?._agentosUseToolForStructuredOutput).toBeUndefined();
   });
+
+  it('no-provider agent: the primary payload follows env/model resolution, not an openai default', async () => {
+    // The agent sets NO provider/model; resolution (env keys) lands on
+    // anthropic. The primary structured-output payload must be shaped for
+    // the provider that actually serves the call — an OpenAI json_schema
+    // sent to AnthropicProvider is silently ignored (schema unenforced,
+    // ObjectGenerationError on prose).
+    (resolveModelOption as unknown as Mock).mockImplementation(() => ({
+      providerId: 'anthropic',
+      modelId: 'claude-opus-4-8',
+    }));
+    hoisted.generateCompletion.mockImplementation(async (modelId: string) =>
+      okResponse(modelId, '{"title":"x"}'),
+    );
+
+    const a = agent({ memory: false, fallbackProviders: [] });
+    const result = await a.session().send('hi', {
+      responseSchema: z.object({ title: z.string() }),
+      schemaName: 'titled',
+    });
+
+    expect((result as { object?: unknown }).object).toEqual({ title: 'x' });
+    const primaryOptions = (hoisted.generateCompletion.mock.calls[0]?.[2] ?? {}) as {
+      responseFormat?: Record<string, unknown>;
+    };
+    expect(primaryOptions.responseFormat?._agentosUseToolForStructuredOutput).toBe(true);
+    expect(primaryOptions.responseFormat?.type).toBeUndefined();
+  });
+
+  it('Fable primary degrades to the prompt-only JSON path (no forced-tool marker)', async () => {
+    hoisted.generateCompletion.mockImplementation(async (modelId: string) =>
+      okResponse(modelId, '{"title":"x"}'),
+    );
+
+    const a = agent({
+      provider: 'anthropic',
+      model: 'claude-fable-5',
+      memory: false,
+      fallbackProviders: [],
+    });
+    const result = await a.session().send('hi', {
+      responseSchema: z.object({ title: z.string() }),
+      schemaName: 'titled',
+    });
+
+    expect((result as { object?: unknown }).object).toEqual({ title: 'x' });
+    const primaryOptions = (hoisted.generateCompletion.mock.calls[0]?.[2] ?? {}) as {
+      responseFormat?: unknown;
+    };
+    // Fable rejects a forced tool_choice at the API level; the primary must
+    // run schema-in-prompt only, exactly like generateObject's primary path.
+    expect(primaryOptions.responseFormat).toBeUndefined();
+  });
+
+  it('record schema on an openai primary degrades to json_object (strict gate)', async () => {
+    hoisted.generateCompletion.mockImplementation(async (modelId: string) =>
+      okResponse(modelId, '{"palette":{"primary":"#aabbcc"}}'),
+    );
+
+    const a = agent({
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      memory: false,
+      fallbackProviders: [],
+    });
+    const result = await a.session().send('hi', {
+      // z.record lowers to a schema-valued additionalProperties -> fails the
+      // strict validator; an ungated strict json_schema payload 400s.
+      responseSchema: z.object({ palette: z.record(z.string(), z.string()) }),
+      schemaName: 'palette',
+    });
+
+    expect((result as { object?: unknown }).object).toEqual({
+      palette: { primary: '#aabbcc' },
+    });
+    const primaryOptions = (hoisted.generateCompletion.mock.calls[0]?.[2] ?? {}) as {
+      responseFormat?: Record<string, unknown>;
+    };
+    expect(primaryOptions.responseFormat).toEqual({ type: 'json_object' });
+  });
 });

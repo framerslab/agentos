@@ -21,8 +21,8 @@ import {
   type MessageContent,
   type ToolCallHookInfo,
 } from './generateText.js';
-import { buildResponseFormat } from '../core/llm/providers/structuredOutputFormat.js';
 import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
+import { resolveModelOption } from './model.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { ObjectGenerationError } from './generateObject.js';
 import { streamText, type StreamTextResult } from './streamText.js';
@@ -378,26 +378,6 @@ export interface Agent {
   getAvatarBindings(): import('./types').AvatarBindingInputs & Record<string, unknown>;
   /** Inject game-specific binding overrides (healthBand, combatMode, etc.). */
   setAvatarBindingOverrides(overrides: Record<string, unknown>): void;
-}
-
-/**
- * Resolve the provider id from agentos baseOpts for structured-output
- * adapter routing. Reads `opts.provider` first, then parses the
- * `'<provider>:<model>'` form from `opts.model`. Falls back to 'openai'
- * to match the legacy default elsewhere in agentos.
- *
- * Used only by {@link AgentSession.send} when a `responseSchema` is set,
- * to pick the right native structured-output payload shape per provider.
- */
-function resolveProviderForStructuredOutput(opts: Partial<GenerateTextOptions>): string {
-  if (opts.provider) return opts.provider;
-  if (typeof opts.model === 'string' && opts.model.includes(':')) {
-    // Trim handles inputs like ":openai" / "  openai:gpt-4". Empty after
-    // trim falls back to the default.
-    const head = opts.model.split(':', 1)[0]?.trim();
-    if (head) return head;
-  }
-  return 'openai';
 }
 
 function mergeUsageLedgerOptions(
@@ -806,20 +786,31 @@ export function agent(opts: AgentOptions): Agent {
             : [userMessage];
 
           // Schema-driven structured output: when responseSchema is set,
-          // route through the provider's native enforcement API. The
-          // adapter at structuredOutputFormat.ts maps the Zod schema to
-          // the per-provider payload shape; generateText passes it
-          // through to the provider via _responseFormat (see
-          // generateText.ts:931 for the plumbing).
+          // route through the provider's native enforcement API via the
+          // same per-provider builder generateObject uses; generateText
+          // passes the payload through to the provider via _responseFormat.
           let responseFormat: Record<string, unknown> | undefined;
           let responseFormatBuilder: GenerateTextOptions['_responseFormatBuilder'];
           if (sendOpts?.responseSchema) {
-            const providerId = resolveProviderForStructuredOutput(baseOpts);
+            // Resolve the primary the same way generateText will (explicit
+            // provider/model fields, then env auto-detect) so the payload is
+            // shaped for the provider that actually serves the call. The old
+            // local resolver defaulted to 'openai', so a no-provider agent
+            // whose env resolution picked e.g. Anthropic sent an OpenAI
+            // json_schema payload the provider silently ignores — schema
+            // unenforced, ObjectGenerationError on prose. Routing through
+            // buildResponseFormatForProvider also applies the strict gates
+            // (record schemas degrade to json_object; Fable degrades to the
+            // prompt-only JSON path) exactly like generateObject's primary.
+            const { providerId, modelId } = resolveModelOption(baseOpts, 'text');
             const schema = sendOpts.responseSchema;
             const schemaName = sendOpts.schemaName ?? 'response';
-            responseFormat = buildResponseFormat({
-              provider: providerId,
-              schema,
+            const jsonSchema = lowerZodToJsonSchema(schema);
+            responseFormat = buildResponseFormatForProvider({
+              providerId,
+              modelId,
+              jsonSchema,
+              effectiveSchema: schema,
               schemaName,
             });
             // Per-leg rebuild (same contract as generateObject): a fallback
@@ -827,7 +818,6 @@ export function agent(opts: AgentOptions): Agent {
             // provider instead of this primary-shaped one, which the leg
             // provider's guard would silently drop — leaving the leg with
             // zero provider-side enforcement.
-            const jsonSchema = lowerZodToJsonSchema(schema);
             responseFormatBuilder = (legProviderId, legModelId) =>
               buildResponseFormatForProvider({
                 providerId: legProviderId,
