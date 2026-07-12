@@ -27,6 +27,29 @@ describe('defaultOpenRouterProviderPrefs', () => {
     ).toEqual({ order: ['Groq'], allow_fallbacks: true });
   });
 
+  it('accepts each documented sort value', () => {
+    for (const sort of ['price', 'throughput', 'latency']) {
+      expect(defaultOpenRouterProviderPrefs({ OPENROUTER_PROVIDER_SORT: sort })).toEqual({
+        sort,
+      });
+    }
+  });
+
+  it('ignores an unrecognized OPENROUTER_PROVIDER_SORT value', () => {
+    expect(
+      defaultOpenRouterProviderPrefs({ OPENROUTER_PROVIDER_SORT: 'cheapest' }),
+    ).toBeUndefined();
+  });
+
+  it('keeps the order pin when the sort value is unrecognized', () => {
+    expect(
+      defaultOpenRouterProviderPrefs({
+        OPENROUTER_PROVIDER_ORDER: 'Groq',
+        OPENROUTER_PROVIDER_SORT: 'cheapest',
+      }),
+    ).toEqual({ order: ['Groq'], allow_fallbacks: true });
+  });
+
   it('combines order and sort, trimming and dropping empty CSV entries', () => {
     expect(
       defaultOpenRouterProviderPrefs({

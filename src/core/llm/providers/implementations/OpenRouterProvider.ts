@@ -89,10 +89,12 @@ interface OpenRouterChatCompletionAPIResponse {
  * `OPENROUTER_PROVIDER_ORDER` (comma-separated upstream host names, e.g.
  * `Groq,DeepInfra`) pins an explicit host preference — tried in order with
  * `allow_fallbacks: true` so an unavailable pin falls through to the rest of
- * the pool. `OPENROUTER_PROVIDER_SORT` (`throughput` | `price` | `latency`)
- * sets the routing sort, and acts as the tiebreak when both are set. Returns
- * `undefined` when neither env is set so default routing stays
- * byte-identical.
+ * the pool. `OPENROUTER_PROVIDER_SORT` (`price` | `throughput` | `latency`)
+ * sets the routing sort, and acts as the tiebreak when both are set; a value
+ * outside that set is ignored with a one-time warning rather than sent to the
+ * API, where an unknown sort fails every request routed through the default.
+ * Returns `undefined` when neither env yields a usable value so default
+ * routing stays byte-identical.
  *
  * Why this lives in the provider: routing consistency is a prerequisite for
  * upstream prompt-cache hits (caches are per-host, so price-variance routing
@@ -103,10 +105,26 @@ interface OpenRouterChatCompletionAPIResponse {
  * `provider` preferences (via `customModelParams`) win field-by-field over
  * these defaults.
  */
+const OPENROUTER_PROVIDER_SORTS = new Set(['price', 'throughput', 'latency']);
+
+let warnedInvalidProviderSort = false;
+
 export function defaultOpenRouterProviderPrefs(
   env: NodeJS.ProcessEnv = process.env,
 ): Record<string, unknown> | undefined {
-  const sort = env.OPENROUTER_PROVIDER_SORT?.trim();
+  const sortRaw = env.OPENROUTER_PROVIDER_SORT?.trim();
+  let sort: string | undefined;
+  if (sortRaw) {
+    if (OPENROUTER_PROVIDER_SORTS.has(sortRaw)) {
+      sort = sortRaw;
+    } else if (!warnedInvalidProviderSort) {
+      // Warn once per process: this helper runs on every request payload.
+      warnedInvalidProviderSort = true;
+      console.warn(
+        `OpenRouterProvider: Ignoring OPENROUTER_PROVIDER_SORT='${sortRaw}' — expected one of price, throughput, latency.`,
+      );
+    }
+  }
   const orderRaw = env.OPENROUTER_PROVIDER_ORDER?.trim();
   const order = orderRaw
     ? orderRaw
