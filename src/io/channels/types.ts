@@ -197,6 +197,8 @@ export interface RemoteUser {
   username?: string;
   /** Avatar URL if available. */
   avatarUrl?: string;
+  /** True when the platform marks this sender as a bot/automated account. */
+  isBot?: boolean;
 }
 
 /**
@@ -221,6 +223,14 @@ export interface ChannelMessage {
   timestamp: string;
   /** Message being replied to, if this is a reply. */
   replyToMessageId?: string;
+  /**
+   * Platform-native user IDs mentioned in this message, when the adapter can
+   * extract them (used by GroupPolicy mention gating). Adapters that cannot
+   * detect mentions leave this undefined and SHOULD NOT set supportsMentions.
+   */
+  mentions?: string[];
+  /** Set true by adapters that reliably populate `mentions`. */
+  supportsMentions?: boolean;
   /** Platform-specific raw data (for adapters that need pass-through). */
   rawEvent?: unknown;
 }
@@ -231,6 +241,29 @@ export interface ChannelSendResult {
   messageId: string;
   /** Timestamp of the sent message. */
   timestamp?: string;
+}
+
+/** Group activation modes for GroupPolicy. */
+export type GroupActivation = 'mention' | 'always' | 'owner-only';
+
+/**
+ * Group-chat safety policy. Evaluated by evaluateGroupPolicy()
+ * (./group-policy.ts) before inbound group messages reach the agent —
+ * enforced in ChannelRouter and reusable by host security gates.
+ */
+export interface GroupPolicy {
+  /** When the agent engages in group conversations. Recommended default for new bindings: 'mention'. */
+  activation: GroupActivation;
+  /** Extra owner user IDs honored by 'owner-only' (the binding's ownerUserId always counts). */
+  ownerIds?: string[];
+  /** Only these sender IDs may activate the agent (empty/undefined = everyone). */
+  allowFrom?: string[];
+  /** These sender IDs are always dropped (wins over allowFrom). */
+  denyFrom?: string[];
+  /** Tool names blocked for turns originating from this group (host-enforced). */
+  toolRestrictions?: string[];
+  /** Drop messages from bot senders (loop protection). Default true. */
+  botLoopProtection?: boolean;
 }
 
 // ============================================================================
@@ -307,6 +340,8 @@ export interface ChannelBindingConfig {
   autoBroadcast: boolean;
   /** Platform-specific configuration. */
   platformConfig?: Record<string, unknown>;
+  /** Group-chat safety policy for this binding (see GroupPolicy / group-policy.ts). */
+  groupPolicy?: GroupPolicy;
 }
 
 /**

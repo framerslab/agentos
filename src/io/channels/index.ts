@@ -8,6 +8,8 @@ export * from './types.js';
 export type { IChannelAdapter } from './IChannelAdapter.js';
 export { ChannelRouter } from './ChannelRouter.js';
 export type { InboundMessageHandler, RegisterAdapterOptions } from './ChannelRouter.js';
+export { evaluateGroupPolicy } from './group-policy.js';
+export type { GroupPolicyInput, GroupPolicyResult, GroupPolicyReason } from './group-policy.js';
 
 // Phase 4: Adapter implementations — base class + 13 platform adapters
 export { BaseChannelAdapter } from './adapters/BaseChannelAdapter.js';
