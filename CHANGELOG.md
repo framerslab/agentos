@@ -1,3 +1,7 @@
+## <small>0.9.138 (2026-07-12)</small>
+
+* fix(llm): resolve the AgentSession structured-output primary through the per-provider builder ([80a83acc3e8ff723f5ff4f0a74a3d765da50ce6e](https://github.com/framerslab/agentos/commit/80a83acc3e8ff723f5ff4f0a74a3d765da50ce6e))
+
 ## <small>0.9.137 (2026-07-12)</small>
 
 * feat(api): expose active extension http handlers from the AgentOS facade ([f18b12ac480c106159537b993863bcd465217106](https://github.com/framerslab/agentos/commit/f18b12ac480c106159537b993863bcd465217106))
