@@ -1,3 +1,7 @@
+## <small>0.9.136 (2026-07-12)</small>
+
+* fix(openrouter): validate provider sort env before shaping routing prefs ([aa98dea4275e2e018b6b400e62af95cf89b153fd](https://github.com/framerslab/agentos/commit/aa98dea4275e2e018b6b400e62af95cf89b153fd))
+
 ## <small>0.9.135 (2026-07-11)</small>
 
 * fix(rag): enforce hybrid metadata filters ([641901f643c7672ff651cabf118b45301c8b08a7](https://github.com/framerslab/agentos/commit/641901f643c7672ff651cabf118b45301c8b08a7))
