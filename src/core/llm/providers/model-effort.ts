@@ -59,11 +59,13 @@ export function mapEffortToOpenAiReasoningEffort(effort: unknown): string | unde
  *
  * Live-probed 2026-07-08: `POST /v1/responses {model:'gpt-5.5', tools:[…],
  * reasoning:{effort:'xhigh'}}` → HTTP 200 (status: completed). gpt-5.5 (and its
- * point/`-pro` variants) accept it. The codegen frontier-fallback chain uses
- * gpt-5.5 today; widen the allow-list only after probing the new id.
+ * point/`-pro` variants) accept it. Live-probed 2026-07-14: `gpt-5.6` and
+ * `gpt-5.6-sol` with `reasoning:{effort:'xhigh'}` → HTTP 200 (status:
+ * completed) — the 5.6 family joins the allow-list. Widen further only after
+ * probing the new id.
  */
 export function modelAcceptsXhighResponsesEffort(modelId: string): boolean {
-  return /^gpt-5\.5/i.test(modelId);
+  return /^gpt-5\.[56]/i.test(modelId);
 }
 
 /**

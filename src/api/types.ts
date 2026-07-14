@@ -1331,8 +1331,14 @@ export interface BaseAgentConfig {
   /**
    * Reasoning-effort control forwarded to every generate/stream/session call.
    * On effort-capable Claude models (Opus 4.5+, Sonnet 4.6, Fable/Mythos 5) the
-   * provider sends `output_config.effort` (low|medium|high|xhigh|max).
-   * Independent of `thinking`; ignored on unsupported models/values.
+   * provider sends `output_config.effort` (low|medium|high|xhigh|max). On
+   * OpenAI reasoning models (o-series, GPT-5.x) the provider sends
+   * `reasoning_effort` (chat) / `reasoning.effort` (Responses), with `max`
+   * clamping to `xhigh` — OpenAI's ceiling — and a model-aware guard capping
+   * `xhigh` → `high` on ids not probe-verified for xhigh (gpt-5.5/5.6 families
+   * are verified). Independent of `thinking`; ignored on unsupported
+   * models/values. Works per-agent in `agency()` rosters — each sub-agent may
+   * pin its own depth.
    */
   effort?: string;
   /**

@@ -71,9 +71,21 @@ describe('mapEffortToOpenAiResponsesEffort (model-aware /v1/responses effort)', 
     expect(modelAcceptsXhighResponsesEffort('gpt-5-mini')).toBe(false);
   });
 
+  it('allow-lists the gpt-5.6 family for xhigh (live-probed 2026-07-14)', () => {
+    expect(modelAcceptsXhighResponsesEffort('gpt-5.6')).toBe(true);
+    expect(modelAcceptsXhighResponsesEffort('gpt-5.6-sol')).toBe(true);
+    // 5.4 and below stay capped — never probed clean.
+    expect(modelAcceptsXhighResponsesEffort('gpt-5.4')).toBe(false);
+  });
+
   it('passes xhigh through for gpt-5.5 (max -> xhigh, allow-listed)', () => {
     expect(mapEffortToOpenAiResponsesEffort('gpt-5.5', 'max')).toBe('xhigh');
     expect(mapEffortToOpenAiResponsesEffort('gpt-5.5', 'xhigh')).toBe('xhigh');
+  });
+
+  it('passes xhigh through for gpt-5.6 / gpt-5.6-sol (max -> xhigh, allow-listed)', () => {
+    expect(mapEffortToOpenAiResponsesEffort('gpt-5.6', 'max')).toBe('xhigh');
+    expect(mapEffortToOpenAiResponsesEffort('gpt-5.6-sol', 'xhigh')).toBe('xhigh');
   });
 
   it('caps xhigh -> high for a non-allow-listed gpt-5 model', () => {
