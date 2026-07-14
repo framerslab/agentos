@@ -584,6 +584,13 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
             ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
             ...(opts.presencePenalty !== undefined ? { presencePenalty: opts.presencePenalty } : {}),
+            // Forward the extended-thinking switch and reasoning effort like
+            // generateText does — without these, every streamed request
+            // reaches the provider non-thinking, which silently pins it to
+            // the non-thinking auto-cache branch and drops the caller's
+            // intended reasoning depth. Omitted callers keep the defaults.
+            ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
+            ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
             // Cache-diagnostics opt-in (Anthropic beta): thread the previous
             // request's message id — the caller's seed on step 1, the prior
             // step's id after — so the verdict names any prefix divergence.
