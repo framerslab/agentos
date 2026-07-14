@@ -1635,23 +1635,22 @@ export class AnthropicProvider implements IProvider {
     //
     //  - SYSTEM markers (e.g. a `cacheBreakpoint` from generateText /
     //    generateObject, possibly with a non-default 1h TTL): the caller owns
-    //    the system region — never restructure it or add markers there. Under
-    //    extended thinking the auto moving TAIL on the final message is still
-    //    pinned: in agent loops the growing history lives in the
-    //    provider-facing message array the caller never sees, so this layer is
-    //    the only one that can mark it. Full stand-down here left that history
-    //    permanently uncached — measured 2026-07-05 at 15M+ full-price prompt
-    //    tokens/day (avg 16-19K uncached tokens/step) while marker-free calls
-    //    on the same image collapsed to ~2 uncached tokens/step. A caller 1h
-    //    system TTL alongside a 5-min moving tail is valid API usage (stable
-    //    prefix long TTL, moving tail short TTL).
+    //    the system region — never restructure it or add markers there. The
+    //    auto moving TAIL on the final message is still pinned, with or
+    //    without thinking: in agent loops and multi-turn chats the growing
+    //    history lives in the provider-facing message array the caller never
+    //    sees, so this layer is the only one that can mark it. Full
+    //    stand-down here left that history permanently uncached — measured
+    //    2026-07-05 on the thinking path at 15M+ full-price prompt tokens/day
+    //    (avg 16-19K uncached tokens/step) while marker-free calls on the
+    //    same image collapsed to ~2 uncached tokens/step; the non-thinking
+    //    stand-down had the identical shape on streamed conversation turns
+    //    (system prefix cached, every turn's history re-billed at full input
+    //    price). A caller 1h system TTL alongside a 5-min moving tail is
+    //    valid API usage (stable prefix long TTL, moving tail short TTL).
     //
     //  - MESSAGE markers: the caller owns the whole messages region — the auto
     //    tail stands down entirely.
-    //
-    //  - Non-thinking requests keep the old semantics: any caller marker
-    //    stands the top-level auto marker down (it would cover the same
-    //    regions the caller already scoped).
     //
     // Callers that need it off (single-shot prompts where the cache-write
     // premium can't amortize) set AGENTOS_ANTHROPIC_AUTO_CACHE=0.
@@ -1710,7 +1709,6 @@ export class AnthropicProvider implements IProvider {
           payload.cache_control = { type: 'ephemeral' };
         }
       } else if (
-        payload.thinking !== undefined &&
         messageBreakpoints === 0 &&
         explicitBreakpoints > 0 &&
         explicitBreakpoints < 4
@@ -1718,6 +1716,9 @@ export class AnthropicProvider implements IProvider {
         // Caller marked the system prefix only: keep their placement + TTL
         // verbatim and pin just the moving message tail (the API cap is 4
         // breakpoints per request — the tail adds one, so require headroom).
+        // Applies on thinking AND non-thinking requests alike — the streamed
+        // conversation surfaces (caller-marked system, no thinking) were the
+        // last shape whose per-turn history went permanently uncached.
         this.markLastCacheableMessageBlock(anthropicMessages);
       }
     }

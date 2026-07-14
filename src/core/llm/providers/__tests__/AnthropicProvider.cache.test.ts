@@ -223,9 +223,10 @@ describe('AnthropicProvider cache-aware cost estimation', () => {
  * `{type:'ephemeral'}` writes the cache and reads it back on the next
  * identical request). The API auto-places a moving cache breakpoint on the
  * last cacheable block (tools + system + messages). buildRequestPayload sets
- * it by default and STANDS DOWN whenever the caller has placed an explicit
- * block-level breakpoint, so a caller's 1h-TTL breakpoint is never mixed with
- * a 5-min auto one. Exercises the REAL private buildRequestPayload (the single
+ * it by default. Caller markers compose per region: SYSTEM-only markers keep
+ * their placement + TTL verbatim while the auto moving tail still lands on
+ * the final message (thinking or not); MESSAGE markers stand the auto path
+ * down entirely. Exercises the REAL private buildRequestPayload (the single
  * chokepoint feeding both the streaming and non-streaming /v1/messages paths).
  */
 import { AnthropicProvider } from '../implementations/AnthropicProvider';
@@ -638,7 +639,14 @@ describe('AnthropicProvider automatic prompt caching', () => {
     }
   });
 
-  it('stands down when the caller placed an explicit breakpoint, preserving its 1h TTL', async () => {
+  /**
+   * The non-thinking twin of the compose test above. Streamed conversation
+   * surfaces (a caller-marked 1h system prefix, no thinking) used to hit a
+   * full stand-down here: the system prefix cached while every turn's
+   * growing history was re-billed at full input price — the same shape the
+   * 2026-07-05 thinking-path fix closed. The tail must land without thinking.
+   */
+  it('without thinking, composes: caller system breakpoint preserved AND auto message-tail pinned', async () => {
     const payload = await buildPayload([
       {
         role: 'system',
@@ -654,8 +662,70 @@ describe('AnthropicProvider automatic prompt caching', () => {
     expect(payload.cache_control).toBeUndefined();
     const system = payload.system as Array<{ cache_control?: unknown }>;
     expect(Array.isArray(system)).toBe(true);
-    // The caller's explicit 1h breakpoint is preserved verbatim.
+    // The caller's explicit 1h breakpoint is preserved verbatim, none added.
     expect(system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
     expect(system[1].cache_control).toBeUndefined();
+    // …and the moving tail still lands on the final message.
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content as Array<{
+      type: string;
+      cache_control?: unknown;
+    }>;
+    expect(Array.isArray(lastContent)).toBe(true);
+    expect(lastContent[lastContent.length - 1].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('without thinking, stands down entirely when the caller marked a MESSAGE block', async () => {
+    const payload = await buildPayload([
+      {
+        role: 'system',
+        content: [
+          { type: 'text', text: 'Stable prefix', cache_control: { type: 'ephemeral', ttl: '1h' } },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'shared few-shot context', cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: 'varying question' },
+        ],
+      },
+      { role: 'user', content: 'follow-up' },
+    ]);
+    expect(payload.cache_control).toBeUndefined();
+    // Caller owns the messages region: no auto tail on the final message.
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content;
+    if (Array.isArray(lastContent)) {
+      for (const block of lastContent as Array<{ cache_control?: unknown }>) {
+        expect(block.cache_control).toBeUndefined();
+      }
+    } else {
+      expect(typeof lastContent).toBe('string');
+    }
+  });
+
+  it('without thinking, skips the auto tail when caller markers already fill the API cap of 4', async () => {
+    const payload = await buildPayload([
+      {
+        role: 'system',
+        content: [
+          { type: 'text', text: 'p1', cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: 'p2', cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: 'p3', cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: 'p4', cache_control: { type: 'ephemeral' } },
+        ],
+      },
+      { role: 'user', content: 'hi' },
+    ]);
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content;
+    if (Array.isArray(lastContent)) {
+      for (const block of lastContent as Array<{ cache_control?: unknown }>) {
+        expect(block.cache_control).toBeUndefined();
+      }
+    } else {
+      expect(typeof lastContent).toBe('string');
+    }
   });
 });
