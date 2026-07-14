@@ -1,3 +1,8 @@
+## <small>0.9.140 (2026-07-14)</small>
+
+* fix(anthropic): pin the auto cache tail alongside caller system markers without thinking ([5b3ba64efdbb1d059632b04486c10f2ecc1de430](https://github.com/framerslab/agentos/commit/5b3ba64efdbb1d059632b04486c10f2ecc1de430))
+* fix(api): forward thinking and effort through streamText step options ([76853668a3007ffd02c199a9b484a2875c7c5614](https://github.com/framerslab/agentos/commit/76853668a3007ffd02c199a9b484a2875c7c5614))
+
 ## <small>0.9.139 (2026-07-14)</small>
 
 * fix(api): the anthropic fallback leg matches the frontier floor ([790b80d90b2c34f06fb9104e6cf3d40d1c2eb625](https://github.com/framerslab/agentos/commit/790b80d90b2c34f06fb9104e6cf3d40d1c2eb625))
