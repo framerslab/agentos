@@ -1,3 +1,7 @@
+## <small>0.9.139 (2026-07-14)</small>
+
+* fix(api): the anthropic fallback leg matches the frontier floor ([790b80d90b2c34f06fb9104e6cf3d40d1c2eb625](https://github.com/framerslab/agentos/commit/790b80d90b2c34f06fb9104e6cf3d40d1c2eb625))
+
 ## <small>0.9.138 (2026-07-12)</small>
 
 * fix(llm): resolve the AgentSession structured-output primary through the per-provider builder ([80a83acc3e8ff723f5ff4f0a74a3d765da50ce6e](https://github.com/framerslab/agentos/commit/80a83acc3e8ff723f5ff4f0a74a3d765da50ce6e))
