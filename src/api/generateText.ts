@@ -1055,7 +1055,7 @@ export function isRetryableError(error: unknown): boolean {
  * quality floor for failover traffic. A primary-provider outage must not
  * silently downgrade user-facing output to a mini-tier model:
  * 1. OpenAI (`gpt-5.5`)
- * 2. Anthropic (`claude-haiku-4-5-20251001`)
+ * 2. Anthropic (`claude-sonnet-5`)
  * 3. OpenRouter (`openai/gpt-5.5`)
  * 4. Gemini (`gemini-2.5-flash`)
  *
@@ -1080,7 +1080,9 @@ export function buildFallbackChain(
     chain.push({ provider: 'openai', model: 'gpt-5.5' });
   }
   if (process.env.ANTHROPIC_API_KEY && excludeProvider !== 'anthropic') {
-    chain.push({ provider: 'anthropic', model: 'claude-haiku-4-5-20251001' });
+    // Sonnet-class, matching the gpt-5.5 floor on the OpenAI legs — an
+    // OpenAI-primary outage keeps frontier-adjacent quality on the way down.
+    chain.push({ provider: 'anthropic', model: 'claude-sonnet-5' });
   }
   if (process.env.OPENROUTER_API_KEY && excludeProvider !== 'openrouter') {
     // ALWAYS pin an explicit model here. A model-less OpenRouter entry

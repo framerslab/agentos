@@ -626,7 +626,7 @@ describe('generateText', () => {
       // The default chain's anthropic leg — present in any rebuilt chain
       // (the explicit chain has no anthropic entry), so its absence proves
       // the explicit chain was preserved verbatim.
-      expect(requestedModels).not.toContain('claude-haiku-4-5-20251001');
+      expect(requestedModels).not.toContain('claude-sonnet-5');
     } finally {
       // Restore the fixed resolvers so later tests see the default behavior.
       (resolveModelOption as unknown as Mock).mockImplementation(() => ({
