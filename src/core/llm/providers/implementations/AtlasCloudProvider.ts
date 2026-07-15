@@ -126,7 +126,8 @@ export class AtlasCloudProvider implements IProvider {
 
   public async listAvailableModels(filter?: { capability?: string }): Promise<ModelInfo[]> {
     if (filter?.capability) {
-      return ATLAS_CLOUD_MODELS.filter(m => m.capabilities.includes(filter.capability!));
+      const { capability } = filter;
+      return ATLAS_CLOUD_MODELS.filter(m => m.capabilities.includes(capability));
     }
     return [...ATLAS_CLOUD_MODELS];
   }
