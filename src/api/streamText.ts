@@ -462,7 +462,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           resolved.modelId,
           userMessages,
           toolNames,
-          planConfig,
+          // Inherit the root per-call cache control (planning-specific
+          // override wins) — a cache:false stream's planning sub-call must
+          // not auto-cache behind the caller's back.
+          planConfig?.cache !== undefined || opts.cache !== undefined
+            ? { ...planConfig, cache: planConfig?.cache ?? opts.cache }
+            : planConfig,
           usage,
         );
 

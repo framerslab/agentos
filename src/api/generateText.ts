@@ -204,6 +204,15 @@ export interface PlanningConfig {
    * of hanging until the provider default.
    */
   requestTimeout?: number;
+
+  /**
+   * Per-call prompt-cache control for the planning completion. Inherits the
+   * root {@link GenerateTextOptions.cache} when unset, so a `cache: false`
+   * caller's planning sub-call cannot silently re-enable auto-caching and a
+   * `{ ttl: '1h' }` caller's planning call keeps the same pacing. A
+   * planning-specific value here overrides the inherited one.
+   */
+  cache?: { ttl?: '5m' | '1h' } | false;
 }
 
 /**
@@ -871,6 +880,9 @@ export async function createPlan(
     temperature,
     maxTokens,
     ...(requestTimeout !== undefined ? { requestTimeout } : {}),
+    // Inherited (or planning-specific) cache control: a cache:false root
+    // call's planning sub-call must not auto-cache behind the caller's back.
+    ...(config?.cache !== undefined ? { cache: config.cache } : {}),
   });
 
   // Accumulate planning call usage
@@ -1448,9 +1460,15 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           resolved.modelId,
           userMessages,
           toolNames,
-          // Thread the caller's per-call requestTimeout into the planning
-          // completion (a planning-specific override on planConfig wins).
-          { ...planConfig, requestTimeout: planConfig?.requestTimeout ?? opts.requestTimeout },
+          // Thread the caller's per-call requestTimeout + cache control into
+          // the planning completion (planning-specific overrides win).
+          {
+            ...planConfig,
+            requestTimeout: planConfig?.requestTimeout ?? opts.requestTimeout,
+            ...(planConfig?.cache !== undefined || opts.cache !== undefined
+              ? { cache: planConfig?.cache ?? opts.cache }
+              : {}),
+          },
           totalUsage,
         );
 
