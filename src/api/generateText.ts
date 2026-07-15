@@ -373,6 +373,27 @@ export interface GenerateTextOptions {
    */
   effort?: string;
   /**
+   * Per-call prompt-cache control, forwarded to cache-capable providers
+   * (Anthropic today; others ignore it).
+   *
+   * - `false` — this request emits NO `cache_control` at all: the provider's
+   *   automatic markers (request-level marker, thinking-mode block markers,
+   *   the moving message-tail) are suppressed AND any caller-placed
+   *   system/message markers (e.g. {@link SystemContentBlock.cacheBreakpoint})
+   *   are stripped before the wire. Set this on TRUE one-shots — a single
+   *   never-repeated call pays the cache-write premium (1.25x/2x input) on
+   *   bytes nothing will ever read back.
+   * - `{ ttl: '1h' }` — the automatic markers (including the moving
+   *   message-tail pinned for multi-turn history) carry a 1-hour TTL instead
+   *   of the 5-minute default. Set this on slow loops: codegen
+   *   orchestrator/tool steps gap 2-14 minutes and human-paced conversation
+   *   turns regularly exceed 5 minutes, so the default-TTL entry expires
+   *   between steps and every turn re-writes. Caller-placed markers keep
+   *   their own TTLs ({@link SystemContentBlock.cacheTtl}).
+   * - omitted / `{ ttl: '5m' }` — default 5-minute auto markers.
+   */
+  cache?: { ttl?: '5m' | '1h' } | false;
+  /**
    * Enable Anthropic prompt-cache diagnostics (beta `cache-diagnosis-2026-04-07`)
    * across the agentic loop. The loop auto-threads each step's response id into
    * the next step's `diagnostics.previous_message_id`, so every step after the
@@ -1473,6 +1494,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               // Forward reasoning effort the same way; provider drops it on
               // unsupported models/values.
               ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
+              // Forward per-call cache control (opt-out / 1h TTL) so the
+              // shim path honors it like the native step loop below.
+              ...(opts.cache !== undefined ? { cache: opts.cache } : {}),
               // Forward provider-specific top-level payload params (e.g.
               // OpenRouter provider-routing preferences) on the shim path too.
               ...(opts.customModelParams !== undefined
@@ -1592,6 +1616,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 // Forward reasoning effort (output_config.effort) the same way;
                 // the provider drops it on unsupported models/values.
                 ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
+                // Forward per-call cache control: `false` = zero cache_control
+                // on the wire (true one-shots); `{ ttl: '1h' }` = 1h TTL on
+                // the auto markers incl. the moving message-tail (slow loops).
+                ...(opts.cache !== undefined ? { cache: opts.cache } : {}),
                 // Cache diagnostics: thread the previous step's message id so
                 // the API explains any prefix divergence between loop steps.
                 ...(opts.cacheDiagnostics

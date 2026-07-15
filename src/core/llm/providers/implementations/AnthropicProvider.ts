@@ -1335,7 +1335,7 @@ export class AnthropicProvider implements IProvider {
     // Anthropic treats system as a top-level field, not a conversation role.
     // When cache_control markers are present on content parts, emit system
     // as an array of content blocks (required for Anthropic prompt caching).
-    type SystemBlock = { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } };
+    type SystemBlock = { type: 'text'; text: string; cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' } };
     const systemBlocks: SystemBlock[] = [];
     const conversationMessages: ChatMessage[] = [];
     // Index one past the last block contributed by the FIRST system message
@@ -1411,6 +1411,27 @@ export class AnthropicProvider implements IProvider {
           : msg,
       ),
     );
+
+    // --- Per-call cache opt-out: options.cache === false (region strip) ---
+    // Strip caller-placed markers from the system and message regions BEFORE
+    // payload assembly, so system falls back to the joined-string emission
+    // and the auto-cache gate below stands down entirely. Markers that ride
+    // in via customModelParams (raw tools, request-level cache_control) are
+    // cleared at the gate itself. One switch, zero cache_control on the
+    // wire — the hard guarantee a true one-shot needs: a cache write there
+    // is pure premium (1.25x/2x), never read back.
+    if (options.cache === false) {
+      for (const b of systemBlocks) delete b.cache_control;
+      for (const msg of anthropicMessages) {
+        const content = msg.content;
+        if (!Array.isArray(content)) continue;
+        for (const block of content) {
+          if (block && typeof block === 'object') {
+            delete (block as Record<string, unknown>).cache_control;
+          }
+        }
+      }
+    }
 
     const payload: Record<string, unknown> = {
       model: modelId,
@@ -1659,10 +1680,36 @@ export class AnthropicProvider implements IProvider {
     //  - MESSAGE markers: the caller owns the whole messages region — the auto
     //    tail stands down entirely.
     //
-    // Callers that need it off (single-shot prompts where the cache-write
-    // premium can't amortize) set AGENTOS_ANTHROPIC_AUTO_CACHE=0.
+    // Per-call control (ModelCompletionOptions.cache):
+    //
+    //  - `cache: false` — zero cache_control on the wire for this request:
+    //    the region strip above already cleared caller system/message
+    //    markers, and the block below clears customModelParams-injected
+    //    tools/request markers + stands the auto path down. For true
+    //    one-shots (unique-suffix judges, single-call enrichment) where a
+    //    write can never be read back.
+    //  - `cache: { ttl: '1h' }` — the auto markers (system-end + moving
+    //    tail) carry `ttl: '1h'` and are placed as explicit block markers so
+    //    the TTL reaches the wire. For loops whose step gaps exceed the
+    //    5-minute default TTL (codegen tool calls run 2-14 min; human
+    //    think-time between conversation turns regularly exceeds 5m).
+    //
+    // Process-global kill switch (single-shot batch processes):
+    // AGENTOS_ANTHROPIC_AUTO_CACHE=0 — disables the auto path only; caller
+    // markers still pass through there (use `cache: false` for a per-call
+    // hard-off including caller markers).
     const autoCacheEnv = process.env.AGENTOS_ANTHROPIC_AUTO_CACHE;
-    if (
+    if (options.cache === false) {
+      // customModelParams passthrough ran above and may have injected raw
+      // marked tools or a request-level cache_control; clear those too so
+      // the opt-out holds regardless of how the marker arrived.
+      delete payload.cache_control;
+      if (Array.isArray(payload.tools)) {
+        for (const t of payload.tools as Array<Record<string, unknown>>) {
+          if (t && typeof t === 'object') delete t.cache_control;
+        }
+      }
+    } else if (
       autoCacheEnv !== '0'
       && autoCacheEnv !== 'false'
       && payload.cache_control === undefined
@@ -1688,13 +1735,26 @@ export class AnthropicProvider implements IProvider {
             (t) => t && typeof t === 'object' && (t as { cache_control?: unknown }).cache_control,
           ).length
         : 0;
+      // Per-call TTL for the AUTO-placed markers only (caller markers keep
+      // their own TTLs). '1h' writes at 2x instead of 1.25x, so it is opt-in
+      // per call site — worth it exactly when step gaps exceed the 5m TTL.
+      const autoTtl: '1h' | undefined =
+        options.cache && options.cache.ttl === '1h' ? '1h' : undefined;
       if (explicitBreakpoints === 0 && messageBreakpoints === 0 && toolBreakpoints === 0) {
-        if (payload.thinking !== undefined) {
-          // Extended thinking: the request-level auto marker measurably
-          // produces ZERO cache creation on thinking-enabled calls
-          // (2026-07: 900+ agent-loop calls, ~12M prompt tokens/day,
-          // 0.000 hit rate). Place explicit block-level breakpoints
-          // instead:
+        if (payload.thinking !== undefined || autoTtl !== undefined) {
+          // Two reasons to use explicit block-level breakpoints instead of
+          // the request-level auto marker:
+          //
+          //  - Extended thinking: the request-level auto marker measurably
+          //    produces ZERO cache creation on thinking-enabled calls
+          //    (2026-07: 900+ agent-loop calls, ~12M prompt tokens/day,
+          //    0.000 hit rate).
+          //  - A per-call TTL (`cache: { ttl: '1h' }`): the TTL is a
+          //    block-level attribute, so honoring it requires explicit
+          //    placement. Opt-in only — callers without a TTL keep the
+          //    request-level marker exactly as before.
+          //
+          // Placement:
           //
           //  1. On the last block of the FIRST system message — the
           //     primary system prompt precedes the thinking-bearing
@@ -1714,11 +1774,14 @@ export class AnthropicProvider implements IProvider {
           // Two breakpoints total, under the API cap of 4.
           let placed = false;
           if (firstSystemMsgBlockEnd > 0) {
-            systemBlocks[firstSystemMsgBlockEnd - 1].cache_control = { type: 'ephemeral' };
+            systemBlocks[firstSystemMsgBlockEnd - 1].cache_control = {
+              type: 'ephemeral',
+              ...(autoTtl ? { ttl: autoTtl } : {}),
+            };
             payload.system = systemBlocks;
             placed = true;
           }
-          if (this.markLastCacheableMessageBlock(anthropicMessages)) {
+          if (this.markLastCacheableMessageBlock(anthropicMessages, autoTtl)) {
             placed = true;
           }
           if (!placed) {
@@ -1741,8 +1804,10 @@ export class AnthropicProvider implements IProvider {
         // across ALL wire markers, tools included).
         // Applies on thinking AND non-thinking requests alike — the streamed
         // conversation surfaces (caller-marked system, no thinking) were the
-        // last shape whose per-turn history went permanently uncached.
-        this.markLastCacheableMessageBlock(anthropicMessages);
+        // last shape whose per-turn history went permanently uncached. A
+        // per-call `cache: { ttl: '1h' }` rides on the tail here too; the
+        // caller's own system markers keep their own TTLs.
+        this.markLastCacheableMessageBlock(anthropicMessages, autoTtl);
       }
     }
 
@@ -1785,19 +1850,25 @@ export class AnthropicProvider implements IProvider {
    * carry `cache_control` and are skipped.
    *
    * @param anthropicMessages - Messages already converted to Anthropic wire format.
+   * @param ttl - Optional non-default TTL for the marker (per-call
+   *   `cache: { ttl: '1h' }`); omitted = the 5-minute default.
    * @returns True when a marker was placed.
    * @private
    */
   private markLastCacheableMessageBlock(
     anthropicMessages: Array<Record<string, unknown>>,
+    ttl?: '1h',
   ): boolean {
+    const marker = ttl
+      ? { type: 'ephemeral' as const, ttl }
+      : { type: 'ephemeral' as const };
     if (anthropicMessages.length === 0) return false;
     const last = anthropicMessages[anthropicMessages.length - 1];
     const content = last.content;
     if (typeof content === 'string') {
       if (!content) return false;
       last.content = [
-        { type: 'text', text: content, cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: content, cache_control: { ...marker } },
       ];
       return true;
     }
@@ -1806,7 +1877,7 @@ export class AnthropicProvider implements IProvider {
       for (let i = content.length - 1; i >= 0; i--) {
         const block = content[i] as Record<string, unknown>;
         if (block && typeof block === 'object' && CACHEABLE.has(block.type as string)) {
-          block.cache_control = { type: 'ephemeral' };
+          block.cache_control = { ...marker };
           return true;
         }
       }

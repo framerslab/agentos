@@ -236,6 +236,25 @@ export interface GenerateObjectOptions<T extends ZodType> {
    * models that don't support it.
    */
   effort?: string;
+
+  /**
+   * Per-call prompt-cache control, forwarded to
+   * {@link import('./generateText.js').GenerateTextOptions.cache}.
+   * `false` opts this call out of ALL cache marking (the schema block's
+   * marker included — right for one-shot extractions); `{ ttl: '1h' }` puts
+   * a 1-hour TTL on the provider's auto markers (the moving message-tail).
+   */
+  cache?: { ttl?: '5m' | '1h' } | false;
+
+  /**
+   * TTL for the schema block's own cache marker (the block this call appends
+   * after the caller's system). The schema bytes are stable per call SITE, so
+   * sites whose calls gap more than 5 minutes (human-paced pipelines, slow
+   * loops) should set `'1h'` — otherwise the entry expires between calls and
+   * every call re-writes the prefix at the write premium. Defaults to the
+   * 5-minute marker (previous behavior). Ignored when `cache` is `false`.
+   */
+  schemaCacheTtl?: '5m' | '1h';
 }
 
 /**
@@ -314,11 +333,22 @@ function buildSchemaSystemPrompt(
   jsonSchema: Record<string, unknown>,
   schemaName?: string,
   schemaDescription?: string,
+  schemaCacheTtl?: '5m' | '1h',
 ): string | SystemContentBlock[] {
   const schemaText = buildSchemaInstructionText(jsonSchema, schemaName, schemaDescription);
 
   if (Array.isArray(userSystem)) {
-    return [...userSystem, { text: schemaText, cacheBreakpoint: true }];
+    return [
+      ...userSystem,
+      {
+        text: schemaText,
+        cacheBreakpoint: true,
+        // Per-call-site TTL: schema bytes are stable per site, so sites whose
+        // calls gap past the 5m default (human-paced pipelines) pass '1h' to
+        // keep the entry alive between calls instead of re-writing it.
+        ...(schemaCacheTtl === '1h' ? { cacheTtl: '1h' as const } : {}),
+      },
+    ];
   }
 
   const parts: string[] = [];
@@ -499,6 +529,7 @@ export async function generateObject<T extends ZodType>(
     jsonSchema,
     effectiveSchemaName,
     opts.schemaDescription,
+    opts.schemaCacheTtl,
   );
 
   // Provider-native structured-output payload for the PRIMARY provider —
@@ -603,6 +634,10 @@ export async function generateObject<T extends ZodType>(
       // reasoning_effort, effort-capable Claude -> output_config.effort) run at
       // the requested depth instead of their default.
       effort: opts.effort,
+      // Forward per-call cache control: `false` = zero cache_control on the
+      // wire (one-shot extractions, schema block included); `{ ttl: '1h' }`
+      // = 1h TTL on the provider's auto markers (moving message-tail).
+      ...(opts.cache !== undefined ? { cache: opts.cache } : {}),
       _responseFormat: responseFormat,
       // Fallback legs rebuild the payload for THEIR provider via this
       // callback (see generateText's fallback loop) instead of inheriting

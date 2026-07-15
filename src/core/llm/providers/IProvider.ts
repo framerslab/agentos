@@ -162,6 +162,24 @@ export interface ModelCompletionOptions {
    */
   cacheDiagnostics?: { previousMessageId: string | null };
   /**
+   * Per-call prompt-cache control (Anthropic; other providers ignore it).
+   *
+   * - `false` — this request emits NO `cache_control` at all: the automatic
+   *   markers (request-level marker, thinking-mode block markers, the moving
+   *   message-tail) are suppressed AND caller-placed system/message/tool
+   *   markers are stripped before the wire. Hard guarantee for true
+   *   one-shots, where a cache write (1.25x at 5m, 2x at 1h) can never be
+   *   read back.
+   * - `{ ttl: '1h' }` — the automatic markers (including the moving
+   *   message-tail) carry `ttl: '1h'` instead of the 5-minute default, and
+   *   the auto path uses explicit block placement so the TTL reaches the
+   *   wire. For slow loops whose step gaps exceed 5 minutes (codegen
+   *   orchestrator/tool calls, human-paced conversation turns).
+   *   Caller-placed markers keep their own TTLs untouched.
+   * - `{ ttl: '5m' }` or omitted — default behavior (5-minute auto markers).
+   */
+  cache?: { ttl?: '5m' | '1h' } | false;
+  /**
    * Positive values penalize new tokens based on whether they appear in the text so far,
    * increasing the model's likelihood to talk about new topics.
    */

@@ -511,6 +511,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               // unsupported models/values.
               ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
               ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
+              // Per-call cache control rides the shim path too (opt-out /
+              // 1h TTL on the auto markers), matching the native stream path.
+              ...(opts.cache !== undefined ? { cache: opts.cache } : {}),
               // Forward provider-specific top-level payload params (e.g.
               // OpenRouter provider-routing preferences) on the shim path too.
               ...(opts.customModelParams !== undefined
@@ -600,6 +603,11 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // intended reasoning depth. Omitted callers keep the defaults.
             ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
             ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
+            // Per-call cache control: `false` = zero cache_control on the
+            // wire; `{ ttl: '1h' }` = 1h TTL on the auto markers incl. the
+            // moving message-tail (human-paced streamed turns routinely gap
+            // past the 5m default TTL).
+            ...(opts.cache !== undefined ? { cache: opts.cache } : {}),
             // Cache-diagnostics opt-in (Anthropic beta): thread the previous
             // request's message id — the caller's seed on step 1, the prior
             // step's id after — so the verdict names any prefix divergence.
