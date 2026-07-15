@@ -1,3 +1,7 @@
+## <small>0.9.143 (2026-07-15)</small>
+
+* fix(api): plumb per-call prompt-cache control through generateText, streamText, generateObject ([2208e6aa4a605798d314b39a9902e47ce92a0fe7](https://github.com/framerslab/agentos/commit/2208e6aa4a605798d314b39a9902e47ce92a0fe7))
+
 ## <small>0.9.142 (2026-07-15)</small>
 
 * fix(anthropic): count tool cache markers in the breakpoint cap; reconcile tool_choice after customModelParams ([b76f60a2eeb00b14b756458ee966f87f5368e2c3](https://github.com/framerslab/agentos/commit/b76f60a2eeb00b14b756458ee966f87f5368e2c3))
