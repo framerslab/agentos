@@ -1579,6 +1579,22 @@ export class AnthropicProvider implements IProvider {
       payload.tool_choice = { type: 'tool', name: sf.tool.name };
     }
 
+    // Pass through any custom model params — minus OpenRouter's routing
+    // controls, which only OpenRouter's body accepts (a fallback leg reuses
+    // the same params object across hosts; see openrouter-only-params).
+    //
+    // This runs BEFORE the forced tool_choice reconciliation below so that a
+    // `tool_choice` injected through customModelParams is reconciled too —
+    // otherwise it merges in after the clamp and can send the forbidden
+    // thinking + forced-tool combination (or a Fable-rejected forced tool),
+    // which Anthropic 400s on.
+    {
+      const passthrough = stripOpenRouterOnlyParams(options.customModelParams);
+      if (passthrough) {
+        Object.assign(payload, passthrough);
+      }
+    }
+
     // --- Forced tool_choice reconciliation ---
     // A FORCED tool_choice ({type:'any'} or {type:'tool'}) is incompatible with
     // two situations, and Anthropic 400s on either:
@@ -1590,8 +1606,9 @@ export class AnthropicProvider implements IProvider {
     // letting the request 400. The model still chooses tools on 'auto' —
     // strongest with prescriptive tool descriptions — but forced tool use is no
     // longer guaranteed. Centralizing this means no caller has to special-case
-    // the thinking or Fable quirks. Catches both the convertToolChoice path and
-    // the structured-output forced tool.
+    // the thinking or Fable quirks. Catches the convertToolChoice path, the
+    // structured-output forced tool, AND a tool_choice injected via
+    // customModelParams (which is why this runs after the passthrough above).
     {
       const tc = payload.tool_choice as { type?: string } | undefined;
       if (tc && (tc.type === 'any' || tc.type === 'tool')) {
@@ -1608,16 +1625,6 @@ export class AnthropicProvider implements IProvider {
           );
           payload.tool_choice = { type: 'auto' };
         }
-      }
-    }
-
-    // Pass through any custom model params — minus OpenRouter's routing
-    // controls, which only OpenRouter's body accepts (a fallback leg reuses
-    // the same params object across hosts; see openrouter-only-params).
-    {
-      const passthrough = stripOpenRouterOnlyParams(options.customModelParams);
-      if (passthrough) {
-        Object.assign(payload, passthrough);
       }
     }
 
@@ -1666,7 +1673,22 @@ export class AnthropicProvider implements IProvider {
     ) {
       const explicitBreakpoints = systemBlocks.filter(b => b.cache_control).length;
       const messageBreakpoints = this.countMessageCacheMarkers(anthropicMessages);
-      if (explicitBreakpoints === 0 && messageBreakpoints === 0) {
+      // Tool definitions can carry their own cache_control (tool-use prompt
+      // caching), and those markers count against Anthropic's hard
+      // 4-breakpoint-per-request cap. Fold them into the accounting so a
+      // request with e.g. 3 marked system blocks + 1 marked tool (4, at the
+      // cap) does not get a 5th tail marker here and 400. agentos does not
+      // emit marked tools today (adaptTools adds none, and a customModelParams
+      // tools override is raw), so toolBreakpoints is 0 for every current
+      // caller — this is forward-safety, not a behavior change. Any caller
+      // that DOES mark tools also stands the auto path down entirely (below),
+      // matching the caller-owns-the-region philosophy.
+      const toolBreakpoints = Array.isArray(payload.tools)
+        ? (payload.tools as Array<{ cache_control?: unknown }>).filter(
+            (t) => t && typeof t === 'object' && (t as { cache_control?: unknown }).cache_control,
+          ).length
+        : 0;
+      if (explicitBreakpoints === 0 && messageBreakpoints === 0 && toolBreakpoints === 0) {
         if (payload.thinking !== undefined) {
           // Extended thinking: the request-level auto marker measurably
           // produces ZERO cache creation on thinking-enabled calls
@@ -1711,11 +1733,12 @@ export class AnthropicProvider implements IProvider {
       } else if (
         messageBreakpoints === 0 &&
         explicitBreakpoints > 0 &&
-        explicitBreakpoints < 4
+        explicitBreakpoints + toolBreakpoints < 4
       ) {
         // Caller marked the system prefix only: keep their placement + TTL
         // verbatim and pin just the moving message tail (the API cap is 4
-        // breakpoints per request — the tail adds one, so require headroom).
+        // breakpoints per request — the tail adds one, so require headroom
+        // across ALL wire markers, tools included).
         // Applies on thinking AND non-thinking requests alike — the streamed
         // conversation surfaces (caller-marked system, no thinking) were the
         // last shape whose per-turn history went permanently uncached.

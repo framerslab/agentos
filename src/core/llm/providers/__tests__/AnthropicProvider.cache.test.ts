@@ -728,4 +728,100 @@ describe('AnthropicProvider automatic prompt caching', () => {
       expect(typeof lastContent).toBe('string');
     }
   });
+
+  /**
+   * Tool cache markers count against the hard 4-breakpoint cap. 3 marked
+   * system blocks + 1 marked tool = 4 (at the cap); the tail must NOT be
+   * added, or the request 400s with a 5th marker. Tools are injected via
+   * customModelParams — the exact vector where a marked tool can reach the
+   * wire payload after passthrough.
+   */
+  it('folds tool cache markers into the cap and skips the tail at 4 wire markers', async () => {
+    const payload = await buildPayload(
+      [
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'p1', cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: 'p2', cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: 'p3', cache_control: { type: 'ephemeral' } },
+          ],
+        },
+        { role: 'user', content: 'hi' },
+      ],
+      {
+        customModelParams: {
+          tools: [
+            {
+              name: 't',
+              description: 'd',
+              input_schema: { type: 'object', properties: {} },
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      },
+    );
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content;
+    if (Array.isArray(lastContent)) {
+      for (const block of lastContent as Array<{ cache_control?: unknown }>) {
+        expect(block.cache_control).toBeUndefined();
+      }
+    } else {
+      expect(typeof lastContent).toBe('string');
+    }
+  });
+
+  it('still pins the tail with tool markers present when there is headroom (< 4)', async () => {
+    const payload = await buildPayload(
+      [
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'p1', cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: 'p2', cache_control: { type: 'ephemeral' } },
+          ],
+        },
+        { role: 'user', content: 'hi' },
+      ],
+      {
+        customModelParams: {
+          tools: [
+            {
+              name: 't',
+              description: 'd',
+              input_schema: { type: 'object', properties: {} },
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      },
+    );
+    // 2 system + 1 tool = 3 < 4 → tail lands on the final message.
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content as Array<{
+      cache_control?: unknown;
+    }>;
+    expect(Array.isArray(lastContent)).toBe(true);
+    expect(lastContent[lastContent.length - 1].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  /**
+   * The forced-tool reconciliation runs AFTER the customModelParams
+   * passthrough, so a tool_choice injected through customModelParams under
+   * extended thinking is clamped to 'auto' rather than reaching the wire as
+   * the forbidden thinking + forced-tool combination (Anthropic 400s on it).
+   */
+  it('reconciles a forced tool_choice injected via customModelParams under thinking', async () => {
+    const payload = await buildPayload(
+      [{ role: 'user', content: 'hi' }],
+      {
+        thinking: { budgetTokens: 1 },
+        customModelParams: { tool_choice: { type: 'tool', name: 'x' } },
+      },
+      'claude-opus-4-8',
+    );
+    expect(payload.tool_choice).toEqual({ type: 'auto' });
+  });
 });
