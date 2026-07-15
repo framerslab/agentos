@@ -502,6 +502,15 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
               ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
               ...(opts.presencePenalty !== undefined ? { presencePenalty: opts.presencePenalty } : {}),
+              // Forward the extended-thinking budget + reasoning effort on the
+              // shim path too, matching the native stream path above and
+              // generateText's own shim path. Without this, a thinking-capable
+              // streaming caller that falls into prompt-tool emulation (or the
+              // auto tool-unsupported fallback) silently loses its reasoning
+              // depth. Omitted = thinking off; the provider drops effort on
+              // unsupported models/values.
+              ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
+              ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
               // Forward provider-specific top-level payload params (e.g.
               // OpenRouter provider-routing preferences) on the shim path too.
               ...(opts.customModelParams !== undefined

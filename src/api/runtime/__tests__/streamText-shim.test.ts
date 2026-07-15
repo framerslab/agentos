@@ -72,3 +72,36 @@ it('toolMode:auto falls back to the shim when native streaming rejects tool use'
   expect(streamed).toBe('You went to the beach.');
   await expect(result.text).resolves.toBe('You went to the beach.');
 });
+
+it('forwards thinking and effort through the shim callModel to generateCompletion', async () => {
+  // The shim path (toolMode:prompt) drives the provider through
+  // generateCompletion, not generateCompletionStream. Without forwarding
+  // there, a thinking-capable streaming caller that emulates tools silently
+  // loses its reasoning depth — the parity gap CodeRabbit caught in 0.9.140.
+  hoisted.generateCompletion.mockResolvedValueOnce(okStep('done.'));
+
+  const result = streamText({
+    model: 'openai:uncensored-x', prompt: 'reason then answer',
+    tools: [recall] as any, toolMode: 'prompt', maxSteps: 3,
+    thinking: { budgetTokens: 2048 }, effort: 'high',
+  } as any);
+  for await (const _ of result.textStream) void _;
+
+  const options = hoisted.generateCompletion.mock.calls[0][2] as Record<string, unknown>;
+  expect(options.thinking).toEqual({ budgetTokens: 2048 });
+  expect(options.effort).toBe('high');
+});
+
+it('omits thinking and effort from the shim callModel when the caller did not set them', async () => {
+  hoisted.generateCompletion.mockResolvedValueOnce(okStep('done.'));
+
+  const result = streamText({
+    model: 'openai:uncensored-x', prompt: 'answer',
+    tools: [recall] as any, toolMode: 'prompt', maxSteps: 3,
+  } as any);
+  for await (const _ of result.textStream) void _;
+
+  const options = hoisted.generateCompletion.mock.calls[0][2] as Record<string, unknown>;
+  expect('thinking' in options).toBe(false);
+  expect('effort' in options).toBe(false);
+});
