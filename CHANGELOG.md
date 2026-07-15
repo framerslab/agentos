@@ -1,3 +1,7 @@
+## <small>0.9.144 (2026-07-15)</small>
+
+* feat(api): parallel-panel quorum — minAgents/minProviders floors checked post-fan-out, before synthesis ([0bf18aaed76801087ef4ad10f60533cecd556aa0](https://github.com/framerslab/agentos/commit/0bf18aaed76801087ef4ad10f60533cecd556aa0))
+
 ## <small>0.9.143 (2026-07-15)</small>
 
 * fix(api): plumb per-call prompt-cache control through generateText, streamText, generateObject ([2208e6aa4a605798d314b39a9902e47ce92a0fe7](https://github.com/framerslab/agentos/commit/2208e6aa4a605798d314b39a9902e47ce92a0fe7))
