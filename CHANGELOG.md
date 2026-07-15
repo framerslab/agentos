@@ -1,3 +1,9 @@
+## <small>0.9.141 (2026-07-15)</small>
+
+* fix(api): forward thinking and effort through streamText's tool-emulation shim ([eaa0d08c0714490db5a1b1a2cb45bf1c090c622a](https://github.com/framerslab/agentos/commit/eaa0d08c0714490db5a1b1a2cb45bf1c090c622a))
+* examples: multi-provider round-table agency panel with graceful degradation ([eec46c9f3a5107fd42df367467cfa6fa67ac601f](https://github.com/framerslab/agentos/commit/eec46c9f3a5107fd42df367467cfa6fa67ac601f))
+* providers: allow xhigh Responses effort for the gpt-5.6 family (live-probed) ([ca1a5ff6592e19d4e45888d02f0eddfe46627d64](https://github.com/framerslab/agentos/commit/ca1a5ff6592e19d4e45888d02f0eddfe46627d64))
+
 ## <small>0.9.140 (2026-07-14)</small>
 
 * fix(anthropic): pin the auto cache tail alongside caller system markers without thinking ([5b3ba64efdbb1d059632b04486c10f2ecc1de430](https://github.com/framerslab/agentos/commit/5b3ba64efdbb1d059632b04486c10f2ecc1de430))
