@@ -8,7 +8,7 @@
 
 # **AgentOS** · TypeScript AI Agent Framework
 
-**Agents that remember, forge their own tools, and survive long-running sessions.** Persistent cognitive memory, optional HEXACO personality, multi-agent orchestration, and one dispatch interface across 11 LLM providers. Apache-2.0.
+**Agents that remember, forge their own tools, and survive long-running sessions.** Persistent cognitive memory, optional HEXACO personality, multi-agent orchestration, and one dispatch interface across 12 LLM providers. Apache-2.0.
 
 [![npm](https://img.shields.io/npm/v/@framers/agentos?style=flat-square&logo=npm&color=cb3837)](https://www.npmjs.com/package/@framers/agentos)
 [![CI](https://img.shields.io/github/actions/workflow/status/framerslab/agentos/ci.yml?branch=master&style=flat-square&logo=github&label=CI)](https://github.com/framerslab/agentos/actions/workflows/ci.yml)
@@ -33,7 +33,7 @@ AgentOS is an open-source TypeScript framework for AI agents that **remember, ad
 - **Top open-source memory benchmarks:** [85.6% on LongMemEval-S](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) at $0.0090/correct (gpt-4o), and 70.2% on LongMemEval-M, the only open-source library above 65% on M with reproducible methodology.
 - **Runtime tool forging.** An agent writes a TypeScript function with a Zod schema, an LLM judge approves it, and it runs in a hardened `node:vm` sandbox before joining the catalog for the rest of the session.
 - **Persistent [cognitive memory](https://docs.agentos.sh/features/cognitive-memory)** with 8 neuroscience-backed mechanisms: Ebbinghaus decay, retrieval-induced forgetting, reconsolidation, source-confidence decay.
-- **Optional [HEXACO personality](https://docs.agentos.sh/features/hexaco-personality)**, [6 orchestration strategies](https://docs.agentos.sh/features/agency-collaboration), [guardrails](https://docs.agentos.sh/features/guardrails-architecture), and [voice](https://docs.agentos.sh/features/voice-pipeline) across **11 LLM providers**; 100+ extensions and 88 skills auto-load at startup.
+- **Optional [HEXACO personality](https://docs.agentos.sh/features/hexaco-personality)**, [6 orchestration strategies](https://docs.agentos.sh/features/agency-collaboration), [guardrails](https://docs.agentos.sh/features/guardrails-architecture), and [voice](https://docs.agentos.sh/features/voice-pipeline) across **12 LLM providers**; 100+ extensions and 88 skills auto-load at startup.
 
 ---
 
@@ -164,7 +164,7 @@ Strategies: `sequential`, `parallel`, `debate`, `review-loop`, `hierarchical`, `
 
 | Package | Role |
 |---|---|
-| [`@framers/agentos`](https://www.npmjs.com/package/@framers/agentos) | Core runtime: agents, cognitive memory, orchestration, guardrails, voice, 11 LLM providers. Apache-2.0. |
+| [`@framers/agentos`](https://www.npmjs.com/package/@framers/agentos) | Core runtime: agents, cognitive memory, orchestration, guardrails, voice, 12 LLM providers. Apache-2.0. |
 | [`@framers/agentos-extensions`](https://www.npmjs.com/package/@framers/agentos-extensions) | 100+ first-party extensions: channel adapters, tool packs, integrations, guardrail packs. |
 | [`@framers/agentos-extensions-registry`](https://www.npmjs.com/package/@framers/agentos-extensions-registry) | Discovery + auto-loader for the extensions catalog. |
 | [`@framers/agentos-skills`](https://www.npmjs.com/package/@framers/agentos-skills) | 88 curated `SKILL.md` skills. |

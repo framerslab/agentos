@@ -1,6 +1,6 @@
 # LLM Providers — multi-provider configuration & routing
 
-AgentOS abstracts every LLM behind a single [`IProvider`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/IProvider.ts) interface. Eleven providers are wired in directly — nine via API key, two via local CLI bridges that ride an existing Claude Max or Google account subscription. OpenRouter, included in the eleven, fans out to 200+ additional models from the same set of vendors. Every provider speaks the same streaming protocol, supports the same tool-call shape (with the documented exceptions below), and participates in the same cost ledger. The fallback chain is auto-built from whichever keys are set in the environment and is overridable per agent.
+AgentOS abstracts every LLM behind a single [`IProvider`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/IProvider.ts) interface. Twelve providers are wired in directly — ten via API key, two via local CLI bridges that ride an existing Claude Max or Google account subscription. OpenRouter, included in the twelve, fans out to 200+ additional models from the same set of vendors. Every provider speaks the same streaming protocol, supports the same tool-call shape (with the documented exceptions below), and participates in the same cost ledger. The fallback chain is auto-built from whichever keys are set in the environment and is overridable per agent.
 
 ---
 
@@ -22,6 +22,7 @@ AgentOS abstracts every LLM behind a single [`IProvider`](https://github.com/fra
    - [Mistral AI](#mistral-ai)
    - [xAI (Grok)](#xai-grok)
    - [OpenRouter](#openrouter)
+   - [Atlas Cloud](#atlas-cloud)
    - [Ollama](#ollama)
 9. [Programmatic Configuration](#programmatic-configuration)
 10. [Adding a Custom Provider](#adding-a-custom-provider)
@@ -36,7 +37,7 @@ AgentOS abstracts LLM access behind a unified [`IProvider`](https://github.com/f
 
 **Key features:**
 
-- **11 providers** supported out of the box (9 API-key + 2 CLI-based)
+- **12 providers** supported out of the box (10 API-key + 2 CLI-based)
 - **CLI providers**: Use your Claude Max or Google account subscription via local CLI — no API key needed
 - **Auto-detection**: Set an API key or install a CLI and the provider is available
 - **Fallback**: Automatic retry with alternate providers on failure (`fallbackProviders`)
@@ -58,6 +59,7 @@ AgentOS abstracts LLM access behind a unified [`IProvider`](https://github.com/f
 | **Mistral** | `MISTRAL_API_KEY` | `mistral-large-latest` | Yes | Yes | No | Yes | $$ |
 | **xAI** | `XAI_API_KEY` | `grok-2` | Yes | Yes | Yes | No | $$ |
 | **OpenRouter** | `OPENROUTER_API_KEY` | `openai/gpt-4o` | Yes | Yes | Yes* | Yes* | Varies |
+| **Atlas Cloud** | `ATLASCLOUD_API_KEY` | `deepseek-ai/deepseek-v4-pro` | Yes | Yes | No | No | Varies |
 | **Ollama** | `OLLAMA_BASE_URL` | `llama3.2` | Yes | Partial | Model-dep. | Yes | Free |
 | **Claude Code CLI** | _(PATH detection)_ | `claude-sonnet-4-5-20250929` | Yes | Yes | Yes | No | Free* |
 | **Gemini CLI** | _(PATH detection)_ | `gemini-2.5-flash` | Yes | Partial** | Yes | No | Free* |
@@ -111,15 +113,16 @@ order and uses the first one found:
 
 1. `OPENROUTER_API_KEY` → OpenRouter
 2. `OPENAI_API_KEY` → OpenAI
-3. `ANTHROPIC_API_KEY` → Anthropic
-4. `GEMINI_API_KEY` → Google Gemini
-5. `GROQ_API_KEY` → Groq
-6. `TOGETHER_API_KEY` → Together AI
-7. `MISTRAL_API_KEY` → Mistral
-8. `XAI_API_KEY` → xAI
-9. `which claude` → Claude Code CLI (PATH detection — no API key, uses Max subscription)
-10. `which gemini` → Gemini CLI (PATH detection — no API key, uses Google account)
-11. `OLLAMA_BASE_URL` → Ollama
+3. `ATLASCLOUD_API_KEY` → Atlas Cloud
+4. `ANTHROPIC_API_KEY` → Anthropic
+5. `GEMINI_API_KEY` → Google Gemini
+6. `GROQ_API_KEY` → Groq
+7. `TOGETHER_API_KEY` → Together AI
+8. `MISTRAL_API_KEY` → Mistral
+9. `XAI_API_KEY` → xAI
+10. `which claude` → Claude Code CLI (PATH detection — no API key, uses Max subscription)
+11. `which gemini` → Gemini CLI (PATH detection — no API key, uses Google account)
+12. `OLLAMA_BASE_URL` → Ollama
 
 You can override auto-detection in four ways, highest priority first:
 
@@ -160,6 +163,9 @@ OPENAI_API_KEY=sk-...
 
 # Fallback provider
 OPENROUTER_API_KEY=sk-or-...
+
+# OpenAI-compatible provider
+ATLASCLOUD_API_KEY=...
 
 # Local provider (no API key needed)
 OLLAMA_BASE_URL=http://localhost:11434
@@ -240,7 +246,7 @@ AgentOS tracks token usage and cost across all providers:
 | Tier | Providers | Approximate Cost (1M tokens) |
 |------|-----------|------------------------------|
 | **$** (Budget) | Groq, Together, Ollama (free) | $0.00–$0.60 |
-| **$$** (Standard) | Gemini, Mistral, xAI, OpenRouter (varies) | $0.50–$3.00 |
+| **$$** (Standard) | Gemini, Mistral, xAI, OpenRouter (varies), Atlas Cloud (varies) | $0.50–$3.00 |
 | **$$$** (Premium) | OpenAI, Anthropic | $3.00–$15.00 |
 
 ### Cost-Aware Caps
@@ -385,6 +391,23 @@ Popular OpenRouter models:
 - `google/gemini-2.5-flash`
 - `meta-llama/llama-3.3-70b-instruct`
 
+### Atlas Cloud
+
+```bash
+export ATLASCLOUD_API_KEY=...
+# Optional endpoint override for proxies or private deployments:
+export ATLASCLOUD_BASE_URL=https://api.atlascloud.ai/v1
+```
+
+Atlas Cloud uses an OpenAI-compatible `/v1/chat/completions` endpoint, so it
+shares AgentOS's standard OpenAI-compatible transport, streaming, tool-call, and
+structured-output handling.
+
+| Model | Context | Vision | Tool Calling | Notes |
+|-------|---------|--------|-------------|-------|
+| `deepseek-ai/deepseek-v4-pro` | 1M | No | Yes | Default long-context reasoning model |
+| `qwen/qwen3.5-flash` | 1M | No | Partial | Fast chat model |
+
 ### Ollama
 
 ```bash
@@ -491,6 +514,7 @@ exercised paths.
 | Mistral | Yes | No | `auto/none/any` | Good support |
 | xAI | Yes | No | `auto/none` | Basic tool use |
 | OpenRouter | Model-dependent | Model-dependent | Model-dependent | Pass-through |
+| Atlas Cloud | Yes | Yes | `auto/none` | OpenAI-compatible JSON schema mode |
 | Ollama | Partial | No | `auto/none` | Model-dependent |
 
 ### Embedding Support

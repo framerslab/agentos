@@ -57,6 +57,16 @@ describe('resolveProvider', () => {
     expect(config.baseUrl).toBe('http://localhost:11434');
   });
 
+  it('resolves atlascloud from ATLASCLOUD_API_KEY and ATLASCLOUD_BASE_URL', () => {
+    process.env.ATLASCLOUD_API_KEY = 'atlas-test';
+    process.env.ATLASCLOUD_BASE_URL = 'https://proxy.example.com/v1';
+    const config = resolveProvider('atlascloud', 'deepseek-ai/deepseek-v4-pro');
+    expect(config.providerId).toBe('atlascloud');
+    expect(config.apiKey).toBe('atlas-test');
+    expect(config.baseUrl).toBe('https://proxy.example.com/v1');
+    expect(config.modelId).toBe('deepseek-ai/deepseek-v4-pro');
+  });
+
   it('throws when no API key found', () => {
     delete process.env.OPENAI_API_KEY;
     expect(() => resolveProvider('openai', 'gpt-4o')).toThrow('No API key');

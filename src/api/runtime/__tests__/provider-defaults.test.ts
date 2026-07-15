@@ -13,7 +13,7 @@ import { resolveModelOption, resolveProvider } from '../model.js';
 
 describe('PROVIDER_DEFAULTS', () => {
   it('has text model for all major providers', () => {
-    for (const id of ['openai', 'anthropic', 'ollama', 'openrouter', 'gemini']) {
+    for (const id of ['openai', 'anthropic', 'ollama', 'openrouter', 'atlascloud', 'gemini']) {
       expect(PROVIDER_DEFAULTS[id]?.text).toBeDefined();
     }
   });
@@ -40,6 +40,7 @@ describe('autoDetectProvider', () => {
     // Restore env after each test
     for (const key of [
       'OPENROUTER_API_KEY',
+      'ATLASCLOUD_API_KEY',
       'OPENAI_API_KEY',
       'ANTHROPIC_API_KEY',
       'GEMINI_API_KEY',
@@ -62,6 +63,7 @@ describe('autoDetectProvider', () => {
   it('detects openai from OPENAI_API_KEY', () => {
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.OPENROUTER_API_KEY;
+    delete process.env.ATLASCLOUD_API_KEY;
     process.env.OPENAI_API_KEY = 'test';
     expect(autoDetectProvider()).toBe('openai');
   });
@@ -75,6 +77,7 @@ describe('autoDetectProvider', () => {
   it('detects anthropic from ANTHROPIC_API_KEY', () => {
     delete process.env.OPENAI_API_KEY;
     delete process.env.OPENROUTER_API_KEY;
+    delete process.env.ATLASCLOUD_API_KEY;
     process.env.ANTHROPIC_API_KEY = 'test';
     expect(autoDetectProvider()).toBe('anthropic');
   });
@@ -82,6 +85,7 @@ describe('autoDetectProvider', () => {
   it('skips providers without image defaults when detecting for image tasks', () => {
     delete process.env.OPENAI_API_KEY;
     delete process.env.OPENROUTER_API_KEY;
+    delete process.env.ATLASCLOUD_API_KEY;
     process.env.ANTHROPIC_API_KEY = 'anthropic-test';
     process.env.STABILITY_API_KEY = 'stability-test';
 
@@ -92,6 +96,7 @@ describe('autoDetectProvider', () => {
     delete process.env.OPENAI_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.OPENROUTER_API_KEY;
+    delete process.env.ATLASCLOUD_API_KEY;
     delete process.env.GEMINI_API_KEY;
     delete process.env.GROQ_API_KEY;
     delete process.env.TOGETHER_API_KEY;
@@ -107,6 +112,7 @@ describe('autoDetectProvider', () => {
     delete process.env.OPENAI_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.OPENROUTER_API_KEY;
+    delete process.env.ATLASCLOUD_API_KEY;
     delete process.env.GEMINI_API_KEY;
     delete process.env.GROQ_API_KEY;
     delete process.env.TOGETHER_API_KEY;
@@ -120,12 +126,24 @@ describe('autoDetectProvider', () => {
 
     expect(autoDetectProvider()).toBe('claude-code-cli');
   });
+
+  it('detects atlascloud from ATLASCLOUD_API_KEY', () => {
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    process.env.ATLASCLOUD_API_KEY = 'atlas-test';
+    expect(autoDetectProvider()).toBe('atlascloud');
+  });
 });
 
 describe('resolveModelOption', () => {
   it('resolves provider-only to default text model', () => {
     const result = resolveModelOption({ provider: 'openai' }, 'text');
     expect(result).toEqual({ providerId: 'openai', modelId: 'gpt-4o' });
+  });
+
+  it('resolves atlascloud provider-only to default text model', () => {
+    const result = resolveModelOption({ provider: 'atlascloud' }, 'text');
+    expect(result).toEqual({ providerId: 'atlascloud', modelId: 'deepseek-ai/deepseek-v4-pro' });
   });
 
   it('resolves provider + explicit model override', () => {

@@ -27,6 +27,7 @@ import { GroqProvider, GroqProviderConfig } from './implementations/GroqProvider
 import { TogetherProvider, TogetherProviderConfig } from './implementations/TogetherProvider';
 import { MistralProvider, MistralProviderConfig } from './implementations/MistralProvider';
 import { XAIProvider, XAIProviderConfig } from './implementations/XAIProvider';
+import { AtlasCloudProvider, AtlasCloudProviderConfig } from './implementations/AtlasCloudProvider';
 import { GeminiProvider, GeminiProviderConfig } from './implementations/GeminiProvider';
 import { ClaudeCodeProvider, ClaudeCodeProviderConfig } from './implementations/ClaudeCodeProvider';
 import { GeminiCLIProvider, GeminiCLIProviderConfig } from './implementations/GeminiCLIProvider';
@@ -39,7 +40,7 @@ import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../utils/err
 export interface ProviderConfigEntry {
   providerId: string;
   enabled: boolean;
-  config: Partial<OpenAIProviderConfig | OpenRouterProviderConfig | OllamaProviderConfig | AnthropicProviderConfig | GroqProviderConfig | TogetherProviderConfig | MistralProviderConfig | XAIProviderConfig | GeminiProviderConfig | ClaudeCodeProviderConfig | GeminiCLIProviderConfig | Record<string, any>>;
+  config: Partial<OpenAIProviderConfig | OpenRouterProviderConfig | OllamaProviderConfig | AnthropicProviderConfig | GroqProviderConfig | TogetherProviderConfig | MistralProviderConfig | XAIProviderConfig | AtlasCloudProviderConfig | GeminiProviderConfig | ClaudeCodeProviderConfig | GeminiCLIProviderConfig | Record<string, any>>;
   isDefault?: boolean;
 }
 
@@ -143,6 +144,9 @@ export class AIModelProviderManager {
             break;
           case 'xai':
             providerInstance = new XAIProvider();
+            break;
+          case 'atlascloud':
+            providerInstance = new AtlasCloudProvider();
             break;
           case 'gemini':
             providerInstance = new GeminiProvider();
@@ -376,4 +380,3 @@ export class AIModelProviderManager {
     console.log("AIModelProviderManager: Shutdown complete. All providers processed.");
   }
 }
-

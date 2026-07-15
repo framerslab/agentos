@@ -55,6 +55,10 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
     text: 'openai/gpt-4o',
     cheap: 'openai/gpt-4o-mini',
   },
+  atlascloud: {
+    text: 'deepseek-ai/deepseek-v4-pro',
+    cheap: 'qwen/qwen3.5-flash',
+  },
   gemini: {
     text: 'gemini-2.5-flash',
     cheap: 'gemini-2.0-flash',
@@ -125,6 +129,7 @@ const AUTO_DETECT_ORDER: AutoDetectProbe[] = [
   // are set".
   { envKey: 'OPENROUTER_API_KEY', provider: 'openrouter' },
   { envKey: 'OPENAI_API_KEY', provider: 'openai' },
+  { envKey: 'ATLASCLOUD_API_KEY', provider: 'atlascloud' },
   { envKey: 'ANTHROPIC_API_KEY', provider: 'anthropic' },
   { envKey: 'GEMINI_API_KEY', provider: 'gemini' },
   { envKey: 'GROQ_API_KEY', provider: 'groq' },
