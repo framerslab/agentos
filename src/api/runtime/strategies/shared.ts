@@ -14,12 +14,14 @@ import { agent as createAgent } from '../agent.js';
 import { mergeAdaptableTools } from '../toolAdapter.js';
 import type {
   AgencyOptions,
+  AgencyQuorumConfig,
   Agent,
   BaseAgentConfig,
   AgentCallRecord,
   ApprovalRequest,
   ApprovalDecision,
 } from '../types.js';
+import { AgencyQuorumError } from '../types.js';
 
 /**
  * Type guard that checks whether a value is a pre-built {@link Agent} instance
@@ -45,6 +47,44 @@ import type {
  */
 export function isAgent(value: BaseAgentConfig | Agent): value is Agent {
   return typeof (value as Agent).generate === 'function';
+}
+
+/**
+ * Enforce a post-fan-out panel quorum (parallel strategy).
+ *
+ * Checked against the agents that actually SUCCEEDED: `minAgents` is a
+ * simple count; `minProviders` counts distinct resolved `provider` values on
+ * the results — a multi-model panel that quietly collapsed to a single
+ * vendor must not synthesize a false consensus.
+ *
+ * @param quorum - The agency's quorum config; `undefined` is a no-op.
+ * @param settled - Successful fan-out results (name + generate result).
+ * @param rosterSize - Total agents attempted, for the error message.
+ * @throws {AgencyQuorumError} On shortfall when `onShortfall` is `'error'`
+ *   (the default).
+ */
+export function enforceQuorum(
+  quorum: AgencyQuorumConfig | undefined,
+  settled: Array<{ name: string; result: Record<string, unknown> }>,
+  rosterSize: number,
+): void {
+  if (!quorum) return;
+  const minAgents = quorum.minAgents ?? 0;
+  const minProviders = quorum.minProviders ?? 0;
+  const providers = new Set(
+    settled
+      .map((s) => String((s.result as { provider?: unknown }).provider ?? ''))
+      .filter((p) => p !== ''),
+  );
+  if (settled.length >= minAgents && providers.size >= minProviders) return;
+  const detail =
+    `panel quorum shortfall: ${settled.length}/${rosterSize} agents succeeded ` +
+    `(need ${minAgents}), ${providers.size} distinct providers (need ${minProviders})`;
+  if ((quorum.onShortfall ?? 'error') === 'proceed') {
+    console.warn(`[AgentOS][Parallel] ${detail} — proceeding (onShortfall=proceed)`);
+    return;
+  }
+  throw new AgencyQuorumError(detail);
 }
 
 /**
