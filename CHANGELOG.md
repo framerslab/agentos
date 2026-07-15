@@ -1,3 +1,7 @@
+## <small>0.9.146 (2026-07-15)</small>
+
+* fix(api): planning sub-call inherits the per-call cache control ([372da99259ea20b6fb4cd2a1e5b0785edf6446de](https://github.com/framerslab/agentos/commit/372da99259ea20b6fb4cd2a1e5b0785edf6446de))
+
 ## <small>0.9.145 (2026-07-15)</small>
 
 * fix(api): harden cache:false against customModelParams region overrides; honor schemaCacheTtl on string systems ([bbe326b0670037b3300b27e04969e62169edacac](https://github.com/framerslab/agentos/commit/bbe326b0670037b3300b27e04969e62169edacac))
