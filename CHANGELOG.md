@@ -1,3 +1,7 @@
+## <small>0.9.145 (2026-07-15)</small>
+
+* fix(api): harden cache:false against customModelParams region overrides; honor schemaCacheTtl on string systems ([bbe326b0670037b3300b27e04969e62169edacac](https://github.com/framerslab/agentos/commit/bbe326b0670037b3300b27e04969e62169edacac))
+
 ## <small>0.9.144 (2026-07-15)</small>
 
 * feat(api): parallel-panel quorum — minAgents/minProviders floors checked post-fan-out, before synthesis ([0bf18aaed76801087ef4ad10f60533cecd556aa0](https://github.com/framerslab/agentos/commit/0bf18aaed76801087ef4ad10f60533cecd556aa0))
