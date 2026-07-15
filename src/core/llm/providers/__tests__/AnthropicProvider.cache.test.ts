@@ -1023,3 +1023,49 @@ describe('AnthropicProvider per-call cache option (options.cache)', () => {
     expect(typeof payload.system).toBe('string');
   });
 });
+
+describe('AnthropicProvider cache:false sanitizes customModelParams-injected regions', () => {
+  async function buildPayload(
+    messages: Array<Record<string, unknown>>,
+    options: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>> {
+    const provider = new AnthropicProvider();
+    await provider.initialize({ apiKey: 'test-anthropic-key' });
+    return (provider as unknown as {
+      buildRequestPayload: (
+        modelId: string,
+        messages: unknown,
+        options: unknown,
+        stream: boolean,
+      ) => Record<string, unknown>;
+    }).buildRequestPayload('claude-sonnet-4-6', messages, options, false);
+  }
+
+  it('strips markers from a customModelParams system/messages override', async () => {
+    const injectedSystem = [
+      { type: 'text', text: 'injected stable', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ];
+    const injectedMessages = [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'injected turn', cache_control: { type: 'ephemeral' } },
+        ],
+      },
+    ];
+    const payload = await buildPayload(
+      [{ role: 'user', content: 'hi' }],
+      {
+        cache: false,
+        customModelParams: { system: injectedSystem, messages: injectedMessages },
+      },
+    );
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    expect(system[0].cache_control).toBeUndefined();
+    const messages = payload.messages as Array<{ content: Array<{ cache_control?: unknown }> }>;
+    expect(messages[0].content[0].cache_control).toBeUndefined();
+    // The caller's own customModelParams objects are never mutated.
+    expect(injectedSystem[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    expect(injectedMessages[0].content[0].cache_control).toEqual({ type: 'ephemeral' });
+  });
+});

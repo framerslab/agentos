@@ -351,6 +351,18 @@ function buildSchemaSystemPrompt(
     ];
   }
 
+  // A string (or omitted) system normally takes the legacy joined-string
+  // branch below, which carries no cache marker at all — a schemaCacheTtl
+  // there would be silently ignored. Honor the option by upgrading to the
+  // block emission (opt-in only: callers without schemaCacheTtl keep the
+  // exact legacy string shape).
+  if (schemaCacheTtl === '1h') {
+    return [
+      ...(userSystem ? [{ text: userSystem }] : []),
+      { text: schemaText, cacheBreakpoint: true, cacheTtl: '1h' as const },
+    ];
+  }
+
   const parts: string[] = [];
   if (userSystem) {
     parts.push(userSystem);

@@ -1700,14 +1700,33 @@ export class AnthropicProvider implements IProvider {
     // hard-off including caller markers).
     const autoCacheEnv = process.env.AGENTOS_ANTHROPIC_AUTO_CACHE;
     if (options.cache === false) {
-      // customModelParams passthrough ran above and may have injected raw
-      // marked tools or a request-level cache_control; clear those too so
-      // the opt-out holds regardless of how the marker arrived.
+      // customModelParams passthrough ran above and may have injected ANY
+      // marked region — raw tools, a request-level cache_control, or even a
+      // wholesale system/messages override. Sanitize all of them so the
+      // opt-out holds regardless of how a marker arrived. Regions are
+      // rebuilt as copies (never mutated in place): after the spread these
+      // may be the caller's own customModelParams objects.
       delete payload.cache_control;
+      const stripBlockMarkers = (value: unknown): unknown =>
+        Array.isArray(value)
+          ? value.map((block) => {
+              if (!block || typeof block !== 'object') return block;
+              const { cache_control: _stripped, ...rest } = block as Record<string, unknown>;
+              return rest;
+            })
+          : value;
+      payload.system = stripBlockMarkers(payload.system);
+      if (payload.system === undefined) delete payload.system;
+      if (Array.isArray(payload.messages)) {
+        payload.messages = (payload.messages as Array<Record<string, unknown>>).map((message) => {
+          if (!message || typeof message !== 'object') return message;
+          const copy = { ...message };
+          copy.content = stripBlockMarkers(copy.content);
+          return copy;
+        });
+      }
       if (Array.isArray(payload.tools)) {
-        for (const t of payload.tools as Array<Record<string, unknown>>) {
-          if (t && typeof t === 'object') delete t.cache_control;
-        }
+        payload.tools = stripBlockMarkers(payload.tools);
       }
     } else if (
       autoCacheEnv !== '0'
