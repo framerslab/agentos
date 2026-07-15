@@ -1,3 +1,7 @@
+## <small>0.9.142 (2026-07-15)</small>
+
+* fix(anthropic): count tool cache markers in the breakpoint cap; reconcile tool_choice after customModelParams ([b76f60a2eeb00b14b756458ee966f87f5368e2c3](https://github.com/framerslab/agentos/commit/b76f60a2eeb00b14b756458ee966f87f5368e2c3))
+
 ## <small>0.9.141 (2026-07-15)</small>
 
 * fix(api): forward thinking and effort through streamText's tool-emulation shim ([eaa0d08c0714490db5a1b1a2cb45bf1c090c622a](https://github.com/framerslab/agentos/commit/eaa0d08c0714490db5a1b1a2cb45bf1c090c622a))
