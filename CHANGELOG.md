@@ -1,3 +1,7 @@
+## <small>0.9.154 (2026-07-16)</small>
+
+* fix(api): adopt the repaired candidate so inner validation errors surface ([92d6c51279a56548b2923c9a63ff21a0c641222e](https://github.com/framerslab/agentos/commit/92d6c51279a56548b2923c9a63ff21a0c641222e))
+
 ## <small>0.9.153 (2026-07-16)</small>
 
 * fix(api): complete the container-repair helper body ([f003645084b6f6f85bcb5e2a62da8fb2981968cf](https://github.com/framerslab/agentos/commit/f003645084b6f6f85bcb5e2a62da8fb2981968cf))
