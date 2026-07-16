@@ -1,3 +1,7 @@
+## <small>0.9.155 (2026-07-16)</small>
+
+* fix(api): retry feedback names a container-as-string mistake explicitly ([c52f76a50c81c347204c2e7f1656539475b0b013](https://github.com/framerslab/agentos/commit/c52f76a50c81c347204c2e7f1656539475b0b013))
+
 ## <small>0.9.154 (2026-07-16)</small>
 
 * fix(api): adopt the repaired candidate so inner validation errors surface ([92d6c51279a56548b2923c9a63ff21a0c641222e](https://github.com/framerslab/agentos/commit/92d6c51279a56548b2923c9a63ff21a0c641222e))
