@@ -1,3 +1,7 @@
+## <small>0.9.151 (2026-07-16)</small>
+
+* fix(orchestration): align inlined anthropic text defaults with the canonical table ([6731caaa870f0f122e3ed4501be8bb866eacc8ff](https://github.com/framerslab/agentos/commit/6731caaa870f0f122e3ed4501be8bb866eacc8ff))
+
 ## <small>0.9.150 (2026-07-16)</small>
 
 * fix(api): forward sessionId through generateObject to the provider layer ([7a9200179f62ca267b926276f5a0b6e68080fa9b](https://github.com/framerslab/agentos/commit/7a9200179f62ca267b926276f5a0b6e68080fa9b))
