@@ -100,6 +100,36 @@ describe('generateObject', () => {
     expect(providerOptions.effort).toBe('max');
   });
 
+  it('forwards sessionId through generateText to the provider options', async () => {
+    hoisted.generateCompletion.mockResolvedValue(mockResponse('{"name": "Alice", "age": 28}'));
+
+    await generateObject({
+      schema: personSchema,
+      prompt: 'Extract person info',
+      sessionId: 'bp-1234',
+    });
+
+    // Same forwarding contract as effort/cache: generateObject -> generateText
+    // -> ModelCompletionOptions.sessionId (OpenRouter emits it as session_id
+    // for provider sticky routing; other providers ignore it).
+    const callArgs = hoisted.generateCompletion.mock.calls[0];
+    const providerOptions = callArgs[2] as { sessionId?: string };
+    expect(providerOptions.sessionId).toBe('bp-1234');
+  });
+
+  it('omits sessionId from provider options when the caller did not set it', async () => {
+    hoisted.generateCompletion.mockResolvedValue(mockResponse('{"name": "Alice", "age": 28}'));
+
+    await generateObject({
+      schema: personSchema,
+      prompt: 'Extract person info',
+    });
+
+    const callArgs = hoisted.generateCompletion.mock.calls[0];
+    const providerOptions = callArgs[2] as { sessionId?: string };
+    expect(providerOptions.sessionId).toBeUndefined();
+  });
+
   it('surfaces fallback.fired when the underlying generateText fell back', async () => {
     globalLLMProviderHealth.reset();
     hoisted.generateCompletion

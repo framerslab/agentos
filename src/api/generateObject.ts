@@ -255,6 +255,18 @@ export interface GenerateObjectOptions<T extends ZodType> {
    * 5-minute marker (previous behavior). Ignored when `cache` is `false`.
    */
   schemaCacheTtl?: '5m' | '1h';
+
+  /**
+   * Per-conversation affinity key, forwarded to
+   * {@link import('./generateText.js').GenerateTextOptions.sessionId}.
+   * OpenRouter emits it as `session_id` for provider sticky routing —
+   * upstream prompt caches are host-scoped, so a load-balanced multi-call
+   * pipeline otherwise cold-misses the cache a prior call wrote on a
+   * different host. Pass a stable id per logical session (blueprint/build
+   * id for codegen loops, conversation id for chat extraction). Providers
+   * without an affinity concept ignore the field.
+   */
+  sessionId?: string;
 }
 
 /**
@@ -650,6 +662,9 @@ export async function generateObject<T extends ZodType>(
       // wire (one-shot extractions, schema block included); `{ ttl: '1h' }`
       // = 1h TTL on the provider's auto markers (moving message-tail).
       ...(opts.cache !== undefined ? { cache: opts.cache } : {}),
+      // Per-conversation affinity key (OpenRouter session_id sticky
+      // routing; other providers ignore it).
+      ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
       _responseFormat: responseFormat,
       // Fallback legs rebuild the payload for THEIR provider via this
       // callback (see generateText's fallback loop) instead of inheriting
