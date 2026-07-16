@@ -819,3 +819,70 @@ describe('generateObject fallback-leg responseFormat rebuild (2026-07-07)', () =
     }
   });
 });
+
+describe('string-encoded container repair', () => {
+  // Claude's tool-use / structured-output path intermittently DOUBLE-ENCODES
+  // a nested container — `{"verdicts": "[{...}]"}` instead of
+  // `{"verdicts": [{...}]}` — most often on long, deeply nested payloads.
+  // The JSON extracts fine, Zod rejects `expected array, received string`
+  // on every attempt, and the call burns its full retry budget for nothing:
+  // the 2026-07-10..16 outage where every wilds converge chain exhausted on
+  // visual_evidence_missing was exactly this shape.
+  const verdictsSchema = z.object({
+    verdicts: z.array(z.object({ trackId: z.string(), verdict: z.string() })),
+  });
+
+  beforeEach(() => {
+    hoisted.generateCompletion.mockReset();
+  });
+
+  it('repairs a container field the model double-encoded as a JSON string, without burning a retry', async () => {
+    hoisted.generateCompletion.mockResolvedValue(
+      mockResponse('{"verdicts":"[{\\"trackId\\":\\"hud_renders\\",\\"verdict\\":\\"red\\"}]"}'),
+    );
+
+    const result = await generateObject({
+      schema: verdictsSchema,
+      prompt: 'grade the tracks',
+    });
+
+    expect(result.object.verdicts).toEqual([{ trackId: 'hud_renders', verdict: 'red' }]);
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it('repairs a nested string-encoded OBJECT as well', async () => {
+    const schema = z.object({ meta: z.object({ tags: z.array(z.string()) }) });
+    hoisted.generateCompletion.mockResolvedValue(
+      mockResponse('{"meta":"{\\"tags\\":[\\"a\\",\\"b\\"]}"}'),
+    );
+
+    const result = await generateObject({ schema, prompt: 'x' });
+
+    expect(result.object.meta.tags).toEqual(['a', 'b']);
+  });
+
+  it('a string that is not JSON for the expected container still retries as before', async () => {
+    hoisted.generateCompletion
+      .mockResolvedValueOnce(mockResponse('{"verdicts":"not json at all"}'))
+      .mockResolvedValueOnce(
+        mockResponse('{"verdicts":[{"trackId":"a","verdict":"green"}]}'),
+      );
+
+    const result = await generateObject({
+      schema: verdictsSchema,
+      prompt: 'x',
+      maxRetries: 1,
+    });
+
+    expect(result.object.verdicts[0]?.trackId).toBe('a');
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(2);
+  });
+
+  it('an unrepairable string still exhausts retries into ObjectGenerationError', async () => {
+    hoisted.generateCompletion.mockResolvedValue(mockResponse('{"verdicts":"nope"}'));
+
+    await expect(
+      generateObject({ schema: verdictsSchema, prompt: 'x', maxRetries: 0 }),
+    ).rejects.toThrow(ObjectGenerationError);
+  });
+});

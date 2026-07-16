@@ -467,6 +467,87 @@ function summarizeZodErrors(error: ZodError): string {
 }
 
 /**
+ * Re-parses string-encoded containers where the schema expects an array or
+ * object but the model produced a JSON STRING containing one.
+ *
+ * Models on the tool-use / structured-output path intermittently
+ * double-encode a nested container — `{"verdicts": "[{...}]"}` instead of
+ * `{"verdicts": [{...}]}` — most often on long, deeply nested payloads. The
+ * raw text extracts as valid JSON, so only Zod sees the defect
+ * (`invalid_type: expected array, received string`), and a retry re-rolls
+ * the same dice with the same prompt.
+ *
+ * Driven strictly by the validation issues: for each `invalid_type` issue
+ * expecting a container whose actual value is a string that syntactically
+ * starts like that container, `JSON.parse` the string in place on a clone.
+ * One pass, no recursion; anything that does not parse is left untouched so
+ * the caller's normal retry/feedback path still applies.
+ *
+ * @param value - The extracted-but-invalid candidate value.
+ * @param error - The Zod error from the failed validation.
+ * @returns The (possibly repaired) value and whether any repair applied.
+ * @internal
+ */
+function repairStringEncodedContainers(
+  value: unknown,
+  error: ZodError,
+): { value: unknown; repaired: boolean } {
+  type ContainerIssue = { code?: string; expected?: string; path?: PropertyKey[] };
+  const targets = (error.issues as unknown as ContainerIssue[]).filter(
+    issue =>
+      issue.code === 'invalid_type' &&
+      (issue.expected === 'array' || issue.expected === 'object'),
+  );
+  if (targets.length === 0) return { value, repaired: false };
+
+  let root: unknown;
+  try {
+    root = structuredClone(value);
+  } catch {
+    // Non-cloneable input (should never happen for JSON-derived data) —
+    // repair is best-effort, never a new failure mode.
+    return { value, repaired: false };
+  }
+
+  let repaired = false;
+  for (const issue of targets) {
+    const path = issue.path ?? [];
+    // Resolve the offending node and its parent inside the clone.
+    let parent: Record<PropertyKey, unknown> | null = null;
+    let node: unknown = root;
+    for (const key of path) {
+      if (node === null || typeof node !== 'object') {
+        node = undefined;
+        break;
+      }
+      parent = node as Record<PropertyKey, unknown>;
+      node = parent[key];
+    }
+    if (typeof node !== 'string') continue;
+    const trimmed = node.trim();
+    const expectsArray = issue.expected === 'array';
+    if (expectsArray ? !trimmed.startsWith('[') : !trimmed.startsWith('{')) continue;
+    let inner: unknown;
+    try {
+      inner = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (path.length === 0) {
+      // The root itself was string-encoded.
+      root = inner;
+      repaired = true;
+      continue;
+    }
+    if (parent) {
+      parent[path[path.length - 1] as PropertyKey] = inner;
+      repaired = true;
+    }
+  }
+  return { value: root, repaired };
+}
+
+/**
  * Grows the output-token budget after a truncated attempt, capped at
  * {@link TRUNCATION_RETRY_MAX_TOKENS}. The provider layer clamps the result to
  * the target model's real ceiling, so this can never produce a request the
@@ -736,9 +817,28 @@ export async function generateObject<T extends ZodType>(
 
     // Step 2: Validate against the Zod schema
     // Use safeParse to capture structured validation errors for retry feedback
-    const validation = effectiveSchema.safeParse(parsed) as
+    let validation = effectiveSchema.safeParse(parsed) as
       | { success: true; data: { items: z.infer<T> } | z.infer<T> }
       | { success: false; error: ZodError };
+
+    if (!validation.success) {
+      // Models on the tool-use / structured-output path intermittently
+      // DOUBLE-ENCODE a nested container — `{"verdicts": "[{...}]"}` instead
+      // of `{"verdicts": [{...}]}` — most often on long, deeply nested
+      // payloads. The JSON extracts fine, so only validation sees it, and a
+      // retry re-rolls the same dice with the same prompt: the 2026-07-10..16
+      // outage where every wilds visual-judge call exhausted its retries was
+      // exactly this. Repair the string-encoded containers the validation
+      // issues point at and re-validate once before spending a retry.
+      const repair = repairStringEncodedContainers(parsed, validation.error);
+      if (repair.repaired) {
+        const revalidation = effectiveSchema.safeParse(repair.value) as typeof validation;
+        if (revalidation.success) {
+          parsed = repair.value;
+          validation = revalidation;
+        }
+      }
+    }
 
     if (validation.success) {
       // Unwrap the synthetic envelope when we wrapped a top-level
