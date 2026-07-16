@@ -452,8 +452,61 @@ function extractJson(text: string): unknown {
 function repairStringEncodedContainers(
   value: unknown,
   error: ZodError,
-): { value: unknown; repaired: boolean }
+): { value: unknown; repaired: boolean } {
+  type ContainerIssue = { code?: string; expected?: string; path?: PropertyKey[] };
+  const targets = (error.issues as unknown as ContainerIssue[]).filter(
+    issue =>
+      issue.code === 'invalid_type' &&
+      (issue.expected === 'array' || issue.expected === 'object'),
+  );
+  if (targets.length === 0) return { value, repaired: false };
 
+  let root: unknown;
+  try {
+    root = structuredClone(value);
+  } catch {
+    // Non-cloneable input (should never happen for JSON-derived data) —
+    // repair is best-effort, never a new failure mode.
+    return { value, repaired: false };
+  }
+
+  let repaired = false;
+  for (const issue of targets) {
+    const path = issue.path ?? [];
+    // Resolve the offending node and its parent inside the clone.
+    let parent: Record<PropertyKey, unknown> | null = null;
+    let node: unknown = root;
+    for (const key of path) {
+      if (node === null || typeof node !== 'object') {
+        node = undefined;
+        break;
+      }
+      parent = node as Record<PropertyKey, unknown>;
+      node = parent[key];
+    }
+    if (typeof node !== 'string') continue;
+    const trimmed = node.trim();
+    const expectsArray = issue.expected === 'array';
+    if (expectsArray ? !trimmed.startsWith('[') : !trimmed.startsWith('{')) continue;
+    let inner: unknown;
+    try {
+      inner = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (path.length === 0) {
+      // The root itself was string-encoded.
+      root = inner;
+      repaired = true;
+      continue;
+    }
+    if (parent) {
+      parent[path[path.length - 1] as PropertyKey] = inner;
+      repaired = true;
+    }
+  }
+  return { value: root, repaired };
+}
 // ---------------------------------------------------------------------------
 // Retry feedback truncation
 // ---------------------------------------------------------------------------
