@@ -1,3 +1,9 @@
+## <small>0.9.152 (2026-07-16)</small>
+
+* fix(api): repair string-encoded containers before burning a structured-output retry ([8a3674e64bd34778d86a8a7fefd019f44b7fbadb](https://github.com/framerslab/agentos/commit/8a3674e64bd34778d86a8a7fefd019f44b7fbadb))
+* fix(providers): keep cache marker TTL order valid; never restructure overridden payload regions ([35f5cb55d922e15854c909264aac49b0ec4bf6f8](https://github.com/framerslab/agentos/commit/35f5cb55d922e15854c909264aac49b0ec4bf6f8))
+* test(api): name the sessionId forwarding test after its caller ([da5f7b4aeae2e2aceb826a83dceb6733b15b6795](https://github.com/framerslab/agentos/commit/da5f7b4aeae2e2aceb826a83dceb6733b15b6795))
+
 ## <small>0.9.151 (2026-07-16)</small>
 
 * fix(orchestration): align inlined anthropic text defaults with the canonical table ([6731caaa870f0f122e3ed4501be8bb866eacc8ff](https://github.com/framerslab/agentos/commit/6731caaa870f0f122e3ed4501be8bb866eacc8ff))
