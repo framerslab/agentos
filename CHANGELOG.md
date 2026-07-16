@@ -1,3 +1,11 @@
+## <small>0.9.153 (2026-07-16)</small>
+
+* fix(api): complete the container-repair helper body ([f003645084b6f6f85bcb5e2a62da8fb2981968cf](https://github.com/framerslab/agentos/commit/f003645084b6f6f85bcb5e2a62da8fb2981968cf))
+* fix(api): complete the string-encoded container repair restoration ([dd15d8716120236c911b5f93e4260a16fb4a1f75](https://github.com/framerslab/agentos/commit/dd15d8716120236c911b5f93e4260a16fb4a1f75))
+* fix(api): drop the duplicated container-repair helper ([7b992022b5ed882c0e0a6ae559ebd32344de07bb](https://github.com/framerslab/agentos/commit/7b992022b5ed882c0e0a6ae559ebd32344de07bb))
+* fix(api): restore the string-encoded container repair lost to a concurrent whole-file update ([c45039f422c999fa35cb2abe8dd586b2e8a0ea7c](https://github.com/framerslab/agentos/commit/c45039f422c999fa35cb2abe8dd586b2e8a0ea7c))
+* fix(channels,server): harden w0 review findings ([4a12425a5423f0d8afb4dba50d5850178017b054](https://github.com/framerslab/agentos/commit/4a12425a5423f0d8afb4dba50d5850178017b054))
+
 ## <small>0.9.152 (2026-07-16)</small>
 
 * fix(api): repair string-encoded containers before burning a structured-output retry ([8a3674e64bd34778d86a8a7fefd019f44b7fbadb](https://github.com/framerslab/agentos/commit/8a3674e64bd34778d86a8a7fefd019f44b7fbadb))
