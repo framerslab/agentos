@@ -69,10 +69,10 @@ export class AgentOSServer {
         try {
           if (await handler(req, res)) return;
         } catch (error) {
-          this.sendJson(res, 500, {
-            error: 'Extension HTTP handler error',
-            details: (error as Error).message,
-          });
+          // Log the detail server-side; never echo arbitrary extension error
+          // text back to the client (it can carry internal/sensitive strings).
+          console.error('[AgentOSServer] Extension HTTP handler error:', (error as Error).message);
+          this.sendJson(res, 500, { error: 'Extension HTTP handler error' });
           return;
         }
       }

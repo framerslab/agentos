@@ -68,13 +68,14 @@ describe('AgentOSServer extension http dispatch', () => {
     expect(calls).toEqual(['first', 'second']);
   });
 
-  it('a throwing handler yields 500 without crashing the server', async () => {
+  it('a throwing handler yields a generic 500 without leaking the error text', async () => {
     const boom: Handler = () => {
-      throw new Error('boom');
+      throw new Error('boom-internal-secret');
     };
     const { status, body } = await request(makeServer([boom]), '/x');
     expect(status).toBe(500);
-    expect(body).toContain('boom');
+    expect(body).not.toContain('boom-internal-secret');
+    expect(JSON.parse(body)).toEqual({ error: 'Extension HTTP handler error' });
   });
 
   it('flag off: handlers are not consulted', async () => {

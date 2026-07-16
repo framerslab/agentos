@@ -69,6 +69,13 @@ describe('evaluateGroupPolicy', () => {
     });
   });
 
+  it('mention activation with mention support but no known bot id cannot gate — unsupported, not mention-required', () => {
+    const p = policy({ activation: 'mention' });
+    expect(
+      evaluateGroupPolicy(p, { ...base, supportsMentions: true, botUserId: undefined, mentions: ['someone'] })
+    ).toEqual({ verdict: 'drop', reason: 'mention-gating-unsupported' });
+  });
+
   it('owner-only: binding owner and policy.ownerIds allow; others drop', () => {
     const p = policy({ activation: 'owner-only', ownerIds: ['u9'] });
     expect(evaluateGroupPolicy(p, { ...base, senderId: 'owner-1' }).verdict).toBe('allow');
