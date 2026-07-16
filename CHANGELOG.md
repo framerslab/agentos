@@ -1,3 +1,7 @@
+## <small>0.9.150 (2026-07-16)</small>
+
+* fix(api): forward sessionId through generateObject to the provider layer ([7a9200179f62ca267b926276f5a0b6e68080fa9b](https://github.com/framerslab/agentos/commit/7a9200179f62ca267b926276f5a0b6e68080fa9b))
+
 ## <small>0.9.149 (2026-07-16)</small>
 
 * fix(openrouter): per-conversation session_id for provider sticky routing ([18fbdb066aff8eaf0478bc4182c4a0e547576fec](https://github.com/framerslab/agentos/commit/18fbdb066aff8eaf0478bc4182c4a0e547576fec))
