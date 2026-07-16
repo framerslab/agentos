@@ -837,10 +837,15 @@ export async function generateObject<T extends ZodType>(
       const repair = repairStringEncodedContainers(parsed, validation.error);
       if (repair.repaired) {
         const revalidation = effectiveSchema.safeParse(repair.value) as typeof validation;
-        if (revalidation.success) {
-          parsed = repair.value;
-          validation = revalidation;
-        }
+        // Adopt the repaired candidate even when it STILL fails validation:
+        // the unwrap succeeded, so the real defect lives inside the container
+        // (a bad enum, a missing field, out-of-range value). Keeping the
+        // pre-repair error here fed the model — and the terminal
+        // ObjectGenerationError — the misleading "expected array, received
+        // string" issue instead of the true one, so retries fixed the wrong
+        // thing and the failure log masked the actual cause.
+        parsed = repair.value;
+        validation = revalidation;
       }
     }
 

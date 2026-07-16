@@ -900,6 +900,36 @@ describe('string-encoded container repair', () => {
     expect(hoisted.generateCompletion).toHaveBeenCalledTimes(2);
   });
 
+  it('surfaces the INNER validation error when the unwrapped container still fails', async () => {
+    // The residual failure class: the unwrap works, but the content inside
+    // the string was genuinely invalid (here: a verdict outside the enum).
+    // The retry feedback and the terminal error must carry the inner issue,
+    // not the misleading pre-repair "expected array, received string".
+    const verdictsSchema2 = z.object({
+      verdicts: z.array(
+        z.object({ trackId: z.string(), verdict: z.enum(['green', 'yellow', 'red']) }),
+      ),
+    });
+    hoisted.generateCompletion.mockResolvedValue(
+      mockResponse('{"verdicts":"[{\"trackId\":\"t\",\"verdict\":\"purple\"}]"}'),
+    );
+
+    const err = await generateObject({
+      schema: verdictsSchema2,
+      prompt: 'x',
+      maxRetries: 1,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(ObjectGenerationError);
+    const issues = (err as ObjectGenerationError).validationErrors?.issues ?? [];
+    const paths = issues.map((i) => i.path.join('.'));
+    expect(paths.some((p) => p.startsWith('verdicts.0.verdict'))).toBe(true);
+    expect(issues.some((i) => i.message.includes('received string'))).toBe(false);
+  });
+
   it('an unrepairable string still exhausts retries into ObjectGenerationError', async () => {
     hoisted.generateCompletion.mockResolvedValue(mockResponse('{"verdicts":"nope"}'));
 
