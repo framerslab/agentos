@@ -638,7 +638,7 @@ export class AnthropicProvider implements IProvider {
   private recordCacheLeakSample(
     modelId: string,
     payload: Record<string, unknown>,
-    apiResponse: AnthropicMessagesResponse,
+    apiResponse: Pick<AnthropicMessagesResponse, 'usage'>,
   ): void {
     try {
       const system = payload.system as
@@ -1138,6 +1138,24 @@ export class AnthropicProvider implements IProvider {
                 cacheReadInputTokens: cacheReadTokens,
               }),
             };
+
+            // Sample the leak detector on the STREAMING path too. This was
+            // the RC9 blind spot: only generateCompletion sampled, so the
+            // streamed conversation surfaces (narrator, companion) — where
+            // the 2026-07 history-caching regressions actually lived — were
+            // invisible to the zero-read / unmarked tripwires.
+            this.recordCacheLeakSample(modelId, payload, {
+              usage: {
+                input_tokens: inputTokens,
+                output_tokens: outputTokens,
+                ...(cacheCreationTokens !== undefined && {
+                  cache_creation_input_tokens: cacheCreationTokens,
+                }),
+                ...(cacheReadTokens !== undefined && {
+                  cache_read_input_tokens: cacheReadTokens,
+                }),
+              },
+            });
 
             yield {
               id: responseId,

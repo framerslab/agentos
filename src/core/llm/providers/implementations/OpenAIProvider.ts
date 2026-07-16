@@ -55,6 +55,14 @@ namespace OpenAIAPITypes {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    /**
+     * OpenAI automatic prompt caching (gpt-4o and newer): prompt tokens
+     * served from cache at the discounted rate. Normalized into
+     * {@link ModelUsage.cacheReadInputTokens} so the gpt-5.5 / gpt-4o
+     * fallback legs' caching is visible platform-wide (OpenRouterProvider
+     * already normalizes the same field).
+     */
+    prompt_tokens_details?: { cached_tokens?: number };
   }
   /** Complete tool call as returned on a non-streaming message. */
   export interface ToolCall {
@@ -144,6 +152,8 @@ namespace OpenAIAPITypes {
     input_tokens: number;
     output_tokens: number;
     total_tokens: number;
+    /** Responses-API spelling of the cached-prompt-token detail. */
+    input_tokens_details?: { cached_tokens?: number };
   }
   export interface ResponsesOutputContentPart {
     type: string; // 'output_text' | …
@@ -1119,6 +1129,11 @@ export class OpenAIProvider implements IProvider {
               prompt_tokens: apiResponse.usage.input_tokens,
               completion_tokens: apiResponse.usage.output_tokens,
               total_tokens: apiResponse.usage.total_tokens,
+              // Responses API spells the cached detail input_tokens_details;
+              // re-key to the chat spelling the shared mapper reads.
+              ...(apiResponse.usage.input_tokens_details
+                ? { prompt_tokens_details: { cached_tokens: apiResponse.usage.input_tokens_details.cached_tokens } }
+                : {}),
             },
             apiResponse.model ?? modelId
           )
@@ -1307,14 +1322,29 @@ export class OpenAIProvider implements IProvider {
    * @private
    */
   private calculateUsage(
-    usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number },
+    usage: {
+      prompt_tokens: number;
+      completion_tokens: number;
+      total_tokens: number;
+      prompt_tokens_details?: { cached_tokens?: number };
+    },
     modelId: string
   ): ModelUsage {
+    // OpenAI automatic caching reports cached prompt tokens as a detail
+    // field (they remain INCLUDED in prompt_tokens, unlike Anthropic's
+    // exclusive accounting). Normalize into cacheReadInputTokens so the
+    // fallback legs' caching stops being invisible in platform telemetry;
+    // cost stays computed off the full prompt_tokens (the discount is a
+    // billing-side rate, not a token-count change).
+    const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
     return {
       promptTokens: usage.prompt_tokens,
       completionTokens: usage.completion_tokens,
       totalTokens: usage.total_tokens,
       costUSD: this.calculateCost(usage.prompt_tokens, usage.completion_tokens, modelId),
+      ...(typeof cachedTokens === 'number' && cachedTokens >= 0
+        ? { cacheReadInputTokens: cachedTokens }
+        : {}),
     };
   }
 

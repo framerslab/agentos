@@ -15,7 +15,7 @@ import { hostPolicyToRouteParams, mergeRequiredCapabilities } from './runtime/ho
 import { adaptTools } from './runtime/toolAdapter.js';
 import { runEmulatedToolLoop, type ToolMode } from './runtime/tool-emulation/index.js';
 import {
-  buildFallbackChain,
+  buildPolicyAwareFallbackChain,
   createPlan,
   isRetryableError,
   resolveChainOfThought,
@@ -969,9 +969,13 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // call targeting the next available fallback.  All parts from the
       // fallback stream are yielded transparently to the consumer.
       // Resolve fallback chain: caller-supplied wins, undefined triggers
-      // auto-build from env keys, empty array explicitly opts out.
+      // auto-build from env keys, empty array explicitly opts out. The
+      // auto-build is POLICY-AWARE like generateText's (mature tiers get
+      // the uncensored prefix) — streaming previously used the plain
+      // availability chain, so a mature streamed turn that lost its
+      // primary fell onto refuse-happy legs first.
       const effectiveFallbacks = opts.fallbackProviders === undefined
-        ? buildFallbackChain(recordedProviderId)
+        ? buildPolicyAwareFallbackChain(opts.policyTier, recordedProviderId)
        : opts.fallbackProviders;
 
       if (effectiveFallbacks.length && isRetryableError(error)) {
@@ -1015,7 +1019,15 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               model: fb.model,
               apiKey: undefined,
               baseUrl: undefined,
-              fallbackProviders: undefined,
+              // Preserve the REMAINING chain (entries AFTER the current fb;
+              // `attempt` is 1-indexed so slice(attempt) drops fb and all
+              // already-tried entries), mirroring generateText. Passing
+              // `undefined` here made the recursion REBUILD the default
+              // chain — it could re-try the already-failed primary and
+              // ignored explicit frontier-only chains. The final entry
+              // passes [] -> explicit opt-out -> the recursion throws
+              // instead of looping.
+              fallbackProviders: effectiveFallbacks.slice(attempt),
               onFallback: undefined,
             });
 
