@@ -100,7 +100,7 @@ describe('generateObject', () => {
     expect(providerOptions.effort).toBe('max');
   });
 
-  it('forwards sessionId through generateText to the provider options', async () => {
+  it('forwards sessionId from generateObject through generateText to the provider options', async () => {
     hoisted.generateCompletion.mockResolvedValue(mockResponse('{"name": "Alice", "age": 28}'));
 
     await generateObject({
