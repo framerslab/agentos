@@ -1,3 +1,7 @@
+## <small>0.9.147 (2026-07-16)</small>
+
+* fix(providers): close the streaming cache-telemetry gaps; honor the remaining fallback chain on streamed retries ([69c0199de858ff7f9dc43ac2b8ce899d756935b2](https://github.com/framerslab/agentos/commit/69c0199de858ff7f9dc43ac2b8ce899d756935b2))
+
 ## <small>0.9.146 (2026-07-15)</small>
 
 * fix(api): planning sub-call inherits the per-call cache control ([372da99259ea20b6fb4cd2a1e5b0785edf6446de](https://github.com/framerslab/agentos/commit/372da99259ea20b6fb4cd2a1e5b0785edf6446de))
