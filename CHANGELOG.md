@@ -1,3 +1,7 @@
+## <small>0.9.148 (2026-07-16)</small>
+
+* fix(safety): emit a loud structured event when a provider breaker opens ([48ba40d1932f8a89089d1b79fc9bec89642a7490](https://github.com/framerslab/agentos/commit/48ba40d1932f8a89089d1b79fc9bec89642a7490))
+
 ## <small>0.9.147 (2026-07-16)</small>
 
 * fix(providers): close the streaming cache-telemetry gaps; honor the remaining fallback chain on streamed retries ([69c0199de858ff7f9dc43ac2b8ce899d756935b2](https://github.com/framerslab/agentos/commit/69c0199de858ff7f9dc43ac2b8ce899d756935b2))
