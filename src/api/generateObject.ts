@@ -888,9 +888,24 @@ export async function generateObject<T extends ZodType>(
         currentMaxTokens = escalateForTruncation(currentMaxTokens);
         messages.push({ role: 'user', content: TRUNCATION_RETRY_FEEDBACK });
       } else {
+        // When a container came back as a quoted string whose CONTENTS did
+        // not parse (the repair above declines those), the generic schema
+        // feedback tends to re-roll the exact same shape — name the mistake
+        // so the retry emits the container inline (observed: the visual
+        // judge's residual ~1-in-5 failed rounds after the repair shipped).
+        const stringContainerPaths = validation.error.issues
+          .filter(issue => {
+            if (issue.code !== 'invalid_type') return false;
+            const expected = (issue as { expected?: string }).expected;
+            return expected === 'array' || expected === 'object';
+          })
+          .map(issue => issue.path.join('.') || '<root>');
+        const stringContainerNote = stringContainerPaths.length
+          ? `\nIMPORTANT: ${stringContainerPaths.join(', ')} must be raw inline JSON (an actual array/object in the output), NEVER a quoted or stringified JSON value.`
+          : '';
         messages.push({
           role: 'user',
-          content: `The JSON you produced does not match the required schema. Validation errors:\n${summarizeZodErrors(validation.error)}\n\nPlease fix the JSON and respond with ONLY a valid JSON object.`,
+          content: `The JSON you produced does not match the required schema. Validation errors:\n${summarizeZodErrors(validation.error)}${stringContainerNote}\n\nPlease fix the JSON and respond with ONLY a valid JSON object.`,
         });
       }
       continue;

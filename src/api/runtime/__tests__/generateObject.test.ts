@@ -937,4 +937,30 @@ describe('string-encoded container repair', () => {
       generateObject({ schema: verdictsSchema, prompt: 'x', maxRetries: 0 }),
     ).rejects.toThrow(ObjectGenerationError);
   });
+
+  it('names the container-as-string mistake in the retry feedback when the inner string does not parse', async () => {
+    const verdictsSchema2 = z.object({
+      verdicts: z.array(z.object({ trackId: z.string(), verdict: z.string() })),
+    });
+    hoisted.generateCompletion
+      // Complete outer JSON; the quoted inner content is broken JSON, so the
+      // in-place repair declines and the call must burn a retry — with a
+      // feedback line that names the exact mistake.
+      .mockResolvedValueOnce(mockResponse('{"verdicts":"[{ broken"}'))
+      .mockResolvedValueOnce(
+        mockResponse('{"verdicts":[{"trackId":"t","verdict":"green"}]}'),
+      );
+
+    const result = await generateObject({
+      schema: verdictsSchema2,
+      prompt: 'x',
+      maxRetries: 1,
+    });
+
+    expect(result.object).toEqual({ verdicts: [{ trackId: 't', verdict: 'green' }] });
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(2);
+    const secondCall = JSON.stringify(hoisted.generateCompletion.mock.calls[1]);
+    expect(secondCall).toContain('NEVER a quoted or stringified JSON value');
+    expect(secondCall).toContain('verdicts');
+  });
 });
