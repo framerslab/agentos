@@ -823,7 +823,7 @@ const CHEAP_MODELS: Record<string, string> = {
 /** Provider → strong model mapping for T2/T3 deep generation. */
 const STRONG_MODELS: Record<string, string> = {
   openai: 'gpt-4o',
-  anthropic: 'claude-sonnet-5',
+  anthropic: 'claude-sonnet-4-6',
   openrouter: 'openai/gpt-4o',
   gemini: 'gemini-2.5-flash',
   groq: 'llama-3.3-70b-versatile',
@@ -831,7 +831,7 @@ const STRONG_MODELS: Record<string, string> = {
   mistral: 'mistral-large-latest',
   xai: 'grok-2',
   ollama: 'llama3.2',
-  'claude-code-cli': 'claude-sonnet-5',
+  'claude-code-cli': 'claude-sonnet-4-6',
   'gemini-cli': 'gemini-2.5-flash',
 };
 
