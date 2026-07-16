@@ -180,6 +180,15 @@ export interface ModelCompletionOptions {
    */
   cache?: { ttl?: '5m' | '1h' } | false;
   /**
+   * Per-conversation affinity key. OpenRouter forwards it as `session_id`
+   * to pin provider sticky routing: upstream prompt caches are host-scoped,
+   * so load-balanced conversations otherwise cold-miss the cache a prior
+   * turn wrote on a different host. Pass a stable id per conversation
+   * (game session id, companion conversation id). Providers without an
+   * affinity concept ignore the field.
+   */
+  sessionId?: string;
+  /**
    * Positive values penalize new tokens based on whether they appear in the text so far,
    * increasing the model's likelihood to talk about new topics.
    */

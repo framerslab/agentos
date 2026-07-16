@@ -403,6 +403,14 @@ export interface GenerateTextOptions {
    */
   cache?: { ttl?: '5m' | '1h' } | false;
   /**
+   * Per-conversation affinity key, forwarded to providers that support
+   * request affinity (OpenRouter sends it as `session_id` for provider
+   * sticky routing — upstream prompt caches are host-scoped, so a
+   * load-balanced conversation otherwise cold-misses the cache a prior
+   * turn wrote on a different host). Pass a stable id per conversation.
+   */
+  sessionId?: string;
+  /**
    * Enable Anthropic prompt-cache diagnostics (beta `cache-diagnosis-2026-04-07`)
    * across the agentic loop. The loop auto-threads each step's response id into
    * the next step's `diagnostics.previous_message_id`, so every step after the
@@ -1515,6 +1523,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               // Forward per-call cache control (opt-out / 1h TTL) so the
               // shim path honors it like the native step loop below.
               ...(opts.cache !== undefined ? { cache: opts.cache } : {}),
+              // Per-conversation affinity key (OpenRouter session_id sticky
+              // routing; other providers ignore it).
+              ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
               // Forward provider-specific top-level payload params (e.g.
               // OpenRouter provider-routing preferences) on the shim path too.
               ...(opts.customModelParams !== undefined
@@ -1638,6 +1649,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 // on the wire (true one-shots); `{ ttl: '1h' }` = 1h TTL on
                 // the auto markers incl. the moving message-tail (slow loops).
                 ...(opts.cache !== undefined ? { cache: opts.cache } : {}),
+                // Per-conversation affinity key (OpenRouter session_id sticky
+                // routing; other providers ignore it).
+                ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
                 // Cache diagnostics: thread the previous step's message id so
                 // the API explains any prefix divergence between loop steps.
                 ...(opts.cacheDiagnostics

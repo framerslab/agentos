@@ -372,6 +372,10 @@ export class OpenRouterProvider implements IProvider {
       ...(options.frequencyPenalty !== undefined && { frequency_penalty: options.frequencyPenalty }),
       ...(options.stopSequences !== undefined && { stop: options.stopSequences }),
       ...(options.userId !== undefined && { user: options.userId }),
+      // Provider sticky routing: pins the conversation to one upstream host
+      // so its prompt cache (host-scoped) actually gets re-read; without it
+      // load balancing cold-misses upstream caches turn over turn.
+      ...(options.sessionId !== undefined && { session_id: options.sessionId }),
       ...(options.tools !== undefined && { tools: options.tools }),
       ...(options.toolChoice !== undefined && { tool_choice: options.toolChoice }),
       ...(options.responseFormat?.type === 'json_object' && { response_format: { type: 'json_object' } }),
@@ -513,6 +517,10 @@ export class OpenRouterProvider implements IProvider {
       ...(options.frequencyPenalty !== undefined && { frequency_penalty: options.frequencyPenalty }),
       ...(options.stopSequences !== undefined && { stop: options.stopSequences }),
       ...(options.userId !== undefined && { user: options.userId }),
+      // Provider sticky routing: pins the conversation to one upstream host
+      // so its prompt cache (host-scoped) actually gets re-read; without it
+      // load balancing cold-misses upstream caches turn over turn.
+      ...(options.sessionId !== undefined && { session_id: options.sessionId }),
       ...(options.tools !== undefined && { tools: options.tools }),
       ...(options.toolChoice !== undefined && { tool_choice: options.toolChoice }),
       ...(options.responseFormat?.type === 'json_object' && { response_format: { type: 'json_object' } }),

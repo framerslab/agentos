@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
+  OpenRouterProvider,
   defaultOpenRouterProviderPrefs,
   mapOpenRouterUsage,
 } from '../OpenRouterProvider';
@@ -105,5 +106,81 @@ describe('mapOpenRouterUsage', () => {
       prompt_tokens_details: {},
     });
     expect(usage).not.toHaveProperty('cacheReadInputTokens');
+  });
+});
+
+describe('OpenRouterProvider session_id sticky routing', () => {
+  it('forwards options.sessionId as session_id in the request body', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: 'gen-1',
+          object: 'chat.completion',
+          created: 1,
+          model: 'anthropic/claude-sonnet-4-6',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'hi' },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    try {
+      const provider = new OpenRouterProvider();
+      await provider.initialize({ apiKey: 'sk-or-test' });
+      await provider.generateCompletion(
+        'anthropic/claude-sonnet-4-6',
+        [{ role: 'user', content: 'hi' }],
+        { sessionId: 'sess-abc123' },
+      );
+      const calls = (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+      const init = calls[calls.length - 1]![1] as RequestInit;
+      const body = JSON.parse(init.body as string);
+      expect(body.session_id).toBe('sess-abc123');
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('omits session_id when no sessionId option is passed', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: 'gen-2',
+          object: 'chat.completion',
+          created: 1,
+          model: 'anthropic/claude-sonnet-4-6',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'hi' },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    try {
+      const provider = new OpenRouterProvider();
+      await provider.initialize({ apiKey: 'sk-or-test' });
+      await provider.generateCompletion(
+        'anthropic/claude-sonnet-4-6',
+        [{ role: 'user', content: 'hi' }],
+        {},
+      );
+      const calls = (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+      const init = calls[calls.length - 1]![1] as RequestInit;
+      const body = JSON.parse(init.body as string);
+      expect('session_id' in body).toBe(false);
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 });
