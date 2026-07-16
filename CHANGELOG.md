@@ -1,3 +1,7 @@
+## <small>0.9.149 (2026-07-16)</small>
+
+* fix(openrouter): per-conversation session_id for provider sticky routing ([18fbdb066aff8eaf0478bc4182c4a0e547576fec](https://github.com/framerslab/agentos/commit/18fbdb066aff8eaf0478bc4182c4a0e547576fec))
+
 ## <small>0.9.148 (2026-07-16)</small>
 
 * fix(safety): emit a loud structured event when a provider breaker opens ([48ba40d1932f8a89089d1b79fc9bec89642a7490](https://github.com/framerslab/agentos/commit/48ba40d1932f8a89089d1b79fc9bec89642a7490))
