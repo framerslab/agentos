@@ -1627,9 +1627,18 @@ export class AnthropicProvider implements IProvider {
     // otherwise it merges in after the clamp and can send the forbidden
     // thinking + forced-tool combination (or a Fable-rejected forced tool),
     // which Anthropic 400s on.
+    // Track whether the passthrough replaced whole payload regions: the
+    // auto-cache block below must never restructure a region it no longer
+    // owns — mutating the stale pre-override locals would clobber the
+    // caller's system override, and a tail marker written into the stale
+    // message array never reaches the wire.
+    let customSystemOverride = false;
+    let customMessagesOverride = false;
     {
       const passthrough = stripOpenRouterOnlyParams(options.customModelParams);
       if (passthrough) {
+        customSystemOverride = Object.prototype.hasOwnProperty.call(passthrough, 'system');
+        customMessagesOverride = Object.prototype.hasOwnProperty.call(passthrough, 'messages');
         Object.assign(payload, passthrough);
       }
     }
@@ -1755,6 +1764,27 @@ export class AnthropicProvider implements IProvider {
       // Explicit caller markers above still pass through untouched.
       && resolveCacheCapabilities(modelId).supportsPromptCaching
     ) {
+      if (customSystemOverride || customMessagesOverride) {
+        // customModelParams replaced payload.system/messages wholesale, so
+        // the locals below (systemBlocks / anthropicMessages and their
+        // marker counts) describe regions that are no longer on the wire.
+        // Never restructure here. Count markers on the ACTUAL payload:
+        // any marker means the caller owns the wire (full stand-down);
+        // none means the request-level auto marker — valid on any payload
+        // shape — keeps the pre-override caching behavior.
+        const overrideMarkers =
+          this.countWireBlockMarkers(payload.system) +
+          this.countMessageCacheMarkers(
+            Array.isArray(payload.messages)
+              ? (payload.messages as Array<Record<string, unknown>>)
+              : [],
+          ) +
+          this.countWireBlockMarkers(payload.tools);
+        if (overrideMarkers === 0) {
+          payload.cache_control = { type: 'ephemeral' };
+        }
+        return payload;
+      }
       const explicitBreakpoints = systemBlocks.filter(b => b.cache_control).length;
       const messageBreakpoints = this.countMessageCacheMarkers(anthropicMessages);
       // Tool definitions can carry their own cache_control (tool-use prompt
@@ -1835,20 +1865,63 @@ export class AnthropicProvider implements IProvider {
         explicitBreakpoints > 0 &&
         explicitBreakpoints + toolBreakpoints < 4
       ) {
-        // Caller marked the system prefix only: keep their placement + TTL
+        // Caller marked the system prefix only: keep their placement
         // verbatim and pin just the moving message tail (the API cap is 4
         // breakpoints per request — the tail adds one, so require headroom
         // across ALL wire markers, tools included).
         // Applies on thinking AND non-thinking requests alike — the streamed
         // conversation surfaces (caller-marked system, no thinking) were the
-        // last shape whose per-turn history went permanently uncached. A
-        // per-call `cache: { ttl: '1h' }` rides on the tail here too; the
-        // caller's own system markers keep their own TTLs.
-        this.markLastCacheableMessageBlock(anthropicMessages, autoTtl);
+        // last shape whose per-turn history went permanently uncached.
+        //
+        // TTL ordering (Anthropic hard rule): every 1h marker must precede
+        // every 5m marker in cache order (tools → system → messages), or
+        // the request 400s. A 1h moving tail therefore requires the
+        // caller's system markers to be 1h too — `cache: { ttl: '1h' }`
+        // declares the whole call's pacing, so RAISE shorter/unset system
+        // marker TTLs to 1h (a codegen call's 5m-marked system + 1h tail
+        // was the rejected shape). Marked tools are raw caller objects we
+        // never mutate — with one present the tail falls back to the 5m
+        // default instead, keeping the order valid.
+        let tailTtl = autoTtl;
+        if (autoTtl === '1h') {
+          if (toolBreakpoints > 0) {
+            tailTtl = undefined;
+          } else {
+            for (const block of systemBlocks) {
+              if (block.cache_control && block.cache_control.ttl !== '1h') {
+                block.cache_control = { ...block.cache_control, ttl: '1h' };
+              }
+            }
+          }
+        }
+        this.markLastCacheableMessageBlock(anthropicMessages, tailTtl);
       }
     }
 
     return payload;
+  }
+
+  /**
+   * Count `cache_control` markers on a raw wire-shaped block array (a
+   * customModelParams `system` or `tools` override). Non-arrays (joined
+   * string systems, absent regions) count zero. Used by the override
+   * stand-down in the auto-cache block: with an override on the wire the
+   * pre-override locals cannot be trusted, so marker ownership is decided
+   * from the actual payload regions.
+   *
+   * @param value - The payload region as it will hit the wire.
+   * @returns Number of blocks carrying a `cache_control` marker.
+   * @private
+   */
+  private countWireBlockMarkers(value: unknown): number {
+    if (!Array.isArray(value)) return 0;
+    let count = 0;
+    for (const block of value) {
+      if (block && typeof block === 'object' && (block as Record<string, unknown>).cache_control) {
+        count += 1;
+      }
+    }
+    return count;
   }
 
   /**

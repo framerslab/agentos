@@ -976,7 +976,7 @@ describe('AnthropicProvider per-call cache option (options.cache)', () => {
     expect(lastContent[lastContent.length - 1].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
   });
 
-  it('cache ttl 1h composes with a caller-marked system: caller TTL untouched, tail gets 1h', async () => {
+  it('cache ttl 1h composes with a caller-marked system: caller marker raised to 1h, tail gets 1h', async () => {
     const payload = await buildPayload([
       {
         role: 'system',
@@ -988,13 +988,110 @@ describe('AnthropicProvider per-call cache option (options.cache)', () => {
       { role: 'user', content: 'hi' },
     ], { cache: { ttl: '1h' } });
     const system = payload.system as Array<{ cache_control?: unknown }>;
-    // The caller's own marker keeps ITS TTL choice (5m default here).
-    expect(system[0].cache_control).toEqual({ type: 'ephemeral' });
+    // Anthropic requires every 1h marker to PRECEDE every 5m marker in cache
+    // order — a 5m system marker ahead of the 1h tail 400s the request. The
+    // per-call TTL declares the whole call's pacing, so the caller's
+    // default-TTL marker is raised to 1h alongside the tail.
+    expect(system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
     expect(system[1].cache_control).toBeUndefined();
-    // The auto tail carries the per-call 1h TTL.
     const messages = payload.messages as Array<{ content: unknown }>;
     const lastContent = messages[messages.length - 1].content as Array<{ cache_control?: unknown }>;
     expect(lastContent[lastContent.length - 1].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+
+  it('cache ttl 1h raises an explicit 5m caller system marker too (mixed order would 400)', async () => {
+    const payload = await buildPayload([
+      {
+        role: 'system',
+        content: [
+          { type: 'text', text: 'Prefix', cache_control: { type: 'ephemeral', ttl: '5m' } },
+        ],
+      },
+      { role: 'user', content: 'hi' },
+    ], { cache: { ttl: '1h' } });
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    expect(system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+
+  it('cache ttl 1h with a marked tool present: tail falls back to the default TTL (order stays valid)', async () => {
+    const payload = await buildPayload(
+      [
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'Prefix', cache_control: { type: 'ephemeral' } },
+          ],
+        },
+        { role: 'user', content: 'hi' },
+      ],
+      {
+        cache: { ttl: '1h' },
+        customModelParams: {
+          tools: [
+            {
+              name: 'x',
+              description: 'd',
+              input_schema: { type: 'object' },
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      },
+    );
+    // Marked tools are raw caller objects the provider never mutates, and
+    // tools render before system: a 1h tail after a 5m tool marker would
+    // 400, so the tail keeps the default TTL and the system marker stays.
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    expect(system[0].cache_control).toEqual({ type: 'ephemeral' });
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content as Array<{ cache_control?: unknown }>;
+    expect(lastContent[lastContent.length - 1].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('customModelParams system override + cache 1h: override preserved verbatim, request-level marker only', async () => {
+    const payload = await buildPayload(
+      [
+        { role: 'system', content: 'Original system that the override replaces.' },
+        { role: 'user', content: 'hi' },
+      ],
+      {
+        cache: { ttl: '1h' },
+        customModelParams: { system: 'CUSTOM OVERRIDE SYSTEM' },
+      },
+    );
+    // The explicit-placement path must not restructure regions it no longer
+    // owns: the pre-override locals would clobber the custom system.
+    expect(payload.system).toBe('CUSTOM OVERRIDE SYSTEM');
+    expect(payload.cache_control).toEqual({ type: 'ephemeral' });
+    const messages = payload.messages as Array<{ content: unknown }>;
+    for (const m of messages) {
+      if (!Array.isArray(m.content)) continue;
+      for (const b of m.content as Array<{ cache_control?: unknown }>) {
+        expect(b.cache_control).toBeUndefined();
+      }
+    }
+  });
+
+  it('customModelParams messages override carrying a marker: full stand-down (caller owns the wire)', async () => {
+    const payload = await buildPayload(
+      [{ role: 'user', content: 'original' }],
+      {
+        cache: { ttl: '1h' },
+        customModelParams: {
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: 'custom', cache_control: { type: 'ephemeral' } },
+              ],
+            },
+          ],
+        },
+      },
+    );
+    expect(payload.cache_control).toBeUndefined();
+    // The override rides the wire untouched; its own marker is the only one.
+    expect(collectMarkers(payload)).toEqual([{ type: 'ephemeral' }]);
   });
 
   it('cache ttl 1h does not override the caller-owns-messages stand-down', async () => {
