@@ -32,7 +32,6 @@ describe('MiniMaxMusicProvider', () => {
       data: { audio: 'https://cdn.example.com/music.mp3', status: 2 },
       trace_id: 'trace-global',
       extra_info: { music_duration: 12_500, music_sample_rate: 44_100 },
-      base_resp: { status_code: 0, status_msg: 'success' },
     }));
 
     const result = await provider.generateMusic({ prompt: 'Cinematic ambient music' });
@@ -149,6 +148,16 @@ describe('MiniMaxMusicProvider', () => {
 
     await expect(provider.generateMusic({ prompt: 'test', outputFormat: 'flac' }))
       .rejects.toThrow('MiniMax music audio format must be "mp3", "wav", or "pcm".');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects unsupported response formats before sending a request', async () => {
+    await provider.initialize({ apiKey: 'minimax-test-key' });
+
+    await expect(provider.generateMusic({
+      prompt: 'test',
+      providerOptions: { responseFormat: 'foo' },
+    })).rejects.toThrow('MiniMax music responseFormat must be "url" or "hex".');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

@@ -72,6 +72,23 @@ function asOptions(value: Record<string, unknown> | undefined): MiniMaxMusicProv
   return (value ?? {}) as MiniMaxMusicProviderOptions;
 }
 
+function hexToBase64(hex: string): string {
+  if (hex.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(hex)) {
+    throw new Error('MiniMax music generation returned invalid hex audio.');
+  }
+
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return globalThis.btoa(binary);
+}
+
 export class MiniMaxMusicProvider implements IAudioGenerator {
   public readonly providerId = 'minimax-music';
   public isInitialized = false;
@@ -172,7 +189,8 @@ export class MiniMaxMusicProvider implements IAudioGenerator {
     });
 
     const payload = await response.json() as MiniMaxMusicResponse;
-    if (!response.ok || payload.base_resp?.status_code !== 0) {
+    const apiStatusCode = payload.base_resp?.status_code;
+    if (!response.ok || (apiStatusCode !== undefined && apiStatusCode !== 0)) {
       const message = payload.base_resp?.status_msg || response.statusText || 'unknown error';
       throw new Error(`MiniMax music generation failed (${response.status}): ${message}`);
     }
@@ -189,7 +207,7 @@ export class MiniMaxMusicProvider implements IAudioGenerator {
     const generatedAudio = {
       ...(responseFormat === 'url'
         ? { url: audio }
-        : { base64: Buffer.from(audio, 'hex').toString('base64') }),
+        : { base64: hexToBase64(audio) }),
       mimeType: AUDIO_MIME_TYPES[audioFormat],
       ...(durationMs !== undefined ? { durationSec: durationMs / 1000 } : {}),
       ...(payload.extra_info?.music_sample_rate !== undefined

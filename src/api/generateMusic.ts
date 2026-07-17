@@ -4,7 +4,7 @@
  *
  * Resolves a music generation provider from explicit `opts.provider`, or by
  * probing environment variables in priority order:
- * `SUNO_API_KEY` -> `STABILITY_API_KEY` -> `REPLICATE_API_TOKEN` ->
+ * `SUNO_API_KEY` -> `UDIO_API_KEY` -> `STABILITY_API_KEY` -> `REPLICATE_API_TOKEN` ->
  * `FAL_API_KEY` -> `MINIMAX_API_KEY` -> (local MusicGen — no key required).
  *
  * When multiple music-capable providers are configured (via env vars), the
@@ -204,7 +204,7 @@ async function createMusicProviderWithFallback(
  *
  * At minimum, a `prompt` is required. The provider is resolved from
  * `opts.provider`, `opts.apiKey`, or the first music-capable env var found
- * (`SUNO_API_KEY` -> `STABILITY_API_KEY` -> `REPLICATE_API_TOKEN` ->
+ * (`SUNO_API_KEY` -> `UDIO_API_KEY` -> `STABILITY_API_KEY` -> `REPLICATE_API_TOKEN` ->
  * `FAL_API_KEY` -> `MINIMAX_API_KEY` -> local MusicGen).
  */
 export interface GenerateMusicOptions {
@@ -362,7 +362,7 @@ export async function generateMusic(opts: GenerateMusicOptions): Promise<Generat
         );
         if (providerChain.length === 0) {
           throw new Error(
-            'No music provider configured. Set MINIMAX_API_KEY, SUNO_API_KEY, STABILITY_API_KEY, REPLICATE_API_TOKEN, or FAL_API_KEY.',
+            'No music provider configured. Set SUNO_API_KEY, UDIO_API_KEY, STABILITY_API_KEY, REPLICATE_API_TOKEN, FAL_API_KEY, or MINIMAX_API_KEY.',
           );
         }
         providerId = providerChain[0];
