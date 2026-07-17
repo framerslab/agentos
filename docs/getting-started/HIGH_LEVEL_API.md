@@ -368,6 +368,9 @@ const music = await generateMusic({
 });
 ```
 
+Request PCM output with `providerOptions.audioSetting.format: 'pcm'`; PCM is a
+MiniMax-specific format and is not part of the shared `outputFormat` union.
+
 ## Media Provider Preferences
 
 Image, video, music, and SFX helpers accept `providerPreferences` so callers can

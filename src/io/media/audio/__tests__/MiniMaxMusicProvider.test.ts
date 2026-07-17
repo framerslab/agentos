@@ -115,6 +115,30 @@ describe('MiniMaxMusicProvider', () => {
     expect(body).not.toHaveProperty('is_instrumental');
   });
 
+  it('requires lyrics when music cover uses a coverFeatureId', async () => {
+    await provider.initialize({ apiKey: 'minimax-test-key', defaultModelId: 'music-cover' });
+
+    await expect(provider.generateMusic({
+      prompt: 'Acoustic folk cover',
+      providerOptions: { coverFeatureId: 'feature-123' },
+    })).rejects.toThrow(
+      'MiniMax music coverFeatureId requires lyrics between 10 and 1000 characters.',
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects whitespace-only cover references', async () => {
+    await provider.initialize({ apiKey: 'minimax-test-key', defaultModelId: 'music-cover' });
+
+    await expect(provider.generateMusic({
+      prompt: 'Acoustic folk cover',
+      providerOptions: { audioUrl: '   ' },
+    })).rejects.toThrow(
+      'MiniMax music cover requires exactly one of audioUrl, audioBase64, or coverFeatureId.',
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('does not optimize lyrics for instrumental generation', async () => {
     await provider.initialize({ apiKey: 'minimax-test-key' });
     fetchSpy.mockResolvedValueOnce(mockResponse({
@@ -143,6 +167,19 @@ describe('MiniMaxMusicProvider', () => {
       .rejects.toThrow('MiniMax music generation failed (200): invalid request');
   });
 
+  it('preserves HTTP diagnostics for non-JSON error responses', async () => {
+    await provider.initialize({ apiKey: 'minimax-test-key' });
+    fetchSpy.mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      statusText: 'Bad Gateway',
+      json: vi.fn(async () => { throw new Error('not JSON'); }),
+    });
+
+    await expect(provider.generateMusic({ prompt: 'test' }))
+      .rejects.toThrow('MiniMax music generation failed (502): Bad Gateway');
+  });
+
   it('rejects unsupported audio formats before sending a request', async () => {
     await provider.initialize({ apiKey: 'minimax-test-key' });
 
@@ -158,6 +195,16 @@ describe('MiniMaxMusicProvider', () => {
       prompt: 'test',
       providerOptions: { responseFormat: 'foo' },
     })).rejects.toThrow('MiniMax music responseFormat must be "url" or "hex".');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects unsupported regions before resolving an endpoint', async () => {
+    await provider.initialize({ apiKey: 'minimax-test-key', baseURL: 'https://proxy.example.com' });
+
+    await expect(provider.generateMusic({
+      prompt: 'test',
+      providerOptions: { region: 'cn' },
+    })).rejects.toThrow('MiniMax music region must be "global" or "china".');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

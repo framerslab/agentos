@@ -131,11 +131,15 @@ export class MiniMaxMusicProvider implements IAudioGenerator {
 
     const options = asOptions(request.providerOptions);
     const model = request.modelId || this.defaultModelId || 'music-3.0';
-    const region = options.region === 'china' || options.region === 'global'
+    if (options.region !== undefined && options.region !== 'china' && options.region !== 'global') {
+      throw new Error('MiniMax music region must be "global" or "china".');
+    }
+    const regionOverride = options.region === 'china' || options.region === 'global'
       ? options.region
-      : this._config.region;
+      : undefined;
+    const region = regionOverride ?? this._config.region;
     const endpoint = options.baseURL?.trim() ||
-      (options.region ? MUSIC_ENDPOINTS[region] : this._config.baseURL);
+      (regionOverride ? MUSIC_ENDPOINTS[region] : this._config.baseURL);
     const responseFormat = options.responseFormat ?? 'url';
     if (responseFormat !== 'url' && responseFormat !== 'hex') {
       throw new Error('MiniMax music responseFormat must be "url" or "hex".');
@@ -146,13 +150,21 @@ export class MiniMaxMusicProvider implements IAudioGenerator {
     }
     const audioFormat: MiniMaxMusicAudioFormat = requestedAudioFormat;
     const isCover = model === 'music-cover' || model === 'music-cover-free';
-    const referenceInputs = [options.audioUrl, options.audioBase64, options.coverFeatureId]
-      .filter((value) => typeof value === 'string' && value.length > 0);
+    const audioUrl = typeof options.audioUrl === 'string' ? options.audioUrl.trim() : '';
+    const audioBase64 = typeof options.audioBase64 === 'string' ? options.audioBase64.trim() : '';
+    const coverFeatureId = typeof options.coverFeatureId === 'string'
+      ? options.coverFeatureId.trim()
+      : '';
+    const referenceInputs = [audioUrl, audioBase64, coverFeatureId].filter(Boolean);
 
     if (isCover && referenceInputs.length !== 1) {
       throw new Error(
         'MiniMax music cover requires exactly one of audioUrl, audioBase64, or coverFeatureId.',
       );
+    }
+    const lyricsLength = typeof options.lyrics === 'string' ? options.lyrics.trim().length : 0;
+    if (isCover && coverFeatureId && (lyricsLength < 10 || lyricsLength > 1000)) {
+      throw new Error('MiniMax music coverFeatureId requires lyrics between 10 and 1000 characters.');
     }
 
     const body: Record<string, unknown> = {
@@ -175,9 +187,9 @@ export class MiniMaxMusicProvider implements IAudioGenerator {
     if (region === 'china' && options.aigcWatermark !== undefined) {
       body.aigc_watermark = options.aigcWatermark;
     }
-    if (options.audioUrl) body.audio_url = options.audioUrl;
-    if (options.audioBase64) body.audio_base64 = options.audioBase64;
-    if (options.coverFeatureId) body.cover_feature_id = options.coverFeatureId;
+    if (audioUrl) body.audio_url = audioUrl;
+    if (audioBase64) body.audio_base64 = audioBase64;
+    if (coverFeatureId) body.cover_feature_id = coverFeatureId;
 
     const response = await fetch(endpoint, {
       method: 'POST',
@@ -188,9 +200,25 @@ export class MiniMaxMusicProvider implements IAudioGenerator {
       body: JSON.stringify(body),
     });
 
-    const payload = await response.json() as MiniMaxMusicResponse;
+    if (!response.ok) {
+      let message = response.statusText || 'request failed';
+      try {
+        const errorPayload = await response.json() as MiniMaxMusicResponse;
+        message = errorPayload.base_resp?.status_msg || message;
+      } catch {
+        // Preserve the HTTP status when the error body is empty or non-JSON.
+      }
+      throw new Error(`MiniMax music generation failed (${response.status}): ${message}`);
+    }
+
+    let payload: MiniMaxMusicResponse;
+    try {
+      payload = await response.json() as MiniMaxMusicResponse;
+    } catch {
+      throw new Error(`MiniMax music generation returned invalid JSON (${response.status}).`);
+    }
     const apiStatusCode = payload.base_resp?.status_code;
-    if (!response.ok || (apiStatusCode !== undefined && apiStatusCode !== 0)) {
+    if (apiStatusCode !== undefined && apiStatusCode !== 0) {
       const message = payload.base_resp?.status_msg || response.statusText || 'unknown error';
       throw new Error(`MiniMax music generation failed (${response.status}): ${message}`);
     }
