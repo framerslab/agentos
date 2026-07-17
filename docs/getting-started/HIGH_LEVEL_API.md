@@ -356,6 +356,18 @@ console.log(music.audio[0]?.url);
 console.log(sfx.audio[0]?.url);
 ```
 
+MiniMax Music uses `MINIMAX_API_KEY` and the `minimax-music` provider. It defaults
+to Music 3.0 and the global endpoint; select the China endpoint through provider
+options:
+
+```ts
+const music = await generateMusic({
+  provider: 'minimax-music',
+  prompt: 'Cinematic orchestral music with a gradual build.',
+  providerOptions: { region: 'china', responseFormat: 'url' },
+});
+```
+
 ## Media Provider Preferences
 
 Image, video, music, and SFX helpers accept `providerPreferences` so callers can

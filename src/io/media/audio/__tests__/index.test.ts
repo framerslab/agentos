@@ -8,6 +8,7 @@ describe('media/audio index', () => {
       'audiogen-local',
       'elevenlabs-sfx',
       'fal-audio',
+      'minimax-music',
       'musicgen-local',
       'replicate-audio',
       'stable-audio',
