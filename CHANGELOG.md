@@ -1,3 +1,7 @@
+## <small>0.9.156 (2026-07-18)</small>
+
+* fix(llm): sanitize Gemini responseSchema to the accepted proto subset ([68a1a87f49e9c6b00126cb6669e99066e1f63a45](https://github.com/framerslab/agentos/commit/68a1a87f49e9c6b00126cb6669e99066e1f63a45))
+
 ## <small>0.9.155 (2026-07-16)</small>
 
 * fix(api): retry feedback names a container-as-string mistake explicitly ([c52f76a50c81c347204c2e7f1656539475b0b013](https://github.com/framerslab/agentos/commit/c52f76a50c81c347204c2e7f1656539475b0b013))
