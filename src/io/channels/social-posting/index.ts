@@ -34,4 +34,5 @@ export {
   XquikSocialPostingService,
   type XquikPublishInput,
   type XquikSocialPostingConfig,
+  type XquikSocialPostPlatformResult,
 } from "./XquikSocialPostingService";

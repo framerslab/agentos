@@ -44,9 +44,9 @@ interface XquikCreateTweetPending {
   writeActionId: string;
 }
 
-type XquikCreateTweetResponse =
-  | XquikCreateTweetSuccess
-  | XquikCreateTweetPending;
+export interface XquikSocialPostPlatformResult extends SocialPostPlatformResult {
+  writeActionId?: string;
+}
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
@@ -66,6 +66,20 @@ const isXquikCreateTweetPending = (
   response.status === "pending_confirmation" &&
   typeof response.writeActionId === "string";
 
+const getXquikErrorMessage = (response: unknown): string => {
+  if (isRecord(response)) {
+    if (typeof response.error === "string") {
+      return response.error;
+    }
+
+    if (typeof response.message === "string") {
+      return response.message;
+    }
+  }
+
+  return "Unexpected Xquik create tweet response.";
+};
+
 export class XquikSocialPostingService extends SocialAbstractService {
   private readonly account: string;
   private readonly apiKey: string;
@@ -83,7 +97,7 @@ export class XquikSocialPostingService extends SocialAbstractService {
   async publish(
     input: XquikPublishInput,
     options: SocialRequestOptions = {},
-  ): Promise<SocialPostPlatformResult> {
+  ): Promise<XquikSocialPostPlatformResult> {
     const response = await this.fetchJson<unknown>(
       `${this.baseUrl}/api/v1/x/tweets`,
       {
@@ -107,20 +121,25 @@ export class XquikSocialPostingService extends SocialAbstractService {
       };
     }
 
-    if (!isXquikCreateTweetPending(response)) {
-      throw new Error("Unexpected Xquik create tweet response.");
+    if (isXquikCreateTweetPending(response)) {
+      return {
+        platform: this.platform,
+        status: "pending",
+        writeActionId: response.writeActionId,
+      };
     }
 
     return {
+      error: getXquikErrorMessage(response),
       platform: this.platform,
-      status: "pending",
+      status: "error",
     };
   }
 
   publishPost(
     post: SocialPost,
     options: SocialRequestOptions = {},
-  ): Promise<SocialPostPlatformResult> {
+  ): Promise<XquikSocialPostPlatformResult> {
     const input: XquikPublishInput = {
       text:
         post.adaptations[this.platform] ??
