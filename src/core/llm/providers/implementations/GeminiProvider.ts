@@ -36,6 +36,7 @@ import { stripOpenRouterOnlyParams } from '../openrouter-only-params';
 import { GeminiProviderError } from '../errors/GeminiProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
+import { sanitizeGeminiResponseSchema } from './geminiResponseSchema.js';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -757,7 +758,16 @@ export class GeminiProvider implements IProvider {
       generationConfig.responseMimeType = 'application/json';
       const geminiExtra = (options.responseFormat as { _gemini?: { responseSchema?: Record<string, unknown> } })._gemini;
       if (geminiExtra?.responseSchema) {
-        generationConfig.responseSchema = geminiExtra.responseSchema;
+        // Gemini's responseSchema is an OpenAPI-subset proto that 400s the
+        // whole request on ANY unknown field (`Unknown name "…"`), and
+        // lowered JSON Schemas legitimately carry fields outside it —
+        // z.record lowers to `additionalProperties`, strict-mode shapes pin
+        // `additionalProperties: false` (killed a world-creation objectives
+        // pass in production, 2026-07-16). Sanitize to the accepted subset
+        // at this boundary so every caller is covered.
+        generationConfig.responseSchema = sanitizeGeminiResponseSchema(
+          geminiExtra.responseSchema,
+        );
       }
     }
     // topK support via customModelParams
