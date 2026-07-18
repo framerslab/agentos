@@ -142,8 +142,8 @@ export class XquikSocialPostingService extends SocialAbstractService {
   ): Promise<XquikSocialPostPlatformResult> {
     const input: XquikPublishInput = {
       text:
-        post.adaptations[this.platform] ??
-        post.adaptations.twitter ??
+        post.adaptations[this.platform] ||
+        post.adaptations.twitter ||
         post.baseContent,
     };
 

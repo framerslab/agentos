@@ -210,9 +210,22 @@ describe("XquikSocialPostingService", () => {
       id: "post-3",
       seedId: "seed-3",
     });
+    const postWithEmptyPlatformAdaptation = buildTestPost({
+      adaptations: { twitter: "fallback after empty", x: "" },
+      id: "post-4",
+      seedId: "seed-4",
+    });
+    const postWithEmptyAdaptations = buildTestPost({
+      adaptations: { twitter: "", x: "" },
+      baseContent: "base after empty",
+      id: "post-5",
+      seedId: "seed-5",
+    });
 
     await service.publishPost(postWithTwitterFallback);
     await service.publishPost(postWithBaseFallback);
+    await service.publishPost(postWithEmptyPlatformAdaptation);
+    await service.publishPost(postWithEmptyAdaptations);
 
     expect(readRequestBody(fetchMock)).toEqual({
       account: "@agent",
@@ -221,6 +234,14 @@ describe("XquikSocialPostingService", () => {
     expect(readRequestBody(fetchMock, 1)).toEqual({
       account: "@agent",
       text: "base only",
+    });
+    expect(readRequestBody(fetchMock, 2)).toEqual({
+      account: "@agent",
+      text: "fallback after empty",
+    });
+    expect(readRequestBody(fetchMock, 3)).toEqual({
+      account: "@agent",
+      text: "base after empty",
     });
   });
 });
