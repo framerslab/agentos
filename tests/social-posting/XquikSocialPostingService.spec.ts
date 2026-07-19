@@ -160,6 +160,27 @@ describe("XquikSocialPostingService", () => {
     });
   });
 
+  it("maps non-JSON responses to an error instead of throwing", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("temporary upstream response", {
+        headers: { "content-type": "text/plain" },
+        status: 200,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = new XquikSocialPostingService({
+      account: "@agent",
+      apiKey: "test-key",
+    });
+
+    await expect(service.publish({ text: "hello" })).resolves.toEqual({
+      error: "Unexpected Xquik create tweet response.",
+      platform: "twitter",
+      status: "error",
+    });
+  });
+
   it("publishes the adapted platform content from a social post", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ success: true, tweetId: "67890" }), {
