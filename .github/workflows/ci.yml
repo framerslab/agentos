@@ -62,3 +62,42 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  # Failure-gating job for the batch-1 hardening test set. The full suite
+  # above still runs with continue-on-error (pre-existing failures pending
+  # burn-down); this job is the required check for the batch's own tests.
+  # --passWithNoTests keeps it green until each listed file lands.
+  batch1-tests:
+    name: Batch-1 gated tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+
+      - name: Install PNPM
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Batch-1 tests (failure-gating)
+        run: >-
+          pnpm vitest run --passWithNoTests
+          src/core/llm/providers/__tests__/openai-cache-params.test.ts
+          src/core/llm/providers/__tests__/default-judge.test.ts
+          src/core/llm/providers/implementations/__tests__/openai-typed-cache-options.test.ts
+          src/api/__tests__/observability.genai.test.ts
+          src/api/__tests__/inclusive-input-tokens.test.ts
+          src/api/__tests__/hitl.llmJudge.test.ts
+          src/cognition/emergent/__tests__/decay-for-agent.test.ts
+          src/cognition/emergent/__tests__/adapt-personality.test.ts
+          src/cognition/rag/__tests__/neo4j-graphrag-export.test.ts

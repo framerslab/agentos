@@ -1,7 +1,9 @@
 name: Release
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [master]
 
 permissions:
@@ -14,14 +16,30 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
-    # Only run if CI passes and not a release commit
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    # Runs only after the CI workflow completes successfully on master.
+    if: github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      # semantic-release requires a branch checkout, so we stay on master and
+      # instead guard that master still points at the CI-tested commit. When a
+      # newer push has moved master, this run skips — that push's own CI run
+      # releases it. Guarantees the published SHA is always a CI-passed SHA.
+      - name: Verify master still points at the tested commit
+        id: guard
+        run: |
+          TESTED="${{ github.event.workflow_run.head_sha }}"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [ "$HEAD_SHA" = "$TESTED" ]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "master ($HEAD_SHA) moved past tested commit ($TESTED); skipping — the newer push's CI will release"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
@@ -35,12 +53,15 @@ jobs:
           version: 10
 
       - name: Install dependencies
+        if: steps.guard.outputs.should_release == 'true'
         run: pnpm install
 
       - name: Build
+        if: steps.guard.outputs.should_release == 'true'
         run: pnpm run build
 
       - name: Verify build
+        if: steps.guard.outputs.should_release == 'true'
         run: |
           if [ ! -d "dist" ]; then
             echo "Build failed: dist directory not found"
@@ -48,9 +69,11 @@ jobs:
           fi
 
       - name: Refresh test-count badge
+        if: steps.guard.outputs.should_release == 'true'
         run: node scripts/update-test-badge.mjs
 
       - name: Semantic Release
+        if: steps.guard.outputs.should_release == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -58,7 +81,7 @@ jobs:
         run: pnpm exec semantic-release
 
       - name: Trigger docs rebuild
-        if: success()
+        if: success() && steps.guard.outputs.should_release == 'true'
         run: |
           curl -X POST \
             -H "Accept: application/vnd.github.v3+json" \
