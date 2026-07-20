@@ -55,7 +55,6 @@ jobs:
 
       - name: Test with coverage
         run: pnpm run test -- --coverage
-        continue-on-error: true
 
       - name: Upload coverage to Codecov
         if: always()
@@ -63,9 +62,9 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
 
-  # Failure-gating job for the batch-1 hardening test set. The full suite
-  # above still runs with continue-on-error (pre-existing failures pending
-  # burn-down); this job is the required check for the batch's own tests.
+  # Fast targeted gate for the batch-1 hardening test set: fails in minutes
+  # without waiting on the coverage matrix. The full suite above is
+  # failure-gating too (44-red burn-down completed 2026-07-20).
   batch1-tests:
     name: Batch-1 gated tests
     runs-on: ubuntu-latest
