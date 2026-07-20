@@ -158,6 +158,12 @@ export function mapOpenRouterUsage(
     completionTokens: apiUsage.completion_tokens,
     totalTokens: apiUsage.total_tokens,
     costUSD: apiUsage.cost,
+    // OpenRouter's prompt_tokens (like OpenAI's) already INCLUDES cached
+    // tokens, so the provider-independent inclusive input total is the
+    // prompt count as-is (Anthropic computes input + cache_read + cache_creation).
+    ...(typeof apiUsage.prompt_tokens === 'number'
+      ? { inclusiveInputTokens: apiUsage.prompt_tokens }
+      : {}),
     ...(typeof cachedTokens === 'number' && cachedTokens >= 0
       ? { cacheReadInputTokens: cachedTokens }
       : {}),

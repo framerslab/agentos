@@ -702,6 +702,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               if (typeof cacheCreate === 'number') {
                 usage.cacheCreationTokens = (usage.cacheCreationTokens ?? 0) + cacheCreate;
               }
+              const chunkInclusiveIn = (chunk.usage as { inclusiveInputTokens?: number }).inclusiveInputTokens;
+              if (typeof chunkInclusiveIn === 'number') {
+                usage.inclusiveInputTokens = (usage.inclusiveInputTokens ?? 0) + chunkInclusiveIn;
+              }
               attachUsageAttributes(stepSpan, {
                 promptTokens: chunk.usage.promptTokens,
                 completionTokens: chunk.usage.completionTokens,
@@ -1063,6 +1067,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             }
             if (typeof fbUsage.cacheCreationTokens === 'number') {
               usage.cacheCreationTokens = (usage.cacheCreationTokens ?? 0) + fbUsage.cacheCreationTokens;
+            }
+            if (typeof fbUsage.inclusiveInputTokens === 'number') {
+              usage.inclusiveInputTokens = (usage.inclusiveInputTokens ?? 0) + fbUsage.inclusiveInputTokens;
             }
 
             const fbToolCalls = await fallbackResult.toolCalls;

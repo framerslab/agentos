@@ -150,6 +150,14 @@ export interface TokenUsage {
   /** Total cost reported by the provider across all steps, when available. */
   costUSD?: number;
   /**
+   * Provider-independent total input tokens INCLUDING cached reads/writes,
+   * summed across steps (spec batch-1 C1). Anthropic reports input
+   * exclusive of cache (this field adds it back); OpenAI/OpenRouter report
+   * prompt tokens already inclusive (used as-is). Tri-state: undefined =
+   * no step reported enough to compute; a reported 0 is preserved.
+   */
+  inclusiveInputTokens?: number;
+  /**
    * Tokens served from the provider's prompt-prefix cache, billed at the
    * cache-read rate. Reported by Anthropic (`cache_read_input_tokens`),
    * OpenAI (`prompt_tokens_details.cached_tokens` on Chat Completions,
@@ -930,11 +938,17 @@ export async function createPlan(
     // so callers can see cache hit rate and per-hit savings.
     const cacheRead = (response.usage as { cacheReadInputTokens?: number }).cacheReadInputTokens;
     const cacheCreate = (response.usage as { cacheCreationInputTokens?: number }).cacheCreationInputTokens;
-    if (typeof cacheRead === 'number' && cacheRead > 0) {
+    // typeof-only guards: a REPORTED zero is meaningful (cache miss on a
+    // cache-capable call) and must be preserved, not collapsed into absent.
+    if (typeof cacheRead === 'number') {
       totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + cacheRead;
     }
-    if (typeof cacheCreate === 'number' && cacheCreate > 0) {
+    if (typeof cacheCreate === 'number') {
       totalUsage.cacheCreationTokens = (totalUsage.cacheCreationTokens ?? 0) + cacheCreate;
+    }
+    const planInclusiveIn = (response.usage as { inclusiveInputTokens?: number }).inclusiveInputTokens;
+    if (typeof planInclusiveIn === 'number') {
+      totalUsage.inclusiveInputTokens = (totalUsage.inclusiveInputTokens ?? 0) + planInclusiveIn;
     }
   }
 
@@ -1734,11 +1748,17 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           // these fields; TokenUsage was dropping them.
           const cacheRead = (response.usage as { cacheReadInputTokens?: number }).cacheReadInputTokens;
           const cacheCreate = (response.usage as { cacheCreationInputTokens?: number }).cacheCreationInputTokens;
-          if (typeof cacheRead === 'number' && cacheRead > 0) {
+          // typeof-only guards: a REPORTED zero is meaningful (cache miss on
+          // a cache-capable call) and must be preserved, not dropped.
+          if (typeof cacheRead === 'number') {
             totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + cacheRead;
           }
-          if (typeof cacheCreate === 'number' && cacheCreate > 0) {
+          if (typeof cacheCreate === 'number') {
             totalUsage.cacheCreationTokens = (totalUsage.cacheCreationTokens ?? 0) + cacheCreate;
+          }
+          const stepInclusiveIn = (response.usage as { inclusiveInputTokens?: number }).inclusiveInputTokens;
+          if (typeof stepInclusiveIn === 'number') {
+            totalUsage.inclusiveInputTokens = (totalUsage.inclusiveInputTokens ?? 0) + stepInclusiveIn;
           }
         }
 

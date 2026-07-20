@@ -1137,6 +1137,13 @@ export class AnthropicProvider implements IProvider {
               ...(cacheReadTokens !== undefined && {
                 cacheReadInputTokens: cacheReadTokens,
               }),
+              // Inclusive input total (input_tokens excludes cache on Anthropic).
+              ...(typeof inputTokens === 'number'
+                ? {
+                    inclusiveInputTokens:
+                      inputTokens + (cacheReadTokens ?? 0) + (cacheCreationTokens ?? 0),
+                  }
+                : {}),
             };
 
             // Sample the leak detector on the STREAMING path too. This was
@@ -2242,6 +2249,13 @@ export class AnthropicProvider implements IProvider {
       ),
       cacheCreationInputTokens: apiResponse.usage.cache_creation_input_tokens,
       cacheReadInputTokens: apiResponse.usage.cache_read_input_tokens,
+      // Anthropic's input_tokens EXCLUDES cache reads/writes; the
+      // provider-independent inclusive input total adds them back
+      // (OpenAI/OpenRouter report prompt_tokens already inclusive).
+      inclusiveInputTokens:
+        apiResponse.usage.input_tokens
+        + (apiResponse.usage.cache_read_input_tokens ?? 0)
+        + (apiResponse.usage.cache_creation_input_tokens ?? 0),
     };
 
     const choice: ModelCompletionChoice = {
