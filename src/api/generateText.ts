@@ -13,7 +13,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { resolveModelOption, resolveProvider, createProviderManager } from './model.js';
-import { attachUsageAttributes, toTurnMetricUsage } from './observability.js';
+import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { fireLlmUsageObserver } from './observers.js';
 import {
   hostPolicyToRouteParams,
@@ -673,6 +673,13 @@ export interface GenerateTextResult {
   provider: string;
   /** Resolved model identifier used for the run. */
   model: string;
+  /**
+   * Provider-reported model id of the final step (spec batch-1 C1) — can
+   * differ from `model` across aliases and fallback routing. Undefined on
+   * paths where no provider-reported id was captured. `model` keeps its
+   * existing meaning (zero-change).
+   */
+  responseModel?: string;
   /**
    * Upstream host that actually served the request when `provider` is an
    * aggregator/router (OpenRouter reports e.g. `'Groq'` or `'DeepInfra'`
@@ -1481,6 +1488,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
 
       const allToolCalls: ToolCallRecord[] = [];
       const totalUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+      // Provider-reported model id of the final step (spec batch-1 C1);
+      // additive — the public `model` field keeps the resolved requested id.
+      let lastResponseModelId: string | undefined;
       const maxSteps = opts.maxSteps ?? 1;
       span?.setAttribute('agentos.api.max_steps', maxSteps);
 
@@ -1594,6 +1604,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         fireLlmUsageObserver({
           provider: resolved.providerId,
           model: resolved.modelId,
+          ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
           usage: shimUsage,
           source: opts.source,
           finishReason: loopResult.finishReason,
@@ -1603,6 +1614,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         return {
           provider: resolved.providerId,
           model: resolved.modelId,
+          ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
           text: loopResult.text,
           usage: shimUsage,
           toolCalls: loopResult.toolCalls.map((c) => ({
@@ -1647,6 +1659,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               system: opts.system,
               tools: Array.from(toolMap.values()),
               model: resolved.modelId,
+          ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
               provider: resolved.providerId,
               step,
               prompt: opts.prompt,
@@ -1729,6 +1742,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
 
         if (typeof response.servingProvider === 'string' && response.servingProvider.length > 0) {
           lastServingProvider = response.servingProvider;
+        }
+        if (typeof response.modelId === 'string' && response.modelId) {
+          lastResponseModelId = response.modelId;
         }
         if (opts.cacheDiagnostics) {
           // Chain the id for the NEXT step's comparison; keep this step's
@@ -1814,6 +1830,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           span?.setAttribute('agentos.api.finish_reason', choice.finishReason ?? 'stop');
           span?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
           attachUsageAttributes(span, totalUsage);
+        attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: totalUsage });
           // 2026-05-29 — fire the global LLM usage observer so hosts
           // (wilds-ai foundation_usage_events, billing dashboards) get
           // the resolved provider + model + cost without wrapping every
@@ -1821,6 +1838,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           fireLlmUsageObserver({
             provider: resolved.providerId,
             model: resolved.modelId,
+          ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
             usage: totalUsage,
             source: opts.source,
             finishReason: choice.finishReason ?? 'stop',
@@ -1831,6 +1849,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           return {
             provider: resolved.providerId,
             model: resolved.modelId,
+          ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
             ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
             ...(lastCacheDiagnostics !== undefined
               ? { cacheDiagnostics: lastCacheDiagnostics }
@@ -1958,9 +1977,11 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         span?.setAttribute('agentos.api.finish_reason', choice.finishReason ?? 'stop');
         span?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
         attachUsageAttributes(span, totalUsage);
+        attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: totalUsage });
         fireLlmUsageObserver({
           provider: resolved.providerId,
           model: resolved.modelId,
+          ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
           usage: totalUsage,
           source: opts.source,
           finishReason: choice.finishReason ?? 'stop',
@@ -1971,6 +1992,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         return {
           provider: resolved.providerId,
           model: resolved.modelId,
+          ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
           ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
           ...(lastCacheDiagnostics !== undefined ? { cacheDiagnostics: lastCacheDiagnostics } : {}),
           ...(opts.cacheDiagnostics ? { providerMessageId: lastProviderMessageId } : {}),

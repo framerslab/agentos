@@ -9,7 +9,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { resolveModelOption, resolveProvider, createProviderManager } from './model.js';
-import { attachUsageAttributes, toTurnMetricUsage } from './observability.js';
+import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { fireLlmUsageObserver } from './observers.js';
 import { hostPolicyToRouteParams, mergeRequiredCapabilities } from './runtime/hostPolicy.js';
 import { adaptTools } from './runtime/toolAdapter.js';
@@ -116,6 +116,14 @@ export interface StreamTextResult {
   text: Promise<string>;
   /** Resolves to aggregated {@link TokenUsage} when the stream completes. */
   usage: Promise<TokenUsage>;
+  /**
+   * Provider-reported model id of the final step (may differ from the
+   * requested/resolved id across aliases and fallback hops; spec batch-1
+   * C1). Settles on every terminal path — normal completion, fallback,
+   * error, early abandonment — and is `undefined` when no chunk reported a
+   * model id. The existing `model`-related fields keep their meaning.
+   */
+  responseModel: Promise<string | undefined>;
   /** Resolves to the ordered list of {@link ToolCallRecord}s when the stream completes. */
   toolCalls: Promise<ToolCallRecord[]>;
   /**
@@ -224,6 +232,8 @@ function formatPlanForPrompt(plan: Plan): string {
 export function streamText(opts: GenerateTextOptions): StreamTextResult {
   let resolveText: (v: string) => void;
   let resolveUsage: (v: TokenUsage) => void;
+  let resolveResponseModel: (v: string | undefined) => void;
+  let lastResponseModelId: string | undefined;
   let resolveToolCalls: (v: ToolCallRecord[]) => void;
   let resolveProviderId: (v: string) => void;
   let resolveModelId: (v: string) => void;
@@ -237,6 +247,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
   });
   const toolCallsPromise = new Promise<ToolCallRecord[]>((r) => {
     resolveToolCalls = r;
+  });
+  // Provider-reported model id of the final step (spec batch-1 C1).
+  // Settled at every resolveUsage site so it can never stay pending —
+  // normal completion, fallback resolution, error, and abandonment alike.
+  const responseModelPromise = new Promise<string | undefined>((r) => {
+    resolveResponseModel = r;
   });
   // Provider + model resolution lives inside the lazy async generator,
   // so we expose them as Deferred Promises that the generator resolves
@@ -551,7 +567,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           yield part;
         }
         resolveText!(finalText);
-        resolveUsage!(usage);
+        resolveUsage!(usage); resolveResponseModel!(lastResponseModelId);
         resolveToolCalls!(shimToolCalls);
       }
       if (tools.length > 0 && toolMode === 'prompt') {
@@ -661,7 +677,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               yield part;
               metricStatus = 'error';
               resolveText!(finalText);
-              resolveUsage!(usage);
+              resolveUsage!(usage); resolveResponseModel!(lastResponseModelId);
               resolveToolCalls!(allToolCalls);
               resolveFinishReason!('error');
               return;
@@ -701,6 +717,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               }
               if (typeof cacheCreate === 'number') {
                 usage.cacheCreationTokens = (usage.cacheCreationTokens ?? 0) + cacheCreate;
+              }
+              if (typeof chunk.modelId === 'string' && chunk.modelId) {
+                lastResponseModelId = chunk.modelId;
               }
               const chunkInclusiveIn = (chunk.usage as { inclusiveInputTokens?: number }).inclusiveInputTokens;
               if (typeof chunkInclusiveIn === 'number') {
@@ -793,8 +812,17 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           rootSpan?.setAttribute('agentos.api.finish_reason', stepFinish);
           rootSpan?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
           attachUsageAttributes(rootSpan, usage);
+          if (recordedProviderId && recordedModelId) {
+            attachGenAiAttributes(rootSpan, {
+              providerName: recordedProviderId,
+              operationName: 'chat',
+              requestModel: recordedModelId,
+              responseModel: lastResponseModelId,
+              usage,
+            });
+          }
           resolveText!(finalText);
-          resolveUsage!(usage);
+          resolveUsage!(usage); resolveResponseModel!(lastResponseModelId);
           resolveToolCalls!(allToolCalls);
           resolveFinishReason!(stepFinish);
           return;
@@ -953,7 +981,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       }
 
       resolveText!(finalText);
-      resolveUsage!(usage);
+      resolveUsage!(usage); resolveResponseModel!(lastResponseModelId);
       resolveToolCalls!(allToolCalls);
       // maxSteps exhausted. Outstanding tool calls with no final text is
       // the classic 'tool-calls' ending; otherwise the last step's own
@@ -1103,7 +1131,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
         if (fallbackSucceeded) {
           resolveText!(finalText);
-          resolveUsage!(usage);
+          resolveUsage!(usage); resolveResponseModel!(lastResponseModelId);
           resolveToolCalls!(allToolCalls);
           resolveFinishReason!(fallbackFinishReason);
         } else {
@@ -1120,7 +1148,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           parts.push(errorPart);
           yield errorPart;
           resolveText!(finalText);
-          resolveUsage!(usage);
+          resolveUsage!(usage); resolveResponseModel!(lastResponseModelId);
           resolveToolCalls!(allToolCalls);
           resolveFinishReason!('error');
         }
@@ -1130,7 +1158,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         parts.push(part);
         yield part;
         resolveText!(finalText);
-        resolveUsage!(usage);
+        resolveUsage!(usage); resolveResponseModel!(lastResponseModelId);
         resolveToolCalls!(allToolCalls);
         resolveFinishReason!('error');
       }
@@ -1146,7 +1174,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // streamed before the abandonment; normal completions already settled
       // these, making the calls no-ops (first settle wins).
       resolveText!(finalText);
-      resolveUsage!(usage);
+      resolveUsage!(usage); resolveResponseModel!(lastResponseModelId);
       resolveToolCalls!(allToolCalls);
       resolveProviderId!(recordedProviderId ?? '');
       resolveModelId!(recordedModelId ?? '');
@@ -1177,6 +1205,15 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         rootSpan?.setAttribute('agentos.api.finish_reason', 'tool-calls');
       }
       attachUsageAttributes(rootSpan, usage);
+      if (recordedProviderId && recordedModelId) {
+        attachGenAiAttributes(rootSpan, {
+          providerName: recordedProviderId,
+          operationName: 'chat',
+          requestModel: recordedModelId,
+          responseModel: lastResponseModelId,
+          usage,
+        });
+      }
       rootSpan?.end();
       try {
         await recordAgentOSUsageLazy({
@@ -1194,6 +1231,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       recordAgentOSTurnMetrics({
         durationMs: Date.now() - startedAt,
         status: metricStatus,
+        ...(firstPartAt !== undefined ? { ttfbMs: firstPartAt - startedAt } : {}),
         usage: toTurnMetricUsage(usage),
       });
       // 2026-05-29 — fire the global LLM usage observer with the
@@ -1270,6 +1308,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     fullStream: fullStreamIterable,
     text: textPromise,
     usage: usagePromise,
+    responseModel: responseModelPromise,
     toolCalls: toolCallsPromise,
     provider: providerPromise,
     model: modelPromise,

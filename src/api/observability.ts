@@ -6,6 +6,12 @@ export interface ApiUsageLike {
   totalTokens?: number;
   costUSD?: number;
   totalCostUSD?: number;
+  /** Cache-read tokens (normalized across providers; spec batch-1 C1). */
+  cacheReadTokens?: number;
+  /** Cache-creation tokens (normalized across providers). */
+  cacheCreationTokens?: number;
+  /** Provider-independent input total INCLUDING cached reads/writes. */
+  inclusiveInputTokens?: number;
 }
 
 export function attachUsageAttributes(span: Span | null, usage?: ApiUsageLike | null): void {
@@ -37,12 +43,17 @@ export function toTurnMetricUsage(usage?: ApiUsageLike | null): {
   promptTokens?: number;
   completionTokens?: number;
   totalCostUSD?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
 } | undefined {
   if (!usage) return undefined;
 
   const totalTokens = typeof usage.totalTokens === 'number' ? usage.totalTokens : undefined;
   const promptTokens = typeof usage.promptTokens === 'number' ? usage.promptTokens : undefined;
   const completionTokens = typeof usage.completionTokens === 'number' ? usage.completionTokens : undefined;
+  const cacheReadTokens = typeof usage.cacheReadTokens === 'number' ? usage.cacheReadTokens : undefined;
+  const cacheCreationTokens =
+    typeof usage.cacheCreationTokens === 'number' ? usage.cacheCreationTokens : undefined;
   const totalCostUSD =
     typeof usage.totalCostUSD === 'number'
       ? usage.totalCostUSD
@@ -55,6 +66,8 @@ export function toTurnMetricUsage(usage?: ApiUsageLike | null): {
     && promptTokens === undefined
     && completionTokens === undefined
     && totalCostUSD === undefined
+    && cacheReadTokens === undefined
+    && cacheCreationTokens === undefined
   ) {
     return undefined;
   }
@@ -64,5 +77,51 @@ export function toTurnMetricUsage(usage?: ApiUsageLike | null): {
     promptTokens,
     completionTokens,
     totalCostUSD,
+    cacheReadTokens,
+    cacheCreationTokens,
   };
+}
+
+export interface GenAiSpanInfo {
+  providerName: string;
+  operationName: 'chat';
+  requestModel: string;
+  responseModel?: string;
+  usage?: ApiUsageLike | null;
+  durationMs?: number;
+}
+
+/**
+ * OTel GenAI semconv attributes, dual-emitted beside the legacy
+ * `llm.usage.*` set (spec batch-1 C1). Attribute names pinned to
+ * open-telemetry/semantic-conventions-genai commit
+ * c26a2c21d1ee70d5231bd440c7b48d3c94ee506a — see
+ * docs/observability/OBSERVABILITY.md. Called ONLY from the
+ * generateText/streamText chat spans; embeddings and media surfaces are
+ * distinct gen_ai operations and are out of scope for this batch.
+ * `gen_ai.usage.input_tokens` reads the normalized inclusive input total
+ * (cached tokens included per the semconv contract) — never a provider-raw
+ * prompt count.
+ */
+export function attachGenAiAttributes(span: Span | null, info: GenAiSpanInfo): void {
+  if (!span) return;
+  span.setAttribute('gen_ai.provider.name', info.providerName);
+  span.setAttribute('gen_ai.operation.name', info.operationName);
+  span.setAttribute('gen_ai.request.model', info.requestModel);
+  if (info.responseModel !== undefined) span.setAttribute('gen_ai.response.model', info.responseModel);
+  const u = info.usage;
+  if (u) {
+    if (typeof u.inclusiveInputTokens === 'number') {
+      span.setAttribute('gen_ai.usage.input_tokens', u.inclusiveInputTokens);
+    }
+    if (typeof u.completionTokens === 'number') {
+      span.setAttribute('gen_ai.usage.output_tokens', u.completionTokens);
+    }
+    if (typeof u.cacheReadTokens === 'number') {
+      span.setAttribute('gen_ai.usage.cache_read.input_tokens', u.cacheReadTokens);
+    }
+    if (typeof u.cacheCreationTokens === 'number') {
+      span.setAttribute('gen_ai.usage.cache_creation.input_tokens', u.cacheCreationTokens);
+    }
+  }
 }
