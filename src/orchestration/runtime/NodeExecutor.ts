@@ -466,6 +466,11 @@ export class NodeExecutor {
 
     // --- LLM judge: delegate to an LLM for the approval decision ---
     if (config.judge) {
+      // Resolve the judge selection OUTSIDE the provider try/catch: an
+      // invalid judge configuration (e.g. a non-default provider pinned
+      // without a model) is a caller error that must propagate, not be
+      // silently converted into a human interrupt like a provider failure.
+      const judgeSel = resolveJudgeLlm(config.judge);
       try {
         const { generateText } = await import('../../api/generateText.js');
 
@@ -477,7 +482,6 @@ export class NodeExecutor {
           'Do not include any other text.',
         ].join('\n');
 
-        const judgeSel = resolveJudgeLlm(config.judge);
         const result = await generateText({
           model: judgeSel.model,
           provider: judgeSel.provider,

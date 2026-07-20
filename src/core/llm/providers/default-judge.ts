@@ -32,10 +32,26 @@ const DEFAULT: JudgeSelection = { provider: 'openai', model: 'gpt-5.6', effort: 
  * combined with a provider it was not set alongside. `AGENTOS_JUDGE_EFFORT`
  * must pass {@link isEffortLevel}; invalid values warn and keep the default.
  */
+/** Provider ids the env valve accepts; anything else warns and disables BOTH valves. */
+const KNOWN_JUDGE_PROVIDERS: readonly string[] = [
+  'openai', 'anthropic', 'openrouter', 'google', 'gemini', 'groq', 'together', 'ollama',
+];
+
 export function resolveDefaultJudgeModel(): JudgeSelection {
-  const envProvider = process.env.AGENTOS_JUDGE_PROVIDER?.trim().toLowerCase() || undefined;
-  const envModel = process.env.AGENTOS_JUDGE_MODEL?.trim() || undefined;
+  let envProvider = process.env.AGENTOS_JUDGE_PROVIDER?.trim().toLowerCase() || undefined;
+  let envModel = process.env.AGENTOS_JUDGE_MODEL?.trim() || undefined;
   const envEffort = process.env.AGENTOS_JUDGE_EFFORT?.trim().toLowerCase();
+
+  // Unrecognized env provider disables BOTH valves — the model valve was set
+  // alongside a provider that cannot be honored, so it must not be misrouted
+  // onto the default provider (spec batch-1 review fold).
+  if (envProvider && !KNOWN_JUDGE_PROVIDERS.includes(envProvider)) {
+    console.warn(
+      `[agentos] AGENTOS_JUDGE_PROVIDER '${envProvider}' unrecognized; ignoring the provider AND model valves`,
+    );
+    envProvider = undefined;
+    envModel = undefined;
+  }
 
   const effort: EffortLevel = isEffortLevel(envEffort) ? envEffort : DEFAULT.effort;
   if (envEffort && !isEffortLevel(envEffort)) {

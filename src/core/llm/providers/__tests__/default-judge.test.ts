@@ -2,13 +2,23 @@
  * @fileoverview Env-valve matrix tests for the central judge resolver and
  * the shared caller-wins resolution (spec batch-1 C3).
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { resolveDefaultJudgeModel } from '../default-judge.js';
 import { resolveJudgeLlm } from '../judge-config.js';
 
 const ENV = ['AGENTOS_JUDGE_MODEL', 'AGENTOS_JUDGE_PROVIDER', 'AGENTOS_JUDGE_EFFORT'] as const;
-afterEach(() => {
+// Save/restore the real environment so this suite cannot leak valve state
+// into other suites (or inherit a developer's local valves).
+const originalEnv = new Map(ENV.map((key) => [key, process.env[key]]));
+beforeEach(() => {
   for (const k of ENV) delete process.env[k];
+});
+afterAll(() => {
+  for (const k of ENV) {
+    const value = originalEnv.get(k);
+    if (value === undefined) delete process.env[k];
+    else process.env[k] = value;
+  }
 });
 
 describe('resolveDefaultJudgeModel', () => {
@@ -84,5 +94,29 @@ describe('gpt-5.6 chat effort ceiling (probe regression pin)', () => {
     expect(mapEffortToOpenAiReasoningEffortForModel('max', 'gpt-5.6')).toBe('xhigh');
     expect(mapEffortToOpenAiReasoningEffortForModel('max', 'gpt-5.6-sol')).toBe('xhigh');
     expect(mapEffortToOpenAiReasoningEffortForModel('high', 'gpt-5.6')).toBe('high');
+  });
+});
+
+describe('layered resolution (env valves never leak into the caller rule)', () => {
+  it('caller pinning the code-default provider ignores an env pair for a different provider', () => {
+    process.env.AGENTOS_JUDGE_PROVIDER = 'anthropic';
+    process.env.AGENTOS_JUDGE_MODEL = 'claude-sonnet-5';
+    expect(resolveJudgeLlm({ provider: 'openai' })).toEqual({
+      provider: 'openai',
+      model: 'gpt-5.6',
+      effort: 'max',
+    });
+  });
+
+  it('caller pinning a non-default provider still requires a caller model even when the env pair matches', () => {
+    process.env.AGENTOS_JUDGE_PROVIDER = 'anthropic';
+    process.env.AGENTOS_JUDGE_MODEL = 'claude-sonnet-5';
+    expect(() => resolveJudgeLlm({ provider: 'anthropic' })).toThrow(/explicit model/);
+  });
+
+  it('an unrecognized env provider disables both valves', () => {
+    process.env.AGENTOS_JUDGE_PROVIDER = 'my-custom-llm';
+    process.env.AGENTOS_JUDGE_MODEL = 'whatever-1';
+    expect(resolveDefaultJudgeModel()).toEqual({ provider: 'openai', model: 'gpt-5.6', effort: 'max' });
   });
 });
