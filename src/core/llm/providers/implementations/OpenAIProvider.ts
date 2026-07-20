@@ -33,6 +33,7 @@ import {
   ProviderEmbeddingResponse,
 } from '../IProvider';
 import { stripOpenRouterOnlyParams } from '../openrouter-only-params';
+import { resolveOpenAiCacheRetentionParams, resolvePromptCacheKey } from '../openai-cache-params';
 import { OpenAIProviderError } from '../errors/OpenAIProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
 import { toOpenAiResponseFormat } from './openai-response-format-guard';
@@ -57,12 +58,13 @@ namespace OpenAIAPITypes {
     total_tokens: number;
     /**
      * OpenAI automatic prompt caching (gpt-4o and newer): prompt tokens
-     * served from cache at the discounted rate. Normalized into
-     * {@link ModelUsage.cacheReadInputTokens} so the gpt-5.5 / gpt-4o
-     * fallback legs' caching is visible platform-wide (OpenRouterProvider
-     * already normalizes the same field).
+     * served from cache at the discounted rate, plus — on GPT-5.6+ —
+     * tokens written to cache (billed 1.25x). Normalized into
+     * {@link ModelUsage.cacheReadInputTokens} / cacheCreationInputTokens
+     * so caching is visible platform-wide (OpenRouterProvider already
+     * normalizes the same fields).
      */
-    prompt_tokens_details?: { cached_tokens?: number };
+    prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
   }
   /** Complete tool call as returned on a non-streaming message. */
   export interface ToolCall {
@@ -95,6 +97,8 @@ namespace OpenAIAPITypes {
     model: string;
     choices: ChatChoice[];
     usage?: Usage;
+    /** Service tier the call actually ran at (present when service_tier was requested or defaulted). */
+    service_tier?: string;
   }
   export interface StreamDelta {
     role?: string;
@@ -153,7 +157,7 @@ namespace OpenAIAPITypes {
     output_tokens: number;
     total_tokens: number;
     /** Responses-API spelling of the cached-prompt-token detail. */
-    input_tokens_details?: { cached_tokens?: number };
+    input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
   }
   export interface ResponsesOutputContentPart {
     type: string; // 'output_text' | …
@@ -178,6 +182,8 @@ namespace OpenAIAPITypes {
     output?: ResponsesOutputItem[];
     usage?: ResponsesUsage;
     incomplete_details?: { reason?: string } | null;
+    /** Service tier the call actually ran at. */
+    service_tier?: string;
   }
 }
 
@@ -948,7 +954,12 @@ export class OpenAIProvider implements IProvider {
       const coerced = toOpenAiResponseFormat(options.responseFormat);
       if (coerced !== undefined) payload.response_format = coerced;
     }
-    
+
+    // Typed OpenAI prompt-cache / service-tier policy (spec batch-1 C2).
+    // customModelParams (below) keeps last-write precedence — it is the
+    // raw escape hatch and intentionally overrides these typed fields.
+    this.applyCacheAndTierParams(payload, modelId, options);
+
     {
       // Strip OpenRouter-only routing controls; see openrouter-only-params.
       const passthrough = stripOpenRouterOnlyParams(options.customModelParams);
@@ -958,6 +969,33 @@ export class OpenAIProvider implements IProvider {
     }
 
     return payload;
+  }
+
+  /**
+   * Apply the typed prompt-cache key/retention and service-tier options to
+   * an outgoing payload (Chat and Responses builders share this; spec
+   * batch-1 C2). Unsupported retention combinations are omitted fail-closed
+   * with a debug log — never a hard error.
+   * @private
+   */
+  private applyCacheAndTierParams(
+    payload: Record<string, unknown>,
+    modelId: string,
+    options: ModelCompletionOptions,
+  ): void {
+    const cacheKey = resolvePromptCacheKey(options.promptCacheKey, options.sessionId);
+    if (cacheKey) payload.prompt_cache_key = cacheKey;
+    if (options.promptCacheRetention) {
+      const retention = resolveOpenAiCacheRetentionParams(modelId, options.promptCacheRetention);
+      if (retention) {
+        Object.assign(payload, retention);
+      } else {
+        console.debug(
+          `OpenAIProvider: promptCacheRetention '${options.promptCacheRetention}' unsupported on ${modelId}; omitted`,
+        );
+      }
+    }
+    if (options.serviceTier) payload.service_tier = options.serviceTier;
   }
 
   /**
@@ -1017,6 +1055,11 @@ export class OpenAIProvider implements IProvider {
     // presence/frequency penalties + stop are intentionally OMITTED — reasoning
     // models don't meaningfully use them and the orchestrator sets none;
     // temperature/top_p omitted (reasoning models reject them). See spec §D3.
+
+    // Typed prompt-cache / service-tier policy — same helper as the Chat
+    // builder; customModelParams below keeps last-write precedence.
+    this.applyCacheAndTierParams(payload, modelId, options);
+
     {
       // Strip OpenRouter-only routing controls; see openrouter-only-params.
       // The /responses body rejects unknown top-level fields just like
@@ -1113,6 +1156,7 @@ export class OpenAIProvider implements IProvider {
       object: 'chat.completion',
       created: apiResponse.created_at ?? Math.floor(Date.now() / 1000),
       modelId: apiResponse.model ?? modelId,
+      ...(typeof apiResponse.service_tier === 'string' ? { serviceTier: apiResponse.service_tier } : {}),
       choices: [{
         index: 0,
         message: {
@@ -1132,7 +1176,10 @@ export class OpenAIProvider implements IProvider {
               // Responses API spells the cached detail input_tokens_details;
               // re-key to the chat spelling the shared mapper reads.
               ...(apiResponse.usage.input_tokens_details
-                ? { prompt_tokens_details: { cached_tokens: apiResponse.usage.input_tokens_details.cached_tokens } }
+                ? { prompt_tokens_details: {
+                      cached_tokens: apiResponse.usage.input_tokens_details.cached_tokens,
+                      cache_write_tokens: apiResponse.usage.input_tokens_details.cache_write_tokens,
+                    } }
                 : {}),
             },
             apiResponse.model ?? modelId
@@ -1164,6 +1211,7 @@ export class OpenAIProvider implements IProvider {
         logprobs: c.logprobs,
       })),
       usage: apiResponse.usage ? this.calculateUsage(apiResponse.usage, apiResponse.model) : undefined,
+      ...(typeof apiResponse.service_tier === 'string' ? { serviceTier: apiResponse.service_tier } : {}),
       // No deltas for non-streaming response
     };
   }
@@ -1197,6 +1245,9 @@ export class OpenAIProvider implements IProvider {
                 choices: [],
                 isFinal: true,
                 usage: usageOnlyUsage,
+                ...(typeof (apiChunk as { service_tier?: string }).service_tier === 'string'
+                  ? { serviceTier: (apiChunk as { service_tier?: string }).service_tier }
+                  : {}),
             };
         }
 
@@ -1326,24 +1377,34 @@ export class OpenAIProvider implements IProvider {
       prompt_tokens: number;
       completion_tokens: number;
       total_tokens: number;
-      prompt_tokens_details?: { cached_tokens?: number };
+      prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
     },
     modelId: string
   ): ModelUsage {
-    // OpenAI automatic caching reports cached prompt tokens as a detail
-    // field (they remain INCLUDED in prompt_tokens, unlike Anthropic's
-    // exclusive accounting). Normalize into cacheReadInputTokens so the
-    // fallback legs' caching stops being invisible in platform telemetry;
-    // cost stays computed off the full prompt_tokens (the discount is a
-    // billing-side rate, not a token-count change).
+    // OpenAI automatic caching reports cached prompt tokens as detail
+    // fields (reads AND — on GPT-5.6+, billed 1.25x — writes; both remain
+    // INCLUDED in prompt_tokens, unlike Anthropic's exclusive accounting).
+    // Normalize into cacheReadInputTokens / cacheCreationInputTokens so
+    // caching stops being invisible in platform telemetry; cost stays
+    // computed off the full prompt_tokens (the discount/premium is a
+    // billing-side rate, not a token-count change). Because prompt_tokens
+    // is already inclusive here, inclusiveInputTokens is prompt_tokens
+    // as-is (Anthropic computes input + cache_read + cache_creation).
     const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
+    const cacheWriteTokens = usage.prompt_tokens_details?.cache_write_tokens;
     return {
       promptTokens: usage.prompt_tokens,
       completionTokens: usage.completion_tokens,
       totalTokens: usage.total_tokens,
       costUSD: this.calculateCost(usage.prompt_tokens, usage.completion_tokens, modelId),
+      ...(typeof usage.prompt_tokens === 'number'
+        ? { inclusiveInputTokens: usage.prompt_tokens }
+        : {}),
       ...(typeof cachedTokens === 'number' && cachedTokens >= 0
         ? { cacheReadInputTokens: cachedTokens }
+        : {}),
+      ...(typeof cacheWriteTokens === 'number' && cacheWriteTokens >= 0
+        ? { cacheCreationInputTokens: cacheWriteTokens }
         : {}),
     };
   }

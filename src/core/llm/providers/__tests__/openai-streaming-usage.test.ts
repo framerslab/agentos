@@ -14,7 +14,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OpenAIProvider } from '../implementations/OpenAIProvider.js';
 
-function makeUsageOnlyChunk(promptTokens: number, completionTokens: number) {
+function makeUsageOnlyChunk(
+  promptTokens: number,
+  completionTokens: number,
+  promptTokensDetails?: { cached_tokens?: number; cache_write_tokens?: number },
+) {
   return {
     id: 'chatcmpl-usage-only',
     object: 'chat.completion.chunk',
@@ -25,6 +29,7 @@ function makeUsageOnlyChunk(promptTokens: number, completionTokens: number) {
       prompt_tokens: promptTokens,
       completion_tokens: completionTokens,
       total_tokens: promptTokens + completionTokens,
+      ...(promptTokensDetails ? { prompt_tokens_details: promptTokensDetails } : {}),
     },
   };
 }
@@ -284,5 +289,51 @@ describe('OpenAIProvider cached-token normalization (automatic prompt caching)',
 
     const usageChunk = chunks.find((c) => c.usage && c.isFinal);
     expect(usageChunk?.usage?.cacheReadInputTokens).toBe(384);
+  });
+});
+
+describe('OpenAIProvider streaming cache-write usage (spec batch-1 C2)', () => {
+  let provider: OpenAIProvider;
+
+  beforeEach(async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          object: 'list',
+          data: [{ id: 'gpt-4o', object: 'model', created: 1, owned_by: 'openai' }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    provider = new OpenAIProvider();
+    await provider.initialize({ apiKey: 'sk-test', maxRetries: 1 });
+    vi.spyOn(globalThis, 'fetch').mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('normalizes cached_tokens + cache_write_tokens from the trailing usage-only chunk', async () => {
+    const sentinel = makeUsageOnlyChunk(120, 5, { cached_tokens: 64, cache_write_tokens: 40 });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(`data: ${JSON.stringify(sentinel)}\n\ndata: [DONE]\n\n`, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      }),
+    );
+
+    let finalUsage: { cacheReadInputTokens?: number; cacheCreationInputTokens?: number; inclusiveInputTokens?: number } | undefined;
+    for await (const chunk of provider.generateCompletionStream(
+      'gpt-4o',
+      [{ role: 'user', content: 'hi' }],
+      {},
+    )) {
+      if (chunk.usage) finalUsage = chunk.usage;
+    }
+
+    expect(finalUsage?.cacheReadInputTokens).toBe(64);
+    expect(finalUsage?.cacheCreationInputTokens).toBe(40);
+    expect(finalUsage?.inclusiveInputTokens).toBe(120);
   });
 });

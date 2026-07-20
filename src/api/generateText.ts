@@ -387,6 +387,25 @@ export interface GenerateTextOptions {
    */
   effort?: string;
   /**
+   * OpenAI prompt-cache shard key (spec batch-1 C2; other providers ignore
+   * it). `'auto'` derives a sha256-hashed key from {@link sessionId}
+   * (omitted when no session id is set; raw ids never leave the process);
+   * an explicit string is sent verbatim; `false`/absent omit the field.
+   */
+  promptCacheKey?: string | 'auto' | false;
+  /**
+   * OpenAI prompt-cache retention request. Emitted only when the fail-closed
+   * capability table allows the model/value combination; unsupported combos
+   * are omitted with a debug log. See `openai-cache-params.ts`.
+   */
+  promptCacheRetention?: 'in_memory' | '24h' | '30m';
+  /**
+   * OpenAI service tier (`service_tier`, verbatim). No default. `'flex'`
+   * bills at ~batch rates but can 429 under load; automatic tier fallback
+   * is deliberately not implemented.
+   */
+  serviceTier?: 'auto' | 'default' | 'flex' | 'priority';
+  /**
    * Per-call prompt-cache control, forwarded to cache-capable providers
    * (Anthropic today; others ignore it).
    *
@@ -1531,6 +1550,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               // Per-conversation affinity key (OpenRouter session_id sticky
               // routing; other providers ignore it).
               ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
+              ...(opts.promptCacheKey !== undefined ? { promptCacheKey: opts.promptCacheKey } : {}),
+              ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
+              ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
               // Forward provider-specific top-level payload params (e.g.
               // OpenRouter provider-routing preferences) on the shim path too.
               ...(opts.customModelParams !== undefined
@@ -1657,6 +1679,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 // Per-conversation affinity key (OpenRouter session_id sticky
                 // routing; other providers ignore it).
                 ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
+              ...(opts.promptCacheKey !== undefined ? { promptCacheKey: opts.promptCacheKey } : {}),
+              ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
+              ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
                 // Cache diagnostics: thread the previous step's message id so
                 // the API explains any prefix divergence between loop steps.
                 ...(opts.cacheDiagnostics

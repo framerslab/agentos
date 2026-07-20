@@ -522,6 +522,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               // Per-conversation affinity key (OpenRouter session_id sticky
               // routing; other providers ignore it).
               ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
+            ...(opts.promptCacheKey !== undefined ? { promptCacheKey: opts.promptCacheKey } : {}),
+            ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
+            ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
               // Forward provider-specific top-level payload params (e.g.
               // OpenRouter provider-routing preferences) on the shim path too.
               ...(opts.customModelParams !== undefined
@@ -619,6 +622,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // Per-conversation affinity key (OpenRouter session_id sticky
             // routing; other providers ignore it).
             ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
+            ...(opts.promptCacheKey !== undefined ? { promptCacheKey: opts.promptCacheKey } : {}),
+            ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
+            ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
             // Cache-diagnostics opt-in (Anthropic beta): thread the previous
             // request's message id — the caller's seed on step 1, the prior
             // step's id after — so the verdict names any prefix divergence.
