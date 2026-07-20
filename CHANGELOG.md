@@ -1,3 +1,7 @@
+## <small>0.9.160 (2026-07-20)</small>
+
+* fix(llm): record the probed gpt-5.6 chat effort ceiling ([41f52df1bd64704e8c7d01e0ee9794dacf4696fe](https://github.com/framerslab/agentos/commit/41f52df1bd64704e8c7d01e0ee9794dacf4696fe))
+
 ## <small>0.9.159 (2026-07-20)</small>
 
 * feat: agent-scoped idempotent personality mutation decay ([4f6f5e68615cfe8bd5d56a2c9b6fad6aef7aafa7](https://github.com/framerslab/agentos/commit/4f6f5e68615cfe8bd5d56a2c9b6fad6aef7aafa7))
