@@ -1,3 +1,12 @@
+## <small>0.9.157 (2026-07-20)</small>
+
+* feat: export usable Neo4j GraphRAG surface from cognition/rag ([7ebbbf2d8db1f44d17feb3a30e5b222541202401](https://github.com/framerslab/agentos/commit/7ebbbf2d8db1f44d17feb3a30e5b222541202401))
+* feat: fail-closed OpenAI cache-retention capability table ([30c50a9661ed2b9ad04c34623707763bed23c74c](https://github.com/framerslab/agentos/commit/30c50a9661ed2b9ad04c34623707763bed23c74c))
+* feat: provider-aware inclusive input token accounting ([8d58b16dbc659442a3d3705883300ad348e920f0](https://github.com/framerslab/agentos/commit/8d58b16dbc659442a3d3705883300ad348e920f0))
+* feat: typed OpenAI prompt-cache and service-tier policy with cache-write capture ([d7f123bf42e53a617d4caf086549668029e8ab6e](https://github.com/framerslab/agentos/commit/d7f123bf42e53a617d4caf086549668029e8ab6e))
+* docs: correct cache-token accounting semantics per provider ([807581bdb38bbe1da9b6589df4b124321d7eb961](https://github.com/framerslab/agentos/commit/807581bdb38bbe1da9b6589df4b124321d7eb961))
+* ci: gate batch tests and order releases after CI ([0861069693e3bce0e5f4ff2ffbf55ed6639ca54f](https://github.com/framerslab/agentos/commit/0861069693e3bce0e5f4ff2ffbf55ed6639ca54f))
+
 ## <small>0.9.156 (2026-07-18)</small>
 
 * fix(llm): sanitize Gemini responseSchema to the accepted proto subset ([68a1a87f49e9c6b00126cb6669e99066e1f63a45](https://github.com/framerslab/agentos/commit/68a1a87f49e9c6b00126cb6669e99066e1f63a45))
