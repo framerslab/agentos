@@ -1,3 +1,9 @@
+## <small>0.9.162 (2026-07-20)</small>
+
+* fix: complete response identity and tier threading with full shim usage ([7a53873d1cd98d54ae5224046084cbb320fe8d8e](https://github.com/framerslab/agentos/commit/7a53873d1cd98d54ae5224046084cbb320fe8d8e))
+* fix: conflict-safe decay guard, rate validation, and serialized release runs ([d13d41fd41bac85cbaaf59997944068bdaaea8f2](https://github.com/framerslab/agentos/commit/d13d41fd41bac85cbaaf59997944068bdaaea8f2))
+* fix(llm): layered judge resolution with validated env valves ([4de808981f6b29af359aa9a7e52ff53f09704172](https://github.com/framerslab/agentos/commit/4de808981f6b29af359aa9a7e52ff53f09704172))
+
 ## <small>0.9.161 (2026-07-20)</small>
 
 * fix(api): stand fallback-leg cache markers down and thread agent-level cache ([8d9faa9d53c1cd64e66a6a8d9b3800d3136a2dc7](https://github.com/framerslab/agentos/commit/8d9faa9d53c1cd64e66a6a8d9b3800d3136a2dc7))
