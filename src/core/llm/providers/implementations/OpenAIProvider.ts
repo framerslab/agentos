@@ -38,7 +38,7 @@ import { OpenAIProviderError } from '../errors/OpenAIProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
 import { toOpenAiResponseFormat } from './openai-response-format-guard';
 import { clampMaxOutputTokens } from '../model-output-limits.js';
-import { mapEffortToOpenAiReasoningEffort, mapEffortToOpenAiResponsesEffort } from '../model-effort.js';
+import { mapEffortToOpenAiReasoningEffort, mapEffortToOpenAiReasoningEffortForModel, mapEffortToOpenAiResponsesEffort } from '../model-effort.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
 // Assuming a fetch-like interface is available globally or polyfilled (e.g., node-fetch)
 // For Node.js, ensure 'node-fetch' is a dependency or use Node's built-in fetch from v18+.
@@ -913,7 +913,7 @@ export class OpenAIProvider implements IProvider {
       // (it demands the Responses API, which agentos doesn't implement). When
       // the request carries tools, DROP the effort param instead of 400ing —
       // the model reasons at its default depth and the tool call succeeds.
-      const reasoningEffort = mapEffortToOpenAiReasoningEffort(options.effort);
+      const reasoningEffort = mapEffortToOpenAiReasoningEffortForModel(options.effort, modelId);
       const dropEffortForTools =
         requestHasFunctionTools(options.tools) &&
         openAiRejectsReasoningEffortWithTools(modelId);

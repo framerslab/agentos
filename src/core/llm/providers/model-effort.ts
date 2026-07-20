@@ -84,3 +84,39 @@ export function mapEffortToOpenAiResponsesEffort(
   if (base === undefined) return undefined;
   return base === 'xhigh' && !modelAcceptsXhighResponsesEffort(modelId) ? 'high' : base;
 }
+
+/**
+ * Chat-completions models whose `reasoning_effort` accepts `'max'`.
+ * Live-probed per entry — record request shape, status, response summary,
+ * date, and the exact model alias in this comment when adding one.
+ *
+ * 2026-07-20 probe (chat.completions, top-level `reasoning_effort: 'max'`,
+ * model `gpt-5.6`): NOT COMPLETED — both available OpenAI keys returned
+ * `insufficient_quota` (HTTP 429 class, billing), which per the probe
+ * protocol is a TRANSIENT outcome and never lowers/raises the ceiling.
+ * The list stays empty (ceiling `xhigh`) until a probe returns HTTP 200
+ * (→ add the family here) or a definitive unsupported-parameter 4xx
+ * (→ record the refusal here). The current model catalog suggests gpt-5.6
+ * accepts `max`; re-probe when a key has quota.
+ */
+const CHAT_MAX_EFFORT_MODELS: readonly string[] = [];
+
+/**
+ * Model-aware Chat `reasoning_effort` mapping (spec batch-1 C3): `max`
+ * stays `'max'` on probe-verified models, else falls back to the standard
+ * mapping (which clamps `max` → `'xhigh'`).
+ */
+export function mapEffortToOpenAiReasoningEffortForModel(
+  effort: unknown,
+  modelId: string,
+): string | undefined {
+  const base = mapEffortToOpenAiReasoningEffort(effort);
+  if (
+    effort === 'max'
+    && base === 'xhigh'
+    && CHAT_MAX_EFFORT_MODELS.some((f) => modelId.toLowerCase().startsWith(f))
+  ) {
+    return 'max';
+  }
+  return base;
+}
