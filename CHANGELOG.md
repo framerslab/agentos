@@ -1,3 +1,8 @@
+## <small>0.9.164 (2026-07-20)</small>
+
+* test: repair full-suite drift against current runtime contracts ([b20d940e58bf931855a3a52047ef9ee93706d708](https://github.com/framerslab/agentos/commit/b20d940e58bf931855a3a52047ef9ee93706d708))
+* fix(deps): declare the ws runtime dependency ([d3bfa614a833d88d9f47d25a9099dde219b44203](https://github.com/framerslab/agentos/commit/d3bfa614a833d88d9f47d25a9099dde219b44203))
+
 ## <small>0.9.163 (2026-07-20)</small>
 
 * fix: complete response identity and tier threading with full shim usage ([a3e12f57b41ea0be108594995afb3ca321c6d4f8](https://github.com/framerslab/agentos/commit/a3e12f57b41ea0be108594995afb3ca321c6d4f8))
