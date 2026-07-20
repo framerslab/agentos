@@ -1,3 +1,11 @@
+## <small>0.9.163 (2026-07-20)</small>
+
+* fix: complete response identity and tier threading with full shim usage ([a3e12f57b41ea0be108594995afb3ca321c6d4f8](https://github.com/framerslab/agentos/commit/a3e12f57b41ea0be108594995afb3ca321c6d4f8))
+* fix: complete span telemetry on shim and exhaustion terminals ([b4264bef1dca171083de7bbbbbd90056afc739df](https://github.com/framerslab/agentos/commit/b4264bef1dca171083de7bbbbbd90056afc739df))
+* fix: complete span telemetry on shim and exhaustion terminals ([7cb6197d0de7973b42440cd1a89e933a3ea28a88](https://github.com/framerslab/agentos/commit/7cb6197d0de7973b42440cd1a89e933a3ea28a88))
+* fix: conflict-safe decay guard and stricter test gating ([cb510de6799e038269f3d6b7f320f7b951165b03](https://github.com/framerslab/agentos/commit/cb510de6799e038269f3d6b7f320f7b951165b03))
+* fix(llm): layered judge resolution with validated env valves ([5f286c8f76f3e2dce5b40887e02b0251dd823844](https://github.com/framerslab/agentos/commit/5f286c8f76f3e2dce5b40887e02b0251dd823844))
+
 ## <small>0.9.162 (2026-07-20)</small>
 
 * fix: complete response identity and tier threading with full shim usage ([7a53873d1cd98d54ae5224046084cbb320fe8d8e](https://github.com/framerslab/agentos/commit/7a53873d1cd98d54ae5224046084cbb320fe8d8e))
