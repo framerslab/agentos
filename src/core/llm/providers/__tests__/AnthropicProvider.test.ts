@@ -698,10 +698,12 @@ describe('AnthropicProvider', () => {
       expect(fetchMock.mock.calls[0][1].headers['anthropic-beta']).toBeUndefined();
     });
 
-    it('strips thinking from earlier assistant turns, replaying only the last (bounded payload)', async () => {
+    it('strips prior thinking on non-retaining models, replaying only the last turn (bounded payload)', async () => {
+      // Haiku models never retain prior thinking server-side, so the client
+      // strip is cache-neutral there and keeps the wire bounded.
       fetchMock.mockResolvedValueOnce(mockSseResponse(makeAnthropicResponse()));
       await provider.generateCompletion(
-        'claude-opus-4-8',
+        'claude-haiku-4-5-20251001',
         [
           { role: 'user', content: 'go' },
           {
@@ -727,6 +729,38 @@ describe('AnthropicProvider', () => {
       // so large thinking blocks don't accumulate across a long tool loop).
       expect(assistantMsgs[0].content.some((b: any) => b.type === 'thinking')).toBe(false);
       // Most-recent assistant turn: thinking preserved (Anthropic requires it for continuation).
+      expect(assistantMsgs[1].content[0]).toEqual({ type: 'thinking', thinking: 'second', signature: 's2' });
+    });
+
+    it('replays prior thinking verbatim on retaining models (cache byte-stability)', async () => {
+      // Retaining models keep prior thinking in server context and cache it;
+      // a client-side strip would mutate the prior turn's bytes every step
+      // and invalidate the whole cached prefix (measured prod 2026-07-06).
+      fetchMock.mockResolvedValueOnce(mockSseResponse(makeAnthropicResponse()));
+      await provider.generateCompletion(
+        'claude-opus-4-8',
+        [
+          { role: 'user', content: 'go' },
+          {
+            role: 'assistant',
+            content: null,
+            thinkingBlocks: [{ type: 'thinking', thinking: 'first', signature: 's1' }],
+            tool_calls: [{ id: 't1', type: 'function', function: { name: 'f', arguments: '{}' } }],
+          },
+          { role: 'tool', tool_call_id: 't1', content: 'r1' },
+          {
+            role: 'assistant',
+            content: null,
+            thinkingBlocks: [{ type: 'thinking', thinking: 'second', signature: 's2' }],
+            tool_calls: [{ id: 't2', type: 'function', function: { name: 'f', arguments: '{}' } }],
+          },
+          { role: 'tool', tool_call_id: 't2', content: 'r2' },
+        ],
+        {},
+      );
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      const assistantMsgs = body.messages.filter((m: any) => m.role === 'assistant');
+      expect(assistantMsgs[0].content[0]).toEqual({ type: 'thinking', thinking: 'first', signature: 's1' });
       expect(assistantMsgs[1].content[0]).toEqual({ type: 'thinking', thinking: 'second', signature: 's2' });
     });
   });
@@ -1628,7 +1662,7 @@ describe('AnthropicProvider', () => {
 
     it('aborts a mid-body stall after streamIdleTimeoutMs instead of hanging', async () => {
       const idleProvider = new AnthropicProvider();
-      await idleProvider.initialize({ apiKey: 'k', streamIdleTimeoutMs: 40 });
+      await idleProvider.initialize({ apiKey: 'k', streamIdleTimeoutMs: 40, maxRetries: 1 });
       fetchMock.mockResolvedValueOnce(stallingSseResponse([
         d({ type: 'message_start', message: { ...makeAnthropicResponse(), content: [], stop_reason: null } }),
       ]));
@@ -1683,6 +1717,10 @@ describe('AnthropicProvider', () => {
     });
 
     it('throws on a stream that ends without message_delta (incomplete)', async () => {
+      // Single attempt: the retry-era default would re-read the one-shot mock
+      // Response on retry and mask the incomplete-stream error.
+      const singleShot = new AnthropicProvider();
+      await singleShot.initialize({ apiKey: 'k', maxRetries: 1 });
       fetchMock.mockResolvedValueOnce({
         ok: true, status: 200, statusText: 'OK', headers: new Headers(),
         json: () => Promise.reject(new Error('SSE body, not JSON')),
@@ -1692,7 +1730,7 @@ describe('AnthropicProvider', () => {
       } as unknown as Response);
 
       await expect(
-        provider.generateCompletion(
+        singleShot.generateCompletion(
           'claude-sonnet-4-20250514',
           [{ role: 'user', content: 'Hi' }],
           {},
@@ -1701,7 +1739,9 @@ describe('AnthropicProvider', () => {
     });
 
     it('throws the API error from an SSE error event', async () => {
-      fetchMock.mockResolvedValue({
+      const singleShot = new AnthropicProvider();
+      await singleShot.initialize({ apiKey: 'k', maxRetries: 1 });
+      fetchMock.mockResolvedValueOnce({
         ok: true, status: 200, statusText: 'OK', headers: new Headers(),
         json: () => Promise.reject(new Error('SSE body, not JSON')),
         body: createSseStream([
@@ -1711,7 +1751,7 @@ describe('AnthropicProvider', () => {
       } as unknown as Response);
 
       await expect(
-        provider.generateCompletion(
+        singleShot.generateCompletion(
           'claude-sonnet-4-20250514',
           [{ role: 'user', content: 'Hi' }],
           {},

@@ -44,6 +44,11 @@ vi.mock('child_process', () => ({
     if (cb) cb(null, { stdout: '[]', stderr: '' });
     return { on: vi.fn() };
   }),
+  execFile: vi.fn((cmd, args, cb) => {
+    const done = typeof args === 'function' ? args : cb;
+    if (done) done(null, { stdout: '[]', stderr: '' });
+    return { on: vi.fn() };
+  }),
 }));
 
 vi.mock('util', () => ({

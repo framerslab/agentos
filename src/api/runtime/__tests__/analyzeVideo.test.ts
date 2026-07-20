@@ -66,6 +66,7 @@ vi.mock('../../../io/hearing/providers/OpenAIWhisperSpeechToTextProvider.js', ()
 // Mock observability to avoid OTel dependencies
 vi.mock('../../observability.js', () => ({
   attachUsageAttributes: vi.fn(),
+  attachGenAiAttributes: vi.fn(),
   toTurnMetricUsage: vi.fn().mockReturnValue(undefined),
 }));
 

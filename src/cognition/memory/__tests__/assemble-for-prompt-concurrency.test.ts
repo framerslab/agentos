@@ -118,17 +118,27 @@ describe('assembleForPrompt concurrency', () => {
       return { documents: [] };
     });
 
+    const checkSpy = vi.spyOn(
+      (manager as unknown as { prospective: { check: (...a: unknown[]) => Promise<unknown[]> } })
+        .prospective,
+      'check',
+    );
+
     const pending = manager.assembleForPrompt('what did we plan for friday', 2048, MOOD);
 
     // Let the event loop drain everything that isn't blocked on the latch.
     await new Promise((resolve) => setTimeout(resolve, 25));
 
     // Serial implementation: neither fires until retrieve() resolves.
-    // Concurrent implementation: both have already started.
+    // Concurrent implementation: both have already started. Identical query
+    // embeds can be served from the embedding cache (one manager hit shared
+    // by the store and prospective paths), so assert the prospective stage
+    // itself ran during the latch window instead of counting embed calls.
     expect(persistentRead).toHaveBeenCalledTimes(1);
+    expect(checkSpy).toHaveBeenCalledTimes(1);
     expect(
       mocks.mockEmbeddingManager.generateEmbeddings.mock.calls.length,
-    ).toBeGreaterThanOrEqual(2); // store's query embed + prospective's query embed
+    ).toBeGreaterThanOrEqual(1);
 
     releaseQuery();
     const out = await pending;

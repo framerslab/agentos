@@ -911,7 +911,7 @@ describe('string-encoded container repair', () => {
       ),
     });
     hoisted.generateCompletion.mockResolvedValue(
-      mockResponse('{"verdicts":"[{\"trackId\":\"t\",\"verdict\":\"purple\"}]"}'),
+      mockResponse('{"verdicts":"[{\\"trackId\\":\\"t\\",\\"verdict\\":\\"purple\\"}]"}'),
     );
 
     const err = await generateObject({
