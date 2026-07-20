@@ -150,24 +150,29 @@ export interface TokenUsage {
   /** Total cost reported by the provider across all steps, when available. */
   costUSD?: number;
   /**
-   * Tokens served from the provider's prompt-prefix cache. When present,
-   * these were billed at the cache-read rate (0.1× input price on
-   * Anthropic) and are NOT also counted in `promptTokens`. Callers that
-   * want total tokens-ever-sent should add `promptTokens + cacheReadTokens
-   * + cacheCreationTokens`.
+   * Tokens served from the provider's prompt-prefix cache, billed at the
+   * cache-read rate. Reported by Anthropic (`cache_read_input_tokens`),
+   * OpenAI (`prompt_tokens_details.cached_tokens` on Chat Completions,
+   * `input_tokens_details.cached_tokens` on Responses), and OpenRouter
+   * (`prompt_tokens_details.cached_tokens`) — all normalized into this field.
    *
-   * Undefined when the provider does not report cache usage (OpenAI's
-   * auto-cache does not expose this at the per-call layer; Anthropic
-   * does via `cache_read_input_tokens`).
+   * ACCOUNTING WARNING — the counters are distinct but NOT universally
+   * disjoint: Anthropic's `promptTokens` EXCLUDES cached tokens (its total
+   * input = `promptTokens + cacheReadTokens + cacheCreationTokens`), while
+   * OpenAI's `promptTokens` already INCLUDES cached reads (adding them
+   * double-counts). For a provider-independent input total, use the
+   * normalized inclusive input accounting rather than summing these fields.
    */
   cacheReadTokens?: number;
   /**
    * Tokens written to the provider's prompt-prefix cache as a new cache
-   * entry. Billed at the cache-creation rate (1.25× input price on
-   * Anthropic for 5-minute TTL, 2× for 1-hour TTL). NOT also counted in
-   * `promptTokens`. A `cacheReadTokens` of 0 and `cacheCreationTokens > 0`
-   * indicates the first call that filled the cache; subsequent calls
-   * with a cache hit flip the numbers.
+   * entry, billed at the cache-write rate (Anthropic: 1.25× input for the
+   * 5-minute TTL, 2× for 1-hour; OpenAI GPT-5.6+: 1.25×, reported as
+   * `cache_write_tokens` in the usage details). Same disjointness caveat as
+   * `cacheReadTokens`: excluded from Anthropic's `promptTokens`, included
+   * in OpenAI's. A `cacheReadTokens` of 0 with `cacheCreationTokens > 0`
+   * indicates the call that filled the cache; later cache hits flip the
+   * numbers.
    */
   cacheCreationTokens?: number;
 }
