@@ -1,3 +1,10 @@
+## <small>0.9.159 (2026-07-20)</small>
+
+* feat: agent-scoped idempotent personality mutation decay ([4f6f5e68615cfe8bd5d56a2c9b6fad6aef7aafa7](https://github.com/framerslab/agentos/commit/4f6f5e68615cfe8bd5d56a2c9b6fad6aef7aafa7))
+* feat: centralize judge model selection on gpt-5.6 ([1eb9552ea66208bb9ed66896b5ee07debf60bb0d](https://github.com/framerslab/agentos/commit/1eb9552ea66208bb9ed66896b5ee07debf60bb0d))
+* feat: decay-on-adapt wiring for personality mutation aging ([3551b40c6c8f444657788c6c62993a268f0fe354](https://github.com/framerslab/agentos/commit/3551b40c6c8f444657788c6c62993a268f0fe354))
+* feat: model-aware OpenAI reasoning-effort ceiling ([36ef29674579bbb097c9dee028c3385f3698e53b](https://github.com/framerslab/agentos/commit/36ef29674579bbb097c9dee028c3385f3698e53b))
+
 ## <small>0.9.158 (2026-07-20)</small>
 
 * feat: cache-token and first-part turn metrics ([f817edd4702cb3a0003cd17a1ae5c945aeb1ab0c](https://github.com/framerslab/agentos/commit/f817edd4702cb3a0003cd17a1ae5c945aeb1ab0c))
