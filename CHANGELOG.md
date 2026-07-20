@@ -1,3 +1,8 @@
+## <small>0.9.158 (2026-07-20)</small>
+
+* feat: cache-token and first-part turn metrics ([f817edd4702cb3a0003cd17a1ae5c945aeb1ab0c](https://github.com/framerslab/agentos/commit/f817edd4702cb3a0003cd17a1ae5c945aeb1ab0c))
+* feat: GenAI semconv span attributes and provider-reported response model ([70fa7687cb51c561d23d93c9b02efa56477a1585](https://github.com/framerslab/agentos/commit/70fa7687cb51c561d23d93c9b02efa56477a1585))
+
 ## <small>0.9.157 (2026-07-20)</small>
 
 * feat: export usable Neo4j GraphRAG surface from cognition/rag ([7ebbbf2d8db1f44d17feb3a30e5b222541202401](https://github.com/framerslab/agentos/commit/7ebbbf2d8db1f44d17feb3a30e5b222541202401))
