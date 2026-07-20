@@ -80,6 +80,17 @@ export interface IStorageAdapter {
    * @param sql - The raw SQL string to execute.
    */
   exec?(sql: string): Promise<void>;
+
+  /**
+   * Run `fn` atomically. The adapter passes a transaction-scoped runner with
+   * the same run/get/all shape; a throw inside `fn` rolls the whole unit
+   * back. Optional — consumers that require atomicity (e.g.
+   * `PersonalityMutationStore.decayForAgent`) must check for it and fail
+   * with a descriptive error when absent (spec batch-1 C6).
+   */
+  transaction?<T>(
+    fn: (tx: Pick<IStorageAdapter, 'run' | 'get' | 'all'>) => Promise<T>,
+  ): Promise<T>;
 }
 
 // ============================================================================

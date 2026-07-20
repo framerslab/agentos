@@ -183,6 +183,12 @@ export class PersonalityMutationStore {
           );
           CREATE INDEX IF NOT EXISTS idx_personality_mutations_agent
             ON personality_mutations(agent_id, trait);
+          CREATE TABLE IF NOT EXISTS personality_decay_cycles (
+            agent_id TEXT NOT NULL,
+            cycle_id TEXT NOT NULL,
+            applied_at BIGINT NOT NULL,
+            PRIMARY KEY (agent_id, cycle_id)
+          );
         `;
 
         if (this.db.exec) {
@@ -302,6 +308,11 @@ export class PersonalityMutationStore {
   /**
    * Decay all active mutations by the given rate and prune expired ones.
    *
+   * @deprecated for production paths — use {@link decayForAgent}: this
+   * method is UNSCOPED (touches every agent's rows) and non-atomic
+   * (row-by-row writes double-decay on retry). Kept for administrative /
+   * maintenance use only.
+   *
    * For each mutation with strength above 0.1:
    * - Subtracts `rate` from its strength.
    * - If the new strength is at or below 0.1, the mutation is deleted (pruned).
@@ -341,5 +352,78 @@ export class PersonalityMutationStore {
     }
 
     return { decayed, pruned };
+  }
+
+  /**
+   * Agent-scoped, idempotent, atomic decay (spec batch-1 C6).
+   *
+   * Runs one transaction that (a) inserts the `(agent_id, cycle_id)` guard
+   * row FIRST — a replayed cycle id aborts as a no-op before touching any
+   * mutation row; (b) deletes this agent's rows already at/below the 0.1
+   * prune threshold (pre-existing sub-threshold rows never decay again
+   * under `decayAll`'s `> 0.1` selector — this closes that leak); (c)
+   * decays the remaining rows, pruning any whose post-decay strength is at
+   * or below the threshold. Requires a transaction-capable adapter — the
+   * decay unit must be all-or-nothing so a mid-cycle failure cannot
+   * double-decay on retry.
+   *
+   * @param agentId - The agent whose mutations decay (other agents' rows
+   *   are untouched — the class defect in `decayAll`).
+   * @param rate    - Strength subtracted per cycle (typically
+   *   `SelfImprovementConfig.personality.decayRate`, default 0.05).
+   * @param cycleId - Stable-per-cycle identity (e.g. `day:2026-07-20` UTC
+   *   buckets from decay-on-adapt). Replays are no-ops via the guard table.
+   */
+  async decayForAgent(
+    agentId: string,
+    rate: number,
+    cycleId: string,
+  ): Promise<DecayResult & { skipped?: boolean }> {
+    await this.ensureSchema();
+    if (!this.db.transaction) {
+      throw new Error(
+        'PersonalityMutationStore.decayForAgent requires a transaction-capable storage adapter',
+      );
+    }
+    return this.db.transaction(async (tx) => {
+      const guard = await tx.get(
+        'SELECT 1 AS hit FROM personality_decay_cycles WHERE agent_id = ? AND cycle_id = ?',
+        [agentId, cycleId],
+      );
+      if (guard) return { decayed: 0, pruned: 0, skipped: true };
+      await tx.run(
+        'INSERT INTO personality_decay_cycles (agent_id, cycle_id, applied_at) VALUES (?, ?, ?)',
+        [agentId, cycleId, Date.now()],
+      );
+
+      const stale = (await tx.all(
+        'SELECT id FROM personality_mutations WHERE agent_id = ? AND strength <= 0.1',
+        [agentId],
+      )) as Array<{ id: string }>;
+      for (const row of stale) {
+        await tx.run('DELETE FROM personality_mutations WHERE id = ?', [row.id]);
+      }
+      let pruned = stale.length;
+
+      const rows = (await tx.all(
+        'SELECT id, strength FROM personality_mutations WHERE agent_id = ?',
+        [agentId],
+      )) as Array<{ id: string; strength: number }>;
+      let decayed = 0;
+      for (const row of rows) {
+        const newStrength = row.strength - rate;
+        if (newStrength <= 0.1) {
+          await tx.run('DELETE FROM personality_mutations WHERE id = ?', [row.id]);
+          pruned++;
+        } else {
+          await tx.run(
+            'UPDATE personality_mutations SET strength = ? WHERE id = ?',
+            [newStrength, row.id],
+          );
+          decayed++;
+        }
+      }
+      return { decayed, pruned };
+    });
   }
 }
