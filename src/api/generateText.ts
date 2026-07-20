@@ -1657,6 +1657,13 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           totalTokens: (totalUsage.totalTokens ?? 0) + loopResult.totalTokens,
         };
         metricUsage = shimUsage;
+        // Dual-emit the same root-span attribute pairs as the native
+        // terminals below — the shim early-return is a first-class chat
+        // terminal, not a bypass (spec batch-1 residual).
+        span?.setAttribute('agentos.api.finish_reason', loopResult.finishReason);
+        span?.setAttribute('agentos.api.tool_calls', loopResult.toolCalls.length);
+        attachUsageAttributes(span, shimUsage);
+        attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: shimUsage, ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}), ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}) });
         fireLlmUsageObserver({
           provider: resolved.providerId,
           model: resolved.modelId,
@@ -2081,6 +2088,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       span?.setAttribute('agentos.api.finish_reason', 'tool-calls');
       span?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
       attachUsageAttributes(span, totalUsage);
+      attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: totalUsage, ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}), ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}) });
       fireLlmUsageObserver({
         provider: resolved.providerId,
         model: resolved.modelId,

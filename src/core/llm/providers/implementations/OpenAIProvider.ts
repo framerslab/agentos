@@ -115,7 +115,7 @@ namespace OpenAIAPITypes {
     finish_reason: string | null;
     logprobs?: unknown;
   }
-  export interface ChatCompletionStreamResponse {
+  export interface ChatCompletionStreamResponse extends StreamChunkExtras {
     id: string;
     object: string;
     created: number;
@@ -1252,8 +1252,8 @@ export class OpenAIProvider implements IProvider {
                 choices: [],
                 isFinal: true,
                 usage: usageOnlyUsage,
-                ...(typeof (apiChunk as { service_tier?: string }).service_tier === 'string'
-                  ? { serviceTier: (apiChunk as { service_tier?: string }).service_tier }
+                ...(typeof apiChunk.service_tier === 'string'
+                  ? { serviceTier: apiChunk.service_tier }
                   : {}),
             };
         }

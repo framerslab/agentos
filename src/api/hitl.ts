@@ -13,7 +13,7 @@
  *
  * // Auto-approve everything (useful in tests and CI environments)
  * const testAgency = agency({
- *   agents: { worker: { provider: 'openai', model: 'gpt-4o-mini' } },
+ *   agents: { worker: { provider: 'openai', model: 'gpt-5.5' } },
  *   hitl: {
  *     approvals: { beforeTool: ['delete-file'] },
  *     handler: hitl.autoApprove(),
