@@ -66,12 +66,13 @@ jobs:
   # Failure-gating job for the batch-1 hardening test set. The full suite
   # above still runs with continue-on-error (pre-existing failures pending
   # burn-down); this job is the required check for the batch's own tests.
-  # --passWithNoTests keeps it green until each listed file lands.
   batch1-tests:
     name: Batch-1 gated tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
@@ -91,9 +92,10 @@ jobs:
 
       - name: Batch-1 tests (failure-gating)
         run: >-
-          pnpm vitest run --passWithNoTests
+          pnpm vitest run
           src/core/llm/providers/__tests__/openai-cache-params.test.ts
           src/core/llm/providers/__tests__/default-judge.test.ts
+          src/core/llm/providers/__tests__/openai-streaming-usage.test.ts
           src/core/llm/providers/implementations/__tests__/openai-typed-cache-options.test.ts
           src/api/__tests__/observability.genai.test.ts
           src/api/__tests__/inclusive-input-tokens.test.ts

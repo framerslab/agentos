@@ -379,6 +379,11 @@ export class PersonalityMutationStore {
     rate: number,
     cycleId: string,
   ): Promise<DecayResult & { skipped?: boolean }> {
+    if (!Number.isFinite(rate) || rate < 0) {
+      throw new Error(
+        `PersonalityMutationStore.decayForAgent: rate must be a finite non-negative number, got ${rate}`,
+      );
+    }
     await this.ensureSchema();
     if (!this.db.transaction) {
       throw new Error(
@@ -386,15 +391,20 @@ export class PersonalityMutationStore {
       );
     }
     return this.db.transaction(async (tx) => {
-      const guard = await tx.get(
-        'SELECT 1 AS hit FROM personality_decay_cycles WHERE agent_id = ? AND cycle_id = ?',
-        [agentId, cycleId],
-      );
-      if (guard) return { decayed: 0, pruned: 0, skipped: true };
+      // Conflict-safe guard INSERT FIRST (no check-then-insert window): a
+      // concurrent same-cycle caller's insert is ignored, and ownership is
+      // decided by reading back which applied_at stamp won. The loser
+      // returns the promised `skipped` no-op instead of a uniqueness error.
+      const stamp = Date.now() + Math.random();
       await tx.run(
-        'INSERT INTO personality_decay_cycles (agent_id, cycle_id, applied_at) VALUES (?, ?, ?)',
-        [agentId, cycleId, Date.now()],
+        'INSERT OR IGNORE INTO personality_decay_cycles (agent_id, cycle_id, applied_at) VALUES (?, ?, ?)',
+        [agentId, cycleId, stamp],
       );
+      const guard = (await tx.get(
+        'SELECT applied_at FROM personality_decay_cycles WHERE agent_id = ? AND cycle_id = ?',
+        [agentId, cycleId],
+      )) as { applied_at?: number } | undefined;
+      if (guard?.applied_at !== stamp) return { decayed: 0, pruned: 0, skipped: true };
 
       const stale = (await tx.all(
         'SELECT id FROM personality_mutations WHERE agent_id = ? AND strength <= 0.1',

@@ -211,7 +211,11 @@ describe('AdaptPersonalityTool', () => {
 });
 
 describe('decay-on-adapt (spec batch-1 C6)', () => {
-  it('ages stored strengths for this agent before recording, once per UTC day', async () => {
+  it('ages stored strengths for this agent before recording; a second same-day adapt reuses the same cycle id (store no-ops via its guard)', async () => {
+    // Freeze the clock so the UTC-day cycle id cannot straddle midnight
+    // between the two executes and the assertion below.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-20T12:00:00Z'));
     const decayForAgent = vi.fn().mockResolvedValue({ decayed: 1, pruned: 0 });
     const deps = makeDeps({
       config: { maxDeltaPerSession: 0.3, persistWithDecay: true, decayRate: 0.05 },
@@ -223,16 +227,23 @@ describe('decay-on-adapt (spec batch-1 C6)', () => {
     const tool = new AdaptPersonalityTool(deps);
 
     await tool.execute(
-      { trait: 'openness', delta: 0.1, reasoning: 'test' },
+      { trait: 'openness', delta: 0.05, reasoning: 'test' },
+      makeContext({ gmiId: 'agent-decay' }),
+    );
+    await tool.execute(
+      { trait: 'openness', delta: 0.05, reasoning: 'test again' },
       makeContext({ gmiId: 'agent-decay' }),
     );
 
-    const expectedCycle = 'day:' + new Date().toISOString().slice(0, 10);
-    expect(decayForAgent).toHaveBeenCalledWith('agent-decay', 0.05, expectedCycle);
+    const expectedCycle = 'day:2026-07-20';
+    expect(decayForAgent).toHaveBeenCalledTimes(2);
+    expect(decayForAgent).toHaveBeenNthCalledWith(1, 'agent-decay', 0.05, expectedCycle);
+    expect(decayForAgent).toHaveBeenNthCalledWith(2, 'agent-decay', 0.05, expectedCycle);
     const order =
       decayForAgent.mock.invocationCallOrder[0]! <
       (deps.mutationStore!.record as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!;
     expect(order).toBe(true);
+    vi.useRealTimers();
   });
 
   it('persistWithDecay false performs zero decay calls', async () => {

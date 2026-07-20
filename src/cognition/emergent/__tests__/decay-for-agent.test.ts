@@ -17,7 +17,7 @@ interface Row { id: string; agentId: string; strength: number }
 
 class FakeAdapter {
   rows = new Map<string, Row>();
-  cycles = new Set<string>();
+  cycles = new Map<string, number>();
   /** When set, the Nth write inside a transaction throws (1-based). */
   failOnWrite = 0;
   private writes = 0;
@@ -36,11 +36,10 @@ class FakeAdapter {
   }
 
   async run(sql: string, params: unknown[] = []): Promise<unknown> {
-    if (sql.includes('INSERT INTO personality_decay_cycles')) {
+    if (sql.includes('INSERT OR IGNORE INTO personality_decay_cycles')) {
       this.bump();
       const key = `${params[0]}|${params[1]}`;
-      if (this.cycles.has(key)) throw new Error('UNIQUE constraint failed');
-      this.cycles.add(key);
+      if (!this.cycles.has(key)) this.cycles.set(key, Number(params[2]));
       return {};
     }
     if (sql.includes('DELETE FROM personality_mutations WHERE id = ?')) {
@@ -59,7 +58,8 @@ class FakeAdapter {
 
   async get(sql: string, params: unknown[] = []): Promise<unknown> {
     if (sql.includes('FROM personality_decay_cycles')) {
-      return this.cycles.has(`${params[0]}|${params[1]}`) ? { hit: 1 } : undefined;
+      const key = `${params[0]}|${params[1]}`;
+      return this.cycles.has(key) ? { applied_at: this.cycles.get(key) } : undefined;
     }
     return undefined;
   }
@@ -77,7 +77,7 @@ class FakeAdapter {
     fn: (tx: { run: FakeAdapter['run']; get: FakeAdapter['get']; all: FakeAdapter['all'] }) => Promise<T>,
   ): Promise<T> {
     const rowsSnapshot = new Map([...this.rows.entries()].map(([k, v]) => [k, { ...v }]));
-    const cyclesSnapshot = new Set(this.cycles);
+    const cyclesSnapshot = new Map(this.cycles);
     this.writes = 0;
     try {
       return await fn({
@@ -180,5 +180,20 @@ describe('PersonalityMutationStore.decayForAgent', () => {
     await expect(bareStore.decayForAgent('a1', 0.05, 'day:2026-07-20')).rejects.toThrow(
       /transaction-capable/,
     );
+  });
+});
+
+describe('rate validation', () => {
+  it('rejects negative and non-finite rates without touching any state', async () => {
+    const adapter = new FakeAdapter();
+    adapter.seed('m1', 'a1', 1.0);
+    const store = new PersonalityMutationStore(adapter);
+
+    await expect(store.decayForAgent('a1', -0.05, 'day:2026-07-20')).rejects.toThrow(/non-negative/);
+    await expect(store.decayForAgent('a1', Number.NaN, 'day:2026-07-20')).rejects.toThrow(/finite/);
+    await expect(store.decayForAgent('a1', Infinity, 'day:2026-07-20')).rejects.toThrow(/finite/);
+
+    expect(adapter.rows.get('m1')!.strength).toBe(1.0);
+    expect(adapter.cycles.size).toBe(0);
   });
 });

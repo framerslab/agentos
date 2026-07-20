@@ -12,6 +12,13 @@ permissions:
   pull-requests: write
   id-token: write
 
+# Serialize release runs (workflow_run events from back-to-back CI
+# completions must not race semantic-release's tag/version writes);
+# never cancel an in-progress publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     name: Release
