@@ -157,3 +157,36 @@ describe('OpenAIProvider typed cache/tier options', () => {
     expect(res.usage?.promptTokens).toBe(120);
   });
 });
+
+describe('promptCacheSessionId derivation source (spec review fold)', () => {
+  it('auto derives from the cache-only session field when the affinity sessionId is absent', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          object: 'list',
+          data: [{ id: 'gpt-5.5', object: 'model', created: 1, owned_by: 'openai' }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const provider2 = new OpenAIProvider();
+    await provider2.initialize({ apiKey: 'sk-test', maxRetries: 1 });
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify(chatResponseBody()), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    spy.mockClear();
+
+    await provider2.generateCompletion('gpt-5.5', [{ role: 'user', content: 'hi' }], {
+      promptCacheKey: 'auto',
+      promptCacheSessionId: 'ledger-1',
+    });
+    const body = JSON.parse((spy.mock.calls.at(-1)![1] as RequestInit).body as string);
+    const expected = 'agentos:' + createHash('sha256').update('ledger-1').digest('hex').slice(0, 16);
+    expect(body.prompt_cache_key).toBe(expected);
+    expect(JSON.stringify(body)).not.toContain('ledger-1');
+    expect(body).not.toHaveProperty('session_id');
+  });
+});

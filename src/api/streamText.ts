@@ -124,6 +124,12 @@ export interface StreamTextResult {
    * model id. The existing `model`-related fields keep their meaning.
    */
   responseModel: Promise<string | undefined>;
+  /**
+   * Provider-reported service tier the final step actually ran at (OpenAI;
+   * spec batch-1 C2). Settles on every terminal path; `undefined` when no
+   * chunk reported a tier.
+   */
+  serviceTier: Promise<string | undefined>;
   /** Resolves to the ordered list of {@link ToolCallRecord}s when the stream completes. */
   toolCalls: Promise<ToolCallRecord[]>;
   /**
@@ -234,6 +240,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
   let resolveUsage: (v: TokenUsage) => void;
   let resolveResponseModel: (v: string | undefined) => void;
   let lastResponseModelId: string | undefined;
+  let resolveServiceTier: (v: string | undefined) => void;
+  let lastServiceTier: string | undefined;
   let resolveToolCalls: (v: ToolCallRecord[]) => void;
   let resolveProviderId: (v: string) => void;
   let resolveModelId: (v: string) => void;
@@ -253,6 +261,11 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
   // normal completion, fallback resolution, error, and abandonment alike.
   const responseModelPromise = new Promise<string | undefined>((r) => {
     resolveResponseModel = r;
+  });
+  // Provider-reported service tier of the final step (spec batch-1 C2);
+  // settled at every terminal path alongside responseModel.
+  const serviceTierPromise = new Promise<string | undefined>((r) => {
+    resolveServiceTier = r;
   });
   // Provider + model resolution lives inside the lazy async generator,
   // so we expose them as Deferred Promises that the generator resolves
@@ -539,6 +552,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               // routing; other providers ignore it).
               ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
             ...(opts.promptCacheKey !== undefined ? { promptCacheKey: opts.promptCacheKey } : {}),
+            ...(opts.promptCacheKey === 'auto' && (opts.sessionId ?? opts.usageLedger?.sessionId) !== undefined
+              ? { promptCacheSessionId: (opts.sessionId ?? opts.usageLedger?.sessionId) as string }
+              : {}),
             ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
             ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
               // Forward provider-specific top-level payload params (e.g.
@@ -547,6 +563,26 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
                 ? { customModelParams: opts.customModelParams }
                 : {}),
             } as any);
+            // Aggregate the COMPLETE normalized usage from every shim
+            // roundtrip (spec batch-1 review fold). totalTokens still flows
+            // via loopResult below — NOT accumulated here, or it would
+            // double count.
+            if (r.usage) {
+              if (typeof r.usage.promptTokens === 'number') usage.promptTokens += r.usage.promptTokens;
+              if (typeof r.usage.completionTokens === 'number') usage.completionTokens += r.usage.completionTokens;
+              if (typeof r.usage.costUSD === 'number') usage.costUSD = (usage.costUSD ?? 0) + r.usage.costUSD;
+              if (typeof r.usage.cacheReadInputTokens === 'number') {
+                usage.cacheReadTokens = (usage.cacheReadTokens ?? 0) + r.usage.cacheReadInputTokens;
+              }
+              if (typeof r.usage.cacheCreationInputTokens === 'number') {
+                usage.cacheCreationTokens = (usage.cacheCreationTokens ?? 0) + r.usage.cacheCreationInputTokens;
+              }
+              if (typeof r.usage.inclusiveInputTokens === 'number') {
+                usage.inclusiveInputTokens = (usage.inclusiveInputTokens ?? 0) + r.usage.inclusiveInputTokens;
+              }
+            }
+            if (typeof r.modelId === 'string' && r.modelId) lastResponseModelId = r.modelId;
+            if (typeof r.serviceTier === 'string' && r.serviceTier) lastServiceTier = r.serviceTier;
             const cc = r.choices?.[0]?.message?.content;
             return {
               text: typeof cc === 'string' ? cc : ((cc as any)?.text ?? ''),
@@ -567,7 +603,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           yield part;
         }
         resolveText!(finalText);
-        resolveUsage!(usage); resolveResponseModel!(lastResponseModelId);
+        resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
         resolveToolCalls!(shimToolCalls);
       }
       if (tools.length > 0 && toolMode === 'prompt') {
@@ -639,6 +675,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // routing; other providers ignore it).
             ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
             ...(opts.promptCacheKey !== undefined ? { promptCacheKey: opts.promptCacheKey } : {}),
+            ...(opts.promptCacheKey === 'auto' && (opts.sessionId ?? opts.usageLedger?.sessionId) !== undefined
+              ? { promptCacheSessionId: (opts.sessionId ?? opts.usageLedger?.sessionId) as string }
+              : {}),
             ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
             ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
             // Cache-diagnostics opt-in (Anthropic beta): thread the previous
@@ -660,6 +699,15 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
         try {
           for await (const chunk of stream) {
+            // Capture the provider-reported identity from EVERY chunk (not
+            // only the usage-final one) so an error or abandonment after a
+            // model-bearing chunk still resolves responseModel/serviceTier.
+            if (typeof chunk.modelId === 'string' && chunk.modelId) {
+              lastResponseModelId = chunk.modelId;
+            }
+            if (typeof chunk.serviceTier === 'string' && chunk.serviceTier) {
+              lastServiceTier = chunk.serviceTier;
+            }
             reconstructor.push(chunk);
 
             const textDelta = chunk.responseTextDelta ?? '';
@@ -677,7 +725,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               yield part;
               metricStatus = 'error';
               resolveText!(finalText);
-              resolveUsage!(usage); resolveResponseModel!(lastResponseModelId);
+              resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
               resolveToolCalls!(allToolCalls);
               resolveFinishReason!('error');
               return;
@@ -717,9 +765,6 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               }
               if (typeof cacheCreate === 'number') {
                 usage.cacheCreationTokens = (usage.cacheCreationTokens ?? 0) + cacheCreate;
-              }
-              if (typeof chunk.modelId === 'string' && chunk.modelId) {
-                lastResponseModelId = chunk.modelId;
               }
               const chunkInclusiveIn = (chunk.usage as { inclusiveInputTokens?: number }).inclusiveInputTokens;
               if (typeof chunkInclusiveIn === 'number') {
@@ -819,10 +864,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               requestModel: recordedModelId,
               responseModel: lastResponseModelId,
               usage,
+              ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}),
+              ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}),
             });
           }
           resolveText!(finalText);
-          resolveUsage!(usage); resolveResponseModel!(lastResponseModelId);
+          resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
           resolveToolCalls!(allToolCalls);
           resolveFinishReason!(stepFinish);
           return;
@@ -981,7 +1028,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       }
 
       resolveText!(finalText);
-      resolveUsage!(usage); resolveResponseModel!(lastResponseModelId);
+      resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
       resolveToolCalls!(allToolCalls);
       // maxSteps exhausted. Outstanding tool calls with no final text is
       // the classic 'tool-calls' ending; otherwise the last step's own
@@ -1104,6 +1151,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             if (typeof fbUsage.inclusiveInputTokens === 'number') {
               usage.inclusiveInputTokens = (usage.inclusiveInputTokens ?? 0) + fbUsage.inclusiveInputTokens;
             }
+            // Adopt the fallback stream's response identity (spec batch-1
+            // review fold): the fallback is the run that actually answered.
+            const fbResponseModel = await fallbackResult.responseModel;
+            if (fbResponseModel) lastResponseModelId = fbResponseModel;
+            const fbServiceTier = await fallbackResult.serviceTier;
+            if (fbServiceTier) lastServiceTier = fbServiceTier;
 
             const fbToolCalls = await fallbackResult.toolCalls;
             allToolCalls.push(...fbToolCalls);
@@ -1136,7 +1189,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
         if (fallbackSucceeded) {
           resolveText!(finalText);
-          resolveUsage!(usage); resolveResponseModel!(lastResponseModelId);
+          resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
           resolveToolCalls!(allToolCalls);
           resolveFinishReason!(fallbackFinishReason);
         } else {
@@ -1153,7 +1206,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           parts.push(errorPart);
           yield errorPart;
           resolveText!(finalText);
-          resolveUsage!(usage); resolveResponseModel!(lastResponseModelId);
+          resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
           resolveToolCalls!(allToolCalls);
           resolveFinishReason!('error');
         }
@@ -1163,7 +1216,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         parts.push(part);
         yield part;
         resolveText!(finalText);
-        resolveUsage!(usage); resolveResponseModel!(lastResponseModelId);
+        resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
         resolveToolCalls!(allToolCalls);
         resolveFinishReason!('error');
       }
@@ -1179,7 +1232,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // streamed before the abandonment; normal completions already settled
       // these, making the calls no-ops (first settle wins).
       resolveText!(finalText);
-      resolveUsage!(usage); resolveResponseModel!(lastResponseModelId);
+      resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
       resolveToolCalls!(allToolCalls);
       resolveProviderId!(recordedProviderId ?? '');
       resolveModelId!(recordedModelId ?? '');
@@ -1217,6 +1270,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           requestModel: recordedModelId,
           responseModel: lastResponseModelId,
           usage,
+          ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}),
+          ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}),
         });
       }
       rootSpan?.end();
@@ -1249,6 +1304,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         fireLlmUsageObserver({
           provider: recordedProviderId ?? '',
           model: recordedModelId ?? '',
+          ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
           usage,
           source: opts.source,
           finishReason:
@@ -1314,6 +1370,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     text: textPromise,
     usage: usagePromise,
     responseModel: responseModelPromise,
+    serviceTier: serviceTierPromise,
     toolCalls: toolCallsPromise,
     provider: providerPromise,
     model: modelPromise,

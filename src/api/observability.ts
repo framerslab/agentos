@@ -89,6 +89,10 @@ export interface GenAiSpanInfo {
   responseModel?: string;
   usage?: ApiUsageLike | null;
   durationMs?: number;
+  /** Caller-requested OpenAI service tier (emitted as `openai.request.service_tier`). */
+  requestServiceTier?: string;
+  /** Provider-reported service tier the call ran at (`openai.response.service_tier`). */
+  responseServiceTier?: string;
 }
 
 /**
@@ -109,6 +113,10 @@ export function attachGenAiAttributes(span: Span | null, info: GenAiSpanInfo): v
   span.setAttribute('gen_ai.operation.name', info.operationName);
   span.setAttribute('gen_ai.request.model', info.requestModel);
   if (info.responseModel !== undefined) span.setAttribute('gen_ai.response.model', info.responseModel);
+  // Service tiers use the OTel registry's provider-scoped attribute names —
+  // nothing invented under gen_ai.* (spec batch-1 review fold).
+  if (info.requestServiceTier !== undefined) span.setAttribute('openai.request.service_tier', info.requestServiceTier);
+  if (info.responseServiceTier !== undefined) span.setAttribute('openai.response.service_tier', info.responseServiceTier);
   const u = info.usage;
   if (u) {
     if (typeof u.inclusiveInputTokens === 'number') {

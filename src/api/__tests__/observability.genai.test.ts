@@ -85,3 +85,19 @@ describe('toTurnMetricUsage cache passthrough', () => {
     expect(mapped?.cacheReadTokens).toBe(0);
   });
 });
+
+describe('service-tier span attributes', () => {
+  it('emits the OTel registry openai.* tier names, never gen_ai.* inventions', () => {
+    const { attrs, span } = fakeSpan();
+    attachGenAiAttributes(span, {
+      providerName: 'openai',
+      operationName: 'chat',
+      requestModel: 'gpt-5.6',
+      requestServiceTier: 'flex',
+      responseServiceTier: 'default',
+    });
+    expect(attrs['openai.request.service_tier']).toBe('flex');
+    expect(attrs['openai.response.service_tier']).toBe('default');
+    expect(Object.keys(attrs).some((k) => k.startsWith('gen_ai.') && k.includes('service_tier'))).toBe(false);
+  });
+});

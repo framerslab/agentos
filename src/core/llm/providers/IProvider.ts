@@ -199,6 +199,14 @@ export interface ModelCompletionOptions {
    */
   promptCacheKey?: string | 'auto' | false;
   /**
+   * Cache-key derivation source ONLY (spec batch-1 review fold): the session
+   * id used by `promptCacheKey: 'auto'` when the affinity {@link sessionId}
+   * is absent (e.g. it came from `usageLedger.sessionId` at the api layer).
+   * Never emitted on the wire itself and never used for OpenRouter
+   * `session_id` sticky routing — that stays {@link sessionId}'s job.
+   */
+  promptCacheSessionId?: string;
+  /**
    * OpenAI prompt-cache retention request (other providers ignore it).
    * Emitted only when the fail-closed capability table allows the
    * model/value combination (see `openai-cache-params.ts`): `'30m'` →

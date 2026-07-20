@@ -100,6 +100,10 @@ namespace OpenAIAPITypes {
     /** Service tier the call actually ran at (present when service_tier was requested or defaulted). */
     service_tier?: string;
   }
+  export interface StreamChunkExtras {
+    /** Service tier the call actually ran at (present on chunks when requested/defaulted). */
+    service_tier?: string;
+  }
   export interface StreamDelta {
     role?: string;
     content?: string | null;
@@ -983,7 +987,10 @@ export class OpenAIProvider implements IProvider {
     modelId: string,
     options: ModelCompletionOptions,
   ): void {
-    const cacheKey = resolvePromptCacheKey(options.promptCacheKey, options.sessionId);
+    const cacheKey = resolvePromptCacheKey(
+      options.promptCacheKey,
+      options.promptCacheSessionId ?? options.sessionId,
+    );
     if (cacheKey) payload.prompt_cache_key = cacheKey;
     if (options.promptCacheRetention) {
       const retention = resolveOpenAiCacheRetentionParams(modelId, options.promptCacheRetention);

@@ -697,6 +697,12 @@ export interface GenerateTextResult {
    */
   responseModel?: string;
   /**
+   * Provider-reported service tier the final step actually ran at (OpenAI
+   * `service_tier` on the response; spec batch-1 C2). Undefined on
+   * providers/paths without a tier concept.
+   */
+  serviceTier?: string;
+  /**
    * Upstream host that actually served the request when `provider` is an
    * aggregator/router (OpenRouter reports e.g. `'Groq'` or `'DeepInfra'`
    * per completion). Undefined for direct providers, for aggregators that
@@ -1514,6 +1520,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       // Provider-reported model id of the final step (spec batch-1 C1);
       // additive — the public `model` field keeps the resolved requested id.
       let lastResponseModelId: string | undefined;
+      // Provider-reported service tier of the final step (spec batch-1 C2).
+      let lastServiceTier: string | undefined;
       const maxSteps = opts.maxSteps ?? 1;
       span?.setAttribute('agentos.api.max_steps', maxSteps);
 
@@ -1598,6 +1606,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               // routing; other providers ignore it).
               ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
               ...(opts.promptCacheKey !== undefined ? { promptCacheKey: opts.promptCacheKey } : {}),
+              ...(opts.promptCacheKey === 'auto' && (opts.sessionId ?? opts.usageLedger?.sessionId) !== undefined
+                ? { promptCacheSessionId: (opts.sessionId ?? opts.usageLedger?.sessionId) as string }
+                : {}),
               ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
               ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
               // Forward provider-specific top-level payload params (e.g.
@@ -1612,6 +1623,28 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               // ignoring the caller's requestTimeout bound.
               ...(opts.requestTimeout !== undefined ? { requestTimeout: opts.requestTimeout } : {}),
             } as any);
+            // Aggregate the COMPLETE normalized usage from every shim
+            // roundtrip (spec batch-1 review fold): the thin {totalTokens}
+            // loop contract stays for the GMI helper (totalTokens flows via
+            // loopResult below — NOT accumulated here, or it would double
+            // count), while all richer counters land on totalUsage and the
+            // final response identity is captured for telemetry.
+            if (r.usage) {
+              if (typeof r.usage.promptTokens === 'number') totalUsage.promptTokens += r.usage.promptTokens;
+              if (typeof r.usage.completionTokens === 'number') totalUsage.completionTokens += r.usage.completionTokens;
+              if (typeof r.usage.costUSD === 'number') totalUsage.costUSD = (totalUsage.costUSD ?? 0) + r.usage.costUSD;
+              if (typeof r.usage.cacheReadInputTokens === 'number') {
+                totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + r.usage.cacheReadInputTokens;
+              }
+              if (typeof r.usage.cacheCreationInputTokens === 'number') {
+                totalUsage.cacheCreationTokens = (totalUsage.cacheCreationTokens ?? 0) + r.usage.cacheCreationInputTokens;
+              }
+              if (typeof r.usage.inclusiveInputTokens === 'number') {
+                totalUsage.inclusiveInputTokens = (totalUsage.inclusiveInputTokens ?? 0) + r.usage.inclusiveInputTokens;
+              }
+            }
+            if (typeof r.modelId === 'string' && r.modelId) lastResponseModelId = r.modelId;
+            if (typeof r.serviceTier === 'string' && r.serviceTier) lastServiceTier = r.serviceTier;
             const cc = r.choices?.[0]?.message?.content;
             return {
               text: typeof cc === 'string' ? cc : ((cc as any)?.text ?? ''),
@@ -1638,6 +1671,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           provider: resolved.providerId,
           model: resolved.modelId,
           ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
+          ...(lastServiceTier !== undefined ? { serviceTier: lastServiceTier } : {}),
           text: loopResult.text,
           usage: shimUsage,
           toolCalls: loopResult.toolCalls.map((c) => ({
@@ -1682,7 +1716,6 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               system: opts.system,
               tools: Array.from(toolMap.values()),
               model: resolved.modelId,
-          ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
               provider: resolved.providerId,
               step,
               prompt: opts.prompt,
@@ -1730,6 +1763,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 // routing; other providers ignore it).
                 ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
               ...(opts.promptCacheKey !== undefined ? { promptCacheKey: opts.promptCacheKey } : {}),
+              ...(opts.promptCacheKey === 'auto' && (opts.sessionId ?? opts.usageLedger?.sessionId) !== undefined
+                ? { promptCacheSessionId: (opts.sessionId ?? opts.usageLedger?.sessionId) as string }
+                : {}),
               ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
               ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
                 // Cache diagnostics: thread the previous step's message id so
@@ -1768,6 +1804,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         }
         if (typeof response.modelId === 'string' && response.modelId) {
           lastResponseModelId = response.modelId;
+        }
+        if (typeof response.serviceTier === 'string' && response.serviceTier) {
+          lastServiceTier = response.serviceTier;
         }
         if (opts.cacheDiagnostics) {
           // Chain the id for the NEXT step's comparison; keep this step's
@@ -1853,7 +1892,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           span?.setAttribute('agentos.api.finish_reason', choice.finishReason ?? 'stop');
           span?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
           attachUsageAttributes(span, totalUsage);
-        attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: totalUsage });
+        attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: totalUsage, ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}), ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}) });
           // 2026-05-29 — fire the global LLM usage observer so hosts
           // (wilds-ai foundation_usage_events, billing dashboards) get
           // the resolved provider + model + cost without wrapping every
@@ -1873,6 +1912,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             provider: resolved.providerId,
             model: resolved.modelId,
           ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
+          ...(lastServiceTier !== undefined ? { serviceTier: lastServiceTier } : {}),
             ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
             ...(lastCacheDiagnostics !== undefined
               ? { cacheDiagnostics: lastCacheDiagnostics }
@@ -2000,7 +2040,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         span?.setAttribute('agentos.api.finish_reason', choice.finishReason ?? 'stop');
         span?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
         attachUsageAttributes(span, totalUsage);
-        attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: totalUsage });
+        attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: totalUsage, ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}), ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}) });
         fireLlmUsageObserver({
           provider: resolved.providerId,
           model: resolved.modelId,
@@ -2016,6 +2056,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           provider: resolved.providerId,
           model: resolved.modelId,
           ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
+          ...(lastServiceTier !== undefined ? { serviceTier: lastServiceTier } : {}),
           ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
           ...(lastCacheDiagnostics !== undefined ? { cacheDiagnostics: lastCacheDiagnostics } : {}),
           ...(opts.cacheDiagnostics ? { providerMessageId: lastProviderMessageId } : {}),
@@ -2053,6 +2094,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       return {
         provider: resolved.providerId,
         model: resolved.modelId,
+        ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
+        ...(lastServiceTier !== undefined ? { serviceTier: lastServiceTier } : {}),
         text: (lastAssistant?.content as string) ?? '',
         usage: totalUsage,
         toolCalls: allToolCalls,
