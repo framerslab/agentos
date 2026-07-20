@@ -263,6 +263,9 @@ type AgentOSMetricsInstruments = Readonly<{
   turnTokensPrompt: ReturnType<ReturnType<typeof metrics.getMeter>['createHistogram']>;
   turnTokensCompletion: ReturnType<ReturnType<typeof metrics.getMeter>['createHistogram']>;
   turnCostUsd: ReturnType<ReturnType<typeof metrics.getMeter>['createHistogram']>;
+  turnTokensCacheRead: ReturnType<ReturnType<typeof metrics.getMeter>['createHistogram']>;
+  turnTokensCacheCreation: ReturnType<ReturnType<typeof metrics.getMeter>['createHistogram']>;
+  turnFirstPartMs: ReturnType<ReturnType<typeof metrics.getMeter>['createHistogram']>;
   turnTaskSuccessScore: ReturnType<ReturnType<typeof metrics.getMeter>['createHistogram']>;
   toolResults: ReturnType<ReturnType<typeof metrics.getMeter>['createCounter']>;
   toolResultDurationMs: ReturnType<ReturnType<typeof metrics.getMeter>['createHistogram']>;
@@ -298,6 +301,18 @@ function getMetricInstruments(): AgentOSMetricsInstruments | null {
       description: 'Completion/output tokens used per turn.',
       unit: '1',
     }),
+    turnTokensCacheRead: meter.createHistogram('agentos.turn.tokens.cache_read', {
+      description: 'Cache-read input tokens per turn.',
+      unit: '1',
+    }),
+    turnTokensCacheCreation: meter.createHistogram('agentos.turn.tokens.cache_creation', {
+      description: 'Cache-creation input tokens per turn.',
+      unit: '1',
+    }),
+    turnFirstPartMs: meter.createHistogram('agentos.turn.first_part_ms', {
+      description: 'AgentOS-surface first-part latency: surface entry to the first StreamPart (streaming surfaces only; NOT the provider-boundary time-to-first-chunk).',
+      unit: 'ms',
+    }),
     turnCostUsd: meter.createHistogram('agentos.turn.cost.usd', {
       description: 'Total cost (USD) per turn (when available).',
       unit: 'USD',
@@ -326,11 +341,18 @@ export type AgentOSTurnMetricInput = Readonly<{
   personaId?: string;
   taskOutcomeStatus?: 'success' | 'partial' | 'failed';
   taskOutcomeScore?: number;
+  /**
+   * AgentOS-surface first-part latency in ms (surface entry to the first
+   * StreamPart, text or tool-call alike). Streaming surfaces only.
+   */
+  ttfbMs?: number;
   usage?: {
     totalTokens?: number;
     promptTokens?: number;
     completionTokens?: number;
     totalCostUSD?: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
   };
 }>;
 
@@ -362,6 +384,13 @@ export function recordAgentOSTurnMetrics(input: AgentOSTurnMetricInput): void {
   } catch {
     // ignore
   }
+  try {
+    if (typeof input.ttfbMs === 'number' && Number.isFinite(input.ttfbMs)) {
+      inst.turnFirstPartMs.record(Math.max(0, input.ttfbMs), baseAttributes);
+    }
+  } catch {
+    // ignore
+  }
 
   const usage = input.usage;
   if (!usage) return;
@@ -389,6 +418,18 @@ export function recordAgentOSTurnMetrics(input: AgentOSTurnMetricInput): void {
   }
   try {
     if (typeof totalCostUSD === 'number') inst.turnCostUsd.record(Math.max(0, totalCostUSD), baseAttributes);
+  } catch {
+    // ignore
+  }
+  try {
+    if (typeof usage.cacheReadTokens === 'number')
+      inst.turnTokensCacheRead.record(Math.max(0, usage.cacheReadTokens), baseAttributes);
+  } catch {
+    // ignore
+  }
+  try {
+    if (typeof usage.cacheCreationTokens === 'number')
+      inst.turnTokensCacheCreation.record(Math.max(0, usage.cacheCreationTokens), baseAttributes);
   } catch {
     // ignore
   }
