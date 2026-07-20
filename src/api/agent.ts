@@ -207,6 +207,18 @@ export interface AgentOptions extends BaseAgentConfig {
    */
   systemBlocks?: import('./generateText.js').SystemContentBlock[];
   /**
+   * Per-call prompt-cache control forwarded to every generate / stream /
+   * session call this agent makes (same contract as
+   * {@link GenerateTextOptions.cache}): `false` sends zero cache markers;
+   * `{ ttl: '1h' }` re-times the auto markers — including the moving
+   * conversation-history tail — onto the 1-hour cache. Set `'1h'` for agent
+   * loops whose steps gap past the 5-minute default cache TTL (multi-minute
+   * tool executions between LLM steps), where the default-paced history
+   * marker expires between steps and every step re-writes the whole prefix.
+   * Unset -> the provider's default marker pacing.
+   */
+  cache?: import('./generateText.js').GenerateTextOptions['cache'];
+  /**
    * Per-agent identity loaded from a SOUL.md workspace (the OpenClaw / aaronjmars-soul.md
    * convention). Three forms are accepted:
    *
@@ -690,6 +702,10 @@ export function agent(opts: AgentOptions): Agent {
     // provider-routing preferences) forwarded to every generate / stream /
     // session call this agent makes. Unset adds no payload keys.
     customModelParams: opts.customModelParams,
+    // Per-call prompt-cache disposition forwarded like thinking/effort (both
+    // spread baseOpts -> every generate/stream/session call this agent
+    // makes). Unset keeps the provider's default marker pacing.
+    cache: opts.cache,
     chainOfThought: opts.chainOfThought ?? true,
     apiKey: opts.apiKey,
     baseUrl: opts.baseUrl,

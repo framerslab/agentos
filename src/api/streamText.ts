@@ -1061,6 +1061,11 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ...opts,
               provider: fb.provider,
               model: fb.model,
+              // Per-hop cache disposition, mirroring generateText's fallback
+              // recursion: canonical chain legs pin `cache: false` so a rescue
+              // hop pays no cache-write premium its one-shot traffic never
+              // reads back; entries without `cache` inherit the call level.
+              ...(fb.cache !== undefined ? { cache: fb.cache } : {}),
               apiKey: undefined,
               baseUrl: undefined,
               // Preserve the REMAINING chain (entries AFTER the current fb;

@@ -273,6 +273,22 @@ export interface FallbackProviderEntry {
    * Omitted -> the hop inherits the call-level `effort`.
    */
   effort?: string;
+  /**
+   * Per-hop prompt-cache disposition applied ONLY when THIS entry serves the
+   * call (same override shape as {@link FallbackProviderEntry.effort}).
+   * `false` sends zero `cache_control` on the hop; `{ ttl }` re-times the
+   * hop's markers. Omitted -> the hop inherits the call-level
+   * {@link GenerateTextOptions.cache}.
+   *
+   * The canonical chains ({@link buildFallbackChain} /
+   * {@link buildPolicyAwareFallbackChain}) pin `cache: false` on every leg:
+   * rescue traffic is sporadic and one-shot-shaped, so cache writes on a
+   * fallback hop rarely earn their reads back (the claude-sonnet-5 leg
+   * measured 0.45x write amortization in wilds prod, 2026-07-13..20 — the
+   * writes cost ~2x what the reads saved). A caller-supplied entry keeps
+   * full control: omit to inherit, or set a ttl to cache a hop deliberately.
+   */
+  cache?: { ttl?: '5m' | '1h' } | false;
 }
 
 /**
@@ -1147,7 +1163,12 @@ export function isRetryableError(error: unknown): boolean {
  *
  * @param excludeProvider - Provider to omit from the chain (typically the
  *   primary provider that already failed).
- * @returns An array of `{ provider, model? }` entries ready for use as
+ * Every leg pins `cache: false`: failover hops are sporadic one-shots, so
+ * prompt-cache writes on a rescue leg almost never earn their reads back
+ * (see {@link FallbackProviderEntry.cache}). Callers wanting a cached hop
+ * supply their own chain with a per-entry ttl.
+ *
+ * @returns An array of `{ provider, model?, cache }` entries ready for use as
  *   {@link GenerateTextOptions.fallbackProviders}.
  *
  * @example
@@ -1163,12 +1184,12 @@ export function buildFallbackChain(
   const chain: FallbackProviderEntry[] = [];
 
   if (process.env.OPENAI_API_KEY && excludeProvider !== 'openai') {
-    chain.push({ provider: 'openai', model: 'gpt-5.5' });
+    chain.push({ provider: 'openai', model: 'gpt-5.5', cache: false });
   }
   if (process.env.ANTHROPIC_API_KEY && excludeProvider !== 'anthropic') {
     // Sonnet-class, matching the gpt-5.5 floor on the OpenAI legs — an
     // OpenAI-primary outage keeps frontier-adjacent quality on the way down.
-    chain.push({ provider: 'anthropic', model: 'claude-sonnet-5' });
+    chain.push({ provider: 'anthropic', model: 'claude-sonnet-5', cache: false });
   }
   if (process.env.OPENROUTER_API_KEY && excludeProvider !== 'openrouter') {
     // ALWAYS pin an explicit model here. A model-less OpenRouter entry
@@ -1179,10 +1200,10 @@ export function buildFallbackChain(
     // floor (same family as the direct leg, structured-output safe) and
     // routes around an OpenAI-direct outage that already knocked the
     // `openai` link above out.
-    chain.push({ provider: 'openrouter', model: 'openai/gpt-5.5' });
+    chain.push({ provider: 'openrouter', model: 'openai/gpt-5.5', cache: false });
   }
   if (process.env.GEMINI_API_KEY && excludeProvider !== 'gemini') {
-    chain.push({ provider: 'gemini' });
+    chain.push({ provider: 'gemini', cache: false });
   }
 
   return chain;
@@ -1248,6 +1269,7 @@ export function buildPolicyAwareFallbackChain(
     chain.push({
       provider: 'openrouter',
       model: 'nousresearch/hermes-3-llama-3.1-405b',
+      cache: false,
     });
     // Sonnet via OpenRouter as the second uncensored band. We keep
     // it on OpenRouter (not direct Anthropic) because the chain's
@@ -1258,6 +1280,7 @@ export function buildPolicyAwareFallbackChain(
     chain.push({
       provider: 'openrouter',
       model: 'anthropic/claude-sonnet-4',
+      cache: false,
     });
   }
 
@@ -2158,6 +2181,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             // Lets an explicit chain run the fallback at a higher depth than the
             // primary without changing the primary call's effort.
             ...(fb.effort !== undefined ? { effort: fb.effort } : {}),
+            // Per-hop cache: same override semantics as per-hop effort above.
+            // The canonical chains pin `cache: false` on their legs so a
+            // rescue hop sends zero cache_control (no write premium paid on
+            // one-shot failover traffic); an entry without `cache` inherits
+            // the call-level disposition via the `...opts` spread.
+            ...(fb.cache !== undefined ? { cache: fb.cache } : {}),
             // Clear explicit keys/URLs so resolution uses env vars for the
             // fallback provider rather than the primary's overrides.
             apiKey: undefined,
