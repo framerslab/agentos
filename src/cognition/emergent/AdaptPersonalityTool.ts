@@ -63,6 +63,16 @@ export type HEXACOTrait = (typeof VALID_TRAITS)[number];
 export interface PersonalityMutationStore {
   /** Persist a single mutation record. */
   record(mutation: RecordMutationInput): Promise<string> | string;
+  /**
+   * Agent-scoped, idempotent strength aging (spec batch-1 C6). Optional —
+   * older store implementations without it skip decay-on-adapt with a
+   * warning; the concrete SQLite store implements it transactionally.
+   */
+  decayForAgent?(
+    agentId: string,
+    rate: number,
+    cycleId: string,
+  ): Promise<{ decayed: number; pruned: number; skipped?: boolean }>;
 }
 
 // ============================================================================
@@ -117,6 +127,16 @@ export interface AdaptPersonalityDeps {
   config: {
     /** Maximum total |delta| that may be applied to any single trait per session. */
     maxDeltaPerSession: number;
+    /**
+     * When true, each adapt first ages this agent's STORED mutation
+     * strengths for the current UTC-day cycle via
+     * {@link PersonalityMutationStore.decayForAgent} ("decay-on-adapt",
+     * spec batch-1 C6). Forwarded from
+     * `SelfImprovementConfig.personality.persistWithDecay`.
+     */
+    persistWithDecay?: boolean;
+    /** Strength subtracted per decay cycle. @default 0.05 */
+    decayRate?: number;
   };
   /** Optional durable store for recording mutation history. */
   mutationStore?: PersonalityMutationStore;
@@ -248,6 +268,30 @@ export class AdaptPersonalityTool
         success: false,
         error: 'delta is required and must be a finite number',
       };
+    }
+
+    // Decay-on-adapt (spec batch-1 C6): before applying a new mutation, age
+    // this agent's STORED mutation strengths for the current UTC-day cycle.
+    // Idempotent per (agent, day) via the store's guard table; a decay
+    // failure never blocks the adapt itself. Aging advances on activity —
+    // dormant agents' mutations hold strength until their next adapt.
+    if (this.deps.config.persistWithDecay && this.deps.mutationStore) {
+      if (this.deps.mutationStore.decayForAgent) {
+        const cycleId = 'day:' + new Date().toISOString().slice(0, 10);
+        try {
+          await this.deps.mutationStore.decayForAgent(
+            context.gmiId,
+            this.deps.config.decayRate ?? 0.05,
+            cycleId,
+          );
+        } catch (err) {
+          console.warn('[agentos] decay-on-adapt failed (mutation proceeds):', err);
+        }
+      } else {
+        console.warn(
+          '[agentos] persistWithDecay is on but the mutation store lacks decayForAgent; decay skipped',
+        );
+      }
     }
 
     // 3. Check session budget — track total |delta| per trait

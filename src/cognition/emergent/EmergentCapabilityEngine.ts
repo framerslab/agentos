@@ -620,6 +620,10 @@ export class EmergentCapabilityEngine {
         adaptPersonalityTool = new AdaptPersonalityTool({
           config: {
             maxDeltaPerSession: selfConfig.personality.maxDeltaPerSession,
+            // Decay wiring (spec batch-1 C6): both values forwarded so
+            // decay-on-adapt can run — construction previously dropped them.
+            persistWithDecay: selfConfig.personality.persistWithDecay,
+            decayRate: selfConfig.personality.decayRate,
           },
           getPersonality: deps.getPersonality,
           setPersonality: deps.setPersonality,

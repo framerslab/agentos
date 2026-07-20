@@ -264,7 +264,7 @@ export const hitl = {
    *   hitl: {
    *     approvals: { beforeTool: ['delete-file'] },
    *     handler: hitl.llmJudge({
-   *       model: 'gpt-4o-mini',
+   *       model: 'gpt-5.6',
    *       criteria: 'Is this action safe and non-destructive?',
    *       confidenceThreshold: 0.8,
    *       fallback: hitl.cli(), // escalate uncertain decisions to human
