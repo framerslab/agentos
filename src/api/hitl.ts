@@ -33,6 +33,8 @@
 
 import type { ApprovalRequest, ApprovalDecision } from './types.js';
 import type { GenerateTextResult } from './generateText.js';
+import { resolveJudgeLlm } from '../core/llm/providers/judge-config.js';
+import type { EffortLevel } from '../core/llm/providers/model-effort.js';
 
 // ---------------------------------------------------------------------------
 // Public type
@@ -272,10 +274,16 @@ export const hitl = {
    * ```
    */
   llmJudge(config: {
-    /** LLM model to use. @default 'gpt-4o-mini' */
+    /** LLM model to use. @default the central judge resolver (`resolveDefaultJudgeModel()` — gpt-5.6) */
     model?: string;
-    /** LLM provider. @default 'openai' */
+    /** LLM provider. @default 'openai'; pinning a non-openai provider requires an explicit `model` */
     provider?: string;
+    /**
+     * Reasoning effort. When omitted, the resolver's default (`max`) applies
+     * only when the resolver's model was also selected — a caller-pinned
+     * model gets no injected effort.
+     */
+    effort?: EffortLevel;
     /** Custom evaluation criteria/rubric. @default 'Evaluate whether this action is safe, relevant, and appropriate.' */
     criteria?: string;
     /** Confidence threshold — below this, escalate to fallback handler. @default 0.7 */
@@ -285,8 +293,9 @@ export const hitl = {
     /** API key override. */
     apiKey?: string;
   } = {}): HitlHandler {
-    const model = config.model ?? 'gpt-4o-mini';
-    const provider = config.provider ?? 'openai';
+    const judgeSel = resolveJudgeLlm({ model: config.model, provider: config.provider, effort: config.effort });
+    const model = judgeSel.model;
+    const provider = judgeSel.provider;
     const criteria = config.criteria ?? 'Evaluate whether this action is safe, relevant, and appropriate.';
     const threshold = config.confidenceThreshold ?? 0.7;
     const fallback = config.fallback ?? hitl.autoReject('LLM judge confidence too low');
@@ -327,6 +336,7 @@ export const hitl = {
           system: systemPrompt,
           prompt: userPrompt,
           temperature: 0.1,
+          ...(judgeSel.effort !== undefined ? { effort: judgeSel.effort } : {}),
           apiKey: config.apiKey,
         });
 

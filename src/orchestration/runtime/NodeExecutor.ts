@@ -13,7 +13,8 @@
  * after the `LoopController` and extension managers are available.
  */
 
-import type { GraphNode, GraphState, GraphCondition, CompiledExecutionGraph } from '../ir/types.js';
+import type { GraphNode, GraphState, GraphCondition, CompiledExecutionGraph, JudgeNodeConfig } from '../ir/types.js';
+import { resolveJudgeLlm } from '../../core/llm/providers/judge-config.js';
 import type {
   GraphEvent,
   MissionExpansionTrigger,
@@ -438,12 +439,7 @@ export class NodeExecutor {
       prompt: string;
       autoAccept?: boolean;
       autoReject?: boolean | string;
-      judge?: {
-        model?: string;
-        provider?: string;
-        criteria?: string;
-        confidenceThreshold?: number;
-      };
+      judge?: JudgeNodeConfig;
       onTimeout?: 'accept' | 'reject' | 'error';
       guardrailOverride?: boolean;
     },
@@ -481,12 +477,14 @@ export class NodeExecutor {
           'Do not include any other text.',
         ].join('\n');
 
+        const judgeSel = resolveJudgeLlm(config.judge);
         const result = await generateText({
-          model: config.judge.model ?? 'gpt-4o-mini',
-          provider: config.judge.provider ?? 'openai',
+          model: judgeSel.model,
+          provider: judgeSel.provider,
           system: systemPrompt,
           prompt: config.prompt,
           temperature: 0.1,
+          ...(judgeSel.effort !== undefined ? { effort: judgeSel.effort } : {}),
         });
 
         const jsonMatch = result.text.match(/\{[\s\S]*\}/);
