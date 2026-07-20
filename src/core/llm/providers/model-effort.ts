@@ -91,13 +91,14 @@ export function mapEffortToOpenAiResponsesEffort(
  * date, and the exact model alias in this comment when adding one.
  *
  * 2026-07-20 probe (chat.completions, top-level `reasoning_effort: 'max'`,
- * model `gpt-5.6`): NOT COMPLETED — both available OpenAI keys returned
- * `insufficient_quota` (HTTP 429 class, billing), which per the probe
- * protocol is a TRANSIENT outcome and never lowers/raises the ceiling.
- * The list stays empty (ceiling `xhigh`) until a probe returns HTTP 200
- * (→ add the family here) or a definitive unsupported-parameter 4xx
- * (→ record the refusal here). The current model catalog suggests gpt-5.6
- * accepts `max`; re-probe when a key has quota.
+ * max_completion_tokens 16): DEFINITIVE REFUSAL on BOTH `gpt-5.6` and
+ * `gpt-5.6-sol` — HTTP 400 `invalid_request_error`,
+ * `code: 'unsupported_value'`, `param: 'reasoning_effort'`, message
+ * enumerating the supported set: `'none', 'low', 'medium', 'high', 'xhigh'`.
+ * `xhigh` is therefore the PROVEN hard ceiling for the gpt-5.6 family on
+ * Chat Completions (matching the 2026-07-14 xhigh probe above; the model
+ * catalog's `max` listing does not apply to this API surface). The list
+ * stays empty until a future family probe returns HTTP 200.
  */
 const CHAT_MAX_EFFORT_MODELS: readonly string[] = [];
 

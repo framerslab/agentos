@@ -77,3 +77,12 @@ describe('resolveJudgeLlm', () => {
     expect(resolveJudgeLlm({ model: '  ' })).toEqual({ provider: 'openai', model: 'gpt-5.6', effort: 'max' });
   });
 });
+
+describe('gpt-5.6 chat effort ceiling (probe regression pin)', () => {
+  it('clamps agentos max to xhigh on the gpt-5.6 family (proven 2026-07-20: reasoning_effort rejects "max" with unsupported_value)', async () => {
+    const { mapEffortToOpenAiReasoningEffortForModel } = await import('../model-effort.js');
+    expect(mapEffortToOpenAiReasoningEffortForModel('max', 'gpt-5.6')).toBe('xhigh');
+    expect(mapEffortToOpenAiReasoningEffortForModel('max', 'gpt-5.6-sol')).toBe('xhigh');
+    expect(mapEffortToOpenAiReasoningEffortForModel('high', 'gpt-5.6')).toBe('high');
+  });
+});
