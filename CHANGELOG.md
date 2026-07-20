@@ -1,3 +1,7 @@
+## <small>0.9.161 (2026-07-20)</small>
+
+* fix(api): stand fallback-leg cache markers down and thread agent-level cache ([8d9faa9d53c1cd64e66a6a8d9b3800d3136a2dc7](https://github.com/framerslab/agentos/commit/8d9faa9d53c1cd64e66a6a8d9b3800d3136a2dc7))
+
 ## <small>0.9.160 (2026-07-20)</small>
 
 * fix(llm): record the probed gpt-5.6 chat effort ceiling ([41f52df1bd64704e8c7d01e0ee9794dacf4696fe](https://github.com/framerslab/agentos/commit/41f52df1bd64704e8c7d01e0ee9794dacf4696fe))
