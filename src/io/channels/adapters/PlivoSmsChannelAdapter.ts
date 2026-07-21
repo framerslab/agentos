@@ -277,7 +277,14 @@ export class PlivoSmsChannelAdapter extends BaseChannelAdapter<PlivoSmsAuthParam
     const url = meta?.url ?? this.webhookUrl;
     const method = (meta?.method ?? 'POST').toUpperCase();
 
-    if (!signature || !nonce || !url || !this.authToken) return false;
+    if (!url) {
+      console.warn(
+        '[Plivo SMS] Cannot verify inbound webhook — no request URL available. ' +
+          'Set params.webhookUrl (or pass meta.url) when signature verification is enabled.',
+      );
+      return false;
+    }
+    if (!signature || !nonce || !this.authToken) return false;
 
     let expected: string;
     try {

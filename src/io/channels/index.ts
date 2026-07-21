@@ -11,7 +11,7 @@ export type { InboundMessageHandler, RegisterAdapterOptions } from './ChannelRou
 export { evaluateGroupPolicy } from './group-policy.js';
 export type { GroupPolicyInput, GroupPolicyResult, GroupPolicyReason } from './group-policy.js';
 
-// Phase 4: Adapter implementations — base class + 13 platform adapters
+// Phase 4: Adapter implementations — base class + 14 platform adapters
 export { BaseChannelAdapter } from './adapters/BaseChannelAdapter.js';
 export type { RetryConfig } from './adapters/BaseChannelAdapter.js';
 
@@ -42,3 +42,7 @@ export { TeamsChannelAdapter } from './adapters/TeamsChannelAdapter.js';
 export type { TeamsAuthParams } from './adapters/TeamsChannelAdapter.js';
 export { GoogleChatChannelAdapter } from './adapters/GoogleChatChannelAdapter.js';
 export type { GoogleChatAuthParams } from './adapters/GoogleChatChannelAdapter.js';
+
+// SMS
+export { PlivoSmsChannelAdapter } from './adapters/PlivoSmsChannelAdapter.js';
+export type { PlivoSmsAuthParams } from './adapters/PlivoSmsChannelAdapter.js';
