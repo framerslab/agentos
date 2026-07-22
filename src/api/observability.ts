@@ -84,7 +84,7 @@ export function toTurnMetricUsage(usage?: ApiUsageLike | null): {
 
 export interface GenAiSpanInfo {
   providerName: string;
-  operationName: 'chat';
+  operationName: 'chat' | 'embeddings';
   requestModel: string;
   responseModel?: string;
   usage?: ApiUsageLike | null;

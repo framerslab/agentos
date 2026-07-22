@@ -776,6 +776,26 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
                 totalTokens: chunk.usage.totalTokens,
                 costUSD: chunk.usage.costUSD,
               });
+              // Per-step GenAI semconv attrs (queue item: step-span wiring).
+              attachGenAiAttributes(stepSpan, {
+                providerName: resolved.providerId,
+                operationName: 'chat',
+                requestModel: resolved.modelId,
+                ...(typeof chunk.modelId === 'string' && chunk.modelId
+                  ? { responseModel: chunk.modelId }
+                  : {}),
+                ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}),
+                ...(typeof chunk.serviceTier === 'string'
+                  ? { responseServiceTier: chunk.serviceTier }
+                  : {}),
+                usage: {
+                  promptTokens: chunk.usage.promptTokens,
+                  completionTokens: chunk.usage.completionTokens,
+                  inclusiveInputTokens: (chunk.usage as { inclusiveInputTokens?: number }).inclusiveInputTokens,
+                  cacheReadTokens: (chunk.usage as { cacheReadInputTokens?: number }).cacheReadInputTokens,
+                  cacheCreationTokens: (chunk.usage as { cacheCreationInputTokens?: number }).cacheCreationInputTokens,
+                },
+              });
             }
           }
         } finally {

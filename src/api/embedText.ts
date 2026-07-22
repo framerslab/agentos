@@ -11,7 +11,7 @@
  * @see {@link resolveModelOption} for model resolution with `TaskType = 'embedding'`.
  */
 import { resolveModelOption, resolveProvider } from './model.js';
-import { attachUsageAttributes, toTurnMetricUsage } from './observability.js';
+import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { recordAgentOSUsage, type AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 
@@ -380,6 +380,21 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
         attachUsageAttributes(span, {
           promptTokens: usage.promptTokens,
           totalTokens: usage.totalTokens,
+        });
+        // GenAI semconv for the embeddings operation (queue item:
+        // modality-aware operation names — embeddings input carries no
+        // cache split, so the inclusive total is the prompt count as-is).
+        attachGenAiAttributes(span, {
+          providerName: resolved.providerId,
+          operationName: 'embeddings',
+          requestModel: resolved.modelId,
+          ...(typeof reportedModel === 'string' && reportedModel
+            ? { responseModel: reportedModel }
+            : {}),
+          usage: {
+            promptTokens: usage.promptTokens,
+            inclusiveInputTokens: usage.promptTokens,
+          },
         });
 
         return {
