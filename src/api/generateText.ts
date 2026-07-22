@@ -1970,8 +1970,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           messages.push({
             role: 'assistant',
             content: textContent,
-            ...(((choice.message as Record<string, unknown> | undefined)?.thinking) !== undefined
-              ? { thinking: (choice.message as Record<string, unknown>).thinking }
+            ...(((choice.message as unknown as { thinking?: unknown } | undefined)?.thinking) !== undefined
+              ? { thinking: (choice.message as unknown as { thinking?: unknown }).thinking }
               : {}),
           });
           return {
@@ -2125,8 +2125,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         messages.push({
           role: 'assistant',
           content: textContent,
-          ...(((choice.message as Record<string, unknown> | undefined)?.thinking) !== undefined
-            ? { thinking: (choice.message as Record<string, unknown>).thinking }
+          ...(((choice.message as unknown as { thinking?: unknown } | undefined)?.thinking) !== undefined
+            ? { thinking: (choice.message as unknown as { thinking?: unknown }).thinking }
             : {}),
         });
         return {
