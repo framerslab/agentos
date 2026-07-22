@@ -820,6 +820,10 @@ describe('generateText', () => {
       const result = await generateText({
         model: 'openai:gpt-4.1-mini',
         prompt: 'find x',
+        // Bare generateText defaults maxSteps to 1 — the tool round would
+        // exhaust the loop (finishReason 'tool-calls', delta correctly ending
+        // on the tool result) and the final reply would never be requested.
+        maxSteps: 3,
         tools: [{
           name: 'lookup',
           description: 'find things',

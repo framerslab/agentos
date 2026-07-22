@@ -461,13 +461,16 @@ describe('agent session.send: structured output (responseSchema)', () => {
     const session = assistant.session('demo');
     await session.send('first', { responseSchema: Decision });
     await session.send('second', { responseSchema: Decision });
+    // 0.10 session shape: string input rides `prompt`; `messages` carries the
+    // prior transcript only (the delta-less mock falls back to the minimal
+    // user/assistant pair).
     expect(hoisted.generateText).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
+        prompt: 'second',
         messages: [
           { role: 'user', content: 'first' },
           { role: 'assistant', content: '{"verdict":"yes","confidence":0.8}' },
-          { role: 'user', content: 'second' },
         ],
       }),
     );
