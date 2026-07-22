@@ -45,6 +45,13 @@ import { warnOnDeferredLightweightAgentCapabilities } from './runtime/lightweigh
 import type { BaseAgentConfig } from './types.js';
 import { exportAgentConfig, exportAgentConfigJSON, type AgentExportConfig } from './agentExportCore.js';
 import { applyMemoryProvider } from './runtime/memoryProviderHooks.js';
+import {
+  SessionHistoryBuffer,
+  SESSION_HISTORY_DEFAULTS,
+  type HistoryEvent,
+  type SessionHistoryConfig,
+} from './sessionHistory.js';
+import type { SessionTranscriptMessage } from './sessionTranscript.js';
 
 /**
  * Provider hook interface consumed by `agent()` for memory integration.
@@ -219,6 +226,15 @@ export interface AgentOptions extends BaseAgentConfig {
    */
   cache?: import('./generateText.js').GenerateTextOptions['cache'];
   /**
+   * Session conversation-history policy (spec 2026-07-20 §1a/§1c). Sessions
+   * maintain a lossless transcript by default — independent of the memory
+   * subsystem — bounded past `maxTokens` (default 120K estimated) by
+   * chunk-amortized whole-block eviction. `false` restores stateless
+   * sessions (the pre-0.10 `memory: false` behavior). Partial objects
+   * override individual bounds.
+   */
+  history?: false | Partial<SessionHistoryConfig>;
+  /**
    * Per-agent identity loaded from a SOUL.md workspace (the OpenClaw / aaronjmars-soul.md
    * convention). Three forms are accepted:
    *
@@ -275,6 +291,23 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
    * Sanitized to /[a-zA-Z0-9_]/ and truncated to 64 chars.
    */
   schemaName?: string;
+  /**
+   * Telemetry + eviction-boundary label for this send's transcript block
+   * (spec §1c(iv)). Labels are markers, not pins.
+   */
+  blockLabel?: string;
+  /**
+   * Per-send generation overrides, merged over the agent's baseOpts with
+   * send-level precedence — the same contract `generate(prompt, extra)`
+   * gives `extra` (spec §1f). Long tool-driving loops rely on these
+   * (toolChoice, requestTimeout, cacheDiagnostics); without send-level
+   * carriage a caller migrating from generate() silently loses them.
+   */
+  toolChoice?: GenerateTextOptions['toolChoice'];
+  requestTimeout?: number;
+  cacheDiagnostics?: GenerateTextOptions['cacheDiagnostics'];
+  cache?: GenerateTextOptions['cache'];
+  maxTokens?: number;
 }
 
 /**
@@ -295,7 +328,8 @@ export interface AgentSession {
   readonly id: string;
   /**
    * Sends a user message and returns the complete assistant reply.
-   * Appends both turns to the session history when `memory` is enabled.
+   * Appends the send's lossless transcript delta to the session history
+   * (disable with `history: false` on the agent config).
    * Accepts plain text or multimodal content (text + image parts).
    *
    * @param input - User message as text string or MessageContent array.
@@ -331,8 +365,24 @@ export interface AgentSession {
    * @returns A {@link StreamTextResult} with async iterables and awaitable aggregates.
    */
   stream(input: MessageContent): StreamTextResult;
-  /** Returns a snapshot of the current conversation history for this session. */
-  messages(): Message[];
+  /**
+   * Returns a snapshot of the current conversation transcript for this
+   * session in provider-replayable shape (assistant tool_calls, tool
+   * results with ids, thinking blocks). Suitable as checkpoint material
+   * for {@link AgentSession.reseed}.
+   */
+  messages(): SessionTranscriptMessage[];
+  /**
+   * Atomically replaces the session history with a caller-built compact
+   * snapshot — the divergence-reset primitive (spec §1d). Bumps the
+   * history epoch: an in-flight send that began under an older epoch
+   * still returns to its caller, but its history append is discarded.
+   * Throws when the snapshot violates tool_use/tool_result pairing.
+   */
+  reseed(snapshot: SessionTranscriptMessage[]): void;
+  /** Returns accumulated history telemetry events (evictions, reseeds,
+   *  stale-append discards) and clears the queue. */
+  drainHistoryEvents(): HistoryEvent[];
   /** Returns persisted usage totals for this session when the usage ledger is enabled. */
   usage(): Promise<AgentOSUsageAggregate>;
   /** Clears all messages from this session's history. */
@@ -643,8 +693,25 @@ export function loadSoulFromOption(
  *
  * @category Core
  */
+/**
+ * Copies only the defined per-send generation overrides off SessionSendOptions
+ * (spec §1f) so undefined keys never clobber agent-level baseOpts via spread.
+ */
+function pickSendGenerationOverrides(
+  sendOpts?: SessionSendOptions<ZodType>,
+): Partial<GenerateTextOptions> {
+  if (!sendOpts) return {};
+  const out: Partial<GenerateTextOptions> = {};
+  if (sendOpts.toolChoice !== undefined) out.toolChoice = sendOpts.toolChoice;
+  if (sendOpts.requestTimeout !== undefined) out.requestTimeout = sendOpts.requestTimeout;
+  if (sendOpts.cacheDiagnostics !== undefined) out.cacheDiagnostics = sendOpts.cacheDiagnostics;
+  if (sendOpts.cache !== undefined) out.cache = sendOpts.cache;
+  if (sendOpts.maxTokens !== undefined) out.maxTokens = sendOpts.maxTokens;
+  return out;
+}
+
 export function agent(opts: AgentOptions): Agent {
-  const sessions = new Map<string, Message[]>();
+  const sessionBuffers = new Map<string, SessionHistoryBuffer | null>();
   // In-memory usage tally per session and per agent. Populated synchronously
   // after every generate/send/stream call so `agent.usage()` and
   // `session.usage()` work even when the persisted ledger is disabled (the
@@ -781,11 +848,21 @@ export function agent(opts: AgentOptions): Agent {
 
     session(id?: string): AgentSession {
       const sessionId = id ?? crypto.randomUUID();
-      if (!sessions.has(sessionId)) sessions.set(sessionId, []);
+      if (!sessionBuffers.has(sessionId)) {
+        // History is independent of the memory subsystem (spec §1a): every
+        // session keeps a lossless transcript unless the agent opts out via
+        // `history: false`. Bounded by default — unbounded growth was the
+        // latent failure mode for every long-lived consumer.
+        const historyCfg =
+          opts.history === false
+            ? null
+            : { ...SESSION_HISTORY_DEFAULTS, ...(opts.history ?? {}) };
+        sessionBuffers.set(sessionId, historyCfg ? new SessionHistoryBuffer(historyCfg) : null);
+      }
       if (!sessionUsageTallies.has(sessionId)) {
         sessionUsageTallies.set(sessionId, createEmptyUsageAggregate(sessionId));
       }
-      const history = sessions.get(sessionId)!;
+      const historyBuffer = sessionBuffers.get(sessionId)!;
       const sessionUsageTally = sessionUsageTallies.get(sessionId)!;
 
       const session = {
@@ -797,9 +874,17 @@ export function agent(opts: AgentOptions): Agent {
         ): Promise<GenerateTextResult | SessionSendStructuredResult<unknown>> {
           const textForMemory = typeof input === 'string' ? input : extractTextFromContent(input);
           const userMessage: Message = { role: 'user', content: input };
-          const requestMessages = useMemory
-            ? [...history, userMessage]
-            : [userMessage];
+          // History epoch at entry: a reseed() during this send makes the
+          // append below a stale no-op (the caller still gets its result).
+          const epochAtStart = historyBuffer?.epoch();
+          const priorHistory = historyBuffer
+            ? (historyBuffer.messages() as unknown as Message[])
+            : [];
+          // String input rides `prompt` so generateText's transcript delta
+          // captures the user turn positionally; parts input rides the tail
+          // of `messages` with the internal trailing-caller marker.
+          const inputIsString = typeof input === 'string';
+          const requestMessages = inputIsString ? priorHistory : [...priorHistory, userMessage];
 
           // Schema-driven structured output: when responseSchema is set,
           // route through the provider's native enforcement API via the
@@ -868,7 +953,11 @@ export function agent(opts: AgentOptions): Agent {
           const wrappedOpts = applyMemoryProvider(
             {
               ...baseForRequest,
+              ...pickSendGenerationOverrides(sendOpts),
               messages: requestMessages,
+              ...(inputIsString
+                ? { prompt: input as string }
+                : { _transcriptIncludeTrailingCallerMessages: 1 }),
               usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, {
                 sessionId,
                 source: 'agent.session.send',
@@ -912,9 +1001,12 @@ export function agent(opts: AgentOptions): Agent {
             }
           }
 
-          if (useMemory) {
-            history.push(userMessage);
-            history.push({ role: 'assistant', content: result.text });
+          if (historyBuffer && result.transcriptDelta) {
+            historyBuffer.appendSendDelta(
+              result.transcriptDelta,
+              sendOpts?.blockLabel,
+              epochAtStart,
+            );
           }
 
           // Backwards-compat: when no schema, return plain GenerateTextResult.
@@ -933,8 +1025,8 @@ export function agent(opts: AgentOptions): Agent {
           const wrappedOpts = applyMemoryProvider(
             {
               ...baseOpts,
-              messages: useMemory
-                ? [...history, userMessage]
+              messages: historyBuffer
+                ? [...(historyBuffer.messages() as unknown as Message[]), userMessage]
                 : [userMessage],
               usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, {
                 sessionId,
@@ -956,11 +1048,21 @@ export function agent(opts: AgentOptions): Agent {
           // Capture text for history when done. Memory observe runs inside
           // applyMemoryProvider's onAfterGeneration wrapper so it's not
           // re-fired here.
-          if (useMemory) {
-            history.push(userMessage);
+          if (historyBuffer) {
+            // Streaming has no lossless delta yet (v1 limitation, documented):
+            // append the minimal user/assistant text pair, epoch-guarded so a
+            // reseed during the stream discards the stale append.
+            const epochAtStreamStart = historyBuffer.epoch();
             void result.text
               .then((replyText) => {
-                history.push({ role: 'assistant', content: replyText });
+                historyBuffer.appendSendDelta(
+                  [
+                    { role: 'user', content: input } as SessionTranscriptMessage,
+                    { role: 'assistant', content: replyText },
+                  ],
+                  undefined,
+                  epochAtStreamStart,
+                );
               })
               .catch(() => {
                 /* history update failed, non-critical */
@@ -969,8 +1071,19 @@ export function agent(opts: AgentOptions): Agent {
           return result;
         },
 
-        messages(): Message[] {
-          return [...history];
+        messages(): SessionTranscriptMessage[] {
+          return historyBuffer ? historyBuffer.messages() : [];
+        },
+
+        reseed(snapshot: SessionTranscriptMessage[]): void {
+          if (!historyBuffer) {
+            throw new Error('reseed requires session history (history: false is set on this agent)');
+          }
+          historyBuffer.reseed(snapshot);
+        },
+
+        drainHistoryEvents(): HistoryEvent[] {
+          return historyBuffer?.drainHistoryEvents() ?? [];
         },
 
         async usage(): Promise<AgentOSUsageAggregate> {
@@ -989,7 +1102,7 @@ export function agent(opts: AgentOptions): Agent {
         },
 
         clear() {
-          history.length = 0;
+          historyBuffer?.reseed([]);
         },
       };
       // The send() implementation returns a union (GenerateTextResult |
@@ -1018,7 +1131,7 @@ export function agent(opts: AgentOptions): Agent {
     },
 
     async close() {
-      sessions.clear();
+      sessionBuffers.clear();
     },
 
     /**

@@ -116,7 +116,20 @@ describe('agent', () => {
     );
   });
 
-  it('does not retain session history when memory is disabled', async () => {
+  it('retains session history independently of memory, appending the transcript delta (0.10 contract)', async () => {
+    // The mocked generateText supplies the lossless delta the session appends.
+    hoisted.generateText.mockImplementation(async (opts: { prompt?: string }) => ({
+      provider: 'openai',
+      model: 'gpt-4.1-mini',
+      text: 'ok',
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      toolCalls: [],
+      finishReason: 'stop',
+      transcriptDelta: [
+        { role: 'user', content: opts.prompt ?? '' },
+        { role: 'assistant', content: 'ok' },
+      ],
+    }));
     const assistant = agent({
       model: 'openai:gpt-4.1-mini',
       memory: false,
@@ -126,17 +139,47 @@ describe('agent', () => {
     await session.send('first');
     await session.send('second');
 
+    // String input rides `prompt`; prior history rides `messages`.
     expect(hoisted.generateText).toHaveBeenNthCalledWith(
       1,
-      expect.objectContaining({
-        messages: [{ role: 'user', content: 'first' }],
-      })
+      expect.objectContaining({ prompt: 'first', messages: [] })
     );
     expect(hoisted.generateText).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
-        messages: [{ role: 'user', content: 'second' }],
+        prompt: 'second',
+        messages: [
+          { role: 'user', content: 'first' },
+          { role: 'assistant', content: 'ok' },
+        ],
       })
+    );
+    expect(session.messages().map((m) => m.role)).toEqual([
+      'user',
+      'assistant',
+      'user',
+      'assistant',
+    ]);
+  });
+
+  it('history: false restores stateless sessions (pre-0.10 behavior)', async () => {
+    const assistant = agent({
+      model: 'openai:gpt-4.1-mini',
+      memory: false,
+      history: false,
+    });
+
+    const session = assistant.session('demo');
+    await session.send('first');
+    await session.send('second');
+
+    expect(hoisted.generateText).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ prompt: 'first', messages: [] })
+    );
+    expect(hoisted.generateText).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ prompt: 'second', messages: [] })
     );
     expect(session.messages()).toEqual([]);
   });
