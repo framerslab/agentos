@@ -289,7 +289,7 @@ router.registerAdapter(whatsapp);
 
 ### Plivo (SMS)
 
-Plivo is available as its own messaging channel for SMS. Get your Auth ID and Auth Token from the Plivo console at [cx.plivo.com](https://cx.plivo.com), and use one of your Plivo numbers as the sender.
+Plivo is available as its own messaging channel for SMS. Get your Auth ID and Auth Token from the Plivo console at [cx.plivo.com](https://cx.plivo.com/?utm_source=github&utm_medium=oss&utm_campaign=agentos), and use one of your Plivo numbers as the sender.
 
 ```bash
 export PLIVO_AUTH_ID=your-auth-id
