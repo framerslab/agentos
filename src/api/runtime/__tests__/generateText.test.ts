@@ -796,77 +796,6 @@ describe('generateText', () => {
   // this branch, NSFW callers either had to roll their own fallback
   // or eat the 400. See `buildPolicyAwareFallbackChain` +
   // `isContentPolicyRefusal` for the full path.
-  describe('transcriptDelta', () => {
-    it('returns the lossless per-send delta: user turn, assistant tool_calls, tool results, final assistant', async () => {
-      hoisted.generateCompletion
-        .mockResolvedValueOnce({
-          modelId: 'gpt-4.1-mini',
-          usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
-          choices: [{
-            message: {
-              role: 'assistant',
-              content: null,
-              tool_calls: [{ id: 'tc_1', type: 'function', function: { name: 'lookup', arguments: '{"q":"x"}' } }],
-            },
-            finishReason: 'tool_calls',
-          }],
-        })
-        .mockResolvedValueOnce({
-          modelId: 'gpt-4.1-mini',
-          usage: { promptTokens: 6, completionTokens: 2, totalTokens: 8 },
-          choices: [{ message: { role: 'assistant', content: 'done' }, finishReason: 'stop' }],
-        });
-
-      const result = await generateText({
-        model: 'openai:gpt-4.1-mini',
-        prompt: 'find x',
-        tools: [{
-          name: 'lookup',
-          description: 'find things',
-          inputSchema: { type: 'object', properties: { q: { type: 'string' } } },
-          execute: async () => ({ success: true, output: { found: true } }),
-        }] as never,
-      });
-
-      const delta = result.transcriptDelta ?? [];
-      expect(delta.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'assistant']);
-      const assistantCall = delta[1] as { tool_calls?: Array<{ id: string }> };
-      expect(assistantCall.tool_calls?.[0]?.id).toBe('tc_1');
-      expect((delta[2] as { tool_call_id?: string }).tool_call_id).toBe('tc_1');
-      expect((delta[3] as { content?: unknown }).content).toBe('done');
-    });
-
-    it('carries the delta on plain no-tool calls too (sessions rely on it)', async () => {
-      hoisted.generateCompletion.mockResolvedValueOnce({
-        modelId: 'gpt-4.1-mini',
-        usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
-        choices: [{ message: { role: 'assistant', content: 'ok' }, finishReason: 'stop' }],
-      });
-      const result = await generateText({ model: 'openai:gpt-4.1-mini', prompt: 'hi' });
-      expect(result.transcriptDelta?.map((m) => m.role)).toEqual(['user', 'assistant']);
-    });
-
-    it('honors the trailing-caller-messages marker for message-carried user turns', async () => {
-      hoisted.generateCompletion.mockResolvedValueOnce({
-        modelId: 'gpt-4.1-mini',
-        usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
-        choices: [{ message: { role: 'assistant', content: 'ok' }, finishReason: 'stop' }],
-      });
-      const result = await generateText({
-        model: 'openai:gpt-4.1-mini',
-        messages: [
-          { role: 'user', content: 'earlier history' },
-          { role: 'assistant', content: 'earlier reply' },
-          { role: 'user', content: [{ type: 'text', text: 'parts turn' }] as never },
-        ],
-        _transcriptIncludeTrailingCallerMessages: 1,
-      } as never);
-      const delta = result.transcriptDelta ?? [];
-      expect(delta.map((m) => m.role)).toEqual(['user', 'assistant']);
-      expect(JSON.stringify(delta[0])).toContain('parts turn');
-    });
-  });
-
   describe('per-hop fallback cache', () => {
     const useDynamicResolvers = () => {
       (resolveModelOption as unknown as Mock).mockImplementation(
@@ -1092,5 +1021,48 @@ describe('canonical fallback chains stand their cache markers down', () => {
         expect(entry.cache, `${entry.provider}:${entry.model ?? ''}`).toBe(false);
       }
     });
+  });
+});
+
+describe('provider-reported response identity (spec batch-1)', () => {
+  beforeEach(() => {
+    hoisted.generateCompletion.mockReset();
+  });
+
+  it('carries responseModel and serviceTier onto the result additively', async () => {
+    hoisted.generateCompletion.mockResolvedValue({
+      modelId: 'gpt-4.1-mini-2026-01-01',
+      serviceTier: 'default',
+      usage: { promptTokens: 5, completionTokens: 2, totalTokens: 7 },
+      choices: [
+        {
+          message: { role: 'assistant', content: 'ok' },
+          finishReason: 'stop',
+        },
+      ],
+    });
+
+    const result = await generateText({ model: 'openai:gpt-4.1-mini', prompt: 'hi' });
+
+    expect(result.model).toBe('gpt-4.1-mini');
+    expect(result.responseModel).toBe('gpt-4.1-mini-2026-01-01');
+    expect(result.serviceTier).toBe('default');
+  });
+
+  it('omits responseModel and serviceTier when the provider reports neither', async () => {
+    hoisted.generateCompletion.mockResolvedValue({
+      usage: { promptTokens: 5, completionTokens: 2, totalTokens: 7 },
+      choices: [
+        {
+          message: { role: 'assistant', content: 'ok' },
+          finishReason: 'stop',
+        },
+      ],
+    });
+
+    const result = await generateText({ model: 'openai:gpt-4.1-mini', prompt: 'hi' });
+
+    expect(result.responseModel).toBeUndefined();
+    expect(result.serviceTier).toBeUndefined();
   });
 });

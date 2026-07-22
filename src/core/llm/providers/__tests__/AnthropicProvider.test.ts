@@ -1776,3 +1776,38 @@ describe('AnthropicProvider', () => {
     });
   });
 });
+
+describe('inclusive input accounting (spec batch-1 C1)', () => {
+  let provider: AnthropicProvider;
+
+  beforeEach(async () => {
+    fetchMock.mockReset();
+    provider = new AnthropicProvider();
+    await provider.initialize({ apiKey: 'test-anthropic-key' });
+  });
+
+  it("adds cache reads and writes back onto Anthropic's exclusive input count", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockSseResponse(
+        makeAnthropicResponse({
+          usage: {
+            input_tokens: 100,
+            output_tokens: 5,
+            cache_read_input_tokens: 400,
+            cache_creation_input_tokens: 50,
+          },
+        }),
+      ),
+    );
+
+    const res = await provider.generateCompletion(
+      'claude-sonnet-4-6',
+      [{ role: 'user', content: 'Hello' }],
+      {},
+    );
+
+    expect(res.usage?.cacheReadInputTokens).toBe(400);
+    expect(res.usage?.cacheCreationInputTokens).toBe(50);
+    expect(res.usage?.inclusiveInputTokens).toBe(550);
+  });
+});
