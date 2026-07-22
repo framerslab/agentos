@@ -80,6 +80,7 @@ class LLMProviderCircuitOpenError extends Error {
   }
 }
 import type { IModelRouter, ModelRouteParams } from '../core/llm/routing/IModelRouter.js';
+import type { SessionTranscriptMessage } from './sessionTranscript.js';
 import type {
   MessageContent,
   MessageContentPart,
@@ -679,12 +680,31 @@ export interface GenerateTextOptions {
     providerId: string,
     modelId: string,
   ) => Record<string, unknown> | undefined;
+  /**
+   * INTERNAL (sessions): how many TRAILING entries of `messages` belong to
+   * THIS call's transcript delta rather than prior history. Sessions that
+   * carry a non-string user turn inside `messages` set 1 so the delta
+   * includes it; prompt-based calls leave it unset (the prompt push is
+   * captured positionally). Not part of the public API.
+   */
+  _transcriptIncludeTrailingCallerMessages?: number;
 }
 
 /**
  * The completed result returned by {@link generateText}.
  */
 export interface GenerateTextResult {
+  /**
+   * Lossless message delta this call appended to the conversation: the
+   * request's user turn plus every assistant / tool turn the tool loop
+   * recorded, in order, in provider-replayable shape (tool_call ids,
+   * parallel results, thinking blocks). Sessions append THIS — never a
+   * reconstruction — to their history. Absent only on legacy paths that
+   * never seeded a conversation array. The prompt-shim path carries a
+   * partial delta (seeded turns only); native providers carry the full
+   * trail.
+   */
+  transcriptDelta?: SessionTranscriptMessage[];
   /** Provider identifier used for the final run. */
   provider: string;
   /** Resolved model identifier used for the run. */
@@ -1503,6 +1523,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       if (opts.messages) {
         for (const m of opts.messages) messages.push({ role: m.role, content: m.content });
       }
+      // Transcript delta capture (sessions, spec 2026-07-20 §1b): everything
+      // from here on is THIS call's contribution. Callers that carry their
+      // new user turn inside opts.messages mark how many trailing caller
+      // messages belong to the delta.
+      const transcriptDeltaStart =
+        messages.length - (opts._transcriptIncludeTrailingCallerMessages ?? 0);
       if (opts.prompt) messages.push({ role: 'user', content: opts.prompt });
 
       span?.setAttribute('agentos.api.tool_count', tools.length);
@@ -1675,6 +1701,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           durationMs: Date.now() - rootStartedAt,
         });
         return {
+          transcriptDelta: messages.slice(transcriptDeltaStart) as unknown as SessionTranscriptMessage[],
           provider: resolved.providerId,
           model: resolved.modelId,
           ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
@@ -1937,7 +1964,18 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             durationMs: Date.now() - rootStartedAt,
             ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
           });
+          // Final assistant turn is not on the loop's messages array at a stop
+          // terminal; push it so the transcript delta ends on the reply (a
+          // session history must never end on a tool result).
+          messages.push({
+            role: 'assistant',
+            content: textContent,
+            ...(((choice.message as Record<string, unknown> | undefined)?.thinking) !== undefined
+              ? { thinking: (choice.message as Record<string, unknown>).thinking }
+              : {}),
+          });
           return {
+            transcriptDelta: messages.slice(transcriptDeltaStart) as unknown as SessionTranscriptMessage[],
             provider: resolved.providerId,
             model: resolved.modelId,
           ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
@@ -2081,7 +2119,18 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           durationMs: Date.now() - rootStartedAt,
           ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
         });
+        // Final assistant turn is not on the loop's messages array at a stop
+        // terminal; push it so the transcript delta ends on the reply (a
+        // session history must never end on a tool result).
+        messages.push({
+          role: 'assistant',
+          content: textContent,
+          ...(((choice.message as Record<string, unknown> | undefined)?.thinking) !== undefined
+            ? { thinking: (choice.message as Record<string, unknown>).thinking }
+            : {}),
+        });
         return {
+          transcriptDelta: messages.slice(transcriptDeltaStart) as unknown as SessionTranscriptMessage[],
           provider: resolved.providerId,
           model: resolved.modelId,
           ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
@@ -2122,6 +2171,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
       });
       return {
+        transcriptDelta: messages.slice(transcriptDeltaStart) as unknown as SessionTranscriptMessage[],
         provider: resolved.providerId,
         model: resolved.modelId,
         ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
