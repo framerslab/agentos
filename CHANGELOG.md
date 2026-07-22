@@ -1,3 +1,24 @@
+## 0.10.0 (2026-07-22)
+
+* test: judge-site, response-identity, and inclusive-input coverage ([dd893ec4af021b79e47bc47c3c73a3e617dec589](https://github.com/framerslab/agentos/commit/dd893ec4af021b79e47bc47c3c73a3e617dec589))
+* test(api): align the delta and schema-send session tests with the loop contract ([1fe482250d0282670c6f13ec6e2132e19ea75b39](https://github.com/framerslab/agentos/commit/1fe482250d0282670c6f13ec6e2132e19ea75b39))
+* fix(api): hoist the session transcript type import out of the split import block ([4902b28160f5903595600549585e2e8e5f7bdbde](https://github.com/framerslab/agentos/commit/4902b28160f5903595600549585e2e8e5f7bdbde))
+* fix(api): repair transcript import placement and restore concurrent session additions ([9d701c4828f28eda7fb70dea3803fe18c02f6026](https://github.com/framerslab/agentos/commit/9d701c4828f28eda7fb70dea3803fe18c02f6026))
+* fix(api): restore the step-span attributes lost to a stale blob replay ([48a7f6f796b0522d7be174df2a62d4907b01ca6c](https://github.com/framerslab/agentos/commit/48a7f6f796b0522d7be174df2a62d4907b01ca6c))
+* fix(api): route the stop-terminal thinking probe through unknown ([6de26423d32f8036eebfc1c7df1192bffc18da93](https://github.com/framerslab/agentos/commit/6de26423d32f8036eebfc1c7df1192bffc18da93))
+* fix(api): shim terminal joins the transcript; sessions tolerate delta-less results ([7c6eb65a93e4a237b9a5da7998cb6cf176d87f30](https://github.com/framerslab/agentos/commit/7c6eb65a93e4a237b9a5da7998cb6cf176d87f30))
+* feat: modality-aware GenAI span attributes on step and embeddings surfaces ([645dbaa7e9ec0822d0dea37ac5c6e01e06638d7c](https://github.com/framerslab/agentos/commit/645dbaa7e9ec0822d0dea37ac5c6e01e06638d7c))
+* feat(api): sessions carry a lossless bounded transcript with reseed ([8a2d628d00ec6bcc985ba40832e24e434acca9a5](https://github.com/framerslab/agentos/commit/8a2d628d00ec6bcc985ba40832e24e434acca9a5))
+* ci: gate the full suite ([4ef0d378bc8baaceae61bf9ca263c9ff03907524](https://github.com/framerslab/agentos/commit/4ef0d378bc8baaceae61bf9ca263c9ff03907524))
+
+### BREAKING CHANGE
+
+* sessions on memory:false agents now retain
+conversation history by default; pass history: false for the previous
+stateless behavior. Session histories default to bounded eviction past
+120K estimated tokens on every agent. AgentSession.messages() returns
+the transcript-typed view.
+
 ## <small>0.9.164 (2026-07-20)</small>
 
 * test: repair full-suite drift against current runtime contracts ([b20d940e58bf931855a3a52047ef9ee93706d708](https://github.com/framerslab/agentos/commit/b20d940e58bf931855a3a52047ef9ee93706d708))
