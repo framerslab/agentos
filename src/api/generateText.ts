@@ -1700,6 +1700,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           surface: 'generateText',
           durationMs: Date.now() - rootStartedAt,
         });
+        // The shim's final assistant text lives in loopResult, never on the
+        // messages array — push it so the transcript delta ends on the reply.
+        messages.push({ role: 'assistant', content: loopResult.text });
         return {
           transcriptDelta: messages.slice(transcriptDeltaStart) as unknown as SessionTranscriptMessage[],
           provider: resolved.providerId,

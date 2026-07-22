@@ -1001,9 +1001,15 @@ export function agent(opts: AgentOptions): Agent {
             }
           }
 
-          if (historyBuffer && result.transcriptDelta) {
+          if (historyBuffer) {
+            // Lossless delta when the call carried one; minimal user/assistant
+            // pair otherwise (legacy generateText wrappers and test doubles
+            // predating transcriptDelta keep the pre-0.10 history shape).
             historyBuffer.appendSendDelta(
-              result.transcriptDelta,
+              result.transcriptDelta ?? [
+                userMessage as unknown as SessionTranscriptMessage,
+                { role: 'assistant', content: result.text },
+              ],
               sendOpts?.blockLabel,
               epochAtStart,
             );
