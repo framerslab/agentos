@@ -80,12 +80,12 @@ class LLMProviderCircuitOpenError extends Error {
   }
 }
 import type { IModelRouter, ModelRouteParams } from '../core/llm/routing/IModelRouter.js';
+import type { SessionTranscriptMessage } from './sessionTranscript.js';
 import type {
   MessageContent,
   MessageContentPart,
   CacheDiagnostics,
 } from '../core/llm/providers/IProvider.js';
-import type { SessionTranscriptMessage } from './sessionTranscript.js';
 
 // Re-export multimodal types for downstream consumers
 export type { MessageContent, MessageContentPart };
@@ -1828,6 +1828,28 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               completionTokens: stepResponse.usage?.completionTokens,
               totalTokens: stepResponse.usage?.totalTokens,
               costUSD: stepResponse.usage?.costUSD,
+            });
+            // Per-step GenAI semconv attrs (queue item: step-span wiring).
+            // ModelUsage's cache fields are the *InputTokens spellings —
+            // mapped here onto the ApiUsageLike names the helper reads.
+            attachGenAiAttributes(stepSpan, {
+              providerName: resolved.providerId,
+              operationName: 'chat',
+              requestModel: resolved.modelId,
+              ...(typeof stepResponse.modelId === 'string' && stepResponse.modelId
+                ? { responseModel: stepResponse.modelId }
+                : {}),
+              ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}),
+              ...(typeof stepResponse.serviceTier === 'string'
+                ? { responseServiceTier: stepResponse.serviceTier }
+                : {}),
+              usage: {
+                promptTokens: stepResponse.usage?.promptTokens,
+                completionTokens: stepResponse.usage?.completionTokens,
+                inclusiveInputTokens: stepResponse.usage?.inclusiveInputTokens,
+                cacheReadTokens: stepResponse.usage?.cacheReadInputTokens,
+                cacheCreationTokens: stepResponse.usage?.cacheCreationInputTokens,
+              },
             });
             return stepResponse;
           }
