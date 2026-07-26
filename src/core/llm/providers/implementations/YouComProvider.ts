@@ -1,21 +1,19 @@
 // File: backend/agentos/core/llm/providers/implementations/YouComProvider.ts
 /**
- * @fileoverview You.com MCP provider integration for AgentOS. Unlike traditional LLM providers,
- * this provider focuses on exposing You.com's web search, content extraction, and research
- * capabilities through the Model Context Protocol (MCP) server at https://api.you.com/mcp.
+ * @fileoverview You.com search provider integration for AgentOS. Unlike traditional LLM providers,
+ * this provider focuses on exposing You.com's web and news search capabilities through the
+ * Search API at https://ydc-index.io/v1/search.
  *
- * The You.com provider serves as a specialized tool provider rather than a text generation
+ * The You.com provider serves as a specialized search provider rather than a text generation
  * provider, offering agents access to:
- * - Real-time web search (you-search)
- * - URL content extraction (you-contents)
- * - Research synthesis (you-research)
+ * - Real-time web search
+ * - News search with publication metadata
  *
- * Integration approaches:
- * 1. Direct HTTP calls to You.com Search API (keyless tier: 100 searches/day)
- * 2. MCP server integration for full tool access with YDC_API_KEY
+ * The wider You.com platform also exposes MCP tools for content extraction and research
+ * synthesis, but this provider keeps the integration on the Search API path.
  *
- * This provider implements IProvider but focuses primarily on tools rather than LLM completions.
- * For text generation, it can proxy to other providers while augmenting with You.com search tools.
+ * This provider implements IProvider but focuses primarily on search rather than LLM completions.
+ * For text generation, use a different provider and combine it with You.com search results.
  *
  * @module backend/agentos/core/llm/providers/implementations/YouComProvider
  */
@@ -36,7 +34,7 @@ import {
 export interface YouComProviderConfig {
   /** Optional You.com API key for authenticated MCP server access */
   apiKey?: string;
-  /** Base URL for You.com Search API (default: https://api.you.com/v1/agents/search) */
+  /** Base URL for You.com Search API (default: https://ydc-index.io/v1/search) */
   searchApiUrl?: string;
   /** MCP server URL for authenticated access (default: https://api.you.com/mcp) */
   mcpServerUrl?: string;
@@ -53,18 +51,36 @@ interface YouComSearchResult {
   web?: Array<{
     title: string;
     url: string;
-    snippet: string;
+    description: string;
+    snippets: string[];
   }>;
   news?: Array<{
     title: string;
     url: string;
-    snippet: string;
+    description: string;
+    snippets: string[];
     published_at?: string;
   }>;
+  metadata?: Record<string, unknown>;
+}
+
+interface RawYouComSearchResult {
+  results?: {
+    web?: unknown[];
+    news?: unknown[];
+  };
+  metadata?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+interface YouComSearchOptions {
+  count?: number;
+  type?: 'web' | 'news';
+  freshness?: 'day' | 'week' | 'month' | 'year' | string;
 }
 
 /**
- * YouComProvider - Specialized provider for You.com search and research capabilities
+ * YouComProvider - Specialized provider for You.com search capabilities
  * 
  * This provider focuses on tool integration rather than LLM completion,
  * offering real-time web search and content access through You.com's APIs.
@@ -74,6 +90,7 @@ export class YouComProvider implements IProvider {
   public readonly defaultModelId = 'youcom-search'; // Represents search capability rather than LLM model
   private config!: YouComProviderConfig;
   private _isInitialized = false;
+  private static readonly REQUEST_TIMEOUT_MS = 10_000;
 
   public get isInitialized(): boolean {
     return this._isInitialized;
@@ -84,7 +101,7 @@ export class YouComProvider implements IProvider {
    */
   public async initialize(config: YouComProviderConfig = {}): Promise<void> {
     this.config = {
-      searchApiUrl: 'https://api.you.com/v1/agents/search',
+      searchApiUrl: 'https://ydc-index.io/v1/search',
       mcpServerUrl: 'https://api.you.com/mcp',
       debug: false,
       ...config
@@ -95,39 +112,44 @@ export class YouComProvider implements IProvider {
       this.config.apiKey = process.env.YDC_API_KEY || process.env.YOUCOM_API_KEY;
     }
 
-    try {
-      // Test connectivity to You.com Search API (keyless tier)
-      await this.testSearchConnectivity();
-      
-      this._isInitialized = true;
-      
-      if (this.config.debug) {
-        const authMode = this.config.apiKey ? 'authenticated' : 'keyless';
-        console.log(`YouComProvider initialized successfully in ${authMode} mode.`);
-      }
-    } catch (error) {
-      throw new Error(`YouComProvider initialization failed: ${error instanceof Error ? error.message : String(error)}`);
+    // Test connectivity to the Search API, but do not fail initialization if
+    // the host is offline or the API is temporarily unreachable.
+    await this.testSearchConnectivity(true);
+
+    this._isInitialized = true;
+
+    if (this.config.debug) {
+      const authMode = this.config.apiKey ? 'authenticated' : 'unauthenticated';
+      console.log(`YouComProvider initialized successfully in ${authMode} mode.`);
     }
   }
 
   /**
    * Test basic connectivity to You.com Search API
    */
-  private async testSearchConnectivity(): Promise<void> {
+  private async testSearchConnectivity(logFailures = false): Promise<boolean> {
     try {
-      const response = await fetch(`${this.config.searchApiUrl}?query=test&count=1`, {
+      const url = new URL(this.config.searchApiUrl!);
+      url.searchParams.set('query', 'test');
+      url.searchParams.set('count', '1');
+
+      const response = await this.fetchWithTimeout(url, {
         method: 'GET',
         headers: this.getSearchHeaders(),
       });
 
-      if (!response.ok) {
-        throw new Error(`Search API connectivity test failed: ${response.status} ${response.statusText}`);
+      if (!response.ok && logFailures && this.config.debug) {
+        console.warn(
+          `YouComProvider: Search API connectivity test failed with ${response.status} ${response.statusText}.`
+        );
       }
+
+      return response.ok;
     } catch (error) {
-      if (this.config.debug) {
+      if (logFailures && this.config.debug) {
         console.warn('YouComProvider: Search API test failed, but continuing initialization:', error);
       }
-      // Don't fail initialization on connectivity test - allow offline/restricted environments
+      return false;
     }
   }
 
@@ -138,35 +160,123 @@ export class YouComProvider implements IProvider {
     const headers: Record<string, string> = {
       'User-Agent': 'AgentOS/1.0 (YouComProvider)',
       'Accept': 'application/json',
-      'Content-Type': 'application/json'
     };
 
     if (this.config.apiKey) {
-      headers['Authorization'] = `Bearer ${this.config.apiKey}`;
+      headers['X-API-Key'] = this.config.apiKey;
     }
 
     return headers;
   }
 
+  private async fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), YouComProvider.REQUEST_TIMEOUT_MS);
+
+    try {
+      return await fetch(input, {
+        ...init,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  private validateCount(count: number): void {
+    if (!Number.isInteger(count) || count < 1 || count > 100) {
+      throw new Error('You.com search count must be an integer between 1 and 100.');
+    }
+  }
+
+  private normalizeResultSection(section: unknown): Array<{
+    title: string;
+    url: string;
+    description: string;
+    snippets: string[];
+    published_at?: string;
+  }> {
+    if (!Array.isArray(section)) {
+      return [];
+    }
+
+    return section.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') {
+        return [];
+      }
+
+      const result = entry as Record<string, unknown>;
+      const title = typeof result.title === 'string' ? result.title : '';
+      const url = typeof result.url === 'string' ? result.url : '';
+
+      if (!title || !url) {
+        return [];
+      }
+
+      const description = this.pickFirstString(result.description, result.snippet, '');
+      const snippets = this.normalizeSnippets(result.snippets, description);
+      const publishedAt = this.pickFirstString(result.published_at, result.page_age);
+
+      return [
+        {
+          title,
+          url,
+          description,
+          snippets,
+          ...(publishedAt ? { published_at: publishedAt } : {}),
+        },
+      ];
+    });
+  }
+
+  private normalizeSnippets(value: unknown, fallback: string): string[] {
+    if (Array.isArray(value)) {
+      const snippets = value
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean);
+      if (snippets.length > 0) {
+        return snippets;
+      }
+    }
+
+    if (typeof value === 'string' && value.trim()) {
+      return [value.trim()];
+    }
+
+    return fallback ? [fallback] : [];
+  }
+
+  private pickFirstString(...values: unknown[]): string {
+    for (const value of values) {
+      if (typeof value === 'string' && value.trim()) {
+        return value.trim();
+      }
+    }
+    return '';
+  }
+
   /**
    * Perform You.com web search
    */
-  public async search(query: string, options: { count?: number; type?: 'web' | 'news' } = {}): Promise<YouComSearchResult> {
+  public async search(query: string, options: YouComSearchOptions = {}): Promise<YouComSearchResult> {
     if (!this._isInitialized) {
       throw new Error('YouComProvider is not initialized. Call initialize() first.');
     }
 
-    const { count = 10, type = 'web' } = options;
+    const { count = 10, type = 'web', freshness } = options;
+    this.validateCount(count);
     
     try {
       const url = new URL(this.config.searchApiUrl!);
       url.searchParams.set('query', query);
       url.searchParams.set('count', count.toString());
-      if (type === "news") {
-        url.searchParams.set("type", "news");
+      const effectiveFreshness = freshness ?? (type === 'news' ? 'week' : undefined);
+      if (effectiveFreshness) {
+        url.searchParams.set('freshness', effectiveFreshness);
       }
       
-      const response = await fetch(url.toString(), {
+      const response = await this.fetchWithTimeout(url, {
         method: 'GET',
         headers: this.getSearchHeaders(),
       });
@@ -178,8 +288,14 @@ export class YouComProvider implements IProvider {
         throw new Error(`Search request failed: ${response.status} ${response.statusText}`);
       }
 
-      const data = await response.json();
-      return data;
+      const data = (await response.json()) as RawYouComSearchResult;
+      const results = (data.results ?? data) as { web?: unknown[]; news?: unknown[] };
+
+      return {
+        web: this.normalizeResultSection(results.web),
+        news: this.normalizeResultSection(results.news),
+        ...(data.metadata ? { metadata: data.metadata } : {}),
+      };
     } catch (error) {
       throw new Error(`You.com search failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -282,15 +398,11 @@ export class YouComProvider implements IProvider {
    * Check provider health
    */
   public async checkHealth(): Promise<{ isHealthy: boolean; details?: unknown }> {
-    try {
-      await this.testSearchConnectivity();
-      return { isHealthy: true, details: { apiKeyConfigured: Boolean(this.config.apiKey) } };
-    } catch (error) {
-      return {
-        isHealthy: false,
-        details: { error: error instanceof Error ? error.message : String(error) }
-      };
-    }
+    const isHealthy = await this.testSearchConnectivity(false);
+    return {
+      isHealthy,
+      details: { apiKeyConfigured: Boolean(this.config.apiKey) }
+    };
   }
 
   /**

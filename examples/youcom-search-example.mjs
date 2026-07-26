@@ -1,119 +1,77 @@
 #!/usr/bin/env node
 /**
  * @fileoverview YouCom Provider Example - Demonstrates You.com integration with AgentOS
- * 
- * This example shows how to use AgentOS with the YouCom provider for web search capabilities.
- * The YouCom provider offers both keyless (free tier) and authenticated search access.
- * 
+ *
+ * This example shows how to use the YouCom provider for web search and news search.
+ *
  * Usage:
  *   node examples/youcom-search-example.mjs
- *   
+ *
  * Environment variables:
- *   YDC_API_KEY - Optional You.com API key for authenticated access
- *   YOUCOM_API_KEY - Alternative env var (fallback for legacy setups)
+ *   YDC_API_KEY - You.com API key
+ *   YOUCOM_API_KEY - Legacy fallback env var
  */
 
-import { agent } from '@framers/agentos';
+import { YouComProvider } from '@framers/agentos';
+
+function printConfigurationExamples() {
+  console.log('\n📚 Configuration Examples:\n');
+
+  console.log('1. Environment-based setup:');
+  console.log('   export YDC_API_KEY="your-api-key-here"');
+  console.log('   # or export YOUCOM_API_KEY="your-api-key-here"\n');
+
+  console.log('2. Explicit initialization:');
+  console.log(`   const provider = new YouComProvider();
+   await provider.initialize({
+     apiKey: process.env.YDC_API_KEY ?? process.env.YOUCOM_API_KEY,
+   });\n`);
+}
 
 async function runYouComExample() {
-  console.log('🔍 YouCom Provider Example - Web Search with AgentOS\n');
+  console.log('🔍 YouCom Provider Example - Search with AgentOS\n');
 
-  try {
-    // Create an agent using the YouCom provider
-    const searchAgent = agent({
-      provider: 'youcom',
-      instructions: `You are a research assistant with access to current web information through You.com search.
-      
-When users ask questions that require current information, use your search capabilities to find relevant results.
-Always cite your sources with URLs and provide a balanced view from multiple sources when possible.`,
-      tools: ['search'], // YouCom provider exposes search as a core capability
-      memory: { types: ['episodic'], working: { enabled: true } },
-    });
+  const provider = new YouComProvider();
+  await provider.initialize({
+    apiKey: process.env.YDC_API_KEY ?? process.env.YOUCOM_API_KEY,
+    debug: true,
+  });
 
-    const session = searchAgent.session('youcom-demo');
+  const webQuery = 'What are the latest developments in AI agent frameworks?';
+  console.log(`\n📋 Web query: ${webQuery}`);
+  const webResults = await provider.search(webQuery, { count: 5, type: 'web' });
 
-    console.log('Creating agent session with YouCom provider...');
-    
-    // Example queries demonstrating different search capabilities
-    const queries = [
-      "What are the latest developments in AI agent frameworks?",
-      "Find recent news about TypeScript 5.7 features",
-      "Search for information about MCP (Model Context Protocol) adoption"
-    ];
-
-    for (const query of queries) {
-      console.log(`\n📋 Query: ${query}`);
-      console.log('🔄 Searching...\n');
-      
-      try {
-        const response = await session.send(query);
-        console.log(`📖 Response:\n${response}\n`);
-        console.log('─'.repeat(80));
-      } catch (error) {
-        console.error(`❌ Error processing query: ${error.message}`);
-        
-        if (error.message.includes('rate limit')) {
-          console.log('💡 Tip: Set YDC_API_KEY environment variable for higher search quotas');
-        }
-      }
+  for (const [index, result] of (webResults.web ?? []).entries()) {
+    console.log(`${index + 1}. ${result.title}`);
+    console.log(`   ${result.url}`);
+    console.log(`   ${result.description}`);
+    if (result.snippets[0]) {
+      console.log(`   ${result.snippets[0]}`);
     }
+  }
 
-    // Demonstrate direct search API access
-    console.log('\n🔧 Direct YouCom Search API Example:\n');
-    
-    const provider = searchAgent.provider; // Access the YouCom provider directly
-    if (provider && typeof provider.search === 'function') {
-      try {
-        const searchResult = await provider.search('AgentOS framework features', { count: 3 });
-        
-        console.log('Direct search results:');
-        if (searchResult.web) {
-          searchResult.web.forEach((result, index) => {
-            console.log(`${index + 1}. ${result.title}`);
-            console.log(`   ${result.url}`);
-            console.log(`   ${result.snippet}\n`);
-          });
-        }
-      } catch (error) {
-        console.log(`Direct search failed: ${error.message}`);
-      }
-    }
+  const newsQuery = 'TypeScript 5.7 release';
+  console.log(`\n📰 News query: ${newsQuery}`);
+  const newsResults = await provider.search(newsQuery, {
+    count: 3,
+    type: 'news',
+    freshness: 'week',
+  });
 
-  } catch (error) {
-    console.error('❌ Failed to initialize YouCom provider:', error.message);
-    
-    if (error.message.includes('not initialized')) {
-      console.log('\n💡 Troubleshooting:');
-      console.log('   - Make sure you have network connectivity');
-      console.log('   - For higher quotas, set YDC_API_KEY environment variable');
-      console.log('   - Check https://you.com/platform/api-keys for API keys');
+  for (const [index, result] of (newsResults.news ?? []).entries()) {
+    console.log(`${index + 1}. ${result.title}`);
+    console.log(`   ${result.url}`);
+    console.log(`   ${result.description}`);
+    if (result.published_at) {
+      console.log(`   published: ${result.published_at}`);
     }
   }
 }
 
-// Configuration examples for different authentication modes
-function printConfigurationExamples() {
-  console.log('\n📚 Configuration Examples:\n');
-  
-  console.log('1. Keyless mode (100 free searches/day per IP):');
-  console.log('   No configuration needed - just use provider: "youcom"\n');
-  
-  console.log('2. Authenticated mode (higher quotas):');
-  console.log('   export YDC_API_KEY="your-api-key-here"');
-  console.log('   # Get API keys at: https://you.com/platform/api-keys\n');
-  
-  console.log('3. Custom configuration:');
-  console.log(`   const agent = agent({
-     provider: 'youcom',
-     providerConfig: {
-       apiKey: 'your-key',
-       debug: true
-     }
-   });\n`);
-}
-
-// Check if running directly vs imported
 if (import.meta.url === `file://${process.argv[1]}`) {
   printConfigurationExamples();
-  runYouComExample().catch(console.error);
+  runYouComExample().catch((error) => {
+    console.error('❌ YouCom example failed:', error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
 }

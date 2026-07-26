@@ -150,11 +150,15 @@ function isBinaryOnPath(binaryName: string): boolean {
 }
 
 // Provider-id → probe lookup so a custom priority list (just provider
-// ids) can be resolved back to its env-var or CLI-binary probe. Stays
+// ids) can be resolved back to its env-var or CLI-binary probes. Stays
 // in sync automatically with `AUTO_DETECT_ORDER`.
-const PROBE_BY_PROVIDER: Record<string, AutoDetectProbe> = Object.fromEntries(
-  AUTO_DETECT_ORDER.map((probe) => [probe.provider, probe])
-);
+const PROBES_BY_PROVIDER: Record<string, AutoDetectProbe[]> = {};
+for (const probe of AUTO_DETECT_ORDER) {
+  if (!PROBES_BY_PROVIDER[probe.provider]) {
+    PROBES_BY_PROVIDER[probe.provider] = [];
+  }
+  PROBES_BY_PROVIDER[probe.provider].push(probe);
+}
 
 /**
  * Auto-detects the active provider by scanning well-known environment variables
@@ -173,9 +177,7 @@ const PROBE_BY_PROVIDER: Record<string, AutoDetectProbe> = Object.fromEntries(
 export function autoDetectProvider(task?: ProviderDefaultTask): string | undefined {
   const customOrder = getProviderPriority();
   const order: AutoDetectProbe[] = customOrder
-    ? customOrder
-        .map((p) => PROBE_BY_PROVIDER[p])
-        .filter((probe): probe is AutoDetectProbe => Boolean(probe))
+    ? customOrder.flatMap((p) => PROBES_BY_PROVIDER[p] ?? [])
     : AUTO_DETECT_ORDER;
 
   for (const probe of order) {

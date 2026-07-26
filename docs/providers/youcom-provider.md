@@ -1,42 +1,41 @@
 # You.com Provider Integration
 
-The YouCom provider integrates You.com's web search and research capabilities into AgentOS, offering agents access to real-time web information, news search, and content extraction.
+The YouCom provider integrates You.com's web search into AgentOS, offering access to real-time web information and news search.
 
 ## Overview
 
 Unlike traditional LLM providers, YouCom specializes in:
-- **Real-time web search** with source URLs and snippets
-- **News search** with timestamps and publication metadata  
-- **Content extraction** from URLs
-- **Research synthesis** with citations
+- **Real-time web search** with source URLs, descriptions, and snippets
+- **News search** with timestamps and publication metadata
 
-The provider supports both keyless (free tier) and authenticated operation modes.
+The provider reads credentials from `YDC_API_KEY` or `YOUCOM_API_KEY`, and you can also pass an explicit `apiKey` during initialization.
 
 ## Quick Start
 
 ```typescript
-import { agent } from '@framers/agentos';
+import { YouComProvider } from '@framers/agentos';
 
-// Basic usage with keyless access
-const researcher = agent({
-  provider: 'youcom',
-  instructions: 'You are a research assistant with access to current web information.',
+const provider = new YouComProvider();
+await provider.initialize({
+  apiKey: process.env.YDC_API_KEY ?? process.env.YOUCOM_API_KEY,
 });
 
-const session = researcher.session('research-1');
-await session.send('What are the latest developments in AI agent frameworks?');
+const results = await provider.search('What are the latest developments in AI agent frameworks?', {
+  count: 5,
+});
+
+for (const item of results.web ?? []) {
+  console.log(item.title);
+  console.log(item.url);
+  console.log(item.description);
+  console.log(item.snippets[0]);
+}
 ```
 
 ## Authentication
 
-### Keyless Mode (Default)
-- **100 free searches per day per IP**
-- No API key required
-- Automatic rate limiting
-- Perfect for development and evaluation
-
-### Authenticated Mode  
-Set your You.com API key for higher quotas and enhanced features:
+### Environment-Based Setup
+The provider reads `YDC_API_KEY` first and falls back to `YOUCOM_API_KEY` for legacy setups.
 
 ```bash
 export YDC_API_KEY="your_api_key_here"
@@ -44,7 +43,7 @@ export YDC_API_KEY="your_api_key_here"
 
 Get your API key at [you.com/platform/api-keys](https://you.com/platform/api-keys).
 
-Alternative environment variable (legacy support):
+Alternative environment variable:
 ```bash
 export YOUCOM_API_KEY="your_api_key_here"
 ```
@@ -52,14 +51,12 @@ export YOUCOM_API_KEY="your_api_key_here"
 ### Custom Configuration
 
 ```typescript
-const agent = agent({
-  provider: 'youcom',
-  providerConfig: {
-    apiKey: 'your-key',
-    searchApiUrl: 'https://api.you.com/v1/agents/search', // default
-    mcpServerUrl: 'https://api.you.com/mcp', // for future MCP integration
-    debug: true
-  }
+const provider = new YouComProvider();
+await provider.initialize({
+  apiKey: process.env.YDC_API_KEY ?? process.env.YOUCOM_API_KEY,
+  searchApiUrl: 'https://ydc-index.io/v1/search',
+  mcpServerUrl: 'https://api.you.com/mcp',
+  debug: true,
 });
 ```
 
@@ -76,7 +73,9 @@ Access You.com search functionality directly:
 
 ```typescript
 const provider = new YouComProvider();
-await provider.initialize({ apiKey: 'optional' });
+await provider.initialize({
+  apiKey: process.env.YDC_API_KEY ?? process.env.YOUCOM_API_KEY,
+});
 
 // Web search
 const results = await provider.search('TypeScript frameworks', {
@@ -100,7 +99,8 @@ const news = await provider.search('AI developments', {
     {
       title: "Page title",
       url: "https://example.com",
-      snippet: "Relevant excerpt from the page..."
+      description: "Relevant excerpt from the page...",
+      snippets: ["Relevant excerpt from the page..."]
     }
   ]
 }
@@ -113,7 +113,8 @@ const news = await provider.search('AI developments', {
     {
       title: "Article title",
       url: "https://news.example.com/article",
-      snippet: "Article excerpt...",
+      description: "Article excerpt...",
+      snippets: ["Article excerpt..."],
       published_at: "2026-07-26T10:00:00Z"
     }
   ]
@@ -133,7 +134,8 @@ The provider handles common error scenarios gracefully:
 try {
   const results = await provider.search('query');
 } catch (error) {
-  if (error.message.includes('rate limit')) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes('rate limit')) {
     console.log('Consider using an API key for higher quotas');
   }
 }
@@ -149,24 +151,37 @@ console.log('Healthy:', health.isHealthy);
 console.log('API Key configured:', health.details.apiKeyConfigured);
 ```
 
-## Integration with AgentOS Tools
+## AgentOS Registry
 
-The YouCom provider exposes search capabilities through AgentOS's tool system:
+YouCom is automatically registered in AgentOS's provider system:
 
 ```typescript
-const agent = agent({
-  provider: 'youcom',
-  tools: ['search'], // Enables search tool access
-  instructions: 'Use search when you need current information'
+import { AIModelProviderManager } from '@framers/agentos';
+
+const manager = new AIModelProviderManager();
+await manager.initialize({
+  providers: [
+    {
+      providerId: 'youcom',
+      enabled: true,
+      config: {
+        apiKey: process.env.YDC_API_KEY ?? process.env.YOUCOM_API_KEY,
+      },
+    },
+  ],
 });
 ```
 
-## MCP Server Integration (Future)
+## MCP Server Path
 
-YouCom provider is designed for future integration with You.com's MCP server at `https://api.you.com/mcp`, which will provide:
-- `you-search` tool for web search
-- `you-contents` tool for URL content extraction  
-- `you-research` tool for research synthesis
+You.com's MCP surface also includes content and research tooling. This provider
+keeps the search integration small and optional, but if you wire the MCP server
+later the corresponding tool names are:
+- `you-search` for web search
+- `you-contents` for URL content extraction
+- `you-research` for research synthesis
+
+Those MCP tools are not enabled by this PR.
 
 ## Limitations
 
@@ -174,28 +189,6 @@ YouCom provider is designed for future integration with You.com's MCP server at 
 - **No embeddings**: Use other providers for embedding models
 - **No streaming**: Search results are returned as complete responses
 - **Rate limits**: Keyless tier has daily quotas (overcome with API key)
-
-## Provider Registry
-
-YouCom is automatically registered in AgentOS's provider system:
-
-```typescript
-// Auto-detection via environment variables
-// Priority: YDC_API_KEY > YOUCOM_API_KEY
-
-const config = {
-  providers: [
-    {
-      providerId: 'youcom',
-      enabled: true,
-      config: {
-        apiKey: process.env.YDC_API_KEY,
-        debug: false
-      }
-    }
-  ]
-};
-```
 
 ## Best Practices
 
@@ -208,8 +201,8 @@ const config = {
 ## Examples
 
 See `examples/youcom-search-example.mjs` for a complete working example demonstrating:
-- Agent configuration with YouCom provider
-- Multiple search query types
+- Direct search and news search with YouComProvider
+- Multiple query types
 - Direct API access
 - Error handling patterns
 - Configuration examples
