@@ -98,10 +98,6 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
     text: 'grok-2',
     cheap: 'grok-2-mini',
   },
-  youcom: {
-    text: 'youcom-search', // YouCom is primarily a search/tool provider, not LLM
-    cheap: 'youcom-search',
-  },
 };
 
 /** Runtime probes checked for auto-detection, in priority order. */

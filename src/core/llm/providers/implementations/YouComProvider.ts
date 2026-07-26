@@ -162,6 +162,9 @@ export class YouComProvider implements IProvider {
       const url = new URL(this.config.searchApiUrl!);
       url.searchParams.set('query', query);
       url.searchParams.set('count', count.toString());
+      if (type === "news") {
+        url.searchParams.set("type", "news");
+      }
       
       const response = await fetch(url.toString(), {
         method: 'GET',
@@ -195,27 +198,8 @@ export class YouComProvider implements IProvider {
       throw new Error('YouComProvider is not initialized. Call initialize() first.');
     }
 
-    // For now, YouComProvider focuses on tool integration rather than LLM generation
-    // This could be enhanced to provide search-augmented responses
-    return {
-      id: `youcom-${Date.now()}`,
-      object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
-      modelId: modelId,
-      choices: [{
-        index: 0,
-        message: {
-          role: 'assistant',
-          content: 'YouComProvider is optimized for search and research tools. Please use the search() method or integrate with AgentOS tools for web search capabilities.',
-        },
-        finishReason: 'stop'
-      }],
-      usage: {
-        totalTokens: 50,
-        promptTokens: 25,
-        completionTokens: 25
-      }
-    };
+    // YouComProvider is designed for search tools, not LLM completion
+    throw new Error("YouComProvider does not support text completion. Use search() method or configure a different provider for text generation.");
   }
 
   /**
@@ -226,7 +210,21 @@ export class YouComProvider implements IProvider {
     messages: ChatMessage[],
     options: ModelCompletionOptions
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
-    throw new Error('Streaming completion is not implemented for YouComProvider. Use search tools instead.');
+    // YouComProvider does not support streaming, yield single error response
+    const errorResponse: ModelCompletionResponse = {
+      id: `youcom-error-${Date.now()}`,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      modelId,
+      choices: [],
+      usage: { totalTokens: 0, promptTokens: 0, completionTokens: 0 },
+      error: {
+        message: "YouComProvider does not support streaming completion. Use search() method instead.",
+        type: "unsupported_operation"
+      },
+      isFinal: true
+    };
+    yield errorResponse;
   }
 
   /**
