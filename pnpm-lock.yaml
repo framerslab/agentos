@@ -80,6 +80,9 @@ importers:
       uuid:
         specifier: ^11.1.0
         version: 11.1.1
+      ws:
+        specifier: ^8.18.0
+        version: 8.20.0
       yaml:
         specifier: ^2.8.1
         version: 2.8.4
@@ -135,6 +138,9 @@ importers:
       '@types/pg':
         specifier: ^8.20.0
         version: 8.20.0
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
       better-sqlite3:
         specifier: ^12.9.0
         version: 12.9.0
@@ -11037,7 +11043,6 @@ snapshots:
   '@types/ws@8.18.1':
     dependencies:
       '@types/node': 20.19.40
-    optional: true
 
   '@types/yauzl@2.10.3':
     dependencies:
@@ -17219,8 +17224,7 @@ snapshots:
   ws@7.5.10:
     optional: true
 
-  ws@8.20.0:
-    optional: true
+  ws@8.20.0: {}
 
   wsl-utils@0.1.0:
     dependencies:

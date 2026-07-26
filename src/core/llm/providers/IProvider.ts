@@ -162,6 +162,68 @@ export interface ModelCompletionOptions {
    */
   cacheDiagnostics?: { previousMessageId: string | null };
   /**
+   * Per-call prompt-cache control (Anthropic; other providers ignore it).
+   *
+   * - `false` — this request emits NO `cache_control` at all: the automatic
+   *   markers (request-level marker, thinking-mode block markers, the moving
+   *   message-tail) are suppressed AND caller-placed system/message/tool
+   *   markers are stripped before the wire. Hard guarantee for true
+   *   one-shots, where a cache write (1.25x at 5m, 2x at 1h) can never be
+   *   read back.
+   * - `{ ttl: '1h' }` — the automatic markers (including the moving
+   *   message-tail) carry `ttl: '1h'` instead of the 5-minute default, and
+   *   the auto path uses explicit block placement so the TTL reaches the
+   *   wire. For slow loops whose step gaps exceed 5 minutes (codegen
+   *   orchestrator/tool calls, human-paced conversation turns).
+   *   Caller-placed markers keep their own TTLs untouched.
+   * - `{ ttl: '5m' }` or omitted — default behavior (5-minute auto markers).
+   */
+  cache?: { ttl?: '5m' | '1h' } | false;
+  /**
+   * Per-conversation affinity key. OpenRouter forwards it as `session_id`
+   * to pin provider sticky routing: upstream prompt caches are host-scoped,
+   * so load-balanced conversations otherwise cold-miss the cache a prior
+   * turn wrote on a different host. Pass a stable id per conversation
+   * (game session id, companion conversation id). Providers without an
+   * affinity concept ignore the field.
+   */
+  sessionId?: string;
+  /**
+   * OpenAI prompt-cache shard key (spec batch-1 C2; other providers ignore
+   * it). `'auto'` derives `agentos:<first 16 hex of sha256(sessionId)>` from
+   * {@link sessionId} — omitted when no session id is available; raw ids
+   * never leave the process. An explicit string is sent verbatim after
+   * trimming (empty → omitted). `false`/absent omit the field (zero-change
+   * default). OpenAI recommends ≤~15 requests/min per key; sharding beyond
+   * that is caller policy.
+   */
+  promptCacheKey?: string | 'auto' | false;
+  /**
+   * Cache-key derivation source ONLY (spec batch-1 review fold): the session
+   * id used by `promptCacheKey: 'auto'` when the affinity {@link sessionId}
+   * is absent (e.g. it came from `usageLedger.sessionId` at the api layer).
+   * Never emitted on the wire itself and never used for OpenRouter
+   * `session_id` sticky routing — that stays {@link sessionId}'s job.
+   */
+  promptCacheSessionId?: string;
+  /**
+   * OpenAI prompt-cache retention request (other providers ignore it).
+   * Emitted only when the fail-closed capability table allows the
+   * model/value combination (see `openai-cache-params.ts`): `'30m'` →
+   * `prompt_cache_options.ttl` on GPT-5.6+ families; `'24h'`/`'in_memory'`
+   * → `prompt_cache_retention` on the enumerated allow-list. Unsupported
+   * combinations are omitted with a debug log, never a hard error.
+   */
+  promptCacheRetention?: 'in_memory' | '24h' | '30m';
+  /**
+   * OpenAI service tier, emitted verbatim as `service_tier` (other
+   * providers ignore it). No default. `'flex'` bills at ~batch rates but
+   * can return 429 `resource_unavailable` under load — the existing retry
+   * path retries the same tier; automatic tier fallback is deliberately
+   * not implemented.
+   */
+  serviceTier?: 'auto' | 'default' | 'flex' | 'priority';
+  /**
    * Positive values penalize new tokens based on whether they appear in the text so far,
    * increasing the model's likelihood to talk about new topics.
    */
@@ -251,10 +313,18 @@ export interface ModelUsage {
   completionTokens?: number;
   totalTokens: number;
   costUSD?: number;
-  /** Tokens written to the prompt cache on this call (Anthropic: 25% surcharge). */
+  /** Tokens written to the prompt cache on this call (Anthropic: 25% surcharge at 5m TTL; OpenAI GPT-5.6+: 25% surcharge, from `cache_write_tokens`). */
   cacheCreationInputTokens?: number;
   /** Tokens read from the prompt cache on this call (Anthropic: 90% discount). */
   cacheReadInputTokens?: number;
+  /**
+   * Provider-independent total input tokens INCLUDING cached reads/writes
+   * (spec batch-1 C1). Anthropic: `input_tokens + cache_read + cache_creation`
+   * (its `input_tokens` excludes cache). OpenAI/OpenRouter: `prompt_tokens`
+   * as-is (already inclusive). Tri-state: undefined = the provider did not
+   * report enough to compute; a reported 0 is meaningful and preserved.
+   */
+  inclusiveInputTokens?: number;
 }
 
 /**
@@ -288,6 +358,13 @@ export interface ModelCompletionResponse {
    * 4s on Groq vs 10s+ on a price-biased host, so attribution needs this.
    */
   servingProvider?: string;
+  /**
+   * Provider-reported service tier the call actually ran at (OpenAI
+   * `service_tier` on the response body; spec batch-1 C2). Can differ from
+   * the requested tier (e.g. flex spill-over to default). Undefined on
+   * providers/responses without a tier concept.
+   */
+  serviceTier?: string;
   /** One or more choices; for multi‑choice inference some providers return >1. */
   choices: ModelCompletionChoice[];
   /** Token usage & optional cost metrics (present on final chunk; may be partial/omitted on deltas). */

@@ -1580,6 +1580,18 @@ export interface AgencyOptions extends BaseAgentConfig {
    */
   agents: Record<string, BaseAgentConfig | Agent>;
   /**
+   * Minimum viable panel for the `parallel` strategy, checked AFTER the
+   * fan-out against the agents that actually SUCCEEDED (HITL-rejected and
+   * errored agents don't count): `minAgents` = successful agents required;
+   * `minProviders` = distinct providers among them — provider diversity is
+   * what makes a multi-model panel meaningful, and a panel that quietly
+   * collapsed to one vendor must not synthesize a false consensus.
+   * Shortfall throws {@link AgencyQuorumError} by default; set
+   * `onShortfall: 'proceed'` to log a warning and synthesize anyway.
+   * Ignored by strategies other than `parallel`.
+   */
+  quorum?: AgencyQuorumConfig;
+  /**
    * Orchestration strategy for coordinating sub-agents.
    * Defaults to `"sequential"` when omitted.
    */
@@ -1638,5 +1650,37 @@ export class AgencyConfigError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'AgencyConfigError';
+  }
+}
+
+/**
+ * Quorum requirements for a `parallel` panel run.
+ * @see AgencyOptions.quorum
+ */
+export interface AgencyQuorumConfig {
+  /** Minimum number of agents that must SUCCEED (default 0 = no floor). */
+  minAgents?: number;
+  /**
+   * Minimum number of DISTINCT providers among the successful agents
+   * (default 0 = no floor). Counted from each result's resolved `provider`.
+   */
+  minProviders?: number;
+  /**
+   * What a shortfall does: `'error'` (default) throws
+   * {@link AgencyQuorumError} before synthesis; `'proceed'` logs a warning
+   * and synthesizes anyway.
+   */
+  onShortfall?: 'error' | 'proceed';
+}
+
+/**
+ * Thrown by the `parallel` strategy when the post-fan-out panel falls below
+ * the configured {@link AgencyQuorumConfig} — too few surviving agents or
+ * too little provider diversity to synthesize an honest consensus.
+ */
+export class AgencyQuorumError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AgencyQuorumError';
   }
 }

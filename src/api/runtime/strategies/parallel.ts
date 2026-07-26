@@ -39,6 +39,7 @@ import {
   checkBeforeAgent,
   accumulateExtraUsage,
   buildAgentCallUsage,
+  enforceQuorum,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -147,6 +148,11 @@ export function compileParallel(
           settled.push(outcome.value);
         }
       }
+
+      // Quorum enforcement (optional): a panel that lost too many seats — or
+      // collapsed to a single provider — must not synthesize a false
+      // consensus. Throws AgencyQuorumError before any synthesis spend.
+      enforceQuorum(agencyConfig.quorum, settled, entries.length);
 
       // Collect agent call records and aggregate usage.
       const agentCalls: AgentCallRecord[] = [];

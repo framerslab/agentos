@@ -1613,6 +1613,7 @@ export class QueryRouter {
     // both are configured.
     const envKeys = [
       'OPENAI_API_KEY',
+      'ATLASCLOUD_API_KEY',
       'ANTHROPIC_API_KEY',
       'GEMINI_API_KEY',
       'GROQ_API_KEY',
@@ -1650,6 +1651,7 @@ export class QueryRouter {
     // to OpenRouter when no direct key is present.
     const directKeys = [
       'OPENAI_API_KEY',
+      'ATLASCLOUD_API_KEY',
       'ANTHROPIC_API_KEY',
       'GEMINI_API_KEY',
       'GROQ_API_KEY',

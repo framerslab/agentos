@@ -240,6 +240,32 @@ export class LLMProviderHealthRegistry {
       // breaker was previously closed.
       if (record.openUntil === 0 || Date.now() >= record.openUntil) {
         record.totalTrips += 1;
+        // Loud, structured trip event. The policy classes (401/403 bad
+        // key, 402 billing) open a 5-30 minute breaker after a SINGLE
+        // failure and silently divert every call cross-provider for the
+        // whole cooldown — ops must see the moment it opens, not
+        // discover the divert in cost attribution later. Availability
+        // trips stay at warn.
+        const isPolicyClass = status === 401 || status === 402 || status === 403;
+        const detail = {
+          event: 'provider_breaker_open',
+          providerId,
+          statusCode: status ?? null,
+          cooldownMs: policy.cooldownMs,
+          totalTrips: record.totalTrips,
+        };
+        if (isPolicyClass) {
+          console.error(
+            `[agentos] provider breaker OPEN for '${providerId}' (auth/billing class ` +
+              `${status}): ALL traffic diverts to fallbacks for ${Math.round(policy.cooldownMs / 60_000)} min`,
+            detail,
+          );
+        } else {
+          console.warn(
+            `[agentos] provider breaker OPEN for '${providerId}' (status ${status ?? 'network'})`,
+            detail,
+          );
+        }
       }
       record.openUntil = Date.now() + policy.cooldownMs;
     }

@@ -158,6 +158,12 @@ export function mapOpenRouterUsage(
     completionTokens: apiUsage.completion_tokens,
     totalTokens: apiUsage.total_tokens,
     costUSD: apiUsage.cost,
+    // OpenRouter's prompt_tokens (like OpenAI's) already INCLUDES cached
+    // tokens, so the provider-independent inclusive input total is the
+    // prompt count as-is (Anthropic computes input + cache_read + cache_creation).
+    ...(typeof apiUsage.prompt_tokens === 'number'
+      ? { inclusiveInputTokens: apiUsage.prompt_tokens }
+      : {}),
     ...(typeof cachedTokens === 'number' && cachedTokens >= 0
       ? { cacheReadInputTokens: cachedTokens }
       : {}),
@@ -372,6 +378,10 @@ export class OpenRouterProvider implements IProvider {
       ...(options.frequencyPenalty !== undefined && { frequency_penalty: options.frequencyPenalty }),
       ...(options.stopSequences !== undefined && { stop: options.stopSequences }),
       ...(options.userId !== undefined && { user: options.userId }),
+      // Provider sticky routing: pins the conversation to one upstream host
+      // so its prompt cache (host-scoped) actually gets re-read; without it
+      // load balancing cold-misses upstream caches turn over turn.
+      ...(options.sessionId !== undefined && { session_id: options.sessionId }),
       ...(options.tools !== undefined && { tools: options.tools }),
       ...(options.toolChoice !== undefined && { tool_choice: options.toolChoice }),
       ...(options.responseFormat?.type === 'json_object' && { response_format: { type: 'json_object' } }),
@@ -513,6 +523,10 @@ export class OpenRouterProvider implements IProvider {
       ...(options.frequencyPenalty !== undefined && { frequency_penalty: options.frequencyPenalty }),
       ...(options.stopSequences !== undefined && { stop: options.stopSequences }),
       ...(options.userId !== undefined && { user: options.userId }),
+      // Provider sticky routing: pins the conversation to one upstream host
+      // so its prompt cache (host-scoped) actually gets re-read; without it
+      // load balancing cold-misses upstream caches turn over turn.
+      ...(options.sessionId !== undefined && { session_id: options.sessionId }),
       ...(options.tools !== undefined && { tools: options.tools }),
       ...(options.toolChoice !== undefined && { tool_choice: options.toolChoice }),
       ...(options.responseFormat?.type === 'json_object' && { response_format: { type: 'json_object' } }),

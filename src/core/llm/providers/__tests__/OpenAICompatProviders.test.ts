@@ -337,7 +337,7 @@ describe('OpenAI-compatible provider wrappers', () => {
     it('includes atlascloud with correct defaults', () => {
       expect(PROVIDER_DEFAULTS.atlascloud).toBeDefined();
       expect(PROVIDER_DEFAULTS.atlascloud.text).toBe('deepseek-ai/deepseek-v4-pro');
-      expect(PROVIDER_DEFAULTS.atlascloud.cheap).toBe('qwen/qwen3.5-flash');
+      expect(PROVIDER_DEFAULTS.atlascloud.cheap).toBe('deepseek-ai/deepseek-v4-pro');
     });
 
     it('still has anthropic defaults', () => {

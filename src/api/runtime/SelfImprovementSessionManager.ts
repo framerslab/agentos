@@ -272,6 +272,24 @@ export class SelfImprovementSessionManager {
           all: async (sql: string, params?: unknown[]) =>
             storageAdapter.all(sql, params as any),
           exec: async (sql: string) => storageAdapter.exec(sql),
+          // Forward transaction support so decayForAgent's guard-first
+          // decay unit is atomic (spec batch-1 C6). Mirrors the main
+          // AgentOS storage wrapper, which preserves this capability —
+          // this wrapper previously dropped it.
+          transaction: async <T>(
+            fn: (tx: {
+              run: (sql: string, params?: unknown[]) => Promise<unknown>;
+              get: (sql: string, params?: unknown[]) => Promise<unknown>;
+              all: (sql: string, params?: unknown[]) => Promise<unknown[]>;
+            }) => Promise<T>,
+          ): Promise<T> =>
+            storageAdapter.transaction(async (trx) =>
+              fn({
+                run: async (sql, params) => trx.run(sql, params as any),
+                get: async (sql, params) => trx.get(sql, params as any),
+                all: async (sql, params) => trx.all(sql, params as any),
+              }),
+            ),
         })
       : undefined;
 

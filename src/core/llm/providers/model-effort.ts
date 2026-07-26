@@ -84,3 +84,40 @@ export function mapEffortToOpenAiResponsesEffort(
   if (base === undefined) return undefined;
   return base === 'xhigh' && !modelAcceptsXhighResponsesEffort(modelId) ? 'high' : base;
 }
+
+/**
+ * Chat-completions models whose `reasoning_effort` accepts `'max'`.
+ * Live-probed per entry — record request shape, status, response summary,
+ * date, and the exact model alias in this comment when adding one.
+ *
+ * 2026-07-20 probe (chat.completions, top-level `reasoning_effort: 'max'`,
+ * max_completion_tokens 16): DEFINITIVE REFUSAL on BOTH `gpt-5.6` and
+ * `gpt-5.6-sol` — HTTP 400 `invalid_request_error`,
+ * `code: 'unsupported_value'`, `param: 'reasoning_effort'`, message
+ * enumerating the supported set: `'none', 'low', 'medium', 'high', 'xhigh'`.
+ * `xhigh` is therefore the PROVEN hard ceiling for the gpt-5.6 family on
+ * Chat Completions (matching the 2026-07-14 xhigh probe above; the model
+ * catalog's `max` listing does not apply to this API surface). The list
+ * stays empty until a future family probe returns HTTP 200.
+ */
+const CHAT_MAX_EFFORT_MODELS: readonly string[] = [];
+
+/**
+ * Model-aware Chat `reasoning_effort` mapping (spec batch-1 C3): `max`
+ * stays `'max'` on probe-verified models, else falls back to the standard
+ * mapping (which clamps `max` → `'xhigh'`).
+ */
+export function mapEffortToOpenAiReasoningEffortForModel(
+  effort: unknown,
+  modelId: string,
+): string | undefined {
+  const base = mapEffortToOpenAiReasoningEffort(effort);
+  if (
+    effort === 'max'
+    && base === 'xhigh'
+    && CHAT_MAX_EFFORT_MODELS.some((f) => modelId.toLowerCase().startsWith(f))
+  ) {
+    return 'max';
+  }
+  return base;
+}

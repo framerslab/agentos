@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
+  OpenRouterProvider,
   defaultOpenRouterProviderPrefs,
   mapOpenRouterUsage,
 } from '../OpenRouterProvider';
@@ -82,6 +83,7 @@ describe('mapOpenRouterUsage', () => {
       completionTokens: 300,
       totalTokens: 1500,
       costUSD: 0.0042,
+      inclusiveInputTokens: 1200,
     });
   });
 
@@ -105,5 +107,83 @@ describe('mapOpenRouterUsage', () => {
       prompt_tokens_details: {},
     });
     expect(usage).not.toHaveProperty('cacheReadInputTokens');
+  });
+});
+
+describe('OpenRouterProvider session_id sticky routing', () => {
+  it('forwards options.sessionId as session_id in the request body', async () => {
+    // The provider speaks through its axios client, not global fetch — spy
+    // on the client seam so no request can escape to the network.
+    const provider = new OpenRouterProvider();
+    await provider.initialize({ apiKey: 'sk-or-test' });
+    const requestSpy = vi
+      .spyOn(
+        (provider as unknown as { client: { request: (cfg: unknown) => Promise<unknown> } }).client,
+        'request',
+      )
+      .mockResolvedValue({
+        data: {
+          id: 'gen-1',
+          object: 'chat.completion',
+          created: 1,
+          model: 'anthropic/claude-sonnet-4-6',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'hi' },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+        },
+      });
+    try {
+      await provider.generateCompletion(
+        'anthropic/claude-sonnet-4-6',
+        [{ role: 'user', content: 'hi' }],
+        { sessionId: 'sess-abc123' },
+      );
+      const cfg = requestSpy.mock.calls.at(-1)![0] as { data: { session_id?: string } };
+      expect(cfg.data.session_id).toBe('sess-abc123');
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('omits session_id when no sessionId option is passed', async () => {
+    const provider = new OpenRouterProvider();
+    await provider.initialize({ apiKey: 'sk-or-test' });
+    const requestSpy = vi
+      .spyOn(
+        (provider as unknown as { client: { request: (cfg: unknown) => Promise<unknown> } }).client,
+        'request',
+      )
+      .mockResolvedValue({
+        data: {
+          id: 'gen-2',
+          object: 'chat.completion',
+          created: 1,
+          model: 'anthropic/claude-sonnet-4-6',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'hi' },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+        },
+      });
+    try {
+      await provider.generateCompletion(
+        'anthropic/claude-sonnet-4-6',
+        [{ role: 'user', content: 'hi' }],
+        {},
+      );
+      const cfg = requestSpy.mock.calls.at(-1)![0] as { data: Record<string, unknown> };
+      expect('session_id' in cfg.data).toBe(false);
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 });

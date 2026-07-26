@@ -1,6 +1,6 @@
 # LLM Providers — multi-provider configuration & routing
 
-AgentOS abstracts every LLM behind a single [`IProvider`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/IProvider.ts) interface. Twelve providers are wired in directly — ten via API key, two via local CLI bridges that ride an existing Claude Max or Google account subscription. OpenRouter, included in the twelve, fans out to 200+ additional models from the same set of vendors. Every provider speaks the same streaming protocol, supports the same tool-call shape (with the documented exceptions below), and participates in the same cost ledger. The fallback chain is auto-built from whichever keys are set in the environment and is overridable per agent.
+AgentOS abstracts every LLM behind a single [`IProvider`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/IProvider.ts) interface. Twelve providers are wired in directly — nine via API key, Ollama locally, and two via local CLI bridges that ride an existing Claude Max or Google account subscription. OpenRouter, included in the twelve, fans out to 200+ additional models from the same set of vendors. Every provider speaks the same streaming protocol, supports the same tool-call shape (with the documented exceptions below), and participates in the same cost ledger. The fallback chain is auto-built from whichever keys are set in the environment and is overridable per agent.
 
 ---
 
@@ -37,7 +37,7 @@ AgentOS abstracts LLM access behind a unified [`IProvider`](https://github.com/f
 
 **Key features:**
 
-- **12 providers** supported out of the box (10 API-key + 2 CLI-based)
+- **12 providers** supported out of the box (9 API-key + Ollama + 2 CLI-based)
 - **CLI providers**: Use your Claude Max or Google account subscription via local CLI — no API key needed
 - **Auto-detection**: Set an API key or install a CLI and the provider is available
 - **Fallback**: Automatic retry with alternate providers on failure (`fallbackProviders`)

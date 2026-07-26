@@ -728,4 +728,441 @@ describe('AnthropicProvider automatic prompt caching', () => {
       expect(typeof lastContent).toBe('string');
     }
   });
+
+  /**
+   * Tool cache markers count against the hard 4-breakpoint cap. 3 marked
+   * system blocks + 1 marked tool = 4 (at the cap); the tail must NOT be
+   * added, or the request 400s with a 5th marker. Tools are injected via
+   * customModelParams — the exact vector where a marked tool can reach the
+   * wire payload after passthrough.
+   */
+  it('folds tool cache markers into the cap and skips the tail at 4 wire markers', async () => {
+    const payload = await buildPayload(
+      [
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'p1', cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: 'p2', cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: 'p3', cache_control: { type: 'ephemeral' } },
+          ],
+        },
+        { role: 'user', content: 'hi' },
+      ],
+      {
+        customModelParams: {
+          tools: [
+            {
+              name: 't',
+              description: 'd',
+              input_schema: { type: 'object', properties: {} },
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      },
+    );
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content;
+    if (Array.isArray(lastContent)) {
+      for (const block of lastContent as Array<{ cache_control?: unknown }>) {
+        expect(block.cache_control).toBeUndefined();
+      }
+    } else {
+      expect(typeof lastContent).toBe('string');
+    }
+  });
+
+  it('still pins the tail with tool markers present when there is headroom (< 4)', async () => {
+    const payload = await buildPayload(
+      [
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'p1', cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: 'p2', cache_control: { type: 'ephemeral' } },
+          ],
+        },
+        { role: 'user', content: 'hi' },
+      ],
+      {
+        customModelParams: {
+          tools: [
+            {
+              name: 't',
+              description: 'd',
+              input_schema: { type: 'object', properties: {} },
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      },
+    );
+    // 2 system + 1 tool = 3 < 4 → tail lands on the final message.
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content as Array<{
+      cache_control?: unknown;
+    }>;
+    expect(Array.isArray(lastContent)).toBe(true);
+    expect(lastContent[lastContent.length - 1].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  /**
+   * The forced-tool reconciliation runs AFTER the customModelParams
+   * passthrough, so a tool_choice injected through customModelParams under
+   * extended thinking is clamped to 'auto' rather than reaching the wire as
+   * the forbidden thinking + forced-tool combination (Anthropic 400s on it).
+   */
+  it('reconciles a forced tool_choice injected via customModelParams under thinking', async () => {
+    const payload = await buildPayload(
+      [{ role: 'user', content: 'hi' }],
+      {
+        thinking: { budgetTokens: 1 },
+        customModelParams: { tool_choice: { type: 'tool', name: 'x' } },
+      },
+      'claude-opus-4-8',
+    );
+    expect(payload.tool_choice).toEqual({ type: 'auto' });
+  });
+});
+
+describe('AnthropicProvider per-call cache option (options.cache)', () => {
+  const ENV_KEY = 'AGENTOS_ANTHROPIC_AUTO_CACHE';
+  let savedEnv: string | undefined;
+
+  beforeEach(() => {
+    savedEnv = process.env[ENV_KEY];
+    delete process.env[ENV_KEY];
+  });
+
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = savedEnv;
+  });
+
+  async function buildPayload(
+    messages: Array<Record<string, unknown>>,
+    options: Record<string, unknown> = {},
+    modelId: string = 'claude-sonnet-4-6',
+  ): Promise<Record<string, unknown>> {
+    const provider = new AnthropicProvider();
+    await provider.initialize({ apiKey: 'test-anthropic-key' });
+    return (provider as unknown as {
+      buildRequestPayload: (
+        modelId: string,
+        messages: unknown,
+        options: unknown,
+        stream: boolean,
+      ) => Record<string, unknown>;
+    }).buildRequestPayload(modelId, messages, options, false);
+  }
+
+  /** Every cache_control reachable from the payload, flattened for asserts. */
+  function collectMarkers(payload: Record<string, unknown>): unknown[] {
+    const found: unknown[] = [];
+    if (payload.cache_control) found.push(payload.cache_control);
+    const system = payload.system;
+    if (Array.isArray(system)) {
+      for (const b of system as Array<{ cache_control?: unknown }>) {
+        if (b.cache_control) found.push(b.cache_control);
+      }
+    }
+    for (const msg of (payload.messages as Array<{ content?: unknown }>) ?? []) {
+      if (!Array.isArray(msg.content)) continue;
+      for (const b of msg.content as Array<{ cache_control?: unknown }>) {
+        if (b.cache_control) found.push(b.cache_control);
+      }
+    }
+    if (Array.isArray(payload.tools)) {
+      for (const t of payload.tools as Array<{ cache_control?: unknown }>) {
+        if (t.cache_control) found.push(t.cache_control);
+      }
+    }
+    return found;
+  }
+
+  /**
+   * `cache: false` is the per-call hard-off for true one-shots: unlike the
+   * process-global env kill switch (auto path only), it also strips
+   * caller-placed markers so the request pays no cache-write premium
+   * anywhere. A one-shot's write (1.25x at 5m, 2x at 1h) is never read back.
+   */
+  it('cache:false emits zero cache_control — auto suppressed AND caller markers stripped', async () => {
+    const payload = await buildPayload([
+      {
+        role: 'system',
+        content: [
+          { type: 'text', text: 'Stable prefix', cache_control: { type: 'ephemeral', ttl: '1h' } },
+          { type: 'text', text: 'Dynamic tail' },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'few-shot context', cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: 'question' },
+        ],
+      },
+      { role: 'user', content: 'follow-up' },
+    ], { cache: false });
+    expect(collectMarkers(payload)).toEqual([]);
+    // With every marker stripped, system falls back to the joined-string emission.
+    expect(typeof payload.system).toBe('string');
+  });
+
+  it('cache:false also clears markers injected via customModelParams (tools + request-level)', async () => {
+    const payload = await buildPayload(
+      [{ role: 'user', content: 'hi' }],
+      {
+        cache: false,
+        customModelParams: {
+          cache_control: { type: 'ephemeral' },
+          tools: [
+            {
+              name: 'x',
+              description: 'd',
+              input_schema: { type: 'object' },
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      },
+    );
+    expect(collectMarkers(payload)).toEqual([]);
+  });
+
+  it('cache:false beats the default auto marker on a bare request', async () => {
+    const payload = await buildPayload([{ role: 'user', content: 'hi' }], { cache: false });
+    expect(payload.cache_control).toBeUndefined();
+    expect(collectMarkers(payload)).toEqual([]);
+  });
+
+  /**
+   * `cache: { ttl: '1h' }` on a marker-free non-thinking request: the TTL is
+   * a block-level attribute, so the auto path switches from the request-level
+   * marker to explicit placement — system-end breakpoint + moving message
+   * tail — both carrying the 1h TTL. Slow loops (codegen tool calls gap
+   * 2-14 min; human turns routinely exceed 5m) stop expiring between steps.
+   */
+  it('cache ttl 1h without thinking places block-level markers carrying the TTL', async () => {
+    const payload = await buildPayload([
+      { role: 'system', content: 'You are a stable, reusable system prompt.' },
+      { role: 'user', content: 'hi' },
+    ], { cache: { ttl: '1h' } });
+    expect(payload.cache_control).toBeUndefined();
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    expect(Array.isArray(system)).toBe(true);
+    expect(system[system.length - 1].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content as Array<{ cache_control?: unknown }>;
+    expect(Array.isArray(lastContent)).toBe(true);
+    expect(lastContent[lastContent.length - 1].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+
+  it('cache ttl 1h under thinking carries the TTL on both auto breakpoints', async () => {
+    const payload = await buildPayload(
+      [
+        { role: 'system', content: 'Primary system prompt.' },
+        { role: 'user', content: 'hi' },
+      ],
+      { thinking: { budgetTokens: 1 }, cache: { ttl: '1h' } },
+      'claude-opus-4-8',
+    );
+    expect(payload.cache_control).toBeUndefined();
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    expect(system[system.length - 1].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content as Array<{ cache_control?: unknown }>;
+    expect(lastContent[lastContent.length - 1].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+
+  it('cache ttl 1h composes with a caller-marked system: caller marker raised to 1h, tail gets 1h', async () => {
+    const payload = await buildPayload([
+      {
+        role: 'system',
+        content: [
+          { type: 'text', text: 'Stable persona prefix', cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: 'Dynamic per-turn state' },
+        ],
+      },
+      { role: 'user', content: 'hi' },
+    ], { cache: { ttl: '1h' } });
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    // Anthropic requires every 1h marker to PRECEDE every 5m marker in cache
+    // order — a 5m system marker ahead of the 1h tail 400s the request. The
+    // per-call TTL declares the whole call's pacing, so the caller's
+    // default-TTL marker is raised to 1h alongside the tail.
+    expect(system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    expect(system[1].cache_control).toBeUndefined();
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content as Array<{ cache_control?: unknown }>;
+    expect(lastContent[lastContent.length - 1].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+
+  it('cache ttl 1h raises an explicit 5m caller system marker too (mixed order would 400)', async () => {
+    const payload = await buildPayload([
+      {
+        role: 'system',
+        content: [
+          { type: 'text', text: 'Prefix', cache_control: { type: 'ephemeral', ttl: '5m' } },
+        ],
+      },
+      { role: 'user', content: 'hi' },
+    ], { cache: { ttl: '1h' } });
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    expect(system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+
+  it('cache ttl 1h with a marked tool present: tail falls back to the default TTL (order stays valid)', async () => {
+    const payload = await buildPayload(
+      [
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'Prefix', cache_control: { type: 'ephemeral' } },
+          ],
+        },
+        { role: 'user', content: 'hi' },
+      ],
+      {
+        cache: { ttl: '1h' },
+        customModelParams: {
+          tools: [
+            {
+              name: 'x',
+              description: 'd',
+              input_schema: { type: 'object' },
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      },
+    );
+    // Marked tools are raw caller objects the provider never mutates, and
+    // tools render before system: a 1h tail after a 5m tool marker would
+    // 400, so the tail keeps the default TTL and the system marker stays.
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    expect(system[0].cache_control).toEqual({ type: 'ephemeral' });
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content as Array<{ cache_control?: unknown }>;
+    expect(lastContent[lastContent.length - 1].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('customModelParams system override + cache 1h: override preserved verbatim, request-level marker only', async () => {
+    const payload = await buildPayload(
+      [
+        { role: 'system', content: 'Original system that the override replaces.' },
+        { role: 'user', content: 'hi' },
+      ],
+      {
+        cache: { ttl: '1h' },
+        customModelParams: { system: 'CUSTOM OVERRIDE SYSTEM' },
+      },
+    );
+    // The explicit-placement path must not restructure regions it no longer
+    // owns: the pre-override locals would clobber the custom system.
+    expect(payload.system).toBe('CUSTOM OVERRIDE SYSTEM');
+    expect(payload.cache_control).toEqual({ type: 'ephemeral' });
+    const messages = payload.messages as Array<{ content: unknown }>;
+    for (const m of messages) {
+      if (!Array.isArray(m.content)) continue;
+      for (const b of m.content as Array<{ cache_control?: unknown }>) {
+        expect(b.cache_control).toBeUndefined();
+      }
+    }
+  });
+
+  it('customModelParams messages override carrying a marker: full stand-down (caller owns the wire)', async () => {
+    const payload = await buildPayload(
+      [{ role: 'user', content: 'original' }],
+      {
+        cache: { ttl: '1h' },
+        customModelParams: {
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: 'custom', cache_control: { type: 'ephemeral' } },
+              ],
+            },
+          ],
+        },
+      },
+    );
+    expect(payload.cache_control).toBeUndefined();
+    // The override rides the wire untouched; its own marker is the only one.
+    expect(collectMarkers(payload)).toEqual([{ type: 'ephemeral' }]);
+  });
+
+  it('cache ttl 1h does not override the caller-owns-messages stand-down', async () => {
+    const payload = await buildPayload([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'shared context', cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: 'varying question' },
+        ],
+      },
+      { role: 'user', content: 'follow-up' },
+    ], { cache: { ttl: '1h' } });
+    expect(payload.cache_control).toBeUndefined();
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content;
+    expect(typeof lastContent).toBe('string');
+  });
+
+  it('cache ttl 5m keeps the default request-level marker (no behavior change)', async () => {
+    const payload = await buildPayload([
+      { role: 'system', content: 'A system prompt.' },
+      { role: 'user', content: 'hi' },
+    ], { cache: { ttl: '5m' } });
+    expect(payload.cache_control).toEqual({ type: 'ephemeral' });
+    expect(typeof payload.system).toBe('string');
+  });
+});
+
+describe('AnthropicProvider cache:false sanitizes customModelParams-injected regions', () => {
+  async function buildPayload(
+    messages: Array<Record<string, unknown>>,
+    options: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>> {
+    const provider = new AnthropicProvider();
+    await provider.initialize({ apiKey: 'test-anthropic-key' });
+    return (provider as unknown as {
+      buildRequestPayload: (
+        modelId: string,
+        messages: unknown,
+        options: unknown,
+        stream: boolean,
+      ) => Record<string, unknown>;
+    }).buildRequestPayload('claude-sonnet-4-6', messages, options, false);
+  }
+
+  it('strips markers from a customModelParams system/messages override', async () => {
+    const injectedSystem = [
+      { type: 'text', text: 'injected stable', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ];
+    const injectedMessages = [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'injected turn', cache_control: { type: 'ephemeral' } },
+        ],
+      },
+    ];
+    const payload = await buildPayload(
+      [{ role: 'user', content: 'hi' }],
+      {
+        cache: false,
+        customModelParams: { system: injectedSystem, messages: injectedMessages },
+      },
+    );
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    expect(system[0].cache_control).toBeUndefined();
+    const messages = payload.messages as Array<{ content: Array<{ cache_control?: unknown }> }>;
+    expect(messages[0].content[0].cache_control).toBeUndefined();
+    // The caller's own customModelParams objects are never mutated.
+    expect(injectedSystem[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    expect(injectedMessages[0].content[0].cache_control).toEqual({ type: 'ephemeral' });
+  });
 });

@@ -19,11 +19,11 @@ import type { ProviderStrategyConfig, NodeProviderAssignment, ExplicitAssignment
  */
 const DEFAULTS: Record<string, { text: string; cheap: string }> = {
   openai: { text: 'gpt-4o', cheap: 'gpt-4o-mini' },
-  anthropic: { text: 'claude-sonnet-5', cheap: 'claude-haiku-4-5-20251001' },
+  anthropic: { text: 'claude-sonnet-4-6', cheap: 'claude-haiku-4-5-20251001' },
   gemini: { text: 'gemini-2.5-flash', cheap: 'gemini-2.0-flash' },
   ollama: { text: 'llama3.2', cheap: 'llama3.2' },
   openrouter: { text: 'openai/gpt-4o', cheap: 'openai/gpt-4o-mini' },
-  atlascloud: { text: 'deepseek-ai/deepseek-v4-pro', cheap: 'qwen/qwen3.5-flash' },
+  atlascloud: { text: 'deepseek-ai/deepseek-v4-pro', cheap: 'deepseek-ai/deepseek-v4-pro' },
   groq: { text: 'llama-3.3-70b-versatile', cheap: 'gemma2-9b-it' },
   together: {
     text: 'meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo',
@@ -130,16 +130,16 @@ export class ProviderAssignmentEngine {
       tier === 'cheap'
         ? this.pickProvider(
             'balanced:cheap',
-            ['groq', 'gemini', 'openai', 'openrouter', 'together', 'mistral', 'xai', 'anthropic', 'ollama'],
+            ['groq', 'gemini', 'atlascloud', 'openai', 'openrouter', 'together', 'mistral', 'xai', 'anthropic', 'ollama'],
           )
         : tier === 'strong'
           ? this.pickProvider(
               'balanced:strong',
-              ['anthropic', 'openai', 'openrouter', 'gemini', 'groq', 'xai', 'mistral', 'together', 'ollama'],
+              ['anthropic', 'openai', 'openrouter', 'atlascloud', 'gemini', 'groq', 'xai', 'mistral', 'together', 'ollama'],
             )
           : this.pickProvider(
               'balanced:standard',
-              ['openai', 'openrouter', 'anthropic', 'gemini', 'groq', 'mistral', 'xai', 'together', 'ollama'],
+              ['openai', 'openrouter', 'atlascloud', 'anthropic', 'gemini', 'groq', 'mistral', 'xai', 'together', 'ollama'],
             );
     const defaults = DEFAULTS[provider];
 

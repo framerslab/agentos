@@ -392,8 +392,12 @@ export class ChannelRouter {
         bindingOwnerUserId: binding.ownerUserId,
       });
       if (policyResult.verdict === 'drop') {
+        // Audit at info level WITHOUT raw sender / conversation identifiers:
+        // mention-gated groups drop most traffic, so this fires often and must
+        // not become a high-volume PII sink. bindingId locates the group config;
+        // per-sender detail belongs behind a debug/redacted channel.
         console.info(
-          `[ChannelRouter] group-policy drop reason=${policyResult.reason} platform=${message.platform} conversation=${message.conversationId} sender=${message.sender.id} binding=${binding.bindingId}`,
+          `[ChannelRouter] group-policy drop reason=${policyResult.reason} platform=${message.platform} binding=${binding.bindingId}`,
         );
         continue;
       }

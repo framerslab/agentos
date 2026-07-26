@@ -164,6 +164,14 @@ export { PostgresVectorStore, type PostgresVectorStoreConfig } from './vector_st
 // ============================================================================
 
 export { GraphRAGEngine } from '../memory/retrieval/graph/graphrag/index.js';
+// Neo4j GraphRAG: construct with a Neo4jConnectionManager, then
+// `await manager.initialize(config)` BEFORE `engine.initialize(graphRagConfig)` —
+// neo4j-driver (optional peer dep) loads only inside manager.initialize().
+export { Neo4jGraphRAGEngine } from '../memory/retrieval/graph/graphrag/index.js';
+export { Neo4jConnectionManager } from '../memory/retrieval/graph/neo4j/index.js';
+export type { Neo4jGraphRAGEngineDeps } from '../memory/retrieval/graph/graphrag/Neo4jGraphRAGEngine.js';
+export type { Neo4jConnectionConfig } from '../memory/retrieval/graph/neo4j/index.js';
+export type { ExtractionResult } from '../memory/retrieval/graph/graphrag/index.js';
 export type {
   IGraphRAGEngine,
   GraphRAGConfig,

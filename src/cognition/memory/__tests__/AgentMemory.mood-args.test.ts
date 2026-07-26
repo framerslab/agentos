@@ -51,12 +51,12 @@ describe('AgentMemory.getContext mood arg', () => {
   it('omitted → NEUTRAL passed to assembleForPrompt', async () => {
     const { mem, manager } = cognitiveMemoryWithManagerSpy();
     await mem.getContext('q', { tokenBudget: 1000 });
-    expect(manager.assembleForPrompt).toHaveBeenCalledWith('q', 1000, { valence: 0, arousal: 0, dominance: 0 });
+    expect(manager.assembleForPrompt).toHaveBeenCalledWith('q', 1000, { valence: 0, arousal: 0, dominance: 0 }, { maxTierRank: undefined });
   });
   it('supplied currentMood passes through; default budget 2000 preserved', async () => {
     const { mem, manager } = cognitiveMemoryWithManagerSpy();
     await mem.getContext('q', { currentMood: { valence: 0.4, arousal: 0.2, dominance: 0 } });
-    expect(manager.assembleForPrompt).toHaveBeenCalledWith('q', 2000, { valence: 0.4, arousal: 0.2, dominance: 0 });
+    expect(manager.assembleForPrompt).toHaveBeenCalledWith('q', 2000, { valence: 0.4, arousal: 0.2, dominance: 0 }, { maxTierRank: undefined });
   });
 });
 

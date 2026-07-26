@@ -14,7 +14,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OpenAIProvider } from '../implementations/OpenAIProvider.js';
 
-function makeUsageOnlyChunk(promptTokens: number, completionTokens: number) {
+function makeUsageOnlyChunk(
+  promptTokens: number,
+  completionTokens: number,
+  promptTokensDetails?: { cached_tokens?: number; cache_write_tokens?: number },
+) {
   return {
     id: 'chatcmpl-usage-only',
     object: 'chat.completion.chunk',
@@ -25,6 +29,7 @@ function makeUsageOnlyChunk(promptTokens: number, completionTokens: number) {
       prompt_tokens: promptTokens,
       completion_tokens: completionTokens,
       total_tokens: promptTokens + completionTokens,
+      ...(promptTokensDetails ? { prompt_tokens_details: promptTokensDetails } : {}),
     },
   };
 }
@@ -174,5 +179,161 @@ describe('OpenAIProvider streaming usage', () => {
     const usageChunk = chunks.find((c) => c.usage && c.isFinal);
     expect(usageChunk).toBeDefined();
     expect(usageChunk!.usage!.totalTokens).toBe(46);
+  });
+});
+
+describe('OpenAIProvider cached-token normalization (automatic prompt caching)', () => {
+  let provider: OpenAIProvider;
+
+  beforeEach(async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          object: 'list',
+          data: [{ id: 'gpt-4o', object: 'model', created: 1, owned_by: 'openai' }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    provider = new OpenAIProvider();
+    await provider.initialize({ apiKey: 'sk-test', maxRetries: 1 });
+    vi.spyOn(globalThis, 'fetch').mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('normalizes prompt_tokens_details.cached_tokens on non-streaming completions', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: 'chatcmpl-cached',
+          object: 'chat.completion',
+          created: 1,
+          model: 'gpt-4o',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'hello' },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          usage: {
+            prompt_tokens: 1200,
+            completion_tokens: 40,
+            total_tokens: 1240,
+            prompt_tokens_details: { cached_tokens: 1024 },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+
+    const result = await provider.generateCompletion(
+      'gpt-4o',
+      [{ role: 'user', content: 'hi' }],
+      {},
+    );
+    // Cached tokens surface on the same normalized field the Anthropic and
+    // OpenRouter providers use; prompt_tokens stays INCLUSIVE of them
+    // (OpenAI accounting), so promptTokens is unchanged.
+    expect(result.usage?.cacheReadInputTokens).toBe(1024);
+    expect(result.usage?.promptTokens).toBe(1200);
+  });
+
+  it('normalizes cached_tokens on the trailing streaming usage-only chunk', async () => {
+    const usageOnly = {
+      ...makeUsageOnlyChunk(500, 20),
+      usage: {
+        prompt_tokens: 500,
+        completion_tokens: 20,
+        total_tokens: 520,
+        prompt_tokens_details: { cached_tokens: 384 },
+      },
+    };
+    const sse = [
+      `data: ${JSON.stringify({
+        id: 'chatcmpl-2',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: 'gpt-4o',
+        choices: [
+          { index: 0, delta: { role: 'assistant', content: 'hi' }, finish_reason: null },
+        ],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        id: 'chatcmpl-2',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: 'gpt-4o',
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      })}\n\n`,
+      `data: ${JSON.stringify(usageOnly)}\n\n`,
+      'data: [DONE]\n\n',
+    ].join('');
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+    );
+
+    const chunks: { isFinal?: boolean; usage?: { cacheReadInputTokens?: number } }[] = [];
+    for await (const chunk of provider.generateCompletionStream(
+      'gpt-4o',
+      [{ role: 'user', content: 'hi' }],
+      {},
+    )) {
+      chunks.push(chunk as { isFinal?: boolean; usage?: { cacheReadInputTokens?: number } });
+    }
+
+    const usageChunk = chunks.find((c) => c.usage && c.isFinal);
+    expect(usageChunk?.usage?.cacheReadInputTokens).toBe(384);
+  });
+});
+
+describe('OpenAIProvider streaming cache-write usage (spec batch-1 C2)', () => {
+  let provider: OpenAIProvider;
+
+  beforeEach(async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          object: 'list',
+          data: [{ id: 'gpt-4o', object: 'model', created: 1, owned_by: 'openai' }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    provider = new OpenAIProvider();
+    await provider.initialize({ apiKey: 'sk-test', maxRetries: 1 });
+    vi.spyOn(globalThis, 'fetch').mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('normalizes cached_tokens + cache_write_tokens from the trailing usage-only chunk', async () => {
+    const sentinel = makeUsageOnlyChunk(120, 5, { cached_tokens: 64, cache_write_tokens: 40 });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(`data: ${JSON.stringify(sentinel)}\n\ndata: [DONE]\n\n`, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      }),
+    );
+
+    let finalUsage: { cacheReadInputTokens?: number; cacheCreationInputTokens?: number; inclusiveInputTokens?: number } | undefined;
+    for await (const chunk of provider.generateCompletionStream(
+      'gpt-4o',
+      [{ role: 'user', content: 'hi' }],
+      {},
+    )) {
+      if (chunk.usage) finalUsage = chunk.usage;
+    }
+
+    expect(finalUsage?.cacheReadInputTokens).toBe(64);
+    expect(finalUsage?.cacheCreationInputTokens).toBe(40);
+    expect(finalUsage?.inclusiveInputTokens).toBe(120);
   });
 });

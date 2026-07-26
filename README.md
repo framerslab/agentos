@@ -78,6 +78,20 @@ await session.send('Can you expand on that?'); // remembers context
 
 [Full quickstart](https://docs.agentos.sh/getting-started) * [Examples cookbook](https://docs.agentos.sh/getting-started/examples) * [API reference](https://docs.agentos.sh/api)
 
+**Sessions in 0.10.** Sessions carry a lossless conversation transcript — assistant tool calls, tool results, thinking blocks — independent of the memory subsystem, bounded by default (whole-block eviction past a ~120K-token estimate). `memory: false` no longer makes a session stateless; pass `history: false` for that. Long tool-driving loops get `session.reseed(snapshot)` (atomic history replacement with in-flight epoch guarding), `session.messages()` as checkpoint material, and per-send generation overrides (`toolChoice`, `requestTimeout`, `cache`, `cacheDiagnostics`, `blockLabel`):
+
+```ts
+// Before 0.10 — stateless unless memory was on:
+const s = agent({ model, memory: false }).session('job-1'); // kept no history
+
+// 0.10 — sessions remember by default; opt out explicitly:
+const stateless = agent({ model, memory: false, history: false }).session('job-1');
+const bounded = agent({ model, history: { maxTokens: 60_000 } }).session('job-2');
+bounded.reseed([{ role: 'user', content: 'compact resume snapshot' }]);
+```
+
+Cache note: history byte-stability holds for the stored transcript between eviction events; the wire request can still legitimately differ when dynamic memory context or message-mutating hooks inject per-call content.
+
 ---
 
 ## Emergent Design

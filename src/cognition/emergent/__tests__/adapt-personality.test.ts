@@ -209,3 +209,89 @@ describe('AdaptPersonalityTool', () => {
     expect(result.error).toContain('finite number');
   });
 });
+
+describe('decay-on-adapt (spec batch-1 C6)', () => {
+  it('ages stored strengths for this agent before recording; a second same-day adapt reuses the same cycle id (store no-ops via its guard)', async () => {
+    // Freeze the clock so the UTC-day cycle id cannot straddle midnight
+    // between the two executes and the assertion below.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-20T12:00:00Z'));
+    const decayForAgent = vi.fn().mockResolvedValue({ decayed: 1, pruned: 0 });
+    const deps = makeDeps({
+      config: { maxDeltaPerSession: 0.3, persistWithDecay: true, decayRate: 0.05 },
+      mutationStore: {
+        record: vi.fn().mockResolvedValue('pm_test'),
+        decayForAgent,
+      } as PersonalityMutationStore,
+    });
+    const tool = new AdaptPersonalityTool(deps);
+
+    await tool.execute(
+      { trait: 'openness', delta: 0.05, reasoning: 'test' },
+      makeContext({ gmiId: 'agent-decay' }),
+    );
+    await tool.execute(
+      { trait: 'openness', delta: 0.05, reasoning: 'test again' },
+      makeContext({ gmiId: 'agent-decay' }),
+    );
+
+    const expectedCycle = 'day:2026-07-20';
+    expect(decayForAgent).toHaveBeenCalledTimes(2);
+    expect(decayForAgent).toHaveBeenNthCalledWith(1, 'agent-decay', 0.05, expectedCycle);
+    expect(decayForAgent).toHaveBeenNthCalledWith(2, 'agent-decay', 0.05, expectedCycle);
+    const order =
+      decayForAgent.mock.invocationCallOrder[0]! <
+      (deps.mutationStore!.record as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!;
+    expect(order).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it('persistWithDecay false performs zero decay calls', async () => {
+    const decayForAgent = vi.fn();
+    const deps = makeDeps({
+      config: { maxDeltaPerSession: 0.3, persistWithDecay: false },
+      mutationStore: {
+        record: vi.fn().mockResolvedValue('pm_test'),
+        decayForAgent,
+      } as PersonalityMutationStore,
+    });
+    const tool = new AdaptPersonalityTool(deps);
+
+    await tool.execute({ trait: 'openness', delta: 0.1, reasoning: 'test' }, makeContext());
+
+    expect(decayForAgent).not.toHaveBeenCalled();
+  });
+
+  it('a store without decayForAgent skips decay and the adapt still succeeds', async () => {
+    const deps = makeDeps({
+      config: { maxDeltaPerSession: 0.3, persistWithDecay: true, decayRate: 0.05 },
+      mutationStore: { record: vi.fn().mockResolvedValue('pm_test') } as PersonalityMutationStore,
+    });
+    const tool = new AdaptPersonalityTool(deps);
+
+    const result = await tool.execute(
+      { trait: 'openness', delta: 0.1, reasoning: 'test' },
+      makeContext(),
+    );
+
+    expect((result as { success: boolean }).success).toBe(true);
+  });
+
+  it('a decay failure never blocks the adapt', async () => {
+    const deps = makeDeps({
+      config: { maxDeltaPerSession: 0.3, persistWithDecay: true, decayRate: 0.05 },
+      mutationStore: {
+        record: vi.fn().mockResolvedValue('pm_test'),
+        decayForAgent: vi.fn().mockRejectedValue(new Error('db down')),
+      } as PersonalityMutationStore,
+    });
+    const tool = new AdaptPersonalityTool(deps);
+
+    const result = await tool.execute(
+      { trait: 'openness', delta: 0.1, reasoning: 'test' },
+      makeContext(),
+    );
+
+    expect((result as { success: boolean }).success).toBe(true);
+  });
+});

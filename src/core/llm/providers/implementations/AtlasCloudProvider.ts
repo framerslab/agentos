@@ -93,7 +93,6 @@ export class AtlasCloudProvider implements IProvider {
     });
 
     this.isInitialized = true;
-    console.log(`AtlasCloudProvider initialized. Default model: ${this.defaultModelId}.`);
   }
 
   /** @inheritdoc */
@@ -146,6 +145,5 @@ export class AtlasCloudProvider implements IProvider {
   public async shutdown(): Promise<void> {
     await this.delegate.shutdown();
     this.isInitialized = false;
-    console.log('AtlasCloudProvider shutdown complete.');
   }
 }

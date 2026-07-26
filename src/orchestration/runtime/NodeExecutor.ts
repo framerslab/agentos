@@ -13,7 +13,8 @@
  * after the `LoopController` and extension managers are available.
  */
 
-import type { GraphNode, GraphState, GraphCondition, CompiledExecutionGraph } from '../ir/types.js';
+import type { GraphNode, GraphState, GraphCondition, CompiledExecutionGraph, JudgeNodeConfig } from '../ir/types.js';
+import { resolveJudgeLlm } from '../../core/llm/providers/judge-config.js';
 import type {
   GraphEvent,
   MissionExpansionTrigger,
@@ -438,12 +439,7 @@ export class NodeExecutor {
       prompt: string;
       autoAccept?: boolean;
       autoReject?: boolean | string;
-      judge?: {
-        model?: string;
-        provider?: string;
-        criteria?: string;
-        confidenceThreshold?: number;
-      };
+      judge?: JudgeNodeConfig;
       onTimeout?: 'accept' | 'reject' | 'error';
       guardrailOverride?: boolean;
     },
@@ -470,6 +466,11 @@ export class NodeExecutor {
 
     // --- LLM judge: delegate to an LLM for the approval decision ---
     if (config.judge) {
+      // Resolve the judge selection OUTSIDE the provider try/catch: an
+      // invalid judge configuration (e.g. a non-default provider pinned
+      // without a model) is a caller error that must propagate, not be
+      // silently converted into a human interrupt like a provider failure.
+      const judgeSel = resolveJudgeLlm(config.judge);
       try {
         const { generateText } = await import('../../api/generateText.js');
 
@@ -482,11 +483,12 @@ export class NodeExecutor {
         ].join('\n');
 
         const result = await generateText({
-          model: config.judge.model ?? 'gpt-4o-mini',
-          provider: config.judge.provider ?? 'openai',
+          model: judgeSel.model,
+          provider: judgeSel.provider,
           system: systemPrompt,
           prompt: config.prompt,
           temperature: 0.1,
+          ...(judgeSel.effort !== undefined ? { effort: judgeSel.effort } : {}),
         });
 
         const jsonMatch = result.text.match(/\{[\s\S]*\}/);

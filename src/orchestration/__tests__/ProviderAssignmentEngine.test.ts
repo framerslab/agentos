@@ -48,7 +48,7 @@ describe('ProviderAssignmentEngine', () => {
       const assignments = engine.assign(nodes, { strategy: 'best' });
 
       expect(assignments[0]!.provider).toBe('anthropic');
-      expect(assignments[0]!.model).toBe('claude-sonnet-4-20250514');
+      expect(assignments[0]!.model).toBe('claude-sonnet-4-6');
     });
   });
 
@@ -72,6 +72,23 @@ describe('ProviderAssignmentEngine', () => {
 
       expect(assignments.find((a) => a.nodeId === 'border_low')!.model).toBe('gpt-4o-mini');
       expect(assignments.find((a) => a.nodeId === 'border_high')!.model).toBe('gpt-4o');
+    });
+
+    it('uses Atlas Cloud when it is the only available provider', () => {
+      const engine = new ProviderAssignmentEngine(['atlascloud']);
+      const nodes = [makeGmiNode('easy', 0.1), makeGmiNode('hard', 0.9)];
+      const assignments = engine.assign(nodes, { strategy: 'balanced' });
+
+      expect(assignments).toEqual([
+        expect.objectContaining({
+          provider: 'atlascloud',
+          model: 'deepseek-ai/deepseek-v4-pro',
+        }),
+        expect.objectContaining({
+          provider: 'atlascloud',
+          model: 'deepseek-ai/deepseek-v4-pro',
+        }),
+      ]);
     });
   });
 

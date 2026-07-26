@@ -13,7 +13,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { resolveModelOption, resolveProvider, createProviderManager } from './model.js';
-import { attachUsageAttributes, toTurnMetricUsage } from './observability.js';
+import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { fireLlmUsageObserver } from './observers.js';
 import {
   hostPolicyToRouteParams,
@@ -80,6 +80,7 @@ class LLMProviderCircuitOpenError extends Error {
   }
 }
 import type { IModelRouter, ModelRouteParams } from '../core/llm/routing/IModelRouter.js';
+import type { SessionTranscriptMessage } from './sessionTranscript.js';
 import type {
   MessageContent,
   MessageContentPart,
@@ -150,24 +151,37 @@ export interface TokenUsage {
   /** Total cost reported by the provider across all steps, when available. */
   costUSD?: number;
   /**
-   * Tokens served from the provider's prompt-prefix cache. When present,
-   * these were billed at the cache-read rate (0.1× input price on
-   * Anthropic) and are NOT also counted in `promptTokens`. Callers that
-   * want total tokens-ever-sent should add `promptTokens + cacheReadTokens
-   * + cacheCreationTokens`.
+   * Provider-independent total input tokens INCLUDING cached reads/writes,
+   * summed across steps (spec batch-1 C1). Anthropic reports input
+   * exclusive of cache (this field adds it back); OpenAI/OpenRouter report
+   * prompt tokens already inclusive (used as-is). Tri-state: undefined =
+   * no step reported enough to compute; a reported 0 is preserved.
+   */
+  inclusiveInputTokens?: number;
+  /**
+   * Tokens served from the provider's prompt-prefix cache, billed at the
+   * cache-read rate. Reported by Anthropic (`cache_read_input_tokens`),
+   * OpenAI (`prompt_tokens_details.cached_tokens` on Chat Completions,
+   * `input_tokens_details.cached_tokens` on Responses), and OpenRouter
+   * (`prompt_tokens_details.cached_tokens`) — all normalized into this field.
    *
-   * Undefined when the provider does not report cache usage (OpenAI's
-   * auto-cache does not expose this at the per-call layer; Anthropic
-   * does via `cache_read_input_tokens`).
+   * ACCOUNTING WARNING — the counters are distinct but NOT universally
+   * disjoint: Anthropic's `promptTokens` EXCLUDES cached tokens (its total
+   * input = `promptTokens + cacheReadTokens + cacheCreationTokens`), while
+   * OpenAI's `promptTokens` already INCLUDES cached reads (adding them
+   * double-counts). For a provider-independent input total, use the
+   * normalized inclusive input accounting rather than summing these fields.
    */
   cacheReadTokens?: number;
   /**
    * Tokens written to the provider's prompt-prefix cache as a new cache
-   * entry. Billed at the cache-creation rate (1.25× input price on
-   * Anthropic for 5-minute TTL, 2× for 1-hour TTL). NOT also counted in
-   * `promptTokens`. A `cacheReadTokens` of 0 and `cacheCreationTokens > 0`
-   * indicates the first call that filled the cache; subsequent calls
-   * with a cache hit flip the numbers.
+   * entry, billed at the cache-write rate (Anthropic: 1.25× input for the
+   * 5-minute TTL, 2× for 1-hour; OpenAI GPT-5.6+: 1.25×, reported as
+   * `cache_write_tokens` in the usage details). Same disjointness caveat as
+   * `cacheReadTokens`: excluded from Anthropic's `promptTokens`, included
+   * in OpenAI's. A `cacheReadTokens` of 0 with `cacheCreationTokens > 0`
+   * indicates the call that filled the cache; later cache hits flip the
+   * numbers.
    */
   cacheCreationTokens?: number;
 }
@@ -204,6 +218,15 @@ export interface PlanningConfig {
    * of hanging until the provider default.
    */
   requestTimeout?: number;
+
+  /**
+   * Per-call prompt-cache control for the planning completion. Inherits the
+   * root {@link GenerateTextOptions.cache} when unset, so a `cache: false`
+   * caller's planning sub-call cannot silently re-enable auto-caching and a
+   * `{ ttl: '1h' }` caller's planning call keeps the same pacing. A
+   * planning-specific value here overrides the inherited one.
+   */
+  cache?: { ttl?: '5m' | '1h' } | false;
 }
 
 /**
@@ -251,6 +274,22 @@ export interface FallbackProviderEntry {
    * Omitted -> the hop inherits the call-level `effort`.
    */
   effort?: string;
+  /**
+   * Per-hop prompt-cache disposition applied ONLY when THIS entry serves the
+   * call (same override shape as {@link FallbackProviderEntry.effort}).
+   * `false` sends zero `cache_control` on the hop; `{ ttl }` re-times the
+   * hop's markers. Omitted -> the hop inherits the call-level
+   * {@link GenerateTextOptions.cache}.
+   *
+   * The canonical chains ({@link buildFallbackChain} /
+   * {@link buildPolicyAwareFallbackChain}) pin `cache: false` on every leg:
+   * rescue traffic is sporadic and one-shot-shaped, so cache writes on a
+   * fallback hop rarely earn their reads back (the claude-sonnet-5 leg
+   * measured 0.45x write amortization in wilds prod, 2026-07-13..20 — the
+   * writes cost ~2x what the reads saved). A caller-supplied entry keeps
+   * full control: omit to inherit, or set a ttl to cache a hop deliberately.
+   */
+  cache?: { ttl?: '5m' | '1h' } | false;
 }
 
 /**
@@ -372,6 +411,54 @@ export interface GenerateTextOptions {
    * provider drops it on unsupported models or invalid values.
    */
   effort?: string;
+  /**
+   * OpenAI prompt-cache shard key (spec batch-1 C2; other providers ignore
+   * it). `'auto'` derives a sha256-hashed key from {@link sessionId}
+   * (omitted when no session id is set; raw ids never leave the process);
+   * an explicit string is sent verbatim; `false`/absent omit the field.
+   */
+  promptCacheKey?: string | 'auto' | false;
+  /**
+   * OpenAI prompt-cache retention request. Emitted only when the fail-closed
+   * capability table allows the model/value combination; unsupported combos
+   * are omitted with a debug log. See `openai-cache-params.ts`.
+   */
+  promptCacheRetention?: 'in_memory' | '24h' | '30m';
+  /**
+   * OpenAI service tier (`service_tier`, verbatim). No default. `'flex'`
+   * bills at ~batch rates but can 429 under load; automatic tier fallback
+   * is deliberately not implemented.
+   */
+  serviceTier?: 'auto' | 'default' | 'flex' | 'priority';
+  /**
+   * Per-call prompt-cache control, forwarded to cache-capable providers
+   * (Anthropic today; others ignore it).
+   *
+   * - `false` — this request emits NO `cache_control` at all: the provider's
+   *   automatic markers (request-level marker, thinking-mode block markers,
+   *   the moving message-tail) are suppressed AND any caller-placed
+   *   system/message markers (e.g. {@link SystemContentBlock.cacheBreakpoint})
+   *   are stripped before the wire. Set this on TRUE one-shots — a single
+   *   never-repeated call pays the cache-write premium (1.25x/2x input) on
+   *   bytes nothing will ever read back.
+   * - `{ ttl: '1h' }` — the automatic markers (including the moving
+   *   message-tail pinned for multi-turn history) carry a 1-hour TTL instead
+   *   of the 5-minute default. Set this on slow loops: codegen
+   *   orchestrator/tool steps gap 2-14 minutes and human-paced conversation
+   *   turns regularly exceed 5 minutes, so the default-TTL entry expires
+   *   between steps and every turn re-writes. Caller-placed markers keep
+   *   their own TTLs ({@link SystemContentBlock.cacheTtl}).
+   * - omitted / `{ ttl: '5m' }` — default 5-minute auto markers.
+   */
+  cache?: { ttl?: '5m' | '1h' } | false;
+  /**
+   * Per-conversation affinity key, forwarded to providers that support
+   * request affinity (OpenRouter sends it as `session_id` for provider
+   * sticky routing — upstream prompt caches are host-scoped, so a
+   * load-balanced conversation otherwise cold-misses the cache a prior
+   * turn wrote on a different host). Pass a stable id per conversation.
+   */
+  sessionId?: string;
   /**
    * Enable Anthropic prompt-cache diagnostics (beta `cache-diagnosis-2026-04-07`)
    * across the agentic loop. The loop auto-threads each step's response id into
@@ -593,16 +680,48 @@ export interface GenerateTextOptions {
     providerId: string,
     modelId: string,
   ) => Record<string, unknown> | undefined;
+  /**
+   * INTERNAL (sessions): how many TRAILING entries of `messages` belong to
+   * THIS call's transcript delta rather than prior history. Sessions that
+   * carry a non-string user turn inside `messages` set 1 so the delta
+   * includes it; prompt-based calls leave it unset (the prompt push is
+   * captured positionally). Not part of the public API.
+   */
+  _transcriptIncludeTrailingCallerMessages?: number;
 }
 
 /**
  * The completed result returned by {@link generateText}.
  */
 export interface GenerateTextResult {
+  /**
+   * Lossless message delta this call appended to the conversation: the
+   * request's user turn plus every assistant / tool turn the tool loop
+   * recorded, in order, in provider-replayable shape (tool_call ids,
+   * parallel results, thinking blocks). Sessions append THIS — never a
+   * reconstruction — to their history. Absent only on legacy paths that
+   * never seeded a conversation array. The prompt-shim path carries a
+   * partial delta (seeded turns only); native providers carry the full
+   * trail.
+   */
+  transcriptDelta?: SessionTranscriptMessage[];
   /** Provider identifier used for the final run. */
   provider: string;
   /** Resolved model identifier used for the run. */
   model: string;
+  /**
+   * Provider-reported model id of the final step (spec batch-1 C1) — can
+   * differ from `model` across aliases and fallback routing. Undefined on
+   * paths where no provider-reported id was captured. `model` keeps its
+   * existing meaning (zero-change).
+   */
+  responseModel?: string;
+  /**
+   * Provider-reported service tier the final step actually ran at (OpenAI
+   * `service_tier` on the response; spec batch-1 C2). Undefined on
+   * providers/paths without a tier concept.
+   */
+  serviceTier?: string;
   /**
    * Upstream host that actually served the request when `provider` is an
    * aggregator/router (OpenRouter reports e.g. `'Groq'` or `'DeepInfra'`
@@ -850,6 +969,9 @@ export async function createPlan(
     temperature,
     maxTokens,
     ...(requestTimeout !== undefined ? { requestTimeout } : {}),
+    // Inherited (or planning-specific) cache control: a cache:false root
+    // call's planning sub-call must not auto-cache behind the caller's back.
+    ...(config?.cache !== undefined ? { cache: config.cache } : {}),
   });
 
   // Accumulate planning call usage
@@ -865,11 +987,17 @@ export async function createPlan(
     // so callers can see cache hit rate and per-hit savings.
     const cacheRead = (response.usage as { cacheReadInputTokens?: number }).cacheReadInputTokens;
     const cacheCreate = (response.usage as { cacheCreationInputTokens?: number }).cacheCreationInputTokens;
-    if (typeof cacheRead === 'number' && cacheRead > 0) {
+    // typeof-only guards: a REPORTED zero is meaningful (cache miss on a
+    // cache-capable call) and must be preserved, not collapsed into absent.
+    if (typeof cacheRead === 'number') {
       totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + cacheRead;
     }
-    if (typeof cacheCreate === 'number' && cacheCreate > 0) {
+    if (typeof cacheCreate === 'number') {
       totalUsage.cacheCreationTokens = (totalUsage.cacheCreationTokens ?? 0) + cacheCreate;
+    }
+    const planInclusiveIn = (response.usage as { inclusiveInputTokens?: number }).inclusiveInputTokens;
+    if (typeof planInclusiveIn === 'number') {
+      totalUsage.inclusiveInputTokens = (totalUsage.inclusiveInputTokens ?? 0) + planInclusiveIn;
     }
   }
 
@@ -1061,7 +1189,12 @@ export function isRetryableError(error: unknown): boolean {
  *
  * @param excludeProvider - Provider to omit from the chain (typically the
  *   primary provider that already failed).
- * @returns An array of `{ provider, model? }` entries ready for use as
+ * Every leg pins `cache: false`: failover hops are sporadic one-shots, so
+ * prompt-cache writes on a rescue leg almost never earn their reads back
+ * (see {@link FallbackProviderEntry.cache}). Callers wanting a cached hop
+ * supply their own chain with a per-entry ttl.
+ *
+ * @returns An array of `{ provider, model?, cache }` entries ready for use as
  *   {@link GenerateTextOptions.fallbackProviders}.
  *
  * @example
@@ -1077,12 +1210,12 @@ export function buildFallbackChain(
   const chain: FallbackProviderEntry[] = [];
 
   if (process.env.OPENAI_API_KEY && excludeProvider !== 'openai') {
-    chain.push({ provider: 'openai', model: 'gpt-5.5' });
+    chain.push({ provider: 'openai', model: 'gpt-5.5', cache: false });
   }
   if (process.env.ANTHROPIC_API_KEY && excludeProvider !== 'anthropic') {
     // Sonnet-class, matching the gpt-5.5 floor on the OpenAI legs — an
     // OpenAI-primary outage keeps frontier-adjacent quality on the way down.
-    chain.push({ provider: 'anthropic', model: 'claude-sonnet-5' });
+    chain.push({ provider: 'anthropic', model: 'claude-sonnet-5', cache: false });
   }
   if (process.env.OPENROUTER_API_KEY && excludeProvider !== 'openrouter') {
     // ALWAYS pin an explicit model here. A model-less OpenRouter entry
@@ -1093,10 +1226,10 @@ export function buildFallbackChain(
     // floor (same family as the direct leg, structured-output safe) and
     // routes around an OpenAI-direct outage that already knocked the
     // `openai` link above out.
-    chain.push({ provider: 'openrouter', model: 'openai/gpt-5.5' });
+    chain.push({ provider: 'openrouter', model: 'openai/gpt-5.5', cache: false });
   }
   if (process.env.GEMINI_API_KEY && excludeProvider !== 'gemini') {
-    chain.push({ provider: 'gemini' });
+    chain.push({ provider: 'gemini', cache: false });
   }
 
   return chain;
@@ -1162,6 +1295,7 @@ export function buildPolicyAwareFallbackChain(
     chain.push({
       provider: 'openrouter',
       model: 'nousresearch/hermes-3-llama-3.1-405b',
+      cache: false,
     });
     // Sonnet via OpenRouter as the second uncensored band. We keep
     // it on OpenRouter (not direct Anthropic) because the chain's
@@ -1172,6 +1306,7 @@ export function buildPolicyAwareFallbackChain(
     chain.push({
       provider: 'openrouter',
       model: 'anthropic/claude-sonnet-4',
+      cache: false,
     });
   }
 
@@ -1388,6 +1523,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       if (opts.messages) {
         for (const m of opts.messages) messages.push({ role: m.role, content: m.content });
       }
+      // Transcript delta capture (sessions, spec 2026-07-20 §1b): everything
+      // from here on is THIS call's contribution. Callers that carry their
+      // new user turn inside opts.messages mark how many trailing caller
+      // messages belong to the delta.
+      const transcriptDeltaStart =
+        messages.length - (opts._transcriptIncludeTrailingCallerMessages ?? 0);
       if (opts.prompt) messages.push({ role: 'user', content: opts.prompt });
 
       span?.setAttribute('agentos.api.tool_count', tools.length);
@@ -1402,6 +1543,11 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
 
       const allToolCalls: ToolCallRecord[] = [];
       const totalUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+      // Provider-reported model id of the final step (spec batch-1 C1);
+      // additive — the public `model` field keeps the resolved requested id.
+      let lastResponseModelId: string | undefined;
+      // Provider-reported service tier of the final step (spec batch-1 C2).
+      let lastServiceTier: string | undefined;
       const maxSteps = opts.maxSteps ?? 1;
       span?.setAttribute('agentos.api.max_steps', maxSteps);
 
@@ -1427,9 +1573,15 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           resolved.modelId,
           userMessages,
           toolNames,
-          // Thread the caller's per-call requestTimeout into the planning
-          // completion (a planning-specific override on planConfig wins).
-          { ...planConfig, requestTimeout: planConfig?.requestTimeout ?? opts.requestTimeout },
+          // Thread the caller's per-call requestTimeout + cache control into
+          // the planning completion (planning-specific overrides win).
+          {
+            ...planConfig,
+            requestTimeout: planConfig?.requestTimeout ?? opts.requestTimeout,
+            ...(planConfig?.cache !== undefined || opts.cache !== undefined
+              ? { cache: planConfig?.cache ?? opts.cache }
+              : {}),
+          },
           totalUsage,
         );
 
@@ -1473,6 +1625,18 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               // Forward reasoning effort the same way; provider drops it on
               // unsupported models/values.
               ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
+              // Forward per-call cache control (opt-out / 1h TTL) so the
+              // shim path honors it like the native step loop below.
+              ...(opts.cache !== undefined ? { cache: opts.cache } : {}),
+              // Per-conversation affinity key (OpenRouter session_id sticky
+              // routing; other providers ignore it).
+              ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
+              ...(opts.promptCacheKey !== undefined ? { promptCacheKey: opts.promptCacheKey } : {}),
+              ...(opts.promptCacheKey === 'auto' && (opts.sessionId ?? opts.usageLedger?.sessionId) !== undefined
+                ? { promptCacheSessionId: (opts.sessionId ?? opts.usageLedger?.sessionId) as string }
+                : {}),
+              ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
+              ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
               // Forward provider-specific top-level payload params (e.g.
               // OpenRouter provider-routing preferences) on the shim path too.
               ...(opts.customModelParams !== undefined
@@ -1485,6 +1649,28 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               // ignoring the caller's requestTimeout bound.
               ...(opts.requestTimeout !== undefined ? { requestTimeout: opts.requestTimeout } : {}),
             } as any);
+            // Aggregate the COMPLETE normalized usage from every shim
+            // roundtrip (spec batch-1 review fold): the thin {totalTokens}
+            // loop contract stays for the GMI helper (totalTokens flows via
+            // loopResult below — NOT accumulated here, or it would double
+            // count), while all richer counters land on totalUsage and the
+            // final response identity is captured for telemetry.
+            if (r.usage) {
+              if (typeof r.usage.promptTokens === 'number') totalUsage.promptTokens += r.usage.promptTokens;
+              if (typeof r.usage.completionTokens === 'number') totalUsage.completionTokens += r.usage.completionTokens;
+              if (typeof r.usage.costUSD === 'number') totalUsage.costUSD = (totalUsage.costUSD ?? 0) + r.usage.costUSD;
+              if (typeof r.usage.cacheReadInputTokens === 'number') {
+                totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + r.usage.cacheReadInputTokens;
+              }
+              if (typeof r.usage.cacheCreationInputTokens === 'number') {
+                totalUsage.cacheCreationTokens = (totalUsage.cacheCreationTokens ?? 0) + r.usage.cacheCreationInputTokens;
+              }
+              if (typeof r.usage.inclusiveInputTokens === 'number') {
+                totalUsage.inclusiveInputTokens = (totalUsage.inclusiveInputTokens ?? 0) + r.usage.inclusiveInputTokens;
+              }
+            }
+            if (typeof r.modelId === 'string' && r.modelId) lastResponseModelId = r.modelId;
+            if (typeof r.serviceTier === 'string' && r.serviceTier) lastServiceTier = r.serviceTier;
             const cc = r.choices?.[0]?.message?.content;
             return {
               text: typeof cc === 'string' ? cc : ((cc as any)?.text ?? ''),
@@ -1497,18 +1683,32 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           totalTokens: (totalUsage.totalTokens ?? 0) + loopResult.totalTokens,
         };
         metricUsage = shimUsage;
+        // Dual-emit the same root-span attribute pairs as the native
+        // terminals below — the shim early-return is a first-class chat
+        // terminal, not a bypass (spec batch-1 residual).
+        span?.setAttribute('agentos.api.finish_reason', loopResult.finishReason);
+        span?.setAttribute('agentos.api.tool_calls', loopResult.toolCalls.length);
+        attachUsageAttributes(span, shimUsage);
+        attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: shimUsage, ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}), ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}) });
         fireLlmUsageObserver({
           provider: resolved.providerId,
           model: resolved.modelId,
+          ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
           usage: shimUsage,
           source: opts.source,
           finishReason: loopResult.finishReason,
           surface: 'generateText',
           durationMs: Date.now() - rootStartedAt,
         });
+        // The shim's final assistant text lives in loopResult, never on the
+        // messages array — push it so the transcript delta ends on the reply.
+        messages.push({ role: 'assistant', content: loopResult.text });
         return {
+          transcriptDelta: messages.slice(transcriptDeltaStart) as unknown as SessionTranscriptMessage[],
           provider: resolved.providerId,
           model: resolved.modelId,
+          ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
+          ...(lastServiceTier !== undefined ? { serviceTier: lastServiceTier } : {}),
           text: loopResult.text,
           usage: shimUsage,
           toolCalls: loopResult.toolCalls.map((c) => ({
@@ -1592,6 +1792,19 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 // Forward reasoning effort (output_config.effort) the same way;
                 // the provider drops it on unsupported models/values.
                 ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
+                // Forward per-call cache control: `false` = zero cache_control
+                // on the wire (true one-shots); `{ ttl: '1h' }` = 1h TTL on
+                // the auto markers incl. the moving message-tail (slow loops).
+                ...(opts.cache !== undefined ? { cache: opts.cache } : {}),
+                // Per-conversation affinity key (OpenRouter session_id sticky
+                // routing; other providers ignore it).
+                ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
+              ...(opts.promptCacheKey !== undefined ? { promptCacheKey: opts.promptCacheKey } : {}),
+              ...(opts.promptCacheKey === 'auto' && (opts.sessionId ?? opts.usageLedger?.sessionId) !== undefined
+                ? { promptCacheSessionId: (opts.sessionId ?? opts.usageLedger?.sessionId) as string }
+                : {}),
+              ...(opts.promptCacheRetention !== undefined ? { promptCacheRetention: opts.promptCacheRetention } : {}),
+              ...(opts.serviceTier !== undefined ? { serviceTier: opts.serviceTier } : {}),
                 // Cache diagnostics: thread the previous step's message id so
                 // the API explains any prefix divergence between loop steps.
                 ...(opts.cacheDiagnostics
@@ -1619,12 +1832,40 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               totalTokens: stepResponse.usage?.totalTokens,
               costUSD: stepResponse.usage?.costUSD,
             });
+            // Per-step GenAI semconv attrs (queue item: step-span wiring).
+            // ModelUsage's cache fields are the *InputTokens spellings —
+            // mapped here onto the ApiUsageLike names the helper reads.
+            attachGenAiAttributes(stepSpan, {
+              providerName: resolved.providerId,
+              operationName: 'chat',
+              requestModel: resolved.modelId,
+              ...(typeof stepResponse.modelId === 'string' && stepResponse.modelId
+                ? { responseModel: stepResponse.modelId }
+                : {}),
+              ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}),
+              ...(typeof stepResponse.serviceTier === 'string'
+                ? { responseServiceTier: stepResponse.serviceTier }
+                : {}),
+              usage: {
+                promptTokens: stepResponse.usage?.promptTokens,
+                completionTokens: stepResponse.usage?.completionTokens,
+                inclusiveInputTokens: stepResponse.usage?.inclusiveInputTokens,
+                cacheReadTokens: stepResponse.usage?.cacheReadInputTokens,
+                cacheCreationTokens: stepResponse.usage?.cacheCreationInputTokens,
+              },
+            });
             return stepResponse;
           }
         );
 
         if (typeof response.servingProvider === 'string' && response.servingProvider.length > 0) {
           lastServingProvider = response.servingProvider;
+        }
+        if (typeof response.modelId === 'string' && response.modelId) {
+          lastResponseModelId = response.modelId;
+        }
+        if (typeof response.serviceTier === 'string' && response.serviceTier) {
+          lastServiceTier = response.serviceTier;
         }
         if (opts.cacheDiagnostics) {
           // Chain the id for the NEXT step's comparison; keep this step's
@@ -1644,11 +1885,17 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           // these fields; TokenUsage was dropping them.
           const cacheRead = (response.usage as { cacheReadInputTokens?: number }).cacheReadInputTokens;
           const cacheCreate = (response.usage as { cacheCreationInputTokens?: number }).cacheCreationInputTokens;
-          if (typeof cacheRead === 'number' && cacheRead > 0) {
+          // typeof-only guards: a REPORTED zero is meaningful (cache miss on
+          // a cache-capable call) and must be preserved, not dropped.
+          if (typeof cacheRead === 'number') {
             totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + cacheRead;
           }
-          if (typeof cacheCreate === 'number' && cacheCreate > 0) {
+          if (typeof cacheCreate === 'number') {
             totalUsage.cacheCreationTokens = (totalUsage.cacheCreationTokens ?? 0) + cacheCreate;
+          }
+          const stepInclusiveIn = (response.usage as { inclusiveInputTokens?: number }).inclusiveInputTokens;
+          if (typeof stepInclusiveIn === 'number') {
+            totalUsage.inclusiveInputTokens = (totalUsage.inclusiveInputTokens ?? 0) + stepInclusiveIn;
           }
         }
 
@@ -1704,6 +1951,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           span?.setAttribute('agentos.api.finish_reason', choice.finishReason ?? 'stop');
           span?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
           attachUsageAttributes(span, totalUsage);
+        attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: totalUsage, ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}), ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}) });
           // 2026-05-29 — fire the global LLM usage observer so hosts
           // (wilds-ai foundation_usage_events, billing dashboards) get
           // the resolved provider + model + cost without wrapping every
@@ -1711,6 +1959,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           fireLlmUsageObserver({
             provider: resolved.providerId,
             model: resolved.modelId,
+          ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
             usage: totalUsage,
             source: opts.source,
             finishReason: choice.finishReason ?? 'stop',
@@ -1718,9 +1967,22 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             durationMs: Date.now() - rootStartedAt,
             ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
           });
+          // Final assistant turn is not on the loop's messages array at a stop
+          // terminal; push it so the transcript delta ends on the reply (a
+          // session history must never end on a tool result).
+          messages.push({
+            role: 'assistant',
+            content: textContent,
+            ...(((choice.message as unknown as { thinking?: unknown } | undefined)?.thinking) !== undefined
+              ? { thinking: (choice.message as unknown as { thinking?: unknown }).thinking }
+              : {}),
+          });
           return {
+            transcriptDelta: messages.slice(transcriptDeltaStart) as unknown as SessionTranscriptMessage[],
             provider: resolved.providerId,
             model: resolved.modelId,
+          ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
+          ...(lastServiceTier !== undefined ? { serviceTier: lastServiceTier } : {}),
             ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
             ...(lastCacheDiagnostics !== undefined
               ? { cacheDiagnostics: lastCacheDiagnostics }
@@ -1848,9 +2110,11 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         span?.setAttribute('agentos.api.finish_reason', choice.finishReason ?? 'stop');
         span?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
         attachUsageAttributes(span, totalUsage);
+        attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: totalUsage, ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}), ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}) });
         fireLlmUsageObserver({
           provider: resolved.providerId,
           model: resolved.modelId,
+          ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
           usage: totalUsage,
           source: opts.source,
           finishReason: choice.finishReason ?? 'stop',
@@ -1858,9 +2122,22 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           durationMs: Date.now() - rootStartedAt,
           ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
         });
+        // Final assistant turn is not on the loop's messages array at a stop
+        // terminal; push it so the transcript delta ends on the reply (a
+        // session history must never end on a tool result).
+        messages.push({
+          role: 'assistant',
+          content: textContent,
+          ...(((choice.message as unknown as { thinking?: unknown } | undefined)?.thinking) !== undefined
+            ? { thinking: (choice.message as unknown as { thinking?: unknown }).thinking }
+            : {}),
+        });
         return {
+          transcriptDelta: messages.slice(transcriptDeltaStart) as unknown as SessionTranscriptMessage[],
           provider: resolved.providerId,
           model: resolved.modelId,
+          ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
+          ...(lastServiceTier !== undefined ? { serviceTier: lastServiceTier } : {}),
           ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
           ...(lastCacheDiagnostics !== undefined ? { cacheDiagnostics: lastCacheDiagnostics } : {}),
           ...(opts.cacheDiagnostics ? { providerMessageId: lastProviderMessageId } : {}),
@@ -1885,6 +2162,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       span?.setAttribute('agentos.api.finish_reason', 'tool-calls');
       span?.setAttribute('agentos.api.tool_calls', allToolCalls.length);
       attachUsageAttributes(span, totalUsage);
+      attachGenAiAttributes(span, { providerName: resolved.providerId, operationName: 'chat', requestModel: resolved.modelId, responseModel: lastResponseModelId, usage: totalUsage, ...(opts.serviceTier !== undefined ? { requestServiceTier: opts.serviceTier } : {}), ...(lastServiceTier !== undefined ? { responseServiceTier: lastServiceTier } : {}) });
       fireLlmUsageObserver({
         provider: resolved.providerId,
         model: resolved.modelId,
@@ -1896,8 +2174,11 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         ...(lastServingProvider ? { servingProvider: lastServingProvider } : {}),
       });
       return {
+        transcriptDelta: messages.slice(transcriptDeltaStart) as unknown as SessionTranscriptMessage[],
         provider: resolved.providerId,
         model: resolved.modelId,
+        ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
+        ...(lastServiceTier !== undefined ? { serviceTier: lastServiceTier } : {}),
         text: (lastAssistant?.content as string) ?? '',
         usage: totalUsage,
         toolCalls: allToolCalls,
@@ -2026,6 +2307,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             // Lets an explicit chain run the fallback at a higher depth than the
             // primary without changing the primary call's effort.
             ...(fb.effort !== undefined ? { effort: fb.effort } : {}),
+            // Per-hop cache: same override semantics as per-hop effort above.
+            // The canonical chains pin `cache: false` on their legs so a
+            // rescue hop sends zero cache_control (no write premium paid on
+            // one-shot failover traffic); an entry without `cache` inherits
+            // the call-level disposition via the `...opts` spread.
+            ...(fb.cache !== undefined ? { cache: fb.cache } : {}),
             // Clear explicit keys/URLs so resolution uses env vars for the
             // fallback provider rather than the primary's overrides.
             apiKey: undefined,

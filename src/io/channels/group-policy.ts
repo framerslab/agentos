@@ -74,8 +74,12 @@ export function evaluateGroupPolicy(
     case 'always':
       return ALLOW;
     case 'mention': {
-      if (!input.supportsMentions) return drop('mention-gating-unsupported');
-      const mentioned = input.botUserId ? (input.mentions ?? []).includes(input.botUserId) : false;
+      // Mentions can only be gated when the adapter reports mention support AND
+      // we know the agent's own platform user id to match against. Missing
+      // either means we cannot evaluate mention gating — fail closed as
+      // "unsupported" rather than the misleading "mention-required".
+      if (!input.supportsMentions || !input.botUserId) return drop('mention-gating-unsupported');
+      const mentioned = (input.mentions ?? []).includes(input.botUserId);
       return mentioned ? ALLOW : drop('mention-required');
     }
     case 'owner-only': {

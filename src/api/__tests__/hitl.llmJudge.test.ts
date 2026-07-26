@@ -193,3 +193,41 @@ describe('hitl.llmJudge', () => {
     expect(callArgs.system).toContain('Is the response factually accurate and well-sourced?');
   });
 });
+
+describe('judge default resolution (spec batch-1 C3)', () => {
+  it('default judge call carries the resolver model, provider, and effort', async () => {
+    mockGenerateText.mockResolvedValue({
+      text: '{ "approved": true, "confidence": 0.9, "reasoning": "ok" }',
+      provider: 'openai',
+      model: 'gpt-5.6',
+      usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 },
+      toolCalls: [],
+      finishReason: 'stop',
+    });
+
+    const handler = hitl.llmJudge();
+    await handler(makeRequest());
+
+    expect(mockGenerateText).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'gpt-5.6', provider: 'openai', effort: 'max' }),
+    );
+  });
+
+  it('a caller-pinned model gets no injected effort (zero-change)', async () => {
+    mockGenerateText.mockResolvedValue({
+      text: '{ "approved": true, "confidence": 0.9, "reasoning": "ok" }',
+      provider: 'openai',
+      model: 'gpt-4o',
+      usage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 },
+      toolCalls: [],
+      finishReason: 'stop',
+    });
+
+    const handler = hitl.llmJudge({ model: 'gpt-4o' });
+    await handler(makeRequest());
+
+    const lastCall = mockGenerateText.mock.calls.at(-1)![0];
+    expect(lastCall.model).toBe('gpt-4o');
+    expect('effort' in lastCall).toBe(false);
+  });
+});

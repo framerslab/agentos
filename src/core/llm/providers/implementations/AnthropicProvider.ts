@@ -638,7 +638,7 @@ export class AnthropicProvider implements IProvider {
   private recordCacheLeakSample(
     modelId: string,
     payload: Record<string, unknown>,
-    apiResponse: AnthropicMessagesResponse,
+    apiResponse: Pick<AnthropicMessagesResponse, 'usage'>,
   ): void {
     try {
       const system = payload.system as
@@ -1137,7 +1137,32 @@ export class AnthropicProvider implements IProvider {
               ...(cacheReadTokens !== undefined && {
                 cacheReadInputTokens: cacheReadTokens,
               }),
+              // Inclusive input total (input_tokens excludes cache on Anthropic).
+              ...(typeof inputTokens === 'number'
+                ? {
+                    inclusiveInputTokens:
+                      inputTokens + (cacheReadTokens ?? 0) + (cacheCreationTokens ?? 0),
+                  }
+                : {}),
             };
+
+            // Sample the leak detector on the STREAMING path too. This was
+            // the RC9 blind spot: only generateCompletion sampled, so the
+            // streamed conversation surfaces (narrator, companion) — where
+            // the 2026-07 history-caching regressions actually lived — were
+            // invisible to the zero-read / unmarked tripwires.
+            this.recordCacheLeakSample(modelId, payload, {
+              usage: {
+                input_tokens: inputTokens,
+                output_tokens: outputTokens,
+                ...(cacheCreationTokens !== undefined && {
+                  cache_creation_input_tokens: cacheCreationTokens,
+                }),
+                ...(cacheReadTokens !== undefined && {
+                  cache_read_input_tokens: cacheReadTokens,
+                }),
+              },
+            });
 
             yield {
               id: responseId,
@@ -1335,7 +1360,7 @@ export class AnthropicProvider implements IProvider {
     // Anthropic treats system as a top-level field, not a conversation role.
     // When cache_control markers are present on content parts, emit system
     // as an array of content blocks (required for Anthropic prompt caching).
-    type SystemBlock = { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } };
+    type SystemBlock = { type: 'text'; text: string; cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' } };
     const systemBlocks: SystemBlock[] = [];
     const conversationMessages: ChatMessage[] = [];
     // Index one past the last block contributed by the FIRST system message
@@ -1411,6 +1436,27 @@ export class AnthropicProvider implements IProvider {
           : msg,
       ),
     );
+
+    // --- Per-call cache opt-out: options.cache === false (region strip) ---
+    // Strip caller-placed markers from the system and message regions BEFORE
+    // payload assembly, so system falls back to the joined-string emission
+    // and the auto-cache gate below stands down entirely. Markers that ride
+    // in via customModelParams (raw tools, request-level cache_control) are
+    // cleared at the gate itself. One switch, zero cache_control on the
+    // wire — the hard guarantee a true one-shot needs: a cache write there
+    // is pure premium (1.25x/2x), never read back.
+    if (options.cache === false) {
+      for (const b of systemBlocks) delete b.cache_control;
+      for (const msg of anthropicMessages) {
+        const content = msg.content;
+        if (!Array.isArray(content)) continue;
+        for (const block of content) {
+          if (block && typeof block === 'object') {
+            delete (block as Record<string, unknown>).cache_control;
+          }
+        }
+      }
+    }
 
     const payload: Record<string, unknown> = {
       model: modelId,
@@ -1579,6 +1625,31 @@ export class AnthropicProvider implements IProvider {
       payload.tool_choice = { type: 'tool', name: sf.tool.name };
     }
 
+    // Pass through any custom model params — minus OpenRouter's routing
+    // controls, which only OpenRouter's body accepts (a fallback leg reuses
+    // the same params object across hosts; see openrouter-only-params).
+    //
+    // This runs BEFORE the forced tool_choice reconciliation below so that a
+    // `tool_choice` injected through customModelParams is reconciled too —
+    // otherwise it merges in after the clamp and can send the forbidden
+    // thinking + forced-tool combination (or a Fable-rejected forced tool),
+    // which Anthropic 400s on.
+    // Track whether the passthrough replaced whole payload regions: the
+    // auto-cache block below must never restructure a region it no longer
+    // owns — mutating the stale pre-override locals would clobber the
+    // caller's system override, and a tail marker written into the stale
+    // message array never reaches the wire.
+    let customSystemOverride = false;
+    let customMessagesOverride = false;
+    {
+      const passthrough = stripOpenRouterOnlyParams(options.customModelParams);
+      if (passthrough) {
+        customSystemOverride = Object.prototype.hasOwnProperty.call(passthrough, 'system');
+        customMessagesOverride = Object.prototype.hasOwnProperty.call(passthrough, 'messages');
+        Object.assign(payload, passthrough);
+      }
+    }
+
     // --- Forced tool_choice reconciliation ---
     // A FORCED tool_choice ({type:'any'} or {type:'tool'}) is incompatible with
     // two situations, and Anthropic 400s on either:
@@ -1590,8 +1661,9 @@ export class AnthropicProvider implements IProvider {
     // letting the request 400. The model still chooses tools on 'auto' —
     // strongest with prescriptive tool descriptions — but forced tool use is no
     // longer guaranteed. Centralizing this means no caller has to special-case
-    // the thinking or Fable quirks. Catches both the convertToolChoice path and
-    // the structured-output forced tool.
+    // the thinking or Fable quirks. Catches the convertToolChoice path, the
+    // structured-output forced tool, AND a tool_choice injected via
+    // customModelParams (which is why this runs after the passthrough above).
     {
       const tc = payload.tool_choice as { type?: string } | undefined;
       if (tc && (tc.type === 'any' || tc.type === 'tool')) {
@@ -1608,16 +1680,6 @@ export class AnthropicProvider implements IProvider {
           );
           payload.tool_choice = { type: 'auto' };
         }
-      }
-    }
-
-    // Pass through any custom model params — minus OpenRouter's routing
-    // controls, which only OpenRouter's body accepts (a fallback leg reuses
-    // the same params object across hosts; see openrouter-only-params).
-    {
-      const passthrough = stripOpenRouterOnlyParams(options.customModelParams);
-      if (passthrough) {
-        Object.assign(payload, passthrough);
       }
     }
 
@@ -1652,10 +1714,55 @@ export class AnthropicProvider implements IProvider {
     //  - MESSAGE markers: the caller owns the whole messages region — the auto
     //    tail stands down entirely.
     //
-    // Callers that need it off (single-shot prompts where the cache-write
-    // premium can't amortize) set AGENTOS_ANTHROPIC_AUTO_CACHE=0.
+    // Per-call control (ModelCompletionOptions.cache):
+    //
+    //  - `cache: false` — zero cache_control on the wire for this request:
+    //    the region strip above already cleared caller system/message
+    //    markers, and the block below clears customModelParams-injected
+    //    tools/request markers + stands the auto path down. For true
+    //    one-shots (unique-suffix judges, single-call enrichment) where a
+    //    write can never be read back.
+    //  - `cache: { ttl: '1h' }` — the auto markers (system-end + moving
+    //    tail) carry `ttl: '1h'` and are placed as explicit block markers so
+    //    the TTL reaches the wire. For loops whose step gaps exceed the
+    //    5-minute default TTL (codegen tool calls run 2-14 min; human
+    //    think-time between conversation turns regularly exceeds 5m).
+    //
+    // Process-global kill switch (single-shot batch processes):
+    // AGENTOS_ANTHROPIC_AUTO_CACHE=0 — disables the auto path only; caller
+    // markers still pass through there (use `cache: false` for a per-call
+    // hard-off including caller markers).
     const autoCacheEnv = process.env.AGENTOS_ANTHROPIC_AUTO_CACHE;
-    if (
+    if (options.cache === false) {
+      // customModelParams passthrough ran above and may have injected ANY
+      // marked region — raw tools, a request-level cache_control, or even a
+      // wholesale system/messages override. Sanitize all of them so the
+      // opt-out holds regardless of how a marker arrived. Regions are
+      // rebuilt as copies (never mutated in place): after the spread these
+      // may be the caller's own customModelParams objects.
+      delete payload.cache_control;
+      const stripBlockMarkers = (value: unknown): unknown =>
+        Array.isArray(value)
+          ? value.map((block) => {
+              if (!block || typeof block !== 'object') return block;
+              const { cache_control: _stripped, ...rest } = block as Record<string, unknown>;
+              return rest;
+            })
+          : value;
+      payload.system = stripBlockMarkers(payload.system);
+      if (payload.system === undefined) delete payload.system;
+      if (Array.isArray(payload.messages)) {
+        payload.messages = (payload.messages as Array<Record<string, unknown>>).map((message) => {
+          if (!message || typeof message !== 'object') return message;
+          const copy = { ...message };
+          copy.content = stripBlockMarkers(copy.content);
+          return copy;
+        });
+      }
+      if (Array.isArray(payload.tools)) {
+        payload.tools = stripBlockMarkers(payload.tools);
+      }
+    } else if (
       autoCacheEnv !== '0'
       && autoCacheEnv !== 'false'
       && payload.cache_control === undefined
@@ -1664,15 +1771,64 @@ export class AnthropicProvider implements IProvider {
       // Explicit caller markers above still pass through untouched.
       && resolveCacheCapabilities(modelId).supportsPromptCaching
     ) {
+      if (customSystemOverride || customMessagesOverride) {
+        // customModelParams replaced payload.system/messages wholesale, so
+        // the locals below (systemBlocks / anthropicMessages and their
+        // marker counts) describe regions that are no longer on the wire.
+        // Never restructure here. Count markers on the ACTUAL payload:
+        // any marker means the caller owns the wire (full stand-down);
+        // none means the request-level auto marker — valid on any payload
+        // shape — keeps the pre-override caching behavior.
+        const overrideMarkers =
+          this.countWireBlockMarkers(payload.system) +
+          this.countMessageCacheMarkers(
+            Array.isArray(payload.messages)
+              ? (payload.messages as Array<Record<string, unknown>>)
+              : [],
+          ) +
+          this.countWireBlockMarkers(payload.tools);
+        if (overrideMarkers === 0) {
+          payload.cache_control = { type: 'ephemeral' };
+        }
+        return payload;
+      }
       const explicitBreakpoints = systemBlocks.filter(b => b.cache_control).length;
       const messageBreakpoints = this.countMessageCacheMarkers(anthropicMessages);
-      if (explicitBreakpoints === 0 && messageBreakpoints === 0) {
-        if (payload.thinking !== undefined) {
-          // Extended thinking: the request-level auto marker measurably
-          // produces ZERO cache creation on thinking-enabled calls
-          // (2026-07: 900+ agent-loop calls, ~12M prompt tokens/day,
-          // 0.000 hit rate). Place explicit block-level breakpoints
-          // instead:
+      // Tool definitions can carry their own cache_control (tool-use prompt
+      // caching), and those markers count against Anthropic's hard
+      // 4-breakpoint-per-request cap. Fold them into the accounting so a
+      // request with e.g. 3 marked system blocks + 1 marked tool (4, at the
+      // cap) does not get a 5th tail marker here and 400. agentos does not
+      // emit marked tools today (adaptTools adds none, and a customModelParams
+      // tools override is raw), so toolBreakpoints is 0 for every current
+      // caller — this is forward-safety, not a behavior change. Any caller
+      // that DOES mark tools also stands the auto path down entirely (below),
+      // matching the caller-owns-the-region philosophy.
+      const toolBreakpoints = Array.isArray(payload.tools)
+        ? (payload.tools as Array<{ cache_control?: unknown }>).filter(
+            (t) => t && typeof t === 'object' && (t as { cache_control?: unknown }).cache_control,
+          ).length
+        : 0;
+      // Per-call TTL for the AUTO-placed markers only (caller markers keep
+      // their own TTLs). '1h' writes at 2x instead of 1.25x, so it is opt-in
+      // per call site — worth it exactly when step gaps exceed the 5m TTL.
+      const autoTtl: '1h' | undefined =
+        options.cache && options.cache.ttl === '1h' ? '1h' : undefined;
+      if (explicitBreakpoints === 0 && messageBreakpoints === 0 && toolBreakpoints === 0) {
+        if (payload.thinking !== undefined || autoTtl !== undefined) {
+          // Two reasons to use explicit block-level breakpoints instead of
+          // the request-level auto marker:
+          //
+          //  - Extended thinking: the request-level auto marker measurably
+          //    produces ZERO cache creation on thinking-enabled calls
+          //    (2026-07: 900+ agent-loop calls, ~12M prompt tokens/day,
+          //    0.000 hit rate).
+          //  - A per-call TTL (`cache: { ttl: '1h' }`): the TTL is a
+          //    block-level attribute, so honoring it requires explicit
+          //    placement. Opt-in only — callers without a TTL keep the
+          //    request-level marker exactly as before.
+          //
+          // Placement:
           //
           //  1. On the last block of the FIRST system message — the
           //     primary system prompt precedes the thinking-bearing
@@ -1692,11 +1848,14 @@ export class AnthropicProvider implements IProvider {
           // Two breakpoints total, under the API cap of 4.
           let placed = false;
           if (firstSystemMsgBlockEnd > 0) {
-            systemBlocks[firstSystemMsgBlockEnd - 1].cache_control = { type: 'ephemeral' };
+            systemBlocks[firstSystemMsgBlockEnd - 1].cache_control = {
+              type: 'ephemeral',
+              ...(autoTtl ? { ttl: autoTtl } : {}),
+            };
             payload.system = systemBlocks;
             placed = true;
           }
-          if (this.markLastCacheableMessageBlock(anthropicMessages)) {
+          if (this.markLastCacheableMessageBlock(anthropicMessages, autoTtl)) {
             placed = true;
           }
           if (!placed) {
@@ -1711,19 +1870,65 @@ export class AnthropicProvider implements IProvider {
       } else if (
         messageBreakpoints === 0 &&
         explicitBreakpoints > 0 &&
-        explicitBreakpoints < 4
+        explicitBreakpoints + toolBreakpoints < 4
       ) {
-        // Caller marked the system prefix only: keep their placement + TTL
+        // Caller marked the system prefix only: keep their placement
         // verbatim and pin just the moving message tail (the API cap is 4
-        // breakpoints per request — the tail adds one, so require headroom).
+        // breakpoints per request — the tail adds one, so require headroom
+        // across ALL wire markers, tools included).
         // Applies on thinking AND non-thinking requests alike — the streamed
         // conversation surfaces (caller-marked system, no thinking) were the
         // last shape whose per-turn history went permanently uncached.
-        this.markLastCacheableMessageBlock(anthropicMessages);
+        //
+        // TTL ordering (Anthropic hard rule): every 1h marker must precede
+        // every 5m marker in cache order (tools → system → messages), or
+        // the request 400s. A 1h moving tail therefore requires the
+        // caller's system markers to be 1h too — `cache: { ttl: '1h' }`
+        // declares the whole call's pacing, so RAISE shorter/unset system
+        // marker TTLs to 1h (a codegen call's 5m-marked system + 1h tail
+        // was the rejected shape). Marked tools are raw caller objects we
+        // never mutate — with one present the tail falls back to the 5m
+        // default instead, keeping the order valid.
+        let tailTtl = autoTtl;
+        if (autoTtl === '1h') {
+          if (toolBreakpoints > 0) {
+            tailTtl = undefined;
+          } else {
+            for (const block of systemBlocks) {
+              if (block.cache_control && block.cache_control.ttl !== '1h') {
+                block.cache_control = { ...block.cache_control, ttl: '1h' };
+              }
+            }
+          }
+        }
+        this.markLastCacheableMessageBlock(anthropicMessages, tailTtl);
       }
     }
 
     return payload;
+  }
+
+  /**
+   * Count `cache_control` markers on a raw wire-shaped block array (a
+   * customModelParams `system` or `tools` override). Non-arrays (joined
+   * string systems, absent regions) count zero. Used by the override
+   * stand-down in the auto-cache block: with an override on the wire the
+   * pre-override locals cannot be trusted, so marker ownership is decided
+   * from the actual payload regions.
+   *
+   * @param value - The payload region as it will hit the wire.
+   * @returns Number of blocks carrying a `cache_control` marker.
+   * @private
+   */
+  private countWireBlockMarkers(value: unknown): number {
+    if (!Array.isArray(value)) return 0;
+    let count = 0;
+    for (const block of value) {
+      if (block && typeof block === 'object' && (block as Record<string, unknown>).cache_control) {
+        count += 1;
+      }
+    }
+    return count;
   }
 
   /**
@@ -1762,19 +1967,25 @@ export class AnthropicProvider implements IProvider {
    * carry `cache_control` and are skipped.
    *
    * @param anthropicMessages - Messages already converted to Anthropic wire format.
+   * @param ttl - Optional non-default TTL for the marker (per-call
+   *   `cache: { ttl: '1h' }`); omitted = the 5-minute default.
    * @returns True when a marker was placed.
    * @private
    */
   private markLastCacheableMessageBlock(
     anthropicMessages: Array<Record<string, unknown>>,
+    ttl?: '1h',
   ): boolean {
+    const marker = ttl
+      ? { type: 'ephemeral' as const, ttl }
+      : { type: 'ephemeral' as const };
     if (anthropicMessages.length === 0) return false;
     const last = anthropicMessages[anthropicMessages.length - 1];
     const content = last.content;
     if (typeof content === 'string') {
       if (!content) return false;
       last.content = [
-        { type: 'text', text: content, cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: content, cache_control: { ...marker } },
       ];
       return true;
     }
@@ -1783,7 +1994,7 @@ export class AnthropicProvider implements IProvider {
       for (let i = content.length - 1; i >= 0; i--) {
         const block = content[i] as Record<string, unknown>;
         if (block && typeof block === 'object' && CACHEABLE.has(block.type as string)) {
-          block.cache_control = { type: 'ephemeral' };
+          block.cache_control = { ...marker };
           return true;
         }
       }
@@ -2038,6 +2249,13 @@ export class AnthropicProvider implements IProvider {
       ),
       cacheCreationInputTokens: apiResponse.usage.cache_creation_input_tokens,
       cacheReadInputTokens: apiResponse.usage.cache_read_input_tokens,
+      // Anthropic's input_tokens EXCLUDES cache reads/writes; the
+      // provider-independent inclusive input total adds them back
+      // (OpenAI/OpenRouter report prompt_tokens already inclusive).
+      inclusiveInputTokens:
+        apiResponse.usage.input_tokens
+        + (apiResponse.usage.cache_read_input_tokens ?? 0)
+        + (apiResponse.usage.cache_creation_input_tokens ?? 0),
     };
 
     const choice: ModelCompletionChoice = {
