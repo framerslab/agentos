@@ -98,6 +98,10 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
     text: 'grok-2',
     cheap: 'grok-2-mini',
   },
+  youcom: {
+    text: 'youcom-search', // YouCom is primarily a search/tool provider, not LLM
+    cheap: 'youcom-search',
+  },
 };
 
 /** Runtime probes checked for auto-detection, in priority order. */
@@ -131,6 +135,8 @@ const AUTO_DETECT_ORDER: AutoDetectProbe[] = [
   { envKey: 'TOGETHER_API_KEY', provider: 'together' },
   { envKey: 'MISTRAL_API_KEY', provider: 'mistral' },
   { envKey: 'XAI_API_KEY', provider: 'xai' },
+  { envKey: 'YDC_API_KEY', provider: 'youcom' },
+  { envKey: 'YOUCOM_API_KEY', provider: 'youcom' }, // Fallback for legacy env var
   { binaryName: 'claude', provider: 'claude-code-cli' },
   { binaryName: 'gemini', provider: 'gemini-cli' },
   { envKey: 'OLLAMA_BASE_URL', provider: 'ollama' },

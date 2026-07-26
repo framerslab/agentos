@@ -1,0 +1,13 @@
+allowBuilds:
+  '@matrix-org/matrix-sdk-crypto-nodejs': set this to true or false
+  '@whiskeysockets/baileys': set this to true or false
+  bcrypt: set this to true or false
+  better-sqlite3: set this to true or false
+  esbuild: set this to true or false
+  ffi-napi: set this to true or false
+  hnswlib-node: set this to true or false
+  onnxruntime-node: set this to true or false
+  protobufjs: set this to true or false
+  ref-napi: set this to true or false
+  sharp: set this to true or false
+  tesseract.js: set this to true or false
