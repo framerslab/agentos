@@ -382,6 +382,24 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
     status: 'active',
   },
   {
+    modelId: 'claude-sonnet-5',
+    providerId: 'anthropic',
+    displayName: 'Claude Sonnet 5',
+    description: 'Near-Opus coding/agentic Sonnet; adaptive thinking on by default.',
+    capabilities: ['chat', 'tool_use', 'vision_input'],
+    contextWindowSize: 1000000,
+    outputTokenLimit: 128000,
+    // Sticker rates ($2/$10 intro pricing runs through 2026-08-31 —
+    // meter at sticker so cost rollups stay conservative). Absent from
+    // this table the model priced as costUSD undefined, which turned
+    // the 2026-07-20..26 quota-outage fallback traffic (thousands of
+    // sonnet-5 leg calls/day) into unmetered spend.
+    pricePer1MTokensInput: 3,
+    pricePer1MTokensOutput: 15,
+    supportsStreaming: true,
+    status: 'active',
+  },
+  {
     modelId: 'claude-sonnet-4-6',
     providerId: 'anthropic',
     displayName: 'Claude Sonnet 4.6',
