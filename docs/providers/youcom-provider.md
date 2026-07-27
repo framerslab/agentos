@@ -16,9 +16,7 @@ The provider reads credentials from `YDC_API_KEY` or `YOUCOM_API_KEY`, and you c
 import { YouComProvider } from '@framers/agentos';
 
 const provider = new YouComProvider();
-await provider.initialize({
-  apiKey: process.env.YDC_API_KEY ?? process.env.YOUCOM_API_KEY,
-});
+await provider.initialize();
 
 const results = await provider.search('What are the latest developments in AI agent frameworks?', {
   count: 5,
@@ -53,7 +51,6 @@ export YOUCOM_API_KEY="your_api_key_here"
 ```typescript
 const provider = new YouComProvider();
 await provider.initialize({
-  apiKey: process.env.YDC_API_KEY ?? process.env.YOUCOM_API_KEY,
   searchApiUrl: 'https://ydc-index.io/v1/search',
   mcpServerUrl: 'https://api.you.com/mcp',
   debug: true,

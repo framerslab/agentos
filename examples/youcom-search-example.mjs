@@ -24,7 +24,6 @@ function printConfigurationExamples() {
   console.log('2. Explicit initialization:');
   console.log(`   const provider = new YouComProvider();
    await provider.initialize({
-     apiKey: process.env.YDC_API_KEY ?? process.env.YOUCOM_API_KEY,
    });\n`);
 }
 
@@ -32,10 +31,7 @@ async function runYouComExample() {
   console.log('🔍 YouCom Provider Example - Search with AgentOS\n');
 
   const provider = new YouComProvider();
-  await provider.initialize({
-    apiKey: process.env.YDC_API_KEY ?? process.env.YOUCOM_API_KEY,
-    debug: true,
-  });
+  await provider.initialize({ debug: true });
 
   const webQuery = 'What are the latest developments in AI agent frameworks?';
   console.log(`\n📋 Web query: ${webQuery}`);
