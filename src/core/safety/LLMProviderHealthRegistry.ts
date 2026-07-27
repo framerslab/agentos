@@ -160,6 +160,37 @@ export function classifyErrorStatus(error: unknown): number | null {
   return null;
 }
 
+/**
+ * Detect billing/quota exhaustion hiding behind a 429. OpenAI reports a
+ * dead account (`insufficient_quota`) with HTTP 429 — the same status as
+ * a transient rate limit — but the semantics are a billing outage: it
+ * does not lift until a human tops up the account. Left in the 429
+ * class the breaker flaps on a 30s cooldown forever (observed 6 days of
+ * quiet cross-provider divert, 2026-07-20..26, thousands of uncacheable
+ * fallback-leg calls), so it must ride the 402 billing class instead:
+ * single-failure trip, minutes-long window, error-level loud event.
+ *
+ * Reads the OpenAI SDK error shape (`code` / `type`, incl. the nested
+ * `error.error.code` body) and falls back to the distinctive message.
+ *
+ * @internal
+ */
+export function isQuotaExhaustion(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const obj = error as {
+    code?: unknown;
+    type?: unknown;
+    message?: unknown;
+    error?: { code?: unknown; type?: unknown } | null;
+  };
+  const marks = [obj.code, obj.type, obj.error?.code, obj.error?.type];
+  if (marks.some((m) => m === 'insufficient_quota')) return true;
+  return (
+    typeof obj.message === 'string' &&
+    /insufficient_quota|exceeded your current quota/i.test(obj.message)
+  );
+}
+
 function policyForStatus(status: number | null): ErrorPolicy {
   if (status === 402) return POLICY_402;
   if (status === 401 || status === 403) return POLICY_AUTH;
@@ -230,7 +261,12 @@ export class LLMProviderHealthRegistry {
     // caller's fault, not a provider-health signal — ignore it entirely so it
     // neither trips the breaker nor inflates the streak.
     if (isNonHealthClientError(status)) return;
-    const policy = policyForStatus(status);
+    // Billing exhaustion wearing a 429: reroute to the 402 class (see
+    // isQuotaExhaustion). Without this a quota-dead account flaps the
+    // 30s transient breaker indefinitely and never emits the loud
+    // billing-class event ops are watching for.
+    const quotaExhausted = status === 429 && isQuotaExhaustion(error);
+    const policy = quotaExhausted ? POLICY_402 : policyForStatus(status);
     const record = this.records.get(providerId) ?? this.makeRecord();
     record.failureCount += 1;
     record.lastStatusCode = status;
@@ -246,7 +282,8 @@ export class LLMProviderHealthRegistry {
         // whole cooldown — ops must see the moment it opens, not
         // discover the divert in cost attribution later. Availability
         // trips stay at warn.
-        const isPolicyClass = status === 401 || status === 402 || status === 403;
+        const isPolicyClass =
+          quotaExhausted || status === 401 || status === 402 || status === 403;
         const detail = {
           event: 'provider_breaker_open',
           providerId,
@@ -255,9 +292,10 @@ export class LLMProviderHealthRegistry {
           totalTrips: record.totalTrips,
         };
         if (isPolicyClass) {
+          const classLabel = quotaExhausted ? 'quota exhausted' : `auth/billing class ${status}`;
           console.error(
-            `[agentos] provider breaker OPEN for '${providerId}' (auth/billing class ` +
-              `${status}): ALL traffic diverts to fallbacks for ${Math.round(policy.cooldownMs / 60_000)} min`,
+            `[agentos] provider breaker OPEN for '${providerId}' (${classLabel}): ` +
+              `ALL traffic diverts to fallbacks for ${Math.round(policy.cooldownMs / 60_000)} min`,
             detail,
           );
         } else {

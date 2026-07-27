@@ -44,6 +44,65 @@ describe('LLMProviderHealthRegistry — client-error 4xx must not trip the break
   });
 });
 
+describe('LLMProviderHealthRegistry — quota exhaustion rides the billing class', () => {
+  /** OpenAI reports a dead account as HTTP 429 + insufficient_quota. */
+  const quotaErr = () => ({
+    statusCode: 429,
+    code: 'insufficient_quota',
+    message:
+      'You exceeded your current quota, please check your plan and billing details.',
+  });
+
+  it('trips after a SINGLE quota-exhaustion failure (not the 429 streak threshold)', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const reg = new LLMProviderHealthRegistry();
+      reg.recordFailure('openai', quotaErr());
+      expect(reg.isOpen('openai')).toBe(true);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('emits the error-level billing-class event naming quota exhaustion', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const reg = new LLMProviderHealthRegistry();
+      reg.recordFailure('openai', quotaErr());
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const [message, detail] = errorSpy.mock.calls[0] as [string, Record<string, unknown>];
+      expect(message).toContain('quota exhausted');
+      expect(detail).toMatchObject({ event: 'provider_breaker_open', providerId: 'openai' });
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('detects the nested OpenAI SDK body shape (error.error.code)', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const reg = new LLMProviderHealthRegistry();
+      reg.recordFailure('openai', {
+        status: 429,
+        error: { code: 'insufficient_quota' },
+        message: 'Request failed',
+      });
+      expect(reg.isOpen('openai')).toBe(true);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('leaves a plain 429 rate limit in the transient class (no single-failure trip)', () => {
+    const reg = new LLMProviderHealthRegistry();
+    reg.recordFailure('openai', {
+      statusCode: 429,
+      message: 'Rate limit reached for requests. Please try again in 20s.',
+    });
+    expect(reg.isOpen('openai')).toBe(false);
+  });
+});
+
 describe('LLMProviderHealthRegistry — loud breaker-open events', () => {
   it('emits an error-level structured event when a policy-class breaker opens', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});

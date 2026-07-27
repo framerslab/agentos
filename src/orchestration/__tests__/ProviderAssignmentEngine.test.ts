@@ -82,7 +82,7 @@ describe('ProviderAssignmentEngine', () => {
       expect(assignments).toEqual([
         expect.objectContaining({
           provider: 'atlascloud',
-          model: 'deepseek-ai/deepseek-v4-pro',
+          model: 'qwen/qwen3.5-flash',
         }),
         expect.objectContaining({
           provider: 'atlascloud',

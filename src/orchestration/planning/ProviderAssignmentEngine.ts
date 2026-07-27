@@ -23,7 +23,7 @@ const DEFAULTS: Record<string, { text: string; cheap: string }> = {
   gemini: { text: 'gemini-2.5-flash', cheap: 'gemini-2.0-flash' },
   ollama: { text: 'llama3.2', cheap: 'llama3.2' },
   openrouter: { text: 'openai/gpt-4o', cheap: 'openai/gpt-4o-mini' },
-  atlascloud: { text: 'deepseek-ai/deepseek-v4-pro', cheap: 'deepseek-ai/deepseek-v4-pro' },
+  atlascloud: { text: 'deepseek-ai/deepseek-v4-pro', cheap: 'qwen/qwen3.5-flash' },
   groq: { text: 'llama-3.3-70b-versatile', cheap: 'gemma2-9b-it' },
   together: {
     text: 'meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo',

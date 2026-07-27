@@ -1,3 +1,7 @@
+## <small>0.10.1 (2026-07-26)</small>
+
+* fix(safety): quota exhaustion rides the billing breaker class; price claude-sonnet-5 ([5cef556fb30f698f8b42809d8698d1b0903db9ea](https://github.com/framerslab/agentos/commit/5cef556fb30f698f8b42809d8698d1b0903db9ea))
+
 ## 0.10.0 (2026-07-22)
 
 * test: judge-site, response-identity, and inclusive-input coverage ([dd893ec4af021b79e47bc47c3c73a3e617dec589](https://github.com/framerslab/agentos/commit/dd893ec4af021b79e47bc47c3c73a3e617dec589))

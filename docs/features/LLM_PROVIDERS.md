@@ -59,7 +59,7 @@ AgentOS abstracts LLM access behind a unified [`IProvider`](https://github.com/f
 | **Mistral** | `MISTRAL_API_KEY` | `mistral-large-latest` | Yes | Yes | No | Yes | $$ |
 | **xAI** | `XAI_API_KEY` | `grok-2` | Yes | Yes | Yes | No | $$ |
 | **OpenRouter** | `OPENROUTER_API_KEY` | `openai/gpt-4o` | Yes | Yes | Yes* | Yes* | Varies |
-| **Atlas Cloud** | `ATLASCLOUD_API_KEY` | `deepseek-ai/deepseek-v4-pro` | Yes | Yes | No | No | Varies |
+| **Atlas Cloud** | `ATLASCLOUD_API_KEY` | `deepseek-ai/deepseek-v4-pro` | Yes | Model-dep. | No | No | Varies |
 | **Ollama** | `OLLAMA_BASE_URL` | `llama3.2` | Yes | Partial | Model-dep. | Yes | Free |
 | **Claude Code CLI** | _(PATH detection)_ | `claude-sonnet-4-5-20250929` | Yes | Yes | Yes | No | Free* |
 | **Gemini CLI** | _(PATH detection)_ | `gemini-2.5-flash` | Yes | Partial** | Yes | No | Free* |
@@ -246,7 +246,8 @@ AgentOS tracks token usage and cost across all providers:
 | Tier | Providers | Approximate Cost (1M tokens) |
 |------|-----------|------------------------------|
 | **$** (Budget) | Groq, Together, Ollama (free) | $0.00–$0.60 |
-| **$$** (Standard) | Gemini, Mistral, xAI, OpenRouter (varies), Atlas Cloud (varies) | $0.50–$3.00 |
+| **$$** (Standard) | Gemini, Mistral, xAI | $0.50–$3.00 |
+| **Varies** | OpenRouter, Atlas Cloud | Model-dependent |
 | **$$$** (Premium) | OpenAI, Anthropic | $3.00–$15.00 |
 
 ### Cost-Aware Caps
@@ -514,7 +515,7 @@ exercised paths.
 | Mistral | Yes | No | `auto/none/any` | Good support |
 | xAI | Yes | No | `auto/none` | Basic tool use |
 | OpenRouter | Model-dependent | Model-dependent | Model-dependent | Pass-through |
-| Atlas Cloud | Yes | Yes | `auto/none` | OpenAI-compatible JSON schema mode |
+| Atlas Cloud | Model-dependent | Model-dependent | Model-dependent | Depends on the selected Atlas Cloud model |
 | Ollama | Partial | No | `auto/none` | Model-dependent |
 
 ### Embedding Support

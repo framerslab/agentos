@@ -811,7 +811,7 @@ const CHEAP_MODELS: Record<string, string> = {
   openai: 'gpt-4o-mini',
   anthropic: 'claude-haiku-4-5-20251001',
   openrouter: 'openai/gpt-4o-mini',
-  atlascloud: 'deepseek-ai/deepseek-v4-pro',
+  atlascloud: 'qwen/qwen3.5-flash',
   gemini: 'gemini-2.0-flash',
   groq: 'gemma2-9b-it',
   together: 'meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo',

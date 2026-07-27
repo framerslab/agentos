@@ -276,9 +276,9 @@ describe('QueryRouter', () => {
 
       expect(DEFAULT_QUERY_ROUTER_CONFIG).toMatchObject({
         classifierProvider: 'atlascloud',
-        classifierModel: 'deepseek-ai/deepseek-v4-pro',
+        classifierModel: 'qwen/qwen3.5-flash',
         generationProvider: 'atlascloud',
-        generationModel: 'deepseek-ai/deepseek-v4-pro',
+        generationModel: 'qwen/qwen3.5-flash',
         generationModelDeep: 'deepseek-ai/deepseek-v4-pro',
       });
     } finally {

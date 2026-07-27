@@ -57,7 +57,7 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
   },
   atlascloud: {
     text: 'deepseek-ai/deepseek-v4-pro',
-    cheap: 'deepseek-ai/deepseek-v4-pro',
+    cheap: 'qwen/qwen3.5-flash',
   },
   gemini: {
     text: 'gemini-2.5-flash',
