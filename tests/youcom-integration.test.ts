@@ -28,6 +28,8 @@ describe('YouComProvider Integration', () => {
     provider = new YouComProvider();
     fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
+    vi.stubEnv('YDC_API_KEY', '');
+    vi.stubEnv('YOUCOM_API_KEY', '');
   });
 
   afterEach(async () => {
@@ -35,6 +37,7 @@ describe('YouComProvider Integration', () => {
       await provider.shutdown();
     }
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   it('initializes successfully and exposes its provider metadata', async () => {
