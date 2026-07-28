@@ -1,3 +1,8 @@
+## <small>0.10.2 (2026-07-28)</small>
+
+* fix(api): usage-observer events name their fallback leg; generateObject carries the source label ([ae3173c99d4ab4f9de9178386b7dbbad1ec07f69](https://github.com/framerslab/agentos/commit/ae3173c99d4ab4f9de9178386b7dbbad1ec07f69))
+* feat(models): add Claude Opus 5 across the Anthropic capability surface ([42659e4c22c991a1349f6468f9fc7fd100ff0dfa](https://github.com/framerslab/agentos/commit/42659e4c22c991a1349f6468f9fc7fd100ff0dfa))
+
 ## <small>0.10.1 (2026-07-26)</small>
 
 * fix(safety): quota exhaustion rides the billing breaker class; price claude-sonnet-5 ([5cef556fb30f698f8b42809d8698d1b0903db9ea](https://github.com/framerslab/agentos/commit/5cef556fb30f698f8b42809d8698d1b0903db9ea))
