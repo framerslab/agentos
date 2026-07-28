@@ -1,3 +1,7 @@
+## <small>0.10.3 (2026-07-28)</small>
+
+* fix(safety): classify OpenAIProviderError's httpStatus; quota trip works without a status; depth reaches the max-steps terminal ([e2b9a9347baba068889db362040bb3d35418acbf](https://github.com/framerslab/agentos/commit/e2b9a9347baba068889db362040bb3d35418acbf))
+
 ## <small>0.10.2 (2026-07-28)</small>
 
 * fix(api): usage-observer events name their fallback leg; generateObject carries the source label ([ae3173c99d4ab4f9de9178386b7dbbad1ec07f69](https://github.com/framerslab/agentos/commit/ae3173c99d4ab4f9de9178386b7dbbad1ec07f69))
