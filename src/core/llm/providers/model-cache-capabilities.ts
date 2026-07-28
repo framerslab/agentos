@@ -78,7 +78,14 @@ export function resolveCacheCapabilities(modelId: string): AnthropicCacheCapabil
     return { supportsPromptCaching: true, minCacheablePrefixTokens: 2048, retainsPriorThinkingInContext: true };
   }
 
-  // --- Opus ---
+  // --- Opus 5: modern semantics (thinking on by default, retention holds).
+  // Documented minimum cacheable prefix is 512; keep the same conservative
+  // floor as the Fable/Mythos row so floor-based heuristics stay quiet-biased.
+  if (/claude-opus-5/.test(id)) {
+    return { supportsPromptCaching: true, minCacheablePrefixTokens: 2048, retainsPriorThinkingInContext: true };
+  }
+
+  // --- Opus 4.x ---
   if (/claude-opus-4-(5|6|7|8)/.test(id)) {
     return { supportsPromptCaching: true, minCacheablePrefixTokens: 4096, retainsPriorThinkingInContext: true };
   }

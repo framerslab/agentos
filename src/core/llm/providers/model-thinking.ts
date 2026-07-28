@@ -37,7 +37,7 @@
  * @returns `true` when Anthropic accepts a `thinking` block for this model.
  */
 export function modelSupportsThinking(modelId: string): boolean {
-  return /^claude-(opus-4-(7|8)|sonnet-5|fable-5)\b/i.test(modelId);
+  return /^claude-(opus-4-(7|8)|opus-5|sonnet-5|fable-5)\b/i.test(modelId);
 }
 
 /** The resolved extended-thinking payload plus the max_tokens to send. */

@@ -154,7 +154,7 @@ export function modelSupportsTemperature(modelId: string): boolean {
   // models that reject `temperature` (and `top_p` / `top_k`). Future
   // reasoning-first siblings get added here as Anthropic releases them, in
   // lockstep with modelSupportsThinking.
-  return !/^claude-(opus-4-(7|8)|sonnet-5|fable-5)\b/i.test(modelId);
+  return !/^claude-(opus-4-(7|8)|opus-5|sonnet-5|fable-5)\b/i.test(modelId);
 }
 
 // ---------------------------------------------------------------------------
@@ -325,7 +325,7 @@ type AnthropicStreamEvent =
  * NOT the per-request default: when a caller omits `maxTokens`, the request
  * falls back to `config.defaultMaxTokens`, not this value — but a per-call
  * `maxTokens` IS clamped to it via {@link clampAnthropicMaxTokens}. Anthropic
- * specs: Fable 5 = 128K output / 1M context, Opus 4.x = 128K output / 1M
+ * specs: Fable 5 = 128K output / 1M context, Opus 5 / 4.x = 128K output / 1M
  * context, Sonnet 4.x = 64K output / 1M context, Haiku 4.5 = 64K output / 200K.
  */
 const ANTHROPIC_MODELS: ModelInfo[] = [
@@ -339,6 +339,19 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
     outputTokenLimit: 128000,
     pricePer1MTokensInput: 10,
     pricePer1MTokensOutput: 50,
+    supportsStreaming: true,
+    status: 'active',
+  },
+  {
+    modelId: 'claude-opus-5',
+    providerId: 'anthropic',
+    displayName: 'Claude Opus 5',
+    description: 'Frontier Opus for agents and coding; drop-in successor to Claude Opus 4.8 at the same pricing.',
+    capabilities: ['chat', 'tool_use', 'vision_input'],
+    contextWindowSize: 1000000,
+    outputTokenLimit: 128000,
+    pricePer1MTokensInput: 5,
+    pricePer1MTokensOutput: 25,
     supportsStreaming: true,
     status: 'active',
   },
