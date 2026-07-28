@@ -78,6 +78,37 @@ describe('LLMProviderHealthRegistry — quota exhaustion rides the billing class
     }
   });
 
+  it('trips on the real OpenAIProviderError shape (httpStatus + openaiErrorCode, no statusCode/prefix)', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const reg = new LLMProviderHealthRegistry();
+      // The provider's thrown shape during the 2026-07 outage: status in
+      // httpStatus, code in openaiErrorCode, message without [NNN] prefix.
+      reg.recordFailure('openai', {
+        httpStatus: 429,
+        openaiErrorCode: 'insufficient_quota',
+        message:
+          'You exceeded your current quota, please check your plan and billing details.',
+      });
+      expect(reg.isOpen('openai')).toBe(true);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('trips on a quota-shaped error even when no status field is classifiable', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const reg = new LLMProviderHealthRegistry();
+      reg.recordFailure('openai', {
+        message: 'You exceeded your current quota, please check your plan and billing details.',
+      });
+      expect(reg.isOpen('openai')).toBe(true);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it('detects the nested OpenAI SDK body shape (error.error.code)', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {

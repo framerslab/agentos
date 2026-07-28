@@ -2181,6 +2181,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         model: resolved.modelId,
         usage: totalUsage,
         source: opts.source,
+        ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
         finishReason: 'tool-calls',
         surface: 'generateText',
         durationMs: Date.now() - rootStartedAt,

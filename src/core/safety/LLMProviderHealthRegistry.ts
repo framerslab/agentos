@@ -140,7 +140,12 @@ const POLICY_TRANSIENT: ErrorPolicy = { threshold: 5, cooldownMs: 60_000 };
  */
 export function classifyErrorStatus(error: unknown): number | null {
   if (!error || typeof error !== 'object') return null;
-  const obj = error as { message?: unknown; statusCode?: unknown; status?: unknown };
+  const obj = error as {
+    message?: unknown;
+    statusCode?: unknown;
+    status?: unknown;
+    httpStatus?: unknown;
+  };
   // 1. Prefix in message
   if (typeof obj.message === 'string') {
     const match = obj.message.match(/^\[(\d{3})\]/);
@@ -156,6 +161,13 @@ export function classifyErrorStatus(error: unknown): number | null {
   // 3. status property
   if (typeof obj.status === 'number' && obj.status >= 100 && obj.status < 600) {
     return obj.status;
+  }
+  // 4. httpStatus property: OpenAIProviderError carries the HTTP status
+  //    here (and no [NNN] message prefix) — without this shape a direct
+  //    OpenAI failure classified null/transient, which is exactly how
+  //    the 2026-07-20..26 quota outage dodged the billing breaker.
+  if (typeof obj.httpStatus === 'number' && obj.httpStatus >= 100 && obj.httpStatus < 600) {
+    return obj.httpStatus;
   }
   return null;
 }
@@ -182,8 +194,18 @@ export function isQuotaExhaustion(error: unknown): boolean {
     type?: unknown;
     message?: unknown;
     error?: { code?: unknown; type?: unknown } | null;
+    openaiErrorCode?: unknown;
+    openaiErrorType?: unknown;
   };
-  const marks = [obj.code, obj.type, obj.error?.code, obj.error?.type];
+  const marks = [
+    obj.code,
+    obj.type,
+    obj.error?.code,
+    obj.error?.type,
+    // OpenAIProviderError's own field names for the same signals.
+    obj.openaiErrorCode,
+    obj.openaiErrorType,
+  ];
   if (marks.some((m) => m === 'insufficient_quota')) return true;
   return (
     typeof obj.message === 'string' &&
@@ -265,7 +287,8 @@ export class LLMProviderHealthRegistry {
     // isQuotaExhaustion). Without this a quota-dead account flaps the
     // 30s transient breaker indefinitely and never emits the loud
     // billing-class event ops are watching for.
-    const quotaExhausted = status === 429 && isQuotaExhaustion(error);
+    const quotaExhausted =
+      (status === 429 || status === null) && isQuotaExhaustion(error);
     const policy = quotaExhausted ? POLICY_402 : policyForStatus(status);
     const record = this.records.get(providerId) ?? this.makeRecord();
     record.failureCount += 1;
