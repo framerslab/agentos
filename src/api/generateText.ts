@@ -598,6 +598,15 @@ export interface GenerateTextOptions {
    */
   __rootStartedAt?: number;
   /**
+   * Internal — DO NOT set from application code. Fallback-hop depth,
+   * threaded into the provider-fallback recursion so the leg's usage
+   * observer event carries `fallbackDepth` and hosts can tell leg
+   * traffic from primary traffic. Absent (0) on top-level calls.
+   *
+   * @internal
+   */
+  __fallbackDepth?: number;
+  /**
    * Optional model router for intelligent provider/model selection.
    * When provided, the router's `selectModel()` is called before provider
    * resolution.  The router result overrides `model`/`provider`.
@@ -1696,6 +1705,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
           usage: shimUsage,
           source: opts.source,
+          ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
           finishReason: loopResult.finishReason,
           surface: 'generateText',
           durationMs: Date.now() - rootStartedAt,
@@ -1962,6 +1972,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
             usage: totalUsage,
             source: opts.source,
+            ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
+          ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
             finishReason: choice.finishReason ?? 'stop',
             surface: 'generateText',
             durationMs: Date.now() - rootStartedAt,
@@ -2117,6 +2129,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
           usage: totalUsage,
           source: opts.source,
+          ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
           finishReason: choice.finishReason ?? 'stop',
           surface: 'generateText',
           durationMs: Date.now() - rootStartedAt,
@@ -2301,6 +2314,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             // observer reports true end-to-end durationMs (spanning this
             // failed primary + every fallback hop), not just its own leg.
             __rootStartedAt: rootStartedAt,
+            // Stamp the leg's observer events with its hop depth (see
+            // LlmUsageEvent.fallbackDepth).
+            __fallbackDepth: (opts.__fallbackDepth ?? 0) + 1,
             // Per-hop effort: when this fallback entry sets `effort`, it
             // overrides the call-level effort for THIS hop only (the spread
             // above carries opts.effort; an entry without `effort` inherits it).

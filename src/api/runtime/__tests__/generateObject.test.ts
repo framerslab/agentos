@@ -139,6 +139,25 @@ describe('generateObject', () => {
     expect(schemaBlock.cache_control).toEqual({ type: 'ephemeral' });
   });
 
+  it('surfaces the source label on the global usage observer event', async () => {
+    hoisted.generateCompletion.mockResolvedValue(mockResponse('{"name": "Alice", "age": 28}'));
+    const { setGlobalLlmObserver } = await import('../../observers.js');
+    const seen: Array<{ source?: string; surface?: string }> = [];
+    setGlobalLlmObserver((e) => {
+      seen.push({ source: e.source, surface: e.surface });
+    });
+    try {
+      await generateObject({
+        schema: personSchema,
+        prompt: 'Extract person info',
+        source: 'codegen_tool',
+      });
+      expect(seen.some((e) => e.source === 'codegen_tool')).toBe(true);
+    } finally {
+      setGlobalLlmObserver(null);
+    }
+  });
+
   it('omits sessionId from provider options when the caller did not set it', async () => {
     hoisted.generateCompletion.mockResolvedValue(mockResponse('{"name": "Alice", "age": 28}'));
 

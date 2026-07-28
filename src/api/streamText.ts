@@ -1133,6 +1133,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               // hop pays no cache-write premium its one-shot traffic never
               // reads back; entries without `cache` inherit the call level.
               ...(fb.cache !== undefined ? { cache: fb.cache } : {}),
+              // Stamp the leg's observer events with its hop depth (see
+              // LlmUsageEvent.fallbackDepth).
+              __fallbackDepth: (opts.__fallbackDepth ?? 0) + 1,
               apiKey: undefined,
               baseUrl: undefined,
               // Preserve the REMAINING chain (entries AFTER the current fb;
@@ -1327,6 +1330,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
           usage,
           source: opts.source,
+          ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
           finishReason:
             allToolCalls.length > 0 && !finalText
               ? 'tool-calls'
