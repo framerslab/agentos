@@ -1973,7 +1973,6 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             usage: totalUsage,
             source: opts.source,
             ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
-          ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
             finishReason: choice.finishReason ?? 'stop',
             surface: 'generateText',
             durationMs: Date.now() - rootStartedAt,

@@ -184,6 +184,10 @@ export function classifyErrorStatus(error: unknown): number | null {
  *
  * Reads the OpenAI SDK error shape (`code` / `type`, incl. the nested
  * `error.error.code` body) and falls back to the distinctive message.
+ * Anthropic reports the same billing outage as HTTP 400
+ * invalid_request_error ("credit balance is too low"; some surfaces use
+ * a `billing_error` type) — matched here so a client-error transport
+ * status cannot smuggle a dead account past the breaker as a caller bug.
  *
  * @internal
  */
@@ -206,10 +210,12 @@ export function isQuotaExhaustion(error: unknown): boolean {
     obj.openaiErrorCode,
     obj.openaiErrorType,
   ];
-  if (marks.some((m) => m === 'insufficient_quota')) return true;
+  if (marks.some((m) => m === 'insufficient_quota' || m === 'billing_error')) return true;
   return (
     typeof obj.message === 'string' &&
-    /insufficient_quota|exceeded your current quota/i.test(obj.message)
+    /insufficient_quota|exceeded your current quota|credit balance is too low/i.test(
+      obj.message,
+    )
   );
 }
 
@@ -279,16 +285,18 @@ export class LLMProviderHealthRegistry {
    */
   recordFailure(providerId: string, error: unknown): void {
     const status = classifyErrorStatus(error);
+    // Billing/quota exhaustion is provider health regardless of the
+    // transport status it wears: OpenAI reports it as 429, Anthropic as
+    // 400 invalid_request_error ("credit balance is too low"). Detect it
+    // BEFORE the client-error drop — classifying by status first routed
+    // Anthropic credit exhaustion into the 4xx ignore branch, leaving the
+    // breaker fully blind to an Anthropic billing outage.
+    const quotaExhausted = isQuotaExhaustion(error);
     // A client-error 4xx (bad request / unknown model / unprocessable) is the
     // caller's fault, not a provider-health signal — ignore it entirely so it
-    // neither trips the breaker nor inflates the streak.
-    if (isNonHealthClientError(status)) return;
-    // Billing exhaustion wearing a 429: reroute to the 402 class (see
-    // isQuotaExhaustion). Without this a quota-dead account flaps the
-    // 30s transient breaker indefinitely and never emits the loud
-    // billing-class event ops are watching for.
-    const quotaExhausted =
-      (status === 429 || status === null) && isQuotaExhaustion(error);
+    // neither trips the breaker nor inflates the streak. Quota exhaustion is
+    // exempt: it wears client-error statuses but is an account-level outage.
+    if (!quotaExhausted && isNonHealthClientError(status)) return;
     const policy = quotaExhausted ? POLICY_402 : policyForStatus(status);
     const record = this.records.get(providerId) ?? this.makeRecord();
     record.failureCount += 1;

@@ -175,3 +175,75 @@ describe('LLMProviderHealthRegistry — loud breaker-open events', () => {
     }
   });
 });
+
+describe('LLMProviderHealthRegistry — quota exhaustion wearing client-error statuses', () => {
+  /**
+   * Anthropic reports credit exhaustion as HTTP 400 invalid_request_error.
+   * AnthropicProviderError carries the status in `httpStatus`; there is no
+   * [NNN] message prefix, no statusCode/status property, and none of the
+   * OpenAI insufficient_quota marks — only the distinctive message.
+   */
+  const anthropicCreditErr = () => ({
+    httpStatus: 400,
+    type: 'invalid_request_error',
+    message:
+      'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.',
+  });
+
+  it('trips the billing breaker after a SINGLE Anthropic credit-exhaustion 400', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const reg = new LLMProviderHealthRegistry();
+      reg.recordFailure('anthropic', anthropicCreditErr());
+      expect(reg.isOpen('anthropic')).toBe(true);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect((errorSpy.mock.calls[0] as [string])[0]).toContain('quota exhausted');
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('still ignores a plain 400 bad-request carried in httpStatus (no quota shape)', () => {
+    const reg = new LLMProviderHealthRegistry();
+    for (let i = 0; i < 10; i++) {
+      reg.recordFailure('anthropic', {
+        httpStatus: 400,
+        type: 'invalid_request_error',
+        message: 'max_tokens: 200000 is greater than the model maximum',
+      });
+    }
+    expect(reg.isOpen('anthropic')).toBe(false);
+  });
+
+  it('recognizes the billing_error type mark regardless of transport status', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const reg = new LLMProviderHealthRegistry();
+      reg.recordFailure('anthropic', {
+        httpStatus: 403,
+        type: 'billing_error',
+        message: 'There is a billing issue with your account.',
+      });
+      expect(reg.isOpen('anthropic')).toBe(true);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});
+
+describe('classifyErrorStatus — the httpStatus shape is load-bearing on its own', () => {
+  it('classifies a bare-httpStatus 401 into the auth class (single-failure trip)', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const reg = new LLMProviderHealthRegistry();
+      // No [NNN] prefix, no statusCode/status, no quota marks: only the
+      // httpStatus branch can classify this error. Deleting that branch
+      // leaves status null -> transient class (threshold 5) and this
+      // single-failure trip assertion fails.
+      reg.recordFailure('openai', { httpStatus: 401, message: 'Unauthorized' });
+      expect(reg.isOpen('openai')).toBe(true);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});

@@ -326,7 +326,8 @@ type AnthropicStreamEvent =
  * falls back to `config.defaultMaxTokens`, not this value — but a per-call
  * `maxTokens` IS clamped to it via {@link clampAnthropicMaxTokens}. Anthropic
  * specs: Fable 5 = 128K output / 1M context, Opus 5 / 4.x = 128K output / 1M
- * context, Sonnet 4.x = 64K output / 1M context, Haiku 4.5 = 64K output / 200K.
+ * context, Sonnet 5 / 4.6 = 128K output / 1M context, Sonnet 4.5 = 64K / 200K,
+ * Haiku 4.5 = 64K output / 200K.
  */
 const ANTHROPIC_MODELS: ModelInfo[] = [
   {
@@ -419,7 +420,10 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
     description: 'Optimal balance of intelligence, cost, and speed.',
     capabilities: ['chat', 'tool_use', 'vision_input'],
     contextWindowSize: 1000000,
-    outputTokenLimit: 64000,
+    // 128K per current Anthropic specs (every current-generation model
+    // streams to 128K; only Haiku 4.5 and legacy Sonnet 4.5 cap at 64K).
+    // The old 64000 silently halved caller budgets via the clamp.
+    outputTokenLimit: 128000,
     pricePer1MTokensInput: 3,
     pricePer1MTokensOutput: 15,
     supportsStreaming: true,
@@ -491,11 +495,23 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
  * matched by prefix. Unknown models pass through unchanged (no catalog ceiling).
  */
 export function clampAnthropicMaxTokens(modelId: string, requested: number): number {
-  const entry =
-    ANTHROPIC_MODELS.find((m) => m.modelId === modelId) ??
-    ANTHROPIC_MODELS.find((m) => modelId.startsWith(m.modelId) || m.modelId.startsWith(modelId));
-  const ceiling = entry?.outputTokenLimit;
+  const ceiling = resolveAnthropicModelEntry(modelId)?.outputTokenLimit;
   return typeof ceiling === 'number' && ceiling > 0 ? Math.min(requested, ceiling) : requested;
+}
+
+/**
+ * Resolves a caller-supplied model id to its ANTHROPIC_MODELS catalog row.
+ * Exact id match wins; otherwise a dated snapshot (`claude-sonnet-5-20260101`)
+ * or bare alias is matched by prefix — the SAME resolution the max-tokens
+ * clamp uses, shared so pricing and clamping can never disagree about which
+ * row a model id means (estimateCost's exact-only match priced every dated
+ * snapshot id as costUSD undefined: unmetered spend).
+ */
+export function resolveAnthropicModelEntry(modelId: string): ModelInfo | undefined {
+  return (
+    ANTHROPIC_MODELS.find((m) => m.modelId === modelId) ??
+    ANTHROPIC_MODELS.find((m) => modelId.startsWith(m.modelId) || m.modelId.startsWith(modelId))
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2398,7 +2414,7 @@ export class AnthropicProvider implements IProvider {
     cacheReadTokens?: number,
     cacheCreationTokens?: number,
   ): number | undefined {
-    const info = ANTHROPIC_MODELS.find(m => m.modelId === modelId);
+    const info = resolveAnthropicModelEntry(modelId);
     if (!info?.pricePer1MTokensInput || !info?.pricePer1MTokensOutput) return undefined;
     const inputPrice = info.pricePer1MTokensInput;
     const outputPrice = info.pricePer1MTokensOutput;
