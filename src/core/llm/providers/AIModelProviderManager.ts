@@ -21,6 +21,7 @@
 import { IProvider, ModelInfo } from './IProvider';
 import { OpenAIProvider, OpenAIProviderConfig } from './implementations/OpenAIProvider';
 import { OpenRouterProvider, OpenRouterProviderConfig } from './implementations/OpenRouterProvider';
+import { RequestyProvider, RequestyProviderConfig } from './implementations/RequestyProvider';
 import { OllamaProvider, OllamaProviderConfig } from './implementations/OllamaProvider';
 import { AnthropicProvider, AnthropicProviderConfig } from './implementations/AnthropicProvider';
 import { GroqProvider, GroqProviderConfig } from './implementations/GroqProvider';
@@ -39,7 +40,7 @@ import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../utils/err
 export interface ProviderConfigEntry {
   providerId: string;
   enabled: boolean;
-  config: Partial<OpenAIProviderConfig | OpenRouterProviderConfig | OllamaProviderConfig | AnthropicProviderConfig | GroqProviderConfig | TogetherProviderConfig | MistralProviderConfig | XAIProviderConfig | GeminiProviderConfig | ClaudeCodeProviderConfig | GeminiCLIProviderConfig | Record<string, any>>;
+  config: Partial<OpenAIProviderConfig | OpenRouterProviderConfig | RequestyProviderConfig | OllamaProviderConfig | AnthropicProviderConfig | GroqProviderConfig | TogetherProviderConfig | MistralProviderConfig | XAIProviderConfig | GeminiProviderConfig | ClaudeCodeProviderConfig | GeminiCLIProviderConfig | Record<string, any>>;
   isDefault?: boolean;
 }
 
@@ -125,6 +126,9 @@ export class AIModelProviderManager {
             break;
           case 'openrouter':
             providerInstance = new OpenRouterProvider();
+            break;
+          case 'requesty':
+            providerInstance = new RequestyProvider();
             break;
           case 'ollama':
             providerInstance = new OllamaProvider();
