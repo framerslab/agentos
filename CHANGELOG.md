@@ -1,3 +1,7 @@
+## <small>0.10.4 (2026-07-29)</small>
+
+* fix(api): one usage event per served stream answer; quota trips survive client-error statuses; Anthropic catalog resolution + sonnet-4-6 ceiling ([dca6f78a1d3ad9b88478a93bbab03515c94bd615](https://github.com/framerslab/agentos/commit/dca6f78a1d3ad9b88478a93bbab03515c94bd615))
+
 ## <small>0.10.3 (2026-07-28)</small>
 
 * fix(safety): classify OpenAIProviderError's httpStatus; quota trip works without a status; depth reaches the max-steps terminal ([e2b9a9347baba068889db362040bb3d35418acbf](https://github.com/framerslab/agentos/commit/e2b9a9347baba068889db362040bb3d35418acbf))
