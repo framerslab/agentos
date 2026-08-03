@@ -6,6 +6,8 @@ describe('modelSupportsThinking', () => {
     expect(modelSupportsThinking('claude-opus-4-8')).toBe(true);
     expect(modelSupportsThinking('claude-opus-4-7')).toBe(true);
     expect(modelSupportsThinking('claude-opus-4-8-20260501')).toBe(true);
+    expect(modelSupportsThinking('claude-opus-5')).toBe(true);
+    expect(modelSupportsThinking('claude-opus-5-20260701')).toBe(true);
     expect(modelSupportsThinking('claude-sonnet-5')).toBe(true);
     expect(modelSupportsThinking('claude-sonnet-5-20260101')).toBe(true);
     expect(modelSupportsThinking('claude-fable-5')).toBe(true);
@@ -37,6 +39,9 @@ describe('resolveThinkingPayload', () => {
     expect(r).not.toBeNull();
     expect(r!.thinking).toEqual({ type: 'adaptive' });
     expect(r!.thinking).not.toHaveProperty('budget_tokens');
+    // Opus 5 rides the same adaptive-only shape (budget_tokens 400s there too).
+    const r5 = resolveThinkingPayload('claude-opus-5', { budgetTokens: 8000 }, 4000);
+    expect(r5!.thinking).toEqual({ type: 'adaptive' });
   });
 
   it('leaves max_tokens untouched — adaptive has no budget to floor against', () => {

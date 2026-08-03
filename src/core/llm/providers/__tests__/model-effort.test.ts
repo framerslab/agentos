@@ -9,13 +9,15 @@ import {
 } from '../model-effort.js';
 
 describe('modelSupportsEffort', () => {
-  it('accepts Opus 4.5-4.8, Sonnet 5, Sonnet 4.6, Fable/Mythos 5 (bare + provider-prefixed)', () => {
+  it('accepts Opus 4.5-4.8, Opus 5, Sonnet 5, Sonnet 4.6, Fable/Mythos 5 (bare + provider-prefixed)', () => {
     for (const m of [
       'claude-opus-4-5',
       'claude-opus-4-6',
       'claude-opus-4-7',
       'claude-opus-4-8',
       'anthropic/claude-opus-4-8',
+      'claude-opus-5',
+      'anthropic/claude-opus-5',
       'claude-sonnet-5',
       'anthropic/claude-sonnet-5',
       'claude-sonnet-4-6',

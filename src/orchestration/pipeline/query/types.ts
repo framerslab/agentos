@@ -806,6 +806,21 @@ function resolveDefaultProvider(): string {
   return 'openai';
 }
 
+/**
+ * Resolve embeddings independently because not every text provider supports
+ * the OpenAI embeddings API. Atlas-only configurations intentionally fall
+ * back to `openai` without a key so QueryRouter uses keyword retrieval.
+ */
+function resolveDefaultEmbeddingProvider(): string {
+  try {
+    if (process.env.OPENAI_API_KEY) return 'openai';
+    if (process.env.OPENROUTER_API_KEY) return 'openrouter';
+  } catch {
+    // Browser or restricted env — fall back
+  }
+  return 'openai';
+}
+
 /** Provider → cheap model mapping for classifier/T0-T1 generation. */
 const CHEAP_MODELS: Record<string, string> = {
   openai: 'gpt-4o-mini',
@@ -843,7 +858,7 @@ export const DEFAULT_QUERY_ROUTER_CONFIG = {
   classifierModel: CHEAP_MODELS[resolveDefaultProvider()] ?? 'gpt-4o-mini',
   classifierProvider: resolveDefaultProvider(),
   maxTier: 3 as QueryTier,
-  embeddingProvider: resolveDefaultProvider(),
+  embeddingProvider: resolveDefaultEmbeddingProvider(),
   embeddingModel: 'text-embedding-3-small',
   generationModel: CHEAP_MODELS[resolveDefaultProvider()] ?? 'gpt-4o-mini',
   generationModelDeep: STRONG_MODELS[resolveDefaultProvider()] ?? 'gpt-4o',

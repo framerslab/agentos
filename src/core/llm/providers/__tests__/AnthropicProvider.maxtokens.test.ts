@@ -2,7 +2,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.stubGlobal('fetch', vi.fn());
 
-import { AnthropicProvider, clampAnthropicMaxTokens } from '../implementations/AnthropicProvider';
+import {
+  AnthropicProvider,
+  clampAnthropicMaxTokens,
+  resolveAnthropicModelEntry,
+} from '../implementations/AnthropicProvider';
 import type { ChatMessage } from '../IProvider';
 
 describe('clampAnthropicMaxTokens — output ceiling clamp (truncation-retry 64000 hard-400)', () => {
@@ -53,5 +57,58 @@ describe('Anthropic catalog — corrected per Anthropic specs', () => {
       buildRequestPayload: (m: string, msgs: ChatMessage[], o: unknown, s: boolean) => { max_tokens: number };
     }).buildRequestPayload('claude-opus-4-8', messages, { maxTokens: 200000 }, true);
     expect(payload.max_tokens).toBe(128000);
+  });
+});
+
+describe('resolveAnthropicModelEntry — shared catalog resolution (pricing + clamp)', () => {
+  it('resolves an exact catalog id', () => {
+    expect(resolveAnthropicModelEntry('claude-sonnet-5')?.modelId).toBe('claude-sonnet-5');
+  });
+
+  it('resolves a dated snapshot id to its catalog row by prefix', () => {
+    expect(resolveAnthropicModelEntry('claude-sonnet-5-20260101')?.modelId).toBe('claude-sonnet-5');
+    expect(resolveAnthropicModelEntry('claude-sonnet-4-6-20260115')?.modelId).toBe(
+      'claude-sonnet-4-6',
+    );
+  });
+
+  it('resolves a bare alias to a dated catalog row', () => {
+    expect(resolveAnthropicModelEntry('claude-haiku-4-5')?.modelId).toBe(
+      'claude-haiku-4-5-20251001',
+    );
+  });
+
+  it('returns undefined for unknown models', () => {
+    expect(resolveAnthropicModelEntry('some-future-model')).toBeUndefined();
+  });
+
+  it('prices dated snapshot ids through estimateCost instead of undefined (unmetered spend)', async () => {
+    const provider = new AnthropicProvider();
+    await provider.initialize({ apiKey: 'test-key' });
+    const priced = provider as unknown as {
+      estimateCost(i: number, o: number, m: string): number | undefined;
+    };
+    // Sonnet 5 sticker: $3/1M input + $15/1M output.
+    expect(priced.estimateCost(1_000_000, 1_000_000, 'claude-sonnet-5-20260101')).toBeCloseTo(
+      18,
+      5,
+    );
+    expect(priced.estimateCost(1000, 1000, 'not-a-real-model')).toBeUndefined();
+  });
+});
+
+describe('claude-sonnet-4-6 output ceiling — 128K per current Anthropic specs', () => {
+  it('no longer clamps a >64K caller budget on sonnet-4-6', () => {
+    expect(clampAnthropicMaxTokens('claude-sonnet-4-6', 100000)).toBe(100000);
+    expect(clampAnthropicMaxTokens('claude-sonnet-4-6', 200000)).toBe(128000);
+  });
+
+  it('reports the corrected ceiling via getModelInfo; legacy Sonnet 4.5 stays 64K', async () => {
+    const provider = new AnthropicProvider();
+    await provider.initialize({ apiKey: 'test-key' });
+    const info = await provider.getModelInfo('claude-sonnet-4-6');
+    expect(info?.outputTokenLimit).toBe(128000);
+    const legacy = await provider.getModelInfo('claude-sonnet-4-5');
+    expect(legacy?.outputTokenLimit).toBe(64000);
   });
 });

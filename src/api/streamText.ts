@@ -316,6 +316,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     let finalText = '';
     let metricStatus: 'ok' | 'error' = 'ok';
+    // True when a provider-fallback leg served this stream. The recursive
+    // leg call fires its own usage-observer event (leg provider/model,
+    // fallbackDepth stamped), so the outer finally must NOT fire a second
+    // aggregate event: recordedProviderId/ModelId still name the FAILED
+    // primary and opts.__fallbackDepth is absent at the top level, so the
+    // duplicate re-billed the leg's folded usage under the dead primary as
+    // unstamped primary traffic (the 2026-07-20..26 misattribution shape).
+    let fallbackServedStream = false;
     let recordedProviderId: string | undefined;
     let recordedModelId: string | undefined;
     // Raw provider finish reason of the most recent step's final chunk.
@@ -1133,6 +1141,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               // hop pays no cache-write premium its one-shot traffic never
               // reads back; entries without `cache` inherit the call level.
               ...(fb.cache !== undefined ? { cache: fb.cache } : {}),
+              // Stamp the leg's observer events with its hop depth (see
+              // LlmUsageEvent.fallbackDepth).
+              __fallbackDepth: (opts.__fallbackDepth ?? 0) + 1,
               apiKey: undefined,
               baseUrl: undefined,
               // Preserve the REMAINING chain (entries AFTER the current fb;
@@ -1201,6 +1212,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               attempt,
             });
             fallbackSucceeded = true;
+            fallbackServedStream = true;
             break;
           } catch (fbErr: any) {
             lastFallbackError = fbErr instanceof Error ? fbErr: new Error(String(fbErr));
@@ -1320,17 +1332,33 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // one consistent stream of events whether the caller used
       // generateText or streamText. No-op when no observer is
       // registered.
-      if (metricStatus !== 'error') {
+      // One usage event per served answer:
+      // - fallback-served: the recursive leg already fired a correctly
+      //   attributed event — never fire the outer aggregate. (Primary-side
+      //   partial usage is not lost by this: providers report usage on the
+      //   final chunk, so a thrown-over primary has accrued none.)
+      // - error terminals: fire ONLY when the stream accrued real billable
+      //   usage (tokens metered before a later failure) — suppressing those
+      //   left real spend unmetered; zero-usage failures stay silent.
+      const accruedBillableUsage =
+        usage.promptTokens > 0 ||
+        usage.completionTokens > 0 ||
+        (usage.cacheReadTokens ?? 0) > 0 ||
+        (usage.cacheCreationTokens ?? 0) > 0;
+      if (!fallbackServedStream && (metricStatus !== 'error' || accruedBillableUsage)) {
         fireLlmUsageObserver({
           provider: recordedProviderId ?? '',
           model: recordedModelId ?? '',
           ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
           usage,
           source: opts.source,
+          ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
           finishReason:
-            allToolCalls.length > 0 && !finalText
-              ? 'tool-calls'
-              : normalizeStreamFinishReason(lastStepFinishReason),
+            metricStatus === 'error'
+              ? 'error'
+              : allToolCalls.length > 0 && !finalText
+                ? 'tool-calls'
+                : normalizeStreamFinishReason(lastStepFinishReason),
           surface: 'streamText',
           durationMs: Date.now() - startedAt,
           ...(firstPartAt !== undefined ? { ttfbMs: firstPartAt - startedAt } : {}),

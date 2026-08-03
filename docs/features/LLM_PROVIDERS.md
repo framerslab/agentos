@@ -124,6 +124,10 @@ order and uses the first one found:
 11. `which gemini` → Gemini CLI (PATH detection — no API key, uses Google account)
 12. `OLLAMA_BASE_URL` → Ollama
 
+This list describes the public runtime's `autoDetectProvider()` order. The
+QueryRouter defaults prefer direct provider keys before `OPENROUTER_API_KEY` so
+their selected provider and credential resolver remain aligned.
+
 You can override auto-detection in four ways, highest priority first:
 
 1. **Inline** — `agent({ provider: '...', apiKey: '...' })` on a single call.

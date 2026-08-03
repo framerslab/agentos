@@ -14,6 +14,8 @@ describe('resolveCacheCapabilities', () => {
     ['claude-opus-4-8', { floor: 4096, retains: true }],
     ['anthropic/claude-opus-4-8', { floor: 4096, retains: true }],
     ['anthropic.claude-opus-4-8', { floor: 4096, retains: true }],
+    ['claude-opus-5', { floor: 2048, retains: true }],
+    ['anthropic/claude-opus-5', { floor: 2048, retains: true }],
     ['anthropic:claude-opus-4-7', { floor: 4096, retains: true }],
     ['claude-opus-4-5-20251101', { floor: 4096, retains: true }],
     // Older Opus — pre-retention

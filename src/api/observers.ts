@@ -59,6 +59,15 @@ export interface LlmUsageEvent {
    */
   source?: string;
   /**
+   * Set (>= 1) when this event was served by a provider-fallback leg
+   * rather than the requested primary; the value is the hop number.
+   * Absent on primary-served calls. Lets hosts tell a leg row from a
+   * primary row instead of inferring it from paired token counts —
+   * during the 2026-07-20..26 quota outage every diverted call was
+   * indistinguishable from primary traffic in cost telemetry.
+   */
+  fallbackDepth?: number;
+  /**
    * Mirrors the `finishReason` on the GenerateText result so observers
    * can distinguish a clean stop from a token-cap truncation.
    */

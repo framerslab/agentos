@@ -1320,7 +1320,7 @@ export interface BaseAgentConfig {
    * ```ts
    * const codegen = agent({
    *   provider: 'anthropic',
-   *   model: 'claude-opus-4-8',
+   *   model: 'claude-opus-5',
    *   tools: { GenerateCode, RunTests, JudgeOutput },
    *   maxTokens: 24000,
    *   thinking: { budgetTokens: 8000 },

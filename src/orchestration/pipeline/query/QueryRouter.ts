@@ -1561,12 +1561,14 @@ export class QueryRouter {
 
   /**
    * Resolve API key for embedding calls.
-   * Falls back through embedding-specific → global → env var scan.
+   * Falls back through embedding-specific → global → embedding-capable env vars.
    */
   private getEmbeddingApiKey(): string {
     if (this.config.embeddingApiKey) return this.config.embeddingApiKey;
-    // Fall through to general LLM key resolver
-    return this.getLlmApiKey();
+    if (this.config.apiKey) return this.config.apiKey;
+    if (process.env.OPENAI_API_KEY) return process.env.OPENAI_API_KEY;
+    if (process.env.OPENROUTER_API_KEY) return process.env.OPENROUTER_API_KEY;
+    return '';
   }
 
   private getEmbeddingBaseUrl(): string | undefined {

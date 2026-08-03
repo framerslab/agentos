@@ -251,6 +251,8 @@ describe('QueryRouter', () => {
 
     expect((router as any).getLlmApiKey()).toBe('test-atlascloud-key');
     expect((router as any).getLlmBaseUrl()).toBeUndefined();
+    expect((router as any).getEmbeddingApiKey()).toBe('');
+    expect((router as any).getEmbeddingBaseUrl()).toBeUndefined();
   });
 
   it('uses Atlas Cloud models in QueryRouter defaults when it is the only configured provider', async () => {
@@ -277,6 +279,7 @@ describe('QueryRouter', () => {
       expect(DEFAULT_QUERY_ROUTER_CONFIG).toMatchObject({
         classifierProvider: 'atlascloud',
         classifierModel: 'qwen/qwen3.5-flash',
+        embeddingProvider: 'openai',
         generationProvider: 'atlascloud',
         generationModel: 'qwen/qwen3.5-flash',
         generationModelDeep: 'deepseek-ai/deepseek-v4-pro',
