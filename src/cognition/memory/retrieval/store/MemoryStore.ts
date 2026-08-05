@@ -556,6 +556,8 @@ export class MemoryStore {
   private readonly coordinationTarget: StoreCoordinationTarget;
   private coordinationRegistration: StoreRegistration | null;
   private disposed = false;
+  /** Brain attachment is immutable once any memory operation has started. */
+  private brainAttachmentLocked = false;
 
   constructor(config: MemoryStoreConfig) {
     this.config = config;
@@ -583,21 +585,40 @@ export class MemoryStore {
   /**
    * Attach a Brain for durable write-through persistence.
    * Once attached, all store/softDelete/recordAccess operations also
-   * write to the brain's `memory_traces` table.
+   * write to the brain's `memory_traces` table. Initial attachment must happen
+   * before any memory operation; after that, only another handle with the same
+   * coordination token can be supplied.
    *
    * @param brain - Brain instance (already initialized with schema)
+   * @throws When attachment is late or would switch backing resources.
    */
   setBrain(brain: import('./Brain.js').Brain): void {
     this.assertNotDisposed();
-    if (this.coordinationRegistration) {
-      unregisterCoordinationTarget(this.coordinationRegistration);
+    if (this.brain) {
+      if (this.brain.coordinationToken !== brain.coordinationToken) {
+        throw new Error(
+          'MemoryStore.setBrain: cannot switch to a different backing resource',
+        );
+      }
+      this.brain = brain;
+      return;
     }
+    if (this.brainAttachmentLocked) {
+      throw new Error(
+        'MemoryStore.setBrain: attach a Brain before starting memory operations',
+      );
+    }
+
+    const previousRegistration = this.coordinationRegistration;
     this.brain = brain;
     this.coordinationNamespace = brain.coordinationToken;
     this.coordinationRegistration = registerCoordinationTarget(
       this.coordinationNamespace,
       this.coordinationTarget,
     );
+    if (previousRegistration) {
+      unregisterCoordinationTarget(previousRegistration);
+    }
   }
 
   /**
@@ -627,7 +648,15 @@ export class MemoryStore {
     }
   }
 
+  private beginOperation(): void {
+    this.assertNotDisposed();
+    this.brainAttachmentLocked = true;
+  }
+
   private markDeletedLocally(traceId: string, authoritative = true): void {
+    // Passive sibling coordination is still resource-specific state. Once it
+    // arrives, this store cannot safely migrate that state to another Brain.
+    this.brainAttachmentLocked = true;
     this.tombstonedTraceIds.add(traceId);
     if (authoritative) this.authoritativeTombstoneIds.add(traceId);
     this.embeddingCache.delete(traceId);
@@ -665,6 +694,7 @@ export class MemoryStore {
     embedding: number[],
     source: boolean,
   ): Promise<boolean> {
+    this.brainAttachmentLocked = true;
     if (source) {
       const cached = this.traceCache.get(trace.id);
       if (cached) cached.isActive = true;
@@ -814,7 +844,7 @@ export class MemoryStore {
    * graph association injection so a tombstone cannot bypass vector filters.
    */
   async filterRecallableTraceIds(traceIds: string[]): Promise<Set<string>> {
-    this.assertNotDisposed();
+    this.beginOperation();
     const uniqueIds = [...new Set(traceIds)];
     const validated = await this.reconcileDurableTraceStates(
       uniqueIds,
@@ -994,7 +1024,7 @@ export class MemoryStore {
    * and record as episodic memory in the knowledge graph.
    */
   async store(trace: MemoryTrace): Promise<void> {
-    this.assertNotDisposed();
+    this.beginOperation();
     const namespace = this.coordinationNamespace;
     const brain = this.brain;
     await withTraceOperation(
@@ -1078,6 +1108,58 @@ export class MemoryStore {
       );
     }
 
+    // The Brain is authoritative whenever attached. Persist before publishing
+    // the active trace to caches or secondary graph indexes; otherwise a
+    // failed write would look successful locally and then be fenced as a
+    // provider-only document on the next durable recall.
+    if (brain) {
+      try {
+        const { dialect } = brain.features;
+        const result = await brain.run(
+          dialect.insertOrReplace(
+            'memory_traces',
+            ['brain_id', 'id', 'type', 'scope', 'content', 'embedding', 'strength', 'created_at', 'last_accessed', 'retrieval_count', 'tags', 'emotions', 'metadata', 'deleted'],
+            ['?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '0'],
+            'brain_id, id',
+          ),
+          [
+            brain.brainId,
+            trace.id,
+            trace.type,
+            trace.scope,
+            trace.content,
+            embeddingToBlob(embedding),
+            trace.encodingStrength,
+            trace.createdAt,
+            trace.lastAccessedAt,
+            trace.retrievalCount,
+            JSON.stringify(trace.tags),
+            JSON.stringify(trace.emotionalContext),
+            JSON.stringify({
+              scopeId: trace.scopeId,
+              provenance: trace.provenance,
+              entities: trace.entities,
+              stability: trace.stability,
+              importance: trace.importance,
+              associatedTraceIds: trace.associatedTraceIds,
+              structuredData: trace.structuredData,
+            }),
+          ],
+        );
+        if (result.changes === 0) {
+          throw new Error('durable write affected no rows');
+        }
+      } catch {
+        trace.isActive = false;
+        // The SQL error is ambiguous: another process may already have
+        // committed a successful store for the same trace. Fence this
+        // process non-authoritatively, but do not erase a shared provider
+        // vector that could belong to that successful writer.
+        markTraceDeleted(namespace, trace.id, false);
+        throw new Error('MemoryStore.store: durable trace write failed');
+      }
+    }
+
     trace.isActive = true;
     trace.updatedAt = activeUpdatedAt;
 
@@ -1122,46 +1204,6 @@ export class MemoryStore {
     this.traceCache.set(trace.id, trace);
     this.embeddingCache.set(trace.id, embedding);
     this.registerScope(trace.scope, trace.scopeId);
-    // Write-through to Brain for durability.
-    // The SQL row mirrors the in-memory cache so traces survive restart.
-    if (brain) {
-      try {
-        const { dialect } = brain.features;
-        await brain.run(
-          dialect.insertOrReplace(
-            'memory_traces',
-            ['brain_id', 'id', 'type', 'scope', 'content', 'embedding', 'strength', 'created_at', 'last_accessed', 'retrieval_count', 'tags', 'emotions', 'metadata', 'deleted'],
-            ['?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '?', '0'],
-            'brain_id, id',
-          ),
-          [
-            brain.brainId,
-            trace.id,
-            trace.type,
-            trace.scope,
-            trace.content,
-            embeddingToBlob(embedding), // durable so recall survives a fresh instance (see ensureHydratedFromBrain)
-            trace.encodingStrength,
-            trace.createdAt,
-            trace.lastAccessedAt,
-            trace.retrievalCount,
-            JSON.stringify(trace.tags),
-            JSON.stringify(trace.emotionalContext),
-            JSON.stringify({
-              scopeId: trace.scopeId,
-              provenance: trace.provenance,
-              entities: trace.entities,
-              stability: trace.stability,
-              importance: trace.importance,
-              associatedTraceIds: trace.associatedTraceIds,
-              structuredData: trace.structuredData,
-            }),
-          ]
-        );
-      } catch {
-        // Write-through is best-effort — in-memory store is primary
-      }
-    }
     return embedding;
   }
 
@@ -1189,7 +1231,7 @@ export class MemoryStore {
       scoringMs: number;
     };
   }> {
-    this.assertNotDisposed();
+    this.beginOperation();
     const now = Date.now();
     const topK = options.topK ?? 20;
     const namespace = this.coordinationNamespace;
@@ -1283,18 +1325,28 @@ export class MemoryStore {
     const allCandidates: CandidateTrace[] = [];
     const vectorSearchStart = Date.now();
 
+    if (this.tombstonedTraceIds.size > 0) {
+      const localStateAvailable = await this.reconcileDurableTraceStates(
+        [...this.tombstonedTraceIds],
+        namespace,
+        brain,
+      );
+      if (!localStateAvailable) {
+        return {
+          scored: [],
+          partial: [],
+          timings: {
+            vectorSearchMs: Date.now() - vectorSearchStart,
+            scoringMs: 0,
+          },
+        };
+      }
+    }
+
     for (const { scope, scopeId } of scopes) {
       const collection = collectionName(this.config.collectionPrefix, scope, scopeId);
 
       try {
-        if (this.tombstonedTraceIds.size > 0) {
-          const localStateAvailable = await this.reconcileDurableTraceStates(
-            [...this.tombstonedTraceIds],
-            namespace,
-            brain,
-          );
-          if (!localStateAvailable) continue;
-        }
         const results = await this.config.vectorStore.query(collection, queryEmbedding, {
           topK: topK * 2, // over-fetch for re-ranking
           filter: metadataFilter as MetadataFilter,
@@ -1413,7 +1465,7 @@ export class MemoryStore {
    * Updates decay parameters via spaced repetition.
    */
   async recordAccess(traceId: string): Promise<RetrievalUpdateResult | null> {
-    this.assertNotDisposed();
+    this.beginOperation();
     const namespace = this.coordinationNamespace;
     const brain = this.brain;
     return withTraceOperation(
@@ -1530,24 +1582,20 @@ export class MemoryStore {
    * topK) and does not guarantee completeness.
    */
   async getByScope(scope: MemoryScope, scopeId: string, type?: MemoryType): Promise<MemoryTrace[]> {
-    this.assertNotDisposed();
+    this.beginOperation();
     const namespace = this.coordinationNamespace;
     const brain = this.brain;
     await this.ensureHydratedFromBrain();
-    // Return from cache + filter
-    const results: MemoryTrace[] = [];
-    for (const trace of this.traceCache.values()) {
-      if (
-        !this.tombstonedTraceIds.has(trace.id) &&
-        trace.isActive &&
-        trace.scope === scope &&
-        trace.scopeId === scopeId
-      ) {
-        if (!type || trace.type === type) {
-          results.push(trace);
-        }
-      }
-    }
+    const collectCachedResults = (): MemoryTrace[] =>
+      [...this.traceCache.values()].filter(
+        (trace) =>
+          !this.tombstonedTraceIds.has(trace.id) &&
+          trace.isActive &&
+          trace.scope === scope &&
+          trace.scopeId === scopeId &&
+          (!type || trace.type === type),
+      );
+    let results = collectCachedResults();
 
     const collection = collectionName(this.config.collectionPrefix, scope, scopeId);
     const cachedStateAvailable = await this.reconcileDurableTraceStates(
@@ -1559,9 +1607,12 @@ export class MemoryStore {
       brain,
     );
     if (!cachedStateAvailable) return [];
+    // Reconciliation can revive a trace while waiting behind an in-flight
+    // store. Refresh the snapshot so that revival is visible in this call.
+    results = collectCachedResults();
 
     // Fallback: if cache is empty for this scope, query the vector store.
-    if (results.every((trace) => !trace.isActive)) {
+    if (results.length === 0) {
       try {
         const dim = this.config.embeddingDimension ?? 1536;
         const zeroVector = new Array(dim).fill(0);
@@ -1634,7 +1685,7 @@ export class MemoryStore {
    * not be durably updated.
    */
   async persistTraceMetadata(traceId: string): Promise<void> {
-    this.assertNotDisposed();
+    this.beginOperation();
     const namespace = this.coordinationNamespace;
     await withTraceOperation(
       namespace,
@@ -1687,7 +1738,7 @@ export class MemoryStore {
    *   has no durable row to update.
    */
   async softDelete(traceId: string): Promise<void> {
-    this.assertNotDisposed();
+    this.beginOperation();
     const namespace = this.coordinationNamespace;
     const brain = this.brain;
     await withTraceOperation(

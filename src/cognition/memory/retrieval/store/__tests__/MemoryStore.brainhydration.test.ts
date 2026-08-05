@@ -630,7 +630,8 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
       const brain = await Brain.openSqlite(path.join(tmpDir, 'brain.sqlite'));
       let releaseStoreWrite: (() => void) | undefined;
       try {
-        const store = mkStore(await mkVectorStore());
+        const vectorStore = await mkVectorStore();
+        const store = mkStore(vectorStore);
         store.setBrain(brain);
         const trace = mkTrace('t1', 'remember this detail');
         await store.store(trace);
@@ -668,6 +669,7 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
           }
           return rows;
         });
+        const vectorQuery = vi.spyOn(vectorStore, 'query');
 
         const storing = store.store(trace);
         await storeWriteStarted;
@@ -686,6 +688,9 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
         expect(ids).toContain('t1');
         expect(store.isDeleted('t1')).toBe(false);
         expect(store.getTrace('t1')?.isActive).toBe(true);
+        if (readPath === 'getByScope') {
+          expect(vectorQuery).not.toHaveBeenCalled();
+        }
       } finally {
         releaseStoreWrite?.();
         await brain.close();
@@ -760,6 +765,121 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
     expect(store.isDeleted(trace.id)).toBe(true);
   });
 
+  it.each(['throw', 'zero'] as const)(
+    'fails closed when a durable store write returns %s after vector upsert',
+    async (failureMode) => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brainhydration-'));
+      const brain = await Brain.openSqlite(path.join(tmpDir, 'brain.sqlite'));
+      try {
+        const vectorStore = await mkVectorStore();
+        const store = mkStore(vectorStore);
+        store.setBrain(brain);
+        const trace = mkTrace('t1', 'durable detail');
+        const originalRun = brain.run.bind(brain);
+        const runSpy = vi.spyOn(brain, 'run').mockImplementation(async (sql, params) => {
+          if (sql.includes('memory_traces') && Array.isArray(params) && params.length > 10) {
+            if (failureMode === 'throw') {
+              throw new Error('simulated durable write outage');
+            }
+            return { changes: 0 };
+          }
+          return originalRun(sql, params);
+        });
+
+        await expect(store.store(trace)).rejects.toThrow('durable trace write failed');
+        expect(trace.isActive).toBe(false);
+        expect(store.isDeleted(trace.id)).toBe(true);
+        const probe = new Array(16).fill(0).map((_, index) => (index === 0 ? 1 : 0));
+        const providerResult = await vectorStore.query('cogmem_user_u1', probe, {
+          topK: 10,
+          includeMetadata: true,
+        });
+        // The SQL outcome is ambiguous, so rollback must not destructively
+        // erase a vector that could belong to a concurrent successful writer.
+        // Durable validation, rather than provider deletion, fences recall.
+        expect(providerResult.documents.map((document) => document.id)).toContain('t1');
+        expect((await store.query('durable detail', neutralMood, {
+          scopes: [{ scope: 'user' as MemoryScope, scopeId: 'u1' }],
+        })).scored).toEqual([]);
+        expect(await store.getByScope('user', 'u1')).toEqual([]);
+
+        runSpy.mockRestore();
+        await store.store(trace);
+        expect(store.isDeleted(trace.id)).toBe(false);
+        expect((await store.query('durable detail', neutralMood, {
+          scopes: [{ scope: 'user' as MemoryScope, scopeId: 'u1' }],
+        })).scored.map((item) => item.id)).toContain('t1');
+      } finally {
+        await brain.close();
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('does not erase a concurrent cross-token writer after an ambiguous durable failure', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brainhydration-'));
+    const dbPath = path.join(tmpDir, 'brain.sqlite');
+    let brainA: Brain | undefined;
+    let brainB: Brain | undefined;
+    let releaseFailure: (() => void) | undefined;
+    try {
+      brainA = await Brain.openSqlite(dbPath, {
+        brainId: 'brain',
+        coordinationToken: {},
+      });
+      brainB = await Brain.openSqlite(dbPath, {
+        brainId: 'brain',
+        coordinationToken: {},
+      });
+      const vectorStore = await mkVectorStore();
+      const failingStore = mkStore(vectorStore);
+      const successfulStore = mkStore(vectorStore);
+      failingStore.setBrain(brainA);
+      successfulStore.setBrain(brainB);
+
+      let signalFailureStarted: (() => void) | undefined;
+      const failureStarted = new Promise<void>((resolve) => {
+        signalFailureStarted = resolve;
+      });
+      const failureGate = new Promise<void>((resolve) => {
+        releaseFailure = resolve;
+      });
+      const originalRun = brainA.run.bind(brainA);
+      vi.spyOn(brainA, 'run').mockImplementation(async (sql, params) => {
+        if (sql.includes('memory_traces') && Array.isArray(params) && params.length > 10) {
+          signalFailureStarted?.();
+          await failureGate;
+          throw new Error('ambiguous durable failure');
+        }
+        return originalRun(sql, params);
+      });
+
+      const failedWrite = failingStore.store(mkTrace('shared-id', 'failed detail'));
+      await failureStarted;
+      await successfulStore.store(mkTrace('shared-id', 'committed detail'));
+      releaseFailure?.();
+      await expect(failedWrite).rejects.toThrow('durable trace write failed');
+
+      const recall = await successfulStore.query('committed detail', neutralMood, {
+        scopes: [{ scope: 'user' as MemoryScope, scopeId: 'u1' }],
+      });
+      expect(recall.scored.map((item) => item.content)).toContain('committed detail');
+      const probe = new Array(16).fill(0).map((_, index) => (index === 0 ? 1 : 0));
+      const providerResult = await vectorStore.query('cogmem_user_u1', probe, {
+        topK: 10,
+        includeMetadata: true,
+        includeTextContent: true,
+      });
+      expect(providerResult.documents.find((document) => document.id === 'shared-id')?.textContent)
+        .toBe('committed detail');
+    } finally {
+      releaseFailure?.();
+      await brainB?.close();
+      await brainA?.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('fails recall closed when durable tombstone validation is unavailable', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brainhydration-'));
     const brain = await Brain.openSqlite(path.join(tmpDir, 'brain.sqlite'));
@@ -785,6 +905,48 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
       });
       expect(recall.scored).toEqual([]);
       expect(await coldStore.getByScope('user', 'u1')).toEqual([]);
+    } finally {
+      await brain.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails every scope closed when global tombstone validation is unavailable', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brainhydration-'));
+    const brain = await Brain.openSqlite(path.join(tmpDir, 'brain.sqlite'));
+    try {
+      const vectorStore = await mkVectorStore();
+      const writer = mkStore(vectorStore);
+      writer.setBrain(brain);
+      const reader = mkStore(vectorStore);
+      reader.setBrain(brain);
+      await writer.store(mkTrace('t1', 'remember this detail'));
+      await writer.softDelete('t1');
+      expect(reader.isDeleted('t1')).toBe(true);
+
+      const originalAll = brain.all.bind(brain) as typeof brain.all;
+      let durableReads = 0;
+      vi.spyOn(brain, 'all').mockImplementation(async <T = unknown>(
+        sql: string,
+        params?: StorageParameters,
+      ) => {
+        if (sql.includes('id IN')) {
+          durableReads += 1;
+          if (durableReads === 1) throw new Error('simulated durable read outage');
+        }
+        return originalAll<T>(sql, params);
+      });
+      const vectorQuery = vi.spyOn(vectorStore, 'query');
+
+      const recall = await reader.query('remember this detail', neutralMood, {
+        scopes: [
+          { scope: 'user' as MemoryScope, scopeId: 'u1' },
+          { scope: 'organization' as MemoryScope, scopeId: 'o1' },
+        ],
+      });
+      expect(recall.scored).toEqual([]);
+      expect(durableReads).toBe(1);
+      expect(vectorQuery).not.toHaveBeenCalled();
     } finally {
       await brain.close();
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -1105,18 +1267,14 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
     let brainA: Brain | undefined;
     let brainB: Brain | undefined;
     let aliasBrain: Brain | undefined;
-    let uriBrain: Brain | undefined;
     try {
       brainA = await Brain.openSqlite(pathA, { brainId: 'b:c' });
       brainB = await Brain.openSqlite(pathB, { brainId: 'c' });
       fs.symlinkSync(pathA, alias);
       aliasBrain = await Brain.openSqlite(alias, { brainId: 'b:c' });
-      uriBrain = await Brain.openSqlite(`file:${pathA}#ignored`, { brainId: 'b:c' });
       expect(brainA.coordinationToken).not.toBe(brainB.coordinationToken);
       expect(brainA.coordinationToken).toBe(aliasBrain.coordinationToken);
-      expect(brainA.coordinationToken).toBe(uriBrain.coordinationToken);
     } finally {
-      await uriBrain?.close();
       await aliasBrain?.close();
       await brainB?.close();
       await brainA?.close();
@@ -1124,30 +1282,67 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
     }
   });
 
-  it('derives one default brain identity for equivalent better-sqlite3 file URIs', async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brainhydration-'));
-    const dbPath = path.join(tmpDir, 'brain');
+  it('matches better-sqlite3 file identities to its runtime URI setting', async () => {
+    const stem = `.brainhydration-uri-${process.pid}-${Date.now()}.sqlite`;
+    const dbPath = path.resolve(stem);
+    const uriPath = `file:${stem}`;
     let pathBrain: Brain | undefined;
     let uriBrain: Brain | undefined;
     try {
       pathBrain = await Brain.openSqlite(dbPath, { priority: ['better-sqlite3'] });
-      uriBrain = await Brain.openSqlite(`file:${dbPath}#ignored`, {
+      uriBrain = await Brain.openSqlite(uriPath, {
         priority: ['better-sqlite3'],
       });
-      expect(pathBrain.brainId).toBe(uriBrain.brainId);
-      expect(pathBrain.coordinationToken).toBe(uriBrain.coordinationToken);
+      await pathBrain.exec(
+        'CREATE TABLE uri_identity_probe (id TEXT PRIMARY KEY)',
+      );
+      await pathBrain.run(
+        'INSERT INTO uri_identity_probe (id) VALUES (?)',
+        ['shared-resource'],
+      );
+      const sharesBackingResource = await uriBrain
+        .get<{ id: string }>(
+          'SELECT id FROM uri_identity_probe WHERE id = ?',
+          ['shared-resource'],
+        )
+        .then((row) => row?.id === 'shared-resource')
+        .catch(() => false);
+
+      if (sharesBackingResource) {
+        expect(pathBrain.brainId).toBe(uriBrain.brainId);
+        expect(pathBrain.coordinationToken).toBe(uriBrain.coordinationToken);
+      } else {
+        expect(pathBrain.brainId).not.toBe(uriBrain.brainId);
+        expect(pathBrain.coordinationToken).not.toBe(uriBrain.coordinationToken);
+      }
     } finally {
       await uriBrain?.close();
       await pathBrain?.close();
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(path.resolve(uriPath), { force: true });
+      fs.rmSync(dbPath, { force: true });
     }
   });
 
   it('normalizes equivalent shared-memory URI names', async () => {
     const memoryName = `agentos-memory-${process.pid}-${Date.now()}`;
+    const probeStem = `.brainhydration-uri-probe-${process.pid}-${Date.now()}.sqlite`;
+    const probePath = path.resolve(probeStem);
+    const probeUriPath = `file:${probeStem}`;
+    let pathProbe: Brain | undefined;
+    let uriProbe: Brain | undefined;
     let singleSlashBrain: Brain | undefined;
     let tripleSlashBrain: Brain | undefined;
     try {
+      pathProbe = await Brain.openSqlite(probePath, { priority: ['better-sqlite3'] });
+      uriProbe = await Brain.openSqlite(probeUriPath, { priority: ['better-sqlite3'] });
+      await pathProbe.exec('CREATE TABLE uri_mode_probe (id TEXT PRIMARY KEY)');
+      await pathProbe.run('INSERT INTO uri_mode_probe (id) VALUES (?)', ['recognized']);
+      const uriModeEnabled = await uriProbe
+        .get<{ id: string }>('SELECT id FROM uri_mode_probe WHERE id = ?', ['recognized'])
+        .then((row) => row?.id === 'recognized')
+        .catch(() => false);
+      if (!uriModeEnabled) return;
+
       singleSlashBrain = await Brain.openSqlite(
         `file:/${memoryName}?mode=memory&cache=shared`,
         { brainId: 'brain', priority: ['better-sqlite3'] },
@@ -1156,12 +1351,76 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
         `file:///${memoryName}?mode=memory&cache=shared`,
         { brainId: 'brain', priority: ['better-sqlite3'] },
       );
+      await singleSlashBrain.exec(
+        'CREATE TABLE shared_memory_identity_probe (id TEXT PRIMARY KEY)',
+      );
+      await singleSlashBrain.run(
+        'INSERT INTO shared_memory_identity_probe (id) VALUES (?)',
+        ['shared-memory'],
+      );
+      const sharedRow = await tripleSlashBrain
+        .get<{ id: string }>(
+          'SELECT id FROM shared_memory_identity_probe WHERE id = ?',
+          ['shared-memory'],
+        )
+        .catch(() => undefined);
+      if (!sharedRow) {
+        expect(singleSlashBrain.coordinationToken).not.toBe(
+          tripleSlashBrain.coordinationToken,
+        );
+        return;
+      }
+      expect(sharedRow).toEqual({ id: 'shared-memory' });
       expect(singleSlashBrain.coordinationToken).toBe(
         tripleSlashBrain.coordinationToken,
       );
     } finally {
       await tripleSlashBrain?.close();
       await singleSlashBrain?.close();
+      await uriProbe?.close();
+      await pathProbe?.close();
+      fs.rmSync(path.resolve(probeUriPath), { force: true });
+      fs.rmSync(probePath, { force: true });
+    }
+  });
+
+  it('keeps temporary SQLite handles in separate coordination namespaces', async () => {
+    const brainA = await Brain.openSqlite('', { priority: ['better-sqlite3'] });
+    const brainB = await Brain.openSqlite('', { priority: ['better-sqlite3'] });
+    try {
+      expect(brainA.brainId).toBe('default');
+      expect(brainB.brainId).toBe('default');
+      expect(brainA.coordinationToken).not.toBe(brainB.coordinationToken);
+    } finally {
+      await brainB.close();
+      await brainA.close();
+    }
+  });
+
+  it('matches private memory URI coordination to actual backing state', async () => {
+    const name = `.brainhydration-private-${process.pid}-${Date.now()}`;
+    const uriPath = `file:${name}?mode=memory&cache=private`;
+    let brainA: Brain | undefined;
+    let brainB: Brain | undefined;
+    try {
+      brainA = await Brain.openSqlite(uriPath, { priority: ['better-sqlite3'] });
+      brainB = await Brain.openSqlite(uriPath, { priority: ['better-sqlite3'] });
+      await brainA.exec('CREATE TABLE private_identity_probe (id TEXT PRIMARY KEY)');
+      await brainA.run('INSERT INTO private_identity_probe (id) VALUES (?)', ['probe']);
+      const sharesBackingResource = await brainB
+        .get<{ id: string }>('SELECT id FROM private_identity_probe WHERE id = ?', ['probe'])
+        .then((row) => row?.id === 'probe')
+        .catch(() => false);
+
+      if (sharesBackingResource) {
+        expect(brainA.coordinationToken).toBe(brainB.coordinationToken);
+      } else {
+        expect(brainA.coordinationToken).not.toBe(brainB.coordinationToken);
+      }
+    } finally {
+      await brainB?.close();
+      await brainA?.close();
+      fs.rmSync(path.resolve(uriPath), { force: true });
     }
   });
 
@@ -1192,6 +1451,83 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
       await ordinaryBrain?.close();
       fs.rmSync(uriLiteralDir, { recursive: true, force: true });
       fs.rmSync(ordinaryDir, { recursive: true, force: true });
+    }
+  });
+
+  it('locks Brain attachment after passive sibling deletion or revival', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brainhydration-'));
+    let targetBrain: Brain | undefined;
+    let source: MemoryStore | undefined;
+    let deletePassive: MemoryStore | undefined;
+    let revivePassive: MemoryStore | undefined;
+    try {
+      targetBrain = await Brain.openSqlite(path.join(tmpDir, 'target.sqlite'));
+      const vectorStore = await mkVectorStore();
+      source = mkStore(vectorStore);
+      const trace = mkTrace('t1', 'shared vector detail');
+      await source.store(trace);
+
+      deletePassive = mkStore(vectorStore);
+      await source.softDelete(trace.id);
+      expect(deletePassive.isDeleted(trace.id)).toBe(true);
+      expect(() => deletePassive!.setBrain(targetBrain!)).toThrow(
+        'attach a Brain before starting memory operations',
+      );
+
+      revivePassive = mkStore(vectorStore);
+      await source.store(trace);
+      expect(revivePassive.getTrace(trace.id)?.content).toBe(trace.content);
+      expect(() => revivePassive!.setBrain(targetBrain!)).toThrow(
+        'attach a Brain before starting memory operations',
+      );
+    } finally {
+      revivePassive?.dispose();
+      deletePassive?.dispose();
+      source?.dispose();
+      await targetBrain?.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('binds a Brain before use and rejects backing-resource migration', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brainhydration-'));
+    let brainA: Brain | undefined;
+    let brainAlias: Brain | undefined;
+    let brainB: Brain | undefined;
+    let boundStore: MemoryStore | undefined;
+    let lateStore: MemoryStore | undefined;
+    try {
+      const pathA = path.join(tmpDir, 'a.sqlite');
+      brainA = await Brain.openSqlite(pathA, { brainId: 'brain' });
+      brainAlias = await Brain.openSqlite(pathA, { brainId: 'brain' });
+      brainB = await Brain.openSqlite(path.join(tmpDir, 'b.sqlite'), {
+        brainId: 'brain',
+      });
+
+      boundStore = mkStore(await mkVectorStore());
+      boundStore.setBrain(brainA);
+      await boundStore.query('nothing yet', neutralMood, {
+        scopes: [{ scope: 'user' as MemoryScope, scopeId: 'u1' }],
+      });
+      expect(() => boundStore!.setBrain(brainAlias!)).not.toThrow();
+      expect(() => boundStore!.setBrain(brainB!)).toThrow(
+        'cannot switch to a different backing resource',
+      );
+
+      lateStore = mkStore(await mkVectorStore());
+      await lateStore.query('nothing yet', neutralMood, {
+        scopes: [{ scope: 'user' as MemoryScope, scopeId: 'u1' }],
+      });
+      expect(() => lateStore!.setBrain(brainA!)).toThrow(
+        'attach a Brain before starting memory operations',
+      );
+    } finally {
+      lateStore?.dispose();
+      boundStore?.dispose();
+      await brainB?.close();
+      await brainAlias?.close();
+      await brainA?.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 });

@@ -131,11 +131,16 @@ export class AgentMemory {
   private manager?: ICognitiveMemoryManager;
   private standalone?: StandaloneMemoryBackend;
   private _initialized = false;
+  private lifecycleState: 'uninitialized' | 'initializing' | 'initialized' | 'shutting-down' =
+    'uninitialized';
+  private lifecycleRequest = 0;
+  private lifecycleTail: Promise<void> = Promise.resolve();
 
   constructor(backend?: ICognitiveMemoryManager | StandaloneMemoryBackend) {
     if (isStandaloneMemoryBackend(backend)) {
       this.standalone = backend;
       this._initialized = true;
+      this.lifecycleState = 'initialized';
       return;
     }
 
@@ -149,6 +154,7 @@ export class AgentMemory {
   static wrap(manager: ICognitiveMemoryManager): AgentMemory {
     const mem = new AgentMemory(manager);
     mem._initialized = true; // assume the passed manager is already initialized
+    mem.lifecycleState = 'initialized';
     return mem;
   }
 
@@ -173,13 +179,24 @@ export class AgentMemory {
    * `AgentMemory.sqlite()`).
    */
   async initialize(config: CognitiveMemoryConfig): Promise<void> {
-    if (this._initialized) return;
-    if (!this.manager) {
-      this._initialized = true;
-      return;
-    }
-    await this.manager.initialize(config);
-    this._initialized = true;
+    if (this._initialized && this.lifecycleState === 'initialized') return;
+    const request = ++this.lifecycleRequest;
+    this.lifecycleState = 'initializing';
+    await this.enqueueLifecycle(async () => {
+      try {
+        if (this._initialized) return;
+        if (!this.manager) {
+          this._initialized = true;
+          return;
+        }
+        await this.manager.initialize(config);
+        this._initialized = true;
+      } finally {
+        if (request === this.lifecycleRequest) {
+          this.lifecycleState = this._initialized ? 'initialized' : 'uninitialized';
+        }
+      }
+    });
   }
 
   /**
@@ -366,14 +383,27 @@ export class AgentMemory {
 
   /** Shutdown and release resources. */
   async shutdown(): Promise<void> {
-    if (!this._initialized) return;
-    if (this.standalone) {
-      await this.standalone.close();
-      this._initialized = false;
-      return;
-    }
-    await this.manager?.shutdown();
-    this._initialized = false;
+    if (!this._initialized && this.lifecycleState === 'uninitialized') return;
+    const request = ++this.lifecycleRequest;
+    this.lifecycleState = 'shutting-down';
+    await this.enqueueLifecycle(async () => {
+      try {
+        if (!this._initialized) return;
+        try {
+          if (this.standalone) {
+            await this.standalone.close();
+            return;
+          }
+          await this.manager?.shutdown();
+        } finally {
+          this._initialized = false;
+        }
+      } finally {
+        if (request === this.lifecycleRequest) {
+          this.lifecycleState = 'uninitialized';
+        }
+      }
+    });
   }
 
   /**
@@ -862,7 +892,7 @@ export class AgentMemory {
   }
 
   get isInitialized(): boolean {
-    return this._initialized;
+    return this._initialized && this.lifecycleState === 'initialized';
   }
 
   /** Access the underlying manager for advanced usage. */
@@ -882,12 +912,21 @@ export class AgentMemory {
   }
 
   private ensureReady(): void {
-    if (!this._initialized) {
+    if (!this._initialized || this.lifecycleState !== 'initialized') {
       throw new Error(
         'AgentMemory not initialized. Call await memory.initialize(config), ' +
         'use AgentMemory.wrap(existingManager), or create a standalone instance with AgentMemory.sqlite(...).',
       );
     }
+  }
+
+  private enqueueLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.lifecycleTail.then(operation, operation);
+    this.lifecycleTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   private async recallFromStandalone(query: string, options?: SearchOptions): Promise<RecallResult> {

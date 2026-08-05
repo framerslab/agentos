@@ -62,6 +62,7 @@ import { redactPostgresPassword } from './postgresPasswordRedaction.js';
 function parseBetterSqliteUri(dbPath: string): {
   body: string;
   params: URLSearchParams;
+  rawQuery: string;
 } {
   const withoutFragment = dbPath.split('#', 1)[0];
   const queryIndex = withoutFragment.indexOf('?');
@@ -76,7 +77,7 @@ function parseBetterSqliteUri(dbPath: string): {
   } catch {
     body = encodedBody;
   }
-  return { body, params: new URLSearchParams(query) };
+  return { body, params: new URLSearchParams(query), rawQuery: query };
 }
 
 function sqliteUriBodyToPath(body: string): string {
@@ -89,13 +90,29 @@ function sqliteUriBodyToPath(body: string): string {
   return body;
 }
 
-function deriveBrainIdFromPath(dbPath: string, adapterKind?: string): string {
-  let resourcePath = dbPath;
-  if (adapterKind === 'better-sqlite3' && dbPath.startsWith('file:')) {
+interface SqliteOpenedResource {
+  /** Absolute filename reported by SQLite, empty for in-memory, null when unavailable. */
+  filename: string | null;
+  /** True only when the opened connection proves that a file URI selected memory mode. */
+  isUriMemory: boolean;
+  /** Ordered URI query string, retained conservatively for VFS-sensitive identity. */
+  uriParameters: string;
+  /** Whether this SQLite build can honor `cache=shared` for named memory URIs. */
+  supportsSharedCache: boolean;
+  /** Whether filename or caller-literal identity is safe to intern process-wide. */
+  identityKnown: boolean;
+}
+
+function deriveBrainIdFromPath(
+  dbPath: string,
+  openedResource: SqliteOpenedResource,
+): string {
+  let resourcePath = openedResource.filename || dbPath;
+  if (openedResource.isUriMemory) {
     const { body } = parseBetterSqliteUri(dbPath);
     resourcePath = sqliteUriBodyToPath(body);
   }
-  if (resourcePath === ':memory:') return 'default';
+  if (resourcePath === ':memory:' || resourcePath === '') return 'default';
   const basename = path.basename(resourcePath);
   const lastDot = basename.lastIndexOf('.');
   return lastDot > 0 ? basename.slice(0, lastDot) : basename;
@@ -189,32 +206,103 @@ async function sqliteCoordinationIdentity(
   dbPath: string,
   brainId: string,
   adapterKind: string,
+  openedResource: SqliteOpenedResource,
 ): Promise<string | null> {
-  let resourcePath = dbPath;
-  // better-sqlite3 delegates `file:` names to SQLite, which applies URI
-  // semantics. sql.js treats the same string as a literal OS filename, so
-  // decoding it here would make distinct backing files share a token.
-  if (adapterKind === 'better-sqlite3' && dbPath.startsWith('file:')) {
+  if (openedResource.isUriMemory) {
     const { body, params } = parseBetterSqliteUri(dbPath);
-    const isMemory = body === ':memory:' || params.get('mode') === 'memory';
-    if (isMemory) {
-      if (params.get('cache') !== 'shared') return null;
-      return JSON.stringify([
-        'sqlite-memory-uri',
-        adapterKind,
-        sqliteUriBodyToPath(body),
-        brainId,
-      ]);
+    if (params.get('cache') !== 'shared' || !openedResource.supportsSharedCache) {
+      return null;
     }
-
-    if (body.startsWith('//') && !body.toLowerCase().startsWith('//localhost/')) {
-      return JSON.stringify(['sqlite-uri', adapterKind, body, brainId]);
-    }
-    resourcePath = sqliteUriBodyToPath(body);
+    return JSON.stringify([
+      'sqlite-memory-uri',
+      adapterKind,
+      sqliteUriBodyToPath(body),
+      openedResource.uriParameters,
+      brainId,
+    ]);
   }
 
+  if (!openedResource.identityKnown || openedResource.filename === '') {
+    return null;
+  }
+
+  // `PRAGMA database_list` exposes SQLite's opened filename, which is the
+  // VFS-resolved absolute path. This distinguishes an actually parsed file URI
+  // from a literal `file:` filename without trusting mutable process state.
+  const resourcePath = openedResource.filename ?? dbPath;
   const target = await fs.realpath(resourcePath).catch(() => path.resolve(resourcePath));
-  return JSON.stringify(['sqlite', adapterKind, target, brainId]);
+  return JSON.stringify([
+    'sqlite',
+    adapterKind,
+    target,
+    openedResource.uriParameters,
+    brainId,
+  ]);
+}
+
+async function inspectSqliteOpenedResource(
+  adapter: StorageAdapter,
+  dbPath: string,
+): Promise<SqliteOpenedResource> {
+  if (adapter.kind !== 'better-sqlite3') {
+    return {
+      filename: null,
+      isUriMemory: false,
+      uriParameters: '',
+      supportsSharedCache: false,
+      identityKnown: dbPath.length > 0,
+    };
+  }
+
+  const parsedUri = dbPath.startsWith('file:')
+    ? parseBetterSqliteUri(dbPath)
+    : null;
+
+  let filename: string | null;
+  try {
+    const rows = await adapter.all<{ seq: number; name: string; file: string }>(
+      'PRAGMA database_list',
+    );
+    const main = rows.find((row) => row.name === 'main') ?? rows[0];
+    filename = typeof main?.file === 'string' ? main.file : null;
+  } catch {
+    // A file URI can name private or ephemeral databases. Without SQLite's
+    // opened filename, interning its raw text could merge distinct resources.
+    return {
+      filename: null,
+      isUriMemory: false,
+      uriParameters: '',
+      supportsSharedCache: false,
+      identityKnown:
+        dbPath.length > 0 &&
+        !dbPath.startsWith('file:') &&
+        !dbPath.startsWith(':'),
+    };
+  }
+
+  let supportsSharedCache = false;
+  try {
+    const sharedCacheRow = await adapter.get<{ omitted: number }>(
+      "SELECT sqlite_compileoption_used('OMIT_SHARED_CACHE') AS omitted",
+    );
+    supportsSharedCache = Number(sharedCacheRow?.omitted ?? 0) === 0;
+  } catch {
+    // The opened filename remains authoritative for disk identity. Treat
+    // shared-memory support as unavailable when the compile probe is missing.
+  }
+
+  const isUriMemory = Boolean(
+    parsedUri &&
+    filename === '' &&
+    (parsedUri.body === ':memory:' || parsedUri.params.get('mode') === 'memory'),
+  );
+  return {
+    filename,
+    isUriMemory,
+    uriParameters: parsedUri?.rawQuery ?? '',
+    supportsSharedCache,
+    identityKnown: filename !== null,
+  };
 }
 
 function postgresCoordinationIdentity(connectionString: string, brainId: string): string {
@@ -704,12 +792,18 @@ export class Brain {
       priority: opts.priority ?? ['better-sqlite3', 'sqljs', 'indexeddb'],
       quiet: true,
     });
-    const brainId = opts.brainId ?? deriveBrainIdFromPath(dbPath, adapter.kind);
+    const openedResource = await inspectSqliteOpenedResource(adapter, dbPath);
+    const brainId = opts.brainId ?? deriveBrainIdFromPath(dbPath, openedResource);
     const usesFileIdentity =
       adapter.kind === 'better-sqlite3' ||
       (adapter.kind === 'sqljs' && adapter.capabilities.has('persistence'));
     const identity = usesFileIdentity && dbPath !== ':memory:'
-      ? await sqliteCoordinationIdentity(dbPath, brainId, adapter.kind)
+      ? await sqliteCoordinationIdentity(
+          dbPath,
+          brainId,
+          adapter.kind,
+          openedResource,
+        )
       : null;
     const coordinationToken =
       opts.coordinationToken ??
