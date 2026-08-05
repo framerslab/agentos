@@ -1323,6 +1323,31 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
     }
   });
 
+  it('keeps opaque SQLite URI parameters in the coordination identity', async () => {
+    const stem = `.brainhydration-opaque-uri-${process.pid}-${Date.now()}.sqlite`;
+    const uriA = `file:${stem}?resource_selector=a`;
+    const uriB = `file:${stem}?resource_selector=b`;
+    let brainA: Brain | undefined;
+    let brainB: Brain | undefined;
+    try {
+      brainA = await Brain.openSqlite(uriA, {
+        brainId: 'brain',
+        priority: ['better-sqlite3'],
+      });
+      brainB = await Brain.openSqlite(uriB, {
+        brainId: 'brain',
+        priority: ['better-sqlite3'],
+      });
+      expect(brainA.coordinationToken).not.toBe(brainB.coordinationToken);
+    } finally {
+      await brainB?.close();
+      await brainA?.close();
+      fs.rmSync(path.resolve(uriB), { force: true });
+      fs.rmSync(path.resolve(uriA), { force: true });
+      fs.rmSync(path.resolve(stem), { force: true });
+    }
+  });
+
   it('normalizes equivalent shared-memory URI names', async () => {
     const memoryName = `agentos-memory-${process.pid}-${Date.now()}`;
     const probeStem = `.brainhydration-uri-probe-${process.pid}-${Date.now()}.sqlite`;
@@ -1348,7 +1373,7 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
         { brainId: 'brain', priority: ['better-sqlite3'] },
       );
       tripleSlashBrain = await Brain.openSqlite(
-        `file:///${memoryName}?mode=memory&cache=shared`,
+        `file:///${memoryName}?cache=shared&mode=memory`,
         { brainId: 'brain', priority: ['better-sqlite3'] },
       );
       await singleSlashBrain.exec(

@@ -186,8 +186,10 @@ export class AgentMemory {
       try {
         if (this._initialized) return;
         if (!this.manager) {
-          this._initialized = true;
-          return;
+          throw new Error(
+            'AgentMemory.initialize() cannot reopen a closed standalone memory backend. ' +
+            'Create a new instance with AgentMemory.sqlite(...) or AgentMemory.wrapMemory(...).',
+          );
         }
         await this.manager.initialize(config);
         this._initialized = true;

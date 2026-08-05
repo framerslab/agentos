@@ -90,6 +90,21 @@ function sqliteUriBodyToPath(body: string): string {
   return body;
 }
 
+function sharedMemoryUriParameterIdentity(rawQuery: string): string {
+  const parameters = rawQuery.split('&');
+  // This is intentionally limited to the exact stock SQLite pair. SQLite
+  // passes every parameter to the VFS, so preserve raw spelling and ordering
+  // whenever duplicates, encodings, VFS selectors, or extra keys are present.
+  if (
+    parameters.length === 2 &&
+    parameters.includes('mode=memory') &&
+    parameters.includes('cache=shared')
+  ) {
+    return 'cache=shared&mode=memory';
+  }
+  return rawQuery;
+}
+
 interface SqliteOpenedResource {
   /** Absolute filename reported by SQLite, empty for in-memory, null when unavailable. */
   filename: string | null;
@@ -217,7 +232,7 @@ async function sqliteCoordinationIdentity(
       'sqlite-memory-uri',
       adapterKind,
       sqliteUriBodyToPath(body),
-      openedResource.uriParameters,
+      sharedMemoryUriParameterIdentity(openedResource.uriParameters),
       brainId,
     ]);
   }

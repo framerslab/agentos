@@ -18,6 +18,7 @@ import { DEFAULT_DECAY_CONFIG } from '../../core/config.js';
 import { computeCurrentStrength, findPrunableTraces } from '../../core/decay/DecayModel.js';
 import type { IMemoryGraph, MemoryCluster } from '../../retrieval/graph/IMemoryGraph.js';
 import type { MemoryStore } from '../../retrieval/store/MemoryStore.js';
+import { uuid } from '../../core/util/crossPlatformCrypto.js';
 
 /** Append `value` to `list` (creating it if absent) without producing a duplicate. */
 function uniqueAppend(list: string[] | undefined, value: string): string[] {
@@ -350,7 +351,7 @@ export class ConsolidationPipeline {
       // distinguish a durable-memory fault from an optional LLM miss.
       const now = Date.now();
       const schemaTrace: MemoryTrace = {
-        id: `schema_${now}_${schemasCreated}`,
+        id: `schema_${now}_${schemasCreated}_${uuid()}`,
         type: 'semantic',
         scope: 'user',
         scopeId: this.config.agentId,

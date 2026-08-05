@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AgentMemory } from '../AgentMemory.js';
+import { CognitiveMemoryManager } from '../CognitiveMemoryManager.js';
 import { createCognitiveMemoryDescriptor } from '../io/extension/CognitiveMemoryExtension.js';
 
 describe('memory lifecycle serialization', () => {
@@ -82,6 +83,29 @@ describe('memory lifecycle serialization', () => {
 
     await expect(memory.shutdown()).rejects.toThrow('simulated shutdown failure');
     expect(memory.isInitialized).toBe(false);
+  });
+
+  it('preserves initialization and cleanup failures together', async () => {
+    const manager = new CognitiveMemoryManager();
+    const lifecycle = manager as unknown as {
+      initializeResources(config: never): Promise<void>;
+      cleanupResources(): Promise<void>;
+    };
+    const initializationError = new Error('simulated initialization failure');
+    const cleanupError = new Error('simulated cleanup failure');
+    vi.spyOn(lifecycle, 'initializeResources').mockRejectedValue(initializationError);
+    vi.spyOn(lifecycle, 'cleanupResources').mockRejectedValue(cleanupError);
+
+    try {
+      await manager.initialize({} as never);
+      expect.fail('expected initialization to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toEqual([
+        initializationError,
+        cleanupError,
+      ]);
+    }
   });
 
   it('keeps a replacement extension manager installed after the old one shuts down', async () => {

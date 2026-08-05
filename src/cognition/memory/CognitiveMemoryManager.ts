@@ -335,7 +335,14 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         await this.initializeResources(config);
       } catch (error) {
         if (initializationStarted) {
-          await this.cleanupResources();
+          try {
+            await this.cleanupResources();
+          } catch (cleanupError) {
+            throw new AggregateError(
+              [error, cleanupError],
+              'CognitiveMemoryManager initialization failed and cleanup also failed',
+            );
+          }
         }
         throw error;
       } finally {

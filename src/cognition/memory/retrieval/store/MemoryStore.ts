@@ -1035,7 +1035,7 @@ export class MemoryStore {
         if (blockedByDelete) {
           throw new Error('MemoryStore.store: trace deletion is already in progress');
         }
-        const embedding = await this.storeWithTraceLock(trace, brain);
+        const embedding = await this.storeWithTraceLock(trace, brain, namespace);
         if (!isDeletePending()) {
           await reviveTrace(
             namespace,
@@ -1051,6 +1051,7 @@ export class MemoryStore {
   private async storeWithTraceLock(
     trace: MemoryTrace,
     brain: import('./Brain.js').Brain | null,
+    namespace: object,
   ): Promise<number[]> {
     // Calling store with an existing ID is the explicit revival operation.
     // Build active metadata without mutating a caller-provided cached
