@@ -359,7 +359,11 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       minActivation: 0.15,
       onEvict: async (_slotId, traceId) => {
         const trace = this.store.getTrace(traceId);
-        if (trace && !trace.isActive) {
+        // Never resurrect a soft-deleted trace: its isActive=false is a
+        // tombstone, not a working-memory focus state. Re-activating it let
+        // the spaced-repetition sweep re-embed and re-upsert the deleted
+        // document into shared vector recall.
+        if (trace && !trace.isActive && !this.store.isDeleted(traceId)) {
           trace.isActive = true;
         }
       },

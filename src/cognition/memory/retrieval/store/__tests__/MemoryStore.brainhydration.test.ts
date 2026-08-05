@@ -275,6 +275,76 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
     }
   });
 
+  it('a result-reported vector delete failure stays retryable from a cold instance', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brainhydration-'));
+    const dbPath = path.join(tmpDir, 'brain.sqlite');
+    const brain = await Brain.openSqlite(dbPath);
+    try {
+      // ONE shared vector store (the persistent-collection analogue): a failed
+      // eviction leaves a live document behind for every future process.
+      const vectorStore = await mkVectorStore();
+      const writer = mkStore(vectorStore);
+      writer.setBrain(brain);
+      await writer.store(mkTrace('t1', 'remember this detail'));
+
+      // First delete: the provider reports failure through the RESULT (the
+      // Qdrant contract) instead of throwing. The SQL row tombstones; the
+      // vector document survives.
+      const deleteSpy = vi.spyOn(vectorStore, 'delete').mockResolvedValueOnce({
+        deletedCount: 0,
+        failedCount: 1,
+        errors: [{ id: 't1', message: 'simulated provider failure' }],
+      });
+      await writer.softDelete('t1');
+      expect(deleteSpy).toHaveBeenCalledWith('cogmem_user_u1', ['t1']);
+      const probe = new Array(16).fill(0).map((_, index) => (index === 0 ? 1 : 0));
+      const survivor = await vectorStore.query('cogmem_user_u1', probe, {
+        topK: 10,
+        includeMetadata: true,
+      });
+      expect(survivor.documents.map((document) => document.id)).toContain('t1');
+
+      // Retry from a COLD instance: the tombstoned durable row must still
+      // derive the vector collection (loaded for cleanup only — never
+      // recached), so the second eviction actually lands.
+      const coldStore = mkStore(vectorStore);
+      coldStore.setBrain(brain);
+      await coldStore.softDelete('t1');
+
+      expect(coldStore.getTrace('t1')).toBeUndefined();
+      const evicted = await vectorStore.query('cogmem_user_u1', probe, {
+        topK: 10,
+        includeMetadata: true,
+      });
+      expect(evicted.documents.map((document) => document.id)).not.toContain('t1');
+    } finally {
+      await brain.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('a lifecycle isActive flip cannot resurrect a soft-deleted trace via recordAccess', async () => {
+    const vectorStore = await mkVectorStore();
+    const store = mkStore(vectorStore);
+    await store.store(mkTrace('t1', 'remember this detail'));
+    await store.softDelete('t1');
+
+    // The working-memory eviction hook used to re-activate ANY inactive
+    // cached trace, flipping tombstones back to live and letting the
+    // reinforcement sweep re-embed + re-upsert the deleted document.
+    const zombie = store.getTrace('t1');
+    if (zombie) zombie.isActive = true;
+    expect(store.isDeleted('t1')).toBe(true);
+
+    const upsertSpy = vi.spyOn(vectorStore, 'upsert');
+    expect(await store.recordAccess('t1')).toBeNull();
+    expect(upsertSpy).not.toHaveBeenCalled();
+
+    // Re-storing the id is an explicit revival and lifts the barrier.
+    await store.store(mkTrace('t1', 'remember this detail'));
+    expect(store.isDeleted('t1')).toBe(false);
+  });
+
   it('filters a cached tombstone when vector deletion reports failure', async () => {
     const vectorStore = await mkVectorStore();
     const store = mkStore(vectorStore);

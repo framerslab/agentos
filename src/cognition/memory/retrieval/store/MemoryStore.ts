@@ -205,6 +205,8 @@ interface MemoryTraceRow {
   tags: string | null;
   emotions: string | null;
   metadata: string | null;
+  /** Present only when a query selects it (softDelete's cleanup lookup). */
+  deleted?: number;
 }
 
 /**
@@ -488,6 +490,9 @@ export class MemoryStore {
     this.traceCache.set(trace.id, trace);
     this.embeddingCache.set(trace.id, embedding);
     this.registerScope(trace.scope, trace.scopeId);
+    // Re-storing an id is an explicit revival: lift the deletion barrier so
+    // the fresh trace is not filtered out of recall as a stale tombstone.
+    this.tombstonedTraceIds.delete(trace.id);
 
     // Write-through to Brain for durability.
     // The SQL row mirrors the in-memory cache so traces survive restart.
@@ -953,24 +958,33 @@ export class MemoryStore {
 
     // A caller may delete before the first recall hydrates this process-local
     // cache. Load just the requested row so we can invalidate the correct
-    // vector collection without paying the full hydration cost.
+    // vector collection without paying the full hydration cost. Tombstoned
+    // rows are included deliberately: a prior delete whose vector eviction
+    // failed (see below) must still be able to re-derive the collection and
+    // retry — filtering them out made that failure permanent, because a
+    // fresh instance found no row, skipped the vector delete entirely, and
+    // the stale document stayed recallable forever.
     if (!trace && this.brain) {
       try {
         const row = await this.brain.get<MemoryTraceRow>(
           `SELECT id, type, scope, content, embedding, strength, created_at,
-                  last_accessed, retrieval_count, tags, emotions, metadata
+                  last_accessed, retrieval_count, tags, emotions, metadata, deleted
              FROM memory_traces
-            WHERE brain_id = ? AND id = ? AND deleted = 0`,
+            WHERE brain_id = ? AND id = ?`,
           [this.brain.brainId, traceId],
         );
         if (row) {
           trace = this.rowToTrace(row);
-          this.traceCache.set(trace.id, trace);
-          const embedding = blobToEmbedding(row.embedding);
-          if (embedding && isUsableEmbedding(embedding)) {
-            this.embeddingCache.set(trace.id, embedding);
+          // A tombstoned row is loaded solely to name the collection for
+          // (re-)eviction — never recached, so it cannot re-enter recall.
+          if (row.deleted !== 1) {
+            this.traceCache.set(trace.id, trace);
+            const embedding = blobToEmbedding(row.embedding);
+            if (embedding && isUsableEmbedding(embedding)) {
+              this.embeddingCache.set(trace.id, embedding);
+            }
+            this.registerScope(trace.scope, trace.scopeId);
           }
-          this.registerScope(trace.scope, trace.scopeId);
         }
       } catch {
         // Best-effort lookup. The SQL tombstone below can still succeed.
@@ -996,10 +1010,23 @@ export class MemoryStore {
     // recall. The durable Brain row remains as the tombstone source of truth.
     if (trace) {
       const collection = collectionName(this.config.collectionPrefix, trace.scope, trace.scopeId);
+      let evicted = false;
       try {
-        await this.config.vectorStore.delete(collection, [traceId]);
+        const result = await this.config.vectorStore.delete(collection, [traceId]);
+        // Providers like Qdrant report failures through the result instead of
+        // throwing; a reported failure leaves the document live in the shared
+        // index, where a fresh process (whose caches carry no tombstone) would
+        // recall it as active. The durable tombstone keeps this retryable via
+        // the lookup above.
+        evicted = (result.failedCount ?? 0) === 0;
       } catch {
         // Query and getByScope also reject cached tombstones defensively.
+      }
+      if (!evicted) {
+        console.warn(
+          `[MemoryStore] vector eviction incomplete for trace ${traceId} in ${collection}; ` +
+            'the soft-deleted document may persist in a shared index until softDelete is retried',
+        );
       }
       this.embeddingCache.delete(traceId);
     }
@@ -1010,6 +1037,17 @@ export class MemoryStore {
    */
   getTrace(traceId: string): MemoryTrace | undefined {
     return this.traceCache.get(traceId);
+  }
+
+  /**
+   * Whether this store has soft-deleted the trace in this process. Lifecycle
+   * hooks that re-activate traces leaving working memory MUST consult this so
+   * a tombstone's `isActive` flag is never resurrected — a resurrected flag
+   * let the spaced-repetition sweep re-embed and re-upsert deleted memories
+   * back into shared vector recall.
+   */
+  isDeleted(traceId: string): boolean {
+    return this.tombstonedTraceIds.has(traceId);
   }
 
   /**
