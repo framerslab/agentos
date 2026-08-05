@@ -117,6 +117,28 @@ describe('OpenAIProvider typed cache/tier options', () => {
     expect(body).not.toHaveProperty('prompt_cache_key');
   });
 
+  it('a look-alike host containing api.openai.com stays a gateway (exact-host match)', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          object: 'list',
+          data: [{ id: 'gpt-5.5', object: 'model', created: 1, owned_by: 'openai' }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const lookalike = new OpenAIProvider();
+    await lookalike.initialize({
+      apiKey: 'gk-test',
+      baseURL: 'https://api.openai.com.evil.example/v1',
+      maxRetries: 1,
+    });
+    await lookalike.generateCompletion('gpt-5.5', messages, { sessionId: 's-1' });
+    const call = fetchSpy.mock.calls.at(-1)!;
+    const body = JSON.parse((call[1] as RequestInit).body as string) as Record<string, unknown>;
+    expect(body).not.toHaveProperty('prompt_cache_key');
+  });
+
   it('omits prompt_cache_key on explicit false', async () => {
     const body = await requestBody({ sessionId: 's-1', promptCacheKey: false });
     expect(body).not.toHaveProperty('prompt_cache_key');

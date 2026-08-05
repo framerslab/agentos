@@ -1052,14 +1052,18 @@ export class GeminiProvider implements IProvider {
     // subset of promptTokenCount in cachedContentTokenCount; normalize it
     // into the same field the Anthropic/OpenAI/OpenRouter providers
     // populate so cache hits meter identically everywhere. promptTokens
-    // stays inclusive of the cached subset (house convention).
+    // stays inclusive of the cached subset, and an explicit 0 is preserved
+    // (an observed miss), while absent stays absent (unreported) — the same
+    // typeof gate the OpenAI/OpenRouter mappings use.
     const cachedContentTokens = meta?.cachedContentTokenCount;
 
     return {
       promptTokens,
       completionTokens,
       totalTokens,
-      ...(cachedContentTokens ? { cacheReadInputTokens: cachedContentTokens } : {}),
+      ...(typeof cachedContentTokens === 'number' && cachedContentTokens >= 0
+        ? { cacheReadInputTokens: cachedContentTokens }
+        : {}),
       costUSD: this.estimateCost(promptTokens, completionTokens, modelId),
     };
   }

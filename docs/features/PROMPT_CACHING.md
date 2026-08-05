@@ -4,8 +4,8 @@ AgentOS caches LLM prompt prefixes by default on every provider that supports
 it. A multi-turn agent, chat loop, or pipeline gets the provider's discounted
 cache pricing with zero configuration; per-call options tune the TTL, opt
 one-shots out, or shard cache routing. Cache activity is normalized into the
-same usage fields on every provider, so cost metering and leak detection work
-identically everywhere.
+same usage fields on every provider, so cost metering reads one shape
+everywhere; leak detection additionally samples the Anthropic paths.
 
 ```ts
 import { generateText } from '@framers/agentos';
@@ -59,12 +59,14 @@ grown history is read back next turn. Caller markers compose with it:
 Costs and floors (Anthropic pricing rules):
 
 - Cache writes bill 1.25x (5-minute TTL) or 2x (1-hour TTL); reads bill
-  0.1x. Break-even is 2 reads within TTL at 5m, 3+ at 1h.
+  0.1x. Break-even is 2 total requests within the TTL at 5m (one cache
+  read), 3+ at 1h.
 - Every model has a minimum cacheable prefix below which markers are
   **silently ignored** (no error, `cache_creation_input_tokens: 0`): 4096
-  tokens on Opus 4.5–4.8 and Haiku 4.5; 2048 on Fable/Mythos 5, Sonnet 4.6,
-  and Sonnet 5; 1024 on Sonnet 3.7–4.5. Marking a sub-floor prefix is safe —
-  it just does nothing.
+  tokens on Opus 4.5–4.8 and Haiku 4.5; 2048 on Fable/Mythos 5, Opus 5,
+  Sonnet 4.6, Sonnet 5, and Haiku 3.x; 1024 on Sonnet 3.7–4.5. (Opus 5's
+  documented floor is 512; agentos's floor heuristics hold the conservative
+  2048.) Marking a sub-floor prefix is safe — it just does nothing.
 - Caches are model-scoped: a fallback or retry on a different model is a
   cold start. AgentOS's canonical fallback chains pin `cache: false` on
   every leg for exactly this reason — failover hops are one-shots that
@@ -162,15 +164,18 @@ with `promptTokens` always inclusive of the cached subset:
 
 Sources: Anthropic `usage.cache_read_input_tokens` /
 `cache_creation_input_tokens`; OpenAI and OpenAI-compatible
-`prompt_tokens_details.cached_tokens` / `cache_write_tokens` (and the
-Responses API's `input_tokens_details`); OpenRouter unified usage; Gemini
-`usageMetadata.cachedContentTokenCount`.
+`prompt_tokens_details.cached_tokens`, plus `cache_write_tokens` where
+reported (GPT-5.6+ families) and the Responses API's
+`input_tokens_details`; OpenRouter unified usage; Gemini
+`usageMetadata.cachedContentTokenCount`. An explicit zero is preserved (an
+observed miss); the fields are absent when a provider reports nothing.
 
 On top of the per-call fields:
 
 - The cache-leak detector samples Anthropic requests (streaming and
-  non-streaming) and warns on marked-but-zero-creation (floor miss) and
-  zero-read streaks (prefix churn).
+  non-streaming) and warns when marked requests neither create nor read
+  cache (the floor-miss signature) and on sustained zero-read streaks
+  (prefix churn).
 - `LlmUsageEvent` stamps `fallbackDepth`, so a leg served by a failover hop
   (always `cache: false`) is distinguishable from a primary-path miss.
 - For turn-by-turn miss attribution, enable
@@ -191,6 +196,7 @@ prefixes byte-stable:
   evictions.
 - **Keep tool definitions and their order stable.** Tools render first; any
   change invalidates everything after them.
-- **Parallel identical prefixes don't share** until the first response
-  starts streaming; serialize the first request of a burst when the prefix
-  is shared.
+- **Parallel identical prefixes don't share** on Anthropic until the first
+  response starts streaming; serialize the first request of a burst when
+  the prefix is shared. (Other providers don't document their concurrent
+  cache-fill behavior — the serialization habit is safe everywhere.)

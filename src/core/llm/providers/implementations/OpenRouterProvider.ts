@@ -350,17 +350,19 @@ export class OpenRouterProvider implements IProvider {
    * this applies the same default to the OpenRouter leg.
    *
    * Marks two breakpoints, mirroring the direct auto path:
-   * - the last system message (stable prefix), and
+   * - the first system message (stable prefix — later system messages can
+   *   be volatile per-turn recall appended by memory hooks), and
    * - the last text block of the final message (moving tail, so multi-turn
    *   history is read back on the next turn).
    *
    * Stands down entirely when the caller already placed any cache_control
-   * marker (caller placement wins), when `options.cache === false` (the
-   * per-call opt-out; fallback-chain legs pin it), or when
-   * `AGENTOS_ANTHROPIC_AUTO_CACHE=0` (the same kill switch as the direct
-   * path). Sub-floor prefixes are safe to mark: Anthropic silently ignores
-   * markers below the model's minimum cacheable length.
-   * `options.cache.ttl` rides onto the injected markers.
+   * marker on messages or tool definitions (caller placement wins), or on
+   * the `AGENTOS_ANTHROPIC_AUTO_CACHE=0`/`false` kill switch (same syntax
+   * as the direct path). `options.cache === false` goes further, mirroring
+   * the direct provider's per-call hard-off: caller markers already in the
+   * message content are stripped as well. Sub-floor prefixes are safe to
+   * mark: Anthropic silently ignores markers below the model's minimum
+   * cacheable length. `options.cache.ttl` rides onto the injected markers.
    */
   private applyAnthropicSlugCacheControl(
     modelId: string,
@@ -368,8 +370,6 @@ export class OpenRouterProvider implements IProvider {
     options: ModelCompletionOptions,
   ): void {
     if (!modelId.toLowerCase().startsWith('anthropic/')) return;
-    if (options.cache === false) return;
-    if (process.env.AGENTOS_ANTHROPIC_AUTO_CACHE === '0') return;
 
     type WirePart = {
       type?: string;
@@ -377,12 +377,50 @@ export class OpenRouterProvider implements IProvider {
       cache_control?: { type: 'ephemeral'; ttl?: '1h' };
     } & Record<string, unknown>;
 
-    const hasCallerMarker = orMessages.some(
-      (m) =>
-        Array.isArray(m.content) &&
-        (m.content as WirePart[]).some((p) => p && p.cache_control !== undefined),
-    );
-    if (hasCallerMarker) return;
+    if (options.cache === false) {
+      // Per-call hard-off, mirroring AnthropicProvider's cache:false region
+      // strip: caller-provided markers are removed too, so the opt-out
+      // holds regardless of how a marker arrived. Copies, never in-place
+      // edits — content arrays are shared with caller state.
+      for (const message of orMessages) {
+        if (!Array.isArray(message.content)) continue;
+        const parts = message.content as WirePart[];
+        if (!parts.some((p) => p && p.cache_control !== undefined)) continue;
+        (message as { content: unknown }).content = parts.map((part) => {
+          if (!part || part.cache_control === undefined) return part;
+          const { cache_control: _stripped, ...rest } = part;
+          return rest;
+        });
+      }
+      return;
+    }
+
+    // Same kill-switch syntax as the direct Anthropic auto path.
+    const autoCacheEnv = process.env.AGENTOS_ANTHROPIC_AUTO_CACHE;
+    if (autoCacheEnv === '0' || autoCacheEnv === 'false') return;
+
+    // Caller placement wins: a marker already present in messages, tool
+    // definitions, or customModelParams tool overrides means the caller
+    // owns breakpoint placement — injecting two more could exceed
+    // Anthropic's 4-breakpoint cap or order a longer TTL after a shorter
+    // one (both reject with 400).
+    const holdsMarker = (value: unknown): boolean =>
+      Array.isArray(value) &&
+      value.some(
+        (entry) =>
+          entry !== null &&
+          typeof entry === 'object' &&
+          (entry as Record<string, unknown>).cache_control !== undefined,
+      );
+    const customTools = (options.customModelParams as Record<string, unknown> | undefined)
+      ?.tools;
+    if (
+      orMessages.some((m) => holdsMarker(m.content)) ||
+      holdsMarker(options.tools) ||
+      holdsMarker(customTools)
+    ) {
+      return;
+    }
 
     const marker: { type: 'ephemeral'; ttl?: '1h' } =
       options.cache && options.cache.ttl === '1h'
@@ -416,9 +454,12 @@ export class OpenRouterProvider implements IProvider {
       return false;
     };
 
-    // Stable prefix: the last system message.
+    // Stable prefix: the FIRST system message. Memory hooks append volatile
+    // per-turn recall as LATER system messages; a breakpoint there would sit
+    // on bytes that change every turn and cold-miss (write premium, no
+    // reads) forever.
     let systemIdx = -1;
-    for (let i = orMessages.length - 1; i >= 0; i--) {
+    for (let i = 0; i < orMessages.length; i++) {
       if (orMessages[i].role === 'system') {
         systemIdx = i;
         break;

@@ -457,6 +457,23 @@ describe('GeminiProvider', () => {
       expect(result.usage!.cacheReadInputTokens).toBe(64);
     });
 
+    it('preserves an explicit zero cachedContentTokenCount (observed miss)', async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse({
+        usageMetadata: {
+          promptTokenCount: 10,
+          candidatesTokenCount: 5,
+          totalTokenCount: 15,
+          cachedContentTokenCount: 0,
+        },
+      })));
+
+      const result = await provider.generateCompletion('gemini-2.5-flash', [
+        { role: 'user', content: 'Hi' },
+      ], {});
+
+      expect(result.usage!.cacheReadInputTokens).toBe(0);
+    });
+
     it('omits cacheReadInputTokens when the response reports none', async () => {
       fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse()));
 

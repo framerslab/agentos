@@ -979,13 +979,24 @@ export class OpenAIProvider implements IProvider {
    * True when requests target api.openai.com rather than an
    * OpenAI-compatible gateway (the Groq/xAI/Together/Mistral wrappers pass
    * their own baseURL). Gates zero-config defaults that emit request
-   * fields some gateways reject. Tolerates an uninitialized provider
-   * (payload builders are unit-tested without initialize()): no config
-   * means no zero-config default, never a throw.
+   * fields some gateways reject, so the match is an exact parsed-hostname
+   * comparison — a substring test would classify look-alike gateway hosts
+   * (api.openai.com.example.net) as native. Tolerates an uninitialized
+   * provider (payload builders are unit-tested without initialize()) and
+   * malformed URLs: anything unparseable is not native, never a throw.
    * @private
    */
   private isNativeOpenAiEndpoint(): boolean {
-    return (this.config?.baseURL ?? '').includes('api.openai.com');
+    try {
+      const url = new URL(this.config?.baseURL ?? '');
+      return (
+        url.protocol === 'https:' &&
+        url.hostname.toLowerCase() === 'api.openai.com' &&
+        (url.port === '' || url.port === '443')
+      );
+    } catch {
+      return false;
+    }
   }
 
   /**

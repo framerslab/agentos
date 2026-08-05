@@ -133,13 +133,67 @@ describe('OpenRouter anthropic/* zero-config cache_control', () => {
     expect(tailParts.at(-1)!.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
   });
 
-  it('cache:false leaves the request untouched', async () => {
+  it('cache:false leaves plain requests untouched', async () => {
     const wire = await capture('anthropic/claude-sonnet-4-6', convo, { cache: false });
+    for (const m of wire) expect(typeof m.content).toBe('string');
+  });
+
+  it('cache:false strips caller-provided markers (hard opt-out parity)', async () => {
+    const marked: ChatMessage[] = [
+      {
+        role: 'system',
+        content: [
+          { type: 'text', text: 'stable', cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: 'volatile' },
+        ],
+      },
+      { role: 'user', content: 'turn' },
+    ];
+    const wire = await capture('anthropic/claude-sonnet-4-6', marked, { cache: false });
+    const systemParts = wire[0].content as WirePart[];
+    expect(systemParts.every((p) => p.cache_control === undefined)).toBe(true);
+    expect(systemParts.map((p) => p.text)).toEqual(['stable', 'volatile']);
+    // The caller's own array is untouched (copy-on-write strip).
+    expect(
+      (marked[0].content as Array<{ cache_control?: unknown }>)[0].cache_control,
+    ).toEqual({ type: 'ephemeral' });
+  });
+
+  it('marks the FIRST system message when later system messages exist', async () => {
+    const wire = await capture('anthropic/claude-sonnet-4-6', [
+      { role: 'system', content: 'stable leading instructions' },
+      { role: 'system', content: 'volatile per-turn recall' },
+      { role: 'user', content: 'turn' },
+    ]);
+    const first = wire[0].content as WirePart[];
+    expect(first[0].cache_control).toEqual({ type: 'ephemeral' });
+    // The volatile later system message stays unmarked.
+    expect(typeof wire[1].content).toBe('string');
+    const tail = wire.at(-1)!.content as WirePart[];
+    expect(tail.at(-1)!.cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('stands down when a tool definition carries a marker', async () => {
+    const wire = await capture('anthropic/claude-sonnet-4-6', convo, {
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'lookup', parameters: { type: 'object' } },
+          cache_control: { type: 'ephemeral' },
+        },
+      ],
+    });
     for (const m of wire) expect(typeof m.content).toBe('string');
   });
 
   it('AGENTOS_ANTHROPIC_AUTO_CACHE=0 disables injection', async () => {
     process.env.AGENTOS_ANTHROPIC_AUTO_CACHE = '0';
+    const wire = await capture('anthropic/claude-sonnet-4-6', convo);
+    for (const m of wire) expect(typeof m.content).toBe('string');
+  });
+
+  it('AGENTOS_ANTHROPIC_AUTO_CACHE=false disables injection (direct-path syntax parity)', async () => {
+    process.env.AGENTOS_ANTHROPIC_AUTO_CACHE = 'false';
     const wire = await capture('anthropic/claude-sonnet-4-6', convo);
     for (const m of wire) expect(typeof m.content).toBe('string');
   });
