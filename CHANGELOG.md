@@ -1,3 +1,7 @@
+## <small>0.10.8 (2026-08-05)</small>
+
+* fix(memory): coderabbit review pass 1 (guard deletion race) ([8d937f24a26a545c1d42b204729b209e74817dcf](https://github.com/framerslab/agentos/commit/8d937f24a26a545c1d42b204729b209e74817dcf))
+
 ## <small>0.10.7 (2026-08-05)</small>
 
 * fix(memory): evict soft-deleted traces from recall ([39817e0a848527f2f4e8ac9d5b843e275bbf5a05](https://github.com/framerslab/agentos/commit/39817e0a848527f2f4e8ac9d5b843e275bbf5a05))
