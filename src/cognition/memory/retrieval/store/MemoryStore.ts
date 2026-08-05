@@ -739,7 +739,7 @@ export class MemoryStore {
    */
   async recordAccess(traceId: string): Promise<RetrievalUpdateResult | null> {
     const trace = this.traceCache.get(traceId);
-    if (!trace) return null;
+    if (!trace?.isActive) return null;
 
     const now = Date.now();
     const update = updateOnRetrieval(trace, now);
@@ -770,6 +770,7 @@ export class MemoryStore {
         const embeddingResponse = await this.config.embeddingManager.generateEmbeddings({
           texts: trace.content,
         });
+        if (!trace.isActive) return null;
         embedding = embeddingResponse.embeddings[0];
         // CR4: only cache a usable vector — caching [] would poison every future
         // access (a cache hit skips re-embedding, so the empty vector would stick).
@@ -779,7 +780,7 @@ export class MemoryStore {
       }
       // CR4: skip this best-effort metadata refresh rather than upserting a
       // zero-vector that would corrupt the stored trace's recall.
-      if (isUsableEmbedding(embedding)) {
+      if (trace.isActive && isUsableEmbedding(embedding)) {
         await this.config.vectorStore.upsert(collection, [
           {
             id: trace.id,
@@ -793,11 +794,23 @@ export class MemoryStore {
       // Non-critical update
     }
 
+    // Deletion can race the asynchronous embedding or vector refresh above.
+    // If it won, remove any document the late refresh may have restored.
+    if (!trace.isActive) {
+      try {
+        await this.config.vectorStore.delete(collection, [traceId]);
+      } catch {
+        // Query and getByScope still reject the cached tombstone.
+      }
+      this.embeddingCache.delete(traceId);
+      return null;
+    }
+
     // Write-through: update access metadata in the durable SQL store
     if (this.brain) {
       try {
         await this.brain.run(
-          'UPDATE memory_traces SET last_accessed = ?, retrieval_count = ?, strength = ? WHERE brain_id = ? AND id = ?',
+          'UPDATE memory_traces SET last_accessed = ?, retrieval_count = ?, strength = ? WHERE brain_id = ? AND id = ? AND deleted = 0',
           [trace.lastAccessedAt, trace.retrievalCount, trace.encodingStrength, this.brain.brainId, traceId]
         );
       } catch {
@@ -805,7 +818,7 @@ export class MemoryStore {
       }
     }
 
-    return update;
+    return trace.isActive ? update : null;
   }
 
   // =========================================================================

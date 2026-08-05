@@ -167,6 +167,40 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
     }
   });
 
+  it('recordAccess cannot restore a trace deleted during its vector refresh', async () => {
+    const vectorStore = await mkVectorStore();
+    const store = mkStore(vectorStore);
+    await store.store(mkTrace('t1', 'remember this detail'));
+
+    const originalUpsert = vectorStore.upsert.bind(vectorStore);
+    let signalRefreshStarted: (() => void) | undefined;
+    const refreshStarted = new Promise<void>((resolve) => {
+      signalRefreshStarted = resolve;
+    });
+    let releaseRefresh: (() => void) | undefined;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    vi.spyOn(vectorStore, 'upsert').mockImplementation(async (collection, documents) => {
+      signalRefreshStarted?.();
+      await refreshGate;
+      return originalUpsert(collection, documents);
+    });
+
+    const access = store.recordAccess('t1');
+    await refreshStarted;
+    await store.softDelete('t1');
+    releaseRefresh?.();
+
+    expect(await access).toBeNull();
+    const vectorResult = await vectorStore.query(
+      'cogmem_user_u1',
+      new Array(16).fill(0).map((_, index) => (index === 0 ? 1 : 0)),
+      { topK: 10, includeMetadata: true },
+    );
+    expect(vectorResult.documents.map((document) => document.id)).not.toContain('t1');
+  });
+
   it('softDelete tombstones a durable trace before a cold store hydrates', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brainhydration-'));
     const dbPath = path.join(tmpDir, 'brain.sqlite');
