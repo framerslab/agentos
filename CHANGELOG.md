@@ -1,3 +1,11 @@
+## <small>0.10.11 (2026-08-05)</small>
+
+* fix(memory): align retrieval fixture with lifecycle state ([d42a866631756f7931b718d79a283054359cf984](https://github.com/framerslab/agentos/commit/d42a866631756f7931b718d79a283054359cf984))
+* fix(memory): annotate generic test spies ([68a53b84322735360c71c1af6fd5bc6a15b10de3](https://github.com/framerslab/agentos/commit/68a53b84322735360c71c1af6fd5bc6a15b10de3))
+* fix(memory): coderabbit review pass 1 (harden lifecycle) ([0949d15297fd5116ce58cacc6939e9820cd53741](https://github.com/framerslab/agentos/commit/0949d15297fd5116ce58cacc6939e9820cd53741))
+* fix(memory): coderabbit review pass 2 (close lifecycle gaps) ([f36d668c1ec98ddda0edbe041c076a76b78b0c36](https://github.com/framerslab/agentos/commit/f36d668c1ec98ddda0edbe041c076a76b78b0c36))
+* fix(memory): serialize deletion across store instances ([dadb555b66835a5b04c90db0f6484b6042175a3a](https://github.com/framerslab/agentos/commit/dadb555b66835a5b04c90db0f6484b6042175a3a))
+
 ## <small>0.10.10 (2026-08-05)</small>
 
 * fix(memory): make failed vector evictions retryable and tombstones lifecycle-proof ([8f5594b982505f33af98b1a093569c44cf412929](https://github.com/framerslab/agentos/commit/8f5594b982505f33af98b1a093569c44cf412929))
