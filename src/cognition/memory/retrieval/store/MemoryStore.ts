@@ -661,6 +661,13 @@ export class MemoryStore {
               ...tracePartial,
             } as MemoryTrace);
 
+          // Treat the in-memory tombstone as authoritative. A best-effort
+          // vector-store update can fail after softDelete(), leaving a stale
+          // document whose metadata still says it is active.
+          if (!trace.isActive) {
+            continue;
+          }
+
           if (!cached) {
             this.traceCache.set(trace.id, trace);
           }
@@ -820,7 +827,7 @@ export class MemoryStore {
     // Return from cache + filter
     const results: MemoryTrace[] = [];
     for (const trace of this.traceCache.values()) {
-      if (trace.scope === scope && trace.scopeId === scopeId) {
+      if (trace.isActive && trace.scope === scope && trace.scopeId === scopeId) {
         if (!type || trace.type === type) {
           results.push(trace);
         }
@@ -847,7 +854,9 @@ export class MemoryStore {
           if (!doc.metadata) continue;
           const cached = this.traceCache.get(doc.id);
           if (cached) {
-            results.push(cached);
+            if (cached.isActive) {
+              results.push(cached);
+            }
           } else {
             // Reconstruct trace from vector store metadata.
             const partial = metadataToTracePartial(doc.metadata as Record<string, any>);
@@ -859,6 +868,7 @@ export class MemoryStore {
               updatedAt: (partial.createdAt as number) ?? Date.now(),
               ...partial,
             } as MemoryTrace;
+            if (!trace.isActive) continue;
             this.traceCache.set(trace.id, trace);
             results.push(trace);
           }
@@ -905,7 +915,34 @@ export class MemoryStore {
    * Soft-delete a trace.
    */
   async softDelete(traceId: string): Promise<void> {
-    const trace = this.traceCache.get(traceId);
+    let trace = this.traceCache.get(traceId);
+
+    // A caller may delete before the first recall hydrates this process-local
+    // cache. Load just the requested row so we can invalidate the correct
+    // vector collection without paying the full hydration cost.
+    if (!trace && this.brain) {
+      try {
+        const row = await this.brain.get<MemoryTraceRow>(
+          `SELECT id, type, scope, content, embedding, strength, created_at,
+                  last_accessed, retrieval_count, tags, emotions, metadata
+             FROM memory_traces
+            WHERE brain_id = ? AND id = ? AND deleted = 0`,
+          [this.brain.brainId, traceId],
+        );
+        if (row) {
+          trace = this.rowToTrace(row);
+          this.traceCache.set(trace.id, trace);
+          const embedding = blobToEmbedding(row.embedding);
+          if (embedding && isUsableEmbedding(embedding)) {
+            this.embeddingCache.set(trace.id, embedding);
+          }
+          this.registerScope(trace.scope, trace.scopeId);
+        }
+      } catch {
+        // Best-effort lookup. The SQL tombstone below can still succeed.
+      }
+    }
+
     if (trace) {
       trace.isActive = false;
       trace.updatedAt = Date.now();
@@ -918,6 +955,19 @@ export class MemoryStore {
       } catch {
         // Best-effort persistence
       }
+    }
+
+    // The vector store is a derived recall index, so removing this document
+    // preserves soft-delete semantics while preventing stale same-process
+    // recall. The durable Brain row remains as the tombstone source of truth.
+    if (trace) {
+      const collection = collectionName(this.config.collectionPrefix, trace.scope, trace.scopeId);
+      try {
+        await this.config.vectorStore.delete(collection, [traceId]);
+      } catch {
+        // Query and getByScope also reject cached tombstones defensively.
+      }
+      this.embeddingCache.delete(traceId);
     }
   }
 

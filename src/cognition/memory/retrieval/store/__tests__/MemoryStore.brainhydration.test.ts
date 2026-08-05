@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -128,5 +128,85 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
       await brain.close();
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  it('softDelete removes a cached trace from vector recall and scope listings', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brainhydration-'));
+    const dbPath = path.join(tmpDir, 'brain.sqlite');
+    const brain = await Brain.openSqlite(dbPath);
+    try {
+      const vectorStore = await mkVectorStore();
+      const deleteSpy = vi.spyOn(vectorStore, 'delete');
+      const store = mkStore(vectorStore);
+      store.setBrain(brain);
+      await store.store(mkTrace('t1', 'remember this detail'));
+
+      await store.softDelete('t1');
+
+      const vectorResult = await vectorStore.query(
+        'cogmem_user_u1',
+        new Array(16).fill(0).map((_, index) => (index === 0 ? 1 : 0)),
+        { topK: 10, includeMetadata: true },
+      );
+      const recall = await store.query('remember this detail', neutralMood, {
+        scopes: [{ scope: 'user' as MemoryScope, scopeId: 'u1' }],
+      });
+      expect(vectorResult.documents.map((document) => document.id)).not.toContain('t1');
+      expect(recall.scored.map((trace) => trace.id)).not.toContain('t1');
+      expect(await store.getByScope('user', 'u1')).toEqual([]);
+      expect(deleteSpy).toHaveBeenCalledWith('cogmem_user_u1', ['t1']);
+      expect(
+        await brain.get<{ deleted: number }>(
+          'SELECT deleted FROM memory_traces WHERE brain_id = ? AND id = ?',
+          [brain.brainId, 't1'],
+        ),
+      ).toEqual({ deleted: 1 });
+    } finally {
+      await brain.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('softDelete tombstones a durable trace before a cold store hydrates', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brainhydration-'));
+    const dbPath = path.join(tmpDir, 'brain.sqlite');
+    const brain = await Brain.openSqlite(dbPath);
+    try {
+      const writer = mkStore(await mkVectorStore());
+      writer.setBrain(brain);
+      await writer.store(mkTrace('t1', 'remember this detail'));
+
+      const coldStore = mkStore(await mkVectorStore());
+      coldStore.setBrain(brain);
+      await coldStore.softDelete('t1');
+
+      const recall = await coldStore.query('remember this detail', neutralMood, {
+        scopes: [{ scope: 'user' as MemoryScope, scopeId: 'u1' }],
+      });
+      expect(recall.scored).toEqual([]);
+      expect(await coldStore.getByScope('user', 'u1')).toEqual([]);
+    } finally {
+      await brain.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('filters a cached tombstone when vector deletion reports failure', async () => {
+    const vectorStore = await mkVectorStore();
+    const store = mkStore(vectorStore);
+    await store.store(mkTrace('t1', 'remember this detail'));
+    vi.spyOn(vectorStore, 'delete').mockResolvedValue({
+      deletedCount: 0,
+      failedCount: 1,
+      errors: [{ id: 't1', message: 'simulated provider failure' }],
+    });
+
+    await store.softDelete('t1');
+
+    const recall = await store.query('remember this detail', neutralMood, {
+      scopes: [{ scope: 'user' as MemoryScope, scopeId: 'u1' }],
+    });
+    expect(recall.scored).toEqual([]);
+    expect(await store.getByScope('user', 'u1')).toEqual([]);
   });
 });
