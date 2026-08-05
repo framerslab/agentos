@@ -1,7 +1,7 @@
 /**
  * @fileoverview Unit tests for the OpenAI-compatible provider wrappers.
  *
- * Validates that Groq, Together, Mistral, and xAI providers:
+ * Validates that Groq, Together, Mistral, xAI, and Atlas Cloud providers:
  * - Initialize correctly with proper base URLs
  * - Delegate to the underlying OpenAI provider
  * - Have correct model defaults in their catalogs
@@ -41,6 +41,7 @@ import { GroqProvider } from '../implementations/GroqProvider';
 import { TogetherProvider } from '../implementations/TogetherProvider';
 import { MistralProvider } from '../implementations/MistralProvider';
 import { XAIProvider } from '../implementations/XAIProvider';
+import { AtlasCloudProvider } from '../implementations/AtlasCloudProvider';
 import { PROVIDER_DEFAULTS, autoDetectProvider } from '../../../../api/runtime/provider-defaults';
 
 // ---------------------------------------------------------------------------
@@ -248,6 +249,63 @@ describe('OpenAI-compatible provider wrappers', () => {
   });
 
   // =========================================================================
+  // AtlasCloudProvider
+  // =========================================================================
+
+  describe('AtlasCloudProvider', () => {
+    it('has providerId "atlascloud"', () => {
+      const provider = new AtlasCloudProvider();
+      expect(provider.providerId).toBe('atlascloud');
+    });
+
+    it('initializes with Atlas Cloud base URL', async () => {
+      const provider = new AtlasCloudProvider();
+      await provider.initialize({ apiKey: 'atlas-test-key' });
+
+      expect(initializeMock).toHaveBeenCalledTimes(1);
+      const config = initializeMock.mock.calls[0][0];
+      expect(config.apiKey).toBe('atlas-test-key');
+      expect(config.baseURL).toBe('https://api.atlascloud.ai/v1');
+    });
+
+    it('throws when API key is missing', async () => {
+      const provider = new AtlasCloudProvider();
+      await expect(provider.initialize({ apiKey: '' })).rejects.toThrow('API key is required');
+    });
+
+    it('defaults to deepseek-ai/deepseek-v4-pro model', async () => {
+      const provider = new AtlasCloudProvider();
+      await provider.initialize({ apiKey: 'atlas-test' });
+      expect(provider.defaultModelId).toBe('deepseek-ai/deepseek-v4-pro');
+    });
+
+    it('lists known Atlas Cloud models', async () => {
+      const provider = new AtlasCloudProvider();
+      await provider.initialize({ apiKey: 'atlas-test' });
+      const models = await provider.listAvailableModels();
+      const ids = models.map(m => m.modelId);
+      expect(ids).toContain('deepseek-ai/deepseek-v4-pro');
+      expect(ids).toContain('qwen/qwen3.5-flash');
+      for (const m of models) {
+        expect(m.providerId).toBe('atlascloud');
+      }
+    });
+
+    it('delegates generateCompletion to OpenAI provider', async () => {
+      const provider = new AtlasCloudProvider();
+      await provider.initialize({ apiKey: 'atlas-test' });
+      await provider.generateCompletion('test-model', [], {});
+      expect(generateCompletionMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects embeddings (not supported)', async () => {
+      const provider = new AtlasCloudProvider();
+      await provider.initialize({ apiKey: 'atlas-test' });
+      await expect(provider.generateEmbeddings('model', ['text'])).rejects.toThrow('embeddings');
+    });
+  });
+
+  // =========================================================================
   // PROVIDER_DEFAULTS registration
   // =========================================================================
 
@@ -276,6 +334,12 @@ describe('OpenAI-compatible provider wrappers', () => {
       expect(PROVIDER_DEFAULTS.xai.cheap).toBe('grok-2-mini');
     });
 
+    it('includes atlascloud with correct defaults', () => {
+      expect(PROVIDER_DEFAULTS.atlascloud).toBeDefined();
+      expect(PROVIDER_DEFAULTS.atlascloud.text).toBe('deepseek-ai/deepseek-v4-pro');
+      expect(PROVIDER_DEFAULTS.atlascloud.cheap).toBe('qwen/qwen3.5-flash');
+    });
+
     it('still has anthropic defaults', () => {
       expect(PROVIDER_DEFAULTS.anthropic).toBeDefined();
       expect(PROVIDER_DEFAULTS.anthropic.text).toBe('claude-sonnet-4-6');
@@ -294,6 +358,7 @@ describe('OpenAI-compatible provider wrappers', () => {
       // Clear all provider env vars so auto-detect starts clean
       process.env = { ...originalEnv };
       delete process.env.OPENAI_API_KEY;
+      delete process.env.ATLASCLOUD_API_KEY;
       delete process.env.ANTHROPIC_API_KEY;
       delete process.env.OPENROUTER_API_KEY;
       delete process.env.GEMINI_API_KEY;
@@ -329,6 +394,11 @@ describe('OpenAI-compatible provider wrappers', () => {
     it('detects xai when XAI_API_KEY is set', () => {
       process.env.XAI_API_KEY = 'xai-test';
       expect(autoDetectProvider()).toBe('xai');
+    });
+
+    it('detects atlascloud when ATLASCLOUD_API_KEY is set', () => {
+      process.env.ATLASCLOUD_API_KEY = 'atlas-test';
+      expect(autoDetectProvider()).toBe('atlascloud');
     });
 
     it('prefers openai over groq when both are set', () => {

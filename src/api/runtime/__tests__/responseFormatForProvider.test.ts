@@ -81,6 +81,15 @@ describe('buildResponseFormatForProvider', () => {
     ).toEqual({ type: 'json_object' });
   });
 
+  it('atlascloud + plain schema -> strict json_schema; record -> json_object', () => {
+    expect(
+      buildResponseFormatForProvider(inputs('atlascloud', 'deepseek-ai/deepseek-v4-pro', plainSchema)),
+    ).toMatchObject({ type: 'json_schema' });
+    expect(
+      buildResponseFormatForProvider(inputs('atlascloud', 'deepseek-ai/deepseek-v4-pro', recordSchema)),
+    ).toEqual({ type: 'json_object' });
+  });
+
   it('unknown provider -> undefined (schema rides the system prompt)', () => {
     expect(
       buildResponseFormatForProvider(inputs('ollama', 'llama3', plainSchema)),

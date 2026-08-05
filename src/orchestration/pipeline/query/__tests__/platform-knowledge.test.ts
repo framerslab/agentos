@@ -34,7 +34,7 @@ const PLATFORM_CORPUS_FIXTURE = JSON.stringify([
     id: 'api:generateText',
     heading: 'generateText() API',
     content:
-      "import { generateText } from '@framers/agentos'. Core text generation function supporting all 11 LLM providers.",
+      "import { generateText } from '@framers/agentos'. Core text generation function supporting all 12 LLM providers.",
     category: 'api',
   },
   {
