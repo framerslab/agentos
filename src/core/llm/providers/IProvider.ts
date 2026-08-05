@@ -193,8 +193,11 @@ export interface ModelCompletionOptions {
    * it). `'auto'` derives `agentos:<first 16 hex of sha256(sessionId)>` from
    * {@link sessionId} — omitted when no session id is available; raw ids
    * never leave the process. An explicit string is sent verbatim after
-   * trimming (empty → omitted). `false`/absent omit the field (zero-change
-   * default). OpenAI recommends ≤~15 requests/min per key; sharding beyond
+   * trimming (empty → omitted). `false` omits the field. Absent defaults
+   * to `'auto'` on the native OpenAI endpoint (api.openai.com) unless the
+   * call carries `cache: false`; OpenAI-compatible gateways (custom
+   * baseURL) keep the omit default — some reject unknown request fields.
+   * OpenAI recommends ≤~15 requests/min per key; sharding beyond
    * that is caller policy.
    */
   promptCacheKey?: string | 'auto' | false;

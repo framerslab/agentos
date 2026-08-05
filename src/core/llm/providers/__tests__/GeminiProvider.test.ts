@@ -437,6 +437,36 @@ describe('GeminiProvider', () => {
       expect(result.usage!.totalTokens).toBe(59);
     });
 
+    it('maps cachedContentTokenCount into cacheReadInputTokens', async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse({
+        usageMetadata: {
+          promptTokenCount: 100,
+          candidatesTokenCount: 5,
+          totalTokenCount: 105,
+          cachedContentTokenCount: 64,
+        },
+      })));
+
+      const result = await provider.generateCompletion('gemini-2.5-flash', [
+        { role: 'user', content: 'Hi' },
+      ], {});
+
+      // promptTokenCount stays inclusive of the cached subset — the same
+      // convention the OpenAI and Anthropic providers normalize to.
+      expect(result.usage!.promptTokens).toBe(100);
+      expect(result.usage!.cacheReadInputTokens).toBe(64);
+    });
+
+    it('omits cacheReadInputTokens when the response reports none', async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse()));
+
+      const result = await provider.generateCompletion('gemini-2.5-flash', [
+        { role: 'user', content: 'Hi' },
+      ], {});
+
+      expect(result.usage).not.toHaveProperty('cacheReadInputTokens');
+    });
+
     it('includes cost estimation for known models', async () => {
       fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse({
         usageMetadata: {

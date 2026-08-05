@@ -138,6 +138,12 @@ interface GeminiUsageMetadata {
   promptTokenCount?: number;
   candidatesTokenCount?: number;
   totalTokenCount?: number;
+  /**
+   * Prompt tokens served from Gemini's cache (implicit caching is default-on
+   * for 2.5+ models; explicit cachedContents count here too). A subset of
+   * `promptTokenCount`, never additional to it.
+   */
+  cachedContentTokenCount?: number;
 }
 
 /** A single candidate in the Gemini response. */
@@ -1042,11 +1048,18 @@ export class GeminiProvider implements IProvider {
     const promptTokens = meta?.promptTokenCount ?? 0;
     const completionTokens = meta?.candidatesTokenCount ?? 0;
     const totalTokens = meta?.totalTokenCount ?? (promptTokens + completionTokens);
+    // Gemini implicit caching (default-on for 2.5+) reports the cached
+    // subset of promptTokenCount in cachedContentTokenCount; normalize it
+    // into the same field the Anthropic/OpenAI/OpenRouter providers
+    // populate so cache hits meter identically everywhere. promptTokens
+    // stays inclusive of the cached subset (house convention).
+    const cachedContentTokens = meta?.cachedContentTokenCount;
 
     return {
       promptTokens,
       completionTokens,
       totalTokens,
+      ...(cachedContentTokens ? { cacheReadInputTokens: cachedContentTokens } : {}),
       costUSD: this.estimateCost(promptTokens, completionTokens, modelId),
     };
   }

@@ -341,6 +341,97 @@ export class OpenRouterProvider implements IProvider {
     }
   }
 
+  /**
+   * Zero-config prompt caching for Anthropic models routed through
+   * OpenRouter. OpenRouter forwards Anthropic `cache_control` blocks
+   * unchanged, and Anthropic caches ONLY when a request carries them — an
+   * `anthropic/*` slug without markers can never hit cache. Direct
+   * Anthropic traffic gets markers from AnthropicProvider's auto path;
+   * this applies the same default to the OpenRouter leg.
+   *
+   * Marks two breakpoints, mirroring the direct auto path:
+   * - the last system message (stable prefix), and
+   * - the last text block of the final message (moving tail, so multi-turn
+   *   history is read back on the next turn).
+   *
+   * Stands down entirely when the caller already placed any cache_control
+   * marker (caller placement wins), when `options.cache === false` (the
+   * per-call opt-out; fallback-chain legs pin it), or when
+   * `AGENTOS_ANTHROPIC_AUTO_CACHE=0` (the same kill switch as the direct
+   * path). Sub-floor prefixes are safe to mark: Anthropic silently ignores
+   * markers below the model's minimum cacheable length.
+   * `options.cache.ttl` rides onto the injected markers.
+   */
+  private applyAnthropicSlugCacheControl(
+    modelId: string,
+    orMessages: Array<Partial<ChatMessage>>,
+    options: ModelCompletionOptions,
+  ): void {
+    if (!modelId.toLowerCase().startsWith('anthropic/')) return;
+    if (options.cache === false) return;
+    if (process.env.AGENTOS_ANTHROPIC_AUTO_CACHE === '0') return;
+
+    type WirePart = {
+      type?: string;
+      text?: string;
+      cache_control?: { type: 'ephemeral'; ttl?: '1h' };
+    } & Record<string, unknown>;
+
+    const hasCallerMarker = orMessages.some(
+      (m) =>
+        Array.isArray(m.content) &&
+        (m.content as WirePart[]).some((p) => p && p.cache_control !== undefined),
+    );
+    if (hasCallerMarker) return;
+
+    const marker: { type: 'ephemeral'; ttl?: '1h' } =
+      options.cache && options.cache.ttl === '1h'
+        ? { type: 'ephemeral', ttl: '1h' }
+        : { type: 'ephemeral' };
+
+    const markMessage = (msg: Partial<ChatMessage>): boolean => {
+      if (typeof msg.content === 'string') {
+        if (!msg.content) return false;
+        (msg as { content: unknown }).content = [
+          { type: 'text', text: msg.content, cache_control: { ...marker } },
+        ];
+        return true;
+      }
+      if (Array.isArray(msg.content)) {
+        // Copy-on-write: mapToOpenRouterMessages shares content references
+        // with the caller's messages, so mutating a part in place would
+        // leak the injected marker back into caller state (and a retry or
+        // fallback leg would then mistake it for a caller marker).
+        const parts = msg.content as WirePart[];
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const part = parts[i];
+          if (part && part.type === 'text' && typeof part.text === 'string' && part.text) {
+            const copy = parts.slice();
+            copy[i] = { ...part, cache_control: { ...marker } };
+            (msg as { content: unknown }).content = copy;
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+
+    // Stable prefix: the last system message.
+    let systemIdx = -1;
+    for (let i = orMessages.length - 1; i >= 0; i--) {
+      if (orMessages[i].role === 'system') {
+        systemIdx = i;
+        break;
+      }
+    }
+    if (systemIdx >= 0) markMessage(orMessages[systemIdx]);
+
+    // Moving tail: the final message, unless it IS the system message we
+    // just marked (single-message requests keep one breakpoint).
+    const lastIdx = orMessages.length - 1;
+    if (lastIdx >= 0 && lastIdx !== systemIdx) markMessage(orMessages[lastIdx]);
+  }
+
   private mapToOpenRouterMessages(messages: ChatMessage[]): Array<Partial<ChatMessage>> {
     return messages.map(msg => {
       const mappedMsg: Partial<ChatMessage> = { role: msg.role, content: msg.content };
@@ -358,6 +449,7 @@ export class OpenRouterProvider implements IProvider {
   ): Promise<ModelCompletionResponse> {
     this.ensureInitialized();
     const openRouterMessages = this.mapToOpenRouterMessages(messages);
+    this.applyAnthropicSlugCacheControl(modelId, openRouterMessages, options);
 
     const payload: Record<string, unknown> = {
       model: modelId,
@@ -498,6 +590,7 @@ export class OpenRouterProvider implements IProvider {
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     this.ensureInitialized();
     const openRouterMessages = this.mapToOpenRouterMessages(messages);
+    this.applyAnthropicSlugCacheControl(modelId, openRouterMessages, options);
 
     const payload: Record<string, unknown> = {
       model: modelId,

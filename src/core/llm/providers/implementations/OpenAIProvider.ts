@@ -976,6 +976,17 @@ export class OpenAIProvider implements IProvider {
   }
 
   /**
+   * True when requests target api.openai.com rather than an
+   * OpenAI-compatible gateway (the Groq/xAI/Together/Mistral wrappers pass
+   * their own baseURL). Gates zero-config defaults that emit request
+   * fields some gateways reject.
+   * @private
+   */
+  private isNativeOpenAiEndpoint(): boolean {
+    return (this.config.baseURL ?? '').includes('api.openai.com');
+  }
+
+  /**
    * Apply the typed prompt-cache key/retention and service-tier options to
    * an outgoing payload (Chat and Responses builders share this; spec
    * batch-1 C2). Unsupported retention combinations are omitted fail-closed
@@ -987,8 +998,15 @@ export class OpenAIProvider implements IProvider {
     modelId: string,
     options: ModelCompletionOptions,
   ): void {
+    // Zero-config default: on the native OpenAI endpoint the shard key
+    // derives from the session id ('auto' semantics) unless the caller
+    // opted out via promptCacheKey or cache: false. OpenAI-compatible
+    // gateways (Groq/xAI/Together/Mistral wrappers pass their own baseURL)
+    // keep the omit default — some reject unknown request fields.
+    const defaultCacheKeyMode =
+      options.cache !== false && this.isNativeOpenAiEndpoint() ? ('auto' as const) : undefined;
     const cacheKey = resolvePromptCacheKey(
-      options.promptCacheKey,
+      options.promptCacheKey ?? defaultCacheKeyMode,
       options.promptCacheSessionId ?? options.sessionId,
     );
     if (cacheKey) payload.prompt_cache_key = cacheKey;
