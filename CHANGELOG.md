@@ -1,3 +1,7 @@
+## <small>0.10.7 (2026-08-05)</small>
+
+* fix(memory): evict soft-deleted traces from recall ([39817e0a848527f2f4e8ac9d5b843e275bbf5a05](https://github.com/framerslab/agentos/commit/39817e0a848527f2f4e8ac9d5b843e275bbf5a05))
+
 ## <small>0.10.6 (2026-08-05)</small>
 
 * fix(llm): harden the zero-config caching defaults from review ([82e093422a0d24cf89c6281640a82c0d1e17ad26](https://github.com/framerslab/agentos/commit/82e093422a0d24cf89c6281640a82c0d1e17ad26))
