@@ -225,6 +225,56 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
     }
   });
 
+  it('hydration cannot restore a trace deleted while its vector upsert is in flight', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brainhydration-'));
+    const dbPath = path.join(tmpDir, 'brain.sqlite');
+    const brain = await Brain.openSqlite(dbPath);
+    let releaseHydration: (() => void) | undefined;
+    try {
+      const writer = mkStore(await mkVectorStore());
+      writer.setBrain(brain);
+      await writer.store(mkTrace('t1', 'remember this detail'));
+
+      const vectorStore = await mkVectorStore();
+      const originalUpsert = vectorStore.upsert.bind(vectorStore);
+      let signalHydrationStarted: (() => void) | undefined;
+      const hydrationStarted = new Promise<void>((resolve) => {
+        signalHydrationStarted = resolve;
+      });
+      const hydrationGate = new Promise<void>((resolve) => {
+        releaseHydration = resolve;
+      });
+      vi.spyOn(vectorStore, 'upsert').mockImplementation(async (collection, documents) => {
+        signalHydrationStarted?.();
+        await hydrationGate;
+        return originalUpsert(collection, documents);
+      });
+
+      const coldStore = mkStore(vectorStore);
+      coldStore.setBrain(brain);
+      const recall = coldStore.query('remember this detail', neutralMood, {
+        scopes: [{ scope: 'user' as MemoryScope, scopeId: 'u1' }],
+      });
+
+      await hydrationStarted;
+      await coldStore.softDelete('t1');
+      releaseHydration?.();
+
+      expect((await recall).scored).toEqual([]);
+      expect(await coldStore.getByScope('user', 'u1')).toEqual([]);
+      const vectorResult = await vectorStore.query(
+        'cogmem_user_u1',
+        new Array(16).fill(0).map((_, index) => (index === 0 ? 1 : 0)),
+        { topK: 10, includeMetadata: true },
+      );
+      expect(vectorResult.documents.map((document) => document.id)).not.toContain('t1');
+    } finally {
+      releaseHydration?.();
+      await brain.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('filters a cached tombstone when vector deletion reports failure', async () => {
     const vectorStore = await mkVectorStore();
     const store = mkStore(vectorStore);

@@ -244,6 +244,8 @@ export class MemoryStore {
   private traceCache: Map<string, MemoryTrace> = new Map();
   /** Cache embeddings by trace ID to avoid re-generating on metadata-only updates. */
   private embeddingCache: Map<string, number[]> = new Map();
+  /** Process-local deletion barrier for asynchronous vector refreshes and hydration. */
+  private tombstonedTraceIds: Set<string> = new Set();
   /** Track concrete scopes we have seen, so retrieval never falls back to a fake wildcard scope. */
   private knownScopes: Map<string, { scope: MemoryScope; scopeId: string }> = new Map();
   /** Optional cognitive mechanisms engine for retrieval-time hooks. */
@@ -311,7 +313,7 @@ export class MemoryStore {
         [this.brain.brainId, MemoryStore.HYDRATION_LIMIT],
       );
       for (const row of rows) {
-        if (this.traceCache.has(row.id)) continue; // already loaded this lifetime
+        if (this.tombstonedTraceIds.has(row.id) || this.traceCache.has(row.id)) continue;
         const embedding = blobToEmbedding(row.embedding);
         // Legacy rows (persisted before durable embeddings) stored null and are
         // skipped — they become recallable once re-mentioned + re-stored.
@@ -332,9 +334,18 @@ export class MemoryStore {
         } catch {
           // Provider auto-creates the collection or does not expose existence checks.
         }
+        if (this.tombstonedTraceIds.has(row.id)) continue;
         await this.config.vectorStore.upsert(collection, [
           { id: trace.id, textContent: trace.content, embedding, metadata: traceToMetadata(trace) },
         ]);
+        if (this.tombstonedTraceIds.has(row.id)) {
+          try {
+            await this.config.vectorStore.delete(collection, [row.id]);
+          } catch {
+            // Query and getByScope also enforce the process-local tombstone.
+          }
+          continue;
+        }
         this.traceCache.set(trace.id, trace);
         this.embeddingCache.set(trace.id, embedding);
         this.registerScope(trace.scope, trace.scopeId);
@@ -646,6 +657,7 @@ export class MemoryStore {
         });
 
         for (const result of results.documents) {
+          if (this.tombstonedTraceIds.has(result.id)) continue;
           const tracePartial = metadataToTracePartial(result.metadata ?? {});
           const cached = this.traceCache.get(result.id);
 
@@ -739,7 +751,7 @@ export class MemoryStore {
    */
   async recordAccess(traceId: string): Promise<RetrievalUpdateResult | null> {
     const trace = this.traceCache.get(traceId);
-    if (!trace?.isActive) return null;
+    if (this.tombstonedTraceIds.has(traceId) || !trace?.isActive) return null;
 
     const now = Date.now();
     const update = updateOnRetrieval(trace, now);
@@ -840,7 +852,12 @@ export class MemoryStore {
     // Return from cache + filter
     const results: MemoryTrace[] = [];
     for (const trace of this.traceCache.values()) {
-      if (trace.isActive && trace.scope === scope && trace.scopeId === scopeId) {
+      if (
+        !this.tombstonedTraceIds.has(trace.id) &&
+        trace.isActive &&
+        trace.scope === scope &&
+        trace.scopeId === scopeId
+      ) {
         if (!type || trace.type === type) {
           results.push(trace);
         }
@@ -864,6 +881,7 @@ export class MemoryStore {
           includeTextContent: true,
         });
         for (const doc of queryResult.documents) {
+          if (this.tombstonedTraceIds.has(doc.id)) continue;
           if (!doc.metadata) continue;
           const cached = this.traceCache.get(doc.id);
           if (cached) {
@@ -907,7 +925,7 @@ export class MemoryStore {
   async persistTraceMetadata(traceId: string): Promise<void> {
     const trace = this.traceCache.get(traceId);
     const embedding = this.embeddingCache.get(traceId);
-    if (!trace || !embedding) return;
+    if (this.tombstonedTraceIds.has(traceId) || !trace || !embedding) return;
 
     const collection = collectionName(this.config.collectionPrefix, trace.scope, trace.scopeId);
     const doc: VectorDocument = {
@@ -928,6 +946,9 @@ export class MemoryStore {
    * Soft-delete a trace.
    */
   async softDelete(traceId: string): Promise<void> {
+    // Establish the deletion barrier before any awaited lookup or provider
+    // operation so a concurrent hydration or metadata refresh cannot win.
+    this.tombstonedTraceIds.add(traceId);
     let trace = this.traceCache.get(traceId);
 
     // A caller may delete before the first recall hydrates this process-local
