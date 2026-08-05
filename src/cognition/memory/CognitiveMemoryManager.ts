@@ -280,6 +280,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
   private workingMemory!: CognitiveWorkingMemory;
   private featureDetector!: IContentFeatureDetector;
   private initialized = false;
+  private shuttingDown = false;
 
   // Batch 2 modules (optional)
   private graph: IMemoryGraph | null = null;
@@ -319,6 +320,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
   private typedNetworkExtractAtEncode = false;
 
   async initialize(config: CognitiveMemoryConfig): Promise<void> {
+    this.shuttingDown = false;
     this.config = config;
 
     // Cognitive Mechanisms (optional — dynamic import to avoid loading when unused)
@@ -1022,9 +1024,16 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       const seedIds = result.retrieved.slice(0, 3).map((t) => t.id);
       try {
         const activated = await this.graph.spreadingActivation(seedIds, { maxResults: 5 });
+        const recallableIds = await this.store.filterRecallableTraceIds(
+          activated.map((node) => node.memoryId),
+        );
         for (const node of activated) {
           const trace = this.store.getTrace(node.memoryId);
-          if (trace) {
+          if (
+            trace?.isActive &&
+            recallableIds.has(node.memoryId) &&
+            !this.store.isDeleted(node.memoryId)
+          ) {
             graphContext.push(
               `[associated, activation=${node.activation.toFixed(2)}] ${trace.content.substring(0, 150)}`
             );
@@ -1268,6 +1277,9 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
   // =========================================================================
 
   async runConsolidation(): Promise<ConsolidationResult> {
+    if (this.shuttingDown) {
+      throw new Error('CognitiveMemoryManager is shutting down');
+    }
     if (!this.consolidation) {
       return {
         prunedCount: 0,
@@ -1404,9 +1416,15 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
   // =========================================================================
 
   async shutdown(): Promise<void> {
+    this.shuttingDown = true;
     this.consolidation?.stop();
-    await this.graph?.shutdown();
-    this.initialized = false;
+    await this.consolidation?.waitForIdle();
+    try {
+      await this.graph?.shutdown();
+    } finally {
+      this.store?.dispose();
+      this.initialized = false;
+    }
   }
 
   // =========================================================================

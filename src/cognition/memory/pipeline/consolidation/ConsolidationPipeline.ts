@@ -95,6 +95,7 @@ export class ConsolidationPipeline {
   private decayConfig: DecayConfig;
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastRunAt: number = 0;
+  private readonly activeRuns = new Set<Promise<ConsolidationResult>>();
 
   constructor(config: ConsolidationPipelineConfig) {
     this.config = config;
@@ -119,7 +120,12 @@ export class ConsolidationPipeline {
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(
-      () => { void this.run(); },
+      () => {
+        void this.run().catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(`[ConsolidationPipeline] periodic cycle failed: ${message}`);
+        });
+      },
       this.consolidationConfig.intervalMs,
     );
     // Allow Node to exit even if the timer is pending. Works on both
@@ -138,9 +144,29 @@ export class ConsolidationPipeline {
   }
 
   /**
+   * Wait for every consolidation cycle admitted before or during the drain.
+   * Call {@link stop} first when shutting down to prevent new timer cycles.
+   */
+  async waitForIdle(): Promise<void> {
+    while (this.activeRuns.size > 0) {
+      await Promise.allSettled([...this.activeRuns]);
+    }
+  }
+
+  /**
    * Run a single consolidation cycle.
    */
   async run(): Promise<ConsolidationResult> {
+    const cycle = this.runCycle();
+    this.activeRuns.add(cycle);
+    try {
+      return await cycle;
+    } finally {
+      this.activeRuns.delete(cycle);
+    }
+  }
+
+  private async runCycle(): Promise<ConsolidationResult> {
     const startTime = Date.now();
     const result: ConsolidationResult = {
       prunedCount: 0,

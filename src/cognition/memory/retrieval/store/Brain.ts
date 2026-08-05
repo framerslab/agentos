@@ -59,11 +59,195 @@ import { redactPostgresPassword } from './postgresPasswordRedaction.js';
  * Used by {@link Brain.open} when the caller does not supply an
  * explicit `brainId`.
  */
-function deriveBrainIdFromPath(dbPath: string): string {
-  if (dbPath === ':memory:') return 'default';
-  const basename = path.basename(dbPath);
+function parseBetterSqliteUri(dbPath: string): {
+  body: string;
+  params: URLSearchParams;
+} {
+  const withoutFragment = dbPath.split('#', 1)[0];
+  const queryIndex = withoutFragment.indexOf('?');
+  const resource = queryIndex >= 0
+    ? withoutFragment.slice(0, queryIndex)
+    : withoutFragment;
+  const query = queryIndex >= 0 ? withoutFragment.slice(queryIndex + 1) : '';
+  const encodedBody = resource.slice('file:'.length);
+  let body: string;
+  try {
+    body = decodeURIComponent(encodedBody);
+  } catch {
+    body = encodedBody;
+  }
+  return { body, params: new URLSearchParams(query) };
+}
+
+function sqliteUriBodyToPath(body: string): string {
+  if (body.toLowerCase().startsWith('//localhost/')) {
+    return body.slice('//localhost'.length);
+  }
+  if (body.startsWith('///')) {
+    return body.slice(2);
+  }
+  return body;
+}
+
+function deriveBrainIdFromPath(dbPath: string, adapterKind?: string): string {
+  let resourcePath = dbPath;
+  if (adapterKind === 'better-sqlite3' && dbPath.startsWith('file:')) {
+    const { body } = parseBetterSqliteUri(dbPath);
+    resourcePath = sqliteUriBodyToPath(body);
+  }
+  if (resourcePath === ':memory:') return 'default';
+  const basename = path.basename(resourcePath);
   const lastDot = basename.lastIndexOf('.');
   return lastDot > 0 ? basename.slice(0, lastDot) : basename;
+}
+
+interface CoordinationTokenRegistration {
+  identity: string;
+  reference: ReferenceLike<object>;
+}
+
+interface ReferenceLike<T extends object> {
+  deref(): T | undefined;
+}
+
+interface FinalizerLike<T> {
+  register(target: object, heldValue: T, unregisterToken?: object): void;
+  unregister(unregisterToken: object): boolean;
+}
+
+const WeakRefImplementation =
+  typeof WeakRef === 'function' ? WeakRef : undefined;
+const FinalizationRegistryImplementation =
+  typeof FinalizationRegistry === 'function' ? FinalizationRegistry : undefined;
+
+function createReference<T extends object>(target: T): ReferenceLike<T> {
+  if (WeakRefImplementation) return new WeakRefImplementation(target);
+  // Compatibility fallback for runtimes that do not expose WeakRef. Interned
+  // Brain identities then live for the process lifetime and remain bounded by
+  // the number of backing resources opened by that runtime.
+  return { deref: () => target };
+}
+
+const coordinationTokens = new Map<string, ReferenceLike<object>>();
+const adapterCoordinationTokens = new WeakMap<StorageAdapter, Map<string, object>>();
+const coordinationTokenFinalizer: FinalizerLike<CoordinationTokenRegistration> | null =
+  FinalizationRegistryImplementation
+    ? new FinalizationRegistryImplementation<CoordinationTokenRegistration>(
+        ({ identity, reference }) => {
+          if (coordinationTokens.get(identity) === reference) {
+            coordinationTokens.delete(identity);
+          }
+        },
+      )
+    : null;
+
+function internCoordinationToken(identity: string): object {
+  const existing = coordinationTokens.get(identity)?.deref();
+  if (existing) return existing;
+  const token = {};
+  const reference = createReference(token);
+  coordinationTokens.set(identity, reference);
+  coordinationTokenFinalizer?.register(token, { identity, reference }, reference);
+  return token;
+}
+
+function rememberAdapterCoordinationToken(
+  adapter: StorageAdapter,
+  brainId: string,
+  token: object,
+): void {
+  let tokens = adapterCoordinationTokens.get(adapter);
+  if (!tokens) {
+    tokens = new Map();
+    adapterCoordinationTokens.set(adapter, tokens);
+  }
+  tokens.set(brainId, token);
+}
+
+function coordinationTokenForAdapter(adapter: StorageAdapter, brainId: string): object {
+  let tokens = adapterCoordinationTokens.get(adapter);
+  if (!tokens) {
+    tokens = new Map();
+    adapterCoordinationTokens.set(adapter, tokens);
+  }
+  let token = tokens.get(brainId);
+  if (!token) {
+    token = {};
+    tokens.set(brainId, token);
+  }
+  return token;
+}
+
+function rememberedAdapterCoordinationToken(
+  adapter: StorageAdapter,
+  brainId: string,
+): object | undefined {
+  return adapterCoordinationTokens.get(adapter)?.get(brainId);
+}
+
+async function sqliteCoordinationIdentity(
+  dbPath: string,
+  brainId: string,
+  adapterKind: string,
+): Promise<string | null> {
+  let resourcePath = dbPath;
+  // better-sqlite3 delegates `file:` names to SQLite, which applies URI
+  // semantics. sql.js treats the same string as a literal OS filename, so
+  // decoding it here would make distinct backing files share a token.
+  if (adapterKind === 'better-sqlite3' && dbPath.startsWith('file:')) {
+    const { body, params } = parseBetterSqliteUri(dbPath);
+    const isMemory = body === ':memory:' || params.get('mode') === 'memory';
+    if (isMemory) {
+      if (params.get('cache') !== 'shared') return null;
+      return JSON.stringify([
+        'sqlite-memory-uri',
+        adapterKind,
+        sqliteUriBodyToPath(body),
+        brainId,
+      ]);
+    }
+
+    if (body.startsWith('//') && !body.toLowerCase().startsWith('//localhost/')) {
+      return JSON.stringify(['sqlite-uri', adapterKind, body, brainId]);
+    }
+    resourcePath = sqliteUriBodyToPath(body);
+  }
+
+  const target = await fs.realpath(resourcePath).catch(() => path.resolve(resourcePath));
+  return JSON.stringify(['sqlite', adapterKind, target, brainId]);
+}
+
+function postgresCoordinationIdentity(connectionString: string, brainId: string): string {
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(connectionString)) {
+    try {
+      const url = new URL(connectionString);
+      // Keep the role in the internal identity. PostgreSQL defaults the
+      // database to the role when no path is supplied, and role-specific RLS
+      // or `$user` schemas must never share a coordination namespace.
+      url.password = '';
+      for (const key of [...url.searchParams.keys()]) {
+        if (
+          ['password', 'passfile', 'sslcert', 'sslkey', 'sslpassword']
+            .includes(key.toLowerCase())
+        ) {
+          url.searchParams.delete(key);
+        }
+      }
+      url.searchParams.sort();
+      return JSON.stringify(['postgres', url.toString(), brainId]);
+    } catch {
+      // Fall through to credential stripping for malformed or keyword input.
+    }
+  }
+
+  const credentialKey = '(?:password|passfile|sslcert|sslkey|sslpassword)';
+  const withoutCredentials = connectionString
+    .replace(/^([a-z][a-z0-9+.-]*:\/\/[^:@/]+):[^@/]*@/i, '$1@')
+    .replace(new RegExp(`\\b${credentialKey}\\s*=\\s*'(?:''|\\\\'|[^'])*'`, 'gi'), '')
+    .replace(new RegExp(`\\b${credentialKey}\\s*=\\s*"(?:""|\\\\"|[^"])*"`, 'gi'), '')
+    .replace(new RegExp(`\\b${credentialKey}\\s*=\\s*[^\\s'"]+`, 'gi'), '')
+    .trim();
+  return JSON.stringify(['postgres', withoutCredentials, brainId]);
 }
 
 // redactPostgresPassword extracted to ./postgresPasswordRedaction.ts
@@ -431,6 +615,13 @@ export class Brain {
    */
   readonly #brainId: string;
 
+  /**
+   * Opaque process-local key for coordinating operations that target the
+   * same durable storage resource. It intentionally contains no path or
+   * connection-string material.
+   */
+  readonly #coordinationToken: object;
+
   // ---------------------------------------------------------------------------
   // Constructor (private — use Brain.open())
   // ---------------------------------------------------------------------------
@@ -441,11 +632,18 @@ export class Brain {
    * @param adapter  - A fully initialised StorageAdapter instance.
    * @param features - Platform-aware feature bundle.
    * @param brainId  - Brain identifier used to scope multi-tenant queries.
+   * @param coordinationToken - Opaque identity of the backing store and brain.
    */
-  private constructor(adapter: StorageAdapter, features: StorageFeatures, brainId: string) {
+  private constructor(
+    adapter: StorageAdapter,
+    features: StorageFeatures,
+    brainId: string,
+    coordinationToken: object,
+  ) {
     this._adapter = adapter;
     this._features = features;
     this.#brainId = brainId;
+    this.#coordinationToken = coordinationToken;
   }
 
   /**
@@ -455,6 +653,14 @@ export class Brain {
    */
   get brainId(): string {
     return this.#brainId;
+  }
+
+  /**
+   * Opaque identity used to serialize same-process operations across
+   * separate Brain handles that address the same backing store.
+   */
+  get coordinationToken(): object {
+    return this.#coordinationToken;
   }
 
   // ---------------------------------------------------------------------------
@@ -477,26 +683,41 @@ export class Brain {
    * Open a Brain backed by SQLite. Tries adapters in order:
    * better-sqlite3 (Node native) -> sql.js (WASM) -> indexeddb (browser).
    *
-   * @param path - File path. Use `:memory:` for in-process testing.
+   * @param dbPath - File path. Use `:memory:` for in-process testing.
    * @param opts.brainId - Optional explicit brainId; defaults to file basename
    *   (or `'default'` for `:memory:`).
    * @param opts.priority - Override the default adapter priority.
+   * @param opts.coordinationToken - Optional process-local identity for
+   *   non-filesystem adapters whose resource name is adapter-specific.
    * @returns A fully initialised `Brain` instance with the v2 schema.
    */
   static async openSqlite(
-    path: string,
+    dbPath: string,
     opts: {
       brainId?: string;
       priority?: ('better-sqlite3' | 'sqljs' | 'indexeddb')[];
+      coordinationToken?: object;
     } = {},
   ): Promise<Brain> {
     const adapter = await resolveStorageAdapter({
-      filePath: path,
+      filePath: dbPath,
       priority: opts.priority ?? ['better-sqlite3', 'sqljs', 'indexeddb'],
       quiet: true,
     });
-    const brainId = opts.brainId ?? deriveBrainIdFromPath(path);
-    return Brain._initialize(adapter, brainId);
+    const brainId = opts.brainId ?? deriveBrainIdFromPath(dbPath, adapter.kind);
+    const usesFileIdentity =
+      adapter.kind === 'better-sqlite3' ||
+      (adapter.kind === 'sqljs' && adapter.capabilities.has('persistence'));
+    const identity = usesFileIdentity && dbPath !== ':memory:'
+      ? await sqliteCoordinationIdentity(dbPath, brainId, adapter.kind)
+      : null;
+    const coordinationToken =
+      opts.coordinationToken ??
+      (identity
+        ? internCoordinationToken(identity)
+        : coordinationTokenForAdapter(adapter, brainId));
+    rememberAdapterCoordinationToken(adapter, brainId, coordinationToken);
+    return Brain._initialize(adapter, brainId, coordinationToken);
   }
 
   /**
@@ -529,7 +750,11 @@ export class Brain {
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`Brain.openPostgres: connection failed for ${safe}: ${msg}`);
     }
-    return Brain._initialize(adapter, opts.brainId);
+    const coordinationToken = internCoordinationToken(
+      postgresCoordinationIdentity(connectionString, opts.brainId),
+    );
+    rememberAdapterCoordinationToken(adapter, opts.brainId, coordinationToken);
+    return Brain._initialize(adapter, opts.brainId, coordinationToken);
   }
 
   /**
@@ -553,10 +778,12 @@ export class Brain {
    * @param adapter - Pre-built StorageAdapter instance.
    * @param opts.brainId - Required for postgres-kind adapters; optional for
    *   sqlite-kind adapters (defaults to `'default'`).
+   * @param opts.coordinationToken - Optional shared opaque token for separate
+   *   adapter objects that address the same backing database and brain.
    */
   static async openWithAdapter(
     adapter: StorageAdapter,
-    opts: { brainId?: string } = {},
+    opts: { brainId?: string; coordinationToken?: object } = {},
   ): Promise<Brain> {
     const isPostgres = adapter.kind.includes('postgres');
     if (isPostgres && !opts.brainId) {
@@ -565,7 +792,21 @@ export class Brain {
       );
     }
     const brainId = opts.brainId ?? 'default';
-    return Brain._initialize(adapter, brainId);
+    const remembered = rememberedAdapterCoordinationToken(adapter, brainId);
+    if (
+      opts.coordinationToken &&
+      remembered &&
+      remembered !== opts.coordinationToken
+    ) {
+      throw new Error(
+        'Brain.openWithAdapter: coordinationToken conflicts with the token already ' +
+          'registered for this adapter and brainId',
+      );
+    }
+    const coordinationToken =
+      opts.coordinationToken ?? remembered ?? coordinationTokenForAdapter(adapter, brainId);
+    rememberAdapterCoordinationToken(adapter, brainId, coordinationToken);
+    return Brain._initialize(adapter, brainId, coordinationToken);
   }
 
   /**
@@ -579,9 +820,13 @@ export class Brain {
    * 5. Apply full DDL via _initSchema().
    * 6. Seed brain_meta defaults.
    */
-  private static async _initialize(adapter: StorageAdapter, brainId: string): Promise<Brain> {
+  private static async _initialize(
+    adapter: StorageAdapter,
+    brainId: string,
+    coordinationToken: object,
+  ): Promise<Brain> {
     const features = createStorageFeatures(adapter);
-    const brain = new Brain(adapter, features, brainId);
+    const brain = new Brain(adapter, features, brainId, coordinationToken);
 
     const walPragma = features.dialect.pragma('journal_mode', 'WAL');
     if (walPragma) await adapter.exec(walPragma);

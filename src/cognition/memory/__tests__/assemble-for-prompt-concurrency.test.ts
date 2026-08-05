@@ -50,6 +50,7 @@ function makeMocks() {
   const mockVectorStore = {
     initialize: vi.fn(),
     upsert: vi.fn(),
+    delete: vi.fn().mockResolvedValue({ deletedCount: 1, failedCount: 0 }),
     query: vi.fn().mockResolvedValue({ documents: [] }),
     collectionExists: vi.fn().mockResolvedValue(true),
     createCollection: vi.fn(),
@@ -161,5 +162,146 @@ describe('assembleForPrompt concurrency', () => {
     const out = await manager.assembleForPrompt('hello there', 2048, MOOD);
     expect(typeof out.contextText).toBe('string');
     expect(out.contextText).not.toContain('operator notes');
+  });
+
+  it('does not inject a deleted graph-associated trace into the prompt', async () => {
+    const deletedTrace = {
+      id: 'deleted-associated',
+      type: 'episodic',
+      scope: 'user',
+      scopeId: 'u1',
+      content: 'deleted association must stay out of prompts',
+      entities: [],
+      tags: [],
+      provenance: {
+        sourceType: 'user_statement',
+        sourceTimestamp: Date.now(),
+        confidence: 1,
+        verificationCount: 0,
+      },
+      emotionalContext: {
+        valence: 0,
+        arousal: 0,
+        dominance: 0,
+        intensity: 0,
+        gmiMood: '',
+      },
+      encodingStrength: 0.8,
+      stability: 0.5,
+      retrievalCount: 0,
+      lastAccessedAt: Date.now(),
+      accessCount: 0,
+      reinforcementInterval: 0,
+      associatedTraceIds: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      isActive: true,
+    } as const;
+    await manager.getStore().store(deletedTrace as never);
+    await manager.getStore().softDelete(deletedTrace.id);
+
+    vi.spyOn(manager, 'retrieve').mockResolvedValue({
+      retrieved: [{
+        ...deletedTrace,
+        id: 'active-seed',
+        content: 'active seed',
+        isActive: true,
+        retrievalScore: 0.9,
+        vectorSimilarity: 0.9,
+        scoreBreakdown: {
+          strengthScore: 0.9,
+          similarityScore: 0.9,
+          recencyScore: 0.9,
+          emotionalCongruenceScore: 0.5,
+          graphActivationScore: 0,
+          importanceScore: 0.8,
+        },
+      }],
+      partiallyRetrieved: [],
+      diagnostics: {
+        candidatesScanned: 1,
+        vectorSearchTimeMs: 0,
+        scoringTimeMs: 0,
+        totalTimeMs: 0,
+      },
+    } as never);
+    vi.spyOn(manager.getGraph()!, 'spreadingActivation').mockResolvedValue([{
+      memoryId: deletedTrace.id,
+      activation: 0.8,
+      depth: 1,
+      activatedBy: ['active-seed'],
+    }]);
+
+    const out = await manager.assembleForPrompt('recall the active seed', 2048, MOOD);
+    expect(out.contextText).not.toContain(deletedTrace.content);
+  });
+
+  it('manager shutdown disposes its memory store registration', async () => {
+    const store = manager.getStore();
+    await manager.shutdown();
+    await expect(store.query('after shutdown', MOOD)).rejects.toThrow(
+      'operation attempted after dispose',
+    );
+  });
+
+  it('manager shutdown waits for an active consolidation cycle', async () => {
+    const store = manager.getStore();
+    let signalCycleStarted: (() => void) | undefined;
+    let releaseCycle: (() => void) | undefined;
+    const cycleStarted = new Promise<void>((resolve) => {
+      signalCycleStarted = resolve;
+    });
+    const cycleGate = new Promise<void>((resolve) => {
+      releaseCycle = resolve;
+    });
+    vi.spyOn(store, 'getByScope').mockImplementationOnce(async () => {
+      signalCycleStarted?.();
+      await cycleGate;
+      return [];
+    });
+    const disposeSpy = vi.spyOn(store, 'dispose');
+
+    const consolidation = manager.runConsolidation();
+    await cycleStarted;
+    const shuttingDown = manager.shutdown();
+    try {
+      await Promise.resolve();
+      expect(disposeSpy).not.toHaveBeenCalled();
+    } finally {
+      releaseCycle?.();
+      await Promise.all([consolidation, shuttingDown]);
+    }
+    expect(disposeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('manager shutdown blocks new consolidation admission before disposal', async () => {
+    const store = manager.getStore();
+    const consolidation = (
+      manager as unknown as {
+        consolidation: { stop: () => void; waitForIdle: () => Promise<void> };
+      }
+    ).consolidation;
+    let releaseDrain: (() => void) | undefined;
+    const drainGate = new Promise<void>((resolve) => {
+      releaseDrain = resolve;
+    });
+    const stopSpy = vi.spyOn(consolidation, 'stop');
+    const waitSpy = vi.spyOn(consolidation, 'waitForIdle').mockImplementation(
+      async () => drainGate,
+    );
+    const disposeSpy = vi.spyOn(store, 'dispose');
+
+    const shuttingDown = manager.shutdown();
+    try {
+      await Promise.resolve();
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+      expect(waitSpy).toHaveBeenCalledTimes(1);
+      expect(disposeSpy).not.toHaveBeenCalled();
+      await expect(manager.runConsolidation()).rejects.toThrow('is shutting down');
+    } finally {
+      releaseDrain?.();
+      await shuttingDown;
+    }
+    expect(disposeSpy).toHaveBeenCalledTimes(1);
   });
 });
