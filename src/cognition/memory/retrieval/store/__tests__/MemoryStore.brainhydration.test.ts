@@ -2,7 +2,10 @@ import { describe, it, expect, vi } from 'vitest';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
-import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
+import {
+  resolveStorageAdapter,
+  type StorageParameters,
+} from '@framers/sql-storage-adapter';
 import { Brain } from '../Brain.js';
 import { MemoryStore } from '../MemoryStore.js';
 import { InMemoryVectorStore } from '../../../../rag/vector_stores/InMemoryVectorStore.js';
@@ -655,7 +658,10 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
         const tombstoneRead = new Promise<void>((resolve) => {
           signalTombstoneRead = resolve;
         });
-        vi.spyOn(brain, 'all').mockImplementation(async <T = unknown>(sql, params) => {
+        vi.spyOn(brain, 'all').mockImplementation(async <T = unknown>(
+          sql: string,
+          params?: StorageParameters,
+        ) => {
           const rows = await originalAll<T>(sql, params);
           if (sql.includes('id IN') && Array.isArray(params) && params.includes('t1')) {
             signalTombstoneRead?.();
@@ -766,7 +772,10 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
       const coldStore = mkStore(vectorStore);
       coldStore.setBrain(brain);
       const originalAll = brain.all.bind(brain) as typeof brain.all;
-      vi.spyOn(brain, 'all').mockImplementation(async <T = unknown>(sql, params) => {
+      vi.spyOn(brain, 'all').mockImplementation(async <T = unknown>(
+        sql: string,
+        params?: StorageParameters,
+      ) => {
         if (sql.includes('id IN')) throw new Error('simulated durable read outage');
         return originalAll<T>(sql, params);
       });
@@ -839,7 +848,10 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
       const missingRead = new Promise<void>((resolve) => {
         signalMissingRead = resolve;
       });
-      vi.spyOn(brain, 'all').mockImplementation(async <T = unknown>(sql, params) => {
+      vi.spyOn(brain, 'all').mockImplementation(async <T = unknown>(
+        sql: string,
+        params?: StorageParameters,
+      ) => {
         const rows = await originalAll<T>(sql, params);
         if (
           sql.includes('id IN') &&
