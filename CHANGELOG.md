@@ -1,3 +1,7 @@
+## <small>0.10.10 (2026-08-05)</small>
+
+* fix(memory): make failed vector evictions retryable and tombstones lifecycle-proof ([8f5594b982505f33af98b1a093569c44cf412929](https://github.com/framerslab/agentos/commit/8f5594b982505f33af98b1a093569c44cf412929))
+
 ## <small>0.10.9 (2026-08-05)</small>
 
 * fix(memory): prevent hydration from reviving deleted traces ([d75e235499a04911b322093b44fbb3631da58cc5](https://github.com/framerslab/agentos/commit/d75e235499a04911b322093b44fbb3631da58cc5))
