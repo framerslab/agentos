@@ -36,6 +36,7 @@ describe('memory retrieval policy', () => {
   it('suppresses weak cognitive hits when policy minScore is not met', async () => {
     const manager = new CognitiveMemoryManager();
     (manager as any).initialized = true;
+    (manager as any).lifecycleState = 'initialized';
     (manager as any).store = {
       query: vi.fn().mockResolvedValue({
         scored: [

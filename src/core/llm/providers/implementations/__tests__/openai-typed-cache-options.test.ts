@@ -73,8 +73,69 @@ describe('OpenAIProvider typed cache/tier options', () => {
     return JSON.parse((call[1] as RequestInit).body as string) as Record<string, unknown>;
   }
 
-  it('omits prompt_cache_key when the option is absent (zero-change default)', async () => {
+  it('derives prompt_cache_key from sessionId when the option is absent (zero-config default)', async () => {
     const body = await requestBody({ sessionId: 's-1' });
+    const expected = 'agentos:' + createHash('sha256').update('s-1').digest('hex').slice(0, 16);
+    expect(body.prompt_cache_key).toBe(expected);
+  });
+
+  it('omits prompt_cache_key when neither the option nor a session id is present', async () => {
+    const body = await requestBody({});
+    expect(body).not.toHaveProperty('prompt_cache_key');
+  });
+
+  it('cache:false suppresses the zero-config default derivation', async () => {
+    const body = await requestBody({ sessionId: 's-1', cache: false });
+    expect(body).not.toHaveProperty('prompt_cache_key');
+  });
+
+  it('explicit auto still derives under cache:false (explicit wins)', async () => {
+    const body = await requestBody({ sessionId: 's-1', cache: false, promptCacheKey: 'auto' });
+    const expected = 'agentos:' + createHash('sha256').update('s-1').digest('hex').slice(0, 16);
+    expect(body.prompt_cache_key).toBe(expected);
+  });
+
+  it('an OpenAI-compatible gateway baseURL keeps the omit default', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          object: 'list',
+          data: [{ id: 'llama-3.3-70b-versatile', object: 'model', created: 1, owned_by: 'meta' }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const gateway = new OpenAIProvider();
+    await gateway.initialize({
+      apiKey: 'gk-test',
+      baseURL: 'https://api.groq.com/openai/v1',
+      maxRetries: 1,
+    });
+    await gateway.generateCompletion('llama-3.3-70b-versatile', messages, { sessionId: 's-1' });
+    const call = fetchSpy.mock.calls.at(-1)!;
+    const body = JSON.parse((call[1] as RequestInit).body as string) as Record<string, unknown>;
+    expect(body).not.toHaveProperty('prompt_cache_key');
+  });
+
+  it('a look-alike host containing api.openai.com stays a gateway (exact-host match)', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          object: 'list',
+          data: [{ id: 'gpt-5.5', object: 'model', created: 1, owned_by: 'openai' }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const lookalike = new OpenAIProvider();
+    await lookalike.initialize({
+      apiKey: 'gk-test',
+      baseURL: 'https://api.openai.com.evil.example/v1',
+      maxRetries: 1,
+    });
+    await lookalike.generateCompletion('gpt-5.5', messages, { sessionId: 's-1' });
+    const call = fetchSpy.mock.calls.at(-1)!;
+    const body = JSON.parse((call[1] as RequestInit).body as string) as Record<string, unknown>;
     expect(body).not.toHaveProperty('prompt_cache_key');
   });
 

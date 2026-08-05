@@ -59,11 +59,298 @@ import { redactPostgresPassword } from './postgresPasswordRedaction.js';
  * Used by {@link Brain.open} when the caller does not supply an
  * explicit `brainId`.
  */
-function deriveBrainIdFromPath(dbPath: string): string {
-  if (dbPath === ':memory:') return 'default';
-  const basename = path.basename(dbPath);
+function parseBetterSqliteUri(dbPath: string): {
+  body: string;
+  params: URLSearchParams;
+  rawQuery: string;
+} {
+  const withoutFragment = dbPath.split('#', 1)[0];
+  const queryIndex = withoutFragment.indexOf('?');
+  const resource = queryIndex >= 0
+    ? withoutFragment.slice(0, queryIndex)
+    : withoutFragment;
+  const query = queryIndex >= 0 ? withoutFragment.slice(queryIndex + 1) : '';
+  const encodedBody = resource.slice('file:'.length);
+  let body: string;
+  try {
+    body = decodeURIComponent(encodedBody);
+  } catch {
+    body = encodedBody;
+  }
+  return { body, params: new URLSearchParams(query), rawQuery: query };
+}
+
+function sqliteUriBodyToPath(body: string): string {
+  if (body.toLowerCase().startsWith('//localhost/')) {
+    return body.slice('//localhost'.length);
+  }
+  if (body.startsWith('///')) {
+    return body.slice(2);
+  }
+  return body;
+}
+
+function sharedMemoryUriParameterIdentity(rawQuery: string): string {
+  const parameters = rawQuery.split('&');
+  // This is intentionally limited to the exact stock SQLite pair. SQLite
+  // passes every parameter to the VFS, so preserve raw spelling and ordering
+  // whenever duplicates, encodings, VFS selectors, or extra keys are present.
+  if (
+    parameters.length === 2 &&
+    parameters.includes('mode=memory') &&
+    parameters.includes('cache=shared')
+  ) {
+    return 'cache=shared&mode=memory';
+  }
+  return rawQuery;
+}
+
+interface SqliteOpenedResource {
+  /** Absolute filename reported by SQLite, empty for in-memory, null when unavailable. */
+  filename: string | null;
+  /** True only when the opened connection proves that a file URI selected memory mode. */
+  isUriMemory: boolean;
+  /** Ordered URI query string, retained conservatively for VFS-sensitive identity. */
+  uriParameters: string;
+  /** Whether this SQLite build can honor `cache=shared` for named memory URIs. */
+  supportsSharedCache: boolean;
+  /** Whether filename or caller-literal identity is safe to intern process-wide. */
+  identityKnown: boolean;
+}
+
+function deriveBrainIdFromPath(
+  dbPath: string,
+  openedResource: SqliteOpenedResource,
+): string {
+  let resourcePath = openedResource.filename || dbPath;
+  if (openedResource.isUriMemory) {
+    const { body } = parseBetterSqliteUri(dbPath);
+    resourcePath = sqliteUriBodyToPath(body);
+  }
+  if (resourcePath === ':memory:' || resourcePath === '') return 'default';
+  const basename = path.basename(resourcePath);
   const lastDot = basename.lastIndexOf('.');
   return lastDot > 0 ? basename.slice(0, lastDot) : basename;
+}
+
+interface CoordinationTokenRegistration {
+  identity: string;
+  reference: ReferenceLike<object>;
+}
+
+interface ReferenceLike<T extends object> {
+  deref(): T | undefined;
+}
+
+interface FinalizerLike<T> {
+  register(target: object, heldValue: T, unregisterToken?: object): void;
+  unregister(unregisterToken: object): boolean;
+}
+
+const WeakRefImplementation =
+  typeof WeakRef === 'function' ? WeakRef : undefined;
+const FinalizationRegistryImplementation =
+  typeof FinalizationRegistry === 'function' ? FinalizationRegistry : undefined;
+
+function createReference<T extends object>(target: T): ReferenceLike<T> {
+  if (WeakRefImplementation) return new WeakRefImplementation(target);
+  // Compatibility fallback for runtimes that do not expose WeakRef. Interned
+  // Brain identities then live for the process lifetime and remain bounded by
+  // the number of backing resources opened by that runtime.
+  return { deref: () => target };
+}
+
+const coordinationTokens = new Map<string, ReferenceLike<object>>();
+const adapterCoordinationTokens = new WeakMap<StorageAdapter, Map<string, object>>();
+const coordinationTokenFinalizer: FinalizerLike<CoordinationTokenRegistration> | null =
+  FinalizationRegistryImplementation
+    ? new FinalizationRegistryImplementation<CoordinationTokenRegistration>(
+        ({ identity, reference }) => {
+          if (coordinationTokens.get(identity) === reference) {
+            coordinationTokens.delete(identity);
+          }
+        },
+      )
+    : null;
+
+function internCoordinationToken(identity: string): object {
+  const existing = coordinationTokens.get(identity)?.deref();
+  if (existing) return existing;
+  const token = {};
+  const reference = createReference(token);
+  coordinationTokens.set(identity, reference);
+  coordinationTokenFinalizer?.register(token, { identity, reference }, reference);
+  return token;
+}
+
+function rememberAdapterCoordinationToken(
+  adapter: StorageAdapter,
+  brainId: string,
+  token: object,
+): void {
+  let tokens = adapterCoordinationTokens.get(adapter);
+  if (!tokens) {
+    tokens = new Map();
+    adapterCoordinationTokens.set(adapter, tokens);
+  }
+  tokens.set(brainId, token);
+}
+
+function coordinationTokenForAdapter(adapter: StorageAdapter, brainId: string): object {
+  let tokens = adapterCoordinationTokens.get(adapter);
+  if (!tokens) {
+    tokens = new Map();
+    adapterCoordinationTokens.set(adapter, tokens);
+  }
+  let token = tokens.get(brainId);
+  if (!token) {
+    token = {};
+    tokens.set(brainId, token);
+  }
+  return token;
+}
+
+function rememberedAdapterCoordinationToken(
+  adapter: StorageAdapter,
+  brainId: string,
+): object | undefined {
+  return adapterCoordinationTokens.get(adapter)?.get(brainId);
+}
+
+async function sqliteCoordinationIdentity(
+  dbPath: string,
+  brainId: string,
+  adapterKind: string,
+  openedResource: SqliteOpenedResource,
+): Promise<string | null> {
+  if (openedResource.isUriMemory) {
+    const { body, params } = parseBetterSqliteUri(dbPath);
+    if (params.get('cache') !== 'shared' || !openedResource.supportsSharedCache) {
+      return null;
+    }
+    return JSON.stringify([
+      'sqlite-memory-uri',
+      adapterKind,
+      sqliteUriBodyToPath(body),
+      sharedMemoryUriParameterIdentity(openedResource.uriParameters),
+      brainId,
+    ]);
+  }
+
+  if (!openedResource.identityKnown || openedResource.filename === '') {
+    return null;
+  }
+
+  // `PRAGMA database_list` exposes SQLite's opened filename, which is the
+  // VFS-resolved absolute path. This distinguishes an actually parsed file URI
+  // from a literal `file:` filename without trusting mutable process state.
+  const resourcePath = openedResource.filename ?? dbPath;
+  const target = await fs.realpath(resourcePath).catch(() => path.resolve(resourcePath));
+  return JSON.stringify([
+    'sqlite',
+    adapterKind,
+    target,
+    openedResource.uriParameters,
+    brainId,
+  ]);
+}
+
+async function inspectSqliteOpenedResource(
+  adapter: StorageAdapter,
+  dbPath: string,
+): Promise<SqliteOpenedResource> {
+  if (adapter.kind !== 'better-sqlite3') {
+    return {
+      filename: null,
+      isUriMemory: false,
+      uriParameters: '',
+      supportsSharedCache: false,
+      identityKnown: dbPath.length > 0,
+    };
+  }
+
+  const parsedUri = dbPath.startsWith('file:')
+    ? parseBetterSqliteUri(dbPath)
+    : null;
+
+  let filename: string | null;
+  try {
+    const rows = await adapter.all<{ seq: number; name: string; file: string }>(
+      'PRAGMA database_list',
+    );
+    const main = rows.find((row) => row.name === 'main') ?? rows[0];
+    filename = typeof main?.file === 'string' ? main.file : null;
+  } catch {
+    // A file URI can name private or ephemeral databases. Without SQLite's
+    // opened filename, interning its raw text could merge distinct resources.
+    return {
+      filename: null,
+      isUriMemory: false,
+      uriParameters: '',
+      supportsSharedCache: false,
+      identityKnown:
+        dbPath.length > 0 &&
+        !dbPath.startsWith('file:') &&
+        !dbPath.startsWith(':'),
+    };
+  }
+
+  let supportsSharedCache = false;
+  try {
+    const sharedCacheRow = await adapter.get<{ omitted: number }>(
+      "SELECT sqlite_compileoption_used('OMIT_SHARED_CACHE') AS omitted",
+    );
+    supportsSharedCache = Number(sharedCacheRow?.omitted ?? 0) === 0;
+  } catch {
+    // The opened filename remains authoritative for disk identity. Treat
+    // shared-memory support as unavailable when the compile probe is missing.
+  }
+
+  const isUriMemory = Boolean(
+    parsedUri &&
+    filename === '' &&
+    (parsedUri.body === ':memory:' || parsedUri.params.get('mode') === 'memory'),
+  );
+  return {
+    filename,
+    isUriMemory,
+    uriParameters: parsedUri?.rawQuery ?? '',
+    supportsSharedCache,
+    identityKnown: filename !== null,
+  };
+}
+
+function postgresCoordinationIdentity(connectionString: string, brainId: string): string {
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(connectionString)) {
+    try {
+      const url = new URL(connectionString);
+      // Keep the role in the internal identity. PostgreSQL defaults the
+      // database to the role when no path is supplied, and role-specific RLS
+      // or `$user` schemas must never share a coordination namespace.
+      url.password = '';
+      for (const key of [...url.searchParams.keys()]) {
+        if (
+          ['password', 'passfile', 'sslcert', 'sslkey', 'sslpassword']
+            .includes(key.toLowerCase())
+        ) {
+          url.searchParams.delete(key);
+        }
+      }
+      url.searchParams.sort();
+      return JSON.stringify(['postgres', url.toString(), brainId]);
+    } catch {
+      // Fall through to credential stripping for malformed or keyword input.
+    }
+  }
+
+  const credentialKey = '(?:password|passfile|sslcert|sslkey|sslpassword)';
+  const withoutCredentials = connectionString
+    .replace(/^([a-z][a-z0-9+.-]*:\/\/[^:@/]+):[^@/]*@/i, '$1@')
+    .replace(new RegExp(`\\b${credentialKey}\\s*=\\s*'(?:''|\\\\'|[^'])*'`, 'gi'), '')
+    .replace(new RegExp(`\\b${credentialKey}\\s*=\\s*"(?:""|\\\\"|[^"])*"`, 'gi'), '')
+    .replace(new RegExp(`\\b${credentialKey}\\s*=\\s*[^\\s'"]+`, 'gi'), '')
+    .trim();
+  return JSON.stringify(['postgres', withoutCredentials, brainId]);
 }
 
 // redactPostgresPassword extracted to ./postgresPasswordRedaction.ts
@@ -431,6 +718,13 @@ export class Brain {
    */
   readonly #brainId: string;
 
+  /**
+   * Opaque process-local key for coordinating operations that target the
+   * same durable storage resource. It intentionally contains no path or
+   * connection-string material.
+   */
+  readonly #coordinationToken: object;
+
   // ---------------------------------------------------------------------------
   // Constructor (private — use Brain.open())
   // ---------------------------------------------------------------------------
@@ -441,11 +735,18 @@ export class Brain {
    * @param adapter  - A fully initialised StorageAdapter instance.
    * @param features - Platform-aware feature bundle.
    * @param brainId  - Brain identifier used to scope multi-tenant queries.
+   * @param coordinationToken - Opaque identity of the backing store and brain.
    */
-  private constructor(adapter: StorageAdapter, features: StorageFeatures, brainId: string) {
+  private constructor(
+    adapter: StorageAdapter,
+    features: StorageFeatures,
+    brainId: string,
+    coordinationToken: object,
+  ) {
     this._adapter = adapter;
     this._features = features;
     this.#brainId = brainId;
+    this.#coordinationToken = coordinationToken;
   }
 
   /**
@@ -455,6 +756,14 @@ export class Brain {
    */
   get brainId(): string {
     return this.#brainId;
+  }
+
+  /**
+   * Opaque identity used to serialize same-process operations across
+   * separate Brain handles that address the same backing store.
+   */
+  get coordinationToken(): object {
+    return this.#coordinationToken;
   }
 
   // ---------------------------------------------------------------------------
@@ -477,26 +786,47 @@ export class Brain {
    * Open a Brain backed by SQLite. Tries adapters in order:
    * better-sqlite3 (Node native) -> sql.js (WASM) -> indexeddb (browser).
    *
-   * @param path - File path. Use `:memory:` for in-process testing.
+   * @param dbPath - File path. Use `:memory:` for in-process testing.
    * @param opts.brainId - Optional explicit brainId; defaults to file basename
    *   (or `'default'` for `:memory:`).
    * @param opts.priority - Override the default adapter priority.
+   * @param opts.coordinationToken - Optional process-local identity for
+   *   non-filesystem adapters whose resource name is adapter-specific.
    * @returns A fully initialised `Brain` instance with the v2 schema.
    */
   static async openSqlite(
-    path: string,
+    dbPath: string,
     opts: {
       brainId?: string;
       priority?: ('better-sqlite3' | 'sqljs' | 'indexeddb')[];
+      coordinationToken?: object;
     } = {},
   ): Promise<Brain> {
     const adapter = await resolveStorageAdapter({
-      filePath: path,
+      filePath: dbPath,
       priority: opts.priority ?? ['better-sqlite3', 'sqljs', 'indexeddb'],
       quiet: true,
     });
-    const brainId = opts.brainId ?? deriveBrainIdFromPath(path);
-    return Brain._initialize(adapter, brainId);
+    const openedResource = await inspectSqliteOpenedResource(adapter, dbPath);
+    const brainId = opts.brainId ?? deriveBrainIdFromPath(dbPath, openedResource);
+    const usesFileIdentity =
+      adapter.kind === 'better-sqlite3' ||
+      (adapter.kind === 'sqljs' && adapter.capabilities.has('persistence'));
+    const identity = usesFileIdentity && dbPath !== ':memory:'
+      ? await sqliteCoordinationIdentity(
+          dbPath,
+          brainId,
+          adapter.kind,
+          openedResource,
+        )
+      : null;
+    const coordinationToken =
+      opts.coordinationToken ??
+      (identity
+        ? internCoordinationToken(identity)
+        : coordinationTokenForAdapter(adapter, brainId));
+    rememberAdapterCoordinationToken(adapter, brainId, coordinationToken);
+    return Brain._initialize(adapter, brainId, coordinationToken);
   }
 
   /**
@@ -529,7 +859,11 @@ export class Brain {
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`Brain.openPostgres: connection failed for ${safe}: ${msg}`);
     }
-    return Brain._initialize(adapter, opts.brainId);
+    const coordinationToken = internCoordinationToken(
+      postgresCoordinationIdentity(connectionString, opts.brainId),
+    );
+    rememberAdapterCoordinationToken(adapter, opts.brainId, coordinationToken);
+    return Brain._initialize(adapter, opts.brainId, coordinationToken);
   }
 
   /**
@@ -553,10 +887,12 @@ export class Brain {
    * @param adapter - Pre-built StorageAdapter instance.
    * @param opts.brainId - Required for postgres-kind adapters; optional for
    *   sqlite-kind adapters (defaults to `'default'`).
+   * @param opts.coordinationToken - Optional shared opaque token for separate
+   *   adapter objects that address the same backing database and brain.
    */
   static async openWithAdapter(
     adapter: StorageAdapter,
-    opts: { brainId?: string } = {},
+    opts: { brainId?: string; coordinationToken?: object } = {},
   ): Promise<Brain> {
     const isPostgres = adapter.kind.includes('postgres');
     if (isPostgres && !opts.brainId) {
@@ -565,7 +901,21 @@ export class Brain {
       );
     }
     const brainId = opts.brainId ?? 'default';
-    return Brain._initialize(adapter, brainId);
+    const remembered = rememberedAdapterCoordinationToken(adapter, brainId);
+    if (
+      opts.coordinationToken &&
+      remembered &&
+      remembered !== opts.coordinationToken
+    ) {
+      throw new Error(
+        'Brain.openWithAdapter: coordinationToken conflicts with the token already ' +
+          'registered for this adapter and brainId',
+      );
+    }
+    const coordinationToken =
+      opts.coordinationToken ?? remembered ?? coordinationTokenForAdapter(adapter, brainId);
+    rememberAdapterCoordinationToken(adapter, brainId, coordinationToken);
+    return Brain._initialize(adapter, brainId, coordinationToken);
   }
 
   /**
@@ -579,9 +929,13 @@ export class Brain {
    * 5. Apply full DDL via _initSchema().
    * 6. Seed brain_meta defaults.
    */
-  private static async _initialize(adapter: StorageAdapter, brainId: string): Promise<Brain> {
+  private static async _initialize(
+    adapter: StorageAdapter,
+    brainId: string,
+    coordinationToken: object,
+  ): Promise<Brain> {
     const features = createStorageFeatures(adapter);
-    const brain = new Brain(adapter, features, brainId);
+    const brain = new Brain(adapter, features, brainId, coordinationToken);
 
     const walPragma = features.dialect.pragma('journal_mode', 'WAL');
     if (walPragma) await adapter.exec(walPragma);

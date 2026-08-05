@@ -79,6 +79,10 @@ export function resolveOpenAiCacheRetentionParams(
  * (spec C2.2): absent/`false` → omit; `'auto'` → sha256-derived from the
  * session id when present (raw ids never leave the process), else omit;
  * explicit string → sent verbatim after trimming (empty → omit).
+ *
+ * OpenAIProvider substitutes `'auto'` for an absent option on the native
+ * OpenAI endpoint (unless the call carries `cache: false`), so "absent →
+ * omit" here is the mechanism, not the effective provider default.
  */
 export function resolvePromptCacheKey(
   option: string | false | undefined,

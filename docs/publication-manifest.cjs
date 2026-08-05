@@ -226,6 +226,8 @@ const publicationManifest = [
   agentosDoc('STRUCTURED_OUTPUT.md', 'features/structured-output.md', 'Structured Output', 'Tools & Capabilities', 1),
   siteDoc('features/llm-output-validation.md', 'features/llm-output-validation.md', 'LLM Output Validation', 'Model Quality & Cost', 1.5),
   agentosDoc('EVALUATION.md', 'features/evaluation-guide.md', 'Evaluation Guide', 'Model Quality & Cost', 2),
+  agentosDoc('features/PROMPT_CACHING.md', 'features/prompt-caching.md', 'Prompt Caching', 'Model Quality & Cost', 2.5),
+  agentosDoc('features/CACHE_DIAGNOSTICS.md', 'features/cache-diagnostics.md', 'Cache Diagnostics', 'Model Quality & Cost', 2.6),
   agentosDoc('COST_OPTIMIZATION.md', 'features/cost-optimization.md', 'Cost Optimization', 'Model Quality & Cost', 3),
   agentosDoc('UNCENSORED_CONTENT.md', 'features/uncensored-content.md', 'Uncensored Content & Policy-Tier Routing', 'Model Quality & Cost', 3.5),
   agentosDoc('EVALUATION_FRAMEWORK.md', 'features/evaluation-framework.md', 'Evaluation Framework', 'Model Quality & Cost', 4, {

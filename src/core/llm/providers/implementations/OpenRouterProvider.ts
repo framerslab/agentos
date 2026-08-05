@@ -341,6 +341,138 @@ export class OpenRouterProvider implements IProvider {
     }
   }
 
+  /**
+   * Zero-config prompt caching for Anthropic models routed through
+   * OpenRouter. OpenRouter forwards Anthropic `cache_control` blocks
+   * unchanged, and Anthropic caches ONLY when a request carries them — an
+   * `anthropic/*` slug without markers can never hit cache. Direct
+   * Anthropic traffic gets markers from AnthropicProvider's auto path;
+   * this applies the same default to the OpenRouter leg.
+   *
+   * Marks two breakpoints, mirroring the direct auto path:
+   * - the first system message (stable prefix — later system messages can
+   *   be volatile per-turn recall appended by memory hooks), and
+   * - the last text block of the final message (moving tail, so multi-turn
+   *   history is read back on the next turn).
+   *
+   * Stands down entirely when the caller already placed any cache_control
+   * marker on messages or tool definitions (caller placement wins), or on
+   * the `AGENTOS_ANTHROPIC_AUTO_CACHE=0`/`false` kill switch (same syntax
+   * as the direct path). `options.cache === false` goes further, mirroring
+   * the direct provider's per-call hard-off: caller markers already in the
+   * message content are stripped as well. Sub-floor prefixes are safe to
+   * mark: Anthropic silently ignores markers below the model's minimum
+   * cacheable length. `options.cache.ttl` rides onto the injected markers.
+   */
+  private applyAnthropicSlugCacheControl(
+    modelId: string,
+    orMessages: Array<Partial<ChatMessage>>,
+    options: ModelCompletionOptions,
+  ): void {
+    if (!modelId.toLowerCase().startsWith('anthropic/')) return;
+
+    type WirePart = {
+      type?: string;
+      text?: string;
+      cache_control?: { type: 'ephemeral'; ttl?: '1h' };
+    } & Record<string, unknown>;
+
+    if (options.cache === false) {
+      // Per-call hard-off, mirroring AnthropicProvider's cache:false region
+      // strip: caller-provided markers are removed too, so the opt-out
+      // holds regardless of how a marker arrived. Copies, never in-place
+      // edits — content arrays are shared with caller state.
+      for (const message of orMessages) {
+        if (!Array.isArray(message.content)) continue;
+        const parts = message.content as WirePart[];
+        if (!parts.some((p) => p && p.cache_control !== undefined)) continue;
+        (message as { content: unknown }).content = parts.map((part) => {
+          if (!part || part.cache_control === undefined) return part;
+          const { cache_control: _stripped, ...rest } = part;
+          return rest;
+        });
+      }
+      return;
+    }
+
+    // Same kill-switch syntax as the direct Anthropic auto path.
+    const autoCacheEnv = process.env.AGENTOS_ANTHROPIC_AUTO_CACHE;
+    if (autoCacheEnv === '0' || autoCacheEnv === 'false') return;
+
+    // Caller placement wins: a marker already present in messages, tool
+    // definitions, or customModelParams tool overrides means the caller
+    // owns breakpoint placement — injecting two more could exceed
+    // Anthropic's 4-breakpoint cap or order a longer TTL after a shorter
+    // one (both reject with 400).
+    const holdsMarker = (value: unknown): boolean =>
+      Array.isArray(value) &&
+      value.some(
+        (entry) =>
+          entry !== null &&
+          typeof entry === 'object' &&
+          (entry as Record<string, unknown>).cache_control !== undefined,
+      );
+    const customTools = (options.customModelParams as Record<string, unknown> | undefined)
+      ?.tools;
+    if (
+      orMessages.some((m) => holdsMarker(m.content)) ||
+      holdsMarker(options.tools) ||
+      holdsMarker(customTools)
+    ) {
+      return;
+    }
+
+    const marker: { type: 'ephemeral'; ttl?: '1h' } =
+      options.cache && options.cache.ttl === '1h'
+        ? { type: 'ephemeral', ttl: '1h' }
+        : { type: 'ephemeral' };
+
+    const markMessage = (msg: Partial<ChatMessage>): boolean => {
+      if (typeof msg.content === 'string') {
+        if (!msg.content) return false;
+        (msg as { content: unknown }).content = [
+          { type: 'text', text: msg.content, cache_control: { ...marker } },
+        ];
+        return true;
+      }
+      if (Array.isArray(msg.content)) {
+        // Copy-on-write: mapToOpenRouterMessages shares content references
+        // with the caller's messages, so mutating a part in place would
+        // leak the injected marker back into caller state (and a retry or
+        // fallback leg would then mistake it for a caller marker).
+        const parts = msg.content as WirePart[];
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const part = parts[i];
+          if (part && part.type === 'text' && typeof part.text === 'string' && part.text) {
+            const copy = parts.slice();
+            copy[i] = { ...part, cache_control: { ...marker } };
+            (msg as { content: unknown }).content = copy;
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+
+    // Stable prefix: the FIRST system message. Memory hooks append volatile
+    // per-turn recall as LATER system messages; a breakpoint there would sit
+    // on bytes that change every turn and cold-miss (write premium, no
+    // reads) forever.
+    let systemIdx = -1;
+    for (let i = 0; i < orMessages.length; i++) {
+      if (orMessages[i].role === 'system') {
+        systemIdx = i;
+        break;
+      }
+    }
+    if (systemIdx >= 0) markMessage(orMessages[systemIdx]);
+
+    // Moving tail: the final message, unless it IS the system message we
+    // just marked (single-message requests keep one breakpoint).
+    const lastIdx = orMessages.length - 1;
+    if (lastIdx >= 0 && lastIdx !== systemIdx) markMessage(orMessages[lastIdx]);
+  }
+
   private mapToOpenRouterMessages(messages: ChatMessage[]): Array<Partial<ChatMessage>> {
     return messages.map(msg => {
       const mappedMsg: Partial<ChatMessage> = { role: msg.role, content: msg.content };
@@ -358,6 +490,7 @@ export class OpenRouterProvider implements IProvider {
   ): Promise<ModelCompletionResponse> {
     this.ensureInitialized();
     const openRouterMessages = this.mapToOpenRouterMessages(messages);
+    this.applyAnthropicSlugCacheControl(modelId, openRouterMessages, options);
 
     const payload: Record<string, unknown> = {
       model: modelId,
@@ -498,6 +631,7 @@ export class OpenRouterProvider implements IProvider {
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     this.ensureInitialized();
     const openRouterMessages = this.mapToOpenRouterMessages(messages);
+    this.applyAnthropicSlugCacheControl(modelId, openRouterMessages, options);
 
     const payload: Record<string, unknown> = {
       model: modelId,

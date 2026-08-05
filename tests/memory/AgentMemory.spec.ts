@@ -297,6 +297,22 @@ describe('AgentMemory', () => {
     expect(memory.isInitialized).toBe(false);
   });
 
+  it('does not reopen a standalone backend after shutdown', async () => {
+    const standalone = createStandaloneMemory();
+    const memory = AgentMemory.wrapMemory(standalone);
+
+    await memory.shutdown();
+
+    await expect(memory.initialize({} as any)).rejects.toThrow(
+      'cannot reopen a closed standalone memory backend',
+    );
+    expect(memory.isInitialized).toBe(false);
+    await expect(memory.remember('after shutdown')).rejects.toThrow(
+      'AgentMemory not initialized',
+    );
+    expect(standalone.close).toHaveBeenCalledTimes(1);
+  });
+
   it('throws a helpful error when cognitive-only APIs are used on standalone memory', async () => {
     const memory = AgentMemory.wrapMemory(createStandaloneMemory());
 

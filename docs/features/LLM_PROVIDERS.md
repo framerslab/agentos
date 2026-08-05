@@ -540,3 +540,9 @@ exercised paths.
 - [Cost Optimization](./COST_OPTIMIZATION.md) — Budget management and routing
 - [Architecture](./ARCHITECTURE.md) — System architecture overview
 - [Structured Output](./STRUCTURED_OUTPUT.md) — JSON schema enforcement per provider
+
+## Prompt caching
+
+Provider-side prompt caching (Anthropic explicit breakpoints, OpenAI and
+Gemini automatic, OpenRouter forwarding) is on by default with per-call
+overrides — see [Prompt Caching](./PROMPT_CACHING.md).

@@ -1,3 +1,37 @@
+## <small>0.10.11 (2026-08-05)</small>
+
+* fix(memory): align retrieval fixture with lifecycle state ([d42a866631756f7931b718d79a283054359cf984](https://github.com/framerslab/agentos/commit/d42a866631756f7931b718d79a283054359cf984))
+* fix(memory): annotate generic test spies ([68a53b84322735360c71c1af6fd5bc6a15b10de3](https://github.com/framerslab/agentos/commit/68a53b84322735360c71c1af6fd5bc6a15b10de3))
+* fix(memory): coderabbit review pass 1 (harden lifecycle) ([0949d15297fd5116ce58cacc6939e9820cd53741](https://github.com/framerslab/agentos/commit/0949d15297fd5116ce58cacc6939e9820cd53741))
+* fix(memory): coderabbit review pass 2 (close lifecycle gaps) ([f36d668c1ec98ddda0edbe041c076a76b78b0c36](https://github.com/framerslab/agentos/commit/f36d668c1ec98ddda0edbe041c076a76b78b0c36))
+* fix(memory): serialize deletion across store instances ([dadb555b66835a5b04c90db0f6484b6042175a3a](https://github.com/framerslab/agentos/commit/dadb555b66835a5b04c90db0f6484b6042175a3a))
+
+## <small>0.10.10 (2026-08-05)</small>
+
+* fix(memory): make failed vector evictions retryable and tombstones lifecycle-proof ([8f5594b982505f33af98b1a093569c44cf412929](https://github.com/framerslab/agentos/commit/8f5594b982505f33af98b1a093569c44cf412929))
+
+## <small>0.10.9 (2026-08-05)</small>
+
+* fix(memory): prevent hydration from reviving deleted traces ([d75e235499a04911b322093b44fbb3631da58cc5](https://github.com/framerslab/agentos/commit/d75e235499a04911b322093b44fbb3631da58cc5))
+
+## <small>0.10.8 (2026-08-05)</small>
+
+* fix(memory): coderabbit review pass 1 (guard deletion race) ([8d937f24a26a545c1d42b204729b209e74817dcf](https://github.com/framerslab/agentos/commit/8d937f24a26a545c1d42b204729b209e74817dcf))
+
+## <small>0.10.7 (2026-08-05)</small>
+
+* fix(memory): evict soft-deleted traces from recall ([39817e0a848527f2f4e8ac9d5b843e275bbf5a05](https://github.com/framerslab/agentos/commit/39817e0a848527f2f4e8ac9d5b843e275bbf5a05))
+
+## <small>0.10.6 (2026-08-05)</small>
+
+* fix(llm): harden the zero-config caching defaults from review ([82e093422a0d24cf89c6281640a82c0d1e17ad26](https://github.com/framerslab/agentos/commit/82e093422a0d24cf89c6281640a82c0d1e17ad26))
+
+## <small>0.10.5 (2026-08-05)</small>
+
+* fix(llm): tolerate uninitialized provider config in the native-endpoint gate ([1ba33d906c85ae3818321bacf0bed44e42ad5fd4](https://github.com/framerslab/agentos/commit/1ba33d906c85ae3818321bacf0bed44e42ad5fd4))
+* docs(llm): prompt caching guide, publish cache docs to the docs site ([18cf821ae048fec061b2983d9fb79217943d144f](https://github.com/framerslab/agentos/commit/18cf821ae048fec061b2983d9fb79217943d144f))
+* feat(llm): zero-config prompt caching on OpenRouter anthropic slugs, Gemini cache usage, OpenAI auto cache keys ([bee429374501ba4757208ee67eee9d99f2549729](https://github.com/framerslab/agentos/commit/bee429374501ba4757208ee67eee9d99f2549729))
+
 ## <small>0.10.4 (2026-07-29)</small>
 
 * fix(api): one usage event per served stream answer; quota trips survive client-error statuses; Anthropic catalog resolution + sonnet-4-6 ceiling ([dca6f78a1d3ad9b88478a93bbab03515c94bd615](https://github.com/framerslab/agentos/commit/dca6f78a1d3ad9b88478a93bbab03515c94bd615))
