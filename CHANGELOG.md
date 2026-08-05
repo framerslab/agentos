@@ -1,3 +1,9 @@
+## <small>0.10.5 (2026-08-05)</small>
+
+* fix(llm): tolerate uninitialized provider config in the native-endpoint gate ([1ba33d906c85ae3818321bacf0bed44e42ad5fd4](https://github.com/framerslab/agentos/commit/1ba33d906c85ae3818321bacf0bed44e42ad5fd4))
+* docs(llm): prompt caching guide, publish cache docs to the docs site ([18cf821ae048fec061b2983d9fb79217943d144f](https://github.com/framerslab/agentos/commit/18cf821ae048fec061b2983d9fb79217943d144f))
+* feat(llm): zero-config prompt caching on OpenRouter anthropic slugs, Gemini cache usage, OpenAI auto cache keys ([bee429374501ba4757208ee67eee9d99f2549729](https://github.com/framerslab/agentos/commit/bee429374501ba4757208ee67eee9d99f2549729))
+
 ## <small>0.10.4 (2026-07-29)</small>
 
 * fix(api): one usage event per served stream answer; quota trips survive client-error statuses; Anthropic catalog resolution + sonnet-4-6 ceiling ([dca6f78a1d3ad9b88478a93bbab03515c94bd615](https://github.com/framerslab/agentos/commit/dca6f78a1d3ad9b88478a93bbab03515c94bd615))
