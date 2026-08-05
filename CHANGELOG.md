@@ -1,3 +1,7 @@
+## <small>0.10.6 (2026-08-05)</small>
+
+* fix(llm): harden the zero-config caching defaults from review ([82e093422a0d24cf89c6281640a82c0d1e17ad26](https://github.com/framerslab/agentos/commit/82e093422a0d24cf89c6281640a82c0d1e17ad26))
+
 ## <small>0.10.5 (2026-08-05)</small>
 
 * fix(llm): tolerate uninitialized provider config in the native-endpoint gate ([1ba33d906c85ae3818321bacf0bed44e42ad5fd4](https://github.com/framerslab/agentos/commit/1ba33d906c85ae3818321bacf0bed44e42ad5fd4))
