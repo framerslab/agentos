@@ -1,3 +1,7 @@
+## <small>0.10.9 (2026-08-05)</small>
+
+* fix(memory): prevent hydration from reviving deleted traces ([d75e235499a04911b322093b44fbb3631da58cc5](https://github.com/framerslab/agentos/commit/d75e235499a04911b322093b44fbb3631da58cc5))
+
 ## <small>0.10.8 (2026-08-05)</small>
 
 * fix(memory): coderabbit review pass 1 (guard deletion race) ([8d937f24a26a545c1d42b204729b209e74817dcf](https://github.com/framerslab/agentos/commit/8d937f24a26a545c1d42b204729b209e74817dcf))
