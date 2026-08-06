@@ -415,7 +415,10 @@ export interface GenerateTextOptions {
    * OpenAI prompt-cache shard key (spec batch-1 C2; other providers ignore
    * it). `'auto'` derives a sha256-hashed key from {@link sessionId}
    * (omitted when no session id is set; raw ids never leave the process);
-   * an explicit string is sent verbatim; `false`/absent omit the field.
+   * an explicit string is sent verbatim; `false` omits the field. Absent
+   * defaults to `'auto'` on the native OpenAI endpoint unless the call
+   * carries `cache: false`; OpenAI-compatible gateways (custom baseURL)
+   * keep the omit default.
    */
   promptCacheKey?: string | 'auto' | false;
   /**
@@ -432,7 +435,8 @@ export interface GenerateTextOptions {
   serviceTier?: 'auto' | 'default' | 'flex' | 'priority';
   /**
    * Per-call prompt-cache control, forwarded to cache-capable providers
-   * (Anthropic today; others ignore it).
+   * (Anthropic directly and on `anthropic/*` slugs through OpenRouter;
+   * `false` also suppresses OpenAI's session-derived `prompt_cache_key`).
    *
    * - `false` — this request emits NO `cache_control` at all: the provider's
    *   automatic markers (request-level marker, thinking-mode block markers,
@@ -456,7 +460,10 @@ export interface GenerateTextOptions {
    * request affinity (OpenRouter sends it as `session_id` for provider
    * sticky routing — upstream prompt caches are host-scoped, so a
    * load-balanced conversation otherwise cold-misses the cache a prior
-   * turn wrote on a different host). Pass a stable id per conversation.
+   * turn wrote on a different host). On the native OpenAI endpoint the
+   * `prompt_cache_key` shard key derives from it automatically, so the
+   * same id keeps cache routing warm there too. Pass a stable id per
+   * conversation.
    */
   sessionId?: string;
   /**
