@@ -754,9 +754,21 @@ export function agent(opts: AgentOptions): Agent {
     tools: opts.tools,
     maxSteps: opts.maxSteps ?? 5,
     // Per-call completion-token cap applied to every generate /
-    // session.send / stream invocation this agent makes. Unset means
-    // the underlying generateText falls back to the provider default.
-    maxTokens: opts.maxTokens,
+    // session.send / stream invocation this agent makes. Falls back to
+    // controls.maxTotalTokens when no top-level maxTokens is set: on the
+    // lightweight agent() surface the token control caps each call's
+    // completion output (mapped here to maxTokens), NOT the agency()-level
+    // prompt+completion run total, which stays a full-runtime enforcement.
+    // Unset means the underlying generateText falls back to the provider
+    // default. A per-call maxTokens in `extra` overrides both.
+    maxTokens: opts.maxTokens ?? opts.controls?.maxTotalTokens,
+    // Per-call request timeout (ms) derived from the declared
+    // controls.maxDurationMs budget: on the lightweight agent() surface the
+    // duration control bounds each individual LLM request (generateText
+    // requestTimeout), not the whole run's wall clock, which stays an
+    // agency()-level enforcement. Unset keeps the provider's default
+    // failover pacing. A per-call requestTimeout in `extra` overrides this.
+    requestTimeout: opts.controls?.maxDurationMs,
     // Extended-thinking budget forwarded to thinking-capable models on every
     // generate / stream / session call (both spread baseOpts). Unset means
     // thinking stays off; the provider ignores it on unsupported models.

@@ -541,6 +541,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             const r = await provider!.generateCompletion(resolved.modelId, msgs as any, {
               temperature: opts.temperature,
               maxTokens: opts.maxTokens,
+              // Forward per-call requestTimeout on the shim path too so the
+              // prompt-tool-calling emulation honors the caller's bound,
+              // matching generateText's own shim path.
+              ...(opts.requestTimeout !== undefined ? { requestTimeout: opts.requestTimeout } : {}),
               ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
               ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
               ...(opts.presencePenalty !== undefined ? { presencePenalty: opts.presencePenalty } : {}),
@@ -659,6 +663,11 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             tools: toolSchemas,
             temperature: opts.temperature,
             maxTokens: opts.maxTokens,
+            // Per-call request timeout, mirroring generateText: a streamed
+            // call with opts.requestTimeout set (e.g. an agent-level
+            // controls.maxDurationMs budget) bounds the provider request on
+            // the stream path too, not only on the generate path.
+            ...(opts.requestTimeout !== undefined ? { requestTimeout: opts.requestTimeout } : {}),
             // Mirror generateText: forward the sampling controls so a
             // streaming caller's topP / frequency / presence penalties
             // actually reach the provider instead of being silently
