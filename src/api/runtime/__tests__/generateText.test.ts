@@ -1038,8 +1038,10 @@ describe('generateText', () => {
 
 describe('buildFallbackChain — OpenRouter link pins a cheap model', () => {
   it('gives the OpenRouter fallback entry an explicit cheap model, not the gpt-4o default', () => {
-    const originalKey = process.env.OPENROUTER_API_KEY;
+    const originalOrKey = process.env.OPENROUTER_API_KEY;
+    const originalOaKey = process.env.OPENAI_API_KEY;
     process.env.OPENROUTER_API_KEY = 'test-or-key';
+    process.env.OPENAI_API_KEY = 'test-oa-key';
     try {
       const chain = buildFallbackChain('anthropic');
       const orEntry = chain.find((e) => e.provider === 'openrouter');
@@ -1047,12 +1049,18 @@ describe('buildFallbackChain — OpenRouter link pins a cheap model', () => {
       // A model-less OpenRouter entry silently defaults to the OpenRouter
       // provider's defaultModel, which made failover traffic the #1 LLM
       // cost in prod (2026-06-07). The entry must be PINNED — and pinned
-      // to the gpt-5.5 quality floor, so a primary outage neither lands
+      // to the gpt-5.6-sol quality floor, so a primary outage neither lands
       // on an unchosen model nor downgrades output to a mini tier.
-      expect(orEntry?.model).toBe('openai/gpt-5.5');
+      expect(orEntry?.model).toBe('openai/gpt-5.6-sol');
+      // Both frontier legs move together (2026-08-06 flip): the direct
+      // OpenAI leg carries the same -sol pin.
+      const oaEntry = chain.find((e) => e.provider === 'openai');
+      expect(oaEntry?.model).toBe('gpt-5.6-sol');
     } finally {
-      if (originalKey === undefined) delete process.env.OPENROUTER_API_KEY;
-      else process.env.OPENROUTER_API_KEY = originalKey;
+      if (originalOrKey === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = originalOrKey;
+      if (originalOaKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = originalOaKey;
     }
   });
 });

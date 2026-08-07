@@ -99,6 +99,12 @@ describe('mapEffortToOpenAiResponsesEffort (model-aware /v1/responses effort)', 
   it('keeps max clamped to xhigh off the allow-list (gpt-5.5) and chat-side everywhere', () => {
     expect(modelAcceptsMaxResponsesEffort('gpt-5.5')).toBe(false);
     expect(modelAcceptsMaxResponsesEffort('gpt-5.4')).toBe(false);
+    // Exact-id discipline (0.10.13): unprobed 5.6 siblings stay off the max
+    // list and degrade to xhigh like any other xhigh-allow-listed id.
+    expect(modelAcceptsMaxResponsesEffort('gpt-5.6-luna')).toBe(false);
+    expect(modelAcceptsMaxResponsesEffort('gpt-5.6-terra')).toBe(false);
+    expect(modelAcceptsMaxResponsesEffort('gpt-5.6-mini')).toBe(false);
+    expect(mapEffortToOpenAiResponsesEffort('gpt-5.6-luna', 'max')).toBe('xhigh');
     expect(mapEffortToOpenAiResponsesEffort('gpt-5.5', 'max')).toBe('xhigh');
     // Chat Completions rejects max for the 5.6 family (probed 2026-07-20 + 2026-08-06).
     expect(mapEffortToOpenAiReasoningEffortForModel('max', 'gpt-5.6')).toBe('xhigh');

@@ -269,7 +269,7 @@ export interface FallbackProviderEntry {
    * Per-hop reasoning depth applied ONLY when THIS entry serves the call,
    * forwarded as `output_config.effort` (Anthropic) / `reasoning_effort`
    * (OpenAI). Lets a chain run a fallback at a different depth than the primary
-   * — e.g. a gpt-5.5 frontier fallback at `'max'` while the primary keeps its
+   * — e.g. a gpt-5.6-sol frontier fallback at `'max'` while the primary keeps its
    * own (or no) effort, so arming the chain is dormant for the primary call.
    * Omitted -> the hop inherits the call-level `effort`.
    */
@@ -1195,12 +1195,12 @@ export function isRetryableError(error: unknown): boolean {
  *
  * Each entry in the returned array contains a provider identifier and an
  * optional model suitable for fallback use.  Providers are ordered by
- * general availability; the OpenAI legs pin `gpt-5.5` — the platform's
+ * general availability; the OpenAI legs pin `gpt-5.6-sol` — the platform's
  * quality floor for failover traffic. A primary-provider outage must not
  * silently downgrade user-facing output to a mini-tier model:
- * 1. OpenAI (`gpt-5.5`)
+ * 1. OpenAI (`gpt-5.6-sol`)
  * 2. Anthropic (`claude-sonnet-5`)
- * 3. OpenRouter (`openai/gpt-5.5`)
+ * 3. OpenRouter (`openai/gpt-5.6-sol`)
  * 4. Gemini (`gemini-2.5-flash`)
  *
  * @param excludeProvider - Provider to omit from the chain (typically the
@@ -1217,7 +1217,7 @@ export function isRetryableError(error: unknown): boolean {
  * ```ts
  * // Primary is anthropic: build fallback chain from remaining providers
  * const chain = buildFallbackChain('anthropic');
- * // => [{ provider: 'openai', model: 'gpt-5.5' }, { provider: 'openrouter', model: 'openai/gpt-5.5' }, ...]
+ * // => [{ provider: 'openai', model: 'gpt-5.6-sol' }, { provider: 'openrouter', model: 'openai/gpt-5.6-sol' }, ...]
  * ```
  */
 export function buildFallbackChain(
@@ -1226,10 +1226,14 @@ export function buildFallbackChain(
   const chain: FallbackProviderEntry[] = [];
 
   if (process.env.OPENAI_API_KEY && excludeProvider !== 'openai') {
-    chain.push({ provider: 'openai', model: 'gpt-5.5', cache: false });
+    // gpt-5.6-sol: the 5.6 flagship variant at the gpt-5.5 price class
+    // ($5/$30 per MTok, verified against the live catalogs 2026-08-06).
+    // Always the -sol pin — the bare `gpt-5.6` alias has undocumented
+    // billing and luna/terra are cheaper tiers.
+    chain.push({ provider: 'openai', model: 'gpt-5.6-sol', cache: false });
   }
   if (process.env.ANTHROPIC_API_KEY && excludeProvider !== 'anthropic') {
-    // Sonnet-class, matching the gpt-5.5 floor on the OpenAI legs — an
+    // Sonnet-class, matching the gpt-5.6-sol floor on the OpenAI legs — an
     // OpenAI-primary outage keeps frontier-adjacent quality on the way down.
     chain.push({ provider: 'anthropic', model: 'claude-sonnet-5', cache: false });
   }
@@ -1238,11 +1242,11 @@ export function buildFallbackChain(
     // defaults to the provider's `defaultModel`, so failover traffic
     // silently lands on whatever that happens to be — an unpinned entry
     // made `openrouter/openai/gpt-4o` the #1 LLM cost in wilds prod
-    // (2026-06-07, ~half the LLM bill). gpt-5.5 is the pinned quality
+    // (2026-06-07, ~half the LLM bill). gpt-5.6-sol is the pinned quality
     // floor (same family as the direct leg, structured-output safe) and
     // routes around an OpenAI-direct outage that already knocked the
     // `openai` link above out.
-    chain.push({ provider: 'openrouter', model: 'openai/gpt-5.5', cache: false });
+    chain.push({ provider: 'openrouter', model: 'openai/gpt-5.6-sol', cache: false });
   }
   if (process.env.GEMINI_API_KEY && excludeProvider !== 'gemini') {
     chain.push({ provider: 'gemini', cache: false });
@@ -2345,7 +2349,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             // already-tried entries). This stops the recursion from rebuilding
             // the default cheap chain (which includes gpt-4o-mini) when a
             // fallback hop also fails — so an explicit frontier-only chain
-            // (e.g. codegen's [gpt-5.5, openrouter:gpt-5.5]) is honored
+            // (e.g. codegen's [gpt-5.6-sol, openrouter:gpt-5.6-sol]) is honored
             // end-to-end. The final entry passes [] -> explicit opt-out -> throw.
             fallbackProviders: effectiveFallbacks.slice(attempt),
             onFallback: undefined,

@@ -84,11 +84,17 @@ export function modelAcceptsXhighResponsesEffort(modelId: string): boolean {
  * chat.completions still 400s on `max` for the family. Widen only after a
  * fresh Responses probe returns HTTP 200 on the new id.
  */
-const RESPONSES_MAX_EFFORT_MODELS: readonly string[] = ['gpt-5.6'];
+const RESPONSES_MAX_EFFORT_MODELS: ReadonlySet<string> = new Set(['gpt-5.6', 'gpt-5.6-sol']);
 
-/** Whether `modelId` is on the probe-verified Responses `max` allow-list. */
+/**
+ * Whether `modelId` is on the probe-verified Responses `max` allow-list.
+ * EXACT ids only — a prefix match would auto-admit unprobed siblings
+ * (`gpt-5.6-luna`, `gpt-5.6-terra`, a future `gpt-5.6-mini`) and hand them a
+ * `max` their surface may reject, recreating the 400 this mapper exists to
+ * prevent. Probe the new id on /v1/responses first, then add it verbatim.
+ */
 export function modelAcceptsMaxResponsesEffort(modelId: string): boolean {
-  return RESPONSES_MAX_EFFORT_MODELS.some((f) => modelId.toLowerCase().startsWith(f));
+  return RESPONSES_MAX_EFFORT_MODELS.has(modelId.toLowerCase());
 }
 
 /**

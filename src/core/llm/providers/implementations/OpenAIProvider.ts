@@ -436,6 +436,14 @@ export class OpenAIProvider implements IProvider {
     // increase over gpt-5.4; verified against OpenAI's published pricing 2026-06-27)
     'gpt-5.5': { input: 0.005, output: 0.03 },
     'gpt-5.5-pro': { input: 0.03, output: 0.18 },
+    // GPT-5.6 family (flagship variants, Aug 2026 — verified against the live
+    // OpenRouter listing 2026-08-06: sol is the frontier tier at the gpt-5.5
+    // price class, terra mid-tier, luna mini-class; the bare `gpt-5.6` alias
+    // serves the flagship tier).
+    'gpt-5.6': { input: 0.005, output: 0.03 },
+    'gpt-5.6-sol': { input: 0.005, output: 0.03 },
+    'gpt-5.6-terra': { input: 0.001, output: 0.006 },
+    'gpt-5.6-luna': { input: 0.0001, output: 0.0006 },
     // GPT-5.4 family (previous flagship and siblings, Mar 2026)
     'gpt-5.4': { input: 0.0025, output: 0.015 },
     'gpt-5.4-mini': { input: 0.00075, output: 0.0045 },
