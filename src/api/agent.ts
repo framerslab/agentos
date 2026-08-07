@@ -143,6 +143,18 @@ export interface AgentOptions extends BaseAgentConfig {
   /** Host-level routing hints forwarded to the high-level generation helpers. */
   hostPolicy?: HostLLMPolicy;
   /**
+   * Caller's intended content policy tier, forwarded to every `generate()` /
+   * `stream()` / session call this agent makes (same contract as
+   * {@link GenerateTextOptions.policyTier}): on `'mature'` / `'private-adult'`
+   * with no explicit `fallbackProviders`, the auto-built fallback chain
+   * prepends uncensored legs so a content-policy refusal from the primary
+   * re-routes to a model that can complete the request, and the model router
+   * receives the tier as a routing hint. Unset keeps the availability-only
+   * chain and tier-agnostic routing. A per-call `policyTier` in `extra`
+   * overrides this value.
+   */
+  policyTier?: GenerateTextOptions['policyTier'];
+  /**
    * Routing hints passed to the model router's `selectModel()` call.
    *
    * Useful for declaring capability requirements up-front so the router
@@ -794,6 +806,10 @@ export function agent(opts: AgentOptions): Agent {
     router: opts.router,
     hostPolicy: opts.hostPolicy,
     routerParams: opts.routerParams,
+    // Agent-level content policy tier forwarded to every generate / stream /
+    // session call (both spread baseOpts). Unset keeps the availability-only
+    // auto fallback chain and tier-agnostic routing.
+    policyTier: opts.policyTier,
     onBeforeGeneration: opts.onBeforeGeneration,
     onAfterGeneration: opts.onAfterGeneration,
     onBeforeToolExecution: opts.onBeforeToolExecution,

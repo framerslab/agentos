@@ -379,6 +379,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ?? hostPolicyRouteParams.preferredProviderIds,
             policyTier:
               opts.routerParams?.policyTier
+              ?? opts.policyTier
               ?? hostPolicyRouteParams.policyTier,
           };
           const routeResult = await opts.router.selectModel(

@@ -1444,6 +1444,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               ?? hostPolicyRouteParams.preferredProviderIds,
             policyTier:
               opts.routerParams?.policyTier
+              ?? opts.policyTier
               ?? hostPolicyRouteParams.policyTier,
           };
           const routeResult = await opts.router.selectModel(
