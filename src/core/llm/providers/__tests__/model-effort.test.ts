@@ -4,8 +4,10 @@ import {
   isEffortLevel,
   EFFORT_LEVELS,
   mapEffortToOpenAiReasoningEffort,
+  mapEffortToOpenAiReasoningEffortForModel,
   mapEffortToOpenAiResponsesEffort,
   modelAcceptsXhighResponsesEffort,
+  modelAcceptsMaxResponsesEffort,
 } from '../model-effort.js';
 
 describe('modelSupportsEffort', () => {
@@ -85,9 +87,21 @@ describe('mapEffortToOpenAiResponsesEffort (model-aware /v1/responses effort)', 
     expect(mapEffortToOpenAiResponsesEffort('gpt-5.5', 'xhigh')).toBe('xhigh');
   });
 
-  it('passes xhigh through for gpt-5.6 / gpt-5.6-sol (max -> xhigh, allow-listed)', () => {
-    expect(mapEffortToOpenAiResponsesEffort('gpt-5.6', 'max')).toBe('xhigh');
+  it('passes the real max tier through for the gpt-5.6 family (live-probed 2026-08-06)', () => {
+    expect(modelAcceptsMaxResponsesEffort('gpt-5.6')).toBe(true);
+    expect(modelAcceptsMaxResponsesEffort('gpt-5.6-sol')).toBe(true);
+    expect(mapEffortToOpenAiResponsesEffort('gpt-5.6', 'max')).toBe('max');
+    expect(mapEffortToOpenAiResponsesEffort('gpt-5.6-sol', 'max')).toBe('max');
+    // xhigh stays xhigh — the unlock only touches the max tier.
     expect(mapEffortToOpenAiResponsesEffort('gpt-5.6-sol', 'xhigh')).toBe('xhigh');
+  });
+
+  it('keeps max clamped to xhigh off the allow-list (gpt-5.5) and chat-side everywhere', () => {
+    expect(modelAcceptsMaxResponsesEffort('gpt-5.5')).toBe(false);
+    expect(modelAcceptsMaxResponsesEffort('gpt-5.4')).toBe(false);
+    expect(mapEffortToOpenAiResponsesEffort('gpt-5.5', 'max')).toBe('xhigh');
+    // Chat Completions rejects max for the 5.6 family (probed 2026-07-20 + 2026-08-06).
+    expect(mapEffortToOpenAiReasoningEffortForModel('max', 'gpt-5.6')).toBe('xhigh');
   });
 
   it('caps xhigh -> high for a non-allow-listed gpt-5 model', () => {
