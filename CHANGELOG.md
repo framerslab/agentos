@@ -1,3 +1,9 @@
+## <small>0.10.14 (2026-08-07)</small>
+
+* fix(api): enforce agent() controls.maxTotalTokens/maxDurationMs as per-call maxTokens/requestTimeout ([48d242b3766bcc1b53c7d4759471928dbcfd6f7b](https://github.com/framerslab/agentos/commit/48d242b3766bcc1b53c7d4759471928dbcfd6f7b))
+* fix(api): make memory hook timeout/budget overridable and log silent recall drops ([053bfd12a09489e1beffcd3cd03e3f3748e43880](https://github.com/framerslab/agentos/commit/053bfd12a09489e1beffcd3cd03e3f3748e43880))
+* fix(api): thread agent-level policyTier into generation routing and fallback chains ([65c02c66865872ff29909663e1141f1e8068abab](https://github.com/framerslab/agentos/commit/65c02c66865872ff29909663e1141f1e8068abab))
+
 ## <small>0.10.13 (2026-08-07)</small>
 
 * fix(api): pin the default frontier fallback legs to gpt-5.6-sol and tighten the Responses max allow-list to probed ids ([f5f1c784ea4cae88f88f5282762fe5d54605c71f](https://github.com/framerslab/agentos/commit/f5f1c784ea4cae88f88f5282762fe5d54605c71f))
