@@ -44,7 +44,7 @@ import {
 import { warnOnDeferredLightweightAgentCapabilities } from './runtime/lightweightAgentDiagnostics.js';
 import type { BaseAgentConfig } from './types.js';
 import { exportAgentConfig, exportAgentConfigJSON, type AgentExportConfig } from './agentExportCore.js';
-import { applyMemoryProvider } from './runtime/memoryProviderHooks.js';
+import { applyMemoryProvider, type MemoryProviderHookOptions } from './runtime/memoryProviderHooks.js';
 import {
   SessionHistoryBuffer,
   SESSION_HISTORY_DEFAULTS,
@@ -213,6 +213,14 @@ export interface AgentOptions extends BaseAgentConfig {
    * - `observe` runs after each LLM call as fire-and-forget.
    */
   memoryProvider?: AgentMemoryProvider;
+  /**
+   * Optional tunables for the automatic {@link memoryProvider} hooks.
+   * `timeoutMs` bounds each `getContext` call before the turn ships without
+   * memory (default `MEMORY_TIMEOUT_MS`, 5000); `tokenBudget` is forwarded to
+   * `getContext` as the recall ceiling (default `DEFAULT_MEMORY_TOKEN_BUDGET`,
+   * 2000). Both fall back to the historical module constants when omitted.
+   */
+  memoryProviderOptions?: MemoryProviderHookOptions;
   /**
    * Optional skill entries to inject into the system prompt.
    * Skill content is appended to the system prompt as markdown sections.
@@ -831,6 +839,7 @@ export function agent(opts: AgentOptions): Agent {
         },
         opts.memoryProvider,
         userText,
+        opts.memoryProviderOptions,
       );
       if (typeof prompt === 'string') {
         genOpts.prompt = prompt;
@@ -861,6 +870,7 @@ export function agent(opts: AgentOptions): Agent {
         },
         opts.memoryProvider,
         userText,
+        opts.memoryProviderOptions,
       );
       if (typeof prompt === 'string') {
         streamOpts.prompt = prompt;
@@ -997,6 +1007,7 @@ export function agent(opts: AgentOptions): Agent {
             },
             opts.memoryProvider,
             textForMemory,
+            opts.memoryProviderOptions,
           );
 
           const result = await generateText(wrappedOpts as GenerateTextOptions);
@@ -1069,6 +1080,7 @@ export function agent(opts: AgentOptions): Agent {
             },
             opts.memoryProvider,
             textForMemory,
+            opts.memoryProviderOptions,
           );
 
           const result = streamText(wrappedOpts as GenerateTextOptions);

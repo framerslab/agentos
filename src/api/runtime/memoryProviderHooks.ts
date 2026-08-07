@@ -24,6 +24,25 @@ export const MEMORY_TIMEOUT_MS = 5000;
 export const DEFAULT_MEMORY_TOKEN_BUDGET = 2000;
 
 /**
+ * Optional caller overrides for the memory-hook budget guards.
+ * Both fields default to the module constants when omitted, preserving the
+ * historical behavior for existing callers.
+ */
+export interface MemoryProviderHookOptions {
+  /**
+   * Timeout (ms) applied to each `getContext` call. When the provider loses
+   * the race the turn ships without memory context and a warning is logged.
+   * Defaults to {@link MEMORY_TIMEOUT_MS}.
+   */
+  timeoutMs?: number;
+  /**
+   * Token budget forwarded to `getContext` as the recall ceiling.
+   * Defaults to {@link DEFAULT_MEMORY_TOKEN_BUDGET}.
+   */
+  tokenBudget?: number;
+}
+
+/**
  * Apply memory-provider hooks to an options object.
  *
  * @param baseOpts - The GenerateTextOptions object to wrap.
@@ -31,6 +50,9 @@ export const DEFAULT_MEMORY_TOKEN_BUDGET = 2000;
  *   `getContext` and `observe`, returns baseOpts unchanged.
  * @param userText - The user input text for this turn; passed to
  *   getContext and observe('user', ...).
+ * @param hookOptions - Optional overrides for the getContext timeout and
+ *   token budget. Defaults to {@link MEMORY_TIMEOUT_MS} and
+ *   {@link DEFAULT_MEMORY_TOKEN_BUDGET} when omitted.
  * @returns A new options object with onBeforeGeneration +
  *   onAfterGeneration wrappers that invoke the memory hooks. Existing
  *   user hooks (if any) are chained AFTER the memory wiring so the
@@ -40,10 +62,14 @@ export function applyMemoryProvider(
   baseOpts: Partial<GenerateTextOptions>,
   provider: AgentMemoryProvider | undefined,
   userText: string,
+  hookOptions?: MemoryProviderHookOptions,
 ): Partial<GenerateTextOptions> {
   const hasContext = Boolean(provider?.getContext);
   const hasObserve = Boolean(provider?.observe);
   if (!hasContext && !hasObserve) return baseOpts;
+
+  const timeoutMs = hookOptions?.timeoutMs ?? MEMORY_TIMEOUT_MS;
+  const tokenBudget = hookOptions?.tokenBudget ?? DEFAULT_MEMORY_TOKEN_BUDGET;
 
   const userOnBefore = baseOpts.onBeforeGeneration;
   const userOnAfter = baseOpts.onAfterGeneration;
@@ -54,10 +80,25 @@ export function applyMemoryProvider(
     let nextCtx: GenerationHookContext = ctx;
     if (hasContext) {
       try {
+        let timedOut = false;
         const memCtx = await Promise.race([
-          provider!.getContext!(userText, { tokenBudget: DEFAULT_MEMORY_TOKEN_BUDGET }),
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), MEMORY_TIMEOUT_MS)),
+          provider!.getContext!(userText, { tokenBudget }),
+          new Promise<null>((resolve) =>
+            setTimeout(() => {
+              timedOut = true;
+              resolve(null);
+            }, timeoutMs),
+          ),
         ]);
+        if (timedOut) {
+          // The provider lost the race: the turn ships without the recall
+          // block. Log it, because the provider's own success log still
+          // fires later from the still-running loser of the race and would
+          // otherwise read as if memory landed in the prompt.
+          console.warn(
+            `[agentos] memoryProvider.getContext exceeded ${timeoutMs}ms; continuing without memory context.`,
+          );
+        }
         if (memCtx && 'contextText' in memCtx && memCtx.contextText) {
           // Insert AFTER the leading system message(s), never at index 0.
           // Providers derive the prompt-cache key from the request prefix
@@ -83,8 +124,13 @@ export function applyMemoryProvider(
             ],
           };
         }
-      } catch {
+      } catch (err) {
         // Memory recall failure is non-fatal; continue with unmodified ctx.
+        // Logged so a dropped memory block never vanishes silently.
+        console.warn(
+          '[agentos] memoryProvider.getContext failed; continuing without memory context.',
+          err,
+        );
       }
     }
     if (userOnBefore) {
