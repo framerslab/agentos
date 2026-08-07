@@ -1,3 +1,7 @@
+## <small>0.10.13 (2026-08-07)</small>
+
+* fix(api): pin the default frontier fallback legs to gpt-5.6-sol and tighten the Responses max allow-list to probed ids ([f5f1c784ea4cae88f88f5282762fe5d54605c71f](https://github.com/framerslab/agentos/commit/f5f1c784ea4cae88f88f5282762fe5d54605c71f))
+
 ## <small>0.10.12 (2026-08-07)</small>
 
 * fix(providers): pass max reasoning effort through on the Responses API for probe-verified models ([bc978f770f0d5041491b6b73ed608130ffd583a7](https://github.com/framerslab/agentos/commit/bc978f770f0d5041491b6b73ed608130ffd583a7))
