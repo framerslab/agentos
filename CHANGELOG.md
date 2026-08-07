@@ -1,3 +1,8 @@
+## <small>0.10.12 (2026-08-07)</small>
+
+* fix(providers): pass max reasoning effort through on the Responses API for probe-verified models ([bc978f770f0d5041491b6b73ed608130ffd583a7](https://github.com/framerslab/agentos/commit/bc978f770f0d5041491b6b73ed608130ffd583a7))
+* docs(llm): align caching option docs with the zero-config defaults; surface prompt caching in the README ([d59bac5edc60b9527cdc8da9bc0cce594d5bf738](https://github.com/framerslab/agentos/commit/d59bac5edc60b9527cdc8da9bc0cce594d5bf738))
+
 ## <small>0.10.11 (2026-08-05)</small>
 
 * fix(memory): align retrieval fixture with lifecycle state ([d42a866631756f7931b718d79a283054359cf984](https://github.com/framerslab/agentos/commit/d42a866631756f7931b718d79a283054359cf984))
