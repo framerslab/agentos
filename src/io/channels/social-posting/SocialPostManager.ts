@@ -292,7 +292,7 @@ export class SocialPostManager {
     }
 
     // Publish to each platform concurrently
-    const platformResults = await Promise.allSettled(
+    await Promise.all(
       post.platforms.map(async (platform) => {
         try {
           const result = await this.publishHandler!(post, platform);
