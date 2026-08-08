@@ -47,6 +47,8 @@ describe('autoDetectProvider', () => {
       'TOGETHER_API_KEY',
       'MISTRAL_API_KEY',
       'XAI_API_KEY',
+      'YDC_API_KEY',
+      'YOUCOM_API_KEY',
       'OLLAMA_BASE_URL',
       'STABILITY_API_KEY',
       'REPLICATE_API_TOKEN',
@@ -97,6 +99,8 @@ describe('autoDetectProvider', () => {
     delete process.env.TOGETHER_API_KEY;
     delete process.env.MISTRAL_API_KEY;
     delete process.env.XAI_API_KEY;
+    delete process.env.YDC_API_KEY;
+    delete process.env.YOUCOM_API_KEY;
     delete process.env.OLLAMA_BASE_URL;
     delete process.env.STABILITY_API_KEY;
     delete process.env.REPLICATE_API_TOKEN;
@@ -112,6 +116,8 @@ describe('autoDetectProvider', () => {
     delete process.env.TOGETHER_API_KEY;
     delete process.env.MISTRAL_API_KEY;
     delete process.env.XAI_API_KEY;
+    delete process.env.YDC_API_KEY;
+    delete process.env.YOUCOM_API_KEY;
     delete process.env.OLLAMA_BASE_URL;
 
     hoisted.spawnSync.mockImplementation((_cmd: string, args?: string[]) => ({
@@ -119,6 +125,24 @@ describe('autoDetectProvider', () => {
     }));
 
     expect(autoDetectProvider()).toBe('claude-code-cli');
+  });
+
+  it('detects youcom from YDC_API_KEY before the legacy fallback', () => {
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GROQ_API_KEY;
+    delete process.env.TOGETHER_API_KEY;
+    delete process.env.MISTRAL_API_KEY;
+    delete process.env.XAI_API_KEY;
+    delete process.env.OLLAMA_BASE_URL;
+    delete process.env.STABILITY_API_KEY;
+    delete process.env.REPLICATE_API_TOKEN;
+    process.env.YDC_API_KEY = 'new-key';
+    process.env.YOUCOM_API_KEY = 'legacy-key';
+
+    expect(autoDetectProvider()).toBe('youcom');
   });
 });
 

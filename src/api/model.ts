@@ -48,6 +48,7 @@ const ENV_KEY_MAP: Record<string, string> = {
   xai: 'XAI_API_KEY',
   stability: 'STABILITY_API_KEY',
   replicate: 'REPLICATE_API_TOKEN',
+  youcom: 'YDC_API_KEY',
 };
 
 const ENV_URL_MAP: Record<string, string> = {
@@ -59,7 +60,7 @@ const ENV_URL_MAP: Record<string, string> = {
   'stable-diffusion-local': 'STABLE_DIFFUSION_LOCAL_BASE_URL',
 };
 
-const KEYLESS_PROVIDER_IDS = new Set(['claude-code-cli', 'gemini-cli']);
+const KEYLESS_PROVIDER_IDS = new Set(['claude-code-cli', 'gemini-cli', 'youcom']);
 
 /**
  * Splits a `provider:model` string into its constituent parts.
