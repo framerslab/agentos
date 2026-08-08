@@ -32,6 +32,7 @@ export type ChannelPlatform =
   | 'zalo'
   | 'email'
   | 'sms'
+  | 'plivo'
   | 'nostr'
   | 'twitch'
   | 'line'

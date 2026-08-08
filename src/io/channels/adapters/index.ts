@@ -27,6 +27,9 @@ export type { SlackAuthParams } from './SlackChannelAdapter.js';
 export { WhatsAppChannelAdapter } from './WhatsAppChannelAdapter.js';
 export type { WhatsAppAuthParams } from './WhatsAppChannelAdapter.js';
 
+export { PlivoSmsChannelAdapter, computePlivoV3Signature } from './PlivoSmsChannelAdapter.js';
+export type { PlivoSmsAuthParams } from './PlivoSmsChannelAdapter.js';
+
 export { WebChatChannelAdapter } from './WebChatChannelAdapter.js';
 export type { WebChatAuthParams } from './WebChatChannelAdapter.js';
 
