@@ -271,6 +271,7 @@ export type {
   SessionSendOptions,
   SessionSendStructuredResult,
 } from './api/agent.js';
+export type { MemoryProviderHookOptions } from './api/runtime/memoryProviderHooks.js';
 export type {
   IModelRouter,
   ModelRouteParams,

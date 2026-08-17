@@ -603,11 +603,19 @@ export interface ObservabilityConfig {
  * The `onLimitReached` policy determines whether a breach is fatal.
  */
 export interface ResourceControls {
-  /** Maximum total tokens (prompt + completion) across all agents and steps. */
+  /**
+   * Maximum total tokens (prompt + completion) across all agents and steps.
+   * The lightweight `agent()` helper maps this to a per-call completion-token
+   * cap (`maxTokens`) instead of the run total.
+   */
   maxTotalTokens?: number;
   /** Maximum USD cost cap across the entire run. */
   maxCostUSD?: number;
-  /** Wall-clock time budget for the run in milliseconds. */
+  /**
+   * Wall-clock time budget for the run in milliseconds. The lightweight
+   * `agent()` helper maps this to a per-call request timeout
+   * (`requestTimeout`) instead of the whole-run budget.
+   */
   maxDurationMs?: number;
   /** Maximum number of agent invocations (across all agents). */
   maxAgentCalls?: number;
@@ -1399,7 +1407,15 @@ export interface BaseAgentConfig {
   observability?: ObservabilityConfig;
   /** Event callbacks fired at various lifecycle points during the run. */
   on?: AgencyCallbacks;
-  /** Resource limits (tokens, cost, time) applied to the entire run. */
+  /**
+   * Resource limits (tokens, cost, time). `agency()` and the full runtime
+   * enforce every field against the entire run. The lightweight `agent()`
+   * helper forwards two of them per call: `maxTotalTokens` caps each LLM
+   * call's completion output (mapped to `maxTokens` when no explicit
+   * `maxTokens` is set, NOT the prompt+completion run total) and
+   * `maxDurationMs` bounds each LLM request (mapped to `requestTimeout`).
+   * The remaining fields stay agency()-only.
+   */
   controls?: ResourceControls;
   /**
    * Names of other agents in the agency that must complete before this agent runs.

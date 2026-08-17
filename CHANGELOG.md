@@ -1,3 +1,18 @@
+## <small>0.10.14 (2026-08-07)</small>
+
+* fix(api): enforce agent() controls.maxTotalTokens/maxDurationMs as per-call maxTokens/requestTimeout ([48d242b3766bcc1b53c7d4759471928dbcfd6f7b](https://github.com/framerslab/agentos/commit/48d242b3766bcc1b53c7d4759471928dbcfd6f7b))
+* fix(api): make memory hook timeout/budget overridable and log silent recall drops ([053bfd12a09489e1beffcd3cd03e3f3748e43880](https://github.com/framerslab/agentos/commit/053bfd12a09489e1beffcd3cd03e3f3748e43880))
+* fix(api): thread agent-level policyTier into generation routing and fallback chains ([65c02c66865872ff29909663e1141f1e8068abab](https://github.com/framerslab/agentos/commit/65c02c66865872ff29909663e1141f1e8068abab))
+
+## <small>0.10.13 (2026-08-07)</small>
+
+* fix(api): pin the default frontier fallback legs to gpt-5.6-sol and tighten the Responses max allow-list to probed ids ([f5f1c784ea4cae88f88f5282762fe5d54605c71f](https://github.com/framerslab/agentos/commit/f5f1c784ea4cae88f88f5282762fe5d54605c71f))
+
+## <small>0.10.12 (2026-08-07)</small>
+
+* fix(providers): pass max reasoning effort through on the Responses API for probe-verified models ([bc978f770f0d5041491b6b73ed608130ffd583a7](https://github.com/framerslab/agentos/commit/bc978f770f0d5041491b6b73ed608130ffd583a7))
+* docs(llm): align caching option docs with the zero-config defaults; surface prompt caching in the README ([d59bac5edc60b9527cdc8da9bc0cce594d5bf738](https://github.com/framerslab/agentos/commit/d59bac5edc60b9527cdc8da9bc0cce594d5bf738))
+
 ## <small>0.10.11 (2026-08-05)</small>
 
 * fix(memory): align retrieval fixture with lifecycle state ([d42a866631756f7931b718d79a283054359cf984](https://github.com/framerslab/agentos/commit/d42a866631756f7931b718d79a283054359cf984))

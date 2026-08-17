@@ -69,17 +69,49 @@ export function modelAcceptsXhighResponsesEffort(modelId: string): boolean {
 }
 
 /**
+ * Responses-API models whose `reasoning.effort` accepts `'max'` — the tier
+ * ABOVE `xhigh`, and a Responses-API-only surface (Chat Completions rejects
+ * `max` for the same family; see {@link CHAT_MAX_EFFORT_MODELS} below).
+ * Live-probed per entry — record request shape, status, response summary,
+ * date, and the exact model alias in this comment when adding one.
+ *
+ * 2026-08-06 probe (POST /v1/responses, `reasoning: {effort: 'max'}`,
+ * max_output_tokens 2000): HTTP 200 `status: completed` on `gpt-5.6` (bare
+ * alias), on `gpt-5.6-sol`, and on `gpt-5.6-sol` WITH function tools
+ * attached (the agentic shape). Boundary probes the same day: `'ultra'` is
+ * rejected on both aliases (`Invalid value: 'ultra'. Supported values are:
+ * 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'.`), and
+ * chat.completions still 400s on `max` for the family. Widen only after a
+ * fresh Responses probe returns HTTP 200 on the new id.
+ */
+const RESPONSES_MAX_EFFORT_MODELS: ReadonlySet<string> = new Set(['gpt-5.6', 'gpt-5.6-sol']);
+
+/**
+ * Whether `modelId` is on the probe-verified Responses `max` allow-list.
+ * EXACT ids only — a prefix match would auto-admit unprobed siblings
+ * (`gpt-5.6-luna`, `gpt-5.6-terra`, a future `gpt-5.6-mini`) and hand them a
+ * `max` their surface may reject, recreating the 400 this mapper exists to
+ * prevent. Probe the new id on /v1/responses first, then add it verbatim.
+ */
+export function modelAcceptsMaxResponsesEffort(modelId: string): boolean {
+  return RESPONSES_MAX_EFFORT_MODELS.has(modelId.toLowerCase());
+}
+
+/**
  * Map the agentos effort scale onto OpenAI's `/v1/responses` `reasoning.effort`
- * for `modelId`. Identical to {@link mapEffortToOpenAiReasoningEffort} EXCEPT it
- * caps `xhigh` → `high` for any model NOT on
- * {@link modelAcceptsXhighResponsesEffort} — a model-aware guard so a request
+ * for `modelId`. Identical to {@link mapEffortToOpenAiReasoningEffort} EXCEPT:
+ * `max` passes through as the real `'max'` tier on models probe-verified via
+ * {@link modelAcceptsMaxResponsesEffort} (elsewhere it clamps to `'xhigh'` as
+ * before), and `xhigh` caps to `high` for any model NOT on
+ * {@link modelAcceptsXhighResponsesEffort} — model-aware guards so a request
  * for maximum depth degrades one step instead of 400ing the whole Responses
- * call on a model that rejects `xhigh`.
+ * call on a model that rejects the tier.
  */
 export function mapEffortToOpenAiResponsesEffort(
   modelId: string,
   effort: unknown,
 ): string | undefined {
+  if (effort === 'max' && modelAcceptsMaxResponsesEffort(modelId)) return 'max';
   const base = mapEffortToOpenAiReasoningEffort(effort);
   if (base === undefined) return undefined;
   return base === 'xhigh' && !modelAcceptsXhighResponsesEffort(modelId) ? 'high' : base;
