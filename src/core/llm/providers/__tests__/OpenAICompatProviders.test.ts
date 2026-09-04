@@ -291,6 +291,25 @@ describe('OpenAI-compatible provider wrappers', () => {
       }
     });
 
+    it('advertises per-model capabilities matching what Atlas accepts', async () => {
+      // Atlas accepts tool calls on both models, but only deepseek-v4-pro
+      // accepts `response_format`; qwen3.5-flash returns HTTP 400 for both
+      // `json_object` and `json_schema`. Declaring that difference keeps
+      // capability filtering from routing structured output to the cheap model.
+      const provider = new AtlasCloudProvider();
+      await provider.initialize({ apiKey: 'atlas-test' });
+      const models = await provider.listAvailableModels();
+      const byId = new Map(models.map((m) => [m.modelId, m.capabilities]));
+
+      expect(byId.get('deepseek-ai/deepseek-v4-pro')).toEqual(
+        expect.arrayContaining(['chat', 'tool_use', 'json_mode']),
+      );
+      expect(byId.get('qwen/qwen3.5-flash')).toEqual(
+        expect.arrayContaining(['chat', 'tool_use']),
+      );
+      expect(byId.get('qwen/qwen3.5-flash')).not.toContain('json_mode');
+    });
+
     it('delegates generateCompletion to OpenAI provider', async () => {
       const provider = new AtlasCloudProvider();
       await provider.initialize({ apiKey: 'atlas-test' });

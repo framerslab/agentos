@@ -57,7 +57,11 @@ const ATLAS_CLOUD_MODELS: ModelInfo[] = [
     providerId: 'atlascloud',
     displayName: 'Qwen3.5 Flash',
     description: 'Fast long-context chat model served through Atlas Cloud.',
-    capabilities: ['chat'],
+    // Tool calls work on this model, but Atlas rejects `response_format` for it
+    // (both `json_object` and `json_schema` come back as HTTP 400), so it must
+    // not claim `json_mode`. Capability filtering then routes structured-output
+    // work to deepseek-v4-pro instead of failing the request upstream.
+    capabilities: ['chat', 'tool_use'],
     contextWindowSize: 1000000,
     supportsStreaming: true,
     status: 'active',
