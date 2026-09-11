@@ -20,6 +20,12 @@ describe('shouldRouteToOpenAiResponsesApi', () => {
     expect(shouldRouteToOpenAiResponsesApi('gpt-5.5', userMsgs, { tools: toolsOpt, effort: 'max' })).toBe(true);
   });
 
+  it('routes gpt-6 + tools + effort (chat/completions 400s on the combo, probed 2026-09-10)', () => {
+    expect(shouldRouteToOpenAiResponsesApi('gpt-6-astra', userMsgs, { tools: toolsOpt, effort: 'max' })).toBe(true);
+    expect(shouldRouteToOpenAiResponsesApi('gpt-6-astra', userMsgs, { tools: toolsOpt, effort: 'xhigh' })).toBe(true);
+    expect(shouldRouteToOpenAiResponsesApi('gpt-6-astra', userMsgs, { effort: 'max' })).toBe(false); // no tools
+  });
+
   it('does NOT route without tools, without effort, or on non-gpt-5 reasoning/chat models', () => {
     expect(shouldRouteToOpenAiResponsesApi('gpt-5.5', userMsgs, { effort: 'xhigh' })).toBe(false); // no tools
     expect(shouldRouteToOpenAiResponsesApi('gpt-5.5', userMsgs, { tools: toolsOpt })).toBe(false); // no effort

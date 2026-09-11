@@ -342,16 +342,31 @@ export function modelRequiresMaxCompletionTokens(modelId: string): boolean {
 
 /**
  * Whether `modelId` is an OpenAI reasoning model — the o1/o3/o4 series or the
- * GPT-5 family. These models reject custom sampling params (`temperature`,
- * `top_p`) with HTTP 400 in addition to requiring `max_completion_tokens`;
- * they run only at their fixed defaults. Single source of truth for the
- * o-series/gpt-5 detection used by both the param guards.
+ * GPT-5 / GPT-6 families. These models reject custom sampling params
+ * (`temperature`, `top_p`) with HTTP 400 in addition to requiring
+ * `max_completion_tokens`; they run only at their fixed defaults. Single
+ * source of truth for the o-series/gpt-5/gpt-6 detection used by both the
+ * param guards.
  *
- * @param modelId Provider-side model identifier (e.g. `'o3'`, `'gpt-5.4-mini'`).
+ * GPT-6 live-probed 2026-09-10 (chat.completions, `gpt-6-astra`):
+ * `temperature: 0.5` → HTTP 400 `unsupported_value` ("Unsupported value:
+ * 'temperature' does not support 0.5 with this model. Only the default (1)
+ * value is supported."); `max_tokens: 16` → HTTP 400
+ * `unsupported_parameter` ("Unsupported parameter: 'max_tokens' is not
+ * supported with this model. Use 'max_completion_tokens' instead."). The
+ * family therefore behaves exactly like GPT-5 on both guards.
+ *
+ * `gpt-6` is matched as a bare family prefix (mirroring `gpt-5`) so dated
+ * snapshots of `gpt-6-astra` are covered. It is deliberately NOT generalized
+ * to `gpt-\d` — a future family's param contract is unknown, and the
+ * conservative default for an unrecognized id is the legacy `max_tokens`
+ * path. Widen only for a family that has actually shipped and been probed.
+ *
+ * @param modelId Provider-side model identifier (e.g. `'o3'`, `'gpt-6-astra'`).
  */
 export function isOpenAIReasoningModel(modelId: string): boolean {
-  // o1 / o3 / o4 reasoning models, plus GPT-5 family.
-  return /^(o\d|gpt-5)/i.test(modelId);
+  // o1 / o3 / o4 reasoning models, plus the GPT-5 and GPT-6 families.
+  return /^(o\d|gpt-5|gpt-6)/i.test(modelId);
 }
 
 /**
@@ -362,20 +377,30 @@ export function isOpenAIReasoningModel(modelId: string): boolean {
  * 2026-07-08 when the codegen frontier fallback chain routed a tool-carrying,
  * effort:xhigh orchestrator turn to gpt-5.5, hard-erroring the whole build).
  *
- * agentos has no `/v1/responses` code path, so a tool-carrying reasoning call
- * must DROP `reasoning_effort` (the model then reasons at its default depth)
- * rather than 400 the entire request. Scoped to the GPT-5 family: the o-series
+ * Such a call is routed to `/v1/responses` when it qualifies (see
+ * {@link shouldRouteToOpenAiResponsesApi}, which preserves BOTH effort and
+ * tools); otherwise it stays on chat/completions and must DROP
+ * `reasoning_effort` (the model then reasons at its default depth) rather than
+ * 400 the entire request. Scoped to the GPT-5 and GPT-6 families: the o-series
  * (o1/o3/o4) still accepts `reasoning_effort` + tools on chat/completions, so
  * dropping it there would be a needless reasoning-depth regression. Widen this
  * predicate if a future o-series enforces the same Responses-API requirement.
  *
- * Proper long-term fix (separate, larger): add a `/v1/responses` request path
- * and route reasoning + function-tool calls there, preserving both.
+ * GPT-6 enforces the SAME restriction — live-probed 2026-09-10
+ * (chat.completions, `gpt-6-astra`, `reasoning_effort: 'xhigh'` + one function
+ * tool): HTTP 400 `invalid_request_error` — "Function tools with
+ * reasoning_effort are not supported for gpt-6-astra in /v1/chat/completions.
+ * To use function tools, use /v1/responses or set reasoning_effort to 'none'."
+ * The suggested `'none'` escape hatch does NOT exist on this family: the same
+ * probe with `reasoning_effort: 'none'` returns HTTP 400 `unsupported_value`
+ * ("Supported values are: 'low', 'medium', 'high', and 'xhigh'"). Dropping the
+ * param entirely (or routing to `/v1/responses`) is therefore the only viable
+ * path, which is exactly what the two call sites below already do.
  *
- * @param modelId Provider-side model identifier (e.g. `'gpt-5.5'`).
+ * @param modelId Provider-side model identifier (e.g. `'gpt-5.5'`, `'gpt-6-astra'`).
  */
 export function openAiRejectsReasoningEffortWithTools(modelId: string): boolean {
-  return /^gpt-5/i.test(modelId);
+  return /^gpt-(5|6)/i.test(modelId);
 }
 
 /**
@@ -389,8 +414,8 @@ function requestHasFunctionTools(tools: unknown): boolean {
 
 /**
  * Whether a NON-streaming call must use `/v1/responses` instead of
- * `/v1/chat/completions`: a gpt-5 reasoning model carrying function tools AND a
- * requested effort — the ONLY combination chat/completions 400s on
+ * `/v1/chat/completions`: a gpt-5/gpt-6 reasoning model carrying function tools
+ * AND a requested effort — the ONLY combination chat/completions 400s on
  * ("Function tools with reasoning_effort are not supported … Please use
  * /v1/responses instead") and the only case where the Responses path buys
  * anything (preserved reasoning depth). Excludes, per the 2026-07-08 Codex
@@ -432,7 +457,12 @@ export class OpenAIProvider implements IProvider {
   // Input: cost for prompt tokens. Output: cost for completion tokens.
   // For embedding models, 'input' is total tokens.
   private readonly modelPricing: Record<string, { input: number; output: number }> = {
-    // GPT-5.5 family (current flagship, Jun 2026 — $5 / $30 per 1M tokens, a 2x
+    // GPT-6 family (current flagship, Sep 2026 — $10 / $50 per 1M tokens;
+    // verified against developers.openai.com/api/docs/models/gpt-6-astra on
+    // 2026-09-10. `gpt-6-astra` is the only GPT-6 id on /v1/models at that
+    // date — "GPT-6 Pro" is a ChatGPT plan tier, not an API model.)
+    'gpt-6-astra': { input: 0.01, output: 0.05 },
+    // GPT-5.5 family (previous flagship, Jun 2026 — $5 / $30 per 1M tokens, a 2x
     // increase over gpt-5.4; verified against OpenAI's published pricing 2026-06-27)
     'gpt-5.5': { input: 0.005, output: 0.03 },
     'gpt-5.5-pro': { input: 0.03, output: 0.18 },
@@ -1045,8 +1075,9 @@ export class OpenAIProvider implements IProvider {
   }
 
   /**
-   * Build a `/v1/responses` request body for a gpt-5 reasoning + function-tool
-   * call (the only case {@link shouldRouteToOpenAiResponsesApi} routes here).
+   * Build a `/v1/responses` request body for a gpt-5/gpt-6 reasoning +
+   * function-tool call (the only case
+   * {@link shouldRouteToOpenAiResponsesApi} routes here).
    * Preserves BOTH `reasoning.effort` and `tools`, which chat/completions
    * rejects together. Text-only + no structured output by construction (the
    * router excludes multimodal + responseFormat). Live-probed 2026-07-08.

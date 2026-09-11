@@ -34,10 +34,12 @@ export function isEffortLevel(v: unknown): v is EffortLevel {
 }
 
 /**
- * OpenAI reasoning models (o-series, GPT-5 family) take `reasoning_effort`
- * (none|low|medium|high|xhigh) — the OpenAI analogue of Anthropic's
- * `output_config.effort`. This maps the agentos effort scale onto it; `max`
- * clamps to `xhigh`, the GPT-5.x ceiling (there is no higher OpenAI tier).
+ * OpenAI reasoning models (o-series, GPT-5 and GPT-6 families) take
+ * `reasoning_effort` (none|low|medium|high|xhigh) — the OpenAI analogue of
+ * Anthropic's `output_config.effort`. This maps the agentos effort scale onto
+ * it; `max` clamps to `xhigh`, the proven Chat Completions ceiling for both
+ * families (a real `max` tier exists, but only on `/v1/responses` — see
+ * {@link mapEffortToOpenAiResponsesEffort}).
  * Returns undefined for unknown / empty / non-string values so the request
  * payload omits `reasoning_effort` entirely (the model then runs at its default).
  */
@@ -61,11 +63,13 @@ export function mapEffortToOpenAiReasoningEffort(effort: unknown): string | unde
  * reasoning:{effort:'xhigh'}}` → HTTP 200 (status: completed). gpt-5.5 (and its
  * point/`-pro` variants) accept it. Live-probed 2026-07-14: `gpt-5.6` and
  * `gpt-5.6-sol` with `reasoning:{effort:'xhigh'}` → HTTP 200 (status:
- * completed) — the 5.6 family joins the allow-list. Widen further only after
+ * completed) — the 5.6 family joins the allow-list. Live-probed 2026-09-10:
+ * `gpt-6-astra` with `reasoning:{effort:'xhigh'}` → HTTP 200 (status:
+ * completed) — GPT-6 joins the allow-list. Widen further only after
  * probing the new id.
  */
 export function modelAcceptsXhighResponsesEffort(modelId: string): boolean {
-  return /^gpt-5\.[56]/i.test(modelId);
+  return /^(gpt-5\.[56]|gpt-6-astra)/i.test(modelId);
 }
 
 /**
@@ -83,8 +87,17 @@ export function modelAcceptsXhighResponsesEffort(modelId: string): boolean {
  * 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'.`), and
  * chat.completions still 400s on `max` for the family. Widen only after a
  * fresh Responses probe returns HTTP 200 on the new id.
+ *
+ * 2026-09-10 probe (POST /v1/responses, `reasoning: {effort: 'max'}`,
+ * max_output_tokens 16): HTTP 200 `status: completed` on `gpt-6-astra`, and
+ * also on `gpt-5.6-terra` and `gpt-5.6-luna` — the two shipped 5.6 siblings
+ * that the 2026-08-06 sweep never probed. All three join the list. Note the
+ * asymmetry this preserves: the same ids reject `'max'` on chat.completions
+ * (see {@link CHAT_MAX_EFFORT_MODELS}), so `max` stays a Responses-only tier.
  */
-const RESPONSES_MAX_EFFORT_MODELS: ReadonlySet<string> = new Set(['gpt-5.6', 'gpt-5.6-sol']);
+const RESPONSES_MAX_EFFORT_MODELS: ReadonlySet<string> = new Set([
+  'gpt-5.6', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra',
+]);
 
 /**
  * Whether `modelId` is on the probe-verified Responses `max` allow-list.
@@ -131,6 +144,17 @@ export function mapEffortToOpenAiResponsesEffort(
  * Chat Completions (matching the 2026-07-14 xhigh probe above; the model
  * catalog's `max` listing does not apply to this API surface). The list
  * stays empty until a future family probe returns HTTP 200.
+ *
+ * 2026-09-10 probe (chat.completions, `gpt-6-astra`, top-level
+ * `reasoning_effort: 'max'`, max_completion_tokens 16): REFUSED — HTTP 400
+ * `unsupported_value`, "Unsupported value: 'reasoning_effort' does not
+ * support 'max' with this model. Supported values are: 'low', 'medium',
+ * 'high', and 'xhigh'." GPT-6 does NOT join this list. This directly
+ * contradicts the published model page and several third-party guides, which
+ * list `max` among the model's effort levels without noting that it is
+ * Responses-only — do not re-add `gpt-6-astra` here on the strength of a doc
+ * page; only a fresh HTTP 200 chat probe justifies it. (`'none'` is likewise
+ * unsupported on this family, per the same probe run.)
  */
 const CHAT_MAX_EFFORT_MODELS: readonly string[] = [];
 
