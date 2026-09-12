@@ -55,6 +55,10 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
     text: 'openai/gpt-4o',
     cheap: 'openai/gpt-4o-mini',
   },
+  requesty: {
+    text: 'openai/gpt-4o',
+    cheap: 'openai/gpt-4o-mini',
+  },
   gemini: {
     text: 'gemini-2.5-flash',
     cheap: 'gemini-2.0-flash',
@@ -131,6 +135,7 @@ const AUTO_DETECT_ORDER: AutoDetectProbe[] = [
   { envKey: 'TOGETHER_API_KEY', provider: 'together' },
   { envKey: 'MISTRAL_API_KEY', provider: 'mistral' },
   { envKey: 'XAI_API_KEY', provider: 'xai' },
+  { envKey: 'REQUESTY_API_KEY', provider: 'requesty' },
   { binaryName: 'claude', provider: 'claude-code-cli' },
   { binaryName: 'gemini', provider: 'gemini-cli' },
   { envKey: 'OLLAMA_BASE_URL', provider: 'ollama' },
