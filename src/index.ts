@@ -27,6 +27,7 @@ export * from './core/conversation/ILongTermMemoryRetriever';
 export * from './core/conversation/LongTermMemoryPolicy';
 export * from './core/streaming/StreamingManager';
 export * from './core/llm/providers/AIModelProviderManager';
+export { YouComProvider } from './core/llm/providers/implementations/YouComProvider.js';
 export * from './orchestration/turn-planner/TurnPlanner';
 export * from './orchestration/turn-planner/SqlTaskOutcomeTelemetryStore';
 export * from './orchestration/workflows/WorkflowTypes';
