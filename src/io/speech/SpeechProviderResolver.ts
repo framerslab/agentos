@@ -447,6 +447,7 @@ export class SpeechProviderResolver extends EventEmitter {
       { id: 'openai-tts', kind: 'tts' as const, envVars: ['OPENAI_API_KEY'] },
       { id: 'elevenlabs', kind: 'tts' as const, envVars: ['ELEVENLABS_API_KEY'] },
       { id: 'deepgram-aura', kind: 'tts' as const, envVars: ['DEEPGRAM_API_KEY'] },
+      { id: 'minimax-tts', kind: 'tts' as const, envVars: ['MINIMAX_API_KEY'] },
       {
         id: 'azure-speech-tts',
         kind: 'tts' as const,
