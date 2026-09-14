@@ -19,6 +19,7 @@ import { AudioGenLocalProvider } from './providers/AudioGenLocalProvider.js';
 import { ElevenLabsSFXProvider } from './providers/ElevenLabsSFXProvider.js';
 import { FalAudioProvider } from './providers/FalAudioProvider.js';
 import { MusicGenLocalProvider } from './providers/MusicGenLocalProvider.js';
+import { MiniMaxMusicProvider } from './providers/MiniMaxMusicProvider.js';
 import { ReplicateAudioProvider } from './providers/ReplicateAudioProvider.js';
 import { StableAudioProvider } from './providers/StableAudioProvider.js';
 import { SunoProvider } from './providers/SunoProvider.js';
@@ -30,6 +31,7 @@ import { UdioProvider } from './providers/UdioProvider.js';
 export * from './types.js';
 export * from './IAudioGenerator.js';
 export * from './FallbackAudioProxy.js';
+export * from './providers/MiniMaxMusicProvider.js';
 
 // ---------------------------------------------------------------------------
 // Provider factory registry
@@ -45,6 +47,7 @@ export type AudioProviderFactory = () => IAudioGenerator;
  * `createAudioProvider()` API remains synchronous and ESM-safe.
  */
 const audioProviderFactories = new Map<string, AudioProviderFactory>([
+  ['minimax-music', () => new MiniMaxMusicProvider()],
   ['suno', () => new SunoProvider()],
   ['udio', () => new UdioProvider()],
   ['stable-audio', () => new StableAudioProvider()],
