@@ -210,7 +210,7 @@ function getFaqEntries(skillCount = 0) {
       id: 'faq:supported-models',
       heading: 'What LLM models are supported?',
       content:
-        'AgentOS supports 11 LLM providers: OpenAI (gpt-4o, gpt-4o-mini), Anthropic (claude-sonnet, claude-haiku, claude-opus), Google Gemini (gemini-2.5-pro, gemini-2.5-flash), Groq, Together AI, Mistral, xAI, OpenRouter (fans out to 200+ models), and Ollama (any local model), plus CLI bridges for Claude Code and Gemini CLI.',
+        'AgentOS supports 12 LLM providers: OpenAI (gpt-4o, gpt-4o-mini), Anthropic (claude-sonnet, claude-haiku, claude-opus), Google Gemini (gemini-2.5-pro, gemini-2.5-flash), Groq, Together AI, Mistral, xAI, Atlas Cloud, OpenRouter (fans out to 200+ models), and Ollama (any local model), plus CLI bridges for Claude Code and Gemini CLI.',
       category: 'faq',
     },
     {
@@ -489,7 +489,7 @@ function getApiReferenceEntries() {
       id: 'api:generateText',
       heading: 'generateText() API',
       content:
-        "import { generateText } from '@framers/agentos'. generateText({ model: 'openai:gpt-4o', prompt: 'Hello', system?: '...', tools?: [...], maxSteps?: 5, temperature?: 0.7 }) -> Promise<{ text, provider, model, usage, toolCalls }>. The core text generation function supporting all 11 LLM providers.",
+        "import { generateText } from '@framers/agentos'. generateText({ model: 'openai:gpt-4o', prompt: 'Hello', system?: '...', tools?: [...], maxSteps?: 5, temperature?: 0.7 }) -> Promise<{ text, provider, model, usage, toolCalls }>. The core text generation function supporting all 12 LLM providers.",
       category: 'api',
     },
     {

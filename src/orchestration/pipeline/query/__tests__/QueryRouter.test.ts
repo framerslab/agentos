@@ -173,6 +173,7 @@ describe('QueryRouter', () => {
     mockGenerateText.mockReset();
     delete process.env.OPENAI_API_KEY;
     delete process.env.OPENROUTER_API_KEY;
+    delete process.env.ATLASCLOUD_API_KEY;
     mockExistsSync.mockReturnValue(true);
     mockReaddirSync.mockReturnValue([
       { name: 'pricing.md', isDirectory: () => false, isFile: () => true },
@@ -238,6 +239,59 @@ describe('QueryRouter', () => {
     expect((router as any).getLlmBaseUrl()).toBeUndefined();
     expect((router as any).getEmbeddingApiKey()).toBe('test-openai-key');
     expect((router as any).getEmbeddingBaseUrl()).toBeUndefined();
+  });
+
+  it('resolves Atlas Cloud credentials without overriding its provider endpoint', () => {
+    process.env.ATLASCLOUD_API_KEY = 'test-atlascloud-key';
+
+    const router = createRouter({
+      classifierProvider: 'atlascloud',
+      generationProvider: 'atlascloud',
+    });
+
+    expect((router as any).getLlmApiKey()).toBe('test-atlascloud-key');
+    expect((router as any).getLlmBaseUrl()).toBeUndefined();
+    expect((router as any).getEmbeddingApiKey()).toBe('');
+    expect((router as any).getEmbeddingBaseUrl()).toBeUndefined();
+  });
+
+  it('uses Atlas Cloud models in QueryRouter defaults when it is the only configured provider', async () => {
+    const providerEnvKeys = [
+      'OPENAI_API_KEY',
+      'ATLASCLOUD_API_KEY',
+      'ANTHROPIC_API_KEY',
+      'GEMINI_API_KEY',
+      'GROQ_API_KEY',
+      'TOGETHER_API_KEY',
+      'MISTRAL_API_KEY',
+      'XAI_API_KEY',
+      'OPENROUTER_API_KEY',
+    ];
+    const originalEnv = new Map(providerEnvKeys.map((key) => [key, process.env[key]]));
+
+    for (const key of providerEnvKeys) delete process.env[key];
+    process.env.ATLASCLOUD_API_KEY = 'test-atlascloud-key';
+    vi.resetModules();
+
+    try {
+      const { DEFAULT_QUERY_ROUTER_CONFIG } = await import('../types.js');
+
+      expect(DEFAULT_QUERY_ROUTER_CONFIG).toMatchObject({
+        classifierProvider: 'atlascloud',
+        classifierModel: 'qwen/qwen3.5-flash',
+        embeddingProvider: 'openai',
+        generationProvider: 'atlascloud',
+        generationModel: 'qwen/qwen3.5-flash',
+        generationModelDeep: 'deepseek-ai/deepseek-v4-pro',
+      });
+    } finally {
+      for (const key of providerEnvKeys) {
+        const value = originalEnv.get(key);
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      vi.resetModules();
+    }
   });
 
   // -------------------------------------------------------------------------

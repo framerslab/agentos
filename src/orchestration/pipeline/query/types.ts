@@ -788,6 +788,7 @@ function resolveDefaultProvider(): string {
   try {
     const envMap: ReadonlyArray<readonly [string, string]> = [
       ['OPENAI_API_KEY', 'openai'],
+      ['ATLASCLOUD_API_KEY', 'atlascloud'],
       ['ANTHROPIC_API_KEY', 'anthropic'],
       ['GEMINI_API_KEY', 'gemini'],
       ['GROQ_API_KEY', 'groq'],
@@ -805,11 +806,27 @@ function resolveDefaultProvider(): string {
   return 'openai';
 }
 
+/**
+ * Resolve embeddings independently because not every text provider supports
+ * the OpenAI embeddings API. Atlas-only configurations intentionally fall
+ * back to `openai` without a key so QueryRouter uses keyword retrieval.
+ */
+function resolveDefaultEmbeddingProvider(): string {
+  try {
+    if (process.env.OPENAI_API_KEY) return 'openai';
+    if (process.env.OPENROUTER_API_KEY) return 'openrouter';
+  } catch {
+    // Browser or restricted env — fall back
+  }
+  return 'openai';
+}
+
 /** Provider → cheap model mapping for classifier/T0-T1 generation. */
 const CHEAP_MODELS: Record<string, string> = {
   openai: 'gpt-4o-mini',
   anthropic: 'claude-haiku-4-5-20251001',
   openrouter: 'openai/gpt-4o-mini',
+  atlascloud: 'qwen/qwen3.5-flash',
   gemini: 'gemini-2.0-flash',
   groq: 'gemma2-9b-it',
   together: 'meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo',
@@ -825,6 +842,7 @@ const STRONG_MODELS: Record<string, string> = {
   openai: 'gpt-4o',
   anthropic: 'claude-sonnet-4-6',
   openrouter: 'openai/gpt-4o',
+  atlascloud: 'deepseek-ai/deepseek-v4-pro',
   gemini: 'gemini-2.5-flash',
   groq: 'llama-3.3-70b-versatile',
   together: 'meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo',
@@ -840,7 +858,7 @@ export const DEFAULT_QUERY_ROUTER_CONFIG = {
   classifierModel: CHEAP_MODELS[resolveDefaultProvider()] ?? 'gpt-4o-mini',
   classifierProvider: resolveDefaultProvider(),
   maxTier: 3 as QueryTier,
-  embeddingProvider: resolveDefaultProvider(),
+  embeddingProvider: resolveDefaultEmbeddingProvider(),
   embeddingModel: 'text-embedding-3-small',
   generationModel: CHEAP_MODELS[resolveDefaultProvider()] ?? 'gpt-4o-mini',
   generationModelDeep: STRONG_MODELS[resolveDefaultProvider()] ?? 'gpt-4o',

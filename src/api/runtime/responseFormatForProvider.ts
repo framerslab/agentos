@@ -23,7 +23,7 @@ import { modelSupportsForcedToolChoice } from '../../core/llm/providers/model-fo
  * as a loose JSON mode. (Moved from generateObject.ts so the provider-branch
  * logic lives exactly once.)
  */
-export const JSON_MODE_PROVIDERS = new Set(['openai', 'openrouter']);
+export const JSON_MODE_PROVIDERS = new Set(['openai', 'openrouter', 'atlascloud']);
 
 /** Inputs for {@link buildResponseFormatForProvider}. */
 export interface BuildResponseFormatForProviderInputs {
@@ -61,7 +61,7 @@ export interface BuildResponseFormatForProviderInputs {
  *   `options.responseFormat` (bridge options + text return only), so
  *   emitting the Gemini marker there is dead weight; the leg is prompt-only
  *   in practice and this builder says so honestly.
- * - `openrouter` — OpenAI-shaped strict `json_schema` (forwarded upstream
+ * - `openrouter` / `atlascloud` — OpenAI-shaped strict `json_schema` (forwarded upstream
  *   with `require_parameters` routing) when strict-compatible, else
  *   `json_object`.
  * - any other {@link JSON_MODE_PROVIDERS} member — `json_object`.
@@ -101,7 +101,7 @@ export function buildResponseFormatForProvider(
     // The leg is prompt-only in practice; say so honestly.
     return undefined;
   }
-  if (providerId === 'openrouter') {
+  if (providerId === 'openrouter' || providerId === 'atlascloud') {
     return canUseStrictJsonSchema(jsonSchema)
       ? buildOpenAIJsonSchemaResponseFormat(jsonSchema, schemaName)
       : { type: 'json_object' as const };

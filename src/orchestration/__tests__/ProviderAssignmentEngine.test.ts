@@ -73,6 +73,23 @@ describe('ProviderAssignmentEngine', () => {
       expect(assignments.find((a) => a.nodeId === 'border_low')!.model).toBe('gpt-4o-mini');
       expect(assignments.find((a) => a.nodeId === 'border_high')!.model).toBe('gpt-4o');
     });
+
+    it('uses Atlas Cloud when it is the only available provider', () => {
+      const engine = new ProviderAssignmentEngine(['atlascloud']);
+      const nodes = [makeGmiNode('easy', 0.1), makeGmiNode('hard', 0.9)];
+      const assignments = engine.assign(nodes, { strategy: 'balanced' });
+
+      expect(assignments).toEqual([
+        expect.objectContaining({
+          provider: 'atlascloud',
+          model: 'qwen/qwen3.5-flash',
+        }),
+        expect.objectContaining({
+          provider: 'atlascloud',
+          model: 'deepseek-ai/deepseek-v4-pro',
+        }),
+      ]);
+    });
   });
 
   describe('explicit strategy', () => {

@@ -39,6 +39,7 @@ export interface ResolvedProvider {
 
 const ENV_KEY_MAP: Record<string, string> = {
   openai: 'OPENAI_API_KEY',
+  atlascloud: 'ATLASCLOUD_API_KEY',
   anthropic: 'ANTHROPIC_API_KEY',
   openrouter: 'OPENROUTER_API_KEY',
   gemini: 'GEMINI_API_KEY',
@@ -52,6 +53,7 @@ const ENV_KEY_MAP: Record<string, string> = {
 
 const ENV_URL_MAP: Record<string, string> = {
   openai: 'OPENAI_BASE_URL',
+  atlascloud: 'ATLASCLOUD_BASE_URL',
   openrouter: 'OPENROUTER_BASE_URL',
   stability: 'STABILITY_BASE_URL',
   replicate: 'REPLICATE_BASE_URL',
