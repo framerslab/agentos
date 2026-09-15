@@ -412,6 +412,59 @@ function requestHasFunctionTools(tools: unknown): boolean {
   return Array.isArray(tools) ? tools.length > 0 : tools != null;
 }
 
+/** Whether one content part is a plain text block the Responses mapper can carry. */
+function isTextPart(part: unknown): part is { type: 'text'; text: string } {
+  return (
+    part != null &&
+    typeof part === 'object' &&
+    (part as { type?: unknown }).type === 'text' &&
+    typeof (part as { text?: unknown }).text === 'string'
+  );
+}
+
+/**
+ * Whether a message's `content` can be carried to `/v1/responses` by
+ * {@link flattenResponsesTextContent} WITHOUT losing information.
+ *
+ * Accepts a plain string, `null`/absent content, or an array whose parts are
+ * ALL text blocks. Anthropic-style `cache_control` markers on those blocks are
+ * fine to drop: OpenAI has no equivalent request field and caches long prefixes
+ * automatically, so the marker carries no payload.
+ *
+ * Rejects genuinely multimodal content (images, `tool_result` blocks, any
+ * non-text part) because the mapper still cannot represent it — flattening
+ * those would silently discard the payload.
+ *
+ * This is the SINGLE source of truth shared by
+ * {@link shouldRouteToOpenAiResponsesApi} (which refuses to route what the
+ * mapper cannot carry) and the mapper itself, so the two cannot drift into the
+ * state that caused the silent-empty-system-prompt hazard this guard replaced.
+ */
+export function isResponsesMappableContent(content: ChatMessage['content']): boolean {
+  if (content == null || typeof content === 'string') return true;
+  if (!Array.isArray(content)) return false;
+  return content.every(isTextPart);
+}
+
+/**
+ * Flatten a message's content to the plain text `/v1/responses` receives.
+ *
+ * A string passes through; an all-text block array is joined with `\n` (the
+ * shape `systemBlocks` / `SystemContentBlock[]` produces, where each block is
+ * an independently cache-markable slab of one logical prompt); anything else
+ * yields `''`.
+ *
+ * Callers MUST gate on {@link isResponsesMappableContent} first — the `''`
+ * fallback is a defensive floor for unmappable content, not a licence to send
+ * it. Sending unmappable content here is exactly the silent-empty-prompt bug
+ * the paired predicate exists to prevent.
+ */
+export function flattenResponsesTextContent(content: ChatMessage['content']): string {
+  if (typeof content === 'string') return content;
+  if (content == null || !Array.isArray(content)) return '';
+  return content.filter(isTextPart).map((p) => p.text).join('\n');
+}
+
 /**
  * Whether a NON-streaming call must use `/v1/responses` instead of
  * `/v1/chat/completions`: a gpt-5/gpt-6 reasoning model carrying function tools
@@ -421,9 +474,19 @@ function requestHasFunctionTools(tools: unknown): boolean {
  * anything (preserved reasoning depth). Excludes, per the 2026-07-08 Codex
  * review, requests that carry a `responseFormat` (the Responses path maps no
  * structured output — those stay on chat/completions where R4 drops effort) or
- * any non-string (multimodal) message content (the Responses input mapper is
- * text-only). Every excluded case stays on chat/completions; R4's effort-drop
- * remains the defense-in-depth floor there.
+ * message content the input mapper cannot carry (see
+ * {@link isResponsesMappableContent}). Every excluded case stays on
+ * chat/completions; R4's effort-drop remains the defense-in-depth floor there.
+ *
+ * Content gating is delegated to {@link isResponsesMappableContent} rather
+ * than tested inline. It previously required EVERY message's content to be a
+ * plain string, which silently excluded Anthropic-style cache-marked system
+ * blocks (`systemBlocks` / `SystemContentBlock[]`, which reach the provider as
+ * an all-text content array). Callers that set `systemBlocks` to fix a cold
+ * prompt cache therefore lost Responses routing and hard-400ed on
+ * chat/completions — the exact failure this router exists to prevent. All-text
+ * arrays now route and are flattened losslessly; true multimodal content is
+ * still excluded, because the mapper still cannot represent it.
  */
 export function shouldRouteToOpenAiResponsesApi(
   modelId: string,
@@ -435,7 +498,7 @@ export function shouldRouteToOpenAiResponsesApi(
     requestHasFunctionTools(options.tools) &&
     mapEffortToOpenAiReasoningEffort(options.effort) !== undefined &&
     options.responseFormat === undefined &&
-    messages.every((m) => typeof m.content === 'string' || m.content == null)
+    messages.every((m) => isResponsesMappableContent(m.content))
   );
 }
 
@@ -1079,8 +1142,13 @@ export class OpenAIProvider implements IProvider {
    * function-tool call (the only case
    * {@link shouldRouteToOpenAiResponsesApi} routes here).
    * Preserves BOTH `reasoning.effort` and `tools`, which chat/completions
-   * rejects together. Text-only + no structured output by construction (the
-   * router excludes multimodal + responseFormat). Live-probed 2026-07-08.
+   * rejects together. No structured output by construction (the router
+   * excludes responseFormat). Message content arrives as either a plain
+   * string or an all-text block array — {@link flattenResponsesTextContent}
+   * joins the latter, so cache-marked `systemBlocks` survive intact instead of
+   * collapsing to an empty prompt. True multimodal content never reaches here
+   * (the router excludes it via {@link isResponsesMappableContent}).
+   * Live-probed 2026-07-08; block-content path live-probed 2026-09-12.
    * @private
    */
   private buildResponsesPayload(
@@ -1090,7 +1158,7 @@ export class OpenAIProvider implements IProvider {
   ): Record<string, unknown> {
     const input: Array<Record<string, unknown>> = [];
     for (const m of messages) {
-      const text = typeof m.content === 'string' ? m.content : m.content == null ? '' : '';
+      const text = flattenResponsesTextContent(m.content);
       if (m.role === 'tool') {
         // Tool result → function_call_output paired by call_id.
         input.push({ type: 'function_call_output', call_id: m.tool_call_id, output: text });
@@ -1181,8 +1249,16 @@ export class OpenAIProvider implements IProvider {
    * Map a `/v1/responses` response into the same {@link ModelCompletionResponse}
    * shape the rest of agentos consumes from chat/completions: assistant text
    * from `output_text` message parts, tool calls from `function_call` items
-   * (call_id → id). A body with no usable output THROWS (→ fallback advances)
-   * rather than returning an empty success (Codex-Medium-2). @private
+   * (call_id → id).
+   *
+   * An output array with NO items at all THROWS (→ fallback advances) rather
+   * than returning an empty success (Codex-Medium-2). Output that holds items
+   * but no `message`/`function_call` does NOT throw: a reasoning model returns
+   * reasoning-only output when reasoning exhausts the output budget, which is
+   * a legitimate `length` finish. It maps to an empty turn (`content: null`)
+   * carrying the real finishReason, so the caller can retry with a larger
+   * budget instead of losing a whole multi-step build to one capped turn.
+   * @private
    */
   private mapResponsesToCompletionResponse(
     apiResponse: OpenAIAPITypes.ResponsesResponse,
@@ -1206,9 +1282,27 @@ export class OpenAIProvider implements IProvider {
       // reasoning + any other item type: ignored.
     }
 
-    if (assistantText.length === 0 && toolCalls.length === 0) {
-      // Malformed / empty 2xx — throw so generateText's fallback advances
-      // instead of treating an empty turn as a successful result.
+    const incompleteReason = apiResponse.incomplete_details?.reason;
+    const finishReason = toolCalls.length > 0
+      ? 'tool_calls'
+      : apiResponse.status === 'incomplete'
+        ? (incompleteReason === 'max_output_tokens' ? 'length'
+          : incompleteReason === 'content_filter' ? 'content_filter'
+          : 'stop')
+        : 'stop';
+
+    if (output.length === 0) {
+      // GENUINELY empty 2xx — no output items at all. This is the malformed
+      // body the guard was written for: throw so generateText's fallback
+      // advances instead of treating it as a successful empty turn.
+      //
+      // Deliberately NOT triggered by "items present but none usable": a
+      // reasoning model returns output holding ONLY a `reasoning` item when
+      // reasoning consumes the whole output budget. That is a well-formed
+      // `length` finish, not a malformed body, and this check used to sit
+      // ABOVE the finishReason computation — so it threw before the code that
+      // already knew how to express it could run, hard-erroring entire builds
+      // over one budget-capped turn.
       throw new OpenAIProviderError(
         `OpenAI /responses returned no usable output (status: ${apiResponse.status ?? 'unknown'})`,
         'INVALID_RESPONSE',
@@ -1219,14 +1313,21 @@ export class OpenAIProvider implements IProvider {
       );
     }
 
-    const incompleteReason = apiResponse.incomplete_details?.reason;
-    const finishReason = toolCalls.length > 0
-      ? 'tool_calls'
-      : apiResponse.status === 'incomplete'
-        ? (incompleteReason === 'max_output_tokens' ? 'length'
-          : incompleteReason === 'content_filter' ? 'content_filter'
-          : 'stop')
-        : 'stop';
+    if (assistantText.length === 0 && toolCalls.length === 0) {
+      // Items present but no message/function_call — reasoning-only output.
+      // Surfaced as an empty turn carrying the real finishReason ('length'
+      // when max_output_tokens capped it), so the caller can retry with a
+      // larger budget. Reasoning tokens are drawn from the SAME output budget
+      // as the visible answer, so a reasoning model needs a materially larger
+      // maxTokens than a non-reasoning one to leave room for a reply.
+      console.warn(
+        `OpenAIProvider: /responses returned reasoning-only output for ${apiResponse.model ?? modelId} ` +
+        `(status: ${apiResponse.status ?? 'unknown'}${incompleteReason ? `, reason: ${incompleteReason}` : ''}` +
+        `${apiResponse.usage?.output_tokens !== undefined ? `, output_tokens: ${apiResponse.usage.output_tokens}` : ''}` +
+        `) — returning an empty turn with finishReason '${finishReason}'. ` +
+        `Raise max output tokens: reasoning tokens consume the same budget as the reply.`
+      );
+    }
 
     return {
       id: apiResponse.id,

@@ -6,6 +6,8 @@ vi.stubGlobal('fetch', vi.fn());
 import {
   OpenAIProvider,
   shouldRouteToOpenAiResponsesApi,
+  isResponsesMappableContent,
+  flattenResponsesTextContent,
 } from '../implementations/OpenAIProvider';
 import type { ChatMessage, ModelCompletionOptions } from '../IProvider';
 
@@ -13,6 +15,58 @@ const userMsgs: ChatMessage[] = [{ role: 'user', content: 'hi' }];
 const toolsOpt = [
   { type: 'function' as const, function: { name: 'ping', description: 'p', parameters: { type: 'object', properties: {} } } },
 ];
+
+// Anthropic-style cache-marked system blocks, as `systemBlocks` /
+// SystemContentBlock[] reach the provider after generateText maps them.
+const cacheMarkedSystem: ChatMessage[] = [
+  {
+    role: 'system',
+    content: [
+      { type: 'text', text: 'You are a build agent.', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'Follow the plan.' },
+    ],
+  },
+  { role: 'user', content: 'Call ping with x="ok".' },
+];
+
+const multimodal: ChatMessage[] = [
+  {
+    role: 'user',
+    content: [
+      { type: 'text', text: 'what is this' },
+      { type: 'image_url', image_url: { url: 'https://example.com/a.png' } },
+    ],
+  },
+];
+
+describe('isResponsesMappableContent / flattenResponsesTextContent', () => {
+  it('accepts strings, null, and all-text block arrays; rejects multimodal parts', () => {
+    expect(isResponsesMappableContent('hi')).toBe(true);
+    expect(isResponsesMappableContent(null)).toBe(true);
+    expect(isResponsesMappableContent([{ type: 'text', text: 'a' }])).toBe(true);
+    // cache_control is an Anthropic marker with no OpenAI equivalent — its
+    // presence must not make the block unmappable.
+    expect(isResponsesMappableContent([
+      { type: 'text', text: 'a', cache_control: { type: 'ephemeral' } },
+    ])).toBe(true);
+    expect(isResponsesMappableContent([
+      { type: 'text', text: 'a' },
+      { type: 'image_url', image_url: { url: 'u' } },
+    ])).toBe(false);
+    expect(isResponsesMappableContent([
+      { type: 'tool_result', tool_use_id: 't1', content: 'r' },
+    ])).toBe(false);
+  });
+
+  it('flattens all-text blocks to newline-joined text, losing nothing but the markers', () => {
+    expect(flattenResponsesTextContent('hi')).toBe('hi');
+    expect(flattenResponsesTextContent(null)).toBe('');
+    expect(flattenResponsesTextContent([
+      { type: 'text', text: 'You are a build agent.', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'Follow the plan.' },
+    ])).toBe('You are a build agent.\nFollow the plan.');
+  });
+});
 
 describe('shouldRouteToOpenAiResponsesApi', () => {
   it('routes ONLY gpt-5 + tools + effort (no responseFormat, text-only)', () => {
@@ -24,6 +78,25 @@ describe('shouldRouteToOpenAiResponsesApi', () => {
     expect(shouldRouteToOpenAiResponsesApi('gpt-6-astra', userMsgs, { tools: toolsOpt, effort: 'max' })).toBe(true);
     expect(shouldRouteToOpenAiResponsesApi('gpt-6-astra', userMsgs, { tools: toolsOpt, effort: 'xhigh' })).toBe(true);
     expect(shouldRouteToOpenAiResponsesApi('gpt-6-astra', userMsgs, { effort: 'max' })).toBe(false); // no tools
+  });
+
+  it('routes cache-marked systemBlocks (all-text arrays), which previously fell back and 400ed', () => {
+    expect(shouldRouteToOpenAiResponsesApi('gpt-6-astra', cacheMarkedSystem, { tools: toolsOpt, effort: 'xhigh' })).toBe(true);
+    expect(shouldRouteToOpenAiResponsesApi('gpt-5.5', cacheMarkedSystem, { tools: toolsOpt, effort: 'max' })).toBe(true);
+  });
+
+  it('still does NOT route genuinely multimodal content (the mapper cannot carry it)', () => {
+    expect(shouldRouteToOpenAiResponsesApi('gpt-6-astra', multimodal, { tools: toolsOpt, effort: 'xhigh' })).toBe(false);
+  });
+
+  it('still does NOT route cache-marked blocks when responseFormat is present', () => {
+    expect(
+      shouldRouteToOpenAiResponsesApi('gpt-6-astra', cacheMarkedSystem, {
+        tools: toolsOpt,
+        effort: 'xhigh',
+        responseFormat: { type: 'json_object' } as ModelCompletionOptions['responseFormat'],
+      }),
+    ).toBe(false);
   });
 
   it('does NOT route without tools, without effort, or on non-gpt-5 reasoning/chat models', () => {
@@ -91,6 +164,35 @@ describe('OpenAIProvider.buildResponsesPayload', () => {
     expect(p).not.toHaveProperty('response_format');
     expect(p).not.toHaveProperty('temperature');
     expect(p).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('carries cache-marked system blocks into input as non-empty joined text', () => {
+    const p = build('gpt-6-astra', cacheMarkedSystem, { tools: toolsOpt, effort: 'xhigh' });
+    const input = p.input as Array<Record<string, unknown>>;
+    expect(input).toEqual([
+      { role: 'system', content: 'You are a build agent.\nFollow the plan.' },
+      { role: 'user', content: 'Call ping with x="ok".' },
+    ]);
+    // The regression guard: the system prompt must never arrive empty. Before
+    // the fix the mapper collapsed any array content to '' — invisible in the
+    // response, but the model lost its entire system prompt.
+    expect(input[0].content).not.toBe('');
+    expect(String(input[0].content)).toContain('You are a build agent.');
+    // cache_control has no OpenAI request equivalent and must not be emitted.
+    expect(JSON.stringify(p)).not.toContain('cache_control');
+  });
+
+  it('carries block content on user and tool turns too', () => {
+    const convo: ChatMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'do it' }] },
+      { role: 'tool', tool_call_id: 'call_1', content: [{ type: 'text', text: 'pong' }] },
+    ];
+    const input = build('gpt-6-astra', convo, { tools: toolsOpt, effort: 'xhigh' })
+      .input as Array<Record<string, unknown>>;
+    expect(input).toEqual([
+      { role: 'user', content: 'do it' },
+      { type: 'function_call_output', call_id: 'call_1', output: 'pong' },
+    ]);
   });
 
   it('drops an empty assistant turn but keeps assistant text when tool_calls also present', () => {
@@ -169,9 +271,67 @@ describe('OpenAIProvider.mapResponsesToCompletionResponse', () => {
     expect(cfRes.choices[0].finishReason).toBe('content_filter');
   });
 
-  it('THROWS on a body with no usable output (Codex-Medium-2 — must fall back, not empty-succeed)', () => {
+  it('THROWS only on a GENUINELY empty output array (Codex-Medium-2 — must fall back, not empty-succeed)', () => {
     expect(() => map({ id: 'r', model: 'gpt-5.5', status: 'completed', output: [] })).toThrow();
-    expect(() => map({ id: 'r', model: 'gpt-5.5', output: [{ type: 'reasoning', summary: [] }] })).toThrow();
+    expect(() => map({ id: 'r', model: 'gpt-5.5', status: 'completed' })).toThrow(); // output absent
+  });
+
+  it('reasoning-only + incomplete/max_output_tokens → finishReason length, no throw', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = map({
+      id: 'r', model: 'gpt-6-astra', status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens' },
+      output: [{ type: 'reasoning', summary: [] }],
+      usage: { input_tokens: 20, output_tokens: 300, total_tokens: 320 },
+    }) as any;
+    // The regression: this used to throw before finishReason was computed,
+    // hard-erroring an entire build over one budget-capped turn.
+    expect(res.choices[0].finishReason).toBe('length');
+    expect(res.choices[0].message.content).toBeNull();
+    expect(res.choices[0].message.tool_calls).toBeUndefined();
+    expect(res.usage.completionTokens).toBe(300);
+    // Diagnostic must name the budget as the cause.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toMatch(/reasoning-only/i);
+    warn.mockRestore();
+  });
+
+  it('reasoning-only + completed → finishReason stop, no throw (empty turn)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = map({
+      id: 'r', model: 'gpt-6-astra', status: 'completed',
+      output: [{ type: 'reasoning', summary: [] }],
+      usage: { input_tokens: 10, output_tokens: 40, total_tokens: 50 },
+    }) as any;
+    expect(res.choices[0].finishReason).toBe('stop');
+    expect(res.choices[0].message.content).toBeNull();
+    warn.mockRestore();
+  });
+
+  it('reasoning-only + incomplete/content_filter → finishReason content_filter, no throw', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = map({
+      id: 'r', model: 'gpt-6-astra', status: 'incomplete',
+      incomplete_details: { reason: 'content_filter' },
+      output: [{ type: 'reasoning', summary: [] }],
+    }) as any;
+    expect(res.choices[0].finishReason).toBe('content_filter');
+    expect(res.choices[0].message.content).toBeNull();
+    warn.mockRestore();
+  });
+
+  it('reasoning + function_call (no message) still maps tool_calls normally', () => {
+    const res = map({
+      id: 'r', model: 'gpt-6-astra', status: 'completed',
+      output: [
+        { type: 'reasoning', summary: [] },
+        { type: 'function_call', call_id: 'c1', name: 'PickTemplate', arguments: '{"id":"a"}' },
+      ],
+    }) as any;
+    expect(res.choices[0].finishReason).toBe('tool_calls');
+    expect(res.choices[0].message.tool_calls).toEqual([
+      { id: 'c1', type: 'function', function: { name: 'PickTemplate', arguments: '{"id":"a"}' } },
+    ]);
   });
 });
 

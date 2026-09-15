@@ -1,3 +1,11 @@
+## <small>0.10.18 (2026-09-12)</small>
+
+* fix(providers): don't throw on reasoning-only /v1/responses output ([e116f4ed5cbcecb35f0ddbb350ff2fa0ea42eec3](https://github.com/framerslab/agentos/commit/e116f4ed5cbcecb35f0ddbb350ff2fa0ea42eec3))
+
+## <small>0.10.17 (2026-09-11)</small>
+
+* fix(providers): route /v1/responses when system content is cache-marked blocks ([82f028e55e23c6b5f03413be2bdff819fef76ca6](https://github.com/framerslab/agentos/commit/82f028e55e23c6b5f03413be2bdff819fef76ca6))
+
 ## <small>0.10.16 (2026-09-10)</small>
 
 * fix(providers): correct GPT-5.6 cache retention and add the shipped 5.6 siblings ([7f55072d02ee1d73383539312ebba2f5c13fbeb6](https://github.com/framerslab/agentos/commit/7f55072d02ee1d73383539312ebba2f5c13fbeb6))
