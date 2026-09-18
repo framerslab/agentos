@@ -28,12 +28,14 @@
  *
  * Allowlisted APIs (each requires explicit opt-in via {@link SandboxAPI}):
  * - `fetch` — HTTP requests, domain-restricted via {@link SandboxedToolForgeConfig.fetchDomainAllowlist}.
- * - `fs.readFile` — Read-only file access, path-restricted, max 1 MB.
+ * - `fs.readFile` — Read-only file access, max 1 MB, restricted to the
+ *   configured roots after symlink resolution (a link inside a root cannot
+ *   be used to reach a file outside one).
  * - `crypto` — Hashing and HMAC only (`createHash`, `createHmac`).
  */
 
 import { createHash, createHmac, randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { SandboxExecutionRequest, SandboxExecutionResult, SandboxAPI } from './types.js';
 import { CodeSandbox } from '../../safety/sandbox/executor/CodeSandbox.js';
@@ -157,6 +159,21 @@ export class SandboxedToolForge {
   private readonly fsReadRoots: string[];
 
   /**
+   * Real path of each configured root, resolved lazily and cached PER ROOT.
+   *
+   * Both sides of a containment check have to be real paths: a configured
+   * root is frequently itself a link (on macOS `/tmp` is a link to
+   * `/private/tmp`), so comparing a resolved file against an unresolved root
+   * would deny perfectly legitimate reads.
+   *
+   * Per root, not per set: a set-wide cache that is dropped whenever ANY
+   * root fails to resolve would re-resolve the roots that DID succeed, and a
+   * root symlink repointed in between would then be followed to its new
+   * target — losing the pinning this cache exists to provide.
+   */
+  private readonly realFsReadRootCache = new Map<string, Promise<string>>();
+
+  /**
    * Hardened node:vm sandbox shared across all execute() calls. Owns the
    * codeGeneration restriction, frozen console, and explicit-undefined
    * dangerous globals. Reused per forge instance to amortize stats bookkeeping.
@@ -216,6 +233,36 @@ export class SandboxedToolForge {
    * the raw message in that case. The hints map to the 4 most common
    * LLM forge mistakes observed in production.
    */
+  private resolveReadRoots(): Promise<string[]> {
+    return Promise.all(this.fsReadRoots.map((root) => this.resolveReadRoot(root)));
+  }
+
+  /**
+   * Resolve one configured root, pinning the first success.
+   *
+   * A resolved root is pinned for the life of the forge, deliberately:
+   * re-resolving it per read would let a root symlink be repointed
+   * underneath a running sandbox, which is the move this containment check
+   * exists to stop. A caller that needs to follow a retargeted root builds a
+   * new forge. A FAILED resolution is not pinned, so a root that becomes
+   * readable later is picked up — and because each root is cached on its
+   * own, one unreadable root can never un-pin a sibling that resolved.
+   */
+  private resolveReadRoot(root: string): Promise<string> {
+    const cached = this.realFsReadRootCache.get(root);
+    if (cached !== undefined) return cached;
+
+    const pending = realpath(root).catch(() => {
+      // Drop the failure so the next read retries this root. Its lexical
+      // form never matches a real path, so an unresolvable root cannot
+      // widen the sandbox while it stays unreadable.
+      this.realFsReadRootCache.delete(root);
+      return root;
+    });
+    this.realFsReadRootCache.set(root, pending);
+    return pending;
+  }
+
   private describeSyntaxError(message: string): string {
     const m = message || '';
     if (/Unexpected token 'const'/.test(m) || /Unexpected token 'let'/.test(m)) {
@@ -475,15 +522,60 @@ export class SandboxedToolForge {
       extras.fs = {
         readFile: async (filePath: string) => {
           const resolvedPath = path.resolve(filePath);
-          const allowed = this.fsReadRoots.some((root) => {
-            return resolvedPath === root || resolvedPath.startsWith(`${root}${path.sep}`);
-          });
-          if (!allowed) {
+          // Containment via path.relative, not a string prefix: a root that
+          // already ends in a separator (the filesystem root `/`, a Windows
+          // drive root `C:\`) would otherwise be compared against a doubled
+          // separator and deny every file beneath it. path.relative also
+          // applies the platform's own case rules.
+          const withinRoots = (candidate: string, roots: readonly string[]): boolean =>
+            roots.some((root) => {
+              const relative = path.relative(root, candidate);
+              // '' means the candidate IS the root. A relative path that
+              // climbs out ('..' or '../x') or stays absolute (a different
+              // Windows drive) is outside it. Checking for the '..' segment
+              // rather than the '..' prefix keeps a sibling named '..foo'
+              // from reading as an escape.
+              return (
+                relative === '' ||
+                (relative !== '..' &&
+                  !relative.startsWith(`..${path.sep}`) &&
+                  !path.isAbsolute(relative))
+              );
+            });
+
+          // Lexical pass: rejects the obvious `../../etc/passwd` shape before
+          // the sandbox pays for any filesystem call.
+          if (!withinRoots(resolvedPath, this.fsReadRoots)) {
             throw new Error(
               `fs.readFile blocked: path "${resolvedPath}" is outside the allowed roots`,
             );
           }
-          const data = await readFile(filePath);
+
+          // Lexical containment is NOT containment. A symlink sitting inside
+          // an allowed root resolves to an in-root string while pointing at
+          // any file on the machine, so string-prefix checking alone reads
+          // whatever the link targets (CWE-22). Follow the link chain and
+          // re-check against the roots' own real paths.
+          //
+          // The path has already cleared the lexical check, so a resolution
+          // failure here names something inside an allowed root: surface the
+          // filesystem's own error (ENOENT and friends) rather than masking
+          // a missing file as a containment failure.
+          const realPath = await realpath(resolvedPath);
+          if (!withinRoots(realPath, await this.resolveReadRoots())) {
+            throw new Error(
+              `fs.readFile blocked: path "${resolvedPath}" resolves outside the allowed roots`,
+            );
+          }
+
+          // Read the RESOLVED path, not the caller's string: re-resolving the
+          // original would walk the link a second time, and the link can be
+          // repointed between the two walks. (A component of the resolved
+          // path could still be swapped for a link in that window — closing
+          // that needs an O_NOFOLLOW handle, which node's fs/promises does
+          // not expose; it requires local write access inside an allowed
+          // root, which is already outside this sandbox's threat model.)
+          const data = await readFile(realPath);
           if (data.byteLength > 1_048_576) {
             throw new Error(
               `fs.readFile blocked: file exceeds 1 MB limit (${data.byteLength} bytes)`,

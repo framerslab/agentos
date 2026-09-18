@@ -13,7 +13,10 @@
  * 9. Execution time is measured and returned
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, parse } from 'node:path';
 import { SandboxedToolForge } from '../SandboxedToolForge.js';
 import type { SandboxExecutionRequest, SandboxAPI } from '../types.js';
 
@@ -489,5 +492,155 @@ describe('SandboxedToolForge', () => {
     // should report something positive. The exact bound depends on GC timing,
     // so just assert > 0.
     expect(result.memoryUsedBytes).toBeGreaterThan(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // fs.readFile containment (CWE-22): a symlink inside an allowed root must
+  // not reach a file outside one.
+  // -------------------------------------------------------------------------
+  describe('fs.readFile path containment', () => {
+    // realpathSync: on macOS the OS temp dir is itself a symlink, so the
+    // fixture paths have to be real before they are handed to the forge as
+    // roots — otherwise the test would be asserting against the very
+    // root-resolution behavior it means to exercise.
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'forge-fs-')));
+    const allowedRoot = join(base, 'allowed');
+    const secretDir = join(base, 'secret');
+    mkdirSync(allowedRoot, { recursive: true });
+    mkdirSync(secretDir, { recursive: true });
+    writeFileSync(join(allowedRoot, 'ok.txt'), 'in-root content');
+    writeFileSync(join(secretDir, 'secret.txt'), 'SECRET-DO-NOT-READ');
+    // The escape: a link that LIVES in the allowed root, so every
+    // string-prefix check on its own path passes.
+    symlinkSync(join(secretDir, 'secret.txt'), join(allowedRoot, 'escape.txt'));
+
+    afterAll(() => {
+      rmSync(base, { recursive: true, force: true });
+    });
+
+    const readRequest = (target: string): SandboxExecutionRequest =>
+      makeRequest(
+        'async function execute(input) { return await fs.readFile(input.p); }',
+        { p: target },
+        { allowlist: ['fs.readFile'] },
+      );
+
+    const forgeWithRoot = new SandboxedToolForge({ fsReadRoots: [allowedRoot] });
+
+    it('reads an ordinary file inside an allowed root', async () => {
+      const result = await forgeWithRoot.execute(readRequest(join(allowedRoot, 'ok.txt')));
+
+      expect(result.success).toBe(true);
+      expect(result.output).toBe('in-root content');
+    });
+
+    it('blocks a symlink that lives inside the root but targets a file outside it', async () => {
+      const result = await forgeWithRoot.execute(readRequest(join(allowedRoot, 'escape.txt')));
+
+      expect(result.success).toBe(false);
+      expect(result.error ?? '').toMatch(/resolves outside the allowed roots/);
+      // The secret must not leak through the output channel either.
+      expect(JSON.stringify(result.output ?? null)).not.toMatch(/SECRET-DO-NOT-READ/);
+    });
+
+    it('still blocks a plainly out-of-root path before touching the filesystem', async () => {
+      const result = await forgeWithRoot.execute(readRequest(join(secretDir, 'secret.txt')));
+
+      expect(result.success).toBe(false);
+      expect(result.error ?? '').toMatch(/is outside the allowed roots/);
+    });
+
+    it('allows reads under a root that ends in a separator (filesystem / drive root)', async () => {
+      // The prefix form built `//` for a root of `/` and denied everything
+      // beneath it; path.relative containment has no such edge.
+      const fsRoot = parse(base).root;
+      const forgeAtFsRoot = new SandboxedToolForge({ fsReadRoots: [fsRoot] });
+
+      const result = await forgeAtFsRoot.execute(readRequest(join(allowedRoot, 'ok.txt')));
+
+      expect(result.success).toBe(true);
+      expect(result.output).toBe('in-root content');
+    });
+
+    it('does not treat a sibling whose name merely starts with ".." as an escape', async () => {
+      const oddSibling = join(base, '..odd');
+      mkdirSync(oddSibling, { recursive: true });
+      writeFileSync(join(oddSibling, 'f.txt'), 'sibling content');
+      const forgeAtBase = new SandboxedToolForge({ fsReadRoots: [base] });
+
+      const result = await forgeAtBase.execute(readRequest(join(oddSibling, 'f.txt')));
+
+      expect(result.success).toBe(true);
+      expect(result.output).toBe('sibling content');
+    });
+
+    it('pins a resolved root, so repointing the link mid-life cannot move the sandbox', async () => {
+      // Deliberate: re-resolving the root per read would let an attacker who
+      // can rewrite the link relocate a running sandbox. The first read fixes
+      // the real root; the retargeted directory is then outside it.
+      const movingRoot = join(base, 'moving');
+      const firstTarget = join(base, 'target-a');
+      const secondTarget = join(base, 'target-b');
+      mkdirSync(firstTarget, { recursive: true });
+      mkdirSync(secondTarget, { recursive: true });
+      writeFileSync(join(firstTarget, 'f.txt'), 'target A');
+      writeFileSync(join(secondTarget, 'f.txt'), 'target B');
+      symlinkSync(firstTarget, movingRoot);
+
+      const forgeMoving = new SandboxedToolForge({ fsReadRoots: [movingRoot] });
+      const first = await forgeMoving.execute(readRequest(join(movingRoot, 'f.txt')));
+      expect(first.success).toBe(true);
+      expect(first.output).toBe('target A');
+
+      rmSync(movingRoot);
+      symlinkSync(secondTarget, movingRoot);
+
+      const second = await forgeMoving.execute(readRequest(join(movingRoot, 'f.txt')));
+      expect(second.success).toBe(false);
+      expect(second.error ?? '').toMatch(/resolves outside the allowed roots/);
+      // A forge built after the change follows the link's new target.
+      const freshForge = new SandboxedToolForge({ fsReadRoots: [movingRoot] });
+      const fresh = await freshForge.execute(readRequest(join(movingRoot, 'f.txt')));
+      expect(fresh.success).toBe(true);
+      expect(fresh.output).toBe('target B');
+    });
+
+    it('keeps a resolved root pinned even when a sibling root never resolves', async () => {
+      // A set-wide cache dropped on any failure would re-resolve the symlink
+      // root on the next read and follow it to its new target.
+      const movingRoot = join(base, 'moving-mixed');
+      const firstTarget = join(base, 'mixed-a');
+      const secondTarget = join(base, 'mixed-b');
+      mkdirSync(firstTarget, { recursive: true });
+      mkdirSync(secondTarget, { recursive: true });
+      writeFileSync(join(firstTarget, 'f.txt'), 'mixed A');
+      writeFileSync(join(secondTarget, 'f.txt'), 'mixed B');
+      symlinkSync(firstTarget, movingRoot);
+
+      const forgeMixed = new SandboxedToolForge({
+        fsReadRoots: [movingRoot, join(base, 'never-exists')],
+      });
+      const first = await forgeMixed.execute(readRequest(join(movingRoot, 'f.txt')));
+      expect(first.success).toBe(true);
+      expect(first.output).toBe('mixed A');
+
+      rmSync(movingRoot);
+      symlinkSync(secondTarget, movingRoot);
+
+      const second = await forgeMixed.execute(readRequest(join(movingRoot, 'f.txt')));
+      expect(second.success).toBe(false);
+      expect(second.error ?? '').toMatch(/resolves outside the allowed roots/);
+    });
+
+    it('allows a root that is itself a symlink (both sides are resolved)', async () => {
+      const linkedRoot = join(base, 'linked-root');
+      symlinkSync(allowedRoot, linkedRoot);
+      const forgeViaLink = new SandboxedToolForge({ fsReadRoots: [linkedRoot] });
+
+      const result = await forgeViaLink.execute(readRequest(join(linkedRoot, 'ok.txt')));
+
+      expect(result.success).toBe(true);
+      expect(result.output).toBe('in-root content');
+    });
   });
 });
