@@ -605,6 +605,33 @@ describe('SandboxedToolForge', () => {
       expect(fresh.output).toBe('target B');
     });
 
+    it('keeps a resolved root pinned even when a sibling root never resolves', async () => {
+      // A set-wide cache dropped on any failure would re-resolve the symlink
+      // root on the next read and follow it to its new target.
+      const movingRoot = join(base, 'moving-mixed');
+      const firstTarget = join(base, 'mixed-a');
+      const secondTarget = join(base, 'mixed-b');
+      mkdirSync(firstTarget, { recursive: true });
+      mkdirSync(secondTarget, { recursive: true });
+      writeFileSync(join(firstTarget, 'f.txt'), 'mixed A');
+      writeFileSync(join(secondTarget, 'f.txt'), 'mixed B');
+      symlinkSync(firstTarget, movingRoot);
+
+      const forgeMixed = new SandboxedToolForge({
+        fsReadRoots: [movingRoot, join(base, 'never-exists')],
+      });
+      const first = await forgeMixed.execute(readRequest(join(movingRoot, 'f.txt')));
+      expect(first.success).toBe(true);
+      expect(first.output).toBe('mixed A');
+
+      rmSync(movingRoot);
+      symlinkSync(secondTarget, movingRoot);
+
+      const second = await forgeMixed.execute(readRequest(join(movingRoot, 'f.txt')));
+      expect(second.success).toBe(false);
+      expect(second.error ?? '').toMatch(/resolves outside the allowed roots/);
+    });
+
     it('allows a root that is itself a symlink (both sides are resolved)', async () => {
       const linkedRoot = join(base, 'linked-root');
       symlinkSync(allowedRoot, linkedRoot);

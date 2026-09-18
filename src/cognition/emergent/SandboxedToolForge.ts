@@ -159,15 +159,19 @@ export class SandboxedToolForge {
   private readonly fsReadRoots: string[];
 
   /**
-   * {@link fsReadRoots} with their own symlinks resolved, computed lazily on
-   * the first sandboxed read and cached for the life of the forge.
+   * Real path of each configured root, resolved lazily and cached PER ROOT.
    *
    * Both sides of a containment check have to be real paths: a configured
    * root is frequently itself a link (on macOS `/tmp` is a link to
    * `/private/tmp`), so comparing a resolved file against an unresolved root
    * would deny perfectly legitimate reads.
+   *
+   * Per root, not per set: a set-wide cache that is dropped whenever ANY
+   * root fails to resolve would re-resolve the roots that DID succeed, and a
+   * root symlink repointed in between would then be followed to its new
+   * target — losing the pinning this cache exists to provide.
    */
-  private realFsReadRootsPromise: Promise<string[]> | null = null;
+  private readonly realFsReadRootCache = new Map<string, Promise<string>>();
 
   /**
    * Hardened node:vm sandbox shared across all execute() calls. Owns the
@@ -230,37 +234,33 @@ export class SandboxedToolForge {
    * LLM forge mistakes observed in production.
    */
   private resolveReadRoots(): Promise<string[]> {
-    const pending = this.realFsReadRootsPromise ?? this.readRootsRealPaths();
-    this.realFsReadRootsPromise = pending;
-    return pending;
+    return Promise.all(this.fsReadRoots.map((root) => this.resolveReadRoot(root)));
   }
 
   /**
-   * Resolve every configured root once.
+   * Resolve one configured root, pinning the first success.
    *
-   * A fully resolved set is cached for the life of the forge, deliberately:
-   * re-resolving per read would let a root symlink be repointed underneath a
-   * running sandbox, which is the move this containment check exists to
-   * stop. A caller that needs to follow a retargeted root builds a new forge.
-   * A set containing an unresolvable root is NOT cached, so a root that
-   * becomes readable later is picked up instead of being stranded.
+   * A resolved root is pinned for the life of the forge, deliberately:
+   * re-resolving it per read would let a root symlink be repointed
+   * underneath a running sandbox, which is the move this containment check
+   * exists to stop. A caller that needs to follow a retargeted root builds a
+   * new forge. A FAILED resolution is not pinned, so a root that becomes
+   * readable later is picked up — and because each root is cached on its
+   * own, one unreadable root can never un-pin a sibling that resolved.
    */
-  private async readRootsRealPaths(): Promise<string[]> {
-    let allResolved = true;
-    const resolved = await Promise.all(
-      this.fsReadRoots.map(async (root) => {
-        try {
-          return await realpath(root);
-        } catch {
-          // An unresolvable root keeps its lexical form, which simply never
-          // matches a real path — an absent root must not widen the sandbox.
-          allResolved = false;
-          return root;
-        }
-      }),
-    );
-    if (!allResolved) this.realFsReadRootsPromise = null;
-    return resolved;
+  private resolveReadRoot(root: string): Promise<string> {
+    const cached = this.realFsReadRootCache.get(root);
+    if (cached !== undefined) return cached;
+
+    const pending = realpath(root).catch(() => {
+      // Drop the failure so the next read retries this root. Its lexical
+      // form never matches a real path, so an unresolvable root cannot
+      // widen the sandbox while it stays unreadable.
+      this.realFsReadRootCache.delete(root);
+      return root;
+    });
+    this.realFsReadRootCache.set(root, pending);
+    return pending;
   }
 
   private describeSyntaxError(message: string): string {
