@@ -30,6 +30,7 @@ import { XAIProvider, XAIProviderConfig } from './implementations/XAIProvider';
 import { GeminiProvider, GeminiProviderConfig } from './implementations/GeminiProvider';
 import { ClaudeCodeProvider, ClaudeCodeProviderConfig } from './implementations/ClaudeCodeProvider';
 import { GeminiCLIProvider, GeminiCLIProviderConfig } from './implementations/GeminiCLIProvider';
+import { YouComProvider, YouComProviderConfig } from './implementations/YouComProvider';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../utils/errors.js'; // Corrected import path
 
 /**
@@ -39,7 +40,7 @@ import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../utils/err
 export interface ProviderConfigEntry {
   providerId: string;
   enabled: boolean;
-  config: Partial<OpenAIProviderConfig | OpenRouterProviderConfig | OllamaProviderConfig | AnthropicProviderConfig | GroqProviderConfig | TogetherProviderConfig | MistralProviderConfig | XAIProviderConfig | GeminiProviderConfig | ClaudeCodeProviderConfig | GeminiCLIProviderConfig | Record<string, any>>;
+  config: Partial<OpenAIProviderConfig | OpenRouterProviderConfig | OllamaProviderConfig | AnthropicProviderConfig | GroqProviderConfig | TogetherProviderConfig | MistralProviderConfig | XAIProviderConfig | GeminiProviderConfig | ClaudeCodeProviderConfig | GeminiCLIProviderConfig | YouComProviderConfig | Record<string, any>>;
   isDefault?: boolean;
 }
 
@@ -152,6 +153,9 @@ export class AIModelProviderManager {
             break;
           case 'gemini-cli':
             providerInstance = new GeminiCLIProvider();
+            break;
+          case 'youcom':
+            providerInstance = new YouComProvider();
             break;
           default:
             console.warn(`AIModelProviderManager: Unknown provider ID '${providerEntry.providerId}'. Skipping.`);
