@@ -16,7 +16,7 @@
 import { describe, it, expect, afterAll } from 'vitest';
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, parse } from 'node:path';
 import { SandboxedToolForge } from '../SandboxedToolForge.js';
 import type { SandboxExecutionRequest, SandboxAPI } from '../types.js';
 
@@ -548,6 +548,61 @@ describe('SandboxedToolForge', () => {
 
       expect(result.success).toBe(false);
       expect(result.error ?? '').toMatch(/is outside the allowed roots/);
+    });
+
+    it('allows reads under a root that ends in a separator (filesystem / drive root)', async () => {
+      // The prefix form built `//` for a root of `/` and denied everything
+      // beneath it; path.relative containment has no such edge.
+      const fsRoot = parse(base).root;
+      const forgeAtFsRoot = new SandboxedToolForge({ fsReadRoots: [fsRoot] });
+
+      const result = await forgeAtFsRoot.execute(readRequest(join(allowedRoot, 'ok.txt')));
+
+      expect(result.success).toBe(true);
+      expect(result.output).toBe('in-root content');
+    });
+
+    it('does not treat a sibling whose name merely starts with ".." as an escape', async () => {
+      const oddSibling = join(base, '..odd');
+      mkdirSync(oddSibling, { recursive: true });
+      writeFileSync(join(oddSibling, 'f.txt'), 'sibling content');
+      const forgeAtBase = new SandboxedToolForge({ fsReadRoots: [base] });
+
+      const result = await forgeAtBase.execute(readRequest(join(oddSibling, 'f.txt')));
+
+      expect(result.success).toBe(true);
+      expect(result.output).toBe('sibling content');
+    });
+
+    it('pins a resolved root, so repointing the link mid-life cannot move the sandbox', async () => {
+      // Deliberate: re-resolving the root per read would let an attacker who
+      // can rewrite the link relocate a running sandbox. The first read fixes
+      // the real root; the retargeted directory is then outside it.
+      const movingRoot = join(base, 'moving');
+      const firstTarget = join(base, 'target-a');
+      const secondTarget = join(base, 'target-b');
+      mkdirSync(firstTarget, { recursive: true });
+      mkdirSync(secondTarget, { recursive: true });
+      writeFileSync(join(firstTarget, 'f.txt'), 'target A');
+      writeFileSync(join(secondTarget, 'f.txt'), 'target B');
+      symlinkSync(firstTarget, movingRoot);
+
+      const forgeMoving = new SandboxedToolForge({ fsReadRoots: [movingRoot] });
+      const first = await forgeMoving.execute(readRequest(join(movingRoot, 'f.txt')));
+      expect(first.success).toBe(true);
+      expect(first.output).toBe('target A');
+
+      rmSync(movingRoot);
+      symlinkSync(secondTarget, movingRoot);
+
+      const second = await forgeMoving.execute(readRequest(join(movingRoot, 'f.txt')));
+      expect(second.success).toBe(false);
+      expect(second.error ?? '').toMatch(/resolves outside the allowed roots/);
+      // A forge built after the change follows the link's new target.
+      const freshForge = new SandboxedToolForge({ fsReadRoots: [movingRoot] });
+      const fresh = await freshForge.execute(readRequest(join(movingRoot, 'f.txt')));
+      expect(fresh.success).toBe(true);
+      expect(fresh.output).toBe('target B');
     });
 
     it('allows a root that is itself a symlink (both sides are resolved)', async () => {

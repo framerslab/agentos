@@ -230,19 +230,37 @@ export class SandboxedToolForge {
    * LLM forge mistakes observed in production.
    */
   private resolveReadRoots(): Promise<string[]> {
-    this.realFsReadRootsPromise ??= Promise.all(
+    const pending = this.realFsReadRootsPromise ?? this.readRootsRealPaths();
+    this.realFsReadRootsPromise = pending;
+    return pending;
+  }
+
+  /**
+   * Resolve every configured root once.
+   *
+   * A fully resolved set is cached for the life of the forge, deliberately:
+   * re-resolving per read would let a root symlink be repointed underneath a
+   * running sandbox, which is the move this containment check exists to
+   * stop. A caller that needs to follow a retargeted root builds a new forge.
+   * A set containing an unresolvable root is NOT cached, so a root that
+   * becomes readable later is picked up instead of being stranded.
+   */
+  private async readRootsRealPaths(): Promise<string[]> {
+    let allResolved = true;
+    const resolved = await Promise.all(
       this.fsReadRoots.map(async (root) => {
-        // A root that cannot be resolved (it does not exist yet, or is
-        // unreadable) keeps its lexical form, which simply never matches a
-        // real path — absent roots must not widen the sandbox.
         try {
           return await realpath(root);
         } catch {
+          // An unresolvable root keeps its lexical form, which simply never
+          // matches a real path — an absent root must not widen the sandbox.
+          allResolved = false;
           return root;
         }
       }),
     );
-    return this.realFsReadRootsPromise;
+    if (!allResolved) this.realFsReadRootsPromise = null;
+    return resolved;
   }
 
   private describeSyntaxError(message: string): string {
@@ -504,8 +522,26 @@ export class SandboxedToolForge {
       extras.fs = {
         readFile: async (filePath: string) => {
           const resolvedPath = path.resolve(filePath);
+          // Containment via path.relative, not a string prefix: a root that
+          // already ends in a separator (the filesystem root `/`, a Windows
+          // drive root `C:\`) would otherwise be compared against a doubled
+          // separator and deny every file beneath it. path.relative also
+          // applies the platform's own case rules.
           const withinRoots = (candidate: string, roots: readonly string[]): boolean =>
-            roots.some((root) => candidate === root || candidate.startsWith(`${root}${path.sep}`));
+            roots.some((root) => {
+              const relative = path.relative(root, candidate);
+              // '' means the candidate IS the root. A relative path that
+              // climbs out ('..' or '../x') or stays absolute (a different
+              // Windows drive) is outside it. Checking for the '..' segment
+              // rather than the '..' prefix keeps a sibling named '..foo'
+              // from reading as an escape.
+              return (
+                relative === '' ||
+                (relative !== '..' &&
+                  !relative.startsWith(`..${path.sep}`) &&
+                  !path.isAbsolute(relative))
+              );
+            });
 
           // Lexical pass: rejects the obvious `../../etc/passwd` shape before
           // the sandbox pays for any filesystem call.
