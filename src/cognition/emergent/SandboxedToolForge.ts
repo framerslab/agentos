@@ -28,12 +28,14 @@
  *
  * Allowlisted APIs (each requires explicit opt-in via {@link SandboxAPI}):
  * - `fetch` — HTTP requests, domain-restricted via {@link SandboxedToolForgeConfig.fetchDomainAllowlist}.
- * - `fs.readFile` — Read-only file access, path-restricted, max 1 MB.
+ * - `fs.readFile` — Read-only file access, max 1 MB, restricted to the
+ *   configured roots after symlink resolution (a link inside a root cannot
+ *   be used to reach a file outside one).
  * - `crypto` — Hashing and HMAC only (`createHash`, `createHmac`).
  */
 
 import { createHash, createHmac, randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { SandboxExecutionRequest, SandboxExecutionResult, SandboxAPI } from './types.js';
 import { CodeSandbox } from '../../safety/sandbox/executor/CodeSandbox.js';
@@ -157,6 +159,17 @@ export class SandboxedToolForge {
   private readonly fsReadRoots: string[];
 
   /**
+   * {@link fsReadRoots} with their own symlinks resolved, computed lazily on
+   * the first sandboxed read and cached for the life of the forge.
+   *
+   * Both sides of a containment check have to be real paths: a configured
+   * root is frequently itself a link (on macOS `/tmp` is a link to
+   * `/private/tmp`), so comparing a resolved file against an unresolved root
+   * would deny perfectly legitimate reads.
+   */
+  private realFsReadRootsPromise: Promise<string[]> | null = null;
+
+  /**
    * Hardened node:vm sandbox shared across all execute() calls. Owns the
    * codeGeneration restriction, frozen console, and explicit-undefined
    * dangerous globals. Reused per forge instance to amortize stats bookkeeping.
@@ -216,6 +229,22 @@ export class SandboxedToolForge {
    * the raw message in that case. The hints map to the 4 most common
    * LLM forge mistakes observed in production.
    */
+  private resolveReadRoots(): Promise<string[]> {
+    this.realFsReadRootsPromise ??= Promise.all(
+      this.fsReadRoots.map(async (root) => {
+        // A root that cannot be resolved (it does not exist yet, or is
+        // unreadable) keeps its lexical form, which simply never matches a
+        // real path — absent roots must not widen the sandbox.
+        try {
+          return await realpath(root);
+        } catch {
+          return root;
+        }
+      }),
+    );
+    return this.realFsReadRootsPromise;
+  }
+
   private describeSyntaxError(message: string): string {
     const m = message || '';
     if (/Unexpected token 'const'/.test(m) || /Unexpected token 'let'/.test(m)) {
@@ -475,15 +504,42 @@ export class SandboxedToolForge {
       extras.fs = {
         readFile: async (filePath: string) => {
           const resolvedPath = path.resolve(filePath);
-          const allowed = this.fsReadRoots.some((root) => {
-            return resolvedPath === root || resolvedPath.startsWith(`${root}${path.sep}`);
-          });
-          if (!allowed) {
+          const withinRoots = (candidate: string, roots: readonly string[]): boolean =>
+            roots.some((root) => candidate === root || candidate.startsWith(`${root}${path.sep}`));
+
+          // Lexical pass: rejects the obvious `../../etc/passwd` shape before
+          // the sandbox pays for any filesystem call.
+          if (!withinRoots(resolvedPath, this.fsReadRoots)) {
             throw new Error(
               `fs.readFile blocked: path "${resolvedPath}" is outside the allowed roots`,
             );
           }
-          const data = await readFile(filePath);
+
+          // Lexical containment is NOT containment. A symlink sitting inside
+          // an allowed root resolves to an in-root string while pointing at
+          // any file on the machine, so string-prefix checking alone reads
+          // whatever the link targets (CWE-22). Follow the link chain and
+          // re-check against the roots' own real paths.
+          //
+          // The path has already cleared the lexical check, so a resolution
+          // failure here names something inside an allowed root: surface the
+          // filesystem's own error (ENOENT and friends) rather than masking
+          // a missing file as a containment failure.
+          const realPath = await realpath(resolvedPath);
+          if (!withinRoots(realPath, await this.resolveReadRoots())) {
+            throw new Error(
+              `fs.readFile blocked: path "${resolvedPath}" resolves outside the allowed roots`,
+            );
+          }
+
+          // Read the RESOLVED path, not the caller's string: re-resolving the
+          // original would walk the link a second time, and the link can be
+          // repointed between the two walks. (A component of the resolved
+          // path could still be swapped for a link in that window — closing
+          // that needs an O_NOFOLLOW handle, which node's fs/promises does
+          // not expose; it requires local write access inside an allowed
+          // root, which is already outside this sandbox's threat model.)
+          const data = await readFile(realPath);
           if (data.byteLength > 1_048_576) {
             throw new Error(
               `fs.readFile blocked: file exceeds 1 MB limit (${data.byteLength} bytes)`,
