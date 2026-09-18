@@ -45,6 +45,7 @@ Channels are registered as `messaging-channel` extensions and managed by the
 | `matrix` | Chat | `MATRIX_HOMESERVER_URL`, `MATRIX_ACCESS_TOKEN` |
 | `webchat` | Chat | `WEBCHAT_SECRET` (for webhook validation) |
 | `sms` | Messaging | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE` |
+| `plivo` | Messaging | `PLIVO_AUTH_ID`, `PLIVO_AUTH_TOKEN`, `PLIVO_PHONE_NUMBER` |
 | `email` | Messaging | `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS` |
 | `line` | Chat | `LINE_CHANNEL_ACCESS_TOKEN`, `LINE_CHANNEL_SECRET` |
 | `zalo` | Chat | `ZALO_APP_ID`, `ZALO_APP_SECRET` |
@@ -282,6 +283,49 @@ const whatsapp = new WhatsAppChannelAdapter(service);
 await whatsapp.initialize({ credential: process.env.WHATSAPP_ACCESS_TOKEN! });
 
 router.registerAdapter(whatsapp);
+```
+
+---
+
+### Plivo (SMS)
+
+Plivo is available as its own messaging channel for SMS. Get your Auth ID and Auth Token from the Plivo console at [cx.plivo.com](https://cx.plivo.com/?utm_source=github&utm_medium=oss&utm_campaign=agentos), and use one of your Plivo numbers as the sender.
+
+```bash
+export PLIVO_AUTH_ID=your-auth-id
+export PLIVO_AUTH_TOKEN=your-auth-token
+export PLIVO_PHONE_NUMBER=+14150000000   # your Plivo sender number, E.164 format
+```
+
+```typescript
+import { PlivoSmsChannelAdapter } from '@framers/agentos'; // src/io/channels/adapters
+
+const sms = new PlivoSmsChannelAdapter();
+await sms.initialize({
+  platform: 'plivo',
+  credential: process.env.PLIVO_AUTH_TOKEN!, // Auth Token
+  params: {
+    authId: process.env.PLIVO_AUTH_ID!,
+    phoneNumber: process.env.PLIVO_PHONE_NUMBER!,
+    // The externally-visible URL you set as the number's Message URL in Plivo.
+    webhookUrl: 'https://your-host.example/plivo/inbound',
+  },
+});
+
+router.registerAdapter(sms);
+```
+
+**Inbound messages.** Point your Plivo number's Message URL at a route on your host and forward the request to the adapter. Plivo signs inbound webhooks, so pass the method, the exact URL Plivo posted to, and the headers — the adapter verifies `X-Plivo-Signature-V3` and drops anything unsigned or tampered:
+
+```typescript
+app.post('/plivo/inbound', (req, res) => {
+  sms.handleIncomingWebhook(req.body, {
+    method: 'POST',
+    url: 'https://your-host.example/plivo/inbound',
+    headers: req.headers,
+  });
+  res.sendStatus(200);
+});
 ```
 
 ---
