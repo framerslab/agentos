@@ -16,6 +16,7 @@ describe('SpeechRuntime', () => {
       env: {
         OPENAI_API_KEY: 'sk-openai',
         ELEVENLABS_API_KEY: 'sk-elevenlabs',
+        MINIMAX_API_KEY: 'sk-minimax',
       },
     });
 
@@ -25,6 +26,7 @@ describe('SpeechRuntime', () => {
     expect(runtime.getProvider('openai-whisper')).toBeDefined();
     expect(runtime.getProvider('openai-tts')).toBeDefined();
     expect(runtime.getProvider('elevenlabs')).toBeDefined();
+    expect(runtime.getProvider('minimax-tts')).toBeDefined();
   });
 
   it('should hydrate speech providers from the extension manager', async () => {

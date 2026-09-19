@@ -158,6 +158,17 @@ export const SPEECH_PROVIDER_CATALOG: readonly SpeechProviderCatalogEntry[] = [
     features: ['cloud', 'tts', 'streaming', 'low-latency'],
   },
   {
+    id: 'minimax-tts',
+    kind: 'tts',
+    label: 'MiniMax TTS',
+    envVars: ['MINIMAX_API_KEY'],
+    local: false,
+    streaming: true,
+    description: 'Speech synthesis via MiniMax HTTP, async, and WebSocket APIs.',
+    defaultModel: 'speech-2.8-hd',
+    features: ['cloud', 'tts', 'streaming', 'websocket', 'async'],
+  },
+  {
     id: 'google-cloud-tts',
     kind: 'tts',
     label: 'Google Cloud TTS',
