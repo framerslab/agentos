@@ -24,6 +24,7 @@
 
 /** Well-known audio provider identifiers. Extensible via `(string & {})`. */
 export type AudioProviderId =
+  | 'minimax-music'
   | 'suno'
   | 'udio'
   | 'stable-audio'

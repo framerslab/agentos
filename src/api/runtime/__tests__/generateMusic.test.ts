@@ -7,6 +7,8 @@ vi.mock('../../../media/audio/index.js', () => {
 
   const defaultModelFor = (providerId: string): string => {
     switch (providerId) {
+      case 'minimax-music':
+        return 'music-3.0';
       case 'stable-audio':
         return 'stable-audio-open-1.0';
       case 'udio':
@@ -166,8 +168,20 @@ describe('generateMusic', () => {
     expect(result.audio).toHaveLength(1);
   });
 
+  it('auto-detects provider from MINIMAX_API_KEY env var', async () => {
+    process.env.MINIMAX_API_KEY = 'env-minimax-key';
+
+    const result = await generateMusic({
+      prompt: 'Cinematic electronic music',
+    });
+
+    expect(result.provider).toBe('minimax-music');
+    expect(result.model).toBe('music-3.0');
+  });
+
   it('throws when no provider is configured', async () => {
     delete process.env.SUNO_API_KEY;
+    delete process.env.MINIMAX_API_KEY;
     delete process.env.UDIO_API_KEY;
     delete process.env.STABILITY_API_KEY;
     delete process.env.REPLICATE_API_TOKEN;
