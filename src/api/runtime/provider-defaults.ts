@@ -35,6 +35,9 @@ export type ProviderDefaultTask = 'text' | 'image' | 'embedding';
  * selects which sub-key to read.
  */
 export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
+  minimax: {
+    image: 'image-01',
+  },
   openai: {
     text: 'gpt-4o',
     image: 'gpt-image-1',
@@ -149,6 +152,7 @@ const AUTO_DETECT_ORDER: AutoDetectProbe[] = [
   { envKey: 'STABLE_DIFFUSION_LOCAL_BASE_URL', provider: 'stable-diffusion-local' },
   { envKey: 'BFL_API_KEY', provider: 'bfl' },
   { envKey: 'FAL_API_KEY', provider: 'fal' },
+  { envKey: 'MINIMAX_API_KEY', provider: 'minimax' },
 ];
 
 function isBinaryOnPath(binaryName: string): boolean {

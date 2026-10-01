@@ -1,4 +1,5 @@
 import type { IImageProvider } from './IImageProvider.js';
+import { MiniMaxImageProvider } from './providers/MiniMaxImageProvider.js';
 import { OpenAIImageProvider } from './providers/OpenAIImageProvider.js';
 import { OpenRouterImageProvider } from './providers/OpenRouterImageProvider.js';
 import { ReplicateImageProvider } from './providers/ReplicateImageProvider.js';
@@ -8,6 +9,7 @@ import { FluxImageProvider } from './providers/FluxImageProvider.js';
 import { FalImageProvider } from './providers/FalImageProvider.js';
 
 export * from './IImageProvider.js';
+export * from './providers/MiniMaxImageProvider.js';
 export * from './imageToBuffer.js';
 export * from './ImageOperationError.js';
 export * from './FallbackImageProxy.js';
@@ -30,6 +32,7 @@ export {
 export type ImageProviderFactory = () => IImageProvider;
 
 const imageProviderFactories = new Map<string, ImageProviderFactory>([
+  ['minimax', () => new MiniMaxImageProvider()],
   ['openai', () => new OpenAIImageProvider()],
   ['openrouter', () => new OpenRouterImageProvider()],
   ['stability', () => new StabilityImageProvider()],
