@@ -137,21 +137,29 @@ describe('OpenAI-compatible provider wrappers', () => {
       await expect(provider.initialize({ apiKey: '' })).rejects.toThrow('API key is required');
     });
 
-    it('defaults to Llama 3.1 70B Instruct Turbo', async () => {
+    it('defaults to Llama 3.3 70B Instruct Turbo', async () => {
       const provider = new TogetherProvider();
       await provider.initialize({ apiKey: 'tog-test' });
-      expect(provider.defaultModelId).toBe('meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo');
+      expect(provider.defaultModelId).toBe('meta-llama/Llama-3.3-70B-Instruct-Turbo');
     });
 
-    it('lists known Together models', async () => {
+    it('lists only models Together serverless serves', async () => {
       const provider = new TogetherProvider();
       await provider.initialize({ apiKey: 'tog-test' });
-      const models = await provider.listAvailableModels();
-      expect(models.length).toBeGreaterThanOrEqual(3);
-      const ids = models.map(m => m.modelId);
-      expect(ids).toContain('meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo');
-      expect(ids).toContain('meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo');
-      expect(ids).toContain('mistralai/Mixtral-8x7B-Instruct-v0.1');
+      const ids = (await provider.listAvailableModels()).map(m => m.modelId);
+      expect(ids).toEqual([
+        'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+        'openai/gpt-oss-120b',
+        'zai-org/GLM-5.3-Flash',
+      ]);
+      // Removed from serverless 2026-02-25, 2026-03-06 and 2026-04-16.
+      for (const removed of [
+        'meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo',
+        'meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo',
+        'mistralai/Mixtral-8x7B-Instruct-v0.1',
+      ]) {
+        expect(ids).not.toContain(removed);
+      }
     });
   });
 
@@ -260,8 +268,8 @@ describe('OpenAI-compatible provider wrappers', () => {
 
     it('includes together with correct defaults', () => {
       expect(PROVIDER_DEFAULTS.together).toBeDefined();
-      expect(PROVIDER_DEFAULTS.together.text).toBe('meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo');
-      expect(PROVIDER_DEFAULTS.together.cheap).toBe('meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo');
+      expect(PROVIDER_DEFAULTS.together.text).toBe('meta-llama/Llama-3.3-70B-Instruct-Turbo');
+      expect(PROVIDER_DEFAULTS.together.cheap).toBe('meta-llama/Llama-3.3-70B-Instruct-Turbo');
     });
 
     it('includes mistral with correct defaults', () => {

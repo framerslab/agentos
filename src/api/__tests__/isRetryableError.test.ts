@@ -17,6 +17,30 @@ describe('isRetryableError', () => {
     expect(isRetryableError(new Error('connect ECONNREFUSED 127.0.0.1:443'))).toBe(true);
   });
 
+  it('matches request-level network and timeout failures by provider error code', () => {
+    // OpenAIProvider rewrites an exhausted network failure as
+    // "Network error: unable to reach <baseURL>", which carries no status.
+    const network = Object.assign(new Error('unreachable'), { code: 'NETWORK_ERROR' });
+    const timeout = Object.assign(new Error('Request timed out after 60000ms.'), { code: 'REQUEST_TIMEOUT' });
+    expect(isRetryableError(network)).toBe(true);
+    expect(isRetryableError(timeout)).toBe(true);
+    expect(isRetryableError(new Error('Network error: unable to reach https://api.openai.com/v1.'))).toBe(true);
+    expect(isRetryableError(new Error('read ECONNRESET'))).toBe(true);
+  });
+
+  it('does not restart a stream that failed after delivering text', () => {
+    const idle = Object.assign(new Error('stream went quiet'), { code: 'STREAM_IDLE_TIMEOUT' });
+    const incomplete = Object.assign(new Error('response incomplete'), { code: 'STREAM_INCOMPLETE' });
+    expect(isRetryableError(idle)).toBe(false);
+    expect(isRetryableError(incomplete)).toBe(false);
+  });
+
+  it('matches a provider that failed to initialize, whatever its cause', () => {
+    const err = new Error("Provider 'openai' failed to initialize: OpenAIProvider initialization failed: boom");
+    err.name = 'ProviderInitializationError';
+    expect(isRetryableError(err)).toBe(true);
+  });
+
   it('matches the existing credit / quota phrases', () => {
     expect(isRetryableError(new Error('This request requires more credits'))).toBe(true);
     expect(isRetryableError(new Error('Insufficient credits on your account'))).toBe(true);

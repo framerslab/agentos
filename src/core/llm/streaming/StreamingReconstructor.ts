@@ -22,6 +22,8 @@ export interface ReconstructedToolCall {
   arguments?: any;
   rawArguments: string;
   parseError?: string;
+  /** Gemini thought signature carried on the call's deltas, if any. */
+  thoughtSignature?: string;
 }
 
 /** Aggregate reconstruction result for a full streamed completion. */
@@ -37,7 +39,7 @@ export interface StreamingReconstructionResult {
 /** Internal mutable accumulator state. */
 interface ReconstructionAccumulator {
   textBuffer: string;
-  toolBuffers: Record<number, { raw: string; id?: string; name?: string }>;
+  toolBuffers: Record<number, { raw: string; id?: string; name?: string; thoughtSignature?: string }>;
   finalChunk?: ModelCompletionResponse;
 }
 
@@ -54,6 +56,7 @@ function applyChunk(acc: ReconstructionAccumulator, chunk: ModelCompletionRespon
       if (d.function?.arguments_delta) buf.raw += d.function.arguments_delta;
       if (d.id) buf.id = d.id;
       if (d.function?.name) buf.name = d.function.name;
+      if (d.thoughtSignature) buf.thoughtSignature = d.thoughtSignature;
       acc.toolBuffers[d.index] = buf;
     }
   }
@@ -96,6 +99,7 @@ export async function reconstructStream(
       rawArguments: data.raw,
       arguments: error ? undefined : value,
       parseError: error,
+      ...(data.thoughtSignature ? { thoughtSignature: data.thoughtSignature } : {}),
     };
   });
   return {
@@ -129,7 +133,15 @@ export class StreamingReconstructor {
   getToolCalls(): ReconstructedToolCall[] {
     return Object.entries(this.acc.toolBuffers).map(([idx, data]) => {
       const { value, error } = safeParseJson(data.raw);
-      return { index: Number(idx), id: data.id, name: data.name, rawArguments: data.raw, arguments: error ? undefined : value, parseError: error };
+      return {
+        index: Number(idx),
+        id: data.id,
+        name: data.name,
+        rawArguments: data.raw,
+        arguments: error ? undefined : value,
+        parseError: error,
+        ...(data.thoughtSignature ? { thoughtSignature: data.thoughtSignature } : {}),
+      };
     });
   }
 

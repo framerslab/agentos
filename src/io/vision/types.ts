@@ -346,7 +346,7 @@ export interface VisionPipelineConfig {
 
   /**
    * Cloud model override. When unset, the provider's default vision model is used.
-   * @example 'gpt-4o', 'claude-sonnet-4-20250514', 'gemini-2.0-flash'
+   * @example 'gpt-4o', 'claude-sonnet-4-6', 'gemini-2.5-flash'
    */
   cloudModel?: string;
 

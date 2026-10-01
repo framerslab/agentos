@@ -173,6 +173,12 @@ flow into:
 - [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts): runtime personality adjustment via emergent capabilities
 - [`PersonaOverlayManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/persona_overlays/PersonaOverlayManager.ts): mood-based system-prompt overlays
 
+Loaded personas store Honesty-Humility as `personalityTraits.honesty`, the key
+that `agent({ personality })`, `AdaptPersonalityTool`, and the memory system read.
+The frontmatter accepts either `honestyHumility` or `honesty`; when both are set,
+`honesty` wins. `renderSoulMarkdown` writes the trait back as `honestyHumility`,
+so a render-then-load round trip keeps every score.
+
 All existing persona surfaces (mood adaptation, voice routing, avatar generation)
 work identically whether the persona was loaded from JSON or from SOUL.md.
 

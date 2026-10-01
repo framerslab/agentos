@@ -293,3 +293,107 @@ describe('embedText', () => {
     expect(result.embeddings[2][0]).toBe(3.0); // index 2 → Third
   });
 });
+
+describe('embedText request errors', () => {
+  const GATEWAY = 'https://svc:gw-token@gateway.example.com/v1';
+
+  beforeEach(async () => {
+    vi.restoreAllMocks();
+    vi.mocked(resolveModelOption).mockReturnValue({ providerId: 'openai', modelId: 'text-embedding-3-small' });
+    const { resolveProvider } = await import('../model.js');
+    vi.mocked(resolveProvider).mockImplementation(
+      (providerId: string, modelId: string, overrides?: { apiKey?: string; baseUrl?: string }) => ({
+        providerId,
+        modelId,
+        apiKey: overrides?.apiKey ?? 'test-key',
+        baseUrl: overrides?.baseUrl,
+      }),
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
+    try {
+      await promise;
+    } catch (error) {
+      return error as Error;
+    }
+    throw new Error('expected the call to reject');
+  }
+
+  it('keeps base URL credentials out of a rejected request', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      new TypeError(`Request cannot be constructed from a URL that includes credentials: ${GATEWAY}/embeddings`),
+    );
+
+    const error = await rejectionOf(
+      embedText({ model: 'openai:text-embedding-3-small', input: 'x', apiKey: 'sk-test-123', baseUrl: GATEWAY }),
+    );
+
+    expect(error.message).not.toContain('gw-token');
+    expect(String(error.stack)).not.toContain('gw-token');
+    expect(error.message).toContain('https://[redacted]@gateway.example.com/v1/embeddings');
+    expect((error as { cause?: unknown }).cause).toBeUndefined();
+  });
+
+  it.each([
+    ['an email-style username', 'https://me@corp.example:p4ss@gateway.example.com/v1', 'me@corp.example:p4ss'],
+    ['a slash in the password', 'https://svc:pa/ss@gateway.example.com/v1', 'svc:pa/ss'],
+    ['a scheme-relative base', '//svc:tok3n@gateway.example.com/v1', 'svc:tok3n'],
+    ['a scheme-less base', 'svc:tok3n@gateway.example.com/v1', 'svc:tok3n'],
+  ])('masks %s when fetch cannot parse the URL', async (_shape, baseUrl, credentials) => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError(`Failed to parse URL from ${baseUrl}/embeddings`));
+
+    const error = await rejectionOf(
+      embedText({ model: 'openai:text-embedding-3-small', input: 'x', apiKey: 'sk-test-123', baseUrl }),
+    );
+
+    expect(error.message).not.toContain(credentials);
+    expect(error.message).toContain('[redacted]');
+  });
+
+  it('keeps the API key out of a rejected header', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      new TypeError('Headers.append: "Bearer sk-test-123\u0000" is an invalid header value.'),
+    );
+
+    const error = await rejectionOf(
+      embedText({ model: 'openai:text-embedding-3-small', input: 'x', apiKey: 'sk-test-123' }),
+    );
+
+    expect(error.message).not.toContain('sk-test-123');
+  });
+
+  it('keeps the network error code', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }),
+    );
+
+    const error = await rejectionOf(
+      embedText({ model: 'openai:text-embedding-3-small', input: 'x', apiKey: 'sk-test-123' }),
+    );
+
+    expect(error.message).toBe('Embedding request failed: fetch failed (ECONNREFUSED)');
+  });
+
+  it('masks Ollama base URL credentials', async () => {
+    vi.mocked(resolveModelOption).mockReturnValue({ providerId: 'ollama', modelId: 'nomic-embed-text' });
+    const { resolveProvider } = await import('../model.js');
+    vi.mocked(resolveProvider).mockReturnValue({
+      providerId: 'ollama',
+      modelId: 'nomic-embed-text',
+      baseUrl: 'https://svc:ol-token@ollama.example',
+    });
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      new TypeError('Request cannot be constructed from a URL that includes credentials: https://svc:ol-token@ollama.example/api/embed'),
+    );
+
+    const error = await rejectionOf(embedText({ provider: 'ollama', model: 'nomic-embed-text', input: 'x' }));
+
+    expect(error.message).not.toContain('ol-token');
+    expect(error.message).toContain('Ollama embed request failed');
+  });
+});

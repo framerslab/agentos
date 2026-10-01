@@ -43,11 +43,19 @@ import { EmergentToolRegistry } from './EmergentToolRegistry.js';
  * wire each tool without hard-coupling to specific service implementations.
  */
 export interface SelfImprovementToolDeps {
-  /** Returns the current HEXACO personality trait values as a trait→value map. */
-  getPersonality: () => Record<string, number>;
+  /**
+   * Returns the calling agent's HEXACO personality trait values as a
+   * trait→value map. The context identifies the agent instance and session
+   * that made the tool call.
+   */
+  getPersonality: (context?: ToolExecutionContext) => Record<string, number>;
 
-  /** Sets a single HEXACO personality trait to the given value (already clamped). */
-  setPersonality: (trait: string, value: number) => void;
+  /**
+   * Sets a single HEXACO personality trait (already clamped) on the calling
+   * agent. Returns `false` when the caller cannot be resolved, in which case
+   * nothing was changed; returning nothing counts as applied.
+   */
+  setPersonality: (trait: string, value: number, context?: ToolExecutionContext) => boolean | void;
 
   /** Durable store for personality mutations (used by AdaptPersonalityTool for persistence). */
   mutationStore?: PersonalityMutationStore;
@@ -85,8 +93,15 @@ export interface SelfImprovementToolDeps {
   /** Returns the names of all currently registered tools. */
   listTools: () => string[];
 
-  /** Optional callback for persisting self-improvement trace memories. */
-  storeMemory?: (trace: { type: string; scope: string; content: string; tags: string[] }) => Promise<void>;
+  /**
+   * Optional callback for persisting self-improvement trace memories. The
+   * context identifies the calling agent and session, so the host can store
+   * the trace in that agent's memory under that session's scope.
+   */
+  storeMemory?: (
+    trace: { type: string; scope: string; content: string; tags: string[] },
+    context?: ToolExecutionContext,
+  ) => Promise<void>;
 
   /** Optional host-level getter for session-scoped runtime params such as temperature. */
   getSessionParam?: (

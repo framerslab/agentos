@@ -27,7 +27,7 @@ import { GeminiCLIProviderError } from '../errors/GeminiCLIProviderError';
 
 /** Configuration for the Gemini CLI provider. */
 export interface GeminiCLIProviderConfig {
-  /** Override the default model. Defaults to `gemini-2.5-flash`. */
+  /** Override the default model. Defaults to `gemini-3.5-flash`. */
   defaultModelId?: string;
   /** Subprocess timeout in ms (default 120 000). */
   requestTimeout?: number;
@@ -37,12 +37,83 @@ export interface GeminiCLIProviderConfig {
 /*  Static model catalog                                               */
 /* ------------------------------------------------------------------ */
 
+/**
+ * The model this provider uses when none is named. The CLI answers requests
+ * for gemini-2.5-flash (and gemini-3.8-flash) with gemini-3.5-flash (probed
+ * 2026-09-30 with --output-format json, which reports the model that
+ * produced the answer), so the default names the model that actually runs.
+ */
+const GEMINI_CLI_DEFAULT_MODEL = 'gemini-3.5-flash';
+
 const GEMINI_CLI_MODELS: ModelInfo[] = [
   {
-    modelId: 'gemini-2.5-pro',
+    modelId: 'gemini-3.5-flash',
     providerId: 'gemini-cli',
-    displayName: 'Gemini 2.5 Pro',
-    description: 'Most capable Gemini model — deep reasoning and analysis',
+    displayName: 'Gemini 3.5 Flash',
+    description: 'Fast and capable; the model the CLI serves for Flash requests',
+    capabilities: ['chat', 'vision_input', 'tool_use'],
+    contextWindowSize: 1_048_576,
+    inputTokenLimit: 1_048_576,
+    outputTokenLimit: 65_536,
+    pricePer1MTokensInput: 0,
+    pricePer1MTokensOutput: 0,
+    supportsStreaming: true,
+    isDefaultModel: true,
+  },
+  // Each of the next three answered as the model requested through Gemini CLI
+  // (probed 2026-09-29 and again 2026-09-30 with --output-format json).
+  {
+    modelId: 'gemini-3.1-pro-preview',
+    providerId: 'gemini-cli',
+    displayName: 'Gemini 3.1 Pro',
+    description: 'Most capable Gemini model, for complex reasoning and analysis',
+    capabilities: ['chat', 'vision_input', 'tool_use'],
+    contextWindowSize: 1_048_576,
+    inputTokenLimit: 1_048_576,
+    outputTokenLimit: 65_536,
+    pricePer1MTokensInput: 0,
+    pricePer1MTokensOutput: 0,
+    supportsStreaming: true,
+    isDefaultModel: false,
+  },
+  {
+    modelId: 'gemini-3.5-flash-lite',
+    providerId: 'gemini-cli',
+    displayName: 'Gemini 3.5 Flash-Lite',
+    description: 'Lowest-cost Gemini 3.5 tier, for high-volume and latency-sensitive work',
+    capabilities: ['chat', 'vision_input', 'tool_use'],
+    contextWindowSize: 1_048_576,
+    inputTokenLimit: 1_048_576,
+    outputTokenLimit: 65_536,
+    pricePer1MTokensInput: 0,
+    pricePer1MTokensOutput: 0,
+    supportsStreaming: true,
+    isDefaultModel: false,
+  },
+  {
+    modelId: 'gemini-2.5-flash-lite',
+    providerId: 'gemini-cli',
+    displayName: 'Gemini 2.5 Flash-Lite',
+    description: 'Cheapest Gemini model, and the cheap tier for this provider',
+    capabilities: ['chat', 'vision_input', 'tool_use'],
+    contextWindowSize: 1_048_576,
+    inputTokenLimit: 1_048_576,
+    outputTokenLimit: 65_536,
+    pricePer1MTokensInput: 0,
+    pricePer1MTokensOutput: 0,
+    supportsStreaming: true,
+    isDefaultModel: false,
+  },
+  // Not served as requested (probed 2026-09-30): the CLI answers a
+  // gemini-2.5-flash request with gemini-3.5-flash, and returns 404 for
+  // gemini-2.5-pro and exits 1. Kept as `deprecated` rows, and passed through
+  // at request time, so a caller holding either id still sees a catalog row
+  // and an account that is served 2.5 Pro keeps working.
+  {
+    modelId: 'gemini-2.5-flash',
+    providerId: 'gemini-cli',
+    displayName: 'Gemini 2.5 Flash (answered by 3.5 Flash)',
+    description: 'The CLI answers requests for this id with gemini-3.5-flash. Pin gemini-3.5-flash.',
     capabilities: ['chat', 'vision_input', 'tool_use'],
     contextWindowSize: 1_000_000,
     inputTokenLimit: 1_000_000,
@@ -51,12 +122,13 @@ const GEMINI_CLI_MODELS: ModelInfo[] = [
     pricePer1MTokensOutput: 0,
     supportsStreaming: true,
     isDefaultModel: false,
+    status: 'deprecated',
   },
   {
-    modelId: 'gemini-2.5-flash',
+    modelId: 'gemini-2.5-pro',
     providerId: 'gemini-cli',
-    displayName: 'Gemini 2.5 Flash',
-    description: 'Fast and capable — ideal for most tasks',
+    displayName: 'Gemini 2.5 Pro (not served by the CLI)',
+    description: 'Gemini CLI returns 404 for this id and exits 1. Use gemini-3.1-pro-preview.',
     capabilities: ['chat', 'vision_input', 'tool_use'],
     contextWindowSize: 1_000_000,
     inputTokenLimit: 1_000_000,
@@ -64,13 +136,19 @@ const GEMINI_CLI_MODELS: ModelInfo[] = [
     pricePer1MTokensInput: 0,
     pricePer1MTokensOutput: 0,
     supportsStreaming: true,
-    isDefaultModel: true,
+    isDefaultModel: false,
+    status: 'deprecated',
   },
+  // Retired by Google. Through Gemini CLI 0.59.0 (probed 2026-09-29),
+  // gemini-2.0-flash-lite fails with ModelNotFoundError "This model
+  // models/gemini-2.0-flash-lite is no longer available", and a request for
+  // gemini-2.0-flash exits 0 with an answer produced by gemini-3.5-flash. Kept
+  // as `deprecated` so a caller holding either id still sees a catalog row.
   {
     modelId: 'gemini-2.0-flash',
     providerId: 'gemini-cli',
-    displayName: 'Gemini 2.0 Flash',
-    description: 'Previous-gen fast model with 1M context',
+    displayName: 'Gemini 2.0 Flash (retired)',
+    description: 'Retired by Google. The CLI answers requests for it with a different model',
     capabilities: ['chat', 'vision_input', 'tool_use'],
     contextWindowSize: 1_000_000,
     inputTokenLimit: 1_000_000,
@@ -79,12 +157,13 @@ const GEMINI_CLI_MODELS: ModelInfo[] = [
     pricePer1MTokensOutput: 0,
     supportsStreaming: true,
     isDefaultModel: false,
+    status: 'deprecated',
   },
   {
     modelId: 'gemini-2.0-flash-lite',
     providerId: 'gemini-cli',
-    displayName: 'Gemini 2.0 Flash Lite',
-    description: 'Lightest Gemini model — high throughput, low latency',
+    displayName: 'Gemini 2.0 Flash Lite (retired)',
+    description: 'Retired by Google and no longer served',
     capabilities: ['chat', 'tool_use'],
     contextWindowSize: 1_000_000,
     inputTokenLimit: 1_000_000,
@@ -93,6 +172,7 @@ const GEMINI_CLI_MODELS: ModelInfo[] = [
     pricePer1MTokensOutput: 0,
     supportsStreaming: true,
     isDefaultModel: false,
+    status: 'deprecated',
   },
 ];
 
@@ -151,7 +231,7 @@ export class GeminiCLIProvider implements IProvider {
 
   async initialize(config: GeminiCLIProviderConfig): Promise<void> {
     this.config = {
-      defaultModelId: 'gemini-2.5-flash',
+      defaultModelId: GEMINI_CLI_DEFAULT_MODEL,
       requestTimeout: 120_000,
       ...config,
     };
@@ -517,7 +597,7 @@ Each tool_call must include id (unique string), name (tool name), and a JSON bod
       id: responseId ?? `gc-${result.sessionId ?? Date.now()}`,
       object: 'chat.completion',
       created: Date.now(),
-      modelId: modelId ?? this.defaultModelId ?? 'gemini-2.5-flash',
+      modelId: modelId ?? this.defaultModelId ?? GEMINI_CLI_DEFAULT_MODEL,
       choices: [{
         index: 0,
         message: { role: 'assistant', content: text },
@@ -540,7 +620,7 @@ Each tool_call must include id (unique string), name (tool name), and a JSON bod
       id: responseId ?? `gc-${result.sessionId ?? Date.now()}`,
       object: 'chat.completion',
       created: Date.now(),
-      modelId: modelId ?? this.defaultModelId ?? 'gemini-2.5-flash',
+      modelId: modelId ?? this.defaultModelId ?? GEMINI_CLI_DEFAULT_MODEL,
       choices: [{
         index: 0,
         message: {

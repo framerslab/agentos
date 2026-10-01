@@ -11,6 +11,7 @@
  *  - Remain side-effect free and pure: callers can run in CI, authoring tools, or runtime gates.
  */
 import { IPersonaDefinition } from './IPersonaDefinition';
+import { GMIEventType } from '../GMIEvent.js';
 
 /** Classification of validation issue severity. */
 export type PersonaValidationIssueSeverity = 'error' | 'warning' | 'suggestion';
@@ -99,6 +100,10 @@ export interface LoadedPersonaRecord {
 const SEMVER_REGEX = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-.]+)?$/;
 // Lightweight BCP-47 heuristic (not exhaustive): lang subtags 2-3 letters, optional hyphen groups.
 const BCP47_REGEX = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/;
+/** Metaprompt trigger types the MetapromptExecutor fires. A metaprompt with any other type never runs. */
+const SUPPORTED_METAPROMPT_TRIGGER_TYPES: ReadonlySet<string> = new Set(['turn_interval', 'event_based', 'manual']);
+/** Event names the GMI raises, and so the only ones an `event_based` metaprompt can wait for. */
+const GMI_EVENT_NAMES: ReadonlySet<string> = new Set<string>(Object.values(GMIEventType));
 
 /**
  * Validate a single persona definition and return structured issues.
@@ -215,6 +220,32 @@ export async function validatePersona(persona: IPersonaDefinition, opts: Persona
         add('warning', 'rag_summarization_method_missing', 'RAG ingestion summarization enabled but no method provided.', 'memoryConfig.ragConfig.ingestionProcessing.summarization.method');
       }
     }
+  }
+
+  // Metaprompt triggers. Persona JSON is cast rather than type-checked, so a
+  // trigger the executor can never fire would otherwise load without notice.
+  if (Array.isArray(persona.metaPrompts)) {
+    persona.metaPrompts.forEach((metaPrompt, idx) => {
+      const trigger = metaPrompt?.trigger as
+        | { type?: unknown; intervalTurns?: unknown; eventName?: unknown }
+        | undefined;
+      if (!trigger) return;
+      const field = `metaPrompts[${idx}].trigger`;
+      const label = `Metaprompt '${metaPrompt.id}'`;
+
+      if (typeof trigger.type !== 'string' || !SUPPORTED_METAPROMPT_TRIGGER_TYPES.has(trigger.type)) {
+        add('warning', 'unsupported_metaprompt_trigger', `${label} has trigger type '${String(trigger.type)}', which never fires. Supported types: turn_interval, event_based, manual.`, field);
+      } else if (trigger.type === 'turn_interval') {
+        const interval = trigger.intervalTurns;
+        if (typeof interval !== 'number' || !Number.isFinite(interval) || interval < 1) {
+          add('warning', 'invalid_metaprompt_interval', `${label} has intervalTurns ${String(interval)}; it must be a number of at least 1, or the metaprompt never fires.`, field);
+        }
+      } else if (trigger.type === 'event_based') {
+        if (typeof trigger.eventName !== 'string' || !GMI_EVENT_NAMES.has(trigger.eventName)) {
+          add('warning', 'unknown_metaprompt_event', `${label} waits for event '${String(trigger.eventName)}', which the GMI never raises. Known events: ${Array.from(GMI_EVENT_NAMES).join(', ')}.`, field);
+        }
+      }
+    });
   }
 
   const summary = summarizeIssues(issues);

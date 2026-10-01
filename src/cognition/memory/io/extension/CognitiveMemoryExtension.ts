@@ -157,8 +157,12 @@ export function createCognitiveMemoryDescriptor(
     },
     shutdown: async () => {
       if (!manager) return;
-      await manager.shutdown();
-      manager = null;
+      const currentManager = manager;
+      try {
+        await currentManager.shutdown();
+      } finally {
+        if (manager === currentManager) manager = null;
+      }
     },
     ...overrides,
   };

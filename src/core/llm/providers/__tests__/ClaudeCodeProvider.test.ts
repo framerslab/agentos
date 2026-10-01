@@ -204,13 +204,29 @@ describe('ClaudeCodeProvider', () => {
 
     it('returns the static Claude model catalog', async () => {
       const models = await provider.listAvailableModels();
-      expect(models.length).toBe(4);
+      expect(models.length).toBe(9);
       const ids = models.map(m => m.modelId);
+      expect(ids).toContain('claude-fable-5-1');
+      expect(ids).toContain('claude-opus-5-5');
+      expect(ids).toContain('claude-sonnet-5-5');
+      expect(ids).toContain('claude-sonnet-5');
+      expect(ids).toContain('claude-sonnet-4-6');
       expect(ids).toContain('claude-fable-5');
       expect(ids).toContain('claude-opus-4-20250514');
       expect(ids).toContain('claude-sonnet-4-20250514');
       expect(ids).toContain('claude-haiku-4-5-20251001');
       expect(models.every(m => m.pricePer1MTokensInput === 0)).toBe(true);
+    });
+
+    it('defaults to claude-sonnet-4-6 and marks the retired Claude 4 snapshots deprecated', async () => {
+      // claude-sonnet-4-20250514 returns HTTP 404 on the Messages API (probed
+      // 2026-09-29), so it cannot be the default.
+      expect(provider.defaultModelId).toBe('claude-sonnet-4-6');
+      const models = await provider.listAvailableModels();
+      expect(models.filter(m => m.isDefaultModel).map(m => m.modelId)).toEqual(['claude-sonnet-4-6']);
+      for (const id of ['claude-opus-4-20250514', 'claude-sonnet-4-20250514']) {
+        expect(models.find(m => m.modelId === id)?.status).toBe('deprecated');
+      }
     });
   });
 

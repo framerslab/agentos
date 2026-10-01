@@ -15,6 +15,12 @@ export interface RunEmulatedToolLoopOptions {
   maxRoundtrips: number;
   /** Execution context passed to each tool.execute(). */
   toolContext?: ToolExecutionContext;
+  /**
+   * Called with the tool's name right before a parsed call runs the tool.
+   * Callers use it to learn that a tool had side effects, for example to
+   * refuse a failover that would run the call again.
+   */
+  onToolExecute?: (toolName: string) => void;
 }
 
 export interface EmulatedToolLoopResult {
@@ -64,6 +70,7 @@ export async function runEmulatedToolLoop(
           return formatToolResponse(call.name, { success: false, error: `unknown tool "${call.name}"` });
         }
         try {
+          opts.onToolExecute?.(call.name);
           const result = await tool.execute(call.arguments, opts.toolContext as ToolExecutionContext);
           toolCalls.push({ name: call.name, args: call.arguments });
           return formatToolResponse(call.name, result);

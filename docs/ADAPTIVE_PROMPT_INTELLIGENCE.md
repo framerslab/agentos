@@ -99,9 +99,9 @@ export interface MetaPromptDefinition {
   description?: string;
   /** The prompt template, with `{{variable}}` placeholders. */
   promptTemplate: string | { template: string; variables?: string[] };
-  /** Model override (falls back to persona.defaultModelId). */
+  /** Model override (falls back to persona.defaultModelId, then the GMI's default model). */
   modelId?: string;
-  /** Provider override (falls back to persona.defaultProviderId). */
+  /** Provider override (falls back to persona.defaultProviderId, then the GMI's default provider). */
   providerId?: string;
   /** Max tokens for the metaprompt response. Default 512. */
   maxOutputTokens?: number;
@@ -119,22 +119,22 @@ export interface MetaPromptDefinition {
 
 A persona's `metaPrompts?: MetaPromptDefinition[]` lives at [`IPersonaDefinition.ts:438`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts). The runtime merges these with the active preset list (see [Built-in presets](#built-in-presets) below); persona-defined entries override preset entries on matching ID.
 
-The template uses `{{variable}}` placeholders that the executor substitutes with values from the running context. Every handler has its own variable set, documented inline alongside the preset definitions in [`metaprompt_presets.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/metaprompt_presets.ts).
+The template uses `{{variable}}` placeholders that the executor substitutes with values from the running context. Every handler has its own variable set, documented inline alongside the preset definitions in [`metaprompt_presets.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/metaprompt_presets.ts). The `gmi_self_trait_adjustment` handler supplies `evidence`, `current_mood`, `user_skill` and `task_complexity`. A placeholder outside the handler's set reaches the model unreplaced. On the response side, `applyMetapromptUpdates` applies `updatedGmiMood`, `updatedUserSkillLevel`, `updatedTaskComplexity` and `newMemoryImprints`; any other field is ignored.
 
 ## Three trigger types
 
-[`MetapromptExecutor.checkAndTriggerMetaprompts(turnId)`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts) runs once per turn during prompt assembly. For each metaprompt in the persona's merged list, it evaluates the trigger contract and queues any that fire:
+[`MetapromptExecutor.checkAndTriggerMetaprompts(turnId, { countTurn })`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts) runs once at the end of every turn, after the response has streamed. `countTurn` is `true` only for user messages. For each metaprompt in the persona's merged list, it evaluates the trigger contract and queues any that fire:
 
 ```mermaid
 flowchart TD
   start([User message arrives]) --> assemble[PromptEngine.assemble]
   assemble --> check{checkAndTriggerMetaprompts}
 
-  check -- counter ≥ intervalTurns --> interval[turn_interval fires]
+  check -- "user-turn count reaches intervalTurns" --> interval[turn_interval fires]
   check -- pendingEvents.has eventName --> event[event_based fires]
   check -- workingMemory flag set --> manual[manual fires]
 
-  interval --> exec[executeMetaprompts in parallel]
+  interval --> exec[queue one background batch]
   event --> exec
   manual --> exec
 
@@ -164,7 +164,9 @@ flowchart TD
   wmi --> ready
 ```
 
-Triggered metaprompts execute in parallel via `Promise.allSettled`, so one slow handler does not block the others. Failures are logged to the reasoning trace and do not block the user-visible response.
+The metaprompts that fire on one turn form one batch, and the metaprompts in a batch execute in parallel via `Promise.allSettled`, so one slow handler does not block the others. Batches run in the background, one at a time per GMI, in the order they were triggered, so two batches never race on the same mood or context field. Failures are logged to the reasoning trace and do not block the user-visible response. Metaprompt work never changes the GMI's lifecycle state (`getCurrentState()`), so the next turn can start while a batch is still running.
+
+These three are the only trigger types. A metaprompt with any other `trigger.type` never fires: the executor records one `WARNING` trace entry for it, and [`validatePersona`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/PersonaValidation.ts) reports it as `unsupported_metaprompt_trigger`. Validation also reports `invalid_metaprompt_interval` for an `intervalTurns` that is not a number of at least 1, and `unknown_metaprompt_event` for an `eventName` that is not a [`GMIEventType`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMIEvent.ts) value. All three are warnings, so strict validation marks such a persona `degraded` rather than blocking it, unless `treatWarningsAsErrors` or `blockOnCodes` names the code.
 
 ### `turn_interval` — periodic self-regulation
 
@@ -172,7 +174,7 @@ Triggered metaprompts execute in parallel via `Promise.allSettled`, so one slow 
 { trigger: { type: 'turn_interval', intervalTurns: 5 } }
 ```
 
-The executor keeps a per-metaprompt counter at `workingMemory.set('metaprompt_turn_counter_<id>', N)`. Each turn, every `turn_interval` metaprompt either increments its counter or, if `counter >= intervalTurns`, fires and resets the counter to zero. Counters are scoped per metaprompt ID, so two different `turn_interval` definitions on the same persona run on independent cadences.
+The executor keeps a per-metaprompt counter at `workingMemory.set('metaprompt_turn_counter_<id>', N)`. Each user turn (a `TEXT` or `MULTIMODAL_CONTENT` input) increments the counter of every `turn_interval` metaprompt; when a counter reaches `intervalTurns`, that metaprompt fires and its counter resets to zero. With `intervalTurns: 5` it fires on user turns 5, 10, 15 and so on. Tool continuations, system messages and tool-response turns do not count. An `intervalTurns` that is not a number of at least 1 never fires, and the executor records one `WARNING` trace entry for it. Counters are scoped per metaprompt ID, so two different `turn_interval` definitions on the same persona run on independent cadences.
 
 The canonical `turn_interval` metaprompt is `gmi_self_trait_adjustment`. Its handler ([`handleTraitAdjustment`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts)) gathers the last ten conversation messages, the last twenty reasoning-trace entries, the current mood, user context, and task context, then submits all of them as evidence to the metaprompt's template. The expected JSON response shape is the same shape `applyMetapromptUpdates` consumes:
 
@@ -318,8 +320,8 @@ onMemoryImprint: (content: string, tags: string[]) => Promise<void>;
 | Surface | Field name in metaprompt response | Where it surfaces in next turn |
 |---|---|---|
 | **GMI mood** | `updatedGmiMood` | The mood string is appended to the system prompt and read by the LLM as voice/tone guidance. Mood values are validated against the [`GMIMood`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts) enum; unknown values are dropped. |
-| **User context** | `updatedUserSkillLevel`, `updatedUserSentiment`, `updatedUserPreferences` | The inferred user profile injected into the prompt and consumed by `ContextualPromptElement.criteria.userSkillLevel` matching. |
-| **Task context** | `updatedTaskComplexity`, `updatedTaskPhase`, `updatedActiveGoal` | The task profile injected into the prompt and consumed by `ContextualPromptElement.criteria.taskComplexity` matching. |
+| **User context** | `updatedUserSkillLevel` | The inferred user profile injected into the prompt and consumed by `ContextualPromptElement.criteria.userSkillLevel` matching. |
+| **Task context** | `updatedTaskComplexity` | The task profile injected into the prompt and consumed by `ContextualPromptElement.criteria.taskComplexity` matching. |
 | **Working memory imprints** | `newMemoryImprints: [{ key, value, description? }]` | Set on working memory via `workingMemory.set(key, value)`. Imprints persist across turns within the session and are readable by any subsequent prompt assembly or tool. |
 | **HEXACO traits** | (Not a metaprompt surface — mutated by [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) and `PersonaDriftMechanism`.) | The trait values modulate three cognitive memory mechanisms (involuntary recall, consolidation, schema encoding) and the trait paragraph appended to the system prompt. |
 
@@ -509,7 +511,7 @@ Most adaptive surfaces add zero extra LLM cost. Only two paths add LLM calls bey
 | **`ContextualPromptElement[]` (every turn)** | Never. Same local assembly pass. | $0 |
 | **`sentimentTracking.method: 'lexicon_based'` (every turn when enabled)** | Never. VADER-style lexical scan in code, ~10-50ms. | $0 |
 | **`sentimentTracking.method: 'llm'` (every turn when enabled)** | Every user turn. | One small LLM call (~200 in / ~100 out). |
-| **`turn_interval` metaprompt fires** | Once every `intervalTurns` turns. | One LLM call (~1500 in / ≤512 out at temperature 0.3). |
+| **`turn_interval` metaprompt fires** | Once every `intervalTurns` user turns. | One LLM call (~1500 in / ≤512 out at temperature 0.3). |
 | **`event_based` metaprompt fires** | Only when the SentimentTracker emits the matching event (requires `consecutiveTurnsForTrigger` consecutive matches). | One LLM call per event. |
 | **`manual` metaprompt fires** | Only when the host writes the trigger flag. | One LLM call. |
 | **[`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) invocation** | Only when the LLM decides to call it. Tool body is local (clamping and budget enforcement); no separate LLM call. | $0 (folded into the regular completion's tool-call round). |
@@ -546,11 +548,11 @@ Three knobs change the cost curve directly:
 |---|---|
 | `intervalTurns` on the self-reflection metaprompt | Linear. Doubling from 5 to 10 halves the periodic-reflection cost. |
 | `consecutiveTurnsForTrigger` on `sentimentTracking` | Reduces event firings. Default 2; raise to 3-4 to require more sustained signal before paying for a recovery metaprompt. |
-| `metaPrompt.modelId` per metaprompt | Override the persona's model with a cheaper one for reflection. The presets ship with `modelId: undefined` so they fall back to the persona default; setting them to a small model isolates adaptive overhead from your main completion model. |
+| `metaPrompt.modelId` per metaprompt | Override the persona's model with a cheaper one for reflection. The presets ship with `modelId: undefined` so they fall back to the persona default, or to the GMI's default model when the persona sets none; setting them to a small model isolates adaptive overhead from your main completion model. |
 
 ### Latency
 
-Metaprompt execution runs in parallel with the main turn via `Promise.allSettled`, but the parallel block must complete before the next turn's `PromptEngine.assemble()` reads the updated state. In practice, this means a metaprompt firing on turn N influences turn N+1, not turn N. The user-visible latency on turn N is unaffected: the regular completion streams while metaprompts run in the background. Lexicon-based sentiment analysis adds 10-50ms to the per-turn local work; LLM-based adds the full provider round-trip to background work but still does not block the user-visible reply.
+The executor checks triggers at the end of a turn, after the regular completion has streamed, and queues the metaprompts that fire as a background batch. The turn does not wait for the batch's LLM calls, so the user-visible latency on turn N is unaffected. A batch applies its updates when its calls return: a metaprompt firing on turn N shapes the first prompt assembled after that, normally turn N+1, and a slow call can land during a later turn. Batches for one GMI run one at a time, so their updates apply in trigger order. `GMI.shutdown()` waits up to five seconds for a running batch before it closes working memory. Lexicon-based sentiment analysis adds 10-50ms to the per-turn local work; LLM-based adds the full provider round-trip to background work but still does not block the user-visible reply.
 
 **Failure modes.** A failed metaprompt is logged to the reasoning trace as an `ERROR` entry and does not block the user-visible reply. A JSON parsing failure on the metaprompt response is auto-recovered via [`IUtilityAI.parseJsonSafe()`](https://github.com/framerslab/agentos/blob/master/src/cognition/nlp/ai_utilities/IUtilityAI.ts), which prompts a cheaper model to fix malformed JSON before giving up. An unknown mood value is dropped silently (validated against the [`GMIMood`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts) enum).
 

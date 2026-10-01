@@ -17,6 +17,10 @@ Diagnostics are observability only: they never block, alter, or fail a
 request, and fingerprints stored by the API contain hashes and token-count
 estimates, never prompt content.
 
+Cache mechanics themselves — the zero-config defaults, per-call `cache`
+options, TTLs, floors, and per-provider behavior — live in
+[Prompt Caching](PROMPT_CACHING.md).
+
 ## Agentic loops: one flag
 
 For `generateText` (and every agent built on it), set `cacheDiagnostics:

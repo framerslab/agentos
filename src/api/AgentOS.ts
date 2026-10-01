@@ -148,7 +148,10 @@ import { adaptTools, adaptToolsToMap, type AdaptableToolInput } from './runtime/
 import { createSchemaOnDemandPack } from '../extensions/packs/schema-on-demand-pack.js';
 import { WorkflowFacade } from './runtime/WorkflowFacade';
 import { CapabilityDiscoveryInitializer } from './runtime/CapabilityDiscoveryInitializer';
-import { SelfImprovementSessionManager } from './runtime/SelfImprovementSessionManager';
+import {
+  SelfImprovementSessionManager,
+  resolveGMIForToolContext,
+} from './runtime/SelfImprovementSessionManager';
 import { RagMemoryInitializer } from './runtime/RagMemoryInitializer';
 import type { TurnPlannerConfig } from '../orchestration/turn-planner/TurnPlanner';
 import type {
@@ -1088,7 +1091,8 @@ export class AgentOS implements IAgentOS {
             selfImprovementDeps:
               this.config.emergentConfig?.selfImprovement?.enabled
                 ? this.selfImprovementManager.buildToolDeps(storageAdapter, {
-                    getActiveGMI: () => this.gmiManager?.activeGMIs?.values().next().value,
+                    // The GMI that made the tool call, never whichever GMI happens to be first.
+                    getGMIForContext: (context) => resolveGMIForToolContext(this.gmiManager, context),
                     getToolOrchestrator: () => this.toolOrchestrator,
                   })
                 : undefined,

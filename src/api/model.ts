@@ -49,6 +49,8 @@ const ENV_KEY_MAP: Record<string, string> = {
   stability: 'STABILITY_API_KEY',
   replicate: 'REPLICATE_API_TOKEN',
   youcom: 'YDC_API_KEY',
+  fal: 'FAL_API_KEY',
+  bfl: 'BFL_API_KEY',
 };
 
 const ENV_URL_MAP: Record<string, string> = {
@@ -183,11 +185,19 @@ export function resolveMediaProvider(
   modelId: string,
   overrides?: { apiKey?: string; baseUrl?: string }
 ): ResolvedProvider {
+  // The global default's credentials apply when it names this provider, as
+  // in resolveProvider. A default without a provider does not lend its key
+  // here: media calls auto-detect across vendors (Stability, Replicate, ...)
+  // and would send that key to the wrong one.
+  const def = getDefaultProvider();
+  const defAppliesToThisProvider = def?.provider === providerId;
   const apiKey =
     overrides?.apiKey ??
+    (defAppliesToThisProvider ? def?.apiKey : undefined) ??
     (ENV_KEY_MAP[providerId] ? process.env[ENV_KEY_MAP[providerId]] : undefined);
   const baseUrl =
     overrides?.baseUrl ??
+    (defAppliesToThisProvider ? def?.baseUrl : undefined) ??
     (ENV_URL_MAP[providerId] ? process.env[ENV_URL_MAP[providerId]] : undefined);
 
   if (providerId === 'ollama') {
@@ -276,11 +286,27 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
   // Apply global default for `provider` / `model` when neither is inlined.
   // Inline opts always win; the default kicks in only when the caller
   // supplied nothing. Env-var auto-detect happens later as a final
-  // fallback if the default also doesn't pin a provider.
+  // fallback if the default also doesn't pin a provider. The default's
+  // model applies only to a task it can serve (see globalModelForTask);
+  // otherwise the provider's default model for the task is used.
   if (!opts.provider && !opts.model) {
     const def = getDefaultProvider();
     if (def?.provider) {
-      opts = { ...opts, provider: def.provider, model: opts.model ?? def.model };
+      // A custom endpoint (the default's baseUrl, an inline baseUrl on
+      // callers such as embedText, or the provider's base-URL env var) may
+      // serve any model under any name, so the default's model stays.
+      const inlineBaseUrl = (opts as { baseUrl?: unknown }).baseUrl;
+      const envBaseUrlVar = def.provider ? ENV_URL_MAP[def.provider] : undefined;
+      const customEndpoint = Boolean(
+        def.baseUrl ||
+          (typeof inlineBaseUrl === 'string' && inlineBaseUrl) ||
+          (envBaseUrlVar && process.env[envBaseUrlVar]),
+      );
+      opts = {
+        ...opts,
+        provider: def.provider,
+        model: customEndpoint ? def.model : globalModelForTask(def, task),
+      };
     }
   }
 
@@ -291,10 +317,14 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
     // Alternative "provider/model" format — check if the prefix before the
     // first "/" is a known provider ID. This avoids misinterpreting OpenRouter
     // model paths like "meta-llama/llama-3.1-8b" as provider "meta-llama".
+    // An explicit provider wins over another provider's prefix: a gateway
+    // names models `vendor/model` (OpenRouter's `openai/gpt-5.6-sol`), and
+    // that id belongs to the gateway, not to the vendor's own API. A prefix
+    // that repeats the explicit provider is dropped.
     const slashIdx = opts.model.indexOf('/');
     if (slashIdx > 0) {
       const maybeProvider = opts.model.slice(0, slashIdx);
-      if (PROVIDER_DEFAULTS[maybeProvider]) {
+      if (PROVIDER_DEFAULTS[maybeProvider] && (!opts.provider || opts.provider === maybeProvider)) {
         return { providerId: maybeProvider, modelId: opts.model.slice(slashIdx + 1) };
       }
     }
@@ -338,6 +368,43 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
   );
 }
 
+/**
+ * Chat model families, optionally behind a provider prefix such as `openai:`
+ * and a gateway prefix such as `openai/` or `meta-llama/`
+ * (`openrouter:openai/gpt-4o`).
+ */
+const CHAT_MODEL_FAMILY =
+  /^(?:[\w.-]+:)?(?:[\w.-]+\/)?(?:gpt-|chatgpt|o\d|claude|gemini|gemma|llama|mistral|mixtral|codestral|ministral|magistral|grok|deepseek|qwen|command|phi-|sonar|kimi|glm)/i;
+
+/** Names that mark a non-chat model inside a chat family (gpt-image-1, gemini-embedding-2). */
+const NON_CHAT_MODEL_MARKER = /embed|image|dall-e|imagen|tts|whisper|transcri|audio|realtime|moderation/i;
+
+/**
+ * The global default's model when it can serve `task` on the provider's own
+ * endpoint (a custom endpoint keeps the default's model; see
+ * resolveModelOption). The default model is the text model (`generateText`,
+ * agents). An embedding or image call drops it only when it is recognizably
+ * a chat model, which would fail there (the provider's default model for the
+ * task applies instead); any other name is kept, since it may be an embedding
+ * or image model. An embedding call on Ollama keeps any model: Ollama embeds
+ * with whatever model is pulled, and forcing nomic-embed-text would break
+ * hosts that never pulled it.
+ *
+ * @param def - The global default provider config.
+ * @param task - The task being resolved.
+ * @returns The model to apply, or undefined to use the provider's task default.
+ */
+function globalModelForTask(
+  def: { provider?: string; model?: string },
+  task: TaskType,
+): string | undefined {
+  if (!def.model) return undefined;
+  if (task === 'text') return def.model;
+  if (task === 'embedding' && def.provider === 'ollama') return def.model;
+  const isChatModel = CHAT_MODEL_FAMILY.test(def.model) && !NON_CHAT_MODEL_MARKER.test(def.model);
+  return isChatModel ? undefined : def.model;
+}
+
 // ---------------------------------------------------------------------------
 
 /**
@@ -350,6 +417,50 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
  * configs reuse the same one for the life of the process.
  */
 const managerCache = new Map<string, Promise<AIModelProviderManager>>();
+
+/**
+ * Thrown by {@link createProviderManager} when the requested provider did not
+ * initialize: a rejected or revoked API key (the provider's model listing
+ * answers 401), an unreachable endpoint, or a provider id the manager does
+ * not know. The fallback walker treats it as retryable, so a primary whose
+ * key stopped working fails over like one that answers 401 on the call.
+ *
+ * `httpStatus` repeats the cause's HTTP status when it has one, which the
+ * provider health registry uses to pick its cooldown.
+ */
+export class ProviderInitializationError extends Error {
+  /** Provider that failed to initialize. */
+  public readonly providerId: string;
+  /** HTTP status of the underlying failure, when it had one. */
+  public readonly httpStatus?: number;
+  /** The error the provider threw during initialization, when there was one. */
+  public readonly cause?: unknown;
+
+  constructor(providerId: string, cause?: unknown) {
+    const detail =
+      cause instanceof Error
+        ? cause.message
+        : cause !== undefined
+          ? String(cause)
+          : 'the provider was not registered';
+    super(`Provider '${providerId}' failed to initialize: ${detail}`);
+    this.name = 'ProviderInitializationError';
+    this.providerId = providerId;
+    this.cause = cause;
+    const status = httpStatusOf(cause);
+    if (status !== undefined) this.httpStatus = status;
+  }
+}
+
+/** Reads a numeric HTTP status from the fields provider errors use. */
+function httpStatusOf(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const e = error as { httpStatus?: unknown; status?: unknown; statusCode?: unknown };
+  for (const value of [e.httpStatus, e.status, e.statusCode]) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  return undefined;
+}
 
 function buildCacheKey(resolved: ResolvedProvider): string {
   return `${resolved.providerId}::${resolved.apiKey ?? ''}::${resolved.baseUrl ?? ''}`;
@@ -364,11 +475,16 @@ function buildCacheKey(resolved: ResolvedProvider): string {
  *
  * The manager is cached process-wide by resolved key + base URL, so repeated
  * calls with the same credentials reuse one manager instead of allocating
- * a new one per LLM call.
+ * a new one per LLM call. A provider that fails to initialize is not cached:
+ * the call throws and the next call with the same credentials initializes
+ * again, so a transient failure (a network blip, a 503 from the model
+ * listing) does not disable the provider for the life of the process.
  *
  * @param resolved - A `ResolvedProvider` produced by {@link resolveProvider}
  *   or `resolveMediaProvider()`.
  * @returns A fully initialised {@link AIModelProviderManager} instance.
+ * @throws {ProviderInitializationError} When the requested provider did not
+ *   initialize.
  */
 export async function createProviderManager(
   resolved: ResolvedProvider
@@ -397,6 +513,16 @@ export async function createProviderManager(
         },
       ],
     });
+
+    // initialize() logs a provider's failure and leaves it unregistered.
+    // Surface it with its cause so callers can fail over, and reject so the
+    // handler below drops this manager from the cache.
+    if (!manager.getProvider(resolved.providerId)) {
+      throw new ProviderInitializationError(
+        resolved.providerId,
+        manager.getProviderInitError(resolved.providerId),
+      );
+    }
 
     return manager;
   })();

@@ -603,11 +603,19 @@ export interface ObservabilityConfig {
  * The `onLimitReached` policy determines whether a breach is fatal.
  */
 export interface ResourceControls {
-  /** Maximum total tokens (prompt + completion) across all agents and steps. */
+  /**
+   * Maximum total tokens (prompt + completion) across all agents and steps.
+   * The lightweight `agent()` helper maps this to a per-call completion-token
+   * cap (`maxTokens`) instead of the run total.
+   */
   maxTotalTokens?: number;
   /** Maximum USD cost cap across the entire run. */
   maxCostUSD?: number;
-  /** Wall-clock time budget for the run in milliseconds. */
+  /**
+   * Wall-clock time budget for the run in milliseconds. The lightweight
+   * `agent()` helper maps this to a per-call request timeout
+   * (`requestTimeout`) instead of the whole-run budget.
+   */
   maxDurationMs?: number;
   /** Maximum number of agent invocations (across all agents). */
   maxAgentCalls?: number;
@@ -1256,6 +1264,9 @@ export interface BaseAgentConfig {
   /**
    * HEXACO-inspired personality trait overrides (0–1 scale).
    * Encoded as a human-readable trait string appended to the system prompt.
+   * The SOUL.md spellings `honestyHumility` / `honesty_humility` and
+   * `opennessToExperience` are accepted for `honesty` and `openness`; when
+   * both spellings are given, the canonical key wins.
    */
   personality?: Partial<{
     honesty: number;
@@ -1264,6 +1275,9 @@ export interface BaseAgentConfig {
     agreeableness: number;
     conscientiousness: number;
     openness: number;
+    honestyHumility: number;
+    honesty_humility: number;
+    opennessToExperience: number;
   }>;
   /**
    * Tools available to the agent on every call.
@@ -1310,24 +1324,26 @@ export interface BaseAgentConfig {
    */
   maxTokens?: number;
   /**
-   * Extended-thinking budget (in tokens) forwarded to thinking-capable
-   * models (Opus 4.7/4.8) on every `generate()` / `stream()` / session call
-   * this agent makes. When set, the provider emits reasoning blocks and
-   * floors `maxTokens` at `budgetTokens + 8192`. Omitted = thinking off.
-   * No effect on models that do not support extended thinking.
+   * Extended-thinking switch forwarded to Claude models on every
+   * `generate()` / `stream()` / session call this agent makes. Any positive
+   * `budgetTokens` turns adaptive thinking on (the number itself is not
+   * sent). `false` turns thinking off with the model's own off shape; Opus
+   * 5.5, Fable and Mythos always think. Omitted keeps the model's default:
+   * thinking on for Opus 5 and later, Sonnet 5 and later, Fable and Mythos,
+   * off for older models. Other providers ignore it.
    *
    * @example
    * ```ts
    * const codegen = agent({
    *   provider: 'anthropic',
-   *   model: 'claude-opus-4-8',
+   *   model: 'claude-opus-5',
    *   tools: { GenerateCode, RunTests, JudgeOutput },
    *   maxTokens: 24000,
    *   thinking: { budgetTokens: 8000 },
    * });
    * ```
    */
-  thinking?: { budgetTokens: number };
+  thinking?: { budgetTokens: number } | false;
   /**
    * Reasoning-effort control forwarded to every generate/stream/session call.
    * On effort-capable Claude models (Opus 4.5+, Sonnet 4.6, Fable/Mythos 5) the
@@ -1399,7 +1415,15 @@ export interface BaseAgentConfig {
   observability?: ObservabilityConfig;
   /** Event callbacks fired at various lifecycle points during the run. */
   on?: AgencyCallbacks;
-  /** Resource limits (tokens, cost, time) applied to the entire run. */
+  /**
+   * Resource limits (tokens, cost, time). `agency()` and the full runtime
+   * enforce every field against the entire run. The lightweight `agent()`
+   * helper forwards two of them per call: `maxTotalTokens` caps each LLM
+   * call's completion output (mapped to `maxTokens` when no explicit
+   * `maxTokens` is set, NOT the prompt+completion run total) and
+   * `maxDurationMs` bounds each LLM request (mapped to `requestTimeout`).
+   * The remaining fields stay agency()-only.
+   */
   controls?: ResourceControls;
   /**
    * Names of other agents in the agency that must complete before this agent runs.

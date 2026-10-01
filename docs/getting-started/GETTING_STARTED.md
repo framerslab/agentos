@@ -79,6 +79,8 @@ const { text: tenantReply } = await generateText({
 setDefaultProvider(undefined);
 ```
 
+The default's `model` is the text model. `embedText`, `editImage` and `generateImage` use it as well unless it is recognizably a chat model (GPT, Claude, Gemini, Llama and similar families) headed for the provider's own endpoint, in which case they use the provider's default model for the task. `generateImage` without `provider` or `model` tries the default's provider first when that provider makes images, then the image providers whose keys are in the environment. With a custom endpoint (`baseUrl`) or on Ollama, `embedText` uses it too, except on Gemini: there a default model that does not name an embedding model is replaced by `gemini-embedding-2`, so pass `model` to `embedText` to use another one. The default's `apiKey` and `baseUrl` apply to every call that resolves to the same provider, image calls included.
+
 [`setDefaultProvider`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/global-default.ts) is the recommended path for apps that hold their keys somewhere other than environment variables (secrets manager, runtime config service, etc.). It also works inside the [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) class — pass `defaultProvider` in your [`AgentOSConfig`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) and the runtime will install it during `initialize()`.
 
 ### Reordering the auto-detect chain

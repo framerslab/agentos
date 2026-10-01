@@ -121,6 +121,15 @@ export interface PromptComponents {
   systemPrompts?: Array<{ content: string; priority?: number; source?: string }>;
   /** Conversation history messages, typically an array of `Message` objects. */
   conversationHistory?: Message[]; // Using Message type (aliased ConversationMessage)
+  /**
+   * How many messages at the end of `conversationHistory` belong to the turn
+   * being answered: the current user message when it travels as history
+   * (structured input), then the assistant tool calls and tool results of
+   * the turn's earlier calls. Token budgeting summarizes or truncates only
+   * the messages before them, so the model always receives the request it
+   * answers and its own tool rounds. Defaults to 0.
+   */
+  currentTurnMessageCount?: number;
   /** Current user input text. */
   userInput?: string | null; // Can be null if interaction is driven by other means (e.g., tool result)
   /** Visual inputs (images) if the target model supports vision. */

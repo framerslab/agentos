@@ -57,6 +57,7 @@ import * as path from 'node:path';
 import matter from 'gray-matter';
 import { ensureMemoryDir } from '../memory/wiki/migrateMemoryMd.js';
 import type { IPersonaDefinition } from './IPersonaDefinition.js';
+import { normalizeHexacoTraits } from './hexaco.js';
 
 /**
  * Result of loading a soul workspace. The `personaDefinition` is suitable for
@@ -120,10 +121,18 @@ export interface SoulFrontmatter {
 /**
  * HEXACO personality model scores. All values 0.0-1.0.
  * See {@link https://hexaco.org/} for the trait reference.
+ *
+ * Loaded personas store these under the runtime keys from
+ * `normalizeHexacoTraits`: Honesty-Humility becomes `personalityTraits.honesty`.
  */
 export interface HEXACOScores {
-  /** Sincerity, fairness, modesty, low entitlement. */
+  /** Sincerity, fairness, modesty, low entitlement. The documented frontmatter key. */
   honestyHumility?: number;
+  /**
+   * Same trait as `honestyHumility`, under the key runtime personas use.
+   * Accepted in frontmatter; when both spellings are present, `honesty` wins.
+   */
+  honesty?: number;
   /** Anxiety, sensitivity to fear, sentimentality. */
   emotionality?: number;
   /** Sociability, expressiveness, social self-esteem. */
@@ -339,16 +348,9 @@ export function frontmatterToPersona(
     description: frontmatter.role ?? '',
     version: '1.0.0',
     baseSystemPrompt,
-    personalityTraits: frontmatter.hexaco
-      ? {
-          honestyHumility: frontmatter.hexaco.honestyHumility,
-          emotionality: frontmatter.hexaco.emotionality,
-          extraversion: frontmatter.hexaco.extraversion,
-          agreeableness: frontmatter.hexaco.agreeableness,
-          conscientiousness: frontmatter.hexaco.conscientiousness,
-          openness: frontmatter.hexaco.openness,
-        }
-      : undefined,
+    // Runtime readers key Honesty-Humility as `honesty`; the frontmatter may
+    // use either spelling.
+    personalityTraits: frontmatter.hexaco ? normalizeHexacoTraits(frontmatter.hexaco) : undefined,
     moodAdaptation: frontmatter.defaultMood
       ? {
           enabled: true,
@@ -381,13 +383,29 @@ export function frontmatterToPersona(
  * Render a persona definition (typically loaded from JSON or constructed
  * programmatically) as a SOUL.md file. Useful for migration from the
  * legacy JSON-only persona format and for `agent({ soul: { autoGenerate: ... } })`.
+ *
+ * HEXACO traits are written under the documented frontmatter keys
+ * (`honestyHumility`, ...) whichever spelling the persona uses, so the output
+ * parses back to the same `personalityTraits`. Unset optional fields are
+ * left out of the frontmatter.
  */
 export function renderSoulMarkdown(persona: IPersonaDefinition): string {
+  const traits = normalizeHexacoTraits(persona.personalityTraits);
   const fm: SoulFrontmatter = {
     name: persona.name,
     agentId: persona.id,
     role: persona.description,
-    hexaco: persona.personalityTraits as HEXACOScores | undefined,
+    hexaco:
+      Object.keys(traits).length > 0
+        ? {
+            honestyHumility: traits.honesty,
+            emotionality: traits.emotionality,
+            extraversion: traits.extraversion,
+            agreeableness: traits.agreeableness,
+            conscientiousness: traits.conscientiousness,
+            openness: traits.openness,
+          }
+        : undefined,
     voice: persona.voiceConfig
       ? {
           provider: persona.voiceConfig.provider,
@@ -411,7 +429,32 @@ export function renderSoulMarkdown(persona: IPersonaDefinition): string {
   // baseSystemPrompt may be a string, template object, or content array.
   // Normalize to a single string for the markdown body.
   const body = stringifyBaseSystemPrompt(persona.baseSystemPrompt);
-  return matter.stringify(body, fm as Record<string, unknown>);
+  // gray-matter dumps YAML with js-yaml's safeDump, which throws on undefined.
+  return matter.stringify(body, stripUndefined(fm) as Record<string, unknown>);
+}
+
+/**
+ * Return a copy of a YAML-bound value with every `undefined` removed from
+ * plain objects and arrays. Other values (dates, strings, numbers) pass
+ * through unchanged.
+ */
+function stripUndefined(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.filter((entry) => entry !== undefined).map(stripUndefined);
+  }
+  if (value !== null && typeof value === 'object') {
+    const proto = Object.getPrototypeOf(value);
+    if (proto === Object.prototype || proto === null) {
+      const result: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(value)) {
+        if (entry !== undefined) {
+          result[key] = stripUndefined(entry);
+        }
+      }
+      return result;
+    }
+  }
+  return value;
 }
 
 /**

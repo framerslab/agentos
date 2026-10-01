@@ -272,6 +272,7 @@ export type {
   SessionSendOptions,
   SessionSendStructuredResult,
 } from './api/agent.js';
+export type { MemoryProviderHookOptions } from './api/runtime/memoryProviderHooks.js';
 export type {
   IModelRouter,
   ModelRouteParams,
@@ -378,7 +379,12 @@ export {
   clearDefaultProvider,
   type GlobalDefaultProvider,
 } from './api/runtime/global-default.js';
-export { parseModelString, resolveProvider, resolveModelOption } from './api/model.js';
+export {
+  parseModelString,
+  resolveProvider,
+  resolveModelOption,
+  ProviderInitializationError,
+} from './api/model.js';
 export { PROVIDER_DEFAULTS, autoDetectProvider } from './api/runtime/provider-defaults.js';
 export type { ProviderDefaults } from './api/runtime/provider-defaults.js';
 export {

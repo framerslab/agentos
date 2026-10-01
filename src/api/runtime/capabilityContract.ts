@@ -41,7 +41,7 @@ export const BASE_AGENT_CONFIG_CAPABILITY_CONTRACT = {
   output: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced' },
   provenance: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced' },
   observability: { agent: 'partially_enforced', generation: 'partially_enforced', runtime: 'enforced' },
-  controls: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced' },
+  controls: { agent: 'partially_enforced', generation: 'runtime_only', runtime: 'enforced' },
 } as const satisfies Record<CapabilityKey, Record<CapabilitySurface, CapabilitySupport>>;
 
 export function getCapabilitySupport(

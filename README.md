@@ -78,19 +78,13 @@ await session.send('Can you expand on that?'); // remembers context
 
 [Full quickstart](https://docs.agentos.sh/getting-started) * [Examples cookbook](https://docs.agentos.sh/getting-started/examples) * [API reference](https://docs.agentos.sh/api)
 
-**Sessions in 0.10.** Sessions carry a lossless conversation transcript — assistant tool calls, tool results, thinking blocks — independent of the memory subsystem, bounded by default (whole-block eviction past a ~120K-token estimate). `memory: false` no longer makes a session stateless; pass `history: false` for that. Long tool-driving loops get `session.reseed(snapshot)` (atomic history replacement with in-flight epoch guarding), `session.messages()` as checkpoint material, and per-send generation overrides (`toolChoice`, `requestTimeout`, `cache`, `cacheDiagnostics`, `blockLabel`):
+**Sessions.** A session keeps the whole conversation whether memory is on or off: each `send()` records its tool calls, their results and the model's signed thinking, and every later request replays them. `stream()` records its turn as the prompt and the final text. History is capped at about 120K tokens by default. Set `history: false` for a stateless session, set `history: { maxTokens }` to change the cap, and call `reseed()` to replace the history with a shorter set of messages you build yourself.
 
 ```ts
-// Before 0.10 — stateless unless memory was on:
-const s = agent({ model, memory: false }).session('job-1'); // kept no history
-
-// 0.10 — sessions remember by default; opt out explicitly:
 const stateless = agent({ model, memory: false, history: false }).session('job-1');
 const bounded = agent({ model, history: { maxTokens: 60_000 } }).session('job-2');
 bounded.reseed([{ role: 'user', content: 'compact resume snapshot' }]);
 ```
-
-Cache note: history byte-stability holds for the stored transcript between eviction events; the wire request can still legitimately differ when dynamic memory context or message-mutating hooks inject per-call content.
 
 ---
 
@@ -128,7 +122,7 @@ const aria = await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents
 | vs. | AgentOS differentiator |
 |---|---|
 | **LangChain / LangGraph** | Cognitive memory ([8 neuroscience-backed mechanisms](https://docs.agentos.sh/features/cognitive-memory)), HEXACO personality, runtime tool forging |
-| **Vercel AI SDK** | Multi-agent teams (6 strategies), 7 vector backends, [guardrails](https://docs.agentos.sh/features/guardrails-architecture), voice/telephony |
+| **Vercel AI SDK** | Multi-agent teams (6 strategies), 7 vector backends, [guardrails](https://docs.agentos.sh/features/guardrails-architecture), voice/telephony, [zero-config prompt caching](https://docs.agentos.sh/features/prompt-caching) |
 | **CrewAI / Mastra** | Unified orchestration (DAGs + graphs + missions), personality-driven routing, **published reproducible numbers on LongMemEval-S (85.6%) and LongMemEval-M (70.2%) with full methodology disclosure** |
 
 [Full framework comparison ->](https://docs.agentos.sh/blog/2026/02/20/agentos-vs-langgraph-vs-crewai)
@@ -140,6 +134,7 @@ const aria = await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents
 | Category | Highlights |
 |---|---|
 | **LLM Providers** | 11 (9 API-key + 2 local CLI): OpenAI, Anthropic, Gemini, Groq, Ollama, OpenRouter, Together, Mistral, xAI, Claude CLI, Gemini CLI. Plus image/video/audio generation providers. |
+| **Prompt Caching** | Zero config on every provider: automatic Anthropic breakpoints incl. multi-turn history (direct + OpenRouter) * OpenAI cache-key routing * normalized cache usage + leak detection * per-call TTL/opt-out * [guide](https://docs.agentos.sh/features/prompt-caching) |
 | **Cognitive Memory** | 8 mechanisms: reconsolidation, retrieval-induced forgetting, involuntary recall, FOK, gist extraction, schema encoding, source decay, emotion regulation |
 | **HEXACO Personality** | 6 traits modulate memory, retrieval bias, response style |
 | **RAG Pipeline** | 7 vector backends * 4 retrieval strategies * GraphRAG * HyDE * Cohere rerank-v3.5 |

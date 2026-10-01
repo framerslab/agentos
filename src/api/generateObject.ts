@@ -267,6 +267,16 @@ export interface GenerateObjectOptions<T extends ZodType> {
    * without an affinity concept ignore the field.
    */
   sessionId?: string;
+
+  /**
+   * Opt-in source label forwarded to
+   * {@link import('./generateText.js').GenerateTextOptions.source} and
+   * surfaced on the global LLM usage observer event. Hosts tag their
+   * cost/telemetry rows with it (e.g. 'codegen_tool',
+   * 'narrator_state_extractor') — without it every structured-output
+   * call rolls up under the generic surface bucket.
+   */
+  source?: string;
 }
 
 /**
@@ -750,6 +760,8 @@ export async function generateObject<T extends ZodType>(
       // Per-conversation affinity key (OpenRouter session_id sticky
       // routing; other providers ignore it).
       ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
+      // Observer source label (see GenerateObjectOptions.source).
+      ...(opts.source !== undefined ? { source: opts.source } : {}),
       _responseFormat: responseFormat,
       // Fallback legs rebuild the payload for THEIR provider via this
       // callback (see generateText's fallback loop) instead of inheriting

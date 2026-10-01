@@ -11,6 +11,7 @@ import { IWorkingMemory } from './memory/IWorkingMemory';
 import { IPromptEngine } from '../../core/llm/IPromptEngine';
 import { IRetrievalAugmentor } from '../rag/IRetrievalAugmentor';
 import type { ConversationMessage } from '../../core/conversation/ConversationMessage';
+import type { NormalizedUserFeedback } from './userFeedback';
 // Assuming AIModelProviderManager is correctly exported from this path
 import { AIModelProviderManager } from '../../core/llm/providers/AIModelProviderManager';
 import { IUtilityAI } from '../nlp/ai_utilities/IUtilityAI';
@@ -86,6 +87,11 @@ export interface ToolCallRequest {
   id: string;
   name: string;
   arguments: Record<string, any>;
+  /**
+   * Gemini thought signature for this call, kept so the next Gemini 3 turn can
+   * replay it. See `ChatMessage.tool_calls[].thoughtSignature`.
+   */
+  thoughtSignature?: string;
 }
 
 /**
@@ -559,6 +565,27 @@ export interface IGMI {
     },
   ): void;
 
+  /**
+   * Records user feedback on this instance's session: a reasoning-trace entry
+   * and, when cognitive memory is configured, memories scoped to the user.
+   * GMIManager calls it with feedback normalized by `normalizeUserFeedback`.
+   * Optional so that custom IGMI implementations keep compiling.
+   *
+   * @param feedback - Normalized feedback plus the id of the user who sent it.
+   */
+  recordUserFeedback?(feedback: NormalizedUserFeedback & { userId: string }): Promise<void>;
+
+  /**
+   * Sets one personality trait on this instance without mutating the persona
+   * definition shared with other sessions. Used by the self-improvement
+   * `adapt_personality` tool. Optional so that custom IGMI implementations
+   * keep compiling; without it, personality adaptation reports that the
+   * caller could not be resolved.
+   *
+   * @param trait - Trait key, e.g. `openness` or `honesty`.
+   * @param value - New trait value.
+   */
+  setPersonalityTrait?(trait: string, value: number): void;
 
   getReasoningTrace(): Readonly<ReasoningTrace>;
   getWorkingMemorySnapshot(): Promise<Record<string, any>>;

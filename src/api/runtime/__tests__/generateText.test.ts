@@ -642,6 +642,84 @@ describe('generateText', () => {
     }
   });
 
+  it('applies an entry effort and maxTokens headroom to its own hop only, over the ORIGINAL call', async () => {
+    (resolveModelOption as unknown as Mock).mockImplementation(
+      (opts: { provider?: string; model?: string }) => ({
+        providerId: opts?.provider ?? 'openai',
+        modelId: opts?.model ?? 'gpt-4.1-mini',
+      }),
+    );
+    (resolveProvider as unknown as Mock).mockImplementation((providerId: string, modelId: string) => ({
+      providerId,
+      modelId,
+      apiKey: 'test-key',
+    }));
+    globalLLMProviderHealth.reset();
+    try {
+      // The primary and the first rescue leg fail retryably; the second rescue
+      // leg serves. The first leg carries an effort and headroom (a thinking
+      // model); the second carries neither and is reached from INSIDE the
+      // first leg's recursion, which is where an inherited effort or a
+      // stacked budget would show.
+      hoisted.generateCompletion.mockImplementation(async (modelId: string) => {
+        if (modelId === 'plain-leg') {
+          return {
+            modelId,
+            usage: { promptTokens: 5, completionTokens: 3, totalTokens: 8 },
+            choices: [{ message: { role: 'assistant', content: 'rescue reply' }, finishReason: 'stop' }],
+          };
+        }
+        throw new Error('429 rate limit exceeded');
+      });
+      const chain = [
+        { provider: 'gemini', model: 'thinking-leg', effort: 'low', maxTokensHeadroom: 1024 },
+        { provider: 'openai', model: 'plain-leg' },
+      ];
+
+      const result = await generateText({
+        provider: 'anthropic',
+        model: 'claude-primary',
+        prompt: 'hello',
+        maxTokens: 800,
+        fallbackProviders: chain,
+      });
+      expect(result.text).toBe('rescue reply');
+
+      const optionsFor = (modelId: string) =>
+        (((hoisted.generateCompletion.mock.calls as unknown[][]).find((c) => c[0] === modelId)?.[2] ??
+          {}) as { maxTokens?: number; effort?: string });
+      expect(optionsFor('claude-primary')).toMatchObject({ maxTokens: 800 });
+      expect(optionsFor('claude-primary').effort).toBeUndefined();
+      expect(optionsFor('thinking-leg')).toMatchObject({ maxTokens: 1824, effort: 'low' });
+      // Neither the first leg's effort nor its headroom reaches the next leg.
+      expect(optionsFor('plain-leg')).toMatchObject({ maxTokens: 800 });
+      expect(optionsFor('plain-leg').effort).toBeUndefined();
+
+      // A call that set no maxTokens stays uncapped on every hop.
+      hoisted.generateCompletion.mockClear();
+      globalLLMProviderHealth.reset();
+      await generateText({
+        provider: 'anthropic',
+        model: 'claude-primary',
+        prompt: 'hello',
+        fallbackProviders: chain,
+      });
+      expect(optionsFor('thinking-leg').maxTokens).toBeUndefined();
+      expect(optionsFor('plain-leg').maxTokens).toBeUndefined();
+    } finally {
+      (resolveModelOption as unknown as Mock).mockImplementation(() => ({
+        providerId: 'openai',
+        modelId: 'gpt-4.1-mini',
+      }));
+      (resolveProvider as unknown as Mock).mockImplementation(() => ({
+        providerId: 'openai',
+        modelId: 'gpt-4.1-mini',
+        apiKey: 'test-key',
+      }));
+      globalLLMProviderHealth.reset();
+    }
+  });
+
   it('applies a fallback entry effort per-hop — fallback runs at its effort, primary stays untouched', async () => {
     (resolveModelOption as unknown as Mock).mockImplementation(
       (opts: { provider?: string; model?: string }) => ({
@@ -1038,8 +1116,10 @@ describe('generateText', () => {
 
 describe('buildFallbackChain — OpenRouter link pins a cheap model', () => {
   it('gives the OpenRouter fallback entry an explicit cheap model, not the gpt-4o default', () => {
-    const originalKey = process.env.OPENROUTER_API_KEY;
+    const originalOrKey = process.env.OPENROUTER_API_KEY;
+    const originalOaKey = process.env.OPENAI_API_KEY;
     process.env.OPENROUTER_API_KEY = 'test-or-key';
+    process.env.OPENAI_API_KEY = 'test-oa-key';
     try {
       const chain = buildFallbackChain('anthropic');
       const orEntry = chain.find((e) => e.provider === 'openrouter');
@@ -1047,12 +1127,18 @@ describe('buildFallbackChain — OpenRouter link pins a cheap model', () => {
       // A model-less OpenRouter entry silently defaults to the OpenRouter
       // provider's defaultModel, which made failover traffic the #1 LLM
       // cost in prod (2026-06-07). The entry must be PINNED — and pinned
-      // to the gpt-5.5 quality floor, so a primary outage neither lands
+      // to the gpt-5.6-sol quality floor, so a primary outage neither lands
       // on an unchosen model nor downgrades output to a mini tier.
-      expect(orEntry?.model).toBe('openai/gpt-5.5');
+      expect(orEntry?.model).toBe('openai/gpt-5.6-sol');
+      // Both frontier legs move together (2026-08-06 flip): the direct
+      // OpenAI leg carries the same -sol pin.
+      const oaEntry = chain.find((e) => e.provider === 'openai');
+      expect(oaEntry?.model).toBe('gpt-5.6-sol');
     } finally {
-      if (originalKey === undefined) delete process.env.OPENROUTER_API_KEY;
-      else process.env.OPENROUTER_API_KEY = originalKey;
+      if (originalOrKey === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = originalOrKey;
+      if (originalOaKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = originalOaKey;
     }
   });
 });
@@ -1072,6 +1158,24 @@ describe('canonical fallback chains stand their cache markers down', () => {
       }
     }
   };
+
+  it('pins the Gemini leg at the pro tier, thinking bounded and budgeted', () => {
+    withAllKeys(() => {
+      // A model-less Gemini entry took the provider default (a flash model)
+      // and served a whole degraded run on it (2026-09-29).
+      expect(buildFallbackChain().filter((e) => e.provider === 'gemini')).toEqual([
+        { provider: 'gemini', model: 'gemini-3.1-pro-preview', cache: false, effort: 'low', maxTokensHeadroom: 1024 },
+      ]);
+    });
+  });
+
+  it('names a model on every canonical leg', () => {
+    withAllKeys(() => {
+      for (const entry of [...buildFallbackChain(), ...buildPolicyAwareFallbackChain('mature')]) {
+        expect(entry.model, entry.provider).toBeTruthy();
+      }
+    });
+  });
 
   it('buildFallbackChain pins cache:false on every leg', () => {
     withAllKeys(() => {

@@ -140,10 +140,19 @@ export interface AdaptPersonalityDeps {
   };
   /** Optional durable store for recording mutation history. */
   mutationStore?: PersonalityMutationStore;
-  /** Getter returning the current personality trait map (trait → value in [0, 1]). */
-  getPersonality: () => Record<string, number>;
-  /** Setter to apply a new value for a specific trait. */
-  setPersonality: (trait: string, value: number) => void;
+  /**
+   * Getter returning the calling agent's personality trait map
+   * (trait → value in [0, 1]). Receives the tool's execution context so the
+   * host can resolve the agent instance that made the call.
+   */
+  getPersonality: (context?: ToolExecutionContext) => Record<string, number>;
+  /**
+   * Setter to apply a new value for a specific trait on the calling agent.
+   * Returning `false` means the host could not resolve the caller: the tool
+   * then fails without spending budget or recording a mutation. Returning
+   * nothing counts as applied.
+   */
+  setPersonality: (trait: string, value: number, context?: ToolExecutionContext) => boolean | void;
 }
 
 // ============================================================================
@@ -270,30 +279,6 @@ export class AdaptPersonalityTool
       };
     }
 
-    // Decay-on-adapt (spec batch-1 C6): before applying a new mutation, age
-    // this agent's STORED mutation strengths for the current UTC-day cycle.
-    // Idempotent per (agent, day) via the store's guard table; a decay
-    // failure never blocks the adapt itself. Aging advances on activity —
-    // dormant agents' mutations hold strength until their next adapt.
-    if (this.deps.config.persistWithDecay && this.deps.mutationStore) {
-      if (this.deps.mutationStore.decayForAgent) {
-        const cycleId = 'day:' + new Date().toISOString().slice(0, 10);
-        try {
-          await this.deps.mutationStore.decayForAgent(
-            context.gmiId,
-            this.deps.config.decayRate ?? 0.05,
-            cycleId,
-          );
-        } catch (err) {
-          console.warn('[agentos] decay-on-adapt failed (mutation proceeds):', err);
-        }
-      } else {
-        console.warn(
-          '[agentos] persistWithDecay is on but the mutation store lacks decayForAgent; decay skipped',
-        );
-      }
-    }
-
     // 3. Check session budget — track total |delta| per trait
     const { maxDeltaPerSession } = this.deps.config;
     const sessionDeltas = this.getSessionDeltas(context);
@@ -315,8 +300,8 @@ export class AdaptPersonalityTool
       clamped = true;
     }
 
-    // 5. Get current value, compute new value (clamped 0–1), apply
-    const personality = this.deps.getPersonality();
+    // 5. Get the caller's current value, compute new value (clamped 0–1), apply
+    const personality = this.deps.getPersonality(context);
     const previousValue = personality[trait] ?? 0.5;
     let newValue = previousValue + effectiveDelta;
 
@@ -331,11 +316,46 @@ export class AdaptPersonalityTool
       clamped = true;
     }
 
-    this.deps.setPersonality(trait, newValue);
+    const applied = this.deps.setPersonality(trait, newValue, context);
+    if (applied === false) {
+      // The host found no agent instance for this call. Stop before any budget
+      // is spent or a durable mutation is written for an agent nothing changed on.
+      return {
+        success: false,
+        error:
+          'adapt_personality could not resolve the calling agent instance; no trait was changed.',
+      };
+    }
 
-    // Update session tracking
+    // Update session tracking before any await, so an overlapping call for
+    // the same session and trait sees this call's share of the budget.
     const newSessionTotal = currentSessionTotal + Math.abs(effectiveDelta);
     sessionDeltas.set(trait, newSessionTotal);
+
+    // Decay-on-adapt (spec batch-1 C6): before recording the new mutation, age
+    // this agent's STORED mutation strengths for the current UTC-day cycle.
+    // Idempotent per (agent, day) via the store's guard table; a decay
+    // failure never blocks the adapt itself. Aging advances on activity:
+    // dormant agents' mutations hold strength until their next adapt.
+    if (this.deps.config.persistWithDecay && this.deps.mutationStore) {
+      if (this.deps.mutationStore.decayForAgent) {
+        const cycleId = 'day:' + new Date().toISOString().slice(0, 10);
+        try {
+          await this.deps.mutationStore.decayForAgent(
+            context.gmiId,
+            this.deps.config.decayRate ?? 0.05,
+            cycleId,
+          );
+        } catch (err) {
+          console.warn('[agentos] decay-on-adapt failed (mutation proceeds):', err);
+        }
+      } else {
+        console.warn(
+          '[agentos] persistWithDecay is on but the mutation store lacks decayForAgent; decay skipped',
+        );
+      }
+    }
+
 
     // 6. Record in mutation store when persistence is enabled.
     if (this.deps.mutationStore) {

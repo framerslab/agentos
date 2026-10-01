@@ -13,11 +13,15 @@ import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from 
 import { fireLlmUsageObserver } from './observers.js';
 import { hostPolicyToRouteParams, mergeRequiredCapabilities } from './runtime/hostPolicy.js';
 import { adaptTools } from './runtime/toolAdapter.js';
-import { runEmulatedToolLoop, type ToolMode } from './runtime/tool-emulation/index.js';
+import { runEmulatedToolLoop, toShimMessages, type ToolMode } from './runtime/tool-emulation/index.js';
 import {
   buildPolicyAwareFallbackChain,
   createPlan,
+  fallbackHopOverrides,
+  addModelUsage,
+  hasBillableUsage,
   isRetryableError,
+  usageOfError,
   resolveChainOfThought,
   type GenerateTextOptions,
   type GenerationHookContext,
@@ -28,6 +32,7 @@ import {
   type ToolCallRecord,
 } from './generateText.js';
 import type { CacheDiagnostics } from '../core/llm/providers/IProvider.js';
+import { toProviderReplayMessage } from './sessionTranscript.js';
 import type { ModelRouteParams } from '../core/llm/routing/IModelRouter.js';
 import { resolveDynamicToolCalls } from './runtime/dynamicToolCalling.js';
 import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
@@ -43,6 +48,47 @@ async function recordAgentOSUsageLazy(
 ): Promise<boolean> {
   const { recordAgentOSUsage } = await import('./runtime/usageLedger.js');
   return recordAgentOSUsage(input);
+}
+
+/** Adds one {@link TokenUsage} to another; optional counters add when present. */
+function addTokenUsage(target: TokenUsage, add: TokenUsage): void {
+  target.promptTokens += add.promptTokens;
+  target.completionTokens += add.completionTokens;
+  target.totalTokens += add.totalTokens;
+  if (add.costUSD !== undefined) target.costUSD = (target.costUSD ?? 0) + add.costUSD;
+  if (add.cacheReadTokens !== undefined) target.cacheReadTokens = (target.cacheReadTokens ?? 0) + add.cacheReadTokens;
+  if (add.cacheCreationTokens !== undefined) {
+    target.cacheCreationTokens = (target.cacheCreationTokens ?? 0) + add.cacheCreationTokens;
+  }
+  if (add.inclusiveInputTokens !== undefined) {
+    target.inclusiveInputTokens = (target.inclusiveInputTokens ?? 0) + add.inclusiveInputTokens;
+  }
+}
+
+/**
+ * The part of a provider's cumulative usage report (`ModelUsage`) not yet
+ * counted, as {@link TokenUsage}: each counter less what `counted` already
+ * holds, never below zero.
+ */
+function usageBeyond(report: unknown, counted: TokenUsage): TokenUsage | undefined {
+  if (!report || typeof report !== 'object') return undefined;
+  const total: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  addModelUsage(total, report);
+  const less = (x: number | undefined, y: number | undefined): number | undefined =>
+    x === undefined ? undefined : Math.max(0, x - (y ?? 0));
+  return {
+    promptTokens: less(total.promptTokens, counted.promptTokens) ?? 0,
+    completionTokens: less(total.completionTokens, counted.completionTokens) ?? 0,
+    totalTokens: less(total.totalTokens, counted.totalTokens) ?? 0,
+    ...(total.costUSD !== undefined ? { costUSD: less(total.costUSD, counted.costUSD) } : {}),
+    ...(total.cacheReadTokens !== undefined ? { cacheReadTokens: less(total.cacheReadTokens, counted.cacheReadTokens) } : {}),
+    ...(total.cacheCreationTokens !== undefined
+      ? { cacheCreationTokens: less(total.cacheCreationTokens, counted.cacheCreationTokens) }
+      : {}),
+    ...(total.inclusiveInputTokens !== undefined
+      ? { inclusiveInputTokens: less(total.inclusiveInputTokens, counted.inclusiveInputTokens) }
+      : {}),
+  };
 }
 
 /**
@@ -309,13 +355,31 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
   // report `ttfbMs`; stays undefined when the stream errors before
   // producing any part.
   let firstPartAt: number | undefined;
+  // Set once the prompt-tool shim runs a tool: its rounds are buffered and
+  // yield nothing until the end, so firstPartAt cannot show them. A stream
+  // whose tools ran is not restarted on a fallback provider.
+  let shimRanTool = false;
 
   async function* runStream(): AsyncGenerator<StreamPart> {
     const startedAt = Date.now();
     const rootSpan = startAgentOSSpan('agentos.api.stream_text');
     const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    // Usage the current step's final chunks reported so far, so a refusal
+    // that reports the step's cumulative usage is not counted twice.
+    let stepUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     let finalText = '';
     let metricStatus: 'ok' | 'error' = 'ok';
+    // True when a provider-fallback leg served this stream. The recursive
+    // leg call fires its own usage-observer event (leg provider/model,
+    // fallbackDepth stamped), so the outer finally must NOT fire a second
+    // aggregate event: recordedProviderId/ModelId still name the FAILED
+    // primary and opts.__fallbackDepth is absent at the top level, so the
+    // duplicate re-billed the leg's folded usage under the dead primary as
+    // unstamped primary traffic (the 2026-07-20..26 misattribution shape).
+    let fallbackServedStream = false;
+    // What the failed attempt consumed before a fallback leg took over. The
+    // leg meters itself, so this is what the outer stream meters then.
+    let attemptUsage: TokenUsage | undefined;
     let recordedProviderId: string | undefined;
     let recordedModelId: string | undefined;
     // Raw provider finish reason of the most recent step's final chunk.
@@ -371,6 +435,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ?? hostPolicyRouteParams.preferredProviderIds,
             policyTier:
               opts.routerParams?.policyTier
+              ?? opts.policyTier
               ?? hostPolicyRouteParams.policyTier,
           };
           const routeResult = await opts.router.selectModel(
@@ -459,8 +524,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         messages.push({ role: 'system', content: parts });
       }
 
+      // Session history replays through here, so keep the tool pairing and
+      // thinking fields (see toProviderReplayMessage).
       if (opts.messages)
-        for (const m of opts.messages) messages.push({ role: m.role, content: m.content });
+        for (const m of opts.messages) messages.push(toProviderReplayMessage(m));
       if (opts.prompt) messages.push({ role: 'user', content: opts.prompt });
 
       rootSpan?.setAttribute('agentos.api.tool_count', tools.length);
@@ -494,9 +561,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // Inherit the root per-call cache control (planning-specific
           // override wins) — a cache:false stream's planning sub-call must
           // not auto-cache behind the caller's back.
-          planConfig?.cache !== undefined || opts.cache !== undefined
-            ? { ...planConfig, cache: planConfig?.cache ?? opts.cache }
-            : planConfig,
+          {
+            ...planConfig,
+            requestTimeout: planConfig?.requestTimeout ?? opts.requestTimeout,
+            ...(planConfig?.cache !== undefined || opts.cache !== undefined
+              ? { cache: planConfig?.cache ?? opts.cache }
+              : {}),
+            ...(planConfig?.thinking === false || opts.thinking === false ? { thinking: false as const } : {}),
+          },
           usage,
         );
 
@@ -522,10 +594,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       async function* runShimStream(): AsyncGenerator<StreamPart> {
         const loopResult = await runEmulatedToolLoop({
           tools: Array.from(toolMap.values()),
-          messages: messages.map((m) => ({
-            role: String(m.role),
-            content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? ''),
-          })),
+          onToolExecute: () => {
+            shimRanTool = true;
+          },
+          // Native tool turns in the history become the shim's own
+          // <tool_call> / <tool_response> text.
+          messages: toShimMessages(messages),
           maxRoundtrips: opts.maxSteps ?? 5,
           callModel: async (msgs) => {
             // provider is guaranteed non-undefined by the `if (!provider) throw`
@@ -533,6 +607,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             const r = await provider!.generateCompletion(resolved.modelId, msgs as any, {
               temperature: opts.temperature,
               maxTokens: opts.maxTokens,
+              // Forward per-call requestTimeout on the shim path too so the
+              // prompt-tool-calling emulation honors the caller's bound,
+              // matching generateText's own shim path.
+              ...(opts.requestTimeout !== undefined ? { requestTimeout: opts.requestTimeout } : {}),
               ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
               ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
               ...(opts.presencePenalty !== undefined ? { presencePenalty: opts.presencePenalty } : {}),
@@ -564,10 +642,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
                 : {}),
             } as any);
             // Aggregate the COMPLETE normalized usage from every shim
-            // roundtrip (spec batch-1 review fold). totalTokens still flows
-            // via loopResult below — NOT accumulated here, or it would
-            // double count.
+            // roundtrip (spec batch-1 review fold) as each call returns, so
+            // a stream that fails on a later round still reports what its
+            // earlier rounds consumed. The loop's own {totalTokens} sum is
+            // left unused, or it would count twice.
             if (r.usage) {
+              if (typeof r.usage.totalTokens === 'number') usage.totalTokens += r.usage.totalTokens;
               if (typeof r.usage.promptTokens === 'number') usage.promptTokens += r.usage.promptTokens;
               if (typeof r.usage.completionTokens === 'number') usage.completionTokens += r.usage.completionTokens;
               if (typeof r.usage.costUSD === 'number') usage.costUSD = (usage.costUSD ?? 0) + r.usage.costUSD;
@@ -590,7 +670,6 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             };
           },
         });
-        usage.totalTokens = (usage.totalTokens ?? 0) + loopResult.totalTokens;
         finalText = loopResult.text;
         const shimToolCalls: ToolCallRecord[] = loopResult.toolCalls.map((c) => ({
           name: c.name,
@@ -614,6 +693,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       let streamedAnyText = false;
       try {
       for (let step = 0; step < maxSteps; step++) {
+        stepUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
         // --- onBeforeGeneration hook ---
         let effectiveMessages = messages;
         if (opts.onBeforeGeneration) {
@@ -651,6 +731,11 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             tools: toolSchemas,
             temperature: opts.temperature,
             maxTokens: opts.maxTokens,
+            // Per-call request timeout, mirroring generateText: a streamed
+            // call with opts.requestTimeout set (e.g. an agent-level
+            // controls.maxDurationMs budget) bounds the provider request on
+            // the stream path too, not only on the generate path.
+            ...(opts.requestTimeout !== undefined ? { requestTimeout: opts.requestTimeout } : {}),
             // Mirror generateText: forward the sampling controls so a
             // streaming caller's topP / frequency / presence penalties
             // actually reach the provider instead of being silently
@@ -718,20 +803,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               streamedAnyText = true;
             }
 
-            if (chunk.error) {
-              const error = new Error(chunk.error.message);
-              const part: StreamPart = { type: 'error', error };
-              parts.push(part);
-              yield part;
-              metricStatus = 'error';
-              resolveText!(finalText);
-              resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
-              resolveToolCalls!(allToolCalls);
-              resolveFinishReason!('error');
-              return;
-            }
-
-            if (chunk.isFinal && opts.cacheDiagnostics) {
+            // An error chunk ends the step without a provider message, so it
+            // names no id for the next step to compare against.
+            if (chunk.isFinal && opts.cacheDiagnostics && !chunk.error) {
               sawFinalProviderChunk = true;
               // Chain the id for the NEXT step's comparison; keep the
               // latest verdict for the result promise (the final step's
@@ -745,6 +819,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             }
 
             if (chunk.isFinal && chunk.usage) {
+              addModelUsage(stepUsage, chunk.usage);
               usage.promptTokens += chunk.usage.promptTokens ?? 0;
               usage.completionTokens += chunk.usage.completionTokens ?? 0;
               usage.totalTokens += chunk.usage.totalTokens ?? 0;
@@ -797,6 +872,23 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
                 },
               });
             }
+
+            // After the usage above: a provider that ends a step with an
+            // error can still report what the step billed (a failed
+            // /v1/responses response carries its usage), and the result,
+            // the usage ledger and the observer read `usage`.
+            if (chunk.error) {
+              const error = new Error(chunk.error.message);
+              const part: StreamPart = { type: 'error', error };
+              parts.push(part);
+              yield part;
+              metricStatus = 'error';
+              resolveText!(finalText);
+              resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
+              resolveToolCalls!(allToolCalls);
+              resolveFinishReason!('error');
+              return;
+            }
           }
         } finally {
           stepSpan?.end();
@@ -824,6 +916,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
                 name: toolCall.name!,
                 arguments: toolCall.rawArguments || JSON.stringify(toolCall.arguments ?? {}),
               },
+              ...(toolCall.thoughtSignature ? { thoughtSignature: toolCall.thoughtSignature } : {}),
             })),
           {
             text: stepText,
@@ -895,10 +988,16 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           return;
         }
 
+        // Anthropic requires the tool turn's signed thinking back on the
+        // continuation request (same rule generateText applies per step).
+        const stepThinkingBlocks = finalChunk?.choices?.[0]?.message?.thinkingBlocks;
         messages.push({
           role: 'assistant',
           content: effectiveStepText || null,
           tool_calls: streamedToolCalls,
+          ...(stepThinkingBlocks && stepThinkingBlocks.length > 0
+            ? { thinkingBlocks: stepThinkingBlocks }
+            : {}),
         } as any);
 
         for (const toolCall of streamedToolCalls) {
@@ -1066,6 +1165,13 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       }
     } catch (err: any) {
       const error = err instanceof Error ? err: new Error(String(err));
+      // A step the provider ended with usage attached (a refused turn) was
+      // billed; the thrown error replaced the final chunk that reports it.
+      // That usage is the request's running total, so what the step's
+      // earlier final chunks already reported is left out.
+      const unreported = usageBeyond(usageOfError(err), stepUsage);
+      if (unreported) addTokenUsage(usage, unreported);
+      attemptUsage = { ...usage };
 
       // Record the failure on the provider-health registry. Synthetic
       // circuit-open errors are skipped because they're already a
@@ -1089,7 +1195,13 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         ? buildPolicyAwareFallbackChain(opts.policyTier, recordedProviderId)
        : opts.fallbackProviders;
 
-      if (effectiveFallbacks.length && isRetryableError(error)) {
+      // A stream that already handed text or tool activity to the consumer
+      // is not restarted on another provider (a refusal after text
+      // included): the consumer would receive the partial answer followed by
+      // a fresh one, and tools could run twice.
+      // firstPartAt is stamped when the first part reaches the consumer.
+      const deliveredOutput = firstPartAt !== undefined || shimRanTool;
+      if (effectiveFallbacks.length && isRetryableError(error) && !deliveredOutput) {
         let lastFallbackError: Error = error;
         let fallbackSucceeded = false;
         let fallbackFinishReason: StreamFinishReason = 'stop';
@@ -1128,11 +1240,16 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ...opts,
               provider: fb.provider,
               model: fb.model,
-              // Per-hop cache disposition, mirroring generateText's fallback
-              // recursion: canonical chain legs pin `cache: false` so a rescue
-              // hop pays no cache-write premium its one-shot traffic never
-              // reads back; entries without `cache` inherit the call level.
-              ...(fb.cache !== undefined ? { cache: fb.cache } : {}),
+              // Per-hop effort, cache and output budget over the ORIGINAL
+              // call, shared with generateText's walker (see
+              // fallbackHopOverrides). Canonical chain legs pin `cache: false`
+              // so a rescue hop pays no cache-write premium its one-shot
+              // traffic never reads back; entries without an override take
+              // the call level.
+              ...fallbackHopOverrides(opts, fb),
+              // Stamp the leg's observer events with its hop depth (see
+              // LlmUsageEvent.fallbackDepth).
+              __fallbackDepth: (opts.__fallbackDepth ?? 0) + 1,
               apiKey: undefined,
               baseUrl: undefined,
               // Preserve the REMAINING chain (entries AFTER the current fb;
@@ -1201,6 +1318,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               attempt,
             });
             fallbackSucceeded = true;
+            fallbackServedStream = true;
             break;
           } catch (fbErr: any) {
             lastFallbackError = fbErr instanceof Error ? fbErr: new Error(String(fbErr));
@@ -1299,7 +1417,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         await recordAgentOSUsageLazy({
           providerId: recordedProviderId,
           modelId: recordedModelId,
-          usage,
+          // A fallback leg recorded its own usage; this row is the attempt's.
+          usage: fallbackServedStream && attemptUsage ? attemptUsage : usage,
           options: {
             ...opts.usageLedger,
             source: opts.usageLedger?.source ?? 'streamText',
@@ -1312,7 +1431,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         durationMs: Date.now() - startedAt,
         status: metricStatus,
         ...(firstPartAt !== undefined ? { ttfbMs: firstPartAt - startedAt } : {}),
-        usage: toTurnMetricUsage(usage),
+        usage: toTurnMetricUsage(fallbackServedStream && attemptUsage ? attemptUsage : usage),
       });
       // 2026-05-29 — fire the global LLM usage observer with the
       // finalized stream usage. Same hook generateText fires; hosts
@@ -1320,17 +1439,42 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // one consistent stream of events whether the caller used
       // generateText or streamText. No-op when no observer is
       // registered.
-      if (metricStatus !== 'error') {
+      // One usage event per served answer:
+      // - fallback-served: the recursive leg already fired a correctly
+      //   attributed event — never fire the outer aggregate. The failed
+      //   attempt gets its own event only when it was billed: providers
+      //   report usage on the final chunk, so a thrown-over primary has
+      //   usually accrued none, but a refusal carries its usage on the error.
+      // - error terminals: fire ONLY when the stream accrued real billable
+      //   usage (tokens metered before a later failure) — suppressing those
+      //   left real spend unmetered; zero-usage failures stay silent.
+      const accruedBillableUsage = hasBillableUsage(usage);
+      if (fallbackServedStream && attemptUsage && hasBillableUsage(attemptUsage)) {
+        fireLlmUsageObserver({
+          provider: recordedProviderId ?? '',
+          model: recordedModelId ?? '',
+          usage: attemptUsage,
+          source: opts.source,
+          ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
+          finishReason: 'error',
+          surface: 'streamText',
+          durationMs: Date.now() - startedAt,
+        });
+      }
+      if (!fallbackServedStream && (metricStatus !== 'error' || accruedBillableUsage)) {
         fireLlmUsageObserver({
           provider: recordedProviderId ?? '',
           model: recordedModelId ?? '',
           ...(lastResponseModelId !== undefined ? { responseModel: lastResponseModelId } : {}),
           usage,
           source: opts.source,
+          ...(opts.__fallbackDepth ? { fallbackDepth: opts.__fallbackDepth } : {}),
           finishReason:
-            allToolCalls.length > 0 && !finalText
-              ? 'tool-calls'
-              : normalizeStreamFinishReason(lastStepFinishReason),
+            metricStatus === 'error'
+              ? 'error'
+              : allToolCalls.length > 0 && !finalText
+                ? 'tool-calls'
+                : normalizeStreamFinishReason(lastStepFinishReason),
           surface: 'streamText',
           durationMs: Date.now() - startedAt,
           ...(firstPartAt !== undefined ? { ttfbMs: firstPartAt - startedAt } : {}),

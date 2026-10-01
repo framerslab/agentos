@@ -486,7 +486,7 @@ const exported = await exportAgentConfig({
 // Import as a new agent with modified settings
 const config = JSON.parse(exported.content);
 config.agent.name = 'Research Assistant v2';
-config.llm.model = 'claude-opus-4-20250514';
+config.llm.model = 'claude-opus-5-5';
 
 await importAgent({
   source: JSON.stringify(config),

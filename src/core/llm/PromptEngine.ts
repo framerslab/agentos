@@ -31,6 +31,7 @@ import {
   IPromptEngineUtilityAI,
   TokenEstimator,
 } from './IPromptEngine';
+import { resolveCacheCapabilities } from './providers/model-cache-capabilities';
 import {
   ContextualPromptElement,
   ContextualPromptElementCriteria,
@@ -38,6 +39,42 @@ import {
 import { ConversationMessage as Message, MessageRole, ConversationToolCallRequest } from '../conversation/ConversationMessage'; // Corrected import: Used alias and added MessageRole
 import { ChatMessage, MessageContentPart } from './providers/IProvider'; // Added MessageContentPart
 import { ITool, JSONSchemaObject } from '../tools/ITool'; // Corrected import path
+import { sha256Hex } from '../utils/sha256';
+
+/**
+ * Text of `value` for a prompt cache key, built by JSON.stringify so each
+ * value serializes as prompt construction's JSON copy sees it (a `toJSON`
+ * hook gets its property key; functions and undefined drop out). Three kinds
+ * of value that JSON cannot carry as-is become placeholders: a bigint, an
+ * object seen before (so a cycle cannot throw), and a typed array (hashed, so
+ * large audio or image bytes are not turned into text). Each placeholder is
+ * also listed after the JSON with the position it took, so an input string
+ * that looks like a placeholder never reads as one.
+ */
+function cacheKeyText(value: unknown): string {
+  const seen = new Map<object, number>();
+  const placeholders: string[] = [];
+  let position = 0;
+  const text = JSON.stringify(value, (_key: string, current: unknown) => {
+    position += 1;
+    const placeholder = (description: string): string => {
+      placeholders.push(`${position}:${description}`);
+      return `\u0000${description}`;
+    };
+    if (typeof current === 'bigint') return placeholder(`bigint:${current}`);
+    if (current === null || typeof current !== 'object') return current;
+    if (ArrayBuffer.isView(current)) {
+      const digest = sha256Hex(new Uint8Array(current.buffer, current.byteOffset, current.byteLength));
+      return placeholder(`bytes:${current.constructor?.name ?? 'view'}:${digest}`);
+    }
+    const order = seen.get(current);
+    if (order !== undefined) return placeholder(`ref:${order}`);
+    seen.set(current, seen.size);
+    return current;
+  });
+  // JSON escapes control characters, so a raw \u0001 cannot occur in `text`.
+  return `${text ?? 'undefined'}\u0001${placeholders.join(',')}`;
+}
 
 
 /**
@@ -97,6 +134,10 @@ export class PromptEngine implements IPromptEngine {
   constructor() {
     this.defaultTemplates = {
       'openai_chat': this.createOpenAIChatTemplate(),
+      // GeminiProvider takes OpenAI-style ChatMessage[] and converts it to
+      // Gemini contents itself, so a caller that names this format gets the
+      // chat template rather than an empty prompt.
+      'google_gemini': this.createOpenAIChatTemplate(),
       'anthropic_messages': this.createAnthropicMessagesTemplate(),
       'generic_completion': this.createGenericCompletionTemplate(),
     };
@@ -200,6 +241,10 @@ export class PromptEngine implements IPromptEngine {
     }
 
     try {
+      // Copied now, in the same step as the cache key and before the first
+      // await, so the key and the prompt describe the same input even when
+      // the caller changes its components object while this call runs.
+      const components = JSON.parse(JSON.stringify(baseComponents)) as PromptComponents;
       let selectedElements: ContextualPromptElement[] = [];
       // Corrected: use contextualPromptElements directly from IPersonaDefinition
       if (executionContext?.activePersona?.contextualPromptElements) {
@@ -221,7 +266,7 @@ export class PromptEngine implements IPromptEngine {
       }
 
       const augmentedComponents = this.augmentBaseComponents(
-        baseComponents,
+        components,
         selectedElements,
         executionContext,
       );
@@ -398,7 +443,7 @@ export class PromptEngine implements IPromptEngine {
     let estimatedTokens = 0;
     if (components.systemPrompts) estimatedTokens += (await Promise.all(components.systemPrompts.map(sp => this.estimateTokenCount(sp.content, modelTargetInfo.modelId)))).reduce((a,b) => a+b, 0);
     if (components.userInput) estimatedTokens += await this.estimateTokenCount(components.userInput, modelTargetInfo.modelId);
-    if (components.conversationHistory) estimatedTokens += await this.calculateTokensForMessages(components.conversationHistory, modelTargetInfo.modelId); // Corrected: Call fixed calculateTokensForMessages
+    if (components.conversationHistory) estimatedTokens += await this.calculateTokensForMessages(components.conversationHistory, modelTargetInfo.modelId, this.thinkingSentFor(components.conversationHistory, modelTargetInfo));
 
 
     if (estimatedTokens > modelTargetInfo.maxContextTokens) {
@@ -505,45 +550,63 @@ export class PromptEngine implements IPromptEngine {
     }
   }
 
+  /**
+   * Builds the key a constructed prompt is cached under. A cached result is
+   * served to any later call with the same key, so the key covers everything
+   * that shapes the prompt: every component (the whole history, retrieved and
+   * memory context, tools), the model target, the template, and the
+   * execution context that templates and contextual elements read (the
+   * persona definition, mood, task, skill level, language, signals,
+   * preferences). The working memory handle is left out, since contextual
+   * criteria do not query it. The key is a SHA-256 digest, so it carries none
+   * of that content into logs.
+   */
   private generateCacheKey(
     components: Readonly<PromptComponents>,
     modelInfo: Readonly<ModelTargetInfo>,
     executionContext?: Readonly<PromptExecutionContext>,
     templateName?: string
   ): string {
-    /**
-     * Generates a stable cache key for a prospective prompt construction result.
-     * Key Composition Strategy (intentional truncation for privacy & size):
-     *  - First 50 chars of each system prompt concatenated (order sensitive)
-     *  - First 100 chars of user input
-     *  - Last turn content excerpt (first 50 chars) for light history sensitivity
-     *  - Tool id list (joined)
-     *  - Model id, template name, persona id, mood, task hint
-     *
-     * Hashing: Simple 32‑bit additive hash -> base36 to keep key short; collision risk acceptable for cache.
-     *
-     * NOTE: Omits retrievedContext & full history intentionally to avoid large keys and leaking RAG content into logs.
-     */
-    const relevantData = {
-      system: components.systemPrompts?.map(p => p.content.substring(0,50)).join(';'),
-      userInput: components.userInput?.substring(0,100),
-      historyLastTurn: components.conversationHistory?.[components.conversationHistory.length -1]?.content?.toString().substring(0,50),
-      tools: components.tools?.map(t => t.id).join(','),
-      modelId: modelInfo.modelId,
-      template: templateName,
-      personaId: executionContext?.activePersona.id,
-      mood: executionContext?.currentMood,
-      task: executionContext?.taskHint,
-      userPreferences: this.buildUserPreferenceCacheKey(executionContext?.userPreferences),
-    };
-    const keyString = Object.values(relevantData).filter(v => v !== undefined).join('||');
-    let hash = 0;
-    for (let i = 0; i < keyString.length; i++) {
-      const char = keyString.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash |= 0;
-    }
-    return `promptcache:${modelInfo.modelId}:${hash.toString(36)}`;
+    const { workingMemory: _workingMemory, ...context } = executionContext ?? ({} as Partial<PromptExecutionContext>);
+    const persona = executionContext?.activePersona;
+    // The components serialize at the root and as given, as prompt
+    // construction's JSON copy serializes them, so a toJSON hook or a getter
+    // it reads sees the same object and key.
+    const parts = [
+      cacheKeyText(components),
+      // A tool class may define its name and schema as getters, which JSON
+      // serialization of own properties would miss.
+      cacheKeyText(
+        components.tools?.map((tool) => ({
+          id: tool.id,
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+        })),
+      ),
+      cacheKeyText({
+        modelInfo,
+        templateName,
+        context,
+        // Read the way prompt construction reads them, so values a context
+        // or persona object holds on its prototype still count.
+        read: {
+          personaId: persona?.id,
+          contextualPromptElements: persona?.contextualPromptElements,
+          preferencePrompts: this.buildUserPreferencePrompts(executionContext),
+          currentMood: executionContext?.currentMood,
+          userSkillLevel: executionContext?.userSkillLevel,
+          taskHint: executionContext?.taskHint,
+          taskComplexity: executionContext?.taskComplexity,
+          language: executionContext?.language,
+          conversationSignals: executionContext?.conversationSignals,
+        },
+      }),
+    ];
+    // Hashed synchronously: constructPrompt copies the components in the same
+    // step, so the key and the prompt describe the same input.
+    const digest = sha256Hex(parts.map((part) => `${part.length}:${part}`).join(''));
+    return `promptcache:${modelInfo.modelId}:${digest}`;
   }
 
   private setupCacheEviction(): void {
@@ -554,7 +617,7 @@ export class PromptEngine implements IPromptEngine {
      * No size‑based LRU yet; maxCacheSizeBytes reserved for future implementation.
      */
     const interval = (this.config.performance.cacheTimeoutSeconds / 2) * 1000;
-    setInterval(() => {
+    const timer = setInterval(() => {
       const now = Date.now();
       for (const [key, entry] of this.cache.entries()) {
         if ((now - entry.timestamp) > this.config.performance.cacheTimeoutSeconds * 1000) {
@@ -562,6 +625,8 @@ export class PromptEngine implements IPromptEngine {
         }
       }
     }, Math.max(interval, 60000));
+    // Eviction is housekeeping; it must not keep the process alive.
+    (timer as unknown as { unref?: () => void }).unref?.();
   }
 
   private startPerformanceTimer(timerId: string): void {
@@ -584,12 +649,12 @@ export class PromptEngine implements IPromptEngine {
   }
 
   private augmentBaseComponents(
-    base: Readonly<PromptComponents>,
+    augmented: PromptComponents,
     selectedElements: ReadonlyArray<ContextualPromptElement>,
     executionContext?: Readonly<PromptExecutionContext>,
   ): PromptComponents {
     /**
-     * Applies selected contextual elements onto the immutable base components producing a mutable augmented copy.
+     * Applies selected contextual elements onto `augmented`, the copy of the base components constructPrompt owns, and returns it.
      * Merging Rules:
      *  - System prompt augmenters append as new system prompts with synthetic source tag.
      *  - Few‑shot examples accumulate under customComponents.fewShotExamples.
@@ -597,8 +662,6 @@ export class PromptEngine implements IPromptEngine {
      *  - All other element types fall back to a dynamic bucket keyed by normalized type.
      * Sorting: Final systemPrompts sorted ascending by priority to preserve intended ordering.
      */
-    const augmented = JSON.parse(JSON.stringify(base)) as PromptComponents;
-
     if (!augmented.systemPrompts) augmented.systemPrompts = [];
     if (!augmented.customComponents) augmented.customComponents = {};
 
@@ -726,23 +789,6 @@ export class PromptEngine implements IPromptEngine {
     return undefined;
   }
 
-  private buildUserPreferenceCacheKey(preferences?: Record<string, unknown>): string | undefined {
-    if (!preferences || typeof preferences !== 'object') {
-      return undefined;
-    }
-
-    const verbosity = this.normalizeVerbosityPreference(preferences.verbosity);
-    const preferredFormat = this.normalizePreferredFormatPreference(preferences);
-    if (!verbosity && !preferredFormat) {
-      return undefined;
-    }
-
-    return JSON.stringify({
-      ...(verbosity ? { verbosity } : {}),
-      ...(preferredFormat ? { preferredFormat } : {}),
-    });
-  }
-
   private async applyTokenBudget(
     components: PromptComponents,
     modelInfo: Readonly<ModelTargetInfo>,
@@ -763,7 +809,8 @@ export class PromptEngine implements IPromptEngine {
     };
 
     const budget = modelInfo.optimalContextTokens || modelInfo.maxContextTokens;
-    let currentTokens = await this.calculateTotalTokens(optimized, modelInfo.modelId);
+    const sendsThinking = this.thinkingSentFor(optimized.conversationHistory, modelInfo);
+    let currentTokens = await this.calculateTotalTokens(optimized, modelInfo.modelId, sendsThinking);
     modifications.details!.originalEstimatedTokenCount = currentTokens;
 
     const budgets = {
@@ -775,41 +822,64 @@ export class PromptEngine implements IPromptEngine {
     };
 
     if (optimized.conversationHistory && optimized.conversationHistory.length > 0) {
-      let historyTokens = await this.calculateTokensForMessages(optimized.conversationHistory, modelInfo.modelId);
+      const historyTokens = await this.calculateTokensForMessages(optimized.conversationHistory, modelInfo.modelId, sendsThinking);
       if (historyTokens > budgets.history || currentTokens > budget) {
-        const originalCount = optimized.conversationHistory.length;
-        if (this.utilityAI && this.config.historyManagement.summarizationTriggerRatio > 0 && (historyTokens / budgets.history > this.config.historyManagement.summarizationTriggerRatio)) {
-          try {
-            const { summaryMessages, finalTokenCount } = await this.utilityAI.summarizeConversationHistory(
-              optimized.conversationHistory,
-              (currentTokens > budget) ? budgets.history - (currentTokens - budget) : budgets.history,
-              modelInfo,
-              this.config.historyManagement.preserveImportantMessages
-            );
-            optimized.conversationHistory = summaryMessages;
-            modifications.details!.summarizedComponents!.push('conversationHistory');
-            modifications.wasModified = true;
-            currentTokens = currentTokens - historyTokens + finalTokenCount;
-            historyTokens = finalTokenCount;
-          } catch (e) {
-            issues?.push({type: 'warning', code: 'HISTORY_SUMMARIZATION_FAILED', message: `History summarization failed: ${e instanceof Error ? e.message : String(e)}`});
-            optimized.conversationHistory = this.truncateMessages(optimized.conversationHistory, budgets.history, (content) => this.estimateTokenCount(content, modelInfo.modelId));
-            modifications.details!.truncatedComponents!.push('conversationHistory');
-            modifications.wasModified = true;
-            const newHistoryTokens = await this.calculateTokensForMessages(optimized.conversationHistory, modelInfo.modelId);
-            currentTokens = currentTokens - historyTokens + newHistoryTokens;
-            historyTokens = newHistoryTokens;
+        // The turn being answered stays whole: summarizing or truncating it
+        // would drop the request itself (a structured user message has no
+        // userInput copy) or split a tool call from its result. Only the
+        // messages before it are reduced, to what the budget leaves them.
+        const history = optimized.conversationHistory;
+        const turnCount = Math.min(
+          Math.max(0, Math.floor(optimized.currentTurnMessageCount ?? 0)),
+          history.length,
+        );
+        const turnMessages = history.slice(history.length - turnCount);
+        const earlier = history.slice(0, history.length - turnCount);
+        const turnTokens = await this.calculateTokensForMessages(turnMessages, modelInfo.modelId, sendsThinking);
+        const earlierTokens = historyTokens - turnTokens;
+        // The earlier history keeps its share of the history budget, and no
+        // more than fits beside everything else in the prompt.
+        const earlierBudget = Math.max(0, budgets.history - turnTokens);
+        const earlierTarget = Math.max(0, Math.min(earlierBudget, budget - (currentTokens - earlierTokens)));
+        // When the turn is kept, or the request travels as userInput, there
+        // is always a message to send, so the earlier history may go
+        // entirely.
+        const minEarlierKept = turnMessages.length > 0 || optimized.userInput ? 0 : 1;
+        let reducedEarlier = earlier;
+        if (earlier.length > 0 && earlierTarget <= 0 && minEarlierKept === 0) {
+          // Nothing earlier fits; a summary would still add a message.
+          reducedEarlier = [];
+          modifications.details!.truncatedComponents!.push('conversationHistory');
+          modifications.wasModified = true;
+        } else if (earlier.length > 0) {
+          if (this.utilityAI && this.config.historyManagement.summarizationTriggerRatio > 0 && (historyTokens / budgets.history > this.config.historyManagement.summarizationTriggerRatio)) {
+            try {
+              const { summaryMessages } = await this.utilityAI.summarizeConversationHistory(
+                earlier,
+                earlierTarget,
+                modelInfo,
+                this.config.historyManagement.preserveImportantMessages
+              );
+              reducedEarlier = summaryMessages;
+              modifications.details!.summarizedComponents!.push('conversationHistory');
+              modifications.wasModified = true;
+            } catch (e) {
+              issues?.push({type: 'warning', code: 'HISTORY_SUMMARIZATION_FAILED', message: `History summarization failed: ${e instanceof Error ? e.message : String(e)}`});
+              reducedEarlier = this.truncateMessages([...earlier], earlierTarget, (content) => this.estimateTokenCount(content, modelInfo.modelId), minEarlierKept, sendsThinking);
+              modifications.details!.truncatedComponents!.push('conversationHistory');
+              modifications.wasModified = true;
+            }
+          } else {
+            reducedEarlier = this.truncateMessages([...earlier], earlierTarget, (content) => this.estimateTokenCount(content, modelInfo.modelId), minEarlierKept, sendsThinking);
+            if (reducedEarlier.length < earlier.length) {
+              modifications.details!.truncatedComponents!.push('conversationHistory');
+              modifications.wasModified = true;
+            }
           }
-        } else {
-          optimized.conversationHistory = this.truncateMessages(optimized.conversationHistory, budgets.history, (content) => this.estimateTokenCount(content, modelInfo.modelId));
-          if(optimized.conversationHistory.length < originalCount) {
-            modifications.details!.truncatedComponents!.push('conversationHistory');
-            modifications.wasModified = true;
-          }
-          const newHistoryTokens = await this.calculateTokensForMessages(optimized.conversationHistory, modelInfo.modelId);
-          currentTokens = currentTokens - historyTokens + newHistoryTokens;
-          historyTokens = newHistoryTokens;
         }
+        optimized.conversationHistory = [...reducedEarlier, ...turnMessages];
+        const newEarlierTokens = await this.calculateTokensForMessages(reducedEarlier, modelInfo.modelId, sendsThinking);
+        currentTokens = currentTokens - earlierTokens + newEarlierTokens;
       }
     }
 
@@ -857,11 +927,15 @@ export class PromptEngine implements IPromptEngine {
     return { optimizedComponents: optimized, modifications };
   }
 
-  private async calculateTotalTokens(components: PromptComponents, modelId: string): Promise<number> {
+  private async calculateTotalTokens(
+    components: PromptComponents,
+    modelId: string,
+    sendsThinking: (msg: Message) => boolean = () => false,
+  ): Promise<number> {
     let total = 0;
     if(components.systemPrompts) total += (await Promise.all(components.systemPrompts.map(sp => this.estimateTokenCount(sp.content, modelId)))).reduce((a,b) => a+b, 0);
     if(components.userInput) total += await this.estimateTokenCount(components.userInput, modelId);
-    if(components.conversationHistory) total += await this.calculateTokensForMessages(components.conversationHistory, modelId);
+    if(components.conversationHistory) total += await this.calculateTokensForMessages(components.conversationHistory, modelId, sendsThinking);
     if(components.retrievedContext) {
       const contextStr = typeof components.retrievedContext === 'string' ? components.retrievedContext : components.retrievedContext.map(r => r.content).join('\n');
       total += await this.estimateTokenCount(contextStr, modelId);
@@ -870,7 +944,43 @@ export class PromptEngine implements IPromptEngine {
     return total;
   }
 
-  private async calculateTokensForMessages(messages: Message[], modelId: string): Promise<number> {
+  /**
+   * Tells which history messages' thinking the target model receives. Only
+   * Anthropic sends thinking back: all of it to models that keep prior
+   * thinking in context, otherwise only the latest assistant turn's. Other
+   * providers drop it. AnthropicProvider's
+   * `AGENTOS_ANTHROPIC_STRIP_PRIOR_THINKING` override (`1`/`true` strips,
+   * `0`/`false` replays) wins over the model's retention, as it does there.
+   *
+   * @param history The history the prompt is built from.
+   * @param modelInfo The target model.
+   * @returns Whether a message's thinking blocks reach the model.
+   */
+  private thinkingSentFor(
+    history: readonly Message[] | undefined,
+    modelInfo: Readonly<ModelTargetInfo>,
+  ): (msg: Message) => boolean {
+    if (modelInfo.providerId !== 'anthropic' || !history?.length) return () => false;
+    const stripEnv = process.env.AGENTOS_ANTHROPIC_STRIP_PRIOR_THINKING;
+    const replaysAll =
+      stripEnv === '1' || stripEnv === 'true'
+        ? false
+        : stripEnv === '0' || stripEnv === 'false'
+          ? true
+          : resolveCacheCapabilities(modelInfo.modelId).retainsPriorThinkingInContext;
+    if (replaysAll) return () => true;
+    let lastAssistant: Message | undefined;
+    for (const msg of history) {
+      if (msg.role === MessageRole.ASSISTANT) lastAssistant = msg;
+    }
+    return (msg) => msg === lastAssistant;
+  }
+
+  private async calculateTokensForMessages(
+    messages: Message[],
+    modelId: string,
+    sendsThinking: (msg: Message) => boolean = () => false,
+  ): Promise<number> {
     if (!messages) return 0;
     let sum = 0;
     for (const msg of messages) {
@@ -892,16 +1002,51 @@ export class PromptEngine implements IPromptEngine {
         // This case should not be common if msg.content is Array for multi-part, but as a fallback:
         sum += await this.estimateTokenCount(JSON.stringify(msg.content), modelId);
       }
+      // Thinking the target receives with the message is input too.
+      if (sendsThinking(msg)) {
+        for (const block of msg.thinkingBlocks ?? []) {
+          sum += await this.estimateTokenCount(block.type === 'thinking' ? block.thinking : block.data, modelId);
+        }
+      }
       sum += 5; // Overhead for role, name, etc.
     }
     return sum;
   }
 
-  private truncateMessages(messages: Message[], targetTokenCount: number, _estimateFn: TokenEstimator): Message[] {
-    let currentTokens = messages.reduce((sum, msg) => sum + (typeof msg.content === 'string' ? msg.content.length : (Array.isArray(msg.content) ? JSON.stringify(msg.content).length : 50)) , 0) / 4; // More robust rough estimate
-    while(currentTokens > targetTokenCount && messages.length > 1) {
-      const removedMsg = messages.shift();
-      currentTokens -= (typeof removedMsg?.content === 'string' ? removedMsg.content.length : (Array.isArray(removedMsg?.content) ? JSON.stringify(removedMsg?.content).length : 50)) / 4;
+  /**
+   * Drops the oldest messages until the rest fit `targetTokenCount`, keeping
+   * at least `minKept`. A tool result left first would reach the provider
+   * without the assistant call it answers, which chat APIs reject, so leading
+   * tool results go too.
+   */
+  private truncateMessages(
+    messages: Message[],
+    targetTokenCount: number,
+    _estimateFn: TokenEstimator,
+    minKept = 1,
+    sendsThinking: (msg: Message) => boolean = () => false,
+  ): Message[] {
+    // Rough estimate: four characters a token, over the content and any
+    // thinking the target receives with the message.
+    const roughTokens = (msg: Message | undefined): number => {
+      if (!msg) return 0;
+      const contentChars = typeof msg.content === 'string'
+        ? msg.content.length
+        : (Array.isArray(msg.content) ? JSON.stringify(msg.content).length : 50);
+      const thinkingChars = sendsThinking(msg)
+        ? (msg.thinkingBlocks ?? []).reduce(
+            (chars, block) => chars + (block.type === 'thinking' ? block.thinking.length : block.data.length),
+            0,
+          )
+        : 0;
+      return (contentChars + thinkingChars) / 4;
+    };
+    let currentTokens = messages.reduce((sum, msg) => sum + roughTokens(msg), 0);
+    while(currentTokens > targetTokenCount && messages.length > minKept) {
+      currentTokens -= roughTokens(messages.shift());
+    }
+    while (messages.length > minKept && messages[0]?.role === MessageRole.TOOL) {
+      messages.shift();
     }
     return messages;
   }
@@ -1006,6 +1151,7 @@ export class PromptEngine implements IPromptEngine {
         name: call.name,
         arguments: this.serializeToolArguments(call.arguments),
       },
+      ...(call.thoughtSignature ? { thoughtSignature: call.thoughtSignature } : {}),
     }));
   }
 
@@ -1049,6 +1195,11 @@ export class PromptEngine implements IPromptEngine {
         chatMsg.content = null;
       }
     }
+          // Anthropic rejects a tool-loop request whose earlier assistant
+          // turn lost its signed thinking, so the blocks ride along verbatim.
+          if (role === 'assistant' && msg.thinkingBlocks && msg.thinkingBlocks.length > 0) {
+            chatMsg.thinkingBlocks = [...msg.thinkingBlocks];
+          }
           messages.push(chatMsg);
         });
       }
@@ -1071,8 +1222,11 @@ export class PromptEngine implements IPromptEngine {
         const ragContent = typeof components.retrievedContext === 'string' ? components.retrievedContext : components.retrievedContext.map(r => `Source: ${r.source}\nContent: ${r.content}`).join('\n\n');
         if (messages.length > 0 && messages[messages.length-1].role === 'user') {
           const lastUserMsg = messages[messages.length-1];
-          const newUserContent = `Context:\n${ragContent}\n\nUser Query: ${lastUserMsg.content}`;
-          messages[messages.length-1].content = newUserContent;
+          // A multimodal message keeps its parts: the context goes in front
+          // as a text part instead of flattening the parts into a string.
+          lastUserMsg.content = Array.isArray(lastUserMsg.content)
+            ? [{ type: 'text', text: `Context:\n${ragContent}\n\nUser Query:` }, ...lastUserMsg.content]
+            : `Context:\n${ragContent}\n\nUser Query: ${lastUserMsg.content}`;
         } else {
           messages.push({role: 'user', content: `Based on the following context:\n${ragContent}\n\nPlease respond to the implicit or explicit user query.`});
         }

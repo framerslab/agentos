@@ -26,6 +26,12 @@ describe('modelSupportsStrictToolUse', () => {
     expect(modelSupportsStrictToolUse('claude-sonnet-5')).toBe(true);
     expect(modelSupportsStrictToolUse('claude-fable-5')).toBe(true);
     expect(modelSupportsStrictToolUse('claude-fable-5-20260601')).toBe(true);
+    // Opus 5.5 and Fable 5.1 reject a forced tool_choice, which leaves strict
+    // tool use as the provider-side constraint on their tool inputs. Both
+    // accept `strict: true` (probed 2026-09-29).
+    expect(modelSupportsStrictToolUse('claude-opus-5-5')).toBe(true);
+    expect(modelSupportsStrictToolUse('claude-opus-5-5-20260901')).toBe(true);
+    expect(modelSupportsStrictToolUse('claude-fable-5-1')).toBe(true);
   });
 
   it('rejects pre-4.5 models that 400 on the unknown strict field', () => {

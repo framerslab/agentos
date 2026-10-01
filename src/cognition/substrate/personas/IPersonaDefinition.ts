@@ -329,9 +329,14 @@ export interface MetaPromptDefinition {
     maxOutputTokens?: number;
     temperature?: number;
     outputSchema?: Record<string, any>; // Expected JSON schema of the output, for validation/parsing
-    trigger?: // How this meta-prompt is triggered
-      | { type: 'turn_interval'; intervalTurns: number }
-      | { type: 'event_based'; eventName: string } // e.g., 'error_threshold_reached', 'user_sentiment_negative'
+    /**
+     * How this meta-prompt is triggered. The executor fires only these three
+     * types; PersonaValidation warns about any other type, an intervalTurns
+     * below 1, or an eventName that is not a GMIEventType value.
+     */
+    trigger?:
+      | { type: 'turn_interval'; intervalTurns: number } // Fires on every intervalTurns-th user turn
+      | { type: 'event_based'; eventName: string } // A GMIEventType value, e.g. 'user_frustrated' or 'error_threshold_exceeded'
       | { type: 'manual' }; // Triggered explicitly by system or user
 }
 

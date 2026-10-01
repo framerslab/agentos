@@ -21,10 +21,18 @@
 
 import type { AgentOSInput } from '../types/AgentOSInput';
 import type { ILogger } from '../../core/logging/ILogger';
+import type { ToolExecutionContext } from '../../core/tools/ITool.js';
 import type { SelfImprovementToolDeps } from '../../cognition/emergent/EmergentCapabilityEngine.js';
 import { PersonalityMutationStore } from '../../cognition/emergent/PersonalityMutationStore.js';
 import { resolveSelfImprovementSessionKey } from '../../cognition/emergent/sessionScope.js';
 import type { CapabilityIndexSources } from '../../cognition/discovery/types';
+import type { IGMI } from '../../cognition/substrate/IGMI.js';
+import {
+  HEXACO_TRAIT_KEYS,
+  normalizeHexacoTraits,
+} from '../../cognition/substrate/personas/hexaco.js';
+import type { MemoryScope } from '../../cognition/memory/core/types.js';
+import { resolveMemoryToolScopeId } from '../../cognition/memory/io/tools/scopeContext.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 
 import {
@@ -67,10 +75,104 @@ function resolveSessionKey(
  * can resolve runtime services at tool-call time rather than at bootstrap.
  */
 export interface SelfImprovementRuntimeAccessors {
-  /** Returns the first active GMI, if any. */
-  getActiveGMI: () => any | undefined;
+  /**
+   * Returns the GMI that issued a tool call, resolved from the call's
+   * execution context, or `undefined` when no active GMI matches. It must
+   * never fall back to an arbitrary GMI: the hooks that use it change that
+   * instance's personality and write to its memory.
+   */
+  getGMIForContext: (context?: ToolExecutionContext) => IGMI | undefined;
   /** Returns the tool orchestrator instance. */
   getToolOrchestrator: () => import('../core/tools/IToolOrchestrator').IToolOrchestrator;
+}
+
+/**
+ * The part of GMIManager that maps instance ids and session ids to active
+ * GMIs. GMIManager exposes both maps publicly.
+ */
+export interface GMISessionRegistry {
+  /** Active GMIs keyed by GMI instance id. */
+  readonly activeGMIs: ReadonlyMap<string, IGMI>;
+  /** GMI instance id keyed by session id. */
+  readonly gmiSessionMap: ReadonlyMap<string, string>;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+/**
+ * Resolves the GMI that issued a tool call. The GMI instance id in
+ * `context.gmiId` is tried first, then the session id in
+ * `context.sessionData.sessionId`. Returns `undefined` when neither matches an
+ * active GMI, and never falls back to another session's GMI.
+ *
+ * The maps are read directly rather than through
+ * `GMIManager.getGMIByInstanceId`, which throws before the manager is
+ * initialized.
+ *
+ * @param registry - GMIManager (or any object with the same two maps).
+ * @param context - Execution context of the tool call.
+ * @returns The calling GMI, or `undefined`.
+ */
+export function resolveGMIForToolContext(
+  registry: GMISessionRegistry | undefined,
+  context?: ToolExecutionContext,
+): IGMI | undefined {
+  if (!registry || !context) {
+    return undefined;
+  }
+
+  const gmiId = nonEmptyString(context.gmiId);
+  if (gmiId) {
+    const byInstanceId = registry.activeGMIs.get(gmiId);
+    if (byInstanceId) {
+      return byInstanceId;
+    }
+  }
+
+  const sessionId = nonEmptyString(context.sessionData?.sessionId);
+  if (sessionId) {
+    const instanceId = registry.gmiSessionMap.get(sessionId);
+    if (instanceId) {
+      return registry.activeGMIs.get(instanceId);
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Maps the free-form scope on a self-improvement trace to a cognitive memory
+ * scope and its id for the calling session. 'session' (and any unknown value)
+ * becomes the `thread` scope of the calling conversation; 'user' and
+ * 'organization' keep their meaning; 'agent' and 'persona' become the
+ * per-user persona scope. Ids come from the execution context, the same way
+ * the memory tools resolve them.
+ *
+ * @param scope - Scope named on the trace, e.g. 'session'.
+ * @param context - Execution context of the tool call.
+ * @returns The target scope, or `undefined` when its id cannot be resolved.
+ */
+function resolveSelfImprovementMemoryScope(
+  scope: string | undefined,
+  context: ToolExecutionContext,
+): { scope: MemoryScope; scopeId: string } | undefined {
+  const requested = (scope ?? '').trim().toLowerCase();
+  const memoryScope: MemoryScope =
+    requested === 'user'
+      ? 'user'
+      : requested === 'organization'
+        ? 'organization'
+        : requested === 'agent' || requested === 'persona'
+          ? 'persona'
+          : 'thread';
+  const scopeId = resolveMemoryToolScopeId(memoryScope, context);
+  return scopeId ? { scope: memoryScope, scopeId } : undefined;
 }
 
 /**
@@ -295,31 +397,35 @@ export class SelfImprovementSessionManager {
 
     return {
       // --- Personality (HEXACO) ---
-      getPersonality: (): Record<string, number> => {
+      // Both hooks act on the GMI that made the tool call. Traits are read
+      // under canonical keys, so a persona authored with `honestyHumility`
+      // reports its real Honesty-Humility score.
+      getPersonality: (context?: ToolExecutionContext): Record<string, number> => {
+        const result: Record<string, number> = {};
         try {
-          const gmi = accessors.getActiveGMI();
-          const traits = gmi?.getPersona()?.personalityTraits;
-          if (traits && typeof traits === 'object') {
-            const result: Record<string, number> = {};
-            for (const [k, v] of Object.entries(traits)) {
-              if (typeof v === 'number') result[k] = v;
-            }
-            return result;
+          const traits = normalizeHexacoTraits(
+            accessors.getGMIForContext(context)?.getPersona()?.personalityTraits,
+          );
+          for (const key of HEXACO_TRAIT_KEYS) {
+            const value = traits[key];
+            if (value !== undefined) result[key] = value;
           }
-        } catch { /* GMI not ready yet — return empty. */ }
-        return {};
+        } catch { /* GMI not initialized: report no traits. */ }
+        return result;
       },
-      setPersonality: (trait: string, value: number): void => {
+      setPersonality: (trait: string, value: number, context?: ToolExecutionContext): boolean => {
+        const gmi = accessors.getGMIForContext(context);
+        if (!gmi || typeof gmi.setPersonalityTrait !== 'function') {
+          return false;
+        }
         try {
-          const gmi = accessors.getActiveGMI();
-          const persona = gmi?.getPersona();
-          if (persona) {
-            if (!persona.personalityTraits) {
-              persona.personalityTraits = {};
-            }
-            persona.personalityTraits[trait] = value;
-          }
-        } catch { /* GMI not ready — ignore. */ }
+          // Copy-on-write inside the GMI: the shared persona definition is untouched.
+          gmi.setPersonalityTrait(trait, value);
+          return true;
+        } catch {
+          // GMI not initialized: nothing was changed.
+          return false;
+        }
       },
       mutationStore,
 
@@ -423,23 +529,40 @@ export class SelfImprovementSessionManager {
       },
 
       // --- Memory ---
-      storeMemory: async (trace): Promise<void> => {
+      // Self-evaluation traces carry the user's query. They go to the calling
+      // GMI's memory under a valid scope with an explicit id, so a memory
+      // backend shared by several sessions keeps them in the session that
+      // produced them.
+      storeMemory: async (trace, context): Promise<void> => {
+        if (!context) {
+          return;
+        }
+        const memory = accessors.getGMIForContext(context)?.getCognitiveMemoryManager?.();
+        if (!memory) {
+          return;
+        }
+        const target = resolveSelfImprovementMemoryScope(trace.scope, context);
+        if (!target) {
+          this.logger.debug?.('[SelfImprovement] Skipped a memory trace: no scope id for the calling session.', {
+            traceType: trace.type,
+            scope: trace.scope,
+            gmiId: context.gmiId,
+          });
+          return;
+        }
         try {
-          const gmi = accessors.getActiveGMI();
-          const mem = gmi?.getCognitiveMemoryManager?.();
-          if (mem) {
-            await mem.encode(
-              `[self-improvement:${trace.type}] ${trace.content}`,
-              { valence: 0, arousal: 0, dominance: 0.5 },
-              'neutral',
-              {
-                type: 'semantic' as any,
-                scope: (trace.scope ?? 'agent') as any,
-                tags: trace.tags,
-              },
-            );
-          }
-        } catch { /* Memory not available — silently skip. */ }
+          await memory.encode(
+            `[self-improvement:${trace.type}] ${trace.content}`,
+            { valence: 0, arousal: 0, dominance: 0.5 },
+            'neutral',
+            {
+              type: 'semantic',
+              scope: target.scope,
+              scopeId: target.scopeId,
+              tags: trace.tags,
+            },
+          );
+        } catch { /* Memory not available: skip. */ }
       },
     };
   }

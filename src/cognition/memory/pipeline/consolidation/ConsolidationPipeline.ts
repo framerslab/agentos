@@ -18,6 +18,7 @@ import { DEFAULT_DECAY_CONFIG } from '../../core/config.js';
 import { computeCurrentStrength, findPrunableTraces } from '../../core/decay/DecayModel.js';
 import type { IMemoryGraph, MemoryCluster } from '../../retrieval/graph/IMemoryGraph.js';
 import type { MemoryStore } from '../../retrieval/store/MemoryStore.js';
+import { uuid } from '../../core/util/crossPlatformCrypto.js';
 
 /** Append `value` to `list` (creating it if absent) without producing a duplicate. */
 function uniqueAppend(list: string[] | undefined, value: string): string[] {
@@ -95,6 +96,7 @@ export class ConsolidationPipeline {
   private decayConfig: DecayConfig;
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastRunAt: number = 0;
+  private readonly activeRuns = new Set<Promise<ConsolidationResult>>();
 
   constructor(config: ConsolidationPipelineConfig) {
     this.config = config;
@@ -119,7 +121,12 @@ export class ConsolidationPipeline {
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(
-      () => { void this.run(); },
+      () => {
+        void this.run().catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(`[ConsolidationPipeline] periodic cycle failed: ${message}`);
+        });
+      },
       this.consolidationConfig.intervalMs,
     );
     // Allow Node to exit even if the timer is pending. Works on both
@@ -138,9 +145,29 @@ export class ConsolidationPipeline {
   }
 
   /**
+   * Wait for every consolidation cycle admitted before or during the drain.
+   * Call {@link stop} first when shutting down to prevent new timer cycles.
+   */
+  async waitForIdle(): Promise<void> {
+    while (this.activeRuns.size > 0) {
+      await Promise.allSettled([...this.activeRuns]);
+    }
+  }
+
+  /**
    * Run a single consolidation cycle.
    */
   async run(): Promise<ConsolidationResult> {
+    const cycle = this.runCycle();
+    this.activeRuns.add(cycle);
+    try {
+      return await cycle;
+    } finally {
+      this.activeRuns.delete(cycle);
+    }
+  }
+
+  private async runCycle(): Promise<ConsolidationResult> {
     const startTime = Date.now();
     const result: ConsolidationResult = {
       prunedCount: 0,
@@ -308,73 +335,75 @@ export class ConsolidationPipeline {
       }
       if (contents.length < this.consolidationConfig.minClusterSize) continue;
 
+      let summary: string;
       try {
-        const summary = await this.config.llmInvoker(
+        summary = await this.config.llmInvoker(
           'Summarize the following related memories into a single semantic knowledge statement. Be concise (1-2 sentences). Output only the summary.',
           contents.join('\n---\n'),
         );
+      } catch {
+        // LLM synthesis is optional; persistence failures below are not.
+        continue;
+      }
+      if (!summary.trim()) continue;
 
-        if (summary.trim()) {
-          // Store as a new semantic trace
-          const now = Date.now();
-          const schemaTrace: MemoryTrace = {
-            id: `schema_${now}_${schemasCreated}`,
-            type: 'semantic',
-            scope: 'user',
-            scopeId: this.config.agentId,
-            content: summary.trim(),
-            entities: [],
-            tags: ['schema', 'consolidated'],
-            provenance: {
-              sourceType: 'reflection',
-              sourceTimestamp: now,
-              confidence: 0.8,
-              verificationCount: cluster.memberIds.length,
-            },
-            emotionalContext: { valence: 0, arousal: 0, dominance: 0, intensity: 0, gmiMood: '' },
-            encodingStrength: 0.7,
-            stability: 7_200_000, // 2 hours (schemas are more stable)
-            retrievalCount: 0,
-            lastAccessedAt: now,
-            accessCount: 0,
-            reinforcementInterval: 7_200_000,
-            associatedTraceIds: cluster.memberIds,
-            createdAt: now,
-            updatedAt: now,
-            consolidatedAt: now,
-            isActive: true,
-          };
+      // Store as a new semantic trace. Failures here propagate so callers can
+      // distinguish a durable-memory fault from an optional LLM miss.
+      const now = Date.now();
+      const schemaTrace: MemoryTrace = {
+        id: `schema_${now}_${schemasCreated}_${uuid()}`,
+        type: 'semantic',
+        scope: 'user',
+        scopeId: this.config.agentId,
+        content: summary.trim(),
+        entities: [],
+        tags: ['schema', 'consolidated'],
+        provenance: {
+          sourceType: 'reflection',
+          sourceTimestamp: now,
+          confidence: 0.8,
+          verificationCount: cluster.memberIds.length,
+        },
+        emotionalContext: { valence: 0, arousal: 0, dominance: 0, intensity: 0, gmiMood: '' },
+        encodingStrength: 0.7,
+        stability: 7_200_000, // 2 hours (schemas are more stable)
+        retrievalCount: 0,
+        lastAccessedAt: now,
+        accessCount: 0,
+        reinforcementInterval: 7_200_000,
+        associatedTraceIds: cluster.memberIds,
+        createdAt: now,
+        updatedAt: now,
+        consolidatedAt: now,
+        isActive: true,
+      };
 
-          await this.config.store.store(schemaTrace);
+      await this.config.store.store(schemaTrace);
 
-          // Add SCHEMA_INSTANCE edges from cluster members to schema
-          if (this.config.graph) {
-            await this.config.graph.addNode(schemaTrace.id, {
-              type: 'semantic',
-              scope: 'user',
-              scopeId: this.config.agentId,
-              strength: 0.7,
+      // Add SCHEMA_INSTANCE edges from cluster members to schema
+      if (this.config.graph) {
+        await this.config.graph.addNode(schemaTrace.id, {
+          type: 'semantic',
+          scope: 'user',
+          scopeId: this.config.agentId,
+          strength: 0.7,
+          createdAt: now,
+        });
+
+        for (const memberId of cluster.memberIds) {
+          if (this.config.graph.hasNode(memberId)) {
+            await this.config.graph.addEdge({
+              sourceId: memberId,
+              targetId: schemaTrace.id,
+              type: 'SCHEMA_INSTANCE',
+              weight: 0.6,
               createdAt: now,
             });
-
-            for (const memberId of cluster.memberIds) {
-              if (this.config.graph.hasNode(memberId)) {
-                await this.config.graph.addEdge({
-                  sourceId: memberId,
-                  targetId: schemaTrace.id,
-                  type: 'SCHEMA_INSTANCE',
-                  weight: 0.6,
-                  createdAt: now,
-                });
-              }
-            }
           }
-
-          schemasCreated++;
         }
-      } catch {
-        // LLM failure is non-critical
       }
+
+      schemasCreated++;
     }
 
     return schemasCreated;
