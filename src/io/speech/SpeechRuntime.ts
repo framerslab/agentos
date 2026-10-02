@@ -12,6 +12,7 @@ import { SpeechSession } from './SpeechSession.js';
 import { BuiltInAdaptiveVadProvider } from '../hearing/providers/BuiltInAdaptiveVadProvider.js';
 import { ElevenLabsTextToSpeechProvider } from './providers/ElevenLabsTextToSpeechProvider.js';
 import { OpenAITextToSpeechProvider } from './providers/OpenAITextToSpeechProvider.js';
+import { MiniMaxTextToSpeechProvider } from './providers/MiniMaxTextToSpeechProvider.js';
 import { OpenAIWhisperSpeechToTextProvider } from '../hearing/providers/OpenAIWhisperSpeechToTextProvider.js';
 import type {
   ProviderRequirements,
@@ -86,6 +87,18 @@ export class SpeechRuntime {
           apiKey: elevenLabsApiKey,
           model: env['ELEVENLABS_TTS_MODEL'] ?? 'eleven_multilingual_v2',
           voiceId: env['ELEVENLABS_VOICE_ID'],
+        });
+        this.registry.registerTtsProvider(tts);
+        this.registerProviderInResolver(tts, 'tts');
+      }
+
+      const miniMaxApiKey = env['MINIMAX_API_KEY'];
+      if (miniMaxApiKey) {
+        const tts = new MiniMaxTextToSpeechProvider({
+          apiKey: miniMaxApiKey,
+          region: env['MINIMAX_REGION'] === 'china' ? 'china' : 'global',
+          model: env['MINIMAX_TTS_MODEL'] ?? 'speech-2.8-hd',
+          voice: env['MINIMAX_TTS_VOICE'],
         });
         this.registry.registerTtsProvider(tts);
         this.registerProviderInResolver(tts, 'tts');
