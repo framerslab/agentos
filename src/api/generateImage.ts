@@ -51,6 +51,7 @@ const IMAGE_PROVIDER_ENV_MAP: Array<{ envKey: string; providerId: string }> = [
   { envKey: 'STABILITY_API_KEY', providerId: 'stability' },
   { envKey: 'OPENROUTER_API_KEY', providerId: 'openrouter' },
   { envKey: 'STABLE_DIFFUSION_LOCAL_BASE_URL', providerId: 'stable-diffusion-local' },
+  { envKey: 'MINIMAX_API_KEY', providerId: 'minimax' },
 ];
 
 /** Shared emitter for image fallback events (singleton per process). */
