@@ -855,41 +855,67 @@ export class OpenRouterProvider implements IProvider {
     const accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }> = new Map();
 
     const abortSignal = options.abortSignal;
+    const abortChunk = (message: string): ModelCompletionResponse => ({
+      id: `openrouter-abort-${Date.now()}`,
+      object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000),
+      modelId,
+      choices: [],
+      error: { message, type: 'abort' },
+      isFinal: true,
+    });
     if (abortSignal?.aborted) {
-      yield { id: `openrouter-abort-${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), modelId, choices: [], error: { message: 'Stream aborted prior to first chunk', type: 'abort' }, isFinal: true };
+      yield abortChunk('Stream aborted prior to first chunk');
       return;
     }
     const abortHandler = () => { /* passive; loop logic handles emission */ };
     abortSignal?.addEventListener('abort', abortHandler, { once: true });
 
-    for await (const rawChunk of this.parseSseStream(stream)) {
-      if (abortSignal?.aborted) {
-        yield { id: `openrouter-abort-${Date.now()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now()/1000), modelId, choices: [], error: { message: 'Stream aborted by caller', type: 'abort' }, isFinal: true };
-        break;
-      }
-      if (rawChunk.startsWith('data: ') && rawChunk.includes('[DONE]')) {
-        const doneData = rawChunk.substring('data: '.length).trim();
-        if (doneData === '[DONE]') break;
-      }
-      if (rawChunk === 'data: [DONE]') {
-        break;
-      }
+    // Spec R5. Text yielded so far (for the decline's partialText); the
+    // decline held back when a content_filter finish arrives, while the
+    // trailing usage chunk is read; a read error seen during that wait.
+    let yieldedText = '';
+    let held: { decline: OpenRouterDecline; refusal: string | null; usage?: ModelUsage } | null = null;
+    let readError: unknown;
+    const isDecline = (e: unknown): boolean =>
+      e instanceof OpenRouterProviderError && (e.code === 'content_filter' || e.code === 'content_policy_violation');
 
-      if (rawChunk.startsWith('data: ')) {
-        const jsonData = rawChunk.substring('data: '.length);
-        try {
-          const apiChunk = JSON.parse(jsonData) as OpenRouterChatCompletionAPIResponse & {
-            error?: { code?: number | string; message?: string; metadata?: unknown };
-          };
+    try {
+      try {
+        for await (const rawChunk of this.parseSseStream(stream)) {
+          if (abortSignal?.aborted) {
+            yield abortChunk('Stream aborted by caller');
+            return;
+          }
+          if (!rawChunk.startsWith('data: ')) continue;
+          const jsonData = rawChunk.substring('data: '.length);
+          if (jsonData.trim() === '[DONE]') break;
+
+          // The parse has its own catch: a malformed chunk is skipped, as
+          // before, and nothing thrown while HANDLING a chunk is swallowed.
+          let apiChunk: OpenRouterChatCompletionAPIResponse;
+          try {
+            apiChunk = JSON.parse(jsonData) as OpenRouterChatCompletionAPIResponse;
+          } catch (error: unknown) {
+            console.warn('OpenRouterProvider: Failed to parse stream chunk JSON, skipping chunk. Data:', jsonData, 'Error:', error);
+            continue;
+          }
+
           // OpenRouter reports upstream failures MID-STREAM as an SSE data
-          // event carrying an `error` object and no choices. Previously this
-          // fell into the empty-choices branch and surfaced as a generic
-          // "Stream chunk contained no choices" — the real upstream reason
-          // (provider outage, moderation, context overflow) was discarded,
-          // which made every mid-stream failure look identical to callers'
-          // retry/fallback routing. Surface the actual message + code and
-          // terminate the stream.
+          // event carrying an `error` object. A content decline throws typed
+          // (the walkers move on before any output; after output the stream
+          // ends with an error part). Any other error still surfaces as an
+          // upstream_error chunk and ends the stream.
           if (apiChunk.error && typeof apiChunk.error === 'object') {
+            const decline = classifyOpenRouterDecline(apiChunk.error);
+            if (decline) {
+              throw this.declineError(modelId, decline, {
+                httpStatus: typeof apiChunk.error.code === 'number' ? apiChunk.error.code : undefined,
+                error: apiChunk.error,
+                partialText: yieldedText,
+                usage: held?.usage,
+              });
+            }
             const errMessage = apiChunk.error.message || 'OpenRouter mid-stream error';
             const errCode = apiChunk.error.code;
             yield {
@@ -906,18 +932,50 @@ export class OpenRouterProvider implements IProvider {
             };
             break;
           }
-          yield this.mapApiToStreamChunkResponse(apiChunk, modelId, accumulatedToolCalls);
+
+          if (held) {
+            // After a content_filter finish only the trailing usage-only
+            // chunk is wanted; nothing more is yielded.
+            if (apiChunk.usage) held.usage = mapOpenRouterUsage(apiChunk.usage);
+            continue;
+          }
+          const choice = apiChunk.choices?.[0];
+          if (choice && choice.finish_reason === 'content_filter') {
+            held = {
+              decline: { code: 'content_filter', nativeType: 'content_filter_finish' },
+              refusal: choice.delta?.refusal ?? choice.message?.refusal ?? null,
+              usage: mapOpenRouterUsage(apiChunk.usage),
+            };
+            continue;
+          }
+
+          const mapped = this.mapApiToStreamChunkResponse(apiChunk, modelId, accumulatedToolCalls);
+          if (mapped.responseTextDelta) yieldedText += mapped.responseTextDelta;
+          yield mapped;
           // Don't break on finish_reason: with stream_options.include_usage,
           // OpenRouter (like OpenAI) emits a trailing usage-only chunk AFTER
-          // the finish_reason chunk and BEFORE [DONE]. Breaking here would
-          // skip the usage chunk and zero out the caller's token totals. The
-          // [DONE] marker check above is the right termination signal.
-        } catch (error: unknown) {
-          console.warn('OpenRouterProvider: Failed to parse stream chunk JSON, skipping chunk. Data:', jsonData, 'Error:', error);
+          // the finish_reason chunk and BEFORE [DONE]. The [DONE] marker
+          // check above is the right termination signal.
         }
+      } catch (error: unknown) {
+        if (isDecline(error)) throw error;
+        // A read error after a content_filter finish does not lose the
+        // decline: it is thrown below with the usage held so far.
+        if (held) readError = error;
+        else throw error;
       }
+      if (held) {
+        throw this.declineError(modelId, held.decline, {
+          httpStatus: 200,
+          refusal: held.refusal,
+          partialText: yieldedText,
+          usage: held.usage,
+          readError,
+        });
+      }
+    } finally {
+      abortSignal?.removeEventListener('abort', abortHandler);
     }
-    abortSignal?.removeEventListener('abort', abortHandler);
   }
 
   public async generateEmbeddings(
