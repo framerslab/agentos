@@ -133,20 +133,21 @@ own orchestrator and reach into agentos for the lower-level primitives
 2. [Scope: when to reach for agency()](#scope-when-to-reach-for-agency)
 3. [API Hierarchy](#api-hierarchy)
 4. [Minimal Example](#minimal-example)
-5. [Orchestration Strategies](#orchestration-strategies)
-6. [Adaptive Mode](#adaptive-mode)
-7. [Emergent Agent Creation](#emergent-agent-creation)
-8. [Human-in-the-Loop (HITL)](#human-in-the-loop-hitl)
-9. [Memory and RAG](#memory-and-rag)
-10. [Voice and Channels](#voice-and-channels)
-11. [Guardrails and Security](#guardrails-and-security)
-12. [Permissions](#permissions)
-13. [Resource Controls](#resource-controls)
-14. [Observability and Callbacks](#observability-and-callbacks)
-15. [Structured Output with Zod](#structured-output-with-zod)
-16. [Nested Agencies](#nested-agencies)
-17. [Hierarchical Delegation — Manager Dispatches Dynamically](#hierarchical-delegation--manager-dispatches-dynamically)
-18. [Full-Featured Example](#full-featured-example)
+5. [Models, Providers and Keys per Agent](#models-providers-and-keys-per-agent)
+6. [Orchestration Strategies](#orchestration-strategies)
+7. [Adaptive Mode](#adaptive-mode)
+8. [Emergent Agent Creation](#emergent-agent-creation)
+9. [Human-in-the-Loop (HITL)](#human-in-the-loop-hitl)
+10. [Memory and RAG](#memory-and-rag)
+11. [Voice and Channels](#voice-and-channels)
+12. [Guardrails and Security](#guardrails-and-security)
+13. [Permissions](#permissions)
+14. [Resource Controls](#resource-controls)
+15. [Observability and Callbacks](#observability-and-callbacks)
+16. [Structured Output with Zod](#structured-output-with-zod)
+17. [Nested Agencies](#nested-agencies)
+18. [Hierarchical Delegation — Manager Dispatches Dynamically](#hierarchical-delegation--manager-dispatches-dynamically)
+19. [Full-Featured Example](#full-featured-example)
 
 ---
 
@@ -197,8 +198,57 @@ console.log(result.text);
 ```
 
 Set `OPENAI_API_KEY` (or another provider's key) and the agency auto-detects
-the provider.  Pass `provider: 'openai', model: 'gpt-4o'` (or any other
+the provider.  Pass `provider: 'openai', model: 'gpt-6-astra'` (or any other
 provider/model pair) to control the model explicitly.
+
+---
+
+## Models, Providers and Keys per Agent
+
+Every roster entry is a full `agent()` config. `model`, `provider`, `apiKey`
+and `baseUrl` set on a seat win over the agency-level values; a seat that sets
+none of them inherits the agency's. The same holds for `effort`, `thinking`,
+`maxTokens`, `instructions`, `output` and `tools` (the seat's tools are merged
+with the agency's).
+
+```typescript
+const team = agency({
+  // Default for seats that set nothing, and the chair for parallel, debate and hierarchical.
+  provider: 'openai', model: 'gpt-6-astra',
+  agents: {
+    drafter: { instructions: 'Draft the answer.' },                                  // openai / gpt-6-astra
+    checker: { provider: 'anthropic', model: 'claude-opus-5-5', effort: 'high',
+               instructions: 'Check every claim in the draft.' },
+    local:   { provider: 'ollama', model: 'llama3.2', baseUrl: 'http://127.0.0.1:11434',
+               instructions: 'Summarize in three sentences.' },
+    keyed:   { provider: 'gemini', model: 'gemini-3.1-pro-preview', apiKey: process.env.GEMINI_REVIEW_KEY,
+               instructions: 'Give a second opinion.' },
+  },
+  strategy: 'sequential',
+});
+```
+
+Rules worth knowing:
+
+- Keys resolve per seat: the seat's `apiKey`, else the agency's `apiKey`, else
+  the provider's environment variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+  `GEMINI_API_KEY`, and so on). A comma-separated key value becomes a rotating
+  key pool.
+- Options passed to `generate(prompt, options)` apply to every seat and to the
+  chair. A `model` or `provider` passed there replaces every seat's own
+  setting, so configure models on the roster, not per call.
+- Each seat keeps the default provider failover: when its primary fails with a
+  retryable error, the call is retried on other providers whose keys are in the
+  environment, and the seat's result reports the provider that answered. To pin
+  a seat to one provider, put a pre-built `agent({ ..., fallbackProviders: [] })`
+  in the roster.
+- `provider: 'anthropic'` with no Anthropic key but an `OPENROUTER_API_KEY` in
+  the environment is routed through OpenRouter as `anthropic/<model>` and
+  reports `provider: 'openrouter'`.
+
+The per-seat ledger `agentCalls` records each seat's name, input, output, tool
+calls, usage and duration. The result's top-level `provider` and `model` are the
+chair's (parallel, debate, hierarchical) or the last seat's (sequential, graph).
 
 ---
 
@@ -226,36 +276,64 @@ console.log(agentCalls.length); // 3 — one record per agent
 
 ### parallel
 
-All agents run concurrently.  Their outputs are merged by a synthesis step that
-uses the agency-level `model`.  Requires `model` or `provider` at the agency
-level.
+All agents run concurrently on the same prompt.  A synthesis step merges their
+outputs using the agency-level `model` and `provider` (the chair).  Requires
+`model` or `provider` at the agency level.
+
+Each seat can run on its own provider, model and key, so one question can be
+put to several vendors at once and the chair reads every answer:
 
 ```typescript
 const panel = agency({
-  provider: 'openai', model: 'gpt-4o',
+  // The chair: synthesizes the seats' answers.
+  provider: 'anthropic', model: 'claude-opus-5-5',
   agents: {
-    optimist:  { instructions: 'Argue in favour.' },
-    pessimist: { instructions: 'Argue against.' },
-    neutral:   { instructions: 'Give a balanced view.' },
+    claude: { provider: 'anthropic', model: 'claude-opus-5-5',        effort: 'high', instructions: 'Review the change for defects.' },
+    gpt:    { provider: 'openai',    model: 'gpt-6-astra',            effort: 'high', instructions: 'Review the change for defects.' },
+    gemini: { provider: 'gemini',    model: 'gemini-3.1-pro-preview', effort: 'high', instructions: 'Review the change for defects.' },
   },
   strategy: 'parallel',
+  quorum: { minAgents: 2, minProviders: 2 },
 });
 
-const { text } = await panel.generate('Should AI systems have legal rights?');
+// prDiff: the unified diff of the change under review
+const { text, agentCalls } = await panel.generate(`Review this change:\n\n${prDiff}`);
+console.log(agentCalls.map((c) => c.agent)); // the seats that answered
 ```
+
+#### Provider quorum
+
+`quorum` sets a floor on the panel after the fan-out and before synthesis:
+
+- `minAgents`: how many seats must succeed. A seat succeeds when its call
+  resolves and no HITL gate rejected it.
+- `minProviders`: how many distinct providers must be among the successful
+  seats. The count uses the `provider` each seat's result reports, which is the
+  provider that answered: a seat served by its failover chain counts as the
+  failover provider.
+- `onShortfall`: `'error'` (default) throws [`AgencyQuorumError`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) before
+  synthesis; `'proceed'` logs a warning and synthesizes anyway.
+
+Two things the quorum does not check: a seat that returned empty text still
+counts as succeeded, and two seats on different models of one provider count as
+one provider. Only `parallel` enforces `quorum`.
 
 ### debate
 
 Agents argue and refine a shared answer over multiple rounds.  The number of
-rounds is controlled by `maxRounds` (default: 3).  Requires an agency-level
-`model` for the synthesis step.
+rounds is controlled by `maxRounds` (default: 3).  Every round, each agent sees
+the full transcript of the rounds so far.  Requires an agency-level `model` for
+the judge that writes the verdict after the last round.  Putting the two sides
+on different vendors keeps one model from arguing with itself:
 
 ```typescript
 const debaters = agency({
-  provider: 'openai', model: 'gpt-4o',
+  provider: 'openai', model: 'gpt-6-astra',                           // the judge
   agents: {
-    proponent: { instructions: 'Defend your position vigorously.' },
-    critic:    { instructions: 'Challenge every claim you hear.' },
+    proponent: { provider: 'anthropic', model: 'claude-opus-5-5',
+                 instructions: 'Defend your position vigorously.' },
+    critic:    { provider: 'gemini', model: 'gemini-3.1-pro-preview',
+                 instructions: 'Challenge every claim you hear.' },
   },
   strategy: 'debate',
   maxRounds: 4,
@@ -267,14 +345,17 @@ const { text } = await debaters.generate('Is remote work better than in-office?'
 ### review-loop
 
 One agent produces output; another reviews it and requests revisions.  The loop
-continues until the reviewer is satisfied or `maxRounds` is reached.
+continues until the reviewer is satisfied or `maxRounds` is reached.  The first
+roster entry is the producer and the second the reviewer; each runs on its own
+model, so the reviewer can come from a different vendor than the drafter.
 
 ```typescript
 const loop = agency({
-  provider: 'openai', model: 'gpt-4o-mini',
   agents: {
-    drafter:  { instructions: 'Draft a press release.' },
-    reviewer: { instructions: 'Review for brand voice and accuracy. Request changes if needed.' },
+    drafter:  { provider: 'openai', model: 'gpt-6-astra',
+                instructions: 'Draft a press release.' },
+    reviewer: { provider: 'anthropic', model: 'claude-opus-5-5',
+                instructions: 'Review for brand voice and accuracy. Request changes if needed.' },
   },
   strategy: 'review-loop',
   maxRounds: 3,
@@ -291,11 +372,11 @@ Required for emergent agent synthesis.
 
 ```typescript
 const team = agency({
-  provider: 'openai', model: 'gpt-4o',
+  provider: 'openai', model: 'gpt-6-astra',                           // the coordinator
   agents: {
-    researcher: { instructions: 'Find factual information.' },
-    coder:      { instructions: 'Write and explain code.' },
-    writer:     { instructions: 'Produce polished prose.' },
+    researcher: { provider: 'gemini', model: 'gemini-3.1-pro-preview', instructions: 'Find factual information.' },
+    coder:      { provider: 'anthropic', model: 'claude-opus-5-5',     instructions: 'Write and explain code.' },
+    writer:     { instructions: 'Produce polished prose.' },          // inherits openai / gpt-6-astra
   },
   strategy: 'hierarchical',
 });
@@ -921,30 +1002,28 @@ const arxivTool: ITool = {
   execute: async ({ query }) => ({ success: true, output: `(stub) arxiv: ${query}` }),
 };
 
-// Hierarchical agency where manager delegates dynamically
+// Hierarchical agency where the coordinator delegates dynamically.
+// The coordinator is not a roster entry: it is built from the agency-level
+// model and provider, and the agency-level `instructions` are added to its brief.
 const dynamicTeam = agency({
+  provider: 'openai', model: 'gpt-6-astra',
+  instructions: 'Delegate research, analysis, and writing tasks to the specialists.',
   agents: {
-    manager: {
-      provider: 'openai', model: 'gpt-4o',
-      instructions:
-        'You coordinate the team. Delegate research, analysis, and writing tasks to specialists.',
-    },
     researcher: {
-      provider: 'openai', model: 'gpt-4o',
+      provider: 'gemini', model: 'gemini-3.1-pro-preview',
       instructions: 'Find information from web and academic sources.',
       tools: [webSearchTool, arxivTool],
     },
     analyst: {
-      provider: 'openai', model: 'gpt-4o',
+      provider: 'anthropic', model: 'claude-opus-5-5',
       instructions: 'Analyze data and extract insights.',
     },
     writer: {
-      provider: 'openai', model: 'gpt-4o',
-      instructions: 'Write polished content based on research and analysis.',
+      instructions: 'Write polished content based on research and analysis.',   // inherits openai / gpt-6-astra
     },
   },
   strategy: 'hierarchical',
-  // manager gets delegate_to_researcher, delegate_to_analyst, delegate_to_writer tools
+  // the coordinator gets delegate_to_researcher, delegate_to_analyst, delegate_to_writer tools
 });
 
 const result = await dynamicTeam.generate(
