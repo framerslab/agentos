@@ -925,7 +925,9 @@ export class OpenRouterProvider implements IProvider {
                 httpStatus: typeof apiChunk.error.code === 'number' ? apiChunk.error.code : undefined,
                 error: apiChunk.error,
                 partialText: yieldedText,
-                usage: held?.usage,
+                // The event's own usage when it reports one, else what the
+                // held finish or the usage chunk reported.
+                usage: mapOpenRouterUsage(apiChunk.usage) ?? held?.usage,
               });
             }
             const errMessage = apiChunk.error.message || 'OpenRouter mid-stream error';
@@ -935,6 +937,7 @@ export class OpenRouterProvider implements IProvider {
               // The answer already ended on a content_filter finish. A later
               // upstream failure is the end of the read: it neither replaces
               // the held decline nor loses the usage read so far.
+              if (apiChunk.usage) held.usage = mapOpenRouterUsage(apiChunk.usage);
               readError = new Error(decorated);
               break;
             }
@@ -949,6 +952,8 @@ export class OpenRouterProvider implements IProvider {
                 message: decorated,
                 type: 'upstream_error',
               },
+              // What the failed turn billed, when the event reports it.
+              ...(apiChunk.usage ? { usage: mapOpenRouterUsage(apiChunk.usage) } : {}),
             };
             break;
           }

@@ -460,6 +460,14 @@ describe('streams', () => {
     expect((err.details as { httpStatus?: number }).httpStatus).toBe(403);
   });
 
+  it('a refusal error event that carries usage keeps it on the decline', async () => {
+    const withUsage = chunk({ error: { code: 403, message: 'refused', metadata: { error_type: 'refusal' } }, choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error' }], usage: USAGE });
+    const request = vi.fn().mockResolvedValueOnce({ data: sse([withUsage, 'data: [DONE]']) });
+    const err = await thrown(drain(makeProvider(request).generateCompletionStream(MODEL, messages, {})));
+    expect(err.code).toBe('content_filter');
+    expect((err.details as { usage?: { promptTokens: number } }).usage?.promptTokens).toBe(120);
+  });
+
   it('an error event with code 403 and no error_type is an in-body decline (the stream is a 200)', async () => {
     const bare403 = chunk({ error: { code: 403, message: 'Forbidden' }, choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error' }] });
     const request = vi.fn().mockResolvedValueOnce({ data: sse([bare403, 'data: [DONE]']) });
@@ -472,6 +480,15 @@ describe('streams', () => {
     const request = vi.fn().mockResolvedValueOnce({ data: sse([textChunk('a'), upstreamEvent, textChunk('never')]) });
     const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { type?: string }; responseTextDelta?: string }>;
     expect(out.map((c) => c.responseTextDelta ?? c.error?.type)).toEqual(['a', 'upstream_error']);
+  });
+
+  it('a non-decline error event that carries usage reports it on the upstream_error chunk', async () => {
+    const withUsage = chunk({ error: { code: 502, message: 'Provider disconnected', metadata: { error_type: 'provider_unavailable' } }, choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error' }], usage: USAGE });
+    const request = vi.fn().mockResolvedValueOnce({ data: sse([textChunk('a'), withUsage]) });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { type?: string }; isFinal?: boolean; usage?: { promptTokens: number } }>;
+    expect(out.at(-1)?.error?.type).toBe('upstream_error');
+    expect(out.at(-1)?.isFinal).toBe(true);
+    expect(out.at(-1)?.usage?.promptTokens).toBe(120);
   });
 
   it('an unparseable chunk is still skipped', async () => {
@@ -550,5 +567,12 @@ describe('streams', () => {
     const err = await thrown(drain(makeProvider(request).generateCompletionStream(MODEL, messages, {})));
     expect(err.code).toBe('content_filter');
     expect((err.details as { partialText?: string }).partialText).toBe('x'.repeat(2000));
+  });
+
+  it('partial text is the first 2,000 characters delivered, in order, across many chunks', async () => {
+    const deltas = ['a'.repeat(1500), 'b'.repeat(1500), 'c'.repeat(9000), 'd'.repeat(9000)];
+    const request = vi.fn().mockResolvedValueOnce({ data: sse([...deltas.map(textChunk), filterChunk, usageChunk, 'data: [DONE]']) });
+    const err = await thrown(drain(makeProvider(request).generateCompletionStream(MODEL, messages, {})));
+    expect((err.details as { partialText?: string }).partialText).toBe('a'.repeat(1500) + 'b'.repeat(500));
   });
 });
