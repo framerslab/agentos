@@ -119,3 +119,61 @@ describe('the decline error (R2)', () => {
     expect(d.upstreamMessage as string).not.toContain('key-a');
   });
 });
+
+function okResponse() {
+  return {
+    id: 'gen-ok',
+    object: 'chat.completion',
+    created: 1,
+    model: MODEL,
+    choices: [{ index: 0, message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' }],
+    usage: USAGE,
+  };
+}
+
+describe('HTTP error responses (R3)', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  it('does not retry a decline inside the provider and does not cool the pool key', async () => {
+    const request = vi
+      .fn()
+      .mockRejectedValueOnce(axiosError(403, { error: { code: 403, message: 'refused', metadata: { error_type: 'refusal' } } }))
+      .mockResolvedValueOnce({ data: okResponse() });
+    const provider = makeProvider(request);
+    const err = await thrown(provider.generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('content_filter');
+    expect(request).toHaveBeenCalledTimes(1);
+    // No key was cooled: every pool entry's cooldown is still unset. (The pool is a
+    // weighted round-robin, so the next key drawn is not a usable signal.)
+    const pool = (provider as unknown as { keyPool: { keys: Array<{ key: string; exhaustedUntil: number }> } }).keyPool;
+    expect(pool.keys.map((k) => k.exhaustedUntil)).toEqual([0, 0]);
+  });
+
+  it('keeps a 403 with no decline type as the auth-class request failure', async () => {
+    const request = vi.fn().mockRejectedValueOnce(
+      axiosError(403, { error: { code: 403, message: 'Request blocked: prompt injection patterns detected', metadata: { patterns: ['ignore all previous instructions'] } } }),
+    );
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('API_REQUEST_FAILED');
+    expect(err.httpStatus).toBe(403);
+  });
+
+  it('classifies a 403 decline whose body arrives as a stream', async () => {
+    const body = JSON.stringify({ error: { code: 403, message: 'refused', metadata: { error_type: 'refusal' } } });
+    const request = vi.fn().mockRejectedValueOnce(axiosError(403, Readable.from([Buffer.from(body)])));
+    const err = await thrown(drain(makeProvider(request).generateCompletionStream(MODEL, messages, {})));
+    expect(err.code).toBe('content_filter');
+    expect(err.httpStatus).toBeUndefined();
+  });
+
+  it('a 403 body cut at the 8 KiB read cap is not classified (the limit is pinned, not hidden)', async () => {
+    const padding = 'x'.repeat(9000);
+    const body = JSON.stringify({ error: { code: 403, message: padding, metadata: { error_type: 'refusal' } } });
+    const request = vi.fn().mockRejectedValueOnce(axiosError(403, Readable.from([Buffer.from(body)])));
+    const err = await thrown(drain(makeProvider(request).generateCompletionStream(MODEL, messages, {})));
+    expect(err.code).toBe('API_REQUEST_FAILED');
+    expect(err.httpStatus).toBe(403);
+  });
+});
