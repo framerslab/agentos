@@ -202,7 +202,7 @@ Three layers, highest priority first: inline `apiKey` on the call, a module-leve
 - **`generateText()` / `streamText()` / `generateObject()` / `generateImage()` / `generateVideo()` / `generateMusic()` / `performOCR()` / `embedText()`**: low-level multi-modal helpers with native tool calling.
 - **`workflow()` / `AgentGraph` / `mission()`**: three orchestration authoring APIs over one graph runtime.
 
-Provider fallback is an explicit opt-in via `agent({ fallbackProviders: [...] })`; the runtime never silently retries against a different provider unless you configure a chain.
+Provider fallback is on by default: when a call fails with a retryable error, it is retried on the other providers whose keys are in the environment. Pass `fallbackProviders: []` to turn it off, or a list to set the chain yourself.
 
 [Full API reference ->](https://docs.agentos.sh/api) * [High-Level API guide ->](https://docs.agentos.sh/getting-started/high-level-api)
 

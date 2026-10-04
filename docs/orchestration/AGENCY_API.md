@@ -249,7 +249,8 @@ the key together on every seat of a multi-vendor roster:
   `apiKey: process.env.UNSET_VAR`) counts as set and blocks inheritance.
 
 Keys resolve per seat: the seat's `apiKey`, else the agency's `apiKey`, else a
-key set with `setDefaultProvider()`, else the provider's environment variable
+key set with `setDefaultProvider()` (used when that default names no provider
+or names the seat's provider), else the provider's environment variable
 (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, and so on). A
 comma-separated key value becomes a rotating key pool. A seat with no key at
 all fails without failover, with one exception: `provider: 'anthropic'` with no
@@ -261,11 +262,12 @@ chair. A `model` or `provider` passed there replaces every seat's own setting,
 so configure models on the roster, not per call.
 
 Each seat keeps the default provider failover. When a seat's call fails with a
-retryable error (HTTP 401, 402, 403, 429, 5xx, a timeout), the call is retried
-on the providers whose keys are in the environment, in this order and on these
-models: OpenAI `gpt-5.6-sol`, Anthropic `claude-sonnet-5`, OpenRouter
-`openai/gpt-5.6-sol`, Gemini `gemini-3.1-pro-preview`; the seat's own provider
-is skipped. The seat's result then reports the provider that answered, but
+retryable error (HTTP 401, 402, 403, 429, 500, 502, 503, 504 or 529, a network
+error or a timeout), the call is retried on the providers whose keys are in the
+environment. With no `policyTier` set, the order and models are: OpenAI
+`gpt-5.6-sol`, Anthropic `claude-sonnet-5`, OpenRouter `openai/gpt-5.6-sol`,
+Gemini `gemini-3.1-pro-preview`; the seat's own provider is skipped. The
+seat's result then reports the provider that answered, but
 `agentCalls` does not record it. To pin every seat and the chair to their
 configured providers, pass `generate(prompt, { fallbackProviders: [] })`; to pin
 one seat, put a pre-built `agent({ ..., fallbackProviders: [] })` in the roster.
@@ -322,8 +324,12 @@ const panel = agency({
   quorum: { minAgents: 2, minProviders: 2 },
 });
 
-// prDiff: the unified diff of the change under review
-const { text, agentCalls } = await panel.generate(`Review this change:\n\n${prDiff}`);
+const change = `
+- if (attempt > maxRetries) throw err;
++ if (attempt >= maxRetries) throw err;
+`;
+
+const { text, agentCalls } = await panel.generate(`Review this change for defects:\n${change}`);
 console.log(agentCalls.map((c) => c.agent)); // the seats that answered
 ```
 
@@ -683,8 +689,9 @@ const qualityGated = agency({
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `model` | `string` | `'gpt-4o-mini'` | LLM model to use for evaluation. |
-| `provider` | `string` | `'openai'` | LLM provider. |
+| `model` | `string` | `'gpt-5.6'` | Judge model. The default comes from the central judge resolver; `AGENTOS_JUDGE_MODEL` overrides it. |
+| `provider` | `string` | `'openai'` | Judge provider (`AGENTOS_JUDGE_PROVIDER` overrides the default). Pinning a provider other than `openai` requires an explicit `model`. |
+| `effort` | `string` | `'max'` | Reasoning effort. The default applies only when the resolver also chose the model; a caller-pinned `model` gets no effort unless one is passed. |
 | `criteria` | `string` | `'Evaluate whether this action is safe, relevant, and appropriate.'` | Custom rubric the judge evaluates against. |
 | `confidenceThreshold` | `number` | `0.7` | Confidence threshold (0-1). Below this the fallback handler is used. |
 | `fallback` | [`HitlHandler`](https://github.com/framerslab/agentos/blob/master/src/api/hitl.ts) | `hitl.autoReject(...)` | Handler invoked when confidence is below threshold or LLM call fails. |
