@@ -907,7 +907,8 @@ export class OpenRouterProvider implements IProvider {
           // ends with an error part). Any other error still surfaces as an
           // upstream_error chunk and ends the stream.
           if (apiChunk.error && typeof apiChunk.error === 'object') {
-            const decline = classifyOpenRouterDecline(apiChunk.error);
+            // The stream is an HTTP 200, so the in-body 403 row applies here too.
+            const decline = classifyOpenRouterDecline(apiChunk.error, { inBody: true });
             if (decline) {
               throw this.declineError(modelId, decline, {
                 httpStatus: typeof apiChunk.error.code === 'number' ? apiChunk.error.code : undefined,
