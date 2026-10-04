@@ -855,7 +855,9 @@ export class OpenRouterProvider implements IProvider {
     const accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }> = new Map();
 
     const abortSignal = options.abortSignal;
-    const abortChunk = (message: string): ModelCompletionResponse => ({
+    // `usage` is what a refused turn billed before the abort; a consumer
+    // metering final chunks would otherwise lose it.
+    const abortChunk = (message: string, usage?: ModelUsage): ModelCompletionResponse => ({
       id: `openrouter-abort-${Date.now()}`,
       object: 'chat.completion.chunk',
       created: Math.floor(Date.now() / 1000),
@@ -863,8 +865,12 @@ export class OpenRouterProvider implements IProvider {
       choices: [],
       error: { message, type: 'abort' },
       isFinal: true,
+      ...(usage ? { usage } : {}),
     });
     if (abortSignal?.aborted) {
+      // The response is already open, and parseSseStream, which closes it,
+      // never runs on this path.
+      (stream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
       yield abortChunk('Stream aborted prior to first chunk');
       return;
     }
@@ -884,20 +890,25 @@ export class OpenRouterProvider implements IProvider {
       try {
         for await (const rawChunk of this.parseSseStream(stream)) {
           if (abortSignal?.aborted) {
-            yield abortChunk('Stream aborted by caller');
+            yield abortChunk('Stream aborted by caller', held?.usage);
             return;
           }
           if (!rawChunk.startsWith('data: ')) continue;
           const jsonData = rawChunk.substring('data: '.length);
           if (jsonData.trim() === '[DONE]') break;
 
-          // The parse has its own catch: a malformed chunk is skipped, as
-          // before, and nothing thrown while HANDLING a chunk is swallowed.
+          // The parse has its own catch, so a decline thrown while HANDLING
+          // a chunk is never swallowed as a parse failure. A line that is not
+          // JSON, or is JSON but not an object, is skipped as before.
           let apiChunk: OpenRouterChatCompletionAPIResponse;
           try {
             apiChunk = JSON.parse(jsonData) as OpenRouterChatCompletionAPIResponse;
           } catch (error: unknown) {
             console.warn('OpenRouterProvider: Failed to parse stream chunk JSON, skipping chunk. Data:', jsonData, 'Error:', error);
+            continue;
+          }
+          if (!apiChunk || typeof apiChunk !== 'object') {
+            console.warn('OpenRouterProvider: Stream chunk is not a JSON object, skipping chunk. Data:', jsonData);
             continue;
           }
 
@@ -919,6 +930,14 @@ export class OpenRouterProvider implements IProvider {
             }
             const errMessage = apiChunk.error.message || 'OpenRouter mid-stream error';
             const errCode = apiChunk.error.code;
+            const decorated = errCode !== undefined ? `[${errCode}] ${errMessage}` : errMessage;
+            if (held) {
+              // The answer already ended on a content_filter finish. A later
+              // upstream failure is the end of the read: it neither replaces
+              // the held decline nor loses the usage read so far.
+              readError = new Error(decorated);
+              break;
+            }
             yield {
               id: apiChunk.id ?? `openrouter-error-${Date.now()}`,
               object: 'chat.completion.chunk',
@@ -927,7 +946,7 @@ export class OpenRouterProvider implements IProvider {
               choices: [],
               isFinal: true,
               error: {
-                message: errCode !== undefined ? `[${errCode}] ${errMessage}` : errMessage,
+                message: decorated,
                 type: 'upstream_error',
               },
             };
@@ -950,7 +969,16 @@ export class OpenRouterProvider implements IProvider {
             continue;
           }
 
-          const mapped = this.mapApiToStreamChunkResponse(apiChunk, modelId, accumulatedToolCalls);
+          // A chunk of an unexpected shape (no choices array, a malformed
+          // tool call) is logged and skipped, as it was when the parse and
+          // the mapping shared one catch.
+          let mapped: ModelCompletionResponse;
+          try {
+            mapped = this.mapApiToStreamChunkResponse(apiChunk, modelId, accumulatedToolCalls);
+          } catch (error: unknown) {
+            console.warn('OpenRouterProvider: Failed to map stream chunk, skipping chunk. Data:', jsonData, 'Error:', this.describeError(error));
+            continue;
+          }
           if (mapped.responseTextDelta) yieldedText += mapped.responseTextDelta;
           yield mapped;
           // Don't break on finish_reason: with stream_options.include_usage,
@@ -966,6 +994,13 @@ export class OpenRouterProvider implements IProvider {
         else throw error;
       }
       if (held) {
+        // An abort during the wait wins over the decline. The loop only
+        // checks the signal when a line arrives, so a read that ended
+        // without one is checked here.
+        if (abortSignal?.aborted) {
+          yield abortChunk('Stream aborted by caller', held.usage);
+          return;
+        }
         throw this.declineError(modelId, held.decline, {
           httpStatus: 200,
           refusal: held.refusal,
@@ -1484,7 +1519,9 @@ export class OpenRouterProvider implements IProvider {
    * An error reported inside an HTTP 200 body (spec R4): a decline becomes
    * the decline error; anything else becomes the error an HTTP response with
    * that code produces today, so `isRetryableError` and the breaker treat it
-   * by its code.
+   * by its code. The exception is a 401 or 403 that is not a decline: it is
+   * still retryable, but it carries no status, so it counts as a transient
+   * failure and not as a rejected key.
    */
   private inBodyError(
     error: OpenRouterErrorEnvelope,
@@ -1501,15 +1538,27 @@ export class OpenRouterProvider implements IProvider {
         usage: extra.usage,
       });
     }
-    const message = this.redactSecrets(error.message || 'OpenRouter reported an error in a 200 response');
+    // The body is untyped network input: a message that is not a string
+    // must not reach the redaction's string calls.
+    const message = this.redactSecrets(
+      typeof error.message === 'string' && error.message ? error.message : 'OpenRouter reported an error in a 200 response',
+    );
     const metaType = typeof error.metadata?.error_type === 'string' ? error.metadata.error_type : undefined;
+    // The 200 means the configured key was accepted, so a 401 or 403 inside
+    // the body describes an upstream attempt (a BYOK key, a failover leg),
+    // not this account. Its code stays in the message, where the retry
+    // classifiers read it, and in details; the error carries no status and
+    // no `[NNN]` prefix, so the breaker counts one transient failure instead
+    // of opening its auth policy (one failure, 30 minutes) on one response.
+    const inBodyAuth = code === 401 || code === 403;
     return new OpenRouterProviderError(
-      code !== undefined ? `[${code}] ${message}` : message,
+      code === undefined ? message : inBodyAuth ? `OpenRouter in-body error ${code}: ${message}` : `[${code}] ${message}`,
       'API_REQUEST_FAILED',
-      code,
+      inBodyAuth ? undefined : code,
       metaType ?? 'UNKNOWN_API_ERROR',
       {
         responseId: extra.responseId,
+        ...(inBodyAuth ? { httpStatus: code } : {}),
         responseData: this.redactResponseData(error),
         partialText: typeof extra.partialText === 'string' ? this.redactSecrets(extra.partialText).slice(0, 2000) : undefined,
         usage: extra.usage,
