@@ -273,3 +273,90 @@ describe('HTTP 200 bodies, non-stream (R4)', () => {
     expect(res.choices[0].finishReason).toBe('error');
   });
 });
+
+describe('streams (R5)', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  const chunk = (o: Record<string, unknown>) => 'data: ' + JSON.stringify({ id: 'gen-s', object: 'chat.completion.chunk', created: 1, model: MODEL, ...o });
+  const textChunk = (t: string) => chunk({ choices: [{ index: 0, delta: { role: 'assistant', content: t }, finish_reason: null }] });
+  const filterChunk = chunk({ choices: [{ index: 0, delta: { content: '', refusal: 'I cannot help with that.' }, finish_reason: 'content_filter' }] });
+  const usageChunk = chunk({ choices: [], usage: USAGE });
+  const refusalEvent = chunk({ error: { code: 403, message: 'refused', metadata: { error_type: 'refusal' } }, choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error' }] });
+  const upstreamEvent = chunk({ error: { code: 502, message: 'Provider disconnected', metadata: { error_type: 'provider_unavailable' } }, choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error' }] });
+
+  it('a content_filter finish before any text throws the decline after the trailing usage chunk', async () => {
+    const request = vi.fn().mockResolvedValueOnce({ data: sse([filterChunk, usageChunk, 'data: [DONE]']) });
+    const err = await thrown(drain(makeProvider(request).generateCompletionStream(MODEL, messages, {})));
+    expect(err.code).toBe('content_filter');
+    const d = err.details as { usage?: { promptTokens: number }; refusal?: string; partialText?: string };
+    expect(d.usage?.promptTokens).toBe(120);
+    expect(d.refusal).toBe('I cannot help with that.');
+    expect(d.partialText).toBeUndefined();
+  });
+
+  it('a content_filter finish after text throws with the partial text; the text chunks were yielded', async () => {
+    const request = vi.fn().mockResolvedValueOnce({ data: sse([textChunk('Once '), textChunk('upon'), filterChunk, usageChunk, 'data: [DONE]']) });
+    const gen = makeProvider(request).generateCompletionStream(MODEL, messages, {});
+    const seen: string[] = [];
+    let caught: OpenRouterProviderError | undefined;
+    try {
+      for await (const c of gen) seen.push((c as { responseTextDelta?: string }).responseTextDelta ?? '');
+    } catch (e) {
+      caught = e as OpenRouterProviderError;
+    }
+    expect(seen).toEqual(['Once ', 'upon']);
+    expect(caught?.code).toBe('content_filter');
+    expect((caught?.details as { partialText?: string }).partialText).toBe('Once upon');
+  });
+
+  it('a content_filter finish followed by a read error still throws the decline, with the usage held so far', async () => {
+    const broken = new Readable({
+      read() {
+        this.push(Buffer.from(filterChunk + '\n\n'));
+        this.push(Buffer.from(usageChunk + '\n\n'));
+        this.destroy(new Error('read ECONNRESET'));
+      },
+    });
+    const request = vi.fn().mockResolvedValueOnce({ data: broken });
+    const err = await thrown(drain(makeProvider(request).generateCompletionStream(MODEL, messages, {})));
+    expect(err.code).toBe('content_filter');
+    expect((err.details as { usage?: { promptTokens: number } }).usage?.promptTokens).toBe(120);
+    expect((err.details as { readError?: { message: string } }).readError?.message).toContain('ECONNRESET');
+  });
+
+  it('a refusal error event before text throws the decline', async () => {
+    const request = vi.fn().mockResolvedValueOnce({ data: sse([refusalEvent, 'data: [DONE]']) });
+    const err = await thrown(drain(makeProvider(request).generateCompletionStream(MODEL, messages, {})));
+    expect(err.code).toBe('content_filter');
+    expect((err.details as { httpStatus?: number }).httpStatus).toBe(403);
+  });
+
+  it('a non-decline error event still yields the upstream_error chunk and ends the stream', async () => {
+    const request = vi.fn().mockResolvedValueOnce({ data: sse([textChunk('a'), upstreamEvent, textChunk('never')]) });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { type?: string }; responseTextDelta?: string }>;
+    expect(out.map((c) => c.responseTextDelta ?? c.error?.type)).toEqual(['a', 'upstream_error']);
+  });
+
+  it('an unparseable chunk is still skipped', async () => {
+    const request = vi.fn().mockResolvedValueOnce({ data: sse(['data: {not json', textChunk('ok'), chunk({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }), usageChunk, 'data: [DONE]']) });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ responseTextDelta?: string }>;
+    expect(out.some((c) => c.responseTextDelta === 'ok')).toBe(true);
+  });
+
+  it('an abort during the usage wait yields the abort chunk and throws nothing', async () => {
+    const controller = new AbortController();
+    const slow = new Readable({
+      read() {
+        this.push(Buffer.from(filterChunk + '\n\n'));
+        controller.abort();
+        this.push(Buffer.from(usageChunk + '\n\n'));
+        this.push(null);
+      },
+    });
+    const request = vi.fn().mockResolvedValueOnce({ data: slow });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, { abortSignal: controller.signal }))) as Array<{ error?: { type?: string } }>;
+    expect(out.at(-1)?.error?.type).toBe('abort');
+  });
+});
