@@ -207,9 +207,11 @@ provider/model pair) to control the model explicitly.
 
 Every roster entry is a full `agent()` config. `model`, `provider`, `apiKey`
 and `baseUrl` set on a seat win over the agency-level values; a seat that sets
-none of them inherits the agency's. The same holds for `effort`, `thinking`,
-`maxTokens`, `instructions`, `output` and `tools` (the seat's tools are merged
-with the agency's).
+none of them inherits the agency's. Only those four are inherited. `effort`,
+`thinking`, `maxTokens`, `instructions` and `output` apply to the seat that sets
+them and are not copied from the agency level; agency-level `instructions` go to
+the chair (parallel), the judge (debate) and the coordinator (hierarchical), not
+to the seats. A seat's `tools` are merged with the agency's `tools`.
 
 ```typescript
 const team = agency({
