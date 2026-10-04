@@ -333,6 +333,14 @@ describe('streams (R5)', () => {
     expect((err.details as { httpStatus?: number }).httpStatus).toBe(403);
   });
 
+  it('an error event with code 403 and no error_type is an in-body decline (the stream is a 200)', async () => {
+    const bare403 = chunk({ error: { code: 403, message: 'Forbidden' }, choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error' }] });
+    const request = vi.fn().mockResolvedValueOnce({ data: sse([bare403, 'data: [DONE]']) });
+    const err = await thrown(drain(makeProvider(request).generateCompletionStream(MODEL, messages, {})));
+    expect(err.code).toBe('content_policy_violation');
+    expect(err.openRouterErrorType).toBe('in_body_403');
+  });
+
   it('a non-decline error event still yields the upstream_error chunk and ends the stream', async () => {
     const request = vi.fn().mockResolvedValueOnce({ data: sse([textChunk('a'), upstreamEvent, textChunk('never')]) });
     const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { type?: string }; responseTextDelta?: string }>;
