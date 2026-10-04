@@ -890,6 +890,9 @@ export class OpenRouterProvider implements IProvider {
       try {
         for await (const rawChunk of this.parseSseStream(stream)) {
           if (abortSignal?.aborted) {
+            // The line that shows the abort is usually the usage line a held
+            // decline was waiting for: read what it reports before leaving.
+            if (held) held.usage = this.usageOfSseLine(rawChunk) ?? held.usage;
             yield abortChunk('Stream aborted by caller', held?.usage);
             return;
           }
@@ -1654,6 +1657,19 @@ export class OpenRouterProvider implements IProvider {
       };
     }
     return { message: this.redactSecrets(String(error)) };
+  }
+
+  /** The usage a raw SSE line reports, when it is a data line that carries one. */
+  private usageOfSseLine(rawChunk: string): ModelUsage | undefined {
+    if (!rawChunk.startsWith('data: ')) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(rawChunk.substring('data: '.length));
+      return parsed && typeof parsed === 'object'
+        ? mapOpenRouterUsage((parsed as OpenRouterChatCompletionAPIResponse).usage)
+        : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private async *parseSseStream(stream: NodeJS.ReadableStream): AsyncGenerator<string, void, undefined> {
