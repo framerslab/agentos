@@ -39,16 +39,32 @@ export interface OpenRouterProviderConfig {
   streamRequestTimeout?: number;
 }
 
+/**
+ * OpenRouter's error envelope. It arrives as an HTTP error body, as the
+ * body of a 200 whose provider failed after accepting the request, on a
+ * choice (`finish_reason: 'error'`), or as a mid-stream SSE event. `code`
+ * is the HTTP status the failure maps to; `metadata.error_type` is
+ * OpenRouter's stable typed code (the OpenRouter error reference).
+ */
+export interface OpenRouterErrorEnvelope {
+  code?: number | string;
+  message?: string;
+  metadata?: Record<string, unknown>;
+}
+
 interface OpenRouterChatChoice {
   index: number;
   message?: {
     role: ChatMessage['role'];
     content: string | null;
     tool_calls?: ChatMessage['tool_calls'];
+    /** Set when the model declined as output (`finish_reason: 'content_filter'`). */
+    refusal?: string | null;
   };
   delta?: {
     role?: ChatMessage['role'];
     content?: string | null;
+    refusal?: string | null;
     tool_calls?: Array<{
       index: number;
       id?: string;
@@ -58,6 +74,8 @@ interface OpenRouterChatChoice {
   };
   finish_reason: string | null;
   logprobs?: unknown;
+  /** Present with `finish_reason: 'error'`: the provider failed mid-generation. */
+  error?: OpenRouterErrorEnvelope;
 }
 
 interface OpenRouterChatCompletionAPIResponse {
@@ -83,6 +101,8 @@ interface OpenRouterChatCompletionAPIResponse {
      */
     prompt_tokens_details?: { cached_tokens?: number };
   };
+  /** A 200 whose body reports a failure instead of choices, or a mid-stream error event. */
+  error?: OpenRouterErrorEnvelope;
 }
 
 /**
@@ -284,6 +304,55 @@ function parseErrorBody(text: string): unknown {
   } catch {
     return text;
   }
+}
+
+/** How OpenRouter declined a request, read from its error envelope. */
+export interface OpenRouterDecline {
+  /**
+   * AgentOS's content-policy codes: `content_filter` for a model's own
+   * refusal, `content_policy_violation` for a filter around the model. Both
+   * are in `isContentPolicyRefusal`'s and the health registry's sets.
+   */
+  code: 'content_filter' | 'content_policy_violation';
+  /** What OpenRouter reported, kept for diagnostics. */
+  nativeType: 'refusal' | 'content_policy_violation' | 'moderation' | 'in_body_403' | 'content_filter_finish';
+}
+
+/**
+ * Classify an OpenRouter error envelope as a content decline, or not.
+ *
+ * - `metadata.error_type` `refusal`: the model refused (code `content_filter`).
+ * - `metadata.error_type` `content_policy_violation`: a filter flagged the
+ *   input or output.
+ * - The documented moderation metadata (`reasons` + `flagged_input`) with no
+ *   `error_type`.
+ * - With `inBody`, a numeric code 403 and no `error_type`: the error reference
+ *   gives every in-body policy decline the code 403 once the HTTP line was
+ *   already committed. Never applied to an HTTP 403 response, which without a
+ *   decline type is a guardrail or permission block (`permission_denied`).
+ *
+ * @param error - The `error` object from an OpenRouter body, choice or event.
+ * @param opts.inBody - True when the error sits inside an HTTP 200 body.
+ * @returns The decline, or `undefined` when the error is not one.
+ */
+export function classifyOpenRouterDecline(
+  error: unknown,
+  opts: { inBody?: boolean } = {},
+): OpenRouterDecline | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const env = error as OpenRouterErrorEnvelope;
+  const meta = env.metadata && typeof env.metadata === 'object' ? env.metadata : undefined;
+  const errorType = typeof meta?.error_type === 'string' ? meta.error_type : undefined;
+  if (errorType === 'refusal') return { code: 'content_filter', nativeType: 'refusal' };
+  if (errorType === 'content_policy_violation') {
+    return { code: 'content_policy_violation', nativeType: 'content_policy_violation' };
+  }
+  if (errorType !== undefined) return undefined;
+  if (Array.isArray(meta?.reasons) && typeof meta?.flagged_input === 'string') {
+    return { code: 'content_policy_violation', nativeType: 'moderation' };
+  }
+  if (opts.inBody && env.code === 403) return { code: 'content_policy_violation', nativeType: 'in_body_403' };
+  return undefined;
 }
 
 export class OpenRouterProvider implements IProvider {
@@ -1201,7 +1270,8 @@ export class OpenRouterProvider implements IProvider {
           }
           if (errorData?.error && typeof errorData.error === 'object') {
             errorMessage = errorData.error.message || errorMessage;
-            errorType = errorData.error.type || errorType;
+            const metaType = errorData.error.metadata?.error_type;
+            errorType = (typeof metaType === 'string' ? metaType : undefined) || errorData.error.type || errorType;
           } else if (typeof errorData === 'string' && errorData.trim()) {
             errorMessage = errorData;
           } else if ((error as Error).message) {
@@ -1209,6 +1279,17 @@ export class OpenRouterProvider implements IProvider {
           }
         } else if (error instanceof Error) {
           errorMessage = error.message;
+        }
+
+        // A content decline is a verdict on the request, not provider
+        // health: throw it typed at once (no in-provider retry, no key
+        // cooldown) so the walkers move on and the breaker stays closed.
+        const decline = classifyOpenRouterDecline(errorData?.error);
+        if (decline) {
+          throw this.declineError(String(body?.model ?? ''), decline, {
+            httpStatus: statusCode,
+            error: errorData.error as OpenRouterErrorEnvelope,
+          });
         }
 
         // A throttled (429) or credit-exhausted (402) key must not be
@@ -1263,6 +1344,85 @@ export class OpenRouterProvider implements IProvider {
     // Unreachable in practice (the loop either returns or throws), but keeps
     // the compiler + any future refactor honest.
     throw lastError ?? new OpenRouterProviderError('OpenRouter request failed.', 'API_REQUEST_FAILED');
+  }
+
+  /**
+   * The error a declined request raises (spec R2). Code `content_filter` or
+   * `content_policy_violation` is what `isContentPolicyRefusal` and the
+   * health registry's exemption read, so the walkers move on and no breaker
+   * opens. The message is fixed: no HTTP status digits and no upstream text,
+   * which retry classifiers grep for. The response status, the upstream
+   * message (redacted, 300 chars), the provider, the refusal text (300), the
+   * partial text (2,000) and the billed usage ride `details`.
+   */
+  private declineError(
+    modelId: string,
+    decline: OpenRouterDecline,
+    details: {
+      httpStatus?: number;
+      error?: OpenRouterErrorEnvelope;
+      refusal?: string | null;
+      partialText?: string | null;
+      usage?: ModelUsage;
+      readError?: unknown;
+    },
+  ): OpenRouterProviderError {
+    const meta = details.error?.metadata;
+    const bounded = (value: unknown, max: number): string | undefined =>
+      typeof value === 'string' && value.length > 0 ? this.redactSecrets(value).slice(0, max) : undefined;
+    return new OpenRouterProviderError(
+      `OpenRouter declined the request on ${modelId || 'the requested model'} (${decline.nativeType}).`,
+      decline.code,
+      undefined,
+      decline.nativeType,
+      {
+        httpStatus: details.httpStatus,
+        upstreamMessage: bounded(details.error?.message, 300),
+        providerName: typeof meta?.provider_name === 'string' ? meta.provider_name : undefined,
+        providerCode: typeof meta?.provider_code === 'string' ? meta.provider_code : undefined,
+        refusal: bounded(details.refusal, 300),
+        partialText: bounded(details.partialText, 2000),
+        usage: details.usage,
+        ...(details.readError !== undefined ? { readError: this.describeError(details.readError) } : {}),
+      },
+    );
+  }
+
+  /**
+   * An error reported inside an HTTP 200 body (spec R4): a decline becomes
+   * the decline error; anything else becomes the error an HTTP response with
+   * that code produces today, so `isRetryableError` and the breaker treat it
+   * by its code.
+   */
+  private inBodyError(
+    error: OpenRouterErrorEnvelope,
+    modelId: string,
+    extra: { responseId?: string; usage?: ModelUsage; partialText?: string | null },
+  ): OpenRouterProviderError {
+    const code = typeof error.code === 'number' ? error.code : undefined;
+    const decline = classifyOpenRouterDecline(error, { inBody: true });
+    if (decline) {
+      return this.declineError(modelId, decline, {
+        httpStatus: code,
+        error,
+        partialText: extra.partialText,
+        usage: extra.usage,
+      });
+    }
+    const message = this.redactSecrets(error.message || 'OpenRouter reported an error in a 200 response');
+    const metaType = typeof error.metadata?.error_type === 'string' ? error.metadata.error_type : undefined;
+    return new OpenRouterProviderError(
+      code !== undefined ? `[${code}] ${message}` : message,
+      'API_REQUEST_FAILED',
+      code,
+      metaType ?? 'UNKNOWN_API_ERROR',
+      {
+        responseId: extra.responseId,
+        responseData: this.redactResponseData(error),
+        partialText: typeof extra.partialText === 'string' ? this.redactSecrets(extra.partialText).slice(0, 2000) : undefined,
+        usage: extra.usage,
+      },
+    );
   }
 
   /**
