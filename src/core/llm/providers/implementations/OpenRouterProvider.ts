@@ -877,7 +877,7 @@ export class OpenRouterProvider implements IProvider {
     const abortHandler = () => { /* passive; loop logic handles emission */ };
     abortSignal?.addEventListener('abort', abortHandler, { once: true });
 
-    // Spec R5. Text yielded so far (for the decline's partialText); the
+    // Text yielded so far (for the decline's partialText); the
     // decline held back when a content_filter finish arrives, while the
     // trailing usage chunk is read; a read error seen during that wait.
     let yieldedText = '';
@@ -1442,7 +1442,7 @@ export class OpenRouterProvider implements IProvider {
   }
 
   /**
-   * The error a declined request raises (spec R2). Code `content_filter` or
+   * The error a declined request raises. Code `content_filter` or
    * `content_policy_violation` is what `isContentPolicyRefusal` and the
    * health registry's exemption read, so the walkers move on and no breaker
    * opens. The message is fixed: no HTTP status digits and no upstream text,
@@ -1485,7 +1485,7 @@ export class OpenRouterProvider implements IProvider {
 
   /**
    * A 200 body that reports a failure instead of an answer throws before
-   * mapping (spec R4), in this order: a body holding only `error` and no
+   * mapping, in this order: a body holding only `error` and no
    * choice; a choice ended by `finish_reason: 'error'` with its own error
    * object; a choice ended by `finish_reason: 'content_filter'` (the model
    * declined as output). A choice with `finish_reason: 'error'` and no error
@@ -1516,7 +1516,7 @@ export class OpenRouterProvider implements IProvider {
   }
 
   /**
-   * An error reported inside an HTTP 200 body (spec R4): a decline becomes
+   * An error reported inside an HTTP 200 body: a decline becomes
    * the decline error; anything else becomes the error an HTTP response with
    * that code produces today, so `isRetryableError` and the breaker treat it
    * by its code. The exception is a 401 or 403 that is not a decline: it is

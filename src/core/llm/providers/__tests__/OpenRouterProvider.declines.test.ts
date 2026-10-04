@@ -77,7 +77,7 @@ async function drain(gen: AsyncGenerator<unknown>): Promise<unknown[]> {
   return out;
 }
 
-describe('classifyOpenRouterDecline (R1)', () => {
+describe('classifyOpenRouterDecline', () => {
   it('maps error_type refusal to content_filter', () => {
     expect(classifyOpenRouterDecline({ code: 403, metadata: { error_type: 'refusal' } })).toEqual({
       code: 'content_filter',
@@ -109,7 +109,7 @@ describe('classifyOpenRouterDecline (R1)', () => {
   });
 });
 
-describe('the decline error (R2)', () => {
+describe('the decline error', () => {
   beforeEach(() => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
@@ -174,7 +174,7 @@ function okResponse() {
   };
 }
 
-describe('HTTP error responses (R3)', () => {
+describe('HTTP error responses', () => {
   beforeEach(() => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
@@ -248,7 +248,7 @@ describe('HTTP error responses (R3)', () => {
   });
 });
 
-describe('HTTP 200 bodies, non-stream (R4)', () => {
+describe('HTTP 200 bodies, non-stream', () => {
   beforeEach(() => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
@@ -401,7 +401,7 @@ describe('HTTP 200 bodies, non-stream (R4)', () => {
   });
 });
 
-describe('streams (R5)', () => {
+describe('streams', () => {
   beforeEach(() => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
