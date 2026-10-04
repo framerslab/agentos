@@ -518,6 +518,17 @@ describe('streams', () => {
     expect(out[0]?.usage?.promptTokens).toBe(120);
   });
 
+  it('an abort that lands before the usage line still reports that line on the abort chunk', async () => {
+    // The usual order: the finish is held, the caller aborts, and the usage
+    // line is the next thing read. That line is what the wait was for.
+    const controller = new AbortController();
+    const request = vi.fn().mockResolvedValueOnce({ data: gated([filterChunk, () => controller.abort(), usageChunk, 'data: [DONE]']) });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, { abortSignal: controller.signal }))) as Array<{ error?: { type?: string }; usage?: { promptTokens: number } }>;
+    expect(out).toHaveLength(1);
+    expect(out[0]?.error?.type).toBe('abort');
+    expect(out[0]?.usage?.promptTokens).toBe(120);
+  });
+
   it('an abort before the first chunk closes the response stream', async () => {
     const controller = new AbortController();
     controller.abort();
