@@ -482,15 +482,6 @@ describe('streams', () => {
     expect(out.map((c) => c.responseTextDelta ?? c.error?.type)).toEqual(['a', 'upstream_error']);
   });
 
-  it('a non-decline error event that carries usage reports it on the upstream_error chunk', async () => {
-    const withUsage = chunk({ error: { code: 502, message: 'Provider disconnected', metadata: { error_type: 'provider_unavailable' } }, choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error' }], usage: USAGE });
-    const request = vi.fn().mockResolvedValueOnce({ data: sse([textChunk('a'), withUsage]) });
-    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { type?: string }; isFinal?: boolean; usage?: { promptTokens: number } }>;
-    expect(out.at(-1)?.error?.type).toBe('upstream_error');
-    expect(out.at(-1)?.isFinal).toBe(true);
-    expect(out.at(-1)?.usage?.promptTokens).toBe(120);
-  });
-
   it('an unparseable chunk is still skipped', async () => {
     const request = vi.fn().mockResolvedValueOnce({ data: sse(['data: {not json', textChunk('ok'), chunk({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }), usageChunk, 'data: [DONE]']) });
     const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ responseTextDelta?: string }>;

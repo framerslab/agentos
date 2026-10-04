@@ -955,8 +955,6 @@ export class OpenRouterProvider implements IProvider {
                 message: decorated,
                 type: 'upstream_error',
               },
-              // What the failed turn billed, when the event reports it.
-              ...(apiChunk.usage ? { usage: mapOpenRouterUsage(apiChunk.usage) } : {}),
             };
             break;
           }
