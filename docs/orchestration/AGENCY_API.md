@@ -205,13 +205,17 @@ provider/model pair) to control the model explicitly.
 
 ## Models, Providers and Keys per Agent
 
-Every roster entry is a full `agent()` config. `model`, `provider`, `apiKey`
-and `baseUrl` set on a seat win over the agency-level values; a seat that sets
-none of them inherits the agency's. Only those four are inherited. `effort`,
-`thinking`, `maxTokens`, `instructions` and `output` apply to the seat that sets
-them and are not copied from the agency level; agency-level `instructions` go to
-the chair (parallel), the judge (debate) and the coordinator (hierarchical), not
-to the seats. A seat's `tools` are merged with the agency's `tools`.
+Every roster entry is a `BaseAgentConfig` or a pre-built `agent()`. For a
+config entry, `model`, `provider`, `apiKey` and `baseUrl` set on the seat win
+over the agency-level values, and each of the four is inherited on its own when
+the seat leaves it out. A seat's `tools` are merged with the agency's `tools`,
+and the agency's `hitl.approvals.beforeTool` list is copied into every seat.
+Nothing else is inherited: `effort`, `thinking`, `maxTokens`, `instructions` and
+`output` apply to the seat that sets them, and agency-level `effort`,
+`thinking` and `maxTokens` reach neither the seats nor the chair. Agency-level
+`instructions` go to the chair (parallel), the judge (debate) and the
+coordinator (hierarchical). A pre-built `agent()` in the roster runs as it is
+and inherits nothing.
 
 ```typescript
 const team = agency({
@@ -230,27 +234,47 @@ const team = agency({
 });
 ```
 
-Rules worth knowing:
+Because the four values are inherited one by one, set `provider`, `model` and
+the key together on every seat of a multi-vendor roster:
 
-- Keys resolve per seat: the seat's `apiKey`, else the agency's `apiKey`, else
-  the provider's environment variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-  `GEMINI_API_KEY`, and so on). A comma-separated key value becomes a rotating
-  key pool.
-- Options passed to `generate(prompt, options)` apply to every seat and to the
-  chair. A `model` or `provider` passed there replaces every seat's own
-  setting, so configure models on the roster, not per call.
-- Each seat keeps the default provider failover: when its primary fails with a
-  retryable error, the call is retried on other providers whose keys are in the
-  environment, and the seat's result reports the provider that answered. To pin
-  a seat to one provider, put a pre-built `agent({ ..., fallbackProviders: [] })`
-  in the roster.
-- `provider: 'anthropic'` with no Anthropic key but an `OPENROUTER_API_KEY` in
-  the environment is routed through OpenRouter as `anthropic/<model>` and
-  reports `provider: 'openrouter'`.
+- A seat that sets `provider` but not `model` inherits the agency's model id. An
+  Anthropic seat that inherits `gpt-6-astra` gets a 404 from Anthropic, which is
+  not retried on another provider, and the seat fails.
+- An agency-level `apiKey` or `baseUrl` is inherited by every config seat that
+  sets none, whatever that seat's provider. An OpenAI key sent to Anthropic gets
+  a 401; that error is retryable, so the seat silently fails over to another
+  provider. The inherited key also disables the Anthropic-through-OpenRouter
+  route described below.
+- A seat value set explicitly to `undefined` (for example
+  `apiKey: process.env.UNSET_VAR`) counts as set and blocks inheritance.
+
+Keys resolve per seat: the seat's `apiKey`, else the agency's `apiKey`, else a
+key set with `setDefaultProvider()`, else the provider's environment variable
+(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, and so on). A
+comma-separated key value becomes a rotating key pool. A seat with no key at
+all fails without failover, with one exception: `provider: 'anthropic'` with no
+Anthropic key but an `OPENROUTER_API_KEY` in the environment is routed through
+OpenRouter as `anthropic/<model>` and reports `provider: 'openrouter'`.
+
+Options passed to `generate(prompt, options)` apply to every seat and to the
+chair. A `model` or `provider` passed there replaces every seat's own setting,
+so configure models on the roster, not per call.
+
+Each seat keeps the default provider failover. When a seat's call fails with a
+retryable error (HTTP 401, 402, 403, 429, 5xx, a timeout), the call is retried
+on the providers whose keys are in the environment, in this order and on these
+models: OpenAI `gpt-5.6-sol`, Anthropic `claude-sonnet-5`, OpenRouter
+`openai/gpt-5.6-sol`, Gemini `gemini-3.1-pro-preview`; the seat's own provider
+is skipped. The seat's result then reports the provider that answered, but
+`agentCalls` does not record it. To pin every seat and the chair to their
+configured providers, pass `generate(prompt, { fallbackProviders: [] })`; to pin
+one seat, put a pre-built `agent({ ..., fallbackProviders: [] })` in the roster.
 
 The per-seat ledger `agentCalls` records each seat's name, input, output, tool
-calls, usage and duration. The result's top-level `provider` and `model` are the
-chair's (parallel, debate, hierarchical) or the last seat's (sequential, graph).
+calls, usage and duration; the chair's own call is not in it. The result's
+top-level `provider` and `model` are the chair's for parallel, debate and
+hierarchical, the last seat's for sequential, and the last result of the final
+tier for graph. review-loop results and `stream()` results carry neither.
 
 ---
 
@@ -309,24 +333,33 @@ console.log(agentCalls.map((c) => c.agent)); // the seats that answered
 
 - `minAgents`: how many seats must succeed. A seat succeeds when its call
   resolves and no HITL gate rejected it.
-- `minProviders`: how many distinct providers must be among the successful
-  seats. The count uses the `provider` each seat's result reports, which is the
+- `minProviders`: how many distinct provider ids must be among the successful
+  seats. The id is the `provider` each seat's result reports, which is the
   provider that answered: a seat served by its failover chain counts as the
-  failover provider.
+  failover provider. Ids are not vendors: OpenRouter is one provider whatever
+  model it serves, so an `openai` seat plus a seat that failed over to
+  OpenRouter's `openai/gpt-5.6-sol` leg passes `minProviders: 2` on one vendor.
 - `onShortfall`: `'error'` (default) throws [`AgencyQuorumError`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) before
-  synthesis; `'proceed'` logs a warning and synthesizes anyway.
+  synthesis; `'proceed'` logs a warning and synthesizes anyway. The error class
+  is not exported from the package entry point; test
+  `err.name === 'AgencyQuorumError'`.
 
-Two things the quorum does not check: a seat that returned empty text still
-counts as succeeded, and two seats on different models of one provider count as
-one provider. Only `parallel` enforces `quorum`.
+Three things the quorum does not check: a seat that returned empty text still
+counts as succeeded; two seats on different models of one provider count as
+one provider; and with `adaptive: true` the agency compiles the hierarchical
+strategy whatever `strategy` says, so the quorum is skipped without a warning.
+Only `parallel` enforces `quorum`.
 
 ### debate
 
-Agents argue and refine a shared answer over multiple rounds.  The number of
-rounds is controlled by `maxRounds` (default: 3).  Every round, each agent sees
-the full transcript of the rounds so far.  Requires an agency-level `model` for
-the judge that writes the verdict after the last round.  Putting the two sides
-on different vendors keeps one model from arguing with itself:
+Agents argue over `maxRounds` rounds (default: 3), speaking in roster order.
+The first speaker of round one gets the motion alone and writes an opening
+statement.  Every later turn gets the motion plus the transcript of all earlier
+turns, including the current round's, and must quote the strongest opposing
+claim, attack it and add one new point in about 150 words.  After the last
+round a judge built from the agency-level `model` or `provider` writes the
+verdict, so one of the two is required.  Putting the two sides on different
+vendors keeps one model from arguing with itself:
 
 ```typescript
 const debaters = agency({
