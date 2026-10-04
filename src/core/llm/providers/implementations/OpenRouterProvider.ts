@@ -700,6 +700,7 @@ export class OpenRouterProvider implements IProvider {
         payload
       );
     }
+    this.throwOnInBodyError(apiResponseData, modelId);
     return this.mapApiToCompletionResponse(apiResponseData, modelId);
   }
 
@@ -1386,6 +1387,38 @@ export class OpenRouterProvider implements IProvider {
         ...(details.readError !== undefined ? { readError: this.describeError(details.readError) } : {}),
       },
     );
+  }
+
+  /**
+   * A 200 body that reports a failure instead of an answer throws before
+   * mapping (spec R4), in this order: a body holding only `error` and no
+   * choice; a choice ended by `finish_reason: 'error'` with its own error
+   * object; a choice ended by `finish_reason: 'content_filter'` (the model
+   * declined as output). A choice with `finish_reason: 'error'` and no error
+   * object is not a documented shape and is mapped as before.
+   */
+  private throwOnInBodyError(body: OpenRouterChatCompletionAPIResponse, modelId: string): void {
+    const choices = Array.isArray(body.choices) ? body.choices : [];
+    const first = choices[0];
+    const usage = mapOpenRouterUsage(body.usage);
+    if (body.error && typeof body.error === 'object' && choices.length === 0) {
+      throw this.inBodyError(body.error, modelId, { responseId: body.id, usage });
+    }
+    if (first && first.finish_reason === 'error' && first.error && typeof first.error === 'object') {
+      throw this.inBodyError(first.error, modelId, {
+        responseId: body.id,
+        usage,
+        partialText: first.message?.content ?? null,
+      });
+    }
+    if (first && first.finish_reason === 'content_filter') {
+      throw this.declineError(modelId, { code: 'content_filter', nativeType: 'content_filter_finish' }, {
+        httpStatus: 200,
+        refusal: first.message?.refusal ?? null,
+        partialText: first.message?.content ?? null,
+        usage,
+      });
+    }
   }
 
   /**
