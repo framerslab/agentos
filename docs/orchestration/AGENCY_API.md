@@ -210,12 +210,13 @@ config entry, `model`, `provider`, `apiKey` and `baseUrl` set on the seat win
 over the agency-level values, and each of the four is inherited on its own when
 the seat leaves it out. A seat's `tools` are merged with the agency's `tools`,
 and the agency's `hitl.approvals.beforeTool` list is copied into every seat.
-Nothing else is inherited: `effort`, `thinking`, `maxTokens`, `instructions` and
-`output` apply to the seat that sets them, and agency-level `effort`,
-`thinking` and `maxTokens` reach neither the seats nor the chair. Agency-level
-`instructions` go to the chair (parallel), the judge (debate) and the
-coordinator (hierarchical). A pre-built `agent()` in the roster runs as it is
-and inherits nothing.
+Nothing else is inherited: `effort`, `thinking`, `maxTokens` and `instructions`
+apply to the seat that sets them, and agency-level `effort`, `thinking` and
+`maxTokens` reach neither the seats nor the chair. Agency-level `instructions`
+go to the chair (parallel), the judge (debate) and the coordinator
+(hierarchical). `output` is read at the agency level only: its schema is
+applied to the final text, and a seat's own `output` has no effect. A
+pre-built `agent()` in the roster runs as it is and inherits nothing.
 
 ```typescript
 const team = agency({
