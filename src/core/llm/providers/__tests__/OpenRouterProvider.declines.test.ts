@@ -177,3 +177,99 @@ describe('HTTP error responses (R3)', () => {
     expect(err.httpStatus).toBe(403);
   });
 });
+
+describe('HTTP 200 bodies, non-stream (R4)', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  it('an error-only body that is a decline throws the decline error with details.httpStatus 403', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: { id: 'gen-1', error: { code: 403, message: 'refused', metadata: { error_type: 'refusal' } } },
+    });
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('content_filter');
+    expect(err.httpStatus).toBeUndefined();
+    expect((err.details as { httpStatus?: number }).httpStatus).toBe(403);
+  });
+
+  it('an error-only body with code 403 and no error_type is a decline (the in-body row)', async () => {
+    const request = vi.fn().mockResolvedValueOnce({ data: { id: 'gen-1', error: { code: 403, message: 'Forbidden' } } });
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('content_policy_violation');
+    expect(err.openRouterErrorType).toBe('in_body_403');
+  });
+
+  it('an error-only body with code 502 throws a typed request failure with that status', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: { id: 'gen-1', error: { code: 502, message: 'Provider disconnected', metadata: { error_type: 'provider_unavailable' } } },
+    });
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err).toBeInstanceOf(OpenRouterProviderError);
+    expect(err.code).toBe('API_REQUEST_FAILED');
+    expect(err.httpStatus).toBe(502);
+    expect(err.openRouterErrorType).toBe('provider_unavailable');
+    expect(err.message).toMatch(/^\[502\] /);
+  });
+
+  it('a choice-level error keeps the partial text and the usage in details', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: {
+        id: 'gen-1', object: 'chat.completion', created: 1, model: MODEL,
+        choices: [{ index: 0, message: { role: 'assistant', content: 'partial output...' }, finish_reason: 'error',
+          error: { code: 502, message: 'Provider disconnected mid-stream', metadata: { error_type: 'provider_unavailable' } } }],
+        usage: USAGE,
+      },
+    });
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('API_REQUEST_FAILED');
+    expect(err.httpStatus).toBe(502);
+    const d = err.details as { partialText?: string; usage?: { promptTokens: number } };
+    expect(d.partialText).toBe('partial output...');
+    expect(d.usage?.promptTokens).toBe(120);
+  });
+
+  it('a choice-level error that is a decline throws the decline error', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: {
+        id: 'gen-1', object: 'chat.completion', created: 1, model: MODEL,
+        choices: [{ index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'error',
+          error: { code: 403, message: 'refused', metadata: { error_type: 'refusal' } } }],
+        usage: USAGE,
+      },
+    });
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('content_filter');
+    expect((err.details as { usage?: { promptTokens: number } }).usage?.promptTokens).toBe(120);
+  });
+
+  it('a content_filter finish throws the decline error with the refusal text and the usage', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: {
+        id: 'gen-1', object: 'chat.completion', created: 1, model: MODEL,
+        choices: [{ index: 0, message: { role: 'assistant', content: null, refusal: 'I cannot help with that.' }, finish_reason: 'content_filter' }],
+        usage: USAGE,
+      },
+    });
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('content_filter');
+    expect(err.openRouterErrorType).toBe('content_filter_finish');
+    const d = err.details as { refusal?: string; usage?: { promptTokens: number }; httpStatus?: number };
+    expect(d.refusal).toBe('I cannot help with that.');
+    expect(d.usage?.promptTokens).toBe(120);
+    expect(d.httpStatus).toBe(200);
+  });
+
+  it("a choice with finish_reason 'error' and no error object is returned as today", async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: {
+        id: 'gen-1', object: 'chat.completion', created: 1, model: MODEL,
+        choices: [{ index: 0, message: { role: 'assistant', content: 'half' }, finish_reason: 'error' }],
+        usage: USAGE,
+      },
+    });
+    const res = await makeProvider(request).generateCompletion(MODEL, messages, {});
+    expect(res.choices[0].message.content).toBe('half');
+    expect(res.choices[0].finishReason).toBe('error');
+  });
+});
