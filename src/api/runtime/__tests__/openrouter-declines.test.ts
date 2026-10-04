@@ -98,12 +98,32 @@ afterEach(() => {
 });
 
 const call = () => generateText({ provider: 'openrouter', model: MODEL, prompt: 'Hello?', fallbackProviders: CHAIN });
-const stream = async () => {
-  const r = streamText({ provider: 'openrouter', model: MODEL, prompt: 'Hello?', fallbackProviders: CHAIN });
+const collect = async (r: ReturnType<typeof streamText>) => {
   const parts: Array<{ type: string; text?: string }> = [];
   for await (const p of r.fullStream) parts.push(p as { type: string; text?: string });
   return { parts, text: await r.text, usage: await r.usage, finishReason: await r.finishReason };
 };
+const stream = () => collect(streamText({ provider: 'openrouter', model: MODEL, prompt: 'Hello?', fallbackProviders: CHAIN }));
+
+// Prompt-tool shim fixtures: a tool the shim can run, a round that calls it,
+// and a round the model refuses as output.
+const makePingTool = () => {
+  const execute = vi.fn(async () => ({ success: true, output: { ok: true } }));
+  const tool = Object.freeze({
+    id: 'ping',
+    name: 'ping',
+    displayName: 'Ping',
+    description: 'ping',
+    inputSchema: { type: 'object', properties: {} },
+    execute,
+  });
+  return { tool, execute };
+};
+const okBody = (content: string) => ({ data: { id: 'gen-ok', object: 'chat.completion', created: 1, model: MODEL, choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }], usage: USAGE } });
+const REFUSED_BODY = { data: { id: 'gen-1', object: 'chat.completion', created: 1, model: MODEL, choices: [{ index: 0, message: { role: 'assistant', content: null, refusal: 'no' }, finish_reason: 'content_filter' }], usage: USAGE } };
+const PING_CALL = '<tool_call>{"name":"ping","arguments":{}}</tool_call>';
+/** The mark generateText puts on an error once a tool has run (a walker reading it does not restart). */
+const TOOLS_RAN = Symbol.for('agentos.generateText.toolsRan');
 
 describe('OpenRouter declines through generateText', () => {
   it('HTTP 403 refusal: the next leg answers and the breaker stays closed', async () => {
@@ -152,6 +172,16 @@ describe('OpenRouter declines through generateText', () => {
     const result = await call();
     expect(result.text).toBe('from gemini');
     expect(result.usage.promptTokens).toBe(120 + 5);
+    // On a chainless call the error itself carries the partial text and the usage.
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce({
+      data: { id: 'gen-1', object: 'chat.completion', created: 1, model: MODEL,
+        choices: [{ index: 0, message: { role: 'assistant', content: 'par' }, finish_reason: 'error', error: { code: 403, message: 'refused', metadata: { error_type: 'refusal' } } }],
+        usage: USAGE },
+    });
+    await expect(generateText({ provider: 'openrouter', model: MODEL, prompt: 'Hello?', fallbackProviders: [] })).rejects.toMatchObject({
+      code: 'content_filter',
+      details: expect.objectContaining({ partialText: 'par', usage: expect.objectContaining({ promptTokens: 120 }) }),
+    });
   });
 
   it('a content_filter finish with usage: the next leg answers and the usage is counted once', async () => {
@@ -172,27 +202,47 @@ describe('OpenRouter declines through generateText', () => {
     expect(globalLLMProviderHealth.getStats('openrouter')?.failureCount).toBe(1);
   });
 
-  it('prompt-tool shim: a decline before any tool ran walks; a decline after a tool ran ends the call with the tools-ran mark', async () => {
-    const execute = vi.fn(async () => ({ success: true, output: { ok: true } }));
-    const tool = Object.freeze({
-      id: 'ping',
-      name: 'ping',
-      displayName: 'Ping',
-      description: 'ping',
-      inputSchema: { type: 'object', properties: {} },
-      execute,
+  it('an in-body 401 after the 200: the next leg answers and the breaker stays closed (one transient failure)', async () => {
+    // The 200 proves the configured key was accepted, so the 401 describes an
+    // upstream attempt. It must not open the breaker's auth policy (one
+    // failure, 30 minutes) the way an HTTP 401 does.
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce({
+      data: { id: 'gen-1', error: { code: 401, message: 'Invalid credentials', metadata: { error_type: 'authentication' } } },
     });
-    const ok = (content: string) => ({ data: { id: 'gen-ok', object: 'chat.completion', created: 1, model: MODEL, choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }], usage: USAGE } });
-    const refused = { data: { id: 'gen-1', object: 'chat.completion', created: 1, model: MODEL, choices: [{ index: 0, message: { role: 'assistant', content: null, refusal: 'no' }, finish_reason: 'content_filter' }], usage: USAGE } };
+    expect((await call()).text).toBe('from gemini');
+    expect(globalLLMProviderHealth.isOpen('openrouter')).toBe(false);
+    expect(globalLLMProviderHealth.getStats('openrouter')?.failureCount).toBe(1);
+  });
+
+  it('a choice-level 403 with a non-decline type: the next leg answers and the breaker stays closed', async () => {
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce({
+      data: { id: 'gen-1', object: 'chat.completion', created: 1, model: MODEL,
+        choices: [{ index: 0, message: { role: 'assistant', content: 'par' }, finish_reason: 'error', error: { code: 403, message: 'Blocked by a guardrail', metadata: { error_type: 'permission_denied' } } }],
+        usage: USAGE },
+    });
+    expect((await call()).text).toBe('from gemini');
+    expect(globalLLMProviderHealth.isOpen('openrouter')).toBe(false);
+  });
+
+  it('prompt-tool shim: a decline before any tool ran walks; a decline after a tool ran ends the call with the tools-ran mark', async () => {
+    const { tool, execute } = makePingTool();
     // Round 1 refuses, no tool ran: the walk reaches the next leg.
-    hoisted.state.openrouterRequest!.mockResolvedValueOnce(refused);
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce(REFUSED_BODY);
     const walked = await generateText({ provider: 'openrouter', model: MODEL, prompt: 'go', tools: [tool], toolMode: 'prompt', fallbackProviders: CHAIN });
     expect(walked.text).toBe('from gemini');
     expect(execute).not.toHaveBeenCalled();
     // Round 1 calls the tool, round 2 refuses: no walk, the tools-ran error.
     hoisted.state.geminiCalls = 0;
-    hoisted.state.openrouterRequest!.mockResolvedValueOnce(ok('<tool_call>{"name":"ping","arguments":{}}</tool_call>')).mockResolvedValueOnce(refused);
-    await expect(generateText({ provider: 'openrouter', model: MODEL, prompt: 'go', tools: [tool], toolMode: 'prompt', fallbackProviders: CHAIN })).rejects.toMatchObject({ code: 'content_filter' });
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce(okBody(PING_CALL)).mockResolvedValueOnce(REFUSED_BODY);
+    const err = await generateText({ provider: 'openrouter', model: MODEL, prompt: 'go', tools: [tool], toolMode: 'prompt', fallbackProviders: CHAIN }).then(
+      () => {
+        throw new Error('expected a throw');
+      },
+      (e: unknown) => e as Record<symbol, unknown> & { code?: string },
+    );
+    expect(err.code).toBe('content_filter');
+    // toMatchObject skips symbol keys, so the mark is read directly.
+    expect(err[TOOLS_RAN]).toBe(true);
     expect(execute).toHaveBeenCalledTimes(1);
     expect(hoisted.state.geminiCalls).toBe(0);
   });
@@ -250,5 +300,25 @@ describe('OpenRouter declines through streamText', () => {
     expect(r.parts.filter((p) => p.type === 'error')).toHaveLength(1);
     expect(r.parts.filter((p) => p.type === 'text').map((p) => p.text)).toEqual(['a']);
     expect(hoisted.state.geminiCalls).toBe(0);
+  });
+
+  it('prompt-tool shim: a decline before any tool ran walks to the next leg', async () => {
+    const { tool, execute } = makePingTool();
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce(REFUSED_BODY);
+    const r = await collect(streamText({ provider: 'openrouter', model: MODEL, prompt: 'go', tools: [tool] as never, toolMode: 'prompt', fallbackProviders: CHAIN }));
+    expect(r.text).toBe('from gemini');
+    expect(execute).not.toHaveBeenCalled();
+    expect(globalLLMProviderHealth.isOpen('openrouter')).toBe(false);
+  });
+
+  it('prompt-tool shim: a decline after a tool ran ends the stream with one error part and no second leg', async () => {
+    const { tool, execute } = makePingTool();
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce(okBody(PING_CALL)).mockResolvedValueOnce(REFUSED_BODY);
+    const r = await collect(streamText({ provider: 'openrouter', model: MODEL, prompt: 'go', tools: [tool] as never, toolMode: 'prompt', fallbackProviders: CHAIN }));
+    expect(r.parts.filter((p) => p.type === 'error')).toHaveLength(1);
+    expect(r.finishReason).toBe('error');
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(hoisted.state.geminiCalls).toBe(0);
+    expect(globalLLMProviderHealth.isOpen('openrouter')).toBe(false);
   });
 });

@@ -45,6 +45,21 @@ function sse(lines: string[]): NodeJS.ReadableStream {
   return Readable.from(lines.map((l) => Buffer.from(l + '\n\n')));
 }
 
+/**
+ * A response body that runs a step between lines, so a test can act (abort)
+ * after the provider has handled one line and before it reads the next.
+ * `Readable.from` reads ahead, which would run the step too early.
+ */
+function gated(steps: Array<string | (() => void)>): NodeJS.ReadableStream {
+  async function* body() {
+    for (const step of steps) {
+      if (typeof step === 'function') step();
+      else yield Buffer.from(step + '\n\n');
+    }
+  }
+  return body() as unknown as NodeJS.ReadableStream;
+}
+
 const USAGE = { prompt_tokens: 120, completion_tokens: 7, total_tokens: 127, cost: 0.0004 };
 
 async function thrown(p: Promise<unknown>): Promise<OpenRouterProviderError> {
@@ -118,6 +133,34 @@ describe('the decline error (R2)', () => {
     expect((d.upstreamMessage as string).length).toBeLessThanOrEqual(300);
     expect(d.upstreamMessage as string).not.toContain('key-a');
   });
+
+  it('caps the refusal at 300 characters and the partial text at 2,000', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: {
+        id: 'gen-1', object: 'chat.completion', created: 1, model: MODEL,
+        choices: [{ index: 0, message: { role: 'assistant', content: 'p'.repeat(2500), refusal: 'r'.repeat(400) }, finish_reason: 'content_filter' }],
+        usage: USAGE,
+      },
+    });
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    const d = err.details as { refusal?: string; partialText?: string };
+    expect(d.refusal).toBe('r'.repeat(300));
+    expect(d.partialText).toBe('p'.repeat(2000));
+  });
+
+  it('caps the partial text of an in-body error that is not a decline at 2,000 characters', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: {
+        id: 'gen-1', object: 'chat.completion', created: 1, model: MODEL,
+        choices: [{ index: 0, message: { role: 'assistant', content: 'p'.repeat(2500) }, finish_reason: 'error',
+          error: { code: 502, message: 'Provider disconnected', metadata: { error_type: 'provider_unavailable' } } }],
+        usage: USAGE,
+      },
+    });
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('API_REQUEST_FAILED');
+    expect((err.details as { partialText?: string }).partialText).toBe('p'.repeat(2000));
+  });
 });
 
 function okResponse() {
@@ -149,6 +192,33 @@ describe('HTTP error responses (R3)', () => {
     // weighted round-robin, so the next key drawn is not a usable signal.)
     const pool = (provider as unknown as { keyPool: { keys: Array<{ key: string; exhaustedUntil: number }> } }).keyPool;
     expect(pool.keys.map((k) => k.exhaustedUntil)).toEqual([0, 0]);
+  });
+
+  it('a decline body on a throttled status is thrown before the key cooldown and the retry', async () => {
+    // A 429 is the status the provider both cools a key on and retries, so this
+    // pins the order: the decline check runs first. (A 403 is neither cooled nor
+    // retried, so the case above cannot tell the two orders apart.)
+    const request = vi
+      .fn()
+      .mockRejectedValueOnce(axiosError(429, { error: { code: 429, message: 'refused', metadata: { error_type: 'refusal' } } }))
+      .mockResolvedValueOnce({ data: okResponse() });
+    const provider = makeProvider(request);
+    const err = await thrown(provider.generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('content_filter');
+    expect((err.details as { httpStatus?: number }).httpStatus).toBe(429);
+    expect(request).toHaveBeenCalledTimes(1);
+    const pool = (provider as unknown as { keyPool: { keys: Array<{ exhaustedUntil: number }> } }).keyPool;
+    expect(pool.keys.map((k) => k.exhaustedUntil)).toEqual([0, 0]);
+  });
+
+  it('an HTTP error that is not a decline takes its error type from metadata.error_type', async () => {
+    const request = vi.fn().mockRejectedValueOnce(
+      axiosError(400, { error: { code: 400, message: 'Bad request', metadata: { error_type: 'invalid_request' } } }),
+    );
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('API_REQUEST_FAILED');
+    expect(err.httpStatus).toBe(400);
+    expect(err.openRouterErrorType).toBe('invalid_request');
   });
 
   it('keeps a 403 with no decline type as the auth-class request failure', async () => {
@@ -233,14 +303,71 @@ describe('HTTP 200 bodies, non-stream (R4)', () => {
     const request = vi.fn().mockResolvedValueOnce({
       data: {
         id: 'gen-1', object: 'chat.completion', created: 1, model: MODEL,
-        choices: [{ index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'error',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'par' }, finish_reason: 'error',
           error: { code: 403, message: 'refused', metadata: { error_type: 'refusal' } } }],
         usage: USAGE,
       },
     });
     const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
     expect(err.code).toBe('content_filter');
-    expect((err.details as { usage?: { promptTokens: number } }).usage?.promptTokens).toBe(120);
+    const d = err.details as { usage?: { promptTokens: number }; partialText?: string };
+    expect(d.usage?.promptTokens).toBe(120);
+    expect(d.partialText).toBe('par');
+  });
+
+  it('an in-body error whose message is not a string still throws the typed request failure', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: { id: 'gen-1', error: { code: 502, message: { detail: 'upstream reset' } } },
+    });
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err).toBeInstanceOf(OpenRouterProviderError);
+    expect(err.code).toBe('API_REQUEST_FAILED');
+    expect(err.httpStatus).toBe(502);
+    expect(err.message).toMatch(/^\[502\] /);
+  });
+
+  it('an in-body error with a string code carries no status', async () => {
+    const request = vi.fn().mockResolvedValueOnce({ data: { id: 'gen-1', error: { code: '502', message: 'down' } } });
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('API_REQUEST_FAILED');
+    expect(err.httpStatus).toBeUndefined();
+    expect(err.message).toBe('down');
+  });
+
+  it('an in-body 401 that is not a decline carries no status: the 200 proves the key was accepted', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: { id: 'gen-1', error: { code: 401, message: 'Invalid credentials', metadata: { error_type: 'authentication' } } },
+    });
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('API_REQUEST_FAILED');
+    expect(err.httpStatus).toBeUndefined();
+    expect(err.openRouterErrorType).toBe('authentication');
+    // The code stays in the message for the retry classifiers, but not as the
+    // `[NNN]` prefix the breaker reads a status from.
+    expect(err.message).toMatch(/\b401\b/);
+    expect(err.message).not.toMatch(/^\[\d{3}\]/);
+    expect((err.details as { httpStatus?: number }).httpStatus).toBe(401);
+  });
+
+  it('a choice-level 403 with a non-decline error type carries no status either', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: {
+        id: 'gen-1', object: 'chat.completion', created: 1, model: MODEL,
+        choices: [{ index: 0, message: { role: 'assistant', content: 'par' }, finish_reason: 'error',
+          error: { code: 403, message: 'Blocked by a guardrail', metadata: { error_type: 'permission_denied' } } }],
+        usage: USAGE,
+      },
+    });
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('API_REQUEST_FAILED');
+    expect(err.httpStatus).toBeUndefined();
+    expect(err.openRouterErrorType).toBe('permission_denied');
+    expect(err.message).toMatch(/\b403\b/);
+    expect(err.message).not.toMatch(/^\[\d{3}\]/);
+    const d = err.details as { httpStatus?: number; partialText?: string; usage?: { promptTokens: number } };
+    expect(d.httpStatus).toBe(403);
+    expect(d.partialText).toBe('par');
+    expect(d.usage?.promptTokens).toBe(120);
   });
 
   it('a content_filter finish throws the decline error with the refusal text and the usage', async () => {
@@ -353,18 +480,75 @@ describe('streams (R5)', () => {
     expect(out.some((c) => c.responseTextDelta === 'ok')).toBe(true);
   });
 
-  it('an abort during the usage wait yields the abort chunk and throws nothing', async () => {
+  it('an abort during the usage wait yields the abort chunk and throws nothing, even when no further line arrives', async () => {
+    // The filter line is handled (the decline is held), then the caller aborts
+    // and the stream ends. Only a held decline can throw here, so a clean drain
+    // proves the abort won.
     const controller = new AbortController();
-    const slow = new Readable({
-      read() {
-        this.push(Buffer.from(filterChunk + '\n\n'));
-        controller.abort();
-        this.push(Buffer.from(usageChunk + '\n\n'));
-        this.push(null);
-      },
-    });
-    const request = vi.fn().mockResolvedValueOnce({ data: slow });
+    const request = vi.fn().mockResolvedValueOnce({ data: gated([filterChunk, () => controller.abort()]) });
     const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, { abortSignal: controller.signal }))) as Array<{ error?: { type?: string } }>;
-    expect(out.at(-1)?.error?.type).toBe('abort');
+    expect(out).toHaveLength(1);
+    expect(out[0]?.error?.type).toBe('abort');
+  });
+
+  it('an abort after the usage chunk arrived keeps that usage on the abort chunk', async () => {
+    const controller = new AbortController();
+    const request = vi.fn().mockResolvedValueOnce({ data: gated([filterChunk, usageChunk, () => controller.abort(), 'data: [DONE]']) });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, { abortSignal: controller.signal }))) as Array<{ error?: { type?: string }; isFinal?: boolean; usage?: { promptTokens: number } }>;
+    expect(out).toHaveLength(1);
+    expect(out[0]?.error?.type).toBe('abort');
+    expect(out[0]?.isFinal).toBe(true);
+    expect(out[0]?.usage?.promptTokens).toBe(120);
+  });
+
+  it('an abort before the first chunk closes the response stream', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const body = sse([textChunk('never')]) as Readable;
+    const request = vi.fn().mockResolvedValueOnce({ data: body });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, { abortSignal: controller.signal }))) as Array<{ error?: { type?: string } }>;
+    expect(out).toHaveLength(1);
+    expect(out[0]?.error?.type).toBe('abort');
+    expect(body.destroyed).toBe(true);
+  });
+
+  it('a non-decline error event during the usage wait does not replace the held decline', async () => {
+    const request = vi.fn().mockResolvedValueOnce({ data: sse([filterChunk, usageChunk, upstreamEvent, 'data: [DONE]']) });
+    const gen = makeProvider(request).generateCompletionStream(MODEL, messages, {});
+    const seen: Array<{ error?: { type?: string } }> = [];
+    let caught: OpenRouterProviderError | undefined;
+    try {
+      for await (const c of gen) seen.push(c as { error?: { type?: string } });
+    } catch (e) {
+      caught = e as OpenRouterProviderError;
+    }
+    expect(seen).toEqual([]);
+    expect(caught?.code).toBe('content_filter');
+    const d = caught?.details as { usage?: { promptTokens: number }; readError?: { message: string } };
+    expect(d.usage?.promptTokens).toBe(120);
+    expect(d.readError?.message).toContain('Provider disconnected');
+  });
+
+  it('a line that parses but is not a completion chunk is skipped, as before', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: sse([
+        'data: null',
+        'data: {"id":"g","object":"chat.completion.chunk"}',
+        textChunk('ok'),
+        chunk({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+        usageChunk,
+        'data: [DONE]',
+      ]),
+    });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ responseTextDelta?: string; usage?: { promptTokens: number } }>;
+    expect(out.some((c) => c.responseTextDelta === 'ok')).toBe(true);
+    expect(out.at(-1)?.usage?.promptTokens).toBe(120);
+  });
+
+  it('a stream that delivered more than 2,000 characters carries at most 2,000 as partial text', async () => {
+    const request = vi.fn().mockResolvedValueOnce({ data: sse([textChunk('x'.repeat(2500)), filterChunk, usageChunk, 'data: [DONE]']) });
+    const err = await thrown(drain(makeProvider(request).generateCompletionStream(MODEL, messages, {})));
+    expect(err.code).toBe('content_filter');
+    expect((err.details as { partialText?: string }).partialText).toBe('x'.repeat(2000));
   });
 });
