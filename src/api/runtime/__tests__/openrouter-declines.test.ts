@@ -173,19 +173,27 @@ describe('OpenRouter declines through generateText', () => {
   });
 
   it('prompt-tool shim: a decline before any tool ran walks; a decline after a tool ran ends the call with the tools-ran mark', async () => {
-    const tool = { name: 'ping', description: 'ping', parameters: { type: 'object', properties: {} }, execute: vi.fn(async () => ({ ok: true })) };
+    const execute = vi.fn(async () => ({ success: true, output: { ok: true } }));
+    const tool = Object.freeze({
+      id: 'ping',
+      name: 'ping',
+      displayName: 'Ping',
+      description: 'ping',
+      inputSchema: { type: 'object', properties: {} },
+      execute,
+    });
     const ok = (content: string) => ({ data: { id: 'gen-ok', object: 'chat.completion', created: 1, model: MODEL, choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }], usage: USAGE } });
     const refused = { data: { id: 'gen-1', object: 'chat.completion', created: 1, model: MODEL, choices: [{ index: 0, message: { role: 'assistant', content: null, refusal: 'no' }, finish_reason: 'content_filter' }], usage: USAGE } };
     // Round 1 refuses, no tool ran: the walk reaches the next leg.
     hoisted.state.openrouterRequest!.mockResolvedValueOnce(refused);
     const walked = await generateText({ provider: 'openrouter', model: MODEL, prompt: 'go', tools: [tool], toolMode: 'prompt', fallbackProviders: CHAIN });
     expect(walked.text).toBe('from gemini');
-    expect(tool.execute).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
     // Round 1 calls the tool, round 2 refuses: no walk, the tools-ran error.
     hoisted.state.geminiCalls = 0;
     hoisted.state.openrouterRequest!.mockResolvedValueOnce(ok('<tool_call>{"name":"ping","arguments":{}}</tool_call>')).mockResolvedValueOnce(refused);
     await expect(generateText({ provider: 'openrouter', model: MODEL, prompt: 'go', tools: [tool], toolMode: 'prompt', fallbackProviders: CHAIN })).rejects.toMatchObject({ code: 'content_filter' });
-    expect(tool.execute).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledTimes(1);
     expect(hoisted.state.geminiCalls).toBe(0);
   });
 });
