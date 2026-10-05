@@ -91,6 +91,35 @@ function errorChunk(error: Record<string, unknown>, usage?: Usage) {
 
 const status = (code: number, message = 'failed') => Object.assign(new Error(`[${code}] ${message}`), { httpStatus: code });
 
+/** A step's final chunk that asks for the `lookup` tool, ending the step with a tool call. */
+function toolCallChunk() {
+  return {
+    id: 'calls',
+    object: 'chat.completion.chunk',
+    created: 1,
+    modelId: 'm',
+    choices: [{
+      index: 0,
+      message: {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'lookup', arguments: '{}' } }],
+      },
+      finishReason: 'tool_calls',
+    }],
+    isFinal: true,
+    usage: used(5, 2),
+  };
+}
+
+const LOOKUP = {
+  lookup: {
+    description: 'Looks something up',
+    parameters: { type: 'object', properties: {} },
+    execute: async () => ({ found: true }),
+  },
+};
+
 type Part = { type: string; text?: string; error?: unknown };
 
 async function collect(r: ReturnType<typeof streamText>) {
@@ -306,6 +335,67 @@ describe('a provider error chunk', () => {
     const r = await collect(streamText({ provider: 'gemini', model: 'gemini-x', prompt: 'hi', fallbackProviders: [LEGS[0]!] }));
     expect(r.text).toBe('rescued');
     expect(globalLLMProviderHealth.getStats('gemini')?.failureCount).toBe(1);
+  });
+});
+
+describe('a stream that ends after a completed step', () => {
+  it("keeps the completed step's text when the next step's first chunk is an error", async () => {
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { yield textChunk('A '); yield toolCallChunk(); })
+      .mockImplementationOnce(async function* () {
+        yield errorChunk({ message: '[502] Provider disconnected', type: 'upstream_error' });
+      });
+    const r = await collect(streamText({
+      provider: 'openai', model: 'gpt-5.5', prompt: 'hi', maxSteps: 2, tools: LOOKUP, fallbackProviders: LEGS,
+    }));
+    expect(r.resultText).toBe('A ');
+    expect(r.errors).toHaveLength(1);
+    expect(r.finishReason).toBe('error');
+    expect(hoisted.generateCompletionStream).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the completed step's text when the next step throws before any text, and does not walk", async () => {
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { yield textChunk('A '); yield toolCallChunk(); })
+      .mockImplementationOnce(async function* () { throw status(502); });
+    const r = await collect(streamText({
+      provider: 'openai', model: 'gpt-5.5', prompt: 'hi', maxSteps: 2, tools: LOOKUP, fallbackProviders: LEGS,
+    }));
+    expect(r.resultText).toBe('A ');
+    expect(r.errors).toHaveLength(1);
+    expect(r.finishReason).toBe('error');
+    expect(hoisted.generateCompletionStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('settles the text of the step in progress, not both steps, when that step errors after text', async () => {
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { yield textChunk('A '); yield toolCallChunk(); })
+      .mockImplementationOnce(async function* () {
+        yield textChunk('B ');
+        yield errorChunk({ message: '[502] Provider disconnected', type: 'upstream_error' });
+      });
+    const r = await collect(streamText({
+      provider: 'openai', model: 'gpt-5.5', prompt: 'hi', maxSteps: 2, tools: LOOKUP, fallbackProviders: LEGS,
+    }));
+    expect(r.text).toBe('A B ');
+    expect(r.resultText).toBe('B ');
+    expect(r.finishReason).toBe('error');
+  });
+
+  it('keeps the text a hook rewrote when the consumer leaves between steps', async () => {
+    hoisted.generateCompletionStream.mockImplementationOnce(async function* () {
+      yield textChunk('Checking. ');
+      yield toolCallChunk();
+    });
+    const r = streamText({
+      provider: 'openai', model: 'gpt-5.5', prompt: 'hi', maxSteps: 2, tools: LOOKUP,
+      onAfterGeneration: async (step) => (step.toolCalls.length ? { ...step, text: 'REWRITTEN' } : step),
+    });
+    for await (const part of r.fullStream) {
+      if (part.type === 'tool-call') break;
+    }
+    expect(await r.text).toBe('REWRITTEN');
+    expect(hoisted.generateCompletionStream).toHaveBeenCalledTimes(1);
   });
 });
 
