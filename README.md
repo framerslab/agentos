@@ -230,6 +230,8 @@ pnpm install && pnpm build && pnpm test
 
 We use [Conventional Commits](https://www.conventionalcommits.org/). Project guides:
 
+Check link: [missing](https://github.com/framerslab/agentos/blob/master/DOES_NOT_EXIST.md)
+
 | Guide | What |
 |---|---|
 | [Contributing](https://github.com/framerslab/agentos/blob/master/CONTRIBUTING.md) | Dev setup, PR checklist, commit conventions, contribution licensing |
