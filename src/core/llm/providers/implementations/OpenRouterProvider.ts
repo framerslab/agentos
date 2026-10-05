@@ -324,6 +324,15 @@ function isContextWindowRejection(errorType: string | undefined, code: number | 
   return code === 400 && /maximum context length is \d+ tokens/i.test(message);
 }
 
+/**
+ * A string error code that names a class (`server_error`), kept as the error's
+ * code. A number in a string (`'502'`) is not one: it is neither a status the
+ * registry should read nor a class the retry classifier knows.
+ */
+function namedErrorCode(code: unknown): string | undefined {
+  return typeof code === 'string' && /^[a-z][a-z0-9_]*$/i.test(code) ? code : undefined;
+}
+
 /** How OpenRouter declined a request, read from its error envelope. */
 export interface OpenRouterDecline {
   /**
@@ -977,9 +986,7 @@ export class OpenRouterProvider implements IProvider {
             const chunkCode =
               isContextWindowRejection(errType, typeof errCode === 'number' ? errCode : undefined, errMessage)
                 ? CONTEXT_WINDOW_EXCEEDED_CODE
-                : typeof errCode === 'string'
-                  ? errCode
-                  : undefined;
+                : namedErrorCode(errCode);
             if (held) {
               // The answer already ended on a content_filter finish. A later
               // upstream failure is the end of the read: it neither replaces
@@ -1580,9 +1587,9 @@ export class OpenRouterProvider implements IProvider {
     extra: { responseId?: string; usage?: ModelUsage; partialText?: string | null },
   ): OpenRouterProviderError {
     const code = typeof error.code === 'number' ? error.code : undefined;
-    // A string code (`server_error`) is kept as the error's code, as a stream
-    // error event's is, so the retry classifier reads it.
-    const stringCode = typeof error.code === 'string' && error.code ? error.code : undefined;
+    // A named string code (`server_error`) is kept as the error's code, as a
+    // stream error event's is, so the retry classifier reads it.
+    const stringCode = namedErrorCode(error.code);
     const decline = classifyOpenRouterDecline(error, { inBody: true });
     if (decline) {
       return this.declineError(modelId, decline, {

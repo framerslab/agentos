@@ -668,4 +668,10 @@ describe('streams', () => {
     const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { code?: unknown } }>;
     expect(out.at(-1)?.error?.code).toBe('CONTEXT_WINDOW_EXCEEDED');
   });
+
+  it('drops a number in a string from a stream error chunk, as the 200-body path does', async () => {
+    const request = vi.fn().mockResolvedValueOnce({ data: sse([errorEvent({ code: '502', message: 'down' })]) });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { code?: unknown } }>;
+    expect(out.at(-1)?.error?.code).toBeUndefined();
+  });
 });
