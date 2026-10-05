@@ -29,6 +29,15 @@ function runInNode(body: string): string {
   return execFileSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8' });
 }
 
+/** The class logs to stdout as it works, so the script marks its own result line. */
+const RESULT_MARK = 'NODE_ESM_RESULT ';
+
+function readResult<T>(stdout: string): T {
+  const line = stdout.split('\n').find((l) => l.startsWith(RESULT_MARK));
+  if (!line) throw new Error(`no result line in the child's output:\n${stdout}`);
+  return JSON.parse(line.slice(RESULT_MARK.length)) as T;
+}
+
 describe.skipIf(!existsSync(builtModule))('StatisticalUtilityAI built for plain Node ESM', () => {
   it('constructs, tokenizes with natural, and detects a French passage', () => {
     const out = runInNode(`
@@ -38,9 +47,9 @@ describe.skipIf(!existsSync(builtModule))('StatisticalUtilityAI built for plain 
           'Ils sont doués de raison et de conscience et doivent agir les uns envers les autres.',
         { maxCandidates: 1 },
       );
-      process.stdout.write(JSON.stringify({ tokens: tokens.length, language: top.language }));
+      process.stdout.write('\\n${RESULT_MARK}' + JSON.stringify({ tokens: tokens.length, language: top.language }) + '\\n');
     `);
-    const result = JSON.parse(out) as { tokens: number; language: string };
+    const result = readResult<{ tokens: number; language: string }>(out);
     expect(result.tokens).toBeGreaterThan(0);
     expect(result.language).toBe('fr');
   });
