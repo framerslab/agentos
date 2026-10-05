@@ -8,7 +8,9 @@
  * exports built at run time) arrives as `default` only. This suite runs the
  * built module in a child Node process, the way such a consumer does.
  *
- * CI builds before it tests; without a build the suite is skipped.
+ * CI builds before it tests, and there the suite always runs: a missing build
+ * fails it instead of skipping it. On a machine without a build it is skipped
+ * (run `pnpm run build` first to check the current source).
  */
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -38,7 +40,9 @@ function readResult<T>(stdout: string): T {
   return JSON.parse(line.slice(RESULT_MARK.length)) as T;
 }
 
-describe.skipIf(!existsSync(builtModule))('StatisticalUtilityAI built for plain Node ESM', () => {
+const inCI = Boolean(process.env.CI);
+
+describe.skipIf(!inCI && !existsSync(builtModule))('StatisticalUtilityAI built for plain Node ESM', () => {
   it('constructs, tokenizes with natural, and detects a French passage', () => {
     const out = runInNode(`
       const tokens = await utility.tokenize('The quick brown fox jumps');
