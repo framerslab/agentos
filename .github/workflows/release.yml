@@ -86,12 +86,3 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: pnpm exec semantic-release
-
-      - name: Trigger docs rebuild
-        if: success() && steps.guard.outputs.should_release == 'true'
-        run: |
-          curl -X POST \
-            -H "Accept: application/vnd.github.v3+json" \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/framersai/agentos-live-docs/dispatches \
-            -d '{"event_type":"docs-rebuild"}' || true
