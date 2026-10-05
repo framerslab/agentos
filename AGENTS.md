@@ -23,7 +23,7 @@ Instructions for coding agents working in this repository. People contributing b
 
 ## Toolchain
 
-CI uses Node 20 and pnpm 10. TypeScript with Bundler module resolution; the package is ESM (`"type": "module"`).
+CI uses Node 22 and pnpm 10. TypeScript with Bundler module resolution; the package is ESM (`"type": "module"`).
 
 ## Commands
 
