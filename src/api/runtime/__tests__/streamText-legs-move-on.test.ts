@@ -6,7 +6,8 @@
  * prompt-emulated tools ran, or that walked every entry after it, ends the
  * walk; the consumer sees one terminal error at most; a provider error chunk
  * before any output is a failure of the attempt, not the end of the stream;
- * each attempt meters its own usage once.
+ * each attempt meters its own usage once; the result text holds what the
+ * consumer received when the stream ends mid-step.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -99,6 +100,7 @@ async function collect(r: ReturnType<typeof streamText>) {
     parts,
     text: parts.filter((p) => p.type === 'text').map((p) => p.text).join(''),
     errors: parts.filter((p) => p.type === 'error'),
+    resultText: await r.text,
     finishReason: await r.finishReason,
     usage: await r.usage,
   };
@@ -208,10 +210,27 @@ describe('a leg that fails after output', () => {
       });
     const r = await collect(streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'hi', fallbackProviders: LEGS }));
     expect(r.text).toBe('partial ');
+    expect(r.resultText).toBe('partial ');
     expect(r.errors).toHaveLength(1);
     expect(r.finishReason).toBe('error');
     expect(hoisted.generateCompletionStream).toHaveBeenCalledTimes(2);
     expect(count('fallback_succeeded')).toBe(0);
+    expect(count('fallback_failed_after_output')).toBe(1);
+  });
+
+  it('settles the result text with what the leg delivered before its error chunk', async () => {
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { throw status(503); })
+      .mockImplementationOnce(async function* () {
+        yield textChunk('half ');
+        yield errorChunk({ message: '[502] Provider disconnected', type: 'upstream_error' });
+      });
+    const r = await collect(streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'hi', fallbackProviders: LEGS }));
+    expect(r.text).toBe('half ');
+    expect(r.resultText).toBe('half ');
+    expect(r.errors).toHaveLength(1);
+    expect(r.finishReason).toBe('error');
+    expect(hoisted.generateCompletionStream).toHaveBeenCalledTimes(2);
     expect(count('fallback_failed_after_output')).toBe(1);
   });
 });
@@ -250,6 +269,7 @@ describe('a provider error chunk', () => {
     });
     const r = await collect(streamText({ provider: 'openrouter', model: 'x', prompt: 'hi', fallbackProviders: LEGS }));
     expect(r.text).toBe('half ');
+    expect(r.resultText).toBe('half ');
     expect(r.errors).toHaveLength(1);
     expect(r.finishReason).toBe('error');
     expect(hoisted.generateCompletionStream).toHaveBeenCalledTimes(1);
@@ -323,6 +343,8 @@ describe('usage', () => {
     // The second leg had reported no usage when the consumer left; the
     // primary and the first leg had.
     expect((await r.usage).totalTokens).toBe(30);
+    // The text is what the consumer received before it left.
+    expect(await r.text).toBe('first ');
   });
 
   it('meters each attempt once on a walk that no leg serves', async () => {

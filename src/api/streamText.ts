@@ -174,7 +174,12 @@ export interface StreamTextResult {
   textStream: AsyncIterable<string>;
   /** Async iterable that yields all {@link StreamPart} events in order. */
   fullStream: AsyncIterable<StreamPart>;
-  /** Resolves to the fully assembled assistant reply when the stream completes. */
+  /**
+   * Resolves to the assembled assistant reply when the stream completes: the
+   * text of the latest step that produced any. A stream that ends mid-step,
+   * on an error after output or because the consumer stopped reading,
+   * resolves to the text that step delivered.
+   */
   text: Promise<string>;
   /** Resolves to aggregated {@link TokenUsage} when the stream completes. */
   usage: Promise<TokenUsage>;
@@ -384,6 +389,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     // that reports the step's cumulative usage is not counted twice.
     let stepUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     let finalText = '';
+    // Text of the step in progress, as the consumer received it. A stream
+    // that ends mid-step reports it as its text: the consumer already has it.
+    let stepTextSoFar = '';
     let metricStatus: 'ok' | 'error' = 'ok';
     // True once a provider-fallback leg ran, served or failed. Each leg is a
     // recursive streamText call that meters its own attempt (usage-observer
@@ -796,6 +804,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         );
 
         const reconstructor = new StreamingReconstructor();
+        stepTextSoFar = '';
 
         try {
           for await (const chunk of stream) {
@@ -814,6 +823,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             if (textDelta) {
               const part: StreamPart = { type: 'text', text: textDelta };
               parts.push(part);
+              stepTextSoFar += textDelta;
               yield part;
               streamedAnyText = true;
             }
@@ -917,7 +927,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               parts.push(part);
               yield part;
               metricStatus = 'error';
-              resolveText!(finalText);
+              resolveText!(stepTextSoFar || finalText);
               resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
               resolveToolCalls!(allToolCalls);
               resolveFinishReason!('error');
@@ -998,6 +1008,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         if (effectiveStepText) {
           finalText = effectiveStepText;
         }
+        // The step's text is settled; finalText reports it from here on.
+        stepTextSoFar = '';
 
         if (!streamedToolCalls || streamedToolCalls.length === 0) {
           const stepFinish = normalizeStreamFinishReason(lastStepFinishReason);
@@ -1325,8 +1337,11 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             } finally {
               // This call's result usage covers every attempt, a leg the
               // consumer abandoned mid-stream included: closing the loop
-              // above ran the leg's finally, which settled its usage.
+              // above ran the leg's finally, which settled its usage and its
+              // text. The leg's text is what the consumer received from it,
+              // served, failed after output or abandoned.
               addTokenUsage(usage, await fallbackResult.usage);
+              finalText = await fallbackResult.text;
             }
 
             if (legError) {
@@ -1344,7 +1359,6 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               continue;
             }
 
-            finalText = await fallbackResult.text;
             // Adopt the leg's response identity: the leg is the run that
             // answered.
             const fbResponseModel = await fallbackResult.responseModel;
@@ -1442,7 +1456,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         const part: StreamPart = { type: 'error', error: terminal };
         parts.push(part);
         yield part;
-        resolveText!(finalText);
+        resolveText!(stepTextSoFar || finalText);
         resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
         resolveToolCalls!(allToolCalls);
         resolveFinishReason!('error');
@@ -1458,7 +1472,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // to await text/usage/toolCalls without hanging. Values reflect what
       // streamed before the abandonment; normal completions already settled
       // these, making the calls no-ops (first settle wins).
-      resolveText!(finalText);
+      resolveText!(stepTextSoFar || finalText);
       resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
       resolveToolCalls!(allToolCalls);
       resolveProviderId!(recordedProviderId ?? '');
