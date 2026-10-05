@@ -307,6 +307,23 @@ function parseErrorBody(text: string): unknown {
   }
 }
 
+/**
+ * Whether an OpenRouter error is a request larger than the model's context
+ * window. Once a provider took the request, OpenRouter types it
+ * `context_length_exceeded`. Its own check before routing answers HTTP 400
+ * with no type, only the message: "This endpoint's maximum context length is
+ * 16384 tokens. However, you requested about 33760 tokens ..." (observed
+ * 2026-10-05, for streamed and plain requests alike).
+ *
+ * @param errorType - The typed code, when the error carries one.
+ * @param code - The HTTP status, or the numeric code inside a 200 body or event.
+ * @param message - The error's message as OpenRouter sent it.
+ */
+function isContextWindowRejection(errorType: string | undefined, code: number | undefined, message: string): boolean {
+  if (errorType === 'context_length_exceeded') return true;
+  return code === 400 && /maximum context length is \d+ tokens/i.test(message);
+}
+
 /** How OpenRouter declined a request, read from its error envelope. */
 export interface OpenRouterDecline {
   /**
@@ -958,7 +975,7 @@ export class OpenRouterProvider implements IProvider {
             // A context-window rejection, or a string code such as
             // `server_error`, rides the chunk's `code` for the walkers.
             const chunkCode =
-              errType === 'context_length_exceeded'
+              isContextWindowRejection(errType, typeof errCode === 'number' ? errCode : undefined, errMessage)
                 ? CONTEXT_WINDOW_EXCEEDED_CODE
                 : typeof errCode === 'string'
                   ? errCode
@@ -1433,7 +1450,7 @@ export class OpenRouterProvider implements IProvider {
         const decoratedMessage = this.redactSecrets(statusCode ? `[${statusCode}] ${errorMessage}` : errorMessage);
         lastError = new OpenRouterProviderError(
           decoratedMessage,
-          errorType === 'context_length_exceeded' ? CONTEXT_WINDOW_EXCEEDED_CODE : 'API_REQUEST_FAILED',
+          isContextWindowRejection(errorType, statusCode, errorMessage) ? CONTEXT_WINDOW_EXCEEDED_CODE : 'API_REQUEST_FAILED',
           statusCode,
           errorType,
           {
@@ -1563,6 +1580,9 @@ export class OpenRouterProvider implements IProvider {
     extra: { responseId?: string; usage?: ModelUsage; partialText?: string | null },
   ): OpenRouterProviderError {
     const code = typeof error.code === 'number' ? error.code : undefined;
+    // A string code (`server_error`) is kept as the error's code, as a stream
+    // error event's is, so the retry classifier reads it.
+    const stringCode = typeof error.code === 'string' && error.code ? error.code : undefined;
     const decline = classifyOpenRouterDecline(error, { inBody: true });
     if (decline) {
       return this.declineError(modelId, decline, {
@@ -1595,7 +1615,9 @@ export class OpenRouterProvider implements IProvider {
     const inBodyAuth = code === 401 || code === 403;
     return new OpenRouterProviderError(
       code === undefined ? message : inBodyAuth ? `OpenRouter in-body error ${code}: ${message}` : `[${code}] ${message}`,
-      errorType === 'context_length_exceeded' ? CONTEXT_WINDOW_EXCEEDED_CODE : 'API_REQUEST_FAILED',
+      isContextWindowRejection(errorType, code, message)
+        ? CONTEXT_WINDOW_EXCEEDED_CODE
+        : (stringCode ?? 'API_REQUEST_FAILED'),
       inBodyAuth ? undefined : code,
       errorType ?? 'UNKNOWN_API_ERROR',
       {
