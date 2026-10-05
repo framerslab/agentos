@@ -7,7 +7,7 @@ Maintainers review and merge changes, triage issues, and own the long-term healt
 | Johnny Dunn | [@jddunn](https://github.com/jddunn) | Runtime, cognitive memory, orchestration, releases |
 | Victor Evogor | [@Victor-Evogor](https://github.com/Victor-Evogor) | Orchestration, core runtime |
 
-Review routing is defined in [.github/CODEOWNERS](.github/CODEOWNERS).
+Review routing is defined in [.github/CODEOWNERS](.github/CODEOWNERS). A maintainer adds a provider integration's owner there once that person has write access.
 
 ## Becoming a maintainer
 

@@ -1,130 +1,52 @@
 # Releasing @framers/agentos
 
-> Last updated: 2026-02-09
+Releases are automated. A maintainer releases by merging a pull request to `master`; nobody publishes by hand.
 
-This document describes the release process for the AgentOS package.
+## What happens on a merge
 
----
+1. CI ([`ci.yml`](https://github.com/framerslab/agentos/blob/master/.github/workflows/ci.yml)) runs on the merge commit.
+2. When CI succeeds, the release workflow ([`release.yml`](https://github.com/framerslab/agentos/blob/master/.github/workflows/release.yml)) starts. It stops if `master` has moved past the commit CI tested; the newer commit's own CI run releases it.
+3. [semantic-release](https://semantic-release.gitbook.io/) reads every commit since the last tag and decides the version with the rules below. With no releasing commit, nothing publishes.
+4. On a release, npm runs `prepublishOnly` (`build:knowledge`, `build`, `verify:exports`) and publishes `@framers/agentos`. semantic-release then commits `CHANGELOG.md`, `package.json` and the test-count badge as `chore(release): <version> [skip ci]`, tags `v<version>` and creates a GitHub release with the generated notes.
 
-## Automated Releases
+## Version rules
 
-Releases are **fully automated** using [semantic-release](https://semantic-release.gitbook.io/). When you push commits to `master`, the release workflow analyzes your commit messages and automatically:
+AgentOS is 0.x, so the rules in [`release.config.js`](https://github.com/framerslab/agentos/blob/master/release.config.js) are conservative:
 
-1. Determines the next version number
-2. Generates release notes
-3. Updates CHANGELOG.md
-4. Publishes to npm
-5. Creates a GitHub Release with the tag
+| Commit | Release | Example |
+|---|---|---|
+| `fix:`, `feat:`, `perf:`, `refactor:`, `revert:` | patch | 0.10.31 to 0.10.32 |
+| any type with `!`, or a `BREAKING CHANGE:` footer | minor | 0.10.31 to 0.11.0 |
+| `docs:`, `chore:`, `test:`, `ci:`, `build:`, `style:` | none | |
 
-### How It Works
+## Merging
 
-The version bump is determined by your commit messages following [Conventional Commits](https://www.conventionalcommits.org/).
+Maintainers squash-merge. The squash commit's subject is the pull request title and its body is empty, so the title is what semantic-release reads. Read the subject in the merge box before confirming. For a change that breaks users, the title carries `!` and the merger adds a footer to the commit body in the merge box:
 
-AgentOS uses **conservative versioning while still 0.x**:
-- `feat:` releases are treated as **patch** (not minor) until 1.0
-- breaking changes bump **minor** (0.x → 0.(x+1).0), not 1.0
-
-| Commit Type | Version Bump | Example |
-|-------------|--------------|---------|
-| `fix:` | Patch | `0.1.0` → `0.1.1` |
-| `feat:` | Patch | `0.1.0` → `0.1.1` |
-| `feat!:` or `BREAKING CHANGE:` | Minor | `0.1.0` → `0.2.0` |
-| `perf:` | Patch | `0.1.0` → `0.1.1` |
-| `refactor:` | Patch | `0.1.0` → `0.1.1` |
-| `docs:`, `chore:`, `ci:`, `test:` | No release | — |
-
-### Commit Message Examples
-
-```bash
-# Patch release (0.1.0 → 0.1.1)
-git commit -m "fix: resolve memory leak in GMI manager"
-
-# Patch release (0.1.0 → 0.1.1)
-git commit -m "feat: add streaming support for tool calls"
-
-# Minor release (0.1.0 → 0.2.0)
-git commit -m "feat!: redesign AgentOS initialization API
-
-BREAKING CHANGE: The initialize() method now requires a config object instead of positional arguments."
-
-# No release triggered
-git commit -m "docs: update README examples"
-git commit -m "chore: update dependencies"
-git commit -m "ci: fix workflow permissions"
+```text
+BREAKING CHANGE: <what users must change>
 ```
 
----
+That footer becomes the breaking-change note in the changelog and the GitHub release.
 
-## Prerequisites
+## Documentation sites
 
-For automated releases to work, ensure these secrets are configured in the repository:
+- The API reference rebuilds when a push to `master` changes `src/`, `docs/`, `README.md`, `package.json`, `CHANGELOG.md` or `typedoc.json` ([`docs.yml`](https://github.com/framerslab/agentos/blob/master/.github/workflows/docs.yml)).
+- The guides at [docs.agentos.sh](https://docs.agentos.sh) are built by the [agentos-live-docs](https://github.com/framerslab/agentos-live-docs) repository on its own pushes or a manual run. A release rebuilds neither site.
 
-| Secret | Purpose |
-|--------|---------|
-| `NPM_TOKEN` | npm authentication for publishing |
-| `GITHUB_TOKEN` | Automatically provided by GitHub Actions |
+## Never
 
-To set up `NPM_TOKEN`:
-1. Go to [npmjs.com](https://www.npmjs.com/) → Access Tokens → Generate New Token
-2. Choose "Automation" type
-3. Go to repo Settings → Secrets → Actions → New repository secret
-4. Name: `NPM_TOKEN`, Value: your token
+- Edit `CHANGELOG.md` or the `version` field by hand.
+- Run `npm publish`.
+- Push a code change to `master` with `[skip ci]` in the message.
 
----
+There is no prerelease channel; every release comes from `master`.
 
-## Manual Release (Optional)
+## Secrets
 
-You can also trigger a release manually with a dry-run option:
-
-1. Go to [Actions → Release](https://github.com/framerslab/agentos/actions/workflows/release.yml)
-2. Click **"Run workflow"**
-3. (Optional) Check "Dry run" to see what would be released without publishing
-4. Click **"Run workflow"**
-
----
+The release workflow uses the `NPM_TOKEN` repository secret (an npm automation token with publish rights for the `@framers` scope) and the `GITHUB_TOKEN` that GitHub Actions provides.
 
 ## Troubleshooting
 
-### "No release published"
-
-This means semantic-release didn't find any commits that trigger a release. Only `feat:`, `fix:`, `perf:`, `refactor:`, and `revert:` commits trigger releases.
-
-### npm publish fails with 401
-
-Ensure `NPM_TOKEN` is set correctly:
-1. Verify the token hasn't expired
-2. Verify the token has publish permissions
-3. Check the token is for the correct npm account
-
-### Version already exists
-
-If a version was partially published, you may need to:
-1. Manually delete the git tag: `git push --delete origin v0.1.1`
-2. Re-run the release workflow
-
----
-
-## Release Configuration
-
-The release behavior is configured in `release.config.js`:
-
-```javascript
-// Commit types that trigger releases
-releaseRules: [
-  { type: 'feat', release: 'patch' },      // Conservative: feat = patch until 1.0
-  { type: 'fix', release: 'patch' },
-  { type: 'perf', release: 'patch' },
-  { type: 'refactor', release: 'patch' },
-  { type: 'revert', release: 'patch' },
-  { breaking: true, release: 'minor' },   // BREAKING = minor while 0.x
-]
-```
-
----
-
-## Related
-
-- [Conventional Commits](https://www.conventionalcommits.org/) — Commit message format
-- [Semantic Release](https://semantic-release.gitbook.io/) — Release automation
-- [CHANGELOG.md](../CHANGELOG.md) — Release history
-- [GitHub Actions](https://github.com/framerslab/agentos/actions) — CI/CD status
+- **No release published:** no commit since the last tag has a releasing type.
+- **npm publish fails with 401:** the `NPM_TOKEN` secret has expired or lacks publish rights for `@framers`.

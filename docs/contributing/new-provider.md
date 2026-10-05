@@ -34,7 +34,7 @@ Model your implementation on the closest existing provider rather than starting 
 - [ ] A streaming test if the API streams.
 - [ ] Documentation: a short usage section and the default model.
 - [ ] No new required dependency on the core. A provider SDK must be optional or a peer dependency, loaded lazily, so users who do not use the provider do not pay for it.
-- [ ] A named maintainer. Provider integrations break when upstream APIs change, so each needs an owner. Add yourself to [`/.github/CODEOWNERS`](https://github.com/framerslab/agentos/blob/master/.github/CODEOWNERS) for the provider file.
+- [ ] A named maintainer. Provider integrations break when upstream APIs change, so each needs an owner. Name the owner in the pull request; the merging maintainer adds them to [`/.github/CODEOWNERS`](https://github.com/framerslab/agentos/blob/master/.github/CODEOWNERS) once they have write access to this repository.
 - [ ] Conventional Commit title and green CI.
 
 ## Sponsorship and disclosure

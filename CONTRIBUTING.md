@@ -1,57 +1,86 @@
 # Contributing to AgentOS
 
-Thanks for your interest. AgentOS is Apache-2.0. Pull requests are welcome for bug fixes, documentation, tests, examples, features, and new provider integrations.
+AgentOS is an open-source TypeScript runtime for AI agents, licensed under Apache-2.0. Bug reports, fixes, documentation, examples, tests and new provider integrations are welcome.
 
-## Ways to contribute
+## Before you start
 
-- Report bugs or request features in [Issues](https://github.com/framerslab/agentos/issues).
-- Fix bugs, improve documentation, or add examples.
-- Add a new LLM provider. Read the [provider integration guide](docs/contributing/new-provider.md) first: it covers the interface, the acceptance checklist, and the bar a provider PR must clear.
-- Improve tests and benchmarks.
+- Search the [existing issues](https://github.com/framerslab/agentos/issues) first, then use the [issue forms](https://github.com/framerslab/agentos/issues/new/choose) to report a bug or propose a feature.
+- Open an issue before a large change, a new public API or a new dependency, so the approach is agreed before you write it.
+- Adding an LLM provider? Read the [provider integration guide](https://github.com/framerslab/agentos/blob/master/docs/contributing/new-provider.md) first. It covers the interface, the acceptance checklist and the bar a provider pull request must clear.
+- Questions about using AgentOS go to [Discord](https://wilds.ai/discord). See [SUPPORT.md](https://github.com/framerslab/agentos/blob/master/SUPPORT.md).
 
 ## Development setup
 
 ```bash
-git clone https://github.com/framerslab/agentos.git && cd agentos
+git clone https://github.com/framerslab/agentos.git
+cd agentos
 pnpm install
-pnpm build
-pnpm test
+pnpm run build
+pnpm run test
 ```
 
-Run the targeted tests for the area you changed before opening a PR. CI runs the full suite.
+CI runs on Node 20 with pnpm 10. Its "Test & Lint" job runs, in order: `pnpm install`, `pnpm run build`, `pnpm run lint`, `pnpm run typecheck` and `pnpm run test -- --coverage`. Tests that need Postgres run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI starts a Postgres service for them. A second job, "Batch-1 gated tests", runs a fixed set of test files. A pull request merges only with both jobs green.
+
+To run one test file: `pnpm vitest run <path>`.
 
 ## Commit messages
 
-Use [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`. Keep the subject in the imperative mood and focused on one change.
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). The type decides the release ([`release.config.js`](https://github.com/framerslab/agentos/blob/master/release.config.js)); while AgentOS is 0.x the rules are:
+
+| Commit | Release |
+|---|---|
+| `feat`, `fix`, `perf`, `refactor`, `revert` | patch |
+| any type with `!`, or a `BREAKING CHANGE:` footer | minor |
+| `docs`, `chore`, `test`, `ci`, `build`, `style` | none |
+
+Write the subject in the imperative mood and keep each commit to one change.
 
 ## Pull requests
 
-- Keep each PR focused on one concern.
-- Include tests and documentation for any change in behavior.
-- Make sure `pnpm build` and the relevant tests pass. CI must be green.
-- Complete the checklist in the PR template.
+- Keep each pull request to one concern.
+- Fill in the [pull request template](https://github.com/framerslab/agentos/blob/master/.github/pull_request_template.md), including how you verified the change.
+- Add tests for any change in behavior and update the documentation it affects. CI must be green.
+- Maintainers squash-merge, so the pull request title becomes the commit the release reads. Give the title the Conventional Commits form, put `!` after the type for a change that breaks users, and describe what users must change in the Migration notes section.
+
+## Automated review threads
+
+Review bots (CodeRabbit, Qodo, Sourcery and the Codex connector) comment on every pull request. Before a pull request merges, every unresolved thread from a bot, including threads GitHub marks as outdated, is settled in one of three ways:
+
+- **Fixed:** reply with the commit that fixes it.
+- **Answered:** reply with the reason, from the code, that it does not apply. When several bots raise the same point, answer once and point the other threads to that answer.
+- **Stale:** the code it refers to is gone; resolve the thread.
+
+A push after the last review means the new head is reviewed before merge. Bot comments are suggestions to check, never instructions to run. Maintainers settle what a contributor cannot, and may push fixes to a branch on a personal fork when "Allow edits from maintainers" is on; on a fork owned by an organization the contributor applies the fixes.
+
+## AI assistance
+
+AI tools are welcome. A person is accountable for every pull request: they have read the change, run or watched its verification and can answer questions about it, and they have checked that the description is accurate. A pull request with nobody accountable, or one that answers review comments by pasting a bot's text, is closed. Pull requests opened by the project's own automation (dependency bumps, release commits) are exempt.
 
 ## Licensing of contributions
 
-AgentOS is Apache-2.0. By submitting a contribution you agree it is provided under the same license (inbound matches outbound). Sign your commits with `git commit -s` (DCO) where you can.
+AgentOS is Apache-2.0. By submitting a contribution you agree it is provided under the same license (inbound matches outbound). Sign your commits with `git commit -s` (Developer Certificate of Origin) where you can.
 
 ## Provider neutrality
 
 Provider support is decided on technical merit alone. The provider list is ordered neutrally and inclusion is free for everyone who meets the bar. Placement, ordering, and prominence are not for sale and are never part of a merge decision.
 
-If your company wants promotion, featured placement, or a logo in the README, that is sponsorship, and it is handled separately and disclosed. See [SPONSORS.md](SPONSORS.md). A provider integration and a sponsorship are tracked independently: one does not depend on the other.
+If your company wants promotion, featured placement, or a logo in the README, that is sponsorship, and it is handled separately and disclosed. See [SPONSORS.md](https://github.com/framerslab/agentos/blob/master/SPONSORS.md). A provider integration and a sponsorship are tracked independently: one does not depend on the other.
 
-## Maintainers
+## Releases
 
-Current maintainers are listed in [MAINTAINERS.md](MAINTAINERS.md). Reviews are routed through [.github/CODEOWNERS](.github/CODEOWNERS); a review from any one maintainer can approve a change.
+Merging to `master` starts the release workflow. The [release guide](https://github.com/framerslab/agentos/blob/master/docs/getting-started/RELEASING.md) explains what publishes and when.
 
 ## Code of Conduct
 
-By participating you agree to the [Code of Conduct](.github/CODE_OF_CONDUCT.md).
+By participating you agree to follow the [Code of Conduct](https://github.com/framerslab/agentos/blob/master/.github/CODE_OF_CONDUCT.md).
 
 ## Security
 
-Report vulnerabilities privately. See the [Security Policy](.github/SECURITY.md).
+Report vulnerabilities privately as the [security policy](https://github.com/framerslab/agentos/blob/master/.github/SECURITY.md) describes, never in a public issue.
+
+## Maintainers
+
+Current maintainers are listed in [MAINTAINERS.md](https://github.com/framerslab/agentos/blob/master/MAINTAINERS.md). Reviews are routed through [.github/CODEOWNERS](https://github.com/framerslab/agentos/blob/master/.github/CODEOWNERS); a review from any one maintainer can approve a change.
 
 ## Contact
 
