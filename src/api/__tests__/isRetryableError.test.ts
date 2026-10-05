@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { isRetryableError } from '../generateText';
+import { AnthropicProviderError } from '../../core/llm/providers/errors/AnthropicProviderError';
 
 describe('isRetryableError', () => {
   it('matches a typed provider error via numeric httpStatus 402', () => {
@@ -105,5 +106,13 @@ describe('isRetryableError', () => {
     expect(isRetryableError(Object.assign(new Error('busy'), { type: 'overloaded_error' }))).toBe(true);
     expect(isRetryableError(Object.assign(new Error('Provider disconnected unexpectedly'), { code: 'server_error' }))).toBe(true);
     expect(isRetryableError(Object.assign(new Error('bad field'), { type: 'invalid_request_error' }))).toBe(false);
+  });
+
+  it('reads the server-failure class AnthropicProviderError keeps for an SSE error event', () => {
+    // The provider throws the event as an AnthropicProviderError with no
+    // status; its class sits in anthropicErrorType, not in type.
+    expect(isRetryableError(new AnthropicProviderError('Internal server error', 'STREAM_ERROR_EVENT', undefined, 'api_error'))).toBe(true);
+    expect(isRetryableError(new AnthropicProviderError('busy', 'STREAM_ERROR_EVENT', undefined, 'overloaded_error'))).toBe(true);
+    expect(isRetryableError(new AnthropicProviderError('bad field', 'STREAM_ERROR_EVENT', undefined, 'invalid_request_error'))).toBe(false);
   });
 });

@@ -325,6 +325,31 @@ describe('Claude refusals through the public API', () => {
     // The refused text already reached the consumer, so no fallback request.
     expect(postedBodies().map((body) => body.model)).toEqual(['claude-opus-5-5']);
   });
+
+  it('generateText falls back to the next model when an SSE api_error ends the reply before any output', async () => {
+    // Anthropic reports a server failure inside the 200 stream as an `error`
+    // event; the provider throws it with no HTTP status.
+    route({
+      'claude-opus-5-5': [
+        () =>
+          sse([
+            messageStart('claude-opus-5-5', { input_tokens: 10 }),
+            { type: 'error', error: { type: 'api_error', message: 'Internal server error' } },
+          ]),
+      ],
+      'claude-opus-4-8': [textTurn('claude-opus-4-8', 'Recovered.')],
+    });
+
+    const result = await generateText({
+      provider: 'anthropic',
+      model: 'claude-opus-5-5',
+      prompt: 'Hello?',
+      fallbackProviders: [{ provider: 'anthropic', model: 'claude-opus-4-8' }],
+    });
+
+    expect(result.text).toBe('Recovered.');
+    expect(postedBodies().map((b) => b.model)).toEqual(['claude-opus-5-5', 'claude-opus-4-8']);
+  });
 });
 
 describe('Claude refusals in a session', () => {

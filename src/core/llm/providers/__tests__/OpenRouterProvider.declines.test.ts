@@ -418,6 +418,15 @@ describe('HTTP 200 bodies, non-stream', () => {
     const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
     expect(err.code).toBe('CONTEXT_WINDOW_EXCEEDED');
   });
+
+  it('types an in-body context-window rejection named by the envelope type, as the HTTP path does', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: { id: 'gen-1', error: { code: 400, message: 'too long', type: 'context_length_exceeded' } },
+    });
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('CONTEXT_WINDOW_EXCEEDED');
+    expect(err.openRouterErrorType).toBe('context_length_exceeded');
+  });
 });
 
 describe('streams', () => {
@@ -626,5 +635,13 @@ describe('streams', () => {
     });
     const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { code?: unknown } }>;
     expect(out.at(-1)?.error?.code).toBe('server_error');
+  });
+
+  it('puts the context-window code on a stream error chunk when the envelope type names it', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: sse([errorEvent({ code: 400, message: 'too long', type: 'context_length_exceeded' })]),
+    });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { code?: unknown } }>;
+    expect(out.at(-1)?.error?.code).toBe('CONTEXT_WINDOW_EXCEEDED');
   });
 });
