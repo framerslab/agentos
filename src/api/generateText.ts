@@ -1180,8 +1180,9 @@ const TOOLS_RAN = Symbol.for('agentos.generateText.toolsRan');
  * Error first.
  *
  * @returns The marked error.
+ * @internal Shared with streamText.
  */
-function markToolsRan(error: unknown): unknown {
+export function markToolsRan(error: unknown): unknown {
   const target = error !== null && typeof error === 'object' ? error : new Error(String(error));
   try {
     Object.defineProperty(target, TOOLS_RAN, { value: true, configurable: true });
@@ -1270,8 +1271,9 @@ const CHAIN_WALKED = Symbol.for('agentos.generateText.chainWalked');
  * first.
  *
  * @returns The marked error.
+ * @internal Shared with streamText.
  */
-function markChainWalked(error: unknown): unknown {
+export function markChainWalked(error: unknown): unknown {
   const target = error !== null && typeof error === 'object' ? error : new Error(String(error));
   try {
     Object.defineProperty(target, CHAIN_WALKED, { value: true, configurable: true });
@@ -1281,8 +1283,12 @@ function markChainWalked(error: unknown): unknown {
   return target;
 }
 
-/** Whether `error` was marked by {@link markChainWalked}. */
-function chainWalkedBefore(error: unknown): boolean {
+/**
+ * Whether `error` was marked by {@link markChainWalked}.
+ *
+ * @internal Shared with streamText.
+ */
+export function chainWalkedBefore(error: unknown): boolean {
   return (
     error !== null &&
     typeof error === 'object' &&
@@ -1290,8 +1296,12 @@ function chainWalkedBefore(error: unknown): boolean {
   );
 }
 
-/** Whether `error` was marked by {@link markToolsRan}. */
-function toolsRanBefore(error: unknown): boolean {
+/**
+ * Whether `error` was marked by {@link markToolsRan}.
+ *
+ * @internal Shared with streamText.
+ */
+export function toolsRanBefore(error: unknown): boolean {
   return (
     error !== null &&
     typeof error === 'object' &&
