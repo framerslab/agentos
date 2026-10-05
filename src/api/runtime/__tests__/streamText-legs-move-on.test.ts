@@ -170,6 +170,32 @@ describe('a leg that fails before output', () => {
     expect(r.errors).toHaveLength(1);
     expect((r.errors[0]!.error as Record<symbol, unknown>)[TOOLS_RAN]).toBe(true);
   });
+
+  it("stops the walk when a leg reports the caller's abort", async () => {
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { throw status(503); })
+      .mockImplementationOnce(async function* () { yield errorChunk({ message: 'Stream aborted by caller', type: 'abort' }); })
+      .mockImplementationOnce(async function* () { yield textChunk('late', used(1, 1)); });
+    const r = await collect(streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'hi', fallbackProviders: LEGS }));
+    expect(r.text).toBe('');
+    expect(r.errors).toHaveLength(1);
+    expect(hoisted.generateCompletionStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports every hop to onFallback, as generateText does, whatever the error class', async () => {
+    for (const legFailure of [status(503), status(400, 'request too long for this model')]) {
+      hoisted.generateCompletionStream.mockReset();
+      const onFallback = vi.fn();
+      hoisted.generateCompletionStream
+        .mockImplementationOnce(async function* () { throw status(503); })
+        .mockImplementationOnce(async function* () { throw legFailure; })
+        .mockImplementationOnce(async function* () { throw status(503); })
+        .mockImplementationOnce(async function* () { yield textChunk('from the last', used(1, 1)); });
+      const r = await collect(streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'hi', fallbackProviders: LEGS, onFallback }));
+      expect(r.text).toBe('from the last');
+      expect(onFallback.mock.calls.map(([, provider]) => provider)).toEqual(['anthropic', 'gemini', 'mistral']);
+    }
+  });
 });
 
 describe('a leg that fails after output', () => {
@@ -239,6 +265,28 @@ describe('a provider error chunk', () => {
     expect(hoisted.generateCompletionStream).toHaveBeenCalledTimes(1);
     expect(globalLLMProviderHealth.getStats('openrouter')?.failureCount ?? 0).toBe(0);
   });
+
+  it('keeps the chunk details, which the content-policy check reads, so a refusal chunk walks', async () => {
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () {
+        yield errorChunk({ message: 'Request was rejected', details: { error: { code: 'content_policy_violation' } } });
+      })
+      .mockImplementationOnce(async function* () { yield textChunk('rescued', used(1, 1)); });
+    const r = await collect(streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'hi', fallbackProviders: LEGS }));
+    expect(r.text).toBe('rescued');
+    expect(r.errors).toHaveLength(0);
+  });
+
+  it("reads a numeric code as the HTTP status, so a Gemini in-stream 500 walks and is counted", async () => {
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () {
+        yield errorChunk({ message: 'An internal error has occurred.', type: 'INTERNAL', code: 500 });
+      })
+      .mockImplementationOnce(async function* () { yield textChunk('rescued', used(1, 1)); });
+    const r = await collect(streamText({ provider: 'gemini', model: 'gemini-x', prompt: 'hi', fallbackProviders: [LEGS[0]!] }));
+    expect(r.text).toBe('rescued');
+    expect(globalLLMProviderHealth.getStats('gemini')?.failureCount).toBe(1);
+  });
 });
 
 describe('usage', () => {
@@ -275,5 +323,23 @@ describe('usage', () => {
     // The second leg had reported no usage when the consumer left; the
     // primary and the first leg had.
     expect((await r.usage).totalTokens).toBe(30);
+  });
+
+  it('meters each attempt once on a walk that no leg serves', async () => {
+    const events: LlmUsageEvent[] = [];
+    setGlobalLlmObserver((e) => {
+      events.push(e);
+    });
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { yield errorChunk({ message: '[503] busy', type: 'upstream_error' }, used(10)); })
+      .mockImplementationOnce(async function* () { yield errorChunk({ message: '[503] busy', type: 'upstream_error' }, used(20)); });
+    const r = await collect(streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'hi', fallbackProviders: [LEGS[0]!] }));
+    expect(r.errors).toHaveLength(1);
+    expect(r.usage.totalTokens).toBe(30);
+    const metered = events
+      .filter((e) => e.surface === 'streamText')
+      .map((e) => `${e.provider}:${e.usage.totalTokens}`)
+      .sort();
+    expect(metered).toEqual(['anthropic:20', 'openai:10']);
   });
 });
