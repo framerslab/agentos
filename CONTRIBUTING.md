@@ -64,9 +64,9 @@ AgentOS is Apache-2.0. By submitting a contribution you agree it is provided und
 
 ## Provider neutrality
 
-Provider support is decided on technical merit alone, and inclusion is free for everyone who meets the bar. Sponsorship never affects whether a provider is accepted, code review or merge decisions.
+Provider support is decided on technical merit alone. The provider list is ordered neutrally and inclusion is free for everyone who meets the bar. Placement, ordering, and prominence are not for sale and are never part of a merge decision.
 
-If your company wants promotion, featured placement, or a logo in the README, that is sponsorship: it is handled separately, and every sponsored placement is labeled. See [SPONSORS.md](https://github.com/framerslab/agentos/blob/master/SPONSORS.md). A provider integration and a sponsorship are tracked independently: one does not depend on the other.
+If your company wants promotion, featured placement, or a logo in the README, that is sponsorship, and it is handled separately and disclosed. See [SPONSORS.md](https://github.com/framerslab/agentos/blob/master/SPONSORS.md). A provider integration and a sponsorship are tracked independently: one does not depend on the other.
 
 ## Releases
 
