@@ -257,4 +257,23 @@ describe('usage', () => {
     const metered = events.filter((e) => e.surface === 'streamText').map((e) => e.usage.totalTokens);
     expect(metered.sort((x, y) => x - y)).toEqual([6, 10, 20]);
   });
+
+  it('folds every attempt into the result even when the consumer abandons a leg mid-stream', async () => {
+    hoisted.generateCompletionStream
+      // The primary fails before output, as does the first leg; the first
+      // leg walks to the second, which streams two text parts.
+      .mockImplementationOnce(async function* () { yield errorChunk({ message: '[503] busy', type: 'upstream_error' }, used(10)); })
+      .mockImplementationOnce(async function* () { yield errorChunk({ message: '[503] busy', type: 'upstream_error' }, used(20)); })
+      .mockImplementationOnce(async function* () {
+        yield textChunk('first ');
+        yield textChunk('second', used(5, 1));
+      });
+    const r = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'hi', fallbackProviders: LEGS });
+    for await (const part of r.fullStream) {
+      if (part.type === 'text') break;
+    }
+    // The second leg had reported no usage when the consumer left; the
+    // primary and the first leg had.
+    expect((await r.usage).totalTokens).toBe(30);
+  });
 });
