@@ -350,4 +350,36 @@ describe('OpenRouter declines through streamText', () => {
     const r = await stream();
     expect(r.text).toBe('from gemini');
   });
+
+  const errorEvent = (error: Record<string, unknown>) =>
+    chunk({ error, choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error' }] });
+
+  it('an upstream error event before text: the next leg streams; the registry counts one transient failure', async () => {
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce({
+      data: sse([errorEvent({ code: 502, message: 'Provider disconnected', metadata: { error_type: 'provider_unavailable' } }), 'data: [DONE]']),
+    });
+    const r = await stream();
+    expect(r.text).toBe('from gemini');
+    expect(r.parts.filter((p) => p.type === 'error')).toHaveLength(0);
+    expect(globalLLMProviderHealth.getStats('openrouter')?.failureCount).toBe(1);
+  });
+
+  it('an in-stream 403 that is not a decline before text: the next leg streams; the breaker stays closed', async () => {
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce({
+      data: sse([errorEvent({ code: 403, message: 'Blocked upstream', metadata: { error_type: 'permission_denied' } }), 'data: [DONE]']),
+    });
+    const r = await stream();
+    expect(r.text).toBe('from gemini');
+    expect(globalLLMProviderHealth.isOpen('openrouter')).toBe(false);
+    expect(globalLLMProviderHealth.getStats('openrouter')?.failureCount).toBe(1);
+  });
+
+  it('a context-window error event before text: the next leg streams; the registry counts nothing', async () => {
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce({
+      data: sse([errorEvent({ code: 400, message: 'too long', metadata: { error_type: 'context_length_exceeded' } }), 'data: [DONE]']),
+    });
+    const r = await stream();
+    expect(r.text).toBe('from gemini');
+    expect(globalLLMProviderHealth.getStats('openrouter')?.failureCount ?? 0).toBe(0);
+  });
 });
