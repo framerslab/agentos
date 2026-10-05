@@ -55,6 +55,18 @@ async function recordAgentOSUsageLazy(
 }
 
 /** Adds one {@link TokenUsage} to another; optional counters add when present. */
+/**
+ * The HTTP status a provider error chunk names in a numeric code: Gemini's
+ * in-stream errors carry `code: 500` beside `type: 'INTERNAL'`. A 401 or 403
+ * inside a stream describes an upstream attempt, not this key, so it is not
+ * read as a status (the health registry would open its auth policy on it).
+ */
+function statusOfChunkCode(code: unknown): number | undefined {
+  return typeof code === 'number' && Number.isInteger(code) && code >= 400 && code <= 599 && code !== 401 && code !== 403
+    ? code
+    : undefined;
+}
+
 function addTokenUsage(target: TokenUsage, add: TokenUsage): void {
   target.promptTokens += add.promptTokens;
   target.completionTokens += add.completionTokens;
@@ -884,9 +896,11 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               // The error keeps what the provider classified, so the retry
               // classifier and the health registry read the fields a thrown
               // provider error carries.
+              const chunkStatus = statusOfChunkCode(chunk.error.code);
               const error: Error = Object.assign(new Error(chunk.error.message), {
                 ...(chunk.error.type !== undefined ? { type: chunk.error.type } : {}),
                 ...(chunk.error.code !== undefined ? { code: chunk.error.code } : {}),
+                ...(chunkStatus !== undefined ? { httpStatus: chunkStatus } : {}),
                 ...(chunk.error.details !== undefined ? { details: chunk.error.details } : {}),
               });
               const aborted = chunk.error.type === 'abort';
@@ -1288,7 +1302,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               // passes [] -> explicit opt-out -> the recursion throws
               // instead of looping.
               fallbackProviders: effectiveFallbacks.slice(attempt),
-              onFallback: undefined,
+              // The leg reports the hops of its own walk, as generateText's
+              // legs do, so every hop is reported once.
             });
             // The leg meters its own attempt from here on, served or failed.
             fallbackLegRan = true;
