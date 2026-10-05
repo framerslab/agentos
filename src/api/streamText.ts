@@ -924,14 +924,16 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               if (!aborted && recordedProviderId) {
                 globalLLMProviderHealth.recordFailure(recordedProviderId, error);
               }
-              const part: StreamPart = { type: 'error', error };
-              parts.push(part);
-              yield part;
+              // Settled before the error part is handed over: a consumer that
+              // stops reading at it still finds the stream failed.
               metricStatus = 'error';
               resolveText!(stepTextSoFar || finalText);
               resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
               resolveToolCalls!(allToolCalls);
               resolveFinishReason!('error');
+              const part: StreamPart = { type: 'error', error };
+              parts.push(part);
+              yield part;
               return;
             }
           }
@@ -1332,6 +1334,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
                   continue;
                 }
                 legDelivered = true;
+                // An error part after the leg's output ends this stream too;
+                // marked before it is handed over, so a consumer that stops
+                // reading at it finds the stream failed.
+                if (fbPart.type === 'error') metricStatus = 'error';
                 parts.push(fbPart);
                 yield fbPart;
               }
@@ -1408,6 +1414,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               // Output already reached the consumer: this error ends the
               // stream and nothing is replayed.
               outcome = 'failed-after-output';
+              metricStatus = 'error';
               const errorPart: StreamPart = { type: 'error', error: lastFallbackError };
               parts.push(errorPart);
               yield errorPart;
