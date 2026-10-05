@@ -257,6 +257,22 @@ describe('HTTP error responses', () => {
     expect(err.openRouterErrorType).toBe('context_length_exceeded');
     expect(request).toHaveBeenCalledTimes(1);
   });
+
+  it('types the context-window rejection OpenRouter sends before routing, which carries no error_type', async () => {
+    // The body OpenRouter returned on 2026-10-05 for a 33,760-token request
+    // to a 16,384-token endpoint, streamed or not: HTTP 400, no error_type.
+    const request = vi.fn().mockRejectedValueOnce(axiosError(400, { error: { message: "This endpoint's maximum context length is 16384 tokens. However, you requested about 33760 tokens (33750 of text input, 10 in the output). Please reduce the length of either one, or use the context-compression plugin to compress your prompt automatically.", code: 400, metadata: { provider_name: null } } }));
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('CONTEXT_WINDOW_EXCEEDED');
+    expect(err.httpStatus).toBe(400);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves another 400 untyped', async () => {
+    const request = vi.fn().mockRejectedValueOnce(axiosError(400, { error: { code: 400, message: 'temperature must be at most 2' } }));
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('API_REQUEST_FAILED');
+  });
 });
 
 describe('HTTP 200 bodies, non-stream', () => {
@@ -426,6 +442,14 @@ describe('HTTP 200 bodies, non-stream', () => {
     const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
     expect(err.code).toBe('CONTEXT_WINDOW_EXCEEDED');
     expect(err.openRouterErrorType).toBe('context_length_exceeded');
+  });
+
+  it('keeps a string error code from a 200 body, as the stream path does', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: { id: 'gen-1', error: { code: 'server_error', message: 'Provider disconnected unexpectedly' } },
+    });
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('server_error');
   });
 });
 
