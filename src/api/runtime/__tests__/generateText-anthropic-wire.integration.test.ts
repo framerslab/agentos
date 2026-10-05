@@ -328,27 +328,38 @@ describe('Claude refusals through the public API', () => {
 
   it('generateText falls back to the next model when an SSE api_error ends the reply before any output', async () => {
     // Anthropic reports a server failure inside the 200 stream as an `error`
-    // event; the provider throws it with no HTTP status.
+    // event. The provider retries it in place (three attempts in all), then
+    // throws it with no HTTP status and the class in anthropicErrorType; the
+    // walk then moves on to the next model.
+    const apiError = (): Reply => () =>
+      sse([
+        messageStart('claude-opus-5-5', { input_tokens: 10 }),
+        { type: 'error', error: { type: 'api_error', message: 'Internal server error' } },
+      ]);
     route({
-      'claude-opus-5-5': [
-        () =>
-          sse([
-            messageStart('claude-opus-5-5', { input_tokens: 10 }),
-            { type: 'error', error: { type: 'api_error', message: 'Internal server error' } },
-          ]),
-      ],
+      'claude-opus-5-5': [apiError(), apiError(), apiError()],
       'claude-opus-4-8': [textTurn('claude-opus-4-8', 'Recovered.')],
     });
+    // The provider's backoff between its attempts, at its shortest.
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const result = await generateText({
+        provider: 'anthropic',
+        model: 'claude-opus-5-5',
+        prompt: 'Hello?',
+        fallbackProviders: [{ provider: 'anthropic', model: 'claude-opus-4-8' }],
+      });
 
-    const result = await generateText({
-      provider: 'anthropic',
-      model: 'claude-opus-5-5',
-      prompt: 'Hello?',
-      fallbackProviders: [{ provider: 'anthropic', model: 'claude-opus-4-8' }],
-    });
-
-    expect(result.text).toBe('Recovered.');
-    expect(postedBodies().map((b) => b.model)).toEqual(['claude-opus-5-5', 'claude-opus-4-8']);
+      expect(result.text).toBe('Recovered.');
+      expect(postedBodies().map((b) => b.model)).toEqual([
+        'claude-opus-5-5',
+        'claude-opus-5-5',
+        'claude-opus-5-5',
+        'claude-opus-4-8',
+      ]);
+    } finally {
+      random.mockRestore();
+    }
   });
 });
 
