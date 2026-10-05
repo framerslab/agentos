@@ -11,6 +11,11 @@ tsconfig.build.tsbuildinfo
 
 node_modules/
 
+# Local environment files; examples stay tracked
+.env
+.env.*
+!.env*.example
+
 # Prisma generated client
 src/generated/
 

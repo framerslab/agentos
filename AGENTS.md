@@ -9,7 +9,7 @@ Instructions for coding agents working in this repository. People contributing b
 ## Repository map
 
 - `src/api/`: the high-level API (`generateText`, `streamText`, `agent()`, `agency()`) and its runtime
-- `src/core/`: LLM providers (`src/core/llm/providers/`), conversation, embeddings, storage, streaming, tools, vector stores
+- `src/core/`: LLM providers (`src/core/llm/providers/`), API-key pools (`src/core/providers/`), conversation, embeddings, guardrails, rate limiting, storage, streaming, tools, vector stores
 - `src/cognition/`: memory, RAG, emergent behavior, skills, web search
 - `src/orchestration/`: planners, the compiler, workflows, checkpoints, human-in-the-loop
 - `src/io/`: channels, speech, the voice pipeline, vision, avatars
@@ -18,7 +18,7 @@ Instructions for coding agents working in this repository. People contributing b
 - `src/agents/`, `src/config/`, `src/logging/`, `src/utils/`
 - `tests/` and `src/**/__tests__/`: vitest suites
 - `docs/`: guides; `docs/publication-manifest.cjs` decides which pages docs.agentos.sh publishes
-- `examples/`: runnable `.mjs` examples
+- `examples/`: runnable examples (`.mjs` and `.ts`)
 - `scripts/`: build and release helpers
 
 ## Toolchain
@@ -27,7 +27,7 @@ CI uses Node 20 and pnpm 10. TypeScript with Bundler module resolution; the pack
 
 ## Commands
 
-CI is the gate: push and read the result.
+CI runs the commands below, and its result decides. Run any of them locally to check a change before you push.
 
 CI runs (job "Test & Lint" in [`.github/workflows/ci.yml`](https://github.com/framerslab/agentos/blob/master/.github/workflows/ci.yml)), in order:
 
@@ -39,7 +39,7 @@ CI runs (job "Test & Lint" in [`.github/workflows/ci.yml`](https://github.com/fr
 
 A second job, "Batch-1 gated tests", builds and runs a fixed list of test files with `pnpm vitest run`.
 
-Available scripts that CI does not run: `pnpm run verify:exports` (checks that every `exports` entry points at a built file; the release runs it), `pnpm run build:knowledge`, `pnpm run docs`, `pnpm run dev:test`.
+Available scripts that CI does not run: `pnpm run verify:exports` (checks that every non-wildcard `exports` target exists in the build; the release runs it), `pnpm run build:knowledge`, `pnpm run docs`, `pnpm run dev:test`.
 
 ## Conventions
 
@@ -48,20 +48,20 @@ Available scripts that CI does not run: `pnpm run verify:exports` (checks that e
 - A new public module needs an entry in the `exports` map of `package.json`.
 - The build rewrites relative import specifiers in `dist` ([`scripts/fix-esm-imports.mjs`](https://github.com/framerslab/agentos/blob/master/scripts/fix-esm-imports.mjs)); follow the import style of the file you edit.
 - New LLM providers follow the [provider integration guide](https://github.com/framerslab/agentos/blob/master/docs/contributing/new-provider.md): a provider SDK is an optional or peer dependency loaded lazily, never a new required dependency of the core.
-- Provider support is decided on technical merit; sponsorship never affects placement, review or merges ([SPONSORS.md](https://github.com/framerslab/agentos/blob/master/SPONSORS.md)).
+- Provider support is decided on technical merit. Sponsorship never affects whether a provider is accepted, code review, merge decisions or the roadmap, and sponsored placement is always labeled ([SPONSORS.md](https://github.com/framerslab/agentos/blob/master/SPONSORS.md)).
 - Benchmarks live in [agentos-bench](https://github.com/framerslab/agentos-bench), not here.
 - Tests exercise the real path: an integration test for any behavior with an observable surface, unit tests for pure logic and regression pins, no filler tests.
-- A bug in another package of this family (agentos-extensions, the registries, wunderland) is fixed in that package's repository and released, not patched here.
+- A bug in a first-party package this repository uses, such as `@framers/agentos-extensions-registry` (a dev dependency), is fixed in that package's repository and released. Do not patch `node_modules` or copy a workaround into this repository.
 
 ## Commits and pull requests
 
 - Conventional Commits; the type decides the release (see Releases).
 - One concern per pull request; fill in the template and say how the change was verified.
-- The pull request title becomes the squash commit. Give it the Conventional Commits form, with `!` for a change that breaks users.
+- Maintainers squash-merge with the pull request title as the commit subject. Give the title the Conventional Commits form, with `!` for a change that breaks users.
 
 ## Releases
 
-semantic-release evaluates every merge to `master` after CI passes. `feat`, `fix`, `perf`, `refactor` and `revert` release a patch; a breaking change releases a minor while AgentOS is 0.x; `docs`, `chore`, `test`, `ci`, `build` and `style` release nothing. Never edit `CHANGELOG.md` or the `version` field, and never run `npm publish`. Details: the [release guide](https://github.com/framerslab/agentos/blob/master/docs/getting-started/RELEASING.md).
+semantic-release evaluates every push to `master` after CI passes. `feat`, `fix`, `perf`, `refactor` and `revert` release a patch; a breaking change releases a minor while AgentOS is 0.x; `docs`, `chore`, `test`, `ci`, `build` and `style` release nothing. Never edit `CHANGELOG.md` or the `version` field, and never run `npm publish`. Details: the [release guide](https://github.com/framerslab/agentos/blob/master/docs/getting-started/RELEASING.md).
 
 ## Automated review threads
 

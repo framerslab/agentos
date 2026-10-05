@@ -10,8 +10,10 @@
 
 - [ ] Bug fix
 - [ ] Feature
+- [ ] Performance
 - [ ] Documentation
 - [ ] Refactor
+- [ ] Tests
 - [ ] Build or CI
 
 ## How this was verified
@@ -28,5 +30,5 @@
 - [ ] Docs are updated.
 - [ ] The title follows Conventional Commits, with `!` after the type for a change that breaks users.
 - [ ] No secrets or private data are included.
-- [ ] Every automated review thread is settled (see CONTRIBUTING.md).
+- [ ] Every automated review thread is settled ([how](https://github.com/framerslab/agentos/blob/master/CONTRIBUTING.md#automated-review-threads)).
 - [ ] I have read this change and can explain every line.

@@ -11,6 +11,8 @@ AgentOS is an open-source TypeScript runtime for AI agents, licensed under Apach
 
 ## Development setup
 
+You need Node.js 20 and pnpm 10, the versions CI uses.
+
 ```bash
 git clone https://github.com/framerslab/agentos.git
 cd agentos
@@ -19,7 +21,7 @@ pnpm run build
 pnpm run test
 ```
 
-CI runs on Node 20 with pnpm 10. Its "Test & Lint" job runs, in order: `pnpm install`, `pnpm run build`, `pnpm run lint`, `pnpm run typecheck` and `pnpm run test -- --coverage`. Tests that need Postgres run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI starts a Postgres service for them. A second job, "Batch-1 gated tests", runs a fixed set of test files. A pull request merges only with both jobs green.
+CI runs on Node 20 with pnpm 10. Its "Test & Lint" job runs, in order: `pnpm install`, `pnpm run build`, `pnpm run lint`, `pnpm run typecheck` and `pnpm run test -- --coverage`. Tests that need Postgres run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI starts a Postgres service for them. A second job, "Batch-1 gated tests", runs a fixed set of test files. Maintainers merge a pull request only when both jobs are green.
 
 To run one test file: `pnpm vitest run <path>`.
 
@@ -40,11 +42,11 @@ Write the subject in the imperative mood and keep each commit to one change.
 - Keep each pull request to one concern.
 - Fill in the [pull request template](https://github.com/framerslab/agentos/blob/master/.github/pull_request_template.md), including how you verified the change.
 - Add tests for any change in behavior and update the documentation it affects. CI must be green.
-- Maintainers squash-merge, so the pull request title becomes the commit the release reads. Give the title the Conventional Commits form, put `!` after the type for a change that breaks users, and describe what users must change in the Migration notes section.
+- Maintainers squash-merge with the pull request title as the commit subject, which is what the release reads. Give the title the Conventional Commits form, put `!` after the type for a change that breaks users, and describe what users must change in the Migration notes section.
 
 ## Automated review threads
 
-Review bots (CodeRabbit, Qodo, Sourcery and the Codex connector) comment on every pull request. Before a pull request merges, every unresolved thread from a bot, including threads GitHub marks as outdated, is settled in one of three ways:
+Review bots (CodeRabbit, Qodo, Sourcery and the Codex connector) review pull requests. Before a pull request merges, every unresolved thread from a bot, including threads GitHub marks as outdated, is settled in one of three ways:
 
 - **Fixed:** reply with the commit that fixes it.
 - **Answered:** reply with the reason, from the code, that it does not apply. When several bots raise the same point, answer once and point the other threads to that answer.
@@ -54,7 +56,7 @@ A push after the last review means the new head is reviewed before merge. Bot co
 
 ## AI assistance
 
-AI tools are welcome. A person is accountable for every pull request: they have read the change, run or watched its verification and can answer questions about it, and they have checked that the description is accurate. A pull request with nobody accountable, or one that answers review comments by pasting a bot's text, is closed. Pull requests opened by the project's own automation (dependency bumps, release commits) are exempt.
+AI tools are welcome. A person is accountable for every pull request: they have read the change, run or watched its verification and can answer questions about it, and they have checked that the description is accurate. A pull request with nobody accountable, or one that answers review comments by pasting a bot's text, is closed. Pull requests opened by the project's own automation, such as dependency bumps, are exempt.
 
 ## Licensing of contributions
 
@@ -62,13 +64,13 @@ AgentOS is Apache-2.0. By submitting a contribution you agree it is provided und
 
 ## Provider neutrality
 
-Provider support is decided on technical merit alone. The provider list is ordered neutrally and inclusion is free for everyone who meets the bar. Placement, ordering, and prominence are not for sale and are never part of a merge decision.
+Provider support is decided on technical merit alone, and inclusion is free for everyone who meets the bar. Sponsorship never affects whether a provider is accepted, code review or merge decisions.
 
-If your company wants promotion, featured placement, or a logo in the README, that is sponsorship, and it is handled separately and disclosed. See [SPONSORS.md](https://github.com/framerslab/agentos/blob/master/SPONSORS.md). A provider integration and a sponsorship are tracked independently: one does not depend on the other.
+If your company wants promotion, featured placement, or a logo in the README, that is sponsorship: it is handled separately, and every sponsored placement is labeled. See [SPONSORS.md](https://github.com/framerslab/agentos/blob/master/SPONSORS.md). A provider integration and a sponsorship are tracked independently: one does not depend on the other.
 
 ## Releases
 
-Merging to `master` starts the release workflow. The [release guide](https://github.com/framerslab/agentos/blob/master/docs/getting-started/RELEASING.md) explains what publishes and when.
+Every push to `master`, including a merged pull request, starts the release workflow once CI passes. The [release guide](https://github.com/framerslab/agentos/blob/master/docs/getting-started/RELEASING.md) explains what publishes and when.
 
 ## Code of Conduct
 
@@ -84,4 +86,4 @@ Current maintainers are listed in [MAINTAINERS.md](https://github.com/framerslab
 
 ## Contact
 
-Questions: team@frame.dev or [frame.dev](https://frame.dev).
+Questions about using AgentOS go to [Discord](https://wilds.ai/discord). Commercial, partnership or sponsorship inquiries: team@frame.dev or [frame.dev](https://frame.dev).
