@@ -1321,7 +1321,9 @@ const RETRYABLE_PROVIDER_ERROR_CODES = new Set([
 /**
  * Error classes a provider's stream error event names for a server failure:
  * Anthropic's `api_error` (HTTP 500) and `overloaded_error` (529). A thrown
- * provider error carries the HTTP status; a stream event carries the class.
+ * provider error carries the HTTP status; a stream event carries the class,
+ * as `type` on a stream error chunk and as `anthropicErrorType` on the
+ * AnthropicProviderError the provider throws for an SSE `error` event.
  */
 const RETRYABLE_PROVIDER_ERROR_TYPES = new Set(['api_error', 'overloaded_error']);
 
@@ -1413,7 +1415,8 @@ export function isRetryableError(error: unknown): boolean {
   // exhausted network failure as "Network error: unable to reach ...").
   const code = (error as { code?: unknown }).code;
   if (typeof code === 'string' && RETRYABLE_PROVIDER_ERROR_CODES.has(code)) return true;
-  const errorType = (error as { type?: unknown }).type;
+  const errorType =
+    (error as { type?: unknown }).type ?? (error as { anthropicErrorType?: unknown }).anthropicErrorType;
   if (typeof errorType === 'string' && RETRYABLE_PROVIDER_ERROR_TYPES.has(errorType)) return true;
 
   const msg = error.message;

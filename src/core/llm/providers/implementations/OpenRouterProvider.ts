@@ -936,7 +936,15 @@ export class OpenRouterProvider implements IProvider {
             }
             const errMessage = apiChunk.error.message || 'OpenRouter mid-stream error';
             const errCode = apiChunk.error.code;
-            const errType = typeof apiChunk.error.metadata?.error_type === 'string' ? apiChunk.error.metadata.error_type : undefined;
+            // The typed code: metadata.error_type, else the envelope's own
+            // `type`, in the order the HTTP error path reads them.
+            const envelopeType = (apiChunk.error as { type?: unknown }).type;
+            const errType =
+              typeof apiChunk.error.metadata?.error_type === 'string'
+                ? apiChunk.error.metadata.error_type
+                : typeof envelopeType === 'string'
+                  ? envelopeType
+                  : undefined;
             // A 401 or 403 inside a 200 stream describes an upstream attempt,
             // not this key: without the `[NNN]` prefix the health registry
             // counts a transient failure, not its auth policy (as inBodyError
@@ -1569,7 +1577,15 @@ export class OpenRouterProvider implements IProvider {
     const message = this.redactSecrets(
       typeof error.message === 'string' && error.message ? error.message : 'OpenRouter reported an error in a 200 response',
     );
-    const metaType = typeof error.metadata?.error_type === 'string' ? error.metadata.error_type : undefined;
+    // The typed code: metadata.error_type, else the envelope's own `type`, in
+    // the order the HTTP error path reads them.
+    const envelopeType = (error as { type?: unknown }).type;
+    const errorType =
+      typeof error.metadata?.error_type === 'string'
+        ? error.metadata.error_type
+        : typeof envelopeType === 'string'
+          ? envelopeType
+          : undefined;
     // The 200 means the configured key was accepted, so a 401 or 403 inside
     // the body describes an upstream attempt (a BYOK key, a failover leg),
     // not this account. Its code stays in the message, where the retry
@@ -1579,9 +1595,9 @@ export class OpenRouterProvider implements IProvider {
     const inBodyAuth = code === 401 || code === 403;
     return new OpenRouterProviderError(
       code === undefined ? message : inBodyAuth ? `OpenRouter in-body error ${code}: ${message}` : `[${code}] ${message}`,
-      metaType === 'context_length_exceeded' ? CONTEXT_WINDOW_EXCEEDED_CODE : 'API_REQUEST_FAILED',
+      errorType === 'context_length_exceeded' ? CONTEXT_WINDOW_EXCEEDED_CODE : 'API_REQUEST_FAILED',
       inBodyAuth ? undefined : code,
-      metaType ?? 'UNKNOWN_API_ERROR',
+      errorType ?? 'UNKNOWN_API_ERROR',
       {
         responseId: extra.responseId,
         ...(inBodyAuth ? { httpStatus: code } : {}),
