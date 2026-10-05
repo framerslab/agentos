@@ -246,6 +246,13 @@ describe('OpenRouter declines through generateText', () => {
     expect(execute).toHaveBeenCalledTimes(1);
     expect(hoisted.state.geminiCalls).toBe(0);
   });
+
+  it('a context-window rejection on the first model: the next leg answers and the breaker stays closed', async () => {
+    hoisted.state.openrouterRequest!.mockRejectedValueOnce(axiosError(400, { error: { code: 400, message: 'This endpoint maximum context length is 32768 tokens', metadata: { error_type: 'context_length_exceeded' } } }));
+    expect((await call()).text).toBe('from gemini');
+    expect(globalLLMProviderHealth.isOpen('openrouter')).toBe(false);
+    expect(globalLLMProviderHealth.getStats('openrouter')?.failureCount ?? 0).toBe(0);
+  });
 });
 
 describe('OpenRouter declines through streamText', () => {
@@ -320,5 +327,14 @@ describe('OpenRouter declines through streamText', () => {
     expect(execute).toHaveBeenCalledTimes(1);
     expect(hoisted.state.geminiCalls).toBe(0);
     expect(globalLLMProviderHealth.isOpen('openrouter')).toBe(false);
+  });
+
+  it('a context-window rejection on the stream request: the next leg streams; breaker closed', async () => {
+    const body = JSON.stringify({ error: { code: 400, message: 'This endpoint maximum context length is 32768 tokens', metadata: { error_type: 'context_length_exceeded' } } });
+    hoisted.state.openrouterRequest!.mockRejectedValueOnce(axiosError(400, Readable.from([Buffer.from(body)])));
+    const r = await stream();
+    expect(r.text).toBe('from gemini');
+    expect(globalLLMProviderHealth.isOpen('openrouter')).toBe(false);
+    expect(globalLLMProviderHealth.getStats('openrouter')?.failureCount ?? 0).toBe(0);
   });
 });

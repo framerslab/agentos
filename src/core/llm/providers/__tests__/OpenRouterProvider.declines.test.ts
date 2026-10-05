@@ -246,6 +246,17 @@ describe('HTTP error responses', () => {
     expect(err.code).toBe('API_REQUEST_FAILED');
     expect(err.httpStatus).toBe(403);
   });
+
+  it('types a context-window rejection: code CONTEXT_WINDOW_EXCEEDED, one request', async () => {
+    const request = vi.fn().mockRejectedValueOnce(
+      axiosError(400, { error: { code: 400, message: 'This endpoint maximum context length is 32768 tokens', metadata: { error_type: 'context_length_exceeded' } } }),
+    );
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('CONTEXT_WINDOW_EXCEEDED');
+    expect(err.httpStatus).toBe(400);
+    expect(err.openRouterErrorType).toBe('context_length_exceeded');
+    expect(request).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('HTTP 200 bodies, non-stream', () => {
@@ -398,6 +409,14 @@ describe('HTTP 200 bodies, non-stream', () => {
     const res = await makeProvider(request).generateCompletion(MODEL, messages, {});
     expect(res.choices[0].message.content).toBe('half');
     expect(res.choices[0].finishReason).toBe('error');
+  });
+
+  it('types an in-body context-window rejection the same way', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: { id: 'gen-1', error: { code: 400, message: 'too long', metadata: { error_type: 'context_length_exceeded' } } },
+    });
+    const err = await thrown(makeProvider(request).generateCompletion(MODEL, messages, {}));
+    expect(err.code).toBe('CONTEXT_WINDOW_EXCEEDED');
   });
 });
 
@@ -576,5 +595,36 @@ describe('streams', () => {
     const request = vi.fn().mockResolvedValueOnce({ data: sse([...deltas.map(textChunk), filterChunk, usageChunk, 'data: [DONE]']) });
     const err = await thrown(drain(makeProvider(request).generateCompletionStream(MODEL, messages, {})));
     expect((err.details as { partialText?: string }).partialText).toBe('a'.repeat(1500) + 'b'.repeat(500));
+  });
+
+  const errorEvent = (error: Record<string, unknown>) =>
+    chunk({ error, choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error' }] });
+
+  it('puts the context-window code on a stream error chunk', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: sse([errorEvent({ code: 400, message: 'too long', metadata: { error_type: 'context_length_exceeded' } })]),
+    });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { code?: unknown; type?: string } }>;
+    expect(out.at(-1)?.error).toMatchObject({ type: 'upstream_error', code: 'CONTEXT_WINDOW_EXCEEDED' });
+  });
+
+  it('reports an in-stream 401 or 403 that is not a decline without the status prefix', async () => {
+    // The 200 proves the configured key was accepted: the code describes an
+    // upstream attempt, so the health registry must not read it as a status.
+    for (const code of [401, 403]) {
+      const request = vi.fn().mockResolvedValueOnce({
+        data: sse([errorEvent({ code, message: 'Blocked upstream', metadata: { error_type: 'permission_denied' } })]),
+      });
+      const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { message?: string } }>;
+      expect(out.at(-1)?.error?.message).toBe(`OpenRouter in-body error ${code}: Blocked upstream`);
+    }
+  });
+
+  it('carries a string error code on a stream error chunk', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: sse([errorEvent({ code: 'server_error', message: 'Provider disconnected unexpectedly' })]),
+    });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { code?: unknown } }>;
+    expect(out.at(-1)?.error?.code).toBe('server_error');
   });
 });

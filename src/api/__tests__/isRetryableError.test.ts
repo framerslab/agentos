@@ -89,4 +89,21 @@ describe('isRetryableError', () => {
     expect(isRetryableError(null)).toBe(false);
     expect(isRetryableError(undefined)).toBe(false);
   });
+
+  it('treats a context-window rejection as retryable, so a model with a larger window can serve it', () => {
+    const err = Object.assign(new Error('[400] This endpoint maximum context length is 32768 tokens'), {
+      httpStatus: 400,
+      code: 'CONTEXT_WINDOW_EXCEEDED',
+    });
+    expect(isRetryableError(err)).toBe(true);
+  });
+
+  it('treats the stream error classes that report a server failure as retryable', () => {
+    // A stream error event names its class, not an HTTP status: Anthropic's
+    // api_error (500) and overloaded_error (529), OpenRouter's server_error.
+    expect(isRetryableError(Object.assign(new Error('Internal server error'), { type: 'api_error' }))).toBe(true);
+    expect(isRetryableError(Object.assign(new Error('busy'), { type: 'overloaded_error' }))).toBe(true);
+    expect(isRetryableError(Object.assign(new Error('Provider disconnected unexpectedly'), { code: 'server_error' }))).toBe(true);
+    expect(isRetryableError(Object.assign(new Error('bad field'), { type: 'invalid_request_error' }))).toBe(false);
+  });
 });

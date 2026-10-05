@@ -188,4 +188,10 @@ describe('UncensoredModelCatalog', () => {
       expect(model).toBeNull();
     });
   });
+
+  it('lists no tool use for hermes-3-llama-3.1-70b: OpenRouter serves it without tool support', () => {
+    const hermes = catalog.getTextModels().find((m) => m.modelId === 'nousresearch/hermes-3-llama-3.1-70b');
+    expect(hermes).toBeDefined();
+    expect(hermes!.capabilities).not.toContain('tool_use');
+  });
 });
