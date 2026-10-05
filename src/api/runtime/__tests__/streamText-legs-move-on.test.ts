@@ -247,6 +247,21 @@ describe('a leg that fails after output', () => {
     expect(count('fallback_failed_after_output')).toBe(1);
   });
 
+  it("reports the stream failed when the consumer stops at a leg's error part", async () => {
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () { throw status(503); })
+      .mockImplementationOnce(async function* () {
+        yield textChunk('half ');
+        yield errorChunk({ message: '[502] Provider disconnected', type: 'upstream_error' });
+      });
+    const r = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'hi', fallbackProviders: LEGS });
+    for await (const part of r.fullStream) {
+      if (part.type === 'error') break;
+    }
+    expect(await r.finishReason).toBe('error');
+    expect(await r.text).toBe('half ');
+  });
+
   it('settles the result text with what the leg delivered before its error chunk', async () => {
     hoisted.generateCompletionStream
       .mockImplementationOnce(async function* () { throw status(503); })
@@ -303,6 +318,19 @@ describe('a provider error chunk', () => {
     expect(r.finishReason).toBe('error');
     expect(hoisted.generateCompletionStream).toHaveBeenCalledTimes(1);
     expect(globalLLMProviderHealth.getStats('openrouter')?.failureCount).toBe(1);
+  });
+
+  it('reports the stream failed when the consumer stops at the error part', async () => {
+    hoisted.generateCompletionStream.mockImplementationOnce(async function* () {
+      yield textChunk('half ');
+      yield errorChunk({ message: '[502] Provider disconnected', type: 'upstream_error' });
+    });
+    const r = streamText({ provider: 'openrouter', model: 'x', prompt: 'hi', fallbackProviders: LEGS });
+    for await (const part of r.fullStream) {
+      if (part.type === 'error') break;
+    }
+    expect(await r.finishReason).toBe('error');
+    expect(await r.text).toBe('half ');
   });
 
   it('never walks or records an abort', async () => {
