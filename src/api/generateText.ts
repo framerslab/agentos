@@ -29,6 +29,7 @@ import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/
 import { createLogger } from '../core/logging/loggerFactory.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
+import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../core/llm/providers/errors/errorCodes.js';
 import { describeResponseFormatShape } from './runtime/responseFormatForProvider.js';
 
 const fallbackLogger = createLogger('fallback');
@@ -1300,10 +1301,12 @@ function toolsRanBefore(error: unknown): boolean {
 
 /**
  * Provider error codes for request-level failures that another provider may
- * not share: unreachable endpoints, request timeouts, and retries exhausted
- * inside the provider. Mid-stream codes (STREAM_IDLE_TIMEOUT,
- * STREAM_INCOMPLETE) are left out, because a stream that already delivered
- * text must not be restarted on another provider.
+ * not share: unreachable endpoints, request timeouts, retries exhausted
+ * inside the provider, a request larger than the model's context window, and
+ * OpenRouter's string code for a server failure on a stream error event.
+ * Mid-stream codes (STREAM_IDLE_TIMEOUT, STREAM_INCOMPLETE) are left out,
+ * because a stream that already delivered text must not be restarted on
+ * another provider.
  */
 const RETRYABLE_PROVIDER_ERROR_CODES = new Set([
   'NETWORK_ERROR',
@@ -1311,7 +1314,16 @@ const RETRYABLE_PROVIDER_ERROR_CODES = new Set([
   'REQUEST_HARD_TIMEOUT',
   'TIMEOUT',
   'MAX_RETRIES_REACHED',
+  CONTEXT_WINDOW_EXCEEDED_CODE,
+  'server_error',
 ]);
+
+/**
+ * Error classes a provider's stream error event names for a server failure:
+ * Anthropic's `api_error` (HTTP 500) and `overloaded_error` (529). A thrown
+ * provider error carries the HTTP status; a stream event carries the class.
+ */
+const RETRYABLE_PROVIDER_ERROR_TYPES = new Set(['api_error', 'overloaded_error']);
 
 /**
  * Detect content-policy refusals across providers so the fallback chain
@@ -1401,6 +1413,8 @@ export function isRetryableError(error: unknown): boolean {
   // exhausted network failure as "Network error: unable to reach ...").
   const code = (error as { code?: unknown }).code;
   if (typeof code === 'string' && RETRYABLE_PROVIDER_ERROR_CODES.has(code)) return true;
+  const errorType = (error as { type?: unknown }).type;
+  if (typeof errorType === 'string' && RETRYABLE_PROVIDER_ERROR_TYPES.has(errorType)) return true;
 
   const msg = error.message;
   // HTTP status codes that warrant a provider switch (string-grepped fallback

@@ -240,6 +240,7 @@ export {
   buildFallbackChain,
   buildPolicyAwareFallbackChain,
 } from './api/generateText.js';
+export { CONTEXT_WINDOW_EXCEEDED_CODE } from './core/llm/providers/errors/errorCodes.js';
 export type {
   GenerateTextOptions,
   GenerateTextResult,

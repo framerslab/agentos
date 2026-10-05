@@ -133,7 +133,8 @@ const TEXT_MODELS: CatalogEntry[] = [
     modality: 'text',
     quality: 'medium',
     contentPermissions: ['general', 'romantic', 'erotic', 'violent', 'horror'],
-    capabilities: ['chat', 'tool_use', 'json_mode'],
+    // No tool_use: OpenRouter serves this model without tool support.
+    capabilities: ['chat', 'json_mode'],
   },
   {
     modelId: 'meta-llama/llama-3.1-8b-instruct',

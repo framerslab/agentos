@@ -80,6 +80,8 @@
  * ```
  */
 
+import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../llm/providers/errors/errorCodes.js';
+
 /** Snapshot of breaker state for a single provider. */
 export interface LLMProviderHealthStats {
   /** Provider id this snapshot describes. */
@@ -249,6 +251,19 @@ const CONTENT_POLICY_MARKS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * A request larger than the model's context window is a verdict on the
+ * request: the provider answered, or was never asked. Counting it would trip
+ * a healthy provider's breaker on long conversations.
+ */
+function isRequestTooLarge(error: unknown): boolean {
+  return (
+    !!error &&
+    typeof error === 'object' &&
+    (error as { code?: unknown }).code === CONTEXT_WINDOW_EXCEEDED_CODE
+  );
+}
+
+/**
  * A content-policy decline (an Anthropic refusal, a Gemini safety block, an
  * OpenAI content-policy rejection) is a verdict on the request: the provider
  * is up and answered. These errors often carry no HTTP status, which
@@ -306,12 +321,14 @@ export class LLMProviderHealthRegistry {
    * a repeat failure on an open breaker just refreshes the
    * cooldown for the new error class.
    *
-   * A content-policy decline is ignored entirely (see
-   * {@link isContentPolicyDecline}): it neither trips the breaker nor
-   * counts toward a streak.
+   * A content-policy decline and a context-window rejection are ignored
+   * entirely (see {@link isContentPolicyDecline} and
+   * {@link isRequestTooLarge}): they neither trip the breaker nor count
+   * toward a streak.
    */
   recordFailure(providerId: string, error: unknown): void {
     if (isContentPolicyDecline(error)) return;
+    if (isRequestTooLarge(error)) return;
     const status = classifyErrorStatus(error);
     // Billing/quota exhaustion is provider health regardless of the
     // transport status it wears: OpenAI reports it as 429, Anthropic as
