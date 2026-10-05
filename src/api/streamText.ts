@@ -1297,18 +1297,22 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // delivered anything, that part is held back and the walk moves
             // on, so the consumer sees one terminal error at most. After
             // output it is the stream's terminal error; nothing is replayed.
-            for await (const fbPart of fallbackResult.fullStream) {
-              if (fbPart.type === 'error' && !legDelivered) {
-                legError = fbPart.error;
-                continue;
+            try {
+              for await (const fbPart of fallbackResult.fullStream) {
+                if (fbPart.type === 'error' && !legDelivered) {
+                  legError = fbPart.error;
+                  continue;
+                }
+                legDelivered = true;
+                parts.push(fbPart);
+                yield fbPart;
               }
-              legDelivered = true;
-              parts.push(fbPart);
-              yield fbPart;
+            } finally {
+              // This call's result usage covers every attempt, a leg the
+              // consumer abandoned mid-stream included: closing the loop
+              // above ran the leg's finally, which settled its usage.
+              addTokenUsage(usage, await fallbackResult.usage);
             }
-
-            // This call's result usage covers every attempt.
-            addTokenUsage(usage, await fallbackResult.usage);
 
             if (legError) {
               lastFallbackError = legError;
