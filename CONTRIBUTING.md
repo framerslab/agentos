@@ -42,7 +42,7 @@ Write the subject in the imperative mood and keep each commit to one change.
 - Keep each pull request to one concern.
 - Fill in the [pull request template](https://github.com/framerslab/agentos/blob/master/.github/pull_request_template.md), including how you verified the change.
 - Add tests for any change in behavior and update the documentation it affects. CI must be green.
-- Maintainers squash-merge with the pull request title as the commit subject, which is what the release reads. Give the title the Conventional Commits form, put `!` after the type for a change that breaks users, and describe what users must change in the Migration notes section.
+- Maintainers squash-merge with the pull request title as the commit subject, which is what the release reads. Give the title the Conventional Commits form, put `!` before the colon for a change that breaks users (`feat!:` or `feat(api)!:`), and describe what users must change in the Migration notes section.
 
 ## Automated review threads
 

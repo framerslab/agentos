@@ -105,9 +105,6 @@ jobs:
           # Create .nojekyll to prevent GitHub Pages from ignoring _* files
           touch docs-deploy/.nojekyll
 
-          # Create CNAME for custom domain
-          echo "docs.agentos.sh" > docs-deploy/CNAME
-
       - name: Deploy to agentos-live-docs branch
         uses: peaceiris/actions-gh-pages@v4
         with:

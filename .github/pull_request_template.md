@@ -28,7 +28,7 @@
 
 - [ ] Tests cover the changed behavior.
 - [ ] Docs are updated.
-- [ ] The title follows Conventional Commits, with `!` after the type for a change that breaks users.
+- [ ] The title follows Conventional Commits, with `!` before the colon for a change that breaks users (`feat!:` or `feat(api)!:`).
 - [ ] No secrets or private data are included.
 - [ ] Every automated review thread is settled ([how](https://github.com/framerslab/agentos/blob/master/CONTRIBUTING.md#automated-review-threads)).
 - [ ] I have read this change and can explain every line.
