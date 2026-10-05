@@ -366,6 +366,22 @@ describe('a provider error chunk', () => {
   });
 });
 
+describe('a thrown error after output', () => {
+  it('keeps the delivered text and reports the stream failed when the consumer stops at the error part', async () => {
+    hoisted.generateCompletionStream.mockImplementationOnce(async function* () {
+      yield textChunk('half ');
+      throw status(502);
+    });
+    const r = streamText({ provider: 'openai', model: 'gpt-5.5', prompt: 'hi', fallbackProviders: LEGS });
+    for await (const part of r.fullStream) {
+      if (part.type === 'error') break;
+    }
+    expect(await r.text).toBe('half ');
+    expect(await r.finishReason).toBe('error');
+    expect(hoisted.generateCompletionStream).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('a stream that ends after a completed step', () => {
   it("keeps the completed step's text when the next step's first chunk is an error", async () => {
     hoisted.generateCompletionStream
