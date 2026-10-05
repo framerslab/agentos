@@ -230,9 +230,10 @@ export interface StreamTextResult {
    * chunk `choices[0].finishReason`; Anthropic maps `max_tokens` →
    * `length` in its adapter). Settled via the generator's cleanup on
    * early abandonment too, so awaiting it after a partial consume does
-   * not hang — though like `text`/`usage` it is only meaningful after a
-   * full drain. The prompt-shim tool-emulation path reports `'stop'`
-   * (its internal calls do not thread per-step reasons).
+   * not hang. On a stream the consumer abandoned it does not say why the
+   * stream ended: it reports the latest step that finished. The
+   * prompt-shim tool-emulation path reports `'stop'` (its internal calls
+   * do not thread per-step reasons).
    */
   finishReason: Promise<StreamFinishReason>;
   /**
