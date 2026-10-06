@@ -62,11 +62,11 @@ AI tools are welcome. A person is accountable for every pull request: they have 
 
 AgentOS is Apache-2.0. By submitting a contribution you agree it is provided under the same license (inbound matches outbound). Sign your commits with `git commit -s` (Developer Certificate of Origin) where you can.
 
-## Provider neutrality
+## Providers and sponsorship
 
-Provider support is decided on technical merit alone. The provider list is ordered neutrally and inclusion is free for everyone who meets the bar. Placement, ordering, and prominence are not for sale and are never part of a merge decision.
+Whether a provider integration is accepted, how it is reviewed and whether it merges are decided on technical merit alone. Inclusion is free for every provider that meets the bar in the [provider integration guide](https://github.com/framerslab/agentos/blob/master/docs/contributing/new-provider.md).
 
-If your company wants promotion, featured placement, or a logo in the README, that is sponsorship, and it is handled separately and disclosed. See [SPONSORS.md](https://github.com/framerslab/agentos/blob/master/SPONSORS.md). A provider integration and a sponsorship are tracked independently: one does not depend on the other.
+Sponsors and partners can also be featured: a prominent spot in the provider list or the examples, a partner badge, or a logo in the README. Every such placement is labeled as sponsored or as a partner, and any material connection is disclosed where the sponsor appears. Sponsorship is arranged outside pull requests; see [SPONSORS.md](https://github.com/framerslab/agentos/blob/master/SPONSORS.md). A provider integration and a sponsorship are tracked independently: one does not depend on the other.
 
 ## Releases
 

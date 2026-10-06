@@ -240,7 +240,7 @@ We use [Conventional Commits](https://www.conventionalcommits.org/). Project gui
 | [Code of Conduct](https://github.com/framerslab/agentos/blob/master/.github/CODE_OF_CONDUCT.md) | Community standards |
 | [Security Policy](https://github.com/framerslab/agentos/blob/master/.github/SECURITY.md) | Reporting vulnerabilities privately |
 | [Support](https://github.com/framerslab/agentos/blob/master/SUPPORT.md) | Where to get help |
-| [Sponsors](https://github.com/framerslab/agentos/blob/master/SPONSORS.md) | Funding and the vendor-neutral placement policy |
+| [Sponsors](https://github.com/framerslab/agentos/blob/master/SPONSORS.md) | Funding, sponsor placement and disclosure |
 
 ---
 
