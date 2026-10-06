@@ -55,6 +55,11 @@ export class PolicyAwareRouter implements IModelRouter {
     this.defaultPolicyTier = defaultPolicyTier;
   }
 
+  /** The tier this router applies when a request carries none: its own default, else its base router's. */
+  get policyTier(): PolicyTier | undefined {
+    return this.defaultPolicyTier ?? this.baseRouter?.policyTier;
+  }
+
   /**
    * No-op initialization. The PolicyAwareRouter is stateless beyond its
    * constructor arguments; it does not require async setup.

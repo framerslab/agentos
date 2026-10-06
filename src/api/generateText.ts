@@ -30,6 +30,14 @@ import { createLogger } from '../core/logging/loggerFactory.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../core/llm/providers/errors/errorCodes.js';
+import { ContextWindowExceededError } from '../core/llm/providers/errors/ContextWindowExceededError.js';
+import {
+  catalogEntryHasCapability,
+  createUncensoredModelCatalog,
+  findCatalogTextModel,
+  type PolicyTier,
+} from '../core/llm/routing/UncensoredModelCatalog.js';
+import { checkContextFit } from './runtime/contextWindowFit.js';
 import { describeResponseFormatShape } from './runtime/responseFormatForProvider.js';
 
 const fallbackLogger = createLogger('fallback');
@@ -1576,6 +1584,27 @@ export function fallbackHopOverrides(
     cache: entry.cache !== undefined ? entry.cache : base.cache,
     __hopBase: base,
   };
+}
+
+/**
+ * The policy tier a call's fallback chain is built for: the explicit route
+ * tier, the call's tier, the host policy's tier (`standard` when a host
+ * policy names none), then the router's default. The primary's route block
+ * sends the first three terms only, so a delegated base router still sees no
+ * tier when no explicit source set one.
+ */
+export function resolvePolicyTier(opts: {
+  routerParams?: { policyTier?: PolicyTier };
+  policyTier?: PolicyTier;
+  hostPolicy?: HostLLMPolicy;
+  router?: { readonly policyTier?: PolicyTier };
+}): PolicyTier | undefined {
+  return (
+    opts.routerParams?.policyTier ??
+    opts.policyTier ??
+    hostPolicyToRouteParams(opts.hostPolicy).policyTier ??
+    opts.router?.policyTier
+  );
 }
 
 /**

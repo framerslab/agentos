@@ -201,3 +201,18 @@ describe('PolicyAwareRouter', () => {
     expect(router.routerId).toBe('policy_aware_router_v1');
   });
 });
+
+describe('PolicyAwareRouter.policyTier', () => {
+  const catalog = createUncensoredModelCatalog();
+
+  it('exposes the router default tier', () => {
+    expect(new PolicyAwareRouter(catalog, null, {}, 'mature').policyTier).toBe('mature');
+    expect(new PolicyAwareRouter(catalog).policyTier).toBeUndefined();
+  });
+
+  it('falls back to the base router tier when it has none of its own', () => {
+    const base = new PolicyAwareRouter(catalog, null, {}, 'private-adult');
+    expect(new PolicyAwareRouter(catalog, base).policyTier).toBe('private-adult');
+    expect(new PolicyAwareRouter(catalog, base, {}, 'mature').policyTier).toBe('mature');
+  });
+});
