@@ -1298,17 +1298,27 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           fallbackProvider: entry.provider,
           fallbackModel: entry.model,
         });
+      // A stream that already handed text or tool activity to the consumer
+      // is not restarted on another provider (a refusal after text
+      // included): the consumer would receive the partial answer followed by
+      // a fresh one, and tools could run twice.
+      // firstPartAt is stamped when the first part reaches the consumer.
+      const deliveredOutput = firstPartAt !== undefined || shimRanTool;
+      const walks = isRetryableError(error) && !deliveredOutput;
       // The top-level walk resolves the chain once (the failed first model's
       // policy leg dropped, explicit requirements applied, standing legs and
-      // refills marked); a leg receives its resolved slice.
-      const effectiveFallbacks: ResolvedFallbackEntry[] = opts.__fallbackWalk
-        ? chainEntries
-        : resolveFallbackChain(chainEntries, {
-            primary: { provider: recordedProviderId, model: recordedModelId },
-            requiredCapabilities: explicitRequiredCapabilities(opts),
-            excludedModelIds: opts.routerParams?.excludedModelIds,
-            onSkip: logLegSkip,
-          });
+      // refills marked); a leg receives its resolved slice. Resolved only
+      // when the walk runs, so its skip lines describe a walk.
+      const effectiveFallbacks: ResolvedFallbackEntry[] = !walks
+        ? []
+        : opts.__fallbackWalk
+          ? chainEntries
+          : resolveFallbackChain(chainEntries, {
+              primary: { provider: recordedProviderId, model: recordedModelId },
+              requiredCapabilities: explicitRequiredCapabilities(opts),
+              excludedModelIds: opts.routerParams?.excludedModelIds,
+              onSkip: logLegSkip,
+            });
       // This attempt's own failure updates the walk: a refusal is recorded,
       // and a standing leg that failed on availability is owed a refill.
       let walkState = advanceFallbackWalk(
@@ -1317,13 +1327,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         error,
       );
 
-      // A stream that already handed text or tool activity to the consumer
-      // is not restarted on another provider (a refusal after text
-      // included): the consumer would receive the partial answer followed by
-      // a fresh one, and tools could run twice.
-      // firstPartAt is stamped when the first part reaches the consumer.
-      const deliveredOutput = firstPartAt !== undefined || shimRanTool;
-      if (effectiveFallbacks.length && isRetryableError(error) && !deliveredOutput) {
+      if (walks && effectiveFallbacks.length) {
         let lastFallbackError: Error = error;
         // How the walk ended: a leg served the stream; a leg failed after it
         // delivered output (its error part already reached the consumer); or

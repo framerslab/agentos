@@ -2891,14 +2891,20 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         fallbackProvider: entry.provider,
         fallbackModel: entry.model,
       });
-    const effectiveFallbacks: ResolvedFallbackEntry[] = opts.__fallbackWalk
-      ? chainEntries
-      : resolveFallbackChain(chainEntries, {
-          primary: { provider: metricProviderId, model: metricModelId },
-          requiredCapabilities: explicitRequiredCapabilities(opts),
-          excludedModelIds: opts.routerParams?.excludedModelIds,
-          onSkip: logLegSkip,
-        });
+    // Resolved only when the walk runs, so its skip lines describe a walk.
+    // A call whose prompt-shim tools already ran cannot be continued, and a
+    // restart would run them again; it surfaces the error instead.
+    const walks = isRetryableError(error) && !toolProgress.shimRanTool;
+    const effectiveFallbacks: ResolvedFallbackEntry[] = !walks
+      ? []
+      : opts.__fallbackWalk
+        ? chainEntries
+        : resolveFallbackChain(chainEntries, {
+            primary: { provider: metricProviderId, model: metricModelId },
+            requiredCapabilities: explicitRequiredCapabilities(opts),
+            excludedModelIds: opts.routerParams?.excludedModelIds,
+            onSkip: logLegSkip,
+          });
     // This attempt's own failure updates the walk: a refusal is recorded,
     // and a standing leg that failed on availability is owed a refill.
     let walkState = advanceFallbackWalk(
@@ -2907,13 +2913,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       error,
     );
 
-    // A call whose prompt-shim tools already ran cannot be continued, and a
-    // restart would run them again; it surfaces the error instead.
-    if (
-      effectiveFallbacks.length &&
-      isRetryableError(error) &&
-      !toolProgress.shimRanTool
-    ) {
+    if (walks && effectiveFallbacks.length) {
       let lastError = error;
       let attempt = 0;
       for (const fb of effectiveFallbacks) {
