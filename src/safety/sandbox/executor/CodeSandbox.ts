@@ -74,7 +74,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
 
 /**
  * Keys that callers MUST NOT be able to override via SandboxConfig.extraGlobals.
- * The hardened context explicitly nulls these to prevent host-state leaks; if
+ * The minimal context explicitly nulls these to prevent host-state leaks; if
  * we let extraGlobals re-bind them the entire isolation guarantee evaporates.
  * Filtered silently at merge time so a forge-style consumer that includes one
  * of these by accident still gets a working sandbox without a noisy error.
@@ -152,7 +152,9 @@ const DANGEROUS_PATTERNS: Record<SandboxLanguage, RegExp[]> = {
 /**
  * Code Execution Sandbox implementation.
  *
- * Provides isolated code execution with security controls.
+ * Runs code with a time limit and a minimal set of globals: JavaScript in a
+ * node:vm context inside this process, Python in a child process. `node:vm`
+ * is not a security mechanism (Node's documentation).
  */
 export class CodeSandbox implements ICodeSandbox {
   private logger?: ILogger;
@@ -281,14 +283,17 @@ export class CodeSandbox implements ICodeSandbox {
   }
 
   /**
-   * Executes JavaScript code in a hardened VM sandbox using node:vm.
+   * Executes JavaScript code in a node:vm context inside this process.
    *
-   * Security guarantees:
-   * - Isolated context prevents access to host globals (process, require, etc.)
-   * - `codeGeneration.strings = false` blocks eval() and new Function() inside the sandbox
+   * What the context does:
+   * - removes host globals from the context (process, require, global, globalThis)
+   * - `codeGeneration.strings = false` blocks eval() and new Function() inside the context
    * - `codeGeneration.wasm = false` blocks WebAssembly compilation
-   * - Frozen console object prevents prototype chain manipulation
-   * - Explicit undefined assignments for dangerous globals (process, global, globalThis)
+   * - freezes the console object
+   *
+   * What it does not do: `node:vm` is not a security mechanism (Node's
+   * documentation), memory is not limited, and a host call started before the
+   * timeout keeps running after it.
    */
   private async executeJavaScript(
     executionId: string,
@@ -358,9 +363,9 @@ export class CodeSandbox implements ICodeSandbox {
       Atomics: undefined,
     };
 
-    // Merge caller-supplied extras AFTER the hardened defaults so an explicit
+    // Merge caller-supplied extras AFTER the minimal defaults so an explicit
     // override (e.g., SandboxedToolForge injecting an allowlisted fetch wrapper)
-    // can replace the hardened-undefined values where it makes sense. Keys in
+    // can replace the removed values where it makes sense. Keys in
     // DANGEROUS_GLOBAL_KEYS are dropped silently to keep the hardening intact.
     if (config.extraGlobals) {
       for (const [key, value] of Object.entries(config.extraGlobals)) {

@@ -1154,10 +1154,10 @@ When `emergent: true` is set in [`AgentOSConfig`](https://github.com/framerslab/
 
 1. The agent generates JavaScript code for a new tool (name, description, input schema, implementation)
 2. [`SandboxedToolForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/SandboxedToolForge.ts) performs static validation, rejecting dangerous patterns (`eval`, `Function`, `process`, `require`, `import`, `child_process`, `fs.write*`)
-3. Validated code executes in a hardened node:vm sandbox via [`CodeSandbox`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/executor/CodeSandbox.ts) with configurable bounds:
+3. Validated code executes in an in-process node:vm context (not a security boundary, per Node's documentation) via [`CodeSandbox`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/executor/CodeSandbox.ts) with configurable bounds:
    - Memory: observed as a heap delta only, not preemptively capped
    - Timeout: 5,000 ms default
-   - API allowlist: only `fetch` (domain-restricted), `fs.readFile` (path-restricted, 1 MB max), `crypto` (hash/HMAC only)
+   - API allowlist: `fetch` (any method and host; `fetchDomainAllowlist` checks the first URL's host when a host sets it), `fs.readFile` (under `fsReadRoots`, the working directory by default; 1 MB, checked after the read), `crypto` (hash, HMAC, UUID)
 4. [`EmergentJudge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentJudge.ts) evaluates the tool against safety criteria before permanent registration
 5. [`EmergentToolRegistry`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentToolRegistry.ts) persists approved tools via [`IStorageAdapter`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentToolRegistry.ts)
 

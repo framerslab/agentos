@@ -12,8 +12,9 @@
  * - Steps execute sequentially; the first failure aborts the pipeline and surfaces
  *   the error immediately.
  * - The composite tool's final output is the last step's raw output value.
- * - Safe by construction: all tool invocations are delegated to a caller-supplied
- *   `executeTool` callback, so the builder never touches an external registry directly.
+ * - Every tool invocation is delegated to a caller-supplied `executeTool`
+ *   callback; the builder holds no registry, and the callback decides which
+ *   checks a step meets.
  */
 
 import type { ComposableToolSpec, ComposableStep } from './types.js';
@@ -68,9 +69,9 @@ interface PipelineContext {
  * Reference expressions nested inside plain objects are resolved recursively, so
  * `{ query: "$input.topic", limit: 10 }` becomes `{ query: "actual-topic", limit: 10 }`.
  *
- * Safe by construction — all tool invocations are delegated to the `executeTool`
- * callback supplied at construction time. The builder never holds a reference to
- * any tool registry.
+ * All tool invocations are delegated to the `executeTool` callback supplied at
+ * construction time. The builder never holds a reference to any tool registry,
+ * and it applies no permission or approval check of its own.
  *
  * @example
  * ```ts
