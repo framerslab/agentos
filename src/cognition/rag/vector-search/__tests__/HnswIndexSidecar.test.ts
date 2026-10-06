@@ -46,7 +46,9 @@ describe('HnswIndexSidecar', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    MockHierarchicalNSW.mockImplementation(() => mockIndex);
+    MockHierarchicalNSW.mockImplementation(function () {
+      return mockIndex;
+    });
     fsMocks.access.mockRejectedValue(new Error('ENOENT'));
     fsMocks.writeFile.mockResolvedValue(undefined);
     sidecar = new HnswIndexSidecar();
