@@ -177,14 +177,16 @@ describe('gateFallbackEntry and advanceFallbackWalk', () => {
 describe('resolvePolicyTier', () => {
   const catalog = createUncensoredModelCatalog();
 
-  it.each([
-    [{ routerParams: { policyTier: 'standard' as const }, policyTier: 'mature' as const }, 'standard'],
-    [{ policyTier: 'mature' as const, router: { policyTier: 'private-adult' as const } }, 'mature'],
-    [{ hostPolicy: {}, router: { policyTier: 'mature' as const } }, 'standard'],
-    [{ hostPolicy: { policyTier: 'private-adult' as const } }, 'private-adult'],
-    [{ router: { policyTier: 'mature' as const } }, 'mature'],
+  type TierCase = [opts: Parameters<typeof resolvePolicyTier>[0], expected: string | undefined];
+  const TIER_CASES: TierCase[] = [
+    [{ routerParams: { policyTier: 'standard' }, policyTier: 'mature' }, 'standard'],
+    [{ policyTier: 'mature', router: { policyTier: 'private-adult' } }, 'mature'],
+    [{ hostPolicy: {}, router: { policyTier: 'mature' } }, 'standard'],
+    [{ hostPolicy: { policyTier: 'private-adult' } }, 'private-adult'],
+    [{ router: { policyTier: 'mature' } }, 'mature'],
     [{}, undefined],
-  ])('%j -> %s', (opts, expected) => {
+  ];
+  it.each(TIER_CASES)('%j -> %s', (opts, expected) => {
     expect(resolvePolicyTier(opts)).toBe(expected);
   });
 
