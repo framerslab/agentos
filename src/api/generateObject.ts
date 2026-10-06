@@ -238,6 +238,18 @@ export interface GenerateObjectOptions<T extends ZodType> {
   effort?: string;
 
   /**
+   * Extended-thinking switch, forwarded to
+   * {@link import('./generateText.js').GenerateTextOptions.thinking}.
+   * `false` turns thinking off with the model's own off shape (Sonnet 5.5
+   * takes `between_tools`, at effort `high` or below); Opus 5.5, Fable and
+   * Mythos always think. Omitted keeps the model's default, which is thinking
+   * on for Opus 5 and later, Sonnet 5 and later, Fable and Mythos. Thinking
+   * tokens count toward `maxTokens`, so a structured call on a thinking model
+   * needs room for both.
+   */
+  thinking?: { budgetTokens: number } | false;
+
+  /**
    * Per-call prompt-cache control, forwarded to
    * {@link import('./generateText.js').GenerateTextOptions.cache}.
    * `false` opts this call out of ALL cache marking (the schema block's
@@ -762,6 +774,10 @@ export async function generateObject<T extends ZodType>(
       // reasoning_effort, effort-capable Claude -> output_config.effort) run at
       // the requested depth instead of their default.
       effort: opts.effort,
+      // Forward the thinking switch so a structured call on a model that
+      // thinks by default (Sonnet 5.5) can turn it off and keep its whole
+      // output budget for the JSON.
+      thinking: opts.thinking,
       // Forward per-call cache control: `false` = zero cache_control on the
       // wire (one-shot extractions, schema block included); `{ ttl: '1h' }`
       // = 1h TTL on the provider's auto markers (moving message-tail).

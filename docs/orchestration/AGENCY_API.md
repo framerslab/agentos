@@ -266,7 +266,7 @@ Each seat keeps the default provider failover. When a seat's call fails with a
 retryable error (HTTP 401, 402, 403, 429, 500, 502, 503, 504 or 529, a network
 error or a timeout), the call is retried on the providers whose keys are in the
 environment. With no `policyTier` set, the order and models are: OpenAI
-`gpt-5.6-sol`, Anthropic `claude-sonnet-5`, OpenRouter `openai/gpt-5.6-sol`,
+`gpt-5.6-sol`, Anthropic `claude-sonnet-5-5` (effort `low`), OpenRouter `openai/gpt-5.6-sol`,
 Gemini `gemini-3.1-pro-preview`; the seat's own provider is skipped. The
 seat's result then reports the provider that answered, but
 `agentCalls` does not record it. To pin every seat and the chair to their

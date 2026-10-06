@@ -264,3 +264,32 @@ describe('streamObject — the schema text carries the Zod size checks (2026-10-
     expect(text).toContain('"maxItems": 3');
   });
 });
+
+describe('streamObject — reasoning options reach the provider', () => {
+  beforeEach(() => {
+    hoisted.generateCompletionStream.mockReset();
+  });
+
+  it('forwards effort and thinking through streamText', async () => {
+    hoisted.generateCompletionStream.mockImplementationOnce(async function* () {
+      yield textChunk('{"name": "A", "age": 3, "hobbies": []}', {
+        isFinal: true,
+        usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+      });
+    });
+    const schema = z.object({ name: z.string(), age: z.number(), hobbies: z.array(z.string()) });
+
+    const result = streamObject({ schema, prompt: 'Create a profile', effort: 'low', thinking: false });
+    for await (const _partial of result.partialObjectStream) {
+      // drain the stream so the provider call is made
+    }
+    await expect(result.object).resolves.toEqual({ name: 'A', age: 3, hobbies: [] });
+
+    const providerOptions = hoisted.generateCompletionStream.mock.calls[0][2] as {
+      effort?: string;
+      thinking?: unknown;
+    };
+    expect(providerOptions.effort).toBe('low');
+    expect(providerOptions.thinking).toBe(false);
+  });
+});
