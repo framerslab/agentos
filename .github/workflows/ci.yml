@@ -50,6 +50,19 @@ jobs:
       - name: Lint
         run: pnpm run lint
 
+      - name: Documentation states only what the code enforces
+        run: |
+          set -euo pipefail
+          # Words the published pages may not use for the in-process node:vm executor.
+          if grep -rn -i -E 'hardened|domain-restricted|host-realm escape is blocked|isolated context|security guarantees|safe[- ]by[- ]construction' \
+              docs/architecture/EMERGENT_CAPABILITIES.md docs/architecture/ARCHITECTURE.md \
+              src/cognition/emergent/SandboxedToolForge.ts src/cognition/emergent/ComposableToolBuilder.ts \
+              src/cognition/emergent/EmergentCapabilityEngine.ts src/cognition/emergent/types.ts \
+              src/safety/sandbox/executor/CodeSandbox.ts src/safety/sandbox/executor/ICodeSandbox.ts; then
+            echo "::error::the documentation claims an isolation the executor does not provide (see docs/architecture/EMERGENT_CAPABILITIES.md, Sandbox Mode)"
+            exit 1
+          fi
+
       - name: Type check
         run: pnpm run typecheck
 
