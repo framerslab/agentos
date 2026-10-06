@@ -9,6 +9,7 @@
 // this script calls the two plugins directly and needs none. Nothing is
 // tagged, published or committed.
 import { execFileSync } from 'node:child_process';
+import { format } from 'node:util';
 import config from '../release.config.js';
 
 const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
@@ -55,7 +56,7 @@ const commits = git('log', `--format=${format}`, range)
     };
   });
 
-const say = (...parts) => console.log('[release dry run]', ...parts);
+const say = (...parts) => console.log('[release dry run]', format(...parts));
 const logger = { log: say, error: say, warn: say, success: say };
 const lastRelease = lastTag
   ? { gitTag: lastTag, gitHead: git('rev-list', '-n', '1', lastTag), version: lastTag.slice(tagPrefix.length) }
