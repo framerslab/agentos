@@ -328,6 +328,11 @@ export class ToolOrchestrator implements IToolOrchestrator {
         onToolPromoted: async (tool) => {
           await this.emergentDiscoveryIndexer?.([tool]);
         },
+        // Suspending or removing a forged tool takes its executable out of the
+        // executor; before this hook was wired the tool stayed callable.
+        onToolRemoved: async (tool) => {
+          await this.toolExecutor.unregisterTool(tool.name);
+        },
       });
 
       // Create and register the forge_tool meta-tool.

@@ -46,7 +46,12 @@ export type {
 export { EmergentJudge } from './EmergentJudge.js';
 export type { ToolCandidate, EmergentJudgeConfig } from './EmergentJudge.js';
 export { EmergentCapabilityEngine } from './EmergentCapabilityEngine.js';
-export type { EmergentCapabilityEngineDeps } from './EmergentCapabilityEngine.js';
+export type {
+  EmergentCapabilityEngineDeps,
+  FailedToolLoad,
+  LoadedToolOutcome,
+  LoadPersistedToolsResult,
+} from './EmergentCapabilityEngine.js';
 export { ForgeToolMetaTool } from './ForgeToolMetaTool.js';
 export type { ForgeToolInput } from './ForgeToolMetaTool.js';
 export {

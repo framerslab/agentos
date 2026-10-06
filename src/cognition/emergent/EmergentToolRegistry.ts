@@ -30,12 +30,13 @@ import type {
   ToolTier,
   ToolUsageStats,
   EmergentConfig,
+  PersistedToolRow,
   StoredRequest,
   ToolState,
   ToolStateRecord,
 } from './types.js';
 import { DEFAULT_EMERGENT_CONFIG } from './types.js';
-import { parsePersistedSource } from './persisted-source.js';
+import { parsePersistedSource, parseStoredRequest } from './persisted-source.js';
 
 // ============================================================================
 // STORAGE ADAPTER INTERFACE
@@ -515,6 +516,79 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       this.persistedTools.set(tool.id, tool);
     }
     this.states.set(tool.id, record);
+  }
+
+  private static readonly ROW_COLUMNS = `
+        t.id, t.name, t.description, t.input_schema, t.output_schema,
+        t.implementation_mode, t.implementation_source, t.tier,
+        t.created_by_agent, t.created_by_session, t.created_at,
+        t.judge_verdicts, t.confidence_score, t.total_uses, t.success_count,
+        t.failure_count, t.avg_execution_ms, t.last_used_at, t.is_active,
+        s.state AS state, s.state_reason AS state_reason,
+        s.state_at AS state_at, s.request_json AS request_json
+   FROM agentos_emergent_tools t
+   LEFT JOIN agentos_emergent_tool_state s ON s.tool_id = t.id`;
+
+  /** Every stored row of the given tiers, in creation order, with its state row. */
+  async loadRows(tiers: readonly ToolTier[]): Promise<PersistedToolRow[]> {
+    if (!this.db || tiers.length === 0) {
+      return [];
+    }
+    await this.ensureSchemaReady();
+    const marks = tiers.map(() => '?').join(', ');
+    const rows = await this.db.all(
+      `SELECT ${EmergentToolRegistry.ROW_COLUMNS}
+        WHERE t.tier IN (${marks})
+        ORDER BY t.created_at ASC`,
+      [...tiers],
+    );
+    return rows as PersistedToolRow[];
+  }
+
+  /** One stored row with its state row, or `undefined`. */
+  async loadRow(toolId: string): Promise<PersistedToolRow | undefined> {
+    if (!this.db) {
+      return undefined;
+    }
+    await this.ensureSchemaReady();
+    const row = await this.db.get(
+      `SELECT ${EmergentToolRegistry.ROW_COLUMNS}
+        WHERE t.id = ?`,
+      [toolId],
+    );
+    return (row as PersistedToolRow | undefined) ?? undefined;
+  }
+
+  /** A tool's state: the held one, else the stored one, else `undefined`. */
+  async readState(toolId: string): Promise<ToolStateRecord | undefined> {
+    const held = this.states.get(toolId);
+    if (held || !this.db) {
+      return held;
+    }
+    await this.ensureSchemaReady();
+    const row = (await this.db.get(
+      `SELECT state, state_reason, state_at, request_json
+         FROM agentos_emergent_tool_state
+        WHERE tool_id = ?`,
+      [toolId],
+    )) as
+      | {
+          state?: ToolState | null;
+          state_reason?: string | null;
+          state_at?: number | string | null;
+          request_json?: string | null;
+        }
+      | undefined;
+    if (!row?.state) {
+      return undefined;
+    }
+    return {
+      toolId,
+      state: row.state,
+      reason: row.state_reason ?? null,
+      at: Number(row.state_at ?? 0),
+      request: parseStoredRequest(row.request_json),
+    };
   }
 
   /**
