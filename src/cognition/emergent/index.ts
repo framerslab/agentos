@@ -16,6 +16,14 @@ export { type SelfImprovementConfig, DEFAULT_SELF_IMPROVEMENT_CONFIG } from './S
 export { ComposableToolBuilder } from './ComposableToolBuilder.js';
 export { SandboxedToolForge } from './SandboxedToolForge.js';
 export type { SandboxedToolForgeConfig } from './SandboxedToolForge.js';
+export { CAPABILITY_NAMES, CAPABILITY_ALIASES, normalizeAllowlist, toSandboxApis } from './capabilities.js';
+export {
+  parsePersistedSource,
+  inferRequestFromCode,
+  requestFromImplementation,
+  parseStoredRequest,
+} from './persisted-source.js';
+export type { PersistedSource } from './persisted-source.js';
 export { EmergentToolRegistry } from './EmergentToolRegistry.js';
 export type {
   IStorageAdapter as EmergentRegistryStorageAdapter,

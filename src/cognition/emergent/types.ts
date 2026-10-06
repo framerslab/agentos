@@ -50,6 +50,13 @@ export type ToolTier = 'session' | 'agent' | 'shared';
  */
 export type SandboxAPI = 'fetch' | 'fs.readFile' | 'crypto';
 
+/**
+ * A capability a code-forged tool can be granted, by its catalogue name.
+ * `fs.read` is the catalogue name of the `fs.readFile` function injected into
+ * forged code; `SandboxAPI` keeps the injected names.
+ */
+export type CapabilityName = 'fetch' | 'fs.read' | 'crypto';
+
 // ============================================================================
 // TOOL IMPLEMENTATIONS
 // ============================================================================
@@ -416,6 +423,55 @@ export interface ToolUsageStats {
    * is recorded.
    */
   confidenceScore: number;
+}
+
+/** Whether a stored tool may run. `demoted` is a host's decision and is never undone by loading. */
+export type ToolState = 'active' | 'suspended' | 'demoted';
+
+/** What a tool asked for when it was forged, kept so a rebuilt tool carries the same request. */
+export type StoredRequest =
+  | { kind: 'sandbox'; capabilities: CapabilityName[]; inferred?: boolean }
+  | { kind: 'compose'; steps: Array<{ name: string; tool: string }> };
+
+/** One row of `agentos_emergent_tool_state`. */
+export interface ToolStateRecord {
+  toolId: string;
+  state: ToolState;
+  /** Machine-readable reason for a state other than `active`. */
+  reason: string | null;
+  /** Unix epoch milliseconds of the last state change. */
+  at: number;
+  request: StoredRequest | null;
+}
+
+/**
+ * One row of `agentos_emergent_tools` joined with its state row. The four
+ * state columns are null for a row written before state was kept.
+ */
+export interface PersistedToolRow {
+  id: string;
+  name: string;
+  description: string;
+  input_schema: string;
+  output_schema: string | null;
+  implementation_mode: string;
+  implementation_source: string;
+  tier: ToolTier;
+  created_by_agent: string;
+  created_by_session: string;
+  created_at: number | string;
+  judge_verdicts: string | null;
+  confidence_score: number | null;
+  total_uses: number | null;
+  success_count: number | null;
+  failure_count: number | null;
+  avg_execution_ms: number | null;
+  last_used_at: number | string | null;
+  is_active: number | boolean | null;
+  state: ToolState | null;
+  state_reason: string | null;
+  state_at: number | string | null;
+  request_json: string | null;
 }
 
 // ============================================================================
