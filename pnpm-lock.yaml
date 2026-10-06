@@ -27,8 +27,8 @@ importers:
         specifier: ^1.7.7
         version: 1.20.0
       execa:
-        specifier: ^9.6.1
-        version: 9.6.1
+        specifier: ^10.0.1
+        version: 10.0.1
       graphology:
         specifier: '>=0.25.0'
         version: 0.26.0(graphology-types@0.24.8)
@@ -51,8 +51,8 @@ importers:
         specifier: ^1.12.0
         version: 1.13.0
       minimatch:
-        specifier: ^9.0.5
-        version: 9.0.9
+        specifier: ^10.2.6
+        version: 10.2.6
       natural:
         specifier: ^6.12.0
         version: 6.12.0(socks@2.8.10)
@@ -66,8 +66,8 @@ importers:
         specifier: ^8.20.0
         version: 8.23.1
       pino:
-        specifier: ^9.14.0
-        version: 9.14.0
+        specifier: ^10.4.0
+        version: 10.4.0
       ppu-paddle-ocr:
         specifier: '>=3.0.0'
         version: 6.6.0(onnxruntime-node@1.21.0)
@@ -78,8 +78,8 @@ importers:
         specifier: ^1.4.0
         version: 1.8.1(@napi-rs/canvas@1.0.10)
       uuid:
-        specifier: ^11.1.0
-        version: 11.1.1
+        specifier: ^14.0.2
+        version: 14.0.2
       ws:
         specifier: ^8.18.0
         version: 8.22.0
@@ -5829,6 +5829,10 @@ packages:
     resolution: {integrity: sha512-r34yH/GlQpKZbU1BvFFqOjhISRo1MNx1tWYsYvmj6KIRHSPMT2+yHOEb1SG6NMvRoHRF0a07kCOox/9yakl1vg==}
     hasBin: true
 
+  pino@10.4.0:
+    resolution: {integrity: sha512-bk1ZMTwG/Vymx+zPoa28MhNzucFvXJWp3csrSuxuHPSMeUettaCoQ5Jvg07mtC4JGNpcfTwz41oVCnNgBK9+vA==}
+    hasBin: true
+
   pino@9.14.0:
     resolution: {integrity: sha512-8OEwKp5juEvb/MjpIc4hjqfgCNysrS94RIOMXYvpYCdm/jglrKEiAYmiumbmGhCvs+IcInsphYDFwqrjr7398w==}
     hasBin: true
@@ -7092,8 +7096,8 @@ packages:
     deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
     hasBin: true
 
-  uuid@11.1.1:
-    resolution: {integrity: sha512-vIYxrBCC/N/K+Js3qSN88go7kIfNPssr/hHCesKCQNAjmgvYS2oqr69kIufEG+O4+PfezOH4EbIeHCfFov8ZgQ==}
+  uuid@14.0.2:
+    resolution: {integrity: sha512-xZe/16rV4aa+HGSOCiY2YeLT1OybRLrrkL/Rqaq7p7GMVXjFh+6wN4oMYgjFmnSnhY8t6Xpdl2l9qmnHYuMHwQ==}
     hasBin: true
 
   uuid@3.4.0:
@@ -14459,11 +14463,11 @@ snapshots:
   pino-abstract-transport@2.0.0:
     dependencies:
       split2: 4.2.0
+    optional: true
 
   pino-abstract-transport@3.0.0:
     dependencies:
       split2: 4.2.0
-    optional: true
 
   pino-std-serializers@7.1.0: {}
 
@@ -14482,6 +14486,20 @@ snapshots:
       thread-stream: 4.2.0
     optional: true
 
+  pino@10.4.0:
+    dependencies:
+      '@pinojs/redact': 0.4.0
+      atomic-sleep: 1.0.0
+      on-exit-leak-free: 2.1.2
+      pino-abstract-transport: 3.0.0
+      pino-std-serializers: 7.1.0
+      process-warning: 5.1.0
+      quick-format-unescaped: 4.0.4
+      real-require: 1.0.0
+      safe-stable-stringify: 2.5.0
+      sonic-boom: 4.2.1
+      thread-stream: 4.2.0
+
   pino@9.14.0:
     dependencies:
       '@pinojs/redact': 0.4.0
@@ -14495,6 +14513,7 @@ snapshots:
       safe-stable-stringify: 2.5.0
       sonic-boom: 4.2.1
       thread-stream: 3.2.0
+    optional: true
 
   pkg-conf@2.1.0:
     dependencies:
@@ -14874,10 +14893,10 @@ snapshots:
     dependencies:
       picomatch: 2.3.2
 
-  real-require@0.2.0: {}
-
-  real-require@1.0.0:
+  real-require@0.2.0:
     optional: true
+
+  real-require@1.0.0: {}
 
   redis@4.7.1:
     dependencies:
@@ -15761,11 +15780,11 @@ snapshots:
   thread-stream@3.2.0:
     dependencies:
       real-require: 0.2.0
+    optional: true
 
   thread-stream@4.2.0:
     dependencies:
       real-require: 1.0.0
-    optional: true
 
   through2@2.0.5:
     dependencies:
@@ -16166,7 +16185,7 @@ snapshots:
   uuid@10.0.0:
     optional: true
 
-  uuid@11.1.1: {}
+  uuid@14.0.2: {}
 
   uuid@3.4.0:
     optional: true
