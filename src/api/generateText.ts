@@ -323,6 +323,21 @@ export interface FallbackProviderEntry {
    * headroom runs at the original.
    */
   maxTokensHeadroom?: number;
+  /**
+   * Who wrote this entry. `'policy-default'` marks an entry the policy chain
+   * built for a mature or private-adult tier; a walk may pass over only such
+   * entries (one that names the failed first model, and Claude legs after a
+   * refusal). Absent on caller-written entries, which keep their order and
+   * contents.
+   */
+  origin?: 'policy-default';
+  /**
+   * The entry's group in a policy chain. `'uncensored'` marks the catalog
+   * ladder legs; a walk runs the first two as standing legs and the rest only
+   * to replace a standing leg that failed on availability or did not fit the
+   * request.
+   */
+  group?: 'uncensored';
 }
 
 /**
@@ -1607,90 +1622,64 @@ export function resolvePolicyTier(opts: {
   );
 }
 
+/** The catalog the policy chain reads its ladders from. */
+const POLICY_CATALOG = createUncensoredModelCatalog();
+
+/** A catalog model never used as a fallback leg: too weak for a rescue reply. */
+const NEVER_A_LEG_MODEL = 'meta-llama/llama-3.1-8b-instruct';
+
 /**
- * Build a policy-tier-aware fallback chain. Used by callers that pass
- * `policyTier: 'mature' | 'private-adult'` so refusals from the
- * primary model (typically gpt-4o, Claude, Gemini: all of which
- * moderate explicit content) re-route to an uncensored OpenRouter
- * model instead of hard-failing the request.
+ * Build a policy-tier-aware fallback chain, for callers that pass
+ * `policyTier: 'mature' | 'private-adult'`: a refusal or an outage of the
+ * primary walks to an uncensored model before the availability legs.
  *
- * Chain order for mature / private-adult:
- *   1. `nousresearch/hermes-3-llama-3.1-405b` on OpenRouter: leads
- *      the uncensored leaderboard for instruction-following + long-
- *      context comprehension. Same model the wilds-ai
- *      companion-pipeline uses for identity generation on mature+
- *      companions; battle-tested on real workloads.
- *   2. `anthropic/claude-sonnet-4` on OpenRouter: Claude refuses
- *      hard NSFW but is markedly more permissive than gpt-4o for
- *      narrative analysis of explicit fiction (extracting characters
- *      from a CAI-export with mild adult content, etc.). Acts as the
- *      headroom band when Hermes 3 is rate-limited or down.
- *   3. The standard {@link buildFallbackChain} suffix: keeps
- *      availability fallback on top of the policy fallback so a
- *      mature request that hits a Hermes 3 outage AND a Sonnet
- *      outage still has gpt-4o-mini etc. to fall back to (which
- *      will refuse on the explicit case but at least surfaces a
- *      moderation error rather than a network error).
+ * Mature and private-adult: the tier's catalog ladder
+ * (the catalog's `getFallbackLadder`; private-adult keeps the
+ * models that permit `erotic`) as OpenRouter legs in the `uncensored`
+ * group, llama-3.1-8b left out, then the {@link buildFallbackChain} suffix.
+ * Every entry is tagged `origin: 'policy-default'`, which lets the walk drop
+ * the leg naming the failed first model, keep two standing uncensored legs,
+ * and pass over Claude legs after a refusal. Safe, standard and an absent
+ * tier get {@link buildFallbackChain} unchanged and untagged.
  *
- * For `safe` / `standard` tiers, this is identical to
- * {@link buildFallbackChain}: no uncensored prefix needed. Callers
- * that don't pass a tier should keep using the original builder.
+ * Each leg pins `cache: false`. A missing key drops its legs instead of
+ * throwing, so a partial deploy still gets a shorter usable chain.
  *
- * Auto-built fallbacks always require their own env keys; missing
- * keys silently drop the entry rather than throwing, so a partial
- * deploy still produces a usable (shorter) chain.
- *
- * @param tier - Caller's intended content tier. Mature/private-adult
- *   triggers the uncensored prefix; safe/standard returns the
- *   availability-only chain.
- * @param excludeProvider - Provider to omit (typically the primary
- *   that already failed). Mirrors {@link buildFallbackChain}.
- * @returns Ordered fallback entries: uncensored prefix (when tier
- *   warrants it) + availability suffix.
+ * @param tier - The call's content tier.
+ * @param excludeProvider - Provider to leave out of the availability suffix
+ *   (typically the failed primary's). The ladder legs ignore it: another
+ *   model on the same provider is a valid rescue, and the walk drops the
+ *   exact failed model.
  */
 export function buildPolicyAwareFallbackChain(
   tier: 'safe' | 'standard' | 'mature' | 'private-adult' | undefined,
   excludeProvider?: string,
 ): FallbackProviderEntry[] {
-  const isMatureTier = tier === 'mature' || tier === 'private-adult';
-  if (!isMatureTier) {
+  if (tier !== 'mature' && tier !== 'private-adult') {
     return buildFallbackChain(excludeProvider);
   }
 
   const chain: FallbackProviderEntry[] = [];
-
-  // Hermes 3 405B leads: uncensored, large, instruction-following
-  // proven on the wilds-ai identity-generation path. Skipped when
-  // OPENROUTER_API_KEY is absent rather than throwing; the suffix
-  // chain may still produce a usable fallback.
   if (process.env.OPENROUTER_API_KEY) {
-    chain.push({
-      provider: 'openrouter',
-      model: 'nousresearch/hermes-3-llama-3.1-405b',
-      cache: false,
-    });
-    // Sonnet via OpenRouter as the second uncensored band. We keep
-    // it on OpenRouter (not direct Anthropic) because the chain's
-    // `excludeProvider` semantics treat each entry as a provider
-    // ID: using `anthropic` here would lock out the suffix's
-    // Anthropic fallback. OpenRouter routes Claude under its own
-    // billing surface, so the slot is independent.
-    chain.push({
-      provider: 'openrouter',
-      model: 'anthropic/claude-sonnet-4',
-      cache: false,
-    });
+    const ladder =
+      tier === 'private-adult'
+        ? POLICY_CATALOG.getFallbackLadder('private-adult', { contentIntent: 'erotic' })
+        : POLICY_CATALOG.getFallbackLadder('mature');
+    for (const entry of ladder) {
+      if (entry.modelId === NEVER_A_LEG_MODEL) continue;
+      chain.push({
+        provider: entry.providerId,
+        model: entry.modelId,
+        cache: false,
+        origin: 'policy-default',
+        group: 'uncensored',
+      });
+    }
   }
 
-  // Append the standard availability chain. Filter out duplicates
-  // since the uncensored prefix may have already added openrouter.
-  const availability = buildFallbackChain(excludeProvider);
-  for (const entry of availability) {
-    const alreadyInChain = chain.some(
-      (existing) =>
-        existing.provider === entry.provider && existing.model === entry.model,
-    );
-    if (!alreadyInChain) chain.push(entry);
+  for (const entry of buildFallbackChain(excludeProvider)) {
+    const listed = chain.some((e) => e.provider === entry.provider && e.model === entry.model);
+    if (!listed) chain.push({ ...entry, origin: 'policy-default' });
   }
   return chain;
 }
