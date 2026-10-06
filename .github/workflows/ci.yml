@@ -109,6 +109,11 @@ jobs:
   release-dry-run:
     name: Release dry run
     runs-on: ubuntu-latest
+    # The branch must exist in this repository for semantic-release to read
+    # it, so a pull request from a fork skips the job instead of failing it.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v5
         with:
@@ -130,4 +135,6 @@ jobs:
         run: pnpm install
 
       - name: Dry-run semantic-release on this branch
-        run: node scripts/release-dry-run.mjs "${{ github.head_ref || github.ref_name }}"
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: node scripts/release-dry-run.mjs "$BRANCH"
