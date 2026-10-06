@@ -317,7 +317,7 @@ describe('EmergentToolRegistry', () => {
     expect(demoted.isActive).toBe(false);
   });
 
-  it('preserves promoted_at when a promoted tool is persisted again after usage', async () => {
+  it("preserves promoted_at when a promoted tool's row is rewritten", async () => {
     const adapter = new MockStorageAdapter();
     const registry = new EmergentToolRegistry(
       { ...DEFAULT_EMERGENT_CONFIG, enabled: true },
@@ -330,7 +330,9 @@ describe('EmergentToolRegistry', () => {
     await registry.promote(tool.id, 'agent', 'admin');
     const firstPromotedAt = adapter.rows.get(tool.id)?.promoted_at;
 
-    registry.recordUse(tool.id, {}, {}, true, 10);
+    // A whole-row rewrite with no approver named: the stored promotion stays.
+    // (recordUse no longer rewrites the row, so it cannot drive this case.)
+    registry.upsert({ ...registry.get(tool.id)! });
     await new Promise((resolve) => setTimeout(resolve, 0));
     const secondPromotedAt = adapter.rows.get(tool.id)?.promoted_at;
 

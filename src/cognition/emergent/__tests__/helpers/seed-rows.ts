@@ -8,6 +8,8 @@ export interface SeedRow {
   tier?: 'session' | 'agent' | 'shared';
   isActive?: 0 | 1;
   inputSchema?: Record<string, unknown>;
+  /** The raw column text, so a test can write a schema column that does not read. */
+  inputSchemaRaw?: string;
   outputSchema?: Record<string, unknown>;
 }
 
@@ -30,7 +32,7 @@ export function seedToolRow(db: SqliteTestAdapter, row: SeedRow): void {
       row.id,
       row.name,
       `Seeded tool ${row.name}.`,
-      JSON.stringify(row.inputSchema ?? { type: 'object', properties: {} }),
+      row.inputSchemaRaw ?? JSON.stringify(row.inputSchema ?? { type: 'object', properties: {} }),
       JSON.stringify(row.outputSchema ?? { type: 'object', properties: {} }),
       row.mode,
       row.source,
@@ -55,6 +57,8 @@ export interface SeedStateRow {
   toolId: string;
   state: 'active' | 'suspended' | 'demoted';
   reason?: string | null;
+  /** Who set the state; a row written without the column reads as the host's. */
+  setBy?: 'library' | 'host';
   /** The raw column text, so a test can write a request this release does not read. */
   requestJson: string | null;
 }
@@ -64,10 +68,18 @@ export function seedStateRow(db: SqliteTestAdapter, row: SeedStateRow): void {
   db.raw
     .prepare(
       `INSERT INTO agentos_emergent_tool_state
-         (tool_id, state, state_reason, state_at, request_json, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+         (tool_id, state, state_reason, set_by, state_at, request_json, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(row.toolId, row.state, row.reason ?? null, 1_700_000_000_000, row.requestJson, 1_700_000_000_000);
+    .run(
+      row.toolId,
+      row.state,
+      row.reason ?? null,
+      row.setBy ?? 'host',
+      1_700_000_000_000,
+      row.requestJson,
+      1_700_000_000_000,
+    );
 }
 
 export const RAW_DOUBLE = 'function execute(input) { return { doubled: input.n * 2 }; }';

@@ -48,29 +48,48 @@ describe('EmergentToolRegistry state', () => {
     await registry.ensureSchema();
   });
 
-  it('stores the request with the tool and keeps is_active in step with the state', async () => {
+  it('stores the request with the tool and keeps is_active and the convention property in step with the state', async () => {
     const tool = makeTool();
     registry.register(tool, 'agent');
     await settle();
-    await registry.setState(tool.id, 'active', null, { kind: 'sandbox', capabilities: [] });
+    const held = registry.get(tool.id) as EmergentTool & { isActive?: boolean };
+    await registry.setState(tool.id, 'active', null, {
+      request: { kind: 'sandbox', capabilities: [] },
+      setBy: 'library',
+    });
 
     expect(readStateRow(db, tool.id)).toMatchObject({
       state: 'active',
       state_reason: null,
+      set_by: 'library',
       request: { kind: 'sandbox', capabilities: [] },
     });
     expect(readToolRow(db, tool.id)?.is_active).toBe(1);
+    expect(held.isActive).toBe(true);
 
     await registry.suspend(tool.id, 'operator_hold');
 
-    expect(registry.getState(tool.id)).toMatchObject({ state: 'suspended', reason: 'operator_hold' });
+    expect(registry.getState(tool.id)).toMatchObject({
+      state: 'suspended',
+      reason: 'operator_hold',
+      setBy: 'host',
+    });
     expect(readStateRow(db, tool.id)).toMatchObject({
       state: 'suspended',
       state_reason: 'operator_hold',
+      // The host's word, whatever the reason says.
+      set_by: 'host',
       // The request survives a state change that does not name one.
       request: { kind: 'sandbox', capabilities: [] },
     });
     expect(readToolRow(db, tool.id)?.is_active).toBe(0);
+    expect(held.isActive).toBe(false);
+
+    // Reactivated: the property follows, and the row says who did it.
+    await registry.setState(tool.id, 'active', null, { setBy: 'host' });
+    expect(held.isActive).toBe(true);
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active', set_by: 'host' });
+    expect(readToolRow(db, tool.id)?.is_active).toBe(1);
   });
 
   it('leaves a stored request it holds nothing for alone when the state changes', async () => {
@@ -92,8 +111,51 @@ describe('EmergentToolRegistry state', () => {
       request: { kind: 'sandbox', capabilities: ['fs.read', 'fs.write'] },
     });
     // Naming a request writes it; null clears it.
-    await registry.setState('emergent_unloaded', 'suspended', 'operator_hold', null);
+    await registry.setState('emergent_unloaded', 'suspended', 'operator_hold', { request: null });
     expect(readStateRow(db, 'emergent_unloaded')?.request).toBeNull();
+
+    // A first write that names no request stores none, whatever this process holds.
+    await registry.setState('emergent_first', 'suspended', 'operator_hold');
+    expect(readStateRow(db, 'emergent_first')).toMatchObject({ state: 'suspended', request_json: null });
+  });
+
+  it('a reactivation whose write fails leaves the tool off, in memory and in storage', async () => {
+    const tool = makeTool();
+    registry.register(tool, 'agent');
+    await settle();
+    await registry.suspend(tool.id, 'operator_hold');
+
+    db.failNext('agentos_emergent_tool_state');
+    await expect(registry.setState(tool.id, 'active', null, { setBy: 'host' })).rejects.toThrow(
+      'simulated storage failure',
+    );
+
+    expect(registry.isActive(tool.id)).toBe(false);
+    expect((registry.get(tool.id) as EmergentTool & { isActive?: boolean }).isActive).toBe(false);
+    expect(registry.recordUse(tool.id, {}, {}, true, 1)).toBe(false);
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'suspended' });
+    expect(readToolRow(db, tool.id)?.is_active).toBe(0);
+  });
+
+  it('a whole-row write by a process that holds no state for the tool keeps its stored suspension', async () => {
+    const tool = makeTool({ id: 'emergent_test_5' });
+    registry.register(tool, 'agent');
+    await settle();
+    await registry.suspend(tool.id, 'operator_hold');
+
+    // Another process on the same store, holding nothing for the tool, rewrites
+    // its row from an object that says nothing about state.
+    const other = new EmergentToolRegistry(
+      { ...DEFAULT_EMERGENT_CONFIG, enabled: true, persistSandboxSource: true },
+      db,
+    );
+    await other.ensureSchema();
+    other.upsert({ ...tool, description: 'Doubles a number, again.' });
+    await settle();
+
+    expect(readToolRow(db, tool.id)?.description).toBe('Doubles a number, again.');
+    expect(readToolRow(db, tool.id)?.is_active).toBe(0);
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'suspended', set_by: 'host' });
   });
 
   it('refuses to record a use of a tool that is not active', async () => {
@@ -128,18 +190,42 @@ describe('EmergentToolRegistry state', () => {
     await expect(registry.suspend(tool.id, 'operator_hold')).rejects.toThrow('simulated storage failure');
   });
 
-  it('demote writes the demoted state and removing a tool removes its state row', async () => {
+  it('demote writes the demoted state as the host\'s and removing a tool removes its state row', async () => {
     const tool = makeTool();
     registry.register(tool, 'agent');
     await settle();
 
     await registry.demote(tool.id, 'bad output');
-    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'demoted', state_reason: 'bad output' });
+    expect(readStateRow(db, tool.id)).toMatchObject({
+      state: 'demoted',
+      state_reason: 'bad output',
+      set_by: 'host',
+    });
     expect(registry.get(tool.id)?.usageStats.confidenceScore).toBe(0);
+    expect((registry.get(tool.id) as EmergentTool & { isActive?: boolean }).isActive).toBe(false);
 
     registry.remove(tool.id);
     await settle();
     expect(readStateRow(db, tool.id)).toBeUndefined();
+  });
+
+  it('an awaited demote rejects when its write fails, and an un-awaited one is handled', async () => {
+    const tool = makeTool();
+    registry.register(tool, 'agent');
+    await settle();
+
+    db.failNext('agentos_emergent_tool_state');
+    await expect(registry.demote(tool.id, 'bad output')).rejects.toThrow('simulated storage failure');
+    // The restriction held in memory even though the row did not change.
+    expect(registry.isActive(tool.id)).toBe(false);
+
+    // A caller written against the old void signature does not await. A
+    // failed write must not surface as an unhandled rejection, which vitest
+    // reports as a failure of this run.
+    db.failNext('agentos_emergent_tool_state');
+    void registry.demote(tool.id, 'bad output again');
+    await settle();
+    await settle();
   });
 
   it('recording a use updates the usage columns and leaves the stored source alone', async () => {

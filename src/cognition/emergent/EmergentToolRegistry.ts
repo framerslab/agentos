@@ -31,12 +31,13 @@ import type {
   ToolUsageStats,
   EmergentConfig,
   PersistedToolRow,
+  StateSetter,
   StoredRequest,
   ToolState,
   ToolStateRecord,
 } from './types.js';
 import { DEFAULT_EMERGENT_CONFIG } from './types.js';
-import { parsePersistedSource, parseStoredRequest } from './persisted-source.js';
+import { parsePersistedSource, parseStoredRequest, stateSetterFromColumn } from './persisted-source.js';
 
 // ============================================================================
 // STORAGE ADAPTER INTERFACE
@@ -296,6 +297,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
   tool_id TEXT PRIMARY KEY,
   state TEXT NOT NULL,
   state_reason TEXT,
+  set_by TEXT NOT NULL DEFAULT 'host',
   state_at BIGINT NOT NULL,
   request_json TEXT,
   updated_at BIGINT NOT NULL
@@ -375,6 +377,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       toolId: registered.id,
       state: 'active',
       reason: null,
+      setBy: 'library',
       at: Date.now(),
       request: null,
     });
@@ -421,48 +424,70 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
   /**
    * Record a tool's state, awaiting the write.
    *
-   * Leaving `request` undefined leaves the stored request alone: the statement
-   * does not name the column, so a request this process could not read (one a
-   * newer release wrote, say) is still there afterwards. Passing a request, or
-   * `null` to clear it, writes it.
+   * `options.request` left out leaves the stored request alone: a new row
+   * stores none, and an existing row's `request_json` is not named by the
+   * update, so a request this process could not read (one a newer release
+   * wrote, say) is still there afterwards. A request writes it; `null` clears
+   * it.
+   *
+   * `options.setBy` records who set the state (`'host'` when left out). The
+   * library re-checks only its own suspensions at the next load; a host's
+   * stays until the host clears it, whatever words its reason uses.
    *
    * The write is one statement, so two processes recording a first state for
-   * the same tool both succeed instead of one failing on the primary key.
+   * the same tool both succeed instead of one failing on the primary key. The
+   * `isActive` convention property of a tool held in memory follows the state.
    *
-   * @throws If the storage adapter rejects. The in-memory state is already
-   *   updated by then, so the running process honours it either way.
+   * @throws If the storage adapter rejects. For `suspended` and `demoted` the
+   *   held state is already updated by then, so the running process honours
+   *   the restriction either way. For `active` the held state changes only
+   *   after both writes succeed, so a reactivation that did not land leaves
+   *   the tool off.
    */
   async setState(
     toolId: string,
     state: ToolState,
     reason: string | null,
-    request?: StoredRequest | null,
+    options: { request?: StoredRequest | null; setBy?: StateSetter } = {},
   ): Promise<ToolStateRecord> {
     const previous = this.states.get(toolId);
+    const setBy: StateSetter = options.setBy ?? 'host';
+    const named = options.request !== undefined;
     const record: ToolStateRecord = {
       toolId,
       state,
       reason,
+      setBy,
       at: Date.now(),
-      request: request !== undefined ? request : (previous?.request ?? null),
+      request: named ? (options.request ?? null) : (previous?.request ?? null),
     };
-    this.states.set(toolId, record);
-    this.logAudit(toolId, 'state', { state, reason });
+    const hold = (): void => {
+      this.states.set(toolId, record);
+      const held = this.get(toolId);
+      if (held) {
+        (held as EmergentTool & { isActive?: boolean }).isActive = state === 'active';
+      }
+    };
+    // A restriction holds in memory whatever its write does; a reactivation
+    // holds only once it is stored.
+    if (state !== 'active') {
+      hold();
+    }
+    this.logAudit(toolId, 'state', { state, reason, setBy });
 
     if (this.db) {
       await this.ensureSchemaReady();
-      // A first write stores what this process holds for the tool. A later
-      // one replaces the request only when the caller named one.
-      const requestJson = record.request ? JSON.stringify(record.request) : null;
-      const params = [toolId, state, reason, record.at, requestJson, record.at];
-      if (request === undefined) {
+      const requestJson = named && record.request ? JSON.stringify(record.request) : null;
+      const params = [toolId, state, reason, setBy, record.at, requestJson, record.at];
+      if (!named) {
         await this.db.run(
           `INSERT INTO agentos_emergent_tool_state
-             (tool_id, state, state_reason, state_at, request_json, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)
+             (tool_id, state, state_reason, set_by, state_at, request_json, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (tool_id) DO UPDATE SET
              state = excluded.state,
              state_reason = excluded.state_reason,
+             set_by = excluded.set_by,
              state_at = excluded.state_at,
              updated_at = excluded.updated_at`,
           params,
@@ -470,11 +495,12 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       } else {
         await this.db.run(
           `INSERT INTO agentos_emergent_tool_state
-             (tool_id, state, state_reason, state_at, request_json, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)
+             (tool_id, state, state_reason, set_by, state_at, request_json, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (tool_id) DO UPDATE SET
              state = excluded.state,
              state_reason = excluded.state_reason,
+             set_by = excluded.set_by,
              state_at = excluded.state_at,
              request_json = excluded.request_json,
              updated_at = excluded.updated_at`,
@@ -487,12 +513,17 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
         toolId,
       ]);
     }
+    if (state === 'active') {
+      hold();
+    }
     return record;
   }
 
   /**
-   * Suspend a tool: an awaited write of its state and of `is_active = 0`.
-   * Usage statistics are left alone. The caller unregisters the executable.
+   * Suspend a tool on the host's word: an awaited write of its state and of
+   * `is_active = 0`, recorded as the host's, so no load lifts it whatever the
+   * reason says; only a reactivation does. Usage statistics are left alone.
+   * The caller unregisters the executable.
    *
    * @throws If the tool is unknown or the write fails.
    */
@@ -500,7 +531,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     if (!this.get(toolId)) {
       throw new Error(`Cannot suspend: tool "${toolId}" not found.`);
     }
-    await this.setState(toolId, 'suspended', reason);
+    await this.setState(toolId, 'suspended', reason, { setBy: 'host' });
   }
 
   /**
@@ -515,6 +546,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     } else {
       this.persistedTools.set(tool.id, tool);
     }
+    (tool as EmergentTool & { isActive?: boolean }).isActive = record.state === 'active';
     this.states.set(tool.id, record);
   }
 
@@ -524,7 +556,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
         t.created_by_agent, t.created_by_session, t.created_at,
         t.judge_verdicts, t.confidence_score, t.total_uses, t.success_count,
         t.failure_count, t.avg_execution_ms, t.last_used_at, t.is_active,
-        s.state AS state, s.state_reason AS state_reason,
+        s.state AS state, s.state_reason AS state_reason, s.set_by AS set_by,
         s.state_at AS state_at, s.request_json AS request_json
    FROM agentos_emergent_tools t
    LEFT JOIN agentos_emergent_tool_state s ON s.tool_id = t.id`;
@@ -567,7 +599,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     }
     await this.ensureSchemaReady();
     const row = (await this.db.get(
-      `SELECT state, state_reason, state_at, request_json
+      `SELECT state, state_reason, set_by, state_at, request_json
          FROM agentos_emergent_tool_state
         WHERE tool_id = ?`,
       [toolId],
@@ -575,6 +607,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       | {
           state?: ToolState | null;
           state_reason?: string | null;
+          set_by?: string | null;
           state_at?: number | string | null;
           request_json?: string | null;
         }
@@ -586,16 +619,19 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       toolId,
       state: row.state,
       reason: row.state_reason ?? null,
+      setBy: stateSetterFromColumn(row.set_by),
       at: Number(row.state_at ?? 0),
       request: parseStoredRequest(row.request_json),
     };
   }
 
   /**
-   * Upsert a tool into the registry, replacing any prior in-memory copy.
+   * Replace the in-memory copy of a tool and mirror it to storage.
    *
-   * Used to hydrate persisted/shared tools back into a live runtime so they can
-   * become executable again after process restart or admin promotion.
+   * The row is rewritten from the object given. To bring stored tools back
+   * after a restart, call the engine's `loadPersistedTools`, which reads each
+   * row, checks it and never rewrites it. A tool whose state this process does
+   * not hold keeps the `is_active` its row has.
    */
   upsert(tool: EmergentTool): void {
     this.sessionTools.delete(tool.id);
@@ -870,8 +906,10 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
    * Inactive tools are still retrievable via `get()` but should be filtered
    * out by callers when building tool lists for the LLM.
    *
-   * Returns a promise for the state write; await it when the demotion must be
-   * durable. The in-memory effects have happened by the time this returns.
+   * Returns a promise for the state write, which rejects when the write fails;
+   * await it when the demotion must be durable. An un-awaited call cannot
+   * become an unhandled rejection. The in-memory effects have happened by the
+   * time this returns.
    *
    * @param toolId - The ID of the tool to demote.
    * @param reason - Human-readable explanation for why the tool is being demoted.
@@ -885,12 +923,16 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     }
 
     tool.usageStats.confidenceScore = 0;
-    // Kept for hosts that read the convention property.
-    (tool as EmergentTool & { isActive?: boolean }).isActive = false;
 
     this.logAudit(toolId, 'demote', { reason });
-    // The state row is what keeps a demoted tool off at the next load.
-    return this.setState(toolId, 'demoted', reason).then(() => undefined);
+    // The state row is what keeps a demoted tool off at the next load; it is
+    // the host's word, so no load lifts it. setState sets the convention
+    // property `isActive` before it writes.
+    const write = this.setState(toolId, 'demoted', reason, { setBy: 'host' }).then(() => undefined);
+    // Handled here so a caller that does not await is not left with an
+    // unhandled rejection; an awaiting caller still sees the failure.
+    write.catch(() => {});
+    return write;
   }
 
   // --------------------------------------------------------------------------
@@ -1028,31 +1070,41 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     let promotedAt: number | null = null;
     let promotedBy: string | null = approvedBy ?? null;
 
-    if (tool.tier !== 'session') {
-      const existing =
-        ((await this.db.get(
-          `SELECT promoted_at, promoted_by
-             FROM agentos_emergent_tools
-            WHERE id = ?
-            LIMIT 1`,
-          [tool.id],
-        )) as
-          | {
-              promoted_at?: number | null;
-              promoted_by?: string | null;
-            }
-          | undefined) ?? { promoted_at: null, promoted_by: null };
+    // The row as it is, read when the write depends on it: a promoted tool
+    // keeps its promotion, and a tool whose state this process does not hold
+    // keeps the is_active flag its row has.
+    const held = this.states.get(tool.id);
+    let existing:
+      | { promoted_at?: number | null; promoted_by?: string | null; is_active?: number | boolean | null }
+      | undefined;
+    if (tool.tier !== 'session' || !held) {
+      existing = (await this.db.get(
+        `SELECT promoted_at, promoted_by, is_active
+           FROM agentos_emergent_tools
+          WHERE id = ?
+          LIMIT 1`,
+        [tool.id],
+      )) as typeof existing;
+    }
 
+    if (tool.tier !== 'session') {
+      const row = existing ?? { promoted_at: null, promoted_by: null };
       promotedAt =
         approvedBy != null
           ? Date.now()
-          : typeof existing.promoted_at === 'number'
-            ? existing.promoted_at
+          : typeof row.promoted_at === 'number'
+            ? row.promoted_at
             : Date.now();
       promotedBy =
         approvedBy ??
-        (existing.promoted_by != null ? String(existing.promoted_by) : null);
+        (row.promoted_by != null ? String(row.promoted_by) : null);
     }
+
+    // The legacy flag equals state = 'active' for a state this process holds;
+    // with none held, a stored suspension or demotion stays.
+    const isActive = held
+      ? held.state === 'active' ? 1 : 0
+      : existing?.is_active === 0 || existing?.is_active === false ? 0 : 1;
 
     const implementationSource = await this.resolveSourceToStore(tool);
 
@@ -1087,8 +1139,9 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
         tool.usageStats.lastUsedAt
           ? new Date(tool.usageStats.lastUsedAt).getTime()
           : null,
-        // Never a literal: a rewrite must not turn a suspended tool back on.
-        this.isActive(tool.id) ? 1 : 0,
+        // Never a literal: a rewrite must not turn a suspended tool back on,
+        // and a process that holds no state for the tool keeps its stored flag.
+        isActive,
       ],
     );
   }

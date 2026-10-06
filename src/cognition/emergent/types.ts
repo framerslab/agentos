@@ -428,24 +428,46 @@ export interface ToolUsageStats {
 /** Whether a stored tool may run. `demoted` is a host's decision and is never undone by loading. */
 export type ToolState = 'active' | 'suspended' | 'demoted';
 
+/**
+ * Who recorded a tool's state. The library re-checks a suspension its own
+ * checks set at the next load and lifts it when the cause is gone; a state the
+ * host set stays until the host clears it, whatever words its reason uses.
+ */
+export type StateSetter = 'library' | 'host';
+
 /** What a tool asked for when it was forged, kept so a rebuilt tool carries the same request. */
 export type StoredRequest =
   | { kind: 'sandbox'; capabilities: CapabilityName[]; inferred?: boolean }
   | { kind: 'compose'; steps: Array<{ name: string; tool: string }> };
 
-/** One row of `agentos_emergent_tool_state`. */
+/**
+ * A tool's state as this process holds it. It mirrors the tool's row in
+ * `agentos_emergent_tool_state`, except for `request`, which can be `null`
+ * while the row stores a request this release cannot read.
+ */
 export interface ToolStateRecord {
   toolId: string;
   state: ToolState;
-  /** Machine-readable reason for a state other than `active`. */
+  /**
+   * The reason for a state other than `active`. The library's reasons are
+   * catalogue words (`source_not_persisted`, `source_unreadable`,
+   * `legacy_inactive`); a host's reason is the text it gave.
+   */
   reason: string | null;
+  /** Who recorded the state. */
+  setBy: StateSetter;
   /** Unix epoch milliseconds of the last state change. */
   at: number;
+  /**
+   * The request this process holds for the tool: the stored one when it could
+   * be read, else the one derived from the source, else `null`. A state change
+   * that names no request leaves the stored column as it is.
+   */
   request: StoredRequest | null;
 }
 
 /**
- * One row of `agentos_emergent_tools` joined with its state row. The four
+ * One row of `agentos_emergent_tools` joined with its state row. The five
  * state columns are null for a row written before state was kept.
  */
 export interface PersistedToolRow {
@@ -470,6 +492,7 @@ export interface PersistedToolRow {
   is_active: number | boolean | null;
   state: ToolState | null;
   state_reason: string | null;
+  set_by: string | null;
   state_at: number | string | null;
   request_json: string | null;
 }

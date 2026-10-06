@@ -3,6 +3,7 @@ import { normalizeAllowlist, toSandboxApis } from '../capabilities.js';
 import {
   inferRequestFromCode,
   parsePersistedSource,
+  parseRowSchemas,
   parseStoredRequest,
   requestFromImplementation,
   requestFromSource,
@@ -121,6 +122,31 @@ describe('parsePersistedSource', () => {
     expect(parsePersistedSource('sandbox', source)).toEqual({
       format: 'redacted',
       capabilities: ['fetch'],
+    });
+  });
+
+  it('reports a code row or a redacted record whose list it cannot read in full, and stores no request for it', () => {
+    const code = 'async function execute(i) { return { t: await fs.readFile(i.p) }; }';
+    const sources = [
+      JSON.stringify({ mode: 'sandbox', code, allowlist: ['fetch', 'fs.write'] }),
+      JSON.stringify({ mode: 'sandbox', code, allowlist: ['fetch', 7] }),
+      JSON.stringify({ mode: 'sandbox', code, allowlist: 'fetch' }),
+      JSON.stringify({ redacted: true, allowlist: ['fetch', 'fs.write'], codeBytes: 64 }),
+    ];
+    for (const source of sources) {
+      const read = parsePersistedSource('sandbox', source);
+      expect(read.format).toBe('unreadable');
+      // Nothing narrowed to ['fetch'] is written for it.
+      expect(requestFromSource(read)).toBeNull();
+    }
+    expect(parsePersistedSource('sandbox', sources[0])).toEqual({
+      format: 'unreadable',
+      error: 'allowlist names capabilities outside the catalogue: fs.write',
+    });
+    // No list at all is an empty one.
+    expect(parsePersistedSource('sandbox', JSON.stringify({ mode: 'sandbox', code }))).toMatchObject({
+      format: 'code-with-list',
+      capabilities: [],
     });
   });
 
@@ -259,6 +285,7 @@ describe('toolFromRow', () => {
       is_active: 1,
       state: null,
       state_reason: null,
+      set_by: null,
       state_at: null,
       request_json: null,
     };
@@ -277,5 +304,66 @@ describe('toolFromRow', () => {
 
     expect(toolFromRow({ ...row, last_used_at: '' }, implementation).usageStats.lastUsedAt).toBeNull();
     expect(toolFromRow({ ...row, last_used_at: null }, implementation).usageStats.lastUsedAt).toBeNull();
+
+    // judge_verdicts is a list or nothing.
+    expect(toolFromRow({ ...row, judge_verdicts: '{}' }, implementation).judgeVerdicts).toEqual([]);
+    expect(toolFromRow({ ...row, judge_verdicts: 'not json' }, implementation).judgeVerdicts).toEqual([]);
+    expect(toolFromRow({ ...row, judge_verdicts: '[]' }, implementation).judgeVerdicts).toEqual([]);
+  });
+
+  it('reads the schema columns, and refuses a row whose input_schema is not a JSON object', () => {
+    const inputSchema = { type: 'object', properties: { n: { type: 'number' } } };
+    const empty = { type: 'object', properties: {} };
+    expect(parseRowSchemas({ input_schema: JSON.stringify(inputSchema), output_schema: null })).toEqual({
+      inputSchema,
+      outputSchema: empty,
+    });
+    expect(parseRowSchemas({ input_schema: JSON.stringify(inputSchema), output_schema: '' })).toEqual({
+      inputSchema,
+      outputSchema: empty,
+    });
+    expect(parseRowSchemas({ input_schema: '[]', output_schema: null })).toEqual({
+      error: 'input_schema is not a JSON object',
+    });
+    expect(parseRowSchemas({ input_schema: '"x"', output_schema: null })).toEqual({
+      error: 'input_schema is not a JSON object',
+    });
+    expect(parseRowSchemas({ input_schema: '', output_schema: null })).toEqual({ error: 'input_schema is empty' });
+    expect(parseRowSchemas({ input_schema: 'not json', output_schema: null })).toMatchObject({
+      error: expect.stringContaining('input_schema is not JSON'),
+    });
+    expect(parseRowSchemas({ input_schema: JSON.stringify(inputSchema), output_schema: '[1]' })).toEqual({
+      error: 'output_schema is not a JSON object',
+    });
+
+    const implementation: SandboxedToolSpec = { mode: 'sandbox', code: 'function execute(i) { return i; }', allowlist: [] };
+    const row: PersistedToolRow = {
+      id: 'emergent_2',
+      name: 'echo_it',
+      description: 'Echoes.',
+      input_schema: 'not json',
+      output_schema: null,
+      implementation_mode: 'sandbox',
+      implementation_source: implementation.code,
+      tier: 'shared',
+      created_by_agent: 'agent-1',
+      created_by_session: 'sess-1',
+      created_at: 1696000000000,
+      judge_verdicts: null,
+      confidence_score: null,
+      total_uses: null,
+      success_count: null,
+      failure_count: null,
+      avg_execution_ms: null,
+      last_used_at: null,
+      is_active: 1,
+      state: null,
+      state_reason: null,
+      set_by: null,
+      state_at: null,
+      request_json: null,
+    };
+    // Never a schema that accepts any input in its place.
+    expect(() => toolFromRow(row, implementation)).toThrow('input_schema is not JSON');
   });
 });

@@ -29,10 +29,12 @@ import type {
 } from './types.js';
 import {
   parsePersistedSource,
+  parseRowSchemas,
   parseStoredRequest,
   requestFromImplementation,
   requestFromSource,
   sourceFromImplementation,
+  stateSetterFromColumn,
   toolFromRow,
   type PersistedSource,
 } from './persisted-source.js';
@@ -138,16 +140,6 @@ export interface SelfImprovementToolDeps {
 // ============================================================================
 // STORED TOOLS
 // ============================================================================
-
-/**
- * Suspension reasons the library's own checks set and can clear when their
- * cause goes away. Any other reason was set by the host (through
- * `suspendTool`), and only the host clears it (through `reactivateTool`).
- */
-const LIBRARY_SUSPENSION_REASONS: ReadonlySet<string> = new Set([
-  'source_not_persisted',
-  'source_unreadable',
-]);
 
 /** The configuration key behind a reason, named in the start-up line. */
 const REASON_CONFIG_KEYS: Readonly<Record<string, string>> = {
@@ -476,12 +468,10 @@ export class EmergentCapabilityEngine {
 
       this.registry.register(tool, 'session');
       try {
-        await this.registry.setState(
-          toolId,
-          'active',
-          null,
-          requestFromImplementation(request.implementation),
-        );
+        await this.registry.setState(toolId, 'active', null, {
+          request: requestFromImplementation(request.implementation),
+          setBy: 'library',
+        });
       } catch (error: unknown) {
         // The tool runs in this process either way; without the row its request
         // is re-derived from its source at the next load.
@@ -755,7 +745,7 @@ export class EmergentCapabilityEngine {
       if (!row) {
         return false;
       }
-      await this.registry.setState(toolId, 'suspended', reason);
+      await this.registry.setState(toolId, 'suspended', reason, { setBy: 'host' });
       return true;
     }
     await this.registry.suspend(toolId, reason);
@@ -778,7 +768,7 @@ export class EmergentCapabilityEngine {
       if (!row) {
         return false;
       }
-      await this.registry.setState(toolId, 'demoted', reason);
+      await this.registry.setState(toolId, 'demoted', reason, { setBy: 'host' });
       return true;
     }
     await this.registry.demote(toolId, reason);
@@ -825,15 +815,24 @@ export class EmergentCapabilityEngine {
           toolId: row.id,
           state: row.state,
           reason: row.state_reason ?? null,
+          setBy: stateSetterFromColumn(row.set_by),
           at: Number(row.state_at ?? 0),
           request: parseStoredRequest(row.request_json),
         }
       : undefined;
+    // A row whose schema columns do not read cannot be built: it is unreadable
+    // before its source is looked at, so a damaged input_schema never widens
+    // to a schema that accepts any input.
+    const schemas = parseRowSchemas(row);
+    const source: PersistedSource =
+      'error' in schemas
+        ? { format: 'unreadable', error: schemas.error }
+        : parsePersistedSource(row.implementation_mode, row.implementation_source);
     return this.admit(
       {
         toolId: row.id,
         name: row.name,
-        source: parsePersistedSource(row.implementation_mode, row.implementation_source),
+        source,
         stored,
         requestStored: row.request_json != null,
         legacyActive: !(row.is_active === 0 || row.is_active === false),
@@ -860,23 +859,23 @@ export class EmergentCapabilityEngine {
 
     // 1. A tool a host turned off stays off. A row with is_active = 0 and no
     //    suspension on record was turned off by a host (its own SQL, or
-    //    demote()); loading never undoes that.
+    //    demote()); loading never undoes that, so it is recorded as the host's.
     const hostTurnedOff = !legacyActive && stored?.state !== 'suspended';
     if ((stored?.state === 'demoted' || hostTurnedOff) && !options.force) {
       const reason = stored?.state === 'demoted' ? stored.reason : 'legacy_inactive';
       if (stored?.state !== 'demoted') {
-        await this.registry.setState(toolId, 'demoted', 'legacy_inactive', requestToWrite);
+        await this.registry.setState(toolId, 'demoted', 'legacy_inactive', {
+          request: requestToWrite,
+          setBy: 'host',
+        });
       }
       await this.unregisterIfLive(toolId);
       return { toolId, name, state: 'demoted', reason };
     }
 
-    // 2. A suspension the library did not set is cleared only by the host.
-    if (
-      stored?.state === 'suspended' &&
-      !options.force &&
-      !LIBRARY_SUSPENSION_REASONS.has(stored.reason ?? '')
-    ) {
+    // 2. A suspension the host set is cleared only by the host, whatever its
+    //    reason says. One the library set is re-checked below.
+    if (stored?.state === 'suspended' && !options.force && stored.setBy === 'host') {
       return { toolId, name, state: 'suspended', reason: stored.reason };
     }
 
@@ -904,18 +903,29 @@ export class EmergentCapabilityEngine {
     if (refusal || !implementation) {
       const reason = refusal ?? 'source_unreadable';
       if (stored?.state !== 'suspended' || stored.reason !== reason) {
-        await this.registry.setState(toolId, 'suspended', reason, requestToWrite);
+        await this.registry.setState(toolId, 'suspended', reason, {
+          request: requestToWrite,
+          setBy: 'library',
+        });
       }
       await this.unregisterIfLive(toolId);
       return { toolId, name, state: 'suspended', reason };
     }
 
-    // 4. Active: into memory without rewriting the row, then into the executor.
+    // 4. Active: the state row first, so a write that fails leaves the tool
+    //    off; then into memory without rewriting the row; then into the executor.
     const tool = candidate.buildTool(implementation);
-    this.registry.adopt(tool, { toolId, state: 'active', reason: null, at: Date.now(), request });
     if (stored?.state !== 'active' || !requestStored) {
-      await this.registry.setState(toolId, 'active', null, requestToWrite);
+      await this.registry.setState(toolId, 'active', null, { request: requestToWrite, setBy: 'library' });
     }
+    this.registry.adopt(tool, {
+      toolId,
+      state: 'active',
+      reason: null,
+      setBy: 'library',
+      at: Date.now(),
+      request,
+    });
     this.indexTool(
       tool.id,
       tool.createdBy,

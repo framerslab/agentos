@@ -10,9 +10,12 @@
  *   tools with their own SQL);
  * - a redacted record `{ redacted: true, allowlist, codeBytes }` (the registry,
  *   with `persistSandboxSource` off), which cannot be rebuilt.
- * Any other JSON in a code tool's row is unreadable. Compose tools are always
- * the JSON of their spec; a spec whose steps the builder cannot run is
- * unreadable.
+ * Any other JSON in a code tool's row is unreadable, and so is a stored list
+ * this release cannot read in full (a name outside the catalogue, an entry
+ * that is not a string): nothing is narrowed to the part that could be read.
+ * Compose tools are always the JSON of their spec; a spec whose steps the
+ * builder cannot run is unreadable. A row whose schema columns do not hold a
+ * JSON object is unreadable too, whatever its source.
  */
 
 import type {
@@ -22,6 +25,7 @@ import type {
   EmergentTool,
   PersistedToolRow,
   SandboxedToolSpec,
+  StateSetter,
   StoredRequest,
   ToolImplementation,
 } from './types.js';
@@ -66,6 +70,34 @@ const describeError = (err: unknown): string => (err instanceof Error ? err.mess
 /** A JSON object: not null and not an array. */
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** Reads a `set_by` column: anything but the library's own mark is the host's. */
+export function stateSetterFromColumn(value: unknown): StateSetter {
+  return value === 'library' ? 'library' : 'host';
+}
+
+/**
+ * Reads a stored allowlist. Every entry must be a string naming a catalogue
+ * capability or its alias; anything else makes the source unreadable, so a
+ * list this release cannot read in full is never narrowed to the part it can.
+ * No list is an empty one.
+ */
+function readAllowlist(value: unknown): { capabilities: CapabilityName[] } | { error: string } {
+  if (value === undefined || value === null) {
+    return { capabilities: [] };
+  }
+  if (!Array.isArray(value)) {
+    return { error: 'allowlist is not an array' };
+  }
+  if (!value.every((entry) => typeof entry === 'string')) {
+    return { error: 'allowlist holds an entry that is not a string' };
+  }
+  const { capabilities, unknown } = normalizeAllowlist(value as string[]);
+  if (unknown.length > 0) {
+    return { error: `allowlist names capabilities outside the catalogue: ${unknown.join(', ')}` };
+  }
+  return { capabilities };
+}
 
 /**
  * Reads a composition's steps by the rules the builder runs them by: at least
@@ -144,16 +176,24 @@ export function parsePersistedSource(mode: string, source: string): PersistedSou
 
   if (isRecord(parsed)) {
     const record = parsed;
-    const names = Array.isArray(record.allowlist) ? record.allowlist.map(String) : [];
-    if (record.redacted === true) {
-      return { format: 'redacted', capabilities: normalizeAllowlist(names).capabilities };
-    }
-    if (record.mode === 'sandbox' && typeof record.code === 'string') {
-      const { capabilities } = normalizeAllowlist(names);
+    const isRedacted = record.redacted === true;
+    const isCodeWithList = record.mode === 'sandbox' && typeof record.code === 'string';
+    if (isRedacted || isCodeWithList) {
+      const list = readAllowlist(record.allowlist);
+      if ('error' in list) {
+        return { format: 'unreadable', error: list.error };
+      }
+      if (isRedacted) {
+        return { format: 'redacted', capabilities: list.capabilities };
+      }
       return {
         format: 'code-with-list',
-        implementation: { mode: 'sandbox', code: record.code, allowlist: toSandboxApis(capabilities) },
-        capabilities,
+        implementation: {
+          mode: 'sandbox',
+          code: record.code as string,
+          allowlist: toSandboxApis(list.capabilities),
+        },
+        capabilities: list.capabilities,
         inferred: false,
       };
     }
@@ -253,14 +293,61 @@ export function parseStoredRequest(json: string | null | undefined): StoredReque
   return null;
 }
 
-/** Builds the in-memory tool for a stored row and the implementation read from it. */
+type SchemaRead = { schema: JSONSchemaObject } | { error: string };
+
+function readSchemaColumn(raw: string | null, column: 'input_schema' | 'output_schema'): SchemaRead {
+  if (raw == null || raw.trim() === '') {
+    // A tool may have no output schema; it always has an input schema.
+    return column === 'output_schema'
+      ? { schema: { type: 'object', properties: {} } }
+      : { error: `${column} is empty` };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return { error: `${column} is not JSON: ${describeError(err)}` };
+  }
+  if (!isRecord(parsed)) {
+    return { error: `${column} is not a JSON object` };
+  }
+  return { schema: parsed as JSONSchemaObject };
+}
+
+/**
+ * Reads a row's schema columns. A column that does not hold a JSON object is
+ * reported, never replaced by a schema that accepts any input; the loader
+ * reads such a row as unreadable.
+ */
+export function parseRowSchemas(
+  row: Pick<PersistedToolRow, 'input_schema' | 'output_schema'>,
+): { inputSchema: JSONSchemaObject; outputSchema: JSONSchemaObject } | { error: string } {
+  const input = readSchemaColumn(row.input_schema, 'input_schema');
+  if ('error' in input) return { error: input.error };
+  const output = readSchemaColumn(row.output_schema, 'output_schema');
+  if ('error' in output) return { error: output.error };
+  return { inputSchema: input.schema, outputSchema: output.schema };
+}
+
+/**
+ * Builds the in-memory tool for a stored row and the implementation read from it.
+ *
+ * @throws If the row's schema columns do not read (see {@link parseRowSchemas});
+ *   the loader refuses such a row before it gets here.
+ */
 export function toolFromRow(row: PersistedToolRow, implementation: ToolImplementation): EmergentTool {
-  const parseJson = <T>(raw: string | null, fallback: T): T => {
-    if (!raw) return fallback;
+  const schemas = parseRowSchemas(row);
+  if ('error' in schemas) {
+    throw new Error(`stored tool "${row.name}" (${row.id}): ${schemas.error}`);
+  }
+  // judge_verdicts is a list or nothing; any other JSON is read as none.
+  const readVerdicts = (raw: string | null): EmergentTool['judgeVerdicts'] => {
+    if (!raw) return [];
     try {
-      return (JSON.parse(raw) as T) ?? fallback;
+      const parsed: unknown = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as EmergentTool['judgeVerdicts']) : [];
     } catch {
-      return fallback;
+      return [];
     }
   };
   // BIGINT columns come back as numbers from SQLite and as strings from Postgres.
@@ -272,18 +359,17 @@ export function toolFromRow(row: PersistedToolRow, implementation: ToolImplement
     const date = Number.isFinite(numeric) ? new Date(numeric) : new Date(String(value));
     return Number.isNaN(date.getTime()) ? null : date.toISOString();
   };
-  const emptySchema: JSONSchemaObject = { type: 'object', properties: {} };
   return {
     id: row.id,
     name: row.name,
     description: row.description,
-    inputSchema: parseJson<JSONSchemaObject>(row.input_schema, emptySchema),
-    outputSchema: parseJson<JSONSchemaObject>(row.output_schema, emptySchema),
+    inputSchema: schemas.inputSchema,
+    outputSchema: schemas.outputSchema,
     implementation,
     tier: row.tier,
     createdBy: row.created_by_agent,
     createdAt: toIso(row.created_at) ?? new Date(0).toISOString(),
-    judgeVerdicts: parseJson<EmergentTool['judgeVerdicts']>(row.judge_verdicts, []),
+    judgeVerdicts: readVerdicts(row.judge_verdicts),
     usageStats: {
       totalUses: row.total_uses ?? 0,
       successCount: row.success_count ?? 0,

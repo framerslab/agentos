@@ -193,6 +193,76 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect(readToolRow(db, 'raw-1')?.is_active).toBe(1);
   });
 
+  it("a host's suspension holds through the next load even when its reason is one of the library's words, and a library suspension lifts when its cause is gone", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'raw-1',
+      name: 'double_it',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+    });
+    seedToolRow(db, { id: 'odd-1', name: 'odd_shape', mode: 'sandbox', source: '{"v":2}' });
+    const first = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(first.outcomes).toContainEqual({ toolId: 'raw-1', name: 'double_it', state: 'active', reason: null });
+    expect(first.outcomes).toContainEqual({
+      toolId: 'odd-1',
+      name: 'odd_shape',
+      state: 'suspended',
+      reason: 'source_unreadable',
+    });
+    expect(readStateRow(db, 'odd-1')).toMatchObject({ state: 'suspended', set_by: 'library' });
+
+    // The host holds the tool under its own policy and happens to use a word
+    // the library also uses. Who set the suspension decides, not the word.
+    expect(await host.engine.suspendTool('raw-1', 'source_unreadable')).toBe(true);
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'suspended', set_by: 'host' });
+
+    // The unreadable row is repaired by the host's own SQL.
+    db.raw.prepare('UPDATE agentos_emergent_tools SET implementation_source = ? WHERE id = ?').run(RAW_DOUBLE, 'odd-1');
+
+    const again = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(again.outcomes).toContainEqual({
+      toolId: 'raw-1',
+      name: 'double_it',
+      state: 'suspended',
+      reason: 'source_unreadable',
+    });
+    expect(again.outcomes).toContainEqual({ toolId: 'odd-1', name: 'odd_shape', state: 'active', reason: null });
+    expect(await host.orchestrator.getTool('double_it')).toBeUndefined();
+    expect((await callTool(host.orchestrator, 'odd_shape', { n: 2 })).output).toEqual({ doubled: 4 });
+    expect(readStateRow(db, 'odd-1')).toMatchObject({ state: 'active', set_by: 'library' });
+
+    // Only the host lifts its own hold.
+    expect(await host.engine.reactivateTool('raw-1')).toMatchObject({ state: 'active' });
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
+  });
+
+  it('a row whose input_schema does not read loads suspended as unreadable instead of accepting any input', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'bad-schema-1',
+      name: 'bad_schema',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      inputSchemaRaw: 'not json',
+    });
+
+    const summary = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+
+    expect(summary.outcomes).toEqual([
+      { toolId: 'bad-schema-1', name: 'bad_schema', state: 'suspended', reason: 'source_unreadable' },
+    ]);
+    expect(summary.failed).toEqual([]);
+    expect(await host.orchestrator.getTool('bad_schema')).toBeUndefined();
+    // The row keeps its columns as the host wrote them.
+    expect(readToolRow(db, 'bad-schema-1')?.input_schema).toBe('not json');
+    expect(readToolRow(db, 'bad-schema-1')?.is_active).toBe(0);
+  });
+
   it('a row a host turns off with its own SQL is demoted at the next load and taken out of the executor', async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db, tools: [echoTool()] });
