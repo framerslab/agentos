@@ -212,12 +212,12 @@ This keeps the base retrieval system consistent while still allowing richer moda
 ### Hypothetical document expansion
 
 - Gao, L., Ma, X., Lin, J., & Callan, J. (2022). [*Precise zero-shot dense retrieval without relevance labels.*](https://arxiv.org/abs/2212.10496) arXiv preprint. — HyDE retrieval, the foundation of the hypothetical-document expansion path.
-- Lei, F., et al. (2025). [*Never come up empty: Adaptive HyDE retrieval for improving LLM developer support.*](https://arxiv.org/abs/2507.16754) arXiv preprint. — Adaptive HyDE thresholding on a 3M-post Stack Overflow corpus; informs the adaptive thresholding in [`MemoryHydeRetriever`](https://github.com/framerslab/agentos/blob/master/src/memory/retrieval/hyde/MemoryHydeRetriever.ts).
+- Lei, F., et al. (2025). [*Never come up empty: Adaptive HyDE retrieval for improving LLM developer support.*](https://arxiv.org/abs/2507.16754) arXiv preprint. — Adaptive HyDE thresholding on a 3M-post Stack Overflow corpus; informs the adaptive thresholding in [`MemoryHydeRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hyde/MemoryHydeRetriever.ts).
 
 ### Graph-augmented retrieval
 
 - Edge, D., Trinh, H., Cheng, N., Bradley, J., Chao, A., Mody, A., Truitt, S., & Larson, J. (2024). [*From local to global: A graph RAG approach to query-focused summarization.*](https://arxiv.org/abs/2404.16130) arXiv preprint. — Microsoft GraphRAG; community detection + summarization for multi-hop reasoning.
-- Blondel, V. D., Guillaume, J.-L., Lambiotte, R., & Lefebvre, E. (2008). [*Fast unfolding of communities in large networks.*](https://arxiv.org/abs/0803.0476) *Journal of Statistical Mechanics: Theory and Experiment*, 10, P10008. — Louvain algorithm used by [`GraphRAGEngine`](https://github.com/framerslab/agentos/blob/master/src/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) for community detection.
+- Blondel, V. D., Guillaume, J.-L., Lambiotte, R., & Lefebvre, E. (2008). [*Fast unfolding of communities in large networks.*](https://arxiv.org/abs/0803.0476) *Journal of Statistical Mechanics: Theory and Experiment*, 10, P10008. — Louvain algorithm used by [`GraphRAGEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) for community detection.
 
 ### Multimodal embeddings
 
@@ -230,6 +230,6 @@ This keeps the base retrieval system consistent while still allowing richer moda
 
 ### Implementation references
 
-- [`packages/agentos/src/rag/`](https://github.com/framerslab/agentos/tree/master/src/rag) — vector stores, embeddings, fusion, reranking, GraphRAG
-- [`packages/agentos/src/memory/retrieval/hyde/MemoryHydeRetriever.ts`](https://github.com/framerslab/agentos/blob/master/src/memory/retrieval/hyde/MemoryHydeRetriever.ts) — HyDE for memory-specific recall
-- [`packages/agentos/src/memory/retrieval/graph/graphrag/GraphRAGEngine.ts`](https://github.com/framerslab/agentos/blob/master/src/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) — Microsoft GraphRAG-style implementation
+- [`packages/agentos/src/cognition/rag/`](https://github.com/framerslab/agentos/tree/master/src/cognition/rag) — vector stores, embeddings, fusion, reranking, GraphRAG
+- [`packages/agentos/src/cognition/memory/retrieval/hyde/MemoryHydeRetriever.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hyde/MemoryHydeRetriever.ts) — HyDE for memory-specific recall
+- [`packages/agentos/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) — Microsoft GraphRAG-style implementation

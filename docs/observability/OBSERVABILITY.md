@@ -4,7 +4,7 @@ You can't operate an agent runtime in production without observability, and the 
 
 What AgentOS owns is the *emit side*: opt-in spans around turns and tool-result handling, opt-in counters and histograms for the operations worth measuring, optional trace-correlation in logs and streamed response metadata, and an optional path to export application logs as OTEL `LogRecord`s. All defaults are off. Turning them on is a single config change, and the runtime will surface to whatever exporter your host has wired (OTLP to Honeycomb, Tempo, Jaeger, Grafana Cloud — the runtime doesn't care, because your host SDK is what does the export).
 
-The implementation lives in [`src/evaluation/observability/`](https://github.com/framerslab/agentos/tree/master/src/evaluation/observability) and uses [`@opentelemetry/api`](https://www.npmjs.com/package/@opentelemetry/api) directly — never bundled, always peer-dep-style imported, so your host SDK is the one and only OTEL provider in the process.
+The implementation lives in [`src/safety/evaluation/observability/`](https://github.com/framerslab/agentos/tree/master/src/safety/evaluation/observability) and uses [`@opentelemetry/api`](https://www.npmjs.com/package/@opentelemetry/api) directly — never bundled, always peer-dep-style imported, so your host SDK is the one and only OTEL provider in the process.
 
 ---
 
@@ -301,7 +301,7 @@ Common library choices:
 
 ### Implementation references
 
-- `packages/agentos/src/evaluation/observability/Tracer.ts` — span creation around turn / tool / guardrail / LLM-call boundaries
-- `packages/agentos/src/evaluation/observability/otel.ts` — OpenTelemetry API peer-dep wiring
+- `packages/agentos/src/safety/evaluation/observability/Tracer.ts` — span creation around turn / tool / guardrail / LLM-call boundaries
+- `packages/agentos/src/safety/evaluation/observability/otel.ts` — OpenTelemetry API peer-dep wiring
 - `packages/agentos/src/logging/PinoLogger.ts` — structured logger with trace-id / span-id field injection
-- `packages/agentos/src/evaluation/SqlTaskOutcomeTelemetryStore.ts` — persisted per-turn outcome KPIs for rolling-quality dashboards
+- `packages/agentos/src/orchestration/turn-planner/SqlTaskOutcomeTelemetryStore.ts` — persisted per-turn outcome KPIs for rolling-quality dashboards

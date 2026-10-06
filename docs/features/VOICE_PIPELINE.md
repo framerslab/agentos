@@ -11,7 +11,7 @@ This page is the architectural map. The configuration surface is at the bottom; 
 
 ## Architecture
 
-The pipeline is six interfaces wired together by the [`VoicePipelineOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/voice-pipeline/VoicePipelineOrchestrator.ts):
+The pipeline is six interfaces wired together by the [`VoicePipelineOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoicePipelineOrchestrator.ts):
 
 ```mermaid
 graph LR
@@ -532,7 +532,7 @@ const orchestrator = new VoicePipelineOrchestrator({
 
 ### Implementation references
 
-- [`packages/agentos/src/voice-pipeline/VoicePipelineOrchestrator.ts`](https://github.com/framerslab/agentos/blob/master/src/voice-pipeline/VoicePipelineOrchestrator.ts) — the state machine
-- [`packages/agentos/src/voice-pipeline/HeuristicEndpointDetector.ts`](https://github.com/framerslab/agentos/blob/master/src/voice-pipeline/HeuristicEndpointDetector.ts) + [`AcousticEndpointDetector.ts`](https://github.com/framerslab/agentos/blob/master/src/voice-pipeline/AcousticEndpointDetector.ts) — endpoint detection strategies
-- [`packages/agentos/src/voice-pipeline/HardCutBargeinHandler.ts`](https://github.com/framerslab/agentos/blob/master/src/voice-pipeline/HardCutBargeinHandler.ts) + [`SoftFadeBargeinHandler.ts`](https://github.com/framerslab/agentos/blob/master/src/voice-pipeline/SoftFadeBargeinHandler.ts) — barge-in handlers
-- [`packages/agentos/src/voice-pipeline/types.ts`](https://github.com/framerslab/agentos/blob/master/src/voice-pipeline/types.ts) — [`IStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts), [`IStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts), [`IStreamingTTS`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts), [`IBargeinHandler`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) interfaces
+- [`packages/agentos/src/io/voice-pipeline/VoicePipelineOrchestrator.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoicePipelineOrchestrator.ts) — the state machine
+- [`packages/agentos/src/io/voice-pipeline/HeuristicEndpointDetector.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/HeuristicEndpointDetector.ts) + [`AcousticEndpointDetector.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/AcousticEndpointDetector.ts) — endpoint detection strategies
+- [`packages/agentos/src/io/voice-pipeline/HardCutBargeinHandler.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/HardCutBargeinHandler.ts) + [`SoftFadeBargeinHandler.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/SoftFadeBargeinHandler.ts) — barge-in handlers
+- [`packages/agentos/src/io/voice-pipeline/types.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) — [`IStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts), [`IStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts), [`IStreamingTTS`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts), [`IBargeinHandler`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) interfaces

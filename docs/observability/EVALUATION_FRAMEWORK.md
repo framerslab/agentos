@@ -319,6 +319,6 @@ evaluator.registerScorer('llm_judge', judge.createScorer());
 
 ### Implementation references
 
-- [`packages/agentos/src/evaluation/Evaluator.ts`](https://github.com/framerslab/agentos/blob/master/src/evaluation/Evaluator.ts) — the evaluation harness
-- [`packages/agentos/src/evaluation/LLMJudge.ts`](https://github.com/framerslab/agentos/blob/master/src/evaluation/LLMJudge.ts) — judge implementation with position-bias mitigation
-- [`packages/agentos/src/evaluation/SqlTaskOutcomeTelemetryStore.ts`](https://github.com/framerslab/agentos/blob/master/src/evaluation/SqlTaskOutcomeTelemetryStore.ts) — persistent outcome KPIs across runs
+- [`packages/agentos/src/safety/evaluation/Evaluator.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/Evaluator.ts) — the evaluation harness
+- [`packages/agentos/src/safety/evaluation/LLMJudge.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/LLMJudge.ts) — judge implementation with position-bias mitigation
+- [`packages/agentos/src/orchestration/turn-planner/SqlTaskOutcomeTelemetryStore.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/turn-planner/SqlTaskOutcomeTelemetryStore.ts) — persistent outcome KPIs across runs
