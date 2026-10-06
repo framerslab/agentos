@@ -34,9 +34,9 @@ try {
 
 const FIELD = '\u001f';
 const RECORD = '\u001e';
-const format = ['%H', '%h', '%T', '%an', '%ae', '%aI', '%cn', '%ce', '%cI', '%s', '%b'].join(FIELD) + RECORD;
+const logFormat = ['%H', '%h', '%T', '%an', '%ae', '%aI', '%cn', '%ce', '%cI', '%s', '%b'].join(FIELD) + RECORD;
 const range = lastTag ? `${lastTag}..HEAD` : 'HEAD';
-const commits = git('log', `--format=${format}`, range)
+const commits = git('log', `--format=${logFormat}`, range)
   .split(RECORD)
   .map((record) => record.trim())
   .filter(Boolean)
