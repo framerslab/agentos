@@ -687,6 +687,15 @@ export interface GenerateTextOptions {
    */
   __hopBase?: FallbackHopBase;
   /**
+   * Internal — DO NOT set from application code. The fallback walk's state
+   * before this leg ran, and the leg's role, handed down the recursion. Its
+   * presence marks `fallbackProviders` as already resolved, so a nested walk
+   * never resolves it again.
+   *
+   * @internal
+   */
+  __fallbackWalk?: FallbackWalkContext;
+  /**
    * Optional model router for intelligent provider/model selection.
    * When provided, the router's `selectModel()` is called before provider
    * resolution.  The router result overrides `model`/`provider`.
@@ -2105,6 +2114,29 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             }))
          : undefined;
 
+      // A catalog model is sent only a request it can hold: otherwise the
+      // call throws in place of the send and the walk moves on. Checked on
+      // the first native send and on the prompt shim's first send.
+      const assertFitsContextWindow = (sent: { messages: ReadonlyArray<unknown>; tools?: unknown }): void => {
+        const fit = checkContextFit({
+          provider: resolved.providerId,
+          model: resolved.modelId,
+          messages: sent.messages,
+          tools: sent.tools,
+          maxTokens: opts.maxTokens,
+          customModelParams: opts.customModelParams,
+        });
+        if (!fit.fits && fit.contextWindow !== undefined) {
+          throw new ContextWindowExceededError({
+            provider: resolved.providerId,
+            model: resolved.modelId,
+            contextWindow: fit.contextWindow,
+            estimatedInputTokens: fit.estimatedInputTokens,
+            outputTokens: fit.outputTokens,
+          });
+        }
+      };
+
       const allToolCalls: ToolCallRecord[] = [];
       const totalUsage = attemptUsage;
       // Provider-reported model id of the final step (spec batch-1 C1);
@@ -2172,6 +2204,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       // provider's tool-unsupported error (see the catch after the loop).
       const toolMode: ToolMode = opts.toolMode ?? 'auto';
       const shimMaxRoundtrips = opts.maxSteps ?? 5;
+      let shimSendChecked = false;
       const runShim = async (): Promise<GenerateTextResult> => {
         const loopResult = await runEmulatedToolLoop({
           tools: Array.from(toolMap.values()),
@@ -2183,6 +2216,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           messages: toShimMessages(messages),
           maxRoundtrips: shimMaxRoundtrips,
           callModel: async (msgs) => {
+            // The shim sends rendered tool text in place of native schemas,
+            // so its first send is checked on its own.
+            if (!shimSendChecked) {
+              shimSendChecked = true;
+              assertFitsContextWindow({ messages: msgs });
+            }
             const r = await provider.generateCompletion(resolved.modelId, msgs as any, {
               temperature: opts.temperature,
               ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
@@ -2337,6 +2376,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             console.warn('[agentos] onBeforeGeneration hook error:', hookErr);
           }
         }
+
+        // A continuation leg's first send carries its completed tool rounds.
+        // Later steps are not checked again.
+        if (step === 0) assertFitsContextWindow({ messages: effectiveMessages, tools: toolSchemas });
 
         const response = await withAgentOSSpan(
           'agentos.api.generate_text.step',
@@ -2828,16 +2871,41 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       { provider: primaryProviderId ?? 'unknown', model: primaryModelId, ok: false },
     ];
     // ── Fallback chain ────────────────────────────────────────────────
-    // Resolve fallback chain: caller-supplied wins, undefined triggers
-    // auto-build from env keys, empty array explicitly opts out.
-    // When `policyTier` is mature/private-adult, the auto-build picks
-    // the policy-aware chain (Hermes 3 + Sonnet uncensored prefix +
-    // standard availability suffix) instead of the availability-only
-    // chain. Caller-supplied chains are respected verbatim regardless
-    // of tier: explicit beats implicit.
-    const effectiveFallbacks = opts.fallbackProviders === undefined
-      ? buildPolicyAwareFallbackChain(opts.policyTier, metricProviderId)
-     : opts.fallbackProviders;
+    // Caller-supplied wins, undefined auto-builds from env keys for the
+    // call's resolved tier (the policy-aware chain on mature and
+    // private-adult), an empty array opts out. The top-level walk resolves
+    // the chain once: it drops the policy chain's entry for the failed first
+    // model, applies the call's explicit capability and exclusion
+    // requirements, and marks the uncensored group's standing legs and
+    // refills. A leg receives its resolved slice and never resolves it again.
+    const walkTier = resolvePolicyTier(opts);
+    const chainEntries = opts.fallbackProviders === undefined
+      ? buildPolicyAwareFallbackChain(walkTier, metricProviderId)
+      : opts.fallbackProviders;
+    const logLegSkip = (entry: FallbackProviderEntry, reason: FallbackSkipReason): void =>
+      fallbackLogger.info('provider fallback skipped', {
+        event: 'fallback_leg_skipped',
+        api: 'generateText',
+        reason,
+        primaryProvider: metricProviderId,
+        fallbackProvider: entry.provider,
+        fallbackModel: entry.model,
+      });
+    const effectiveFallbacks: ResolvedFallbackEntry[] = opts.__fallbackWalk
+      ? chainEntries
+      : resolveFallbackChain(chainEntries, {
+          primary: { provider: metricProviderId, model: metricModelId },
+          requiredCapabilities: explicitRequiredCapabilities(opts),
+          excludedModelIds: opts.routerParams?.excludedModelIds,
+          onSkip: logLegSkip,
+        });
+    // This attempt's own failure updates the walk: a refusal is recorded,
+    // and a standing leg that failed on availability is owed a refill.
+    let walkState = advanceFallbackWalk(
+      opts.__fallbackWalk?.state ?? INITIAL_FALLBACK_WALK,
+      opts.__fallbackWalk?.role,
+      error,
+    );
 
     // A call whose prompt-shim tools already ran cannot be continued, and a
     // restart would run them again; it surfaces the error instead.
@@ -2850,6 +2918,14 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       let attempt = 0;
       for (const fb of effectiveFallbacks) {
         attempt += 1;
+        // A refill runs only while a standing leg is owed one, and the
+        // policy chain's Claude legs are passed over after a refusal.
+        const gate = gateFallbackEntry(walkState, fb);
+        if (!gate.run) {
+          logLegSkip(fb, gate.reason);
+          continue;
+        }
+        walkState = gate.state;
         // Skip fallback entries whose breaker is already open. Without
         // this check, the loop would still spend a full network round-
         // trip on every dead fallback in the chain before reaching the
@@ -2865,6 +2941,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             fallbackModel: fb.model,
             attempt,
           });
+          // An open breaker is an availability failure: a standing leg is
+          // owed a refill.
+          walkState = advanceFallbackWalk(walkState, fb.walkRole, undefined);
           continue;
         }
         try {
@@ -2898,6 +2977,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             ...opts,
             provider: fb.provider,
             model: fb.model,
+            // Legs run as named: no router re-picks the model, and the call's
+            // resolved tier travels with them.
+            router: undefined,
+            policyTier: walkTier,
+            // The walk's state before this leg, and its role.
+            __fallbackWalk: { state: walkState, role: fb.walkRole },
             // When a builder exists, ALWAYS override _responseFormat —
             // including with an explicit `undefined` on builder failure or
             // decline. Merely omitting the key would let the `...opts`
@@ -2927,7 +3012,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             // fallback provider rather than the primary's overrides.
             apiKey: undefined,
             baseUrl: undefined,
-            // Preserve the REMAINING explicit chain (entries AFTER the current
+            // Preserve the REMAINING resolved chain (entries AFTER the current
             // fb; `attempt` is 1-indexed so slice(attempt) drops fb and all
             // already-tried entries). This stops the recursion from rebuilding
             // the default cheap chain (which includes gpt-4o-mini) when a
@@ -3007,6 +3092,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           if (toolsRanBefore(fbError)) break;
           // The leg walked every entry after it and all of them failed.
           if (chainWalkedBefore(fbError)) break;
+          walkState = advanceFallbackWalk(walkState, fb.walkRole, fbError);
         }
       }
       // All fallbacks exhausted: fall through to throw
