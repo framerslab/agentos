@@ -151,7 +151,8 @@ export class StatisticalUtilityAI implements IUtilityAI {
     this.utilityId = utilityId || `stat-utility-${uuidv4()}`;
     this.tokenizers = {
       word: new natural.WordTokenizer(),
-      sentence: new natural.SentenceTokenizer(),
+      // natural 8 takes the abbreviation list first; none are special-cased here.
+      sentence: new natural.SentenceTokenizer([]),
     };
     this.stemmers = this.createStemmerRegistry();
     this.stopWords = new Map<string, Set<string>>([['en', DEFAULT_ENGLISH_STOP_WORDS]]);
