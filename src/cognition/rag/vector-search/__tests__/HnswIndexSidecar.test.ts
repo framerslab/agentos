@@ -12,7 +12,9 @@ const mockIndex = {
   readIndex: vi.fn(),
 };
 
-const MockHierarchicalNSW = vi.fn(() => mockIndex);
+const MockHierarchicalNSW = vi.fn(function () {
+  return mockIndex;
+});
 
 vi.mock('hnswlib-node', () => ({
   HierarchicalNSW: MockHierarchicalNSW,
@@ -44,7 +46,9 @@ describe('HnswIndexSidecar', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    MockHierarchicalNSW.mockImplementation(() => mockIndex);
+    MockHierarchicalNSW.mockImplementation(function () {
+      return mockIndex;
+    });
     fsMocks.access.mockRejectedValue(new Error('ENOENT'));
     fsMocks.writeFile.mockResolvedValue(undefined);
     sidecar = new HnswIndexSidecar();
