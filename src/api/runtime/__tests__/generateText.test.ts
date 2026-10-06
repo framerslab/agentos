@@ -1042,7 +1042,7 @@ describe('generateText', () => {
       // fallback succeeds. The fallback chain is auto-built from the
       // policyTier: Llama 3.3 70B leads the mature ladder, then magnum and
       // Hermes 3 70B, then the availability suffix.
-      vi.mocked(resolveProvider).mockClear();
+      vi.mocked(resolveModelOption).mockClear();
       const policyError = new Error("Sorry, I can't help with that.");
       (policyError as { httpStatus?: number }).httpStatus = 400;
       (policyError as { code?: string }).code = 'content_policy_violation';
@@ -1069,9 +1069,12 @@ describe('generateText', () => {
           policyTier: 'mature',
         });
         expect(result.text).toBe('uncensored reply');
-        // This file's resolveProvider mock returns a fixed model, so the leg's
-        // requested pair is read from the mock's arguments.
-        expect(vi.mocked(resolveProvider).mock.calls[1]?.slice(0, 2)).toEqual([
+        // This file's model mocks return a fixed model, so the leg's requested
+        // provider and model are read from the options it was called with.
+        const legOptions = vi.mocked(resolveModelOption).mock.calls[1]?.[0] as
+          | { provider?: string; model?: string }
+          | undefined;
+        expect([legOptions?.provider, legOptions?.model]).toEqual([
           'openrouter',
           'meta-llama/llama-3.3-70b-instruct',
         ]);
