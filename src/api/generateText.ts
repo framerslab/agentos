@@ -1622,6 +1622,174 @@ export function resolvePolicyTier(opts: {
   );
 }
 
+/** Why a fallback walk passed over an entry. */
+export type FallbackSkipReason =
+  | 'failed_primary'
+  | 'missing_capability'
+  | 'excluded_model'
+  | 'refill_not_owed'
+  | 'claude_after_refusal';
+
+/**
+ * A fallback entry after the walk's one-time resolution: the uncensored
+ * group's first two entries are standing legs, the rest refills.
+ *
+ * @internal
+ */
+export interface ResolvedFallbackEntry extends FallbackProviderEntry {
+  walkRole?: 'standing' | 'refill';
+}
+
+/**
+ * What a fallback walk has seen. It travels with the resolved slice into
+ * every nested walk.
+ *
+ * @internal
+ */
+export interface FallbackWalkState {
+  /** Standing legs that failed on availability or did not fit, not yet replaced. */
+  refillsOwed: number;
+  /** A model refusal (error code `content_filter`) ended an attempt in this walk. */
+  refusalSeen: boolean;
+}
+
+/**
+ * Handed to every fallback leg: the walk's state before the leg ran, and the
+ * leg's role.
+ *
+ * @internal
+ */
+export interface FallbackWalkContext {
+  state: FallbackWalkState;
+  role?: 'standing' | 'refill';
+}
+
+/** @internal */
+export const INITIAL_FALLBACK_WALK: Readonly<FallbackWalkState> = Object.freeze({
+  refillsOwed: 0,
+  refusalSeen: false,
+});
+
+/** Claude, direct or through OpenRouter. */
+function isClaudeEntry(entry: FallbackProviderEntry): boolean {
+  return (
+    entry.provider === 'anthropic' ||
+    (entry.provider === 'openrouter' && (entry.model ?? '').startsWith('anthropic/'))
+  );
+}
+
+/**
+ * The capabilities a call names explicitly (host policy and route params).
+ * Native tool calling is not inferred from the presence of tools: a model
+ * without it serves a tool-carrying call through the prompt shim.
+ *
+ * @internal
+ */
+export function explicitRequiredCapabilities(
+  opts: Pick<GenerateTextOptions, 'hostPolicy' | 'routerParams'>,
+): string[] {
+  return (
+    mergeRequiredCapabilities(
+      hostPolicyToRouteParams(opts.hostPolicy).requiredCapabilities,
+      opts.routerParams?.requiredCapabilities,
+    ) ?? []
+  );
+}
+
+/**
+ * Resolve a call's fallback chain once, at the start of the top-level walk.
+ * Policy-chain entries (`origin: 'policy-default'`) naming the failed first
+ * model are dropped; every entry is checked against the call's explicitly
+ * required capabilities and excluded models (a model outside the catalog
+ * counts as capable); the uncensored group's first two remaining entries
+ * become standing legs and the rest refills. Caller-written entries keep
+ * their order.
+ *
+ * @internal
+ */
+export function resolveFallbackChain(
+  chain: readonly FallbackProviderEntry[],
+  ctx: {
+    primary: { provider?: string; model?: string };
+    requiredCapabilities?: readonly string[];
+    excludedModelIds?: readonly string[];
+    onSkip?: (entry: FallbackProviderEntry, reason: FallbackSkipReason) => void;
+  },
+): ResolvedFallbackEntry[] {
+  const required = ctx.requiredCapabilities ?? [];
+  const excluded = new Set(ctx.excludedModelIds ?? []);
+  const resolved: ResolvedFallbackEntry[] = [];
+  let uncensoredLegs = 0;
+  for (const entry of chain) {
+    if (
+      entry.origin === 'policy-default' &&
+      entry.provider === ctx.primary.provider &&
+      entry.model === ctx.primary.model
+    ) {
+      ctx.onSkip?.(entry, 'failed_primary');
+      continue;
+    }
+    if (entry.model !== undefined && excluded.has(entry.model)) {
+      ctx.onSkip?.(entry, 'excluded_model');
+      continue;
+    }
+    const catalogEntry = entry.model !== undefined ? findCatalogTextModel(entry.model, entry.provider) : undefined;
+    if (catalogEntry && required.some((capability) => !catalogEntryHasCapability(catalogEntry, capability))) {
+      ctx.onSkip?.(entry, 'missing_capability');
+      continue;
+    }
+    if (entry.origin === 'policy-default' && entry.group === 'uncensored') {
+      resolved.push({ ...entry, walkRole: uncensoredLegs < 2 ? 'standing' : 'refill' });
+      uncensoredLegs += 1;
+    } else {
+      resolved.push(entry);
+    }
+  }
+  return resolved;
+}
+
+/**
+ * Whether the walk runs `entry` now: a refill only while a standing leg is
+ * owed one, and none of the policy chain's Claude legs after a refusal.
+ *
+ * @internal
+ */
+export function gateFallbackEntry(
+  state: FallbackWalkState,
+  entry: ResolvedFallbackEntry,
+): { run: true; state: FallbackWalkState } | { run: false; reason: FallbackSkipReason } {
+  if (state.refusalSeen && entry.origin === 'policy-default' && isClaudeEntry(entry)) {
+    return { run: false, reason: 'claude_after_refusal' };
+  }
+  if (entry.walkRole === 'refill') {
+    if (state.refillsOwed < 1) return { run: false, reason: 'refill_not_owed' };
+    return { run: true, state: { ...state, refillsOwed: state.refillsOwed - 1 } };
+  }
+  return { run: true, state };
+}
+
+/**
+ * The walk's state after an attempt failed with `error`: a standing leg that
+ * failed for anything but a content decline (a timeout, an open breaker and
+ * the context check's refusal included) is owed a refill, and a model
+ * refusal (code `content_filter`; a filter's `content_policy_violation`
+ * does not count) is recorded for the rest of the walk.
+ *
+ * @internal
+ */
+export function advanceFallbackWalk(
+  state: FallbackWalkState,
+  role: 'standing' | 'refill' | undefined,
+  error: unknown,
+): FallbackWalkState {
+  const owed = role === 'standing' && !isContentPolicyRefusal(error) ? 1 : 0;
+  const refusal = (error as { code?: unknown } | null | undefined)?.code === 'content_filter';
+  return {
+    refillsOwed: state.refillsOwed + owed,
+    refusalSeen: state.refusalSeen || refusal,
+  };
+}
+
 /** The catalog the policy chain reads its ladders from. */
 const POLICY_CATALOG = createUncensoredModelCatalog();
 
