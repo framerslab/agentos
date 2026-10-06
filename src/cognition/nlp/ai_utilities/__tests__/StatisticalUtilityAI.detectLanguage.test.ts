@@ -9,6 +9,7 @@ import {
   detectLanguageTrigram,
   iso6393To1,
   getSupportedLanguages,
+  countScripts,
 } from '../trigram-language-profiles';
 
 // ---------------------------------------------------------------------------
@@ -54,6 +55,45 @@ const POLISH_PASSAGE =
 const SWEDISH_PASSAGE =
   'Alla människor äro födda fria och lika i värde och rättigheter. ' +
   'De äro utrustade med förnuft och samvete och böra handla gentemot varandra i en anda av broderskap.';
+
+// Passages for the script stage: one short story told in each script.
+const JAPANESE_PASSAGE =
+  '古い灯台の下で、少女は毎晩ひとりで海の音を聞いていた。嵐が近づくと、彼女は窓を閉めて静かに祈った。';
+
+const CHINESE_PASSAGE =
+  '在古老的灯塔下，女孩每天晚上独自聆听大海的声音。暴风雨来临时，她关上窗户，静静地祈祷。';
+
+const KOREAN_PASSAGE =
+  '오래된 등대 아래에서 소녀는 매일 밤 혼자 바다 소리를 들었다. 폭풍이 다가오면 그녀는 창문을 닫고 조용히 기도했다.';
+
+const ARABIC_PASSAGE =
+  'تحت المنارة القديمة، كانت الفتاة تستمع كل ليلة إلى صوت البحر وحدها. وعندما تقترب العاصفة، تغلق النافذة وتصلي بهدوء.';
+
+const HINDI_PASSAGE =
+  'पुराने प्रकाशस्तंभ के नीचे, लड़की हर रात अकेले समुद्र की आवाज़ सुनती थी। जब तूफ़ान पास आता, तो वह खिड़की बंद करके चुपचाप प्रार्थना करती थी।';
+
+const RUSSIAN_PASSAGE =
+  'Под старым маяком девочка каждую ночь одна слушала шум моря. Когда приближалась буря, она закрывала окно и тихо молилась.';
+
+const UKRAINIAN_PASSAGE =
+  'Під старим маяком дівчинка щоночі сама слухала шум моря. Коли наближалася буря, вона зачиняла вікно і тихо молилася.';
+
+// Russian and Ukrainian fixtures each carry letters only their alphabet has
+// (ы in "закрывала"; і in "дівчинка"); Bulgarian and Serbian carry neither set.
+const BULGARIAN_PASSAGE =
+  'Под стария фар момичето всяка нощ само слушаше шума на морето. Когато бурята наближаваше, тя затваряше прозореца и тихо се молеше.';
+
+const SERBIAN_PASSAGE =
+  'Испод старог светионика девојчица је сваке ноћи сама слушала шум мора. Када би се олуја приближила, затварала је прозор и тихо се молила.';
+
+const GREEK_PASSAGE =
+  'Κάτω από τον παλιό φάρο, το κορίτσι άκουγε κάθε βράδυ μόνο του τον ήχο της θάλασσας.';
+
+const ENGLISH_WITH_CYRILLIC_NAME =
+  'The lighthouse keeper, a quiet man named Алексей, wrote every storm into his log and read the sea like a book.';
+
+const ENGLISH_WITH_JAPANESE_NAME =
+  'Our guide, who signs his notes 田中, led us through the old harbor district at dawn and told us about the storms.';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -334,5 +374,78 @@ describe('StatisticalUtilityAI.detectLanguage', () => {
   it('throws if not initialized', async () => {
     const uninit = new StatisticalUtilityAI();
     await expect(uninit.detectLanguage(ENGLISH_PASSAGE)).rejects.toThrow(/not initialized/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Script stage
+// ---------------------------------------------------------------------------
+
+describe('script stage', () => {
+  let utility: IUtilityAI;
+
+  beforeEach(async () => {
+    utility = new StatisticalUtilityAI();
+    await utility.initialize(defaultConfig);
+  });
+
+  it.each([
+    ['ja', JAPANESE_PASSAGE],
+    ['zh', CHINESE_PASSAGE],
+    ['ko', KOREAN_PASSAGE],
+    ['ar', ARABIC_PASSAGE],
+    ['hi', HINDI_PASSAGE],
+    ['ru', RUSSIAN_PASSAGE],
+    ['uk', UKRAINIAN_PASSAGE],
+  ])('identifies %s by its script as the only candidate', async (language, passage) => {
+    const results = await utility.detectLanguage(passage, { maxCandidates: 32 });
+    expect(results).toHaveLength(1);
+    expect(results[0].language).toBe(language);
+    expect(results[0].confidence).toBeGreaterThan(0.9);
+    expect(results[0].confidence).toBeLessThanOrEqual(1);
+  });
+
+  it('keeps English first when the prose names someone in another script', async () => {
+    for (const passage of [ENGLISH_WITH_CYRILLIC_NAME, ENGLISH_WITH_JAPANESE_NAME]) {
+      const results = await utility.detectLanguage(passage, { maxCandidates: 32 });
+      expect(results[0].language).toBe('en');
+      expect(results.length).toBeGreaterThan(1);
+    }
+  });
+
+  it('scores Latin-script text against the Latin-script profiles only', async () => {
+    const results = await utility.detectLanguage(ENGLISH_PASSAGE, { maxCandidates: 32 });
+    const languages = results.map((r) => r.language);
+    expect(languages).toHaveLength(13);
+    expect(languages).toEqual(expect.arrayContaining(['en', 'es', 'fr', 'de', 'pt', 'it', 'nl', 'tr', 'vi', 'pl', 'sv', 'da', 'no']));
+    for (const r of results) {
+      expect(Math.round(r.confidence * 10000) / 10000).toBe(r.confidence);
+    }
+  });
+
+  it('falls back to the default language for a script no profile covers', async () => {
+    const results = await utility.detectLanguage(GREEK_PASSAGE);
+    expect(results).toEqual([{ language: 'en', confidence: 0.1 }]);
+  });
+
+  it.each([
+    ['Bulgarian', BULGARIAN_PASSAGE],
+    ['Serbian', SERBIAN_PASSAGE],
+  ])('leaves %s undetermined instead of reading it as Russian or Ukrainian', async (_name, passage) => {
+    const results = await utility.detectLanguage(passage, { maxCandidates: 32 });
+    expect(results).toEqual([{ language: 'en', confidence: 0.1 }]);
+  });
+
+  it('falls back to the default language for text without letters', async () => {
+    const results = await utility.detectLanguage('2026 — 12:30 — 42 % … ★★★★★ — 3.14159');
+    expect(results).toEqual([{ language: 'en', confidence: 0.1 }]);
+  });
+
+  it('counts letters per script and finds the dominant group', () => {
+    expect(countScripts(JAPANESE_PASSAGE)).toMatchObject({ dominant: 'cjk' });
+    expect(countScripts(JAPANESE_PASSAGE).kana).toBeGreaterThan(0);
+    expect(countScripts(CHINESE_PASSAGE)).toMatchObject({ dominant: 'cjk', kana: 0 });
+    expect(countScripts(ENGLISH_WITH_CYRILLIC_NAME).dominant).toBe('latin');
+    expect(countScripts(GREEK_PASSAGE).dominant).toBeNull();
   });
 });
