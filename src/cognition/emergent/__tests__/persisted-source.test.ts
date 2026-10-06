@@ -5,14 +5,23 @@ import {
   parsePersistedSource,
   parseStoredRequest,
   requestFromImplementation,
+  requestFromSource,
+  sourceFromImplementation,
+  toolFromRow,
 } from '../persisted-source.js';
+import { SandboxedToolForge } from '../SandboxedToolForge.js';
+import type { PersistedToolRow, SandboxedToolSpec } from '../types.js';
 
 describe('normalizeAllowlist', () => {
   it('maps the alias onto the catalogue name and drops duplicates', () => {
     expect(normalizeAllowlist(['fs.readFile', 'fs.read', 'fetch'])).toEqual({
-      capabilities: ['fs.read', 'fetch'],
+      capabilities: ['fetch', 'fs.read'],
       unknown: [],
     });
+  });
+
+  it('returns the names in catalogue order, whatever order the request wrote them in', () => {
+    expect(normalizeAllowlist(['crypto', 'fetch']).capabilities).toEqual(['fetch', 'crypto']);
   });
 
   it('reports names outside the catalogue instead of dropping them', () => {
@@ -28,7 +37,7 @@ describe('normalizeAllowlist', () => {
 });
 
 describe('inferRequestFromCode', () => {
-  it('finds the three capabilities by the same text scan validateCode uses', () => {
+  it('finds each capability the code uses', () => {
     const code = `async function execute(i) {
       const r = await fetch(i.url);
       const t = await fs.readFile(i.path);
@@ -39,6 +48,44 @@ describe('inferRequestFromCode', () => {
 
   it('returns nothing for code that uses none of them', () => {
     expect(inferRequestFromCode('function execute(i) { return { n: i.n * 2 }; }')).toEqual([]);
+  });
+
+  // A stored code tool is checked by validateCode at every call against the
+  // list inferred here, so the two scans must ask for the same capabilities:
+  // the inferred list passes, and a list missing any one of them does not.
+  const forge = new SandboxedToolForge();
+  it.each([
+    ['fetch alone', 'async function execute(i) { return (await fetch(i.url)).status; }'],
+    ['fs.read alone', 'async function execute(i) { return await fs.readFile(i.path); }'],
+    ['crypto alone', 'function execute(i) { return { id: crypto.randomUUID() }; }'],
+    [
+      'all three',
+      'async function execute(i) { const r = await fetch(i.url); const t = await fs.readFile(i.path); ' +
+        'return { id: crypto.randomUUID(), r: r.status, t }; }',
+    ],
+    ['none of them', 'function execute(i) { return { n: i.n * 2 }; }'],
+    [
+      'fetch called as a property',
+      'async function execute(i) { return (await globalThis.fetch(i.url)).ok; }',
+    ],
+    ['a space before the dot', 'async function execute(i) { return await fs .readFile(i.path); }'],
+    ['an fs member other than readFile', 'async function execute(i) { return await fs.stat(i.path); }'],
+    [
+      'a name only in a comment',
+      'function execute(i) {\n  // crypto.randomUUID() would also do\n  return { id: i.n + 1 };\n}',
+    ],
+    ['a name with no call or member', 'function execute(i) { const crypto = i.c; return { c: crypto }; }'],
+    [
+      'names that only contain a capability',
+      'function execute(i) { return { a: i.refetch(1), b: i.fsx.size, c: i.fetcher }; }',
+    ],
+  ])('agrees with validateCode on %s', (_label, code) => {
+    const inferred = inferRequestFromCode(code);
+    expect(forge.validateCode(code, toSandboxApis(inferred))).toEqual({ valid: true, violations: [] });
+    for (const dropped of inferred) {
+      const narrower = inferred.filter((name) => name !== dropped);
+      expect(forge.validateCode(code, toSandboxApis(narrower)).valid).toBe(false);
+    }
   });
 });
 
@@ -77,6 +124,17 @@ describe('parsePersistedSource', () => {
     });
   });
 
+  it('reports a code row that is JSON of neither stored shape', () => {
+    const unknownShapes = [
+      '{"mode":"sandbox","allowlist":["fetch"]}',
+      '{"code":"function execute(i){return i}","allowlist":[]}',
+      JSON.stringify('function execute(i) { return i; }'),
+    ];
+    for (const source of unknownShapes) {
+      expect(parsePersistedSource('sandbox', source).format).toBe('unreadable');
+    }
+  });
+
   it('reads a compose row', () => {
     const spec = {
       mode: 'compose',
@@ -86,6 +144,37 @@ describe('parsePersistedSource', () => {
       format: 'compose',
       implementation: spec,
     });
+  });
+
+  it("keeps a step's condition and nothing a step does not have", () => {
+    const source = JSON.stringify({
+      mode: 'compose',
+      steps: [{ name: 's1', tool: 'echo', inputMapping: {}, condition: '$prev.ok', note: 'x' }],
+    });
+    expect(parsePersistedSource('compose', source)).toEqual({
+      format: 'compose',
+      implementation: {
+        mode: 'compose',
+        steps: [{ name: 's1', tool: 'echo', inputMapping: {}, condition: '$prev.ok' }],
+      },
+    });
+  });
+
+  it('reports a compose row whose steps the builder cannot run, and stores no request for it', () => {
+    const unrunnable = [
+      '{"mode":"compose","steps":[null]}',
+      '{"mode":"compose","steps":[{"name":"s1"}]}',
+      '{"mode":"compose","steps":[]}',
+      '{"mode":"compose","steps":[{"name":"s1","tool":" ","inputMapping":{}}]}',
+      '{"mode":"compose","steps":[{"name":"s1","tool":"echo","inputMapping":[]}]}',
+    ];
+    for (const source of unrunnable) {
+      const parsed = parsePersistedSource('compose', source);
+      expect(parsed.format).toBe('unreadable');
+      expect(requestFromSource(parsed)).toBeNull();
+    }
+    // The same rules hold for a composition held in memory.
+    expect(sourceFromImplementation({ mode: 'compose', steps: [] }).format).toBe('unreadable');
   });
 
   it('reports a compose row that is not JSON, and an unknown mode', () => {
@@ -122,7 +211,7 @@ describe('stored requests', () => {
       parseStoredRequest(
         '{"kind":"sandbox","capabilities":["fs.readFile","fetch","fs.read"],"inferred":true,"extra":1}',
       ),
-    ).toEqual({ kind: 'sandbox', capabilities: ['fs.read', 'fetch'], inferred: true });
+    ).toEqual({ kind: 'sandbox', capabilities: ['fetch', 'fs.read'], inferred: true });
     expect(
       parseStoredRequest('{"kind":"compose","steps":[{"name":"s1","tool":"echo","inputMapping":{}}]}'),
     ).toEqual({ kind: 'compose', steps: [{ name: 's1', tool: 'echo' }] });
@@ -137,5 +226,56 @@ describe('stored requests', () => {
     expect(parseStoredRequest('{"kind":"compose","steps":[{"name":"s1"}]}')).toBeNull();
     expect(parseStoredRequest('{"kind":"compose","steps":[null]}')).toBeNull();
     expect(parseStoredRequest('["sandbox"]')).toBeNull();
+  });
+});
+
+describe('toolFromRow', () => {
+  it('reads BIGINT times stored as numbers or as strings, and a blank one as no time', () => {
+    const implementation: SandboxedToolSpec = {
+      mode: 'sandbox',
+      code: 'function execute(i) { return { doubled: i.n * 2 }; }',
+      allowlist: [],
+    };
+    // Postgres returns a BIGINT column as a string.
+    const row: PersistedToolRow = {
+      id: 'emergent_1',
+      name: 'double_it',
+      description: 'Doubles a number.',
+      input_schema: '{"type":"object","properties":{"n":{"type":"number"}}}',
+      output_schema: null,
+      implementation_mode: 'sandbox',
+      implementation_source: implementation.code,
+      tier: 'shared',
+      created_by_agent: 'agent-1',
+      created_by_session: 'sess-1',
+      created_at: '1696000000000',
+      judge_verdicts: null,
+      confidence_score: null,
+      total_uses: null,
+      success_count: null,
+      failure_count: null,
+      avg_execution_ms: null,
+      last_used_at: '1696000000500',
+      is_active: 1,
+      state: null,
+      state_reason: null,
+      state_at: null,
+      request_json: null,
+    };
+
+    const tool = toolFromRow(row, implementation);
+    expect(tool.createdAt).toBe('2023-09-29T15:06:40.000Z');
+    expect(tool.usageStats.lastUsedAt).toBe('2023-09-29T15:06:40.500Z');
+
+    // SQLite returns it as a number.
+    const fromNumbers = toolFromRow(
+      { ...row, created_at: 1696000000000, last_used_at: 1696000000500 },
+      implementation,
+    );
+    expect(fromNumbers.createdAt).toBe('2023-09-29T15:06:40.000Z');
+    expect(fromNumbers.usageStats.lastUsedAt).toBe('2023-09-29T15:06:40.500Z');
+
+    expect(toolFromRow({ ...row, last_used_at: '' }, implementation).usageStats.lastUsedAt).toBeNull();
+    expect(toolFromRow({ ...row, last_used_at: null }, implementation).usageStats.lastUsedAt).toBeNull();
   });
 });

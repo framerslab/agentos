@@ -1,7 +1,7 @@
 /**
  * @fileoverview Parsers for the forms a tool's `implementation_source` column
- * has been written in, and the request inference used for rows stored before
- * requests were kept.
+ * has been written in, the request inference used for rows stored before
+ * requests were kept, and the mapping of a stored row to the in-memory tool.
  * @module @framers/agentos/emergent/persisted-source
  *
  * Three forms exist for code-forged tools:
@@ -10,11 +10,14 @@
  *   tools with their own SQL);
  * - a redacted record `{ redacted: true, allowlist, codeBytes }` (the registry,
  *   with `persistSandboxSource` off), which cannot be rebuilt.
- * Compose tools are always the JSON of their spec.
+ * Any other JSON in a code tool's row is unreadable. Compose tools are always
+ * the JSON of their spec; a spec whose steps the builder cannot run is
+ * unreadable.
  */
 
 import type {
   CapabilityName,
+  ComposableStep,
   ComposableToolSpec,
   EmergentTool,
   PersistedToolRow,
@@ -44,9 +47,11 @@ export type PersistedSource =
 
 /**
  * Infers the capabilities a piece of forged code uses, with the same text
- * scan `SandboxedToolForge.validateCode` applies. The code passed that scan
- * against the list the judge reviewed, so the result is never wider than what
- * was approved at forge time.
+ * scan `SandboxedToolForge.validateCode` applies. For code that `forge()`
+ * stored, the code passed that scan against the list the judge reviewed, so
+ * the result is never wider than what was approved. Code written into the
+ * store by other means never met the judge, and nothing bounds its inferred
+ * request until a ceiling is in force.
  */
 export function inferRequestFromCode(code: string): CapabilityName[] {
   const found: CapabilityName[] = [];
@@ -58,18 +63,65 @@ export function inferRequestFromCode(code: string): CapabilityName[] {
 
 const describeError = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
+/** A JSON object: not null and not an array. */
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * Reads a composition's steps by the rules the builder runs them by: at least
+ * one step, each an object with a string `name`, a non-empty `tool` and an
+ * `inputMapping` object; `condition` is kept when it is a string. The steps
+ * are rebuilt field by field, so nothing else the source carried comes along.
+ */
+function readComposeSteps(steps: unknown): { steps: ComposableStep[] } | { error: string } {
+  if (!Array.isArray(steps)) {
+    return { error: 'compose source has no steps array' };
+  }
+  if (steps.length === 0) {
+    return { error: 'compose source has no steps' };
+  }
+  const read: ComposableStep[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const step: unknown = steps[i];
+    if (!isRecord(step)) {
+      return { error: `compose step ${i} is not an object` };
+    }
+    const { name, tool, inputMapping, condition } = step;
+    if (typeof name !== 'string') {
+      return { error: `compose step ${i} has no name` };
+    }
+    if (typeof tool !== 'string' || tool.trim() === '') {
+      return { error: `compose step ${i} has no tool` };
+    }
+    if (!isRecord(inputMapping)) {
+      return { error: `compose step ${i} has no inputMapping object` };
+    }
+    read.push(
+      typeof condition === 'string'
+        ? { name, tool, inputMapping, condition }
+        : { name, tool, inputMapping },
+    );
+  }
+  return { steps: read };
+}
+
 /** Reads one row's `implementation_mode` and `implementation_source`. */
 export function parsePersistedSource(mode: string, source: string): PersistedSource {
   if (mode === 'compose') {
+    let spec: unknown;
     try {
-      const parsed = JSON.parse(source) as Partial<ComposableToolSpec> | null;
-      if (parsed && Array.isArray(parsed.steps)) {
-        return { format: 'compose', implementation: { mode: 'compose', steps: parsed.steps } };
-      }
-      return { format: 'unreadable', error: 'compose source has no steps array' };
+      spec = JSON.parse(source);
     } catch (err) {
       return { format: 'unreadable', error: `compose source is not JSON: ${describeError(err)}` };
     }
+    if (!isRecord(spec)) {
+      return { format: 'unreadable', error: 'compose source is not a JSON object' };
+    }
+    const read = readComposeSteps(spec.steps);
+    if ('error' in read) {
+      return { format: 'unreadable', error: read.error };
+    }
+    return { format: 'compose', implementation: { mode: 'compose', steps: read.steps } };
   }
 
   if (mode !== 'sandbox') {
@@ -80,11 +132,18 @@ export function parsePersistedSource(mode: string, source: string): PersistedSou
   try {
     parsed = JSON.parse(source);
   } catch {
-    parsed = undefined;
+    // Not JSON, so the source is the code itself.
+    const capabilities = inferRequestFromCode(source);
+    return {
+      format: 'raw-code',
+      implementation: { mode: 'sandbox', code: source, allowlist: toSandboxApis(capabilities) },
+      capabilities,
+      inferred: true,
+    };
   }
 
-  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-    const record = parsed as Record<string, unknown>;
+  if (isRecord(parsed)) {
+    const record = parsed;
     const names = Array.isArray(record.allowlist) ? record.allowlist.map(String) : [];
     if (record.redacted === true) {
       return { format: 'redacted', capabilities: normalizeAllowlist(names).capabilities };
@@ -100,13 +159,9 @@ export function parsePersistedSource(mode: string, source: string): PersistedSou
     }
   }
 
-  const capabilities = inferRequestFromCode(source);
-  return {
-    format: 'raw-code',
-    implementation: { mode: 'sandbox', code: source, allowlist: toSandboxApis(capabilities) },
-    capabilities,
-    inferred: true,
-  };
+  // Text that JSON.parse accepts cannot define `execute` or `run`, so this is
+  // no code a tool can be rebuilt from: most likely a form some host wrote.
+  return { format: 'unreadable', error: 'sandbox source is JSON of an unknown shape' };
 }
 
 /** The request to store for a source read from a row. */
@@ -141,7 +196,11 @@ export function requestFromImplementation(implementation: ToolImplementation): S
 /** The source form of an implementation held in memory, for the same checks a stored row gets. */
 export function sourceFromImplementation(implementation: ToolImplementation): PersistedSource {
   if (implementation.mode === 'compose') {
-    return { format: 'compose', implementation };
+    // The step rules a stored composition is read by.
+    const read = readComposeSteps(implementation.steps);
+    return 'error' in read
+      ? { format: 'unreadable', error: read.error }
+      : { format: 'compose', implementation };
   }
   return {
     format: 'code-with-list',
@@ -207,6 +266,8 @@ export function toolFromRow(row: PersistedToolRow, implementation: ToolImplement
   // BIGINT columns come back as numbers from SQLite and as strings from Postgres.
   const toIso = (value: number | string | null): string | null => {
     if (value == null) return null;
+    // A blank column is no time; Number('') is 0, which would read it as 1970.
+    if (typeof value === 'string' && value.trim() === '') return null;
     const numeric = typeof value === 'number' ? value : Number(value);
     const date = Number.isFinite(numeric) ? new Date(numeric) : new Date(String(value));
     return Number.isNaN(date.getTime()) ? null : date.toISOString();
