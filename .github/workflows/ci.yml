@@ -102,3 +102,32 @@ jobs:
           src/cognition/emergent/__tests__/decay-for-agent.test.ts
           src/cognition/emergent/__tests__/adapt-personality.test.ts
           src/cognition/rag/__tests__/neo4j-graphrag-export.test.ts
+
+  # Exercises the release configuration without tagging or publishing: the
+  # commit analyser and the release-notes generator read the commits since
+  # the last tag the way the Release workflow does.
+  release-dry-run:
+    name: Release dry run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install PNPM
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Dry-run semantic-release on this branch
+        run: node scripts/release-dry-run.mjs "${{ github.head_ref || github.ref_name }}"
