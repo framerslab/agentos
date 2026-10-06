@@ -151,17 +151,46 @@ export function sourceFromImplementation(implementation: ToolImplementation): Pe
   };
 }
 
-/** Reads a `request_json` column. Anything unreadable is treated as no stored request. */
+/**
+ * Reads a `request_json` column. Anything unreadable is treated as no stored
+ * request, and so is a request without its list or one that names a
+ * capability outside the catalogue: the caller derives the request from the
+ * source again. The result is rebuilt field by field, so it holds catalogue
+ * names and nothing the column carried beyond the request.
+ */
 export function parseStoredRequest(json: string | null | undefined): StoredRequest | null {
   if (!json) return null;
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(json) as StoredRequest | null;
-    if (parsed && (parsed.kind === 'sandbox' || parsed.kind === 'compose')) {
-      return parsed;
-    }
+    parsed = JSON.parse(json);
   } catch {
-    // Fall through: an unreadable request is re-derived from the source.
+    return null;
   }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+
+  if (record.kind === 'sandbox') {
+    const names = record.capabilities;
+    if (!Array.isArray(names) || !names.every((name) => typeof name === 'string')) return null;
+    const { capabilities, unknown } = normalizeAllowlist(names as string[]);
+    if (unknown.length > 0) return null;
+    return record.inferred === true
+      ? { kind: 'sandbox', capabilities, inferred: true }
+      : { kind: 'sandbox', capabilities };
+  }
+
+  if (record.kind === 'compose') {
+    if (!Array.isArray(record.steps)) return null;
+    const steps: Array<{ name: string; tool: string }> = [];
+    for (const step of record.steps as unknown[]) {
+      if (!step || typeof step !== 'object') return null;
+      const { name, tool } = step as Record<string, unknown>;
+      if (typeof name !== 'string' || typeof tool !== 'string') return null;
+      steps.push({ name, tool });
+    }
+    return { kind: 'compose', steps };
+  }
+
   return null;
 }
 

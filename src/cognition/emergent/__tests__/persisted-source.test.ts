@@ -116,4 +116,26 @@ describe('stored requests', () => {
     expect(parseStoredRequest('{"kind":"other"}')).toBeNull();
     expect(parseStoredRequest(null)).toBeNull();
   });
+
+  it('returns catalogue names and only the fields of a request', () => {
+    expect(
+      parseStoredRequest(
+        '{"kind":"sandbox","capabilities":["fs.readFile","fetch","fs.read"],"inferred":true,"extra":1}',
+      ),
+    ).toEqual({ kind: 'sandbox', capabilities: ['fs.read', 'fetch'], inferred: true });
+    expect(
+      parseStoredRequest('{"kind":"compose","steps":[{"name":"s1","tool":"echo","inputMapping":{}}]}'),
+    ).toEqual({ kind: 'compose', steps: [{ name: 's1', tool: 'echo' }] });
+  });
+
+  it('treats a request without its list, or with a name outside the catalogue, as no stored request', () => {
+    expect(parseStoredRequest('{"kind":"sandbox"}')).toBeNull();
+    expect(parseStoredRequest('{"kind":"sandbox","capabilities":"fetch"}')).toBeNull();
+    expect(parseStoredRequest('{"kind":"sandbox","capabilities":["fetch",7]}')).toBeNull();
+    expect(parseStoredRequest('{"kind":"sandbox","capabilities":["fetch","process.spawn"]}')).toBeNull();
+    expect(parseStoredRequest('{"kind":"compose"}')).toBeNull();
+    expect(parseStoredRequest('{"kind":"compose","steps":[{"name":"s1"}]}')).toBeNull();
+    expect(parseStoredRequest('{"kind":"compose","steps":[null]}')).toBeNull();
+    expect(parseStoredRequest('["sandbox"]')).toBeNull();
+  });
 });
