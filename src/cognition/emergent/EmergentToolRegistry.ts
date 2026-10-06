@@ -35,6 +35,7 @@ import type {
   ToolStateRecord,
 } from './types.js';
 import { DEFAULT_EMERGENT_CONFIG } from './types.js';
+import { parsePersistedSource } from './persisted-source.js';
 
 // ============================================================================
 // STORAGE ADAPTER INTERFACE
@@ -630,6 +631,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
    * @param _output - The output returned by the tool (logged for audit).
    * @param success - Whether the invocation completed successfully.
    * @param executionTimeMs - Wall-clock execution time in milliseconds.
+   * @returns `false` when the tool is suspended or demoted and nothing was recorded.
    *
    * @throws {Error} If no tool with the given ID is registered.
    */
@@ -639,10 +641,16 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     _output: unknown,
     success: boolean,
     executionTimeMs: number,
-  ): void {
+  ): boolean {
     const tool = this.get(toolId);
     if (!tool) {
       throw new Error(`Cannot record use: tool "${toolId}" not found.`);
+    }
+
+    // A suspended or demoted tool records nothing: its statistics must not
+    // move while it cannot run, and nothing here may write it back as active.
+    if (!this.isActive(toolId)) {
+      return false;
     }
 
     const stats = tool.usageStats;
@@ -663,15 +671,36 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     // Confidence is success rate.
     stats.confidenceScore = stats.successCount / stats.totalUses;
 
-    stats.lastUsedAt = new Date().toISOString();
+    const usedAtMs = Date.now();
+    stats.lastUsedAt = new Date(usedAtMs).toISOString();
 
     if (this.db && this.schemaReady) {
-      this.persistToolToDb(tool).catch(() => {
-        // Best-effort persistence mirror. Usage stats still live in memory.
-      });
+      // Usage columns only. Rewriting the whole row re-serialises the source,
+      // which replaced a stored source with the redacted record whenever
+      // persistSandboxSource was off.
+      this.db
+        .run(
+          `UPDATE agentos_emergent_tools
+              SET confidence_score = ?, total_uses = ?, success_count = ?,
+                  failure_count = ?, avg_execution_ms = ?, last_used_at = ?
+            WHERE id = ?`,
+          [
+            stats.confidenceScore,
+            stats.totalUses,
+            stats.successCount,
+            stats.failureCount,
+            stats.avgExecutionTimeMs,
+            usedAtMs,
+            toolId,
+          ],
+        )
+        .catch(() => {
+          // Best-effort persistence mirror. Usage stats still live in memory.
+        });
     }
 
     this.logAudit(toolId, 'use', { success, executionTimeMs });
+    return true;
   }
 
   // --------------------------------------------------------------------------
@@ -951,10 +980,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
         (existing.promoted_by != null ? String(existing.promoted_by) : null);
     }
 
-    const implementationSource =
-      tool.implementation.mode === 'sandbox'
-        ? this.serializeSandboxImplementation(tool)
-        : JSON.stringify(tool.implementation);
+    const implementationSource = await this.resolveSourceToStore(tool);
 
     await this.db.run(
       `INSERT OR REPLACE INTO agentos_emergent_tools
@@ -987,9 +1013,38 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
         tool.usageStats.lastUsedAt
           ? new Date(tool.usageStats.lastUsedAt).getTime()
           : null,
-        1,
+        // Never a literal: a rewrite must not turn a suspended tool back on.
+        this.isActive(tool.id) ? 1 : 0,
       ],
     );
+  }
+
+  /**
+   * The `implementation_source` to write for a tool. With source persistence
+   * off the registry writes the redacted record for a fresh forge, or over an
+   * earlier redacted record, and never over any other stored source: that
+   * source was put there by a host, or while persistence was on, and
+   * replacing it would destroy the tool.
+   */
+  private async resolveSourceToStore(tool: EmergentTool): Promise<string> {
+    if (tool.implementation.mode !== 'sandbox') {
+      return JSON.stringify(tool.implementation);
+    }
+    if (this.config.persistSandboxSource || !this.db) {
+      return this.serializeSandboxImplementation(tool);
+    }
+    const existing = (await this.db.get(
+      `SELECT implementation_source
+         FROM agentos_emergent_tools
+        WHERE id = ?
+        LIMIT 1`,
+      [tool.id],
+    )) as { implementation_source?: string | null } | undefined;
+    const stored = existing?.implementation_source;
+    if (typeof stored === 'string' && parsePersistedSource('sandbox', stored).format !== 'redacted') {
+      return stored;
+    }
+    return this.serializeSandboxImplementation(tool);
   }
 
   private serializeSandboxImplementation(tool: EmergentTool): string {

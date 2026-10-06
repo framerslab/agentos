@@ -141,4 +141,65 @@ describe('EmergentToolRegistry state', () => {
     await settle();
     expect(readStateRow(db, tool.id)).toBeUndefined();
   });
+
+  it('recording a use updates the usage columns and leaves the stored source alone', async () => {
+    // The row was written by a host with its own SQL, in the JSON form.
+    const stored = JSON.stringify({
+      mode: 'sandbox',
+      code: 'function execute(input) { return { doubled: input.n * 2 }; }',
+      allowlist: [],
+    });
+    const tool = makeTool({ id: 'emergent_test_3' });
+    registry.register(tool, 'agent');
+    await settle();
+    db.raw
+      .prepare('UPDATE agentos_emergent_tools SET implementation_source = ? WHERE id = ?')
+      .run(stored, tool.id);
+
+    expect(registry.recordUse(tool.id, { n: 1 }, { doubled: 2 }, true, 12)).toBe(true);
+    await settle();
+
+    const row = readToolRow(db, tool.id);
+    expect(row?.implementation_source).toBe(stored);
+    expect(row?.total_uses).toBe(1);
+    expect(row?.success_count).toBe(1);
+    expect(row?.avg_execution_ms).toBe(12);
+  });
+
+  it('with source persistence off, a rewrite keeps a stored source instead of redacting it', async () => {
+    const offDb = createSqliteAdapter();
+    const offRegistry = new EmergentToolRegistry(
+      { ...DEFAULT_EMERGENT_CONFIG, enabled: true, persistSandboxSource: false },
+      offDb,
+    );
+    await offRegistry.ensureSchema();
+    const code = 'function execute(input) { return { doubled: input.n * 2 }; }';
+    const tool = makeTool({ id: 'emergent_test_4', tier: 'agent' });
+    offRegistry.register(tool, 'agent');
+    await settle();
+    // A fresh forge with persistence off stores the redacted record.
+    expect(String(readToolRow(offDb, tool.id)?.implementation_source)).toContain('"redacted":true');
+
+    // A host stored the code itself; a later whole-row rewrite must keep it.
+    offDb.raw
+      .prepare('UPDATE agentos_emergent_tools SET implementation_source = ? WHERE id = ?')
+      .run(code, tool.id);
+    await offRegistry.promote(tool.id, 'shared', 'admin');
+
+    expect(readToolRow(offDb, tool.id)?.implementation_source).toBe(code);
+    expect(readToolRow(offDb, tool.id)?.tier).toBe('shared');
+
+    // A source in a form this release does not know is kept too; only a
+    // redacted record is ever written over.
+    const unknownShape = '{"v":2,"body":"function execute(i){return i}"}';
+    offDb.raw
+      .prepare('UPDATE agentos_emergent_tools SET implementation_source = ? WHERE id = ?')
+      .run(unknownShape, tool.id);
+    expect(offRegistry.recordUse(tool.id, {}, {}, true, 3)).toBe(true);
+    await settle();
+    offRegistry.upsert({ ...offRegistry.get(tool.id)!, description: 'Doubles a number, twice over.' });
+    await settle();
+    expect(readToolRow(offDb, tool.id)?.implementation_source).toBe(unknownShape);
+    expect(readToolRow(offDb, tool.id)?.description).toBe('Doubles a number, twice over.');
+  });
 });
