@@ -2,10 +2,11 @@
  * @fileoverview Trigram-based language detection profiles and scoring algorithm.
  *
  * Detection runs in two stages. The script stage counts the text's letters
- * per writing system: a script only one profiled language uses (Hangul,
- * Arabic, Devanagari, Bengali, Han and kana) decides the language outright,
- * and Cyrillic text is decided by the letters only Russian or only Ukrainian
- * uses, or left undetermined. Latin-script text goes to the trigram stage,
+ * per writing system: a script only one profiled language uses (Hangul, Han
+ * and kana) decides the language outright; a shared script decides it when no
+ * letter of another language written in that script appears (Arabic,
+ * Devanagari, Bengali), and Cyrillic text is decided by the letters only
+ * Russian or only Ukrainian uses, or left undetermined. Latin-script text goes to the trigram stage,
  * which follows Cavnar & Trenkle (1994): build a ranked trigram frequency
  * profile from the input and compare it against the Latin-script reference
  * profiles; the profile with the lowest "out-of-place" distance wins.
@@ -314,34 +315,48 @@ export function iso6393To1(code: string): string {
 /** Writing systems the profiles cover. Han and kana count as one group. */
 export type ScriptGroup = 'latin' | 'cyrillic' | 'arabic' | 'devanagari' | 'bengali' | 'hangul' | 'cjk';
 
-// Each pattern counts letters only: a script's combining marks (Devanagari
-// and Bengali vowel signs, Arabic vowel points) are not letters, so the
-// lookahead keeps every group's count within the text's letter count.
-const SCRIPT_GROUP_PATTERNS: ReadonlyArray<readonly [ScriptGroup, RegExp]> = [
-  ['latin', /(?=\p{L})\p{Script=Latin}/gu],
-  ['cyrillic', /(?=\p{L})\p{Script=Cyrillic}/gu],
-  ['arabic', /(?=\p{L})\p{Script=Arabic}/gu],
-  ['devanagari', /(?=\p{L})\p{Script=Devanagari}/gu],
-  ['bengali', /(?=\p{L})\p{Script=Bengali}/gu],
-  ['hangul', /(?=\p{L})\p{Script=Hangul}/gu],
-  ['cjk', /(?=\p{L})[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu],
+// Each test runs on one character that is already known to be a letter, so a
+// script's combining marks (Devanagari and Bengali vowel signs, Arabic vowel
+// points), which are not letters, never count.
+const SCRIPT_GROUP_TESTS: ReadonlyArray<readonly [ScriptGroup, RegExp]> = [
+  ['latin', /\p{Script=Latin}/u],
+  ['cyrillic', /\p{Script=Cyrillic}/u],
+  ['arabic', /\p{Script=Arabic}/u],
+  ['devanagari', /\p{Script=Devanagari}/u],
+  ['bengali', /\p{Script=Bengali}/u],
+  ['hangul', /\p{Script=Hangul}/u],
+  ['cjk', /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u],
 ];
 
-const LETTER = /\p{L}/gu;
-const KANA = /(?=\p{L})[\p{Script=Hiragana}\p{Script=Katakana}]/gu;
+const IS_LETTER = /\p{L}/u;
+const IS_KANA = /[\p{Script=Hiragana}\p{Script=Katakana}]/u;
+
+/** A script decision needs at least this many letters in the dominant script. */
+const MIN_SCRIPT_LETTERS = 5;
+
 /**
  * Letters of the Russian alphabet that the Ukrainian alphabet lacks. The hard
  * sign is left out: Russian rarely uses it and Bulgarian uses it constantly.
  */
-const RUSSIAN_ONLY_LETTERS = /[ыэёЫЭЁ]/gu;
+const RUSSIAN_ONLY_LETTERS = /[ыэёЫЭЁ]/u;
 /** Letters of the Ukrainian alphabet that the Russian alphabet lacks. */
-const UKRAINIAN_ONLY_LETTERS = /[іїєґІЇЄҐ]/gu;
+const UKRAINIAN_ONLY_LETTERS = /[іїєґІЇЄҐ]/u;
 /**
- * Letters of other Cyrillic alphabets (Belarusian, Serbian, Macedonian,
- * Kazakh, Kyrgyz, Mongolian, Tatar, Bashkir, Tajik, Uzbek, Chuvash) that
- * neither Russian nor Ukrainian uses. No profile covers those languages.
+ * A Cyrillic letter outside the Russian and Ukrainian alphabets (Belarusian ў,
+ * Serbian ј, Macedonian ѓ, Kazakh ә, Komi ӧ and every other): no profile
+ * covers those languages.
  */
-const OTHER_CYRILLIC_LETTERS = /[ўјљњћђџѓќѕәғқңөұүһҳҷӣӯҡҙҫҗӑӗӳ]/giu;
+const NON_RUSSIAN_UKRAINIAN_CYRILLIC = /(?=\p{Script=Cyrillic})(?=\p{L})[^а-яА-ЯёЁіІїЇєЄґҐ]/u;
+/**
+ * An Arabic-script letter outside the Arabic alphabet (Persian پ چ ژ گ ک ی,
+ * Urdu ٹ ڈ ڑ ں ے ہ ھ, Kurdish, Pashto and others): Arabic is the only
+ * Arabic-script language with a profile.
+ */
+const NON_ARABIC_ARABIC_SCRIPT = /(?=\p{Script=Arabic})(?=\p{L})[^ء-غـ-يٱ]/u;
+/** ळ: Marathi writes it, Hindi does not. */
+const MARATHI_LETTER = /ळ/u;
+/** ৰ and ৱ: Assamese writes them, Bengali does not. */
+const ASSAMESE_LETTERS = /[ৰৱ]/u;
 
 /** Japanese prose mixes kana with Han characters; Chinese has no kana. */
 const MIN_KANA_SHARE_FOR_JAPANESE = 0.1;
@@ -354,14 +369,16 @@ const PROFILE_SCRIPT: Record<string, ScriptGroup> = {
   arb: 'arabic', hin: 'devanagari', ben: 'bengali', kor: 'hangul', jpn: 'cjk', cmn: 'cjk',
 };
 
-function countMatches(text: string, pattern: RegExp): number {
-  return text.match(pattern)?.length ?? 0;
-}
-
 function round4(value: number): number {
   return Math.round(value * 10000) / 10000;
 }
 
+/**
+ * How a text's letters divide among the writing systems the profiles cover:
+ * the letter count, the group that holds more than half of the letters (the
+ * one the detector reads the text as), that group's letters, and the kana
+ * among them.
+ */
 export interface ScriptCounts {
   /** Letters (Unicode category L) in the text. */
   letters: number;
@@ -376,47 +393,73 @@ export interface ScriptCounts {
   kana: number;
 }
 
-/** Count the text's letters per covered script group and find the dominant one. */
+/**
+ * Count the text's letters per covered script group, in one pass that keeps
+ * no per-letter arrays, and find the dominant group.
+ */
 export function countScripts(text: string): ScriptCounts {
-  const letters = countMatches(text, LETTER);
+  const perGroup: Record<ScriptGroup, number> = {
+    latin: 0,
+    cyrillic: 0,
+    arabic: 0,
+    devanagari: 0,
+    bengali: 0,
+    hangul: 0,
+    cjk: 0,
+  };
+  let letters = 0;
+  let kana = 0;
+  for (const ch of text) {
+    if (!IS_LETTER.test(ch)) continue;
+    letters += 1;
+    for (const [group, test] of SCRIPT_GROUP_TESTS) {
+      if (test.test(ch)) {
+        perGroup[group] += 1;
+        if (group === 'cjk' && IS_KANA.test(ch)) kana += 1;
+        break;
+      }
+    }
+  }
   let dominant: ScriptGroup | null = null;
   let dominantLetters = 0;
-  for (const [group, pattern] of SCRIPT_GROUP_PATTERNS) {
-    const count = countMatches(text, pattern);
-    if (count > dominantLetters) {
+  for (const [group] of SCRIPT_GROUP_TESTS) {
+    if (perGroup[group] > dominantLetters) {
       dominant = group;
-      dominantLetters = count;
+      dominantLetters = perGroup[group];
     }
   }
   if (letters === 0 || dominantLetters * 2 <= letters) {
-    return { letters, dominant: null, dominantLetters: 0, kana: countMatches(text, KANA) };
+    return { letters, dominant: null, dominantLetters: 0, kana };
   }
-  return { letters, dominant, dominantLetters, kana: countMatches(text, KANA) };
+  return { letters, dominant, dominantLetters, kana };
 }
 
 /**
  * The language the text's script decides, as an ISO 639-3 code, or null when
- * the script does not decide it (always for Latin; for Cyrillic when the
- * deciding letters are missing, mixed, or belong to another alphabet).
+ * the script does not decide it: always for Latin; for a script other
+ * languages share, when the text carries a letter only another of those
+ * languages writes; for Cyrillic, also when the Russian-only and
+ * Ukrainian-only letters are both missing or both present. Nepali and
+ * Sanskrit have no letter of their own and read as Hindi.
  */
 function languageOfScript(text: string, counts: ScriptCounts): string | null {
   switch (counts.dominant) {
     case 'hangul':
       return 'kor';
     case 'arabic':
-      return 'arb';
+      return NON_ARABIC_ARABIC_SCRIPT.test(text) ? null : 'arb';
     case 'devanagari':
-      return 'hin';
+      return MARATHI_LETTER.test(text) ? null : 'hin';
     case 'bengali':
-      return 'ben';
+      return ASSAMESE_LETTERS.test(text) ? null : 'ben';
     case 'cjk':
       return counts.kana >= counts.dominantLetters * MIN_KANA_SHARE_FOR_JAPANESE ? 'jpn' : 'cmn';
     case 'cyrillic': {
-      if (countMatches(text, OTHER_CYRILLIC_LETTERS) > 0) return null;
-      const russianOnly = countMatches(text, RUSSIAN_ONLY_LETTERS);
-      const ukrainianOnly = countMatches(text, UKRAINIAN_ONLY_LETTERS);
-      if (russianOnly > 0 && ukrainianOnly === 0) return 'rus';
-      if (ukrainianOnly > 0 && russianOnly === 0) return 'ukr';
+      if (NON_RUSSIAN_UKRAINIAN_CYRILLIC.test(text)) return null;
+      const russianOnly = RUSSIAN_ONLY_LETTERS.test(text);
+      const ukrainianOnly = UKRAINIAN_ONLY_LETTERS.test(text);
+      if (russianOnly && !ukrainianOnly) return 'rus';
+      if (ukrainianOnly && !russianOnly) return 'ukr';
       return null;
     }
     default:
@@ -444,8 +487,11 @@ export interface DetectLanguageOptions {
  * scored against the Latin-script trigram profiles, and the candidates come
  * back ranked, with inverse-distance confidences normalised over that set and
  * rounded to four decimals. Text shorter than `minLength`, text with no
- * covered script holding more than half of its letters, and Cyrillic text
- * its letters do not decide return `und`.
+ * covered script holding more than half of its letters or with fewer than
+ * five letters in it, and text in a shared script its letters do not decide
+ * (Cyrillic outside Russian and Ukrainian, Persian or Urdu in Arabic script,
+ * Marathi in Devanagari, Assamese in Bengali script) return `und`.
+ * `maxCandidates` caps every list it returns except `und`.
  *
  * @param text - The input text to analyse
  * @param options - Detection tuning knobs
@@ -464,13 +510,16 @@ export function detectLanguageTrigram(
   }
 
   const scripts = countScripts(text);
-  if (!scripts.dominant) {
+  if (!scripts.dominant || scripts.dominantLetters < MIN_SCRIPT_LETTERS) {
     return [{ language: 'und', confidence: 0 }];
   }
 
   const decided = languageOfScript(text, scripts);
   if (decided) {
-    return [{ language: iso6393To1(decided), confidence: round4(scripts.dominantLetters / scripts.letters) }];
+    return [{ language: iso6393To1(decided), confidence: round4(scripts.dominantLetters / scripts.letters) }].slice(
+      0,
+      maxCandidates,
+    );
   }
   if (scripts.dominant !== 'latin') {
     return [{ language: 'und', confidence: 0 }];

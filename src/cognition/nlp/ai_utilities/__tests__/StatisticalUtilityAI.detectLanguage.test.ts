@@ -72,6 +72,17 @@ const ARABIC_PASSAGE =
 const HINDI_PASSAGE =
   'पुराने प्रकाशस्तंभ के नीचे, लड़की हर रात अकेले समुद्र की आवाज़ सुनती थी। जब तूफ़ान पास आता, तो वह खिड़की बंद करके चुपचाप प्रार्थना करती थी।';
 
+const BENGALI_PASSAGE =
+  'পুরনো বাতিঘরের নিচে মেয়েটি প্রতি রাতে একা সমুদ্রের শব্দ শুনত। ঝড় এলে সে জানালা বন্ধ করে চুপচাপ প্রার্থনা করত।';
+
+// Languages that share a profiled script and carry a letter the profiled one
+// lacks: Persian (پ, گ, ی), Marathi (ळ).
+const PERSIAN_PASSAGE =
+  'زیر فانوس دریایی قدیمی، دختر هر شب تنها به صدای دریا گوش می‌داد. وقتی طوفان نزدیک می‌شد، پنجره را می‌بست و آرام دعا می‌کرد.';
+
+const MARATHI_PASSAGE =
+  'जुन्या दीपगृहाखाली मुलगी रोज रात्री एकटीच समुद्राचा आवाज ऐकत असे. वादळ जवळ आले की ती खिडकी बंद करून शांतपणे प्रार्थना करत असे.';
+
 const RUSSIAN_PASSAGE =
   'Под старым маяком девочка каждую ночь одна слушала шум моря. Когда приближалась буря, она закрывала окно и тихо молилась.';
 
@@ -395,6 +406,7 @@ describe('script stage', () => {
     ['ko', KOREAN_PASSAGE],
     ['ar', ARABIC_PASSAGE],
     ['hi', HINDI_PASSAGE],
+    ['bn', BENGALI_PASSAGE],
     ['ru', RUSSIAN_PASSAGE],
     ['uk', UKRAINIAN_PASSAGE],
   ])('identifies %s by its script as the only candidate', async (language, passage) => {
@@ -431,9 +443,33 @@ describe('script stage', () => {
   it.each([
     ['Bulgarian', BULGARIAN_PASSAGE],
     ['Serbian', SERBIAN_PASSAGE],
-  ])('leaves %s undetermined instead of reading it as Russian or Ukrainian', async (_name, passage) => {
+    // ӧ is outside both alphabets, so the ы that stays in the passage decides nothing.
+    ['Russian with a letter of another Cyrillic alphabet', `${RUSSIAN_PASSAGE} Кӧрт.`],
+    ['Persian', PERSIAN_PASSAGE],
+    ['Marathi', MARATHI_PASSAGE],
+  ])('leaves %s undetermined instead of reading it as a profiled language', async (_name, passage) => {
     const results = await utility.detectLanguage(passage, { maxCandidates: 32 });
     expect(results).toEqual([{ language: 'en', confidence: 0.1 }]);
+  });
+
+  it('needs five letters before a script decides', async () => {
+    for (const fragment of ['😀😀😀😀😀中', '!!!!!!!!!! ア ア', '1234 5678 9 한']) {
+      expect(await utility.detectLanguage(fragment)).toEqual([{ language: 'en', confidence: 0.1 }]);
+    }
+  });
+
+  it('caps a script decision at maxCandidates', () => {
+    expect(detectLanguageTrigram(JAPANESE_PASSAGE, { maxCandidates: 0 })).toEqual([]);
+    expect(detectLanguageTrigram(ENGLISH_PASSAGE, { maxCandidates: 0 })).toEqual([]);
+  });
+
+  it('counts a long text in one pass', () => {
+    const long = `${JAPANESE_PASSAGE}${ENGLISH_PASSAGE}`.repeat(2000);
+    const counts = countScripts(long);
+    const japaneseLetters = countScripts(JAPANESE_PASSAGE).letters;
+    const englishLetters = countScripts(ENGLISH_PASSAGE).letters;
+    expect(counts.letters).toBe((japaneseLetters + englishLetters) * 2000);
+    expect(counts.dominant).toBe(englishLetters > japaneseLetters ? 'latin' : 'cjk');
   });
 
   it('falls back to the default language for text without letters', async () => {
