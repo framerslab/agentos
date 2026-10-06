@@ -23,10 +23,9 @@ const mockGraph = {
 
 vi.mock('graphology', () => {
   return {
-    default: vi.fn().mockImplementation(() => {
+    default: vi.fn().mockImplementation(function () {
       // Reset order/size on each new Graph instance
-      const g = { ...mockGraph, order: 0, size: 0 };
-      return g;
+      return { ...mockGraph, order: 0, size: 0 };
     }),
   };
 });

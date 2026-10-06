@@ -11,7 +11,7 @@ AgentOS is an open-source TypeScript runtime for AI agents, licensed under Apach
 
 ## Development setup
 
-You need Node.js 22 and pnpm 10, the versions CI uses.
+You need Node.js 22.12 or later in the 22 line (vitest's floor) and pnpm 10; CI runs the newest Node.js 22.
 
 ```bash
 git clone https://github.com/framerslab/agentos.git

@@ -87,7 +87,9 @@ export default defineConfig({
     coverage: {
       reporter: ['text', 'html', 'lcov', 'json-summary'],
       reportsDirectory: 'coverage',
-      all: true,
+      // Vitest 4 removed `all`; `include` keeps every source file in the
+      // report, covered or not, and `exclude` is applied within it.
+      include: ['src/**/*.ts'],
       exclude: [
         'src/stubs/**',
         'src/server/**',

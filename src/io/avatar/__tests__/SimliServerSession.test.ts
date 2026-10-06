@@ -44,7 +44,9 @@ function stubWrtc() {
     close: vi.fn(),
     ontrack: null,
   };
-  const RTCPeerConnection = vi.fn(() => pc);
+  const RTCPeerConnection = vi.fn(function () {
+    return pc;
+  });
   return { module: { RTCPeerConnection }, pc, RTCPeerConnection };
 }
 

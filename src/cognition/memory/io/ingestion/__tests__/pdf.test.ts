@@ -24,6 +24,17 @@ import { createOcrPdfLoader } from '../OcrPdfLoader.js';
 import { createDoclingLoader } from '../DoclingLoader.js';
 import { LoaderRegistry } from '../LoaderRegistry.js';
 
+// Vitest hoists vi.mock above every import, so it lives at the top level:
+// the DOCX test needs no real binary, only the loader's wiring around mammoth.
+vi.mock('mammoth', () => ({
+  default: {
+    extractRawText: vi.fn().mockResolvedValue({
+      value: 'Hello world from docx',
+      messages: [],
+    }),
+  },
+}));
+
 // ---------------------------------------------------------------------------
 // PdfLoader
 // ---------------------------------------------------------------------------
@@ -125,18 +136,7 @@ describe('DocxLoader', () => {
   it('loads a minimal DOCX buffer and returns text content with wordCount', async () => {
     const loader = new DocxLoader();
 
-    // Build a trivially small valid DOCX (OOXML) buffer using JSZip-style
-    // construction is complex in a unit test.  Instead we mock mammoth to
-    // avoid needing a real DOCX binary, testing the loader's wiring only.
-    vi.mock('mammoth', () => ({
-      default: {
-        extractRawText: vi.fn().mockResolvedValue({
-          value: 'Hello world from docx',
-          messages: [],
-        }),
-      },
-    }));
-
+    // mammoth is mocked at the top of this file; this checks the loader's wiring.
     // We pass a buffer so the loader skips disk I/O.
     const fakeBuffer = Buffer.from([0x50, 0x4B, 0x03, 0x04]); // PK magic
     const doc = await loader.load(fakeBuffer);
