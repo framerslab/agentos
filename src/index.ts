@@ -241,6 +241,8 @@ export {
   buildPolicyAwareFallbackChain,
 } from './api/generateText.js';
 export { CONTEXT_WINDOW_EXCEEDED_CODE } from './core/llm/providers/errors/errorCodes.js';
+export { ContextWindowExceededError } from './core/llm/providers/errors/ContextWindowExceededError.js';
+export { checkContextFit, type ContextFit, type ContextFitRequest } from './api/runtime/contextWindowFit.js';
 export type {
   GenerateTextOptions,
   GenerateTextResult,
