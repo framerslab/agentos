@@ -12,7 +12,9 @@ const mockIndex = {
   readIndex: vi.fn(),
 };
 
-const MockHierarchicalNSW = vi.fn(() => mockIndex);
+const MockHierarchicalNSW = vi.fn(function () {
+  return mockIndex;
+});
 
 vi.mock('hnswlib-node', () => ({
   HierarchicalNSW: MockHierarchicalNSW,
