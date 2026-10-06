@@ -30,6 +30,9 @@ import type {
   ToolTier,
   ToolUsageStats,
   EmergentConfig,
+  StoredRequest,
+  ToolState,
+  ToolStateRecord,
 } from './types.js';
 import { DEFAULT_EMERGENT_CONFIG } from './types.js';
 
@@ -173,6 +176,9 @@ export class EmergentToolRegistry {
   /** In-memory audit log. Always populated regardless of DB availability. */
   private readonly auditLog: AuditEntry[] = [];
 
+  /** Held state per tool. A tool with no entry counts as active. */
+  private readonly states = new Map<string, ToolStateRecord>();
+
   /** Resolved configuration, merged with defaults. */
   private readonly config: EmergentConfig;
 
@@ -227,9 +233,10 @@ export class EmergentToolRegistry {
   /**
    * Initialize the database schema for emergent tool persistence.
    *
-   * Creates the `agentos_emergent_tools` and `agentos_emergent_audit_log`
-   * tables along with their indexes. Safe to call multiple times — all
-   * statements use `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`.
+   * Creates the `agentos_emergent_tools`, `agentos_emergent_audit_log` and
+   * `agentos_emergent_tool_state` tables along with their indexes. Safe to
+   * call multiple times — all statements use `CREATE TABLE IF NOT EXISTS` /
+   * `CREATE INDEX IF NOT EXISTS`.
    *
    * This method is a no-op when no storage adapter was provided.
    *
@@ -279,10 +286,23 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
 
     const auditIndex = `CREATE INDEX IF NOT EXISTS idx_emergent_audit_tool ON agentos_emergent_audit_log(tool_id, timestamp);`;
 
+    // State and the stored request live in their own table: persistToolToDb
+    // rewrites the whole tool row with INSERT OR REPLACE, which would reset any
+    // column added to agentos_emergent_tools on every call.
+    const stateTable = `
+CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
+  tool_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL,
+  state_reason TEXT,
+  state_at BIGINT NOT NULL,
+  request_json TEXT,
+  updated_at BIGINT NOT NULL
+);`;
+
     // Prefer `exec` for multi-statement DDL; fall back to individual `run` calls.
     if (this.db.exec) {
       await this.db.exec(
-        [toolsTable, toolsTierIndex, toolsAgentIndex, auditTable, auditIndex].join('\n'),
+        [toolsTable, toolsTierIndex, toolsAgentIndex, auditTable, auditIndex, stateTable].join('\n'),
       );
     } else {
       await this.db.run(toolsTable);
@@ -290,6 +310,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
       await this.db.run(toolsAgentIndex);
       await this.db.run(auditTable);
       await this.db.run(auditIndex);
+      await this.db.run(stateTable);
     }
 
     this.schemaReady = true;
@@ -348,6 +369,14 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
       this.persistedTools.set(registered.id, registered);
     }
 
+    this.states.set(registered.id, {
+      toolId: registered.id,
+      state: 'active',
+      reason: null,
+      at: Date.now(),
+      request: null,
+    });
+
     if (this.db && this.schemaReady) {
       this.persistToolToDb(registered).catch(() => {
         // Best-effort persistence mirror. In-memory state remains authoritative.
@@ -371,6 +400,120 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
    */
   get(toolId: string): EmergentTool | undefined {
     return this.sessionTools.get(toolId) ?? this.persistedTools.get(toolId);
+  }
+
+  // --------------------------------------------------------------------------
+  // STATE
+  // --------------------------------------------------------------------------
+
+  /** The held state of a tool, or `undefined` when none has been recorded. */
+  getState(toolId: string): ToolStateRecord | undefined {
+    return this.states.get(toolId);
+  }
+
+  /** Whether a tool may run. A tool with no recorded state is active. */
+  isActive(toolId: string): boolean {
+    return (this.states.get(toolId)?.state ?? 'active') === 'active';
+  }
+
+  /**
+   * Record a tool's state, awaiting the write.
+   *
+   * Leaving `request` undefined leaves the stored request alone: the statement
+   * does not name the column, so a request this process could not read (one a
+   * newer release wrote, say) is still there afterwards. Passing a request, or
+   * `null` to clear it, writes it.
+   *
+   * The write is one statement, so two processes recording a first state for
+   * the same tool both succeed instead of one failing on the primary key.
+   *
+   * @throws If the storage adapter rejects. The in-memory state is already
+   *   updated by then, so the running process honours it either way.
+   */
+  async setState(
+    toolId: string,
+    state: ToolState,
+    reason: string | null,
+    request?: StoredRequest | null,
+  ): Promise<ToolStateRecord> {
+    const previous = this.states.get(toolId);
+    const record: ToolStateRecord = {
+      toolId,
+      state,
+      reason,
+      at: Date.now(),
+      request: request !== undefined ? request : (previous?.request ?? null),
+    };
+    this.states.set(toolId, record);
+    this.logAudit(toolId, 'state', { state, reason });
+
+    if (this.db) {
+      await this.ensureSchemaReady();
+      // A first write stores what this process holds for the tool. A later
+      // one replaces the request only when the caller named one.
+      const requestJson = record.request ? JSON.stringify(record.request) : null;
+      const params = [toolId, state, reason, record.at, requestJson, record.at];
+      if (request === undefined) {
+        await this.db.run(
+          `INSERT INTO agentos_emergent_tool_state
+             (tool_id, state, state_reason, state_at, request_json, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (tool_id) DO UPDATE SET
+             state = excluded.state,
+             state_reason = excluded.state_reason,
+             state_at = excluded.state_at,
+             updated_at = excluded.updated_at`,
+          params,
+        );
+      } else {
+        await this.db.run(
+          `INSERT INTO agentos_emergent_tool_state
+             (tool_id, state, state_reason, state_at, request_json, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (tool_id) DO UPDATE SET
+             state = excluded.state,
+             state_reason = excluded.state_reason,
+             state_at = excluded.state_at,
+             request_json = excluded.request_json,
+             updated_at = excluded.updated_at`,
+          params,
+        );
+      }
+      // The legacy flag hosts query stays equal to state = 'active'.
+      await this.db.run(`UPDATE agentos_emergent_tools SET is_active = ? WHERE id = ?`, [
+        state === 'active' ? 1 : 0,
+        toolId,
+      ]);
+    }
+    return record;
+  }
+
+  /**
+   * Suspend a tool: an awaited write of its state and of `is_active = 0`.
+   * Usage statistics are left alone. The caller unregisters the executable.
+   *
+   * @throws If the tool is unknown or the write fails.
+   */
+  async suspend(toolId: string, reason: string): Promise<void> {
+    if (!this.get(toolId)) {
+      throw new Error(`Cannot suspend: tool "${toolId}" not found.`);
+    }
+    await this.setState(toolId, 'suspended', reason);
+  }
+
+  /**
+   * Take a tool read from storage into memory without rewriting its row.
+   * `upsert` re-serialises the source; a loaded tool must keep the row it has.
+   */
+  adopt(tool: EmergentTool, record: ToolStateRecord): void {
+    this.sessionTools.delete(tool.id);
+    this.persistedTools.delete(tool.id);
+    if (tool.tier === 'session') {
+      this.sessionTools.set(tool.id, tool);
+    } else {
+      this.persistedTools.set(tool.id, tool);
+    }
+    this.states.set(tool.id, record);
   }
 
   /**
@@ -409,9 +552,15 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
       this.sessionTools.delete(toolId) || this.persistedTools.delete(toolId);
 
     if (removed) {
+      this.states.delete(toolId);
       if (this.db && this.schemaReady) {
         this.db
           .run(`DELETE FROM agentos_emergent_tools WHERE id = ?`, [toolId])
+          .catch(() => {
+            // Best-effort cleanup only.
+          });
+        this.db
+          .run(`DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?`, [toolId])
           .catch(() => {
             // Best-effort cleanup only.
           });
@@ -612,35 +761,33 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
    * Demote or deactivate a tool.
    *
    * Marks the tool as inactive by setting a sentinel on its usage stats
-   * (`confidenceScore` set to 0) and logs the demotion event with a reason.
+   * (`confidenceScore` set to 0), records the `demoted` state and logs the
+   * demotion event with a reason.
    *
    * Inactive tools are still retrievable via `get()` but should be filtered
    * out by callers when building tool lists for the LLM.
    *
+   * Returns a promise for the state write; await it when the demotion must be
+   * durable. The in-memory effects have happened by the time this returns.
+   *
    * @param toolId - The ID of the tool to demote.
    * @param reason - Human-readable explanation for why the tool is being demoted.
    *
-   * @throws {Error} If the tool is not found.
+   * @throws {Error} If the tool is not found (thrown synchronously).
    */
-  demote(toolId: string, reason: string): void {
+  demote(toolId: string, reason: string): Promise<void> {
     const tool = this.get(toolId);
     if (!tool) {
       throw new Error(`Cannot demote: tool "${toolId}" not found.`);
     }
 
     tool.usageStats.confidenceScore = 0;
-    // Mark as inactive via a convention property.
+    // Kept for hosts that read the convention property.
     (tool as EmergentTool & { isActive?: boolean }).isActive = false;
 
-    if (this.db && this.schemaReady) {
-      this.db
-        .run(`UPDATE agentos_emergent_tools SET is_active = 0 WHERE id = ?`, [toolId])
-        .catch(() => {
-          // Best-effort persistence only.
-        });
-    }
-
     this.logAudit(toolId, 'demote', { reason });
+    // The state row is what keeps a demoted tool off at the next load.
+    return this.setState(toolId, 'demoted', reason).then(() => undefined);
   }
 
   // --------------------------------------------------------------------------
@@ -664,9 +811,15 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
     for (const [id, tool] of this.sessionTools) {
       if (tool.source.includes(sessionId)) {
         this.sessionTools.delete(id);
+        this.states.delete(id);
         if (this.db && this.schemaReady) {
           this.db
             .run(`DELETE FROM agentos_emergent_tools WHERE id = ?`, [id])
+            .catch(() => {
+              // Best-effort cleanup only.
+            });
+          this.db
+            .run(`DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?`, [id])
             .catch(() => {
               // Best-effort cleanup only.
             });
