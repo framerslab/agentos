@@ -747,21 +747,18 @@ export function agent(opts: AgentOptions): Agent {
   const sessionUsageTallies = new Map<string, AgentOSUsageAggregate>();
   const agentUsageTally: AgentOSUsageAggregate = createEmptyUsageAggregate();
   let avatarBindingOverrides: Record<string, unknown> = {};
-  const useMemory = opts.memory !== false;
-
   warnOnDeferredLightweightAgentCapabilities(opts);
 
   /*
-   * Cognitive mechanisms validation.  When the caller provides a
-   * `cognitiveMechanisms` config but has memory disabled, the mechanisms
-   * cannot be wired (they depend on CognitiveMemoryManager which needs an
-   * active memory subsystem).  Log a warning and drop the config.
+   * The cognitive mechanisms run inside a CognitiveMemoryManager, which this
+   * lightweight helper never constructs, so a `cognitiveMechanisms` config
+   * cannot take effect here. Say so instead of accepting it silently.
    */
-  if (opts.cognitiveMechanisms && !useMemory) {
+  if (opts.cognitiveMechanisms != null) {
     console.warn(
-      '[AgentOS] cognitiveMechanisms config was provided but memory is disabled. ' +
-      'Mechanisms require memory to be enabled (set `memory: true` or pass a MemoryConfig). ' +
-      'The cognitiveMechanisms config will be ignored.',
+      '[AgentOS] agent() accepted a cognitiveMechanisms config, but the lightweight helper does not run ' +
+      'the cognitive mechanisms. Initialize a CognitiveMemoryManager with `cognitiveMechanisms`, or supply ' +
+      'one through gmiManagerConfig.cognitiveMemoryFactory on the full runtime, to use them.',
     );
   }
 

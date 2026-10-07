@@ -77,6 +77,20 @@ describe('agent', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it('warns that cognitiveMechanisms do not run on the lightweight helper', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    agent({
+      model: 'openai:gpt-4.1-mini',
+      cognitiveMechanisms: {},
+    });
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('does not run the cognitive mechanisms'),
+    );
+  });
+
   it('forwards top-level usageLedger to observability.usageLedger', async () => {
     const assistant = agent({
       model: 'openai:gpt-4.1-mini',

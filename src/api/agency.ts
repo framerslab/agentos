@@ -788,46 +788,21 @@ export function agency(opts: AgencyOptions): Agent {
   // ---------------------------------------------------------------------------
 
   /**
-   * When `opts.channels` contains at least one configured channel, attach a
-   * `connect()` method.  On invocation it iterates the channel map, logs each
-   * channel as configured, and defers real adapter initialisation to runtime.
-   *
-   * Full channel wiring depends on the channel adapter infrastructure in
-   * `packages/agentos/src/channels/`.  For v1 `connect()` establishes the
-   * surface — real adapter instances are a follow-up integration.
-   *
-   * Channel adapters follow the `IChannelAdapter` pattern:
-   *   connect(config, messageHandler) — where `messageHandler` bridges incoming
-   *   channel messages to `agentObj.generate()`.
+   * When `opts.channels` names at least one channel, attach a `connect()`
+   * method so the surface matches the full runtime. The lightweight
+   * `agency()` constructs no channel adapters: `connect()` rejects with the
+   * configured channel names instead of logging as if it had connected.
+   * Channel wiring is a full-runtime capability (`ChannelRouter` in
+   * `src/io/channels/` with the `messaging-channel` extension packs).
    */
-  if (opts.channels && Object.keys(opts.channels).length > 0) {
+  const channelNames = Object.keys(opts.channels ?? {});
+  if (channelNames.length > 0) {
     agentObj.connect = async (): Promise<void> => {
-      for (const [channelName, channelConfig] of Object.entries(opts.channels!)) {
-        try {
-          /**
-           * Dynamically import the channel adapter from the extensions registry
-           * and connect it with the agent's generate function as the message handler.
-           */
-          const adapterModule = await import(`../channels/${channelName}/index.js`).catch(() => null);
-          if (adapterModule?.createExtensionPack) {
-            const pack = adapterModule.createExtensionPack();
-            const adapter = pack.channelAdapters?.[0];
-            if (adapter && typeof adapter.connect === 'function') {
-              await adapter.connect(channelConfig, async (msg: string) => {
-                const result = await agentObj.generate(msg);
-                return typeof result === 'string' ? result : (result as any)?.text ?? '';
-              });
-              console.log(`[agency] Channel "${channelName}" connected`);
-            } else {
-              console.log(`[agency] Channel "${channelName}" adapter loaded but no connect() method`);
-            }
-          } else {
-            console.log(`[agency] Channel "${channelName}" configured (adapter not found at channels/${channelName}/)`);
-          }
-        } catch {
-          console.warn(`[agency] Channel "${channelName}" adapter not available`);
-        }
-      }
+      throw new Error(
+        `agency().connect() cannot connect ${channelNames.map((name) => `"${name}"`).join(', ')}: ` +
+          'the lightweight agency() helper constructs no channel adapters. Run the agency behind the full ' +
+          'AgentOS runtime, which wires channels through ChannelRouter and the messaging-channel extension packs.',
+      );
     };
   }
 
