@@ -57,14 +57,17 @@ capability contract), and
 exported classes a host wires itself.
 
 **3. A team-wide coordination shell wraps the whole agency.** HITL approval
-gates, guardrails, resource controls (token, cost, time, call caps), provenance
-and audit logging, structured Zod output. These apply uniformly to the team
-rather than per-agent.
+gates (`hitl.approvals.beforeTool` is forwarded to every member), resource
+controls (the token, time and call caps on `controls`, enforced across the run)
+and structured Zod output (`output`). These apply to the team rather than
+per-agent. Options the lightweight path accepts and defers (`security`,
+`permissions`, `observability`, `rag`, `memory`) take effect on the full
+runtime; see the capability contract.
 
 ```mermaid
 graph TB
     Input["Input"]
-    subgraph Agency["Agency · coordination shell · HITL · guardrails · controls · provenance"]
+    subgraph Agency["Agency · coordination shell · HITL approvals · controls · structured output"]
         Strategy["Orchestration strategy<br/>sequential · parallel · debate<br/>review-loop · hierarchical · graph"]
         subgraph Members["Agents (lightweight agent() members)"]
             direction LR
@@ -710,20 +713,26 @@ runtime). Each member keeps its own session history for the duration of one
 user/assistant message history and aggregate usage persist between `.send()`
 calls.
 
-To give members memory today, pass built agents as roster members: an
+To give members memory, pass built agents as roster members: an
 [`agent()`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) with a `memoryProvider` keeps its hooks when it sits in a
 roster, and a member can carry a `soul` file the same way.
 
 ```typescript
-import { agent, agency } from '@framers/agentos';
+import { agent, agency, type AgentMemoryProvider } from '@framers/agentos';
+
+const myMemory: AgentMemoryProvider = {
+  getContext: async (text) => ({ contextText: await lookupNotes(text) }),   // injected as a system message before the call
+  observe: async (turn) => { await saveNotes(turn); },                       // runs after the reply
+};
 
 const researcher = agent({
   provider: 'openai', model: 'gpt-4o',
   instructions: 'Research the topic.',
-  memoryProvider: myMemory,                 // getContext() before the call, observe() after it
+  memoryProvider: myMemory,
 });
 
 const team = agency({
+  provider: 'openai', model: 'gpt-4o',      // inherited by the inline writer
   agents: { researcher, writer: { instructions: 'Write from the research.' } },
   strategy: 'sequential',
 });
@@ -1166,15 +1175,6 @@ const contentPipeline = agency({
     tier:   'balanced',
   },
 
-  security: { tier: 'balanced' },
-
-  permissions: {
-    tools:      'all',
-    network:    true,
-    filesystem: false,
-    spawn:      false,
-  },
-
   hitl: {
     approvals: {
       beforeReturn:   true,
@@ -1191,11 +1191,6 @@ const contentPipeline = agency({
     maxDurationMs:   120_000,
     maxAgentCalls:   50,
     onLimitReached:  'warn',
-  },
-
-  observability: {
-    logLevel:    'info',
-    traceEvents: true,
   },
 
   on: {

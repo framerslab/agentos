@@ -899,7 +899,7 @@ console.log(result.text);
 console.log(result.agentCalls);
 ```
 
-To give a roster memory today, pass built agents as members: an
+To give a roster memory, pass built agents as members: an
 [`agent()`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) with a `memoryProvider` keeps its own hooks when it
 sits in a roster. Cognitive memory and the RAG pipeline run on the full
 runtime (see [Memory Model](../MEMORY_MODEL.md) and [Agencies](../AGENCIES.md)).
