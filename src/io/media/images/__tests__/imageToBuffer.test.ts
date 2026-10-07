@@ -47,6 +47,58 @@ describe('imageToBuffer', () => {
     expect(await imageToBuffer(raw)).toEqual(svg);
   });
 
+  it.each([
+    ['ICO', [0x00, 0x00, 0x01, 0x00]],
+    ['JPEG 2000 (JP2)', [0x00, 0x00, 0x00, 0x0c, 0x6a, 0x50, 0x20, 0x20, 0x0d, 0x0a, 0x87, 0x0a]],
+    ['JPEG 2000 codestream', [0xff, 0x4f, 0xff, 0x51]],
+    ['JPEG XL container', [0x00, 0x00, 0x00, 0x0c, 0x4a, 0x58, 0x4c, 0x20, 0x0d, 0x0a, 0x87, 0x0a]],
+  ])('decodes raw base64 %s data that contains "/"', async (_format, signature) => {
+    // The signature, zero padding to a 3-byte boundary, then FF FF FF, which is "////".
+    const bytes = Buffer.concat([
+      Buffer.from(signature),
+      Buffer.alloc((3 - (signature.length % 3)) % 3),
+      Buffer.from([0xff, 0xff, 0xff]),
+    ]);
+    const raw = bytes.toString('base64');
+    expect(raw).toContain('/');
+
+    expect(await imageToBuffer(raw)).toEqual(bytes);
+  });
+
+  it.each([
+    ['a comment', '<!--???--><svg></svg>'],
+    ['a declaration and a DOCTYPE', '<?xml version="1.0"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg><!--???--></svg>'],
+  ])('decodes raw base64 SVG markup after %s', async (_prolog, markup) => {
+    const svg = Buffer.from(markup);
+    const raw = svg.toString('base64');
+    expect(raw).toContain('/');
+
+    expect(await imageToBuffer(raw)).toEqual(svg);
+  });
+
+  it.each([
+    ['a root element that only starts with "svg"', '<svg-not/><!--???-->'],
+    ['"<svg" only inside a comment', '<?xml version="1.0"?><doc><!-- <svg --><!--???--></doc>'],
+  ])('rejects base64 of XML with %s', async (_case, markup) => {
+    const raw = Buffer.from(markup).toString('base64');
+    expect(raw).toContain('/');
+
+    await expect(imageToBuffer(raw)).rejects.toThrow('not base64 of a recognised image format');
+  });
+
+  it('quotes at most 40 characters of a short unrecognised payload', async () => {
+    // 00 11 FF repeated: 60 characters of base64 "ABH/", a relative path that names nothing.
+    const raw = Buffer.from(Array.from({ length: 45 }, (_, i) => [0x00, 0x11, 0xff][i % 3])).toString('base64');
+    expect(raw).toHaveLength(60);
+
+    const error = await imageToBuffer(raw).then(
+      () => null,
+      (e: Error) => e,
+    );
+    expect(error!.message).toContain(`${JSON.stringify(raw.slice(0, 40))}... (60 characters)`);
+    expect(error!.message).not.toContain(raw);
+  });
+
   it('rejects base64 of an unrecognised format without repeating it in the error', async () => {
     // 00 11 FF repeated: base64 "ABH/" repeated, a 4,000-character relative path
     // that names nothing and matches no signature.
