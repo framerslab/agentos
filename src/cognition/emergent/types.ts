@@ -57,6 +57,13 @@ export type SandboxAPI = 'fetch' | 'fs.readFile' | 'crypto';
  */
 export type CapabilityName = 'fetch' | 'fs.read' | 'crypto';
 
+/**
+ * A name a request's list may hold: a catalogue name, or the injected name it
+ * stands for (`fs.readFile` for `fs.read`). Lists keep the names as written;
+ * every reader normalises them with `normalizeAllowlist`.
+ */
+export type AllowlistName = SandboxAPI | CapabilityName;
+
 /** The scope a host grants `fetch` under (stage 1: reads only). */
 export interface FetchCeiling {
   /** Hosts a forged tool may reach, matched exactly and case-insensitively; `'*'` is every host; `[]` grants nothing. */
@@ -205,7 +212,7 @@ export interface SandboxedToolSpec {
    * Explicit allowlist of sandbox APIs the code may invoke.
    * Any call to an API not in this list will throw at runtime.
    */
-  allowlist: SandboxAPI[];
+  allowlist: AllowlistName[];
 }
 
 /**
@@ -248,7 +255,7 @@ export interface SandboxExecutionRequest {
   /**
    * APIs the sandbox is permitted to call. Anything not listed is blocked.
    */
-  allowlist: SandboxAPI[];
+  allowlist: AllowlistName[];
 
   /**
    * Nominal heap budget in megabytes for the sandbox execution.

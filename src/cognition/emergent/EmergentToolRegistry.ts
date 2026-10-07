@@ -26,7 +26,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
   EmergentTool,
-  SandboxAPI,
+  AllowlistName,
   ToolTier,
   ToolUsageStats,
   EmergentConfig,
@@ -127,7 +127,7 @@ export interface AuditEntry {
 type PersistedSandboxMetadata = {
   redacted: true;
   reason: 'sandbox-source-not-persisted';
-  allowlist: SandboxAPI[];
+  allowlist: AllowlistName[];
   codeBytes: number;
 };
 
