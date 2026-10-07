@@ -75,6 +75,13 @@ export class SpeechProviderResolver extends EventEmitter {
   private registrations = new Map<string, ProviderRegistration>();
 
   /**
+   * The priority each provider was registered with. `refresh()` restores it
+   * before applying the preferred lists, so a provider that is no longer
+   * preferred loses its boost.
+   */
+  private basePriorities = new Map<string, number>();
+
+  /**
    * Creates a new SpeechProviderResolver.
    *
    * @param config - Optional resolver configuration controlling preferred
@@ -123,6 +130,7 @@ export class SpeechProviderResolver extends EventEmitter {
    */
   register(reg: ProviderRegistration): void {
     this.registrations.set(reg.id, reg);
+    this.basePriorities.set(reg.id, reg.priority);
     this.emit('provider_registered', { id: reg.id, kind: reg.kind, source: reg.source });
   }
 
@@ -293,9 +301,10 @@ export class SpeechProviderResolver extends EventEmitter {
    * 3. `applyPreferredPriorities()` — boost priority for providers listed in
    *    the user's `config.stt.preferred` / `config.tts.preferred` arrays.
    *
-   * @param extensionManager - Optional object exposing `getDescriptorsByKind(kind)`.
-   *   Uses `any` type because the ExtensionManager interface is defined in the
-   *   extensions package and importing it here would create a circular dependency.
+   * @param extensionManager - Optional `ExtensionManager` (its speech provider
+   *   registries are read through `getRegistry(kind).listActive()`), or any
+   *   object exposing `getDescriptorsByKind(kind)`. Uses `any` type because
+   *   importing the ExtensionManager type here would create a circular dependency.
    *
    * @example
    * ```ts
@@ -495,10 +504,13 @@ export class SpeechProviderResolver extends EventEmitter {
    *
    * The `extensionManager` parameter uses `any` because the ExtensionManager
    * type lives in the extensions package — importing it would create a circular
-   * dependency. We only rely on the `getDescriptorsByKind` method signature.
+   * dependency. An `ExtensionManager` is read through
+   * `getRegistry(kind).listActive()`; another object can expose
+   * `getDescriptorsByKind(kind)` instead.
    *
-   * @param extensionManager - Object exposing `getDescriptorsByKind(kind)` that
-   *   returns an array of `{ id: string; payload: unknown }` descriptors.
+   * @param extensionManager - An `ExtensionManager`, or an object exposing
+   *   `getDescriptorsByKind(kind)`; either returns `{ id: string; payload: unknown }`
+   *   descriptors.
    *
    * @example
    * ```ts
@@ -520,7 +532,12 @@ export class SpeechProviderResolver extends EventEmitter {
     };
 
     for (const descriptorKind of Object.keys(kindMap)) {
-      const descriptors: any[] = extensionManager.getDescriptorsByKind?.(descriptorKind) ?? [];
+      const descriptors: any[] =
+        typeof extensionManager.getDescriptorsByKind === 'function'
+          ? (extensionManager.getDescriptorsByKind(descriptorKind) ?? [])
+          : typeof extensionManager.getRegistry === 'function'
+            ? (extensionManager.getRegistry(descriptorKind)?.listActive?.() ?? [])
+            : [];
 
       for (const desc of descriptors) {
         // Try to find a catalog entry for known extensions; fall back to a
@@ -569,6 +586,11 @@ export class SpeechProviderResolver extends EventEmitter {
    * ```
    */
   private applyPreferredPriorities(): void {
+    // Start from the registered priorities, so a provider dropped from a
+    // preferred list does not keep the boost an earlier refresh gave it.
+    for (const [id, reg] of this.registrations) {
+      reg.priority = this.basePriorities.get(id) ?? reg.priority;
+    }
     if (this.config?.stt?.preferred) {
       for (let i = 0; i < this.config.stt.preferred.length; i++) {
         const reg = this.registrations.get(this.config.stt.preferred[i]);

@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
+import { ExtensionManager } from '../../../extensions/ExtensionManager.js';
+import { EXTENSION_KIND_STT_PROVIDER } from '../../../extensions/types.js';
 import { SpeechRuntime } from '../SpeechRuntime.js';
 import { SpeechProviderResolver } from '../SpeechProviderResolver.js';
 
@@ -48,5 +50,42 @@ describe('SpeechProviderResolver.refresh and provider instances', () => {
     expect(resolver.resolveTTS()).toBe(provider);
     await resolver.refresh();
     expect(resolver.resolveTTS()).toBe(provider);
+  });
+
+  it('registers the speech providers an ExtensionManager loaded from a pack', async () => {
+    const manager = new ExtensionManager();
+    const stt = { id: 'pack-stt', getProviderName: () => 'Pack STT', transcribe: vi.fn() };
+    await manager.loadPackFromFactory(
+      {
+        name: 'speech-pack',
+        version: '1.0.0',
+        descriptors: [{ id: 'pack-stt', kind: EXTENSION_KIND_STT_PROVIDER, payload: stt }],
+      },
+      'speech-pack',
+    );
+    const resolver = new SpeechProviderResolver(undefined, {});
+
+    await resolver.refresh(manager);
+
+    expect(resolver.listProviders('stt').find((r) => r.id === 'pack-stt')?.source).toBe('extension');
+    expect(resolver.resolveSTT()).toBe(stt);
+  });
+
+  it('drops the boost of a provider the preferred list no longer names', async () => {
+    const config = { stt: { preferred: ['first'] } };
+    const resolver = new SpeechProviderResolver(config, {});
+    const entry = (id: string) => ({ id, kind: 'stt' as const, label: id, envVars: [], local: false, description: '' });
+    const first = { id: 'first', transcribe: vi.fn() };
+    const second = { id: 'second', transcribe: vi.fn() };
+    resolver.register({ id: 'first', kind: 'stt', provider: first as any, catalogEntry: entry('first'), isConfigured: true, priority: 100, source: 'core' });
+    resolver.register({ id: 'second', kind: 'stt', provider: second as any, catalogEntry: entry('second'), isConfigured: true, priority: 100, source: 'core' });
+
+    await resolver.refresh();
+    expect(resolver.resolveSTT()).toBe(first);
+
+    config.stt.preferred = ['second'];
+    await resolver.refresh();
+    expect(resolver.listProviders('stt').find((r) => r.id === 'first')?.priority).toBe(100);
+    expect(resolver.resolveSTT()).toBe(second);
   });
 });

@@ -26,7 +26,9 @@ import { SpeechRuntime } from '@framers/agentos/speech';
 // Builds OpenAI Whisper and OpenAI TTS when OPENAI_API_KEY is set, ElevenLabs when
 // ELEVENLABS_API_KEY is set, and AgentOS Adaptive VAD, and registers them in its resolver.
 const runtime = new SpeechRuntime({ env: process.env });
-await runtime.resolver.refresh(); // adds the other core ids and any extension providers
+// Records the other core ids. Pass an ExtensionManager to add the speech
+// providers its packs registered: runtime.resolver.refresh(extensionManager).
+await runtime.resolver.refresh();
 
 const stt = runtime.resolver.resolveSTT();   // best configured STT provider
 const tts = runtime.resolver.resolveTTS();   // best configured TTS provider
