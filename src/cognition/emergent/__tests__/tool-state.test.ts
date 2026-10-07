@@ -263,6 +263,26 @@ describe('EmergentToolRegistry state', () => {
     expect(readStateRow(db, tool.id)).toMatchObject({ state: 'suspended', set_by: 'host' });
   });
 
+  it('a whole-row write by a process that holds no state keeps a flag the host lowered with its own SQL, whatever the state row says', async () => {
+    const tool = makeTool({ id: 'emergent_test_8' });
+    registry.register(tool, 'agent');
+    await settle();
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active' });
+    db.raw.prepare('UPDATE agentos_emergent_tools SET is_active = 0 WHERE id = ?').run(tool.id);
+
+    const other = new EmergentToolRegistry(
+      { ...DEFAULT_EMERGENT_CONFIG, enabled: true, persistSandboxSource: true },
+      db,
+    );
+    await other.ensureSchema();
+    other.upsert({ ...tool, description: 'Doubles a number, again.' });
+    await settle();
+
+    expect(readToolRow(db, tool.id)?.description).toBe('Doubles a number, again.');
+    expect(readToolRow(db, tool.id)?.is_active).toBe(0);
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active' });
+  });
+
   it('refuses to record a use of a tool that is not active', async () => {
     const tool = makeTool();
     registry.register(tool, 'agent');

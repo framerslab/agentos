@@ -545,12 +545,16 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
   }
 
   /**
-   * The two statements of a state change: the state row upsert, and the legacy
-   * flag, which is read from the state row inside its own statement so the two
-   * never disagree whatever other processes write in between. With `ifRow`,
-   * an existing row is changed only while its state, setter and time are the
-   * ones given (`'absent'`: never); the row as it stands afterwards is
-   * returned, so a refused write shows as a record other than the one given.
+   * The statements of a state change: the state row upsert, and the legacy
+   * flag, read from the state row inside its own statement so the two agree
+   * whatever other processes write in between. They are ordered so that no
+   * moment shows an active state with the flag off, which a concurrent load
+   * would read as a host's disable: a reactivation raises the flag first,
+   * under the same condition as its upsert, and a restriction writes its
+   * state row before the flag is lowered. With `ifRow`, an existing row is
+   * changed only while its state, setter and time are the ones given
+   * (`'absent'`: never); the row as it stands afterwards is returned, so a
+   * refused write shows as a record other than the one given.
    */
   private async writeStateRow(
     toolId: string,
@@ -578,15 +582,38 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
              updated_at = excluded.updated_at`;
     let guard = '';
     const params: unknown[] = [toolId, record.state, record.reason, record.setBy, record.at, requestJson, record.at];
+    // The flag raised ahead of an activation, under the activation's own
+    // condition; a refused upsert lowers it again below.
+    let raise: { sql: string; params: unknown[] } | undefined;
     if (ifRow === 'absent') {
       guard = `
            WHERE 0 = 1`;
+      raise = {
+        sql: `UPDATE agentos_emergent_tools
+                 SET is_active = 1
+               WHERE id = ?
+                 AND NOT EXISTS (SELECT 1 FROM agentos_emergent_tool_state WHERE tool_id = ?)`,
+        params: [toolId, toolId],
+      };
     } else if (ifRow !== undefined) {
       guard = `
            WHERE agentos_emergent_tool_state.state = ?
              AND agentos_emergent_tool_state.set_by = ?
              AND agentos_emergent_tool_state.state_at = ?`;
       params.push(ifRow.state, ifRow.setBy, ifRow.at);
+      raise = {
+        sql: `UPDATE agentos_emergent_tools
+                 SET is_active = 1
+               WHERE id = ?
+                 AND EXISTS (SELECT 1 FROM agentos_emergent_tool_state
+                              WHERE tool_id = ? AND state = ? AND set_by = ? AND state_at = ?)`,
+        params: [toolId, toolId, ifRow.state, ifRow.setBy, ifRow.at],
+      };
+    } else {
+      raise = { sql: `UPDATE agentos_emergent_tools SET is_active = 1 WHERE id = ?`, params: [toolId] };
+    }
+    if (record.state === 'active') {
+      await db.run(raise.sql, raise.params);
     }
     await db.run(
       `INSERT INTO agentos_emergent_tool_state
@@ -742,6 +769,19 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     const held = this.states.get(toolId);
     if (held || !this.db) {
       return held;
+    }
+    return this.readStoredState(toolId);
+  }
+
+  /**
+   * A tool's state as its row reads now, or `undefined`; what this process
+   * holds is not consulted. The loader reads it before adopting a row it has
+   * nothing to write for, since a restriction another process stored after
+   * the row was read is the newer word.
+   */
+  async readStoredState(toolId: string): Promise<ToolStateRecord | undefined> {
+    if (!this.db) {
+      return undefined;
     }
     await this.ensureSchemaReady();
     const row = (await this.db.get(
@@ -1250,24 +1290,34 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
 
     const implementationSource = await this.resolveSourceToStore(tool);
 
-    // The legacy flag equals state = 'active' for a state this process holds,
-    // read at write time: a state change that landed during the reads above
-    // is the newer word. With none held, a stored suspension or demotion stays.
+    // The legacy flag follows the state row for a state this process holds,
+    // read inside the statement: a state change that landed during the reads
+    // above is the newer word. With none held, the row keeps the flag it has.
+    // A whole-row write is never a reactivation: a flag the host lowered with
+    // its own SQL stays lowered, whatever the state row says, until a load
+    // records the host's decision or the host reactivates the tool.
     const heldNow = this.states.get(tool.id);
-    const isActive = heldNow
-      ? heldNow.state === 'active' ? 1 : 0
-      : existing?.is_active === 0 || existing?.is_active === false ? 0 : 1;
+    const flagExpr = heldNow
+      ? `COALESCE((SELECT CASE WHEN state = 'active' THEN 1 ELSE 0 END
+                     FROM agentos_emergent_tool_state WHERE tool_id = ?), ?)`
+      : `?`;
+    const flagParams = heldNow
+      ? [tool.id, heldNow.state === 'active' ? 1 : 0]
+      : [existing?.is_active === 0 || existing?.is_active === false ? 0 : 1];
+    const columns = [
+      'id', 'name', 'description', 'input_schema', 'output_schema', 'implementation_mode',
+      'implementation_source', 'tier', 'created_by_agent', 'created_by_session',
+      'created_at', 'promoted_at', 'promoted_by', 'judge_verdicts', 'confidence_score',
+      'total_uses', 'success_count', 'failure_count', 'avg_execution_ms', 'last_used_at',
+    ];
 
     await this.db.run(
-      `INSERT OR REPLACE INTO agentos_emergent_tools
-       (id, name, description, input_schema, output_schema, implementation_mode,
-        implementation_source, tier, created_by_agent, created_by_session,
-        created_at, promoted_at, promoted_by, judge_verdicts, confidence_score,
-        total_uses, success_count, failure_count, avg_execution_ms, last_used_at,
-        is_active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-         COALESCE((SELECT CASE WHEN state = 'active' THEN 1 ELSE 0 END
-                     FROM agentos_emergent_tool_state WHERE tool_id = ?), ?))`,
+      `INSERT INTO agentos_emergent_tools
+       (${columns.join(', ')}, is_active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${flagExpr})
+       ON CONFLICT (id) DO UPDATE SET
+         ${columns.slice(1).map((column) => `${column} = excluded.${column}`).join(',\n         ')},
+         is_active = CASE WHEN agentos_emergent_tools.is_active = 0 THEN 0 ELSE excluded.is_active END`,
       [
         tool.id,
         tool.name,
@@ -1291,11 +1341,10 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
         tool.usageStats.lastUsedAt
           ? new Date(tool.usageStats.lastUsedAt).getTime()
           : null,
-        // The flag is read from the state row inside the statement, so the row
-        // gets the state as it is when the write runs, whatever happened while
-        // it was prepared; with no state row, the held state, else the stored flag.
-        tool.id,
-        isActive,
+        // The flag: for a held state, read from the state row inside the
+        // statement; with none held, the flag the row has. On conflict, a flag
+        // the host lowered stays lowered whatever this value is.
+        ...flagParams,
       ],
     );
   }

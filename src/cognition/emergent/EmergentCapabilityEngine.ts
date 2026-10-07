@@ -275,6 +275,20 @@ interface ToolIndex {
  * }
  * ```
  */
+/** Whether two stored requests grant the same thing. */
+function sameGrant(a: StoredRequest | null | undefined, b: StoredRequest | null | undefined): boolean {
+  if (!a || !b) {
+    return !a && !b;
+  }
+  if (a.kind !== b.kind) {
+    return false;
+  }
+  if (a.kind === 'sandbox' && b.kind === 'sandbox') {
+    return a.capabilities.join(',') === b.capabilities.join(',');
+  }
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 export class EmergentCapabilityEngine {
   /** Injected dependencies. */
   private readonly config: EmergentConfig;
@@ -851,7 +865,10 @@ export class EmergentCapabilityEngine {
     );
   }
 
-  private admitRow(row: PersistedToolRow, options: { force?: boolean } = {}): Promise<LoadedToolOutcome> {
+  private admitRow(
+    row: PersistedToolRow,
+    options: { force?: boolean; readmitted?: boolean } = {},
+  ): Promise<LoadedToolOutcome> {
     const stored: ToolStateRecord | undefined = row.state
       ? {
           toolId: row.id,
@@ -890,7 +907,7 @@ export class EmergentCapabilityEngine {
    */
   private async admit(
     candidate: AdmissionCandidate,
-    options: { force?: boolean } = {},
+    options: { force?: boolean; readmitted?: boolean } = {},
   ): Promise<LoadedToolOutcome> {
     const { toolId, name, source, stored, legacyActive, requestStored } = candidate;
     // The request this process works with: the stored one when it can be read,
@@ -990,6 +1007,14 @@ export class EmergentCapabilityEngine {
           ? {}
           : { ifRow: stored ? { at: stored.at, state: stored.state, setBy: stored.setBy } : ('absent' as const) }),
       });
+    } else {
+      // Nothing to write: the row read active with its request. It is read
+      // again here, because the write that would have caught a restriction
+      // another process stored since the first read is not made.
+      const now = await this.registry.readStoredState(toolId);
+      if (now && (now.state !== stored.state || now.setBy !== stored.setBy || now.at !== stored.at)) {
+        written = now;
+      }
     }
     // A suspension or demotion that arrived while the row was being written,
     // in this process or in another, is the newer word: the tool is not
@@ -1000,6 +1025,20 @@ export class EmergentCapabilityEngine {
       this.holdStored(toolId, held);
       await this.unregisterIfLive(toolId);
       return { toolId, name, state: held.state, reason: held.reason };
+    }
+    // A first write refused by another process's active row: that row's
+    // request is the grant, not the one derived here, so the tool is admitted
+    // again from the row as it stands (once).
+    if (
+      written &&
+      requestToWrite !== undefined &&
+      !options.readmitted &&
+      !sameGrant(written.request, requestToWrite)
+    ) {
+      const fresh = await this.registry.loadRow(toolId);
+      if (fresh) {
+        return this.admitRow(fresh, { ...options, readmitted: true });
+      }
     }
     this.registry.adopt(tool, {
       toolId,
@@ -1048,7 +1087,9 @@ export class EmergentCapabilityEngine {
     if (!memory || memory.state === 'active') {
       return undefined;
     }
-    return !stored || memory.at > stored.at ? memory : undefined;
+    // At the row's own time the restriction is the later of the two: two
+    // writes in one millisecond are told apart by nothing else.
+    return !stored || memory.at >= stored.at ? memory : undefined;
   }
 
   /** A stored restriction, held in this process too when the tool is live here. */

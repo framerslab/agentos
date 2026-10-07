@@ -572,6 +572,7 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
 
   it("an agent's stored tools load for that agent only, and a loaded agent tool runs for its agent only", async () => {
     const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
     seedToolRow(db, {
       id: 'a-1',
       name: 'double_it',
@@ -601,7 +602,6 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
       inputSchema: TEXT_IN,
       outputSchema: TEXT_OUT,
     });
-    const host = await makeForgeHost({ db });
 
     // A private tier without its selector is refused, whatever else is asked for.
     await expect(host.engine.loadPersistedTools({ tiers: ['agent', 'shared'] })).rejects.toThrow(/selector_required/);
@@ -626,6 +626,7 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
 
   it("a session's stored tools load for that session only", async () => {
     const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
     seedToolRow(db, {
       id: 'sa-1',
       name: 'double_it',
@@ -646,11 +647,118 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
       inputSchema: SUM_IN,
       outputSchema: SUM_OUT,
     });
-    const host = await makeForgeHost({ db });
 
     const loaded = await host.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess-a' });
     expect(loaded.outcomes).toEqual([{ toolId: 'sa-1', name: 'double_it', state: 'active', reason: null }]);
     expect(await host.orchestrator.getTool('sum_it')).toBeUndefined();
     expect((await callTool(host.orchestrator, 'double_it', { n: 4 })).output).toEqual({ doubled: 8 });
+  });
+
+  it('a row read active before another process suspended it is not registered: the row is read again before the tool is adopted', async () => {
+    const db = createSqliteAdapter();
+    const hostA = await makeForgeHost({ db });
+    const hostB = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'raw-1',
+      name: 'double_it',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+    });
+    seedStateRow(db, {
+      toolId: 'raw-1',
+      state: 'active',
+      setBy: 'library',
+      requestJson: '{"kind":"sandbox","capabilities":[]}',
+    });
+
+    // The row reads active with its request, so host A has nothing to write;
+    // its second read of the state row is held open while host B suspends.
+    const gate = db.gateNext('FROM agentos_emergent_tool_state\n        WHERE tool_id = ?');
+    const loading = hostA.engine.loadPersistedTools({ tiers: ['shared'] });
+    await gate.entered;
+    expect(await hostB.engine.suspendTool('raw-1', 'operator_hold')).toBe(true);
+    gate.release();
+    const summary = await loading;
+
+    expect(summary.outcomes).toEqual([
+      { toolId: 'raw-1', name: 'double_it', state: 'suspended', reason: 'operator_hold' },
+    ]);
+    expect(await hostA.orchestrator.getTool('double_it')).toBeUndefined();
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'suspended', set_by: 'host' });
+    expect(readToolRow(db, 'raw-1')?.is_active).toBe(0);
+  });
+
+  it("a first write refused by another process's row leaves the tool with that row's grant, not the one derived here", async () => {
+    const db = createSqliteAdapter();
+    const hostA = await makeForgeHost({ db });
+    const code = 'function execute(input) { return fetch(input.url).then((r) => ({ ok: r.ok })); }';
+    seedToolRow(db, {
+      id: 'raw-f',
+      name: 'fetch_it',
+      mode: 'sandbox',
+      source: code,
+      inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+      outputSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+    });
+
+    // Host A derives `fetch` from the code and is about to store it when
+    // another process stores an active row granting nothing.
+    const gate = db.gateNext('INSERT INTO agentos_emergent_tool_state');
+    const loading = hostA.engine.loadPersistedTools({ tiers: ['shared'] });
+    await gate.entered;
+    seedStateRow(db, {
+      toolId: 'raw-f',
+      state: 'active',
+      setBy: 'library',
+      requestJson: '{"kind":"sandbox","capabilities":[]}',
+    });
+    gate.release();
+    const summary = await loading;
+
+    expect(summary.outcomes).toEqual([{ toolId: 'raw-f', name: 'fetch_it', state: 'active', reason: null }]);
+    expect(readStateRow(db, 'raw-f')?.request).toEqual({ kind: 'sandbox', capabilities: [] });
+    // The tool runs with the stored grant: no fetch.
+    const called = await callTool(hostA.orchestrator, 'fetch_it', { url: 'http://127.0.0.1:9/' });
+    expect(called.isError).toBe(true);
+    expect(JSON.stringify(called)).toMatch(/fetch/);
+  });
+
+  it('a reactivation never shows an active state with the flag off, so a load that runs meanwhile does not demote the tool', async () => {
+    const db = createSqliteAdapter();
+    const hostA = await makeForgeHost({ db });
+    const hostB = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'raw-1',
+      name: 'double_it',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      isActive: 0,
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+    });
+    seedStateRow(db, { toolId: 'raw-1', state: 'suspended', reason: 'operator_hold', setBy: 'host', requestJson: null });
+    expect((await hostA.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes[0]).toMatchObject({
+      state: 'suspended',
+    });
+
+    // The reactivation's state row write is held open after its flag write.
+    const gate = db.gateNext('INSERT INTO agentos_emergent_tool_state');
+    const reactivating = hostA.engine.reactivateTool('raw-1');
+    await gate.entered;
+    expect(readToolRow(db, 'raw-1')?.is_active).toBe(1);
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'suspended' });
+    const meanwhile = await hostB.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(meanwhile.outcomes).toEqual([
+      { toolId: 'raw-1', name: 'double_it', state: 'suspended', reason: 'operator_hold' },
+    ]);
+    gate.release();
+    expect(await reactivating).toMatchObject({ state: 'active' });
+
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active' });
+    expect(readToolRow(db, 'raw-1')?.is_active).toBe(1);
+    expect((await hostB.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes[0]).toMatchObject({ state: 'active' });
+    expect((await callTool(hostA.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
   });
 });
