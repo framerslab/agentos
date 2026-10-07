@@ -769,10 +769,10 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     const asStoredOwner = await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'gmi-instance-0b7e3c1a' });
     expect(asStoredOwner.isError).toBe(true);
 
-    // Nothing was registered, so there is nothing for the host to reactivate;
-    // the next load re-checks the owner and suspends the row again. Forging the
-    // tool again under the persona is the way back.
-    expect(await host.engine.reactivateTool('old-1')).toBeUndefined();
+    // The host's reactivation goes through the same path and cannot change the
+    // owner, so the row stays suspended; the next load re-checks it and says
+    // the same. Forging the tool again under the persona is the way back.
+    expect(await host.engine.reactivateTool('old-1')).toEqual({ toolId: 'old-1', name: 'double_it', state: 'suspended', reason: 'legacy_owner' });
     const again = await host.engine.loadPersistedTools({ tiers: ['agent'], agentId: 'gmi-instance-0b7e3c1a' });
     expect(again.outcomes).toEqual([{ toolId: 'old-1', name: 'double_it', state: 'suspended', reason: 'legacy_owner' }]);
   });
