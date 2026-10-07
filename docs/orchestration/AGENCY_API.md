@@ -208,15 +208,17 @@ provider/model pair) to control the model explicitly.
 Every roster entry is a `BaseAgentConfig` or a pre-built `agent()`. For a
 config entry, `model`, `provider`, `apiKey` and `baseUrl` set on the seat win
 over the agency-level values, and each of the four is inherited on its own when
-the seat leaves it out. A seat's `tools` are merged with the agency's `tools`,
-and the agency's `hitl.approvals.beforeTool` list is copied into every seat.
+the seat leaves it out. A seat's `tools` are merged with the agency's `tools`.
 Nothing else is inherited: `effort`, `thinking`, `maxTokens` and `instructions`
 apply to the seat that sets them, and agency-level `effort`, `thinking` and
 `maxTokens` reach neither the seats nor the chair. Agency-level `instructions`
 go to the chair (parallel), the judge (debate) and the coordinator
 (hierarchical). `output` is read at the agency level only: its schema is
 applied to the final text, and a seat's own `output` has no effect. A
-pre-built `agent()` in the roster runs as it is and inherits nothing.
+pre-built `agent()` in the roster runs as it is and inherits nothing. The
+agency's `hitl.approvals.beforeTool` list is not copied into any seat: it is
+enforced per call, on config seats and pre-built seats alike (see
+[Approval triggers](#approval-triggers)).
 
 ```typescript
 const team = agency({
@@ -640,6 +642,39 @@ const guarded = agency({
 });
 ```
 
+`beforeTool` lists tool names, or `'*'` for every tool. A listed call waits for
+the handler on every tool loop the agency runs: native tool calls, the
+prompt-tool path (`toolMode: 'prompt'`, and `'auto'` after a provider rejects
+native tools) and streamed calls, on config seats, pre-built seats, the
+hierarchical manager and the specialists it spawns, and nested agencies.
+
+- The handler is asked after the seat's or the caller's
+  `onBeforeToolExecution` has run, so it approves the arguments the tool will
+  run with. A hook that returns `null` skips the tool without asking; a hook
+  that throws is logged and the handler is asked. A `modifications.toolArgs` on
+  the decision is not applied: rewrite arguments in the hook.
+- A rejection skips the tool and the model is told; the run goes on.
+- A handler that throws, and a timeout under `onTimeout: 'error'`, skip the
+  tool, go to `on.error`, and reject the call with that error once the
+  strategy has settled, after the run's usage has been added to the agency
+  totals. No finalization step runs: no output guardrails, no `beforeReturn`
+  approval, no `agentEnd` and no validation retry.
+- After the handler approves, the post-approval guardrails
+  (`hitl.postApprovalGuardrails`, default `pii-redaction` and `code-safety`)
+  run over the arguments unless `hitl.guardrailOverride` is `false`; a block
+  skips the tool and fires `guardrailHitlOverride`.
+- A pre-built seat enforces `beforeTool` only when it forwards per-call options
+  to `generateText` or `streamText`, as every `agent()` and `agency()` does; a
+  custom `Agent` that drops unknown per-call keys runs its listed tools
+  unasked.
+- A parent agency's gate holds inside the agencies it nests and is asked
+  first: after a parent refusal the nested agency's handler is not asked, and a
+  parent handler error rejects the parent call while the nested call
+  completes.
+
+`onBeforeToolExecution` runs on the prompt-tool path as it does on native tool
+calls, for every `generateText` and `streamText` caller.
+
 ### Custom handler
 
 ```typescript
@@ -870,7 +905,7 @@ const restricted = agency({
     network:        false,
     filesystem:     true,
     spawn:          false,
-    requireApproval: ['delete-record'],          // these still need HITL
+    requireApproval: ['delete-record'],          // not enforced by agency(): list tools in hitl.approvals.beforeTool
   },
 });
 ```
