@@ -214,8 +214,9 @@ export interface HitlConfig {
      * pre-built seat that forwards per-call options, a spawned specialist and
      * a nested agency, after `onBeforeToolExecution` has run. A rejection skips
      * the tool and the run goes on; a handler error, or a timeout under
-     * `onTimeout: 'error'`, skips the tool and rejects the call once the
-     * strategy settles, after the run's usage is counted.
+     * `onTimeout: 'error'`, skips that tool and every later one unasked, and
+     * rejects the call once the strategy settles, after the run's usage is
+     * counted.
      */
     beforeTool?: string[];
     /** Agent names whose invocations require approval before execution. */

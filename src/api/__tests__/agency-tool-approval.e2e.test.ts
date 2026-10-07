@@ -30,12 +30,13 @@ const USAGE = { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 };
 const listing = () => jsonResponse({ object: 'list', data: [{ id: 'gpt-4.1', object: 'model', created: 1, owned_by: 'openai' }] });
 const text = (content: string) =>
   jsonResponse({ id: 'c', object: 'chat.completion', created: 1, model: 'gpt-4.1', choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }], usage: USAGE });
-const toolCall = (name: string, args: Json, id = 'call_1') =>
+const toolCalls = (calls: Array<{ name: string; args: Json; id: string }>) =>
   jsonResponse({
     id: 'c', object: 'chat.completion', created: 1, model: 'gpt-4.1',
-    choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }] }, finish_reason: 'tool_calls' }],
+    choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.args) } })) }, finish_reason: 'tool_calls' }],
     usage: USAGE,
   });
+const toolCall = (name: string, args: Json, id = 'call_1') => toolCalls([{ name, args, id }]);
 function sse(events: unknown[]): Response {
   return new Response(events.map((e) => `data: ${typeof e === 'string' ? e : JSON.stringify(e)}\n\n`).join(''), { status: 200, headers: { 'content-type': 'text/event-stream' } });
 }
@@ -70,14 +71,9 @@ function serve(script: Array<(body: Json) => Response>): void {
 function chatBodies(): Json[] {
   return fetchMock.mock.calls.filter(([u]) => /chat\/completions/.test(String(u))).map(([, init]) => JSON.parse(String((init as { body?: unknown }).body)) as Json);
 }
-/**
- * An agency stream's `usage`, `agentCalls` and `parsed` reject with the same
- * error as its `text`; they are observed here so none is left unhandled.
- */
-function observed(stream: unknown): { text: Promise<string> } {
-  const s = stream as { text: Promise<string>; usage: Promise<unknown>; agentCalls: Promise<unknown>; parsed: Promise<unknown> };
-  for (const p of [s.usage, s.agentCalls, s.parsed]) void p.catch(() => undefined);
-  return s;
+/** Reads a stream to its end. */
+async function drain(stream: AsyncIterable<unknown>): Promise<void> {
+  for await (const part of stream) void part;
 }
 const search = { description: 'Search.', parameters: { type: 'object' as const, properties: { q: { type: 'string' } }, required: ['q' as const] }, execute: vi.fn(async () => ({ hits: 1 })) };
 const waitForever = (): Promise<ApprovalDecision> => new Promise(() => {});
@@ -130,9 +126,50 @@ describe('a listed tool waits for the handler', () => {
     serve([() => toolCall('search', { q: 'x' }), () => text('done'), () => toolCallStream('search', { q: 'y' }), () => textStream('done again')]);
     const team = base({ approvals: { beforeTool: ['search'] }, handler: waitForever, timeoutMs: 10, onTimeout: 'error' });
     await expect(team.generate('find x')).rejects.toThrow(/HITL approval timed out/);
-    await expect(observed(team.stream('find y')).text).rejects.toThrow(/HITL approval timed out/);
+    await expect(team.stream('find y').text).rejects.toThrow(/HITL approval timed out/);
     expect(search.execute).not.toHaveBeenCalled();
     expect(((await team.usage()) as Json).totalTokens).toBe(28);
+  });
+
+  it("under onTimeout 'error', textStream and fullStream each end by throwing the timeout error", async () => {
+    serve([() => toolCallStream('search', { q: 'x' }), () => textStream('done'), () => toolCallStream('search', { q: 'y' }), () => textStream('done again')]);
+    const team = base({ approvals: { beforeTool: ['search'] }, handler: waitForever, timeoutMs: 10, onTimeout: 'error' });
+    await expect(drain(team.stream('find x').textStream)).rejects.toThrow(/HITL approval timed out/);
+    await expect(drain(team.stream('find y').fullStream)).rejects.toThrow(/HITL approval timed out/);
+    expect(search.execute).not.toHaveBeenCalled();
+    expect(((await team.usage()) as Json).totalTokens).toBe(28);
+  });
+
+  it('a caller that reads only textStream, inside try/catch, gets the timeout error and leaves no rejection unhandled', async () => {
+    serve([() => toolCallStream('search', { q: 'x' }), () => textStream('done')]);
+    const team = base({ approvals: { beforeTool: ['search'] }, handler: waitForever, timeoutMs: 10, onTimeout: 'error' });
+    const s = team.stream('find x');
+    let caught: unknown;
+    try {
+      for await (const chunk of s.textStream) void chunk;
+    } catch (err) {
+      caught = err;
+    }
+    // Nothing else on the result is read: its text, usage, agentCalls and
+    // parsed reject unobserved, and vitest fails the run on an unhandled rejection.
+    expect((caught as Error | undefined)?.message).toMatch(/HITL approval timed out/);
+    expect(((await team.usage()) as Json).totalTokens).toBe(14);
+  });
+
+  it('after a handler error, a later tool call in the same step is refused without asking the handler', async () => {
+    serve([
+      () => toolCalls([{ name: 'search', args: { q: 'x' }, id: 'call_a' }, { name: 'search', args: { q: 'y' }, id: 'call_b' }]),
+      () => text('done'),
+    ]);
+    const handler = vi.fn(async () => { throw new Error('approval service down'); });
+    const approvalRequested = vi.fn();
+    const team = base({ approvals: { beforeTool: ['search'] }, handler }, { on: { approvalRequested } });
+    await expect(team.generate('find x and y')).rejects.toThrow('approval service down');
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(approvalRequested).toHaveBeenCalledTimes(1);
+    expect(search.execute).not.toHaveBeenCalled();
+    const toolMsgs = (chatBodies()[1].messages as Json[]).filter((m) => m.role === 'tool');
+    expect(toolMsgs.map((m) => JSON.parse(m.content).skipped)).toEqual([true, true]);
   });
 
   it("a seat's own hook that throws does not bypass the gate", async () => {
@@ -305,7 +342,7 @@ describe('nested agencies', () => {
     await expect(parent.generate('x')).rejects.toThrow(/timed out/);
     expect(((await inner.usage()) as Json).totalTokens).toBe(14);
     expect(((await parent.usage()) as Json).totalTokens).toBe(14);
-    await expect(observed(parent.stream('y')).text).rejects.toThrow(/timed out/);
+    await expect(parent.stream('y').text).rejects.toThrow(/timed out/);
     expect(((await parent.usage()) as Json).totalTokens).toBe(28);
   });
 

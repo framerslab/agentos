@@ -537,6 +537,16 @@ export function agency(opts: AgencyOptions): Agent {
       }
     })();
 
+    /**
+     * A promise built from the finalized result. It still rejects for whoever
+     * awaits it, but it is marked handled when created, so a caller that
+     * reads only the streams never leaves a rejection unhandled.
+     */
+    const derived = <T>(promise: Promise<T>): Promise<T> => {
+      promise.catch(() => undefined);
+      return promise;
+    };
+
     return {
       textStream: (async function* () {
         try {
@@ -548,6 +558,13 @@ export function agency(opts: AgencyOptions): Agent {
         } catch (error) {
           reportError(error);
           throw error;
+        }
+        // A handler error or an 'error' timeout ends the call: a consumer
+        // that reads only this stream gets that error here, once the run is
+        // billed. fullStream ends the same way, through the finalized result.
+        if (slot.error !== undefined) {
+          await finalizedResultPromise.catch(() => undefined);
+          throw slot.error;
         }
       })(),
       fullStream: (async function* () {
@@ -579,15 +596,15 @@ export function agency(opts: AgencyOptions): Agent {
           throw error;
         }
       })(),
-      text: finalizedResultPromise.then((result) => (result.text as string) ?? ''),
-      usage: finalizedResultPromise.then((result) => result.usage as {
+      text: derived(finalizedResultPromise.then((result) => (result.text as string) ?? '')),
+      usage: derived(finalizedResultPromise.then((result) => result.usage as {
         promptTokens: number;
         completionTokens: number;
         totalTokens: number;
         costUSD?: number;
-      }),
-      agentCalls: finalizedResultPromise.then((result) => (result.agentCalls ?? []) as AgentCallRecord[]),
-      parsed: finalizedResultPromise.then((result) => result.parsed),
+      })),
+      agentCalls: derived(finalizedResultPromise.then((result) => (result.agentCalls ?? []) as AgentCallRecord[])),
+      parsed: derived(finalizedResultPromise.then((result) => result.parsed)),
       finalTextStream: (async function* () {
         const finalResult = await finalizedResultPromise;
         const finalText = (finalResult.text as string) ?? '';

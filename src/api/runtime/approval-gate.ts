@@ -145,14 +145,22 @@ export interface CreateApprovalGateOptions {
  * guardrails over the arguments unless `hitl.guardrailOverride` is `false`.
  * A `modifications.toolArgs` on the decision is not applied: argument
  * rewriting belongs to `onBeforeToolExecution`, which ran first. Once the
- * slot's owner has settled, the gate skips every tool without asking the
- * handler or firing approval events, and drops any later error.
+ * slot holds an error (the call will reject) or its owner has settled, the
+ * gate skips every tool without asking the handler or firing approval
+ * events; after settlement it also drops any later error.
  */
 export function createApprovalGate(o: CreateApprovalGateOptions): ApprovalGateFn {
   const listed = o.hitl.approvals?.beforeTool ?? [];
   const covers = (name: string): boolean => listed.includes('*') || listed.includes(name);
-  return async (info) => {
+  /** The refusal of a gate whose call is over: its owner settled, or an earlier approval failed. */
+  const stopped = (): ApprovalRefusal | undefined => {
     if (o.slot.settled) return refusal('the run has settled');
+    if (o.slot.error !== undefined) return refusal('an earlier tool approval failed');
+    return undefined;
+  };
+  return async (info) => {
+    const early = stopped();
+    if (early) return early;
     if (o.received) {
       let verdict: unknown;
       try {
@@ -186,7 +194,10 @@ export function createApprovalGate(o: CreateApprovalGateOptions): ApprovalGateFn
       }
       return refusal(err instanceof Error ? err.message : 'approval failed');
     }
-    if (o.slot.settled) return refusal('the run has settled');
+    // A decision that arrives after the call ended (a concurrent approval
+    // failed, or the owner settled) fires nothing and runs nothing.
+    const late = stopped();
+    if (late) return late;
     safeCall(o.on?.approvalDecided, decision);
     if (!decision.approved) return refusal(decision.reason ?? 'rejected by the approval handler');
     if (o.hitl.guardrailOverride !== false) {
@@ -202,7 +213,7 @@ export function createApprovalGate(o: CreateApprovalGateOptions): ApprovalGateFn
         return refusal(`guardrail ${result.guardrailId}: ${result.reason}`);
       }
     }
-    return o.slot.settled ? refusal('the run has settled') : APPROVAL_GRANTED;
+    return stopped() ?? APPROVAL_GRANTED;
   };
 }
 
