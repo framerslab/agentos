@@ -10,7 +10,7 @@
  *  - Offer proactive suggestions that improve quality (e.g., recommend cost strategy if omitted).
  *  - Remain side-effect free and pure: callers can run in CI, authoring tools, or runtime gates.
  */
-import { REASONING_TRACE_MAX_ENTRIES_CEILING, REASONING_TRACE_MAX_MESSAGE_LENGTH_CEILING } from '../reasoningTraceLimits';
+import { REASONING_TRACE_MAX_ENTRIES_CEILING, REASONING_TRACE_MAX_MESSAGE_LENGTH_CEILING, REASONING_TRACE_MIN_ENTRIES, toJsonSafe } from '../reasoningTraceLimits';
 import { IPersonaDefinition } from './IPersonaDefinition';
 import { GMIEventType } from '../GMIEvent.js';
 
@@ -137,12 +137,21 @@ export async function validatePersona(persona: IPersonaDefinition, opts: Persona
     if (typeof traceConfig !== 'object' || traceConfig === null || Array.isArray(traceConfig)) {
       add('error', 'invalid_field_type', `Field 'reasoningTraceConfig' must be an object when present.`, 'reasoningTraceConfig');
     } else {
+      for (const name of Object.keys(traceConfig)) {
+        if (name !== 'maxEntries' && name !== 'maxMessageLength') {
+          add('warning', 'invalid_reasoning_trace_config', `Field 'reasoningTraceConfig.${name}' is not a known setting (maxEntries, maxMessageLength); it is ignored.`, `reasoningTraceConfig.${name}`);
+        }
+      }
       for (const key of ['maxEntries', 'maxMessageLength'] as const) {
         const value = (traceConfig as Record<string, unknown>)[key];
+        const shown = String(toJsonSafe(value));
+        const ceiling = key === 'maxEntries' ? REASONING_TRACE_MAX_ENTRIES_CEILING : REASONING_TRACE_MAX_MESSAGE_LENGTH_CEILING;
         if (value !== undefined && !(typeof value === 'number' && Number.isInteger(value) && value > 0)) {
-          add('warning', 'invalid_reasoning_trace_config', `Field 'reasoningTraceConfig.${key}' is ${String(value)}; it must be a positive integer, so the runtime default applies.`, `reasoningTraceConfig.${key}`);
-        } else if (typeof value === 'number' && value > (key === 'maxEntries' ? REASONING_TRACE_MAX_ENTRIES_CEILING : REASONING_TRACE_MAX_MESSAGE_LENGTH_CEILING)) {
-          add('warning', 'invalid_reasoning_trace_config', `Field 'reasoningTraceConfig.${key}' is ${String(value)}, above the ceiling of ${key === 'maxEntries' ? REASONING_TRACE_MAX_ENTRIES_CEILING : REASONING_TRACE_MAX_MESSAGE_LENGTH_CEILING}; it is clamped.`, `reasoningTraceConfig.${key}`);
+          add('warning', 'invalid_reasoning_trace_config', `Field 'reasoningTraceConfig.${key}' is ${shown}; it must be a positive integer, so the runtime default applies.`, `reasoningTraceConfig.${key}`);
+        } else if (key === 'maxEntries' && typeof value === 'number' && value < REASONING_TRACE_MIN_ENTRIES) {
+          add('warning', 'invalid_reasoning_trace_config', `Field 'reasoningTraceConfig.maxEntries' is ${shown}, below the floor of ${REASONING_TRACE_MIN_ENTRIES} entries that the metaprompts read; the GMI raises it to ${REASONING_TRACE_MIN_ENTRIES}.`, 'reasoningTraceConfig.maxEntries');
+        } else if (typeof value === 'number' && value > ceiling) {
+          add('warning', 'invalid_reasoning_trace_config', `Field 'reasoningTraceConfig.${key}' is ${shown}, above the ceiling of ${ceiling}; it is clamped.`, `reasoningTraceConfig.${key}`);
         }
       }
     }

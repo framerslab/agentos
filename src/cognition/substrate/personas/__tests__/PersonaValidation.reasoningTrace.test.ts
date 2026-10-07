@@ -17,6 +17,18 @@ describe('reasoningTraceConfig validation', () => {
     const result = await validatePersona({ ...good, reasoningTraceConfig: { maxEntries: 50_000 } }, {});
     expect(result.issues.some((i) => i.code === 'invalid_reasoning_trace_config' && i.message.includes('ceiling'))).toBe(true);
   });
+  it('warns below the floor', async () => {
+    const result = await validatePersona({ ...good, reasoningTraceConfig: { maxEntries: 5 } }, {});
+    expect(result.issues.some((i) => i.code === 'invalid_reasoning_trace_config' && i.field === 'reasoningTraceConfig.maxEntries' && i.message.includes('floor'))).toBe(true);
+  });
+  it('warns on an unknown key', async () => {
+    const result = await validatePersona({ ...good, reasoningTraceConfig: { max_entries: 50 } as unknown as IPersonaDefinition['reasoningTraceConfig'] }, {});
+    expect(result.issues.some((i) => i.code === 'invalid_reasoning_trace_config' && i.field === 'reasoningTraceConfig.max_entries')).toBe(true);
+  });
+  it('errors when the field is null', async () => {
+    const result = await validatePersona({ ...good, reasoningTraceConfig: null as unknown as IPersonaDefinition['reasoningTraceConfig'] }, {});
+    expect(result.issues.some((i) => i.code === 'invalid_field_type' && i.field === 'reasoningTraceConfig')).toBe(true);
+  });
   it('errors when the field is not an object', async () => {
     const result = await validatePersona({ ...good, reasoningTraceConfig: 5 as unknown as IPersonaDefinition['reasoningTraceConfig'] }, {});
     expect(result.issues.some((i) => i.code === 'invalid_field_type' && i.field === 'reasoningTraceConfig')).toBe(true);

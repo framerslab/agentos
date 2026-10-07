@@ -422,7 +422,11 @@ export function renderSoulMarkdown(persona: IPersonaDefinition): string {
       : undefined,
     defaultMood: persona.moodAdaptation?.defaultMood,
     allowedMoods: persona.moodAdaptation?.allowedMoods,
-    reasoningTrace: persona.reasoningTraceConfig ? { ...persona.reasoningTraceConfig } : undefined,
+    // A plain object is copied; anything else passes through unchanged, so a value the loader kept for validation survives a render.
+    reasoningTrace:
+      persona.reasoningTraceConfig && typeof persona.reasoningTraceConfig === 'object' && !Array.isArray(persona.reasoningTraceConfig)
+        ? { ...persona.reasoningTraceConfig }
+        : (persona.reasoningTraceConfig as SoulFrontmatter['reasoningTrace']),
     hardLimits: (persona as IPersonaDefinition & { hardLimits?: string[] }).hardLimits,
     avatar: persona.avatarConfig
       ? {
