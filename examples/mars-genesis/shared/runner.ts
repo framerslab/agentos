@@ -10,6 +10,7 @@ import {
   SandboxedToolForge,
   ForgeToolMetaTool,
   generateText,
+  createStepGate,
 } from '@framers/agentos';
 import type {
   LeaderConfig,
@@ -195,13 +196,11 @@ function createEmergentEngine(toolMap: Map<string, ITool>): {
     generateText: llmCallback,
   });
 
-  // ComposableToolBuilder expects a tool executor function, not a Map
-  const toolExecutor = async (toolName: string, args: unknown, context: any) => {
-    const tool = toolMap.get(toolName);
-    if (!tool) return { success: false, error: `Tool "${toolName}" not found` };
-    return tool.execute(args as any, context);
-  };
-  const composableBuilder = new ComposableToolBuilder(toolExecutor as any);
+  // Each step resolves its tool from the map. web_search declares no side
+  // effects, so it is chained freely; a forged code tool declares side
+  // effects, so chaining one needs compose.sideEffectingTools, which this
+  // example does not set.
+  const composableBuilder = new ComposableToolBuilder(createStepGate({ resolve: (name) => toolMap.get(name) }));
   const sandboxForge = new SandboxedToolForge();
 
   const engine = new EmergentCapabilityEngine({
