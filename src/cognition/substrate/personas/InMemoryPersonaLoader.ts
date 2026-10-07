@@ -7,7 +7,7 @@ import { uuidv4 } from '../../../core/utils/uuid';
 import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
 import type { IPersonaDefinition } from './IPersonaDefinition';
 import type { IPersonaLoader, PersonaLoaderConfig } from './IPersonaLoader';
-import { normalizePersonaDefinition } from './personaNormalization';
+import { clonePersonaDefinition, normalizePersonaDefinition } from './personaNormalization';
 
 /** The `personaLoaderConfig` the runtime records when personas come from an inline list. */
 export const INLINE_PERSONA_LOADER_CONFIG: PersonaLoaderConfig = { personaSource: 'inline', loaderType: 'in_memory' };
@@ -15,7 +15,7 @@ export const INLINE_PERSONA_LOADER_CONFIG: PersonaLoaderConfig = { personaSource
 /**
  * Structural rules for an inline persona list, cheap enough to run before any subsystem
  * starts: an array; every entry an object with a non-empty string `id`; no duplicate `id`;
- * `activationKeywords`, when present, an array. Semantic validation (required fields,
+ * `activationKeywords`, when present, an array of strings. Semantic validation (required fields,
  * semver, prompt length) still runs in GMIManager through `validatePersonas`.
  * @throws GMIError CONFIGURATION_ERROR naming the offending index or id.
  */
@@ -36,12 +36,21 @@ export function assertInlinePersonaDefinitions(definitions: unknown): asserts de
     }
     seen.add(id);
     const keywords = (definition as { activationKeywords?: unknown }).activationKeywords;
-    if (keywords !== undefined && !Array.isArray(keywords)) {
-      throw new GMIError(`personas[${index}] ('${id}'): \`activationKeywords\` must be an array when present.`, GMIErrorCode.CONFIGURATION_ERROR, { index, id });
+    if (keywords !== undefined && (!Array.isArray(keywords) || keywords.some((keyword) => typeof keyword !== 'string'))) {
+      throw new GMIError(`personas[${index}] ('${id}'): \`activationKeywords\` must be an array of strings when present.`, GMIErrorCode.CONFIGURATION_ERROR, { index, id });
     }
   });
 }
 
+/**
+ * Serves a fixed list of persona definitions. The constructor checks the list's structure
+ * (see `assertInlinePersonaDefinitions`), normalizes each definition the way the file-system
+ * loader does (sentiment presets become metaprompts) and stores its own copies, so edits the
+ * caller makes to its objects after construction never reach the runtime. `initialize()` accepts
+ * any `PersonaLoaderConfig` (the source is the list, not `personaSource`); `refreshPersonas()`
+ * is a no-op because the set is fixed. Used by `AgentOS.create({ personas })` and exported for
+ * callers composing their own sources.
+ */
 export class InMemoryPersonaLoader implements IPersonaLoader {
   public readonly loaderId: string;
   private readonly personas: Map<string, IPersonaDefinition>;
@@ -50,8 +59,8 @@ export class InMemoryPersonaLoader implements IPersonaLoader {
   constructor(definitions: IPersonaDefinition[]) {
     assertInlinePersonaDefinitions(definitions);
     this.loaderId = `persona-loader-mem-${uuidv4()}`;
-    // A new Map from the list: later pushes by the caller do not change the set.
-    this.personas = new Map(definitions.map((definition) => [definition.id, normalizePersonaDefinition(definition)]));
+    // Own copies in a new Map: later pushes to the list or edits to the caller's objects do not change the set.
+    this.personas = new Map(definitions.map((definition) => [definition.id, clonePersonaDefinition(normalizePersonaDefinition(definition))]));
   }
 
   public async initialize(_config: PersonaLoaderConfig): Promise<void> {

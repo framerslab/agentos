@@ -10,9 +10,15 @@ describe('activationKeywords validation', () => {
     const result = await validatePersona(bad, {});
     expect(result.issues.some((i) => i.code === 'invalid_field_type' && i.field === 'activationKeywords' && i.severity === 'error')).toBe(true);
   });
+  it('reports invalid_field_type for a non-string entry', async () => {
+    const mixed = { ...good, id: 'mixed', activationKeywords: ['ok', 7] } as unknown as IPersonaDefinition;
+    const result = await validatePersona(mixed, {});
+    expect(result.issues.some((i) => i.code === 'invalid_field_type' && i.field === 'activationKeywords')).toBe(true);
+  });
   it('validatePersonas does not throw on it and still validates the rest of the batch', async () => {
-    const report = await validatePersonas([good, bad], {});
-    expect(report.results.length).toBe(2);
+    const mixed = { ...good, id: 'mixed', activationKeywords: ['hello', 7] } as unknown as IPersonaDefinition;
+    const report = await validatePersonas([good, bad, mixed], {});
+    expect(report.results.length).toBe(3);
     expect(report.totals.errors).toBeGreaterThanOrEqual(1);
   });
 });

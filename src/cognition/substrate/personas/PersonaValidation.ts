@@ -124,8 +124,12 @@ export async function validatePersona(persona: IPersonaDefinition, opts: Persona
       add('error', 'missing_required_field', `Required field '${field}' is missing or empty.`, String(field));
     }
   }
-  if (persona.activationKeywords !== undefined && !Array.isArray(persona.activationKeywords)) {
-    add('error', 'invalid_field_type', `Field 'activationKeywords' must be an array of strings when present.`, 'activationKeywords');
+  if (persona.activationKeywords !== undefined) {
+    if (!Array.isArray(persona.activationKeywords)) {
+      add('error', 'invalid_field_type', `Field 'activationKeywords' must be an array of strings when present.`, 'activationKeywords');
+    } else if (persona.activationKeywords.some((keyword) => typeof keyword !== 'string')) {
+      add('error', 'invalid_field_type', `Field 'activationKeywords' has an entry that is not a string.`, 'activationKeywords');
+    }
   }
 
   // Reserved persona id check.
@@ -263,7 +267,7 @@ export async function validatePersonas(personas: IPersonaDefinition[], opts: Per
   }
   const keywordMap = new Map<string, string[]>();
   for (const p of personas) {
-    (Array.isArray(p.activationKeywords) ? p.activationKeywords : []).forEach(kw => {
+    (Array.isArray(p.activationKeywords) ? p.activationKeywords.filter((kw): kw is string => typeof kw === 'string') : []).forEach(kw => {
       const existing = keywordMap.get(kw) || [];
       existing.push(p.id);
       keywordMap.set(kw, existing);

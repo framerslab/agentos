@@ -19,6 +19,9 @@ describe('assertInlinePersonaDefinitions', () => {
   it('rejects a non-array activationKeywords, naming the id', () => {
     expect(() => assertInlinePersonaDefinitions([{ ...a, activationKeywords: {} }] as unknown)).toThrowError(/'a'.*activationKeywords/);
   });
+  it('rejects a non-string activationKeywords entry', () => {
+    expect(() => assertInlinePersonaDefinitions([{ ...a, activationKeywords: ['ok', null] }] as unknown)).toThrowError(/array of strings/);
+  });
   it('throws GMIError CONFIGURATION_ERROR', () => {
     try {
       assertInlinePersonaDefinitions('x' as unknown);
@@ -54,6 +57,16 @@ describe('InMemoryPersonaLoader', () => {
     const loader = new InMemoryPersonaLoader([withPreset]);
     await loader.initialize(INLINE_PERSONA_LOADER_CONFIG);
     expect((await loader.loadPersonaById('a'))?.metaPrompts?.map((m) => m.id)).toEqual(['gmi_error_recovery']);
+  });
+  it('stores its own copies: edits to the caller\'s object after construction do not reach the runtime', async () => {
+    const mine = { ...a, activationKeywords: ['one'] };
+    const loader = new InMemoryPersonaLoader([mine]);
+    mine.name = 'Changed';
+    mine.activationKeywords.push('two');
+    await loader.initialize(INLINE_PERSONA_LOADER_CONFIG);
+    const served = await loader.loadPersonaById('a');
+    expect(served?.name).toBe('A');
+    expect(served?.activationKeywords).toEqual(['one']);
   });
   it('refreshPersonas keeps the set', async () => {
     const loader = new InMemoryPersonaLoader([a]);

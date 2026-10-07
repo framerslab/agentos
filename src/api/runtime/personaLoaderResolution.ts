@@ -15,9 +15,13 @@ import {
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
 import { AgentOSServiceError } from '../errors';
 
+/** The three config fields that decide a runtime's persona source. */
 export interface PersonaSourceConfig {
+  /** Inline definitions; served by an in-memory loader. Exclusive with `personaLoader`. */
   personas?: IPersonaDefinition[];
+  /** A caller-written loader; used as given. */
   personaLoader?: IPersonaLoader;
+  /** The loader config GMIManager would otherwise use (the file-system directory). */
   gmiManagerConfig?: { personaLoaderConfig: PersonaLoaderConfig };
 }
 
@@ -48,6 +52,13 @@ export function validatePersonaSource(config: PersonaSourceConfig): void {
   }
 }
 
+/**
+ * Picks the loader GMIManager receives and the `personaLoaderConfig` recorded with it:
+ * `personas` → a new `InMemoryPersonaLoader` with `{ personaSource: 'inline', loaderType: 'in_memory' }`
+ * (the existing `options` kept); `personaLoader` → that loader with the config unchanged; neither →
+ * no loader (GMIManager builds the file-system loader) with the config unchanged. Assumes
+ * `validatePersonaSource` already ran.
+ */
 export function resolvePersonaLoader(config: PersonaSourceConfig): {
   loader: IPersonaLoader | undefined;
   personaLoaderConfig: PersonaLoaderConfig;

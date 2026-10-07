@@ -33,3 +33,17 @@ export function normalizePersonaDefinition(definition: IPersonaDefinition): IPer
         .filter(Boolean);
   return { ...definition, metaPrompts: mergeMetapromptPresets(definition.metaPrompts, requestedIds) };
 }
+
+/**
+ * Returns a copy of a definition that shares nothing with the input: `structuredClone` for the
+ * plain data every JSON persona is made of, and a shallow copy for a code-built definition
+ * that carries values `structuredClone` rejects (functions, class instances), whose nested
+ * objects then stay shared with the caller.
+ */
+export function clonePersonaDefinition(definition: IPersonaDefinition): IPersonaDefinition {
+  try {
+    return structuredClone(definition);
+  } catch {
+    return { ...definition };
+  }
+}
