@@ -65,3 +65,71 @@ export function redactUrlSecrets(
     .replace(/([?&]key=)[^&\s"')]+/g, '$1[redacted]')
     .replace(/(\/\/)[^/\s@"')]+@/g, '$1[redacted]@');
 }
+
+/** Options for {@link redactUrlForExport}. */
+export interface RedactUrlForExportOptions {
+  /** The URL belongs to a `...webhookUrl` property: keep the origin, replace the path and the query. */
+  webhook?: boolean;
+  /** The export's property-name rule; a query or fragment parameter whose name matches is a secret. */
+  isSecretParam?: (name: string) => boolean;
+}
+
+const URL_SECRET_PARAM_NAMES = new Set(['key', 'sig', 'signature', 'auth', 'password']);
+const EXPORT_PLACEHOLDER = '<<REDACTED>>';
+
+/**
+ * Rewrites a URL for a config export without re-serializing it: the userinfo
+ * becomes `<<REDACTED>>@`; the value of every query or fragment parameter
+ * whose name is a secret (the export's property rule, or `key`, `sig`,
+ * `signature`, `auth`, `password`) becomes `<<REDACTED>>`; a webhook URL keeps
+ * its origin and has its path and query replaced, except when it has no path
+ * and no query. A URL with nothing to remove comes back byte for byte. The
+ * placeholder is spliced in literally, so import can find it again.
+ *
+ * @param url The URL string found in the config.
+ * @param opts Whether it is a webhook URL, and the parameter-name rule.
+ * @returns The URL with its secrets replaced by `<<REDACTED>>`.
+ */
+export function redactUrlForExport(url: string, opts: RedactUrlForExportOptions = {}): string {
+  const scheme = /^[a-z][a-z\d+.-]*:\/\//i.exec(url);
+  if (!scheme) return url;
+  const authorityStart = scheme[0].length;
+  const pathStart = (() => {
+    const i = url.slice(authorityStart).search(/[/?#]/);
+    return i === -1 ? url.length : authorityStart + i;
+  })();
+  let authority = url.slice(authorityStart, pathStart);
+  const at = authority.lastIndexOf('@');
+  if (at !== -1) authority = `${EXPORT_PLACEHOLDER}@${authority.slice(at + 1)}`;
+  const origin = url.slice(0, authorityStart) + authority;
+  const rest = url.slice(pathStart);
+  if (opts.webhook) {
+    if (rest === '' || rest === '/') return origin + rest;
+    const hash = rest.indexOf('#');
+    return `${origin}/${EXPORT_PLACEHOLDER}${hash === -1 ? '' : rest.slice(hash)}`;
+  }
+  const isSecret = (name: string): boolean =>
+    URL_SECRET_PARAM_NAMES.has(name.toLowerCase()) || (opts.isSecretParam?.(name) ?? false);
+  const redactParams = (params: string): string =>
+    params
+      .split('&')
+      .map((pair) => {
+        const eq = pair.indexOf('=');
+        if (eq === -1) return pair;
+        const name = pair.slice(0, eq);
+        return isSecret(name) ? `${name}=${EXPORT_PLACEHOLDER}` : pair;
+      })
+      .join('&');
+  const hash = rest.indexOf('#');
+  const beforeHash = hash === -1 ? rest : rest.slice(0, hash);
+  const fragment = hash === -1 ? '' : rest.slice(hash + 1);
+  const q = beforeHash.indexOf('?');
+  const path = q === -1 ? beforeHash : beforeHash.slice(0, q);
+  const query = q === -1 ? '' : beforeHash.slice(q + 1);
+  return (
+    origin +
+    path +
+    (q === -1 ? '' : `?${redactParams(query)}`) +
+    (hash === -1 ? '' : `#${redactParams(fragment)}`)
+  );
+}
