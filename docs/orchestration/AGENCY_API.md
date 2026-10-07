@@ -258,7 +258,9 @@ the key together on every seat of a multi-vendor roster:
   auto-detection (no `provider` and no prefix on its `model`), it is unknown,
   and every seat that sets none inherits the agency's key and URL.
 - A seat value set explicitly to `undefined` (for example
-  `apiKey: process.env.UNSET_VAR`) counts as set and blocks inheritance.
+  `apiKey: process.env.UNSET_VAR`) counts as set and blocks inheritance. A
+  seat that sets `provider: undefined` goes to auto-detection, so under an
+  agency whose provider is known it does not inherit the agency's key or URL.
 
 A seat `model` written as `provider:model` (`anthropic:claude-opus-5-5`) names
 its provider and does not inherit the agency's `provider`. A call goes to the

@@ -238,8 +238,12 @@ export function mergeDefaults(
   // form, or by its own `provider`), or to auto-detection, which may pick any
   // vendor, does not, since sending them there would leak the key to another
   // vendor. When the agency's provider comes from auto-detection, it is
-  // unknown and the seat inherits them.
-  const seatRouted = routedProviderOf({ provider, model });
+  // unknown and the seat inherits them. The check reads the provider and
+  // model the merged config below carries: a seat value set explicitly to
+  // undefined (`provider: undefined`) counts as set, since the spread of
+  // agentConfig writes it over the agency's.
+  const used: BaseAgentConfig = { model, provider, ...agentConfig };
+  const seatRouted = routedProviderOf({ provider: used.provider, model: used.model });
   const agencyRouted = routedProviderOf(agencyConfig);
   const otherVendor = agencyRouted !== undefined && seatRouted !== agencyRouted;
   return {
