@@ -41,13 +41,26 @@ describe('GMI reasoning trace limits', () => {
     const entries = gmi.getReasoningTrace().entries;
     expect(entries.length).toBe(3);
     expect(entries.every((entry) => entry.type === ReasoningEntryType.DEBUG)).toBe(true);
-    expect(entries[entries.length - 1].details.text).toBe('feedback 4');
+    expect(entries.at(-1)?.details?.text).toBe('feedback 4');
   });
 
   it('uses the runtime default when the persona sets none', async () => {
     const gmi = await bootGmi(base, { defaultReasoningTraceMaxEntries: 4 });
     await feedback(gmi, 6);
     expect(gmi.getReasoningTrace().entries.length).toBe(4);
+  });
+
+  it('clamps an oversized persona limit to the ceiling and records it in the trace', async () => {
+    const gmi = await bootGmi({ ...base, reasoningTraceConfig: { maxEntries: 50_000, maxMessageLength: 5 } });
+    const warning = gmi.getReasoningTrace().entries.find((entry) => entry.type === ReasoningEntryType.WARNING && entry.message.startsWith('Reasoning-trace limit'));
+    expect(warning?.details?.ignored).toEqual([{ source: 'persona', key: 'maxEntries', value: 50_000, reason: 'above_ceiling' }]);
+    expect(warning?.message.length).toBeLessThanOrEqual(5);
+  });
+
+  it('records a runtime default that is not a positive integer', async () => {
+    const gmi = await bootGmi(base, { defaultReasoningTraceMaxEntries: 2.5 });
+    const warning = gmi.getReasoningTrace().entries.find((entry) => entry.type === ReasoningEntryType.WARNING);
+    expect(warning?.details?.ignored).toEqual([{ source: 'config', key: 'maxEntries', value: 2.5, reason: 'not_a_positive_integer' }]);
   });
 
   it('truncates entry messages to maxMessageLength', async () => {

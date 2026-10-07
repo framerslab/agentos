@@ -10,6 +10,7 @@
  *  - Offer proactive suggestions that improve quality (e.g., recommend cost strategy if omitted).
  *  - Remain side-effect free and pure: callers can run in CI, authoring tools, or runtime gates.
  */
+import { REASONING_TRACE_MAX_ENTRIES_CEILING, REASONING_TRACE_MAX_MESSAGE_LENGTH_CEILING } from '../reasoningTraceLimits';
 import { IPersonaDefinition } from './IPersonaDefinition';
 import { GMIEventType } from '../GMIEvent.js';
 
@@ -140,6 +141,8 @@ export async function validatePersona(persona: IPersonaDefinition, opts: Persona
         const value = (traceConfig as Record<string, unknown>)[key];
         if (value !== undefined && !(typeof value === 'number' && Number.isInteger(value) && value > 0)) {
           add('warning', 'invalid_reasoning_trace_config', `Field 'reasoningTraceConfig.${key}' is ${String(value)}; it must be a positive integer, so the runtime default applies.`, `reasoningTraceConfig.${key}`);
+        } else if (typeof value === 'number' && value > (key === 'maxEntries' ? REASONING_TRACE_MAX_ENTRIES_CEILING : REASONING_TRACE_MAX_MESSAGE_LENGTH_CEILING)) {
+          add('warning', 'invalid_reasoning_trace_config', `Field 'reasoningTraceConfig.${key}' is ${String(value)}, above the ceiling of ${key === 'maxEntries' ? REASONING_TRACE_MAX_ENTRIES_CEILING : REASONING_TRACE_MAX_MESSAGE_LENGTH_CEILING}; it is clamped.`, `reasoningTraceConfig.${key}`);
         }
       }
     }

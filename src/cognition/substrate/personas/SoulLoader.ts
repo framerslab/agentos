@@ -116,6 +116,8 @@ export interface SoulFrontmatter {
   avatar?: { type?: string; sourceUrl?: string; descriptionForGeneration?: string };
   /** Free-form structured fields any consumer can read. */
   metadata?: Record<string, unknown>;
+  /** Reasoning-trace limits; maps to `IPersonaDefinition.reasoningTraceConfig`. */
+  reasoningTrace?: { maxEntries?: number; maxMessageLength?: number };
 }
 
 /**
@@ -351,6 +353,7 @@ export function frontmatterToPersona(
     // Runtime readers key Honesty-Humility as `honesty`; the frontmatter may
     // use either spelling.
     personalityTraits: frontmatter.hexaco ? normalizeHexacoTraits(frontmatter.hexaco) : undefined,
+    reasoningTraceConfig: frontmatter.reasoningTrace ? { ...frontmatter.reasoningTrace } : undefined,
     moodAdaptation: frontmatter.defaultMood
       ? {
           enabled: true,
@@ -415,6 +418,7 @@ export function renderSoulMarkdown(persona: IPersonaDefinition): string {
       : undefined,
     defaultMood: persona.moodAdaptation?.defaultMood,
     allowedMoods: persona.moodAdaptation?.allowedMoods,
+    reasoningTrace: persona.reasoningTraceConfig ? { ...persona.reasoningTraceConfig } : undefined,
     hardLimits: (persona as IPersonaDefinition & { hardLimits?: string[] }).hardLimits,
     avatar: persona.avatarConfig
       ? {

@@ -150,11 +150,14 @@ export class GMI implements IGMI {
       this.conversationHistoryManager.clear();
     }
 
+    this.traceLimits = resolveReasoningTraceLimits(persona, config);
+    if (this.traceLimits.ignored.length > 0) {
+      this.addTraceEntry(ReasoningEntryType.WARNING, 'Reasoning-trace limit setting ignored or clamped.', { ignored: this.traceLimits.ignored });
+    }
     this.validateInitializationInputs(persona, config);
 
     this.activePersona = persona;
     this.config = config;
-    this.traceLimits = resolveReasoningTraceLimits(persona, config);
 
     this.workingMemory = config.workingMemory;
     this.promptEngine = config.promptEngine;
@@ -432,7 +435,7 @@ export class GMI implements IGMI {
    * @private
    */
   private addTraceEntry(type: ReasoningEntryType, message: string, details?: Record<string, any>, timestamp?: Date): void {
-    if (this.reasoningTrace.entries.length >= this.traceLimits.maxEntries) {
+    while (this.reasoningTrace.entries.length >= this.traceLimits.maxEntries) {
       this.reasoningTrace.entries.shift();
     }
     const entry: ReasoningTraceEntry = {
