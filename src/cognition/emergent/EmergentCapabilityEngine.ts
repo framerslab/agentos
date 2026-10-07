@@ -1116,8 +1116,10 @@ export class EmergentCapabilityEngine {
     // again from the row as it stands (once).
     // The grant the row holds after the write is what the tool may reach: a
     // request another process stored meanwhile, narrower or wider than the
-    // one this admission built with, admits the tool again from the row.
-    if (written && !sameGrant(written.request, request)) {
+    // one this admission built with, admits the tool again from the row. A
+    // row whose request this release cannot read (or holds none) gives
+    // nothing to compare, and the derived grant stands as before.
+    if (written && written.request !== null && !sameGrant(written.request, request)) {
       return this.readmit(candidate, options);
     }
     this.registry.adopt(tool, {

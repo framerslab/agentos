@@ -70,7 +70,6 @@ export type ForgeLogEvent =
 export interface WrapForgeToolOptions {
   /** The raw ForgeToolMetaTool instance from EmergentCapabilityEngine. */
   raw: ForgeToolMetaTool;
-  /** GMI / agent id patched onto the tool execution context. */
   /**
    * The identity recorded as the owner of every tool forged through this
    * wrapper (its `personaId` and `gmiId` on the forge call), whoever calls.
