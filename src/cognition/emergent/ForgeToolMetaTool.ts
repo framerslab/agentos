@@ -248,11 +248,11 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
     }
 
     const result = await this.engine.forge(args as unknown as ForgeToolRequest, {
-      // Use nullish coalescing (??), not logical OR (||), so that an empty
-      // string '' correctly falls through to 'unknown'. The old || operator
-      // treated any falsy value the same, which is correct for empty strings
-      // but ?? is more intentional about the distinction.
-      agentId: context.gmiId ?? 'unknown',
+      // The agent identity of a forged tool is the persona that forged it: a
+      // GMI instance id is minted per session, so a tool owned by one would
+      // be callable in no later session. Nullish coalescing (??), not ||, so
+      // an empty string is kept as given.
+      agentId: context.personaId ?? 'unknown',
       sessionId: context.correlationId ?? 'unknown',
     });
 

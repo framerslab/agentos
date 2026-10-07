@@ -293,7 +293,7 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
 
     const again = await host.engine.loadPersistedTools({ tiers: ['agent'], agentId: 'agent-seed' });
     expect(again.outcomes).toEqual([{ toolId: 'raw-1', name: 'double_it', state: 'active', reason: null }]);
-    expect((await callTool(host.orchestrator, 'double_it', { n: 2 }, { gmiId: 'agent-seed' })).output).toEqual({
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'agent-seed' })).output).toEqual({
       doubled: 4,
     });
   });
@@ -677,16 +677,73 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect(loaded.outcomes.map((o) => o.toolId).sort()).toEqual(['a-1', 's-1']);
     expect(await host.orchestrator.getTool('sum_it')).toBeUndefined();
 
-    // The agent tool runs for its agent and refuses every other; the shared one runs for both.
-    expect((await callTool(host.orchestrator, 'double_it', { n: 2 }, { gmiId: 'agent-a' })).output).toEqual({
-      doubled: 4,
-    });
-    const other = await callTool(host.orchestrator, 'double_it', { n: 2 }, { gmiId: 'agent-b' });
+    // The agent tool runs for its persona and refuses every other, whatever
+    // GMI instance calls; the shared one runs for both.
+    expect(
+      (await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'agent-a', gmiId: 'gmi-instance-1' }))
+        .output,
+    ).toEqual({ doubled: 4 });
+    const other = await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'agent-b' });
     expect(other.isError).toBe(true);
     expect(JSON.stringify(other)).toMatch(/belongs to agent agent-a/);
-    expect((await callTool(host.orchestrator, 'echo_text', { text: 'hi' }, { gmiId: 'agent-b' })).output).toEqual({
-      text: 'hi',
+    expect((await callTool(host.orchestrator, 'echo_text', { text: 'hi' }, { personaId: 'agent-b' })).output).toEqual(
+      { text: 'hi' },
+    );
+  });
+
+  it('a code-with-list row runs with its stored request when that is narrower than its list', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'list-f',
+      name: 'fetch_it',
+      mode: 'sandbox',
+      source: JSON.stringify({
+        mode: 'sandbox',
+        code: 'function execute(input) { return fetch(input.url).then((r) => ({ ok: r.ok })); }',
+        allowlist: ['fetch'],
+      }),
+      inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+      outputSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
     });
+    seedStateRow(db, { toolId: 'list-f', state: 'active', setBy: 'library', requestJson: '{"kind":"sandbox","capabilities":[]}' });
+
+    const summary = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+
+    expect(summary.outcomes).toEqual([{ toolId: 'list-f', name: 'fetch_it', state: 'active', reason: null }]);
+    const called = await callTool(host.orchestrator, 'fetch_it', { url: 'http://127.0.0.1:9/' });
+    expect(called.isError).toBe(true);
+    expect(JSON.stringify(called)).toMatch(/fetch/);
+  });
+
+  it('a host-synced tool with no stored row gets its row, so its uses are recorded and the next load finds it', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    const tool: EmergentTool = {
+      id: 'host-1',
+      name: 'double_it',
+      description: 'Doubles a number.',
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+      implementation: { mode: 'sandbox', code: RAW_DOUBLE, allowlist: [] },
+      tier: 'shared',
+      createdBy: 'host',
+      createdAt: new Date(1_700_000_000_000).toISOString(),
+      judgeVerdicts: [],
+      usageStats: { totalUses: 0, successCount: 0, failureCount: 0, avgExecutionTimeMs: 0, lastUsedAt: null, confidenceScore: 0.9 },
+      source: 'hydrated by the host from its own store',
+    };
+
+    expect(await host.engine.syncPersistedTool(tool)).toEqual({ toolId: 'host-1', name: 'double_it', state: 'active', reason: null });
+    expect(readToolRow(db, 'host-1')).toMatchObject({ name: 'double_it', is_active: 1 });
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(readToolRow(db, 'host-1')?.total_uses).toBe(1);
+
+    const other = await makeForgeHost({ db });
+    expect((await other.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'host-1', name: 'double_it', state: 'active', reason: null },
+    ]);
   });
 
   it("a session's stored tools load for that session only", async () => {

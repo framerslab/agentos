@@ -32,6 +32,15 @@ import type {
 import type { JSONSchemaObject } from '../../core/tools/ITool.js';
 import { normalizeAllowlist, toSandboxApis } from './capabilities.js';
 
+/**
+ * A stored tool's source as the loader reads it from `implementation_source`:
+ * a composition's step spec; a raw-code row (releases before 0.10.33 stored
+ * the code alone, so its capabilities are inferred from the text); a
+ * code-with-list row (`{ mode, code, allowlist }`, the list is the request);
+ * a redacted record (an API list without code, written with
+ * `persistSandboxSource` off, which cannot be rebuilt); or a row that does
+ * not read, with the reason.
+ */
 export type PersistedSource =
   | { format: 'compose'; implementation: ComposableToolSpec }
   | {

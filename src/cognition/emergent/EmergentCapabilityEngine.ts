@@ -685,7 +685,14 @@ export class EmergentCapabilityEngine {
    * @returns what happened, so a host can tell a registered tool from a refused one.
    */
   async syncPersistedTool(tool: EmergentTool): Promise<LoadedToolOutcome> {
-    const row = await this.registry.loadRow(tool.id);
+    let row = await this.registry.loadRow(tool.id);
+    if (!row && this.registry.hasStorage()) {
+      // No stored row yet: the host hydrates from its own store. The row is
+      // written as it was before loading went through the stored row, so the
+      // tool's uses are recorded and the next load finds it.
+      await this.registry.writeToolRow(tool);
+      row = await this.registry.loadRow(tool.id);
+    }
     if (row) {
       return this.admitRow(row);
     }
@@ -738,7 +745,10 @@ export class EmergentCapabilityEngine {
    * naming either tier without its selector throws (`selector_required`), so
    * a shared store never puts one agent's private tools in another's
    * executor. A loaded or forged `agent` tool also refuses a call from any
-   * other agent (see {@link createExecutableTool}).
+   * other agent (see {@link createExecutableTool}). The agent identity is the
+   * persona id: `forge_tool` records the forging caller's `personaId` as
+   * `created_by_agent`, and `agentId` here is that id. Rows written by
+   * releases before this one hold the forging GMI instance's id instead.
    */
   async loadPersistedTools(options: LoadPersistedToolsOptions): Promise<LoadPersistedToolsResult> {
     const { tiers, agentId, sessionId } = options;
@@ -980,12 +990,12 @@ export class EmergentCapabilityEngine {
     if (
       implementation &&
       implementation.mode === 'sandbox' &&
-      source.format === 'raw-code' &&
       request?.kind === 'sandbox'
     ) {
-      // The request is what the tool was granted. For a raw-code row the
-      // code's text was read only to derive a request where none was stored;
-      // a stored request says what the code may reach whatever its text shows.
+      // The request is what the tool was granted, whatever its text, its
+      // stored list or the list held in memory shows: for a raw-code row the
+      // text was read only to derive a request where none was stored, and a
+      // stored request narrower than a stored list is the grant.
       implementation = { ...implementation, allowlist: toSandboxApis(request.capabilities) };
     }
     if (implementation && !refusal) {
@@ -1263,6 +1273,14 @@ export class EmergentCapabilityEngine {
         args: Record<string, unknown>,
         context: ToolExecutionContext
       ): Promise<ToolExecutionResult> => {
+        // The registry no longer holds the tool (removed, or its session
+        // cleaned up) while the executable is still registered: refuse, do
+        // not run the captured code. This comes before the state check, which
+        // reads "no state" as active.
+        const current = this.registry.get(tool.id);
+        if (!current) {
+          return { success: false, error: `Emergent tool "${tool.name}" is no longer registered.` };
+        }
         if (!this.registry.isActive(tool.id)) {
           const held = this.registry.getState(tool.id);
           return {
@@ -1272,13 +1290,12 @@ export class EmergentCapabilityEngine {
               `${held?.reason ?? 'no reason recorded'}.`,
           };
         }
-        const current = this.registry.get(tool.id) ?? tool;
-        if (current.tier === 'agent' && context.gmiId !== current.createdBy) {
+        if (current.tier === 'agent' && context.personaId !== current.createdBy) {
           return {
             success: false,
             error:
               `Emergent tool "${tool.name}" belongs to agent ${current.createdBy}; ` +
-              `it is not callable by agent ${context.gmiId}.`,
+              `it is not callable as ${context.personaId}.`,
           };
         }
         const startTime = performance.now();

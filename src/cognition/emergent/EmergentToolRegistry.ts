@@ -711,6 +711,21 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     await this.setState(toolId, 'suspended', reason, { setBy: 'host' });
   }
 
+  /** Whether a storage adapter is configured. */
+  hasStorage(): boolean {
+    return this.db !== undefined;
+  }
+
+  /**
+   * Write a tool's row from the object given, awaited. For a host that
+   * hydrates a tool from its own store through `syncPersistedTool` and has no
+   * row for it yet; a tool that has a row is loaded from the row, never
+   * rewritten by a load.
+   */
+  async writeToolRow(tool: EmergentTool): Promise<void> {
+    await this.persistToolToDb(tool);
+  }
+
   /**
    * Take a tool read from storage into memory without rewriting its row.
    * `upsert` re-serialises the source; a loaded tool must keep the row it has.
@@ -881,16 +896,15 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     if (removed) {
       this.states.delete(toolId);
       if (this.db && this.schemaReady) {
-        this.db
-          .run(`DELETE FROM agentos_emergent_tools WHERE id = ?`, [toolId])
-          .catch(() => {
-            // Best-effort cleanup only.
-          });
-        this.db
-          .run(`DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?`, [toolId])
-          .catch(() => {
-            // Best-effort cleanup only.
-          });
+        const db = this.db;
+        // After every queued state write of the tool, so a write still in the
+        // queue cannot recreate the state row once it is deleted.
+        this.queueStateWrite(toolId, async () => {
+          await db.run(`DELETE FROM agentos_emergent_tools WHERE id = ?`, [toolId]);
+          await db.run(`DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?`, [toolId]);
+        }).catch(() => {
+          // Best-effort cleanup only.
+        });
       }
       this.logAudit(toolId, 'remove');
     }

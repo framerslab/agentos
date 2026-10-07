@@ -555,7 +555,10 @@ export interface EmergentTool {
   tier: ToolTier;
 
   /**
-   * Identifier of the entity (agent ID or `'system'`) that created this tool.
+   * The agent that created this tool, or `'system'`. The agent identity is the
+   * persona: `forge_tool` passes the caller's `personaId`, and an `agent`-tier
+   * tool runs only for a caller with that `personaId`. (A GMI instance id is
+   * minted per session and cannot own a tool meant to outlive one.)
    */
   createdBy: string;
 

@@ -969,7 +969,9 @@ export class ToolOrchestrator implements IToolOrchestrator {
             return Promise.resolve(false);
           }
           this.emergentExecutables.delete(tool.name);
-          return this.unregisterTool(tool.name);
+          // Through the executor, as onToolRemoved does: this cleanup is the
+          // library's own and does not depend on allowDynamicRegistration.
+          return this.toolExecutor.unregisterTool(tool.name);
         }),
       );
       console.log(

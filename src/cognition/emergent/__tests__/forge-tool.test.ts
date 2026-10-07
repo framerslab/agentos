@@ -162,7 +162,7 @@ describe('ForgeToolMetaTool', () => {
 
     expect(mockEngine.forge).toHaveBeenCalledTimes(1);
     expect(mockEngine.forge).toHaveBeenCalledWith(input, {
-      agentId: 'agent-99',
+      agentId: 'persona-main',
       sessionId: 'sess-xyz',
     });
   });
@@ -203,10 +203,10 @@ describe('ForgeToolMetaTool', () => {
   // 5. Extracts gmiId and correlationId from context
   // =========================================================================
 
-  it('passes gmiId as agentId and correlationId as sessionId', async () => {
+  it('passes personaId as agentId and correlationId as sessionId', async () => {
     mockEngine.forge.mockResolvedValueOnce(successResult());
 
-    const ctx = makeContext({ gmiId: 'custom-agent', correlationId: 'custom-sess' });
+    const ctx = makeContext({ personaId: 'custom-agent', correlationId: 'custom-sess' });
     await metaTool.execute(makeInput(), ctx);
 
     expect(mockEngine.forge).toHaveBeenCalledWith(expect.anything(), {
@@ -219,14 +219,14 @@ describe('ForgeToolMetaTool', () => {
   // 6. Falls back to 'unknown' when context fields are missing
   // =========================================================================
 
-  it('falls back to "unknown" when gmiId and correlationId are nullish', async () => {
+  it('falls back to "unknown" when personaId and correlationId are nullish', async () => {
     mockEngine.forge.mockResolvedValueOnce(successResult());
 
     // Uses ?? (nullish coalescing), so null/undefined map to 'unknown'
     // but empty string '' passes through because it's not nullish.
     const ctx = {
-      gmiId: undefined as unknown as string,
-      personaId: 'persona-main',
+      gmiId: 'agent-99',
+      personaId: undefined as unknown as string,
       userContext: { userId: 'user-1' },
     } as ToolExecutionContext;
 
@@ -238,15 +238,15 @@ describe('ForgeToolMetaTool', () => {
     });
   });
 
-  it('preserves empty string gmiId instead of replacing with "unknown"', async () => {
+  it('preserves an empty personaId instead of replacing it with "unknown"', async () => {
     mockEngine.forge.mockResolvedValueOnce(successResult());
 
     // Empty string is not nullish — ?? preserves it, unlike || which would
     // replace it with 'unknown'. This is intentional: an explicit empty
     // string assignment is different from a missing/undefined field.
     const ctx = {
-      gmiId: '',
-      personaId: 'persona-main',
+      gmiId: 'agent-99',
+      personaId: '',
       userContext: { userId: 'user-1' },
     } as ToolExecutionContext;
 
