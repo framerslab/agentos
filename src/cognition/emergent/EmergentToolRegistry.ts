@@ -994,6 +994,11 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     return this.readStoredState(toolId);
   }
 
+  /** Every state held in memory: the tools this process forged, loaded or suspended. */
+  listStates(): ToolStateRecord[] {
+    return [...this.states.values()];
+  }
+
   /**
    * A tool's state as its row reads now, or `undefined`; what this process
    * holds is not consulted. The loader reads it before adopting a row it has

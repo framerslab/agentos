@@ -85,6 +85,8 @@ export interface ToolCandidate {
     output: unknown;
     success: boolean;
     error?: string;
+    /** Steps with side effects that were not executed while forging, with their arguments. */
+    effects?: unknown[];
   }>;
 }
 
@@ -436,7 +438,9 @@ export class EmergentJudge {
     const testResultsFormatted = candidate.testResults
       .map(
         (r, i) =>
-          `Test ${i + 1}: input=${JSON.stringify(r.input)} output=${JSON.stringify(r.output)} success=${r.success}${r.error ? ` error=${r.error}` : ''}`,
+          `Test ${i + 1}: input=${JSON.stringify(r.input)} output=${JSON.stringify(r.output)} success=${r.success}` +
+          `${r.error ? ` error=${r.error}` : ''}` +
+          `${r.effects && r.effects.length > 0 ? ` effects=${JSON.stringify(r.effects)}` : ''}`,
       )
       .join('\n');
 

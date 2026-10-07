@@ -147,6 +147,11 @@ export class ComposableToolBuilder {
     return this.gate !== undefined;
   }
 
+  /** The tool a step names, as the gate resolves it now; undefined without a gate. */
+  resolve(stepTool: string): ITool | undefined {
+    return this.gate?.resolve(stepTool);
+  }
+
   /** Whether a step naming this tool may be chained right now. */
   check(stepTool: string): Chainability {
     if (!this.gate) {

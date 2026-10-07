@@ -50,6 +50,7 @@ export type { ToolCandidate, EmergentJudgeConfig } from './EmergentJudge.js';
 export { EmergentCapabilityEngine } from './EmergentCapabilityEngine.js';
 export type {
   EmergentCapabilityEngineDeps,
+  EmergentExecutableTool,
   FailedToolLoad,
   LoadedToolOutcome,
   LoadPersistedToolsOptions,

@@ -615,6 +615,14 @@ export interface ForgeTestCase {
    * The judge uses this as a reference — partial matches may still score well.
    */
   expectedOutput: unknown;
+
+  /**
+   * Outputs for the steps of a composition that have side effects (or are
+   * compositions themselves). While a tool is forged those steps are not
+   * executed; each takes its output from here, keyed by step name, so later
+   * steps receive real data.
+   */
+  stepOutputs?: Record<string, unknown>;
 }
 
 /**
@@ -835,6 +843,16 @@ export interface EmergentConfig {
    * @default undefined (disabled)
    */
   selfImprovement?: SelfImprovementConfig;
+
+  /**
+   * Which tools with side effects a composition or a workflow may chain as a
+   * step. A tool that declares `hasSideEffects: false` is chained freely; one
+   * that declares `true` only when its name is listed here; one that declares
+   * nothing is never chained. The list is read when a step is checked (at
+   * forge, at load, at promotion and on every run), not at construction.
+   * @default { sideEffectingTools: [] }
+   */
+  compose?: { sideEffectingTools?: string[] };
 }
 
 /**

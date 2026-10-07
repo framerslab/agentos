@@ -47,6 +47,7 @@ import type { ITool, ToolExecutionContext, ToolExecutionResult } from '../../cor
 import type { PersonalityMutationStore } from './PersonalityMutationStore.js';
 import type { AdaptPersonalityTool } from './AdaptPersonalityTool.js';
 import { ComposableToolBuilder } from './ComposableToolBuilder.js';
+import type { StepGate } from './StepGate.js';
 import { SandboxedToolForge } from './SandboxedToolForge.js';
 import { EmergentJudge } from './EmergentJudge.js';
 import { EmergentToolRegistry } from './EmergentToolRegistry.js';
@@ -148,6 +149,43 @@ export interface SelfImprovementToolDeps {
 /** The configuration key behind a reason, named in the start-up line. */
 const REASON_CONFIG_KEYS: Readonly<Record<string, string>> = {
   source_not_persisted: 'emergent.persistSandboxSource',
+  sandbox_tools_off: 'emergent.allowSandboxTools',
+  compose_needs_gate: 'a StepGate (deps.stepGate, or the ComposableToolBuilder)',
+  step_not_chainable: 'emergent.compose.sideEffectingTools',
+  side_effects_undeclared: "the step tool's hasSideEffects",
+  step_cycle: "the composition's steps (a step reaches the composition itself)",
+};
+
+/**
+ * The library's suspensions of a composition that a change in what is
+ * registered can lift: the composition is checked again when a tool one of
+ * its steps names is registered (`onHostToolRegistered`).
+ */
+const STEP_SUSPENSION_REASONS: ReadonlySet<string> = new Set([
+  'compose_needs_gate',
+  'step_missing',
+  'step_not_chainable',
+  'side_effects_undeclared',
+  'step_replaced',
+  'step_cycle',
+]);
+
+/** Step refusals a composed call can meet at run time, and the suspension each leads to. */
+const RUN_REFUSAL_REASONS: Readonly<Record<string, string>> = {
+  step_missing: 'step_missing',
+  step_not_chainable: 'step_replaced',
+  side_effects_undeclared: 'step_replaced',
+  compose_needs_gate: 'compose_needs_gate',
+  step_cycle: 'step_cycle',
+};
+
+/** The `ITool` the engine registers for a forged tool. */
+export type EmergentExecutableTool = ITool<Record<string, unknown>, unknown> & {
+  /**
+   * How the tool was forged. A host's orchestrator reads it to ask at each
+   * step of a composition instead of at the composed call.
+   */
+  readonly emergentMode: 'compose' | 'sandbox';
 };
 
 /** What happened to one stored tool at load. */
@@ -240,6 +278,14 @@ export interface EmergentCapabilityEngineDeps {
 
   /** Tiered registry for storing and querying emergent tools. */
   registry: EmergentToolRegistry;
+
+  /**
+   * The gate composed tools run their steps through. `ToolOrchestrator`
+   * passes its own; a host that builds the engine directly passes one from
+   * `createStepGate`, or gives the builder one. Without a gate the engine
+   * forges code but refuses to compose (`compose_needs_gate`).
+   */
+  stepGate?: StepGate;
 
   /** Optional callback used to activate a newly forged tool immediately. */
   onToolForged?: (tool: EmergentTool, executable: ITool) => Promise<void>;
@@ -341,6 +387,12 @@ export class EmergentCapabilityEngine {
     this.onToolForged = deps.onToolForged;
     this.onToolPromoted = deps.onToolPromoted;
     this.onToolRemoved = deps.onToolRemoved;
+    if (deps.stepGate) {
+      this.composableBuilder.bind({ gate: deps.stepGate });
+    }
+    this.composableBuilder.bind({
+      sideEffectingTools: this.config.compose?.sideEffectingTools ?? [],
+    });
   }
 
   // --------------------------------------------------------------------------
@@ -363,12 +415,14 @@ export class EmergentCapabilityEngine {
    * 6. If rejected: return failure with the judge's reasoning.
    *
    * @param request - The forge request describing the desired tool.
-   * @param context - Caller context containing the agent and session IDs.
+   * @param context - The agent and session ids. `caller` is the forging
+   *   call's own context: a composition's test steps run as that caller, so
+   *   they meet the checks the caller's direct calls meet.
    * @returns A {@link ForgeResult} indicating success or failure.
    */
   async forge(
     request: ForgeToolRequest,
-    context: { agentId: string; sessionId: string }
+    context: { agentId: string; sessionId: string; caller?: ToolExecutionContext }
   ): Promise<ForgeResult> {
     // Guard: engine must be enabled.
     if (!this.config.enabled) {
@@ -386,43 +440,76 @@ export class EmergentCapabilityEngine {
       // ---- COMPOSE MODE ----
       source = JSON.stringify(request.implementation);
 
-      // Build the composable tool so we can execute test cases against it.
-      const composedTool = this.composableBuilder.build(
-        request.name,
-        request.description,
-        request.inputSchema,
-        request.implementation
-      );
+      // Every step must be chainable before any test case runs.
+      for (const step of request.implementation.steps) {
+        const verdict = this.composableBuilder.check(step.tool);
+        if (!verdict.ok) {
+          return {
+            success: false,
+            error: `${verdict.code}: step "${step.name}" (tool "${step.tool}"): ${verdict.message}`,
+          };
+        }
+      }
 
-      // Run every declared test case.
-      const mockContext: ToolExecutionContext = {
+      // A composition must not reach itself, through any nesting.
+      const cycle = this.compositionCycle(request.name, request.implementation.steps);
+      if (cycle) {
+        return {
+          success: false,
+          error: `step_cycle: "${request.name}" reaches itself through ${cycle.join(' -> ')}`,
+        };
+      }
+
+      // The test steps run as the forging caller, so they meet the checks the
+      // caller's direct calls meet; a host that builds the engine itself and
+      // passes no caller gets a context of its own.
+      const testContext: ToolExecutionContext = context.caller ?? {
         gmiId: context.agentId,
         personaId: 'emergent-forge',
-        userContext: { userId: 'system' } as any,
+        userContext: { userId: 'system' } as ToolExecutionContext['userContext'],
         correlationId: context.sessionId,
       };
 
       for (const tc of request.testCases) {
+        let result: ToolExecutionResult;
         try {
-          const result = await composedTool.execute(
+          result = await this.composableBuilder.runPipeline(
+            request.implementation,
             tc.input as Record<string, unknown>,
-            mockContext
+            testContext,
+            { dry: { stepOutputs: tc.stepOutputs ?? {} } },
           );
-          testResults.push({
-            input: tc.input,
-            output: result.output,
-            success: result.success,
-            error: result.error,
-          });
         } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
           testResults.push({
             input: tc.input,
             output: undefined,
             success: false,
-            error: message,
+            error: err instanceof Error ? err.message : String(err),
           });
+          continue;
         }
+        const details = result.details as { code?: string; effects?: unknown[] } | undefined;
+        if (details?.code === 'dry_run_needs_output') {
+          return { success: false, error: result.error };
+        }
+        if (details?.code === 'permission_denied' && !context.caller) {
+          // A step needs a capability the stand-in context does not carry:
+          // the test says nothing about the tool, so the forge asks for the
+          // caller instead of recording a failed test.
+          return {
+            success: false,
+            error:
+              'caller_context_required: a step of this composition needs a capability; ' +
+              "pass the forging caller's context (forge(request, { ..., caller }))",
+          };
+        }
+        testResults.push({
+          input: tc.input,
+          output: result.output,
+          success: result.success,
+          error: result.error,
+          ...(details?.effects && details.effects.length > 0 ? { effects: details.effects } : {}),
+        });
       }
     } else {
       // ---- SANDBOX MODE ----
@@ -640,6 +727,13 @@ export class EmergentCapabilityEngine {
 
     if (!tool) {
       return null;
+    }
+
+    // A tool that no longer fits what is in force is suspended, not promoted.
+    const refusal = this.refusalFor(tool.implementation, tool.name);
+    if (refusal) {
+      await this.suspendAsLibrary(toolId, refusal);
+      return { success: false, error: `${refusal}: the tool no longer fits and was suspended.` };
     }
 
     // Only session-tier tools are eligible for auto-promotion.
@@ -864,7 +958,10 @@ export class EmergentCapabilityEngine {
     // process after the rows were read (a removal, a registration) is read
     // again before it is adopted.
     await this.withRead(async (readAt) => {
-      const rows = await this.registry.loadRows(tiers, { agentId, sessionId });
+      // Code tools first: a stored composition may chain a stored code tool.
+      const rows = (await this.registry.loadRows(tiers, { agentId, sessionId })).sort(
+        (a, b) => Number(a.implementation_mode === 'compose') - Number(b.implementation_mode === 'compose'),
+      );
       for (const row of rows) {
         try {
           outcomes.push(await this.admitRow(row, { readAt }));
@@ -875,6 +972,29 @@ export class EmergentCapabilityEngine {
         }
       }
     });
+    // A composition can chain another composition loaded after it: those
+    // suspended because a step was missing are admitted once more.
+    for (let i = 0; i < outcomes.length; i += 1) {
+      const outcome = outcomes[i];
+      if (outcome.state !== 'suspended' || outcome.reason !== 'step_missing') {
+        continue;
+      }
+      try {
+        const again = await this.withRead(async (readAt) => {
+          const row = await this.registry.loadRow(outcome.toolId);
+          return row ? this.admitRow(row, { readAt }) : undefined;
+        });
+        if (again) {
+          outcomes[i] = again;
+        }
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        outcomes.splice(i, 1);
+        i -= 1;
+        failed.push({ toolId: outcome.toolId, name: outcome.name, error: message });
+        console.warn(`[agentos:emergent] stored tool "${outcome.name}" (${outcome.toolId}) did not load: ${message}`);
+      }
+    }
 
     for (const outcome of outcomes) {
       if (outcome.state === 'active') continue;
@@ -954,10 +1074,43 @@ export class EmergentCapabilityEngine {
    * @returns the outcome, or `undefined` when the tool is unknown.
    */
   async reactivateTool(toolId: string): Promise<LoadedToolOutcome | undefined> {
+    return this.recheck(toolId, true);
+  }
+
+  /**
+   * Called by the host when any tool is registered. A composition the library
+   * suspended because a step was missing, refused, replaced or circular is
+   * checked again when a tool one of its steps names arrives, and registered
+   * when it fits. A host's own suspension is left to the host.
+   */
+  async onHostToolRegistered(toolName: string): Promise<void> {
+    for (const record of this.registry.listStates()) {
+      if (
+        record.state !== 'suspended' ||
+        record.setBy !== 'library' ||
+        !STEP_SUSPENSION_REASONS.has(record.reason ?? '')
+      ) {
+        continue;
+      }
+      if (record.request?.kind !== 'compose' || !record.request.steps.some((step) => step.tool === toolName)) {
+        continue;
+      }
+      try {
+        await this.recheck(record.toolId, false);
+      } catch (error: unknown) {
+        console.warn(
+          `[agentos:emergent] could not re-check "${record.toolId}" after "${toolName}" was registered:`,
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+  }
+
+  private async recheck(toolId: string, force: boolean): Promise<LoadedToolOutcome | undefined> {
     return this.withRead(async (readAt) => {
       const row = await this.registry.loadRow(toolId);
       if (row) {
-        return this.admitRow(row, { force: true, readAt });
+        return this.admitRow(row, { force, readAt });
       }
       const tool = this.registry.get(toolId);
       if (!tool) {
@@ -976,7 +1129,7 @@ export class EmergentCapabilityEngine {
           createdBy: tool.createdBy,
           buildTool: () => tool,
         },
-        { force: true, readAt },
+        { force, readAt },
       );
     });
   }
@@ -1184,7 +1337,7 @@ export class EmergentCapabilityEngine {
       refusal = 'legacy_owner';
     }
     if (implementation && !refusal) {
-      refusal = this.refusalFor(implementation);
+      refusal = this.refusalFor(implementation, name);
     }
 
     if (refusal || !implementation) {
@@ -1399,11 +1552,79 @@ export class EmergentCapabilityEngine {
    * configuration in force, or `null`. Later steps add their checks here, so
    * forging, loading and promotion all ask the same question.
    */
-  private refusalFor(implementation: ToolImplementation): string | null {
-    if (implementation.mode === 'sandbox' && implementation.code.trim() === '') {
-      return 'source_not_persisted';
+  private refusalFor(implementation: ToolImplementation, name?: string): string | null {
+    if (implementation.mode === 'sandbox') {
+      if (!this.config.allowSandboxTools) {
+        return 'sandbox_tools_off';
+      }
+      if (implementation.code.trim() === '') {
+        return 'source_not_persisted';
+      }
+      return null;
+    }
+    for (const step of implementation.steps) {
+      const verdict = this.composableBuilder.check(step.tool);
+      if (!verdict.ok) {
+        return verdict.code;
+      }
+    }
+    if (name !== undefined && this.compositionCycle(name, implementation.steps)) {
+      return 'step_cycle';
     }
     return null;
+  }
+
+  /**
+   * The path of step tool names through which a composition named `name`
+   * reaches itself, or a nested composition reaches one already on the path;
+   * null when there is none. Nested compositions are followed through the
+   * tools the gate resolves now.
+   */
+  private compositionCycle(
+    name: string,
+    steps: readonly { tool: string }[],
+    path: readonly string[] = [],
+  ): string[] | null {
+    for (const step of steps) {
+      if (step.tool === name || path.includes(step.tool)) {
+        return [...path, step.tool];
+      }
+      const nested = this.nestedSteps(step.tool);
+      if (nested) {
+        const found = this.compositionCycle(name, nested, [...path, step.tool]);
+        if (found) {
+          return found;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** The steps of the emergent composition registered as `toolName`, or undefined. */
+  private nestedSteps(toolName: string): readonly { tool: string }[] | undefined {
+    const resolved = this.composableBuilder.resolve(toolName) as (ITool & { emergentMode?: string }) | undefined;
+    if (resolved?.emergentMode !== 'compose' || !resolved.id.startsWith('emergent-tool:')) {
+      return undefined;
+    }
+    const implementation = this.registry.get(resolved.id.slice('emergent-tool:'.length))?.implementation;
+    return implementation?.mode === 'compose' ? implementation.steps : undefined;
+  }
+
+  /**
+   * A suspension the library sets from a run or a promotion check: written as
+   * the library's (so a later load, or a registration of the missing step
+   * tool, re-checks it), held here, and the executable taken out.
+   */
+  private async suspendAsLibrary(toolId: string, reason: string): Promise<void> {
+    try {
+      await this.registry.setState(toolId, 'suspended', reason, { setBy: 'library' });
+    } catch (error: unknown) {
+      console.warn(
+        `[agentos:emergent] could not store the suspension of "${toolId}" (${reason}):`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+    await this.unregisterIfLive(toolId);
   }
 
   private async unregisterIfLive(toolId: string): Promise<void> {
@@ -1519,6 +1740,7 @@ export class EmergentCapabilityEngine {
             },
             executeTool: deps.executeTool,
             listTools: deps.listTools,
+            checkStep: (name: string) => this.composableBuilder.check(name),
           }),
         );
       } catch {
@@ -1559,7 +1781,7 @@ export class EmergentCapabilityEngine {
    * runs or a use is recorded; it then performs runtime output validation,
    * usage tracking, and promotion checks after each successful execution.
    */
-  createExecutableTool(tool: EmergentTool): ITool<Record<string, unknown>, unknown> {
+  createExecutableTool(tool: EmergentTool): EmergentExecutableTool {
     const baseTool =
       tool.implementation.mode === 'compose'
         ? this.composableBuilder.build(
@@ -1578,7 +1800,13 @@ export class EmergentCapabilityEngine {
       inputSchema: tool.inputSchema,
       outputSchema: tool.outputSchema,
       category: 'emergent',
-      hasSideEffects: tool.implementation.mode === 'sandbox',
+      emergentMode: tool.implementation.mode,
+      // A composition has side effects when one of its steps does (or is a
+      // composition itself); each such step is then asked at the step (see
+      // ToolOrchestrator), not at the composed call.
+      hasSideEffects:
+        tool.implementation.mode === 'sandbox' ||
+        this.composableBuilder.hasSideEffectingStep(tool.implementation),
       execute: async (
         args: Record<string, unknown>,
         context: ToolExecutionContext
@@ -1618,6 +1846,21 @@ export class EmergentCapabilityEngine {
         const result = await baseTool.execute(args, context);
         const executionTimeMs = Math.round(performance.now() - startTime);
 
+        // A step that can no longer be chained (its tool was removed or
+        // replaced, or the chain reaches itself) suspends the composition
+        // until a fitting tool is registered.
+        const refused = (result.details as { code?: string } | undefined)?.code;
+        const suspendFor = !result.success && refused ? RUN_REFUSAL_REASONS[refused] : undefined;
+        if (suspendFor) {
+          await this.suspendAsLibrary(tool.id, suspendFor);
+          return {
+            success: false,
+            output: result.output,
+            error: result.error ?? 'A step of this composition can no longer be chained.',
+            details: result.details,
+          };
+        }
+
         let success = result.success;
         let error = result.error;
         // Track whether the output passed schema validation separately from
@@ -1649,6 +1892,7 @@ export class EmergentCapabilityEngine {
               success: false,
               output: result.output,
               error: error ?? 'Emergent tool execution failed.',
+              ...(result.details ? { details: result.details } : {}),
             };
       },
     };

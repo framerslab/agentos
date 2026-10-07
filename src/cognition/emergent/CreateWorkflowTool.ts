@@ -103,6 +103,15 @@ export interface CreateWorkflowDeps {
   ) => Promise<unknown>;
   /** Return the list of all currently available tool names. */
   listTools: () => string[];
+  /**
+   * Whether a tool may be chained as a workflow step: the same rule a
+   * composition's steps meet (`hasSideEffects: false` freely, `true` only
+   * when the host lists it, unset never). Each step's own permission check
+   * and approval are what its `executeTool` applies.
+   */
+  checkStep?: (
+    name: string,
+  ) => { ok: true } | { ok: false; code: string; message: string };
 }
 
 // ============================================================================
