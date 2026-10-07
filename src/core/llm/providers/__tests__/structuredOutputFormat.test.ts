@@ -59,6 +59,41 @@ describe('buildResponseFormat', () => {
     expect(inputSchema.required).toEqual(['kind']);
   });
 
+  it('anthropic: a property two variants type differently keeps both schemas under a nested anyOf', () => {
+    // Keeping only the first variant's schema told the model that variant b's
+    // `value` is a string, and a reply that followed it failed the Zod check.
+    const union = z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('a'), value: z.string(), note: z.string() }),
+      z.object({ kind: z.literal('b'), value: z.number(), note: z.string() }),
+    ]);
+    const inputSchema = (buildResponseFormat({ provider: 'anthropic', schema: union, schemaName: 'X' }) as any)
+      .tool.input_schema;
+
+    expect(inputSchema.anyOf).toBeUndefined();
+    expect(inputSchema.properties.kind).toEqual({ enum: ['a', 'b'] });
+    expect(inputSchema.properties.value).toEqual({ anyOf: [{ type: 'string' }, { type: 'number' }] });
+    // The same schema in every variant stays a single schema.
+    expect(inputSchema.properties.note).toEqual({ type: 'string' });
+    expect(inputSchema.required).toEqual(['kind', 'value', 'note']);
+  });
+
+  it('anthropic: a property only one variant has keeps its whole schema', () => {
+    const union = z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('a'), mode: z.enum(['x', 'y']) }),
+      z.object({ kind: z.literal('b') }),
+    ]);
+    const merged = (buildResponseFormat({ provider: 'anthropic', schema: union, schemaName: 'X' }) as any)
+      .tool.input_schema;
+    const alone = (buildResponseFormat({
+      provider: 'anthropic',
+      schema: z.object({ mode: z.enum(['x', 'y']) }),
+      schemaName: 'X',
+    }) as any).tool.input_schema;
+
+    expect(merged.properties.mode).toEqual(alone.properties.mode);
+    expect(merged.required).toEqual(['kind']);
+  });
+
   it('gemini returns json_object with _gemini.responseSchema populated', () => {
     const r = buildResponseFormat({ provider: 'gemini', schema, schemaName: 'X' });
     expect((r as any).type).toBe('json_object');

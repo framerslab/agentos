@@ -59,7 +59,8 @@ function sanitizeName(name: string): string {
  *
  *  1. **Union of objects → one merged object.** Union the members' `properties`
  *     (merging same-named `enum` members so a discriminant like `kind` becomes
- *     the full set of variant values), and keep in `required` only the fields
+ *     the full set of variant values, and keeping a shared property's differing
+ *     schemas under a nested `anyOf`), and keep in `required` only the fields
  *     required by EVERY member, so variant-specific fields stay optional. The
  *     model returns one flat object; the caller's Zod schema re-validates the
  *     exact variant, so strictness is preserved. Nested `anyOf` (inside a
@@ -70,6 +71,42 @@ function sanitizeName(name: string): string {
  *     tool-conversion path applies). An object schema already carrying a `type`
  *     passes through unchanged.
  */
+/**
+ * Merges the schemas that the variants of a top-level union give one property.
+ * Enum schemas (a discriminant such as `kind`) become one enum of every value;
+ * otherwise identical schemas collapse to one, and different ones are kept side
+ * by side under a nested `anyOf`, which Anthropic accepts below the top level.
+ * Keeping only the first variant's schema would tell the model a later
+ * variant's value has the first variant's type, and the reply would then fail
+ * the caller's Zod schema.
+ */
+function mergePropertySchemas(schemas: unknown[]): unknown {
+  if (schemas.length === 1) {
+    return schemas[0];
+  }
+  if (
+    schemas.every(
+      (s) => s && typeof s === 'object' && Array.isArray((s as Record<string, unknown>).enum),
+    )
+  ) {
+    return {
+      enum: Array.from(
+        new Set(schemas.flatMap((s) => (s as Record<string, unknown>).enum as unknown[])),
+      ),
+    };
+  }
+  const distinct: unknown[] = [];
+  const seen = new Set<string>();
+  for (const schema of schemas) {
+    const key = JSON.stringify(schema);
+    if (!seen.has(key)) {
+      seen.add(key);
+      distinct.push(schema);
+    }
+  }
+  return distinct.length === 1 ? distinct[0] : { anyOf: distinct };
+}
+
 function ensureAnthropicObjectSchema(jsonSchema: unknown): Record<string, unknown> {
   if (!jsonSchema || typeof jsonSchema !== 'object') {
     return { type: 'object' };
@@ -89,7 +126,8 @@ function ensureAnthropicObjectSchema(jsonSchema: unknown): Record<string, unknow
     variants.length > 0 &&
     variants.every((v) => v && typeof v === 'object' && v.type === 'object')
   ) {
-    const mergedProperties: Record<string, unknown> = {};
+    // Every variant's schema for each property, in the order properties first appear.
+    const propertySchemas = new Map<string, unknown[]>();
     const requiredCounts: Record<string, number> = {};
     for (const variant of variants) {
       const props =
@@ -97,24 +135,9 @@ function ensureAnthropicObjectSchema(jsonSchema: unknown): Record<string, unknow
           ? (variant.properties as Record<string, unknown>)
           : {};
       for (const [key, propSchema] of Object.entries(props)) {
-        const existing = mergedProperties[key] as
-          | Record<string, unknown>
-          | undefined;
-        const incoming = propSchema as Record<string, unknown>;
-        if (
-          existing &&
-          Array.isArray(existing.enum) &&
-          incoming &&
-          Array.isArray(incoming.enum)
-        ) {
-          // Same field is an enum across variants (e.g. the discriminant) —
-          // union the allowed values so the model can satisfy any variant.
-          mergedProperties[key] = {
-            enum: Array.from(new Set([...existing.enum, ...incoming.enum])),
-          };
-        } else if (!(key in mergedProperties)) {
-          mergedProperties[key] = propSchema;
-        }
+        const schemas = propertySchemas.get(key) ?? [];
+        schemas.push(propSchema);
+        propertySchemas.set(key, schemas);
       }
       const variantRequired = Array.isArray(variant.required)
         ? (variant.required as string[])
@@ -128,6 +151,10 @@ function ensureAnthropicObjectSchema(jsonSchema: unknown): Record<string, unknow
     const required = Object.keys(requiredCounts).filter(
       (field) => requiredCounts[field] === variants.length,
     );
+    const mergedProperties: Record<string, unknown> = {};
+    for (const [key, schemas] of propertySchemas) {
+      mergedProperties[key] = mergePropertySchemas(schemas);
+    }
     return {
       type: 'object',
       properties: mergedProperties,
