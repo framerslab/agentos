@@ -19,6 +19,7 @@
  * bootstrap.
  */
 
+import { randomUUID } from 'node:crypto';
 import type { AgentOSInput } from '../types/AgentOSInput';
 import type { ILogger } from '../../core/logging/ILogger';
 import type { ToolExecutionContext } from '../../core/tools/ITool.js';
@@ -489,23 +490,36 @@ export class SelfImprovementSessionManager {
       executeTool: async (
         name: string,
         args: unknown,
-        context?: import('../core/tools/ITool.js').ToolExecutionContext,
+        context?: ToolExecutionContext,
+        signal?: AbortSignal,
       ): Promise<unknown> => {
         const orchestrator = accessors.getToolOrchestrator();
-        const tool = await orchestrator.getTool(name);
-        if (!tool) {
-          throw new Error(`Tool "${name}" not found in orchestrator.`);
-        }
-        const result = await tool.execute(
-          (args ?? {}) as Record<string, unknown>,
-          context ?? {
-            gmiId: 'self-improvement',
-            personaId: 'self-improvement',
-            userContext: { userId: 'system' } as any,
+        const caller: ToolExecutionContext = context ?? {
+          gmiId: 'self-improvement',
+          personaId: 'self-improvement',
+          userContext: { userId: 'system' } as ToolExecutionContext['userContext'],
+        };
+        // Through processToolCall, so a workflow step meets the disabled list,
+        // the permission check (as the caller) and the approval a direct call
+        // meets; an expired step's signal stops it before its tool starts.
+        const result = await orchestrator.processToolCall({
+          toolCallRequest: {
+            id: `workflow-step-${randomUUID()}`,
+            name,
+            arguments: (args ?? {}) as Record<string, any>,
           },
-        );
-        if (!result.success) {
-          throw new Error(result.error ?? `Tool "${name}" failed.`);
+          gmiId: caller.gmiId,
+          personaId: caller.personaId,
+          personaCapabilities: caller.personaCapabilities ?? [],
+          userContext: caller.userContext,
+          correlationId: caller.correlationId,
+          sessionData: caller.sessionData,
+          ...(signal ? { signal } : {}),
+        });
+        if (result.isError) {
+          throw new Error(
+            (result.errorDetails as { message?: string } | undefined)?.message ?? `Tool "${name}" failed.`,
+          );
         }
         return result.output;
       },

@@ -242,6 +242,7 @@ describe('ToolOrchestrator — emergent engine integration', () => {
       expect.objectContaining({
         correlationId: 'sess-1',
       }),
+      expect.any(AbortSignal),
     );
     expect(executeTool).toHaveBeenNthCalledWith(
       2,
@@ -252,6 +253,7 @@ describe('ToolOrchestrator — emergent engine integration', () => {
       expect.objectContaining({
         correlationId: 'sess-1',
       }),
+      expect.any(AbortSignal),
     );
 
     const otherSessionList = await workflowTool!.execute(

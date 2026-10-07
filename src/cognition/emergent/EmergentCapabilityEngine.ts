@@ -109,6 +109,7 @@ export interface SelfImprovementToolDeps {
     name: string,
     args: unknown,
     context?: ToolExecutionContext,
+    signal?: AbortSignal,
   ) => Promise<unknown>;
 
   /** Returns the names of all currently registered tools. */
