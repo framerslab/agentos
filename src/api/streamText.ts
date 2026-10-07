@@ -14,6 +14,7 @@ import { fireLlmUsageObserver } from './observers.js';
 import { hostPolicyToRouteParams, mergeRequiredCapabilities } from './runtime/hostPolicy.js';
 import { adaptTools } from './runtime/toolAdapter.js';
 import { runEmulatedToolLoop, toShimMessages, type ToolMode } from './runtime/tool-emulation/index.js';
+import { APPROVAL_GRANTED, askApprovalGate } from './runtime/approval-gate.js';
 import {
   buildPolicyAwareFallbackChain,
   createPlan,
@@ -621,6 +622,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           onToolExecute: () => {
             shimRanTool = true;
           },
+          // The hook, then the approval gate, before each parsed call runs,
+          // as on the native loop below.
+          onBeforeToolExecution: opts.onBeforeToolExecution,
+          approvalGate: opts.__approvalGate,
           // Native tool turns in the history become the shim's own
           // <tool_call> / <tool_response> text.
           messages: toShimMessages(messages),
@@ -1132,6 +1137,35 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               parsedArgs = hookResult.args;
             } catch (hookErr) {
               console.warn('[agentos] onBeforeToolExecution hook error:', hookErr);
+            }
+          }
+
+          // --- approval gate (agency hitl.approvals.beforeTool) ---
+          // Runs after the hook, on the arguments the hook left. Anything but
+          // the exact approval skips the tool and tells the model.
+          if (opts.__approvalGate) {
+            const verdict = await askApprovalGate(opts.__approvalGate, {
+              name: fnName,
+              args: (parsedArgs ?? {}) as Record<string, unknown>,
+              id: toolCallId || '',
+              step,
+            });
+            if (verdict !== APPROVAL_GRANTED) {
+              toolCallRecord.error = `Skipped: ${verdict.reason}`;
+              const resultPart: StreamPart = {
+                type: 'tool-result',
+                toolName: fnName,
+                result: { skipped: true, reason: verdict.reason },
+              };
+              parts.push(resultPart);
+              yield resultPart;
+              messages.push({
+                role: 'tool',
+                tool_call_id: toolCallId,
+                content: JSON.stringify({ skipped: true, reason: verdict.reason }),
+              } as any);
+              allToolCalls.push(toolCallRecord);
+              continue;
             }
           }
 

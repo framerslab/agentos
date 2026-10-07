@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ExtensionManager } from '../../../extensions/ExtensionManager.js';
 import { EXTENSION_KIND_TTS_PROVIDER } from '../../../extensions/types.js';
 import { SpeechRuntime } from '../SpeechRuntime.js';
+import type { SpeechToTextProvider } from '../types.js';
 
 /**
  * Tests for {@link SpeechRuntime} — the high-level runtime that manages
@@ -103,5 +104,124 @@ describe('SpeechRuntime', () => {
 
     // Verify the preferred providers were used, not the first-registered ones
     expect(calls).toEqual(['elevenlabs', 'deepgram']);
+  });
+
+  it('should transcribe on gpt-transcribe by default and keep timestamped formats on whisper-1', async () => {
+    // The env-registered provider captures the global fetch when it is built,
+    // so the stub goes in before the runtime is constructed.
+    const forms: FormData[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        forms.push(init?.body as unknown as FormData);
+        return new Response(JSON.stringify({ text: 'hello', languages: [{ code: 'en' }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      })
+    );
+    try {
+      const audio = { data: Buffer.from('wav'), mimeType: 'audio/wav' };
+      const runtime = new SpeechRuntime({ env: { OPENAI_API_KEY: 'sk-openai' } });
+      const stt = runtime.getProvider('openai-whisper') as SpeechToTextProvider;
+
+      const result = await stt.transcribe(audio, { language: 'en' });
+      expect(forms[0].get('model')).toBe('gpt-transcribe');
+      expect(forms[0].get('response_format')).toBe('json');
+      expect(forms[0].getAll('languages[]')).toEqual(['en']);
+      expect(forms[0].has('language')).toBe(false);
+      expect(result.language).toBe('en');
+
+      // Segment timestamps exist only on whisper-1, so a verbose_json call
+      // with no configured model runs there.
+      await stt.transcribe(audio, { responseFormat: 'verbose_json' });
+      expect(forms[1].get('model')).toBe('whisper-1');
+      expect(forms[1].get('response_format')).toBe('verbose_json');
+
+      // WHISPER_MODEL_DEFAULT still pins the model for every call.
+      const pinned = new SpeechRuntime({
+        env: { OPENAI_API_KEY: 'sk-openai', WHISPER_MODEL_DEFAULT: 'whisper-1' },
+      });
+      await (pinned.getProvider('openai-whisper') as SpeechToTextProvider).transcribe(audio);
+      expect(forms[2].get('model')).toBe('whisper-1');
+      expect(forms[2].get('response_format')).toBe('verbose_json');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('SpeechRuntime providers built from the environment', () => {
+  const ids = ['deepgram-batch', 'deepgram-aura', 'assemblyai', 'azure-speech-stt', 'azure-speech-tts'];
+
+  it('builds the Deepgram, AssemblyAI and Azure providers when their keys are set', () => {
+    const runtime = new SpeechRuntime({
+      env: {
+        DEEPGRAM_API_KEY: 'dg',
+        ASSEMBLYAI_API_KEY: 'aai',
+        AZURE_SPEECH_KEY: 'az',
+        AZURE_SPEECH_REGION: 'eastus',
+      },
+    });
+
+    for (const id of ids) {
+      expect(runtime.getProvider(id)?.id).toBe(id);
+    }
+    expect(runtime.resolver.resolveSTT({ preferredIds: ['assemblyai'] }).id).toBe('assemblyai');
+    expect(runtime.resolver.resolveTTS({ preferredIds: ['azure-speech-tts'] }).id).toBe('azure-speech-tts');
+  });
+
+  it('builds the Azure providers only with both the key and the region', () => {
+    const runtime = new SpeechRuntime({ env: { AZURE_SPEECH_KEY: 'az' } });
+
+    expect(runtime.getProvider('azure-speech-stt')).toBeUndefined();
+    expect(runtime.getProvider('azure-speech-tts')).toBeUndefined();
+  });
+
+  it('keeps OpenAI as the default and resolves a preferred core provider after refresh', async () => {
+    const env = { OPENAI_API_KEY: 'op', DEEPGRAM_API_KEY: 'dg' };
+    const plain = new SpeechRuntime({ env });
+    await plain.resolver.refresh();
+    expect(plain.getSTT()?.id).toBe('openai-whisper');
+
+    const preferring = new SpeechRuntime({ env, preferredSttProviderId: 'deepgram-batch' });
+    await preferring.resolver.refresh();
+    expect(preferring.getSTT()?.id).toBe('deepgram-batch');
+  });
+
+  it('resolves a provider passed to registerSttProvider', () => {
+    const runtime = new SpeechRuntime({ autoRegisterFromEnv: false });
+    const custom = {
+      id: 'custom-stt',
+      getProviderName: () => 'Custom',
+      transcribe: async () => ({ text: 'custom', cost: 0 }),
+    };
+
+    runtime.registerSttProvider(custom);
+
+    expect(runtime.getSTT()).toBe(custom);
+  });
+
+  it('matches a streaming requirement against what the provider instance does', () => {
+    // The catalog lists AssemblyAI as streaming; this provider uploads and polls.
+    const runtime = new SpeechRuntime({ env: { ASSEMBLYAI_API_KEY: 'aai' } });
+
+    expect(runtime.getSTT({ streaming: true })).toBeUndefined();
+    expect(runtime.getSTT({ streaming: false })?.id).toBe('assemblyai');
+  });
+
+  it('ignores a catalog entry of another kind, and treats an undeclared provider as not streaming', () => {
+    // 'elevenlabs' is a text-to-speech id in the catalog, listed as streaming.
+    const runtime = new SpeechRuntime({ autoRegisterFromEnv: false });
+    const custom = {
+      id: 'elevenlabs',
+      getProviderName: () => 'Custom',
+      transcribe: async () => ({ text: 'custom', cost: 0 }),
+    };
+
+    runtime.registerSttProvider(custom);
+
+    expect(runtime.getSTT({ streaming: false })).toBe(custom);
+    expect(runtime.getSTT({ streaming: true })).toBeUndefined();
   });
 });

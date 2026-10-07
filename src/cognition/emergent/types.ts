@@ -451,7 +451,7 @@ export interface ToolStateRecord {
   /**
    * The reason for a state other than `active`. The library's reasons are
    * catalogue words (`source_not_persisted`, `source_unreadable`,
-   * `legacy_inactive`); a host's reason is the text it gave.
+   * `legacy_inactive`, `legacy_owner`); a host's reason is the text it gave.
    */
   reason: string | null;
   /** Who recorded the state. */
@@ -562,7 +562,9 @@ export interface EmergentTool {
    * The agent that created this tool, or `'system'`. The agent identity is the
    * persona: `forge_tool` passes the caller's `personaId`, and an `agent`-tier
    * tool runs only for a caller with that `personaId`. (A GMI instance id is
-   * minted per session and cannot own a tool meant to outlive one.)
+   * minted per session and cannot own a tool meant to outlive one: an
+   * `agent`-tier row from an earlier release that carries one loads suspended
+   * with the reason `legacy_owner`.)
    */
   createdBy: string;
 
@@ -856,3 +858,14 @@ export const DEFAULT_EMERGENT_CONFIG: Readonly<EmergentConfig> = {
   judgeModel: 'gpt-4o-mini',
   promotionJudgeModel: 'gpt-4o',
 } as const;
+
+/**
+ * The prefix of a GMI instance id (`GMIManager` mints `gmi-instance-<uuid>`).
+ * Earlier releases recorded the forging instance's id as an `agent`-tier
+ * tool's owner; the persona is the owner now. The prefix is reserved for
+ * telling those rows apart: a tool whose owner begins with it is never
+ * promoted to the `agent` tier, so an `agent`-tier row whose owner carries
+ * it is always one an earlier release wrote, and it loads suspended with the
+ * reason `legacy_owner`.
+ */
+export const GMI_INSTANCE_ID_PREFIX = 'gmi-instance-';

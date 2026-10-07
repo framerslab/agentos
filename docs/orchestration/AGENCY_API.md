@@ -44,39 +44,40 @@ explicit dependencies. The strategy is the data-flow shape. Picking the
 strategy picks how brain-to-brain context propagates; the work itself happens
 inside each brain.
 
-**2. Shared coordination primitives connect the brains.** A shared memory store
-(`memory: { shared: true }`), an [`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgentCommunicationBus.ts)
-for structured agent-to-agent messages, RAG with per-agent access controls, and
-runtime synthesis via [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts)
-when the static roster runs out of specialists.
+**2. The strategy connects the agents.** It decides the order and what each
+agent receives: the previous output (sequential), the same prompt (parallel),
+every prior argument (debate), the manager's delegations (hierarchical) or its
+predecessors' outputs (graph); the hierarchical strategy can add specialists at
+run time through [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts).
+`agency()` builds no shared memory store and runs no retrieval of its own: the
+`memory` and `rag` options are accepted and deferred on this path (see the
+capability contract), and
+[`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts) and
+[`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgentCommunicationBus.ts) are
+exported classes a host wires itself.
 
 **3. A team-wide coordination shell wraps the whole agency.** HITL approval
-gates, guardrails, resource controls (token, cost, time, call caps), provenance
-and audit logging, structured Zod output. These apply uniformly to the team
-rather than per-agent.
+gates (`hitl.approvals.beforeTool` is forwarded to every member), resource
+controls (the token, time and call caps on `controls`, enforced across the run)
+and structured Zod output (`output`). These apply to the team rather than
+per-agent. Options the lightweight path accepts and defers (`security`,
+`permissions`, `observability`, `rag`, `memory`) take effect on the full
+runtime; see the capability contract.
 
 ```mermaid
 graph TB
     Input["Input"]
-    subgraph Agency["Agency · coordination shell · HITL · guardrails · controls · provenance"]
+    subgraph Agency["Agency · coordination shell · HITL approvals · controls · structured output"]
         Strategy["Orchestration strategy<br/>sequential · parallel · debate<br/>review-loop · hierarchical · graph"]
-        subgraph Brains["GMI brains"]
+        subgraph Members["Agents (lightweight agent() members)"]
             direction LR
-            A["GMI A<br/>cognition · memory<br/>persona · tools"]
-            B["GMI B<br/>cognition · memory<br/>persona · tools"]
-            C["GMI C<br/>cognition · memory<br/>persona · tools"]
+            A["Agent A<br/>instructions · personality<br/>tools · own session"]
+            B["Agent B<br/>instructions · personality<br/>tools · own session"]
+            C["Agent C<br/>instructions · personality<br/>tools · own session"]
         end
-        SharedMem["Shared memory<br/>memory: shared: true"]
-        Bus["AgentCommunicationBus"]
         Strategy -->|routes outputs| A
         Strategy -->|routes outputs| B
         Strategy -->|routes outputs| C
-        A <--> SharedMem
-        B <--> SharedMem
-        C <--> SharedMem
-        A <--> Bus
-        B <--> Bus
-        C <--> Bus
     end
     Input --> Strategy
     A --> Output["Coordinated output"]
@@ -86,11 +87,11 @@ graph TB
 
 Three frames worth keeping:
 
-- **Per-agent isolation still holds.** Each GMI has its own `brainId` and scopes
-  its private memory by `thread | user | persona | organization`. The shared
-  layer is additive. Leave it off (the default) and every brain stays isolated.
-- **Strategy is the flow, not the work.** Strategies define how state
-  propagates between brains. The work happens inside each brain; the strategy
+- **Per-agent isolation holds.** Each member is its own lightweight `agent()`
+  with its own session history; nothing is shared between members except what
+  the strategy passes between them.
+- **Strategy is the flow, not the work.** Strategies define how outputs
+  propagate between members. The work happens inside each member; the strategy
   decides who reads what and when.
 - **Flows compose.** `agency()` returns an `Agent`, so an entire agency can sit
   inside another agency, or as a step inside `workflow()`, or as a node inside
@@ -208,15 +209,17 @@ provider/model pair) to control the model explicitly.
 Every roster entry is a `BaseAgentConfig` or a pre-built `agent()`. For a
 config entry, `model`, `provider`, `apiKey` and `baseUrl` set on the seat win
 over the agency-level values, and each of the four is inherited on its own when
-the seat leaves it out. A seat's `tools` are merged with the agency's `tools`,
-and the agency's `hitl.approvals.beforeTool` list is copied into every seat.
+the seat leaves it out. A seat's `tools` are merged with the agency's `tools`.
 Nothing else is inherited: `effort`, `thinking`, `maxTokens` and `instructions`
 apply to the seat that sets them, and agency-level `effort`, `thinking` and
 `maxTokens` reach neither the seats nor the chair. Agency-level `instructions`
 go to the chair (parallel), the judge (debate) and the coordinator
 (hierarchical). `output` is read at the agency level only: its schema is
 applied to the final text, and a seat's own `output` has no effect. A
-pre-built `agent()` in the roster runs as it is and inherits nothing.
+pre-built `agent()` in the roster runs as it is and inherits nothing. The
+agency's `hitl.approvals.beforeTool` list is not copied into any seat: it is
+enforced per call, on config seats and pre-built seats alike (see
+[Approval triggers](#approval-triggers)).
 
 ```typescript
 const team = agency({
@@ -241,15 +244,42 @@ the key together on every seat of a multi-vendor roster:
 - A seat that sets `provider` but not `model` inherits the agency's model id. An
   Anthropic seat that inherits `gpt-6-astra` gets a 404 from Anthropic, which is
   not retried on another provider, and the seat fails.
-- An agency-level `apiKey` or `baseUrl` is inherited by every config seat that
-  sets none, whatever that seat's provider. An OpenAI key sent to Anthropic gets
-  a 401; that error is retryable, so the seat silently fails over to another
-  provider. The inherited key also disables the Anthropic-through-OpenRouter
-  route described below.
+- An agency-level `apiKey` or `baseUrl` belongs to the provider the agency's
+  own calls go to. A config seat that sets none inherits them only when its
+  calls go to that same provider; a seat whose calls go to another provider
+  (its own `provider`, or one its `model` names, described next) does not, so
+  an OpenAI key never reaches Anthropic through a seat. Nor does a seat whose
+  calls go to auto-detection: under an agency that names its provider only
+  by its model's prefix (`model: 'openai:gpt-4.1'`), a seat with a plain
+  `model` (`gpt-4.1-mini`) has no provider to inherit, so it goes to
+  whichever provider the environment's keys select and uses that provider's
+  key. Write the prefix on the seat's model (`openai:gpt-4.1-mini`) or set its
+  `provider` to share the agency's key. When the agency's provider is left to
+  auto-detection (no `provider` and no prefix on its `model`), it is unknown,
+  and every seat that sets none inherits the agency's key and URL.
 - A seat value set explicitly to `undefined` (for example
   `apiKey: process.env.UNSET_VAR`) counts as set and blocks inheritance.
 
-Keys resolve per seat: the seat's `apiKey`, else the agency's `apiKey`, else a
+A seat `model` written as `provider:model` (`anthropic:claude-opus-5-5`) names
+its provider and does not inherit the agency's `provider`. A call goes to the
+provider its `model` prefix names (`provider:`, which wins over `provider`
+except under `provider: 'ollama'`, or `provider/` when `provider` is unset or
+repeats it; an id that also holds a colon takes the `provider/` form only
+when `provider` repeats it), or else to its `provider`. Under `provider: 'openrouter'` a
+`vendor/model` id (`anthropic/claude-sonnet-5-5`) stays an OpenRouter id and
+the seat keeps the agency's OpenRouter key. A colon splits an id only when its
+prefix is a provider agentos knows: `qwen2.5:7b` under `provider: 'ollama'`
+and `meta-llama/llama-3.3-70b-instruct:free` under `provider: 'openrouter'`
+stay whole, and under `provider: 'ollama'` an id is never split. A colon id
+whose prefix is not a provider agentos knows, with no `provider`, is rejected:
+`qwen2.5:7b` alone throws and asks for `provider: 'ollama'`, rather than being
+sent to whichever cloud provider the environment's keys select. An Ollama tag named after a provider (`mistral:7b`) is the one
+case to watch: as a seat `model` under an Ollama agency it names the Mistral
+provider and goes to Mistral's API, so a seat that means the local tag writes
+`provider: 'ollama'` itself.
+
+Keys resolve per seat: the seat's `apiKey`, else the agency's `apiKey` when the
+seat inherits it (above), else a
 key set with `setDefaultProvider()` (used when that default names no provider
 or names the seat's provider), else the provider's environment variable
 (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, and so on). A
@@ -640,6 +670,42 @@ const guarded = agency({
 });
 ```
 
+`beforeTool` lists tool names, or `'*'` for every tool. A listed call waits for
+the handler on every tool loop the agency runs: native tool calls, the
+prompt-tool path (`toolMode: 'prompt'`, and `'auto'` after a provider rejects
+native tools) and streamed calls, on config seats, pre-built seats, the
+hierarchical manager and the specialists it spawns, and nested agencies.
+
+- The handler is asked after the seat's or the caller's
+  `onBeforeToolExecution` has run, so it approves the arguments the tool will
+  run with. A hook that returns `null` skips the tool without asking; a hook
+  that throws is logged and the handler is asked. A `modifications.toolArgs` on
+  the decision is not applied: rewrite arguments in the hook.
+- A rejection skips the tool and the model is told; the run goes on.
+- A handler that throws, and a timeout under `onTimeout: 'error'`, skip the
+  tool, go to `on.error`, and reject the call with that error once the
+  strategy has settled, after the run's usage has been added to the agency
+  totals. Every later tool call of the run is skipped without asking the
+  handler. No finalization step runs: no output guardrails, no `beforeReturn`
+  approval, no `agentEnd` and no validation retry. Under `stream()` the
+  result's promises reject with the error, and `textStream` and `fullStream`
+  end by throwing it.
+- After the handler approves, the post-approval guardrails
+  (`hitl.postApprovalGuardrails`, default `pii-redaction` and `code-safety`)
+  run over the arguments unless `hitl.guardrailOverride` is `false`; a block
+  skips the tool and fires `guardrailHitlOverride`.
+- A pre-built seat enforces `beforeTool` only when it forwards per-call options
+  to `generateText` or `streamText`, as every `agent()` and `agency()` does; a
+  custom `Agent` that drops unknown per-call keys runs its listed tools
+  unasked.
+- A parent agency's gate holds inside the agencies it nests and is asked
+  first: after a parent refusal the nested agency's handler is not asked, and a
+  parent handler error rejects the parent call while the nested call
+  completes.
+
+`onBeforeToolExecution` runs on the prompt-tool path as it does on native tool
+calls, for every `generateText` and `streamText` caller.
+
 ### Custom handler
 
 ```typescript
@@ -702,55 +768,44 @@ const qualityGated = agency({
 
 ## Memory and RAG
 
-### Shared conversation memory
+`agency()` accepts `memory` and `rag` for forward compatibility with the full
+runtime and does not act on them: the capability contract marks both as
+accepted and deferred on the lightweight path, no shared memory store is
+built, and `injectRagContext()` returns the prompt unchanged because no vector
+store is initialised (a `documents` list only logs guidance to use the
+runtime). Each member keeps its own session history for the duration of one
+`generate()` or `stream()` call; inside `agency().session()`, only the
+user/assistant message history and aggregate usage persist between `.send()`
+calls.
+
+To give members memory, pass built agents as roster members: an
+[`agent()`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) with a `memoryProvider` keeps its hooks when it sits in a
+roster, and a member can carry a `soul` file the same way.
 
 ```typescript
-const remembering = agency({
+import { agent, agency, type AgentMemoryProvider } from '@framers/agentos';
+
+const myMemory: AgentMemoryProvider = {
+  getContext: async (text) => ({ contextText: await lookupNotes(text) }),   // injected as a system message before the call
+  observe: async (turn) => { await saveNotes(turn); },                       // runs after the reply
+};
+
+const researcher = agent({
   provider: 'openai', model: 'gpt-4o',
-  agents: {
-    a: { instructions: 'Agent A.' },
-    b: { instructions: 'Agent B.' },
-  },
+  instructions: 'Research the topic.',
+  memoryProvider: myMemory,
+});
+
+const team = agency({
+  provider: 'openai', model: 'gpt-4o',      // inherited by the inline writer
+  agents: { researcher, writer: { instructions: 'Write from the research.' } },
   strategy: 'sequential',
-  memory: {
-    shared: true,             // all agents share one memory store
-    types: ['episodic', 'semantic'],
-    working: { enabled: true, maxTokens: 4096, strategy: 'sliding-window' },
-    consolidation: { enabled: true, interval: 'PT1H' },
-  },
 });
 ```
 
-> ⚠️ **Scope of `memory: { shared: true }` — per-call, not per-session.** The shared memory store is built fresh for each `generate()` or `stream()` call and torn down when that call returns. Inside `agency().session()`, only the user/assistant message history and aggregate usage persist between `.send()` turns — the agency roster, the shared [`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts), and `tier: 'session'` emergent specialists all reset on every turn. To carry shared memory across turns, wire a [`Brain`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts) yourself (one `brainId` shared across agents) or run your own multi-call coordinator on top of `agent()` + [`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts). Per-agent isolation (each `agent()` keeps its own `brainId`) is unaffected — that boundary still holds across turns.
-
-### RAG configuration
-
-```typescript
-const withRag = agency({
-  provider: 'openai', model: 'gpt-4o',
-  agents: {
-    retriever: { instructions: 'Find relevant context from the knowledge base.' },
-    answerer:  { instructions: 'Answer based on retrieved context.' },
-  },
-  strategy: 'sequential',
-  rag: {
-    vectorStore: {
-      provider: 'in-memory',
-      embeddingModel: 'text-embedding-3-small',
-    },
-    documents: [
-      { path: './docs/manual.pdf', loader: 'pdf' },
-      { url: 'https://example.com/spec.html', loader: 'html' },
-    ],
-    topK: 5,
-    minScore: 0.75,
-    graphRag: { enabled: true },
-    agentAccess: {
-      answerer: { topK: 10, collections: ['manuals'] },
-    },
-  },
-});
-```
+Cognitive memory (the `CognitiveMemoryManager`, its mechanisms, the memory
+bridge) and the RAG pipeline (vector stores, GraphRAG, HyDE, reranking) run on
+the full runtime: see [Memory Model](../MEMORY_MODEL.md), [Cognitive Memory](../memory/COGNITIVE_MEMORY.md) and the RAG guides.
 
 ---
 
@@ -870,7 +925,7 @@ const restricted = agency({
     network:        false,
     filesystem:     true,
     spawn:          false,
-    requireApproval: ['delete-record'],          // these still need HITL
+    requireApproval: ['delete-record'],          // not enforced by agency(): list tools in hitl.approvals.beforeTool
   },
 });
 ```
@@ -1179,31 +1234,10 @@ const contentPipeline = agency({
     judge: true,
   },
 
-  memory: {
-    shared: true,
-    types: ['episodic', 'semantic'],
-    working: { enabled: true, maxTokens: 8192 },
-  },
-
-  rag: {
-    vectorStore: { provider: 'in-memory', embeddingModel: 'text-embedding-3-small' },
-    topK: 5,
-    minScore: 0.7,
-  },
-
   guardrails: {
     input:  ['injection-shield'],
     output: ['grounding-guard', 'pii-redaction'],
     tier:   'balanced',
-  },
-
-  security: { tier: 'balanced' },
-
-  permissions: {
-    tools:      'all',
-    network:    true,
-    filesystem: false,
-    spawn:      false,
   },
 
   hitl: {
@@ -1222,11 +1256,6 @@ const contentPipeline = agency({
     maxDurationMs:   120_000,
     maxAgentCalls:   50,
     onLimitReached:  'warn',
-  },
-
-  observability: {
-    logLevel:    'info',
-    traceEvents: true,
   },
 
   on: {

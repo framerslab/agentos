@@ -746,7 +746,7 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     ]);
   });
 
-  it('an agent-tier row from an earlier release, owned by a GMI instance id, runs for any caller of the host that loaded it', async () => {
+  it('an agent-tier row from an earlier release, owned by a GMI instance id, loads suspended and runs for no one', async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db });
     seedToolRow(db, {
@@ -761,10 +761,20 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     });
 
     const loaded = await host.engine.loadPersistedTools({ tiers: ['agent'], agentId: 'gmi-instance-0b7e3c1a' });
-    expect(loaded.outcomes).toEqual([{ toolId: 'old-1', name: 'double_it', state: 'active', reason: null }]);
-    expect((await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'anyone' })).output).toEqual({
-      doubled: 4,
-    });
+    expect(loaded.outcomes).toEqual([{ toolId: 'old-1', name: 'double_it', state: 'suspended', reason: 'legacy_owner' }]);
+    expect(readToolRow(db, 'old-1')).toMatchObject({ is_active: 0 });
+    expect(readStateRow(db, 'old-1')).toMatchObject({ state: 'suspended', state_reason: 'legacy_owner' });
+    const called = await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'anyone' });
+    expect(called.isError).toBe(true);
+    const asStoredOwner = await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'gmi-instance-0b7e3c1a' });
+    expect(asStoredOwner.isError).toBe(true);
+
+    // The host's reactivation goes through the same path and cannot change the
+    // owner, so the row stays suspended; the next load re-checks it and says
+    // the same. Forging the tool again under the persona is the way back.
+    expect(await host.engine.reactivateTool('old-1')).toEqual({ toolId: 'old-1', name: 'double_it', state: 'suspended', reason: 'legacy_owner' });
+    const again = await host.engine.loadPersistedTools({ tiers: ['agent'], agentId: 'gmi-instance-0b7e3c1a' });
+    expect(again.outcomes).toEqual([{ toolId: 'old-1', name: 'double_it', state: 'suspended', reason: 'legacy_owner' }]);
   });
 
   it('a stored request wider than a stored list grants nothing the list did not', async () => {
@@ -1073,6 +1083,157 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect(await host.orchestrator.getTool('double_it')).toBeUndefined();
     expect(readToolRow(db, 'raw-1')).toBeUndefined();
     expect(readStateRow(db, 'raw-1')).toBeUndefined();
+  });
+
+  it('a row read before a removal began is not put back by an admission that starts after it', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, { id: 'a-1', name: 'double_it', mode: 'sandbox', source: RAW_DOUBLE, inputSchema: NUMBER_IN, outputSchema: DOUBLED_OUT });
+    seedToolRow(db, { id: 'b-1', name: 'sum_it', mode: 'sandbox', source: SUM_CODE, inputSchema: SUM_IN, outputSchema: SUM_OUT });
+    db.raw.prepare('UPDATE agentos_emergent_tools SET created_at = ? WHERE id = ?').run(1_700_000_000_001, 'b-1');
+    // Both rows active with their requests stored, so each admission writes nothing.
+    seedStateRow(db, { toolId: 'a-1', state: 'active', setBy: 'library', requestJson: '{"kind":"sandbox","capabilities":[]}' });
+    seedStateRow(db, { toolId: 'b-1', state: 'active', setBy: 'library', requestJson: '{"kind":"sandbox","capabilities":[]}' });
+
+    // The first row's admission is held; the second row was read with it.
+    const first = db.gateNext('FROM agentos_emergent_tool_state s');
+    const loading = host.engine.loadPersistedTools({ tiers: ['shared'] });
+    await first.entered;
+    // The host removes the second tool meanwhile, and its row deletes are held too.
+    const deleting = db.gateNext('DELETE FROM agentos_emergent_tools');
+    const removing = host.engine.removeTool('b-1');
+    await deleting.entered;
+    first.release();
+    // The second admission runs as far as it can while the deletes are held.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    deleting.release();
+    const summary = await loading;
+    await removing;
+
+    expect(summary.outcomes).toEqual([
+      { toolId: 'a-1', name: 'double_it', state: 'active', reason: null },
+      { toolId: 'b-1', name: 'sum_it', state: 'demoted', reason: 'removed' },
+    ]);
+    expect(await host.orchestrator.getTool('sum_it')).toBeUndefined();
+    expect(readToolRow(db, 'b-1')).toBeUndefined();
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
+  });
+
+  it('a tool replaced under its id while its executable registers is settled to the replacement', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, { id: 'raw-1', name: 'double_it', mode: 'sandbox', source: RAW_DOUBLE, inputSchema: NUMBER_IN, outputSchema: DOUBLED_OUT });
+    const engine = host.engine as unknown as {
+      onToolForged: (tool: EmergentTool, executable: unknown) => Promise<void>;
+      registry: { adopt: (tool: EmergentTool, record: Record<string, unknown>) => boolean };
+    };
+    const register = engine.onToolForged;
+    let calls = 0;
+    engine.onToolForged = async (tool, executable) => {
+      calls += 1;
+      if (calls === 1) {
+        // Another admission puts a renamed copy under the id while this registration runs.
+        engine.registry.adopt(
+          { ...tool, name: 'double_it_v2' },
+          { toolId: tool.id, state: 'active', reason: null, setBy: 'library', at: 1, request: null },
+        );
+      }
+      await register(tool, executable);
+    };
+
+    const summary = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+
+    expect(summary.outcomes).toEqual([{ toolId: 'raw-1', name: 'double_it_v2', state: 'active', reason: null }]);
+    expect(calls).toBe(2);
+    expect(await host.orchestrator.getTool('double_it')).toBeUndefined();
+    expect((await callTool(host.orchestrator, 'double_it_v2', { n: 4 })).output).toEqual({ doubled: 8 });
+  });
+
+  it('a replacement whose executable fails to register leaves nothing under the name, and the load reports it', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, { id: 'raw-1', name: 'double_it', mode: 'sandbox', source: RAW_DOUBLE, inputSchema: NUMBER_IN, outputSchema: DOUBLED_OUT });
+    const engine = host.engine as unknown as {
+      onToolForged: (tool: EmergentTool, executable: unknown) => Promise<void>;
+      registry: { adopt: (tool: EmergentTool, record: Record<string, unknown>) => boolean };
+    };
+    const register = engine.onToolForged;
+    let calls = 0;
+    engine.onToolForged = async (tool, executable) => {
+      calls += 1;
+      if (calls > 1) {
+        throw new Error('registration refused');
+      }
+      engine.registry.adopt({ ...tool }, { toolId: tool.id, state: 'active', reason: null, setBy: 'library', at: 1, request: null });
+      await register(tool, executable);
+    };
+
+    const summary = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+
+    expect(summary.outcomes).toEqual([]);
+    expect(summary.failed).toEqual([
+      { toolId: 'raw-1', name: 'double_it', error: expect.stringMatching(/registration refused/) },
+    ]);
+    expect(await host.orchestrator.getTool('double_it')).toBeUndefined();
+  });
+
+  it("a host's row write for a tool whose removal is still deleting lands after the deletes", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    const tool: EmergentTool = {
+      id: 'host-2',
+      name: 'double_it',
+      description: 'Doubles a number.',
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+      implementation: { mode: 'sandbox', code: RAW_DOUBLE, allowlist: [] },
+      tier: 'shared',
+      createdBy: 'host',
+      createdAt: new Date(1_700_000_000_000).toISOString(),
+      judgeVerdicts: [],
+      usageStats: { totalUses: 0, successCount: 0, failureCount: 0, avgExecutionTimeMs: 0, lastUsedAt: null, confidenceScore: 0.9 },
+      source: 'hydrated by the host from its own store',
+    };
+
+    // The removal's first delete is held open; the host syncs the same id meanwhile.
+    const gate = db.gateNext('DELETE FROM agentos_emergent_tools');
+    const removing = host.engine.removeTool('host-2');
+    await gate.entered;
+    const syncing = host.engine.syncPersistedTool(tool);
+    gate.release();
+    await removing;
+
+    expect(await syncing).toEqual({ toolId: 'host-2', name: 'double_it', state: 'active', reason: null });
+    expect(readToolRow(db, 'host-2')).toMatchObject({ name: 'double_it', is_active: 1 });
+    expect((await callTool(host.orchestrator, 'double_it', { n: 3 })).output).toEqual({ doubled: 6 });
+  });
+
+  it("a session's cleanup takes its tools out of the executor", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'sc-1',
+      name: 'double_it',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      tier: 'session',
+      createdBy: 'agent-c',
+      createdBySession: 'sess-c',
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+    });
+    await host.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess-c' });
+    expect(await host.orchestrator.getTool('double_it')).toBeDefined();
+    expect(host.engine.getSessionTools('sess-c').map((t) => t.id)).toEqual(['sc-1']);
+
+    const removed = host.engine.cleanupSession('sess-c');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(removed.map((t) => t.id)).toEqual(['sc-1']);
+    expect(await host.orchestrator.getTool('double_it')).toBeUndefined();
+    expect(host.engine.getSessionTools('sess-c')).toEqual([]);
+    // A call by name finds nothing registered.
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).isError).toBe(true);
   });
 
   it("a session's stored tools load for that session only", async () => {

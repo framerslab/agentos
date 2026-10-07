@@ -1,3 +1,66 @@
+## [0.11.6](https://github.com/framerslab/agentos/compare/v0.11.5...v0.11.6) (2026-10-07)
+
+### fix
+
+* **emergent:** legacy owners load suspended, and a per-tool generation guards adoption ([b6b61c9](https://github.com/framerslab/agentos/commit/b6b61c99e874fdb97055b2e24aae85b1de2d6b5b))
+* **images:** do not attach the payload-carrying read error as cause (#124) ([a3eb89e](https://github.com/framerslab/agentos/commit/a3eb89ef1f0b537de9e45463411ee800bdd8cc8f))
+* **openrouter:** keep the text and tool-argument deltas of the finish chunk (#125) ([eb5fc8d](https://github.com/framerslab/agentos/commit/eb5fc8d6a57320ea4c5cd935f4ecf7fc6f315784))
+* **speech:** take a provider's streaming capability from the instance, and a catalog entry only of its own kind (#126) ([0f0bfbc](https://github.com/framerslab/agentos/commit/0f0bfbc6a3221e9c7bb6f0343c112d5d1ef722cc))
+
+## [0.11.5](https://github.com/framerslab/agentos/compare/v0.11.4...v0.11.5) (2026-10-07)
+
+### fix
+
+* **speech:** build every keyed core provider in SpeechRuntime, and make its register methods reach the resolver (#123) ([346b2f7](https://github.com/framerslab/agentos/commit/346b2f73810a35b4b236514415173abce8515819))
+
+## [0.11.4](https://github.com/framerslab/agentos/compare/v0.11.3...v0.11.4) (2026-10-07)
+
+### fix
+
+* **anthropic:** drop strict mode for a schema over the strict complexity limits (#121) ([88507ea](https://github.com/framerslab/agentos/commit/88507ea12120e62ab7ed5d95177f570634ea9c86))
+* **images:** decode raw base64 BMP, ICO, JPEG 2000, JPEG XL and SVG, and stop echoing base64 in errors (#122) ([ed6bf45](https://github.com/framerslab/agentos/commit/ed6bf4535a1e0f9574a0bb78d6b81eb189ddbe8f))
+
+## [0.11.3](https://github.com/framerslab/agentos/compare/v0.11.2...v0.11.3) (2026-10-07)
+
+### fix
+
+* **speech:** read a real ExtensionManager on refresh, and drop stale preference boosts (#117) ([a10a51f](https://github.com/framerslab/agentos/commit/a10a51f94f5d19f8f2aa4072a094724f029ea060))
+
+## [0.11.2](https://github.com/framerslab/agentos/compare/v0.11.1...v0.11.2) (2026-10-07)
+
+### fix
+
+* **llm:** keep every variant's schema for a property the Anthropic union merge shares (#114) ([ca60ae1](https://github.com/framerslab/agentos/commit/ca60ae1a376096e1d06e1af5f138d8a2934e5f9a))
+
+## [0.11.1](https://github.com/framerslab/agentos/compare/v0.11.0...v0.11.1) (2026-10-07)
+
+### fix
+
+* **images:** decode raw base64 that contains "/" instead of reading it as a file path (#110) ([3bc42c1](https://github.com/framerslab/agentos/commit/3bc42c161b428b033fd5c72bcba027b6cc88f9b6))
+* **model:** split a colon-qualified model id only on a known provider prefix, never under ollama (#106) ([6f68209](https://github.com/framerslab/agentos/commit/6f682096a97874548fb09d053c905db2492d4e47))
+* **openrouter:** keep the role of the final streamed message (#112) ([ffeb2f1](https://github.com/framerslab/agentos/commit/ffeb2f198bc5350649cdffe33d71494d6366e2d6))
+* **speech:** keep registered providers on refresh and never resolve one without an instance (#109) ([48b5e53](https://github.com/framerslab/agentos/commit/48b5e5325ef3b9fd8ed20a41702169bd56d7b0ce))
+
+### feat
+
+* **speech:** current provider defaults for speech and transcription (#115) ([c9147b6](https://github.com/framerslab/agentos/commit/c9147b6b0ecfd4c6f1b491543c2e3837448d29bc))
+
+### docs
+
+* **agency:** describe what agency() shares (#111) ([5b9f428](https://github.com/framerslab/agentos/commit/5b9f428023003f3a6868e33bdb5ad76783ef93eb))
+
+## [0.11.0](https://github.com/framerslab/agentos/compare/v0.10.40...v0.11.0) (2026-10-07)
+
+### ⚠ BREAKING CHANGE
+
+* **export:** redact secrets by default, mark instances and pre-built seats, take secrets and values on import (#99)
+
+### fix
+
+* **emergent:** stored tools load through one checked path, and a suspension holds ([d640311](https://github.com/framerslab/agentos/commit/d64031113364e1234f55696a67c42867e95fd1a4))
+* **export:** redact secrets by default, mark instances and pre-built seats, take secrets and values on import (#99) ([7afad92](https://github.com/framerslab/agentos/commit/7afad924fd9bda013104bafa5a6033bf5e1ca1cf))
+* **hitl:** enforce approvals.beforeTool through a per-call gate on every tool loop (#107) ([6ed4ed9](https://github.com/framerslab/agentos/commit/6ed4ed91acdf8ef2b900142674f823a88bafb6d0))
+
 ## [0.10.40](https://github.com/framerslab/agentos/compare/v0.10.39...v0.10.40) (2026-10-07)
 
 ### feat

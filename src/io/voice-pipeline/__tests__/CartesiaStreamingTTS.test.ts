@@ -57,7 +57,7 @@ describe('CartesiaStreamingTTS', () => {
     const second = JSON.parse(ws.send.mock.calls[1][0]);
     expect(first.transcript).toBe('Hello ');
     expect(first['continue']).toBe(true);
-    expect(first.model_id).toBe('sonic-3.5');
+    expect(first.model_id).toBe('sonic-3.6-2026-08-27');
     expect(first.voice).toEqual({ mode: 'id', id: 'v1' });
     expect(typeof first.context_id).toBe('string');
     expect(second.context_id).toBe(first.context_id);

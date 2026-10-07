@@ -28,6 +28,7 @@ import type {
   ToolStateRecord,
   ToolTier,
 } from './types.js';
+import { GMI_INSTANCE_ID_PREFIX } from './types.js';
 import {
   parsePersistedSource,
   parseRowSchemas,
@@ -197,9 +198,25 @@ interface AdmissionCandidate {
   requestStored: boolean;
   /** The tool row's `is_active`, or a host-built object's `isActive`. */
   legacyActive: boolean;
+  /** The tier the row or the host-built object carries. */
+  tier: ToolTier;
+  /** The owner the row or the host-built object carries (`created_by_agent`). */
+  createdBy: string;
   /** False when the row's last state write did not finish its flag write; undefined for a host-built object. */
   flagSynced?: boolean;
   buildTool: (implementation: ToolImplementation) => EmergentTool;
+}
+
+/** How one admission runs. */
+interface AdmissionOptions {
+  /** Re-check a restriction the host set (a host's own reactivation). */
+  force?: boolean;
+  /** How many times the row was read again after a refused write or adoption. */
+  readmitted?: number;
+  /** The implementation to run when the row holds a redacted record. */
+  sourceFallback?: PersistedSource;
+  /** The point the row's read started at (`EmergentToolRegistry.beginRead`). */
+  readAt?: number;
 }
 
 /**
@@ -506,6 +523,7 @@ export class EmergentCapabilityEngine {
       };
 
       this.registry.register(tool, 'session');
+      const registered = this.registry.generation(toolId);
       let written: ToolStateRecord | undefined;
       try {
         written = await this.registry.setState(toolId, 'active', null, {
@@ -520,7 +538,7 @@ export class EmergentCapabilityEngine {
           error instanceof Error ? error.message : error,
         );
       }
-      if (this.registry.wasRemoved(toolId)) {
+      if (this.registry.generation(toolId) !== registered) {
         // Removed while it was being forged: nothing is registered.
         return { success: false, error: 'the tool was removed while it was being forged' };
       }
@@ -551,8 +569,12 @@ export class EmergentCapabilityEngine {
       this.indexTool(toolId, context.agentId, context.sessionId);
 
       if (this.onToolForged) {
+        // The object the registry holds (a registration stores a stamped copy;
+        // an adoption above stores the object itself), so the settlement
+        // below compares like with like.
+        const live = this.registry.get(toolId) ?? tool;
         try {
-          await this.onToolForged(tool, this.createExecutableTool(tool));
+          await this.onToolForged(live, this.createExecutableTool(live));
         } catch (error: unknown) {
           this.registry.remove(toolId);
           this.removeIndexedTool(toolId, context.agentId, context.sessionId);
@@ -560,6 +582,19 @@ export class EmergentCapabilityEngine {
             success: false,
             error: error instanceof Error ? error.message : 'Failed to activate forged tool.',
           };
+        }
+        let settled: LoadedToolOutcome | undefined;
+        try {
+          settled = await this.settleRegistration(live);
+        } catch (error: unknown) {
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : 'the forged tool could not be registered',
+          };
+        }
+        if (settled && settled.reason === 'removed') {
+          // Removed while the host was registering it: nothing is registered.
+          return { success: false, error: 'the tool was removed while it was being forged' };
         }
       }
 
@@ -609,6 +644,12 @@ export class EmergentCapabilityEngine {
 
     // Only session-tier tools are eligible for auto-promotion.
     if (tool.tier !== 'session') {
+      return null;
+    }
+
+    // An owner with the reserved instance-id prefix is never promoted: an
+    // agent-tier row with that owner reads as one an earlier release wrote.
+    if (tool.createdBy.startsWith(GMI_INSTANCE_ID_PREFIX)) {
       return null;
     }
 
@@ -699,6 +740,17 @@ export class EmergentCapabilityEngine {
     const removedTools = this.getSessionTools(sessionId);
     this.registry.cleanupSession(sessionId);
     this.index.bySession.delete(sessionId);
+    for (const tool of removedTools) {
+      // The agent index too, so a lookup by agent never names a tool that is gone.
+      this.removeIndexedToolEverywhere(tool.id);
+    }
+    if (this.onToolRemoved) {
+      // The executables go with the tools, as removeTool does. A host that
+      // cleans up through the orchestrator unregisters the same names; a
+      // second unregistration of a name finds nothing to do.
+      const unregister = this.onToolRemoved;
+      void Promise.allSettled(removedTools.map((tool) => unregister(tool)));
+    }
     return removedTools;
   }
 
@@ -716,28 +768,37 @@ export class EmergentCapabilityEngine {
    * @returns what happened, so a host can tell a registered tool from a refused one.
    */
   async syncPersistedTool(tool: EmergentTool): Promise<LoadedToolOutcome> {
-    let row = await this.registry.loadRow(tool.id);
-    if (!row && this.registry.hasStorage()) {
+    const existing = await this.registry.loadRow(tool.id);
+    if (!existing && this.registry.hasStorage()) {
       // No stored row yet: the host hydrates from its own store. The row is
       // written as it was before loading went through the stored row, so the
       // tool's uses are recorded and the next load finds it.
       await this.registry.writeToolRow(tool);
-      row = await this.registry.loadRow(tool.id);
     }
-    if (row) {
-      // With source persistence off the row holds a redacted record; the
-      // implementation the host supplied is what runs then.
-      return this.admitRow(row, { sourceFallback: sourceFromImplementation(tool.implementation) });
-    }
-    const stored = await this.registry.readState(tool.id);
-    return this.admit({
-      toolId: tool.id,
-      name: tool.name,
-      source: sourceFromImplementation(tool.implementation),
-      stored,
-      requestStored: stored?.request != null,
-      legacyActive: (tool as EmergentTool & { isActive?: boolean }).isActive ?? true,
-      buildTool: () => tool,
+    // The row is read for the admission after any write above, so the write
+    // is not a change the admission's read missed.
+    return this.withRead(async (readAt) => {
+      const row = await this.registry.loadRow(tool.id);
+      if (row) {
+        // With source persistence off the row holds a redacted record; the
+        // implementation the host supplied is what runs then.
+        return this.admitRow(row, { readAt, sourceFallback: sourceFromImplementation(tool.implementation) });
+      }
+      const stored = await this.registry.readState(tool.id);
+      return this.admit(
+        {
+          toolId: tool.id,
+          name: tool.name,
+          source: sourceFromImplementation(tool.implementation),
+          stored,
+          requestStored: stored?.request != null,
+          legacyActive: (tool as EmergentTool & { isActive?: boolean }).isActive ?? true,
+          tier: tool.tier,
+          createdBy: tool.createdBy,
+          buildTool: () => tool,
+        },
+        { readAt },
+      );
     });
   }
 
@@ -797,18 +858,23 @@ export class EmergentCapabilityEngine {
           "a session's tools are private to it.",
       );
     }
-    const rows = await this.registry.loadRows(tiers, { agentId, sessionId });
     const outcomes: LoadedToolOutcome[] = [];
     const failed: FailedToolLoad[] = [];
-    for (const row of rows) {
-      try {
-        outcomes.push(await this.admitRow(row));
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        failed.push({ toolId: row.id, name: row.name, error: message });
-        console.warn(`[agentos:emergent] stored tool "${row.name}" (${row.id}) did not load: ${message}`);
+    // One read for the rows and their admissions: a tool that changes in this
+    // process after the rows were read (a removal, a registration) is read
+    // again before it is adopted.
+    await this.withRead(async (readAt) => {
+      const rows = await this.registry.loadRows(tiers, { agentId, sessionId });
+      for (const row of rows) {
+        try {
+          outcomes.push(await this.admitRow(row, { readAt }));
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          failed.push({ toolId: row.id, name: row.name, error: message });
+          console.warn(`[agentos:emergent] stored tool "${row.name}" (${row.id}) did not load: ${message}`);
+        }
       }
-    }
+    });
 
     for (const outcome of outcomes) {
       if (outcome.state === 'active') continue;
@@ -888,32 +954,50 @@ export class EmergentCapabilityEngine {
    * @returns the outcome, or `undefined` when the tool is unknown.
    */
   async reactivateTool(toolId: string): Promise<LoadedToolOutcome | undefined> {
-    const row = await this.registry.loadRow(toolId);
-    if (row) {
-      return this.admitRow(row, { force: true });
+    return this.withRead(async (readAt) => {
+      const row = await this.registry.loadRow(toolId);
+      if (row) {
+        return this.admitRow(row, { force: true, readAt });
+      }
+      const tool = this.registry.get(toolId);
+      if (!tool) {
+        return undefined;
+      }
+      const held = this.registry.getState(toolId);
+      return this.admit(
+        {
+          toolId,
+          name: tool.name,
+          source: sourceFromImplementation(tool.implementation),
+          stored: held,
+          requestStored: held?.request != null,
+          legacyActive: true,
+          tier: tool.tier,
+          createdBy: tool.createdBy,
+          buildTool: () => tool,
+        },
+        { force: true, readAt },
+      );
+    });
+  }
+
+  /**
+   * Run a read of stored rows and the admissions that use it. `readAt` is the
+   * point the read started at; an admission adopts only what has not changed
+   * since (see `EmergentToolRegistry.adopt`).
+   */
+  private async withRead<T>(read: (readAt: number) => Promise<T>): Promise<T> {
+    const readAt = this.registry.beginRead();
+    try {
+      return await read(readAt);
+    } finally {
+      this.registry.endRead();
     }
-    const tool = this.registry.get(toolId);
-    if (!tool) {
-      return undefined;
-    }
-    const held = this.registry.getState(toolId);
-    return this.admit(
-      {
-        toolId,
-        name: tool.name,
-        source: sourceFromImplementation(tool.implementation),
-        stored: held,
-        requestStored: held?.request != null,
-        legacyActive: true,
-        buildTool: () => tool,
-      },
-      { force: true },
-    );
   }
 
   private admitRow(
     row: PersistedToolRow,
-    options: { force?: boolean; readmitted?: number; sourceFallback?: PersistedSource } = {},
+    options: AdmissionOptions = {},
   ): Promise<LoadedToolOutcome> {
     const stored: ToolStateRecord | undefined = row.state
       ? {
@@ -951,6 +1035,8 @@ export class EmergentCapabilityEngine {
         requestStored: row.request_json != null,
         legacyActive: !(row.is_active === 0 || row.is_active === false),
         flagSynced: row.flag_synced == null ? undefined : !(row.flag_synced === 0 || row.flag_synced === false),
+        tier: row.tier,
+        createdBy: row.created_by_agent,
         buildTool: (implementation) => toolFromRow(row, implementation),
       },
       options,
@@ -967,19 +1053,21 @@ export class EmergentCapabilityEngine {
    * row that is gone reads as removed; a row still changing after two
    * re-admissions is left for the next load.
    */
-  private async readmit(
-    candidate: AdmissionCandidate,
-    options: { force?: boolean; readmitted?: number; sourceFallback?: PersistedSource },
-  ): Promise<LoadedToolOutcome> {
+  private async readmit(candidate: AdmissionCandidate, options: AdmissionOptions): Promise<LoadedToolOutcome> {
     const { toolId, name } = candidate;
     const depth = options.readmitted ?? 0;
     if (depth < 2) {
-      const fresh = await this.registry.loadRow(toolId);
-      if (fresh) {
-        return this.admitRow(fresh, { ...options, readmitted: depth + 1 });
-      }
-      await this.unregisterIfLive(toolId);
-      return { toolId, name, state: 'demoted', reason: 'removed' };
+      // The tool's queued writes and deletes land first, so the row read next
+      // is the one they leave.
+      await this.registry.settled(toolId);
+      return this.withRead(async (readAt): Promise<LoadedToolOutcome> => {
+        const fresh = await this.registry.loadRow(toolId);
+        if (fresh) {
+          return this.admitRow(fresh, { ...options, readmitted: depth + 1, readAt });
+        }
+        await this.unregisterIfLive(toolId);
+        return { toolId, name, state: 'demoted', reason: 'removed' };
+      });
     }
     // Nothing is written; the tool is held off here until the next load.
     this.holdStored(toolId, {
@@ -994,11 +1082,11 @@ export class EmergentCapabilityEngine {
     return { toolId, name, state: 'suspended', reason: 'contended' };
   }
 
-  private async admit(
-    candidate: AdmissionCandidate,
-    options: { force?: boolean; readmitted?: number; sourceFallback?: PersistedSource } = {},
-  ): Promise<LoadedToolOutcome> {
+  private async admit(candidate: AdmissionCandidate, options: AdmissionOptions = {}): Promise<LoadedToolOutcome> {
     const { toolId, name, source, stored, requestStored } = candidate;
+    // The point after which a change makes what this admission holds stale:
+    // where its row was read, or, for a caller that did not say, now.
+    const readAt = options.readAt ?? this.registry.generation(toolId);
     let legacyActive = candidate.legacyActive;
     // A row whose last state write did not finish its flag write: finish it
     // first, so the flag reads what the state row says before anything is
@@ -1086,6 +1174,14 @@ export class EmergentCapabilityEngine {
         allowlist:
           source.format === 'code-with-list' ? granted.filter((api) => listed.allowlist.includes(api)) : granted,
       };
+    }
+    // 3a. An agent-tier row from an earlier release is owned by the forging
+    //     GMI instance's id, which no persona can match, so no caller could
+    //     ever pass the owner check: it loads suspended rather than running
+    //     for everyone. Forging the tool again under the persona is the way
+    //     back; `reactivateTool` goes through this same path.
+    if (!refusal && candidate.tier === 'agent' && candidate.createdBy.startsWith(GMI_INSTANCE_ID_PREFIX)) {
+      refusal = 'legacy_owner';
     }
     if (implementation && !refusal) {
       refusal = this.refusalFor(implementation);
@@ -1177,17 +1273,33 @@ export class EmergentCapabilityEngine {
     if (live && live.name !== tool.name) {
       await this.unregisterIfLive(toolId);
     }
-    const adopted = this.registry.adopt(tool, {
-      toolId,
-      state: 'active',
-      reason: null,
-      setBy: 'library',
-      at: Date.now(),
-      request,
-    });
+    const adopted = this.registry.adopt(
+      tool,
+      {
+        toolId,
+        state: 'active',
+        reason: null,
+        setBy: 'library',
+        at: Date.now(),
+        request,
+      },
+      readAt,
+    );
     if (!adopted) {
-      // Removed in this process while the row was being admitted.
-      return { toolId, name, state: 'demoted', reason: 'removed' };
+      // The tool changed in this process after its row was read (removed,
+      // replaced under its id, written again), or a removal of it is still
+      // deleting its rows: what this admission holds may be stale. With
+      // storage the row is read again once the tool's queued writes have run;
+      // without, the registry's own record is the answer.
+      if (this.registry.hasStorage()) {
+        return this.readmit(candidate, options);
+      }
+      const current = this.registry.get(toolId);
+      if (!current) {
+        return { toolId, name, state: 'demoted', reason: 'removed' };
+      }
+      const held = this.registry.getState(toolId);
+      return { toolId, name: current.name, state: held?.state ?? 'active', reason: held?.reason ?? null };
     }
     this.indexTool(
       tool.id,
@@ -1205,16 +1317,81 @@ export class EmergentCapabilityEngine {
         this.removeIndexedToolEverywhere(toolId);
         throw error;
       }
-      if (this.registry.wasRemoved(toolId)) {
-        // Removed while the host was registering it: the registration goes.
-        if (this.onToolRemoved) {
-          await this.onToolRemoved(tool);
-        }
-        this.removeIndexedToolEverywhere(toolId);
-        return { toolId, name, state: 'demoted', reason: 'removed' };
+      const settled = await this.settleRegistration(tool);
+      if (settled) {
+        return settled;
       }
     }
     return { toolId, name, state: 'active', reason: null };
+  }
+
+  /**
+   * After the host registered a tool's executable, the registry must still
+   * hold that very object. When it does not (the tool was removed, or
+   * replaced under its id, while the registration ran), the executor is
+   * brought back in line with the registry: the current tool's executable is
+   * registered (the old name's taken out first when the name changed), or
+   * the stale executable is taken out when the registry holds none. The
+   * registry is read again after every registration, so a change during the
+   * settlement is settled too, up to three rounds. A registration that fails,
+   * or a tool still changing after three rounds, leaves no executable under
+   * the name and throws: a tool that cannot be called is reported, never a
+   * stale executable left running. Returns the outcome to report, or
+   * undefined when the first registration stands.
+   */
+  private async settleRegistration(tool: EmergentTool): Promise<LoadedToolOutcome | undefined> {
+    let registered: EmergentTool | undefined = tool;
+    for (let round = 0; round < 3; round += 1) {
+      const current = this.registry.get(tool.id);
+      if (current === registered) {
+        if (round === 0) {
+          return undefined;
+        }
+        if (!current) {
+          this.removeIndexedToolEverywhere(tool.id);
+          return { toolId: tool.id, name: tool.name, state: 'demoted', reason: 'removed' };
+        }
+        const held = this.registry.getState(tool.id);
+        return { toolId: tool.id, name: current.name, state: held?.state ?? 'active', reason: held?.reason ?? null };
+      }
+      try {
+        if (registered && (!current || current.name !== registered.name) && this.onToolRemoved) {
+          await this.onToolRemoved(registered);
+        }
+        if (current && this.onToolForged) {
+          await this.onToolForged(current, this.createExecutableTool(current));
+        }
+        registered = current;
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        await this.dropExecutable(registered ?? current ?? tool);
+        if (!this.registry.get(tool.id)) {
+          this.removeIndexedToolEverywhere(tool.id);
+        }
+        throw new Error(
+          `the executable of "${tool.name}" (${tool.id}) could not be brought in line with the registry: ${message}`,
+        );
+      }
+    }
+    await this.dropExecutable(registered ?? tool);
+    throw new Error(
+      `the executable of "${tool.name}" (${tool.id}) could not be settled: the tool kept changing while it was registered`,
+    );
+  }
+
+  /** Take a tool's executable out of the host, best-effort. */
+  private async dropExecutable(tool: EmergentTool): Promise<void> {
+    if (!this.onToolRemoved) {
+      return;
+    }
+    try {
+      await this.onToolRemoved(tool);
+    } catch (error: unknown) {
+      console.warn(
+        `[agentos:emergent] could not take out the executable of "${tool.name}" (${tool.id}):`,
+        error instanceof Error ? error.message : error,
+      );
+    }
   }
 
   /**
@@ -1426,11 +1603,12 @@ export class EmergentCapabilityEngine {
         // The owner is the persona that forged the tool, compared as it was
         // stored ('unknown' for a caller without one). A row from an earlier
         // release holds the forging GMI instance's id instead, which no
-        // persona can match: such a tool runs for any caller of the host that
-        // loaded it by that id, as it did before this change.
+        // persona can match; the loader suspends such a row (`legacy_owner`),
+        // and a call to one held in memory is refused here like any other
+        // owner mismatch.
         const owner = current.createdBy;
         const caller = context.personaId ?? 'unknown';
-        if (current.tier === 'agent' && !owner.startsWith('gmi-instance-') && caller !== owner) {
+        if (current.tier === 'agent' && caller !== owner) {
           return {
             success: false,
             error: `Emergent tool "${tool.name}" belongs to agent ${owner}; it is not callable as ${caller}.`,

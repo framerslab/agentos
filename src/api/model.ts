@@ -76,6 +76,47 @@ export function providerEnvVars(providerId: string): { key?: string; url?: strin
 const KEYLESS_PROVIDER_IDS = new Set(['claude-code-cli', 'gemini-cli']);
 
 /**
+ * The provider id a `provider:model` string names, when its prefix is a key of
+ * {@link PROVIDER_DEFAULTS}; undefined for a plain id and for a colon whose
+ * prefix is not a provider (`qwen2.5:7b`, `meta-llama/llama-3.3-70b-instruct:free`).
+ *
+ * @param model - A model id, possibly `provider:model`.
+ * @returns The provider id, or undefined.
+ */
+export function knownProviderPrefixOf(model: string | undefined): string | undefined {
+  if (!model) return undefined;
+  const colon = model.indexOf(':');
+  if (colon <= 0 || colon === model.length - 1) return undefined;
+  const prefix = model.slice(0, colon);
+  return Object.prototype.hasOwnProperty.call(PROVIDER_DEFAULTS, prefix) ? prefix : undefined;
+}
+
+/**
+ * The provider {@link resolveModelOption} sends these options to, without
+ * auto-detection: a known `provider:` prefix (never under `ollama`), else a
+ * known `provider/` prefix when `provider` is unset or repeats it, else
+ * `provider`. Undefined when the provider would come from auto-detection.
+ *
+ * @param opts - A `provider` and a `model`, either of which may be unset.
+ * @returns The provider id, or undefined.
+ */
+export function routedProviderOf(opts: { provider?: string; model?: string }): string | undefined {
+  const { provider, model } = opts;
+  if (model && provider !== 'ollama') {
+    const prefixed = knownProviderPrefixOf(model);
+    if (prefixed) return prefixed;
+    // A colon id no known prefix split takes the slash form only when
+    // `provider` repeats its prefix, as in resolveModelOption.
+    const slash = model.includes(':') && !provider ? -1 : model.indexOf('/');
+    if (slash > 0) {
+      const maybe = model.slice(0, slash);
+      if (Object.prototype.hasOwnProperty.call(PROVIDER_DEFAULTS, maybe) && (!provider || provider === maybe)) return maybe;
+    }
+  }
+  return provider;
+}
+
+/**
  * Splits a `provider:model` string into its constituent parts.
  *
  * The format is strict: the provider portion must be non-empty, separated from
@@ -264,7 +305,11 @@ export interface ModelOption {
   provider?: string;
   /**
    * Explicit model identifier.  Accepted in two formats:
-   * - `"provider:model"` — legacy format (e.g. `"openai:gpt-4o"`).  `provider` is ignored.
+   * - `"provider:model"` (e.g. `"openai:gpt-4o"`), split only when the prefix
+   *   is a provider id agentos knows; the prefix then wins over `provider`.
+   *   Under `provider: 'ollama'` an id is never split (Ollama tags carry
+   *   colons: `"qwen2.5:7b"`), and an id whose prefix is not a provider
+   *   (`"meta-llama/llama-3.3-70b-instruct:free"`) is kept whole.
    * - `"model"` — plain name (e.g. `"gpt-4o-mini"`).  Requires `provider` or env-var auto-detect.
    */
   model?: string;
@@ -278,10 +323,11 @@ export interface ModelOption {
  * Resolves a `{ providerId, modelId }` pair from flexible caller-supplied options.
  *
  * Resolution priority:
- * 1. **Explicit `model` string** — if it contains `":"` it is split directly
- *    (backwards-compatible `provider:model` format).  If it is a plain name and
- *    `provider` is set, the pair is used as-is.  If neither, auto-detection
- *    from env vars is attempted.
+ * 1. **Explicit `model` string** — a `provider:model` id is split when its
+ *    prefix is a known provider id (a key of {@link PROVIDER_DEFAULTS}),
+ *    whatever `provider` says, except under `provider: 'ollama'`, where an id
+ *    is never split. Any other id is kept whole: with `provider` set, the pair
+ *    is used as-is; without it, auto-detection from env vars is attempted.
  * 2. **`provider` only** — default model for the requested `task` is looked up
  *    in {@link PROVIDER_DEFAULTS}.
  * 3. **Neither** — auto-detect the first provider with a set API key/URL env
@@ -323,8 +369,17 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
 
   // 1. Explicit model string (backwards compat and direct override)
   if (opts.model) {
-    // Canonical "provider:model" format
-    if (opts.model.includes(':')) return parseModelString(opts.model);
+    // A colon splits the id only when its prefix is a known provider id, and
+    // never under provider 'ollama', whose tags carry colons and may be named
+    // after providers (`mistral:7b`). A known prefix wins over `provider`.
+    if (opts.provider !== 'ollama') {
+      // A first colon with nothing before or after it (`openai:`, `:gpt-4.1`)
+      // is a malformed id, rejected as parseModelString always has.
+      const colon = opts.model.indexOf(':');
+      if (colon === 0 || (colon > 0 && colon === opts.model.length - 1)) return parseModelString(opts.model);
+      const prefixed = knownProviderPrefixOf(opts.model);
+      if (prefixed) return { providerId: prefixed, modelId: opts.model.slice(prefixed.length + 1) };
+    }
     // Alternative "provider/model" format — check if the prefix before the
     // first "/" is a known provider ID. This avoids misinterpreting OpenRouter
     // model paths like "meta-llama/llama-3.1-8b" as provider "meta-llama".
@@ -332,7 +387,11 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
     // names models `vendor/model` (OpenRouter's `openai/gpt-5.6-sol`), and
     // that id belongs to the gateway, not to the vendor's own API. A prefix
     // that repeats the explicit provider is dropped.
-    const slashIdx = opts.model.indexOf('/');
+    // A colon id that no known prefix split (an Ollama tag, an OpenRouter
+    // `:free` id) takes the slash form only when `provider` repeats its
+    // prefix, so with no provider `openai/gpt-4o:free` never goes to OpenAI
+    // as `gpt-4o:free`.
+    const slashIdx = opts.model.includes(':') && !opts.provider ? -1 : opts.model.indexOf('/');
     if (slashIdx > 0) {
       const maybeProvider = opts.model.slice(0, slashIdx);
       if (PROVIDER_DEFAULTS[maybeProvider] && (!opts.provider || opts.provider === maybeProvider)) {
@@ -341,6 +400,15 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
     }
     // Plain model name with explicit provider
     if (opts.provider) return { providerId: opts.provider, modelId: opts.model };
+    // A colon id whose prefix is not a provider agentos knows (an Ollama tag,
+    // a fine-tune id) needs `provider`: auto-detection would send it, with
+    // the detected vendor's key, to whichever provider the environment names.
+    if (opts.model.includes(':')) {
+      throw new Error(
+        `Model "${opts.model}" has a colon, but "${opts.model.slice(0, opts.model.indexOf(':'))}" is not a provider agentos knows; ` +
+          `pass \`provider\` (for an Ollama tag, provider: 'ollama').`,
+      );
+    }
     // Plain model name — try auto-detect for provider
     const detected = autoDetectProvider(task);
     if (detected) return { providerId: detected, modelId: opts.model };

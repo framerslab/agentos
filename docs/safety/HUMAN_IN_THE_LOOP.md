@@ -59,7 +59,7 @@ const guarded = agency({
 
 | Trigger | Pauses before | Typical use |
 |---|---|---|
-| `beforeTool: string[]` | Any tool whose name appears in the list | Destructive or high-cost tool calls (`delete-file`, `send-email`, `purchase`). |
+| `beforeTool: string[]` | Any tool whose name appears in the list (`'*'`: every tool), on every tool loop of the agency's seats and nested agencies, after `onBeforeToolExecution` has run | Destructive or high-cost tool calls (`delete-file`, `send-email`, `purchase`). |
 | `beforeAgent: string[]` | Any agent in the agency whose name appears in the list | Specialists that should only run after human go-ahead (`billing-agent`, `legal-review`). |
 | `beforeEmergent: boolean` | Runtime synthesis of a new specialist via `spawn_specialist` | Production agencies that allow emergent capabilities but require approval before the roster grows. |
 | `beforeReturn: boolean` | The final answer leaves the agency | Customer-facing channels where the last response gets a human or judge review. |
@@ -165,7 +165,7 @@ interface ApprovalDecision {
 }
 ```
 
-When `approved: true` and `modifications` are set, the orchestrator merges them over the original action before proceeding. This is the path for "approve but with these changes" — the human edits tool args, the LLM judge rewrites the final answer, the webhook returns a sanitized version.
+When `approved: true` and `modifications` are set, the orchestrator merges them over the original action before proceeding. This is the path for "approve but with these changes": the LLM judge rewrites the final answer, the webhook returns a sanitized version. A `beforeTool` approval is the exception: it approves or refuses the arguments the call will run with and does not apply `modifications.toolArgs`. Rewrite tool arguments in `onBeforeToolExecution`, which runs before the handler is asked.
 
 ## Timeout policy
 
