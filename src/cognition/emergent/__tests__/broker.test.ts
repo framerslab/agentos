@@ -2,6 +2,12 @@ import { describe, it, expect, afterEach } from 'vitest';
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { brokeredFetch, type FetchScope } from '../broker/fetch.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { brokeredRead, ReadRoots, type ReadTooLarge } from '../broker/fs-read.js';
+import { CapabilityBroker } from '../broker/CapabilityBroker.js';
+import { resolveCeiling } from '../ceiling.js';
 
 interface Seen {
   method?: string;
@@ -154,5 +160,79 @@ describe('brokeredFetch', () => {
     await expect(brokeredFetch('file:///etc/hosts', undefined, scope({ domains: '*' }), live())).rejects.toThrow(
       'scheme_not_allowed',
     );
+  });
+});
+
+function tempDir(): string {
+  return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'broker-')));
+}
+
+const readScope = { maxBytesPerRead: 1024, timeoutMs: 5_000 };
+
+describe('brokeredRead', () => {
+  it('reads a file under a root and refuses one outside, through a link too', async () => {
+    const root = tempDir();
+    const outside = tempDir();
+    fs.writeFileSync(path.join(root, 'in.txt'), 'inside');
+    fs.writeFileSync(path.join(outside, 'secret.txt'), 'outside');
+    fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'link.txt'));
+    const roots = new ReadRoots([root]);
+
+    expect(await brokeredRead(path.join(root, 'in.txt'), roots, readScope, live())).toBe('inside');
+    await expect(brokeredRead(path.join(outside, 'secret.txt'), roots, readScope, live())).rejects.toThrow(
+      'path_not_allowed',
+    );
+    await expect(brokeredRead(path.join(root, 'link.txt'), roots, readScope, live())).rejects.toThrow(
+      'path_not_allowed',
+    );
+  });
+
+  it('refuses a file over maxBytesPerRead without reading it whole', async () => {
+    const root = tempDir();
+    const big = path.join(root, 'big.bin');
+    fs.writeFileSync(big, Buffer.alloc(8 * 1024 * 1024, 1));
+    const refused = (await brokeredRead(big, new ReadRoots([root]), readScope, live()).catch(
+      (error: unknown) => error,
+    )) as ReadTooLarge;
+    expect(refused.code).toBe('file_too_large');
+    // Stopped at the first stream chunk past the limit (64 KiB chunks), far short of 8 MiB.
+    expect(refused.bytesRead).toBeLessThanOrEqual(1024 + 65_536);
+  });
+});
+
+describe('CapabilityBroker.functionsFor', () => {
+  it('hands a call only the functions its grant names, and refuses once the call has ended', async () => {
+    const root = tempDir();
+    fs.writeFileSync(path.join(root, 'a.txt'), 'A');
+    const ceiling = resolveCeiling(
+      { 'fs.read': { roots: [root] }, crypto: {} },
+      { store: 'none' },
+      { hasStorage: false },
+    );
+    const broker = new CapabilityBroker(ceiling);
+    const controller = new AbortController();
+    const fns = broker.functionsFor(['fs.read'], {
+      id: 'call-1',
+      toolId: 'reader',
+      agentId: 'agent-1',
+      signal: controller.signal,
+    });
+
+    expect(Object.keys(fns)).toEqual(['fs']);
+    const readFile = (fns.fs as { readFile(p: string): Promise<string> }).readFile;
+    expect(await readFile(path.join(root, 'a.txt'))).toBe('A');
+    controller.abort();
+    await expect(readFile(path.join(root, 'a.txt'))).rejects.toThrow('call_ended');
+  });
+
+  it('never hands out a capability the ceiling does not hold, whatever the grant says', () => {
+    const broker = new CapabilityBroker(resolveCeiling({ crypto: {} }, { store: 'none' }, { hasStorage: false }));
+    const fns = broker.functionsFor(['fetch', 'crypto'], {
+      id: 'call-2',
+      toolId: 'hasher',
+      agentId: 'agent-1',
+      signal: live(),
+    });
+    expect(Object.keys(fns)).toEqual(['crypto']);
   });
 });

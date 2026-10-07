@@ -218,6 +218,20 @@ export type ToolImplementation = ComposableToolSpec | SandboxedToolSpec;
 // ============================================================================
 
 /**
+ * One run of a code-forged tool, as the broker sees it: the run's id, the
+ * tool and the agent it runs for, and the signal that ends it. Under a
+ * ceiling the engine makes one for every forge test and every call; the
+ * broker checks it before every capability call and again just before the
+ * effect, and keys what is in flight by its id.
+ */
+export interface CallHandle {
+  id: string;
+  toolId: string;
+  agentId: string;
+  signal: AbortSignal;
+}
+
+/**
  * Input to the sandbox executor for running a single sandboxed tool invocation.
  */
 export interface SandboxExecutionRequest {
@@ -250,6 +264,12 @@ export interface SandboxExecutionRequest {
    * @default 5000
    */
   timeoutMs: number;
+
+  /**
+   * The run's handle. Required when the forge has a broker attached (a host
+   * with `EmergentConfig.capabilities`); the engine fills it.
+   */
+  call?: CallHandle;
 }
 
 /**
