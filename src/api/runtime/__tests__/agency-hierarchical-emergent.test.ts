@@ -27,7 +27,7 @@ interface SpawnTool {
     role: string;
     instructions: string;
     justification?: string;
-  }) => Promise<{ success: boolean; data?: string }>;
+  }) => Promise<{ success: boolean; output?: string; error?: string }>;
 }
 
 describe('hierarchical strategy with emergent.enabled', () => {
@@ -87,7 +87,7 @@ describe('hierarchical strategy with emergent.enabled', () => {
 
     expect(first.success).toBe(true);
     expect(second.success).toBe(false);
-    expect(second.data).toMatch(/maxSpecialists|cap/i);
+    expect(second.output).toMatch(/maxSpecialists|cap/i);
   });
 
   it('rejects spawn when requireJustification=true and justification missing', async () => {
@@ -109,7 +109,7 @@ describe('hierarchical strategy with emergent.enabled', () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.data).toMatch(/justification/i);
+    expect(result.output).toMatch(/justification/i);
   });
 
   it('rejects spawn when role collides with existing roster entry', async () => {
@@ -125,7 +125,7 @@ describe('hierarchical strategy with emergent.enabled', () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.data).toMatch(/already exists|delegate_to_researcher/i);
+    expect(result.output).toMatch(/already exists|delegate_to_researcher/i);
   });
 
   it('rejects spawn when forge validation fails (reserved role name)', async () => {
@@ -141,7 +141,7 @@ describe('hierarchical strategy with emergent.enabled', () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.data).toMatch(/reserved|forge rejected/i);
+    expect(result.output).toMatch(/reserved|forge rejected/i);
   });
 
   it('emits a ForgeEvent through the emergentForge callback on successful spawn', async () => {
@@ -239,7 +239,7 @@ describe('hierarchical strategy with emergent.enabled — judge gating', () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.data).toMatch(/judge rejected|unsafe scope/i);
+    expect(result.output).toMatch(/judge rejected|unsafe scope/i);
     expect(roster.rejected_specialist).toBeUndefined();
     expect(Object.keys(tools)).not.toContain('delegate_to_rejected_specialist');
     expect(spawnedCount.value).toBe(0);
@@ -290,7 +290,7 @@ describe('hierarchical strategy with emergent.enabled — judge gating', () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.data).toMatch(/HITL rejected|manual reject/i);
+    expect(result.output).toMatch(/HITL rejected|manual reject/i);
     expect(roster.hitl_blocked).toBeUndefined();
     expect(spawnedCount.value).toBe(0);
   });
@@ -368,12 +368,12 @@ describe('hierarchical strategy with emergent.enabled — judge gating', () => {
 
     // First two get rejected by the judge (judge ran, judgeCallsUsed reached 2)
     expect(first.success).toBe(false);
-    expect(first.data).toMatch(/judge rejected/i);
+    expect(first.output).toMatch(/judge rejected/i);
     expect(second.success).toBe(false);
-    expect(second.data).toMatch(/judge rejected/i);
+    expect(second.output).toMatch(/judge rejected/i);
     // Third hits maxJudgeCalls cap before the judge runs
     expect(third.success).toBe(false);
-    expect(third.data).toMatch(/maxJudgeCalls|cap/i);
+    expect(third.output).toMatch(/maxJudgeCalls|cap/i);
     expect(spawnedCount.value).toBe(0);
   });
 });
