@@ -178,6 +178,9 @@ const RUN_REFUSAL_REASONS: Readonly<Record<string, string>> = {
   side_effects_undeclared: 'step_replaced',
   compose_needs_gate: 'compose_needs_gate',
   step_cycle: 'step_cycle',
+  // The step's tool was replaced between its check and its run: nothing ran,
+  // and the composition waits for a re-check.
+  step_replaced: 'step_replaced',
 };
 
 /** The `ITool` the engine registers for a forged tool. */

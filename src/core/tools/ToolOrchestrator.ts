@@ -951,7 +951,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
     }
 
     if (signal?.aborted) {
-      const errorMsg = `The call to '${toolName}' expired before it was delegated; nothing ran.`;
+      const errorMsg = `step_aborted: the call to '${toolName}' expired before it was delegated; nothing ran.`;
       console.warn(`${logPrefix} ${errorMsg}`);
       return {
         toolCallId: llmProvidedCallId,
@@ -964,7 +964,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
     // No await between this check and the executor's own lookup of the name,
     // which happens synchronously when executeTool is entered.
     if (resolvedForStep && this.toolExecutor.getTool(toolName) !== resolvedForStep) {
-      const errorMsg = `The tool registered as '${toolName}' changed after it was checked; nothing ran.`;
+      const errorMsg = `step_replaced: the tool registered as '${toolName}' changed after it was checked; nothing ran.`;
       console.warn(`${logPrefix} ${errorMsg}`);
       return {
         toolCallId: llmProvidedCallId,
