@@ -214,7 +214,14 @@ export class EmergentToolRegistry {
    * a forge that was mid-flight does not put one back. Cleared when the
    * deletes land, or when a new row is written for the id.
    */
-  private readonly removedIds = new Set<string>();
+  /**
+   * Per-tool generation: advanced by every registration, adoption, row write
+   * and removal in this process. An admission that read a tool adopts it only
+   * while the generation is what it read, so a tool that changed hands in
+   * between (removed, or replaced under its id) is never put back from a
+   * stale read, with or without storage.
+   */
+  private readonly generations = new Map<string, number>();
 
   /**
    * Cached promise from the first `ensureSchemaReady()` call.
@@ -391,7 +398,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       }
     }
 
-    this.removedIds.delete(tool.id);
+    this.bump(tool.id);
     // Stamp the tier on the tool object; a fresh registration is active, so the
     // convention property says so whatever the given object carried.
     const registered: EmergentTool = { ...tool, tier };
@@ -779,6 +786,16 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     this.sessionTools.delete(toolId);
     this.persistedTools.delete(toolId);
     this.states.delete(toolId);
+    this.bump(toolId);
+  }
+
+  /** The tool's generation in this process (see {@link adopt}). */
+  generation(toolId: string): number {
+    return this.generations.get(toolId) ?? 0;
+  }
+
+  private bump(toolId: string): void {
+    this.generations.set(toolId, this.generation(toolId) + 1);
   }
 
   /** Whether a storage adapter is configured. */
@@ -793,45 +810,38 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
    * rewritten by a load.
    */
   async writeToolRow(tool: EmergentTool): Promise<void> {
-    this.removedIds.delete(tool.id);
-    await this.persistToolToDb(tool);
-  }
-
-  /** Whether the tool was removed in this process and its rows are not yet gone. */
-  wasRemoved(toolId: string): boolean {
-    return this.removedIds.has(toolId);
+    this.bump(tool.id);
+    // In the tool's write queue: a removal queued before it deletes first, so
+    // the row the host asks for is the one that stays.
+    await this.queueStateWrite(tool.id, () => this.persistToolToDb(tool));
   }
 
   /**
    * The rows of a tool, deleted after every queued state write of the tool,
    * so a write still in the queue cannot recreate the state row once it is
-   * deleted; the removal is forgotten once they are gone. Best-effort.
+   * deleted. Best-effort.
    */
   private queueRowDeletes(toolId: string): void {
     const db = this.db;
     if (!db) {
-      this.removedIds.delete(toolId);
       return;
     }
     this.queueStateWrite(toolId, async () => {
       await db.run(`DELETE FROM agentos_emergent_tools WHERE id = ?`, [toolId]);
       await db.run(`DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?`, [toolId]);
-    })
-      .catch(() => {
-        // Best-effort cleanup only.
-      })
-      .finally(() => {
-        this.removedIds.delete(toolId);
-      });
+    }).catch(() => {
+      // Best-effort cleanup only.
+    });
   }
 
   /**
    * Take a tool read from storage into memory without rewriting its row.
    * `upsert` re-serialises the source; a loaded tool must keep the row it has.
    */
-  adopt(tool: EmergentTool, record: ToolStateRecord): boolean {
-    if (this.removedIds.has(tool.id)) {
-      // Removed in this process while the caller had the tool in hand.
+  adopt(tool: EmergentTool, record: ToolStateRecord, ifGeneration?: number): boolean {
+    if (ifGeneration !== undefined && this.generation(tool.id) !== ifGeneration) {
+      // The tool changed hands in this process (a removal, a registration, a
+      // row write) after the caller read it: what the caller holds is stale.
       return false;
     }
     this.sessionTools.delete(tool.id);
@@ -843,6 +853,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     }
     (tool as EmergentTool & { isActive?: boolean }).isActive = record.state === 'active';
     this.states.set(tool.id, record);
+    this.bump(tool.id);
     return true;
   }
 
@@ -968,6 +979,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     const normalized: EmergentTool = { ...tool };
     // The convention property follows the held state, not the given object.
     (normalized as EmergentTool & { isActive?: boolean }).isActive = this.isActive(normalized.id);
+    this.bump(normalized.id);
     if (normalized.tier === 'session') {
       this.sessionTools.set(normalized.id, normalized);
     } else {
@@ -993,9 +1005,9 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       this.sessionTools.delete(toolId) || this.persistedTools.delete(toolId);
     this.states.delete(toolId);
     // The rows go whether or not this process held the tool, so a host can
-    // remove a stored tool it never loaded; the removal is remembered until
-    // they are gone.
-    this.removedIds.add(toolId);
+    // remove a stored tool it never loaded; the generation moves, so an
+    // admission that read the tool before this does not put it back.
+    this.bump(toolId);
     this.queueRowDeletes(toolId);
     if (removed) {
       this.logAudit(toolId, 'remove');
@@ -1280,7 +1292,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       if (sessionFromSource(tool.source) === sessionId) {
         this.sessionTools.delete(id);
         this.states.delete(id);
-        this.removedIds.add(id);
+        this.bump(id);
         this.queueRowDeletes(id);
         this.logAudit(id, 'cleanup', { sessionId });
         removedCount += 1;
