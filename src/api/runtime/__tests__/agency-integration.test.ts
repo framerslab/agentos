@@ -1148,6 +1148,24 @@ describe('Agency Full Integration', () => {
     });
   });
 
+  describe('cognitiveMechanisms', () => {
+    it('warns that the lightweight agency() does not run the mechanisms', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      agency({
+        agents: { worker: mockAgentConfig('worker') },
+        strategy: 'sequential',
+        cognitiveMechanisms: {},
+      });
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('agency() accepted a cognitiveMechanisms config'),
+      );
+
+      warn.mockRestore();
+    });
+  });
+
   // ---------------------------------------------------------------------------
   // Task 5: RAG context injection
   // ---------------------------------------------------------------------------
