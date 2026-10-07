@@ -208,6 +208,9 @@ export function createApprovalGate(o: CreateApprovalGateOptions): ApprovalGateFn
         o.hitl.postApprovalGuardrails ?? ['pii-redaction', 'code-safety'],
         o.on,
       );
+      // The guardrail check is awaited: a call that ended meanwhile fires nothing.
+      const afterGuardrails = stopped();
+      if (afterGuardrails) return afterGuardrails;
       if (!result.passed) {
         safeCall(o.on?.guardrailHitlOverride, { guardrailId: result.guardrailId!, reason: result.reason!, toolName: info.name, timestamp: Date.now() });
         return refusal(`guardrail ${result.guardrailId}: ${result.reason}`);
