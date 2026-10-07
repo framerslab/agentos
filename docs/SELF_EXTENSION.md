@@ -20,4 +20,4 @@ In an agency running the hierarchical strategy with emergent planning enabled, t
 
 ## What is not there
 
-No weights are updated anywhere; no evaluation result changes a later turn's policy on its own; no loop rewrites the agent's own code or prompts persistently. [Emergent Capabilities](./architecture/EMERGENT_CAPABILITIES.md) is the full guide.
+No weights are updated anywhere. `self_evaluate` keeps its scores and adjustments in its own session state; the runtime's session manager can carry a `temperature` or `verbosity` override into later requests of the same session (`SelfImprovementSessionManager.setRuntimeParam()`), but no shipped tool writes it, so no evaluation result changes a later turn on its own. No loop rewrites the agent's own code or prompts persistently. [Emergent Capabilities](./architecture/EMERGENT_CAPABILITIES.md) is the full guide.
