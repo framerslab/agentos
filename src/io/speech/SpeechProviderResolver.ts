@@ -159,7 +159,7 @@ export class SpeechProviderResolver extends EventEmitter {
    * @param requirements - Optional filtering criteria (streaming, local, features,
    *   preferredIds).
    * @returns The resolved STT provider, possibly wrapped in a FallbackSTTProxy.
-   * @throws {Error} When no configured STT provider matches the requirements.
+   * @throws {Error} When no configured STT provider with an instance matches the requirements.
    *
    * @see {@link FallbackSTTProxy} for fallback chain behaviour
    * @see {@link ProviderRequirements} for available filter options
@@ -203,7 +203,7 @@ export class SpeechProviderResolver extends EventEmitter {
    * @param requirements - Optional filtering criteria (streaming, local, features,
    *   preferredIds).
    * @returns The resolved TTS provider, possibly wrapped in a FallbackTTSProxy.
-   * @throws {Error} When no configured TTS provider matches the requirements.
+   * @throws {Error} When no configured TTS provider with an instance matches the requirements.
    *
    * @see {@link FallbackTTSProxy} for fallback chain behaviour
    * @see {@link ProviderRequirements} for available filter options
@@ -238,7 +238,7 @@ export class SpeechProviderResolver extends EventEmitter {
    * would cause state inconsistency.
    *
    * @returns The resolved VAD provider instance.
-   * @throws {Error} When no VAD provider is registered and configured.
+   * @throws {Error} When no configured VAD provider with an instance is registered.
    *
    * @example
    * ```ts
@@ -247,7 +247,7 @@ export class SpeechProviderResolver extends EventEmitter {
    * ```
    */
   resolveVAD(): SpeechVadProvider {
-    const vads = this.listProviders('vad').filter((r) => r.isConfigured);
+    const vads = this.listProviders('vad').filter((r) => r.isConfigured && r.provider != null);
     if (vads.length === 0) {
       throw new Error('No VAD provider registered');
     }
@@ -326,12 +326,12 @@ export class SpeechProviderResolver extends EventEmitter {
    * **Path A — Preferred IDs provided:**
    * When `requirements.preferredIds` is set, iterate through the IDs in the
    * caller's specified order. For each ID, look up the registration and include
-   * it only if it matches the kind, is configured, and satisfies all other
-   * requirements. This preserves the caller's explicit ordering preference.
+   * it only if it matches the kind, is configured, holds a provider instance,
+   * and satisfies all other requirements. This preserves the caller's explicit ordering preference.
    *
    * **Path B — No preferred IDs:**
-   * Return all configured providers of the requested kind that match the
-   * requirements, sorted by ascending priority (lower = better). This is the
+   * Return all configured providers of the requested kind that hold an
+   * instance and match the requirements, sorted by ascending priority (lower = better). This is the
    * default path for most callers.
    *
    * @param kind - The provider kind to resolve ('stt', 'tts', etc.).
@@ -357,6 +357,7 @@ export class SpeechProviderResolver extends EventEmitter {
           reg &&
           reg.kind === kind &&
           reg.isConfigured &&
+          reg.provider != null &&
           this.matchesRequirements(reg, requirements)
         ) {
           results.push(reg);
@@ -367,7 +368,7 @@ export class SpeechProviderResolver extends EventEmitter {
 
     // Path B: all matching providers sorted by priority
     return this.listProviders(kind)
-      .filter((r) => r.isConfigured)
+      .filter((r) => r.isConfigured && r.provider != null)
       .filter((r) => this.matchesRequirements(r, requirements));
   }
 
@@ -419,8 +420,10 @@ export class SpeechProviderResolver extends EventEmitter {
    * implemented backends (e.g. NVIDIA NeMo, Bark).
    *
    * Core providers are registered with `priority: 100` and `source: 'core'`.
-   * The `provider` field is set to `null` (lazy instantiation) — actual provider
-   * instances are created on first use by the SpeechRuntime.
+   * A core entry has no instance (`provider` is `null`): it records the id and
+   * whether its keys are set. `SpeechRuntime` registers the instances it builds
+   * under the same ids, and an id that already holds an instance is skipped, so
+   * a refresh keeps it. The resolve methods skip entries without an instance.
    *
    * @example
    * ```ts
@@ -456,6 +459,9 @@ export class SpeechProviderResolver extends EventEmitter {
     ];
 
     for (const def of coreProviders) {
+      // Keep an instance that SpeechRuntime or an extension registered under this id.
+      if (this.registrations.get(def.id)?.provider) continue;
+
       const catalogEntry = findSpeechProviderCatalogEntry(def.id);
       // Skip providers not found in the catalog (should not happen, but defensive)
       if (!catalogEntry) continue;
@@ -470,7 +476,7 @@ export class SpeechProviderResolver extends EventEmitter {
       this.register({
         id: def.id,
         kind: def.kind,
-        provider: null as any, // Lazy — actual provider instance created on first use by SpeechRuntime.
+        provider: null as any, // No instance: SpeechRuntime or an extension registers one under this id.
         catalogEntry,
         isConfigured,
         priority: 100,

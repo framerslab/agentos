@@ -24,7 +24,7 @@ describe('SpeechProviderResolver Integration', () => {
   it('should resolve the first configured STT provider after refresh', async () => {
     const resolver = new SpeechProviderResolver(undefined, { OPENAI_API_KEY: 'key' });
     await resolver.refresh();
-    // Patch the null provider with a mock (refresh registers with null for lazy init)
+    // Give the core entry an instance (refresh registers core ids without one)
     const regs = resolver.listProviders('stt');
     const whisperReg = regs.find(r => r.id === 'openai-whisper');
     if (whisperReg) {
