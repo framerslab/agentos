@@ -308,3 +308,163 @@ describe('the ceiling at load', () => {
     });
   });
 });
+
+describe('the call deadline and effect records', () => {
+  it('7. a run that times out mid-request starts nothing new, aborts the request and returns within about a second of its deadline; a run beside it keeps its request', async () => {
+    let releaseSlow!: () => void;
+    const slowReleased = new Promise<void>((resolve) => {
+      releaseSlow = resolve;
+    });
+    let slowArrived!: () => void;
+    const slowSeen = new Promise<void>((resolve) => {
+      slowArrived = resolve;
+    });
+    const { port, seen } = await serve((req, res) => {
+      if (req.url === '/hang') {
+        return; // never answers
+      }
+      if (req.url === '/slow') {
+        slowArrived();
+        void slowReleased.then(() => res.end('slow'));
+        return;
+      }
+      res.end('ok');
+    });
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({
+      db,
+      config: { sandboxTimeoutMs: 1000, capabilities: { fetch: { domains: ['127.0.0.1'] } } },
+    });
+    const base = `http://127.0.0.1:${port}`;
+    const TWO_STEP =
+      'async function execute(input) { try { await fetch(input.first); } catch (e) {} await fetch(input.then); return { done: true }; }';
+    const FIRE = 'async function execute(input) { fetch(input.url).catch(() => undefined); return { started: true }; }';
+    const TWO_IN = {
+      type: 'object',
+      properties: { first: { type: 'string' }, then: { type: 'string' } },
+      required: ['first', 'then'],
+    };
+    for (const args of [
+      forgeArgs('two_step', TWO_STEP, ['fetch'], TWO_IN, { first: `${base}/ok`, then: `${base}/ok` }),
+      forgeArgs('fire', FIRE, ['fetch'], URL_IN, { url: `${base}/ok` }),
+      forgeArgs('get_it', FETCH_CODE, ['fetch'], URL_IN, { url: `${base}/ok` }),
+    ]) {
+      expect((await callTool(host.orchestrator, 'forge_tool', args)).isError).toBeFalsy();
+    }
+
+    // A run that times out while its request is in flight.
+    const started = Date.now();
+    const timedOut = await callTool(host.orchestrator, 'two_step', { first: `${base}/hang`, then: `${base}/after` });
+    expect(timedOut.isError).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1000 + 1000 + 500);
+    expect(timedOut.effects).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'capability',
+          capability: 'fetch',
+          outcome: expect.stringMatching(/^(aborted|pending)$/),
+        }),
+      ]),
+    );
+    // Its code went on to a second request after the run ended: refused and recorded, never sent.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(seen).not.toContain('/after');
+    expect(
+      db.raw
+        .prepare("SELECT decision, decided_by FROM agentos_emergent_effects WHERE decided_by = 'call_ended'")
+        .all(),
+    ).toEqual([{ decision: 'refused', decided_by: 'call_ended' }]);
+
+    // A run that ends while another run has a request in flight.
+    const slow = callTool(host.orchestrator, 'get_it', { url: `${base}/slow` });
+    await slowSeen;
+    const fired = await callTool(host.orchestrator, 'fire', { url: `${base}/hang` });
+    expect(fired.output).toEqual({ started: true });
+    // Its request was either never sent (the run had ended when its intent
+    // record landed: code call_ended) or aborted in flight (code aborted).
+    expect(fired.effects).toEqual([expect.objectContaining({ capability: 'fetch', outcome: 'aborted' })]);
+    releaseSlow();
+    const slowResult = await slow;
+    expect(slowResult.output).toEqual({ status: 200, body: 'slow' });
+    expect(slowResult.effects).toEqual([
+      expect.objectContaining({ capability: 'fetch', outcome: 'ok', record: 'written' }),
+    ]);
+  });
+
+  it("8. without a ceiling no effect record is written; with one, a failed record write refuses the call; a composed result carries its steps' effects", async () => {
+    const { port, seen } = await serve(routes);
+    const base = `http://127.0.0.1:${port}`;
+
+    // Without a ceiling.
+    const plainDb = createSqliteAdapter();
+    const plain = await makeForgeHost({ db: plainDb });
+    expect(
+      (await callTool(plain.orchestrator, 'forge_tool', forgeArgs('get_it', FETCH_CODE, ['fetch'], URL_IN, { url: `${base}/ok` })))
+        .isError,
+    ).toBeFalsy();
+    const unrecorded = await callTool(plain.orchestrator, 'get_it', { url: `${base}/ok` });
+    expect(unrecorded.output).toEqual({ status: 200, body: 'ok' });
+    expect(unrecorded.effects).toBeUndefined();
+    expect(plainDb.raw.prepare('SELECT COUNT(*) AS n FROM agentos_emergent_effects').get()).toEqual({ n: 0 });
+
+    // With a ceiling: each capability call is recorded before it runs and after.
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({
+      db,
+      config: {
+        capabilities: { fetch: { domains: ['127.0.0.1'] } },
+        compose: { sideEffectingTools: ['get_it'] },
+      },
+    });
+    expect(
+      (await callTool(host.orchestrator, 'forge_tool', forgeArgs('get_it', FETCH_CODE, ['fetch'], URL_IN, { url: `${base}/ok` })))
+        .isError,
+    ).toBeFalsy();
+    const recorded = await callTool(host.orchestrator, 'get_it', { url: `${base}/ok` });
+    expect(recorded.effects).toEqual([
+      expect.objectContaining({
+        kind: 'capability',
+        capability: 'fetch',
+        decision: 'allowed',
+        decidedBy: 'ceiling',
+        outcome: 'ok',
+        record: 'written',
+      }),
+    ]);
+    expect(
+      db.raw.prepare('SELECT capability, decision, outcome, target_form FROM agentos_emergent_effects').all(),
+    ).toEqual(
+      expect.arrayContaining([{ capability: 'fetch', decision: 'allowed', outcome: 'ok', target_form: 'digest' }]),
+    );
+
+    // A failed intent write refuses the call before it is sent.
+    const sentBefore = seen.length;
+    db.failNext('INSERT INTO agentos_emergent_effects');
+    const refused = await callTool(host.orchestrator, 'get_it', { url: `${base}/ok` });
+    expect(refused.isError).toBe(true);
+    expect(String(refused.errorDetails?.message)).toContain('audit_unavailable');
+    expect(refused.effects).toEqual([
+      expect.objectContaining({ decision: 'refused', decidedBy: 'audit_unavailable', record: 'none' }),
+    ]);
+    expect(seen.length).toBe(sentBefore);
+
+    // A composition over the forged tool carries the step's effects.
+    const composed = await callTool(host.orchestrator, 'forge_tool', {
+      name: 'get_through',
+      description: 'Fetches through get_it.',
+      inputSchema: URL_IN,
+      outputSchema: ANY_OUT,
+      implementation: {
+        mode: 'compose',
+        steps: [{ name: 'fetch', tool: 'get_it', inputMapping: { url: '$input.url' } }],
+      },
+      testCases: [{ input: { url: `${base}/ok` }, stepOutputs: { fetch: { status: 200, body: 'ok' } } }],
+    });
+    expect(composed.isError).toBeFalsy();
+    const through = await callTool(host.orchestrator, 'get_through', { url: `${base}/ok` });
+    expect(through.output).toEqual({ status: 200, body: 'ok' });
+    expect(through.effects).toEqual([
+      expect.objectContaining({ kind: 'capability', capability: 'fetch', outcome: 'ok', record: 'written' }),
+    ]);
+  });
+});
