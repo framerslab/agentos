@@ -657,8 +657,11 @@ hierarchical manager and the specialists it spawns, and nested agencies.
 - A handler that throws, and a timeout under `onTimeout: 'error'`, skip the
   tool, go to `on.error`, and reject the call with that error once the
   strategy has settled, after the run's usage has been added to the agency
-  totals. No finalization step runs: no output guardrails, no `beforeReturn`
-  approval, no `agentEnd` and no validation retry.
+  totals. Every later tool call of the run is skipped without asking the
+  handler. No finalization step runs: no output guardrails, no `beforeReturn`
+  approval, no `agentEnd` and no validation retry. Under `stream()` the
+  result's promises reject with the error, and `textStream` and `fullStream`
+  end by throwing it.
 - After the handler approves, the post-approval guardrails
   (`hitl.postApprovalGuardrails`, default `pii-redaction` and `code-safety`)
   run over the arguments unless `hitl.guardrailOverride` is `false`; a block
