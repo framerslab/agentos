@@ -1116,7 +1116,7 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect((await callTool(host.orchestrator, 'double_it', { n: 3 })).output).toEqual({ doubled: 6 });
   });
 
-  it("a session's cleanup takes its tools out of the executor and out of the agent index", async () => {
+  it("a session's cleanup takes its tools out of the executor", async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db });
     seedToolRow(db, {
@@ -1132,14 +1132,16 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     });
     await host.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess-c' });
     expect(await host.orchestrator.getTool('double_it')).toBeDefined();
-    expect(host.engine.getAgentTools('agent-c').map((t) => t.id)).toEqual(['sc-1']);
+    expect(host.engine.getSessionTools('sess-c').map((t) => t.id)).toEqual(['sc-1']);
 
     const removed = host.engine.cleanupSession('sess-c');
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(removed.map((t) => t.id)).toEqual(['sc-1']);
     expect(await host.orchestrator.getTool('double_it')).toBeUndefined();
-    expect(host.engine.getAgentTools('agent-c')).toEqual([]);
+    expect(host.engine.getSessionTools('sess-c')).toEqual([]);
+    // A call by name finds nothing registered.
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).isError).toBe(true);
   });
 
   it("a session's stored tools load for that session only", async () => {
