@@ -18,6 +18,22 @@ GMIs exist only on the full runtime. The lightweight helpers, [`agent()`](https:
 | Guardrails, RAG, HITL, channels, emergent tools | Run by the runtime | Accepted but not applied; `agent()` logs a warning ([capability contract](https://github.com/framerslab/agentos/blob/master/src/api/runtime/capabilityContract.ts)) |
 | Output | A stream of `AgentOSResponse` chunks | A `StreamTextResult` (`textStream`, `fullStream`) |
 
+## What a GMI adds over a plain agent
+
+A plain agent, `agent({...})`, calls the model with a system prompt built from your instructions and personality values, keeps the session's messages in process memory, and runs the tools you list. A GMI runs the same model, tools, extensions, guardrail packs and cognitive memory manager inside a turn loop the lightweight helper does not have:
+
+| Only on a GMI | What it does | Where |
+|---|---|---|
+| Persona definition and overlays | A loaded persona with traits, a mood (PAD) state and per-session overlays, bound to the session by `GMIManager` | [`GMIManager.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMIManager.ts), [`persona_overlays/`](https://github.com/framerslab/agentos/tree/master/src/cognition/substrate/persona_overlays) |
+| Sentiment scoring and events | Every user turn is scored (lexicon-based by default); sustained patterns raise events such as `USER_FRUSTRATED` and `USER_CONFUSED` | [`SentimentTracker.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/SentimentTracker.ts) lines 130 and 258-324 |
+| Metaprompts | Events and turn intervals run metaprompts: frustration recovery, confusion clarification, satisfaction reinforcement, error recovery, engagement, and a self-reflection metaprompt that adjusts the GMI's own traits from evidence. The presets merge into a persona that enables `sentimentTracking`. | [`MetapromptExecutor.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts), [`metaprompt_presets.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/metaprompt_presets.ts), [`PersonaLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/PersonaLoader.ts) lines 199-222 |
+| Mood-weighted memory bridge | With cognitive memory attached, every exchange is observed and encoded with the GMI's current PAD state and mood, and recalled with emotional congruence in the composite score | [`CognitiveMemoryBridge.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts) lines 277-292, [`RetrievalPriorityScorer.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/RetrievalPriorityScorer.ts) lines 40-46 |
+| Reasoning trace | The last 500 decision entries of the turn loop, readable for debugging and used as evidence by the self-reflection metaprompt | [`GMI.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMI.ts) lines 70 and 431 |
+| Self-modification tools | With `emergentConfig.selfImprovement.enabled`, the runtime registers `adapt_personality`, `manage_skills`, `create_workflow` and `self_evaluate`; trait changes are bounded and kept in a `PersonalityMutationStore` | [`ToolOrchestrator.ts`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts) lines 345-360, [`SelfImprovementSessionManager.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/SelfImprovementSessionManager.ts) line 369 |
+| RAG trigger and discovery context | The loop decides per turn whether to retrieve, and injects capability-discovery context when discovery is configured | [`GMI.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMI.ts) lines 683, 880-893 and 951-957 |
+
+The same on both paths: the model and provider, tools and extensions, the eight memory mechanisms and the observer and reflector pipeline (they belong to `CognitiveMemoryManager`, which a host can run without a GMI, as wilds-ai and Wunderland do), HyDE and graph retrieval, and the HEXACO trait values themselves. `agent()` writes those values into the prompt once; a GMI carries them as persona state that its loops can change.
+
 ## Getting a GMI
 
 ```typescript

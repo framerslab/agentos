@@ -106,6 +106,31 @@ const aria = await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents
 
 ---
 
+## Generalized Mind Instances (GMIs)
+
+On the full runtime, every session is served by a **GMI**: a persistent agent with its own persona, mood, conversation history and reasoning trace. `agent()` is the lightweight helper; it calls the model with a prompt and keeps session history. A GMI runs a turn loop around the same model, tools, guardrails and cognitive memory:
+
+- **Sentiment → metaprompts.** Every user turn is scored; sustained frustration or confusion fires recovery metaprompts, and a self-reflection metaprompt lets the GMI adjust its own HEXACO traits from evidence (the presets are enabled per persona).
+- **Mood-weighted memory.** With cognitive memory attached, each exchange is encoded with the GMI's current mood and recalled with emotional congruence in the score.
+- **Self-modification tools.** With `selfImprovement.enabled`, the runtime registers `adapt_personality`, `manage_skills`, `create_workflow` and `self_evaluate`; trait changes are bounded and persisted.
+- **A reasoning trace** of the last 500 decisions, and persona overlays per session.
+
+```ts
+import { AgentOS, AgentOSResponseChunkType } from '@framers/agentos';
+
+const agentos = await AgentOS.create();
+for await (const chunk of agentos.processRequest({
+  userId: 'user-42', sessionId: 'research-q1', selectedPersonaId: 'v_researcher',
+  textInput: 'Summarize the open incidents from this week.',
+})) {
+  if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA) process.stdout.write(chunk.textDelta);
+}
+```
+
+[What a GMI adds over a plain agent →](https://docs.agentos.sh/architecture/gmi)
+
+---
+
 ## Memory Benchmarks
 
 `gpt-4o` reader, `gpt-4o-2024-08-06` judge, full N=500, single-CLI reproduction with bootstrap 95% CIs and per-benchmark judge-FPR probes.
@@ -137,6 +162,7 @@ const aria = await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents
 | **Prompt Caching** | Zero config on every provider: automatic Anthropic breakpoints incl. multi-turn history (direct + OpenRouter) * OpenAI cache-key routing * normalized cache usage + leak detection * per-call TTL/opt-out * [guide](https://docs.agentos.sh/features/prompt-caching) |
 | **Cognitive Memory** | 8 mechanisms: reconsolidation, retrieval-induced forgetting, involuntary recall, FOK, gist extraction, schema encoding, source decay, emotion regulation |
 | **HEXACO Personality** | 6 traits modulate memory, retrieval bias, response style |
+| **GMI Runtime** | Per-session persona, mood and reasoning trace * sentiment-triggered metaprompts * mood-weighted memory bridge * bounded self-adjusting traits |
 | **RAG Pipeline** | 7 vector backends * 4 retrieval strategies * GraphRAG * HyDE * Cohere rerank-v3.5 |
 | **Multi-Agent Teams** | 6 coordination strategies * shared memory * inter-agent messaging * HITL gates |
 | **Orchestration** | `workflow()` DAGs * `AgentGraph` cycles * `mission()` goal-driven planning * checkpointing |
