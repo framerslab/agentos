@@ -1449,6 +1449,12 @@ export class EmergentCapabilityEngine {
     if (!refusal && candidate.tier === 'agent' && candidate.createdBy.startsWith(GMI_INSTANCE_ID_PREFIX)) {
       refusal = 'legacy_owner';
     }
+    // 3b. Under a ceiling, a stored request this release cannot read is not
+    //     replaced by one derived from the source, which could narrow the
+    //     tool silently: it waits, suspended, for a release that reads it.
+    if (!refusal && this.ceiling && implementation?.mode === 'sandbox' && requestStored && !stored?.request) {
+      refusal = 'request_unreadable';
+    }
     if (implementation && !refusal) {
       refusal = this.refusalFor(implementation, name);
     }
@@ -1672,6 +1678,15 @@ export class EmergentCapabilityEngine {
       }
       if (implementation.code.trim() === '') {
         return 'source_not_persisted';
+      }
+      if (this.ceiling) {
+        // The grant must fit the ceiling in force: a lowered ceiling
+        // suspends the tool, and the next load under a ceiling that covers
+        // it again lifts the suspension (the library's, so it is re-checked).
+        const list = normalizeAllowlist(implementation.allowlist);
+        if (list.unknown.length > 0 || !checkRequest(list.capabilities, this.ceiling).ok) {
+          return 'capability_not_granted';
+        }
       }
       return null;
     }
