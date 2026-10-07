@@ -26,7 +26,7 @@ export interface ReasoningTraceLimitIssue {
   /** Where the setting came from. */
   source: 'persona' | 'config';
   key: 'maxEntries' | 'maxMessageLength';
-  /** The value as given. */
+  /** The value as given, made safe for JSON: numbers, strings, booleans and null pass through, anything else becomes its `String()` form. */
   value: unknown;
   /** Why it was not used as given. */
   reason: 'not_a_positive_integer' | 'above_ceiling';
@@ -66,6 +66,8 @@ export function resolveReasoningTraceLimits(
   config?: Pick<GMIBaseConfig, 'defaultReasoningTraceMaxEntries' | 'defaultReasoningTraceMaxMessageLength'>,
 ): ReasoningTraceLimits {
   const ignored: ReasoningTraceLimitIssue[] = [];
+  const safe = (value: unknown): unknown =>
+    value === null || ['number', 'string', 'boolean'].includes(typeof value) ? value : String(value);
   const pick = (key: 'maxEntries' | 'maxMessageLength'): number => {
     const candidates: Array<[ReasoningTraceLimitIssue['source'], unknown]> = [
       ['persona', persona?.reasoningTraceConfig?.[key]],
@@ -75,12 +77,12 @@ export function resolveReasoningTraceLimits(
     for (const [source, value] of candidates) {
       if (value === undefined) continue;
       if (!isPositiveInteger(value)) {
-        ignored.push({ source, key, value, reason: 'not_a_positive_integer' });
+        ignored.push({ source, key, value: safe(value), reason: 'not_a_positive_integer' });
         continue;
       }
       if (chosen !== undefined) continue;
       if (value > CEILINGS[key]) {
-        ignored.push({ source, key, value, reason: 'above_ceiling' });
+        ignored.push({ source, key, value: safe(value), reason: 'above_ceiling' });
         chosen = CEILINGS[key];
       } else {
         chosen = value;

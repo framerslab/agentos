@@ -23,6 +23,12 @@ describe('resolveReasoningTraceLimits', () => {
     expect(r.ignored.map((i) => `${i.source}.${i.key}:${i.reason}`)).toEqual(['persona.maxEntries:not_a_positive_integer', 'config.maxEntries:not_a_positive_integer']);
     expect(resolveReasoningTraceLimits({ reasoningTraceConfig: { maxEntries: -1 } }, { defaultReasoningTraceMaxEntries: 9 }).maxEntries).toBe(9);
   });
+  it('records a non-serialisable value in a JSON-safe form', () => {
+    const r = resolveReasoningTraceLimits({ reasoningTraceConfig: { maxEntries: 1n as unknown as number } });
+    expect(r.maxEntries).toBe(500);
+    expect(r.ignored[0]?.value).toBe('1');
+    expect(() => JSON.stringify(r.ignored)).not.toThrow();
+  });
   it('clamps to the ceilings', () => {
     const r = resolveReasoningTraceLimits({ reasoningTraceConfig: { maxEntries: 1_000_000, maxMessageLength: 1_000_000 } });
     expect(r.maxEntries).toBe(REASONING_TRACE_MAX_ENTRIES_CEILING);

@@ -353,7 +353,11 @@ export function frontmatterToPersona(
     // Runtime readers key Honesty-Humility as `honesty`; the frontmatter may
     // use either spelling.
     personalityTraits: frontmatter.hexaco ? normalizeHexacoTraits(frontmatter.hexaco) : undefined,
-    reasoningTraceConfig: frontmatter.reasoningTrace ? { ...frontmatter.reasoningTrace } : undefined,
+    // Kept as given (an object is copied; anything else passes through) so PersonaValidation can report a malformed value.
+    reasoningTraceConfig:
+      frontmatter.reasoningTrace && typeof frontmatter.reasoningTrace === 'object' && !Array.isArray(frontmatter.reasoningTrace)
+        ? { ...frontmatter.reasoningTrace }
+        : (frontmatter.reasoningTrace as IPersonaDefinition['reasoningTraceConfig']),
     moodAdaptation: frontmatter.defaultMood
       ? {
           enabled: true,
