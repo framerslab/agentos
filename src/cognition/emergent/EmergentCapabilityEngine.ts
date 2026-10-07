@@ -1050,7 +1050,10 @@ export class EmergentCapabilityEngine {
       // again here, because the write that would have caught a restriction
       // another process stored since the first read is not made.
       const now = await this.registry.readStoredState(toolId);
-      if (now && (now.state !== stored.state || now.setBy !== stored.setBy || now.at !== stored.at)) {
+      if (!now) {
+        // The row this load read is gone: another process removed the tool.
+        written = { toolId, state: 'demoted', reason: 'removed', setBy: 'host', at: Date.now(), request: null };
+      } else if (now.state !== stored.state || now.setBy !== stored.setBy || now.at !== stored.at) {
         written = now;
       }
     }
@@ -1077,6 +1080,9 @@ export class EmergentCapabilityEngine {
       if (fresh) {
         return this.admitRow(fresh, { ...options, readmitted: true });
       }
+      // The row is gone: another process removed the tool meanwhile.
+      await this.unregisterIfLive(toolId);
+      return { toolId, name, state: 'demoted', reason: 'removed' };
     }
     this.registry.adopt(tool, {
       toolId,

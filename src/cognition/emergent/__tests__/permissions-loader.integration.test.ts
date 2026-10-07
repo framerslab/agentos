@@ -797,6 +797,69 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect(JSON.stringify(called)).toMatch(/fetch/);
   });
 
+  it('a tool another process removes while a load has it in hand is not registered, and gets no orphan state row', async () => {
+    const db = createSqliteAdapter();
+    const hostA = await makeForgeHost({ db });
+    seedToolRow(db, { id: 'raw-1', name: 'double_it', mode: 'sandbox', source: RAW_DOUBLE, inputSchema: NUMBER_IN, outputSchema: DOUBLED_OUT });
+
+    // Host A has read the row and is about to write its state when the tool
+    // is removed (both rows deleted, as remove() does) by another process.
+    const gate = db.gateNext('INSERT INTO agentos_emergent_tool_state');
+    const loading = hostA.engine.loadPersistedTools({ tiers: ['shared'] });
+    await gate.entered;
+    db.raw.prepare('DELETE FROM agentos_emergent_tools WHERE id = ?').run('raw-1');
+    db.raw.prepare('DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?').run('raw-1');
+    gate.release();
+    const summary = await loading;
+
+    expect(summary.outcomes).toEqual([{ toolId: 'raw-1', name: 'double_it', state: 'demoted', reason: 'removed' }]);
+    expect(await hostA.orchestrator.getTool('double_it')).toBeUndefined();
+    expect(readStateRow(db, 'raw-1')).toBeUndefined();
+    expect(readToolRow(db, 'raw-1')).toBeUndefined();
+  });
+
+  it("a load with nothing to write that finds the row gone reports the tool removed", async () => {
+    const db = createSqliteAdapter();
+    const hostA = await makeForgeHost({ db });
+    seedToolRow(db, { id: 'raw-1', name: 'double_it', mode: 'sandbox', source: RAW_DOUBLE, inputSchema: NUMBER_IN, outputSchema: DOUBLED_OUT });
+    seedStateRow(db, { toolId: 'raw-1', state: 'active', setBy: 'library', requestJson: '{"kind":"sandbox","capabilities":[]}' });
+
+    const gate = db.gateNext('FROM agentos_emergent_tool_state\n        WHERE tool_id = ?');
+    const loading = hostA.engine.loadPersistedTools({ tiers: ['shared'] });
+    await gate.entered;
+    db.raw.prepare('DELETE FROM agentos_emergent_tools WHERE id = ?').run('raw-1');
+    db.raw.prepare('DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?').run('raw-1');
+    gate.release();
+    const summary = await loading;
+
+    expect(summary.outcomes).toEqual([{ toolId: 'raw-1', name: 'double_it', state: 'demoted', reason: 'removed' }]);
+    expect(await hostA.orchestrator.getTool('double_it')).toBeUndefined();
+  });
+
+  it("a host's reactivation overtaken by another process's suspension yields to it, in memory and in the row", async () => {
+    const db = createSqliteAdapter();
+    const hostA = await makeForgeHost({ db });
+    const hostB = await makeForgeHost({ db });
+    seedToolRow(db, { id: 'raw-1', name: 'double_it', mode: 'sandbox', source: RAW_DOUBLE, isActive: 0, inputSchema: NUMBER_IN, outputSchema: DOUBLED_OUT });
+    seedStateRow(db, { toolId: 'raw-1', state: 'suspended', reason: 'operator_hold', setBy: 'host', requestJson: null });
+    expect((await hostA.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes[0]).toMatchObject({ state: 'suspended' });
+
+    // Host A's reactivation has written its state row and is held before its
+    // flag write; host B suspends the tool meanwhile.
+    const gate = db.gateNext('SET is_active = COALESCE(');
+    const reactivating = hostA.engine.reactivateTool('raw-1');
+    await gate.entered;
+    expect(await hostB.engine.suspendTool('raw-1', 'operator_hold_again')).toBe(true);
+    gate.release();
+
+    expect(await reactivating).toMatchObject({ state: 'suspended', reason: 'operator_hold_again' });
+    expect(await hostA.orchestrator.getTool('double_it')).toBeUndefined();
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'suspended', state_reason: 'operator_hold_again' });
+    expect(readToolRow(db, 'raw-1')?.is_active).toBe(0);
+    // Host A holds the suspension too: the next load in A keeps the tool off.
+    expect((await hostA.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes[0]).toMatchObject({ state: 'suspended' });
+  });
+
   it("a session's stored tools load for that session only", async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db });

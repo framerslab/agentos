@@ -471,6 +471,9 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
    * uses it for its active write, so a restriction another process stored
    * after the row was read is never written over; a refused write returns the
    * row's own record, and a restriction read that way is held here as well.
+   * Every write, conditional or not, reads the row back after it: a state
+   * another process stored meanwhile is what is returned and held, and a tool
+   * another process removed reads as `demoted` with the reason `removed`.
    *
    * @returns the record now in force for the tool.
    * @throws If the storage adapter rejects.
@@ -600,7 +603,8 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     // from another of the same content in the same millisecond.
     const writeId = randomUUID();
     record.writeId = writeId;
-    const params: unknown[] = [toolId, record.state, record.reason, record.setBy, record.at, requestJson, Date.now(), writeId];
+    const values: unknown[] = [toolId, record.state, record.reason, record.setBy, record.at, requestJson, Date.now(), writeId];
+    const guardParams: unknown[] = [];
     if (ifRow === 'absent') {
       guard = `
            WHERE 0 = 1`;
@@ -609,7 +613,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
            WHERE agentos_emergent_tool_state.state = ?
              AND agentos_emergent_tool_state.set_by = ?
              AND agentos_emergent_tool_state.state_at = ?`;
-      params.push(ifRow.state, ifRow.setBy, ifRow.at);
+      guardParams.push(ifRow.state, ifRow.setBy, ifRow.at);
     }
     const readRow = async (): Promise<StateRowRead | undefined> =>
       (await db.get(
@@ -628,8 +632,19 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       ...(row.write_id ? { writeId: row.write_id } : {}),
     });
     // Applied when the row carries this write's id; content and time cannot
-    // tell two writes of the same record in one millisecond apart.
-    const matches = (row: StateRowRead | undefined): boolean => !row?.state || row.write_id === writeId;
+    // tell two writes of the same record in one millisecond apart. A row that
+    // is gone was removed by another process: not applied.
+    const matches = (row: StateRowRead | undefined): boolean => !!row?.state && row.write_id === writeId;
+    // What a caller gets for a tool another process removed meanwhile: off,
+    // with the reason, so a load does not register it.
+    const removed = (): ToolStateRecord => ({
+      toolId,
+      state: 'demoted',
+      reason: 'removed',
+      setBy: 'host',
+      at: Date.now(),
+      request: null,
+    });
 
     const before = await readRow();
     if (ifRow === 'absent' && before?.state) {
@@ -637,22 +652,25 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       // statement; the row and its flag are as another process left them.
       return rowRecord(before);
     }
-    // The state row, its flag write marked pending until it is done.
+    // The state row, its flag write marked pending until it is done. It is
+    // inserted only while the tool row exists: a tool another process
+    // removed meanwhile gets no orphan state row, and the read below reports
+    // the removal.
     await db.run(
       `INSERT INTO agentos_emergent_tool_state
          (tool_id, state, state_reason, set_by, state_at, request_json, updated_at, write_id, flag_synced)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, 0
+        WHERE EXISTS (SELECT 1 FROM agentos_emergent_tools WHERE id = ?)
        ON CONFLICT (tool_id) DO UPDATE SET
          ${setList},
          flag_synced = 0${guard}`,
-      params,
+      [...values, toolId, ...guardParams],
     );
-    if (ifRow !== undefined) {
-      const row = await readRow();
-      if (!matches(row)) {
-        // Refused: the row and its flag are as another process left them.
-        return rowRecord(row as StateRowRead);
-      }
+    const row = await readRow();
+    if (!matches(row)) {
+      // Refused, or the tool is gone: the row and its flag are as another
+      // process left them.
+      return row?.state ? rowRecord(row) : removed();
     }
     // The legacy flag follows the state row, then the mark is cleared. A
     // failure here leaves the mark pending for the next write or load.
@@ -663,13 +681,13 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
         WHERE tool_id = ? AND ${record.writeId !== undefined ? 'write_id = ?' : 'state = ? AND set_by = ? AND state_at = ?'}`,
       record.writeId !== undefined ? [toolId, record.writeId] : [toolId, record.state, record.setBy, record.at],
     );
-    if (ifRow !== undefined) {
-      // The row's word after the flag write: a restriction another process
-      // stored meanwhile is what holds, not the record written here.
-      const after = await readRow();
-      if (!matches(after)) {
-        return rowRecord(after as StateRowRead);
-      }
+    // The row's word after the flag write: a restriction another process
+    // stored meanwhile, or a removal, is what holds, not the record written
+    // here. Read for every write, conditional or not, so a host's reactivation
+    // overtaken by another process's suspension yields to it in memory too.
+    const after = await readRow();
+    if (!matches(after)) {
+      return after?.state ? rowRecord(after) : removed();
     }
     return record;
   }
