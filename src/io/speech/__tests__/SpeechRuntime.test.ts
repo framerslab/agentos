@@ -210,6 +210,14 @@ describe('SpeechRuntime providers built from the environment', () => {
     expect(runtime.getSTT({ streaming: false })?.id).toBe('assemblyai');
   });
 
+  it('reads a streaming feature requirement as the streaming capability', () => {
+    // AssemblyAI's catalog features list 'streaming'; this provider uploads and polls.
+    const runtime = new SpeechRuntime({ env: { ASSEMBLYAI_API_KEY: 'aai' } });
+
+    expect(runtime.getSTT({ features: ['streaming'] })).toBeUndefined();
+    expect(runtime.getSTT({ features: ['diarization'] })?.id).toBe('assemblyai');
+  });
+
   it('ignores a catalog entry of another kind, and treats an undeclared provider as not streaming', () => {
     // 'elevenlabs' is a text-to-speech id in the catalog, listed as streaming.
     const runtime = new SpeechRuntime({ autoRegisterFromEnv: false });
