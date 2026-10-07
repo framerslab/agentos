@@ -212,11 +212,11 @@ export interface GenerateObjectOptions<T extends ZodType> {
    *
    * Particularly relevant here because OpenAI's strict structured-
    * output mode (`response_format: json_schema`) is the most
-   * aggressively-moderated path on the platform; a NSFW story
-   * extraction tagged with `policyTier: 'mature'` will pre-empt the
-   * 422 by routing to Hermes 3 (which honors the looser
-   * `json_object` mode that {@link generateObject} falls back to for
-   * non-OpenAI providers).
+   * aggressively-moderated path on the platform; a mature story
+   * extraction tagged with `policyTier: 'mature'` that the primary
+   * refuses walks on to the tier's uncensored OpenRouter models, which
+   * take the looser `json_object` mode that {@link generateObject}
+   * uses for non-OpenAI providers.
    */
   policyTier?: 'safe' | 'standard' | 'mature' | 'private-adult';
   /**

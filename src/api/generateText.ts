@@ -713,23 +713,24 @@ export interface GenerateTextOptions {
    */
   hostPolicy?: HostLLMPolicy;
   /**
-   * Caller's intended content policy tier. When set to `'mature'` or
-   * `'private-adult'` AND no explicit `fallbackProviders` was supplied,
-   * the auto-built fallback chain is constructed via
-   * {@link buildPolicyAwareFallbackChain} instead of the default
-   * availability chain: prepending an uncensored OpenRouter model
-   * (Hermes 3 405B) so a content-policy refusal from the primary
-   * (gpt-4o, Claude, etc.) re-routes to a model that can complete
-   * the request rather than hard-failing.
+   * Caller's intended content policy tier. On `'mature'` or
+   * `'private-adult'` with no explicit `fallbackProviders`, the auto-built
+   * fallback chain is {@link buildPolicyAwareFallbackChain}: the tier's
+   * ranked uncensored OpenRouter models, then the availability chain, so a
+   * content-policy refusal from the primary (an OpenAI or Anthropic model)
+   * re-routes to a model that can complete the request rather than
+   * hard-failing.
    *
    * Combined with the {@link isContentPolicyRefusal} branch in
-   * {@link isRetryableError}, this also makes the existing fallback
-   * loop fire on OpenAI's 400 + `code: 'content_policy_violation'`
-   *: which the network-only retryable matrix would otherwise treat
-   * as a hard error.
+   * {@link isRetryableError}, this also makes the fallback loop fire on
+   * OpenAI's 400 + `code: 'content_policy_violation'`, which the
+   * network-only retryable matrix would otherwise treat as a hard error.
    *
-   * Has no effect for `safe`/`standard` tiers (or when omitted):
-   * those keep the existing availability-only fallback behavior.
+   * When omitted, the chain follows the tier the call resolves to
+   * ({@link resolvePolicyTier}): `routerParams.policyTier`, then this field,
+   * then `hostPolicy` (a host policy without a tier counts as `standard`),
+   * then the router's default tier. `safe` and `standard` keep the
+   * availability-only chain.
    *
    * Mirrors the existing `policyTier` parameter on
    * {@link import('./generateImage.js').GenerateImageOptions} and

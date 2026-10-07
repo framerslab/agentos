@@ -55,9 +55,16 @@ export class PolicyAwareRouter implements IModelRouter {
     this.defaultPolicyTier = defaultPolicyTier;
   }
 
-  /** The tier this router applies when a request carries none: its own default, else its base router's. */
+  /**
+   * The tier this router's selection applies when a request carries none. A
+   * mature or private-adult default is routed here; a safe or standard
+   * default hands the request to the base router unchanged, so the base's own
+   * tier decides, and the wrapper's default stands only when the base has none.
+   */
   get policyTier(): PolicyTier | undefined {
-    return this.defaultPolicyTier ?? this.baseRouter?.policyTier;
+    const own = this.defaultPolicyTier;
+    if (own === 'mature' || own === 'private-adult') return own;
+    return this.baseRouter?.policyTier ?? own;
   }
 
   /**

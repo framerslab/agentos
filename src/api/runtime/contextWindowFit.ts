@@ -5,8 +5,10 @@
  * The input estimate is characters / 4 plus a 10% margin, over the text the
  * request sends: message content (system blocks included), tool-call fields,
  * and tool schemas or the tool text a prompt shim renders. Image parts and
- * replayed reasoning fields are not counted. The output allowance is the one
- * the provider will send.
+ * replayed reasoning fields (Anthropic thinking blocks and signatures, Gemini
+ * thought signatures) are not counted. The output allowance is the one the
+ * provider will send. A call that enables OpenRouter's context-compression
+ * plugin is taken as fitting: OpenRouter trims the prompt to the window.
  *
  * @module api/runtime/contextWindowFit
  */
@@ -19,7 +21,15 @@ const ESTIMATE_MARGIN = 1.1;
 /** OpenRouterProvider's `max_tokens` for a call that sets none. */
 const OPENROUTER_DEFAULT_MAX_TOKENS = 4096;
 /** Keys whose values are not sent to the model as text. */
-const UNCOUNTED_KEYS = new Set(['role', 'type', 'cache_control', 'thinking', 'thinkingBlocks', 'signature']);
+const UNCOUNTED_KEYS = new Set([
+  'role',
+  'type',
+  'cache_control',
+  'thinking',
+  'thinkingBlocks',
+  'signature',
+  'thoughtSignature',
+]);
 
 /** The request one model would be sent. */
 export interface ContextFitRequest {
@@ -39,7 +49,10 @@ export interface ContextFitRequest {
 
 /** The check's verdict and the numbers behind it. */
 export interface ContextFit {
-  /** False only when the catalog knows the model's window and the request exceeds it. */
+  /**
+   * False only when the catalog knows the model's window, the request exceeds
+   * it, and the call has not enabled OpenRouter's context compression.
+   */
   fits: boolean;
   contextWindow?: number;
   estimatedInputTokens: number;
@@ -80,8 +93,25 @@ function outputAllowance(
 }
 
 /**
+ * Whether the call enables OpenRouter's context-compression plugin, which
+ * trims a prompt over the window from the middle until it fits
+ * (`plugins: [{ id: 'context-compression' }]`; `enabled: false` turns it off).
+ */
+function compressesToFit(provider: string, customModelParams: Record<string, unknown> | undefined): boolean {
+  if (provider !== 'openrouter') return false;
+  const plugins = customModelParams?.plugins;
+  if (!Array.isArray(plugins)) return false;
+  return plugins.some((plugin: unknown) => {
+    if (!plugin || typeof plugin !== 'object') return false;
+    const entry = plugin as { id?: unknown; enabled?: unknown };
+    return entry.id === 'context-compression' && entry.enabled !== false;
+  });
+}
+
+/**
  * Whether `request` fits its model's context window. A model the catalog
- * does not list (every direct-provider model) is taken as fitting.
+ * does not list (every direct-provider model) is taken as fitting, and so is
+ * a call that enables OpenRouter's context compression.
  */
 export function checkContextFit(request: ContextFitRequest): ContextFit {
   const chars =
@@ -93,7 +123,10 @@ export function checkContextFit(request: ContextFitRequest): ContextFit {
   const outputTokens = outputAllowance(request.provider, request.model, request.maxTokens, request.customModelParams);
   const contextWindow = findCatalogTextModel(request.model, request.provider)?.contextWindow;
   return {
-    fits: contextWindow === undefined || estimatedInputTokens + outputTokens <= contextWindow,
+    fits:
+      contextWindow === undefined ||
+      estimatedInputTokens + outputTokens <= contextWindow ||
+      compressesToFit(request.provider, request.customModelParams),
     ...(contextWindow !== undefined ? { contextWindow } : {}),
     estimatedInputTokens,
     outputTokens,

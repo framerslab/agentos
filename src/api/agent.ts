@@ -151,11 +151,13 @@ export interface AgentOptions extends BaseAgentConfig {
    * `stream()` / session call this agent makes (same contract as
    * {@link GenerateTextOptions.policyTier}): on `'mature'` / `'private-adult'`
    * with no explicit `fallbackProviders`, the auto-built fallback chain
-   * prepends uncensored legs so a content-policy refusal from the primary
-   * re-routes to a model that can complete the request, and the model router
-   * receives the tier as a routing hint. Unset keeps the availability-only
-   * chain and tier-agnostic routing. A per-call `policyTier` in `extra`
-   * overrides this value.
+   * leads with the tier's uncensored legs so a content-policy refusal from
+   * the primary re-routes to a model that can complete the request, and the
+   * model router receives the tier as a routing hint. Unset, the chain
+   * follows the tier the call otherwise resolves to (a host policy's tier or
+   * the router's default tier); with no tier anywhere it is the
+   * availability-only chain. A per-call `policyTier` in `extra` overrides
+   * this value.
    */
   policyTier?: GenerateTextOptions['policyTier'];
   /**

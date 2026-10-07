@@ -34,7 +34,7 @@ Set `policyTier` on any text call. The [`PolicyAwareRouter`](https://github.com/
 bypasses the default OpenAI/Anthropic chain.
 
 ```typescript
-import { generateText, PolicyAwareRouter, createUncensoredModelCatalog } from '@framers/agentos';
+import { generateText, PolicyAwareRouter, createUncensoredModelCatalog } from '@framers/agentos/api';
 
 // Option 1 — explicit router (most control)
 const router = new PolicyAwareRouter(
@@ -86,7 +86,13 @@ the availability chain. The walk:
   caller wrote run as written;
 - runs each leg as named: a router on the call picks only the first model;
 - skips any catalog model whose context window cannot hold the request
-  (`checkContextFit`), the first model included, which is then never sent.
+  (`checkContextFit`), the first model included, which is then never sent the
+  turn. The check counts the output the provider will be asked for (a leg's
+  `maxTokensHeadroom` and a `customModelParams.max_tokens` override included)
+  and, on the prompt shim, the tool text it renders. With `planning` on, the
+  planning call goes out before the check. A call that enables OpenRouter's
+  context compression (`customModelParams: { plugins: [{ id: 'context-compression' }] }`)
+  is sent as is: OpenRouter trims the prompt to the window.
 
 ### Refusal-retry
 
