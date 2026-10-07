@@ -110,15 +110,23 @@ const aria = await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents
 
 On the full runtime, every session is served by a **GMI**: a persistent agent with its own persona, mood, conversation history and reasoning trace. `agent()` is the lightweight helper; it calls the model with a prompt and keeps session history. A GMI runs a turn loop around the same model, tools, guardrails and cognitive memory:
 
-- **Sentiment → metaprompts.** Every user turn is scored; sustained frustration or confusion fires recovery metaprompts, and a self-reflection metaprompt lets the GMI adjust its own HEXACO traits from evidence (the presets are enabled per persona).
+- **Sentiment → metaprompts.** When a persona enables sentiment tracking, every user turn is scored; sustained frustration or confusion fires recovery metaprompts, and a self-reflection metaprompt re-reads the GMI's mood and task context from evidence.
 - **Mood-weighted memory.** With cognitive memory attached, each exchange is encoded with the GMI's current mood and recalled with emotional congruence in the score.
-- **Self-modification tools.** With `selfImprovement.enabled`, the runtime registers `adapt_personality`, `manage_skills`, `create_workflow` and `self_evaluate`; trait changes are bounded and persisted.
+- **Self-modification tools.** With `selfImprovement.enabled`, the runtime registers `adapt_personality`, `manage_skills`, `create_workflow` and `self_evaluate`; `adapt_personality` changes the running GMI's traits within bounds, and a mutation store records the changes when a storage adapter and `persistWithDecay` are configured.
 - **A reasoning trace** of the last 500 decisions, and persona overlays per session.
 
 ```ts
-import { AgentOS, AgentOSResponseChunkType } from '@framers/agentos';
+import { AgentOS, AgentOSResponseChunkType, BUILT_IN_PERSONAS, getBuiltInPersona } from '@framers/agentos';
 
-const agentos = await AgentOS.create();
+// AgentOS.create() loads persona files from ./personas. A package install has
+// no such directory, so seed a loader from the personas the package ships.
+const personaLoader = {
+  async initialize() {},
+  async loadPersonaById(id: string) { return getBuiltInPersona(id); },
+  async loadAllPersonaDefinitions() { return BUILT_IN_PERSONAS; },
+};
+
+const agentos = await AgentOS.create({ personaLoader });
 for await (const chunk of agentos.processRequest({
   userId: 'user-42', sessionId: 'research-q1', selectedPersonaId: 'v_researcher',
   textInput: 'Summarize the open incidents from this week.',
@@ -162,7 +170,7 @@ for await (const chunk of agentos.processRequest({
 | **Prompt Caching** | Zero config on every provider: automatic Anthropic breakpoints incl. multi-turn history (direct + OpenRouter) * OpenAI cache-key routing * normalized cache usage + leak detection * per-call TTL/opt-out * [guide](https://docs.agentos.sh/features/prompt-caching) |
 | **Cognitive Memory** | 8 mechanisms: reconsolidation, retrieval-induced forgetting, involuntary recall, FOK, gist extraction, schema encoding, source decay, emotion regulation |
 | **HEXACO Personality** | 6 traits modulate memory, retrieval bias, response style |
-| **GMI Runtime** | Per-session persona, mood and reasoning trace * sentiment-triggered metaprompts * mood-weighted memory bridge * bounded self-adjusting traits |
+| **GMI Runtime** | Per-session persona, mood and reasoning trace * sentiment-triggered metaprompts (opt-in per persona) * mood-weighted memory bridge * bounded `adapt_personality` trait changes (opt-in) |
 | **RAG Pipeline** | 7 vector backends * 4 retrieval strategies * GraphRAG * HyDE * Cohere rerank-v3.5 |
 | **Multi-Agent Teams** | 6 coordination strategies * shared memory * inter-agent messaging * HITL gates |
 | **Orchestration** | `workflow()` DAGs * `AgentGraph` cycles * `mission()` goal-driven planning * checkpointing |
