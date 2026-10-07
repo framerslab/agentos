@@ -52,7 +52,8 @@ describe('GMI reasoning trace limits', () => {
 
   it('clamps an oversized persona limit to the ceiling and records it in the trace', async () => {
     const gmi = await bootGmi({ ...base, reasoningTraceConfig: { maxEntries: 50_000, maxMessageLength: 5 } });
-    const warning = gmi.getReasoningTrace().entries.find((entry) => entry.type === ReasoningEntryType.WARNING && entry.message.startsWith('Reasoning-trace limit'));
+    // The message is capped at 5 characters by the same setting, so find the entry by its details.
+    const warning = gmi.getReasoningTrace().entries.find((entry) => entry.type === ReasoningEntryType.WARNING && Array.isArray(entry.details?.ignored));
     expect(warning?.details?.ignored).toEqual([{ source: 'persona', key: 'maxEntries', value: 50_000, reason: 'above_ceiling' }]);
     expect(warning?.message.length).toBeLessThanOrEqual(5);
   });
