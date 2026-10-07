@@ -54,6 +54,19 @@ export interface ToolExecutionRequestDetails {
   userContext: UserContext;
   correlationId?: string;
   sessionData?: Record<string, any>;
+  /**
+   * The tool instance the caller already resolved and checked (a composed
+   * step). `ToolOrchestrator.processToolCall` runs its checks against it and
+   * refuses the call (`STEP_REPLACED`) when the name resolves to another
+   * instance by the time the call is delegated.
+   */
+  tool?: ITool;
+  /**
+   * An expiry signal (a workflow step's timer). When it is aborted after the
+   * checks and the approval, the call is refused (`STEP_ABORTED`) and nothing
+   * runs.
+   */
+  signal?: AbortSignal;
 }
 
 /**

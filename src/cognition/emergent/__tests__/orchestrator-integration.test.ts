@@ -51,7 +51,7 @@ function makeMockToolExecutor(): ToolExecutor {
     unregisterTool: vi.fn(async (name: string) => {
       return registry.delete(name);
     }),
-    getTool: vi.fn(async (name: string) => {
+    getTool: vi.fn((name: string) => {
       return registry.get(name);
     }),
     listAvailableTools: vi.fn(() => {
@@ -186,6 +186,19 @@ describe('ToolOrchestrator — emergent engine integration', () => {
 
     const workflowTool = await orchestrator.getTool('create_workflow');
     expect(workflowTool).toBeDefined();
+
+    // The workflow's steps resolve to tools that declare no side effects.
+    const pureTool = (name: string): ITool => ({
+      id: `${name}-v1`,
+      name,
+      displayName: name,
+      description: name,
+      inputSchema: { type: 'object', properties: {} },
+      hasSideEffects: false,
+      execute: async () => ({ success: true, output: {} }),
+    });
+    await toolExecutor.registerTool(pureTool('lookup'));
+    await toolExecutor.registerTool(pureTool('summarize'));
 
     const createResult = await workflowTool!.execute(
       {
