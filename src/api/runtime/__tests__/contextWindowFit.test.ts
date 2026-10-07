@@ -93,6 +93,52 @@ describe('checkContextFit', () => {
     expect(withImage.estimatedInputTokens).toBe(base.estimatedInputTokens);
   });
 
+  it('does not count Gemini thought signatures, which OpenRouter never receives', () => {
+    const turn = (thoughtSignature?: string) => [
+      { role: 'user', content: 'x'.repeat(90_909) },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'call-1',
+            type: 'function',
+            function: { name: 'lookup', arguments: '{}' },
+            ...(thoughtSignature !== undefined ? { thoughtSignature } : {}),
+          },
+        ],
+      },
+    ];
+    const without = checkContextFit({ provider: 'openrouter', model: MAGNUM, messages: turn() });
+    const withSignature = checkContextFit({ provider: 'openrouter', model: MAGNUM, messages: turn('s'.repeat(16_000)) });
+    expect(withSignature.estimatedInputTokens).toBe(without.estimatedInputTokens);
+    expect(withSignature.fits).toBe(true);
+  });
+
+  it("takes a request as fitting when the call enables OpenRouter's context compression", () => {
+    const compressed = checkContextFit({
+      provider: 'openrouter',
+      model: MAGNUM,
+      messages: messagesOf(145_452),
+      customModelParams: { plugins: [{ id: 'context-compression' }] },
+    });
+    expect(compressed).toMatchObject({ fits: true, contextWindow: 32_768, estimatedInputTokens: 40_000 });
+    const disabled = checkContextFit({
+      provider: 'openrouter',
+      model: MAGNUM,
+      messages: messagesOf(145_452),
+      customModelParams: { plugins: [{ id: 'context-compression', enabled: false }] },
+    });
+    expect(disabled.fits).toBe(false);
+    const otherPlugin = checkContextFit({
+      provider: 'openrouter',
+      model: MAGNUM,
+      messages: messagesOf(145_452),
+      customModelParams: { plugins: [{ id: 'web' }] },
+    });
+    expect(otherPlugin.fits).toBe(false);
+  });
+
   it('takes a model without a known window as fitting', () => {
     const fit = checkContextFit({ provider: 'openai', model: 'gpt-5.6-sol', messages: messagesOf(1_000_000) });
     expect(fit.fits).toBe(true);

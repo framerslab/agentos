@@ -41,6 +41,9 @@ import { agent } from '../../agent.js';
 import { PolicyAwareRouter } from '../../../core/llm/routing/PolicyAwareRouter.js';
 import { createUncensoredModelCatalog } from '../../../core/llm/routing/UncensoredModelCatalog.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
+import { adaptTools } from '../toolAdapter.js';
+import { renderToolSystemBlock } from '../tool-emulation/renderer.js';
+import { between, fitsMagnum, userTurn } from './windowBoundary.js';
 
 const LLAMA = 'meta-llama/llama-3.3-70b-instruct';
 const MAGNUM = 'anthracite-org/magnum-v4-72b';
@@ -174,6 +177,15 @@ describe('fallback walk on generateText', () => {
     expect(sent()).toEqual([MAGNUM, HERMES]);
   });
 
+  it('a standard default over a mature base: the base picks the first model and the chain follows the base', async () => {
+    keys('OPENROUTER_API_KEY');
+    hoisted.generateCompletion.mockRejectedValueOnce(status(429)).mockResolvedValueOnce(ok());
+    const catalog = createUncensoredModelCatalog();
+    const router = new PolicyAwareRouter(catalog, new PolicyAwareRouter(catalog, null, {}, 'mature'), {}, 'standard');
+    await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'hi', router });
+    expect(sent()).toEqual([LLAMA, MAGNUM]);
+  });
+
   it('runs the refill after both standing legs failed on availability', async () => {
     keys('OPENROUTER_API_KEY');
     hoisted.generateCompletion
@@ -184,6 +196,20 @@ describe('fallback walk on generateText', () => {
     const result = await generateText({ provider: 'anthropic', model: 'claude-sonnet-5-5', prompt: 'hi', policyTier: 'mature' });
     expect(result.text).toBe('from hermes');
     expect(sent()).toEqual(['claude-sonnet-5-5', LLAMA, MAGNUM, HERMES]);
+  });
+
+  it('runs the refill in place of a standing leg that could not hold the request', async () => {
+    keys('OPENROUTER_API_KEY');
+    hoisted.generateCompletion
+      .mockRejectedValueOnce(status(429))
+      .mockRejectedValueOnce(decline('content_filter'))
+      .mockResolvedValueOnce(ok('from hermes'));
+    const result = await generateText({ provider: 'anthropic', model: 'claude-sonnet-5-5', prompt: FORTY_K, policyTier: 'mature' });
+    expect(result.text).toBe('from hermes');
+    // llama declined, which owes no refill; magnum was skipped before sending,
+    // which owes the one hermes fills.
+    expect(sent()).toEqual(['claude-sonnet-5-5', LLAMA, HERMES]);
+    expect(attempted()).toContain(MAGNUM);
   });
 
   it('runs no refill after the standing legs declined, and never the 8B', async () => {
@@ -257,9 +283,11 @@ describe('fallback walk on generateText', () => {
     hoisted.generateCompletion
       .mockRejectedValueOnce(status(429))
       .mockRejectedValueOnce(status(503))
-      .mockResolvedValueOnce(ok('from magnum'));
-    await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'hi', policyTier: 'mature', tools: LOOKUP });
-    expect(sent()).toEqual(['gpt-5.5', LLAMA, MAGNUM]);
+      .mockRejectedValueOnce(status(503))
+      .mockResolvedValueOnce(ok('from hermes'));
+    const result = await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'hi', policyTier: 'mature', tools: LOOKUP });
+    expect(result.text).toBe('from hermes');
+    expect(sent()).toEqual(['gpt-5.5', LLAMA, MAGNUM, HERMES]);
   });
 
   it('a 402 opens the OpenRouter breaker at once and the walk skips the remaining OpenRouter legs', async () => {
@@ -280,7 +308,9 @@ describe('fallback walk on generateText', () => {
     expect(result.text).toBe('from llama');
     expect(sent()).toEqual([LLAMA]);
     expect(result.fallback?.hops[0]).toEqual({ provider: 'openrouter', model: MAGNUM, ok: false });
-    expect(globalLLMProviderHealth.isOpen('openrouter')).toBe(false);
+    // The size refusal is never recorded: llama's success alone would not
+    // remove a record, so no record exists at all.
+    expect(globalLLMProviderHealth.getStats('openrouter')).toBeNull();
   });
 
   it('the router pick over its window is not sent and the walk starts', async () => {
@@ -358,5 +388,145 @@ describe('fallback walk on generateText', () => {
     });
     expect(result.object).toEqual({ answer: 'ok' });
     expect(sent()).toEqual([HERMES]);
+  });
+
+  it("counts a leg's maxTokensHeadroom toward its window", async () => {
+    keys('OPENROUTER_API_KEY');
+    const chars = between(
+      (n) => fitsMagnum({ messages: userTurn(n), maxTokens: 1_824 }),
+      (n) => fitsMagnum({ messages: userTurn(n), maxTokens: 800 }),
+    );
+    expect(fitsMagnum({ messages: userTurn(chars), maxTokens: 800 })).toBe(true);
+    expect(fitsMagnum({ messages: userTurn(chars), maxTokens: 1_824 })).toBe(false);
+    const prompt = 'x'.repeat(chars);
+
+    hoisted.generateCompletion.mockRejectedValueOnce(status(429)).mockResolvedValueOnce(ok('from hermes'));
+    await generateText({
+      provider: 'openai',
+      model: 'gpt-5.5',
+      prompt,
+      maxTokens: 800,
+      fallbackProviders: [
+        { provider: 'openrouter', model: MAGNUM, maxTokensHeadroom: 1_024 },
+        { provider: 'openrouter', model: HERMES },
+      ],
+    });
+    expect(attempted()).toContain(MAGNUM);
+    expect(sent()).toEqual(['gpt-5.5', HERMES]);
+
+    hoisted.generateCompletion.mockReset();
+    hoisted.resolveProvider.mockClear();
+    globalLLMProviderHealth.reset();
+    hoisted.generateCompletion.mockRejectedValueOnce(status(429)).mockResolvedValueOnce(ok('from magnum'));
+    await generateText({
+      provider: 'openai',
+      model: 'gpt-5.5',
+      prompt,
+      maxTokens: 800,
+      fallbackProviders: [{ provider: 'openrouter', model: MAGNUM }],
+    });
+    expect(sent()).toEqual(['gpt-5.5', MAGNUM]);
+  });
+
+  it('counts a customModelParams.max_tokens override as the output allowance', async () => {
+    keys('OPENROUTER_API_KEY');
+    const override = { max_tokens: 1_000 };
+    const chars = between(
+      (n) => fitsMagnum({ messages: userTurn(n) }),
+      (n) => fitsMagnum({ messages: userTurn(n), customModelParams: override }),
+    );
+    expect(fitsMagnum({ messages: userTurn(chars), customModelParams: override })).toBe(true);
+    expect(fitsMagnum({ messages: userTurn(chars) })).toBe(false);
+    const prompt = 'x'.repeat(chars);
+
+    hoisted.generateCompletion.mockResolvedValueOnce(ok('from magnum'));
+    await generateText({ provider: 'openrouter', model: MAGNUM, prompt, policyTier: 'mature', customModelParams: override });
+    expect(sent()).toEqual([MAGNUM]);
+
+    hoisted.generateCompletion.mockReset();
+    hoisted.generateCompletion.mockResolvedValueOnce(ok('from llama'));
+    await generateText({ provider: 'openrouter', model: MAGNUM, prompt, policyTier: 'mature' });
+    expect(sent()).toEqual([LLAMA]);
+  });
+
+  it('counts the tool text the prompt shim renders', async () => {
+    keys('OPENROUTER_API_KEY');
+    const shimSystem = { role: 'system', content: renderToolSystemBlock(adaptTools(LOOKUP)) };
+    const chars = between(
+      (n) => fitsMagnum({ messages: [shimSystem, ...userTurn(n)] }),
+      (n) => fitsMagnum({ messages: userTurn(n) }),
+    );
+    expect(fitsMagnum({ messages: userTurn(chars) })).toBe(true);
+    expect(fitsMagnum({ messages: [shimSystem, ...userTurn(chars)] })).toBe(false);
+
+    hoisted.generateCompletion.mockResolvedValueOnce(ok('from hermes'));
+    await generateText({
+      provider: 'openrouter',
+      model: MAGNUM,
+      prompt: 'x'.repeat(chars),
+      policyTier: 'private-adult',
+      tools: LOOKUP,
+      toolMode: 'prompt',
+    });
+    expect(sent()).toEqual([HERMES]);
+  });
+
+  it('toolMode auto: after the provider rejects native tools, the shim send is checked on its own', async () => {
+    keys('OPENROUTER_API_KEY');
+    const tools = adaptTools(LOOKUP);
+    const nativeSchemas = tools.map((t) => ({
+      type: 'function',
+      function: { name: t.name, description: t.description, parameters: t.inputSchema },
+    }));
+    const shimSystem = { role: 'system', content: renderToolSystemBlock(tools) };
+    const chars = between(
+      (n) => fitsMagnum({ messages: [shimSystem, ...userTurn(n)] }),
+      (n) => fitsMagnum({ messages: userTurn(n), tools: nativeSchemas }),
+    );
+    expect(fitsMagnum({ messages: userTurn(chars), tools: nativeSchemas })).toBe(true);
+    expect(fitsMagnum({ messages: [shimSystem, ...userTurn(chars)] })).toBe(false);
+
+    hoisted.generateCompletion
+      .mockRejectedValueOnce(new Error('No endpoints found that support tool use'))
+      .mockResolvedValueOnce(ok('from hermes'));
+    const result = await generateText({
+      provider: 'openrouter',
+      model: MAGNUM,
+      prompt: 'x'.repeat(chars),
+      policyTier: 'private-adult',
+      tools: LOOKUP,
+      toolMode: 'auto',
+    });
+    expect(result.text).toBe('from hermes');
+    // magnum took the native send; the shim's send to it was never made.
+    expect(sent()).toEqual([MAGNUM, HERMES]);
+  });
+
+  it('the router pick over its window is not sent through the prompt shim either', async () => {
+    keys('OPENROUTER_API_KEY');
+    hoisted.generateCompletion.mockResolvedValueOnce(ok('from hermes'));
+    await generateText({
+      provider: 'openai',
+      model: 'gpt-5.5',
+      prompt: FORTY_K,
+      tools: LOOKUP,
+      toolMode: 'prompt',
+      router: new PolicyAwareRouter(createUncensoredModelCatalog(), null, {}, 'private-adult'),
+    });
+    expect(attempted()[0]).toBe(MAGNUM);
+    expect(sent()).toEqual([HERMES]);
+  });
+
+  it("sends a request over the window when the call enables OpenRouter's context compression", async () => {
+    keys('OPENROUTER_API_KEY');
+    hoisted.generateCompletion.mockResolvedValueOnce(ok('from magnum'));
+    await generateText({
+      provider: 'openrouter',
+      model: MAGNUM,
+      prompt: FORTY_K,
+      policyTier: 'mature',
+      customModelParams: { plugins: [{ id: 'context-compression' }] },
+    });
+    expect(sent()).toEqual([MAGNUM]);
   });
 });

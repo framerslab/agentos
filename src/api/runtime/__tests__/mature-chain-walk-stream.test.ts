@@ -38,6 +38,9 @@ import { agent } from '../../agent.js';
 import { PolicyAwareRouter } from '../../../core/llm/routing/PolicyAwareRouter.js';
 import { createUncensoredModelCatalog } from '../../../core/llm/routing/UncensoredModelCatalog.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
+import { adaptTools } from '../toolAdapter.js';
+import { renderToolSystemBlock } from '../tool-emulation/renderer.js';
+import { between, fitsMagnum, userTurn } from './windowBoundary.js';
 
 const LLAMA = 'meta-llama/llama-3.3-70b-instruct';
 const MAGNUM = 'anthracite-org/magnum-v4-72b';
@@ -160,14 +163,92 @@ describe('fallback walk on streamText', () => {
     keys('OPENROUTER_API_KEY');
     hoisted.generateCompletionStream
       .mockImplementationOnce(failing(status(429)))
-      .mockImplementationOnce(failing(status(503)))
+      .mockImplementationOnce(failing(decline('content_filter')))
       .mockImplementationOnce(serving('from hermes', HERMES));
     const result = streamText({ provider: 'anthropic', model: 'claude-sonnet-5-5', prompt: FORTY_K, policyTier: 'mature' });
     expect(await drain(result.textStream)).toBe('from hermes');
-    // llama failed on availability and magnum was skipped before sending:
-    // two refills are owed and the one refill model runs.
+    // llama declined, which owes no refill; magnum was skipped before sending,
+    // which owes the one hermes fills.
     expect(streamed()).toEqual(['claude-sonnet-5-5', LLAMA, HERMES]);
     expect(attempted()).toContain(MAGNUM);
+  });
+
+  it("counts a leg's maxTokensHeadroom toward its window", async () => {
+    keys('OPENROUTER_API_KEY');
+    const chars = between(
+      (n) => fitsMagnum({ messages: userTurn(n), maxTokens: 1_824 }),
+      (n) => fitsMagnum({ messages: userTurn(n), maxTokens: 800 }),
+    );
+    expect(fitsMagnum({ messages: userTurn(chars), maxTokens: 800 })).toBe(true);
+    expect(fitsMagnum({ messages: userTurn(chars), maxTokens: 1_824 })).toBe(false);
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(failing(status(429)))
+      .mockImplementationOnce(serving('from hermes', HERMES));
+    const result = streamText({
+      provider: 'openai',
+      model: 'gpt-5.5',
+      prompt: 'x'.repeat(chars),
+      maxTokens: 800,
+      fallbackProviders: [
+        { provider: 'openrouter', model: MAGNUM, maxTokensHeadroom: 1_024 },
+        { provider: 'openrouter', model: HERMES },
+      ],
+    });
+    expect(await drain(result.textStream)).toBe('from hermes');
+    expect(attempted()).toContain(MAGNUM);
+    expect(streamed()).toEqual(['gpt-5.5', HERMES]);
+  });
+
+  it('counts a customModelParams.max_tokens override as the output allowance', async () => {
+    keys('OPENROUTER_API_KEY');
+    const override = { max_tokens: 1_000 };
+    const chars = between(
+      (n) => fitsMagnum({ messages: userTurn(n) }),
+      (n) => fitsMagnum({ messages: userTurn(n), customModelParams: override }),
+    );
+    expect(fitsMagnum({ messages: userTurn(chars), customModelParams: override })).toBe(true);
+    expect(fitsMagnum({ messages: userTurn(chars) })).toBe(false);
+    hoisted.generateCompletionStream.mockImplementationOnce(serving('from magnum', MAGNUM));
+    const result = streamText({
+      provider: 'openrouter',
+      model: MAGNUM,
+      prompt: 'x'.repeat(chars),
+      policyTier: 'mature',
+      customModelParams: override,
+    });
+    expect(await drain(result.textStream)).toBe('from magnum');
+    expect(streamed()).toEqual([MAGNUM]);
+  });
+
+  it('toolMode auto: after the provider rejects native tools on a stream, the shim send is checked on its own', async () => {
+    keys('OPENROUTER_API_KEY');
+    const tools = adaptTools(LOOKUP);
+    const nativeSchemas = tools.map((t) => ({
+      type: 'function',
+      function: { name: t.name, description: t.description, parameters: t.inputSchema },
+    }));
+    const shimSystem = { role: 'system', content: renderToolSystemBlock(tools) };
+    const chars = between(
+      (n) => fitsMagnum({ messages: [shimSystem, ...userTurn(n)] }),
+      (n) => fitsMagnum({ messages: userTurn(n), tools: nativeSchemas }),
+    );
+    expect(fitsMagnum({ messages: userTurn(chars), tools: nativeSchemas })).toBe(true);
+    expect(fitsMagnum({ messages: [shimSystem, ...userTurn(chars)] })).toBe(false);
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(failing(new Error('No endpoints found that support tool use')))
+      .mockImplementationOnce(serving('from hermes', HERMES));
+    const result = streamText({
+      provider: 'openrouter',
+      model: MAGNUM,
+      prompt: 'x'.repeat(chars),
+      policyTier: 'private-adult',
+      tools: LOOKUP,
+      toolMode: 'auto',
+    });
+    expect(await drain(result.textStream)).toBe('from hermes');
+    expect(streamed()).toEqual([MAGNUM, HERMES]);
+    // The shim sends through generateCompletion; it never reached magnum.
+    expect(hoisted.generateCompletion).not.toHaveBeenCalled();
   });
 
   it('a pinned catalog first model over its window starts the walk without streaming', async () => {
