@@ -83,6 +83,7 @@ import {
   exportAgentConfig,
   exportAgentConfigJSON,
   type AgentExportConfig,
+  type ExportAgentConfigOptions,
 } from './agentExport.js';
 import { createBufferedAsyncReplay } from './runtime/streamBuffer';
 import {
@@ -682,19 +683,21 @@ export function agency(opts: AgencyOptions): Agent {
     /**
      * Exports this agency's configuration as a portable object.
      * @param metadata - Optional human-readable metadata to attach.
+     * @param options - Redaction options; secrets are redacted unless `redactSecrets` is `false`.
      * @returns A portable {@link AgentExportConfig} object.
      */
-    export(metadata?: AgentExportConfig['metadata']): AgentExportConfig {
-      return exportAgentConfig(agentObj, metadata);
+    export(metadata?: AgentExportConfig['metadata'], options?: ExportAgentConfigOptions): AgentExportConfig {
+      return exportAgentConfig(agentObj, metadata, options);
     },
 
     /**
      * Exports this agency's configuration as a pretty-printed JSON string.
      * @param metadata - Optional human-readable metadata to attach.
+     * @param options - Redaction options; secrets are redacted unless `redactSecrets` is `false`.
      * @returns JSON string with 2-space indentation.
      */
-    exportJSON(metadata?: AgentExportConfig['metadata']): string {
-      return exportAgentConfigJSON(agentObj, metadata);
+    exportJSON(metadata?: AgentExportConfig['metadata'], options?: ExportAgentConfigOptions): string {
+      return exportAgentConfigJSON(agentObj, metadata, options);
     },
   };
 
@@ -708,11 +711,11 @@ export function agency(opts: AgencyOptions): Agent {
 
   // Separate stash for agency-specific fields (sub-agent roster, strategy).
   // Needed by the export system to distinguish agency from single agent.
-  const agencySubAgentConfigs: Record<string, BaseAgentConfig> = {};
+  const agencySubAgentConfigs: Record<string, BaseAgentConfig | { prebuilt: true }> = {};
   for (const [name, agentOrConfig] of Object.entries(opts.agents)) {
     if (isAgent(agentOrConfig)) {
-      // Pre-built agents don't carry exportable config — store empty placeholder
-      agencySubAgentConfigs[name] = {};
+      // A pre-built agent carries no exportable config; import refuses the marker.
+      agencySubAgentConfigs[name] = { prebuilt: true };
     } else {
       agencySubAgentConfigs[name] = agentOrConfig as BaseAgentConfig;
     }

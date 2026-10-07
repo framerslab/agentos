@@ -7,6 +7,13 @@
  */
 
 import type { BaseAgentConfig, AgencyStrategy, Agent } from './types.js';
+import { copyExportTree, isSecretName, isWebhookUrlName } from './agentExportRedact.js';
+import { redactUrlForExport } from '../core/llm/providers/url-secrets.js';
+
+/** Written in the roster for a pre-built `Agent` placed in `agents`, whose config the agency cannot see. */
+export interface PrebuiltSeatMarker {
+  prebuilt: true;
+}
 
 /**
  * Portable agent configuration envelope.
@@ -31,8 +38,8 @@ export interface AgentExportConfig {
   /** The full agent configuration. */
   config: BaseAgentConfig;
 
-  /** Sub-agent roster keyed by agent name. Present for agency exports. */
-  agents?: Record<string, BaseAgentConfig>;
+  /** Sub-agent roster keyed by agent name. Present for agency exports. A pre-built seat is `{ prebuilt: true }`. */
+  agents?: Record<string, BaseAgentConfig | PrebuiltSeatMarker>;
 
   /** Orchestration strategy. Present for agency exports. */
   strategy?: AgencyStrategy;
@@ -50,6 +57,17 @@ export interface AgentExportConfig {
     author?: string;
     tags?: string[];
   };
+}
+
+/** Options for {@link exportAgentConfig} and the instance methods `export()` / `exportJSON()`. */
+export interface ExportAgentConfigOptions {
+  /**
+   * Default `true`: every secret string (by property name at any depth) becomes `<<REDACTED>>`,
+   * URLs lose their credentials, and a class instance becomes `{ '<<instance>>': '<constructor name>' }`.
+   * `false` keeps every string; the object form then keeps instances by reference (JSON and YAML
+   * still carry the marker, because an instance cannot be serialized).
+   */
+  redactSecrets?: boolean;
 }
 
 /**
@@ -72,7 +90,7 @@ function extractConfig(agentInstance: Agent): BaseAgentConfig {
  */
 function extractAgencyFields(agentInstance: Agent):
   | {
-      agents?: Record<string, BaseAgentConfig>;
+      agents?: Record<string, BaseAgentConfig | PrebuiltSeatMarker>;
       strategy?: AgencyStrategy;
       adaptive?: boolean;
       maxRounds?: number;
@@ -81,7 +99,7 @@ function extractAgencyFields(agentInstance: Agent):
   const raw = (agentInstance as unknown as Record<string, unknown>).__agencyConfig;
   if (raw && typeof raw === 'object') {
     return raw as {
-      agents?: Record<string, BaseAgentConfig>;
+      agents?: Record<string, BaseAgentConfig | PrebuiltSeatMarker>;
       strategy?: AgencyStrategy;
       adaptive?: boolean;
       maxRounds?: number;
@@ -90,14 +108,30 @@ function extractAgencyFields(agentInstance: Agent):
   return undefined;
 }
 
+function redactUrl(url: string, name: string): string {
+  return redactUrlForExport(url, { webhook: isWebhookUrlName(name), isSecretParam: isSecretName });
+}
+
 /**
- * Exports an agent's configuration as a portable object.
+ * Builds the export document on a copy of the agent's config: the live config
+ * is never written. `form` is `'object'` for the object the caller holds and
+ * `'serialized'` for JSON and YAML.
+ *
+ * @param agentInstance - The agent (or agency) instance to export.
+ * @param metadata - Optional human-readable metadata to attach.
+ * @param options - Redaction options; secrets are redacted unless `redactSecrets` is `false`.
+ * @param form - `'object'` keeps functions (and, without redaction, instances by reference); `'serialized'` drops functions and marks instances.
+ * @returns The export document.
  */
-export function exportAgentConfig(
+export function buildExportDocument(
   agentInstance: Agent,
-  metadata?: AgentExportConfig['metadata']
+  metadata: AgentExportConfig['metadata'] | undefined,
+  options: ExportAgentConfigOptions | undefined,
+  form: 'object' | 'serialized',
 ): AgentExportConfig {
-  const config = extractConfig(agentInstance);
+  const redactSecrets = options?.redactSecrets !== false;
+  const copy = (value: unknown) => copyExportTree(value, { redactSecrets, form, redactUrl });
+  const config = copy(extractConfig(agentInstance)) as BaseAgentConfig;
   const agencyFields = extractAgencyFields(agentInstance);
   const isAgency = !!agencyFields?.agents;
 
@@ -109,25 +143,49 @@ export function exportAgentConfig(
   };
 
   if (isAgency && agencyFields) {
-    exportConfig.agents = agencyFields.agents;
+    exportConfig.agents = copy(agencyFields.agents) as AgentExportConfig['agents'];
     exportConfig.strategy = agencyFields.strategy;
     exportConfig.adaptive = agencyFields.adaptive;
     exportConfig.maxRounds = agencyFields.maxRounds;
   }
 
   if (metadata) {
-    exportConfig.metadata = metadata;
+    exportConfig.metadata = { ...metadata };
   }
 
   return exportConfig;
 }
 
 /**
- * Exports an agent's configuration as pretty-printed JSON.
+ * Exports an agent's configuration as a portable object. Secrets are redacted
+ * unless `options.redactSecrets` is `false`.
+ *
+ * @param agentInstance - The agent (or agency) instance to export.
+ * @param metadata - Optional human-readable metadata to attach.
+ * @param options - Redaction options.
+ * @returns A portable {@link AgentExportConfig} object, built on a copy of the config.
+ */
+export function exportAgentConfig(
+  agentInstance: Agent,
+  metadata?: AgentExportConfig['metadata'],
+  options?: ExportAgentConfigOptions,
+): AgentExportConfig {
+  return buildExportDocument(agentInstance, metadata, options, 'object');
+}
+
+/**
+ * Exports an agent's configuration as pretty-printed JSON. Class instances are
+ * always written as `<<instance>>` markers, since they cannot be serialized.
+ *
+ * @param agentInstance - The agent (or agency) instance to export.
+ * @param metadata - Optional human-readable metadata to attach.
+ * @param options - Redaction options.
+ * @returns JSON string with 2-space indentation.
  */
 export function exportAgentConfigJSON(
   agentInstance: Agent,
-  metadata?: AgentExportConfig['metadata']
+  metadata?: AgentExportConfig['metadata'],
+  options?: ExportAgentConfigOptions,
 ): string {
-  return JSON.stringify(exportAgentConfig(agentInstance, metadata), null, 2);
+  return JSON.stringify(buildExportDocument(agentInstance, metadata, options, 'serialized'), null, 2);
 }

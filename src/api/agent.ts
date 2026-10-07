@@ -47,7 +47,12 @@ import {
 } from './runtime/usageAccumulator.js';
 import { warnOnDeferredLightweightAgentCapabilities } from './runtime/lightweightAgentDiagnostics.js';
 import type { BaseAgentConfig } from './types.js';
-import { exportAgentConfig, exportAgentConfigJSON, type AgentExportConfig } from './agentExportCore.js';
+import {
+  exportAgentConfig,
+  exportAgentConfigJSON,
+  type AgentExportConfig,
+  type ExportAgentConfigOptions,
+} from './agentExportCore.js';
 import { applyMemoryProvider, type MemoryProviderHookOptions } from './runtime/memoryProviderHooks.js';
 import {
   SessionHistoryBuffer,
@@ -449,17 +454,21 @@ export interface Agent {
   /** Releases all in-memory session state held by this agent. */
   close(): Promise<void>;
   /**
-   * Exports the agent's configuration as a portable object.
+   * Exports the agent's configuration as a portable object. Secrets are
+   * redacted unless `options.redactSecrets` is `false`.
    * @param metadata - Optional human-readable metadata to attach.
+   * @param options - Redaction options.
    * @returns A portable {@link AgentExportConfig} object.
    */
-  export(metadata?: AgentExportConfig['metadata']): AgentExportConfig;
+  export(metadata?: AgentExportConfig['metadata'], options?: ExportAgentConfigOptions): AgentExportConfig;
   /**
-   * Exports the agent's configuration as a pretty-printed JSON string.
+   * Exports the agent's configuration as a pretty-printed JSON string. Secrets
+   * are redacted unless `options.redactSecrets` is `false`.
    * @param metadata - Optional human-readable metadata to attach.
+   * @param options - Redaction options.
    * @returns JSON string.
    */
-  exportJSON(metadata?: AgentExportConfig['metadata']): string;
+  exportJSON(metadata?: AgentExportConfig['metadata'], options?: ExportAgentConfigOptions): string;
   /** Read current avatar binding state (auto-populated from mood/voice/relationship). */
   getAvatarBindings(): import('./types').AvatarBindingInputs & Record<string, unknown>;
   /** Inject game-specific binding overrides (healthBand, combatMode, etc.). */
@@ -1200,19 +1209,21 @@ export function agent(opts: AgentOptions): Agent {
     /**
      * Exports this agent's configuration as a portable object.
      * @param metadata - Optional human-readable metadata to attach.
+     * @param options - Redaction options; secrets are redacted unless `redactSecrets` is `false`.
      * @returns A portable {@link AgentExportConfig} object.
      */
-    export(metadata?: AgentExportConfig['metadata']): AgentExportConfig {
-      return exportAgentConfig(agentInstance, metadata);
+    export(metadata?: AgentExportConfig['metadata'], options?: ExportAgentConfigOptions): AgentExportConfig {
+      return exportAgentConfig(agentInstance, metadata, options);
     },
 
     /**
      * Exports this agent's configuration as a pretty-printed JSON string.
      * @param metadata - Optional human-readable metadata to attach.
+     * @param options - Redaction options; secrets are redacted unless `redactSecrets` is `false`.
      * @returns JSON string with 2-space indentation.
      */
-    exportJSON(metadata?: AgentExportConfig['metadata']): string {
-      return exportAgentConfigJSON(agentInstance, metadata);
+    exportJSON(metadata?: AgentExportConfig['metadata'], options?: ExportAgentConfigOptions): string {
+      return exportAgentConfigJSON(agentInstance, metadata, options);
     },
 
     getAvatarBindings() {

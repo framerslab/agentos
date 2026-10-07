@@ -34,9 +34,14 @@ import YAML from 'yaml';
 import { agent as createAgent } from './agent.js';
 import { agency as createAgency } from './agency.js';
 import type { AgencyOptions, Agent } from './types.js';
-import { exportAgentConfig, exportAgentConfigJSON } from './agentExportCore.js';
+import {
+  exportAgentConfig,
+  exportAgentConfigJSON,
+  buildExportDocument,
+  type ExportAgentConfigOptions,
+} from './agentExportCore.js';
 export { exportAgentConfig, exportAgentConfigJSON };
-export type { AgentExportConfig } from './agentExportCore.js';
+export type { AgentExportConfig, ExportAgentConfigOptions, PrebuiltSeatMarker } from './agentExportCore.js';
 import type { AgentExportConfig } from './agentExportCore.js';
 
 /**
@@ -46,7 +51,8 @@ import type { AgentExportConfig } from './agentExportCore.js';
  *
  * @param agentInstance - The agent (or agency) instance to export.
  * @param metadata - Optional human-readable metadata to attach.
- * @returns YAML-formatted string.
+ * @param options - Redaction options; secrets are redacted unless `redactSecrets` is `false`.
+ * @returns YAML-formatted string (class instances always as `<<instance>>` markers).
  *
  * @example
  * ```ts
@@ -56,9 +62,10 @@ import type { AgentExportConfig } from './agentExportCore.js';
  */
 export function exportAgentConfigYAML(
   agentInstance: Agent,
-  metadata?: AgentExportConfig['metadata']
+  metadata?: AgentExportConfig['metadata'],
+  options?: ExportAgentConfigOptions,
 ): string {
-  return YAML.stringify(exportAgentConfig(agentInstance, metadata));
+  return YAML.stringify(buildExportDocument(agentInstance, metadata, options, 'serialized'));
 }
 
 // ============================================================================

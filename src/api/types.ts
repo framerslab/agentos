@@ -1203,16 +1203,18 @@ export interface Agent {
    * can be serialized to JSON or YAML and re-imported via `importAgent()`.
    *
    * @param metadata - Optional human-readable metadata to attach.
+   * @param options - Redaction options; secrets are redacted unless `redactSecrets` is `false`.
    * @returns A portable config object.
    */
-  export?(metadata?: Record<string, unknown>): unknown;
+  export?(metadata?: Record<string, unknown>, options?: { redactSecrets?: boolean }): unknown;
   /**
    * Exports the agent's full configuration as a pretty-printed JSON string.
    *
    * @param metadata - Optional human-readable metadata to attach.
+   * @param options - Redaction options; secrets are redacted unless `redactSecrets` is `false`.
    * @returns JSON string with 2-space indentation.
    */
-  exportJSON?(metadata?: Record<string, unknown>): string;
+  exportJSON?(metadata?: Record<string, unknown>, options?: { redactSecrets?: boolean }): string;
 }
 
 /**
