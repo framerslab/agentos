@@ -31,8 +31,9 @@ import { AgentOS } from '@framers/agentos';
 const agentos = await AgentOS.create({
   emergent: true,
   // Compose mode (chaining existing tools) is always available once emergent is on.
-  // Sandbox mode (agent-written code) stays off until you enable it:
-  emergentConfig: { allowSandboxTools: true },
+  // Sandbox mode (agent-written code) stays off until you set
+  // emergentConfig.allowSandboxTools. Read "Sandbox allowlists" below first:
+  // sandboxed fetch is unrestricted, and reads cover the working directory.
 });
 
 // Every GMI on this runtime now has forge_tool in its tool list. Providers
@@ -302,14 +303,14 @@ If no LLM callback is configured for the judge, **creation review fails closed**
 Tools start at session tier in the [`EmergentToolRegistry`](/api/classes/EmergentToolRegistry) and can be promoted as they prove reliability:
 
 ```
-session ──(5+ uses, >0.8 confidence, panel approved)──→ agent ──(explicit promotion call with an approver id)──→ shared
+session ──(5 or more uses, confidence 0.8 or higher, panel approved)──→ agent ──(explicit promote() call; approvedBy optional)──→ shared
 ```
 
 | Tier | Scope | Lifetime | Promotion rule |
 |---|---|---|---|
 | **Session** | Current conversation only | Discarded on session end | Auto on creation + judge approval |
-| **Agent** | Persisted for the creating agent | Survives restarts | 5+ uses, confidence > 0.8, two-reviewer panel |
-| **Shared** | All agents in the runtime | Permanent until demoted | An explicit `promote()` call that records who approved (`approvedBy`, a human or a system); the runtime ships no human-in-the-loop gate for it |
+| **Agent** | Persisted for the creating agent | Survives restarts | 5 or more uses, confidence 0.8 or higher, two-reviewer panel |
+| **Shared** | All agents in the runtime | Permanent until demoted | An explicit `promote()` call; `approvedBy` is optional and recorded when passed (null otherwise); the runtime ships no human-in-the-loop gate for it |
 
 ## Forge Observability
 
@@ -538,7 +539,7 @@ await importEmergentTool('./slugify.emergent-tool.yaml', { seedId: agentSeedId }
       confidence: 0.8,             // Minimum judge confidence score
     },
 
-    // Sandbox allowlists
+    // Sandbox mode
     allowSandboxTools: false,      // Sandbox mode (agent-written code) stays off until enabled
 
     // Persistence
@@ -547,7 +548,7 @@ await importEmergentTool('./slugify.emergent-tool.yaml', { seedId: agentSeedId }
 }
 ```
 
-Sandbox allowlists are not part of `emergentConfig`: a forge request names the APIs it needs in `implementation.allowlist` (`fetch`, `fs.readFile`, `crypto`), and `fetchDomainAllowlist` and `fsReadRoots` are options of the `SandboxedToolForge` the runtime constructs.
+Sandbox allowlists are not part of `emergentConfig`: a forge request names the APIs it needs in `implementation.allowlist` (`fetch`, `fs.readFile`, `crypto`), but the runtime constructs the `SandboxedToolForge` with `sandboxMemoryMB` and `sandboxTimeoutMs` only ([`ToolOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts)): `fetchDomainAllowlist` stays empty, so a tool whose request allowlists `fetch` can reach any host, and `fsReadRoots` stays at the process working directory (`.env` files included). Neither can be set through `emergentConfig`.
 
 ## Safety Invariants
 
@@ -555,7 +556,7 @@ Sandbox allowlists are not part of `emergentConfig`: a forge request names the A
 - Emergent tools get no memory or credential API. With `fs.readFile` granted they read any file under `fsReadRoots`, which defaults to the working directory, so a `.env` kept there is readable
 - Sandbox code runs in an in-process `node:vm` context (own realm, `process` / `globalThis` / `require` set to undefined, `codeGeneration: { strings: false, wasm: false }` blocks runtime `eval`/`Function` reflection). `node:vm` is not a security mechanism (Node's documentation), and runaway memory is not preempted.
 - Forge, promotion and removal decisions are written to the `agentos_emergent_audit_log` table when a storage adapter is configured, and kept in memory otherwise
-- Shared-tier promotion needs an explicit `promote()` call that records the approver; there is no built-in human-in-the-loop gate
+- Shared-tier promotion needs an explicit `promote()` call; the approver is recorded only when the caller passes `approvedBy`; there is no built-in human-in-the-loop gate
 - Raw sandbox source is redacted at rest by default
 - If no LLM is configured, all forge requests are rejected (fail-closed)
 
@@ -600,7 +601,7 @@ await exportToolAsSkillPack(forgedTool, './skills/slugify');
 - [Adaptive Prompt Intelligence](/features/adaptive-prompt-intelligence) -- the per-turn metaprompt loop that runs on state-mutating triggers, with the `adapt_personality` tool, `PersonaDriftMechanism`, and concrete cost numbers
 - [Adaptive vs. Emergent Intelligence](https://agentos.sh/blog/adaptive-vs-emergent) -- how adaptive and emergent behavior differ in the AgentOS architecture
 - [Self-Improving Agents](/features/self-improving-agents) -- broader patterns for agents that improve over time
-- [Recursive Self-Building](/features/recursive-self-building) -- recursive tool creation and agent spawning
+- [Self-Extension](/architecture/self-extension) -- forged tools, self-improvement tools and specialist spawning
 - [Guardrails](/features/guardrails) -- safety mechanisms that constrain emergent behavior
 - [Agency API](/features/agency-api) -- multi-agent coordination strategies
 - **API Reference:** [`EmergentCapabilityEngine`](/api/classes/EmergentCapabilityEngine) | [`EmergentJudge`](/api/classes/EmergentJudge) | [`EmergentToolRegistry`](/api/classes/EmergentToolRegistry) | [`ForgeToolMetaTool`](/api/classes/ForgeToolMetaTool) | [`ComposableToolBuilder`](/api/classes/ComposableToolBuilder) | [`CodeSandbox`](/api/classes/CodeSandbox) | [`AdaptPersonalityTool`](/api/classes/AdaptPersonalityTool) | [`ManageSkillsTool`](/api/classes/ManageSkillsTool) | [`SelfEvaluateTool`](/api/classes/SelfEvaluateTool) | [`CreateWorkflowTool`](/api/classes/CreateWorkflowTool) | [`exportToolAsSkill`](/api/functions/exportToolAsSkill)

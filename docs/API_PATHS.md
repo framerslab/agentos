@@ -1,6 +1,6 @@
 # Two API paths: lightweight agents and the runtime
 
-AgentOS exposes two ways to run a model, and they do not share a runtime. The lightweight path is a set of functions over a provider call; the runtime path is a server-shaped process that owns a Generalized Mind Instance (GMI) per session. Options are named the same on both, and the capability contract says which path enforces each one.
+AgentOS exposes two ways to run a model, and they do not share a runtime. The lightweight path is a set of functions over a provider call; the runtime path is a server-shaped process that owns a Generalized Mind Instance (GMI) per session. Options are named the same on both, and the capability contract says what each of its three surfaces (`agent`, `generation` for `generateText()` and `streamText()`, and `runtime`) does with each one.
 
 ## The lightweight path
 
@@ -14,8 +14,8 @@ AgentOS exposes two ways to run a model, and they do not share a runtime. The li
 
 ## The capability contract
 
-[`capabilityContract.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/capabilityContract.ts) records, per option, what each surface does with it. The lightweight `agent()` enforces `tools`, partially enforces `memory`, `observability` and `controls`, and accepts but defers `rag`, `discovery`, `guardrails`, `security`, `permissions`, `hitl`, `emergent`, `voice`, `channels`, `output` and `provenance`; the runtime enforces all of them. `agent()` and `agency()` warn when they receive a `cognitiveMechanisms` config, because the lightweight helpers do not run the cognitive mechanisms.
+[`capabilityContract.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/capabilityContract.ts) records, per option, what each surface does with it. The lightweight `agent()` enforces `tools`, partially enforces `memory`, `observability` and `controls`, and accepts but defers `rag`, `discovery`, `guardrails`, `security`, `permissions`, `hitl`, `emergent`, `voice`, `channels`, `output` and `provenance`; the runtime enforces all of them. On the `generation` surface, `tools` is enforced, `guardrails`, `permissions` and `observability` are partially enforced, and the rest are runtime-only. `agent()` and `agency()` warn when they receive a `cognitiveMechanisms` config, because the lightweight helpers do not run the cognitive mechanisms.
 
 ## Choosing
 
-Use the lightweight path for a call, a session with tools, or a roster of agents over one request. Use the runtime when the agent must keep a persona and mood across sessions, run the memory bridge and metaprompts, forge tools, or sit behind guardrails and channels.
+Use the lightweight path for a call, a session with tools, or a roster of agents over one request. Use the runtime when the agent must keep a persona and mood across the turns of a session, run the memory bridge and metaprompts, forge tools, or sit behind guardrails and channels.
