@@ -48,29 +48,6 @@ function sanitizeName(name: string): string {
   return name.replace(SCHEMA_NAME_INVALID_CHARS, '_').slice(0, SCHEMA_NAME_MAX_LEN);
 }
 
-/**
- * Adapt a lowered JSON Schema into a shape Anthropic's tool `input_schema`
- * accepts. The Anthropic Messages API requires the tool input_schema to be a
- * JSON Schema **object** with a top-level `type`, and REJECTS a top-level
- * `oneOf` / `allOf` / `anyOf` (`input_schema does not support … at the top
- * level`). {@link lowerZodToJsonSchema} emits `{ anyOf: [...] }` for a top-level
- * `z.union` / `z.discriminatedUnion` and `{}` for shapes it does not model.
- * Two adaptations:
- *
- *  1. **Union of objects → one merged object.** Union the members' `properties`
- *     (merging same-named `enum` members so a discriminant like `kind` becomes
- *     the full set of variant values, and keeping a shared property's differing
- *     schemas under a nested `anyOf`), and keep in `required` only the fields
- *     required by EVERY member, so variant-specific fields stay optional. The
- *     model returns one flat object; the caller's Zod schema re-validates the
- *     exact variant, so strictness is preserved. Nested `anyOf` (inside a
- *     property / `additionalProperties`) is left intact — Anthropic only forbids
- *     it at the TOP level.
- *  2. **No top-level `type` (e.g. `{}` or a non-object union) → `{ type: 'object' }`**
- *     (mirrors the `?? { type: 'object' }` fallback AnthropicProvider's regular
- *     tool-conversion path applies). An object schema already carrying a `type`
- *     passes through unchanged.
- */
 /** JSON with object keys sorted, so two schemas that differ only in key order compare equal. */
 function stableStringify(value: unknown): string {
   if (Array.isArray(value)) {
@@ -130,6 +107,29 @@ function mergePropertySchemas(schemas: unknown[]): unknown {
   return distinct.length === 1 ? distinct[0] : { anyOf: distinct };
 }
 
+/**
+ * Adapt a lowered JSON Schema into a shape Anthropic's tool `input_schema`
+ * accepts. The Anthropic Messages API requires the tool input_schema to be a
+ * JSON Schema **object** with a top-level `type`, and REJECTS a top-level
+ * `oneOf` / `allOf` / `anyOf` (`input_schema does not support … at the top
+ * level`). {@link lowerZodToJsonSchema} emits `{ anyOf: [...] }` for a top-level
+ * `z.union` / `z.discriminatedUnion` and `{}` for shapes it does not model.
+ * Two adaptations:
+ *
+ *  1. **Union of objects → one merged object.** Union the members' `properties`
+ *     (merging same-named `enum` members so a discriminant like `kind` becomes
+ *     the full set of variant values, and keeping a shared property's differing
+ *     schemas under a nested `anyOf`), and keep in `required` only the fields
+ *     required by EVERY member, so variant-specific fields stay optional. The
+ *     model returns one flat object; the caller's Zod schema re-validates the
+ *     exact variant, so strictness is preserved. Nested `anyOf` (inside a
+ *     property / `additionalProperties`) is left intact — Anthropic only forbids
+ *     it at the TOP level.
+ *  2. **No top-level `type` (e.g. `{}` or a non-object union) → `{ type: 'object' }`**
+ *     (mirrors the `?? { type: 'object' }` fallback AnthropicProvider's regular
+ *     tool-conversion path applies). An object schema already carrying a `type`
+ *     passes through unchanged.
+ */
 function ensureAnthropicObjectSchema(jsonSchema: unknown): Record<string, unknown> {
   if (!jsonSchema || typeof jsonSchema !== 'object') {
     return { type: 'object' };
