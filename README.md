@@ -106,6 +106,34 @@ const aria = await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents
 
 ---
 
+## Generalized Mind Instances (GMIs)
+
+On the full runtime, every session is served by a **GMI**: a persistent agent with its own persona, mood, conversation history and reasoning trace. `agent()` is the lightweight helper; it calls the model with a prompt and keeps session history. A GMI runs a turn loop around the same model, tools, guardrails and cognitive memory:
+
+- **Sentiment → metaprompts.** When a persona enables sentiment tracking, every user turn is scored; sustained frustration or confusion fires recovery metaprompts, and a self-reflection metaprompt re-reads the GMI's mood and task context from evidence.
+- **Mood-weighted memory.** With cognitive memory attached, each exchange is encoded with the GMI's current mood and recalled with emotional congruence in the score.
+- **Self-modification tools.** With `selfImprovement.enabled`, the runtime registers `adapt_personality`, `manage_skills`, `create_workflow` and `self_evaluate`; `adapt_personality` changes the running GMI's traits within bounds, and a mutation store records the changes when a storage adapter and `persistWithDecay` are configured.
+- **A reasoning trace** of the last 500 decisions by default (`reasoningTraceConfig` on the persona or the runtime's default), and persona overlays per session.
+
+```ts
+import { AgentOS, AgentOSResponseChunkType, BUILT_IN_PERSONAS } from '@framers/agentos';
+
+// AgentOS.create() reads persona files from ./personas by default. Personas can
+// also be given inline, as parsed JSON or code-built objects; here, the five the
+// package ships. A custom loader covers any other source.
+const agentos = await AgentOS.create({ personas: BUILT_IN_PERSONAS });
+for await (const chunk of agentos.processRequest({
+  userId: 'user-42', sessionId: 'research-q1', selectedPersonaId: 'v_researcher',
+  textInput: 'Summarize the open incidents from this week.',
+})) {
+  if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA) process.stdout.write(chunk.textDelta);
+}
+```
+
+[What a GMI adds over a plain agent →](https://docs.agentos.sh/architecture/gmi)
+
+---
+
 ## Memory Benchmarks
 
 `gpt-4o` reader, `gpt-4o-2024-08-06` judge, full N=500, single-CLI reproduction with bootstrap 95% CIs and per-benchmark judge-FPR probes.
@@ -137,8 +165,9 @@ const aria = await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents
 | **Prompt Caching** | Zero config on every provider: automatic Anthropic breakpoints incl. multi-turn history (direct + OpenRouter) * OpenAI cache-key routing * normalized cache usage + leak detection * per-call TTL/opt-out * [guide](https://docs.agentos.sh/features/prompt-caching) |
 | **Cognitive Memory** | 8 mechanisms: reconsolidation, retrieval-induced forgetting, involuntary recall, FOK, gist extraction, schema encoding, source decay, emotion regulation |
 | **HEXACO Personality** | 6 traits modulate memory, retrieval bias, response style |
+| **GMI Runtime** | Per-session persona, mood and reasoning trace * sentiment-triggered metaprompts (opt-in per persona) * mood-weighted memory bridge * bounded `adapt_personality` trait changes (opt-in) |
 | **RAG Pipeline** | 7 vector backends * 4 retrieval strategies * GraphRAG * HyDE * Cohere rerank-v3.5 |
-| **Multi-Agent Teams** | 6 coordination strategies * shared memory * inter-agent messaging * HITL gates |
+| **Multi-Agent Teams** | 6 coordination strategies * manager delegation and specialist spawning * panel quorum on the parallel strategy * HITL approval gates |
 | **Orchestration** | `workflow()` DAGs * `AgentGraph` cycles * `mission()` goal-driven planning * checkpointing |
 | **Guardrails** | 5 security tiers * 6 packs (PII, ML classifiers, topicality, code safety, grounding, content policy) |
 | **Emergent Capabilities** | Runtime tool forging * 4 self-improvement tools * tiered promotion * skill export |

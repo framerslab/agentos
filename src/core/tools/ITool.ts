@@ -76,6 +76,12 @@ export interface ToolExecutionContext {
   userContext: UserContext;
   correlationId?: string;
   sessionData?: Record<string, any>;
+  /**
+   * The calling persona's capabilities, as the permission check received them.
+   * A tool that runs other tools on the caller's behalf (a composed tool, a
+   * workflow) passes them on, so each step is checked as the caller.
+   */
+  personaCapabilities?: string[];
 }
 
 /**

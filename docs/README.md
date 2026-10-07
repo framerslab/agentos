@@ -75,7 +75,7 @@
 #### Extensions & Customization
 
 - [**RFC Extension Standards**](./extensions/RFC_EXTENSION_STANDARDS.md) — Extension development guidelines
-- [**Recursive Self-Building Agents**](./architecture/RECURSIVE_SELF_BUILDING_AGENTS.md) — Advanced agent patterns
+- [**Self-Extension: Forging and Self-Improvement**](./SELF_EXTENSION.md) — Forged tools, self-improvement tools and specialist spawning
 - [**Skills (SKILL.md)**](./extensions/SKILLS.md) — Prompt modules loaded from directories/registries
 
 #### Channels & Social

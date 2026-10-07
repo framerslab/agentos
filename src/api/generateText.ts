@@ -22,6 +22,7 @@ import {
 } from './runtime/hostPolicy.js';
 import { adaptTools, type AdaptableToolInput } from './runtime/toolAdapter.js';
 import { runEmulatedToolLoop, toShimMessages, type ToolMode } from './runtime/tool-emulation/index.js';
+import { APPROVAL_GRANTED, askApprovalGate, type ApprovalGateFn } from './runtime/approval-gate.js';
 import type { AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { resolveDynamicToolCalls } from './runtime/dynamicToolCalling.js';
 import type { ITool, ToolExecutionContext } from '../core/tools/ITool.js';
@@ -754,6 +755,16 @@ export interface GenerateTextOptions {
    * permission checks, or return `null` to skip the tool call entirely.
    */
   onBeforeToolExecution?: (info: ToolCallHookInfo) => Promise<ToolCallHookInfo | null>;
+  /**
+   * Internal — DO NOT set from application code. The tool-approval gate,
+   * set by `agency()` when `hitl.approvals.beforeTool` is listed, or
+   * forwarded from a parent agency. Every tool loop calls it after
+   * `onBeforeToolExecution`, on the arguments that hook left; anything but
+   * its exact approval skips the tool and tells the model.
+   *
+   * @internal
+   */
+  __approvalGate?: ApprovalGateFn;
   /**
    * @internal Used by generateObject and AgentSession.send (with
    * responseSchema) to forward a provider-specific response_format
@@ -2239,6 +2250,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           onToolExecute: () => {
             toolProgress.shimRanTool = true;
           },
+          // The hook, then the approval gate, before each parsed call runs,
+          // as on the native loop below.
+          onBeforeToolExecution: opts.onBeforeToolExecution,
+          approvalGate: opts.__approvalGate,
           // Native tool turns (session history, a failover continuation)
           // become the shim's own <tool_call> / <tool_response> text.
           messages: toShimMessages(messages),
@@ -2711,6 +2726,29 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 parsedArgs = hookResult.args;
               } catch (hookErr) {
                 console.warn('[agentos] onBeforeToolExecution hook error:', hookErr);
+              }
+            }
+
+            // --- approval gate (agency hitl.approvals.beforeTool) ---
+            // Runs after the hook, on the arguments the hook left. Anything but
+            // the exact approval skips the tool and tells the model. A tool
+            // that does not exist is reported below without asking anyone.
+            if (tool && opts.__approvalGate) {
+              const verdict = await askApprovalGate(opts.__approvalGate, {
+                name: fnName,
+                args: (parsedArgs ?? {}) as Record<string, unknown>,
+                id: tcId || '',
+                step: runStep,
+              });
+              if (verdict !== APPROVAL_GRANTED) {
+                record.error = `Skipped: ${verdict.reason}`;
+                messages.push({
+                  role: 'tool',
+                  tool_call_id: tcId,
+                  content: JSON.stringify({ skipped: true, reason: verdict.reason }),
+                } as any);
+                allToolCalls.push(record);
+                continue;
               }
             }
 

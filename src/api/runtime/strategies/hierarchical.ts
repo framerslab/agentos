@@ -144,6 +144,14 @@ export interface HierarchicalToolBundle {
 }
 
 /**
+ * A tool refusal both tool-result consumers can read: the native tool loops
+ * read `output` (then `error`), the prompt-tool shim reads `error`.
+ */
+function refusal(reason: string): { success: false; output: string; error: string } {
+  return { success: false, output: reason, error: reason };
+}
+
+/**
  * Build the delegation tool table for a hierarchical strategy run.
  *
  * Every static agent in `initialRoster` becomes a `delegate_to_<name>`
@@ -156,6 +164,10 @@ export interface HierarchicalToolBundle {
  * The returned bundle is shared mutable state for the duration of one
  * `compileHierarchical().execute()` invocation; it is NOT thread-safe
  * across concurrent strategy executions.
+ *
+ * Tools return the `ToolExecutionResult` shape (`success`, `output`,
+ * `error`): both tool-result consumers read `output`, so the manager receives
+ * the delegate's text, a spawn's outcome and a refusal's reason.
  *
  * @internal Exported so tests can drive the spawn_specialist tool directly
  *   without spinning up a manager LLM.
@@ -193,7 +205,7 @@ export function buildHierarchicalTools(
       execute: async (args: { task: string }) => {
         const decision = await checkBeforeAgent(name, args.task, agentCalls, agencyConfig);
         if (decision && !decision.approved) {
-          return { success: false, data: `Agent "${name}" execution was rejected by HITL.` };
+          return refusal(`Agent "${name}" execution was rejected by HITL.`);
         }
 
         const a = resolveAgent(agentOrConfig, agencyConfig);
@@ -230,7 +242,7 @@ export function buildHierarchicalTools(
         subAgentUsage.totalTokens += resultUsage.totalTokens ?? 0;
         accumulateExtraUsage(subAgentUsage, resultUsage);
 
-        return { success: true, data: resultText };
+        return { success: true, output: resultText };
       },
     };
   }
@@ -282,24 +294,15 @@ export function buildHierarchicalTools(
       },
       execute: async (args: { role: string; instructions: string; justification?: string }) => {
         if (spawnedCount.value >= maxSpecialists) {
-          return {
-            success: false,
-            data: `Cannot spawn: maxSpecialists cap (${maxSpecialists}) reached for this run.`,
-          };
+          return refusal(`Cannot spawn: maxSpecialists cap (${maxSpecialists}) reached for this run.`);
         }
 
         if (requireJustification && (!args.justification || args.justification.trim().length === 0)) {
-          return {
-            success: false,
-            data: 'spawn_specialist requires a non-empty justification when requireJustification is enabled.',
-          };
+          return refusal('spawn_specialist requires a non-empty justification when requireJustification is enabled.');
         }
 
         if (roster[args.role]) {
-          return {
-            success: false,
-            data: `Cannot spawn: role "${args.role}" already exists in roster — call delegate_to_${args.role} instead.`,
-          };
+          return refusal(`Cannot spawn: role "${args.role}" already exists in roster — call delegate_to_${args.role} instead.`);
         }
 
         // HITL gate (when hitl.approvals.beforeEmergent is true) — fires
@@ -314,10 +317,7 @@ export function buildHierarchicalTools(
           agencyConfig,
         );
         if (hitlDecision && !hitlDecision.approved) {
-          return {
-            success: false,
-            data: `HITL rejected spawn of "${args.role}"${hitlDecision.reason ? `: ${hitlDecision.reason}` : ''}`,
-          };
+          return refusal(`HITL rejected spawn of "${args.role}"${hitlDecision.reason ? `: ${hitlDecision.reason}` : ''}`);
         }
 
         // Lazy import to avoid pulling EmergentAgentForge into hot path
@@ -345,7 +345,7 @@ export function buildHierarchicalTools(
         );
 
         if (!result.ok) {
-          return { success: false, data: `Forge rejected: ${result.reason}` };
+          return refusal(`Forge rejected: ${result.reason}`);
         }
 
         // Judge gating: when emergent.judge is true, run the synthesised
@@ -353,10 +353,7 @@ export function buildHierarchicalTools(
         // short-circuits and the roster is not mutated.
         if (judgeEnabled) {
           if (judgeCallsUsed >= maxJudgeCalls) {
-            return {
-              success: false,
-              data: `Cannot spawn: maxJudgeCalls cap (${maxJudgeCalls}) reached for this run.`,
-            };
+            return refusal(`Cannot spawn: maxJudgeCalls cap (${maxJudgeCalls}) reached for this run.`);
           }
 
           const { EmergentAgentJudge } = await import('../../../cognition/emergent/EmergentAgentJudge.js');
@@ -382,10 +379,7 @@ export function buildHierarchicalTools(
           });
 
           if (!verdict.approved) {
-            return {
-              success: false,
-              data: `Judge rejected synthesised agent "${args.role}": ${verdict.reason}`,
-            };
+            return refusal(`Judge rejected synthesised agent "${args.role}": ${verdict.reason}`);
           }
         }
 
@@ -405,7 +399,7 @@ export function buildHierarchicalTools(
 
         return {
           success: true,
-          data: `Spawned ${args.role}. Call delegate_to_${args.role}({ task: '...' }) on the next turn to invoke them.`,
+          output: `Spawned ${args.role}. Call delegate_to_${args.role}({ task: '...' }) on the next turn to invoke them.`,
         };
       },
     };

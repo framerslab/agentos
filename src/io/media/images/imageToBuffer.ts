@@ -17,12 +17,20 @@ import * as fs from 'node:fs/promises';
  * - **`Buffer`** — returned as-is.
  * - **Base64 data URL** — e.g. `data:image/png;base64,iVBOR...`.  The base64
  *   payload is extracted and decoded.
- * - **Raw base64 string** — a string that does not look like a URL or file
- *   path is assumed to be raw base64 data.
+ * - **Raw base64 string** — decoded. A string that does not look like a URL
+ *   or a file path is decoded directly. One that looks like a path is read as
+ *   a file first, and decoded when no file exists there and it is base64
+ *   (standard or URL-safe) whose bytes start with a PNG, JPEG, GIF, WebP, TIFF,
+ *   AVIF, HEIC, BMP, ICO, JPEG 2000, JPEG XL or SVG signature: standard base64
+ *   uses `/` (RFC 4648, Table 1), so a JPEG's base64 begins with `/9j/`. A
+ *   missing path is still an error; when the string is base64 of another
+ *   format, the error says so without repeating the string.
  * - **`file://` URL** — resolved to a local filesystem path and read.
  * - **HTTP/HTTPS URL** — fetched via `globalThis.fetch` and buffered.
- * - **Local file path** — any other string is treated as an absolute or
- *   relative filesystem path and read with `fs.readFile`.
+ * - **Local file path** — a string that contains `/` or `\`, or ends in a
+ *   file extension, is read with `fs.readFile`. A string from an
+ *   untrusted caller can name any file the process can read, so pass such
+ *   input as a `Buffer` or a data URL.
  *
  * @param input - The image in any supported format.
  * @returns A `Buffer` containing the raw image bytes.
@@ -82,11 +90,109 @@ export async function imageToBuffer(input: string | Buffer): Promise<Buffer> {
   const looksLikePath =
     trimmed.includes('/') || trimmed.includes('\\') || /\.\w{2,5}$/.test(trimmed);
   if (looksLikePath) {
-    return fs.readFile(trimmed);
+    try {
+      return await fs.readFile(trimmed);
+    } catch (error) {
+      // Standard base64 uses `/` (RFC 4648, Table 1), so raw base64 looks like a
+      // path. When no file exists there and the string decodes to image bytes,
+      // it is the image; a missing path that does not stays an error.
+      const compact = trimmed.replace(/\s+/g, '');
+      if (!isMissingFileError(error) || !BASE64_PATTERN.test(compact)) {
+        throw error;
+      }
+      const bytes = Buffer.from(compact, 'base64');
+      if (hasImageSignature(bytes)) {
+        return bytes;
+      }
+      // Node's error names the whole string as the path, which for a base64
+      // payload can run to megabytes in a message or a log line. It is not
+      // attached as `cause` either: Node prints an error's cause with it.
+      throw Object.assign(
+        new Error(
+          `imageToBuffer: no file exists at ${preview(trimmed)}, and it is not base64 of a ` +
+            'recognised image format (PNG, JPEG, GIF, WebP, TIFF, AVIF, HEIC, BMP, ICO, ' +
+            'JPEG 2000, JPEG XL or SVG). Pass the image as a data URL or a Buffer.',
+        ),
+        { code: (error as NodeJS.ErrnoException).code },
+      );
+    }
   }
 
   // Fallback: raw base64 string (no data URL prefix).
   return Buffer.from(trimmed, 'base64');
+}
+
+/** The standard and URL-safe base64 alphabets of RFC 4648, with optional padding. */
+const BASE64_PATTERN = /^[A-Za-z0-9+/_-]+={0,2}$/;
+
+/** A short, quoted form of `value` for an error message: at most its first 40 characters. */
+function preview(value: string): string {
+  return value.length <= 40
+    ? JSON.stringify(value)
+    : `${JSON.stringify(value.slice(0, 40))}... (${value.length} characters)`;
+}
+
+/**
+ * True when `bytes` start with the signature of PNG, JPEG, GIF, WebP, TIFF, an
+ * ISO media file such as AVIF or HEIC (`ftyp` at offset 4), BMP, ICO, JPEG 2000,
+ * the JPEG XL container, or SVG text. JPEG XL's bare codestream marker (FF 0A)
+ * is left out: two bytes are too few, and a path such as `/work...` decodes to
+ * them.
+ */
+function hasImageSignature(bytes: Buffer): boolean {
+  const startsWith = (...signature: number[]) => signature.every((byte, i) => bytes[i] === byte);
+  return (
+    startsWith(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a) || // PNG
+    startsWith(0xff, 0xd8, 0xff) || // JPEG
+    startsWith(0x47, 0x49, 0x46, 0x38) || // GIF8
+    (startsWith(0x52, 0x49, 0x46, 0x46) && bytes.subarray(8, 12).toString('latin1') === 'WEBP') ||
+    startsWith(0x49, 0x49, 0x2a, 0x00) || // TIFF, little-endian
+    startsWith(0x4d, 0x4d, 0x00, 0x2a) || // TIFF, big-endian
+    bytes.subarray(4, 8).toString('latin1') === 'ftyp' ||
+    // BMP: "BM", then the file size, which a whole file's bytes match.
+    (startsWith(0x42, 0x4d) && bytes.length >= 6 && bytes.readUInt32LE(2) === bytes.length) ||
+    startsWith(0x00, 0x00, 0x01, 0x00) || // ICO
+    startsWith(0x00, 0x00, 0x00, 0x0c, 0x6a, 0x50, 0x20, 0x20, 0x0d, 0x0a, 0x87, 0x0a) || // JPEG 2000 (JP2)
+    startsWith(0xff, 0x4f, 0xff, 0x51) || // JPEG 2000 codestream
+    startsWith(0x00, 0x00, 0x00, 0x0c, 0x4a, 0x58, 0x4c, 0x20, 0x0d, 0x0a, 0x87, 0x0a) || // JPEG XL container
+    isSvgText(bytes)
+  );
+}
+
+/**
+ * The XML prolog items that may come before the root element: the XML
+ * declaration and other processing instructions, comments, and a DOCTYPE
+ * (internal subset included), each with the whitespace before it.
+ *
+ * A DOCTYPE's quoted literals and its subset's comments are read whole, so a
+ * `>` in a system identifier or a `]>` in an entity value does not end it.
+ * Every part has one way to match (a subset comment ends at its first `-->`),
+ * which keeps a failed match linear in the input: a lazy `[\s\S]*?` comment
+ * body inside the repeated subset could end at any later `-->` and backtrack
+ * exponentially on input that has many comments and no closing `]`.
+ */
+const XML_PROLOG_ITEM =
+  /^\s*(?:<\?[\s\S]*?\?>|<!--[\s\S]*?-->|<!DOCTYPE(?:[^>["']|"[^"]*"|'[^']*')*(?:\[(?:<!--(?:[^-]|-(?!->))*-->|"[^"]*"|'[^']*'|<(?!!--)|[^\]"'<])*\])?\s*>)/i;
+
+/**
+ * True when `bytes` are SVG markup: after the XML prolog (declaration,
+ * comments, DOCTYPE), the root element is `<svg>`.
+ */
+function isSvgText(bytes: Buffer): boolean {
+  let head = bytes.subarray(0, 4096).toString('utf8').replace(/^\uFEFF/, '');
+  for (let item = XML_PROLOG_ITEM.exec(head); item; item = XML_PROLOG_ITEM.exec(head)) {
+    head = head.slice(item[0].length);
+  }
+  return /^\s*<svg[\s/>]/.test(head);
+}
+
+/**
+ * True for the errors `fs.readFile` gives when nothing exists at the path,
+ * which are the errors a base64 string read as a path gives.
+ */
+function isMissingFileError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR' || code === 'ENAMETOOLONG';
 }
 
 /**

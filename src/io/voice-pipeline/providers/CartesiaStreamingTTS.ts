@@ -34,7 +34,7 @@ import {
   type ProviderCapabilities,
 } from '../HealthyProvider.js';
 import { VoicePipelineError } from '../VoicePipelineError.js';
-import { CARTESIA_VERSION } from './CartesiaBatchTTS.js';
+import { CARTESIA_DEFAULT_MODEL, CARTESIA_VERSION } from './CartesiaBatchTTS.js';
 
 /** Configuration for the Cartesia streaming TTS provider. */
 export interface CartesiaStreamingTTSConfig {
@@ -42,7 +42,7 @@ export interface CartesiaStreamingTTSConfig {
   apiKey: string;
   /** Default voice id. Cartesia voices are ids; there is no vendor default. */
   voiceId: string;
-  /** Model identifier. @default 'sonic-3.5' */
+  /** Model identifier. @default 'sonic-3.6-2026-08-27' */
   model?: string;
   /** Output sample rate (Hz) for raw pcm chunks. @default 16000 */
   sampleRate?: number;
@@ -227,7 +227,7 @@ export class CartesiaStreamingTTS implements IStreamingTTS, HealthyProvider {
   constructor(config: CartesiaStreamingTTSConfig) {
     this.keyPool = new ApiKeyPool(config.apiKey);
     this.voiceId = config.voiceId;
-    this.model = config.model ?? 'sonic-3.5';
+    this.model = config.model ?? CARTESIA_DEFAULT_MODEL;
     this.sampleRate = config.sampleRate ?? 16000;
     this.wsUrl = config.wsUrl ?? 'wss://api.cartesia.ai/tts/websocket';
     this.priority = config.priority ?? 12;

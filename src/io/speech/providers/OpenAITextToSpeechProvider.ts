@@ -29,6 +29,11 @@ export interface OpenAITextToSpeechProviderConfig {
 
   /**
    * Default TTS model. `tts-1` is optimized for real-time, `tts-1-hd` for quality.
+   *
+   * OpenAI removes `tts-1`, `tts-1-hd` and the `gpt-4o-mini-tts` snapshots on
+   * 2027-01-06. The replacement it names, `gpt-realtime-2.1-mini`, runs only on
+   * the Realtime API and is not accepted by `/v1/audio/speech`, which this
+   * provider calls.
    * @default 'tts-1'
    */
   model?: string;

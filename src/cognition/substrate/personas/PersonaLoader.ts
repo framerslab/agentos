@@ -16,7 +16,7 @@ import { uuidv4 } from '../../../core/utils/uuid';
 import { IPersonaDefinition } from './IPersonaDefinition';
 import { IPersonaLoader, PersonaLoaderConfig } from './IPersonaLoader';
 import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
-import { mergeMetapromptPresets } from './metaprompt_presets.js';
+import { normalizePersonaDefinition } from './personaNormalization';
 
 /**
  * Configuration specific to the FileSystemPersonaLoader.
@@ -196,36 +196,15 @@ export class PersonaLoader implements IPersonaLoader {
           continue;
         }
 
-        // Only merge sentiment-aware preset metaprompts when explicitly enabled
-        const sentimentConfig = personaDefinition.sentimentTracking;
-        if (sentimentConfig?.enabled && sentimentConfig.presets && sentimentConfig.presets.length > 0) {
-          // Map short preset names to full metaprompt IDs
-          const presetNameToId: Record<string, string> = {
-            'frustration_recovery': 'gmi_frustration_recovery',
-            'confusion_clarification': 'gmi_confusion_clarification',
-            'satisfaction_reinforcement': 'gmi_satisfaction_reinforcement',
-            'error_recovery': 'gmi_error_recovery',
-            'engagement_boost': 'gmi_engagement_boost',
-          };
-
-          const requestedIds = sentimentConfig.presets.includes('all')
-            ? undefined // undefined = include all presets
-            : sentimentConfig.presets
-                .filter((p): p is Exclude<typeof p, 'all'> => p !== 'all')
-                .map((p) => presetNameToId[p])
-                .filter(Boolean);
-
-          personaDefinition.metaPrompts = mergeMetapromptPresets(
-            personaDefinition.metaPrompts,
-            requestedIds
-          );
-          console.log(`PersonaLoader (ID: ${this.loaderId}): Merged ${personaDefinition.metaPrompts.length} metaprompts (${requestedIds ? requestedIds.length + ' presets' : 'all presets'} + custom) for persona '${personaDefinition.id}'.`);
+        const normalized = normalizePersonaDefinition(personaDefinition);
+        if (normalized !== personaDefinition) {
+          console.log(`PersonaLoader (ID: ${this.loaderId}): Merged ${normalized.metaPrompts?.length ?? 0} metaprompts for persona '${normalized.id}' from sentimentTracking.presets.`);
         }
 
-        if (this.loadedPersonas.has(personaDefinition.id)) {
-          console.warn(`PersonaLoader (ID: ${this.loaderId}): Duplicate persona ID '${personaDefinition.id}' found in file '${filePath}'. Overwriting previous definition. Ensure persona IDs are unique.`);
+        if (this.loadedPersonas.has(normalized.id)) {
+          console.warn(`PersonaLoader (ID: ${this.loaderId}): Duplicate persona ID '${normalized.id}' found in file '${filePath}'. Overwriting previous definition. Ensure persona IDs are unique.`);
         }
-        this.loadedPersonas.set(personaDefinition.id, personaDefinition);
+        this.loadedPersonas.set(normalized.id, normalized);
       } catch (error: any) {
         console.error(`PersonaLoader (ID: ${this.loaderId}): Error loading or parsing persona from file '${filePath}': ${error.message}`, error);
       }

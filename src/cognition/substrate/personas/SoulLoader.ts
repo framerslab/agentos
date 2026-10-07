@@ -116,6 +116,8 @@ export interface SoulFrontmatter {
   avatar?: { type?: string; sourceUrl?: string; descriptionForGeneration?: string };
   /** Free-form structured fields any consumer can read. */
   metadata?: Record<string, unknown>;
+  /** Reasoning-trace limits; maps to `IPersonaDefinition.reasoningTraceConfig`. */
+  reasoningTrace?: { maxEntries?: number; maxMessageLength?: number };
 }
 
 /**
@@ -351,6 +353,11 @@ export function frontmatterToPersona(
     // Runtime readers key Honesty-Humility as `honesty`; the frontmatter may
     // use either spelling.
     personalityTraits: frontmatter.hexaco ? normalizeHexacoTraits(frontmatter.hexaco) : undefined,
+    // Kept as given (an object is copied; anything else passes through) so PersonaValidation can report a malformed value.
+    reasoningTraceConfig:
+      frontmatter.reasoningTrace && typeof frontmatter.reasoningTrace === 'object' && !Array.isArray(frontmatter.reasoningTrace)
+        ? { ...frontmatter.reasoningTrace }
+        : (frontmatter.reasoningTrace as IPersonaDefinition['reasoningTraceConfig']),
     moodAdaptation: frontmatter.defaultMood
       ? {
           enabled: true,
@@ -415,6 +422,11 @@ export function renderSoulMarkdown(persona: IPersonaDefinition): string {
       : undefined,
     defaultMood: persona.moodAdaptation?.defaultMood,
     allowedMoods: persona.moodAdaptation?.allowedMoods,
+    // A plain object is copied; anything else passes through unchanged, so a value the loader kept for validation survives a render.
+    reasoningTrace:
+      persona.reasoningTraceConfig && typeof persona.reasoningTraceConfig === 'object' && !Array.isArray(persona.reasoningTraceConfig)
+        ? { ...persona.reasoningTraceConfig }
+        : (persona.reasoningTraceConfig as SoulFrontmatter['reasoningTrace']),
     hardLimits: (persona as IPersonaDefinition & { hardLimits?: string[] }).hardLimits,
     avatar: persona.avatarConfig
       ? {

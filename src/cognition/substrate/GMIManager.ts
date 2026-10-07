@@ -53,7 +53,7 @@ export interface GMIManagerConfig {
   personaLoaderConfig: PersonaLoaderConfig;
   defaultGMIInactivityCleanupMinutes?: number;
   defaultWorkingMemoryType?: 'in_memory' | string;
-  defaultGMIBaseConfigDefaults?: Partial<Pick<GMIBaseConfig, 'defaultLlmProviderId' | 'defaultLlmModelId' | 'customSettings'>>;
+  defaultGMIBaseConfigDefaults?: Partial<Pick<GMIBaseConfig, 'defaultLlmProviderId' | 'defaultLlmModelId' | 'customSettings' | 'defaultReasoningTraceMaxEntries' | 'defaultReasoningTraceMaxMessageLength'>>;
   /** Strict validation enforcement configuration (optional, defaults to permissive). */
   personaValidationStrict?: PersonaValidationStrictConfig;
   /** Optional per-GMI cognitive memory factory used by devtools and advanced runtimes. */
@@ -496,6 +496,8 @@ export class GMIManager {
       cognitiveMemory,
       defaultLlmProviderId: persona.defaultProviderId || this.config.defaultGMIBaseConfigDefaults?.defaultLlmProviderId,
       defaultLlmModelId: persona.defaultModelId || this.config.defaultGMIBaseConfigDefaults?.defaultLlmModelId,
+      defaultReasoningTraceMaxEntries: this.config.defaultGMIBaseConfigDefaults?.defaultReasoningTraceMaxEntries,
+      defaultReasoningTraceMaxMessageLength: this.config.defaultGMIBaseConfigDefaults?.defaultReasoningTraceMaxMessageLength,
       customSettings: persona.customFields,
     };
   }

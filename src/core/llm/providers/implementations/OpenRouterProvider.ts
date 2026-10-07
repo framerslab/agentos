@@ -1300,7 +1300,7 @@ export class OpenRouterProvider implements IProvider {
           };
         }
         const finalMessage: ChatMessage = {
-          role: choice.delta?.role || accumulatedToolCalls.size > 0 ? 'assistant' : (choice.message?.role || 'assistant'),
+          role: choice.delta?.role || (accumulatedToolCalls.size > 0 ? 'assistant' : (choice.message?.role || 'assistant')),
           content: responseTextDelta || (choice.message?.content || null),
           tool_calls: Array.from(accumulatedToolCalls.values())
             .filter(tc => tc.id && tc.function?.name)
@@ -1343,8 +1343,10 @@ export class OpenRouterProvider implements IProvider {
         modelId: apiChunk.model || requestedModelId,
         ...(apiChunk.provider ? { servingProvider: apiChunk.provider } : {}),
         choices: finalChoices,
-        responseTextDelta: isFinal ? undefined : responseTextDelta,
-        toolCallsDeltas: isFinal ? undefined : toolCallsDeltas,
+        // The finish chunk can carry the last text or tool-argument fragment,
+        // and deltas are append-only (StreamingReconstructor), so it keeps them.
+        responseTextDelta,
+        toolCallsDeltas,
         isFinal,
         usage: finalUsage,
       };

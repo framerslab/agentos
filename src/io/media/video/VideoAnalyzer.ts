@@ -358,8 +358,12 @@ export class VideoAnalyzer implements IVideoAnalyzer {
           if (audioBuffer && audioBuffer.length > 0) {
             this._emitProgress(request.onProgress, 'transcribing', 30, 'Transcribing audio');
 
+            // Per-scene transcripts need segment timestamps. The OpenAI
+            // provider returns them only for verbose_json (served by
+            // whisper-1); the other providers ignore the field.
             const sttResult = await this._sttProvider!.transcribe(
               { data: audioBuffer, mimeType: 'audio/wav', sampleRate: 16000 },
+              { responseFormat: 'verbose_json' },
             );
 
             fullTranscript = sttResult.text;
