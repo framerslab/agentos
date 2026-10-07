@@ -44,39 +44,40 @@ explicit dependencies. The strategy is the data-flow shape. Picking the
 strategy picks how brain-to-brain context propagates; the work itself happens
 inside each brain.
 
-**2. Shared coordination primitives connect the brains.** A shared memory store
-(`memory: { shared: true }`), an [`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgentCommunicationBus.ts)
-for structured agent-to-agent messages, RAG with per-agent access controls, and
-runtime synthesis via [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts)
-when the static roster runs out of specialists.
+**2. The strategy connects the agents.** It decides the order and what each
+agent receives: the previous output (sequential), the same prompt (parallel),
+every prior argument (debate), the manager's delegations (hierarchical) or its
+predecessors' outputs (graph); the hierarchical strategy can add specialists at
+run time through [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts).
+`agency()` builds no shared memory store and runs no retrieval of its own: the
+`memory` and `rag` options are accepted and deferred on this path (see the
+capability contract), and
+[`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts) and
+[`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgentCommunicationBus.ts) are
+exported classes a host wires itself.
 
 **3. A team-wide coordination shell wraps the whole agency.** HITL approval
-gates, guardrails, resource controls (token, cost, time, call caps), provenance
-and audit logging, structured Zod output. These apply uniformly to the team
-rather than per-agent.
+gates (`hitl.approvals.beforeTool` is forwarded to every member), resource
+controls (the token, time and call caps on `controls`, enforced across the run)
+and structured Zod output (`output`). These apply to the team rather than
+per-agent. Options the lightweight path accepts and defers (`security`,
+`permissions`, `observability`, `rag`, `memory`) take effect on the full
+runtime; see the capability contract.
 
 ```mermaid
 graph TB
     Input["Input"]
-    subgraph Agency["Agency · coordination shell · HITL · guardrails · controls · provenance"]
+    subgraph Agency["Agency · coordination shell · HITL approvals · controls · structured output"]
         Strategy["Orchestration strategy<br/>sequential · parallel · debate<br/>review-loop · hierarchical · graph"]
-        subgraph Brains["GMI brains"]
+        subgraph Members["Agents (lightweight agent() members)"]
             direction LR
-            A["GMI A<br/>cognition · memory<br/>persona · tools"]
-            B["GMI B<br/>cognition · memory<br/>persona · tools"]
-            C["GMI C<br/>cognition · memory<br/>persona · tools"]
+            A["Agent A<br/>instructions · personality<br/>tools · own session"]
+            B["Agent B<br/>instructions · personality<br/>tools · own session"]
+            C["Agent C<br/>instructions · personality<br/>tools · own session"]
         end
-        SharedMem["Shared memory<br/>memory: shared: true"]
-        Bus["AgentCommunicationBus"]
         Strategy -->|routes outputs| A
         Strategy -->|routes outputs| B
         Strategy -->|routes outputs| C
-        A <--> SharedMem
-        B <--> SharedMem
-        C <--> SharedMem
-        A <--> Bus
-        B <--> Bus
-        C <--> Bus
     end
     Input --> Strategy
     A --> Output["Coordinated output"]
@@ -86,11 +87,11 @@ graph TB
 
 Three frames worth keeping:
 
-- **Per-agent isolation still holds.** Each GMI has its own `brainId` and scopes
-  its private memory by `thread | user | persona | organization`. The shared
-  layer is additive. Leave it off (the default) and every brain stays isolated.
-- **Strategy is the flow, not the work.** Strategies define how state
-  propagates between brains. The work happens inside each brain; the strategy
+- **Per-agent isolation holds.** Each member is its own lightweight `agent()`
+  with its own session history; nothing is shared between members except what
+  the strategy passes between them.
+- **Strategy is the flow, not the work.** Strategies define how outputs
+  propagate between members. The work happens inside each member; the strategy
   decides who reads what and when.
 - **Flows compose.** `agency()` returns an `Agent`, so an entire agency can sit
   inside another agency, or as a step inside `workflow()`, or as a node inside
@@ -767,55 +768,44 @@ const qualityGated = agency({
 
 ## Memory and RAG
 
-### Shared conversation memory
+`agency()` accepts `memory` and `rag` for forward compatibility with the full
+runtime and does not act on them: the capability contract marks both as
+accepted and deferred on the lightweight path, no shared memory store is
+built, and `injectRagContext()` returns the prompt unchanged because no vector
+store is initialised (a `documents` list only logs guidance to use the
+runtime). Each member keeps its own session history for the duration of one
+`generate()` or `stream()` call; inside `agency().session()`, only the
+user/assistant message history and aggregate usage persist between `.send()`
+calls.
+
+To give members memory, pass built agents as roster members: an
+[`agent()`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) with a `memoryProvider` keeps its hooks when it sits in a
+roster, and a member can carry a `soul` file the same way.
 
 ```typescript
-const remembering = agency({
+import { agent, agency, type AgentMemoryProvider } from '@framers/agentos';
+
+const myMemory: AgentMemoryProvider = {
+  getContext: async (text) => ({ contextText: await lookupNotes(text) }),   // injected as a system message before the call
+  observe: async (turn) => { await saveNotes(turn); },                       // runs after the reply
+};
+
+const researcher = agent({
   provider: 'openai', model: 'gpt-4o',
-  agents: {
-    a: { instructions: 'Agent A.' },
-    b: { instructions: 'Agent B.' },
-  },
+  instructions: 'Research the topic.',
+  memoryProvider: myMemory,
+});
+
+const team = agency({
+  provider: 'openai', model: 'gpt-4o',      // inherited by the inline writer
+  agents: { researcher, writer: { instructions: 'Write from the research.' } },
   strategy: 'sequential',
-  memory: {
-    shared: true,             // all agents share one memory store
-    types: ['episodic', 'semantic'],
-    working: { enabled: true, maxTokens: 4096, strategy: 'sliding-window' },
-    consolidation: { enabled: true, interval: 'PT1H' },
-  },
 });
 ```
 
-> ⚠️ **Scope of `memory: { shared: true }` — per-call, not per-session.** The shared memory store is built fresh for each `generate()` or `stream()` call and torn down when that call returns. Inside `agency().session()`, only the user/assistant message history and aggregate usage persist between `.send()` turns — the agency roster, the shared [`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts), and `tier: 'session'` emergent specialists all reset on every turn. To carry shared memory across turns, wire a [`Brain`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts) yourself (one `brainId` shared across agents) or run your own multi-call coordinator on top of `agent()` + [`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts). Per-agent isolation (each `agent()` keeps its own `brainId`) is unaffected — that boundary still holds across turns.
-
-### RAG configuration
-
-```typescript
-const withRag = agency({
-  provider: 'openai', model: 'gpt-4o',
-  agents: {
-    retriever: { instructions: 'Find relevant context from the knowledge base.' },
-    answerer:  { instructions: 'Answer based on retrieved context.' },
-  },
-  strategy: 'sequential',
-  rag: {
-    vectorStore: {
-      provider: 'in-memory',
-      embeddingModel: 'text-embedding-3-small',
-    },
-    documents: [
-      { path: './docs/manual.pdf', loader: 'pdf' },
-      { url: 'https://example.com/spec.html', loader: 'html' },
-    ],
-    topK: 5,
-    minScore: 0.75,
-    graphRag: { enabled: true },
-    agentAccess: {
-      answerer: { topK: 10, collections: ['manuals'] },
-    },
-  },
-});
-```
+Cognitive memory (the `CognitiveMemoryManager`, its mechanisms, the memory
+bridge) and the RAG pipeline (vector stores, GraphRAG, HyDE, reranking) run on
+the full runtime: see [Memory Model](../MEMORY_MODEL.md), [Cognitive Memory](../memory/COGNITIVE_MEMORY.md) and the RAG guides.
 
 ---
 
@@ -1244,31 +1234,10 @@ const contentPipeline = agency({
     judge: true,
   },
 
-  memory: {
-    shared: true,
-    types: ['episodic', 'semantic'],
-    working: { enabled: true, maxTokens: 8192 },
-  },
-
-  rag: {
-    vectorStore: { provider: 'in-memory', embeddingModel: 'text-embedding-3-small' },
-    topK: 5,
-    minScore: 0.7,
-  },
-
   guardrails: {
     input:  ['injection-shield'],
     output: ['grounding-guard', 'pii-redaction'],
     tier:   'balanced',
-  },
-
-  security: { tier: 'balanced' },
-
-  permissions: {
-    tools:      'all',
-    network:    true,
-    filesystem: false,
-    spawn:      false,
   },
 
   hitl: {
@@ -1287,11 +1256,6 @@ const contentPipeline = agency({
     maxDurationMs:   120_000,
     maxAgentCalls:   50,
     onLimitReached:  'warn',
-  },
-
-  observability: {
-    logLevel:    'info',
-    traceEvents: true,
   },
 
   on: {

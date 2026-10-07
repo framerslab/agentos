@@ -1,3 +1,15 @@
+## [0.11.0](https://github.com/framerslab/agentos/compare/v0.10.40...v0.11.0) (2026-10-07)
+
+### ⚠ BREAKING CHANGE
+
+* **export:** redact secrets by default, mark instances and pre-built seats, take secrets and values on import (#99)
+
+### fix
+
+* **emergent:** stored tools load through one checked path, and a suspension holds ([d640311](https://github.com/framerslab/agentos/commit/d64031113364e1234f55696a67c42867e95fd1a4))
+* **export:** redact secrets by default, mark instances and pre-built seats, take secrets and values on import (#99) ([7afad92](https://github.com/framerslab/agentos/commit/7afad924fd9bda013104bafa5a6033bf5e1ca1cf))
+* **hitl:** enforce approvals.beforeTool through a per-call gate on every tool loop (#107) ([6ed4ed9](https://github.com/framerslab/agentos/commit/6ed4ed91acdf8ef2b900142674f823a88bafb6d0))
+
 ## [0.10.40](https://github.com/framerslab/agentos/compare/v0.10.39...v0.10.40) (2026-10-07)
 
 ### feat
