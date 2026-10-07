@@ -310,18 +310,44 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
   updated_at BIGINT NOT NULL
 );`;
 
+    // The legacy flag hosts query follows the state row in the same statement:
+    // a state row written or changed sets is_active on its tool row before the
+    // write returns, so the two never disagree and no moment shows one without
+    // the other. A write the state row refuses changes nothing, flag included.
+    const stateInsertTrigger = `
+CREATE TRIGGER IF NOT EXISTS trg_emergent_tool_state_insert
+AFTER INSERT ON agentos_emergent_tool_state
+BEGIN
+  UPDATE agentos_emergent_tools
+     SET is_active = CASE WHEN NEW.state = 'active' THEN 1 ELSE 0 END
+   WHERE id = NEW.tool_id;
+END;`;
+    const stateUpdateTrigger = `
+CREATE TRIGGER IF NOT EXISTS trg_emergent_tool_state_update
+AFTER UPDATE OF state ON agentos_emergent_tool_state
+BEGIN
+  UPDATE agentos_emergent_tools
+     SET is_active = CASE WHEN NEW.state = 'active' THEN 1 ELSE 0 END
+   WHERE id = NEW.tool_id;
+END;`;
+
+    const statements = [
+      toolsTable,
+      toolsTierIndex,
+      toolsAgentIndex,
+      auditTable,
+      auditIndex,
+      stateTable,
+      stateInsertTrigger,
+      stateUpdateTrigger,
+    ];
     // Prefer `exec` for multi-statement DDL; fall back to individual `run` calls.
     if (this.db.exec) {
-      await this.db.exec(
-        [toolsTable, toolsTierIndex, toolsAgentIndex, auditTable, auditIndex, stateTable].join('\n'),
-      );
+      await this.db.exec(statements.join('\n'));
     } else {
-      await this.db.run(toolsTable);
-      await this.db.run(toolsTierIndex);
-      await this.db.run(toolsAgentIndex);
-      await this.db.run(auditTable);
-      await this.db.run(auditIndex);
-      await this.db.run(stateTable);
+      for (const statement of statements) {
+        await this.db.run(statement);
+      }
     }
 
     this.schemaReady = true;
@@ -545,16 +571,14 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
   }
 
   /**
-   * The statements of a state change: the state row upsert, and the legacy
-   * flag, read from the state row inside its own statement so the two agree
-   * whatever other processes write in between. They are ordered so that no
-   * moment shows an active state with the flag off, which a concurrent load
-   * would read as a host's disable: a reactivation raises the flag first,
-   * under the same condition as its upsert, and a restriction writes its
-   * state row before the flag is lowered. With `ifRow`, an existing row is
-   * changed only while its state, setter and time are the ones given
-   * (`'absent'`: never); the row as it stands afterwards is returned, so a
-   * refused write shows as a record other than the one given.
+   * The one statement of a state change: the state row upsert. The legacy
+   * flag follows it inside the same statement, through the state table's
+   * triggers, so the two never disagree and no moment shows an active state
+   * with the flag off (which a concurrent load would read as a host's
+   * disable). With `ifRow`, an existing row is changed only while its state,
+   * setter and time are the ones given (`'absent'`: never); a refused write
+   * changes nothing, flag included, and the row as it stands afterwards is
+   * returned, so it shows as a record other than the one given.
    */
   private async writeStateRow(
     toolId: string,
@@ -582,12 +606,6 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
              updated_at = excluded.updated_at`;
     let guard = '';
     const params: unknown[] = [toolId, record.state, record.reason, record.setBy, record.at, requestJson, record.at];
-    // The flag raised ahead of an activation, under the activation's own
-    // condition, so no moment shows an active state with the flag off; a
-    // refused or failed upsert lowers it again below. With no state row yet
-    // ('absent') the flag is 1 already: a load activates no row it read off.
-    let raise: { sql: string; params: unknown[] } | undefined;
-    let flagBefore: number | undefined;
     if (ifRow === 'absent') {
       guard = `
            WHERE 0 = 1`;
@@ -597,54 +615,16 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
              AND agentos_emergent_tool_state.set_by = ?
              AND agentos_emergent_tool_state.state_at = ?`;
       params.push(ifRow.state, ifRow.setBy, ifRow.at);
-      raise = {
-        sql: `UPDATE agentos_emergent_tools
-                 SET is_active = 1
-               WHERE id = ?
-                 AND EXISTS (SELECT 1 FROM agentos_emergent_tool_state
-                              WHERE tool_id = ? AND state = ? AND set_by = ? AND state_at = ?)`,
-        params: [toolId, toolId, ifRow.state, ifRow.setBy, ifRow.at],
-      };
-    } else if (record.state === 'active') {
-      // Unconditional (a host's reactivation): the flag as it is, for a write
-      // that fails after the raise.
-      const current = (await db.get(`SELECT is_active FROM agentos_emergent_tools WHERE id = ?`, [toolId])) as
-        | { is_active?: number | boolean | null }
-        | undefined;
-      flagBefore = current?.is_active === 0 || current?.is_active === false ? 0 : 1;
-      raise = { sql: `UPDATE agentos_emergent_tools SET is_active = 1 WHERE id = ?`, params: [toolId] };
     }
-    if (raise && record.state === 'active') {
-      await db.run(raise.sql, raise.params);
-    }
-    // The legacy flag hosts query follows the state row, read inside the statement.
-    const follow = `UPDATE agentos_emergent_tools
-          SET is_active = COALESCE((SELECT CASE WHEN state = 'active' THEN 1 ELSE 0 END
-                                      FROM agentos_emergent_tool_state WHERE tool_id = ?), ?)
-        WHERE id = ?`;
-    try {
-      await db.run(
-        `INSERT INTO agentos_emergent_tool_state
-           (tool_id, state, state_reason, set_by, state_at, request_json, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (tool_id) DO UPDATE SET
-           ${setList}${guard}`,
-        params,
-      );
-    } catch (error) {
-      if (raise) {
-        // Raised ahead of a write that did not land: back to what the state
-        // row says, else to what the flag was. The write's own failure is the
-        // one reported.
-        try {
-          await db.run(follow, [toolId, flagBefore ?? 0, toolId]);
-        } catch {
-          // Reported through the first failure.
-        }
-      }
-      throw error;
-    }
-    await db.run(follow, [toolId, record.state === 'active' ? 1 : 0, toolId]);
+    // The tool row's is_active follows inside this statement (the triggers).
+    await db.run(
+      `INSERT INTO agentos_emergent_tool_state
+         (tool_id, state, state_reason, set_by, state_at, request_json, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (tool_id) DO UPDATE SET
+         ${setList}${guard}`,
+      params,
+    );
     if (ifRow === undefined) {
       return record;
     }
