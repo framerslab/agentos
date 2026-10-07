@@ -295,7 +295,12 @@ export {
   importAgentFromYAML,
   validateAgentExport,
 } from './api/agentExport.js';
-export type { AgentExportConfig } from './api/agentExport.js';
+export type {
+  AgentExportConfig,
+  ExportAgentConfigOptions,
+  ImportAgentOptions,
+  PrebuiltSeatMarker,
+} from './api/agentExport.js';
 export { hitl } from './api/hitl.js';
 export type { HitlHandler } from './api/hitl.js';
 export * from './api/runtime/processRequestWithExternalTools.js';

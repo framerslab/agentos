@@ -188,62 +188,46 @@ for await (const chunk of gmi.processTurnStream(turnInput)) {
 
 ## Request Lifecycle
 
-A user request flows through the following stages:
+A request to the full runtime passes through five stages. The stage boundaries below are the ones in the code; the facade owns guardrails, the pipeline owns preparation, the GMI owns the model call.
 
-1. **Authentication & Rate Limiting** -- Validate auth context and check rate limits.
-2. **Context Assembly** -- Load session history, conversation context, and temporal/environmental state.
-3. **GMI Selection** -- Get or create a GMI instance for the user/persona/session tuple.
-4. **Memory Retrieval** -- `CognitiveMemoryBridge` retrieves relevant memory traces; RAG retrieval runs if configured.
-5. **Prompt Construction** -- `MetapromptExecutor` assembles system, persona, memory, RAG context, and conversation history into the prompt via `PromptBuilder`.
-6. **Pre-execution Guardrails** -- [`ParallelGuardrailDispatcher`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/ParallelGuardrailDispatcher.ts) runs input guardrails (sanitizers first, classifiers in parallel).
-7. **Tool Orchestration** -- [`ToolOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts) resolves and executes any tool calls selected by the LLM.
-8. **LLM Execution** -- [`StreamingManager`](https://github.com/framerslab/agentos/blob/master/src/core/streaming/StreamingManager.ts) sends the prompt to the selected LLM provider and streams chunks.
-9. **Post-execution Guardrails** -- Output guardrails evaluate the response (toxicity, PII, grounding).
-10. **Memory Update** -- `CognitiveMemoryBridge` encodes new memory traces; [`MemoryObserver`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryObserver.ts) queues background consolidation.
-11. **Analytics** -- [`Tracer`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/observability/Tracer.ts) records OpenTelemetry spans; cost/token metrics are tracked.
+1. **Facade** ([`AgentOS.processRequest()`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts)) fills `selectedPersonaId` from `defaultPersonaId` when the request has none, applies the self-improvement session overrides and the skill prompt context ([`SelfImprovementSessionManager`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/SelfImprovementSessionManager.ts)), negotiates the language, evaluates the input guardrails with [`evaluateInputGuardrails`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/guardrailDispatcher.ts) (the dispatcher runs sanitizers first, then classifiers, in parallel through [`ParallelGuardrailDispatcher`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/ParallelGuardrailDispatcher.ts)), and hands the turn to the orchestrator. A blocked input ends the request with the guardrail's own stream (`createGuardrailBlockedStream`) before any turn starts. The facade performs no input validation (that is the pipeline's first phase), no authentication and no rate limiting; the host does the last two before calling it.
+2. **Orchestrator** ([`AgentOSOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/AgentOSOrchestrator.ts)) registers the stream and runs the pre-model pipeline.
+3. **Preparation** ([`TurnExecutionPipeline.prepareTurn()`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/TurnExecutionPipeline.ts)), twelve phases: input validation (`selectedPersonaId` must be present; the facade fills it from `defaultPersonaId`), GMI acquisition through [`GMIManager.getOrCreateGMIForSession()`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMIManager.ts), stream context registration, GMI input construction, turn planning (when a turn planner is configured), adaptive execution policies, organization context and long-term memory policy, inbound message persistence, rolling summary compaction, prompt profile routing, long-term memory retrieval, and conversation history assembly with metadata and memory-sink persistence. The result is a `PreparedTurnContext`.
+4. **The GMI turn** ([`GMI.processTurnStream()`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMI.ts)): sentiment scoring when the persona enables it, the RAG trigger, memory context assembly through [`CognitiveMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts) (only when a cognitive memory manager is attached), prompt construction by the [`PromptEngine`](https://github.com/framerslab/agentos/blob/master/src/core/llm/PromptEngine.ts), the streaming model call through the provider manager, the tool loop through [`ToolOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts) (up to `maxToolLoopIterations`, five by default), history and memory updates, and the metaprompts. The turn yields `GMIOutputChunk`s. Metaprompts run after the model call; they do not build the prompt.
+5. **Delivery**: the orchestrator converts GMI chunks to `AgentOSResponseChunk`s with [`GMIChunkTransformer`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/GMIChunkTransformer.ts) and pushes them into the [`StreamingManager`](https://github.com/framerslab/agentos/blob/master/src/core/streaming/StreamingManager.ts). The facade registers an `AsyncStreamClientBridge` as one client of that stream, wraps the bridge's output with [`wrapOutputGuardrails`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/guardrailDispatcher.ts), and yields the guarded chunks to its caller. The output guardrails apply only to the stream `processRequest()` returns; any other client registered on the stream receives the chunks before and without them. When the model requests a tool the host executes, the facade yields that chunk and returns; the host continues the same turn through `resumeExternalToolRequest()`. Delivery does not call the model. Tracing spans are recorded throughout ([`Tracer`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/observability/Tracer.ts)).
 
-The [`TurnExecutionPipeline`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/TurnExecutionPipeline.ts) (in `api/runtime/`) handles steps 2-6 before handing off to the LLM. [`GMIChunkTransformer`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/GMIChunkTransformer.ts) maps raw LLM chunks into [`AgentOSResponse`](https://github.com/framerslab/agentos/blob/master/src/api/types/AgentOSResponse.ts) format. [`ExternalToolResultHandler`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/ExternalToolResultHandler.ts) manages tool-result continuation loops.
+An error in the turn ends the stream with an `ERROR` chunk carrying the original message; the facade wraps it as `GMI_PROCESSING_ERROR` unless the error carries its own code.
 
 ### Sequence Diagram
-
-The following sequence diagram traces a single request through the system:
 
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant AOS as AgentOS
-    participant Orch as Orchestrator
-    participant TP as TurnPipeline
-    participant GMI as GMI
-    participant GR as Guardrails
-    participant LLM as LLM Provider
-    participant TO as ToolOrchestrator
-    participant Mem as CognitiveMemoryBridge
+    participant F as AgentOS.processRequest
+    participant O as AgentOSOrchestrator
+    participant P as TurnExecutionPipeline
+    participant G as GMI.processTurnStream
+    participant L as LLM provider
+    participant T as ToolOrchestrator
+    participant S as StreamingManager
 
-    C->>AOS: processRequest(input)
-    AOS->>Orch: orchestrate(input, sessionId)
-    Orch->>TP: prepare(input, context)
-    TP->>Mem: assembleForPrompt(query, tokenBudget)
-    Mem-->>TP: AssembledMemoryContext
-    TP->>GR: evaluateInput(services, input, ctx)
-    GR-->>TP: GuardrailInputOutcome
-    alt BLOCK
-        TP-->>C: Error stream (policy violation)
-    end
-    TP-->>Orch: PreparedTurn (prompt, tools, memories)
-    Orch->>GMI: processTurnStream(turnInput)
-    GMI->>LLM: stream(messages, tools)
-    loop Tool call loop
-        LLM-->>GMI: tool_call chunk
-        GMI->>TO: processToolCall(request, context)
-        TO-->>GMI: ToolCallResult
-        GMI->>LLM: tool_result continuation
-    end
-    LLM-->>GMI: text chunks
-    GMI-->>Orch: GMIOutputChunk stream
-    Orch->>GR: wrapOutput(services, stream)
-    GR-->>C: Filtered AgentOSResponse stream
-    Orch->>Mem: encode(turnContent) [async]
+    C->>F: input (userId, sessionId, selectedPersonaId, text)
+    F->>F: evaluateInputGuardrails
+    F->>O: orchestrate turn
+    O->>P: prepareTurn (12 phases: GMI acquisition, planning, policies, history, memory retrieval)
+    P-->>O: PreparedTurnContext
+    O->>G: processTurnStream(turnInput)
+    G->>G: sentiment (if enabled), RAG trigger, memory context, PromptEngine.constructPrompt
+    G->>L: generateCompletionStream
+    L-->>G: text deltas, tool calls
+    G->>T: processToolCall (loop, up to maxToolLoopIterations)
+    T-->>G: tool results
+    G->>L: next step with tool results
+    G-->>O: GMIOutputChunks (text, tool requests, usage)
+    O->>S: push AgentOSResponseChunks (GMIChunkTransformer)
+    S->>F: AsyncStreamClientBridge, one client of the stream
+    F->>F: wrapOutputGuardrails
+    F-->>C: yield guarded chunks
 ```
 
 ### Key Types
@@ -1167,4 +1151,4 @@ When `emergent: true` is set in [`AgentOSConfig`](https://github.com/framerslab/
 - [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) / [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) -- Controlled personality adaptation within safety bounds (bounded parameter ranges, mutation logging)
 - [`SelfEvaluateTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/SelfEvaluateTool.ts) -- Agent self-assessment using LLM-as-judge
 
-For details, see [Emergent Capabilities](./EMERGENT_CAPABILITIES.md) and [Recursive Self-Building Agents](./RECURSIVE_SELF_BUILDING_AGENTS.md).
+For details, see [Emergent Capabilities](./EMERGENT_CAPABILITIES.md) and [Self-Extension](../SELF_EXTENSION.md).

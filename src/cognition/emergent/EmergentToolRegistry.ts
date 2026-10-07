@@ -30,8 +30,14 @@ import type {
   ToolTier,
   ToolUsageStats,
   EmergentConfig,
+  PersistedToolRow,
+  StateSetter,
+  StoredRequest,
+  ToolState,
+  ToolStateRecord,
 } from './types.js';
 import { DEFAULT_EMERGENT_CONFIG } from './types.js';
+import { parsePersistedSource, parseStoredRequest, sessionFromSource, stateSetterFromColumn } from './persisted-source.js';
 
 // ============================================================================
 // STORAGE ADAPTER INTERFACE
@@ -163,6 +169,18 @@ const TIER_ORDER: readonly ToolTier[] = ['session', 'agent', 'shared'];
  * const stats = registry.getUsageStats(tool.id);
  * ```
  */
+/** A state row as it is read back from storage. */
+type StateRowRead = {
+  state?: ToolState | null;
+  state_reason?: string | null;
+  set_by?: string | null;
+  state_at?: number | string | null;
+  request_json?: string | null;
+  write_id?: string | null;
+  /** Whether the tool row is still there; a removal deletes it before the state row. */
+  tool_exists?: number | boolean | null;
+};
+
 export class EmergentToolRegistry {
   /** In-memory store for session-tier tools, keyed by tool ID. */
   private readonly sessionTools = new Map<string, EmergentTool>();
@@ -173,6 +191,16 @@ export class EmergentToolRegistry {
   /** In-memory audit log. Always populated regardless of DB availability. */
   private readonly auditLog: AuditEntry[] = [];
 
+  /** Held state per tool. A tool with no entry counts as active. */
+  private readonly states = new Map<string, ToolStateRecord>();
+
+  /**
+   * One chain of state writes per tool. A later `setState` starts its writes
+   * after an earlier one's have finished, so storage sees state changes in
+   * call order whatever the adapter's connections do.
+   */
+  private readonly stateWrites = new Map<string, Promise<unknown>>();
+
   /** Resolved configuration, merged with defaults. */
   private readonly config: EmergentConfig;
 
@@ -181,6 +209,12 @@ export class EmergentToolRegistry {
 
   /** Whether `ensureSchema()` has been called and completed. */
   private schemaReady = false;
+  /**
+   * Ids removed in this process whose rows are not yet gone: an admission or
+   * a forge that was mid-flight does not put one back. Cleared when the
+   * deletes land, or when a new row is written for the id.
+   */
+  private readonly removedIds = new Set<string>();
 
   /**
    * Cached promise from the first `ensureSchemaReady()` call.
@@ -227,9 +261,10 @@ export class EmergentToolRegistry {
   /**
    * Initialize the database schema for emergent tool persistence.
    *
-   * Creates the `agentos_emergent_tools` and `agentos_emergent_audit_log`
-   * tables along with their indexes. Safe to call multiple times — all
-   * statements use `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`.
+   * Creates the `agentos_emergent_tools`, `agentos_emergent_audit_log` and
+   * `agentos_emergent_tool_state` tables along with their indexes. Safe to
+   * call multiple times — all statements use `CREATE TABLE IF NOT EXISTS` /
+   * `CREATE INDEX IF NOT EXISTS`.
    *
    * This method is a no-op when no storage adapter was provided.
    *
@@ -279,17 +314,34 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
 
     const auditIndex = `CREATE INDEX IF NOT EXISTS idx_emergent_audit_tool ON agentos_emergent_audit_log(tool_id, timestamp);`;
 
+    // State and the stored request live in their own table: persistToolToDb
+    // rewrites the whole tool row with INSERT OR REPLACE, which would reset any
+    // column added to agentos_emergent_tools on every call.
+    const stateTable = `
+CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
+  tool_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL,
+  state_reason TEXT,
+  set_by TEXT NOT NULL DEFAULT 'host',
+  state_at BIGINT NOT NULL,
+  request_json TEXT,
+  updated_at BIGINT NOT NULL,
+  flag_synced INTEGER NOT NULL DEFAULT 1,
+  write_id TEXT
+);`;
+
+    // Tables and indexes only: the flag on the tool row is written by the
+    // library's own statements, never by a trigger, so the schema stays
+    // portable (PostgreSQL has no SQLite trigger syntax) and every write to the
+    // tool row passes through the storage adapter's hooks.
+    const statements = [toolsTable, toolsTierIndex, toolsAgentIndex, auditTable, auditIndex, stateTable];
     // Prefer `exec` for multi-statement DDL; fall back to individual `run` calls.
     if (this.db.exec) {
-      await this.db.exec(
-        [toolsTable, toolsTierIndex, toolsAgentIndex, auditTable, auditIndex].join('\n'),
-      );
+      await this.db.exec(statements.join('\n'));
     } else {
-      await this.db.run(toolsTable);
-      await this.db.run(toolsTierIndex);
-      await this.db.run(toolsAgentIndex);
-      await this.db.run(auditTable);
-      await this.db.run(auditIndex);
+      for (const statement of statements) {
+        await this.db.run(statement);
+      }
     }
 
     this.schemaReady = true;
@@ -339,8 +391,11 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
       }
     }
 
-    // Stamp the tier on the tool object.
+    this.removedIds.delete(tool.id);
+    // Stamp the tier on the tool object; a fresh registration is active, so the
+    // convention property says so whatever the given object carried.
     const registered: EmergentTool = { ...tool, tier };
+    (registered as EmergentTool & { isActive?: boolean }).isActive = true;
 
     if (tier === 'session') {
       this.sessionTools.set(registered.id, registered);
@@ -348,9 +403,22 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
       this.persistedTools.set(registered.id, registered);
     }
 
-    if (this.db && this.schemaReady) {
-      this.persistToolToDb(registered).catch(() => {
-        // Best-effort persistence mirror. In-memory state remains authoritative.
+    this.states.set(registered.id, {
+      toolId: registered.id,
+      state: 'active',
+      reason: null,
+      setBy: 'library',
+      at: Date.now(),
+      request: null,
+    });
+
+    if (this.db) {
+      // In the tool's write queue, so its first state write (which inserts a
+      // state row only while the tool row exists) runs after the row lands;
+      // persistToolToDb waits for the schema itself. Best-effort: in-memory
+      // state remains authoritative.
+      this.queueStateWrite(registered.id, () => this.persistToolToDb(registered)).catch(() => {
+        // Best-effort persistence mirror.
       });
     }
 
@@ -373,17 +441,533 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
     return this.sessionTools.get(toolId) ?? this.persistedTools.get(toolId);
   }
 
+  // --------------------------------------------------------------------------
+  // STATE
+  // --------------------------------------------------------------------------
+
+  /** The held state of a tool, or `undefined` when none has been recorded. */
+  getState(toolId: string): ToolStateRecord | undefined {
+    return this.states.get(toolId);
+  }
+
+  /** Whether a tool may run. A tool with no recorded state is active. */
+  isActive(toolId: string): boolean {
+    return (this.states.get(toolId)?.state ?? 'active') === 'active';
+  }
+
   /**
-   * Upsert a tool into the registry, replacing any prior in-memory copy.
+   * Record a tool's state, awaiting the write.
    *
-   * Used to hydrate persisted/shared tools back into a live runtime so they can
-   * become executable again after process restart or admin promotion.
+   * `options.request` left out leaves the stored request alone: a new row
+   * stores none, and an existing row's `request_json` is not named by the
+   * update, so a request this process could not read (one a newer release
+   * wrote, say) is still there afterwards. A request writes it; `null` clears
+   * it.
+   *
+   * `options.setBy` records who set the state (`'host'` when left out). The
+   * library re-checks only its own suspensions at the next load; a host's
+   * stays until the host clears it, whatever words its reason uses.
+   *
+   * Writes for one tool run in call order, one after another. The `isActive`
+   * convention property of a tool held in memory follows the state.
+   *
+   * A restriction (`suspended`, `demoted`) is held in memory at call time, so
+   * the running process honours it whatever its write does. A reactivation
+   * (`active`) is held only once both writes have succeeded, and only when no
+   * other state change arrived while they ran: a suspension or demotion made
+   * meanwhile is the newer word, it stays, and this call returns that record
+   * instead of its own.
+   *
+   * `options.ifRow` makes the write conditional: an existing row is changed
+   * only while its state, setter and time are still the ones given, and
+   * `'absent'` lets the write create a row but never change one. The loader
+   * uses it for its active write, so a restriction another process stored
+   * after the row was read is never written over; a refused write returns the
+   * row's own record, and a restriction read that way is held here as well.
+   * Every write, conditional or not, reads the row back after it: a state
+   * another process stored meanwhile is what is returned and held, and a tool
+   * another process removed reads as `demoted` with the reason `removed`.
+   *
+   * @returns the record now in force for the tool.
+   * @throws If the storage adapter rejects.
+   */
+  async setState(
+    toolId: string,
+    state: ToolState,
+    reason: string | null,
+    options: {
+      request?: StoredRequest | null;
+      setBy?: StateSetter;
+      ifRow?: { at: number; state: ToolState; setBy: StateSetter } | 'absent';
+    } = {},
+  ): Promise<ToolStateRecord> {
+    const previous = this.states.get(toolId);
+    const setBy: StateSetter = options.setBy ?? 'host';
+    const named = options.request !== undefined;
+    const record: ToolStateRecord = {
+      toolId,
+      state,
+      reason,
+      setBy,
+      at: Date.now(),
+      request: named ? (options.request ?? null) : (previous?.request ?? null),
+    };
+    const hold = (): void => {
+      this.states.set(toolId, record);
+      const held = this.get(toolId);
+      if (held) {
+        (held as EmergentTool & { isActive?: boolean }).isActive = state === 'active';
+      }
+      this.logAudit(toolId, 'state', { state, reason, setBy });
+    };
+    if (state !== 'active') {
+      hold();
+    }
+
+    let inForce: ToolStateRecord = record;
+    if (this.db) {
+      inForce = await this.queueStateWrite(toolId, () =>
+        this.writeStateRow(toolId, record, named, options.ifRow),
+      );
+    }
+    if (inForce !== record) {
+      // The row changed under the condition: the write was refused, and the
+      // row's own state is what holds. A restriction read that way is held here.
+      this.logAudit(toolId, 'state_refused', { state, reason, setBy, by: inForce.state });
+      // The row's word is held here too, active or not: it is stored, and it
+      // is the newer one.
+      this.states.set(toolId, inForce);
+      const held = this.get(toolId);
+      if (held) {
+        (held as EmergentTool & { isActive?: boolean }).isActive = inForce.state === 'active';
+      }
+      return inForce;
+    }
+
+    if (state === 'active') {
+      const current = this.states.get(toolId);
+      if (current !== previous && current?.state !== 'active' && current?.writeId === undefined) {
+        // A restriction requested in this process while this reactivation
+        // was being written: its own write is queued after this one, so it is
+        // the newer word and stays. (A restriction observed from another
+        // process's row carries that write's id; this write landed after it
+        // and is the newer word, as is another activation held meanwhile.)
+        this.logAudit(toolId, 'state_superseded', { state, reason, setBy, by: current?.state ?? null });
+        return current ?? record;
+      }
+      hold();
+    }
+    return record;
+  }
+
+  /** Runs `write` after every earlier state write of the same tool has settled. */
+  private queueStateWrite<T>(toolId: string, write: () => Promise<T>): Promise<T> {
+    const prior = this.stateWrites.get(toolId) ?? Promise.resolve();
+    const next: Promise<T> = prior.catch(() => undefined).then(write);
+    this.stateWrites.set(toolId, next);
+    next
+      .finally(() => {
+        if (this.stateWrites.get(toolId) === next) {
+          this.stateWrites.delete(toolId);
+        }
+      })
+      .catch(() => undefined);
+    return next;
+  }
+
+  /**
+   * The statements of a state change: the state row upsert, with its flag
+   * write marked pending; the legacy flag, read from the state row inside its
+   * own statement so the two agree whatever other processes write in between;
+   * then the mark cleared. A failure after the state row leaves the mark
+   * pending, and the next state write or load finishes the flag write, so a
+   * crash or a failed write between the two never leaves the pair apart
+   * beyond the next load. With `ifRow`, an existing row is changed only while
+   * its state, setter and time are the ones given (`'absent'`: never); a
+   * refused write changes nothing, flag included, and the row as it stands
+   * afterwards is returned, so it shows as a record other than the one given.
+   */
+  private async writeStateRow(
+    toolId: string,
+    record: ToolStateRecord,
+    named: boolean,
+    ifRow?: { at: number; state: ToolState; setBy: StateSetter } | 'absent',
+  ): Promise<ToolStateRecord> {
+    const db = this.db;
+    if (!db) {
+      return record;
+    }
+    await this.ensureSchemaReady();
+    const requestJson = named && record.request ? JSON.stringify(record.request) : null;
+    const setList = named
+      ? `state = excluded.state,
+             state_reason = excluded.state_reason,
+             set_by = excluded.set_by,
+             state_at = excluded.state_at,
+             request_json = excluded.request_json,
+             updated_at = excluded.updated_at,
+             write_id = excluded.write_id`
+      : `state = excluded.state,
+             state_reason = excluded.state_reason,
+             set_by = excluded.set_by,
+             state_at = excluded.state_at,
+             updated_at = excluded.updated_at,
+             write_id = excluded.write_id`;
+    let guard = '';
+    // state_at is the call's time; updated_at the write's own.
+    // Every write has an id of its own: the row read back tells this write
+    // from another of the same content in the same millisecond.
+    const writeId = randomUUID();
+    record.writeId = writeId;
+    const values: unknown[] = [toolId, record.state, record.reason, record.setBy, record.at, requestJson, Date.now(), writeId];
+    const guardParams: unknown[] = [];
+    if (ifRow === 'absent') {
+      guard = `
+           WHERE 0 = 1`;
+    } else if (ifRow !== undefined) {
+      guard = `
+           WHERE agentos_emergent_tool_state.state = ?
+             AND agentos_emergent_tool_state.set_by = ?
+             AND agentos_emergent_tool_state.state_at = ?`;
+      guardParams.push(ifRow.state, ifRow.setBy, ifRow.at);
+    }
+    const readRow = async (): Promise<StateRowRead | undefined> =>
+      (await db.get(
+        `SELECT s.state, s.state_reason, s.set_by, s.state_at, s.request_json, s.write_id,
+                EXISTS (SELECT 1 FROM agentos_emergent_tools t WHERE t.id = s.tool_id) AS tool_exists
+           FROM agentos_emergent_tool_state s
+          WHERE s.tool_id = ?`,
+        [toolId],
+      )) as StateRowRead | undefined;
+    const rowRecord = (row: StateRowRead): ToolStateRecord => ({
+      toolId,
+      state: row.state as ToolState,
+      reason: row.state_reason ?? null,
+      setBy: stateSetterFromColumn(row.set_by),
+      at: Number(row.state_at ?? 0),
+      request: parseStoredRequest(row.request_json),
+      ...(row.write_id ? { writeId: row.write_id } : {}),
+    });
+    // Applied when the row carries this write's id and its tool row is still
+    // there; content and time cannot tell two writes of the same record in one
+    // millisecond apart. A row that is gone, or whose tool row is gone, was
+    // removed by another process: not applied.
+    const matches = (row: StateRowRead | undefined): boolean =>
+      !!row?.state && !!row.tool_exists && row.write_id === writeId;
+    // What a caller gets for a tool another process removed meanwhile: off,
+    // with the reason, so a load does not register it.
+    const removed = (): ToolStateRecord => ({
+      toolId,
+      state: 'demoted',
+      reason: 'removed',
+      setBy: 'host',
+      at: Date.now(),
+      request: null,
+    });
+
+    const before = await readRow();
+    if (ifRow === 'absent' && before?.state) {
+      // "No row yet" was the condition and a row exists: refused, without a
+      // statement; the row and its flag are as another process left them, or
+      // the tool is on its way out.
+      return before.tool_exists ? rowRecord(before) : removed();
+    }
+    // The state row, its flag write marked pending until it is done. A new
+    // state row is inserted only while the tool row exists, so a tool another
+    // process removed meanwhile gets no orphan state row; an existing state
+    // row can still be changed, and the read below reports a removal.
+    await db.run(
+      `INSERT INTO agentos_emergent_tool_state
+         (tool_id, state, state_reason, set_by, state_at, request_json, updated_at, write_id, flag_synced)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, 0
+        WHERE EXISTS (SELECT 1 FROM agentos_emergent_tools WHERE id = ?)
+           OR EXISTS (SELECT 1 FROM agentos_emergent_tool_state WHERE tool_id = ?)
+       ON CONFLICT (tool_id) DO UPDATE SET
+         ${setList},
+         flag_synced = 0${guard}`,
+      [...values, toolId, toolId, ...guardParams],
+    );
+    const row = await readRow();
+    if (!matches(row)) {
+      // Refused, or the tool is gone: the row and its flag are as another
+      // process left them.
+      return row?.state && row.tool_exists ? rowRecord(row) : removed();
+    }
+    if (!named) {
+      // The record returned carries the request the row holds, not what this
+      // process happened to hold, so a caller can compare grants.
+      record.request = parseStoredRequest(row?.request_json);
+    }
+    // The legacy flag follows the state row, then the mark is cleared. A
+    // failure here leaves the mark pending for the next write or load.
+    await this.writeLegacyFlag(toolId, record.state);
+    await db.run(
+      `UPDATE agentos_emergent_tool_state
+          SET flag_synced = 1
+        WHERE tool_id = ? AND ${record.writeId !== undefined ? 'write_id = ?' : 'state = ? AND set_by = ? AND state_at = ?'}`,
+      record.writeId !== undefined ? [toolId, record.writeId] : [toolId, record.state, record.setBy, record.at],
+    );
+    // The row's word after the flag write: a restriction another process
+    // stored meanwhile, or a removal, is what holds, not the record written
+    // here. Read for every write, conditional or not, so a host's reactivation
+    // overtaken by another process's suspension yields to it in memory too.
+    const after = await readRow();
+    if (!matches(after)) {
+      return after?.state && after.tool_exists ? rowRecord(after) : removed();
+    }
+    return record;
+  }
+
+  /** The legacy flag hosts query, read from the state row inside the statement. */
+  private async writeLegacyFlag(toolId: string, state: ToolState): Promise<void> {
+    await this.db!.run(
+      `UPDATE agentos_emergent_tools
+          SET is_active = COALESCE((SELECT CASE WHEN state = 'active' THEN 1 ELSE 0 END
+                                      FROM agentos_emergent_tool_state WHERE tool_id = ?), ?)
+        WHERE id = ?`,
+      [toolId, state === 'active' ? 1 : 0, toolId],
+    );
+  }
+
+  /**
+   * Finish a state write whose flag write did not: the legacy flag from the
+   * state row, then the row's mark cleared, under the record the row holds so
+   * a newer write's mark is left alone. The loader calls it for a row whose
+   * mark is pending, before anything about the row is decided.
+   */
+  async syncLegacyFlag(toolId: string, record: Pick<ToolStateRecord, 'state' | 'setBy' | 'at' | 'writeId'>): Promise<void> {
+    const db = this.db;
+    if (!db) {
+      return;
+    }
+    await this.ensureSchemaReady();
+    await this.writeLegacyFlag(toolId, record.state);
+    await db.run(
+      `UPDATE agentos_emergent_tool_state
+          SET flag_synced = 1
+        WHERE tool_id = ? AND ${record.writeId !== undefined ? 'write_id = ?' : 'state = ? AND set_by = ? AND state_at = ?'}`,
+      record.writeId !== undefined ? [toolId, record.writeId] : [toolId, record.state, record.setBy, record.at],
+    );
+  }
+
+  /**
+   * Suspend a tool on the host's word: an awaited write of its state and of
+   * `is_active = 0`, recorded as the host's, so no load lifts it whatever the
+   * reason says; only a reactivation does. Usage statistics are left alone.
+   * The caller unregisters the executable.
+   *
+   * @throws If the tool is unknown or the write fails.
+   */
+  async suspend(toolId: string, reason: string): Promise<void> {
+    if (!this.get(toolId)) {
+      throw new Error(`Cannot suspend: tool "${toolId}" not found.`);
+    }
+    await this.setState(toolId, 'suspended', reason, { setBy: 'host' });
+  }
+
+  /** Resolves once every queued state write and deletion of the tool has run. */
+  async settled(toolId: string): Promise<void> {
+    await (this.stateWrites.get(toolId) ?? Promise.resolve()).catch(() => undefined);
+  }
+
+  /**
+   * Drop a tool from memory without touching its rows: for a load whose
+   * registration with the host failed, so the row is there for the next load
+   * and nothing here claims a tool the executor does not run.
+   */
+  forget(toolId: string): void {
+    this.sessionTools.delete(toolId);
+    this.persistedTools.delete(toolId);
+    this.states.delete(toolId);
+  }
+
+  /** Whether a storage adapter is configured. */
+  hasStorage(): boolean {
+    return this.db !== undefined;
+  }
+
+  /**
+   * Write a tool's row from the object given, awaited. For a host that
+   * hydrates a tool from its own store through `syncPersistedTool` and has no
+   * row for it yet; a tool that has a row is loaded from the row, never
+   * rewritten by a load.
+   */
+  async writeToolRow(tool: EmergentTool): Promise<void> {
+    this.removedIds.delete(tool.id);
+    await this.persistToolToDb(tool);
+  }
+
+  /** Whether the tool was removed in this process and its rows are not yet gone. */
+  wasRemoved(toolId: string): boolean {
+    return this.removedIds.has(toolId);
+  }
+
+  /**
+   * The rows of a tool, deleted after every queued state write of the tool,
+   * so a write still in the queue cannot recreate the state row once it is
+   * deleted; the removal is forgotten once they are gone. Best-effort.
+   */
+  private queueRowDeletes(toolId: string): void {
+    const db = this.db;
+    if (!db) {
+      this.removedIds.delete(toolId);
+      return;
+    }
+    this.queueStateWrite(toolId, async () => {
+      await db.run(`DELETE FROM agentos_emergent_tools WHERE id = ?`, [toolId]);
+      await db.run(`DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?`, [toolId]);
+    })
+      .catch(() => {
+        // Best-effort cleanup only.
+      })
+      .finally(() => {
+        this.removedIds.delete(toolId);
+      });
+  }
+
+  /**
+   * Take a tool read from storage into memory without rewriting its row.
+   * `upsert` re-serialises the source; a loaded tool must keep the row it has.
+   */
+  adopt(tool: EmergentTool, record: ToolStateRecord): boolean {
+    if (this.removedIds.has(tool.id)) {
+      // Removed in this process while the caller had the tool in hand.
+      return false;
+    }
+    this.sessionTools.delete(tool.id);
+    this.persistedTools.delete(tool.id);
+    if (tool.tier === 'session') {
+      this.sessionTools.set(tool.id, tool);
+    } else {
+      this.persistedTools.set(tool.id, tool);
+    }
+    (tool as EmergentTool & { isActive?: boolean }).isActive = record.state === 'active';
+    this.states.set(tool.id, record);
+    return true;
+  }
+
+  private static readonly ROW_COLUMNS = `
+        t.id, t.name, t.description, t.input_schema, t.output_schema,
+        t.implementation_mode, t.implementation_source, t.tier,
+        t.created_by_agent, t.created_by_session, t.created_at,
+        t.judge_verdicts, t.confidence_score, t.total_uses, t.success_count,
+        t.failure_count, t.avg_execution_ms, t.last_used_at, t.is_active,
+        s.state AS state, s.state_reason AS state_reason, s.set_by AS set_by,
+        s.state_at AS state_at, s.request_json AS request_json,
+        s.flag_synced AS flag_synced, s.write_id AS write_id
+   FROM agentos_emergent_tools t
+   LEFT JOIN agentos_emergent_tool_state s ON s.tool_id = t.id`;
+
+  /**
+   * The stored rows of the given tiers, in creation order, with their state
+   * rows: every `shared` row, the `agent` rows of `scope.agentId` and the
+   * `session` rows of `scope.sessionId`. A tier named without its selector
+   * contributes no rows; the engine refuses such a call before it gets here.
+   */
+  async loadRows(
+    tiers: readonly ToolTier[],
+    scope: { agentId?: string; sessionId?: string } = {},
+  ): Promise<PersistedToolRow[]> {
+    if (!this.db || tiers.length === 0) {
+      return [];
+    }
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (tiers.includes('shared')) {
+      clauses.push(`t.tier = 'shared'`);
+    }
+    if (tiers.includes('agent') && scope.agentId !== undefined) {
+      clauses.push(`(t.tier = 'agent' AND t.created_by_agent = ?)`);
+      params.push(scope.agentId);
+    }
+    if (tiers.includes('session') && scope.sessionId !== undefined) {
+      clauses.push(`(t.tier = 'session' AND t.created_by_session = ?)`);
+      params.push(scope.sessionId);
+    }
+    if (clauses.length === 0) {
+      return [];
+    }
+    await this.ensureSchemaReady();
+    const rows = await this.db.all(
+      `SELECT ${EmergentToolRegistry.ROW_COLUMNS}
+        WHERE ${clauses.join(' OR ')}
+        ORDER BY t.created_at ASC`,
+      params,
+    );
+    return rows as PersistedToolRow[];
+  }
+
+  /** One stored row with its state row, or `undefined`. */
+  async loadRow(toolId: string): Promise<PersistedToolRow | undefined> {
+    if (!this.db) {
+      return undefined;
+    }
+    await this.ensureSchemaReady();
+    const row = await this.db.get(
+      `SELECT ${EmergentToolRegistry.ROW_COLUMNS}
+        WHERE t.id = ?`,
+      [toolId],
+    );
+    return (row as PersistedToolRow | undefined) ?? undefined;
+  }
+
+  /** A tool's state: the held one, else the stored one, else `undefined`. */
+  async readState(toolId: string): Promise<ToolStateRecord | undefined> {
+    const held = this.states.get(toolId);
+    if (held || !this.db) {
+      return held;
+    }
+    return this.readStoredState(toolId);
+  }
+
+  /**
+   * A tool's state as its row reads now, or `undefined`; what this process
+   * holds is not consulted. The loader reads it before adopting a row it has
+   * nothing to write for, since a restriction another process stored after
+   * the row was read is the newer word.
+   */
+  async readStoredState(toolId: string): Promise<ToolStateRecord | undefined> {
+    if (!this.db) {
+      return undefined;
+    }
+    await this.ensureSchemaReady();
+    const row = (await this.db.get(
+      `SELECT s.state, s.state_reason, s.set_by, s.state_at, s.request_json, s.write_id,
+              EXISTS (SELECT 1 FROM agentos_emergent_tools t WHERE t.id = s.tool_id) AS tool_exists
+         FROM agentos_emergent_tool_state s
+        WHERE s.tool_id = ?`,
+      [toolId],
+    )) as StateRowRead | undefined;
+    if (!row?.state || !row.tool_exists) {
+      // No state row, or a tool row already gone: nothing stored to hold.
+      return undefined;
+    }
+    return {
+      toolId,
+      state: row.state,
+      reason: row.state_reason ?? null,
+      setBy: stateSetterFromColumn(row.set_by),
+      at: Number(row.state_at ?? 0),
+      request: parseStoredRequest(row.request_json),
+      ...(row.write_id ? { writeId: row.write_id } : {}),
+    };
+  }
+
+  /**
+   * Replace the in-memory copy of a tool and mirror it to storage.
+   *
+   * The row is rewritten from the object given. To bring stored tools back
+   * after a restart, call the engine's `loadPersistedTools`, which reads each
+   * row, checks it and never rewrites it. A tool whose state this process does
+   * not hold keeps the `is_active` its row has.
    */
   upsert(tool: EmergentTool): void {
     this.sessionTools.delete(tool.id);
     this.persistedTools.delete(tool.id);
 
     const normalized: EmergentTool = { ...tool };
+    // The convention property follows the held state, not the given object.
+    (normalized as EmergentTool & { isActive?: boolean }).isActive = this.isActive(normalized.id);
     if (normalized.tier === 'session') {
       this.sessionTools.set(normalized.id, normalized);
     } else {
@@ -407,15 +991,13 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
   remove(toolId: string): boolean {
     const removed =
       this.sessionTools.delete(toolId) || this.persistedTools.delete(toolId);
-
+    this.states.delete(toolId);
+    // The rows go whether or not this process held the tool, so a host can
+    // remove a stored tool it never loaded; the removal is remembered until
+    // they are gone.
+    this.removedIds.add(toolId);
+    this.queueRowDeletes(toolId);
     if (removed) {
-      if (this.db && this.schemaReady) {
-        this.db
-          .run(`DELETE FROM agentos_emergent_tools WHERE id = ?`, [toolId])
-          .catch(() => {
-            // Best-effort cleanup only.
-          });
-      }
       this.logAudit(toolId, 'remove');
     }
 
@@ -481,6 +1063,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
    * @param _output - The output returned by the tool (logged for audit).
    * @param success - Whether the invocation completed successfully.
    * @param executionTimeMs - Wall-clock execution time in milliseconds.
+   * @returns `false` when the tool is suspended or demoted and nothing was recorded.
    *
    * @throws {Error} If no tool with the given ID is registered.
    */
@@ -490,10 +1073,16 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
     _output: unknown,
     success: boolean,
     executionTimeMs: number,
-  ): void {
+  ): boolean {
     const tool = this.get(toolId);
     if (!tool) {
       throw new Error(`Cannot record use: tool "${toolId}" not found.`);
+    }
+
+    // A suspended or demoted tool records nothing: its statistics must not
+    // move while it cannot run, and nothing here may write it back as active.
+    if (!this.isActive(toolId)) {
+      return false;
     }
 
     const stats = tool.usageStats;
@@ -514,15 +1103,36 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
     // Confidence is success rate.
     stats.confidenceScore = stats.successCount / stats.totalUses;
 
-    stats.lastUsedAt = new Date().toISOString();
+    const usedAtMs = Date.now();
+    stats.lastUsedAt = new Date(usedAtMs).toISOString();
 
     if (this.db && this.schemaReady) {
-      this.persistToolToDb(tool).catch(() => {
-        // Best-effort persistence mirror. Usage stats still live in memory.
-      });
+      // Usage columns only. Rewriting the whole row re-serialises the source,
+      // which replaced a stored source with the redacted record whenever
+      // persistSandboxSource was off.
+      this.db
+        .run(
+          `UPDATE agentos_emergent_tools
+              SET confidence_score = ?, total_uses = ?, success_count = ?,
+                  failure_count = ?, avg_execution_ms = ?, last_used_at = ?
+            WHERE id = ?`,
+          [
+            stats.confidenceScore,
+            stats.totalUses,
+            stats.successCount,
+            stats.failureCount,
+            stats.avgExecutionTimeMs,
+            usedAtMs,
+            toolId,
+          ],
+        )
+        .catch(() => {
+          // Best-effort persistence mirror. Usage stats still live in memory.
+        });
     }
 
     this.logAudit(toolId, 'use', { success, executionTimeMs });
+    return true;
   }
 
   // --------------------------------------------------------------------------
@@ -612,35 +1222,39 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
    * Demote or deactivate a tool.
    *
    * Marks the tool as inactive by setting a sentinel on its usage stats
-   * (`confidenceScore` set to 0) and logs the demotion event with a reason.
+   * (`confidenceScore` set to 0), records the `demoted` state and logs the
+   * demotion event with a reason.
    *
    * Inactive tools are still retrievable via `get()` but should be filtered
    * out by callers when building tool lists for the LLM.
    *
+   * Returns a promise for the state write, which rejects when the write fails;
+   * await it when the demotion must be durable. An un-awaited call cannot
+   * become an unhandled rejection. The in-memory effects have happened by the
+   * time this returns.
+   *
    * @param toolId - The ID of the tool to demote.
    * @param reason - Human-readable explanation for why the tool is being demoted.
    *
-   * @throws {Error} If the tool is not found.
+   * @throws {Error} If the tool is not found (thrown synchronously).
    */
-  demote(toolId: string, reason: string): void {
+  demote(toolId: string, reason: string): Promise<void> {
     const tool = this.get(toolId);
     if (!tool) {
       throw new Error(`Cannot demote: tool "${toolId}" not found.`);
     }
 
     tool.usageStats.confidenceScore = 0;
-    // Mark as inactive via a convention property.
-    (tool as EmergentTool & { isActive?: boolean }).isActive = false;
-
-    if (this.db && this.schemaReady) {
-      this.db
-        .run(`UPDATE agentos_emergent_tools SET is_active = 0 WHERE id = ?`, [toolId])
-        .catch(() => {
-          // Best-effort persistence only.
-        });
-    }
 
     this.logAudit(toolId, 'demote', { reason });
+    // The state row is what keeps a demoted tool off at the next load; it is
+    // the host's word, so no load lifts it. setState sets the convention
+    // property `isActive` before it writes.
+    const write = this.setState(toolId, 'demoted', reason, { setBy: 'host' }).then(() => undefined);
+    // Handled here so a caller that does not await is not left with an
+    // unhandled rejection; an awaiting caller still sees the failure.
+    write.catch(() => {});
+    return write;
   }
 
   // --------------------------------------------------------------------------
@@ -650,9 +1264,9 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
   /**
    * Remove all session-tier tools associated with a specific session.
    *
-   * Iterates the session map and deletes every tool whose `source` string
-   * contains the given session ID. Logs a cleanup audit event for each
-   * removed tool.
+   * Iterates the session map and deletes every tool whose `source` names the
+   * given session; the rows go after the tool's queued writes. Logs a cleanup
+   * audit event for each removed tool.
    *
    * @param sessionId - The session identifier to match against tool `source`
    *   strings.
@@ -662,15 +1276,12 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
     let removedCount = 0;
 
     for (const [id, tool] of this.sessionTools) {
-      if (tool.source.includes(sessionId)) {
+      // The session the source names, whole: "sess-1" is not "sess-10".
+      if (sessionFromSource(tool.source) === sessionId) {
         this.sessionTools.delete(id);
-        if (this.db && this.schemaReady) {
-          this.db
-            .run(`DELETE FROM agentos_emergent_tools WHERE id = ?`, [id])
-            .catch(() => {
-              // Best-effort cleanup only.
-            });
-        }
+        this.states.delete(id);
+        this.removedIds.add(id);
+        this.queueRowDeletes(id);
         this.logAudit(id, 'cleanup', { sessionId });
         removedCount += 1;
       }
@@ -765,52 +1376,76 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
     // register() and a slow ensureSchema() could produce "table not found".
     await this.ensureSchemaReady();
 
-    // Extract the session ID from the source string if present.
-    const sessionMatch = tool.source.match(/session\s+([\w-]+)/);
-    const sessionId = sessionMatch?.[1] ?? 'unknown';
+    // The session the tool was forged in, from its source line, kept whole:
+    // the loader's session selector compares it with the id the host gives.
+    const sessionId = sessionFromSource(tool.source) ?? 'unknown';
 
     let promotedAt: number | null = null;
     let promotedBy: string | null = approvedBy ?? null;
 
-    if (tool.tier !== 'session') {
-      const existing =
-        ((await this.db.get(
-          `SELECT promoted_at, promoted_by
-             FROM agentos_emergent_tools
-            WHERE id = ?
-            LIMIT 1`,
-          [tool.id],
-        )) as
-          | {
-              promoted_at?: number | null;
-              promoted_by?: string | null;
-            }
-          | undefined) ?? { promoted_at: null, promoted_by: null };
+    // The row as it is, read when the write depends on it: a promoted tool
+    // keeps its promotion, and a tool whose state this process does not hold
+    // keeps the is_active flag its row has.
+    const held = this.states.get(tool.id);
+    let existing:
+      | { promoted_at?: number | null; promoted_by?: string | null; is_active?: number | boolean | null }
+      | undefined;
+    if (tool.tier !== 'session' || !held) {
+      existing = (await this.db.get(
+        `SELECT promoted_at, promoted_by, is_active
+           FROM agentos_emergent_tools
+          WHERE id = ?
+          LIMIT 1`,
+        [tool.id],
+      )) as typeof existing;
+    }
 
+    if (tool.tier !== 'session') {
+      const row = existing ?? { promoted_at: null, promoted_by: null };
       promotedAt =
         approvedBy != null
           ? Date.now()
-          : typeof existing.promoted_at === 'number'
-            ? existing.promoted_at
+          : typeof row.promoted_at === 'number'
+            ? row.promoted_at
             : Date.now();
       promotedBy =
         approvedBy ??
-        (existing.promoted_by != null ? String(existing.promoted_by) : null);
+        (row.promoted_by != null ? String(row.promoted_by) : null);
     }
 
-    const implementationSource =
-      tool.implementation.mode === 'sandbox'
-        ? this.serializeSandboxImplementation(tool)
-        : JSON.stringify(tool.implementation);
+    const implementationSource = await this.resolveSourceToStore(tool);
+
+    // The legacy flag. For a state this process holds it follows the state
+    // row, read inside the statement (a state change that landed during the
+    // reads above is the newer word), and a flag the host lowered with its own
+    // SQL stays lowered until a load records the host's decision or the host
+    // reactivates the tool. A process that holds no state writes 1 for a new
+    // row and leaves an existing row's flag as it stands at write time, not
+    // as it read it earlier: a whole-row write is never a reactivation, and
+    // never a disable either.
+    const heldNow = this.states.get(tool.id);
+    const flagExpr = heldNow
+      ? `COALESCE((SELECT CASE WHEN state = 'active' THEN 1 ELSE 0 END
+                     FROM agentos_emergent_tool_state WHERE tool_id = ?), ?)`
+      : `1`;
+    const flagParams: unknown[] = heldNow ? [tool.id, heldNow.state === 'active' ? 1 : 0] : [];
+    const flagOnConflict = heldNow
+      ? `CASE WHEN agentos_emergent_tools.is_active = 0 THEN 0 ELSE excluded.is_active END`
+      : `agentos_emergent_tools.is_active`;
+    const columns = [
+      'id', 'name', 'description', 'input_schema', 'output_schema', 'implementation_mode',
+      'implementation_source', 'tier', 'created_by_agent', 'created_by_session',
+      'created_at', 'promoted_at', 'promoted_by', 'judge_verdicts', 'confidence_score',
+      'total_uses', 'success_count', 'failure_count', 'avg_execution_ms', 'last_used_at',
+    ];
 
     await this.db.run(
-      `INSERT OR REPLACE INTO agentos_emergent_tools
-       (id, name, description, input_schema, output_schema, implementation_mode,
-        implementation_source, tier, created_by_agent, created_by_session,
-        created_at, promoted_at, promoted_by, judge_verdicts, confidence_score,
-        total_uses, success_count, failure_count, avg_execution_ms, last_used_at,
-        is_active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO agentos_emergent_tools
+       (${columns.join(', ')}, is_active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${flagExpr})
+       ON CONFLICT (id) DO UPDATE SET
+         ${columns.slice(1).map((column) => `${column} = excluded.${column}`).join(',\n         ')},
+         is_active = ${flagOnConflict}`,
       [
         tool.id,
         tool.name,
@@ -834,9 +1469,38 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_audit_log (
         tool.usageStats.lastUsedAt
           ? new Date(tool.usageStats.lastUsedAt).getTime()
           : null,
-        1,
+        // The flag of a new row; on conflict, see flagOnConflict above.
+        ...flagParams,
       ],
     );
+  }
+
+  /**
+   * The `implementation_source` to write for a tool. With source persistence
+   * off the registry writes the redacted record for a fresh forge, or over an
+   * earlier redacted record, and never over any other stored source: that
+   * source was put there by a host, or while persistence was on, and
+   * replacing it would destroy the tool.
+   */
+  private async resolveSourceToStore(tool: EmergentTool): Promise<string> {
+    if (tool.implementation.mode !== 'sandbox') {
+      return JSON.stringify(tool.implementation);
+    }
+    if (this.config.persistSandboxSource || !this.db) {
+      return this.serializeSandboxImplementation(tool);
+    }
+    const existing = (await this.db.get(
+      `SELECT implementation_source
+         FROM agentos_emergent_tools
+        WHERE id = ?
+        LIMIT 1`,
+      [tool.id],
+    )) as { implementation_source?: string | null } | undefined;
+    const stored = existing?.implementation_source;
+    if (typeof stored === 'string' && parsePersistedSource('sandbox', stored).format !== 'redacted') {
+      return stored;
+    }
+    return this.serializeSandboxImplementation(tool);
   }
 
   private serializeSandboxImplementation(tool: EmergentTool): string {

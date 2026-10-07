@@ -21,7 +21,26 @@ import type {
   PromotionResult,
   EmergentTool,
   ToolUsageStats,
+  PersistedToolRow,
+  StoredRequest,
+  ToolImplementation,
+  ToolState,
+  ToolStateRecord,
+  ToolTier,
 } from './types.js';
+import {
+  parsePersistedSource,
+  parseRowSchemas,
+  parseStoredRequest,
+  requestFromImplementation,
+  sessionFromSource,
+  requestFromSource,
+  sourceFromImplementation,
+  stateSetterFromColumn,
+  toolFromRow,
+  type PersistedSource,
+} from './persisted-source.js';
+import { normalizeAllowlist, toSandboxApis } from './capabilities.js';
 import type { ToolCandidate } from './EmergentJudge.js';
 import type { ITool, ToolExecutionContext, ToolExecutionResult } from '../../core/tools/ITool.js';
 import type { PersonalityMutationStore } from './PersonalityMutationStore.js';
@@ -121,6 +140,68 @@ export interface SelfImprovementToolDeps {
 // DEPENDENCY BUNDLE
 // ============================================================================
 
+// ============================================================================
+// STORED TOOLS
+// ============================================================================
+
+/** The configuration key behind a reason, named in the start-up line. */
+const REASON_CONFIG_KEYS: Readonly<Record<string, string>> = {
+  source_not_persisted: 'emergent.persistSandboxSource',
+};
+
+/** What happened to one stored tool at load. */
+export interface LoadedToolOutcome {
+  toolId: string;
+  name: string;
+  state: ToolState;
+  reason: string | null;
+}
+
+/** A stored tool whose load threw; the row is as it was. */
+export interface FailedToolLoad {
+  toolId: string;
+  name: string;
+  error: string;
+}
+
+/** What {@link EmergentCapabilityEngine.loadPersistedTools} loads. */
+export interface LoadPersistedToolsOptions {
+  tiers: ToolTier[];
+  /** The agent whose `agent`-tier rows to load; required when `tiers` names `agent`. */
+  agentId?: string;
+  /** The session whose `session`-tier rows to load; required when `tiers` names `session`. */
+  sessionId?: string;
+}
+
+/** The result of {@link EmergentCapabilityEngine.loadPersistedTools}. */
+export interface LoadPersistedToolsResult {
+  active: number;
+  suspended: number;
+  demoted: number;
+  outcomes: LoadedToolOutcome[];
+  /** Rows whose load threw (a storage write that failed, say); none of these tools is registered. */
+  failed: FailedToolLoad[];
+}
+
+/** One stored tool on its way through the single-row path. */
+interface AdmissionCandidate {
+  toolId: string;
+  name: string;
+  source: PersistedSource;
+  /** The stored or held state, when one exists. */
+  stored: ToolStateRecord | undefined;
+  /**
+   * Whether the row holds a request, readable by this release or not. A load
+   * writes a derived request only where the row holds none.
+   */
+  requestStored: boolean;
+  /** The tool row's `is_active`, or a host-built object's `isActive`. */
+  legacyActive: boolean;
+  /** False when the row's last state write did not finish its flag write; undefined for a host-built object. */
+  flagSynced?: boolean;
+  buildTool: (implementation: ToolImplementation) => EmergentTool;
+}
+
 /**
  * Dependencies injected into the {@link EmergentCapabilityEngine} constructor.
  *
@@ -198,6 +279,20 @@ interface ToolIndex {
  * }
  * ```
  */
+/** Whether two stored requests grant the same thing. */
+function sameGrant(a: StoredRequest | null | undefined, b: StoredRequest | null | undefined): boolean {
+  if (!a || !b) {
+    return !a && !b;
+  }
+  if (a.kind !== b.kind) {
+    return false;
+  }
+  if (a.kind === 'sandbox' && b.kind === 'sandbox') {
+    return a.capabilities.join(',') === b.capabilities.join(',');
+  }
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 export class EmergentCapabilityEngine {
   /** Injected dependencies. */
   private readonly config: EmergentConfig;
@@ -324,7 +419,18 @@ export class EmergentCapabilityEngine {
 
       source = request.implementation.code;
 
-      // Step 2a: Static code validation before any execution.
+      // Step 2a: the list must name catalogue capabilities (or the alias), so
+      // the request stored for the tool is the list the judge reviews, never a
+      // narrowed reading of it.
+      const list = normalizeAllowlist(request.implementation.allowlist);
+      if (list.unknown.length > 0) {
+        return {
+          success: false,
+          error: `allowlist names capabilities outside the catalogue: ${list.unknown.join(', ')}`,
+        };
+      }
+
+      // Step 2b: Static code validation before any execution.
       const validation = this.sandboxForge.validateCode(
         request.implementation.code,
         request.implementation.allowlist
@@ -400,6 +506,48 @@ export class EmergentCapabilityEngine {
       };
 
       this.registry.register(tool, 'session');
+      let written: ToolStateRecord | undefined;
+      try {
+        written = await this.registry.setState(toolId, 'active', null, {
+          request: requestFromImplementation(request.implementation),
+          setBy: 'library',
+        });
+      } catch (error: unknown) {
+        // The tool runs in this process either way; without the row its request
+        // is re-derived from its source at the next load.
+        console.warn(
+          `[agentos:emergent] could not store the request of "${request.name}" (${toolId}):`,
+          error instanceof Error ? error.message : error,
+        );
+      }
+      if (this.registry.wasRemoved(toolId)) {
+        // Removed while it was being forged: nothing is registered.
+        return { success: false, error: 'the tool was removed while it was being forged' };
+      }
+      if (written && written.state === 'demoted' && written.reason === 'removed') {
+        // The row did not take the state (its tool row never landed): the tool
+        // still runs in this process, held active here, and the next load
+        // re-derives its request from its source.
+        console.warn(
+          `[agentos:emergent] the state of "${request.name}" (${toolId}) was not stored; ` +
+            'the tool runs in this process only',
+        );
+        this.registry.adopt(tool, {
+          toolId,
+          state: 'active',
+          reason: null,
+          setBy: 'library',
+          at: Date.now(),
+          request: requestFromImplementation(request.implementation),
+        });
+      } else if (written && written.state !== 'active') {
+        // Another word arrived first (a host's suspension): it holds, and the
+        // executable refuses calls until the host lifts it.
+        console.warn(
+          `[agentos:emergent] "${request.name}" (${toolId}) was ${written.state} before its forge finished ` +
+            `(${written.reason ?? 'no reason recorded'})`,
+        );
+      }
       this.indexTool(toolId, context.agentId, context.sessionId);
 
       if (this.onToolForged) {
@@ -555,27 +703,42 @@ export class EmergentCapabilityEngine {
   }
 
   /**
-   * Hydrate a persisted tool back into a live runtime and make it executable.
+   * Hydrate one stored tool and make it executable.
    *
-   * This is used by backend/admin control planes to sync shared tools from
-   * durable storage into a running ToolOrchestrator after promotion or restart.
+   * @deprecated Use {@link loadPersistedTools}, which reads the rows itself.
+   * This applies the same checks to the one tool: a suspended or demoted tool
+   * is not registered, and a tool whose source cannot be rebuilt is suspended.
+   * When the tool has a stored row, that row is what is read, not the object
+   * passed in (a host-built object can carry a list the host made up), and a
+   * load never rewrites it. A tool with no row gets its row written first, as
+   * before, so its uses are recorded and the next load finds it.
+   *
+   * @returns what happened, so a host can tell a registered tool from a refused one.
    */
-  async syncPersistedTool(tool: EmergentTool): Promise<void> {
-    this.registry.upsert(tool);
-    this.indexTool(
-      tool.id,
-      tool.createdBy,
-      this.extractSessionId(tool.source) ?? `persisted:${tool.id}`
-    );
-
-    const isActive = (tool as EmergentTool & { isActive?: boolean }).isActive ?? true;
-    if (!isActive) {
-      return;
+  async syncPersistedTool(tool: EmergentTool): Promise<LoadedToolOutcome> {
+    let row = await this.registry.loadRow(tool.id);
+    if (!row && this.registry.hasStorage()) {
+      // No stored row yet: the host hydrates from its own store. The row is
+      // written as it was before loading went through the stored row, so the
+      // tool's uses are recorded and the next load finds it.
+      await this.registry.writeToolRow(tool);
+      row = await this.registry.loadRow(tool.id);
     }
-
-    if (this.onToolForged) {
-      await this.onToolForged(tool, this.createExecutableTool(tool));
+    if (row) {
+      // With source persistence off the row holds a redacted record; the
+      // implementation the host supplied is what runs then.
+      return this.admitRow(row, { sourceFallback: sourceFromImplementation(tool.implementation) });
     }
+    const stored = await this.registry.readState(tool.id);
+    return this.admit({
+      toolId: tool.id,
+      name: tool.name,
+      source: sourceFromImplementation(tool.implementation),
+      stored,
+      requestStored: stored?.request != null,
+      legacyActive: (tool as EmergentTool & { isActive?: boolean }).isActive ?? true,
+      buildTool: () => tool,
+    });
   }
 
   /**
@@ -583,16 +746,516 @@ export class EmergentCapabilityEngine {
    */
   async removeTool(toolId: string): Promise<EmergentTool | undefined> {
     const tool = this.registry.get(toolId);
-    if (!tool) {
-      return undefined;
-    }
-
+    // The rows go whether or not the tool is loaded here, after the tool's
+    // queued state writes; a sync of the same id after this returns finds no
+    // row, as a removal promises.
     this.registry.remove(toolId);
+    await this.registry.settled(toolId);
     this.removeIndexedToolEverywhere(toolId);
-    if (this.onToolRemoved) {
+    if (tool && this.onToolRemoved) {
       await this.onToolRemoved(tool);
     }
     return tool;
+  }
+
+  // --------------------------------------------------------------------------
+  // PUBLIC: stored tools
+  // --------------------------------------------------------------------------
+
+  /**
+   * Load the stored tools of the given tiers into the running process.
+   *
+   * Call it at start, after the host's own tools are registered. For each row
+   * it reads the source (raw code, code with its list, a redacted record, or a
+   * composition), keeps a demoted row off, suspends a row that cannot be
+   * rebuilt, and registers the rest. A row is never rewritten by being loaded,
+   * and a stored request is never replaced by a derived one. One line is logged
+   * per tool that did not load. A row whose load throws is reported in
+   * `failed` and does not stop the others.
+   *
+   * `shared` rows load for every caller. `agent` rows are those of
+   * `options.agentId` and `session` rows those of `options.sessionId`, and
+   * naming either tier without its selector throws (`selector_required`), so
+   * a shared store never puts one agent's private tools in another's
+   * executor. A loaded or forged `agent` tool also refuses a call from any
+   * other agent (see {@link createExecutableTool}). The agent identity is the
+   * persona id: `forge_tool` records the forging caller's `personaId` as
+   * `created_by_agent`, and `agentId` here is that id. Rows written by
+   * releases before this one hold the forging GMI instance's id instead.
+   */
+  async loadPersistedTools(options: LoadPersistedToolsOptions): Promise<LoadPersistedToolsResult> {
+    const { tiers, agentId, sessionId } = options;
+    if (tiers.includes('agent') && agentId === undefined) {
+      throw new Error(
+        "selector_required: loadPersistedTools({ tiers: ['agent'] }) needs the agentId whose tools to load; " +
+          "an agent's tools are private to it.",
+      );
+    }
+    if (tiers.includes('session') && sessionId === undefined) {
+      throw new Error(
+        "selector_required: loadPersistedTools({ tiers: ['session'] }) needs the sessionId whose tools to load; " +
+          "a session's tools are private to it.",
+      );
+    }
+    const rows = await this.registry.loadRows(tiers, { agentId, sessionId });
+    const outcomes: LoadedToolOutcome[] = [];
+    const failed: FailedToolLoad[] = [];
+    for (const row of rows) {
+      try {
+        outcomes.push(await this.admitRow(row));
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        failed.push({ toolId: row.id, name: row.name, error: message });
+        console.warn(`[agentos:emergent] stored tool "${row.name}" (${row.id}) did not load: ${message}`);
+      }
+    }
+
+    for (const outcome of outcomes) {
+      if (outcome.state === 'active') continue;
+      const key = outcome.reason ? REASON_CONFIG_KEYS[outcome.reason] : undefined;
+      console.warn(
+        `[agentos:emergent] stored tool "${outcome.name}" (${outcome.toolId}) is ${outcome.state}: ` +
+          `${outcome.reason ?? 'no reason recorded'}${key ? ` (see ${key})` : ''}`,
+      );
+    }
+
+    const count = (state: ToolState) => outcomes.filter((o) => o.state === state).length;
+    return {
+      active: count('active'),
+      suspended: count('suspended'),
+      demoted: count('demoted'),
+      outcomes,
+      failed,
+    };
+  }
+
+  /**
+   * Suspend a tool and take it out of the executor. The state write is
+   * awaited, so the suspension survives a restart, and no later use, rewrite
+   * or load turns the tool back on. The suspension is recorded as the host's,
+   * so it stays, whatever its reason says, until {@link reactivateTool} is
+   * called.
+   *
+   * @returns `false` when the tool is unknown.
+   */
+  async suspendTool(toolId: string, reason: string): Promise<boolean> {
+    const tool = this.registry.get(toolId);
+    if (!tool) {
+      // Not loaded in this process: the stored row is still suspended, so the
+      // next load keeps it off. The stored request is left as it is.
+      const row = await this.registry.loadRow(toolId);
+      if (!row) {
+        return false;
+      }
+      await this.registry.setState(toolId, 'suspended', reason, { setBy: 'host' });
+      return true;
+    }
+    await this.registry.suspend(toolId, reason);
+    if (this.onToolRemoved) {
+      await this.onToolRemoved(tool);
+    }
+    return true;
+  }
+
+  /**
+   * Demote a tool: its confidence is reset, it is taken out of the executor,
+   * and no later load brings it back. Only {@link reactivateTool} does.
+   *
+   * @returns `false` when the tool is unknown.
+   */
+  async demoteTool(toolId: string, reason: string): Promise<boolean> {
+    const tool = this.registry.get(toolId);
+    if (!tool) {
+      const row = await this.registry.loadRow(toolId);
+      if (!row) {
+        return false;
+      }
+      await this.registry.setState(toolId, 'demoted', reason, { setBy: 'host' });
+      return true;
+    }
+    await this.registry.demote(toolId, reason);
+    if (this.onToolRemoved) {
+      await this.onToolRemoved(tool);
+    }
+    return true;
+  }
+
+  /**
+   * Re-check one suspended or demoted tool against the configuration in force
+   * and, when it fits, register it again. This is how a host clears a
+   * suspension or a demotion it set; the library never does so on its own.
+   *
+   * @returns the outcome, or `undefined` when the tool is unknown.
+   */
+  async reactivateTool(toolId: string): Promise<LoadedToolOutcome | undefined> {
+    const row = await this.registry.loadRow(toolId);
+    if (row) {
+      return this.admitRow(row, { force: true });
+    }
+    const tool = this.registry.get(toolId);
+    if (!tool) {
+      return undefined;
+    }
+    const held = this.registry.getState(toolId);
+    return this.admit(
+      {
+        toolId,
+        name: tool.name,
+        source: sourceFromImplementation(tool.implementation),
+        stored: held,
+        requestStored: held?.request != null,
+        legacyActive: true,
+        buildTool: () => tool,
+      },
+      { force: true },
+    );
+  }
+
+  private admitRow(
+    row: PersistedToolRow,
+    options: { force?: boolean; readmitted?: number; sourceFallback?: PersistedSource } = {},
+  ): Promise<LoadedToolOutcome> {
+    const stored: ToolStateRecord | undefined = row.state
+      ? {
+          toolId: row.id,
+          state: row.state,
+          reason: row.state_reason ?? null,
+          setBy: stateSetterFromColumn(row.set_by),
+          at: Number(row.state_at ?? 0),
+          request: parseStoredRequest(row.request_json),
+          ...(row.write_id ? { writeId: row.write_id } : {}),
+        }
+      : undefined;
+    // A row whose schema columns do not read cannot be built: it is unreadable
+    // before its source is looked at, so a damaged input_schema never widens
+    // to a schema that accepts any input.
+    const schemas = parseRowSchemas(row);
+    const source: PersistedSource =
+      'error' in schemas
+        ? { format: 'unreadable', error: schemas.error }
+        : parsePersistedSource(row.implementation_mode, row.implementation_source);
+    // A redacted record cannot be rebuilt from the row; a host that supplies
+    // the implementation (syncPersistedTool) runs from what it supplied, as it
+    // did before loading went through the row. State, request and the flag
+    // still come from the row.
+    const sourceInUse =
+      source.format === 'redacted' && options.sourceFallback && options.sourceFallback.format !== 'unreadable'
+        ? options.sourceFallback
+        : source;
+    return this.admit(
+      {
+        toolId: row.id,
+        name: row.name,
+        source: sourceInUse,
+        stored,
+        requestStored: row.request_json != null,
+        legacyActive: !(row.is_active === 0 || row.is_active === false),
+        flagSynced: row.flag_synced == null ? undefined : !(row.flag_synced === 0 || row.flag_synced === false),
+        buildTool: (implementation) => toolFromRow(row, implementation),
+      },
+      options,
+    );
+  }
+
+  /**
+   * The single-row path. Every stored tool goes through it, whether the
+   * library read its row or a host built the tool from its own.
+   */
+  /**
+   * The row changed under an admission (another process wrote, or the host
+   * acted): admit the tool again from the row as it stands, up to twice. A
+   * row that is gone reads as removed; a row still changing after two
+   * re-admissions is left for the next load.
+   */
+  private async readmit(
+    candidate: AdmissionCandidate,
+    options: { force?: boolean; readmitted?: number; sourceFallback?: PersistedSource },
+  ): Promise<LoadedToolOutcome> {
+    const { toolId, name } = candidate;
+    const depth = options.readmitted ?? 0;
+    if (depth < 2) {
+      const fresh = await this.registry.loadRow(toolId);
+      if (fresh) {
+        return this.admitRow(fresh, { ...options, readmitted: depth + 1 });
+      }
+      await this.unregisterIfLive(toolId);
+      return { toolId, name, state: 'demoted', reason: 'removed' };
+    }
+    // Nothing is written; the tool is held off here until the next load.
+    this.holdStored(toolId, {
+      toolId,
+      state: 'suspended',
+      reason: 'contended',
+      setBy: 'library',
+      at: Date.now(),
+      request: null,
+    });
+    await this.unregisterIfLive(toolId);
+    return { toolId, name, state: 'suspended', reason: 'contended' };
+  }
+
+  private async admit(
+    candidate: AdmissionCandidate,
+    options: { force?: boolean; readmitted?: number; sourceFallback?: PersistedSource } = {},
+  ): Promise<LoadedToolOutcome> {
+    const { toolId, name, source, stored, requestStored } = candidate;
+    let legacyActive = candidate.legacyActive;
+    // A row whose last state write did not finish its flag write: finish it
+    // first, so the flag reads what the state row says before anything is
+    // decided. A crash or a failed write between a state row and its flag
+    // never leaves the two apart beyond the next load.
+    if (stored && candidate.flagSynced === false) {
+      await this.registry.syncLegacyFlag(toolId, stored);
+      legacyActive = stored.state === 'active';
+    }
+    // The request this process works with: the stored one when it can be read,
+    // else one derived from the source. It is written to the row only when the
+    // row holds none; a stored request this release cannot read stays as it is.
+    const request = stored?.request ?? requestFromSource(source);
+    const requestToWrite = requestStored ? undefined : request;
+
+    // 1. A tool a host turned off stays off. A row with is_active = 0 and no
+    //    suspension on record was turned off by a host (its own SQL, or
+    //    demote()); loading never undoes that, so it is recorded as the host's.
+    //    (A flag write the library had not finished was finished above, so a
+    //    lowered flag here is the host's own.)
+    const hostTurnedOff = !legacyActive && stored?.state !== 'suspended';
+    if ((stored?.state === 'demoted' || hostTurnedOff) && !options.force) {
+      const reason = stored?.state === 'demoted' ? stored.reason : 'legacy_inactive';
+      if (stored?.state === 'demoted') {
+        this.holdStored(toolId, stored);
+      } else {
+        // Written only while the row is as it was read: a host that
+        // reactivated the tool meanwhile is not written over.
+        const written = await this.registry.setState(toolId, 'demoted', 'legacy_inactive', {
+          request: requestToWrite,
+          setBy: 'host',
+          ifRow: stored ? { at: stored.at, state: stored.state, setBy: stored.setBy } : ('absent' as const),
+        });
+        if (written.state !== 'demoted' || written.reason !== 'legacy_inactive') {
+          return this.readmit(candidate, options);
+        }
+      }
+      await this.unregisterIfLive(toolId);
+      return { toolId, name, state: 'demoted', reason };
+    }
+
+    // 2. A suspension the host set is cleared only by the host, whatever its
+    //    reason says. One the library set is re-checked below.
+    if (stored?.state === 'suspended' && !options.force && stored.setBy === 'host') {
+      // Another process may have set it: this one takes it in and lets go of
+      // the executable, so the suspension holds wherever the tool is loaded.
+      this.holdStored(toolId, stored);
+      await this.unregisterIfLive(toolId);
+      return { toolId, name, state: 'suspended', reason: stored.reason };
+    }
+
+    // 3. Can the source be rebuilt, and may it run under the configuration in force?
+    let implementation: ToolImplementation | undefined;
+    let refusal: string | null = null;
+    if (source.format === 'unreadable') {
+      refusal = 'source_unreadable';
+    } else if (source.format === 'redacted') {
+      // The row cannot rebuild the tool, but this process may still hold it:
+      // with source persistence off, a tool forged here runs from memory until
+      // the process ends, and a load must not take it away.
+      const held = this.registry.get(toolId)?.implementation;
+      if (held && held.mode === 'sandbox' && held.code.trim() !== '') {
+        implementation = held;
+      } else {
+        refusal = 'source_not_persisted';
+      }
+    } else {
+      implementation = source.implementation;
+    }
+    if (
+      implementation &&
+      implementation.mode === 'sandbox' &&
+      request?.kind === 'sandbox'
+    ) {
+      // The request is what the tool was granted, whatever its text, its
+      // stored list or the list held in memory shows: for a raw-code row the
+      // text was read only to derive a request where none was stored, and a
+      // stored request narrower than a stored list is the grant. Never wider
+      // than a stored list: a request widened by hand grants nothing the list
+      // did not.
+      const listed = implementation;
+      const granted = toSandboxApis(request.capabilities);
+      implementation = {
+        ...implementation,
+        allowlist:
+          source.format === 'code-with-list' ? granted.filter((api) => listed.allowlist.includes(api)) : granted,
+      };
+    }
+    if (implementation && !refusal) {
+      refusal = this.refusalFor(implementation);
+    }
+
+    if (refusal || !implementation) {
+      const reason = refusal ?? 'source_unreadable';
+      // Written as the library's even when a host's suspension already carries
+      // the same words, so a later load re-checks it (the words decide nothing).
+      if (stored?.state !== 'suspended' || stored.reason !== reason || stored.setBy !== 'library') {
+        // A load writes only while the row is as it was read (a host's
+        // reactivation is unconditional); a refused write re-admits from the
+        // row as it stands.
+        const written = await this.registry.setState(toolId, 'suspended', reason, {
+          request: requestToWrite,
+          setBy: 'library',
+          ...(options.force
+            ? {}
+            : { ifRow: stored ? { at: stored.at, state: stored.state, setBy: stored.setBy } : ('absent' as const) }),
+        });
+        if (written.state !== 'suspended' || written.reason !== reason) {
+          return this.readmit(candidate, options);
+        }
+      } else {
+        // The row already says so; this process holds it too when the tool is live here.
+        this.holdStored(toolId, stored);
+      }
+      await this.unregisterIfLive(toolId);
+      return { toolId, name, state: 'suspended', reason };
+    }
+
+    // 4. Active: the state row first, so a write that fails leaves the tool
+    //    off; then into memory without rewriting the row; then into the executor.
+    const tool = candidate.buildTool(implementation);
+    // A reactivation always writes: the row may already read active while this
+    // process holds a restriction whose own write failed. A load writes only
+    // while the row is still as it read it, so a restriction another process
+    // stored in between is never written over.
+    let written: ToolStateRecord | undefined;
+    if (options.force || stored?.state !== 'active' || !requestStored) {
+      written = await this.registry.setState(toolId, 'active', null, {
+        request: requestToWrite,
+        setBy: 'library',
+        ...(options.force
+          ? {}
+          : { ifRow: stored ? { at: stored.at, state: stored.state, setBy: stored.setBy } : ('absent' as const) }),
+      });
+    } else {
+      // Nothing to write: the row read active with its request. It is read
+      // again here, because the write that would have caught a restriction
+      // another process stored since the first read is not made.
+      const now = await this.registry.readStoredState(toolId);
+      if (!now) {
+        // The row this load read is gone: another process removed the tool.
+        written = { toolId, state: 'demoted', reason: 'removed', setBy: 'host', at: Date.now(), request: null };
+      } else if (
+        now.state !== stored.state ||
+        now.setBy !== stored.setBy ||
+        now.at !== stored.at ||
+        (now.writeId !== undefined && now.writeId !== stored.writeId)
+      ) {
+        written = now;
+      }
+    }
+    // A suspension or demotion that arrived while the row was being written,
+    // in this process or in another, is the newer word: the tool is not
+    // registered. A restriction this process holds from an earlier read is
+    // older than the row and gives way to it.
+    const held = written && written.state !== 'active' ? written : this.newerRestrictionHeld(toolId, stored);
+    if (held && held.state !== 'active') {
+      this.holdStored(toolId, held);
+      await this.unregisterIfLive(toolId);
+      return { toolId, name, state: held.state, reason: held.reason };
+    }
+    // A first write refused by another process's active row: that row's
+    // request is the grant, not the one derived here, so the tool is admitted
+    // again from the row as it stands (once).
+    // The grant the row holds after the write is what the tool may reach: a
+    // request another process stored meanwhile, narrower or wider than the
+    // one this admission built with, admits the tool again from the row. A
+    // row whose request this release cannot read (or holds none) gives
+    // nothing to compare, and the derived grant stands as before.
+    if (written && written.request !== null && !sameGrant(written.request, request)) {
+      return this.readmit(candidate, options);
+    }
+    // A live tool under this id with another name (the host renamed the row):
+    // its executable goes first, so the old name stops running the old code.
+    const live = this.registry.get(toolId);
+    if (live && live.name !== tool.name) {
+      await this.unregisterIfLive(toolId);
+    }
+    const adopted = this.registry.adopt(tool, {
+      toolId,
+      state: 'active',
+      reason: null,
+      setBy: 'library',
+      at: Date.now(),
+      request,
+    });
+    if (!adopted) {
+      // Removed in this process while the row was being admitted.
+      return { toolId, name, state: 'demoted', reason: 'removed' };
+    }
+    this.indexTool(
+      tool.id,
+      tool.createdBy,
+      this.extractSessionId(tool.source) ?? `persisted:${tool.id}`,
+    );
+    if (this.onToolForged) {
+      try {
+        await this.onToolForged(tool, this.createExecutableTool(tool));
+      } catch (error: unknown) {
+        // The host did not register the executable: nothing here claims the
+        // tool, its row stays for the next load, and the failure is the
+        // load's report for this row.
+        this.registry.forget(toolId);
+        this.removeIndexedToolEverywhere(toolId);
+        throw error;
+      }
+      if (this.registry.wasRemoved(toolId)) {
+        // Removed while the host was registering it: the registration goes.
+        if (this.onToolRemoved) {
+          await this.onToolRemoved(tool);
+        }
+        this.removeIndexedToolEverywhere(toolId);
+        return { toolId, name, state: 'demoted', reason: 'removed' };
+      }
+    }
+    return { toolId, name, state: 'active', reason: null };
+  }
+
+  /**
+   * The library's reason for not running an implementation under the
+   * configuration in force, or `null`. Later steps add their checks here, so
+   * forging, loading and promotion all ask the same question.
+   */
+  private refusalFor(implementation: ToolImplementation): string | null {
+    if (implementation.mode === 'sandbox' && implementation.code.trim() === '') {
+      return 'source_not_persisted';
+    }
+    return null;
+  }
+
+  private async unregisterIfLive(toolId: string): Promise<void> {
+    const live = this.registry.get(toolId);
+    if (live && this.onToolRemoved) {
+      await this.onToolRemoved(live);
+    }
+  }
+
+  /**
+   * A restriction this process holds that is newer than the row it just read:
+   * its write is in flight, so the row does not yet show it.
+   */
+  private newerRestrictionHeld(toolId: string, stored: ToolStateRecord | undefined): ToolStateRecord | undefined {
+    const memory = this.registry.getState(toolId);
+    if (!memory || memory.state === 'active') {
+      return undefined;
+    }
+    // At the row's own time the restriction is the later of the two: two
+    // writes in one millisecond are told apart by nothing else.
+    return !stored || memory.at >= stored.at ? memory : undefined;
+  }
+
+  /** A stored restriction, held in this process too when the tool is live here. */
+  private holdStored(toolId: string, record: ToolStateRecord): void {
+    const live = this.registry.get(toolId);
+    if (live) {
+      this.registry.adopt(live, record);
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -714,8 +1377,10 @@ export class EmergentCapabilityEngine {
   /**
    * Create an executable ITool wrapper for a forged emergent tool.
    *
-   * The wrapper performs runtime output validation, usage tracking, and
-   * promotion checks after each successful execution.
+   * The wrapper refuses a call to a tool that is not active and, for an
+   * `agent`-tier tool, a call from any agent but its own, before anything
+   * runs or a use is recorded; it then performs runtime output validation,
+   * usage tracking, and promotion checks after each successful execution.
    */
   createExecutableTool(tool: EmergentTool): ITool<Record<string, unknown>, unknown> {
     const baseTool =
@@ -741,6 +1406,36 @@ export class EmergentCapabilityEngine {
         args: Record<string, unknown>,
         context: ToolExecutionContext
       ): Promise<ToolExecutionResult> => {
+        // The registry no longer holds the tool (removed, or its session
+        // cleaned up) while the executable is still registered: refuse, do
+        // not run the captured code. This comes before the state check, which
+        // reads "no state" as active.
+        const current = this.registry.get(tool.id);
+        if (!current) {
+          return { success: false, error: `Emergent tool "${tool.name}" is no longer registered.` };
+        }
+        if (!this.registry.isActive(tool.id)) {
+          const held = this.registry.getState(tool.id);
+          return {
+            success: false,
+            error:
+              `Emergent tool "${tool.name}" is ${held?.state ?? 'inactive'}: ` +
+              `${held?.reason ?? 'no reason recorded'}.`,
+          };
+        }
+        // The owner is the persona that forged the tool, compared as it was
+        // stored ('unknown' for a caller without one). A row from an earlier
+        // release holds the forging GMI instance's id instead, which no
+        // persona can match: such a tool runs for any caller of the host that
+        // loaded it by that id, as it did before this change.
+        const owner = current.createdBy;
+        const caller = context.personaId ?? 'unknown';
+        if (current.tier === 'agent' && !owner.startsWith('gmi-instance-') && caller !== owner) {
+          return {
+            success: false,
+            error: `Emergent tool "${tool.name}" belongs to agent ${owner}; it is not callable as ${caller}.`,
+          };
+        }
         const startTime = performance.now();
         const result = await baseTool.execute(args, context);
         const executionTimeMs = Math.round(performance.now() - startTime);
@@ -821,8 +1516,7 @@ export class EmergentCapabilityEngine {
   }
 
   private extractSessionId(source: string): string | null {
-    const match = /session\s+([A-Za-z0-9._:-]+)/i.exec(source);
-    return match?.[1] ?? null;
+    return sessionFromSource(source);
   }
 
   private buildSandboxExecutable(tool: EmergentTool): ITool<Record<string, unknown>, unknown> {
