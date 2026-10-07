@@ -453,12 +453,12 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
    * meanwhile is the newer word, it stays, and this call returns that record
    * instead of its own.
    *
-   * `options.ifStateAt` makes the write conditional: an existing row is
-   * changed only while its `state_at` is still that value (-1 for "no row
-   * yet"). The loader uses it for its active write, so a restriction another
-   * process stored after the row was read is never written over; a refused
-   * write returns the row's own record, and a restriction read that way is
-   * held here as well.
+   * `options.ifRow` makes the write conditional: an existing row is changed
+   * only while its state, setter and time are still the ones given, and
+   * `'absent'` lets the write create a row but never change one. The loader
+   * uses it for its active write, so a restriction another process stored
+   * after the row was read is never written over; a refused write returns the
+   * row's own record, and a restriction read that way is held here as well.
    *
    * @returns the record now in force for the tool.
    * @throws If the storage adapter rejects.
@@ -467,7 +467,11 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     toolId: string,
     state: ToolState,
     reason: string | null,
-    options: { request?: StoredRequest | null; setBy?: StateSetter; ifStateAt?: number } = {},
+    options: {
+      request?: StoredRequest | null;
+      setBy?: StateSetter;
+      ifRow?: { at: number; state: ToolState; setBy: StateSetter } | 'absent';
+    } = {},
   ): Promise<ToolStateRecord> {
     const previous = this.states.get(toolId);
     const setBy: StateSetter = options.setBy ?? 'host';
@@ -495,7 +499,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     let inForce: ToolStateRecord = record;
     if (this.db) {
       inForce = await this.queueStateWrite(toolId, () =>
-        this.writeStateRow(toolId, record, named, options.ifStateAt),
+        this.writeStateRow(toolId, record, named, options.ifRow),
       );
     }
     if (inForce !== record) {
@@ -543,16 +547,16 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
   /**
    * The two statements of a state change: the state row upsert, and the legacy
    * flag, which is read from the state row inside its own statement so the two
-   * never disagree whatever other processes write in between. With
-   * `ifStateAt`, an existing row is changed only while its `state_at` is still
-   * that value; the row as it stands afterwards is returned, so a refused
-   * write shows as a record other than the one given.
+   * never disagree whatever other processes write in between. With `ifRow`,
+   * an existing row is changed only while its state, setter and time are the
+   * ones given (`'absent'`: never); the row as it stands afterwards is
+   * returned, so a refused write shows as a record other than the one given.
    */
   private async writeStateRow(
     toolId: string,
     record: ToolStateRecord,
     named: boolean,
-    ifStateAt?: number,
+    ifRow?: { at: number; state: ToolState; setBy: StateSetter } | 'absent',
   ): Promise<ToolStateRecord> {
     const db = this.db;
     if (!db) {
@@ -572,11 +576,17 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
              set_by = excluded.set_by,
              state_at = excluded.state_at,
              updated_at = excluded.updated_at`;
-    const guard = ifStateAt === undefined ? '' : `
-           WHERE agentos_emergent_tool_state.state_at = ?`;
+    let guard = '';
     const params: unknown[] = [toolId, record.state, record.reason, record.setBy, record.at, requestJson, record.at];
-    if (ifStateAt !== undefined) {
-      params.push(ifStateAt);
+    if (ifRow === 'absent') {
+      guard = `
+           WHERE 0 = 1`;
+    } else if (ifRow !== undefined) {
+      guard = `
+           WHERE agentos_emergent_tool_state.state = ?
+             AND agentos_emergent_tool_state.set_by = ?
+             AND agentos_emergent_tool_state.state_at = ?`;
+      params.push(ifRow.state, ifRow.setBy, ifRow.at);
     }
     await db.run(
       `INSERT INTO agentos_emergent_tool_state
@@ -594,7 +604,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
         WHERE id = ?`,
       [toolId, record.state === 'active' ? 1 : 0, toolId],
     );
-    if (ifStateAt === undefined) {
+    if (ifRow === undefined) {
       return record;
     }
     const row = (await db.get(
@@ -611,7 +621,15 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
           request_json?: string | null;
         }
       | undefined;
-    if (!row?.state || Number(row.state_at) === record.at) {
+    // Applied when the row now reads what was written; the time alone cannot
+    // tell two writes in one millisecond apart.
+    if (
+      !row?.state ||
+      (row.state === record.state &&
+        (row.state_reason ?? null) === record.reason &&
+        stateSetterFromColumn(row.set_by) === record.setBy &&
+        Number(row.state_at) === record.at)
+    ) {
       return record;
     }
     return {

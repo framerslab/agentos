@@ -108,14 +108,17 @@ describe('EmergentToolRegistry state', () => {
     const at = Number(readStateRow(db, tool.id)?.state_at);
 
     // "No row yet" was the condition, and a row exists: refused; the row's word holds.
-    const refused = await registry.setState(tool.id, 'active', null, { setBy: 'library', ifStateAt: -1 });
+    const refused = await registry.setState(tool.id, 'active', null, { setBy: 'library', ifRow: 'absent' });
     expect(refused).toMatchObject({ state: 'suspended', reason: 'operator_hold', setBy: 'host' });
     expect(registry.isActive(tool.id)).toBe(false);
     expect(readStateRow(db, tool.id)).toMatchObject({ state: 'suspended' });
     expect(readToolRow(db, tool.id)?.is_active).toBe(0);
 
     // The row as it was read: applied.
-    const applied = await registry.setState(tool.id, 'active', null, { setBy: 'library', ifStateAt: at });
+    const applied = await registry.setState(tool.id, 'active', null, {
+      setBy: 'library',
+      ifRow: { at, state: 'suspended', setBy: 'host' },
+    });
     expect(applied.state).toBe('active');
     expect(registry.isActive(tool.id)).toBe(true);
     expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active' });

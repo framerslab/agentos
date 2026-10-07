@@ -957,7 +957,9 @@ export class EmergentCapabilityEngine {
       written = await this.registry.setState(toolId, 'active', null, {
         request: requestToWrite,
         setBy: 'library',
-        ...(options.force ? {} : { ifStateAt: stored ? stored.at : -1 }),
+        ...(options.force
+          ? {}
+          : { ifRow: stored ? { at: stored.at, state: stored.state, setBy: stored.setBy } : ('absent' as const) }),
       });
     }
     // A suspension or demotion that arrived while the row was being written,
