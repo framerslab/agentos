@@ -23,7 +23,9 @@ import { findSpeechProviderCatalogEntry } from './providerCatalog.js';
  *
  * 2. **Filtering** — When a consumer calls `resolveSTT()`, `resolveTTS()`,
  *    `resolveVAD()`, or `resolveWakeWord()`, the resolver filters
- *    registrations by `kind` and `isConfigured === true`.
+ *    registrations by `kind`, `isConfigured === true` and a registered
+ *    provider instance (`provider`). A core catalog entry with its keys set
+ *    but no instance does not resolve.
  *
  * 3. **Requirements matching** — Optional {@link ProviderRequirements} further
  *    filter by `streaming`, `local`, and `features` capabilities from the
@@ -58,12 +60,11 @@ import { findSpeechProviderCatalogEntry } from './providerCatalog.js';
  *
  * @example
  * ```ts
- * const resolver = new SpeechProviderResolver(
- *   { stt: { preferred: ['deepgram-batch'], fallback: true } },
- *   process.env,
- * );
- * await resolver.refresh();
- * const stt = resolver.resolveSTT({ features: ['diarization'] });
+ * // SpeechRuntime builds the providers whose keys are set (DEEPGRAM_API_KEY
+ * // for deepgram-batch) and registers them in its resolver.
+ * const runtime = new SpeechRuntime({ env: process.env, preferredSttProviderId: 'deepgram-batch' });
+ * await runtime.resolver.refresh(); // applies the preferred priorities
+ * const stt = runtime.resolver.resolveSTT();
  * ```
  */
 export class SpeechProviderResolver extends EventEmitter {
@@ -160,7 +161,8 @@ export class SpeechProviderResolver extends EventEmitter {
    * priority (lower number = higher priority = tried first).
    *
    * This returns both configured and unconfigured providers — use
-   * `.filter(r => r.isConfigured)` if you only want usable ones.
+   * `.filter(r => r.isConfigured && r.provider)` for the ones the resolve
+   * methods can return (keys set and an instance registered).
    *
    * @param kind - The provider kind to filter by.
    * @returns A new array of registrations sorted by ascending priority.
@@ -168,8 +170,8 @@ export class SpeechProviderResolver extends EventEmitter {
    * @example
    * ```ts
    * const allSTT = resolver.listProviders('stt');
-   * const configured = allSTT.filter(r => r.isConfigured);
-   * console.log(`${configured.length} of ${allSTT.length} STT providers ready`);
+   * const ready = allSTT.filter(r => r.isConfigured && r.provider);
+   * console.log(`${ready.length} of ${allSTT.length} STT providers ready`);
    * ```
    */
   listProviders(kind: SpeechProviderKind): ProviderRegistration[] {
@@ -331,9 +333,9 @@ export class SpeechProviderResolver extends EventEmitter {
    *
    * @example
    * ```ts
-   * const resolver = new SpeechProviderResolver(config, process.env);
-   * await resolver.refresh(extensionManager);
-   * // Now all providers are registered and ready to resolve.
+   * const runtime = new SpeechRuntime({ env: process.env });
+   * await runtime.resolver.refresh(extensionManager);
+   * // The manager's speech providers now resolve beside the runtime's own.
    * ```
    */
   async refresh(extensionManager?: any): Promise<void> {

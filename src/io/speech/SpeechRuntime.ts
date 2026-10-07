@@ -9,7 +9,12 @@ import { findSpeechProviderCatalogEntry, getSpeechProviderCatalog } from './prov
 import { SpeechProviderRegistry } from './SpeechProviderRegistry.js';
 import { SpeechProviderResolver } from './SpeechProviderResolver.js';
 import { SpeechSession } from './SpeechSession.js';
+import { AssemblyAISTTProvider } from '../hearing/providers/AssemblyAISTTProvider.js';
+import { AzureSpeechSTTProvider } from '../hearing/providers/AzureSpeechSTTProvider.js';
 import { BuiltInAdaptiveVadProvider } from '../hearing/providers/BuiltInAdaptiveVadProvider.js';
+import { DeepgramBatchSTTProvider } from '../hearing/providers/DeepgramBatchSTTProvider.js';
+import { AzureSpeechTTSProvider } from './providers/AzureSpeechTTSProvider.js';
+import { DeepgramTextToSpeechProvider } from './providers/DeepgramTextToSpeechProvider.js';
 import { ElevenLabsTextToSpeechProvider } from './providers/ElevenLabsTextToSpeechProvider.js';
 import { OpenAITextToSpeechProvider } from './providers/OpenAITextToSpeechProvider.js';
 import { OpenAIWhisperSpeechToTextProvider } from '../hearing/providers/OpenAIWhisperSpeechToTextProvider.js';
@@ -98,6 +103,39 @@ export class SpeechRuntime {
         this.registry.registerTtsProvider(tts);
         this.registerProviderInResolver(tts, 'tts');
       }
+
+      // The other core catalog providers, built under their catalog ids when
+      // their keys are set. They register after OpenAI and ElevenLabs, so with
+      // no preferred provider those stay the defaults.
+      const deepgramApiKey = env['DEEPGRAM_API_KEY'];
+      if (deepgramApiKey) {
+        const stt = new DeepgramBatchSTTProvider({ apiKey: deepgramApiKey });
+        this.registry.registerSttProvider(stt);
+        this.registerProviderInResolver(stt, 'stt');
+
+        const tts = new DeepgramTextToSpeechProvider({ apiKey: deepgramApiKey });
+        this.registry.registerTtsProvider(tts);
+        this.registerProviderInResolver(tts, 'tts');
+      }
+
+      const assemblyAiApiKey = env['ASSEMBLYAI_API_KEY'];
+      if (assemblyAiApiKey) {
+        const stt = new AssemblyAISTTProvider({ apiKey: assemblyAiApiKey });
+        this.registry.registerSttProvider(stt);
+        this.registerProviderInResolver(stt, 'stt');
+      }
+
+      const azureSpeechKey = env['AZURE_SPEECH_KEY'];
+      const azureSpeechRegion = env['AZURE_SPEECH_REGION'];
+      if (azureSpeechKey && azureSpeechRegion) {
+        const stt = new AzureSpeechSTTProvider({ key: azureSpeechKey, region: azureSpeechRegion });
+        this.registry.registerSttProvider(stt);
+        this.registerProviderInResolver(stt, 'stt');
+
+        const tts = new AzureSpeechTTSProvider({ key: azureSpeechKey, region: azureSpeechRegion });
+        this.registry.registerTtsProvider(tts);
+        this.registerProviderInResolver(tts, 'tts');
+      }
     }
   }
 
@@ -105,20 +143,26 @@ export class SpeechRuntime {
     return this.registry;
   }
 
+  // Each register method also registers the provider in the resolver, which
+  // getSTT(), getTTS() and the resolve methods read.
   registerSttProvider(provider: SpeechToTextProvider): void {
     this.registry.registerSttProvider(provider);
+    this.registerProviderInResolver(provider, 'stt');
   }
 
   registerTtsProvider(provider: TextToSpeechProvider): void {
     this.registry.registerTtsProvider(provider);
+    this.registerProviderInResolver(provider, 'tts');
   }
 
   registerVadProvider(provider: SpeechVadProvider): void {
     this.registry.registerVadProvider(provider);
+    this.registerProviderInResolver(provider, 'vad');
   }
 
   registerWakeWordProvider(provider: WakeWordProvider): void {
     this.registry.registerWakeWordProvider(provider);
+    this.registerProviderInResolver(provider, 'wake-word');
   }
 
   hydrateFromExtensionManager(manager: ExtensionManager): void {

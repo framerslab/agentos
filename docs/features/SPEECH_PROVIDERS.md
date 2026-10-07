@@ -23,8 +23,11 @@ Set the environment variables for the providers you want, then build a `SpeechRu
 ```typescript
 import { SpeechRuntime } from '@framers/agentos/speech';
 
-// Builds OpenAI Whisper and OpenAI TTS when OPENAI_API_KEY is set, ElevenLabs when
-// ELEVENLABS_API_KEY is set, and AgentOS Adaptive VAD, and registers them in its resolver.
+// Builds, and registers in its resolver: OpenAI Whisper and OpenAI TTS when
+// OPENAI_API_KEY is set, ElevenLabs when ELEVENLABS_API_KEY is set, Deepgram batch
+// STT and Deepgram Aura TTS when DEEPGRAM_API_KEY is set, AssemblyAI when
+// ASSEMBLYAI_API_KEY is set, Azure Speech STT and TTS when AZURE_SPEECH_KEY and
+// AZURE_SPEECH_REGION are set, and AgentOS Adaptive VAD.
 const runtime = new SpeechRuntime({ env: process.env });
 // Records the other core ids. Pass an ExtensionManager to add the speech
 // providers its packs registered: runtime.resolver.refresh(extensionManager).
@@ -177,24 +180,30 @@ If no configured provider matches the requirements, `resolveSTT()` / `resolveTTS
 
 ## Installing Extension Providers
 
-Extension providers ship as npm packages under the `@framers/agentos-ext-*` namespace and expose their provider implementation via an [`ExtensionPack`](https://github.com/framerslab/agentos/blob/master/src/extensions/manifest.ts). Install the package and pass your [`ExtensionManager`](https://github.com/framerslab/agentos/blob/master/src/extensions/ExtensionManager.ts) to `refresh()`:
+Extension providers ship as npm packages under the `@framers/agentos-ext-*` namespace and expose their provider implementation via an [`ExtensionPack`](https://github.com/framerslab/agentos/blob/master/src/extensions/manifest.ts). Install the package, load it into an [`ExtensionManager`](https://github.com/framerslab/agentos/blob/master/src/extensions/ExtensionManager.ts), and pass the manager to `refresh()`:
 
 ```bash
-npm install @framers/agentos-ext-voice-synthesis
+npm install @framers/agentos-ext-google-cloud-tts
 ```
 
 ```typescript
-import { ExtensionManager } from '@agentos/agentos';
+import { ExtensionManager } from '@framers/agentos/extensions';
+import { SpeechRuntime } from '@framers/agentos/speech';
 
-const em = new ExtensionManager();
-await em.loadPack('@framers/agentos-ext-voice-synthesis');
+// The Google Cloud TTS pack reads its credentials as the GOOGLE_CLOUD_TTS_CREDENTIALS secret.
+const em = new ExtensionManager({
+  secrets: { GOOGLE_CLOUD_TTS_CREDENTIALS: process.env.GOOGLE_CLOUD_TTS_CREDENTIALS ?? '' },
+});
+await em.loadPackFromPackage('@framers/agentos-ext-google-cloud-tts');
 
-const resolver = new SpeechProviderResolver();
-await resolver.refresh(em);
+const runtime = new SpeechRuntime({ env: process.env });
+await runtime.resolver.refresh(em);
 
-// ElevenLabs and any other TTS providers from the pack are now available
-const tts = resolver.resolveTTS();
+// The pack's provider resolves under its own id, beside the ones SpeechRuntime built.
+const tts = runtime.resolver.resolveTTS({ preferredIds: ['google-cloud-tts'] });
 ```
+
+A later `refresh(em)` drops a provider the manager no longer lists as active, such as one from an unloaded pack.
 
 Extension providers default to priority 200. Add them to `tts.preferred` to promote them above core providers.
 
@@ -205,7 +214,7 @@ Extension providers default to priority 200. Add them to `tts.preferred` to prom
 ### 1. Implement the interface
 
 ```typescript
-import type { SpeechToTextProvider, TranscribeInput, TranscribeResult } from '@agentos/agentos/speech';
+import type { SpeechToTextProvider, TranscribeInput, TranscribeResult } from '@framers/agentos/speech';
 
 export class MyCustomSTT implements SpeechToTextProvider {
   readonly id = 'my-custom-stt';
@@ -225,7 +234,7 @@ For TTS implement [`TextToSpeechProvider`](https://github.com/framerslab/agentos
 ### 2. Register it directly
 
 ```typescript
-import { findSpeechProviderCatalogEntry } from '@agentos/agentos/speech';
+import { findSpeechProviderCatalogEntry } from '@framers/agentos/speech';
 
 resolver.register({
   id: 'my-custom-stt',
