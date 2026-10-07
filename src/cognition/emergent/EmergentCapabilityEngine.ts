@@ -1905,10 +1905,11 @@ export class EmergentCapabilityEngine {
         const suspendFor = !result.success && refused ? RUN_REFUSAL_REASONS[refused] : undefined;
         if (suspendFor) {
           await this.suspendAsLibrary(tool.id, suspendFor);
-          if (suspendFor === 'step_replaced') {
-            // The registration that swapped the step's tool ran before this
-            // suspension existed, so it did not re-check this composition:
-            // check it now against the tool that holds the name.
+          if (refused === 'step_replaced') {
+            // The step's tool changed hands between its check and its run (the
+            // gate's refusal; nothing ran). The registration that swapped it ran
+            // before this suspension existed, so it did not re-check this
+            // composition: check it now against the tool that holds the name.
             try {
               await this.recheck(tool.id, false);
             } catch (recheckError: unknown) {
