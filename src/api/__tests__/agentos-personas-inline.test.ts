@@ -8,7 +8,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { createDatabase } from '@framers/sql-storage-adapter';
 
 const providerInitialize = vi.fn(async () => undefined);
 
@@ -52,9 +51,11 @@ const withPresets = {
 } as unknown as IPersonaDefinition;
 const providers = { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey: 'test' } }] };
 
+// No storageAdapter: AgentOS.create() then runs on the package's Prisma stub and keeps
+// conversations in memory (ConversationManager turns persistence off), which is the
+// documented zero-config path the README sample uses.
 async function boot(overrides: Record<string, unknown>): Promise<AgentOS> {
-  const storageAdapter = await createDatabase({ priority: ['memory'] });
-  return AgentOS.create({ storageAdapter, modelProviderManagerConfig: providers, turnPlanning: { enabled: false }, ...overrides } as any);
+  return AgentOS.create({ modelProviderManagerConfig: providers, turnPlanning: { enabled: false }, ...overrides } as any);
 }
 
 async function collect(agentos: AgentOS, selectedPersonaId: string): Promise<any[]> {
