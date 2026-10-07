@@ -8,6 +8,8 @@ import * as path from 'node:path';
 import { brokeredRead, ReadRoots, type ReadTooLarge } from '../broker/fs-read.js';
 import { CapabilityBroker } from '../broker/CapabilityBroker.js';
 import { resolveCeiling } from '../ceiling.js';
+import { EmergentToolRegistry } from '../EmergentToolRegistry.js';
+import { createSqliteAdapter } from './helpers/sqlite-adapter.js';
 
 interface Seen {
   method?: string;
@@ -234,5 +236,103 @@ describe('CapabilityBroker.functionsFor', () => {
       signal: live(),
     });
     expect(Object.keys(fns)).toEqual(['crypto']);
+  });
+});
+
+describe('CapabilityBroker records and ends runs', () => {
+  it('records an allowed call before it runs and its outcome after, and lists the run when it ends', async () => {
+    const { port } = await serve((_req, res) => res.end('ok'));
+    const db = createSqliteAdapter();
+    const store = new EmergentToolRegistry({}, db).effectsStore({ content: 'full' });
+    const broker = new CapabilityBroker(
+      resolveCeiling({ fetch: { domains: ['127.0.0.1'] }, crypto: {} }, { content: 'full' }, { hasStorage: true }),
+      store,
+    );
+    const controller = new AbortController();
+    const call = { id: 'run-1', toolId: 'tool-1', agentId: 'agent-1', signal: controller.signal };
+    const fns = broker.functionsFor(['fetch', 'crypto'], call);
+    const response = await (fns.fetch as (url: string) => Promise<Response>)(`http://127.0.0.1:${port}/x`);
+    expect(await response.text()).toBe('ok');
+    (fns.crypto as { randomUUID(): string }).randomUUID();
+    (fns.crypto as { randomUUID(): string }).randomUUID();
+
+    controller.abort();
+    const effects = await broker.endCall('run-1');
+    expect(effects).toEqual([
+      expect.objectContaining({
+        kind: 'capability',
+        capability: 'fetch',
+        target: `http://127.0.0.1:${port}/x`,
+        decision: 'allowed',
+        decidedBy: 'ceiling',
+        outcome: 'ok',
+        bytes: 2,
+        record: 'written',
+      }),
+      expect.objectContaining({ capability: 'crypto', uses: 2, record: 'written' }),
+    ]);
+    expect(
+      db.raw.prepare('SELECT capability, outcome, uses FROM agentos_emergent_effects ORDER BY capability DESC').all(),
+    ).toEqual([
+      { capability: 'fetch', outcome: 'ok', uses: null },
+      { capability: 'crypto', outcome: 'ok', uses: 2 },
+    ]);
+  });
+
+  it('records a refusal with what decided it, and refuses a call whose intent cannot be written', async () => {
+    const { port, seen } = await serve((_req, res) => res.end('ok'));
+    const db = createSqliteAdapter();
+    const store = new EmergentToolRegistry({}, db).effectsStore({ content: 'digest' });
+    const broker = new CapabilityBroker(
+      resolveCeiling({ fetch: { domains: ['127.0.0.1'] } }, undefined, { hasStorage: true }),
+      store,
+    );
+    const call = { id: 'run-2', toolId: 'tool-1', agentId: 'agent-1', signal: live() };
+    const fetchFn = broker.functionsFor(['fetch'], call).fetch as (url: string) => Promise<Response>;
+
+    await expect(fetchFn(`http://localhost:${port}/x`)).rejects.toThrow('host_not_allowed');
+    db.failNext('INSERT INTO agentos_emergent_effects');
+    await expect(fetchFn(`http://127.0.0.1:${port}/y`)).rejects.toThrow('audit_unavailable');
+    expect(seen).toEqual([]);
+
+    expect(await broker.endCall('run-2')).toEqual([
+      expect.objectContaining({ decision: 'refused', decidedBy: 'host_not_allowed', record: 'written' }),
+      expect.objectContaining({ decision: 'refused', decidedBy: 'audit_unavailable', record: 'none' }),
+    ]);
+  });
+
+  it('ending a run aborts its request in flight and leaves a concurrent run alone', async () => {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { port } = await serve((req, res) => {
+      if (req.url === '/hang') {
+        return;
+      }
+      void released.then(() => res.end('late'));
+    });
+    const broker = new CapabilityBroker(
+      resolveCeiling({ fetch: { domains: ['127.0.0.1'] } }, { store: 'none' }, { hasStorage: false }),
+    );
+    const a = new AbortController();
+    const b = new AbortController();
+    const fetchA = broker.functionsFor(['fetch'], { id: 'a', toolId: 't', agentId: 'x', signal: a.signal })
+      .fetch as (url: string) => Promise<Response>;
+    const fetchB = broker.functionsFor(['fetch'], { id: 'b', toolId: 't', agentId: 'x', signal: b.signal })
+      .fetch as (url: string) => Promise<Response>;
+
+    const hanging = fetchA(`http://127.0.0.1:${port}/hang`).catch((error: Error) => error.message);
+    const late = fetchB(`http://127.0.0.1:${port}/late`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    a.abort();
+    const ended = await broker.endCall('a');
+    expect(await hanging).toContain('aborted');
+    expect(ended).toEqual([expect.objectContaining({ outcome: 'aborted', record: 'none' })]);
+
+    release();
+    expect(await (await late).text()).toBe('late');
+    b.abort();
+    expect(await broker.endCall('b')).toEqual([expect.objectContaining({ outcome: 'ok' })]);
   });
 });
