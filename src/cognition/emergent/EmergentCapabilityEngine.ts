@@ -22,6 +22,7 @@ import type {
   EmergentTool,
   ToolUsageStats,
   PersistedToolRow,
+  StoredRequest,
   ToolImplementation,
   ToolState,
   ToolStateRecord,

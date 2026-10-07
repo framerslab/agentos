@@ -86,7 +86,7 @@ class MockStorageAdapter implements IStorageAdapter {
   >();
 
   async run(sql: string, params: unknown[] = []): Promise<unknown> {
-    if (sql.includes('INSERT OR REPLACE INTO agentos_emergent_tools')) {
+    if (sql.includes('INTO agentos_emergent_tools')) {
       const id = String(params[0]);
       this.rows.set(id, {
         promoted_at:

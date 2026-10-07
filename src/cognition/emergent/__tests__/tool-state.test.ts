@@ -267,7 +267,10 @@ describe('EmergentToolRegistry state', () => {
     const tool = makeTool({ id: 'emergent_test_8' });
     registry.register(tool, 'agent');
     await settle();
+    // The state row is written by a state write, not by registration.
+    await registry.setState(tool.id, 'active', null, { setBy: 'library' });
     expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active' });
+    expect(readToolRow(db, tool.id)?.is_active).toBe(1);
     db.raw.prepare('UPDATE agentos_emergent_tools SET is_active = 0 WHERE id = ?').run(tool.id);
 
     const other = new EmergentToolRegistry(
