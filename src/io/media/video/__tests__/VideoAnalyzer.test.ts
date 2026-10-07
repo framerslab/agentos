@@ -486,6 +486,31 @@ describe('VideoAnalyzer', () => {
     warnSpy.mockRestore();
   });
 
+  it('asks the STT provider for timestamped output and maps its segments onto scenes', async () => {
+    setupExecFileMock();
+    const sttProvider = makeMockSTTProvider();
+
+    const analyzer = new VideoAnalyzer({
+      visionPipeline: makeMockVisionPipeline(),
+      sceneDetector: makeMockSceneDetector(),
+      sttProvider,
+    });
+
+    const result = await analyzer.analyze({
+      video: Buffer.alloc(1024, 0),
+      transcribeAudio: true,
+    });
+
+    // The OpenAI provider returns segments only for verbose_json, so the
+    // analyzer asks for it; without segments no scene gets a transcript.
+    expect(sttProvider.transcribe).toHaveBeenCalledWith(
+      expect.objectContaining({ mimeType: 'audio/wav' }),
+      { responseFormat: 'verbose_json' },
+    );
+    expect(result.fullTranscript).toBe('Hello world, this is a test video narration.');
+    expect(result.scenes.some((scene) => typeof scene.transcript === 'string')).toBe(true);
+  });
+
   it('keeps encoded frames for vision analysis while passing raw RGB frames to scene detection', async () => {
     setupExecFileMock();
 

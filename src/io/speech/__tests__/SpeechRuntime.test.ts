@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ExtensionManager } from '../../../extensions/ExtensionManager.js';
 import { EXTENSION_KIND_TTS_PROVIDER } from '../../../extensions/types.js';
 import { SpeechRuntime } from '../SpeechRuntime.js';
+import type { SpeechToTextProvider } from '../types.js';
 
 /**
  * Tests for {@link SpeechRuntime} — the high-level runtime that manages
@@ -103,5 +104,49 @@ describe('SpeechRuntime', () => {
 
     // Verify the preferred providers were used, not the first-registered ones
     expect(calls).toEqual(['elevenlabs', 'deepgram']);
+  });
+
+  it('should transcribe on gpt-transcribe by default and keep timestamped formats on whisper-1', async () => {
+    // The env-registered provider captures the global fetch when it is built,
+    // so the stub goes in before the runtime is constructed.
+    const forms: FormData[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        forms.push(init?.body as unknown as FormData);
+        return new Response(JSON.stringify({ text: 'hello', languages: [{ code: 'en' }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      })
+    );
+    try {
+      const audio = { data: Buffer.from('wav'), mimeType: 'audio/wav' };
+      const runtime = new SpeechRuntime({ env: { OPENAI_API_KEY: 'sk-openai' } });
+      const stt = runtime.getProvider('openai-whisper') as SpeechToTextProvider;
+
+      const result = await stt.transcribe(audio, { language: 'en' });
+      expect(forms[0].get('model')).toBe('gpt-transcribe');
+      expect(forms[0].get('response_format')).toBe('json');
+      expect(forms[0].getAll('languages[]')).toEqual(['en']);
+      expect(forms[0].has('language')).toBe(false);
+      expect(result.language).toBe('en');
+
+      // Segment timestamps exist only on whisper-1, so a verbose_json call
+      // with no configured model runs there.
+      await stt.transcribe(audio, { responseFormat: 'verbose_json' });
+      expect(forms[1].get('model')).toBe('whisper-1');
+      expect(forms[1].get('response_format')).toBe('verbose_json');
+
+      // WHISPER_MODEL_DEFAULT still pins the model for every call.
+      const pinned = new SpeechRuntime({
+        env: { OPENAI_API_KEY: 'sk-openai', WHISPER_MODEL_DEFAULT: 'whisper-1' },
+      });
+      await (pinned.getProvider('openai-whisper') as SpeechToTextProvider).transcribe(audio);
+      expect(forms[2].get('model')).toBe('whisper-1');
+      expect(forms[2].get('response_format')).toBe('verbose_json');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

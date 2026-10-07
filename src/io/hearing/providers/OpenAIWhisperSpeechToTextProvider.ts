@@ -12,7 +12,7 @@ import { ApiKeyPool } from '../../../core/providers/ApiKeyPool.js';
  * Configuration for the {@link OpenAIWhisperSpeechToTextProvider}.
  *
  * @see {@link OpenAIWhisperSpeechToTextProvider} for usage examples
- * @see https://platform.openai.com/docs/api-reference/audio/createTranscription
+ * @see https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create
  */
 export interface OpenAIWhisperSpeechToTextProviderConfig {
   /**
@@ -29,8 +29,16 @@ export interface OpenAIWhisperSpeechToTextProviderConfig {
   baseUrl?: string;
 
   /**
-   * Default Whisper model to use for transcription.
-   * @default 'whisper-1'
+   * Default transcription model.
+   *
+   * `gpt-transcribe` is the model OpenAI recommends for recorded speech.
+   * OpenAI removes `whisper-1` from the API on 2027-02-26 and names
+   * `gpt-live-transcribe` or `gpt-transcribe` as the replacement, while its
+   * guide still sends callers who need word or segment timestamps to
+   * `whisper-1`. With no model configured, a call that asks for
+   * `verbose_json`, `srt` or `vtt` runs on `whisper-1`, which serves those
+   * formats.
+   * @default 'gpt-transcribe'
    */
   model?: string;
 
@@ -39,6 +47,43 @@ export interface OpenAIWhisperSpeechToTextProviderConfig {
    * @default globalThis.fetch
    */
   fetchImpl?: typeof fetch;
+}
+
+/** The model OpenAI recommends for transcribing recorded speech. */
+const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-transcribe';
+
+/** The OpenAI model that serves segment timestamps (`verbose_json`), `srt` and `vtt`. */
+const TIMESTAMP_MODEL = 'whisper-1';
+
+/** Response formats that carry timestamps. With no model chosen, they run on `whisper-1`. */
+const TIMESTAMP_FORMATS: ReadonlySet<SpeechResponseFormat> = new Set<SpeechResponseFormat>([
+  'verbose_json',
+  'srt',
+  'vtt',
+]);
+
+/** `whisper-1` keeps this provider's `verbose_json` default; the newer models answer in `json`. */
+function isWhisperModel(model: string): boolean {
+  return model.startsWith('whisper');
+}
+
+/** `gpt-transcribe` takes language hints as a `languages` list in place of the singular `language` field. */
+function takesLanguageList(model: string): boolean {
+  return model === 'gpt-transcribe' || model.startsWith('gpt-transcribe-');
+}
+
+/** Reads the billed audio seconds from a `usage` block of type `duration`. */
+function usageSeconds(usage: unknown): number | undefined {
+  if (typeof usage !== 'object' || usage === null) return undefined;
+  const value = usage as Record<string, unknown>;
+  return value.type === 'duration' && typeof value.seconds === 'number' ? value.seconds : undefined;
+}
+
+/** Reads the first code from the `languages` list that `gpt-transcribe` returns. */
+function firstDetectedLanguage(languages: unknown): string | undefined {
+  if (!Array.isArray(languages)) return undefined;
+  const first = languages[0] as Record<string, unknown> | undefined;
+  return first && typeof first.code === 'string' ? first.code : undefined;
 }
 
 /**
@@ -107,23 +152,33 @@ function normalizeSegments(input: unknown): SpeechTranscriptionSegment[] | undef
 }
 
 /**
- * Speech-to-text provider that uses the OpenAI Whisper transcription API.
+ * Speech-to-text provider that uses the OpenAI transcription API.
  *
  * ## API Contract
  *
  * - **Endpoint:** `POST {baseUrl}/audio/transcriptions`
  * - **Authentication:** `Authorization: Bearer <apiKey>`
  * - **Content-Type:** `multipart/form-data` (FormData with file blob)
- * - **Response format:** Controlled by the `response_format` field; defaults
- *   to `verbose_json` which includes segments, language detection, and duration.
+ * - **Response format:** Controlled by the `response_format` field. When the
+ *   caller names none, `whisper-1` is asked for `verbose_json` (segments,
+ *   language and duration) and the other models for `json`.
+ *
+ * ## Models
+ *
+ * - `gpt-transcribe` (default): the model OpenAI recommends for recorded
+ *   speech. It returns the text and the detected `languages`, and it takes
+ *   language hints as a `languages` list.
+ * - `whisper-1`: removed from the API on 2027-02-26. It serves segment
+ *   timestamps, `srt` and `vtt`, so a call that asks for one of those formats
+ *   with no model configured runs on it.
  *
  * ## Supported Response Formats
  *
- * - `verbose_json` — Full JSON with segments, duration, and language (default)
- * - `json` — Minimal JSON with just the text
- * - `text` — Plain text response (no JSON)
- * - `srt` — SubRip subtitle format
- * - `vtt` — WebVTT subtitle format
+ * - `verbose_json`: full JSON with segments, duration and language (`whisper-1`)
+ * - `json`: JSON with the text (the newer models also return `languages`)
+ * - `text`: plain text, no JSON
+ * - `srt`: SubRip subtitles (`whisper-1`)
+ * - `vtt`: WebVTT subtitles (`whisper-1`)
  *
  * When `text`, `srt`, or `vtt` format is used, the response is returned as
  * plain text and segments are not available.
@@ -135,11 +190,16 @@ function normalizeSegments(input: unknown): SpeechTranscriptionSegment[] | undef
  * ```ts
  * const provider = new OpenAIWhisperSpeechToTextProvider({
  *   apiKey: process.env.OPENAI_API_KEY!,
- *   model: 'whisper-1',
  * });
+ * // Runs on gpt-transcribe and answers in json.
  * const result = await provider.transcribe(
  *   { data: audioBuffer, mimeType: 'audio/wav', fileName: 'recording.wav' },
- *   { language: 'en', responseFormat: 'verbose_json' },
+ *   { language: 'en' },
+ * );
+ * // Segment timestamps come from whisper-1.
+ * const timed = await provider.transcribe(
+ *   { data: audioBuffer, mimeType: 'audio/wav', fileName: 'recording.wav' },
+ *   { responseFormat: 'verbose_json' },
  * );
  * ```
  */
@@ -166,7 +226,7 @@ export class OpenAIWhisperSpeechToTextProvider implements SpeechToTextProvider {
    * const provider = new OpenAIWhisperSpeechToTextProvider({
    *   apiKey: 'sk-xxxx',
    *   baseUrl: 'https://api.openai.com/v1', // default
-   *   model: 'whisper-1', // default
+   *   model: 'gpt-transcribe', // default
    * });
    * ```
    */
@@ -218,8 +278,15 @@ export class OpenAIWhisperSpeechToTextProvider implements SpeechToTextProvider {
     options: SpeechTranscriptionOptions = {}
   ): Promise<SpeechTranscriptionResult> {
     const form = new FormData();
-    const responseFormat = (options.responseFormat ?? 'verbose_json') as SpeechResponseFormat;
-    const model = options.model ?? this.config.model ?? 'whisper-1';
+    const requestedFormat = options.responseFormat;
+    const model =
+      options.model ??
+      this.config.model ??
+      (requestedFormat && TIMESTAMP_FORMATS.has(requestedFormat)
+        ? TIMESTAMP_MODEL
+        : DEFAULT_TRANSCRIPTION_MODEL);
+    const responseFormat: SpeechResponseFormat =
+      requestedFormat ?? (isWhisperModel(model) ? 'verbose_json' : 'json');
     // Generate a filename with the correct extension for Whisper's format detection
     const fileName = audio.fileName ?? `speech.${audio.format ?? 'wav'}`;
 
@@ -231,8 +298,13 @@ export class OpenAIWhisperSpeechToTextProvider implements SpeechToTextProvider {
     );
     form.append('model', model);
     form.append('response_format', responseFormat);
-    // Optional fields — only include when explicitly set to avoid API warnings
-    if (options.language) form.append('language', options.language);
+    // Optional fields are sent only when set, to avoid API warnings.
+    // gpt-transcribe reads its language hint from `languages`; OpenAI asks
+    // callers not to send both fields.
+    if (options.language) {
+      if (takesLanguageList(model)) form.append('languages[]', options.language);
+      else form.append('language', options.language);
+    }
     if (options.prompt) form.append('prompt', options.prompt);
     if (typeof options.temperature === 'number') {
       form.append('temperature', String(options.temperature));
@@ -272,14 +344,22 @@ export class OpenAIWhisperSpeechToTextProvider implements SpeechToTextProvider {
       };
     }
 
-    // JSON responses (verbose_json or json) — parse and normalize
+    // JSON responses (verbose_json or json) are parsed and normalized. Only
+    // verbose_json carries `duration` and `language`; the json answer of the
+    // newer models reports the audio length under `usage` and the detected
+    // languages as a `languages` list.
     const payload = (await response.json()) as Record<string, unknown>;
     const durationSeconds =
-      typeof payload.duration === 'number' ? payload.duration : audio.durationSeconds;
+      typeof payload.duration === 'number'
+        ? payload.duration
+        : (usageSeconds(payload.usage) ?? audio.durationSeconds);
 
     return {
       text: typeof payload.text === 'string' ? payload.text : '',
-      language: typeof payload.language === 'string' ? payload.language : options.language,
+      language:
+        typeof payload.language === 'string'
+          ? payload.language
+          : (firstDetectedLanguage(payload.languages) ?? options.language),
       durationSeconds,
       cost: 0,
       segments: normalizeSegments(payload.segments),
