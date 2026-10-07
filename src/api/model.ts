@@ -93,8 +93,9 @@ export function routedProviderOf(opts: { provider?: string; model?: string }): s
   if (model && provider !== 'ollama') {
     const prefixed = knownProviderPrefixOf(model);
     if (prefixed) return prefixed;
-    // A colon id no known prefix split stays whole: no slash form for it.
-    const slash = model.includes(':') ? -1 : model.indexOf('/');
+    // A colon id no known prefix split takes the slash form only when
+    // `provider` repeats its prefix, as in resolveModelOption.
+    const slash = model.includes(':') && !provider ? -1 : model.indexOf('/');
     if (slash > 0) {
       const maybe = model.slice(0, slash);
       if (Object.prototype.hasOwnProperty.call(PROVIDER_DEFAULTS, maybe) && (!provider || provider === maybe)) return maybe;
@@ -375,9 +376,10 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
     // that id belongs to the gateway, not to the vendor's own API. A prefix
     // that repeats the explicit provider is dropped.
     // A colon id that no known prefix split (an Ollama tag, an OpenRouter
-    // `:free` id) is kept whole: the slash form applies only to ids with no
-    // colon, so `openai/gpt-4o:free` never goes to OpenAI as `gpt-4o:free`.
-    const slashIdx = opts.model.includes(':') ? -1 : opts.model.indexOf('/');
+    // `:free` id) takes the slash form only when `provider` repeats its
+    // prefix, so with no provider `openai/gpt-4o:free` never goes to OpenAI
+    // as `gpt-4o:free`.
+    const slashIdx = opts.model.includes(':') && !opts.provider ? -1 : opts.model.indexOf('/');
     if (slashIdx > 0) {
       const maybeProvider = opts.model.slice(0, slashIdx);
       if (PROVIDER_DEFAULTS[maybeProvider] && (!opts.provider || opts.provider === maybeProvider)) {

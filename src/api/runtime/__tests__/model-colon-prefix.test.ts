@@ -14,6 +14,11 @@ describe('a colon in a model id', () => {
   it('keeps an OpenRouter id with a :free suffix whole', () => {
     expect(resolveModelOption({ provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct:free' })).toEqual({ providerId: 'openrouter', modelId: 'meta-llama/llama-3.3-70b-instruct:free' });
   });
+  it('drops a slash prefix that repeats the explicit provider, from a colon id too', () => {
+    expect(resolveModelOption({ provider: 'openrouter', model: 'openrouter/meta-llama/llama-3.3-70b-instruct:free' })).toEqual({ providerId: 'openrouter', modelId: 'meta-llama/llama-3.3-70b-instruct:free' });
+    expect(resolveModelOption({ provider: 'ollama', model: 'ollama/qwen2.5:7b' })).toEqual({ providerId: 'ollama', modelId: 'qwen2.5:7b' });
+    expect(routedProviderOf({ provider: 'openrouter', model: 'openrouter/meta-llama/llama-3.3-70b-instruct:free' })).toBe('openrouter');
+  });
   it('splits a known provider prefix with no provider, and whatever provider says', () => {
     expect(resolveModelOption({ model: 'openai:gpt-6-astra' })).toEqual({ providerId: 'openai', modelId: 'gpt-6-astra' });
     expect(resolveModelOption({ provider: 'openai', model: 'anthropic:claude-opus-5-5' })).toEqual({ providerId: 'anthropic', modelId: 'claude-opus-5-5' });
@@ -95,6 +100,19 @@ describe('mergeDefaults and a prefixed seat model', () => {
     const viaGateway = mergeDefaults({ model: 'anthropic/claude-sonnet-5-5' }, gateway);
     expect(viaGateway.provider).toBe('openrouter');
     expect(viaGateway.apiKey).toBe('sk-or');
+  });
+  it('withholds the agency key from a plain-model seat when the agency names its provider only by a model prefix', () => {
+    const prefixAgency = { agents: {}, model: 'openai:gpt-4.1', apiKey: 'sk-openai', baseUrl: 'https://proxy.local/v1' } as unknown as AgencyOptions;
+    // The plain model goes to auto-detection, which may pick another vendor.
+    const plain = mergeDefaults({ model: 'gpt-4.1-mini' }, prefixAgency);
+    expect(plain.provider).toBeUndefined();
+    expect(plain.apiKey).toBeUndefined();
+    expect(plain.baseUrl).toBeUndefined();
+    // A seat that names the agency's provider, by prefix or by `provider`, shares the key.
+    expect(mergeDefaults({ model: 'openai:gpt-4.1-mini' }, prefixAgency).apiKey).toBe('sk-openai');
+    expect(mergeDefaults({ provider: 'openai', model: 'gpt-4.1-mini' }, prefixAgency).apiKey).toBe('sk-openai');
+    // A seat with no model of its own runs the agency's model, and keeps its key.
+    expect(mergeDefaults({}, prefixAgency).apiKey).toBe('sk-openai');
   });
   it('compares the providers resolveModelOption picks: a model prefix wins over provider, except under ollama', () => {
     const openaiAgency = { agents: {}, provider: 'openai', model: 'gpt-4.1', apiKey: 'sk-openai' } as unknown as AgencyOptions;

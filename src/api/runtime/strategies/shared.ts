@@ -233,13 +233,15 @@ export function mergeDefaults(
   const model = agentConfig.model ?? agencyConfig.model;
   const provider = agentConfig.provider ?? (seatPrefix !== undefined ? undefined : agencyConfig.provider);
   // The agency's key and URL belong to the provider the agency's own calls go
-  // to. A seat whose calls go to another provider (named by a model prefix in
-  // either form, or by its own `provider`) does not inherit them: sending them
-  // there would leak the key to another vendor. When the agency's provider
-  // comes from auto-detection, it is unknown and the seat inherits them.
+  // to. A seat inherits them only when its calls go to that same provider: a
+  // seat whose calls go to another provider (named by a model prefix in either
+  // form, or by its own `provider`), or to auto-detection, which may pick any
+  // vendor, does not, since sending them there would leak the key to another
+  // vendor. When the agency's provider comes from auto-detection, it is
+  // unknown and the seat inherits them.
   const seatRouted = routedProviderOf({ provider, model });
   const agencyRouted = routedProviderOf(agencyConfig);
-  const otherVendor = seatRouted !== undefined && agencyRouted !== undefined && seatRouted !== agencyRouted;
+  const otherVendor = agencyRouted !== undefined && seatRouted !== agencyRouted;
   return {
     // Agency-level model/provider/apiKey/baseUrl serve as defaults.
     // They are placed BEFORE the spread of agentConfig so that agent-level
