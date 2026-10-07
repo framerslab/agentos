@@ -5,11 +5,12 @@
  * builds a prompt, so the prompt is budgeted for the model that will serve it.
  * `stream()` makes ONE provider attempt on a resolved hop with a delivery
  * boundary: a failure before the first content chunk is reported through
- * `outcome` and nothing is yielded, so the GMI can rebuild the prompt for the
- * next hop. The GMI drives the hop loop.
+ * `outcome`, with the usage the provider billed for it, and nothing is
+ * yielded, so the GMI can rebuild the prompt for the next hop. The GMI drives
+ * the hop loop.
  */
 import type { ZodType } from 'zod';
-import type { ChatMessage, ModelCompletionOptions, ModelCompletionResponse } from '../../core/llm/providers/IProvider.js';
+import type { ChatMessage, ModelCompletionOptions, ModelCompletionResponse, ModelUsage } from '../../core/llm/providers/IProvider.js';
 import type { AIModelProviderManager } from '../../core/llm/providers/AIModelProviderManager.js';
 import type { ITool } from '../../core/tools/ITool.js';
 import type { IModelRouter, ModelRouteParams } from '../../core/llm/routing/IModelRouter.js';
@@ -21,6 +22,7 @@ import {
   fallbackHopOverrides,
   isContentPolicyRefusal,
   isRetryableError,
+  usageOfError,
   type FallbackProviderEntry,
   type GenerateTextOptions,
 } from '../generateText.js';
@@ -74,9 +76,14 @@ export interface CompletionResolution {
   readonly chain: ReadonlyArray<CompletionHop>;
 }
 
+/**
+ * How an attempt ended. A `hopFailed` attempt carries `usage` when the
+ * provider billed it and reported the bill (a refused turn, an error chunk
+ * with usage); the GMI adds it to the turn's usage.
+ */
 export type CompletionOutcome =
   | { kind: 'delivered' }
-  | { kind: 'hopFailed'; error: Error; retryable: boolean }
+  | { kind: 'hopFailed'; error: Error; retryable: boolean; usage?: ModelUsage }
   | { kind: 'abandoned' };
 
 /** One provider attempt. `outcome` settles when iteration ends (a never-iterated attempt never calls the provider). */
@@ -220,6 +227,32 @@ function carriesContent(chunk: ModelCompletionResponse): boolean {
   return (chunk as { structuredOutput?: unknown }).structuredOutput !== undefined;
 }
 
+/** A usage report as a provider gives it: an object with a numeric token count. */
+function asUsageReport(value: unknown): ModelUsage | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const { promptTokens, completionTokens, totalTokens } = value as Record<string, unknown>;
+  return [promptTokens, completionTokens, totalTokens].some((n) => typeof n === 'number' && Number.isFinite(n))
+    ? (value as ModelUsage)
+    : undefined;
+}
+
+/**
+ * What the provider billed an attempt that failed before any content: the
+ * error chunk's own usage, else the usage the error carries (`details.usage`,
+ * as a refused Claude turn reports it), else the last usage among the chunks
+ * buffered before the failure. Providers report the request's running total,
+ * so the latest report is the attempt's whole bill.
+ */
+function billedUsage(buffered: ReadonlyArray<ModelCompletionResponse>, error: Error, chunkUsage?: ModelUsage): ModelUsage | undefined {
+  const reported = asUsageReport(chunkUsage) ?? asUsageReport(usageOfError(error));
+  if (reported) return reported;
+  for (let i = buffered.length - 1; i >= 0; i--) {
+    const usage = asUsageReport(buffered[i].usage);
+    if (usage) return usage;
+  }
+  return undefined;
+}
+
 /** The provider-native schema payload for this hop, built as session.send builds it. */
 function lowerForHop(resolution: CompletionResolution, schema: ZodType, schemaName: string): { responseFormat: Record<string, unknown> | undefined; toolName?: string } {
   const responseFormat = buildResponseFormatForProvider({
@@ -335,11 +368,11 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         settle(o);
       }
     };
-    const failed = (error: Error, retryable = isRetryableError(error) || isContentPolicyRefusal(error)): CompletionOutcome => ({
-      kind: 'hopFailed',
-      error,
-      retryable,
-    });
+    const failed = (
+      error: Error,
+      usage: ModelUsage | undefined,
+      retryable = isRetryableError(error) || isContentPolicyRefusal(error),
+    ): CompletionOutcome => ({ kind: 'hopFailed', error, retryable, ...(usage ? { usage } : {}) });
 
     const structured = responseSchema ? lowerForHop(resolution, responseSchema, schemaName) : undefined;
     const callOptions: ModelCompletionOptions = {
@@ -360,7 +393,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         if (!provider) {
           const error = Object.assign(new Error(`Provider '${resolution.providerId}' is not available.`), { name: 'ProviderInitializationError' });
           globalLLMProviderHealth.recordFailure(resolution.providerId, error);
-          finish(failed(error));
+          finish(failed(error, undefined));
           return;
         }
         for await (const raw of provider.generateCompletionStream(resolution.modelId, messages, callOptions)) {
@@ -372,7 +405,8 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
             const error = errorFromChunk(chunk.error);
             if (!aborted) globalLLMProviderHealth.recordFailure(resolution.providerId, error);
             if (!delivered) {
-              finish(aborted ? failed(error, false) : failed(error));
+              const usage = billedUsage(buffer, error, chunk.usage);
+              finish(aborted ? failed(error, usage, false) : failed(error, usage));
               return;
             }
             // After content the step ends with the provider's error chunk. The
@@ -406,7 +440,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         const error = err instanceof Error ? err : new Error(String(err));
         globalLLMProviderHealth.recordFailure(resolution.providerId, error);
         if (!delivered) {
-          finish(failed(error));
+          finish(failed(error, billedUsage(buffer, error)));
           return;
         }
         completed = true;

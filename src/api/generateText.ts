@@ -1231,7 +1231,7 @@ export function addModelUsage(target: TokenUsage, usage: unknown): void {
  * The usage a provider error reports for the request it ended, such as the
  * billed tokens of a refused turn (`details.usage`).
  *
- * @internal Shared with streamText.
+ * @internal Shared with streamText and the completion gateway.
  */
 export function usageOfError(error: unknown): unknown {
   return (error as { details?: { usage?: unknown } } | null | undefined)?.details?.usage;

@@ -89,6 +89,14 @@ function pickCompletionOptions(source: Record<string, unknown> | undefined): Par
   return picked as Partial<ModelCompletionOptions>;
 }
 
+/** Adds one provider usage report to the turn's total. */
+function addUsage(total: CostAggregator, usage: ModelUsage): void {
+  total.promptTokens += usage.promptTokens || 0;
+  total.completionTokens += usage.completionTokens || 0;
+  total.totalTokens = total.promptTokens + total.completionTokens;
+  if (usage.costUSD) total.totalCostUSD = (total.totalCostUSD || 0) + usage.costUSD;
+}
+
 /**
  * @class GMI
  * @implements {IGMI}
@@ -1300,6 +1308,16 @@ export class GMI implements IGMI {
               const failedHop = resolution;
               lastHopError = outcome.error;
               this.addTraceEntry(ReasoningEntryType.WARNING, `Provider '${failedHop.providerId}' (hop ${failedHop.hop}) failed before any output: ${outcome.error.message}`);
+              // A failed attempt can still be billed (a refused turn reports its
+              // usage). It counts toward the turn once, whether or not the turn
+              // goes on, and is reported on its own USAGE_UPDATE: no STEP_FINISHED
+              // carries it.
+              if (outcome.usage) {
+                addUsage(aggregatedUsage, outcome.usage);
+                yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.USAGE_UPDATE, outcome.usage, {
+                  metadata: { attemptFailed: true, hop: failedHop.hop, providerId: failedHop.providerId, modelId: failedHop.modelId },
+                });
+              }
               if (!outcome.retryable) {
                 throw new GMIError(`LLM provider error: ${outcome.error.message}`, GMIErrorCode.LLM_PROVIDER_ERROR, { turnId, providerId: failedHop.providerId, hop: failedHop.hop });
               }
@@ -1324,12 +1342,7 @@ export class GMI implements IGMI {
         if (resolution) this.turnResolution = resolution;
 
         // The step's usage, counted once (D4c).
-        if (stepUsage) {
-          aggregatedUsage.promptTokens += stepUsage.promptTokens || 0;
-          aggregatedUsage.completionTokens += stepUsage.completionTokens || 0;
-          aggregatedUsage.totalTokens = aggregatedUsage.promptTokens + aggregatedUsage.completionTokens;
-          if (stepUsage.costUSD) aggregatedUsage.totalCostUSD = (aggregatedUsage.totalCostUSD || 0) + stepUsage.costUSD;
-        }
+        if (stepUsage) addUsage(aggregatedUsage, stepUsage);
 
         // The step boundary (D4d): the step's own text, finish reason, hop and usage.
         const stepPayload: StepFinishedChunkPayload = {
