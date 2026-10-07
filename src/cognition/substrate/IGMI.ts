@@ -189,6 +189,13 @@ export interface GMIBaseConfig {
   /** Runtime default for the characters kept per trace message. Defaults to `1000`. */
   defaultReasoningTraceMaxMessageLength?: number;
   customSettings?: Record<string, any>;
+  /**
+   * One model layer for the turn. When set, the GMI resolves the hop through it
+   * before it builds the prompt, streams through it, and moves to the next hop
+   * when an attempt fails before any output. `llmProviderManager` is then a
+   * `GatewayProviderManager` (see `src/api/runtime/gatewayProviderManager.ts`).
+   */
+  completionGateway?: import('../../api/runtime/completionGateway.js').CompletionGateway;
 }
 
 /**
@@ -281,6 +288,10 @@ export enum GMIOutputChunkType {
    * The chunk content is `{ ragSources: RagRetrievedChunk[] }`.
    */
   RAG_SOURCES_AVAILABLE = 'rag_sources_available',
+  /** One per model step: the step's text, finish reason, provider, model, hop and usage. Content: StepFinishedChunkPayload. */
+  STEP_FINISHED = 'step_finished',
+  /** One per tool result recorded in the history, failures included. Content: ToolResultChunkPayload. */
+  TOOL_RESULT = 'tool_result',
 }
 
 /**
@@ -298,6 +309,37 @@ export interface GMIOutputChunk {
   usage?: ModelUsage;
   errorDetails?: any; // Can hold GMIError.toPlainObject()
   metadata?: Record<string, any>;
+}
+
+/** Content of a STEP_FINISHED chunk. */
+export interface StepFinishedChunkPayload {
+  /** 0-based index of the model step within the turn. */
+  stepIndex: number;
+  /** The step's text: its deltas joined, or the final message content when the provider sent no deltas. */
+  text: string;
+  finishReason: string | null;
+  providerId: string;
+  modelId: string;
+  /** 0 for the primary, n for the n-th fallback hop. */
+  hop: number;
+  usage?: ModelUsage;
+  /** Model id the provider reported serving the step. */
+  responseModel?: string;
+  serviceTier?: string;
+  /** Provider message id of the step's final chunk. */
+  providerMessageId?: string;
+  cacheDiagnostics?: unknown;
+  /** The step's schema answer when the turn asked for structured output. */
+  structuredOutput?: unknown;
+}
+
+/** Content of a TOOL_RESULT chunk. */
+export interface ToolResultChunkPayload {
+  toolCallId: string;
+  name: string;
+  result: unknown;
+  isError: boolean;
+  errorDetails?: unknown;
 }
 
 /**
@@ -563,6 +605,11 @@ export interface IGMI {
   hydrateConversationHistory?(
     conversationHistory: ConversationMessage[],
   ): void;
+
+  /** Makes `messages` the whole conversation history. An empty array is authoritative. */
+  replaceHistory?(messages: ConversationMessage[]): void;
+  /** Empties the conversation history. */
+  clearHistory?(): void;
 
   hydrateTurnContext?(
     context: {

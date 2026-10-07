@@ -577,6 +577,22 @@ export class GMI implements IGMI {
     this.conversationHistoryManager.hydrate(conversationHistory);
   }
 
+  /**
+   * Makes `messages` the whole conversation history. An empty array is
+   * authoritative: it empties the history (unlike
+   * `metadata.conversationHistoryForPrompt`, which a turn ignores when empty).
+   * The sentiment tracker and the metaprompts read the same history.
+   */
+  public replaceHistory(messages: ConversationMessage[]): void {
+    this.conversationHistoryManager.clear();
+    if (messages.length > 0) this.conversationHistoryManager.hydrate(messages);
+  }
+
+  /** Empties the conversation history. */
+  public clearHistory(): void {
+    this.conversationHistoryManager.clear();
+  }
+
   public hydrateTurnContext(context: {
     sessionId?: string;
     conversationId?: string;
