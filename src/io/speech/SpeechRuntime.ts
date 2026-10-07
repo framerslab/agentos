@@ -66,9 +66,10 @@ export class SpeechRuntime {
       if (openaiApiKey) {
         const stt = new OpenAIWhisperSpeechToTextProvider({
           apiKey: openaiApiKey,
-          // With WHISPER_MODEL_DEFAULT unset or empty, the provider picks the
-          // model per call: gpt-transcribe, or whisper-1 for a call that asks
-          // for verbose_json, srt or vtt.
+          // With WHISPER_MODEL_DEFAULT unset or empty, calls run on
+          // gpt-transcribe. A call that asks for verbose_json, srt or vtt runs
+          // on whisper-1 unless WHISPER_MODEL_DEFAULT names a model that serves
+          // those formats; OpenAI's gpt- transcription models do not.
           model: env['WHISPER_MODEL_DEFAULT'] || undefined,
         });
         this.registry.registerSttProvider(stt);

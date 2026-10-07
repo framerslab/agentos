@@ -35,9 +35,11 @@ export interface OpenAIWhisperSpeechToTextProviderConfig {
    * OpenAI removes `whisper-1` from the API on 2027-02-26 and names
    * `gpt-live-transcribe` or `gpt-transcribe` as the replacement, while its
    * guide still sends callers who need word or segment timestamps to
-   * `whisper-1`. With no model configured, a call that asks for
-   * `verbose_json`, `srt` or `vtt` runs on `whisper-1`, which serves those
-   * formats.
+   * `whisper-1`. A call that asks for `verbose_json`, `srt` or `vtt` runs on
+   * `whisper-1`, which serves those formats, when no model is configured or
+   * the configured model is one of OpenAI's `gpt-` transcription models. A
+   * configured model of a whisper-compatible server keeps those calls, and a
+   * model named on the call is always used as given.
    * @default 'gpt-transcribe'
    */
   model?: string;
@@ -55,7 +57,7 @@ const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-transcribe';
 /** The OpenAI model that serves segment timestamps (`verbose_json`), `srt` and `vtt`. */
 const TIMESTAMP_MODEL = 'whisper-1';
 
-/** Response formats that carry timestamps. With no model chosen, they run on `whisper-1`. */
+/** Response formats that carry timestamps. `pickModel` decides which model serves them. */
 const TIMESTAMP_FORMATS: ReadonlySet<SpeechResponseFormat> = new Set<SpeechResponseFormat>([
   'verbose_json',
   'srt',
@@ -65,6 +67,39 @@ const TIMESTAMP_FORMATS: ReadonlySet<SpeechResponseFormat> = new Set<SpeechRespo
 /** `whisper-1` keeps this provider's `verbose_json` default; the newer models answer in `json`. */
 function isWhisperModel(model: string): boolean {
   return model.startsWith('whisper');
+}
+
+/**
+ * Whether a configured model can answer a timestamped call itself. OpenAI's
+ * `gpt-` transcription models cannot: the API reference limits the
+ * `gpt-4o-transcribe` models to `json` (`json`, `text` and `diarized_json`
+ * for the diarize model), `gpt-transcribe` returns text and languages with no
+ * segments, and OpenAI's guide sends callers who need timestamps to
+ * `whisper-1`. Any other model, such as one a whisper-compatible server
+ * serves under `baseUrl`, is trusted with the format.
+ */
+function servesTimestampFormats(model: string): boolean {
+  return !model.startsWith('gpt-');
+}
+
+/**
+ * Picks the model for one call. A model named on the call is used as given.
+ * A call for `verbose_json`, `srt` or `vtt` runs on `whisper-1` unless the
+ * configured model serves that format itself. Every other call runs on the
+ * configured model, or on `gpt-transcribe` when none is configured. An empty
+ * model id counts as unset.
+ */
+function pickModel(
+  callModel: string | undefined,
+  configuredModel: string | undefined,
+  requestedFormat: SpeechResponseFormat | undefined,
+): string {
+  if (callModel) return callModel;
+  const wantsTimestamps = requestedFormat !== undefined && TIMESTAMP_FORMATS.has(requestedFormat);
+  if (wantsTimestamps && !(configuredModel && servesTimestampFormats(configuredModel))) {
+    return TIMESTAMP_MODEL;
+  }
+  return configuredModel || DEFAULT_TRANSCRIPTION_MODEL;
 }
 
 /** `gpt-transcribe` takes language hints as a `languages` list in place of the singular `language` field. */
@@ -170,7 +205,8 @@ function normalizeSegments(input: unknown): SpeechTranscriptionSegment[] | undef
  *   language hints as a `languages` list.
  * - `whisper-1`: removed from the API on 2027-02-26. It serves segment
  *   timestamps, `srt` and `vtt`, so a call that asks for one of those formats
- *   with no model configured runs on it.
+ *   runs on it unless the call names a model or the configured model serves
+ *   the format itself. A configured `gpt-` model does not.
  *
  * ## Supported Response Formats
  *
@@ -279,12 +315,7 @@ export class OpenAIWhisperSpeechToTextProvider implements SpeechToTextProvider {
   ): Promise<SpeechTranscriptionResult> {
     const form = new FormData();
     const requestedFormat = options.responseFormat;
-    const model =
-      options.model ??
-      this.config.model ??
-      (requestedFormat && TIMESTAMP_FORMATS.has(requestedFormat)
-        ? TIMESTAMP_MODEL
-        : DEFAULT_TRANSCRIPTION_MODEL);
+    const model = pickModel(options.model, this.config.model, requestedFormat);
     const responseFormat: SpeechResponseFormat =
       requestedFormat ?? (isWhisperModel(model) ? 'verbose_json' : 'json');
     // Generate a filename with the correct extension for Whisper's format detection

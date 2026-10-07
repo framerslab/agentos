@@ -97,6 +97,7 @@ vi.mock('sharp', () => {
 
 import { VideoAnalyzer } from '../VideoAnalyzer.js';
 import { SceneDetector } from '../../../vision/SceneDetector.js';
+import { OpenAIWhisperSpeechToTextProvider } from '../../../hearing/providers/OpenAIWhisperSpeechToTextProvider.js';
 import type { VisionPipeline } from '../../../vision/VisionPipeline.js';
 import type { SpeechToTextProvider, SpeechTranscriptionResult } from '../../../speech/types.js';
 import type { VisionResult } from '../../../vision/types.js';
@@ -507,6 +508,52 @@ describe('VideoAnalyzer', () => {
       expect.objectContaining({ mimeType: 'audio/wav' }),
       { responseFormat: 'verbose_json' },
     );
+    expect(result.fullTranscript).toBe('Hello world, this is a test video narration.');
+    expect(result.scenes.some((scene) => typeof scene.transcript === 'string')).toBe(true);
+  });
+
+  it('gets per-scene transcripts from an OpenAI provider configured with gpt-transcribe', async () => {
+    setupExecFileMock();
+    // The real OpenAI provider, configured the way WHISPER_MODEL_DEFAULT=gpt-transcribe
+    // configures it, with the HTTP layer stubbed to answer as whisper-1 does.
+    const forms: FormData[] = [];
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      forms.push(init?.body as unknown as FormData);
+      return new Response(
+        JSON.stringify({
+          text: 'Hello world, this is a test video narration.',
+          language: 'english',
+          duration: 10,
+          segments: [
+            { id: 0, start: 0, end: 3, text: 'Hello world,' },
+            { id: 1, start: 3, end: 6, text: 'this is a test' },
+            { id: 2, start: 6, end: 10, text: 'video narration.' },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+
+    const analyzer = new VideoAnalyzer({
+      visionPipeline: makeMockVisionPipeline(),
+      sceneDetector: makeMockSceneDetector(),
+      sttProvider: new OpenAIWhisperSpeechToTextProvider({
+        apiKey: 'sk-test',
+        model: 'gpt-transcribe',
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      }),
+    });
+
+    const result = await analyzer.analyze({
+      video: Buffer.alloc(1024, 0),
+      transcribeAudio: true,
+    });
+
+    // gpt-transcribe returns no segments, so the analyzer's verbose_json
+    // request runs on whisper-1 instead of failing on the configured model.
+    expect(forms).toHaveLength(1);
+    expect(forms[0].get('model')).toBe('whisper-1');
+    expect(forms[0].get('response_format')).toBe('verbose_json');
     expect(result.fullTranscript).toBe('Hello world, this is a test video narration.');
     expect(result.scenes.some((scene) => typeof scene.transcript === 'string')).toBe(true);
   });

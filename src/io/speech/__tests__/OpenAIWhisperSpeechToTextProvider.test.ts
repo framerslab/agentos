@@ -86,4 +86,34 @@ describe('OpenAIWhisperSpeechToTextProvider', () => {
     expect(forms[1].get('model')).toBe('gpt-transcribe');
     expect(forms[1].get('response_format')).toBe('verbose_json');
   });
+
+  it('moves a timestamped call off a configured gpt- model but keeps a whisper-compatible one', async () => {
+    const { forms, fetchImpl } = jsonFetch({ text: 'hello', duration: 1, segments: [] });
+    // WHISPER_MODEL_DEFAULT=gpt-transcribe reaches the provider this way.
+    const configured = new OpenAIWhisperSpeechToTextProvider({
+      apiKey: 'sk-test',
+      model: 'gpt-transcribe',
+      fetchImpl,
+    });
+
+    await configured.transcribe(AUDIO, { responseFormat: 'verbose_json' });
+    await configured.transcribe(AUDIO);
+
+    expect(forms[0].get('model')).toBe('whisper-1');
+    expect(forms[0].get('response_format')).toBe('verbose_json');
+    expect(forms[1].get('model')).toBe('gpt-transcribe');
+    expect(forms[1].get('response_format')).toBe('json');
+
+    // A whisper-compatible server answers verbose_json with its own model.
+    const compatible = new OpenAIWhisperSpeechToTextProvider({
+      apiKey: 'sk-test',
+      baseUrl: 'http://localhost:8000/v1',
+      model: 'distil-large-v3',
+      fetchImpl,
+    });
+    await compatible.transcribe(AUDIO, { responseFormat: 'verbose_json' });
+
+    expect(forms[2].get('model')).toBe('distil-large-v3');
+    expect(forms[2].get('response_format')).toBe('verbose_json');
+  });
 });
