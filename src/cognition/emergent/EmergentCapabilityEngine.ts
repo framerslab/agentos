@@ -961,8 +961,10 @@ export class EmergentCapabilityEngine {
       });
     }
     // A suspension or demotion that arrived while the row was being written,
-    // in this process or in another, is the newer word: the tool is not registered.
-    const held = written && written.state !== 'active' ? written : this.registry.getState(toolId);
+    // in this process or in another, is the newer word: the tool is not
+    // registered. A restriction this process holds from an earlier read is
+    // older than the row and gives way to it.
+    const held = written && written.state !== 'active' ? written : this.newerRestrictionHeld(toolId, stored);
     if (held && held.state !== 'active') {
       this.holdStored(toolId, held);
       await this.unregisterIfLive(toolId);
@@ -1004,6 +1006,18 @@ export class EmergentCapabilityEngine {
     if (live && this.onToolRemoved) {
       await this.onToolRemoved(live);
     }
+  }
+
+  /**
+   * A restriction this process holds that is newer than the row it just read:
+   * its write is in flight, so the row does not yet show it.
+   */
+  private newerRestrictionHeld(toolId: string, stored: ToolStateRecord | undefined): ToolStateRecord | undefined {
+    const memory = this.registry.getState(toolId);
+    if (!memory || memory.state === 'active') {
+      return undefined;
+    }
+    return !stored || memory.at > stored.at ? memory : undefined;
   }
 
   /** A stored restriction, held in this process too when the tool is live here. */

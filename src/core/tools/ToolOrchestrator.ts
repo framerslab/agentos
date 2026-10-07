@@ -105,6 +105,8 @@ export class ToolOrchestrator implements IToolOrchestrator {
    * @private
    */
   private emergentEngine?: EmergentCapabilityEngine;
+  /** Which forged tool owns the executable registered under each name (the newest wins). */
+  private readonly emergentExecutables = new Map<string, string>();
   private emergentDiscoveryIndexer?: (tools: EmergentTool[]) => Promise<void>;
 
   /**
@@ -322,8 +324,11 @@ export class ToolOrchestrator implements IToolOrchestrator {
         sandboxForge,
         judge,
         registry,
-        onToolForged: async (_tool, executable) => {
+        onToolForged: async (tool, executable) => {
           await this.registerInitialTool(executable);
+          // The executor holds one executable per name; the newest forged tool
+          // of a name owns it.
+          this.emergentExecutables.set(executable.name, tool.id);
         },
         onToolPromoted: async (tool) => {
           await this.emergentDiscoveryIndexer?.([tool]);
@@ -333,8 +338,8 @@ export class ToolOrchestrator implements IToolOrchestrator {
         onToolRemoved: async (tool) => {
           // Only this tool's own executable: a later tool of the same name
           // replaced it in the executor, and that one stays.
-          const current = this.toolExecutor.getTool(tool.name);
-          if (current && current.id === `emergent-tool:${tool.id}`) {
+          if (this.emergentExecutables.get(tool.name) === tool.id) {
+            this.emergentExecutables.delete(tool.name);
             await this.toolExecutor.unregisterTool(tool.name);
           }
         },
@@ -960,10 +965,11 @@ export class ToolOrchestrator implements IToolOrchestrator {
       const removedTools = this.emergentEngine.cleanupSession(sessionId);
       void Promise.allSettled(
         removedTools.map((tool) => {
-          const current = this.toolExecutor.getTool(tool.name);
-          return current && current.id === `emergent-tool:${tool.id}`
-            ? this.unregisterTool(tool.name)
-            : Promise.resolve(false);
+          if (this.emergentExecutables.get(tool.name) !== tool.id) {
+            return Promise.resolve(false);
+          }
+          this.emergentExecutables.delete(tool.name);
+          return this.unregisterTool(tool.name);
         }),
       );
       console.log(
