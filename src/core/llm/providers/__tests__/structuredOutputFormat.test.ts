@@ -77,6 +77,23 @@ describe('buildResponseFormat', () => {
     expect(inputSchema.required).toEqual(['kind', 'value', 'note']);
   });
 
+  it('anthropic: a shared enum property merges to the schema a plain enum of all its values gets', () => {
+    const union = z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('a'), mode: z.enum(['x']).describe('The mode') }),
+      z.object({ kind: z.literal('b'), mode: z.enum(['y']).describe('The mode') }),
+    ]);
+    const inputSchema = (buildResponseFormat({ provider: 'anthropic', schema: union, schemaName: 'X' }) as any)
+      .tool.input_schema;
+    const alone = (buildResponseFormat({
+      provider: 'anthropic',
+      schema: z.object({ mode: z.enum(['x', 'y']).describe('The mode') }),
+      schemaName: 'X',
+    }) as any).tool.input_schema;
+
+    // Fields every variant gives the property are kept, so the merge matches the plain enum.
+    expect(inputSchema.properties.mode).toEqual(alone.properties.mode);
+  });
+
   it('anthropic: a property only one variant has keeps its whole schema', () => {
     const union = z.discriminatedUnion('kind', [
       z.object({ kind: z.literal('a'), mode: z.enum(['x', 'y']) }),

@@ -71,9 +71,24 @@ function sanitizeName(name: string): string {
  *     tool-conversion path applies). An object schema already carrying a `type`
  *     passes through unchanged.
  */
+/** JSON with object keys sorted, so two schemas that differ only in key order compare equal. */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const entries = Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stableStringify((value as Record<string, unknown>)[k])}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
+}
+
 /**
  * Merges the schemas that the variants of a top-level union give one property.
- * Enum schemas (a discriminant such as `kind`) become one enum of every value;
+ * Enum schemas (a discriminant such as `kind`) become one enum of every value,
+ * keeping the fields they all share;
  * otherwise identical schemas collapse to one, and different ones are kept side
  * by side under a nested `anyOf`, which Anthropic accepts below the top level.
  * Keeping only the first variant's schema would tell the model a later
@@ -89,16 +104,24 @@ function mergePropertySchemas(schemas: unknown[]): unknown {
       (s) => s && typeof s === 'object' && Array.isArray((s as Record<string, unknown>).enum),
     )
   ) {
+    const records = schemas as Array<Record<string, unknown>>;
+    // Fields every variant gives the same value (`type`, a shared `description`) stay.
+    const shared: Record<string, unknown> = {};
+    for (const [field, value] of Object.entries(records[0])) {
+      if (field === 'enum') continue;
+      if (records.every((r) => field in r && stableStringify(r[field]) === stableStringify(value))) {
+        shared[field] = value;
+      }
+    }
     return {
-      enum: Array.from(
-        new Set(schemas.flatMap((s) => (s as Record<string, unknown>).enum as unknown[])),
-      ),
+      ...shared,
+      enum: Array.from(new Set(records.flatMap((r) => r.enum as unknown[]))),
     };
   }
   const distinct: unknown[] = [];
   const seen = new Set<string>();
   for (const schema of schemas) {
-    const key = JSON.stringify(schema);
+    const key = stableStringify(schema);
     if (!seen.has(key)) {
       seen.add(key);
       distinct.push(schema);
