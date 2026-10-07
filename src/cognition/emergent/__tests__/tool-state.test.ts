@@ -353,6 +353,33 @@ describe('EmergentToolRegistry state', () => {
     expect(readToolRow(db, tool.id)?.is_active).toBe(1);
   });
 
+  it("a write conditioned on no row, over a state row whose tool row is gone, reads as removed", async () => {
+    db.raw
+      .prepare(
+        `INSERT INTO agentos_emergent_tool_state (tool_id, state, state_reason, state_at, request_json, updated_at)
+         VALUES (?, 'active', NULL, ?, NULL, ?)`,
+      )
+      .run('emergent_gone', 1, 1);
+
+    const result = await registry.setState('emergent_gone', 'active', null, { setBy: 'library', ifRow: 'absent' });
+
+    expect(result).toMatchObject({ state: 'demoted', reason: 'removed' });
+  });
+
+  it('two activations in flight hold the later one', async () => {
+    const tool = makeTool({ id: 'emergent_test_12' });
+    registry.register(tool, 'agent');
+    await settle();
+    await registry.suspend(tool.id, 'operator_hold');
+
+    const first = registry.setState(tool.id, 'active', null, { setBy: 'host' });
+    const second = registry.setState(tool.id, 'active', null, { setBy: 'host' });
+    await Promise.all([first, second]);
+
+    expect(registry.isActive(tool.id)).toBe(true);
+    expect(registry.getState(tool.id)?.writeId).toBe(readStateRow(db, tool.id)?.write_id);
+  });
+
   it('refuses to record a use of a tool that is not active', async () => {
     const tool = makeTool();
     registry.register(tool, 'agent');

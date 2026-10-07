@@ -899,6 +899,38 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect(readStateRow(db, 'raw-1')).toBeUndefined();
   });
 
+  it('a request another process narrowed under a load, in the same millisecond, is what the tool runs with', async () => {
+    const db = createSqliteAdapter();
+    const hostA = await makeForgeHost({ db });
+    const code = 'function execute(input) { return fetch(input.url).then((r) => ({ ok: r.ok })); }';
+    seedToolRow(db, {
+      id: 'raw-f',
+      name: 'fetch_it',
+      mode: 'sandbox',
+      source: code,
+      inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+      outputSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+    });
+    seedStateRow(db, { toolId: 'raw-f', state: 'active', setBy: 'library', requestJson: '{"kind":"sandbox","capabilities":["fetch"]}' });
+
+    // The row reads active with its request, so host A has nothing to write;
+    // its second read is held while another process narrows the request,
+    // leaving state, setter and time as they were.
+    const gate = db.gateNext('FROM agentos_emergent_tool_state s\n        WHERE s.tool_id = ?');
+    const loading = hostA.engine.loadPersistedTools({ tiers: ['shared'] });
+    await gate.entered;
+    db.raw
+      .prepare("UPDATE agentos_emergent_tool_state SET request_json = ?, write_id = 'another-write' WHERE tool_id = ?")
+      .run('{"kind":"sandbox","capabilities":[]}', 'raw-f');
+    gate.release();
+    const summary = await loading;
+
+    expect(summary.outcomes).toEqual([{ toolId: 'raw-f', name: 'fetch_it', state: 'active', reason: null }]);
+    const called = await callTool(hostA.orchestrator, 'fetch_it', { url: 'http://127.0.0.1:9/' });
+    expect(called.isError).toBe(true);
+    expect(JSON.stringify(called)).toMatch(/fetch/);
+  });
+
   it("a session's stored tools load for that session only", async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db });

@@ -535,9 +535,10 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
 
     if (state === 'active') {
       const current = this.states.get(toolId);
-      if (current !== previous) {
+      if (current !== previous && current?.state !== 'active') {
         // A later restriction landed while this reactivation was being
-        // written; it is the newer word and stays.
+        // written; it is the newer word and stays. (Another activation held
+        // meanwhile does not: this one is the later write.)
         this.logAudit(toolId, 'state_superseded', { state, reason, setBy, by: current?.state ?? null });
         return current ?? record;
       }
@@ -654,8 +655,9 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     const before = await readRow();
     if (ifRow === 'absent' && before?.state) {
       // "No row yet" was the condition and a row exists: refused, without a
-      // statement; the row and its flag are as another process left them.
-      return rowRecord(before);
+      // statement; the row and its flag are as another process left them, or
+      // the tool is on its way out.
+      return before.tool_exists ? rowRecord(before) : removed();
     }
     // The state row, its flag write marked pending until it is done. A new
     // state row is inserted only while the tool row exists, so a tool another
@@ -677,6 +679,11 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       // Refused, or the tool is gone: the row and its flag are as another
       // process left them.
       return row?.state && row.tool_exists ? rowRecord(row) : removed();
+    }
+    if (!named) {
+      // The record returned carries the request the row holds, not what this
+      // process happened to hold, so a caller can compare grants.
+      record.request = parseStoredRequest(row?.request_json);
     }
     // The legacy flag follows the state row, then the mark is cleared. A
     // failure here leaves the mark pending for the next write or load.

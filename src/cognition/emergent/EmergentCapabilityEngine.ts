@@ -1092,7 +1092,12 @@ export class EmergentCapabilityEngine {
       if (!now) {
         // The row this load read is gone: another process removed the tool.
         written = { toolId, state: 'demoted', reason: 'removed', setBy: 'host', at: Date.now(), request: null };
-      } else if (now.state !== stored.state || now.setBy !== stored.setBy || now.at !== stored.at) {
+      } else if (
+        now.state !== stored.state ||
+        now.setBy !== stored.setBy ||
+        now.at !== stored.at ||
+        (now.writeId !== undefined && now.writeId !== stored.writeId)
+      ) {
         written = now;
       }
     }
@@ -1109,7 +1114,10 @@ export class EmergentCapabilityEngine {
     // A first write refused by another process's active row: that row's
     // request is the grant, not the one derived here, so the tool is admitted
     // again from the row as it stands (once).
-    if (written && requestToWrite !== undefined && !sameGrant(written.request, requestToWrite)) {
+    // The grant the row holds after the write is what the tool may reach: a
+    // request another process stored meanwhile, narrower or wider than the
+    // one this admission built with, admits the tool again from the row.
+    if (written && !sameGrant(written.request, request)) {
       return this.readmit(candidate, options);
     }
     this.registry.adopt(tool, {
