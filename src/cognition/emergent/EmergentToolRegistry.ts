@@ -535,10 +535,12 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
 
     if (state === 'active') {
       const current = this.states.get(toolId);
-      if (current !== previous && current?.state !== 'active') {
-        // A later restriction landed while this reactivation was being
-        // written; it is the newer word and stays. (Another activation held
-        // meanwhile does not: this one is the later write.)
+      if (current !== previous && current?.state !== 'active' && current?.writeId === undefined) {
+        // A restriction requested in this process while this reactivation
+        // was being written: its own write is queued after this one, so it is
+        // the newer word and stays. (A restriction observed from another
+        // process's row carries that write's id; this write landed after it
+        // and is the newer word, as is another activation held meanwhile.)
         this.logAudit(toolId, 'state_superseded', { state, reason, setBy, by: current?.state ?? null });
         return current ?? record;
       }

@@ -944,6 +944,15 @@ export class EmergentCapabilityEngine {
       await this.unregisterIfLive(toolId);
       return { toolId, name, state: 'demoted', reason: 'removed' };
     }
+    // Nothing is written; the tool is held off here until the next load.
+    this.holdStored(toolId, {
+      toolId,
+      state: 'suspended',
+      reason: 'contended',
+      setBy: 'library',
+      at: Date.now(),
+      request: null,
+    });
     await this.unregisterIfLive(toolId);
     return { toolId, name, state: 'suspended', reason: 'contended' };
   }
@@ -1063,6 +1072,9 @@ export class EmergentCapabilityEngine {
         if (written.state !== 'suspended' || written.reason !== reason) {
           return this.readmit(candidate, options);
         }
+      } else {
+        // The row already says so; this process holds it too when the tool is live here.
+        this.holdStored(toolId, stored);
       }
       await this.unregisterIfLive(toolId);
       return { toolId, name, state: 'suspended', reason };

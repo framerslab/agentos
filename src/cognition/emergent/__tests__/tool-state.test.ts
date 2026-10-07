@@ -380,6 +380,36 @@ describe('EmergentToolRegistry state', () => {
     expect(registry.getState(tool.id)?.writeId).toBe(readStateRow(db, tool.id)?.write_id);
   });
 
+  it("a queued activation that lands after another process's suspension was observed holds its own write", async () => {
+    const tool = makeTool({ id: 'emergent_test_13' });
+    registry.register(tool, 'agent');
+    await settle();
+    await registry.suspend(tool.id, 'operator_hold');
+    const other = new EmergentToolRegistry(
+      { ...DEFAULT_EMERGENT_CONFIG, enabled: true, persistSandboxSource: true },
+      db,
+    );
+    await other.ensureSchema();
+
+    // Two activations queued in this process. The first's flag write is held
+    // open; another process suspends the tool meanwhile, so the first reads
+    // that suspension back and holds it. The second then lands as the newer
+    // word, and this process holds it as such.
+    const gate = db.gateNext('SET is_active = COALESCE(');
+    const first = registry.setState(tool.id, 'active', null, { setBy: 'host' });
+    const second = registry.setState(tool.id, 'active', null, { setBy: 'host' });
+    await gate.entered;
+    await other.setState(tool.id, 'suspended', 'operator_hold_elsewhere', { setBy: 'host' });
+    gate.release();
+
+    expect(await first).toMatchObject({ state: 'suspended', reason: 'operator_hold_elsewhere' });
+    expect(await second).toMatchObject({ state: 'active' });
+    expect(registry.isActive(tool.id)).toBe(true);
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active' });
+    expect(readToolRow(db, tool.id)?.is_active).toBe(1);
+    expect(registry.getState(tool.id)?.writeId).toBe(readStateRow(db, tool.id)?.write_id);
+  });
+
   it('refuses to record a use of a tool that is not active', async () => {
     const tool = makeTool();
     registry.register(tool, 'agent');
