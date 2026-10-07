@@ -931,6 +931,34 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect(JSON.stringify(called)).toMatch(/fetch/);
   });
 
+  it('with source persistence off, a host-synced tool runs from the implementation the host supplied', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, config: { persistSandboxSource: false } });
+    const tool: EmergentTool = {
+      id: 'host-2',
+      name: 'double_it',
+      description: 'Doubles a number.',
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+      implementation: { mode: 'sandbox', code: RAW_DOUBLE, allowlist: [] },
+      tier: 'shared',
+      createdBy: 'host',
+      createdAt: new Date(1_700_000_000_000).toISOString(),
+      judgeVerdicts: [],
+      usageStats: { totalUses: 0, successCount: 0, failureCount: 0, avgExecutionTimeMs: 0, lastUsedAt: null, confidenceScore: 0.9 },
+      source: 'hydrated by the host from its own store',
+    };
+
+    expect(await host.engine.syncPersistedTool(tool)).toEqual({ toolId: 'host-2', name: 'double_it', state: 'active', reason: null });
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
+    // The row holds the redacted record: a load elsewhere cannot rebuild it.
+    expect(String(readToolRow(db, 'host-2')?.implementation_source)).toContain('"redacted":true');
+    const other = await makeForgeHost({ db, config: { persistSandboxSource: false } });
+    expect((await other.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'host-2', name: 'double_it', state: 'suspended', reason: 'source_not_persisted' },
+    ]);
+  });
+
   it("a session's stored tools load for that session only", async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db });

@@ -405,9 +405,13 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       request: null,
     });
 
-    if (this.db && this.schemaReady) {
-      this.persistToolToDb(registered).catch(() => {
-        // Best-effort persistence mirror. In-memory state remains authoritative.
+    if (this.db) {
+      // In the tool's write queue, so its first state write (which inserts a
+      // state row only while the tool row exists) runs after the row lands;
+      // persistToolToDb waits for the schema itself. Best-effort: in-memory
+      // state remains authoritative.
+      this.queueStateWrite(registered.id, () => this.persistToolToDb(registered)).catch(() => {
+        // Best-effort persistence mirror.
       });
     }
 

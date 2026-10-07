@@ -410,6 +410,24 @@ describe('EmergentToolRegistry state', () => {
     expect(registry.getState(tool.id)?.writeId).toBe(readStateRow(db, tool.id)?.write_id);
   });
 
+  it('a tool registered before the schema is ready gets its row, and its first state write lands after it', async () => {
+    const fresh = new EmergentToolRegistry(
+      { ...DEFAULT_EMERGENT_CONFIG, enabled: true, persistSandboxSource: true },
+      db,
+    );
+    const tool = makeTool({ id: 'emergent_test_14' });
+    fresh.register(tool, 'agent');
+    const record = await fresh.setState(tool.id, 'active', null, {
+      request: { kind: 'sandbox', capabilities: ['crypto'] },
+      setBy: 'library',
+    });
+
+    expect(record).toMatchObject({ state: 'active' });
+    expect(fresh.isActive(tool.id)).toBe(true);
+    expect(readToolRow(db, tool.id)).toMatchObject({ name: tool.name, is_active: 1 });
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active', request: { kind: 'sandbox', capabilities: ['crypto'] } });
+  });
+
   it('refuses to record a use of a tool that is not active', async () => {
     const tool = makeTool();
     registry.register(tool, 'agent');

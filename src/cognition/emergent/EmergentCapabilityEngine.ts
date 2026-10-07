@@ -695,7 +695,9 @@ export class EmergentCapabilityEngine {
       row = await this.registry.loadRow(tool.id);
     }
     if (row) {
-      return this.admitRow(row);
+      // With source persistence off the row holds a redacted record; the
+      // implementation the host supplied is what runs then.
+      return this.admitRow(row, { sourceFallback: sourceFromImplementation(tool.implementation) });
     }
     const stored = await this.registry.readState(tool.id);
     return this.admit({
@@ -884,7 +886,7 @@ export class EmergentCapabilityEngine {
 
   private admitRow(
     row: PersistedToolRow,
-    options: { force?: boolean; readmitted?: number } = {},
+    options: { force?: boolean; readmitted?: number; sourceFallback?: PersistedSource } = {},
   ): Promise<LoadedToolOutcome> {
     const stored: ToolStateRecord | undefined = row.state
       ? {
@@ -905,11 +907,19 @@ export class EmergentCapabilityEngine {
       'error' in schemas
         ? { format: 'unreadable', error: schemas.error }
         : parsePersistedSource(row.implementation_mode, row.implementation_source);
+    // A redacted record cannot be rebuilt from the row; a host that supplies
+    // the implementation (syncPersistedTool) runs from what it supplied, as it
+    // did before loading went through the row. State, request and the flag
+    // still come from the row.
+    const sourceInUse =
+      source.format === 'redacted' && options.sourceFallback && options.sourceFallback.format !== 'unreadable'
+        ? options.sourceFallback
+        : source;
     return this.admit(
       {
         toolId: row.id,
         name: row.name,
-        source,
+        source: sourceInUse,
         stored,
         requestStored: row.request_json != null,
         legacyActive: !(row.is_active === 0 || row.is_active === false),
@@ -932,7 +942,7 @@ export class EmergentCapabilityEngine {
    */
   private async readmit(
     candidate: AdmissionCandidate,
-    options: { force?: boolean; readmitted?: number },
+    options: { force?: boolean; readmitted?: number; sourceFallback?: PersistedSource },
   ): Promise<LoadedToolOutcome> {
     const { toolId, name } = candidate;
     const depth = options.readmitted ?? 0;
@@ -959,7 +969,7 @@ export class EmergentCapabilityEngine {
 
   private async admit(
     candidate: AdmissionCandidate,
-    options: { force?: boolean; readmitted?: number } = {},
+    options: { force?: boolean; readmitted?: number; sourceFallback?: PersistedSource } = {},
   ): Promise<LoadedToolOutcome> {
     const { toolId, name, source, stored, requestStored } = candidate;
     let legacyActive = candidate.legacyActive;
