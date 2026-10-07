@@ -451,7 +451,7 @@ export interface ToolStateRecord {
   /**
    * The reason for a state other than `active`. The library's reasons are
    * catalogue words (`source_not_persisted`, `source_unreadable`,
-   * `legacy_inactive`); a host's reason is the text it gave.
+   * `legacy_inactive`, `legacy_owner`); a host's reason is the text it gave.
    */
   reason: string | null;
   /** Who recorded the state. */
@@ -562,7 +562,9 @@ export interface EmergentTool {
    * The agent that created this tool, or `'system'`. The agent identity is the
    * persona: `forge_tool` passes the caller's `personaId`, and an `agent`-tier
    * tool runs only for a caller with that `personaId`. (A GMI instance id is
-   * minted per session and cannot own a tool meant to outlive one.)
+   * minted per session and cannot own a tool meant to outlive one: an
+   * `agent`-tier row from an earlier release that carries one loads suspended
+   * with the reason `legacy_owner`.)
    */
   createdBy: string;
 

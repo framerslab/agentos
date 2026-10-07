@@ -746,7 +746,7 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     ]);
   });
 
-  it('an agent-tier row from an earlier release, owned by a GMI instance id, runs for any caller of the host that loaded it', async () => {
+  it('an agent-tier row from an earlier release, owned by a GMI instance id, loads suspended and runs for no one', async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db });
     seedToolRow(db, {
@@ -761,10 +761,20 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     });
 
     const loaded = await host.engine.loadPersistedTools({ tiers: ['agent'], agentId: 'gmi-instance-0b7e3c1a' });
-    expect(loaded.outcomes).toEqual([{ toolId: 'old-1', name: 'double_it', state: 'active', reason: null }]);
-    expect((await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'anyone' })).output).toEqual({
-      doubled: 4,
-    });
+    expect(loaded.outcomes).toEqual([{ toolId: 'old-1', name: 'double_it', state: 'suspended', reason: 'legacy_owner' }]);
+    expect(readToolRow(db, 'old-1')).toMatchObject({ is_active: 0 });
+    expect(readStateRow(db, 'old-1')).toMatchObject({ state: 'suspended', state_reason: 'legacy_owner' });
+    const called = await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'anyone' });
+    expect(called.isError).toBe(true);
+    const asStoredOwner = await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'gmi-instance-0b7e3c1a' });
+    expect(asStoredOwner.isError).toBe(true);
+
+    // Nothing was registered, so there is nothing for the host to reactivate;
+    // the next load re-checks the owner and suspends the row again. Forging the
+    // tool again under the persona is the way back.
+    expect(await host.engine.reactivateTool('old-1')).toBeUndefined();
+    const again = await host.engine.loadPersistedTools({ tiers: ['agent'], agentId: 'gmi-instance-0b7e3c1a' });
+    expect(again.outcomes).toEqual([{ toolId: 'old-1', name: 'double_it', state: 'suspended', reason: 'legacy_owner' }]);
   });
 
   it('a stored request wider than a stored list grants nothing the list did not', async () => {

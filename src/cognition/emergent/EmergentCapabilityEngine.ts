@@ -197,6 +197,10 @@ interface AdmissionCandidate {
   requestStored: boolean;
   /** The tool row's `is_active`, or a host-built object's `isActive`. */
   legacyActive: boolean;
+  /** The tier the row or the host-built object carries. */
+  tier: ToolTier;
+  /** The owner the row or the host-built object carries (`created_by_agent`). */
+  createdBy: string;
   /** False when the row's last state write did not finish its flag write; undefined for a host-built object. */
   flagSynced?: boolean;
   buildTool: (implementation: ToolImplementation) => EmergentTool;
@@ -905,6 +909,8 @@ export class EmergentCapabilityEngine {
         stored: held,
         requestStored: held?.request != null,
         legacyActive: true,
+        tier: tool.tier,
+        createdBy: tool.createdBy,
         buildTool: () => tool,
       },
       { force: true },
@@ -951,6 +957,8 @@ export class EmergentCapabilityEngine {
         requestStored: row.request_json != null,
         legacyActive: !(row.is_active === 0 || row.is_active === false),
         flagSynced: row.flag_synced == null ? undefined : !(row.flag_synced === 0 || row.flag_synced === false),
+        tier: row.tier,
+        createdBy: row.created_by_agent,
         buildTool: (implementation) => toolFromRow(row, implementation),
       },
       options,
@@ -1086,6 +1094,14 @@ export class EmergentCapabilityEngine {
         allowlist:
           source.format === 'code-with-list' ? granted.filter((api) => listed.allowlist.includes(api)) : granted,
       };
+    }
+    // 3a. An agent-tier row from an earlier release is owned by the forging
+    //     GMI instance's id, which no persona can match, so no caller could
+    //     ever pass the owner check: it loads suspended rather than running
+    //     for everyone. Forging the tool again under the persona is the way
+    //     back; `reactivateTool` goes through this same path.
+    if (!refusal && candidate.tier === 'agent' && candidate.createdBy.startsWith('gmi-instance-')) {
+      refusal = 'legacy_owner';
     }
     if (implementation && !refusal) {
       refusal = this.refusalFor(implementation);
@@ -1426,11 +1442,12 @@ export class EmergentCapabilityEngine {
         // The owner is the persona that forged the tool, compared as it was
         // stored ('unknown' for a caller without one). A row from an earlier
         // release holds the forging GMI instance's id instead, which no
-        // persona can match: such a tool runs for any caller of the host that
-        // loaded it by that id, as it did before this change.
+        // persona can match; the loader suspends such a row (`legacy_owner`),
+        // and a call to one held in memory is refused here like any other
+        // owner mismatch.
         const owner = current.createdBy;
         const caller = context.personaId ?? 'unknown';
-        if (current.tier === 'agent' && !owner.startsWith('gmi-instance-') && caller !== owner) {
+        if (current.tier === 'agent' && caller !== owner) {
           return {
             success: false,
             error: `Emergent tool "${tool.name}" belongs to agent ${owner}; it is not callable as ${caller}.`,
