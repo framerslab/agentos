@@ -266,6 +266,16 @@ export type {
 export { normalizeHostLLMPolicy } from './api/runtime/hostPolicy.js';
 export { streamText, normalizeStreamFinishReason } from './api/streamText.js';
 export type { StreamTextResult, StreamPart, StreamFinishReason } from './api/streamText.js';
+export { createCompletionGateway, toolFormatFor } from './api/runtime/completionGateway.js';
+export type {
+  CompletionAttempt,
+  CompletionGateway,
+  CompletionHop,
+  CompletionOutcome,
+  CompletionResolution,
+  CompletionRoute,
+} from './api/runtime/completionGateway.js';
+export { GatewayProviderManager } from './api/runtime/gatewayProviderManager.js';
 export { agent } from './api/agent.js';
 export { souledAgent } from './api/souledAgent.js';
 export type { SouledAgentOptions, SouledAgent } from './api/souledAgent.js';
