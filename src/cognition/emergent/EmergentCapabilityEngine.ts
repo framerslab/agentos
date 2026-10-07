@@ -196,6 +196,8 @@ interface AdmissionCandidate {
   requestStored: boolean;
   /** The tool row's `is_active`, or a host-built object's `isActive`. */
   legacyActive: boolean;
+  /** When the state row was last written, for a row read from storage. */
+  stateWrittenAt?: number;
   buildTool: (implementation: ToolImplementation) => EmergentTool;
 }
 
@@ -277,9 +279,10 @@ interface ToolIndex {
  * ```
  */
 /**
- * How long after a state row is written the pair "active state, flag off"
- * reads as an activation in flight (its flag write follows its state write)
- * rather than as a host that turned the tool off with its own SQL.
+ * How long after a state row is written (its own write time, not the call's)
+ * the pair "active state, flag off" reads as an activation in flight (its
+ * flag write follows its state write) rather than as a host that turned the
+ * tool off with its own SQL.
  */
 const ACTIVATION_IN_FLIGHT_MS = 10_000;
 
@@ -903,6 +906,7 @@ export class EmergentCapabilityEngine {
         stored,
         requestStored: row.request_json != null,
         legacyActive: !(row.is_active === 0 || row.is_active === false),
+        stateWrittenAt: row.state_updated_at != null ? Number(row.state_updated_at) : undefined,
         buildTool: (implementation) => toolFromRow(row, implementation),
       },
       options,
@@ -931,7 +935,10 @@ export class EmergentCapabilityEngine {
     //    write follows its state write, and a load between the two must not
     //    record a host's disable; a host that turns a tool off within that
     //    window is read at the next load after it.
-    const inFlight = stored?.state === 'active' && Date.now() - stored.at < ACTIVATION_IN_FLIGHT_MS;
+    const inFlight =
+      stored?.state === 'active' &&
+      candidate.stateWrittenAt !== undefined &&
+      Date.now() - candidate.stateWrittenAt < ACTIVATION_IN_FLIGHT_MS;
     const hostTurnedOff = !legacyActive && stored?.state !== 'suspended' && !inFlight;
     if ((stored?.state === 'demoted' || hostTurnedOff) && !options.force) {
       const reason = stored?.state === 'demoted' ? stored.reason : 'legacy_inactive';

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { EmergentTool } from '../types.js';
 import { createSqliteAdapter, readStateRow, readToolRow } from './helpers/sqlite-adapter.js';
 import { callTool, echoTool, makeForgeHost } from './helpers/forge-host.js';
@@ -486,13 +486,50 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     });
 
     db.raw.prepare('UPDATE agentos_emergent_tools SET is_active = 0 WHERE id = ?').run('compose-1');
-    const again = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+    // Within ten seconds of the state row's write the pair reads as an
+    // activation in flight, so the disable is read at the next load after that.
+    const soon = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(soon.outcomes).toEqual([{ toolId: 'compose-1', name: 'echo_once', state: 'active', reason: null }]);
+    expect(readToolRow(db, 'compose-1')?.is_active).toBe(0);
 
-    expect(again.outcomes).toEqual([
-      { toolId: 'compose-1', name: 'echo_once', state: 'demoted', reason: 'legacy_inactive' },
-    ]);
-    expect(await host.orchestrator.getTool('echo_once')).toBeUndefined();
-    expect(readStateRow(db, 'compose-1')).toMatchObject({ state: 'demoted' });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 11_000);
+      const again = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+
+      expect(again.outcomes).toEqual([
+        { toolId: 'compose-1', name: 'echo_once', state: 'demoted', reason: 'legacy_inactive' },
+      ]);
+      expect(await host.orchestrator.getTool('echo_once')).toBeUndefined();
+      expect(readStateRow(db, 'compose-1')).toMatchObject({ state: 'demoted' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a load whose flag write fails leaves no state row behind, is reported failed, and loads at the next start', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'raw-1',
+      name: 'double_it',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+    });
+    db.failNext('SET is_active = COALESCE(');
+
+    const summary = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+
+    expect(summary.failed).toEqual([{ toolId: 'raw-1', name: 'double_it', error: 'simulated storage failure' }]);
+    expect(await host.orchestrator.getTool('double_it')).toBeUndefined();
+    expect(readStateRow(db, 'raw-1')).toBeUndefined();
+    expect(readToolRow(db, 'raw-1')?.is_active).toBe(1);
+
+    const again = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(again.outcomes).toEqual([{ toolId: 'raw-1', name: 'double_it', state: 'active', reason: null }]);
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
   });
 
   it('a code row holding JSON of neither stored shape loads suspended as unreadable', async () => {

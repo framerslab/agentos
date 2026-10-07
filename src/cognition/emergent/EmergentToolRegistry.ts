@@ -169,6 +169,15 @@ const TIER_ORDER: readonly ToolTier[] = ['session', 'agent', 'shared'];
  * const stats = registry.getUsageStats(tool.id);
  * ```
  */
+/** A state row as it is read back from storage. */
+type StateRowRead = {
+  state?: ToolState | null;
+  state_reason?: string | null;
+  set_by?: string | null;
+  state_at?: number | string | null;
+  request_json?: string | null;
+};
+
 export class EmergentToolRegistry {
   /** In-memory store for session-tier tools, keyed by tool ID. */
   private readonly sessionTools = new Map<string, EmergentTool>();
@@ -552,9 +561,10 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
    * pair, with a state row written in the last ten seconds, as an activation
    * in flight rather than a host's disable. With `ifRow`, an existing row is
    * changed only while its state, setter and time are the ones given
-   * (`'absent'`: never); a refused write changes nothing, and the row as it
-   * stands afterwards is returned, so it shows as a record other than the one
-   * given.
+   * (`'absent'`: never); a refused write changes nothing, flag included, and
+   * the row as it stands afterwards is returned, so it shows as a record
+   * other than the one given. A flag write that fails puts the state row back
+   * as it was, so the pair never stays half-changed.
    */
   private async writeStateRow(
     toolId: string,
@@ -581,7 +591,9 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
              state_at = excluded.state_at,
              updated_at = excluded.updated_at`;
     let guard = '';
-    const params: unknown[] = [toolId, record.state, record.reason, record.setBy, record.at, requestJson, record.at];
+    // state_at is the call's time; updated_at the write's own, which the
+    // loader reads to tell an activation in flight from a host's disable.
+    const params: unknown[] = [toolId, record.state, record.reason, record.setBy, record.at, requestJson, Date.now()];
     if (ifRow === 'absent') {
       guard = `
            WHERE 0 = 1`;
@@ -592,6 +604,15 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
              AND agentos_emergent_tool_state.state_at = ?`;
       params.push(ifRow.state, ifRow.setBy, ifRow.at);
     }
+    const readRow = async (): Promise<StateRowRead | undefined> =>
+      (await db.get(
+        `SELECT state, state_reason, set_by, state_at, request_json
+           FROM agentos_emergent_tool_state
+          WHERE tool_id = ?`,
+        [toolId],
+      )) as StateRowRead | undefined;
+    // The row before this write, put back if the flag write that follows fails.
+    const before = await readRow();
     await db.run(
       `INSERT INTO agentos_emergent_tool_state
          (tool_id, state, state_reason, set_by, state_at, request_json, updated_at)
@@ -600,51 +621,73 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
          ${setList}${guard}`,
       params,
     );
-    // The legacy flag hosts query follows the state row, read inside the
-    // statement; a refused upsert leaves the row as it was, and so the flag.
-    await db.run(
-      `UPDATE agentos_emergent_tools
-          SET is_active = COALESCE((SELECT CASE WHEN state = 'active' THEN 1 ELSE 0 END
-                                      FROM agentos_emergent_tool_state WHERE tool_id = ?), ?)
-        WHERE id = ?`,
-      [toolId, record.state === 'active' ? 1 : 0, toolId],
-    );
-    if (ifRow === undefined) {
-      return record;
+    if (ifRow !== undefined) {
+      const row = await readRow();
+      // Applied when the row now reads what was written; the time alone cannot
+      // tell two writes in one millisecond apart.
+      const applied =
+        !row?.state ||
+        (row.state === record.state &&
+          (row.state_reason ?? null) === record.reason &&
+          stateSetterFromColumn(row.set_by) === record.setBy &&
+          Number(row.state_at) === record.at);
+      if (!applied) {
+        // Refused: the row and its flag are as another process left them.
+        return {
+          toolId,
+          state: row.state as ToolState,
+          reason: row.state_reason ?? null,
+          setBy: stateSetterFromColumn(row.set_by),
+          at: Number(row.state_at ?? 0),
+          request: parseStoredRequest(row.request_json),
+        };
+      }
     }
-    const row = (await db.get(
-      `SELECT state, state_reason, set_by, state_at, request_json
-         FROM agentos_emergent_tool_state
-        WHERE tool_id = ?`,
-      [toolId],
-    )) as
-      | {
-          state?: ToolState | null;
-          state_reason?: string | null;
-          set_by?: string | null;
-          state_at?: number | string | null;
-          request_json?: string | null;
+    // The legacy flag hosts query follows the state row, read inside the statement.
+    try {
+      await db.run(
+        `UPDATE agentos_emergent_tools
+            SET is_active = COALESCE((SELECT CASE WHEN state = 'active' THEN 1 ELSE 0 END
+                                        FROM agentos_emergent_tool_state WHERE tool_id = ?), ?)
+          WHERE id = ?`,
+        [toolId, record.state === 'active' ? 1 : 0, toolId],
+      );
+    } catch (error) {
+      // The state row landed and the flag did not: the row goes back to what
+      // it was, under this write's own guard, so the pair never stays
+      // half-changed. The flag write's failure is the one reported.
+      try {
+        if (!before?.state) {
+          await db.run(
+            `DELETE FROM agentos_emergent_tool_state
+              WHERE tool_id = ? AND state = ? AND set_by = ? AND state_at = ?`,
+            [toolId, record.state, record.setBy, record.at],
+          );
+        } else {
+          await db.run(
+            `UPDATE agentos_emergent_tool_state
+                SET state = ?, state_reason = ?, set_by = ?, state_at = ?, request_json = ?, updated_at = ?
+              WHERE tool_id = ? AND state = ? AND set_by = ? AND state_at = ?`,
+            [
+              before.state,
+              before.state_reason ?? null,
+              before.set_by ?? 'host',
+              Number(before.state_at ?? 0),
+              before.request_json ?? null,
+              Date.now(),
+              toolId,
+              record.state,
+              record.setBy,
+              record.at,
+            ],
+          );
         }
-      | undefined;
-    // Applied when the row now reads what was written; the time alone cannot
-    // tell two writes in one millisecond apart.
-    if (
-      !row?.state ||
-      (row.state === record.state &&
-        (row.state_reason ?? null) === record.reason &&
-        stateSetterFromColumn(row.set_by) === record.setBy &&
-        Number(row.state_at) === record.at)
-    ) {
-      return record;
+      } catch {
+        // Reported through the first failure.
+      }
+      throw error;
     }
-    return {
-      toolId,
-      state: row.state,
-      reason: row.state_reason ?? null,
-      setBy: stateSetterFromColumn(row.set_by),
-      at: Number(row.state_at ?? 0),
-      request: parseStoredRequest(row.request_json),
-    };
+    return record;
   }
 
   /**
@@ -685,7 +728,8 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
         t.judge_verdicts, t.confidence_score, t.total_uses, t.success_count,
         t.failure_count, t.avg_execution_ms, t.last_used_at, t.is_active,
         s.state AS state, s.state_reason AS state_reason, s.set_by AS set_by,
-        s.state_at AS state_at, s.request_json AS request_json
+        s.state_at AS state_at, s.request_json AS request_json,
+        s.updated_at AS state_updated_at
    FROM agentos_emergent_tools t
    LEFT JOIN agentos_emergent_tool_state s ON s.tool_id = t.id`;
 

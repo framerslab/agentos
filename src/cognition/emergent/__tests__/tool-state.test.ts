@@ -286,6 +286,41 @@ describe('EmergentToolRegistry state', () => {
     expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active' });
   });
 
+  it('a reactivation whose flag write fails puts the state row back, so the tool stays off', async () => {
+    const tool = makeTool({ id: 'emergent_test_9' });
+    registry.register(tool, 'agent');
+    await settle();
+    await registry.suspend(tool.id, 'operator_hold');
+
+    db.failNext('SET is_active = COALESCE(');
+    await expect(registry.setState(tool.id, 'active', null, { setBy: 'host' })).rejects.toThrow(
+      'simulated storage failure',
+    );
+
+    expect(registry.isActive(tool.id)).toBe(false);
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'suspended', state_reason: 'operator_hold', set_by: 'host' });
+    expect(readToolRow(db, tool.id)?.is_active).toBe(0);
+  });
+
+  it("a refused write leaves the flag as the host set it, even when the row's state is active", async () => {
+    const tool = makeTool({ id: 'emergent_test_10' });
+    registry.register(tool, 'agent');
+    await settle();
+    await registry.setState(tool.id, 'active', null, { setBy: 'library' });
+    db.raw.prepare('UPDATE agentos_emergent_tools SET is_active = 0 WHERE id = ?').run(tool.id);
+
+    // Another process read no state row, and writes on that condition.
+    const other = new EmergentToolRegistry(
+      { ...DEFAULT_EMERGENT_CONFIG, enabled: true, persistSandboxSource: true },
+      db,
+    );
+    await other.ensureSchema();
+    const refused = await other.setState(tool.id, 'active', null, { setBy: 'library', ifRow: 'absent' });
+
+    expect(refused).toMatchObject({ state: 'active', setBy: 'library' });
+    expect(readToolRow(db, tool.id)?.is_active).toBe(0);
+  });
+
   it('refuses to record a use of a tool that is not active', async () => {
     const tool = makeTool();
     registry.register(tool, 'agent');

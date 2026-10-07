@@ -495,6 +495,8 @@ export interface PersistedToolRow {
   set_by: string | null;
   state_at: number | string | null;
   request_json: string | null;
+  /** When the state row was last written; null for a row with no state row. */
+  state_updated_at: number | string | null;
 }
 
 // ============================================================================
