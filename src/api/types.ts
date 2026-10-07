@@ -208,7 +208,15 @@ export interface HitlConfig {
    * no pause at that lifecycle point.
    */
   approvals?: {
-    /** Tool names whose invocations require approval before execution. */
+    /**
+     * Tool names whose invocations require approval before execution; `'*'`
+     * covers every tool. Enforced on every tool loop of a config seat, a
+     * pre-built seat that forwards per-call options, a spawned specialist and
+     * a nested agency, after `onBeforeToolExecution` has run. A rejection skips
+     * the tool and the run goes on; a handler error, or a timeout under
+     * `onTimeout: 'error'`, skips the tool and rejects the call once the
+     * strategy settles, after the run's usage is counted.
+     */
     beforeTool?: string[];
     /** Agent names whose invocations require approval before execution. */
     beforeAgent?: string[];
@@ -700,7 +708,11 @@ export interface ApprovalDecision {
    * proceeding (only when `approved` is `true`).
    */
   modifications?: {
-    /** Overridden tool arguments. */
+    /**
+     * Overridden tool arguments. The `beforeTool` approval gate does not apply
+     * them: it approves or refuses the arguments `onBeforeToolExecution` left,
+     * so rewrite arguments in that hook, which runs first.
+     */
     toolArgs?: unknown;
     /** Overridden output text. */
     output?: string;

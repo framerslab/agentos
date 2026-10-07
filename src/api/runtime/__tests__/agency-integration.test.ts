@@ -974,15 +974,15 @@ describe('Agency Full Integration', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // beforeTool forwarding to sub-agent permissions
+  // beforeTool construction
   // ---------------------------------------------------------------------------
 
-  describe('beforeTool forwarding', () => {
+  describe('beforeTool construction', () => {
     it('agency-level beforeTool config does not throw during construction', () => {
       /**
-       * When `hitl.approvals.beforeTool` is set, the agency forwards those
-       * tool names into each sub-agent's `permissions.requireApproval`. The
-       * construction itself must not throw.
+       * `hitl.approvals.beforeTool` is enforced per call by the approval gate
+       * the agency builds (agency-tool-approval.e2e.test.ts covers the tool
+       * loops). The construction itself must not throw.
        */
       expect(() =>
         agency({
