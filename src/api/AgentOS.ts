@@ -292,6 +292,7 @@ function wrapStorageAdapterWithWriteHooks(
 
 // Re-export from extracted module
 import { AgentOSServiceError } from './errors';
+import { resolvePersonaLoader, validatePersonaSource } from './runtime/personaLoaderResolution';
 export { AgentOSServiceError } from './errors';
 
 export interface AgentOSCapabilityDiscoverySources {
@@ -648,6 +649,12 @@ export interface AgentOSConfig {
   languageConfig?: import('../cognition/nlp/language').AgentOSLanguageConfig;
   /** Optional custom persona loader (useful for browser/local runtimes). */
   personaLoader?: IPersonaLoader;
+  /**
+   * Persona definitions given inline, as parsed JSON objects or code-built objects. They are
+   * served by an in-memory loader and validated like file personas. Exclusive with
+   * `personaLoader`; when set, the file-system persona directory is not read.
+   */
+  personas?: IPersonaDefinition[];
   /**
    * Optional cross-platform storage adapter for client-side persistence.
    * Enables fully offline AgentOS in browsers (IndexedDB), desktop (SQLite), mobile (Capacitor).
@@ -1148,8 +1155,9 @@ export class AgentOS implements IAgentOS {
       console.log('AgentOS: StreamingManager initialized.');
 
       // Initialize GMI Manager
+      const personaSource = resolvePersonaLoader(this.config);
       this.gmiManager = new GMIManager(
-        this.config.gmiManagerConfig,
+        { ...this.config.gmiManagerConfig, personaLoaderConfig: personaSource.personaLoaderConfig },
         this.subscriptionService,
         this.authService,
         this.conversationManager, // Removed Prisma parameter
@@ -1158,7 +1166,7 @@ export class AgentOS implements IAgentOS {
         this.utilityAIService, // Pass the potentially dual-role utility service
         this.toolOrchestrator,
         this.ragMemoryInitializer.retrievalAugmentor,
-        this.config.personaLoader
+        personaSource.loader
       );
       await this.gmiManager.initialize();
       console.log('AgentOS: GMIManager initialized.');
@@ -1243,6 +1251,7 @@ export class AgentOS implements IAgentOS {
       // but as a runtime check:
       missingParams.push('AgentOSConfig (entire object)');
     } else {
+      validatePersonaSource(config);
       // Check for each required sub-configuration
       const requiredConfigs: Array<keyof AgentOSConfig> = [
         'gmiManagerConfig',
