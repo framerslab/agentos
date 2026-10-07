@@ -69,8 +69,9 @@ export interface ElevenLabsStreamingSTTConfig {
   baseUrl?: string;
 
   /**
-   * STT model to use.
-   * @default 'scribe_v1'
+   * STT model, sent as `model_id` on every request (ElevenLabs requires it).
+   * ElevenLabs lists `scribe_v1` as deprecated in favour of `scribe_v2`.
+   * @default 'scribe_v2'
    */
   model?: string;
 
@@ -83,6 +84,9 @@ export interface ElevenLabsStreamingSTTConfig {
   /** Injectable health probe for tests. */
   healthProbe?: (apiKey: string) => Promise<{ ok: boolean; status: number; latencyMs: number }>;
 }
+
+/** ElevenLabs' current batch speech-to-text model. */
+const DEFAULT_STT_MODEL = 'scribe_v2';
 
 // ---------------------------------------------------------------------------
 // ElevenLabs STT response types
@@ -253,14 +257,13 @@ class ElevenLabsChunkedSTTSession extends EventEmitter implements StreamingSTTSe
           `Content-Disposition: form-data; name="language_code"\r\n\r\n${languageCode}\r\n`
         )
       );
-      if (this.config.model) {
-        parts.push(Buffer.from(`--${boundary}\r\n`));
-        parts.push(
-          Buffer.from(
-            `Content-Disposition: form-data; name="model_id"\r\n\r\n${this.config.model}\r\n`
-          )
-        );
-      }
+      // model_id is a required field of the endpoint, so the default applies
+      // whenever no model is configured.
+      const modelId = this.config.model || DEFAULT_STT_MODEL;
+      parts.push(Buffer.from(`--${boundary}\r\n`));
+      parts.push(
+        Buffer.from(`Content-Disposition: form-data; name="model_id"\r\n\r\n${modelId}\r\n`)
+      );
       parts.push(Buffer.from(`--${boundary}--\r\n`));
 
       const body = Buffer.concat(parts);
