@@ -36,6 +36,7 @@ import { AgentOS } from '../AgentOS';
 import { parseSoul } from '../../cognition/substrate/personas/SoulLoader';
 import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPersonaDefinition';
 import { REASONING_TRACE_MIN_ENTRIES } from '../../cognition/substrate/reasoningTraceLimits';
+import type { ReasoningTrace } from '../../cognition/substrate/IGMI';
 
 const inline: IPersonaDefinition = {
   id: 'trace-inline', name: 'Trace Inline', description: 'Sets its own trace limit.', version: '1.0.0',
@@ -74,8 +75,8 @@ async function turn(agentos: AgentOS, personaId: string, i: number): Promise<voi
   }
 }
 
-async function trace(agentos: AgentOS, personaId: string) {
-  const gmi = await agentos.getGMIManager().getOrCreateGMIForSession('user-1', `s-${personaId}`, personaId);
+async function trace(agentos: AgentOS, personaId: string): Promise<Readonly<ReasoningTrace>> {
+  const { gmi } = await agentos.getGMIManager().getOrCreateGMIForSession('user-1', `s-${personaId}`, personaId);
   return gmi.getReasoningTrace();
 }
 
