@@ -37,6 +37,13 @@ export interface DeepgramPreRecordedBatchSTTConfig {
   language?: string;
   /** Add punctuation + capitalization so stored transcripts read naturally. @default true */
   smartFormat?: boolean;
+  /**
+   * Opt requests out of Deepgram's Model Improvement Program by sending
+   * `mip_opt_out=true`. Off by default because Deepgram notes that opting out
+   * has pricing impacts.
+   * @default false
+   */
+  mipOptOut?: boolean;
   /** Base listen endpoint. @default 'https://api.deepgram.com/v1/listen' */
   baseUrl?: string;
   /** Per-request timeout. @default 30000 */
@@ -54,6 +61,7 @@ export class DeepgramPreRecordedBatchSTT implements IBatchSTT {
   private readonly model: string;
   private readonly language: string;
   private readonly smartFormat: boolean;
+  private readonly mipOptOut: boolean;
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: FetchLike;
@@ -63,6 +71,7 @@ export class DeepgramPreRecordedBatchSTT implements IBatchSTT {
     this.model = config.model ?? 'nova-3';
     this.language = config.language ?? 'en';
     this.smartFormat = config.smartFormat ?? true;
+    this.mipOptOut = config.mipOptOut === true;
     this.baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.fetchImpl = config.fetchImpl ?? ((input, init) => fetch(input, init));
@@ -75,6 +84,7 @@ export class DeepgramPreRecordedBatchSTT implements IBatchSTT {
       language: config?.language ?? this.language,
     });
     if (this.smartFormat) params.set('smart_format', 'true');
+    if (this.mipOptOut) params.set('mip_opt_out', 'true');
     const url = `${this.baseUrl}?${params.toString()}`;
 
     const res = await this.fetchImpl(url, {
