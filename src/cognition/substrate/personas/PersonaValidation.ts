@@ -124,6 +124,9 @@ export async function validatePersona(persona: IPersonaDefinition, opts: Persona
       add('error', 'missing_required_field', `Required field '${field}' is missing or empty.`, String(field));
     }
   }
+  if (persona.activationKeywords !== undefined && !Array.isArray(persona.activationKeywords)) {
+    add('error', 'invalid_field_type', `Field 'activationKeywords' must be an array of strings when present.`, 'activationKeywords');
+  }
 
   // Reserved persona id check.
   if (opts.reservedPersonaIds && opts.reservedPersonaIds.has(persona.id)) {
@@ -260,7 +263,7 @@ export async function validatePersonas(personas: IPersonaDefinition[], opts: Per
   }
   const keywordMap = new Map<string, string[]>();
   for (const p of personas) {
-    (p.activationKeywords || []).forEach(kw => {
+    (Array.isArray(p.activationKeywords) ? p.activationKeywords : []).forEach(kw => {
       const existing = keywordMap.get(kw) || [];
       existing.push(p.id);
       keywordMap.set(kw, existing);
