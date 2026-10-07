@@ -87,14 +87,14 @@ The propagation diagram at the top of this page shows the five surfaces a HEXACO
 | **Conscientiousness:** "Be thorough and systematic. Structure responses clearly. Prefer precision over speed." | **Conscientiousness:** "Be flexible and adaptive. Prioritize the big picture. Tolerate ambiguity and improvise." |
 | **Openness:** "Explore creative angles and unconventional ideas. Draw unexpected connections." | **Openness:** "Stick to proven approaches and established knowledge. Be practical and concrete." |
 
-Source: [`packages/agentos/src/api/agent.ts:386`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts#L386).
+Source: [`src/api/agent.ts:386`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts#L386).
 
 ### 2. Memory encoding strength
 
 Traits derive six attention weights that scale how strongly an incoming trace is encoded.
 
 ```ts
-// packages/agentos/src/memory/core/encoding/EncodingModel.ts
+// src/cognition/memory/core/encoding/EncodingModel.ts
 export function computeEncodingWeights(traits: HexacoTraits): EncodingWeights {
   const o = clamp01(traits.openness);
   const c = clamp01(traits.conscientiousness);
@@ -126,14 +126,14 @@ The composite strength is clamped to [0, 1] and feeds the Ebbinghaus stability c
 
 **Practical effect:** an agent with `emotionality: 0.85` encodes emotionally charged moments roughly 4x more strongly than an agent with `emotionality: 0.15` on the same input. Over thousands of interactions, the high-emotionality agent's memory is dominated by emotionally significant traces; the low-emotionality agent's memory is dominated by procedural and factual traces.
 
-Source: [`packages/agentos/src/cognition/memory/core/encoding/EncodingModel.ts:38`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/encoding/EncodingModel.ts#L38).
+Source: [`src/cognition/memory/core/encoding/EncodingModel.ts:38`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/encoding/EncodingModel.ts#L38).
 
 ### 3. Working memory capacity
 
 Baddeley's classic finding (1974) is that working memory holds 7 ± 2 active items. Personality modulates the exact count within that range.
 
 ```ts
-// packages/agentos/src/memory/core/working/CognitiveWorkingMemory.ts
+// src/cognition/memory/core/working/CognitiveWorkingMemory.ts
 function computeCapacity(base: number, traits: HexacoTraits): number {
   const o = clamp01(traits.openness);
   const c = clamp01(traits.conscientiousness);
@@ -151,14 +151,14 @@ function computeCapacity(base: number, traits: HexacoTraits): number {
 | Both > 0.6 | 7 slots (cancel out) | Default Miller's number |
 | Both ≤ 0.6 | 7 slots | Default Miller's number |
 
-Source: [`packages/agentos/src/cognition/memory/core/working/CognitiveWorkingMemory.ts:54`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/working/CognitiveWorkingMemory.ts#L54).
+Source: [`src/cognition/memory/core/working/CognitiveWorkingMemory.ts:54`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/working/CognitiveWorkingMemory.ts#L54).
 
 ### 4. Memory prompt formatting style
 
 When the memory system assembles retrieved traces into the LLM prompt, it picks one of three formatting styles based on the dominant trait among Conscientiousness, Openness, and Emotionality:
 
 ```ts
-// packages/agentos/src/memory/core/prompt/MemoryPromptAssembler.ts
+// src/cognition/memory/core/prompt/MemoryPromptAssembler.ts
 function selectFormattingStyle(traits: HexacoTraits): FormattingStyle {
   const c = clamp01(traits.conscientiousness);
   const o = clamp01(traits.openness);
@@ -178,7 +178,7 @@ function selectFormattingStyle(traits: HexacoTraits): FormattingStyle {
 
 A preamble matching the chosen style is prepended to the memory section, teaching the LLM how to reference traces in its response without announcing them as raw recall.
 
-Source: [`packages/agentos/src/cognition/memory/core/prompt/MemoryPromptAssembler.ts:49`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/prompt/MemoryPromptAssembler.ts#L49).
+Source: [`src/cognition/memory/core/prompt/MemoryPromptAssembler.ts:49`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/prompt/MemoryPromptAssembler.ts#L49).
 
 ### 5. Observer and Reflector bias
 
@@ -258,7 +258,7 @@ Constraints enforced:
 
 This is how a roleplay agent's persona drifts toward what its interactions actually call for, rather than staying frozen at a static config.
 
-Source: [`packages/agentos/src/cognition/emergent/AdaptPersonalityTool.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts).
+Source: [`src/cognition/emergent/AdaptPersonalityTool.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts).
 
 ### Persona Drift mechanism
 
@@ -276,7 +276,7 @@ const DEFAULT_PERSONA_DRIFT_CONFIG = {
 
 This is heuristic-only (no LLM calls) and is the right choice when you want long-running agents to slowly adapt their disposition based on what they actually experience, without the cost or unpredictability of LLM-driven self-evaluation.
 
-Source: [`packages/agentos/src/cognition/memory/mechanisms/PersonaDriftMechanism.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/PersonaDriftMechanism.ts).
+Source: [`src/cognition/memory/mechanisms/PersonaDriftMechanism.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/PersonaDriftMechanism.ts).
 
 For the rest of the runtime adaptation surface — mood, inferred user skill, task complexity, working-memory imprints, and the metaprompt loop that drives them between turns — see [Adaptive Prompt Intelligence](/features/adaptive-prompt-intelligence). The trait-drift mechanisms above are the persistent-state slice of the same broader adaptation story.
 
@@ -323,7 +323,7 @@ await memory.initialize({
 });
 ```
 
-Source: [`CognitiveMemoryConfig`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/config.ts) in `packages/agentos/src/cognition/memory/core/config.ts`.
+Source: [`CognitiveMemoryConfig`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/config.ts) in `src/cognition/memory/core/config.ts`.
 
 ---
 

@@ -214,4 +214,4 @@ All error types are exported from the subprocess barrel:
 import { CLISubprocessError, CLI_ERROR } from '@framers/agentos/sandbox/subprocess';
 ```
 
-Source file: `packages/agentos/src/sandbox/subprocess/errors.ts`
+Source file: `src/safety/sandbox/subprocess/errors.ts`

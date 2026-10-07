@@ -815,7 +815,7 @@ Twelve specific gaps in Mastra's memory architecture that the cognitive memory l
 
 ## Source Files
 
-All source lives in `packages/agentos/src/cognition/memory/`:
+All source lives in `src/cognition/memory/`:
 
 | File | Export |
 |------|--------|
@@ -860,12 +860,12 @@ Both are injected into the system prompt simultaneously. The persistent memory a
 
 ## Mechanism Implementation Reference {#mechanism-implementation-reference}
 
-The eight cognitive mechanisms live under `packages/agentos/src/cognition/memory/mechanisms/`. Each mechanism is a pure function with one mutation responsibility on a [`MemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/SelfEvaluateTool.ts). The [`CognitiveMechanismsEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/CognitiveMechanismsEngine.ts) binds them to lifecycle hooks on [`MemoryStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/MemoryStore.ts) and `MemoryPromptAssembler`.
+The eight cognitive mechanisms live under `src/cognition/memory/mechanisms/`. Each mechanism is a pure function with one mutation responsibility on a [`MemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/SelfEvaluateTool.ts). The [`CognitiveMechanismsEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/CognitiveMechanismsEngine.ts) binds them to lifecycle hooks on [`MemoryStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/MemoryStore.ts) and `MemoryPromptAssembler`.
 
 ### Source-tree layout
 
 ```
-packages/agentos/src/memory/mechanisms/
+src/cognition/memory/mechanisms/
 ├── types.ts                          # CognitiveMechanismsConfig + shared types
 ├── defaults.ts                       # DEFAULT_MECHANISMS_CONFIG + resolveConfig()
 ├── CognitiveMechanismsEngine.ts      # Lifecycle hook orchestrator
@@ -947,11 +947,11 @@ Mechanism metadata is stored in `trace.structuredData.mechanismMetadata` (type [
 Each mechanism is a pure function testable in isolation:
 
 ```bash
-npx vitest run src/memory/mechanisms/
-npx vitest run src/memory/mechanisms/__tests__/retrieval.test.ts
-npx vitest run src/memory/mechanisms/__tests__/consolidation.test.ts
-npx vitest run src/memory/mechanisms/__tests__/engine.test.ts
-npx vitest run src/memory/mechanisms/__tests__/types.test.ts
+npx vitest run src/cognition/memory/mechanisms/
+npx vitest run src/cognition/memory/mechanisms/__tests__/retrieval.test.ts
+npx vitest run src/cognition/memory/mechanisms/__tests__/consolidation.test.ts
+npx vitest run src/cognition/memory/mechanisms/__tests__/engine.test.ts
+npx vitest run src/cognition/memory/mechanisms/__tests__/types.test.ts
 ```
 
 ---
@@ -997,8 +997,8 @@ The runtime constants, formulas, weights, and design decisions in this page are 
 
 Source files cited inline:
 
-- [`packages/agentos/src/cognition/memory/CognitiveMemoryManager.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/CognitiveMemoryManager.ts) — top-level orchestrator
-- [`packages/agentos/src/cognition/memory/core/decay/DecayModel.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/DecayModel.ts) — Ebbinghaus formula + spaced repetition
-- [`packages/agentos/src/cognition/memory/mechanisms/defaults.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/defaults.ts) — eight cognitive mechanism defaults
-- [`packages/agentos/src/cognition/memory/retrieval/hyde/MemoryHydeRetriever.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hyde/MemoryHydeRetriever.ts) — HyDE retriever
-- [`packages/agentos/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) — GraphRAG implementation
+- [`src/cognition/memory/CognitiveMemoryManager.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/CognitiveMemoryManager.ts) — top-level orchestrator
+- [`src/cognition/memory/core/decay/DecayModel.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/DecayModel.ts) — Ebbinghaus formula + spaced repetition
+- [`src/cognition/memory/mechanisms/defaults.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/defaults.ts) — eight cognitive mechanism defaults
+- [`src/cognition/memory/retrieval/hyde/MemoryHydeRetriever.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hyde/MemoryHydeRetriever.ts) — HyDE retriever
+- [`src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) — GraphRAG implementation

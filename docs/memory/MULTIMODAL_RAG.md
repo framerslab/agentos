@@ -230,6 +230,6 @@ This keeps the base retrieval system consistent while still allowing richer moda
 
 ### Implementation references
 
-- [`packages/agentos/src/cognition/rag/`](https://github.com/framerslab/agentos/tree/master/src/cognition/rag) — vector stores, embeddings, fusion, reranking, GraphRAG
-- [`packages/agentos/src/cognition/memory/retrieval/hyde/MemoryHydeRetriever.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hyde/MemoryHydeRetriever.ts) — HyDE for memory-specific recall
-- [`packages/agentos/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) — Microsoft GraphRAG-style implementation
+- [`src/cognition/rag/`](https://github.com/framerslab/agentos/tree/master/src/cognition/rag) — vector stores, embeddings, fusion, reranking, GraphRAG
+- [`src/cognition/memory/retrieval/hyde/MemoryHydeRetriever.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hyde/MemoryHydeRetriever.ts) — HyDE for memory-specific recall
+- [`src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) — Microsoft GraphRAG-style implementation

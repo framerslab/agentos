@@ -527,8 +527,8 @@ npx create-agentos-extension my-extension
 
 ## References
 - [AgentOS Architecture](./ARCHITECTURE.md)
-- [ITool Interface](../src/core/tools/ITool.ts)
-- [ExtensionManager](../src/extensions/ExtensionManager.ts)
+- [ITool Interface](../../src/core/tools/ITool.ts)
+- [ExtensionManager](../../src/extensions/ExtensionManager.ts)
 - [Example Extensions](https://github.com/framerslab/agentos-extensions)
 
 ## Appendix: Quick Start Template

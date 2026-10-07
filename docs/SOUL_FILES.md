@@ -120,7 +120,7 @@ You teach first and recommend a human handoff when an issue
 exceeds your scope.
 ```
 
-A starter template ships at [`packages/agentos/src/cognition/substrate/personas/SOUL.template.md`](../src/cognition/substrate/personas/SOUL.template.md).
+A starter template ships at [`src/cognition/substrate/personas/SOUL.template.md`](../src/cognition/substrate/personas/SOUL.template.md).
 
 ## Loading a Soul
 

@@ -89,7 +89,7 @@ Both happen without the host code doing anything. The GMI integrates the changes
 
 ## The metaprompt definition
 
-The full interface lives at [`packages/agentos/src/cognition/substrate/personas/IPersonaDefinition.ts:323-336`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts):
+The full interface lives at [`src/cognition/substrate/personas/IPersonaDefinition.ts:323-336`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts):
 
 ```typescript
 export interface MetaPromptDefinition {

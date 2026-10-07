@@ -1250,8 +1250,8 @@ describe('Integration: ParallelGuardrailDispatcher + MyGuardrail', () => {
 
 ### Reference test files
 
-- `packages/agentos/tests/safety/guardrails/ParallelGuardrailDispatcher.spec.ts` -- comprehensive dispatcher tests.
-- `packages/agentos/tests/safety/guardrails.integration.spec.ts` -- integration tests for the full guardrail pipeline.
+- `tests/core/guardrails/ParallelGuardrailDispatcher.spec.ts` -- comprehensive dispatcher tests.
+- `tests/core/guardrails.integration.spec.ts` -- integration tests for the full guardrail pipeline.
 
 ---
 

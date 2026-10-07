@@ -296,5 +296,5 @@ const result2 = await onboarding.resume(savedCheckpointId);
 
 ### Implementation references
 
-- [`packages/agentos/src/orchestration/builders/WorkflowBuilder.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/WorkflowBuilder.ts) — `workflow()` factory + chain builder
-- [`packages/agentos/src/orchestration/ir/types.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) — shared IR
+- [`src/orchestration/builders/WorkflowBuilder.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/WorkflowBuilder.ts) — `workflow()` factory + chain builder
+- [`src/orchestration/ir/types.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) — shared IR

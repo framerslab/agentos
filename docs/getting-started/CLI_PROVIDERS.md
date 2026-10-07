@@ -24,7 +24,7 @@ execa → local CLI binary                   ← user's authenticated CLI (claud
 
 ### Core Subprocess Module
 
-The generalized subprocess bridge lives at `packages/agentos/src/sandbox/subprocess/`:
+The generalized subprocess bridge lives at `src/safety/sandbox/subprocess/`:
 
 - **[`CLISubprocessBridge`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLISubprocessBridge.ts)** — abstract base class (template method pattern). Owns process lifecycle: spawn, stdin pipe, NDJSON line splitting, timeout, abort signal. Subclasses implement `buildArgs()`, `classifyError()`, `parseStreamEvent()`.
 - **[`CLISubprocessError`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/errors.ts)** — generic error with open string codes, `guidance` (user-facing fix instructions), and `recoverable` flag. Works for any binary, not just LLM CLIs.

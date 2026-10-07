@@ -336,6 +336,6 @@ See `IPlanningEngine.ts` for complete type definitions.
 
 ### Implementation references
 
-- [`packages/agentos/src/orchestration/planner/PlanningEngine.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/planner/PlanningEngine.ts) — main planner class with ReAct + plan-execute-reflect loops
-- [`packages/agentos/src/orchestration/planner/`](https://github.com/framerslab/agentos/tree/master/src/orchestration/planner) — plan generation, decomposition, refinement, validation
-- [`packages/agentos/src/orchestration/turn-planner/`](https://github.com/framerslab/agentos/tree/master/src/orchestration/turn-planner) — per-turn planning telemetry
+- [`src/orchestration/planner/PlanningEngine.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/planner/PlanningEngine.ts) — main planner class with ReAct + plan-execute-reflect loops
+- [`src/orchestration/planner/`](https://github.com/framerslab/agentos/tree/master/src/orchestration/planner) — plan generation, decomposition, refinement, validation
+- [`src/orchestration/turn-planner/`](https://github.com/framerslab/agentos/tree/master/src/orchestration/turn-planner) — per-turn planning telemetry

@@ -301,7 +301,7 @@ Common library choices:
 
 ### Implementation references
 
-- `packages/agentos/src/safety/evaluation/observability/Tracer.ts` — span creation around turn / tool / guardrail / LLM-call boundaries
-- `packages/agentos/src/safety/evaluation/observability/otel.ts` — OpenTelemetry API peer-dep wiring
-- `packages/agentos/src/logging/PinoLogger.ts` — structured logger with trace-id / span-id field injection
-- `packages/agentos/src/orchestration/turn-planner/SqlTaskOutcomeTelemetryStore.ts` — persisted per-turn outcome KPIs for rolling-quality dashboards
+- `src/safety/evaluation/observability/Tracer.ts` — span creation around turn / tool / guardrail / LLM-call boundaries
+- `src/safety/evaluation/observability/otel.ts` — OpenTelemetry API peer-dep wiring
+- `src/core/logging/PinoLogger.ts` — structured logger with trace-id / span-id field injection
+- `src/orchestration/turn-planner/SqlTaskOutcomeTelemetryStore.ts` — persisted per-turn outcome KPIs for rolling-quality dashboards

@@ -51,7 +51,7 @@ Parallel to [`HydeRetriever`](https://github.com/framerslab/agentos/blob/master/
 
 ## Related modules
 
-- [`src/cognition/memory/retrieval/session/SessionSummaryStore.ts`](../../src/memory/retrieval/session/SessionSummaryStore.ts)
-- [`src/cognition/memory/retrieval/session/SessionRetriever.ts`](../../src/memory/retrieval/session/SessionRetriever.ts)
-- [`src/cognition/memory/ingest/SessionSummarizer.ts`](../../src/memory/ingest/SessionSummarizer.ts) — summary generation (companion)
-- [`src/cognition/memory/retrieval/store/MemoryStore.ts`](../../src/memory/retrieval/store/MemoryStore.ts) — underlying trace store used by Stage 2
+- [`src/cognition/memory/retrieval/session/SessionSummaryStore.ts`](../../src/cognition/memory/retrieval/session/SessionSummaryStore.ts)
+- [`src/cognition/memory/retrieval/session/SessionRetriever.ts`](../../src/cognition/memory/retrieval/session/SessionRetriever.ts)
+- [`src/cognition/memory/ingest/SessionSummarizer.ts`](../../src/cognition/memory/ingest/SessionSummarizer.ts) — summary generation (companion)
+- [`src/cognition/memory/retrieval/store/MemoryStore.ts`](../../src/cognition/memory/retrieval/store/MemoryStore.ts) — underlying trace store used by Stage 2

@@ -57,8 +57,8 @@ In Step 3 MVP, [`HybridRetriever`](https://github.com/framerslab/agentos/blob/ma
 
 ## Related modules
 
-- [`src/cognition/memory/retrieval/hybrid/HybridRetriever.ts`](../../src/memory/retrieval/hybrid/HybridRetriever.ts)
-- [`src/cognition/memory/retrieval/hybrid/reciprocalRankFusion.ts`](../../src/memory/retrieval/hybrid/reciprocalRankFusion.ts)
-- [`src/cognition/rag/search/BM25Index.ts`](../../src/rag/search/BM25Index.ts) — reused verbatim
-- [`src/cognition/memory/retrieval/store/MemoryStore.ts`](../../src/memory/retrieval/store/MemoryStore.ts) — dense source
-- [`src/cognition/rag/reranking/RerankerService.ts`](../../src/rag/reranking/RerankerService.ts) — optional reranker
+- [`src/cognition/memory/retrieval/hybrid/HybridRetriever.ts`](../../src/cognition/memory/retrieval/hybrid/HybridRetriever.ts)
+- [`src/cognition/memory/retrieval/hybrid/reciprocalRankFusion.ts`](../../src/cognition/memory/retrieval/hybrid/reciprocalRankFusion.ts)
+- [`src/cognition/rag/search/BM25Index.ts`](../../src/cognition/rag/search/BM25Index.ts) — reused verbatim
+- [`src/cognition/memory/retrieval/store/MemoryStore.ts`](../../src/cognition/memory/retrieval/store/MemoryStore.ts) — dense source
+- [`src/cognition/rag/reranking/RerankerService.ts`](../../src/cognition/rag/reranking/RerankerService.ts) — optional reranker

@@ -1270,6 +1270,6 @@ await contentPipeline.close();
 - [`docs/OBSERVABILITY.md`](./OBSERVABILITY.md) — OTEL integration and trace event reference
 - [`docs/STRUCTURED_OUTPUT.md`](./STRUCTURED_OUTPUT.md) — Zod schema output and extraction patterns
 - [`docs/AGENT_GRAPH.md`](./AGENT_GRAPH.md) — [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) programmatic graph builder (advanced)
-- [`src/api/types.ts`](../src/api/types.ts) — canonical TypeScript type definitions
-- [`src/api/agency.ts`](../src/api/agency.ts) — `agency()` implementation
-- [`src/api/hitl.ts`](../src/api/hitl.ts) — HITL handler factories
+- [`src/api/types.ts`](../../src/api/types.ts) — canonical TypeScript type definitions
+- [`src/api/agency.ts`](../../src/api/agency.ts) — `agency()` implementation
+- [`src/api/hitl.ts`](../../src/api/hitl.ts) — HITL handler factories
