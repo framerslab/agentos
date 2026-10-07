@@ -64,10 +64,10 @@ import { CognitiveMemoryBridge } from './CognitiveMemoryBridge';
 import { SentimentTracker } from './SentimentTracker';
 import { MetapromptExecutor } from './MetapromptExecutor';
 import { feedbackTraceMessage, type NormalizedUserFeedback } from './userFeedback';
+import { resolveReasoningTraceLimits, type ReasoningTraceLimits } from './reasoningTraceLimits';
 
 const DEFAULT_MAX_CONVERSATION_HISTORY_TURNS = 20;
 const DEFAULT_SELF_REFLECTION_INTERVAL_TURNS = 5;
-const MAX_REASONING_TRACE_ENTRIES = 500; // Limit trace size in memory
 
 /**
  * @class GMI
@@ -98,6 +98,8 @@ export class GMI implements IGMI {
   private currentUserContext!: UserContext;
   private currentTaskContext!: TaskContext;
   private reasoningTrace: ReasoningTrace;
+  /** Entry cap and message cap of the trace; resolved from the persona and the config at initialize(). */
+  private traceLimits: ReasoningTraceLimits = resolveReasoningTraceLimits();
   private conversationHistoryManager!: ConversationHistoryManager;
 
   /**
@@ -152,6 +154,7 @@ export class GMI implements IGMI {
 
     this.activePersona = persona;
     this.config = config;
+    this.traceLimits = resolveReasoningTraceLimits(persona, config);
 
     this.workingMemory = config.workingMemory;
     this.promptEngine = config.promptEngine;
@@ -429,13 +432,13 @@ export class GMI implements IGMI {
    * @private
    */
   private addTraceEntry(type: ReasoningEntryType, message: string, details?: Record<string, any>, timestamp?: Date): void {
-    if (this.reasoningTrace.entries.length >= MAX_REASONING_TRACE_ENTRIES) {
+    if (this.reasoningTrace.entries.length >= this.traceLimits.maxEntries) {
       this.reasoningTrace.entries.shift();
     }
     const entry: ReasoningTraceEntry = {
       timestamp: timestamp || new Date(),
       type,
-      message: message.substring(0, 1000), // Cap message length
+      message: message.substring(0, this.traceLimits.maxMessageLength),
       details: details ? JSON.parse(JSON.stringify(details)) : {},
     };
     this.reasoningTrace.entries.push(entry);

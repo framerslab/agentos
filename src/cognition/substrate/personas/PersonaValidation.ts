@@ -131,6 +131,19 @@ export async function validatePersona(persona: IPersonaDefinition, opts: Persona
       add('error', 'invalid_field_type', `Field 'activationKeywords' has an entry that is not a string.`, 'activationKeywords');
     }
   }
+  const traceConfig = persona.reasoningTraceConfig;
+  if (traceConfig !== undefined) {
+    if (typeof traceConfig !== 'object' || traceConfig === null || Array.isArray(traceConfig)) {
+      add('error', 'invalid_field_type', `Field 'reasoningTraceConfig' must be an object when present.`, 'reasoningTraceConfig');
+    } else {
+      for (const key of ['maxEntries', 'maxMessageLength'] as const) {
+        const value = (traceConfig as Record<string, unknown>)[key];
+        if (value !== undefined && !(typeof value === 'number' && Number.isInteger(value) && value > 0)) {
+          add('warning', 'invalid_reasoning_trace_config', `Field 'reasoningTraceConfig.${key}' is ${String(value)}; it must be a positive integer, so the runtime default applies.`, `reasoningTraceConfig.${key}`);
+        }
+      }
+    }
+  }
 
   // Reserved persona id check.
   if (opts.reservedPersonaIds && opts.reservedPersonaIds.has(persona.id)) {

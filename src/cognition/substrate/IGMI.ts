@@ -181,6 +181,13 @@ export interface GMIBaseConfig {
    * Prevents runaway tool loops in `processTurnStream()`. Defaults to `5`.
    */
   maxToolLoopIterations?: number;
+  /**
+   * Runtime default for the reasoning trace's entry cap when the persona sets no
+   * `reasoningTraceConfig.maxEntries`. Defaults to `500`.
+   */
+  defaultReasoningTraceMaxEntries?: number;
+  /** Runtime default for the characters kept per trace message. Defaults to `1000`. */
+  defaultReasoningTraceMaxMessageLength?: number;
   customSettings?: Record<string, any>;
 }
 

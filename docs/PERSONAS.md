@@ -20,6 +20,8 @@ A definition is an [`IPersonaDefinition`](../src/cognition/substrate/personas/IP
 - `version`: `major.minor.patch`, optionally with a pre-release suffix (`1.2.0-beta.1`); build metadata (`1.0.0+build`) is rejected.
 - `baseSystemPrompt`: a string, a `{ "template": "...", "variables": ["name"] }` object, or an ordered array of `{ "content": "...", "priority": 1 }` fragments.
 - `activationKeywords`, when present, must be an array of strings.
+- `conversationContextConfig.maxMessages` sets the GMI's conversation-history window (20 messages by default).
+- `reasoningTraceConfig.maxEntries` and `reasoningTraceConfig.maxMessageLength` set the reasoning trace's size (500 entries and 1000 characters per message by default; the runtime's `defaultReasoningTraceMaxEntries` and `defaultReasoningTraceMaxMessageLength` in `gmiManagerConfig.defaultGMIBaseConfigDefaults` set the defaults for every persona). Values that are not positive integers are reported by validation and ignored.
 - `sentimentTracking: { "enabled": true, "presets": ["frustration_recovery", "confusion_clarification"] }` (or `["all"]`) expands into the matching recovery metaprompts on load, from every source alike. The preset names are `frustration_recovery`, `confusion_clarification`, `satisfaction_reinforcement`, `error_recovery` and `engagement_boost`.
 
 The package ships five definitions as JSON: `atlas_systems_architect`, `default_assistant_persona`, `default_free_assistant`, `nerf_generalist` and `v_researcher`, exported as `BUILT_IN_PERSONAS` with `getBuiltInPersona(id)`.
