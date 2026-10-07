@@ -653,9 +653,6 @@ export class ToolOrchestrator implements IToolOrchestrator {
   }
 
   /**
-   * @inheritdoc
-   */
-  /**
    * The gate composed tools and workflows run their steps through: each step
    * is a tool call through processToolCall, as the composed call's caller,
    * with the instance the pipeline checked, so it meets the disabled list,
@@ -690,11 +687,16 @@ export class ToolOrchestrator implements IToolOrchestrator {
           details?: Record<string, unknown>;
         };
         const code = stepCodeFor(errorDetails.code, errorDetails.reason);
+        // A code inside the step tool's own details is a nested composition's
+        // refusal of one of its steps: it moves to innerCode, so only that
+        // composition is suspended, not this one.
+        const { code: innerCode, ...stepDetails } = (errorDetails.details ?? {}) as Record<string, unknown>;
         return {
           success: false,
           error: errorDetails.message ?? `Step tool "${step.name}" failed.`,
           details: {
-            ...(errorDetails.details ?? {}),
+            ...stepDetails,
+            ...(innerCode !== undefined ? { innerCode } : {}),
             ...(code ? { code } : {}),
             ...(errorDetails.code ? { orchestratorCode: errorDetails.code } : {}),
           },
@@ -703,6 +705,9 @@ export class ToolOrchestrator implements IToolOrchestrator {
     };
   }
 
+  /**
+   * @inheritdoc
+   */
   public async processToolCall(
     requestDetails: ToolExecutionRequestDetails
   ): Promise<ToolCallResult> {

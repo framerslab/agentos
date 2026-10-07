@@ -101,6 +101,19 @@ describe('createStepGate', () => {
     expect(ran).not.toHaveBeenCalled();
   });
 
+  it("a step tool's own refusal code arrives as innerCode, so it is not the composition's own refusal", async () => {
+    const nested: ITool = {
+      ...tool('nested', false),
+      execute: async () => ({ success: false, error: 'inner step gone', details: { code: 'step_missing', step: 's' } }),
+    };
+    const gate = createStepGate({ resolve: () => nested });
+
+    const result = await gate.run(nested, {}, ctx);
+
+    expect(result).toMatchObject({ success: false, details: { innerCode: 'step_missing', step: 's' } });
+    expect((result.details as Record<string, unknown>).code).toBeUndefined();
+  });
+
   it('a side-effecting step asks approval for that registration, and a rejection stops it', async () => {
     const ran = vi.fn();
     const requestApproval = vi.fn(

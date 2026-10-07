@@ -110,6 +110,7 @@ export interface SelfImprovementToolDeps {
     args: unknown,
     context?: ToolExecutionContext,
     signal?: AbortSignal,
+    tool?: ITool,
   ) => Promise<unknown>;
 
   /** Returns the names of all currently registered tools. */
@@ -376,6 +377,13 @@ export class EmergentCapabilityEngine {
     bySession: new Map(),
     byAgent: new Map(),
   };
+
+  /**
+   * Admissions of one tool run one after another: a load, a re-check after a
+   * registration and a host's sync of the same tool otherwise read and write
+   * its row at the same time, and the loser could be held off as contended.
+   */
+  private readonly admissionChains = new Map<string, Promise<unknown>>();
 
   /**
    * Create a new EmergentCapabilityEngine.
@@ -866,6 +874,10 @@ export class EmergentCapabilityEngine {
    * @returns what happened, so a host can tell a registered tool from a refused one.
    */
   async syncPersistedTool(tool: EmergentTool): Promise<LoadedToolOutcome> {
+    return this.serializeAdmission(tool.id, () => this.syncOne(tool));
+  }
+
+  private async syncOne(tool: EmergentTool): Promise<LoadedToolOutcome> {
     const existing = await this.registry.loadRow(tool.id);
     if (!existing && this.registry.hasStorage()) {
       // No stored row yet: the host hydrates from its own store. The row is
@@ -968,7 +980,7 @@ export class EmergentCapabilityEngine {
       );
       for (const row of rows) {
         try {
-          outcomes.push(await this.admitRow(row, { readAt }));
+          outcomes.push(await this.serializeAdmission(row.id, () => this.admitRow(row, { readAt })));
         } catch (error: unknown) {
           const message = error instanceof Error ? error.message : String(error);
           failed.push({ toolId: row.id, name: row.name, error: message });
@@ -976,27 +988,39 @@ export class EmergentCapabilityEngine {
         }
       }
     });
-    // A composition can chain another composition loaded after it: those
-    // suspended because a step was missing are admitted once more.
-    for (let i = 0; i < outcomes.length; i += 1) {
-      const outcome = outcomes[i];
-      if (outcome.state !== 'suspended' || outcome.reason !== 'step_missing') {
-        continue;
-      }
-      try {
-        const again = await this.withRead(async (readAt) => {
-          const row = await this.registry.loadRow(outcome.toolId);
-          return row ? this.admitRow(row, { readAt }) : undefined;
-        });
-        if (again) {
-          outcomes[i] = again;
+    // A composition can chain another composition loaded after it, at any
+    // depth: those suspended because a step was missing are admitted again,
+    // pass after pass, until a pass activates none.
+    for (let pass = 0; pass < outcomes.length; pass += 1) {
+      let activated = 0;
+      for (let i = 0; i < outcomes.length; i += 1) {
+        const outcome = outcomes[i];
+        if (outcome.state !== 'suspended' || outcome.reason !== 'step_missing') {
+          continue;
         }
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        outcomes.splice(i, 1);
-        i -= 1;
-        failed.push({ toolId: outcome.toolId, name: outcome.name, error: message });
-        console.warn(`[agentos:emergent] stored tool "${outcome.name}" (${outcome.toolId}) did not load: ${message}`);
+        try {
+          const again = await this.serializeAdmission(outcome.toolId, () =>
+            this.withRead(async (readAt) => {
+              const row = await this.registry.loadRow(outcome.toolId);
+              return row ? this.admitRow(row, { readAt }) : undefined;
+            }),
+          );
+          if (again) {
+            outcomes[i] = again;
+            if (again.state === 'active') {
+              activated += 1;
+            }
+          }
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          outcomes.splice(i, 1);
+          i -= 1;
+          failed.push({ toolId: outcome.toolId, name: outcome.name, error: message });
+          console.warn(`[agentos:emergent] stored tool "${outcome.name}" (${outcome.toolId}) did not load: ${message}`);
+        }
+      }
+      if (activated === 0) {
+        break;
       }
     }
 
@@ -1111,6 +1135,10 @@ export class EmergentCapabilityEngine {
   }
 
   private async recheck(toolId: string, force: boolean): Promise<LoadedToolOutcome | undefined> {
+    return this.serializeAdmission(toolId, () => this.recheckNow(toolId, force));
+  }
+
+  private async recheckNow(toolId: string, force: boolean): Promise<LoadedToolOutcome | undefined> {
     return this.withRead(async (readAt) => {
       const row = await this.registry.loadRow(toolId);
       if (row) {
@@ -1150,6 +1178,21 @@ export class EmergentCapabilityEngine {
     } finally {
       this.registry.endRead();
     }
+  }
+
+  /** Run an admission of `toolId` after any admission of it already under way. */
+  private serializeAdmission<T>(toolId: string, run: () => Promise<T>): Promise<T> {
+    const prior = this.admissionChains.get(toolId) ?? Promise.resolve();
+    const next = prior.catch(() => undefined).then(run);
+    this.admissionChains.set(toolId, next);
+    next
+      .finally(() => {
+        if (this.admissionChains.get(toolId) === next) {
+          this.admissionChains.delete(toolId);
+        }
+      })
+      .catch(() => undefined);
+    return next;
   }
 
   private admitRow(
@@ -1744,7 +1787,12 @@ export class EmergentCapabilityEngine {
             },
             executeTool: deps.executeTool,
             listTools: deps.listTools,
-            checkStep: (name: string) => this.composableBuilder.check(name),
+            checkStep: (name: string) => {
+              const verdict = this.composableBuilder.check(name);
+              // The instance checked is the one the step runs (resolved again
+              // with nothing awaited in between).
+              return verdict.ok ? { ...verdict, tool: this.composableBuilder.resolve(name) } : verdict;
+            },
           }),
         );
       } catch {
@@ -1857,6 +1905,19 @@ export class EmergentCapabilityEngine {
         const suspendFor = !result.success && refused ? RUN_REFUSAL_REASONS[refused] : undefined;
         if (suspendFor) {
           await this.suspendAsLibrary(tool.id, suspendFor);
+          if (suspendFor === 'step_replaced') {
+            // The registration that swapped the step's tool ran before this
+            // suspension existed, so it did not re-check this composition:
+            // check it now against the tool that holds the name.
+            try {
+              await this.recheck(tool.id, false);
+            } catch (recheckError: unknown) {
+              console.warn(
+                `[agentos:emergent] could not re-check "${tool.name}" (${tool.id}) after its step was replaced:`,
+                recheckError instanceof Error ? recheckError.message : recheckError,
+              );
+            }
+          }
           return {
             success: false,
             output: result.output,

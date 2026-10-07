@@ -22,7 +22,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentOSInput } from '../types/AgentOSInput';
 import type { ILogger } from '../../core/logging/ILogger';
-import type { ToolExecutionContext } from '../../core/tools/ITool.js';
+import type { ITool, ToolExecutionContext } from '../../core/tools/ITool.js';
 import type { SelfImprovementToolDeps } from '../../cognition/emergent/EmergentCapabilityEngine.js';
 import { PersonalityMutationStore } from '../../cognition/emergent/PersonalityMutationStore.js';
 import { resolveSelfImprovementSessionKey } from '../../cognition/emergent/sessionScope.js';
@@ -492,6 +492,7 @@ export class SelfImprovementSessionManager {
         args: unknown,
         context?: ToolExecutionContext,
         signal?: AbortSignal,
+        tool?: ITool,
       ): Promise<unknown> => {
         const orchestrator = accessors.getToolOrchestrator();
         const caller: ToolExecutionContext = context ?? {
@@ -515,6 +516,9 @@ export class SelfImprovementSessionManager {
           correlationId: caller.correlationId,
           sessionData: caller.sessionData,
           ...(signal ? { signal } : {}),
+          // The instance the workflow's check resolved: the orchestrator
+          // refuses the call (STEP_REPLACED) if the name changed hands since.
+          ...(tool ? { tool } : {}),
         });
         if (result.isError) {
           throw new Error(

@@ -105,6 +105,12 @@ export interface CreateWorkflowDeps {
     args: unknown,
     context?: ToolExecutionContext,
     signal?: AbortSignal,
+    /**
+     * The instance `checkStep` checked, when it returned one: the step runs
+     * that instance, and the call is refused when the name resolves to
+     * another by the time it runs.
+     */
+    tool?: ITool,
   ) => Promise<unknown>;
   /** Return the list of all currently available tool names. */
   listTools: () => string[];
@@ -116,7 +122,7 @@ export interface CreateWorkflowDeps {
    */
   checkStep?: (
     name: string,
-  ) => { ok: true } | { ok: false; code: string; message: string };
+  ) => { ok: true; tool?: ITool } | { ok: false; code: string; message: string };
 }
 
 // ============================================================================
@@ -408,6 +414,7 @@ export class CreateWorkflowTool implements ITool<CreateWorkflowInput> {
           resolvedArgs,
           i,
           context,
+          chainable && chainable.ok ? chainable.tool : undefined,
         );
 
         stepResults.push(result);
@@ -527,13 +534,16 @@ export class CreateWorkflowTool implements ITool<CreateWorkflowInput> {
     args: Record<string, unknown>,
     stepIndex: number,
     context: ToolExecutionContext,
+    checkedTool?: ITool,
   ): Promise<unknown> {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const expiry = new AbortController();
 
     try {
       return await Promise.race([
-        this.deps.executeTool(toolName, args, context, expiry.signal),
+        checkedTool
+          ? this.deps.executeTool(toolName, args, context, expiry.signal, checkedTool)
+          : this.deps.executeTool(toolName, args, context, expiry.signal),
         new Promise<never>((_, reject) => {
           timeoutId = setTimeout(() => {
             // Revoke the step's run: an approval that arrives after this

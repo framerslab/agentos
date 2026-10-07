@@ -374,7 +374,7 @@ describe('compositions and workflows: one gate, one rule', () => {
     ).toEqual(['create_workflow', 'send_message']);
   });
 
-  it('a step tool replaced after it was checked is not run, and the composition is suspended', async () => {
+  it('a step tool replaced after it was checked is not run, and the composition is checked again at once', async () => {
     const first: Array<Record<string, unknown>> = [];
     const second: Array<Record<string, unknown>> = [];
     const db = createSqliteAdapter();
@@ -403,13 +403,111 @@ describe('compositions and workflows: one gate, one rule', () => {
     const called = await callTool(host.orchestrator, 'notify_and_echo', { text: 'hello' }, {
       personaCapabilities: ['messaging'],
     });
+    swapDuringApproval = false;
 
     expect(called.isError).toBe(true);
     expect(String(called.errorDetails?.message)).toContain('step_replaced');
     expect(first).toEqual([]);
     expect(second).toEqual([]);
+    // The replacement fits the rule, so the composition is checked again and back.
     const toolId = String((forged.output as { toolId: string }).toolId);
-    expect(readStateRow(db, toolId)).toMatchObject({ state: 'suspended', state_reason: 'step_replaced' });
+    expect(readStateRow(db, toolId)).toMatchObject({ state: 'active' });
+    const again = await callTool(host.orchestrator, 'notify_and_echo', { text: 'again' }, {
+      personaCapabilities: ['messaging'],
+    });
+    expect(again.output).toEqual({ text: 'sent: again' });
+    expect(first).toEqual([]);
+    expect(second).toEqual([{ text: 'again' }]);
+  });
+
+  it('a stored chain of compositions loads in any row order', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, tools: [echoTool()], config: { compose: { sideEffectingTools: ['middle_c'] } } });
+    const composition = (id: string, name: string, step: string, createdAt: number) => {
+      seedToolRow(db, {
+        id,
+        name,
+        mode: 'compose',
+        source: JSON.stringify({ mode: 'compose', steps: [{ name: 's', tool: step, inputMapping: { text: '$input.text' } }] }),
+        inputSchema: TEXT_IN,
+        outputSchema: TEXT_OUT,
+      });
+      db.raw.prepare('UPDATE agentos_emergent_tools SET created_at = ? WHERE id = ?').run(createdAt, id);
+    };
+    // Outer first: each step's composition is stored after the one that chains it.
+    composition('c-outer', 'outer_c', 'middle_c', 1_700_000_000_001);
+    composition('c-middle', 'middle_c', 'inner_c', 1_700_000_000_002);
+    composition('c-inner', 'inner_c', 'echo', 1_700_000_000_003);
+
+    const summary = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+
+    expect(summary.outcomes).toEqual([
+      { toolId: 'c-outer', name: 'outer_c', state: 'active', reason: null },
+      { toolId: 'c-middle', name: 'middle_c', state: 'active', reason: null },
+      { toolId: 'c-inner', name: 'inner_c', state: 'active', reason: null },
+    ]);
+    expect((await callTool(host.orchestrator, 'outer_c', { text: 'deep' })).output).toEqual({ text: 'deep' });
+  });
+
+  it("a nested composition's refusal suspends that composition only", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, tools: [echoTool('base')] });
+    const inner = await callTool(host.orchestrator, 'forge_tool', composeOver('inner_echo', 'base'));
+    expect(inner.isError).toBeFalsy();
+    const outer = await callTool(
+      host.orchestrator,
+      'forge_tool',
+      composeOver('outer_echo', 'inner_echo', {
+        testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'hi' }, stepOutputs: { s: { text: 'hi' } } }],
+      }),
+    );
+    expect(outer.isError).toBeFalsy();
+
+    // The inner composition's own step tool goes away.
+    await host.orchestrator.unregisterTool('base');
+    const called = await callTool(host.orchestrator, 'outer_echo', { text: 'x' });
+
+    expect(called.isError).toBe(true);
+    const innerId = String((inner.output as { toolId: string }).toolId);
+    const outerId = String((outer.output as { toolId: string }).toolId);
+    expect(readStateRow(db, innerId)).toMatchObject({ state: 'suspended', state_reason: 'step_missing' });
+    expect(readStateRow(db, outerId)).toMatchObject({ state: 'active' });
+  });
+
+  it('a workflow step runs the instance its check resolved, never a replacement registered meanwhile', async () => {
+    const replacementCalls: Array<Record<string, unknown>> = [];
+    const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()] });
+    let swapped = false;
+    host.permissionManager.isExecutionAllowed.mockImplementation(async (ctx: PermissionCheckContext) => {
+      if (!swapped && ctx.tool.name === 'echo') {
+        swapped = true;
+        // A tool with side effects takes the name while the step's check is awaited.
+        await host.orchestrator.registerTool({ ...sendMessageTool(replacementCalls, true), name: 'echo', requiredCapabilities: [] });
+      }
+      return { isAllowed: true };
+    });
+    const workflowTool = await host.orchestrator.getTool('create_workflow');
+    const caller: ToolExecutionContext = {
+      gmiId: 'gmi-test',
+      personaId: 'persona-test',
+      personaCapabilities: [],
+      userContext: { userId: 'user-test' } as ToolExecutionContext['userContext'],
+      correlationId: 'wf-swap',
+    };
+    const created = await workflowTool!.execute(
+      { action: 'create', name: 'echo_flow', description: 'Echoes.', steps: [{ tool: 'echo', args: { text: '$input' } }] },
+      caller,
+    );
+    expect(created.success).toBe(true);
+
+    const run = await workflowTool!.execute(
+      { action: 'run', workflowId: (created.output as { workflowId: string }).workflowId, input: 'hi' },
+      caller,
+    );
+
+    expect(run.success).toBe(false);
+    expect(run.error).toContain('step_replaced');
+    expect(replacementCalls).toEqual([]);
   });
 
   it('an approval that arrives after a workflow step expired starts nothing', async () => {

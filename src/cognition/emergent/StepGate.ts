@@ -33,6 +33,13 @@ export interface StepGate {
   ): Promise<ToolExecutionResult>;
 }
 
+/**
+ * Why a step may not be chained: no gate to resolve it (`compose_needs_gate`),
+ * no tool under its name (`step_missing`), a tool with side effects the host
+ * has not listed (`step_not_chainable`), a tool that does not declare
+ * `hasSideEffects` (`side_effects_undeclared`), or a chain that reaches itself
+ * or nests too deep (`step_cycle`).
+ */
 export type ChainRefusalCode =
   | 'compose_needs_gate'
   | 'step_missing'
@@ -40,10 +47,16 @@ export type ChainRefusalCode =
   | 'side_effects_undeclared'
   | 'step_cycle';
 
+/**
+ * The rule's verdict for one step tool: chainable (and whether it has side
+ * effects, which decides whether a forge test runs it), or refused with a
+ * {@link ChainRefusalCode} and a message naming what the host can change.
+ */
 export type Chainability =
   | { ok: true; sideEffects: boolean }
   | { ok: false; code: ChainRefusalCode; message: string };
 
+/** The message a composition gets when its builder has no gate (`compose_needs_gate`). */
 export const COMPOSE_NEEDS_GATE_MESSAGE =
   'this engine composes tools through a bare callback, which cannot say what a step tool is; ' +
   'pass a StepGate (createStepGate({ resolve, ... })) to ComposableToolBuilder or as deps.stepGate';
@@ -185,7 +198,22 @@ export function createStepGate(options: StepGateOptions): StepGate {
           details: { code: 'step_aborted' },
         };
       }
-      return tool.execute(args, context);
+      return withInnerCode(await tool.execute(args, context));
     },
   };
+}
+
+/**
+ * A step's own failed result as the enclosing composition reads it: a `code`
+ * the step tool put in its details (a nested composition's refusal of one of
+ * its own steps) moves to `innerCode`, so it never reads as a refusal of the
+ * enclosing composition's step, and only the nested composition is suspended.
+ */
+export function withInnerCode(result: ToolExecutionResult): ToolExecutionResult {
+  const details = result.details as Record<string, unknown> | undefined;
+  if (result.success || !details || details.code === undefined) {
+    return result;
+  }
+  const { code: innerCode, ...rest } = details;
+  return { ...result, details: { ...rest, innerCode } };
 }
