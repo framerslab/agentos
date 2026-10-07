@@ -1,5 +1,6 @@
 /**
- * @fileoverview Tests for OpenRouter provider streaming usage propagation.
+ * @fileoverview Tests for OpenRouter provider streaming usage propagation and
+ * the role of the final streamed message.
  *
  * OpenRouter follows OpenAI's streaming convention: usage is omitted unless
  * stream_options.include_usage is set, in which case a trailing usage-only
@@ -199,5 +200,42 @@ describe('OpenRouterProvider streaming usage', () => {
     const usageChunk = chunks.find((c) => c.usage && c.isFinal);
     expect(usageChunk).toBeDefined();
     expect(usageChunk!.usage!.totalTokens).toBe(18);
+  });
+});
+
+describe('OpenRouterProvider streaming final message', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("keeps the role the final chunk's delta names", async () => {
+    // `||` binds tighter than `?:`: the role expression read as
+    // `(delta.role || hasToolCalls) ? 'assistant' : ...` and replaced any
+    // streamed role with 'assistant'.
+    const { provider, client } = await mountProvider();
+    const sseLines = [
+      `data: ${JSON.stringify({
+        id: 'gen-2',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: 'openai/gpt-4o',
+        choices: [{ index: 0, delta: { role: 'tool', content: 'done' }, finish_reason: 'stop' }],
+      })}\n\n`,
+      'data: [DONE]\n\n',
+    ];
+    client.request.mockResolvedValueOnce({ data: makeReadableSse(sseLines) });
+
+    const finals: Array<{ choices: Array<{ message: { role: string } }> }> = [];
+    for await (const chunk of provider.generateCompletionStream(
+      'openai/gpt-4o',
+      [{ role: 'user', content: 'hi' }],
+      {},
+    )) {
+      const c = chunk as { isFinal?: boolean; choices?: Array<{ message: { role: string } }> };
+      if (c.isFinal && c.choices?.length) finals.push(c as { choices: Array<{ message: { role: string } }> });
+    }
+
+    expect(finals).toHaveLength(1);
+    expect(finals[0].choices[0].message.role).toBe('tool');
   });
 });
