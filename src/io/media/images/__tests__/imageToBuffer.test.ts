@@ -26,6 +26,43 @@ describe('imageToBuffer', () => {
     expect(await imageToBuffer(raw)).toEqual(tiffStart);
   });
 
+  it('decodes raw base64 BMP data that contains "/"', async () => {
+    // "BM", the file size (32, little-endian), reserved bytes, the pixel offset, then pixels.
+    const bmp = Buffer.concat([
+      Buffer.from([0x42, 0x4d, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00]),
+      Buffer.alloc(18, 0xff),
+    ]);
+    const raw = bmp.toString('base64');
+    expect(raw).toContain('/');
+
+    expect(await imageToBuffer(raw)).toEqual(bmp);
+  });
+
+  it('decodes raw base64 SVG markup that contains "/"', async () => {
+    const svg = Buffer.from('<svg><!--???--></svg>');
+    const raw = svg.toString('base64');
+    expect(raw).toContain('/');
+
+    expect(await imageToBuffer(raw)).toEqual(svg);
+  });
+
+  it('rejects base64 of an unrecognised format without repeating it in the error', async () => {
+    // 00 11 FF repeated: base64 "ABH/" repeated, a 4,000-character relative path
+    // that names nothing and matches no signature.
+    const raw = Buffer.from(Array.from({ length: 3000 }, (_, i) => [0x00, 0x11, 0xff][i % 3])).toString('base64');
+    expect(raw.startsWith('ABH/ABH/')).toBe(true);
+
+    const error = await imageToBuffer(raw).then(
+      () => null,
+      (e: NodeJS.ErrnoException) => e,
+    );
+    expect(error).not.toBeNull();
+    expect(['ENOENT', 'ENOTDIR', 'ENAMETOOLONG']).toContain(error!.code);
+    expect(error!.message).toContain('Pass the image as a data URL or a Buffer');
+    expect(error!.message).toContain('(4000 characters)');
+    expect(error!.message.length).toBeLessThan(400);
+  });
+
   it('rejects a missing path made only of base64 characters', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'imageToBuffer-'));
     try {
