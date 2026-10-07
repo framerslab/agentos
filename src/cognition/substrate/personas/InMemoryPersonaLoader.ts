@@ -15,7 +15,8 @@ export const INLINE_PERSONA_LOADER_CONFIG: PersonaLoaderConfig = { personaSource
 /**
  * Structural rules for an inline persona list, cheap enough to run before any subsystem
  * starts: an array; every entry an object with a non-empty string `id`; no duplicate `id`;
- * `activationKeywords`, when present, an array of strings. Semantic validation (required fields,
+ * `activationKeywords`, when present, an array of strings; `sentimentTracking.presets`, when present,
+ * an array. Semantic validation (required fields,
  * semver, prompt length) still runs in GMIManager through `validatePersonas`.
  * @throws GMIError CONFIGURATION_ERROR naming the offending index or id.
  */
@@ -39,6 +40,10 @@ export function assertInlinePersonaDefinitions(definitions: unknown): asserts de
     if (keywords !== undefined && (!Array.isArray(keywords) || keywords.some((keyword) => typeof keyword !== 'string'))) {
       throw new GMIError(`personas[${index}] ('${id}'): \`activationKeywords\` must be an array of strings when present.`, GMIErrorCode.CONFIGURATION_ERROR, { index, id });
     }
+    const presets = (definition as { sentimentTracking?: { presets?: unknown } }).sentimentTracking?.presets;
+    if (presets !== undefined && !Array.isArray(presets)) {
+      throw new GMIError(`personas[${index}] ('${id}'): \`sentimentTracking.presets\` must be an array when present.`, GMIErrorCode.CONFIGURATION_ERROR, { index, id });
+    }
   });
 }
 
@@ -46,7 +51,8 @@ export function assertInlinePersonaDefinitions(definitions: unknown): asserts de
  * Serves a fixed list of persona definitions. The constructor checks the list's structure
  * (see `assertInlinePersonaDefinitions`), normalizes each definition the way the file-system
  * loader does (sentiment presets become metaprompts) and stores its own copies, so edits the
- * caller makes to its objects after construction never reach the runtime. `initialize()` accepts
+ * caller makes to its objects after construction never reach the runtime; load results are
+ * copies too, so a caller cannot change a stored definition through them. `initialize()` accepts
  * any `PersonaLoaderConfig` (the source is the list, not `personaSource`); `refreshPersonas()`
  * is a no-op because the set is fixed. Used by `AgentOS.create({ personas })` and exported for
  * callers composing their own sources.
@@ -67,14 +73,17 @@ export class InMemoryPersonaLoader implements IPersonaLoader {
     this.isInitialized = true;
   }
 
+  /** Returns a copy; edits to a load result never reach the stored definition. */
   public async loadPersonaById(personaId: string): Promise<IPersonaDefinition | undefined> {
     this.ensureInitialized();
-    return this.personas.get(personaId);
+    const stored = this.personas.get(personaId);
+    return stored ? clonePersonaDefinition(stored) : undefined;
   }
 
+  /** Returns copies, in the order given at construction. */
   public async loadAllPersonaDefinitions(): Promise<IPersonaDefinition[]> {
     this.ensureInitialized();
-    return Array.from(this.personas.values());
+    return Array.from(this.personas.values(), (stored) => clonePersonaDefinition(stored));
   }
 
   /** The set is fixed at construction; refreshing is a no-op. */

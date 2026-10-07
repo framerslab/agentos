@@ -22,6 +22,9 @@ describe('assertInlinePersonaDefinitions', () => {
   it('rejects a non-string activationKeywords entry', () => {
     expect(() => assertInlinePersonaDefinitions([{ ...a, activationKeywords: ['ok', null] }] as unknown)).toThrowError(/array of strings/);
   });
+  it('rejects a sentimentTracking.presets that is not an array', () => {
+    expect(() => assertInlinePersonaDefinitions([{ ...a, sentimentTracking: { enabled: true, presets: 'frustration_recovery' } }] as unknown)).toThrowError(/sentimentTracking\.presets/);
+  });
   it('throws GMIError CONFIGURATION_ERROR', () => {
     try {
       assertInlinePersonaDefinitions('x' as unknown);
@@ -67,6 +70,14 @@ describe('InMemoryPersonaLoader', () => {
     const served = await loader.loadPersonaById('a');
     expect(served?.name).toBe('A');
     expect(served?.activationKeywords).toEqual(['one']);
+  });
+  it('returns copies from loads: edits to a load result do not change the stored definition', async () => {
+    const loader = new InMemoryPersonaLoader([a]);
+    await loader.initialize(INLINE_PERSONA_LOADER_CONFIG);
+    const first = await loader.loadPersonaById('a');
+    (first as { name: string }).name = 'Edited';
+    expect((await loader.loadPersonaById('a'))?.name).toBe('A');
+    expect((await loader.loadAllPersonaDefinitions())[0].name).toBe('A');
   });
   it('refreshPersonas keeps the set', async () => {
     const loader = new InMemoryPersonaLoader([a]);
