@@ -679,8 +679,9 @@ export class EmergentCapabilityEngine {
    * This applies the same checks to the one tool: a suspended or demoted tool
    * is not registered, and a tool whose source cannot be rebuilt is suspended.
    * When the tool has a stored row, that row is what is read, not the object
-   * passed in (a host-built object can carry a list the host made up). The row
-   * is never rewritten.
+   * passed in (a host-built object can carry a list the host made up), and a
+   * load never rewrites it. A tool with no row gets its row written first, as
+   * before, so its uses are recorded and the next load finds it.
    *
    * @returns what happened, so a host can tell a registered tool from a refused one.
    */
@@ -718,6 +719,9 @@ export class EmergentCapabilityEngine {
     }
 
     this.registry.remove(toolId);
+    // The rows go after the tool's queued state writes; a sync of the same
+    // id after this returns finds no row, as a removal promises.
+    await this.registry.settled(toolId);
     this.removeIndexedToolEverywhere(toolId);
     if (this.onToolRemoved) {
       await this.onToolRemoved(tool);
@@ -890,6 +894,7 @@ export class EmergentCapabilityEngine {
           setBy: stateSetterFromColumn(row.set_by),
           at: Number(row.state_at ?? 0),
           request: parseStoredRequest(row.request_json),
+          ...(row.write_id ? { writeId: row.write_id } : {}),
         }
       : undefined;
     // A row whose schema columns do not read cannot be built: it is unreadable
@@ -995,8 +1000,16 @@ export class EmergentCapabilityEngine {
       // The request is what the tool was granted, whatever its text, its
       // stored list or the list held in memory shows: for a raw-code row the
       // text was read only to derive a request where none was stored, and a
-      // stored request narrower than a stored list is the grant.
-      implementation = { ...implementation, allowlist: toSandboxApis(request.capabilities) };
+      // stored request narrower than a stored list is the grant. Never wider
+      // than a stored list: a request widened by hand grants nothing the list
+      // did not.
+      const listed = implementation;
+      const granted = toSandboxApis(request.capabilities);
+      implementation = {
+        ...implementation,
+        allowlist:
+          source.format === 'code-with-list' ? granted.filter((api) => listed.allowlist.includes(api)) : granted,
+      };
     }
     if (implementation && !refusal) {
       refusal = this.refusalFor(implementation);
@@ -1290,12 +1303,17 @@ export class EmergentCapabilityEngine {
               `${held?.reason ?? 'no reason recorded'}.`,
           };
         }
-        if (current.tier === 'agent' && context.personaId !== current.createdBy) {
+        // The owner is the persona that forged the tool, compared as it was
+        // stored ('unknown' for a caller without one). A row from an earlier
+        // release holds the forging GMI instance's id instead, which no
+        // persona can match: such a tool runs for any caller of the host that
+        // loaded it by that id, as it did before this change.
+        const owner = current.createdBy;
+        const caller = context.personaId ?? 'unknown';
+        if (current.tier === 'agent' && !owner.startsWith('gmi-instance-') && caller !== owner) {
           return {
             success: false,
-            error:
-              `Emergent tool "${tool.name}" belongs to agent ${current.createdBy}; ` +
-              `it is not callable as ${context.personaId}.`,
+            error: `Emergent tool "${tool.name}" belongs to agent ${owner}; it is not callable as ${caller}.`,
           };
         }
         const startTime = performance.now();

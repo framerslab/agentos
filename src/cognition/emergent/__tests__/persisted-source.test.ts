@@ -300,6 +300,7 @@ describe('toolFromRow', () => {
       state_at: null,
       request_json: null,
       flag_synced: null,
+      write_id: null,
     };
 
     const tool = toolFromRow(row, implementation);
@@ -375,6 +376,7 @@ describe('toolFromRow', () => {
       state_at: null,
       request_json: null,
       flag_synced: null,
+      write_id: null,
     };
     // Never a schema that accepts any input in its place.
     expect(() => toolFromRow(row, implementation)).toThrow('input_schema is not JSON');

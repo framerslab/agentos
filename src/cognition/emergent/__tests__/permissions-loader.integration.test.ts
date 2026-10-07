@@ -746,6 +746,57 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     ]);
   });
 
+  it('an agent-tier row from an earlier release, owned by a GMI instance id, runs for any caller of the host that loaded it', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'old-1',
+      name: 'double_it',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      tier: 'agent',
+      createdBy: 'gmi-instance-0b7e3c1a',
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+    });
+
+    const loaded = await host.engine.loadPersistedTools({ tiers: ['agent'], agentId: 'gmi-instance-0b7e3c1a' });
+    expect(loaded.outcomes).toEqual([{ toolId: 'old-1', name: 'double_it', state: 'active', reason: null }]);
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'anyone' })).output).toEqual({
+      doubled: 4,
+    });
+  });
+
+  it('a stored request wider than a stored list grants nothing the list did not', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'list-w',
+      name: 'fetch_it',
+      mode: 'sandbox',
+      source: JSON.stringify({
+        mode: 'sandbox',
+        code: 'function execute(input) { return fetch(input.url).then((r) => ({ ok: r.ok })); }',
+        allowlist: ['crypto'],
+      }),
+      inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+      outputSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+    });
+    seedStateRow(db, {
+      toolId: 'list-w',
+      state: 'active',
+      setBy: 'library',
+      requestJson: '{"kind":"sandbox","capabilities":["fetch","crypto"]}',
+    });
+
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'list-w', name: 'fetch_it', state: 'active', reason: null },
+    ]);
+    const called = await callTool(host.orchestrator, 'fetch_it', { url: 'http://127.0.0.1:9/' });
+    expect(called.isError).toBe(true);
+    expect(JSON.stringify(called)).toMatch(/fetch/);
+  });
+
   it("a session's stored tools load for that session only", async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db });

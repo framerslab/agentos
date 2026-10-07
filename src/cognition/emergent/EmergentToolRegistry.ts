@@ -176,6 +176,7 @@ type StateRowRead = {
   set_by?: string | null;
   state_at?: number | string | null;
   request_json?: string | null;
+  write_id?: string | null;
 };
 
 export class EmergentToolRegistry {
@@ -317,7 +318,8 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
   state_at BIGINT NOT NULL,
   request_json TEXT,
   updated_at BIGINT NOT NULL,
-  flag_synced INTEGER NOT NULL DEFAULT 1
+  flag_synced INTEGER NOT NULL DEFAULT 1,
+  write_id TEXT
 );`;
 
     // Tables and indexes only: the flag on the tool row is written by the
@@ -584,15 +586,21 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
              set_by = excluded.set_by,
              state_at = excluded.state_at,
              request_json = excluded.request_json,
-             updated_at = excluded.updated_at`
+             updated_at = excluded.updated_at,
+             write_id = excluded.write_id`
       : `state = excluded.state,
              state_reason = excluded.state_reason,
              set_by = excluded.set_by,
              state_at = excluded.state_at,
-             updated_at = excluded.updated_at`;
+             updated_at = excluded.updated_at,
+             write_id = excluded.write_id`;
     let guard = '';
     // state_at is the call's time; updated_at the write's own.
-    const params: unknown[] = [toolId, record.state, record.reason, record.setBy, record.at, requestJson, Date.now()];
+    // Every write has an id of its own: the row read back tells this write
+    // from another of the same content in the same millisecond.
+    const writeId = randomUUID();
+    record.writeId = writeId;
+    const params: unknown[] = [toolId, record.state, record.reason, record.setBy, record.at, requestJson, Date.now(), writeId];
     if (ifRow === 'absent') {
       guard = `
            WHERE 0 = 1`;
@@ -605,7 +613,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     }
     const readRow = async (): Promise<StateRowRead | undefined> =>
       (await db.get(
-        `SELECT state, state_reason, set_by, state_at, request_json
+        `SELECT state, state_reason, set_by, state_at, request_json, write_id
            FROM agentos_emergent_tool_state
           WHERE tool_id = ?`,
         [toolId],
@@ -617,21 +625,23 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       setBy: stateSetterFromColumn(row.set_by),
       at: Number(row.state_at ?? 0),
       request: parseStoredRequest(row.request_json),
+      ...(row.write_id ? { writeId: row.write_id } : {}),
     });
-    // Applied when the row reads what was written; the time alone cannot tell
-    // two writes in one millisecond apart.
-    const matches = (row: StateRowRead | undefined): boolean =>
-      !row?.state ||
-      (row.state === record.state &&
-        (row.state_reason ?? null) === record.reason &&
-        stateSetterFromColumn(row.set_by) === record.setBy &&
-        Number(row.state_at) === record.at);
+    // Applied when the row carries this write's id; content and time cannot
+    // tell two writes of the same record in one millisecond apart.
+    const matches = (row: StateRowRead | undefined): boolean => !row?.state || row.write_id === writeId;
 
+    const before = await readRow();
+    if (ifRow === 'absent' && before?.state) {
+      // "No row yet" was the condition and a row exists: refused, without a
+      // statement; the row and its flag are as another process left them.
+      return rowRecord(before);
+    }
     // The state row, its flag write marked pending until it is done.
     await db.run(
       `INSERT INTO agentos_emergent_tool_state
-         (tool_id, state, state_reason, set_by, state_at, request_json, updated_at, flag_synced)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+         (tool_id, state, state_reason, set_by, state_at, request_json, updated_at, write_id, flag_synced)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
        ON CONFLICT (tool_id) DO UPDATE SET
          ${setList},
          flag_synced = 0${guard}`,
@@ -650,8 +660,8 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     await db.run(
       `UPDATE agentos_emergent_tool_state
           SET flag_synced = 1
-        WHERE tool_id = ? AND state = ? AND set_by = ? AND state_at = ?`,
-      [toolId, record.state, record.setBy, record.at],
+        WHERE tool_id = ? AND ${record.writeId !== undefined ? 'write_id = ?' : 'state = ? AND set_by = ? AND state_at = ?'}`,
+      record.writeId !== undefined ? [toolId, record.writeId] : [toolId, record.state, record.setBy, record.at],
     );
     if (ifRow !== undefined) {
       // The row's word after the flag write: a restriction another process
@@ -681,7 +691,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
    * a newer write's mark is left alone. The loader calls it for a row whose
    * mark is pending, before anything about the row is decided.
    */
-  async syncLegacyFlag(toolId: string, record: Pick<ToolStateRecord, 'state' | 'setBy' | 'at'>): Promise<void> {
+  async syncLegacyFlag(toolId: string, record: Pick<ToolStateRecord, 'state' | 'setBy' | 'at' | 'writeId'>): Promise<void> {
     const db = this.db;
     if (!db) {
       return;
@@ -691,8 +701,8 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     await db.run(
       `UPDATE agentos_emergent_tool_state
           SET flag_synced = 1
-        WHERE tool_id = ? AND state = ? AND set_by = ? AND state_at = ?`,
-      [toolId, record.state, record.setBy, record.at],
+        WHERE tool_id = ? AND ${record.writeId !== undefined ? 'write_id = ?' : 'state = ? AND set_by = ? AND state_at = ?'}`,
+      record.writeId !== undefined ? [toolId, record.writeId] : [toolId, record.state, record.setBy, record.at],
     );
   }
 
@@ -709,6 +719,11 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       throw new Error(`Cannot suspend: tool "${toolId}" not found.`);
     }
     await this.setState(toolId, 'suspended', reason, { setBy: 'host' });
+  }
+
+  /** Resolves once every queued state write and deletion of the tool has run. */
+  async settled(toolId: string): Promise<void> {
+    await (this.stateWrites.get(toolId) ?? Promise.resolve()).catch(() => undefined);
   }
 
   /** Whether a storage adapter is configured. */
@@ -750,7 +765,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
         t.failure_count, t.avg_execution_ms, t.last_used_at, t.is_active,
         s.state AS state, s.state_reason AS state_reason, s.set_by AS set_by,
         s.state_at AS state_at, s.request_json AS request_json,
-        s.flag_synced AS flag_synced
+        s.flag_synced AS flag_synced, s.write_id AS write_id
    FROM agentos_emergent_tools t
    LEFT JOIN agentos_emergent_tool_state s ON s.tool_id = t.id`;
 
@@ -828,19 +843,11 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     }
     await this.ensureSchemaReady();
     const row = (await this.db.get(
-      `SELECT state, state_reason, set_by, state_at, request_json
+      `SELECT state, state_reason, set_by, state_at, request_json, write_id
          FROM agentos_emergent_tool_state
         WHERE tool_id = ?`,
       [toolId],
-    )) as
-      | {
-          state?: ToolState | null;
-          state_reason?: string | null;
-          set_by?: string | null;
-          state_at?: number | string | null;
-          request_json?: string | null;
-        }
-      | undefined;
+    )) as StateRowRead | undefined;
     if (!row?.state) {
       return undefined;
     }
@@ -851,6 +858,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       setBy: stateSetterFromColumn(row.set_by),
       at: Number(row.state_at ?? 0),
       request: parseStoredRequest(row.request_json),
+      ...(row.write_id ? { writeId: row.write_id } : {}),
     };
   }
 

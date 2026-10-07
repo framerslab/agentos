@@ -458,6 +458,8 @@ export interface ToolStateRecord {
   setBy: StateSetter;
   /** Unix epoch milliseconds of the last state change. */
   at: number;
+  /** The id of the write that set this state, when the row carries one. */
+  writeId?: string;
   /**
    * The request this process holds for the tool: the stored one when it could
    * be read, else the one derived from the source, else `null`. A state change
@@ -497,6 +499,8 @@ export interface PersistedToolRow {
   request_json: string | null;
   /** Whether the state row's flag write finished (0 while pending); null for a row with no state row. */
   flag_synced: number | boolean | null;
+  /** The id of the last state write; null for a row with no state row, or one written without an id. */
+  write_id: string | null;
 }
 
 // ============================================================================
