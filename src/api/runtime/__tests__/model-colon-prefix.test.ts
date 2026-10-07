@@ -67,4 +67,15 @@ describe('mergeDefaults and a prefixed seat model', () => {
     const keyOnly = { agents: {}, apiKey: 'sk-any' } as unknown as AgencyOptions;
     expect(mergeDefaults({ model: 'openai:gpt-4.1' }, keyOnly).apiKey).toBe('sk-any');
   });
+  it('compares the providers resolveModelOption picks: a model prefix wins over provider, except under ollama', () => {
+    const openaiAgency = { agents: {}, provider: 'openai', model: 'gpt-4.1', apiKey: 'sk-openai' } as unknown as AgencyOptions;
+    // The seat says openai but its model routes to Anthropic: the OpenAI key stays behind.
+    expect(mergeDefaults({ provider: 'openai', model: 'anthropic:claude-opus-5-5' }, openaiAgency).apiKey).toBeUndefined();
+    // An agency whose own model routes to Anthropic shares its key with an Anthropic seat.
+    const routedAgency = { agents: {}, provider: 'openai', model: 'anthropic:claude-opus-5-5', apiKey: 'sk-ant-agency' } as unknown as AgencyOptions;
+    expect(mergeDefaults({ model: 'anthropic:claude-opus-5-5' }, routedAgency).apiKey).toBe('sk-ant-agency');
+    // Under ollama a colon never splits, so the seat stays on ollama and keeps the agency's URL.
+    const ollamaAgency = { agents: {}, provider: 'ollama', model: 'llama3.2', baseUrl: 'http://127.0.0.1:11434' } as unknown as AgencyOptions;
+    expect(mergeDefaults({ provider: 'ollama', model: 'mistral:7b' }, ollamaAgency).baseUrl).toBe('http://127.0.0.1:11434');
+  });
 });

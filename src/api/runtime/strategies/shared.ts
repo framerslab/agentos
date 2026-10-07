@@ -228,13 +228,18 @@ export function mergeDefaults(
 ): BaseAgentConfig {
   // A seat whose own model names a provider (`anthropic:claude-opus-5-5`) does
   // not inherit the agency's provider, so the prefix never meets an inherited
-  // `ollama`, under which a colon is never split. When the agency's provider
-  // is known and differs, the seat does not inherit the agency's key or URL
-  // either: they belong to the agency's provider, and sending them to the
-  // seat's would leak the key to another vendor.
-  const seatPrefix = agentConfig.provider ? undefined : knownProviderPrefixOf(agentConfig.model);
-  const agencyProvider = agencyConfig.provider ?? knownProviderPrefixOf(agencyConfig.model);
-  const otherVendor = seatPrefix !== undefined && agencyProvider !== undefined && seatPrefix !== agencyProvider;
+  // `ollama`, under which a colon is never split. The seat and the agency each
+  // go to the provider resolveModelOption picks (a known model prefix wins
+  // over `provider`, except under `ollama`); when both are known and differ,
+  // the seat does not inherit the agency's key or URL either: they belong to
+  // the agency's provider, and sending them to the seat's would leak the key
+  // to another vendor.
+  const prefixOf = (cfg: { provider?: string; model?: string }) =>
+    cfg.provider === 'ollama' ? undefined : knownProviderPrefixOf(cfg.model);
+  const seatPrefix = prefixOf(agentConfig);
+  const seatProvider = seatPrefix ?? agentConfig.provider;
+  const agencyProvider = prefixOf(agencyConfig) ?? agencyConfig.provider;
+  const otherVendor = seatPrefix !== undefined && agencyProvider !== undefined && seatProvider !== agencyProvider;
   return {
     // Agency-level model/provider/apiKey/baseUrl serve as defaults.
     // They are placed BEFORE the spread of agentConfig so that agent-level
