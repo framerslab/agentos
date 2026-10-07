@@ -100,6 +100,28 @@ describe('EmergentToolRegistry state', () => {
     expect(readToolRow(db, tool.id)?.is_active).toBe(1);
   });
 
+  it('a conditional write is refused when the row changed under it, and the flag follows the state row', async () => {
+    const tool = makeTool({ id: 'emergent_test_7' });
+    registry.register(tool, 'agent');
+    await settle();
+    await registry.suspend(tool.id, 'operator_hold');
+    const at = Number(readStateRow(db, tool.id)?.state_at);
+
+    // "No row yet" was the condition, and a row exists: refused; the row's word holds.
+    const refused = await registry.setState(tool.id, 'active', null, { setBy: 'library', ifStateAt: -1 });
+    expect(refused).toMatchObject({ state: 'suspended', reason: 'operator_hold', setBy: 'host' });
+    expect(registry.isActive(tool.id)).toBe(false);
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'suspended' });
+    expect(readToolRow(db, tool.id)?.is_active).toBe(0);
+
+    // The row as it was read: applied.
+    const applied = await registry.setState(tool.id, 'active', null, { setBy: 'library', ifStateAt: at });
+    expect(applied.state).toBe('active');
+    expect(registry.isActive(tool.id)).toBe(true);
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active' });
+    expect(readToolRow(db, tool.id)?.is_active).toBe(1);
+  });
+
   it('a whole-row write takes is_active at write time, so a state change during its reads is kept', async () => {
     const tool = makeTool({ id: 'emergent_test_6' });
     registry.register(tool, 'agent');

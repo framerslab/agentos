@@ -949,14 +949,22 @@ export class EmergentCapabilityEngine {
     //    off; then into memory without rewriting the row; then into the executor.
     const tool = candidate.buildTool(implementation);
     // A reactivation always writes: the row may already read active while this
-    // process holds a restriction whose own write failed.
+    // process holds a restriction whose own write failed. A load writes only
+    // while the row is still as it read it, so a restriction another process
+    // stored in between is never written over.
+    let written: ToolStateRecord | undefined;
     if (options.force || stored?.state !== 'active' || !requestStored) {
-      await this.registry.setState(toolId, 'active', null, { request: requestToWrite, setBy: 'library' });
+      written = await this.registry.setState(toolId, 'active', null, {
+        request: requestToWrite,
+        setBy: 'library',
+        ...(options.force ? {} : { ifStateAt: stored ? stored.at : -1 }),
+      });
     }
-    // A suspension or demotion that arrived while the row was being written
-    // is the newer word: the tool is not registered.
-    const held = this.registry.getState(toolId);
+    // A suspension or demotion that arrived while the row was being written,
+    // in this process or in another, is the newer word: the tool is not registered.
+    const held = written && written.state !== 'active' ? written : this.registry.getState(toolId);
     if (held && held.state !== 'active') {
+      this.holdStored(toolId, held);
       await this.unregisterIfLive(toolId);
       return { toolId, name, state: held.state, reason: held.reason };
     }

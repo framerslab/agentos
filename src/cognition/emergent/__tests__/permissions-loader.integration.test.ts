@@ -409,6 +409,36 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect(made.output).toEqual({ id: 'fixed-id' });
   });
 
+  it('a load that read a row before another process suspended it does not write over the suspension', async () => {
+    const db = createSqliteAdapter();
+    const hostA = await makeForgeHost({ db });
+    const hostB = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'raw-1',
+      name: 'double_it',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+    });
+
+    // Host A has read the row and is about to write its active state when host
+    // B's suspension lands.
+    const gate = db.gateNext('INSERT INTO agentos_emergent_tool_state');
+    const loading = hostA.engine.loadPersistedTools({ tiers: ['shared'] });
+    await gate.entered;
+    expect(await hostB.engine.suspendTool('raw-1', 'operator_hold')).toBe(true);
+    gate.release();
+    const summary = await loading;
+
+    expect(summary.outcomes).toEqual([
+      { toolId: 'raw-1', name: 'double_it', state: 'suspended', reason: 'operator_hold' },
+    ]);
+    expect(await hostA.orchestrator.getTool('double_it')).toBeUndefined();
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'suspended', set_by: 'host' });
+    expect(readToolRow(db, 'raw-1')?.is_active).toBe(0);
+  });
+
   it('a row whose input_schema does not read loads suspended as unreadable instead of accepting any input', async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db });

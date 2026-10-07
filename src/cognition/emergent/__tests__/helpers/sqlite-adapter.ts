@@ -7,9 +7,9 @@ export type SqliteTestAdapter = IStorageAdapter & {
   /** Makes the next statement whose SQL contains `fragment` reject once. */
   failNext(fragment: string): void;
   /**
-   * Holds the next read whose SQL contains `fragment` until `release` is
-   * called; `entered` resolves when that read has started. For interleaving a
-   * state change with a whole-row write.
+   * Holds the next statement whose SQL contains `fragment` until `release` is
+   * called; `entered` resolves when that statement has started. For
+   * interleaving one write with another.
    */
   gateNext(fragment: string): { entered: Promise<void>; release: () => void };
 };
@@ -51,6 +51,7 @@ export function createSqliteAdapter(): SqliteTestAdapter {
     },
     async run(sql: string, params: unknown[] = []) {
       guard(sql);
+      await waitAtGate(sql);
       return raw.prepare(sql).run(...params);
     },
     async get(sql: string, params: unknown[] = []) {

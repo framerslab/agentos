@@ -187,7 +187,7 @@ export class EmergentToolRegistry {
    * after an earlier one's have finished, so storage sees state changes in
    * call order whatever the adapter's connections do.
    */
-  private readonly stateWrites = new Map<string, Promise<void>>();
+  private readonly stateWrites = new Map<string, Promise<unknown>>();
 
   /** Resolved configuration, merged with defaults. */
   private readonly config: EmergentConfig;
@@ -453,14 +453,21 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
    * meanwhile is the newer word, it stays, and this call returns that record
    * instead of its own.
    *
-   * @returns the record now held for the tool.
+   * `options.ifStateAt` makes the write conditional: an existing row is
+   * changed only while its `state_at` is still that value (-1 for "no row
+   * yet"). The loader uses it for its active write, so a restriction another
+   * process stored after the row was read is never written over; a refused
+   * write returns the row's own record, and a restriction read that way is
+   * held here as well.
+   *
+   * @returns the record now in force for the tool.
    * @throws If the storage adapter rejects.
    */
   async setState(
     toolId: string,
     state: ToolState,
     reason: string | null,
-    options: { request?: StoredRequest | null; setBy?: StateSetter } = {},
+    options: { request?: StoredRequest | null; setBy?: StateSetter; ifStateAt?: number } = {},
   ): Promise<ToolStateRecord> {
     const previous = this.states.get(toolId);
     const setBy: StateSetter = options.setBy ?? 'host';
@@ -485,8 +492,24 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       hold();
     }
 
+    let inForce: ToolStateRecord = record;
     if (this.db) {
-      await this.queueStateWrite(toolId, () => this.writeStateRow(toolId, record, named));
+      inForce = await this.queueStateWrite(toolId, () =>
+        this.writeStateRow(toolId, record, named, options.ifStateAt),
+      );
+    }
+    if (inForce !== record) {
+      // The row changed under the condition: the write was refused, and the
+      // row's own state is what holds. A restriction read that way is held here.
+      this.logAudit(toolId, 'state_refused', { state, reason, setBy, by: inForce.state });
+      if (inForce.state !== 'active') {
+        this.states.set(toolId, inForce);
+        const held = this.get(toolId);
+        if (held) {
+          (held as EmergentTool & { isActive?: boolean }).isActive = false;
+        }
+      }
+      return inForce;
     }
 
     if (state === 'active') {
@@ -503,9 +526,9 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
   }
 
   /** Runs `write` after every earlier state write of the same tool has settled. */
-  private queueStateWrite(toolId: string, write: () => Promise<void>): Promise<void> {
+  private queueStateWrite<T>(toolId: string, write: () => Promise<T>): Promise<T> {
     const prior = this.stateWrites.get(toolId) ?? Promise.resolve();
-    const next = prior.catch(() => undefined).then(write);
+    const next: Promise<T> = prior.catch(() => undefined).then(write);
     this.stateWrites.set(toolId, next);
     next
       .finally(() => {
@@ -517,48 +540,88 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     return next;
   }
 
-  /** The two statements of a state change: the state row upsert and the legacy flag. */
-  private async writeStateRow(toolId: string, record: ToolStateRecord, named: boolean): Promise<void> {
+  /**
+   * The two statements of a state change: the state row upsert, and the legacy
+   * flag, which is read from the state row inside its own statement so the two
+   * never disagree whatever other processes write in between. With
+   * `ifStateAt`, an existing row is changed only while its `state_at` is still
+   * that value; the row as it stands afterwards is returned, so a refused
+   * write shows as a record other than the one given.
+   */
+  private async writeStateRow(
+    toolId: string,
+    record: ToolStateRecord,
+    named: boolean,
+    ifStateAt?: number,
+  ): Promise<ToolStateRecord> {
     const db = this.db;
     if (!db) {
-      return;
+      return record;
     }
     await this.ensureSchemaReady();
     const requestJson = named && record.request ? JSON.stringify(record.request) : null;
-    const params = [toolId, record.state, record.reason, record.setBy, record.at, requestJson, record.at];
-    if (!named) {
-      await db.run(
-        `INSERT INTO agentos_emergent_tool_state
-           (tool_id, state, state_reason, set_by, state_at, request_json, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (tool_id) DO UPDATE SET
-           state = excluded.state,
-           state_reason = excluded.state_reason,
-           set_by = excluded.set_by,
-           state_at = excluded.state_at,
-           updated_at = excluded.updated_at`,
-        params,
-      );
-    } else {
-      await db.run(
-        `INSERT INTO agentos_emergent_tool_state
-           (tool_id, state, state_reason, set_by, state_at, request_json, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (tool_id) DO UPDATE SET
-           state = excluded.state,
-           state_reason = excluded.state_reason,
-           set_by = excluded.set_by,
-           state_at = excluded.state_at,
-           request_json = excluded.request_json,
-           updated_at = excluded.updated_at`,
-        params,
-      );
+    const setList = named
+      ? `state = excluded.state,
+             state_reason = excluded.state_reason,
+             set_by = excluded.set_by,
+             state_at = excluded.state_at,
+             request_json = excluded.request_json,
+             updated_at = excluded.updated_at`
+      : `state = excluded.state,
+             state_reason = excluded.state_reason,
+             set_by = excluded.set_by,
+             state_at = excluded.state_at,
+             updated_at = excluded.updated_at`;
+    const guard = ifStateAt === undefined ? '' : `
+           WHERE agentos_emergent_tool_state.state_at = ?`;
+    const params: unknown[] = [toolId, record.state, record.reason, record.setBy, record.at, requestJson, record.at];
+    if (ifStateAt !== undefined) {
+      params.push(ifStateAt);
     }
-    // The legacy flag hosts query stays equal to state = 'active'.
-    await db.run(`UPDATE agentos_emergent_tools SET is_active = ? WHERE id = ?`, [
-      record.state === 'active' ? 1 : 0,
+    await db.run(
+      `INSERT INTO agentos_emergent_tool_state
+         (tool_id, state, state_reason, set_by, state_at, request_json, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (tool_id) DO UPDATE SET
+         ${setList}${guard}`,
+      params,
+    );
+    // The legacy flag hosts query follows the state row, read inside the statement.
+    await db.run(
+      `UPDATE agentos_emergent_tools
+          SET is_active = COALESCE((SELECT CASE WHEN state = 'active' THEN 1 ELSE 0 END
+                                      FROM agentos_emergent_tool_state WHERE tool_id = ?), ?)
+        WHERE id = ?`,
+      [toolId, record.state === 'active' ? 1 : 0, toolId],
+    );
+    if (ifStateAt === undefined) {
+      return record;
+    }
+    const row = (await db.get(
+      `SELECT state, state_reason, set_by, state_at, request_json
+         FROM agentos_emergent_tool_state
+        WHERE tool_id = ?`,
+      [toolId],
+    )) as
+      | {
+          state?: ToolState | null;
+          state_reason?: string | null;
+          set_by?: string | null;
+          state_at?: number | string | null;
+          request_json?: string | null;
+        }
+      | undefined;
+    if (!row?.state || Number(row.state_at) === record.at) {
+      return record;
+    }
+    return {
       toolId,
-    ]);
+      state: row.state,
+      reason: row.state_reason ?? null,
+      setBy: stateSetterFromColumn(row.set_by),
+      at: Number(row.state_at ?? 0),
+      request: parseStoredRequest(row.request_json),
+    };
   }
 
   /**
