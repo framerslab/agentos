@@ -30,6 +30,11 @@ describe('a colon in a model id', () => {
     vi.stubEnv('OPENROUTER_API_KEY', '');
     expect(() => resolveModelOption({ model: 'ft:gpt-4.1:org:suffix' })).toThrow(/not a provider agentos knows/);
     expect(() => resolveModelOption({ model: 'qwen2.5:7b' })).toThrow(/provider: 'ollama'/);
+    // A slash id with an unknown colon suffix stays whole, so it is rejected
+    // without a provider and goes to the gateway with one.
+    expect(() => resolveModelOption({ model: 'openai/gpt-4o:free' })).toThrow(/not a provider agentos knows/);
+    expect(resolveModelOption({ provider: 'openrouter', model: 'openai/gpt-4o:free' })).toEqual({ providerId: 'openrouter', modelId: 'openai/gpt-4o:free' });
+    expect(routedProviderOf({ model: 'openai/gpt-4o:free' })).toBeUndefined();
   });
   it('routedProviderOf names the provider a call goes to, without auto-detection', () => {
     expect(routedProviderOf({ model: 'anthropic:claude-opus-5-5' })).toBe('anthropic');
