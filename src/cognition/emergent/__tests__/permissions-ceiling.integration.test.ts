@@ -16,6 +16,8 @@ import { EmergentToolRegistry } from '../EmergentToolRegistry.js';
 import { SandboxedToolForge } from '../SandboxedToolForge.js';
 import { DEFAULT_EMERGENT_CONFIG, type EmergentConfig } from '../types.js';
 import { APPROVED_VERDICT, callTool, makeForgeHost } from './helpers/forge-host.js';
+import { createSqliteAdapter, readStateRow } from './helpers/sqlite-adapter.js';
+import { seedStateRow, seedToolRow } from './helpers/seed-rows.js';
 
 const servers: http.Server[] = [];
 afterEach(async () => {
@@ -231,5 +233,78 @@ describe('a ceiling for code-forged tools', () => {
       'unknown_capability: capabilities.fs.write',
     );
     expect(() => build(withCeiling({ crypto: {} }, {}))).toThrow('audit_needs_storage: audit.store');
+  });
+});
+
+describe('the ceiling at load', () => {
+  /** A stored reading tool, as a host or an earlier process wrote it. */
+  function seedReader(db: ReturnType<typeof createSqliteAdapter>): void {
+    seedToolRow(db, {
+      id: 'reader-1',
+      name: 'read_it',
+      mode: 'sandbox',
+      source: JSON.stringify({ mode: 'sandbox', code: READ_CODE, allowlist: ['fs.read'] }),
+      inputSchema: PATH_IN,
+      outputSchema: ANY_OUT,
+    });
+  }
+
+  it('lowering the ceiling suspends a stored tool at the next load, and restoring it brings the tool back', async () => {
+    const root = tempRoot();
+    fs.writeFileSync(path.join(root, 'note.txt'), 'hello');
+    const db = createSqliteAdapter();
+    const wide = { capabilities: { 'fs.read': { roots: [root] }, crypto: {} } };
+
+    const first = await makeForgeHost({ db, config: wide });
+    seedReader(db);
+    expect((await first.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'reader-1', name: 'read_it', state: 'active', reason: null },
+    ]);
+    expect((await callTool(first.orchestrator, 'read_it', { path: path.join(root, 'note.txt') })).output).toEqual({
+      text: 'hello',
+    });
+
+    const narrow = await makeForgeHost({ db, config: { capabilities: { crypto: {} } } });
+    expect((await narrow.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'reader-1', name: 'read_it', state: 'suspended', reason: 'capability_not_granted' },
+    ]);
+    expect(readStateRow(db, 'reader-1')).toMatchObject({
+      state: 'suspended',
+      state_reason: 'capability_not_granted',
+      set_by: 'library',
+    });
+    expect(await narrow.orchestrator.getTool('read_it')).toBeUndefined();
+
+    const restored = await makeForgeHost({ db, config: wide });
+    expect((await restored.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'reader-1', name: 'read_it', state: 'active', reason: null },
+    ]);
+    expect(
+      (await callTool(restored.orchestrator, 'read_it', { path: path.join(root, 'note.txt') })).output,
+    ).toEqual({ text: 'hello' });
+  });
+
+  it('a stored request this release cannot read is suspended under a ceiling, and left as it was', async () => {
+    const root = tempRoot();
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, config: { capabilities: { 'fs.read': { roots: [root] } } } });
+    seedReader(db);
+    // A later release wrote a capability this one does not know.
+    const foreign = '{"kind":"sandbox","capabilities":["fs.read","fs.write"]}';
+    seedStateRow(db, { toolId: 'reader-1', state: 'active', requestJson: foreign });
+
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'reader-1', name: 'read_it', state: 'suspended', reason: 'request_unreadable' },
+    ]);
+    expect(readStateRow(db, 'reader-1')).toMatchObject({
+      state: 'suspended',
+      state_reason: 'request_unreadable',
+      request_json: foreign,
+    });
+    // The host's reactivation meets the same check.
+    expect(await host.engine.reactivateTool('reader-1')).toMatchObject({
+      state: 'suspended',
+      reason: 'request_unreadable',
+    });
   });
 });
