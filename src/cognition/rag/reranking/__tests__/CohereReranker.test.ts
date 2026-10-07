@@ -207,7 +207,10 @@ describe('CohereReranker', () => {
 
     it('should respect timeout configuration', async () => {
       const controller = new AbortController();
-      vi.spyOn(global, 'AbortController').mockReturnValue(controller);
+      // Called with `new`, so the implementation must be constructible.
+      vi.spyOn(global, 'AbortController').mockImplementation(function () {
+        return controller;
+      });
 
       mockFetch.mockImplementationOnce(
         () =>

@@ -282,5 +282,5 @@ const staticIR = deepResearch.toWorkflow();
 
 ### Implementation references
 
-- [`packages/agentos/src/orchestration/builders/MissionBuilder.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/MissionBuilder.ts) — the `mission()` factory + builder
-- [`packages/agentos/src/orchestration/compiler/`](https://github.com/framerslab/agentos/tree/master/src/orchestration/compiler) — IR + graph compiler shared with `workflow()` and [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts)
+- [`src/orchestration/builders/MissionBuilder.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/MissionBuilder.ts) — the `mission()` factory + builder
+- [`src/orchestration/compiler/`](https://github.com/framerslab/agentos/tree/master/src/orchestration/compiler) — IR + graph compiler shared with `workflow()` and [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts)

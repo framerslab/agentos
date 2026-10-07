@@ -118,6 +118,19 @@ export function agency(opts: AgencyOptions): Agent {
   // 1. Validate options — throw early on bad configuration.
   validateAgencyOptions(opts);
 
+  /*
+   * The cognitive mechanisms run inside a CognitiveMemoryManager, which the
+   * lightweight agency() never constructs, and agency-level config is not
+   * forwarded to roster members. Say so instead of accepting it silently.
+   */
+  if (opts.cognitiveMechanisms != null) {
+    console.warn(
+      '[AgentOS] agency() accepted a cognitiveMechanisms config, but the lightweight helper does not run ' +
+      'the cognitive mechanisms. Initialize a CognitiveMemoryManager with `cognitiveMechanisms`, or supply ' +
+      'one through gmiManagerConfig.cognitiveMemoryFactory on the full runtime, to use them.',
+    );
+  }
+
   // 1b. Forward agency-level `beforeTool` to sub-agent permissions.
   //     This ensures that tool-level HITL approval is enforced at the
   //     individual agent layer via `permissions.requireApproval`.
@@ -788,46 +801,23 @@ export function agency(opts: AgencyOptions): Agent {
   // ---------------------------------------------------------------------------
 
   /**
-   * When `opts.channels` contains at least one configured channel, attach a
-   * `connect()` method.  On invocation it iterates the channel map, logs each
-   * channel as configured, and defers real adapter initialisation to runtime.
-   *
-   * Full channel wiring depends on the channel adapter infrastructure in
-   * `packages/agentos/src/channels/`.  For v1 `connect()` establishes the
-   * surface — real adapter instances are a follow-up integration.
-   *
-   * Channel adapters follow the `IChannelAdapter` pattern:
-   *   connect(config, messageHandler) — where `messageHandler` bridges incoming
-   *   channel messages to `agentObj.generate()`.
+   * When `opts.channels` names at least one channel, attach a `connect()`
+   * method so the surface matches the full runtime. The lightweight
+   * `agency()` constructs no channel adapters: `connect()` rejects with the
+   * configured channel names instead of logging as if it had connected.
+   * Channel wiring is done with `ChannelRouter` and the adapters in
+   * `src/io/channels/`, standalone or inside the full runtime; this method
+   * never does it.
    */
-  if (opts.channels && Object.keys(opts.channels).length > 0) {
+  const channelNames = Object.keys(opts.channels ?? {});
+  if (channelNames.length > 0) {
     agentObj.connect = async (): Promise<void> => {
-      for (const [channelName, channelConfig] of Object.entries(opts.channels!)) {
-        try {
-          /**
-           * Dynamically import the channel adapter from the extensions registry
-           * and connect it with the agent's generate function as the message handler.
-           */
-          const adapterModule = await import(`../channels/${channelName}/index.js`).catch(() => null);
-          if (adapterModule?.createExtensionPack) {
-            const pack = adapterModule.createExtensionPack();
-            const adapter = pack.channelAdapters?.[0];
-            if (adapter && typeof adapter.connect === 'function') {
-              await adapter.connect(channelConfig, async (msg: string) => {
-                const result = await agentObj.generate(msg);
-                return typeof result === 'string' ? result : (result as any)?.text ?? '';
-              });
-              console.log(`[agency] Channel "${channelName}" connected`);
-            } else {
-              console.log(`[agency] Channel "${channelName}" adapter loaded but no connect() method`);
-            }
-          } else {
-            console.log(`[agency] Channel "${channelName}" configured (adapter not found at channels/${channelName}/)`);
-          }
-        } catch {
-          console.warn(`[agency] Channel "${channelName}" adapter not available`);
-        }
-      }
+      throw new Error(
+        `agency().connect() cannot connect ${channelNames.map((name) => `"${name}"`).join(', ')}: ` +
+          'the lightweight agency() helper constructs no channel adapters, and this method always rejects. ' +
+          'Wire channels with ChannelRouter and the adapters in src/io/channels (the Channels guide shows the ' +
+          'standalone form), or run the full AgentOS runtime with its messaging-channel extension packs.',
+      );
     };
   }
 

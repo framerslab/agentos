@@ -1434,18 +1434,19 @@ export interface BaseAgentConfig {
   dependsOn?: string[];
 
   /**
-   * Cognitive mechanisms config — 8 neuroscience-backed memory mechanisms.
-   * All HEXACO-modulated (emotionality, conscientiousness, openness, etc.).
+   * Cognitive mechanisms config: the eight memory mechanisms of
+   * `CognitiveMemoryManager` (reconsolidation, retrieval-induced forgetting,
+   * involuntary recall, feeling of knowing, temporal gist, schema encoding,
+   * source-confidence decay and emotion regulation). Pass `{}` for the
+   * defaults, or override fields per mechanism.
    *
-   * - Pass `{}` for sensible defaults (all 8 mechanisms enabled).
-   * - Omit entirely to disable (zero overhead — no code paths execute).
-   * - Provide per-mechanism overrides to tune individual parameters.
+   * The mechanisms run inside a `CognitiveMemoryManager` initialized with this
+   * config (`CognitiveMemoryConfig.cognitiveMechanisms`). The lightweight
+   * `agent()` and `agency()` helpers construct no memory manager, so they log
+   * a warning and leave this field unused. On the full runtime, a
+   * `gmiManagerConfig.cognitiveMemoryFactory` builds the manager for each GMI.
    *
-   * Requires `memory` to be enabled (`true` or a `MemoryConfig` object).
-   * If `cognitiveMechanisms` is set but `memory` is disabled, a warning is logged
-   * and the mechanisms config is ignored.
-   *
-   * @see {@link https://docs.agentos.sh/memory/cognitive-mechanisms | Cognitive Mechanisms Docs}
+   * @see {@link https://docs.agentos.sh/features/cognitive-memory | Cognitive Memory}
    */
   cognitiveMechanisms?: import('../cognition/memory/mechanisms/types.js').CognitiveMechanismsConfig;
 

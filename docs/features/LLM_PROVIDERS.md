@@ -505,7 +505,7 @@ class MyProvider implements IProvider {
   readonly name = 'My Custom LLM';
 
   // ... implement generateCompletion / streamCompletion / listModels / etc.
-  // See packages/agentos/src/core/llm/providers/IProvider.ts for the full
+  // See src/core/llm/providers/IProvider.ts for the full
   // contract; the existing OpenAI / Anthropic / Ollama implementations are
   // good references.
 }

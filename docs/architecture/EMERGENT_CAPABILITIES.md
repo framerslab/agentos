@@ -1,5 +1,5 @@
 ---
-description: "Runtime tool forging for AI agents: AgentOS lets agents generate, sandbox, judge-approve, and register new Zod-typed tools mid-decision in a hardened node:vm. Multi-agent spawn_specialist included."
+description: "Runtime tool forging for AI agents: AgentOS lets agents generate, sandbox, judge-approve, and register new Zod-typed tools mid-decision in an in-process node:vm context. Multi-agent spawn_specialist included."
 keywords: [runtime tool forging, ai agent self-improvement, emergent capabilities llm, sandboxed code generation, node:vm sandbox, llm-as-judge, spawn specialist, multi-agent collaboration]
 ---
 
@@ -39,7 +39,7 @@ const agent = await AgentOS.create({
 
 ## How It Works
 
-![forge_tool runtime forging loop: agent calls forge_tool, the Build stage offers two creation modes (compose chains existing tools via ComposableToolBuilder; sandbox runs new code in a hardened node:vm via SandboxedToolForge), the Test stage runs declared test cases and validates output against the tool's schema, the Judge stage runs an LLM-as-judge over code safety, test correctness, and determinism, and on approval the tool is registered at the session tier — otherwise the rejection reason is returned to the agent.](/img/diagrams/emergent-capabilities-forge-loop.svg)
+![forge_tool runtime forging loop: agent calls forge_tool, the Build stage offers two creation modes (compose chains existing tools via ComposableToolBuilder; sandbox runs new code in an in-process node:vm context via SandboxedToolForge), the Test stage runs declared test cases and validates output against the tool's schema, the Judge stage runs an LLM-as-judge over code safety, test correctness, and determinism, and on approval the tool is registered at the session tier — otherwise the rejection reason is returned to the agent.](/img/diagrams/emergent-capabilities-forge-loop.svg)
 
 ## Two Creation Modes
 
@@ -148,7 +148,7 @@ const forgeRequest = {
 
 ### Sandbox Mode -- Write Novel Code
 
-Sandbox mode runs agent-written JavaScript in a hardened node:vm context. The forge-specific [`SandboxedToolForge`](/api/classes/SandboxedToolForge) layers the `function execute(input)` contract and allowlist-injected APIs on top of [`CodeSandbox`](/api/classes/CodeSandbox), which provides the hardening: `codeGeneration: { strings: false, wasm: false }`, frozen console, and explicit `process` / `globalThis` / `require` set to undefined. Wall-clock timeouts are enforced; memory limits are not (node:vm shares the host heap; an isolated-vm soft dependency would be required for preemptive memory limits and is deferred).
+Sandbox mode runs agent-written JavaScript in an in-process `node:vm` context. Node's documentation says of that module: "The `node:vm` module is not a security mechanism. Do not use it to run untrusted code." The forge-specific [`SandboxedToolForge`](/api/classes/SandboxedToolForge) layers the `function execute(input)` contract and the granted functions on top of [`CodeSandbox`](/api/classes/CodeSandbox), which sets `codeGeneration: { strings: false, wasm: false }`, freezes the console and sets `process`, `globalThis` and `require` to undefined in the context. A scope on a granted function (a domain list, a read root) is a guardrail for code that acts through that function. Wall-clock timeouts are enforced, but a host call the code started keeps running after its timeout; memory is not limited (`node:vm` shares the host heap, and `sandboxMemoryMB` is reported, not enforced).
 
 **Example: CSV parser**
 
@@ -267,7 +267,7 @@ These are rejected at code validation time (before execution):
 
 | API | What it grants |
 |---|---|
-| `fetch` | Outbound HTTP/HTTPS (domain-restricted via `fetchDomainAllowlist`) |
+| `fetch` | Outbound HTTP/HTTPS. The injected function sends the caller's method, headers and body to the host and follows redirects; `fetchDomainAllowlist` checks the first URL's host when a host sets it, and the standard wiring does not set it. A grant that holds `fetch` and `fs.readFile` together can send out what it reads. |
 | `fs.readFile` | Read-only file access in a pre-approved path whitelist |
 | `crypto` | Node.js `crypto` module for hashing / HMAC |
 
@@ -546,8 +546,8 @@ await importEmergentTool('./slugify.emergent-tool.yaml', { seedId: agentSeedId }
 ## Safety Invariants
 
 - Emergent tools **cannot** modify the guardrail pipeline
-- Emergent tools **cannot** access other agents' memory or credentials
-- Sandbox runs in a hardened node:vm context (own realm, `process` / `globalThis` / `require` set to undefined, `codeGeneration: { strings: false, wasm: false }` blocks runtime `eval`/`Function` reflection). Host-realm escape is blocked; runaway memory is not preempted (use isolated-vm for that, currently deferred).
+- Emergent tools get no memory or credential API. With `fs.readFile` granted they read any file under `fsReadRoots`, which defaults to the working directory, so a `.env` kept there is readable
+- Sandbox code runs in an in-process `node:vm` context (own realm, `process` / `globalThis` / `require` set to undefined, `codeGeneration: { strings: false, wasm: false }` blocks runtime `eval`/`Function` reflection). `node:vm` is not a security mechanism (Node's documentation), and runaway memory is not preempted.
 - All forge decisions and metadata are logged to the provenance audit trail
 - Human approval is required for shared-tier promotion
 - Raw sandbox source is redacted at rest by default
