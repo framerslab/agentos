@@ -3,11 +3,14 @@
  * The completion gateway resolves a turn's hop before the GMI builds its
  * prompt: router, primary, then the fallback chain, each hop's provider
  * initialised inside the protected attempt, its context window and
- * capabilities read from the initialised manager. Only the provider manager
- * and credential lookup are faked; model resolution and the fallback helpers
- * are the real ones.
+ * capabilities read from the initialised manager. It then streams one
+ * attempt per hop behind a delivery boundary: a failure before the first
+ * content chunk yields nothing and settles `hopFailed`. Only the provider
+ * manager and credential lookup are faked; model resolution, the fallback
+ * helpers, the retry classifier and the health registry are the real ones.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
 import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager.js';
 
@@ -38,7 +41,7 @@ vi.mock('../../model.js', async (importOriginal) => {
   };
 });
 
-import { createCompletionGateway } from '../completionGateway.js';
+import { createCompletionGateway, type CompletionResolution } from '../completionGateway.js';
 
 const chain = (...entries: Array<[string, string]>) => entries.map(([provider, model]) => ({ provider, model }));
 
@@ -141,5 +144,156 @@ describe('CompletionGateway.resolve', () => {
     const r = await gateway.resolve({ providerId: 'openai', modelId: 'gpt-4o', messages: [{ role: 'user', content: 'summarise the attached report' }], fallbackProviders: [] });
     expect(r).toMatchObject({ providerId: 'anthropic', modelId: 'claude-routed', hop: 0 });
     expect(selectModel.mock.calls[0][0]).toMatchObject({ taskHint: 'summarise the attached report', optimizationPreference: 'balanced' });
+  });
+});
+
+function resolutionWith(
+  gen: (options: Record<string, unknown>) => AsyncGenerator<Record<string, unknown>>,
+  overrides: Partial<CompletionResolution> = {},
+): CompletionResolution {
+  const provider = { providerId: 'openai', generateCompletionStream: (_m: string, _msgs: unknown, options: Record<string, unknown>) => gen(options) };
+  return {
+    providerId: 'openai', modelId: 'gpt-4o', hop: 0, maxContextTokens: 128_000, capabilities: ['tool_use'], toolFormat: 'openai_functions',
+    optionOverrides: {}, chain: [{ provider: 'openai', model: 'gpt-4o' }],
+    providerManager: { getProvider: () => provider } as unknown as AIModelProviderManager,
+    ...overrides,
+  };
+}
+
+async function drain(attempt: AsyncIterable<unknown>): Promise<Array<Record<string, any>>> {
+  const seen: Array<Record<string, any>> = [];
+  for await (const chunk of attempt) seen.push(chunk as Record<string, any>);
+  return seen;
+}
+
+const stop = (content: string, usage?: Record<string, number>) => ({ isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content }, finishReason: 'stop' }], ...(usage ? { usage } : {}) });
+
+describe('CompletionGateway.stream', () => {
+  it('delivers from the first content chunk on and settles delivered', async () => {
+    const gateway = createCompletionGateway();
+    const attempt = gateway.stream(resolutionWith(async function* () { yield { responseTextDelta: 'Hi' }; yield stop('Hi', { promptTokens: 1, completionTokens: 1, totalTokens: 2 }); }), [], {});
+    expect((await drain(attempt)).length).toBe(2);
+    expect(await attempt.outcome).toEqual({ kind: 'delivered' });
+  });
+
+  it('a retryable throw before any content yields nothing and settles hopFailed', async () => {
+    const gateway = createCompletionGateway();
+    const attempt = gateway.stream(resolutionWith(async function* () { throw Object.assign(new Error('overloaded'), { httpStatus: 529 }); }), [], {});
+    expect(await drain(attempt)).toEqual([]);
+    expect(await attempt.outcome).toMatchObject({ kind: 'hopFailed', retryable: true });
+  });
+
+  it('an in-band error chunk before content is a hop failure too', async () => {
+    const gateway = createCompletionGateway();
+    const attempt = gateway.stream(resolutionWith(async function* () { yield { isFinal: true, choices: [], error: { message: 'rate limited', type: 'rate_limit' } }; }), [], {});
+    expect(await drain(attempt)).toEqual([]);
+    expect(await attempt.outcome).toMatchObject({ kind: 'hopFailed', retryable: true });
+  });
+
+  it('reads a numeric in-band error code as its HTTP status, as streamText does', async () => {
+    const gateway = createCompletionGateway();
+    const attempt = gateway.stream(resolutionWith(async function* () { yield { isFinal: true, choices: [], error: { message: 'Internal error encountered.', type: 'INTERNAL', code: 500 } }; }), [], {});
+    expect(await drain(attempt)).toEqual([]);
+    expect(await attempt.outcome).toMatchObject({ kind: 'hopFailed', retryable: true, error: expect.objectContaining({ httpStatus: 500 }) });
+  });
+
+  it('a non-retryable failure before content settles hopFailed with retryable false', async () => {
+    const gateway = createCompletionGateway();
+    const attempt = gateway.stream(resolutionWith(async function* () { throw new Error('400 invalid_request: bad schema'); }), [], {});
+    await drain(attempt);
+    expect(await attempt.outcome).toMatchObject({ kind: 'hopFailed', retryable: false });
+  });
+
+  it('a caller abort before content is not walked and not counted against the provider', async () => {
+    const gateway = createCompletionGateway();
+    for (let i = 0; i < 6; i++) {
+      const attempt = gateway.stream(resolutionWith(async function* () { yield { isFinal: true, choices: [], error: { message: 'Stream aborted by caller', type: 'abort' } }; }), [], {});
+      expect(await drain(attempt)).toEqual([]);
+      expect(await attempt.outcome).toMatchObject({ kind: 'hopFailed', retryable: false });
+    }
+    expect(globalLLMProviderHealth.getStats('openai')).toBeNull();
+  });
+
+  it('an error after content ends the attempt with one terminal error chunk', async () => {
+    const gateway = createCompletionGateway();
+    const attempt = gateway.stream(resolutionWith(async function* () { yield { responseTextDelta: 'Partial' }; throw new Error('connection reset'); }), [], {});
+    const chunks = await drain(attempt);
+    expect(chunks.map((c) => Boolean(c.error))).toEqual([false, true]);
+    expect(chunks[1]).toMatchObject({ isFinal: true, error: { message: 'connection reset' } });
+    expect(await attempt.outcome).toEqual({ kind: 'delivered' });
+  });
+
+  it('an in-band error after content ends the attempt there and counts against the provider', async () => {
+    for (let i = 0; i < 2; i++) globalLLMProviderHealth.recordFailure('openai', Object.assign(new Error('429'), { httpStatus: 429 }));
+    const attempt = createCompletionGateway().stream(resolutionWith(async function* () {
+      yield { responseTextDelta: 'Partial' };
+      yield { isFinal: true, choices: [], error: { message: 'rate limited', type: 'rate_limit', code: 429 } };
+      yield { responseTextDelta: 'after the end' };
+    }), [], {});
+    const chunks = await drain(attempt);
+    expect(chunks.map((c) => c.responseTextDelta ?? c.error?.message)).toEqual(['Partial', 'rate limited']);
+    expect(await attempt.outcome).toEqual({ kind: 'delivered' });
+    expect(globalLLMProviderHealth.isOpen('openai')).toBe(true);
+  });
+
+  it('a stream with no content chunk flushes everything it buffered', async () => {
+    const gateway = createCompletionGateway();
+    const attempt = gateway.stream(resolutionWith(async function* () { yield stop(''); yield { isFinal: true, choices: [], usage: { promptTokens: 3, completionTokens: 0, totalTokens: 3 } }; }), [], {});
+    expect((await drain(attempt)).length).toBe(2);
+    expect(await attempt.outcome).toEqual({ kind: 'delivered' });
+  });
+
+  it('merges the hop overrides over the caller options and always streams', async () => {
+    let seen: Record<string, unknown> = {};
+    const res = resolutionWith(async function* (options) { seen = options; yield { responseTextDelta: 'x' }; }, { optionOverrides: { maxTokens: 400, cache: false } as never });
+    await drain(createCompletionGateway().stream(res, [], { temperature: 0.2, maxTokens: 100 }));
+    expect(seen).toMatchObject({ temperature: 0.2, maxTokens: 400, cache: false, stream: true });
+  });
+
+  it('settles abandoned when the consumer stops reading', async () => {
+    const attempt = createCompletionGateway().stream(resolutionWith(async function* () { yield { responseTextDelta: 'a' }; yield { responseTextDelta: 'b' }; }), [], {});
+    for await (const _chunk of attempt) break;
+    expect(await attempt.outcome).toEqual({ kind: 'abandoned' });
+  });
+
+  it('records the hop failure and the hop success on the health registry', async () => {
+    const gateway = createCompletionGateway();
+    const rateLimited = () => resolutionWith(async function* () { throw Object.assign(new Error('429'), { httpStatus: 429 }); });
+    for (let i = 0; i < 2; i++) await drain(gateway.stream(rateLimited(), [], {}));
+    await drain(gateway.stream(resolutionWith(async function* () { yield { responseTextDelta: 'ok' }; }), [], {}));
+    await drain(gateway.stream(rateLimited(), [], {}));
+    expect(globalLLMProviderHealth.isOpen('openai')).toBe(false);
+    for (let i = 0; i < 2; i++) await drain(gateway.stream(rateLimited(), [], {}));
+    expect(globalLLMProviderHealth.isOpen('openai')).toBe(true);
+  });
+
+  // claude-x stands for a Claude model that accepts a forced tool_choice; Sonnet 5.5 and Opus 5.5 do not (next case).
+  it('lowers a schema for the hop, suppresses tools, and lifts the forced schema tool call into structuredOutput', async () => {
+    let seen: Record<string, unknown> = {};
+    const res = resolutionWith(async function* (options) {
+      seen = options;
+      yield { isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: [{ id: 't1', type: 'function', function: { name: 'answer', arguments: '{"city":"Lyon"}' } }] }, finishReason: 'tool_use' }] };
+    }, { providerId: 'anthropic', modelId: 'claude-x', toolFormat: 'anthropic_tools' });
+    const chunks = await drain(createCompletionGateway().stream(res, [], { tools: [{ type: 'function', function: { name: 'lookup' } }], toolChoice: 'auto' }, z.object({ city: z.string() }), 'answer'));
+    expect(seen.tools).toBeUndefined();
+    expect(seen.toolChoice).toBeUndefined();
+    expect(seen.responseFormat).toMatchObject({ _agentosUseToolForStructuredOutput: true, tool: { name: 'answer' } });
+    expect(chunks.at(-1)).toMatchObject({ structuredOutput: { city: 'Lyon' } });
+    expect(chunks.at(-1)?.choices[0].message.tool_calls).toBeUndefined();
+  });
+
+  it('on a model that refuses a forced tool, the schema rides the prompt only: no response format, no tools, the answer stays text', async () => {
+    let seen: Record<string, unknown> = {};
+    const res = resolutionWith(async function* (options) {
+      seen = options;
+      yield { responseTextDelta: '{"city":"Lyon"}' };
+      yield stop('{"city":"Lyon"}');
+    }, { providerId: 'anthropic', modelId: 'claude-sonnet-5-5', toolFormat: 'anthropic_tools' });
+    const chunks = await drain(createCompletionGateway().stream(res, [], { tools: [{ type: 'function', function: { name: 'lookup' } }], toolChoice: 'auto' }, z.object({ city: z.string() }), 'answer'));
+    expect(seen.responseFormat).toBeUndefined();
+    expect(seen.tools).toBeUndefined();
+    expect(seen.toolChoice).toBeUndefined();
+    expect(chunks.map((c) => c.responseTextDelta).filter(Boolean)).toEqual(['{"city":"Lyon"}']);
+    expect(chunks.some((c) => c.structuredOutput !== undefined)).toBe(false);
   });
 });
