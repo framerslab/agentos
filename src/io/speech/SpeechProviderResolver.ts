@@ -68,9 +68,10 @@ import { findSpeechProviderCatalogEntry } from './providerCatalog.js';
  */
 export class SpeechProviderResolver extends EventEmitter {
   /**
-   * Internal registry of all providers keyed by their unique string id.
-   * Overwrites are allowed — re-registering with the same id replaces the
-   * previous entry, which lets hot-reload and extension refresh work seamlessly.
+   * Internal registry of all providers, keyed by kind and id (`keyOf()`), so a
+   * speech-to-text and a text-to-speech provider can share an id. Overwrites
+   * are allowed — re-registering the same kind and id replaces the previous
+   * entry, which lets hot-reload and extension refresh work seamlessly.
    */
   private registrations = new Map<string, ProviderRegistration>();
 
@@ -80,6 +81,17 @@ export class SpeechProviderResolver extends EventEmitter {
    * preferred loses its boost.
    */
   private basePriorities = new Map<string, number>();
+
+  /**
+   * The providers the last `refresh(extensionManager)` read from the manager,
+   * by key, so the next one can drop those the manager no longer lists.
+   */
+  private discovered = new Map<string, unknown>();
+
+  /** Map key of a registration: providers of different kinds may share an id. */
+  private static keyOf(kind: SpeechProviderKind, id: string): string {
+    return `${kind}:${id}`;
+  }
 
   /**
    * Creates a new SpeechProviderResolver.
@@ -107,7 +119,10 @@ export class SpeechProviderResolver extends EventEmitter {
   }
 
   /**
-   * Register a provider, overwriting any existing registration with the same id.
+   * Register a provider, overwriting any existing registration with the same
+   * kind and id. Re-registering at the priority the resolver shows (a preferred
+   * boost included), as `register({ ...entry, provider })` does, keeps the
+   * priority the provider was first registered with.
    *
    * Emits a `provider_registered` event with `{ id, kind, source }` so that
    * listeners (e.g. UI dashboards, logging middleware) can track what's available.
@@ -129,8 +144,14 @@ export class SpeechProviderResolver extends EventEmitter {
    * ```
    */
   register(reg: ProviderRegistration): void {
-    this.registrations.set(reg.id, reg);
-    this.basePriorities.set(reg.id, reg.priority);
+    const key = SpeechProviderResolver.keyOf(reg.kind, reg.id);
+    const current = this.registrations.get(key);
+    const base =
+      current && reg.priority === current.priority
+        ? (this.basePriorities.get(key) ?? reg.priority)
+        : reg.priority;
+    this.registrations.set(key, reg);
+    this.basePriorities.set(key, base);
     this.emit('provider_registered', { id: reg.id, kind: reg.kind, source: reg.source });
   }
 
@@ -293,12 +314,14 @@ export class SpeechProviderResolver extends EventEmitter {
    * optionally discovering extension providers, and applying user-configured
    * preferred priorities.
    *
-   * The three-phase refresh sequence is:
-   * 1. `registerCoreProviders()` — register all built-in providers from the
+   * The refresh sequence is:
+   * 1. `discoverExtensionProviders()` — if an ExtensionManager is provided, read
+   *    the speech providers it lists as active, and drop the ones an earlier
+   *    refresh read from it that it no longer lists.
+   * 2. `registerCoreProviders()` — register all built-in providers from the
    *    static catalog, marking each as configured/unconfigured based on env vars.
-   * 2. `discoverExtensionProviders()` — if an ExtensionManager is provided,
-   *    discover and register any additional speech providers from extensions.
-   * 3. `applyPreferredPriorities()` — boost priority for providers listed in
+   * 3. Register the providers read in step 1, at priority 200.
+   * 4. `applyPreferredPriorities()` — boost priority for providers listed in
    *    the user's `config.stt.preferred` / `config.tts.preferred` arrays.
    *
    * @param extensionManager - Optional `ExtensionManager` (its speech provider
@@ -314,10 +337,18 @@ export class SpeechProviderResolver extends EventEmitter {
    * ```
    */
   async refresh(extensionManager?: any): Promise<void> {
+    const discovered = extensionManager ? this.discoverExtensionProviders(extensionManager) : null;
+    if (discovered) {
+      this.dropProvidersNoLongerDiscovered(discovered);
+    }
+
     this.registerCoreProviders();
 
-    if (extensionManager) {
-      this.discoverExtensionProviders(extensionManager);
+    if (discovered) {
+      for (const reg of discovered) this.register(reg);
+      this.discovered = new Map<string, unknown>(
+        discovered.map((reg): [string, unknown] => [SpeechProviderResolver.keyOf(reg.kind, reg.id), reg.provider]),
+      );
     }
 
     this.applyPreferredPriorities();
@@ -361,7 +392,7 @@ export class SpeechProviderResolver extends EventEmitter {
     if (requirements?.preferredIds?.length) {
       const results: ProviderRegistration[] = [];
       for (const id of requirements.preferredIds) {
-        const reg = this.registrations.get(id);
+        const reg = this.registrations.get(SpeechProviderResolver.keyOf(kind, id));
         if (
           reg &&
           reg.kind === kind &&
@@ -469,7 +500,7 @@ export class SpeechProviderResolver extends EventEmitter {
 
     for (const def of coreProviders) {
       // Keep an instance that SpeechRuntime or an extension registered under this id.
-      if (this.registrations.get(def.id)?.provider) continue;
+      if (this.registrations.get(SpeechProviderResolver.keyOf(def.kind, def.id))?.provider) continue;
 
       const catalogEntry = findSpeechProviderCatalogEntry(def.id);
       // Skip providers not found in the catalog (should not happen, but defensive)
@@ -495,12 +526,15 @@ export class SpeechProviderResolver extends EventEmitter {
   }
 
   /**
-   * Discover speech providers exposed by an ExtensionManager via
-   * `getDescriptorsByKind()`.
+   * Read the speech providers an ExtensionManager lists as active, as
+   * registrations for `refresh()` to register.
    *
    * Extension providers are registered with `priority: 200` (lower than core's
    * 100) so they serve as fallbacks unless the user explicitly boosts them via
-   * `config.stt.preferred` / `config.tts.preferred`.
+   * `config.stt.preferred` / `config.tts.preferred`. Each is registered under
+   * the provider's own `id` (the descriptor id when the provider has none), the
+   * id preferred lists and `SpeechRuntime` use, and counts as configured: the
+   * pack built the instance with its own options and secrets.
    *
    * The `extensionManager` parameter uses `any` because the ExtensionManager
    * type lives in the extensions package — importing it would create a circular
@@ -511,14 +545,15 @@ export class SpeechProviderResolver extends EventEmitter {
    * @param extensionManager - An `ExtensionManager`, or an object exposing
    *   `getDescriptorsByKind(kind)`; either returns `{ id: string; payload: unknown }`
    *   descriptors.
+   * @returns One registration per active descriptor that carries a provider.
    *
    * @example
    * ```ts
    * // Called internally by refresh():
-   * this.discoverExtensionProviders(extensionManager);
+   * const discovered = this.discoverExtensionProviders(extensionManager);
    * ```
    */
-  private discoverExtensionProviders(extensionManager: any): void {
+  private discoverExtensionProviders(extensionManager: any): ProviderRegistration[] {
     /**
      * Maps extension descriptor kind strings to the normalized
      * {@link SpeechProviderKind} used internally. Extensions use hyphenated
@@ -531,7 +566,9 @@ export class SpeechProviderResolver extends EventEmitter {
       'wake-word-provider': 'wake-word',
     };
 
+    const found: ProviderRegistration[] = [];
     for (const descriptorKind of Object.keys(kindMap)) {
+      const kind = kindMap[descriptorKind] ?? 'stt';
       const descriptors: any[] =
         typeof extensionManager.getDescriptorsByKind === 'function'
           ? (extensionManager.getDescriptorsByKind(descriptorKind) ?? [])
@@ -540,30 +577,48 @@ export class SpeechProviderResolver extends EventEmitter {
             : [];
 
       for (const desc of descriptors) {
-        // Try to find a catalog entry for known extensions; fall back to a
-        // synthetic entry for unknown/third-party extensions.
-        const catalogEntry = findSpeechProviderCatalogEntry(desc.id);
-        const isConfigured = catalogEntry
-          ? catalogEntry.envVars.length === 0 ||
-            catalogEntry.envVars.every((v: string) => Boolean(this.env[v]))
-          : true; // Unknown extensions are assumed configured since we can't check
+        const provider = desc?.payload;
+        if (!provider) continue;
+        const id = typeof provider.id === 'string' && provider.id ? provider.id : desc.id;
+        // Known providers keep their catalog entry (capabilities); others get a
+        // synthetic one.
+        const catalogEntry = findSpeechProviderCatalogEntry(id);
 
-        this.register({
-          id: desc.id,
-          kind: kindMap[descriptorKind] ?? 'stt',
-          provider: desc.payload,
+        found.push({
+          id,
+          kind,
+          provider,
           catalogEntry: catalogEntry ?? {
-            id: desc.id,
-            kind: kindMap[descriptorKind] ?? 'stt',
-            label: desc.id,
+            id,
+            kind,
+            label: id,
             envVars: [],
             local: false,
             description: '',
           },
-          isConfigured,
+          isConfigured: true,
           priority: 200, // Extensions rank below core by default
           source: 'extension',
         });
+      }
+    }
+    return found;
+  }
+
+  /**
+   * Remove the providers an earlier `refresh(extensionManager)` read that the
+   * manager no longer lists as active (an unloaded pack or a deactivated
+   * descriptor), so the resolve methods stop returning them. A registration
+   * that now holds a different provider is left alone.
+   *
+   * @param discovered - The registrations read from the manager this refresh.
+   */
+  private dropProvidersNoLongerDiscovered(discovered: ProviderRegistration[]): void {
+    const current = new Set(discovered.map((reg) => SpeechProviderResolver.keyOf(reg.kind, reg.id)));
+    for (const [key, provider] of this.discovered) {
+      if (!current.has(key) && this.registrations.get(key)?.provider === provider) {
+        this.registrations.delete(key);
+        this.basePriorities.delete(key);
       }
     }
   }
@@ -588,18 +643,18 @@ export class SpeechProviderResolver extends EventEmitter {
   private applyPreferredPriorities(): void {
     // Start from the registered priorities, so a provider dropped from a
     // preferred list does not keep the boost an earlier refresh gave it.
-    for (const [id, reg] of this.registrations) {
-      reg.priority = this.basePriorities.get(id) ?? reg.priority;
+    for (const [key, reg] of this.registrations) {
+      reg.priority = this.basePriorities.get(key) ?? reg.priority;
     }
     if (this.config?.stt?.preferred) {
       for (let i = 0; i < this.config.stt.preferred.length; i++) {
-        const reg = this.registrations.get(this.config.stt.preferred[i]);
+        const reg = this.registrations.get(SpeechProviderResolver.keyOf('stt', this.config.stt.preferred[i]));
         if (reg) reg.priority = 50 + i;
       }
     }
     if (this.config?.tts?.preferred) {
       for (let i = 0; i < this.config.tts.preferred.length; i++) {
-        const reg = this.registrations.get(this.config.tts.preferred[i]);
+        const reg = this.registrations.get(SpeechProviderResolver.keyOf('tts', this.config.tts.preferred[i]));
         if (reg) reg.priority = 50 + i;
       }
     }

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ExtensionManager } from '../../../extensions/ExtensionManager.js';
-import { EXTENSION_KIND_STT_PROVIDER } from '../../../extensions/types.js';
+import { EXTENSION_KIND_STT_PROVIDER, EXTENSION_KIND_TTS_PROVIDER } from '../../../extensions/types.js';
 import { SpeechRuntime } from '../SpeechRuntime.js';
 import { SpeechProviderResolver } from '../SpeechProviderResolver.js';
 
@@ -87,5 +87,80 @@ describe('SpeechProviderResolver.refresh and provider instances', () => {
     await resolver.refresh();
     expect(resolver.listProviders('stt').find((r) => r.id === 'first')?.priority).toBe(100);
     expect(resolver.resolveSTT()).toBe(second);
+  });
+
+  it('registers a pack provider under its own id, the one preferred lists name', async () => {
+    const manager = new ExtensionManager();
+    const tts = { id: 'pack-tts', getProviderName: () => 'Pack TTS', synthesize: vi.fn() };
+    await manager
+      .getRegistry(EXTENSION_KIND_TTS_PROVIDER)
+      .register({ id: 'pack-tts-descriptor', kind: EXTENSION_KIND_TTS_PROVIDER, payload: tts });
+    const resolver = new SpeechProviderResolver(undefined, {});
+
+    await resolver.refresh(manager);
+
+    expect(resolver.resolveTTS({ preferredIds: ['pack-tts'] })).toBe(tts);
+  });
+
+  it('resolves a pack provider under a catalog id although the resolver has no key for it', async () => {
+    const manager = new ExtensionManager();
+    // The pack built this instance with its own key; ELEVENLABS_API_KEY is not in the env below.
+    const tts = { id: 'elevenlabs', getProviderName: () => 'ElevenLabs', synthesize: vi.fn() };
+    await manager
+      .getRegistry(EXTENSION_KIND_TTS_PROVIDER)
+      .register({ id: 'elevenlabs', kind: EXTENSION_KIND_TTS_PROVIDER, payload: tts });
+    const resolver = new SpeechProviderResolver(undefined, {});
+
+    await resolver.refresh(manager);
+
+    expect(resolver.resolveTTS()).toBe(tts);
+  });
+
+  it('stops resolving a pack provider once the manager no longer lists it', async () => {
+    const manager = new ExtensionManager();
+    const registry = manager.getRegistry(EXTENSION_KIND_STT_PROVIDER);
+    const stt = { id: 'pack-stt', getProviderName: () => 'Pack STT', transcribe: vi.fn() };
+    await registry.register({ id: 'pack-stt', kind: EXTENSION_KIND_STT_PROVIDER, payload: stt });
+    const resolver = new SpeechProviderResolver(undefined, {});
+    await resolver.refresh(manager);
+    expect(resolver.resolveSTT()).toBe(stt);
+
+    await registry.unregister('pack-stt');
+    await resolver.refresh(manager);
+
+    expect(resolver.listProviders('stt').some((r) => r.id === 'pack-stt')).toBe(false);
+    expect(() => resolver.resolveSTT()).toThrow('No configured STT provider matches requirements');
+  });
+
+  it('keeps a speech-to-text and a text-to-speech provider that share an id', async () => {
+    const manager = new ExtensionManager();
+    const stt = { id: 'acme', getProviderName: () => 'Acme', transcribe: vi.fn() };
+    const tts = { id: 'acme', getProviderName: () => 'Acme', synthesize: vi.fn() };
+    await manager
+      .getRegistry(EXTENSION_KIND_STT_PROVIDER)
+      .register({ id: 'acme', kind: EXTENSION_KIND_STT_PROVIDER, payload: stt });
+    await manager
+      .getRegistry(EXTENSION_KIND_TTS_PROVIDER)
+      .register({ id: 'acme', kind: EXTENSION_KIND_TTS_PROVIDER, payload: tts });
+    const resolver = new SpeechProviderResolver(undefined, {});
+
+    await resolver.refresh(manager);
+
+    expect(resolver.resolveSTT()).toBe(stt);
+    expect(resolver.resolveTTS()).toBe(tts);
+  });
+
+  it('keeps the registered priority when a boosted provider is registered again', async () => {
+    const config = { tts: { preferred: ['openai-tts'] } };
+    const resolver = new SpeechProviderResolver(config, { OPENAI_API_KEY: 'test-key' });
+    await resolver.refresh();
+    const entry = resolver.listProviders('tts').find((r) => r.id === 'openai-tts')!;
+    expect(entry.priority).toBe(50);
+    resolver.register({ ...entry, provider: { id: 'openai-tts', synthesize: vi.fn() } as any });
+
+    config.tts.preferred = [];
+    await resolver.refresh();
+
+    expect(resolver.listProviders('tts').find((r) => r.id === 'openai-tts')?.priority).toBe(100);
   });
 });
