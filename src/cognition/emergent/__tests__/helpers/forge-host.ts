@@ -75,13 +75,15 @@ export function callTool(
   orchestrator: ToolOrchestrator,
   name: string,
   args: Record<string, unknown>,
-  caller: { personaCapabilities?: string[]; personaId?: string } = {},
+  caller: { personaCapabilities?: string[]; personaId?: string; gmiId?: string; sessionId?: string } = {},
 ): Promise<ToolCallResult> {
   callCounter += 1;
   return orchestrator.processToolCall({
     toolCallRequest: { id: `call-${callCounter}`, name, arguments: args },
-    gmiId: 'gmi-test',
+    gmiId: caller.gmiId ?? 'gmi-test',
     personaId: caller.personaId ?? 'persona-test',
+    // forge_tool records the correlation id as the forging session.
+    ...(caller.sessionId ? { correlationId: caller.sessionId } : {}),
     personaCapabilities: caller.personaCapabilities ?? [],
     userContext: { userId: 'user-test' } as UserContext,
   });

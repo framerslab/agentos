@@ -11,6 +11,9 @@ export interface SeedRow {
   /** The raw column text, so a test can write a schema column that does not read. */
   inputSchemaRaw?: string;
   outputSchema?: Record<string, unknown>;
+  /** The owning agent and session; the loader's selectors read these columns. */
+  createdBy?: string;
+  createdBySession?: string;
 }
 
 /**
@@ -37,8 +40,8 @@ export function seedToolRow(db: SqliteTestAdapter, row: SeedRow): void {
       row.mode,
       row.source,
       row.tier ?? 'shared',
-      'agent-seed',
-      'sess-seed',
+      row.createdBy ?? 'agent-seed',
+      row.createdBySession ?? 'sess-seed',
       1_700_000_000_000,
       null,
       null,

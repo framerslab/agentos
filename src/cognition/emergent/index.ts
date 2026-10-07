@@ -50,6 +50,7 @@ export type {
   EmergentCapabilityEngineDeps,
   FailedToolLoad,
   LoadedToolOutcome,
+  LoadPersistedToolsOptions,
   LoadPersistedToolsResult,
 } from './EmergentCapabilityEngine.js';
 export { ForgeToolMetaTool } from './ForgeToolMetaTool.js';

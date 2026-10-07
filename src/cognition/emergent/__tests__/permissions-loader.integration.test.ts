@@ -65,7 +65,7 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
       outputSchema: DOUBLED_OUT,
     });
 
-    const summary = await host.engine.loadPersistedTools({ tiers: ['agent', 'shared'] });
+    const summary = await host.engine.loadPersistedTools({ tiers: ['agent', 'shared'], agentId: 'agent-seed' });
 
     expect(summary).toMatchObject({ active: 3, suspended: 1, demoted: 1, failed: [] });
     // Raw code: the request is inferred from the code and stored.
@@ -282,7 +282,7 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     // The full statement text: the loader's own row read joins the state table.
     db.failNext('INSERT INTO agentos_emergent_tool_state');
 
-    const summary = await host.engine.loadPersistedTools({ tiers: ['agent'] });
+    const summary = await host.engine.loadPersistedTools({ tiers: ['agent'], agentId: 'agent-seed' });
 
     expect(summary.failed).toEqual([{ toolId: 'raw-1', name: 'double_it', error: 'simulated storage failure' }]);
     expect(summary.outcomes).toEqual([]);
@@ -291,9 +291,11 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect(readToolRow(db, 'raw-1')?.is_active).toBe(1);
     expect(readStateRow(db, 'raw-1')).toBeUndefined();
 
-    const again = await host.engine.loadPersistedTools({ tiers: ['agent'] });
+    const again = await host.engine.loadPersistedTools({ tiers: ['agent'], agentId: 'agent-seed' });
     expect(again.outcomes).toEqual([{ toolId: 'raw-1', name: 'double_it', state: 'active', reason: null }]);
-    expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 }, { gmiId: 'agent-seed' })).output).toEqual({
+      doubled: 4,
+    });
   });
 
   it('a suspension or a demotion another process stored is taken in at the next load, and the executable goes', async () => {
@@ -546,14 +548,14 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
       outputSchema: DOUBLED_OUT,
       implementation: { mode: 'sandbox', code: RAW_DOUBLE, allowlist: [] },
       testCases: [{ input: { n: 2 }, expectedOutput: { doubled: 4 } }],
-    });
+    }, { sessionId: 'sess-test' });
     expect(forged.isError).toBeFalsy();
     const toolId = String(forged.output.toolId);
     await new Promise((resolve) => setTimeout(resolve, 0));
     // The row holds the redacted record, not the code.
     expect(String(readToolRow(db, toolId)?.implementation_source)).toContain('"redacted":true');
 
-    const summary = await host.engine.loadPersistedTools({ tiers: ['session'] });
+    const summary = await host.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess-test' });
 
     expect(summary.outcomes).toEqual([{ toolId, name: 'double_it', state: 'active', reason: null }]);
     expect((await callTool(host.orchestrator, 'double_it', { n: 5 })).output).toEqual({ doubled: 10 });
@@ -562,9 +564,93 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
 
     expect(await host.orchestrator.getTool('double_it')).toBeUndefined();
     expect(readStateRow(db, toolId)).toMatchObject({ state: 'demoted', state_reason: 'bad output' });
-    const again = await host.engine.loadPersistedTools({ tiers: ['session'] });
+    const again = await host.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess-test' });
     expect(again.outcomes).toEqual([
       { toolId, name: 'double_it', state: 'demoted', reason: 'bad output' },
     ]);
+  });
+
+  it("an agent's stored tools load for that agent only, and a loaded agent tool runs for its agent only", async () => {
+    const db = createSqliteAdapter();
+    seedToolRow(db, {
+      id: 'a-1',
+      name: 'double_it',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      tier: 'agent',
+      createdBy: 'agent-a',
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+    });
+    seedToolRow(db, {
+      id: 'b-1',
+      name: 'sum_it',
+      mode: 'sandbox',
+      source: SUM_CODE,
+      tier: 'agent',
+      createdBy: 'agent-b',
+      inputSchema: SUM_IN,
+      outputSchema: SUM_OUT,
+    });
+    seedToolRow(db, {
+      id: 's-1',
+      name: 'echo_text',
+      mode: 'sandbox',
+      source: 'function execute(input) { return { text: input.text }; }',
+      tier: 'shared',
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    const host = await makeForgeHost({ db });
+
+    // A private tier without its selector is refused, whatever else is asked for.
+    await expect(host.engine.loadPersistedTools({ tiers: ['agent', 'shared'] })).rejects.toThrow(/selector_required/);
+    await expect(host.engine.loadPersistedTools({ tiers: ['session'] })).rejects.toThrow(/selector_required/);
+    expect(await host.orchestrator.getTool('echo_text')).toBeUndefined();
+
+    const loaded = await host.engine.loadPersistedTools({ tiers: ['agent', 'shared'], agentId: 'agent-a' });
+    expect(loaded.outcomes.map((o) => o.toolId).sort()).toEqual(['a-1', 's-1']);
+    expect(await host.orchestrator.getTool('sum_it')).toBeUndefined();
+
+    // The agent tool runs for its agent and refuses every other; the shared one runs for both.
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 }, { gmiId: 'agent-a' })).output).toEqual({
+      doubled: 4,
+    });
+    const other = await callTool(host.orchestrator, 'double_it', { n: 2 }, { gmiId: 'agent-b' });
+    expect(other.isError).toBe(true);
+    expect(JSON.stringify(other)).toMatch(/belongs to agent agent-a/);
+    expect((await callTool(host.orchestrator, 'echo_text', { text: 'hi' }, { gmiId: 'agent-b' })).output).toEqual({
+      text: 'hi',
+    });
+  });
+
+  it("a session's stored tools load for that session only", async () => {
+    const db = createSqliteAdapter();
+    seedToolRow(db, {
+      id: 'sa-1',
+      name: 'double_it',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      tier: 'session',
+      createdBySession: 'sess-a',
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+    });
+    seedToolRow(db, {
+      id: 'sb-1',
+      name: 'sum_it',
+      mode: 'sandbox',
+      source: SUM_CODE,
+      tier: 'session',
+      createdBySession: 'sess-b',
+      inputSchema: SUM_IN,
+      outputSchema: SUM_OUT,
+    });
+    const host = await makeForgeHost({ db });
+
+    const loaded = await host.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess-a' });
+    expect(loaded.outcomes).toEqual([{ toolId: 'sa-1', name: 'double_it', state: 'active', reason: null }]);
+    expect(await host.orchestrator.getTool('sum_it')).toBeUndefined();
+    expect((await callTool(host.orchestrator, 'double_it', { n: 4 })).output).toEqual({ doubled: 8 });
   });
 });

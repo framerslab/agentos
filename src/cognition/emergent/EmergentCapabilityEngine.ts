@@ -162,6 +162,15 @@ export interface FailedToolLoad {
   error: string;
 }
 
+/** What {@link EmergentCapabilityEngine.loadPersistedTools} loads. */
+export interface LoadPersistedToolsOptions {
+  tiers: ToolTier[];
+  /** The agent whose `agent`-tier rows to load; required when `tiers` names `agent`. */
+  agentId?: string;
+  /** The session whose `session`-tier rows to load; required when `tiers` names `session`. */
+  sessionId?: string;
+}
+
 /** The result of {@link EmergentCapabilityEngine.loadPersistedTools}. */
 export interface LoadPersistedToolsResult {
   active: number;
@@ -706,9 +715,29 @@ export class EmergentCapabilityEngine {
    * and a stored request is never replaced by a derived one. One line is logged
    * per tool that did not load. A row whose load throws is reported in
    * `failed` and does not stop the others.
+   *
+   * `shared` rows load for every caller. `agent` rows are those of
+   * `options.agentId` and `session` rows those of `options.sessionId`, and
+   * naming either tier without its selector throws (`selector_required`), so
+   * a shared store never puts one agent's private tools in another's
+   * executor. A loaded or forged `agent` tool also refuses a call from any
+   * other agent (see {@link createExecutableTool}).
    */
-  async loadPersistedTools(options: { tiers: ToolTier[] }): Promise<LoadPersistedToolsResult> {
-    const rows = await this.registry.loadRows(options.tiers);
+  async loadPersistedTools(options: LoadPersistedToolsOptions): Promise<LoadPersistedToolsResult> {
+    const { tiers, agentId, sessionId } = options;
+    if (tiers.includes('agent') && agentId === undefined) {
+      throw new Error(
+        "selector_required: loadPersistedTools({ tiers: ['agent'] }) needs the agentId whose tools to load; " +
+          "an agent's tools are private to it.",
+      );
+    }
+    if (tiers.includes('session') && sessionId === undefined) {
+      throw new Error(
+        "selector_required: loadPersistedTools({ tiers: ['session'] }) needs the sessionId whose tools to load; " +
+          "a session's tools are private to it.",
+      );
+    }
+    const rows = await this.registry.loadRows(tiers, { agentId, sessionId });
     const outcomes: LoadedToolOutcome[] = [];
     const failed: FailedToolLoad[] = [];
     for (const row of rows) {
@@ -1149,8 +1178,10 @@ export class EmergentCapabilityEngine {
   /**
    * Create an executable ITool wrapper for a forged emergent tool.
    *
-   * The wrapper performs runtime output validation, usage tracking, and
-   * promotion checks after each successful execution.
+   * The wrapper refuses a call to a tool that is not active and, for an
+   * `agent`-tier tool, a call from any agent but its own, before anything
+   * runs or a use is recorded; it then performs runtime output validation,
+   * usage tracking, and promotion checks after each successful execution.
    */
   createExecutableTool(tool: EmergentTool): ITool<Record<string, unknown>, unknown> {
     const baseTool =
@@ -1183,6 +1214,15 @@ export class EmergentCapabilityEngine {
             error:
               `Emergent tool "${tool.name}" is ${held?.state ?? 'inactive'}: ` +
               `${held?.reason ?? 'no reason recorded'}.`,
+          };
+        }
+        const current = this.registry.get(tool.id) ?? tool;
+        if (current.tier === 'agent' && context.gmiId !== current.createdBy) {
+          return {
+            success: false,
+            error:
+              `Emergent tool "${tool.name}" belongs to agent ${current.createdBy}; ` +
+              `it is not callable by agent ${context.gmiId}.`,
           };
         }
         const startTime = performance.now();

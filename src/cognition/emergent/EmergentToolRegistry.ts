@@ -684,18 +684,41 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
    FROM agentos_emergent_tools t
    LEFT JOIN agentos_emergent_tool_state s ON s.tool_id = t.id`;
 
-  /** Every stored row of the given tiers, in creation order, with its state row. */
-  async loadRows(tiers: readonly ToolTier[]): Promise<PersistedToolRow[]> {
+  /**
+   * The stored rows of the given tiers, in creation order, with their state
+   * rows: every `shared` row, the `agent` rows of `scope.agentId` and the
+   * `session` rows of `scope.sessionId`. A tier named without its selector
+   * contributes no rows; the engine refuses such a call before it gets here.
+   */
+  async loadRows(
+    tiers: readonly ToolTier[],
+    scope: { agentId?: string; sessionId?: string } = {},
+  ): Promise<PersistedToolRow[]> {
     if (!this.db || tiers.length === 0) {
       return [];
     }
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (tiers.includes('shared')) {
+      clauses.push(`t.tier = 'shared'`);
+    }
+    if (tiers.includes('agent') && scope.agentId !== undefined) {
+      clauses.push(`(t.tier = 'agent' AND t.created_by_agent = ?)`);
+      params.push(scope.agentId);
+    }
+    if (tiers.includes('session') && scope.sessionId !== undefined) {
+      clauses.push(`(t.tier = 'session' AND t.created_by_session = ?)`);
+      params.push(scope.sessionId);
+    }
+    if (clauses.length === 0) {
+      return [];
+    }
     await this.ensureSchemaReady();
-    const marks = tiers.map(() => '?').join(', ');
     const rows = await this.db.all(
       `SELECT ${EmergentToolRegistry.ROW_COLUMNS}
-        WHERE t.tier IN (${marks})
+        WHERE ${clauses.join(' OR ')}
         ORDER BY t.created_at ASC`,
-      [...tiers],
+      params,
     );
     return rows as PersistedToolRow[];
   }
