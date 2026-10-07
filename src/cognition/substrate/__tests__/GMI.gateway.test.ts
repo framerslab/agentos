@@ -4,17 +4,18 @@
  * prompt is built, a failure before any output rebuilds the prompt for the
  * next hop, a turn stays on the hop that served its last step and the next
  * user turn starts at the primary, the error codes of the chain's ends, no
- * fallback after output, and the schema answer on STEP_FINISHED.
+ * fallback after output, the schema answer on STEP_FINISHED, and the usage
+ * a failed attempt was billed.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { GMIOutputChunkType, type GMIOutputChunk } from '../IGMI';
 import { GMIErrorCode } from '../../../core/utils/errors';
-import type { ChatMessage, ModelCompletionOptions, ModelCompletionResponse } from '../../../core/llm/providers/IProvider';
+import type { ChatMessage, ModelCompletionOptions, ModelCompletionResponse, ModelUsage } from '../../../core/llm/providers/IProvider';
 import { toolFormatFor, type CompletionGateway, type CompletionOutcome, type CompletionResolution } from '../../../api/runtime/completionGateway';
 import { createScriptedGmi, runTurn, textReply, textTurn, toolCallReply } from './helpers/scriptedGmi';
 
-type Attempt = { hop: number; chunks: ModelCompletionResponse[] } | { hop: number; fails: Error; retryable?: boolean };
+type Attempt = { hop: number; chunks: ModelCompletionResponse[] } | { hop: number; fails: Error; retryable?: boolean; usage?: ModelUsage };
 
 /** A gateway whose hops and attempts are scripted; records what the GMI asked of it. */
 function fakeGateway(hops: Array<{ providerId: string; window: number }>, attempts: Attempt[]) {
@@ -41,7 +42,9 @@ function fakeGateway(hops: Array<{ providerId: string; window: number }>, attemp
       if (!next) throw new Error('unexpected model call');
       expect(next.hop).toBe(res.hop);
       streamed.push({ hop: res.hop, providerId: res.providerId, messages: JSON.parse(JSON.stringify(messages)), options, schema });
-      const outcome = Promise.resolve<CompletionOutcome>('fails' in next ? { kind: 'hopFailed', error: next.fails, retryable: next.retryable ?? true } : { kind: 'delivered' });
+      const outcome = Promise.resolve<CompletionOutcome>('fails' in next
+        ? { kind: 'hopFailed', error: next.fails, retryable: next.retryable ?? true, ...(next.usage ? { usage: next.usage } : {}) }
+        : { kind: 'delivered' });
       const chunks = 'fails' in next ? [] : next.chunks;
       return Object.assign((async function* () { yield* chunks; })(), { outcome });
     },
@@ -121,5 +124,28 @@ describe('GMI turn through the completion gateway', () => {
     expect(of(chunks, GMIOutputChunkType.STEP_FINISHED)[0].content).toMatchObject({ structuredOutput: { city: 'Lyon' } });
     expect(of(chunks, GMIOutputChunkType.TOOL_CALL_REQUEST)).toEqual([]);
     expect(streamed[0].options).not.toHaveProperty('responseSchema');
+  });
+
+  it('a failed attempt the provider billed counts toward the turn and is reported on its own USAGE_UPDATE', async () => {
+    const billed = { promptTokens: 40, completionTokens: 0, totalTokens: 40 };
+    const { gateway } = fakeGateway(two, [{ hop: 0, fails: Object.assign(new Error('overloaded'), { httpStatus: 529 }), usage: billed }, { hop: 1, chunks: textReply('Aye.') }]);
+    const { gmi } = await createScriptedGmi({ gateway });
+    const { chunks, output } = await runTurn(gmi, textTurn('t1', 'Hello?'));
+    const usageChunks = of(chunks, GMIOutputChunkType.USAGE_UPDATE);
+    expect(usageChunks.filter((c) => c.metadata?.attemptFailed === true).map((c) => [c.content, c.metadata])).toEqual([
+      [billed, { attemptFailed: true, hop: 0, providerId: 'openai', modelId: 'openai-model' }],
+    ]);
+    expect(usageChunks.findIndex((c) => c.metadata?.attemptFailed === true)).toBe(0);
+    expect(of(chunks, GMIOutputChunkType.STEP_FINISHED)[0].content.usage).toEqual({ promptTokens: 10, completionTokens: 3, totalTokens: 13 });
+    expect(output.usage).toMatchObject({ promptTokens: 50, completionTokens: 3, totalTokens: 53 });
+  });
+
+  it('a billed failure that ends the turn still counts in the returned usage', async () => {
+    const billed = { promptTokens: 40, completionTokens: 0, totalTokens: 40 };
+    const { gateway } = fakeGateway(two, [{ hop: 0, fails: new Error('400 bad request'), retryable: false, usage: billed }]);
+    const { gmi } = await createScriptedGmi({ gateway });
+    const { chunks, output } = await runTurn(gmi, textTurn('t1', 'Hi.'));
+    expect(of(chunks, GMIOutputChunkType.ERROR)[0]?.errorDetails?.code).toBe(GMIErrorCode.LLM_PROVIDER_ERROR);
+    expect(output.usage).toMatchObject({ promptTokens: 40, totalTokens: 40 });
   });
 });

@@ -296,4 +296,34 @@ describe('CompletionGateway.stream', () => {
     expect(chunks.map((c) => c.responseTextDelta).filter(Boolean)).toEqual(['{"city":"Lyon"}']);
     expect(chunks.some((c) => c.structuredOutput !== undefined)).toBe(false);
   });
+
+  it('a failure before content carries the usage the provider billed', async () => {
+    const gateway = createCompletionGateway();
+    const attempt = gateway.stream(resolutionWith(async function* () {
+      yield { isFinal: true, choices: [], usage: { promptTokens: 40, completionTokens: 0, totalTokens: 40 }, error: { message: 'content filtered', type: 'invalid_request' } };
+    }), [], {});
+    await drain(attempt);
+    expect(await attempt.outcome).toMatchObject({ kind: 'hopFailed', usage: { promptTokens: 40, totalTokens: 40 } });
+  });
+
+  // Providers report the request's running total: the latest report is the attempt's bill.
+  it("a thrown failure carries its error's usage, else the last usage buffered before it, else none", async () => {
+    const gateway = createCompletionGateway();
+    const interim = { choices: [{ index: 0, message: { role: 'assistant', content: null }, finishReason: null }], usage: { promptTokens: 12, completionTokens: 2, totalTokens: 14 } };
+
+    const refused = gateway.stream(resolutionWith(async function* () {
+      yield interim;
+      throw Object.assign(new Error('Claude declined the request'), { code: 'content_filter', details: { usage: { promptTokens: 12, completionTokens: 4, totalTokens: 16 } } });
+    }), [], {});
+    expect(await drain(refused)).toEqual([]);
+    expect(await refused.outcome).toMatchObject({ kind: 'hopFailed', retryable: true, usage: { promptTokens: 12, completionTokens: 4, totalTokens: 16 } });
+
+    const reset = gateway.stream(resolutionWith(async function* () { yield interim; throw new Error('socket hang up'); }), [], {});
+    await drain(reset);
+    expect(await reset.outcome).toMatchObject({ kind: 'hopFailed', usage: { promptTokens: 12, completionTokens: 2, totalTokens: 14 } });
+
+    const unbilled = gateway.stream(resolutionWith(async function* () { throw Object.assign(new Error('overloaded'), { httpStatus: 529 }); }), [], {});
+    await drain(unbilled);
+    expect(await unbilled.outcome).not.toHaveProperty('usage');
+  });
 });
