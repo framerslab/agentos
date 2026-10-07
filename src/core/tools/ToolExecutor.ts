@@ -160,6 +160,15 @@ export class ToolExecutor {
   }
 
   /**
+   * Calls `listener` with the name of every tool registered from now on,
+   * by any path that ends in this executor's registry. Returns a function
+   * that removes the listener.
+   */
+  public onToolRegistered(listener: (toolName: string) => void): () => void {
+    return this.toolRegistry.onRegister((descriptor) => listener(descriptor.id));
+  }
+
+  /**
   * Unregisters a tool from the executor using its functional name.
   * If the tool has a `shutdown` method, it is called prior to removal from the registry.
   *
@@ -303,6 +312,7 @@ export class ToolExecutor {
       userContext,
       correlationId: correlationId || `tool-exec-${uuidv4()}`,
       ...(sessionData ? { sessionData } : {}),
+      ...(personaCapabilities ? { personaCapabilities } : {}),
     };
 
     try {
