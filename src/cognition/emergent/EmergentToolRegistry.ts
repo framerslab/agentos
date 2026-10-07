@@ -37,7 +37,7 @@ import type {
   ToolStateRecord,
 } from './types.js';
 import { DEFAULT_EMERGENT_CONFIG } from './types.js';
-import { parsePersistedSource, parseStoredRequest, stateSetterFromColumn } from './persisted-source.js';
+import { parsePersistedSource, parseStoredRequest, sessionFromSource, stateSetterFromColumn } from './persisted-source.js';
 
 // ============================================================================
 // STORAGE ADAPTER INTERFACE
@@ -763,6 +763,17 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     await (this.stateWrites.get(toolId) ?? Promise.resolve()).catch(() => undefined);
   }
 
+  /**
+   * Drop a tool from memory without touching its rows: for a load whose
+   * registration with the host failed, so the row is there for the next load
+   * and nothing here claims a tool the executor does not run.
+   */
+  forget(toolId: string): void {
+    this.sessionTools.delete(toolId);
+    this.persistedTools.delete(toolId);
+    this.states.delete(toolId);
+  }
+
   /** Whether a storage adapter is configured. */
   hasStorage(): boolean {
     return this.db !== undefined;
@@ -1340,11 +1351,9 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     // register() and a slow ensureSchema() could produce "table not found".
     await this.ensureSchemaReady();
 
-    // The session the tool was forged in, from the source line the forge and
-    // the row reader write ("forged by agent X during session Y"), kept whole:
+    // The session the tool was forged in, from its source line, kept whole:
     // the loader's session selector compares it with the id the host gives.
-    const sessionMatch = tool.source.match(/during session (.+)$/);
-    const sessionId = sessionMatch?.[1] ?? 'unknown';
+    const sessionId = sessionFromSource(tool.source) ?? 'unknown';
 
     let promotedAt: number | null = null;
     let promotedBy: string | null = approvedBy ?? null;

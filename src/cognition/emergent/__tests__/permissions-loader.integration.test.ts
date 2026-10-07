@@ -959,6 +959,89 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     ]);
   });
 
+  it('a load whose registration with the host fails holds nothing, keeps the row, and loads at the next start', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, { id: 'raw-1', name: 'double_it', mode: 'sandbox', source: RAW_DOUBLE, inputSchema: NUMBER_IN, outputSchema: DOUBLED_OUT });
+    const hooks = host.engine as unknown as { onToolForged?: (...args: unknown[]) => Promise<void> };
+    const wired = hooks.onToolForged;
+    hooks.onToolForged = async () => {
+      throw new Error('executor refused');
+    };
+
+    const summary = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+
+    expect(summary.failed).toEqual([{ toolId: 'raw-1', name: 'double_it', error: 'executor refused' }]);
+    expect(summary.outcomes).toEqual([]);
+    expect(host.engine.getAgentTools('agent-seed')).toEqual([]);
+    expect(await host.orchestrator.getTool('double_it')).toBeUndefined();
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active' });
+
+    hooks.onToolForged = wired;
+    const again = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(again.outcomes).toEqual([{ toolId: 'raw-1', name: 'double_it', state: 'active', reason: null }]);
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
+  });
+
+  it('a stored tool the host renamed lets go of the old name at the next load', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, { id: 'raw-1', name: 'double_it', mode: 'sandbox', source: RAW_DOUBLE, inputSchema: NUMBER_IN, outputSchema: DOUBLED_OUT });
+    await host.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
+
+    db.raw.prepare('UPDATE agentos_emergent_tools SET name = ? WHERE id = ?').run('twice_it', 'raw-1');
+    const again = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+
+    expect(again.outcomes).toEqual([{ toolId: 'raw-1', name: 'twice_it', state: 'active', reason: null }]);
+    expect(await host.orchestrator.getTool('double_it')).toBeUndefined();
+    expect((await callTool(host.orchestrator, 'twice_it', { n: 3 })).output).toEqual({ doubled: 6 });
+  });
+
+  it("a host-synced tool's source names its session in the older form too", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    const tool: EmergentTool = {
+      id: 'host-3',
+      name: 'double_it',
+      description: 'Doubles a number.',
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+      implementation: { mode: 'sandbox', code: RAW_DOUBLE, allowlist: [] },
+      tier: 'session',
+      createdBy: 'host',
+      createdAt: new Date(1_700_000_000_000).toISOString(),
+      judgeVerdicts: [],
+      usageStats: { totalUses: 0, successCount: 0, failureCount: 0, avgExecutionTimeMs: 0, lastUsedAt: null, confidenceScore: 0.9 },
+      source: 'hydrated by the host for session sess-h1',
+    };
+
+    expect(await host.engine.syncPersistedTool(tool)).toMatchObject({ state: 'active' });
+    expect(readToolRow(db, 'host-3')).toMatchObject({ created_by_session: 'sess-h1' });
+    expect(host.engine.getSessionTools('sess-h1').map((t) => t.id)).toEqual(['host-3']);
+  });
+
+  it('a forged tool whose row did not land still runs in its process, and says so', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    db.failNext('INTO agentos_emergent_tools');
+
+    const forged = await callTool(host.orchestrator, 'forge_tool', {
+      name: 'double_it',
+      description: 'Doubles a number.',
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+      implementation: { mode: 'sandbox', code: RAW_DOUBLE, allowlist: [] },
+      testCases: [{ input: { n: 2 }, expectedOutput: { doubled: 4 } }],
+    });
+
+    expect(forged.isError).toBeFalsy();
+    const toolId = String(forged.output.toolId);
+    expect(readToolRow(db, toolId)).toBeUndefined();
+    expect(readStateRow(db, toolId)).toBeUndefined();
+    expect((await callTool(host.orchestrator, 'double_it', { n: 5 })).output).toEqual({ doubled: 10 });
+  });
+
   it("a session's stored tools load for that session only", async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db });

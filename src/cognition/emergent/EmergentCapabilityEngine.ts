@@ -33,6 +33,7 @@ import {
   parseRowSchemas,
   parseStoredRequest,
   requestFromImplementation,
+  sessionFromSource,
   requestFromSource,
   sourceFromImplementation,
   stateSetterFromColumn,
@@ -505,8 +506,9 @@ export class EmergentCapabilityEngine {
       };
 
       this.registry.register(tool, 'session');
+      let written: ToolStateRecord | undefined;
       try {
-        await this.registry.setState(toolId, 'active', null, {
+        written = await this.registry.setState(toolId, 'active', null, {
           request: requestFromImplementation(request.implementation),
           setBy: 'library',
         });
@@ -517,6 +519,23 @@ export class EmergentCapabilityEngine {
           `[agentos:emergent] could not store the request of "${request.name}" (${toolId}):`,
           error instanceof Error ? error.message : error,
         );
+      }
+      if (written && written.state !== 'active') {
+        // The row did not take the state (its tool row never landed, or another
+        // word arrived first): the tool still runs in this process, held active
+        // here, and the next load re-derives its request from its source.
+        console.warn(
+          `[agentos:emergent] the state of "${request.name}" (${toolId}) was not stored ` +
+            `(${written.reason ?? written.state}); the tool runs in this process only`,
+        );
+        this.registry.adopt(tool, {
+          toolId,
+          state: 'active',
+          reason: null,
+          setBy: 'library',
+          at: Date.now(),
+          request: requestFromImplementation(request.implementation),
+        });
       }
       this.indexTool(toolId, context.agentId, context.sessionId);
 
@@ -1144,6 +1163,12 @@ export class EmergentCapabilityEngine {
     if (written && written.request !== null && !sameGrant(written.request, request)) {
       return this.readmit(candidate, options);
     }
+    // A live tool under this id with another name (the host renamed the row):
+    // its executable goes first, so the old name stops running the old code.
+    const live = this.registry.get(toolId);
+    if (live && live.name !== tool.name) {
+      await this.unregisterIfLive(toolId);
+    }
     this.registry.adopt(tool, {
       toolId,
       state: 'active',
@@ -1158,7 +1183,16 @@ export class EmergentCapabilityEngine {
       this.extractSessionId(tool.source) ?? `persisted:${tool.id}`,
     );
     if (this.onToolForged) {
-      await this.onToolForged(tool, this.createExecutableTool(tool));
+      try {
+        await this.onToolForged(tool, this.createExecutableTool(tool));
+      } catch (error: unknown) {
+        // The host did not register the executable: nothing here claims the
+        // tool, its row stays for the next load, and the failure is the
+        // load's report for this row.
+        this.registry.forget(toolId);
+        this.removeIndexedToolEverywhere(toolId);
+        throw error;
+      }
     }
     return { toolId, name, state: 'active', reason: null };
   }
@@ -1462,9 +1496,7 @@ export class EmergentCapabilityEngine {
   }
 
   private extractSessionId(source: string): string | null {
-    // The whole id after "during session", as the row keeps it.
-    const match = /during session (.+)$/.exec(source);
-    return match?.[1] ?? null;
+    return sessionFromSource(source);
   }
 
   private buildSandboxExecutable(tool: EmergentTool): ITool<Record<string, unknown>, unknown> {

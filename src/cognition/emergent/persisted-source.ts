@@ -247,6 +247,20 @@ export function requestFromImplementation(implementation: ToolImplementation): S
 }
 
 /** The source form of an implementation held in memory, for the same checks a stored row gets. */
+/**
+ * The session a tool's `source` line names: the whole id after the library's
+ * "during session", else the word after "session" (the form the row writer
+ * accepted before), else nothing.
+ */
+export function sessionFromSource(source: string): string | null {
+  const whole = /during session (.+)$/.exec(source);
+  if (whole) {
+    return whole[1];
+  }
+  const word = /\bsession\s+([\w.:-]+)/i.exec(source);
+  return word?.[1] ?? null;
+}
+
 export function sourceFromImplementation(implementation: ToolImplementation): PersistedSource {
   if (implementation.mode === 'compose') {
     // The step rules a stored composition is read by.
