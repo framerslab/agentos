@@ -245,7 +245,6 @@ const publicationManifest = [
     section: 'Orchestration',
   }),
   agentosDoc('AGENT_COMMUNICATION.md', 'features/agent-communication.md', 'Agent Communication', 'Orchestration', 4),
-  agentosDoc('RECURSIVE_SELF_BUILDING_AGENTS.md', 'features/recursive-self-building.md', 'Recursive Self-Building Agents', 'Tools & Capabilities', 5),
   agentosDoc('MEMORY_CONSOLIDATION.md', 'features/memory-consolidation.md', 'Self-Improving Memory', 'Memory', 6, {
     sidebar: false,
   }),
