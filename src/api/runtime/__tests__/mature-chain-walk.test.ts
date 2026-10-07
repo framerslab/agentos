@@ -244,7 +244,7 @@ describe('fallback walk on generateText', () => {
       .mockRejectedValueOnce(status(503))
       .mockResolvedValueOnce(ok());
     await generateText({ provider: 'openai', model: 'gpt-5.5', prompt: 'hi', policyTier: 'mature' });
-    expect(sent()).toEqual(['gpt-5.5', LLAMA, MAGNUM, HERMES, 'claude-sonnet-5']);
+    expect(sent()).toEqual(['gpt-5.5', LLAMA, MAGNUM, HERMES, 'claude-sonnet-5-5']);
   });
 
   it('keeps a caller-written Claude leg after a refusal', async () => {
