@@ -18,13 +18,21 @@ describe('imageToBuffer', () => {
     expect(await imageToBuffer(raw)).toEqual(JPEG_START);
   });
 
-  it('decodes base64 of any format that contains "/" when no file has that name', async () => {
-    // A BMP header: no signature check is involved, only the missing file.
-    const bmpStart = Buffer.from([0x42, 0x4d, 0xff, 0xff]);
-    const raw = bmpStart.toString('base64');
-    expect(raw).toBe('Qk3//w==');
+  it('decodes raw base64 TIFF data that contains "/"', async () => {
+    const tiffStart = Buffer.from([0x49, 0x49, 0x2a, 0x00, 0xff, 0xff, 0xff]);
+    const raw = tiffStart.toString('base64');
+    expect(raw).toBe('SUkqAP///w==');
 
-    expect(await imageToBuffer(raw)).toEqual(bmpStart);
+    expect(await imageToBuffer(raw)).toEqual(tiffStart);
+  });
+
+  it('rejects a missing path made only of base64 characters', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'imageToBuffer-'));
+    try {
+      await expect(imageToBuffer(join(dir, 'notfound'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('rejects a missing path that is not base64', async () => {

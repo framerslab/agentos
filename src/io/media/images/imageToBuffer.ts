@@ -19,9 +19,10 @@ import * as fs from 'node:fs/promises';
  *   payload is extracted and decoded.
  * - **Raw base64 string** — decoded. A string that does not look like a URL
  *   or a file path is decoded directly. One that looks like a path is read as
- *   a file first, and decoded when no file exists there and it is in the base64
- *   alphabet (standard or URL-safe): standard base64 uses `/` (RFC 4648,
- *   Table 1), so a JPEG's base64 begins with `/9j/`.
+ *   a file first, and decoded when no file exists there and it is base64
+ *   (standard or URL-safe) whose bytes start with a PNG, JPEG, GIF, WebP, TIFF,
+ *   AVIF or HEIC signature: standard base64 uses `/` (RFC 4648, Table 1), so a
+ *   JPEG's base64 begins with `/9j/`. A missing path is still an error.
  * - **`file://` URL** — resolved to a local filesystem path and read.
  * - **HTTP/HTTPS URL** — fetched via `globalThis.fetch` and buffered.
  * - **Local file path** — a string that contains `/` or `\`, or ends in a
@@ -91,10 +92,11 @@ export async function imageToBuffer(input: string | Buffer): Promise<Buffer> {
       return await fs.readFile(trimmed);
     } catch (error) {
       // Standard base64 uses `/` (RFC 4648, Table 1), so raw base64 looks like a
-      // path. When no file exists there and the string is base64, decode it.
-      const compact = trimmed.replace(/\s+/g, '');
-      if (isMissingFileError(error) && BASE64_PATTERN.test(compact)) {
-        return Buffer.from(compact, 'base64');
+      // path. When no file exists there and the string decodes to image bytes,
+      // it is the image; a missing path that does not stays an error.
+      const decoded = isMissingFileError(error) ? decodeBase64Image(trimmed) : null;
+      if (decoded) {
+        return decoded;
       }
       throw error;
     }
@@ -106,6 +108,39 @@ export async function imageToBuffer(input: string | Buffer): Promise<Buffer> {
 
 /** The standard and URL-safe base64 alphabets of RFC 4648, with optional padding. */
 const BASE64_PATTERN = /^[A-Za-z0-9+/_-]+={0,2}$/;
+
+/**
+ * Decodes `value` when it is base64 whose bytes start with an image signature.
+ *
+ * @param value - A string `fs.readFile` found no file at.
+ * @returns The decoded bytes, or `null` when `value` is not base64 or its bytes
+ *   do not start with a PNG, JPEG, GIF, WebP, TIFF, AVIF or HEIC signature.
+ */
+function decodeBase64Image(value: string): Buffer | null {
+  const compact = value.replace(/\s+/g, '');
+  if (!BASE64_PATTERN.test(compact)) {
+    return null;
+  }
+  const bytes = Buffer.from(compact, 'base64');
+  return hasImageSignature(bytes) ? bytes : null;
+}
+
+/**
+ * True when `bytes` start with the signature of PNG, JPEG, GIF, WebP, TIFF, or
+ * an ISO media file such as AVIF or HEIC (`ftyp` at offset 4).
+ */
+function hasImageSignature(bytes: Buffer): boolean {
+  const startsWith = (...signature: number[]) => signature.every((byte, i) => bytes[i] === byte);
+  return (
+    startsWith(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a) || // PNG
+    startsWith(0xff, 0xd8, 0xff) || // JPEG
+    startsWith(0x47, 0x49, 0x46, 0x38) || // GIF8
+    (startsWith(0x52, 0x49, 0x46, 0x46) && bytes.subarray(8, 12).toString('latin1') === 'WEBP') ||
+    startsWith(0x49, 0x49, 0x2a, 0x00) || // TIFF, little-endian
+    startsWith(0x4d, 0x4d, 0x00, 0x2a) || // TIFF, big-endian
+    bytes.subarray(4, 8).toString('latin1') === 'ftyp'
+  );
+}
 
 /**
  * True for the errors `fs.readFile` gives when nothing exists at the path,
