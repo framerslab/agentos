@@ -62,6 +62,12 @@ describe('providerCatalog', () => {
     expect(findSpeechProviderCatalogEntry('openai-whisper')!.defaultModel).toBe('gpt-transcribe');
   });
 
+  it('should default Deepgram batch transcription to nova-3', () => {
+    // Deepgram lists nova-3 as its general-purpose model; DeepgramBatchSTTProvider
+    // sends it when no model is configured.
+    expect(findSpeechProviderCatalogEntry('deepgram-batch')!.defaultModel).toBe('nova-3');
+  });
+
   it('should keep the OpenAI TTS default on a model /v1/audio/speech accepts', () => {
     // The speech endpoint's reference lists these models. OpenAI's named
     // replacement for them, gpt-realtime-2.1-mini, runs only on the Realtime

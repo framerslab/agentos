@@ -61,6 +61,7 @@ export const SPEECH_PROVIDER_CATALOG: readonly SpeechProviderCatalogEntry[] = [
     local: false,
     streaming: false,
     description: 'Batch speech-to-text via Deepgram REST API.',
+    defaultModel: 'nova-3',
     features: ['cloud', 'diarization', 'timestamps'],
   },
   {
