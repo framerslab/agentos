@@ -453,6 +453,22 @@ describe('EmergentCapabilityEngine', () => {
     expect(tool!.tier).toBe('agent');
   });
 
+  it('checkPromotion leaves a tool whose owner has the reserved instance-id prefix at the session tier', async () => {
+    generateText.mockResolvedValueOnce(approvedVerdictJson());
+    const forgeResult = await engine.forge(makeSandboxRequest(), { agentId: 'gmi-instance-0b7e3c1a', sessionId });
+    expect(forgeResult.success).toBe(true);
+    const toolId = forgeResult.toolId!;
+    for (let i = 0; i < 5; i++) {
+      registry.recordUse(toolId, { a: i, b: i }, { sum: i * 2 }, true, 10);
+    }
+    const judgeCalls = generateText.mock.calls.length;
+
+    expect(await engine.checkPromotion(toolId)).toBeNull();
+    // The panel is not asked, and the tool stays at the session tier.
+    expect(generateText.mock.calls.length).toBe(judgeCalls);
+    expect(registry.get(toolId)!.tier).toBe('session');
+  });
+
   // =========================================================================
   // 8. checkPromotion: below threshold → returns null
   // =========================================================================

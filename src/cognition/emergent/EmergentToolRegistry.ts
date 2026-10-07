@@ -36,7 +36,7 @@ import type {
   ToolState,
   ToolStateRecord,
 } from './types.js';
-import { DEFAULT_EMERGENT_CONFIG } from './types.js';
+import { DEFAULT_EMERGENT_CONFIG, GMI_INSTANCE_ID_PREFIX } from './types.js';
 import { parsePersistedSource, parseStoredRequest, sessionFromSource, stateSetterFromColumn } from './persisted-source.js';
 
 // ============================================================================
@@ -215,13 +215,21 @@ export class EmergentToolRegistry {
    * deletes land, or when a new row is written for the id.
    */
   /**
-   * Per-tool generation: advanced by every registration, adoption, row write
-   * and removal in this process. An admission that read a tool adopts it only
-   * while the generation is what it read, so a tool that changed hands in
-   * between (removed, or replaced under its id) is never put back from a
-   * stale read, with or without storage.
+   * Change points. `epoch` advances on every registration, adoption, row
+   * write and removal of any tool in this process, and once more when a
+   * removal's row deletes land; `changedAt` holds, per tool, the epoch of its
+   * last change. A read of stored rows notes the epoch it started at
+   * ({@link beginRead}), and an admission adopts what it read only while the
+   * tool has not changed since and no removal of it is still deleting its
+   * rows ({@link adopt}), so a row read before a removal, or during one, is
+   * never put back, with or without storage.
    */
-  private readonly generations = new Map<string, number>();
+  private epoch = 0;
+  private readonly changedAt = new Map<string, number>();
+  /** Removals whose row deletes have not landed yet, counted per tool. */
+  private readonly removing = new Map<string, number>();
+  /** Reads in flight; change points are forgotten only when none is. */
+  private openReads = 0;
 
   /**
    * Cached promise from the first `ensureSchemaReady()` call.
@@ -789,13 +797,48 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     this.bump(toolId);
   }
 
-  /** The tool's generation in this process (see {@link adopt}). */
+  /**
+   * A number that grows on every change to the tool in this process (a
+   * registration, an adoption, a row write, a removal); 0 for a tool not
+   * seen. Two equal readings mean nothing changed in between.
+   */
   generation(toolId: string): number {
-    return this.generations.get(toolId) ?? 0;
+    return this.changedAt.get(toolId) ?? 0;
   }
 
   private bump(toolId: string): void {
-    this.generations.set(toolId, this.generation(toolId) + 1);
+    this.epoch += 1;
+    this.changedAt.set(toolId, this.epoch);
+  }
+
+  /**
+   * Start a read of stored rows. Returns the point the read started at, for
+   * {@link adopt}'s `ifUnchangedSince`; every call is paired with
+   * {@link endRead}.
+   */
+  beginRead(): number {
+    this.openReads += 1;
+    return this.epoch;
+  }
+
+  /** End a read started with {@link beginRead}. */
+  endRead(): void {
+    this.openReads = Math.max(0, this.openReads - 1);
+    if (this.openReads > 0) {
+      return;
+    }
+    // No read in flight can hold a stale row: forget the change points of
+    // tools this process neither holds nor is removing.
+    for (const toolId of [...this.changedAt.keys()]) {
+      if (
+        !this.sessionTools.has(toolId) &&
+        !this.persistedTools.has(toolId) &&
+        !this.states.has(toolId) &&
+        !this.removing.has(toolId)
+      ) {
+        this.changedAt.delete(toolId);
+      }
+    }
   }
 
   /** Whether a storage adapter is configured. */
@@ -819,29 +862,49 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
   /**
    * The rows of a tool, deleted after every queued state write of the tool,
    * so a write still in the queue cannot recreate the state row once it is
-   * deleted. Best-effort.
+   * deleted. Until the deletes land the removal counts as pending, and when
+   * they land the tool counts as changed: a read that started before either
+   * point may hold the row as it was. Best-effort.
    */
   private queueRowDeletes(toolId: string): void {
     const db = this.db;
     if (!db) {
       return;
     }
+    this.removing.set(toolId, (this.removing.get(toolId) ?? 0) + 1);
     this.queueStateWrite(toolId, async () => {
       await db.run(`DELETE FROM agentos_emergent_tools WHERE id = ?`, [toolId]);
       await db.run(`DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?`, [toolId]);
-    }).catch(() => {
-      // Best-effort cleanup only.
-    });
+    })
+      .catch(() => {
+        // Best-effort cleanup only.
+      })
+      .finally(() => {
+        const left = (this.removing.get(toolId) ?? 1) - 1;
+        if (left > 0) {
+          this.removing.set(toolId, left);
+        } else {
+          this.removing.delete(toolId);
+        }
+        this.bump(toolId);
+      });
   }
 
   /**
    * Take a tool read from storage into memory without rewriting its row.
    * `upsert` re-serialises the source; a loaded tool must keep the row it has.
+   *
+   * @param ifUnchangedSince - The point the caller's read started at
+   *   ({@link beginRead}), or a {@link generation} reading. The adoption is
+   *   refused when the tool changed in this process after it, or a removal of
+   *   the tool is still deleting its rows: the row the caller holds may then
+   *   be one that is gone.
    */
-  adopt(tool: EmergentTool, record: ToolStateRecord, ifGeneration?: number): boolean {
-    if (ifGeneration !== undefined && this.generation(tool.id) !== ifGeneration) {
-      // The tool changed hands in this process (a removal, a registration, a
-      // row write) after the caller read it: what the caller holds is stale.
+  adopt(tool: EmergentTool, record: ToolStateRecord, ifUnchangedSince?: number): boolean {
+    if (
+      ifUnchangedSince !== undefined &&
+      (this.generation(tool.id) > ifUnchangedSince || this.removing.has(tool.id))
+    ) {
       return false;
     }
     this.sessionTools.delete(tool.id);
@@ -1200,6 +1263,15 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       throw new Error(
         `Cannot promote tool from "${tool.tier}" to "${targetTier}": ` +
         `target tier must be strictly higher than current tier.`,
+      );
+    }
+
+    if (targetTier === 'agent' && tool.createdBy.startsWith(GMI_INSTANCE_ID_PREFIX)) {
+      // An agent-tier row with this owner reads as one an earlier release
+      // wrote, and loads suspended (legacy_owner).
+      throw new Error(
+        `Cannot promote tool "${toolId}" to "agent": its owner "${tool.createdBy}" begins with the reserved ` +
+          `prefix "${GMI_INSTANCE_ID_PREFIX}", which marks agent-tier rows from earlier releases.`,
       );
     }
 

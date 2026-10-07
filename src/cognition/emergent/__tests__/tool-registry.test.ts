@@ -416,6 +416,18 @@ describe('EmergentToolRegistry', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Additional: the reserved instance-id prefix never reaches the agent tier
+  // -------------------------------------------------------------------------
+  it('promote() refuses the agent tier for an owner with the reserved instance-id prefix', async () => {
+    const registry = makeRegistry();
+    const tool = makeTool({ createdBy: 'gmi-instance-0b7e3c1a' });
+    registry.register(tool, 'session');
+
+    await expect(registry.promote(tool.id, 'agent')).rejects.toThrow(/reserved prefix "gmi-instance-"/);
+    expect(registry.get(tool.id)?.tier).toBe('session');
+  });
+
+  // -------------------------------------------------------------------------
   // Additional: register() throws on duplicate ID
   // -------------------------------------------------------------------------
   it('register() throws when a tool with the same ID already exists', () => {

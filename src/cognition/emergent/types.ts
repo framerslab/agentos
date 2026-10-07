@@ -858,3 +858,14 @@ export const DEFAULT_EMERGENT_CONFIG: Readonly<EmergentConfig> = {
   judgeModel: 'gpt-4o-mini',
   promotionJudgeModel: 'gpt-4o',
 } as const;
+
+/**
+ * The prefix of a GMI instance id (`GMIManager` mints `gmi-instance-<uuid>`).
+ * Earlier releases recorded the forging instance's id as an `agent`-tier
+ * tool's owner; the persona is the owner now. The prefix is reserved for
+ * telling those rows apart: a tool whose owner begins with it is never
+ * promoted to the `agent` tier, so an `agent`-tier row whose owner carries
+ * it is always one an earlier release wrote, and it loads suspended with the
+ * reason `legacy_owner`.
+ */
+export const GMI_INSTANCE_ID_PREFIX = 'gmi-instance-';
