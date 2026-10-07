@@ -61,7 +61,7 @@ export function createApprovalSlot(): ApprovalSlot {
 export function composeReceivedGate(value: unknown): ApprovalGateFn | undefined {
   if (value === undefined) return undefined;
   if (typeof value === 'function') return value as ApprovalGateFn;
-  return async () => ({ skipped: true, reason: 'the received approval gate is not a function' });
+  return async () => refusal('the received approval gate is not a function');
 }
 
 const refusal = (reason: string): ApprovalRefusal => ({ skipped: true, reason });
