@@ -177,6 +177,8 @@ type StateRowRead = {
   state_at?: number | string | null;
   request_json?: string | null;
   write_id?: string | null;
+  /** Whether the tool row is still there; a removal deletes it before the state row. */
+  tool_exists?: number | boolean | null;
 };
 
 export class EmergentToolRegistry {
@@ -521,12 +523,12 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       // The row changed under the condition: the write was refused, and the
       // row's own state is what holds. A restriction read that way is held here.
       this.logAudit(toolId, 'state_refused', { state, reason, setBy, by: inForce.state });
-      if (inForce.state !== 'active') {
-        this.states.set(toolId, inForce);
-        const held = this.get(toolId);
-        if (held) {
-          (held as EmergentTool & { isActive?: boolean }).isActive = false;
-        }
+      // The row's word is held here too, active or not: it is stored, and it
+      // is the newer one.
+      this.states.set(toolId, inForce);
+      const held = this.get(toolId);
+      if (held) {
+        (held as EmergentTool & { isActive?: boolean }).isActive = inForce.state === 'active';
       }
       return inForce;
     }
@@ -617,9 +619,10 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     }
     const readRow = async (): Promise<StateRowRead | undefined> =>
       (await db.get(
-        `SELECT state, state_reason, set_by, state_at, request_json, write_id
-           FROM agentos_emergent_tool_state
-          WHERE tool_id = ?`,
+        `SELECT s.state, s.state_reason, s.set_by, s.state_at, s.request_json, s.write_id,
+                EXISTS (SELECT 1 FROM agentos_emergent_tools t WHERE t.id = s.tool_id) AS tool_exists
+           FROM agentos_emergent_tool_state s
+          WHERE s.tool_id = ?`,
         [toolId],
       )) as StateRowRead | undefined;
     const rowRecord = (row: StateRowRead): ToolStateRecord => ({
@@ -631,10 +634,12 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       request: parseStoredRequest(row.request_json),
       ...(row.write_id ? { writeId: row.write_id } : {}),
     });
-    // Applied when the row carries this write's id; content and time cannot
-    // tell two writes of the same record in one millisecond apart. A row that
-    // is gone was removed by another process: not applied.
-    const matches = (row: StateRowRead | undefined): boolean => !!row?.state && row.write_id === writeId;
+    // Applied when the row carries this write's id and its tool row is still
+    // there; content and time cannot tell two writes of the same record in one
+    // millisecond apart. A row that is gone, or whose tool row is gone, was
+    // removed by another process: not applied.
+    const matches = (row: StateRowRead | undefined): boolean =>
+      !!row?.state && !!row.tool_exists && row.write_id === writeId;
     // What a caller gets for a tool another process removed meanwhile: off,
     // with the reason, so a load does not register it.
     const removed = (): ToolStateRecord => ({
@@ -652,25 +657,26 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       // statement; the row and its flag are as another process left them.
       return rowRecord(before);
     }
-    // The state row, its flag write marked pending until it is done. It is
-    // inserted only while the tool row exists: a tool another process
-    // removed meanwhile gets no orphan state row, and the read below reports
-    // the removal.
+    // The state row, its flag write marked pending until it is done. A new
+    // state row is inserted only while the tool row exists, so a tool another
+    // process removed meanwhile gets no orphan state row; an existing state
+    // row can still be changed, and the read below reports a removal.
     await db.run(
       `INSERT INTO agentos_emergent_tool_state
          (tool_id, state, state_reason, set_by, state_at, request_json, updated_at, write_id, flag_synced)
        SELECT ?, ?, ?, ?, ?, ?, ?, ?, 0
         WHERE EXISTS (SELECT 1 FROM agentos_emergent_tools WHERE id = ?)
+           OR EXISTS (SELECT 1 FROM agentos_emergent_tool_state WHERE tool_id = ?)
        ON CONFLICT (tool_id) DO UPDATE SET
          ${setList},
          flag_synced = 0${guard}`,
-      [...values, toolId, ...guardParams],
+      [...values, toolId, toolId, ...guardParams],
     );
     const row = await readRow();
     if (!matches(row)) {
       // Refused, or the tool is gone: the row and its flag are as another
       // process left them.
-      return row?.state ? rowRecord(row) : removed();
+      return row?.state && row.tool_exists ? rowRecord(row) : removed();
     }
     // The legacy flag follows the state row, then the mark is cleared. A
     // failure here leaves the mark pending for the next write or load.
@@ -687,7 +693,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     // overtaken by another process's suspension yields to it in memory too.
     const after = await readRow();
     if (!matches(after)) {
-      return after?.state ? rowRecord(after) : removed();
+      return after?.state && after.tool_exists ? rowRecord(after) : removed();
     }
     return record;
   }
@@ -861,12 +867,14 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     }
     await this.ensureSchemaReady();
     const row = (await this.db.get(
-      `SELECT state, state_reason, set_by, state_at, request_json, write_id
-         FROM agentos_emergent_tool_state
-        WHERE tool_id = ?`,
+      `SELECT s.state, s.state_reason, s.set_by, s.state_at, s.request_json, s.write_id,
+              EXISTS (SELECT 1 FROM agentos_emergent_tools t WHERE t.id = s.tool_id) AS tool_exists
+         FROM agentos_emergent_tool_state s
+        WHERE s.tool_id = ?`,
       [toolId],
     )) as StateRowRead | undefined;
-    if (!row?.state) {
+    if (!row?.state || !row.tool_exists) {
+      // No state row, or a tool row already gone: nothing stored to hold.
       return undefined;
     }
     return {

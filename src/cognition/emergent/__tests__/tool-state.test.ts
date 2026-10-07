@@ -327,6 +327,32 @@ describe('EmergentToolRegistry state', () => {
     expect(readToolRow(db, tool.id)?.is_active).toBe(0);
   });
 
+  it("a write overtaken by another process's reactivation holds that word in memory, active included", async () => {
+    const tool = makeTool({ id: 'emergent_test_11' });
+    registry.register(tool, 'agent');
+    await settle();
+    await registry.suspend(tool.id, 'operator_hold');
+    const other = new EmergentToolRegistry(
+      { ...DEFAULT_EMERGENT_CONFIG, enabled: true, persistSandboxSource: true },
+      db,
+    );
+    await other.ensureSchema();
+
+    // This registry's suspension is held before its flag write; the other
+    // registry reactivates the tool meanwhile.
+    const gate = db.gateNext('SET is_active = COALESCE(');
+    const suspending = registry.setState(tool.id, 'suspended', 'operator_hold_again');
+    await gate.entered;
+    await other.setState(tool.id, 'active', null, { setBy: 'host' });
+    gate.release();
+
+    expect(await suspending).toMatchObject({ state: 'active', setBy: 'host' });
+    expect(registry.isActive(tool.id)).toBe(true);
+    expect((registry.get(tool.id) as EmergentTool & { isActive?: boolean }).isActive).toBe(true);
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active' });
+    expect(readToolRow(db, tool.id)?.is_active).toBe(1);
+  });
+
   it('refuses to record a use of a tool that is not active', async () => {
     const tool = makeTool();
     registry.register(tool, 'agent');

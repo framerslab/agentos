@@ -884,7 +884,7 @@ export class EmergentCapabilityEngine {
 
   private admitRow(
     row: PersistedToolRow,
-    options: { force?: boolean; readmitted?: boolean } = {},
+    options: { force?: boolean; readmitted?: number } = {},
   ): Promise<LoadedToolOutcome> {
     const stored: ToolStateRecord | undefined = row.state
       ? {
@@ -924,9 +924,33 @@ export class EmergentCapabilityEngine {
    * The single-row path. Every stored tool goes through it, whether the
    * library read its row or a host built the tool from its own.
    */
+  /**
+   * The row changed under an admission (another process wrote, or the host
+   * acted): admit the tool again from the row as it stands, up to twice. A
+   * row that is gone reads as removed; a row still changing after two
+   * re-admissions is left for the next load.
+   */
+  private async readmit(
+    candidate: AdmissionCandidate,
+    options: { force?: boolean; readmitted?: number },
+  ): Promise<LoadedToolOutcome> {
+    const { toolId, name } = candidate;
+    const depth = options.readmitted ?? 0;
+    if (depth < 2) {
+      const fresh = await this.registry.loadRow(toolId);
+      if (fresh) {
+        return this.admitRow(fresh, { ...options, readmitted: depth + 1 });
+      }
+      await this.unregisterIfLive(toolId);
+      return { toolId, name, state: 'demoted', reason: 'removed' };
+    }
+    await this.unregisterIfLive(toolId);
+    return { toolId, name, state: 'suspended', reason: 'contended' };
+  }
+
   private async admit(
     candidate: AdmissionCandidate,
-    options: { force?: boolean; readmitted?: boolean } = {},
+    options: { force?: boolean; readmitted?: number } = {},
   ): Promise<LoadedToolOutcome> {
     const { toolId, name, source, stored, requestStored } = candidate;
     let legacyActive = candidate.legacyActive;
@@ -955,10 +979,16 @@ export class EmergentCapabilityEngine {
       if (stored?.state === 'demoted') {
         this.holdStored(toolId, stored);
       } else {
-        await this.registry.setState(toolId, 'demoted', 'legacy_inactive', {
+        // Written only while the row is as it was read: a host that
+        // reactivated the tool meanwhile is not written over.
+        const written = await this.registry.setState(toolId, 'demoted', 'legacy_inactive', {
           request: requestToWrite,
           setBy: 'host',
+          ifRow: stored ? { at: stored.at, state: stored.state, setBy: stored.setBy } : ('absent' as const),
         });
+        if (written.state !== 'demoted' || written.reason !== 'legacy_inactive') {
+          return this.readmit(candidate, options);
+        }
       }
       await this.unregisterIfLive(toolId);
       return { toolId, name, state: 'demoted', reason };
@@ -1020,10 +1050,19 @@ export class EmergentCapabilityEngine {
       // Written as the library's even when a host's suspension already carries
       // the same words, so a later load re-checks it (the words decide nothing).
       if (stored?.state !== 'suspended' || stored.reason !== reason || stored.setBy !== 'library') {
-        await this.registry.setState(toolId, 'suspended', reason, {
+        // A load writes only while the row is as it was read (a host's
+        // reactivation is unconditional); a refused write re-admits from the
+        // row as it stands.
+        const written = await this.registry.setState(toolId, 'suspended', reason, {
           request: requestToWrite,
           setBy: 'library',
+          ...(options.force
+            ? {}
+            : { ifRow: stored ? { at: stored.at, state: stored.state, setBy: stored.setBy } : ('absent' as const) }),
         });
+        if (written.state !== 'suspended' || written.reason !== reason) {
+          return this.readmit(candidate, options);
+        }
       }
       await this.unregisterIfLive(toolId);
       return { toolId, name, state: 'suspended', reason };
@@ -1070,19 +1109,8 @@ export class EmergentCapabilityEngine {
     // A first write refused by another process's active row: that row's
     // request is the grant, not the one derived here, so the tool is admitted
     // again from the row as it stands (once).
-    if (
-      written &&
-      requestToWrite !== undefined &&
-      !options.readmitted &&
-      !sameGrant(written.request, requestToWrite)
-    ) {
-      const fresh = await this.registry.loadRow(toolId);
-      if (fresh) {
-        return this.admitRow(fresh, { ...options, readmitted: true });
-      }
-      // The row is gone: another process removed the tool meanwhile.
-      await this.unregisterIfLive(toolId);
-      return { toolId, name, state: 'demoted', reason: 'removed' };
+    if (written && requestToWrite !== undefined && !sameGrant(written.request, requestToWrite)) {
+      return this.readmit(candidate, options);
     }
     this.registry.adopt(tool, {
       toolId,

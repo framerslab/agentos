@@ -221,7 +221,10 @@ export function wrapForgeTool(options: WrapForgeToolOptions): ITool {
       log?.({ kind: 'start', scope, toolName, mode });
       const patched = {
         ...(ctx as Record<string, unknown>),
+        // The identity the wrapper is given is the forging agent's: the
+        // forge records the persona as a tool's owner, so both are set.
         gmiId: agentId,
+        personaId: agentId,
         sessionData: {
           ...((ctx as { sessionData?: Record<string, unknown> })?.sessionData ?? {}),
           sessionId,

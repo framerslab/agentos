@@ -824,7 +824,7 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     seedToolRow(db, { id: 'raw-1', name: 'double_it', mode: 'sandbox', source: RAW_DOUBLE, inputSchema: NUMBER_IN, outputSchema: DOUBLED_OUT });
     seedStateRow(db, { toolId: 'raw-1', state: 'active', setBy: 'library', requestJson: '{"kind":"sandbox","capabilities":[]}' });
 
-    const gate = db.gateNext('FROM agentos_emergent_tool_state\n        WHERE tool_id = ?');
+    const gate = db.gateNext('FROM agentos_emergent_tool_state s\n        WHERE s.tool_id = ?');
     const loading = hostA.engine.loadPersistedTools({ tiers: ['shared'] });
     await gate.entered;
     db.raw.prepare('DELETE FROM agentos_emergent_tools WHERE id = ?').run('raw-1');
@@ -858,6 +858,45 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect(readToolRow(db, 'raw-1')?.is_active).toBe(0);
     // Host A holds the suspension too: the next load in A keeps the tool off.
     expect((await hostA.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes[0]).toMatchObject({ state: 'suspended' });
+  });
+
+  it('a load that read a lowered flag does not demote a tool the host reactivated meanwhile', async () => {
+    const db = createSqliteAdapter();
+    const hostA = await makeForgeHost({ db });
+    const hostB = await makeForgeHost({ db });
+    seedToolRow(db, { id: 'raw-1', name: 'double_it', mode: 'sandbox', source: RAW_DOUBLE, isActive: 0, inputSchema: NUMBER_IN, outputSchema: DOUBLED_OUT });
+    seedStateRow(db, { toolId: 'raw-1', state: 'active', setBy: 'library', requestJson: '{"kind":"sandbox","capabilities":[]}' });
+
+    // Host A read the lowered flag and is about to record the host's disable
+    // when the host reactivates the tool through host B.
+    const gate = db.gateNext('INSERT INTO agentos_emergent_tool_state');
+    const loading = hostA.engine.loadPersistedTools({ tiers: ['shared'] });
+    await gate.entered;
+    expect(await hostB.engine.reactivateTool('raw-1')).toMatchObject({ state: 'active' });
+    gate.release();
+    const summary = await loading;
+
+    expect(summary.outcomes).toEqual([{ toolId: 'raw-1', name: 'double_it', state: 'active', reason: null }]);
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active' });
+    expect(readToolRow(db, 'raw-1')?.is_active).toBe(1);
+    expect((await callTool(hostA.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
+  });
+
+  it('a tool whose removal is under way (tool row gone, state row not yet) is not registered by a load', async () => {
+    const db = createSqliteAdapter();
+    const hostA = await makeForgeHost({ db });
+    seedToolRow(db, { id: 'raw-1', name: 'double_it', mode: 'sandbox', source: RAW_DOUBLE, inputSchema: NUMBER_IN, outputSchema: DOUBLED_OUT });
+
+    const gate = db.gateNext('INSERT INTO agentos_emergent_tool_state');
+    const loading = hostA.engine.loadPersistedTools({ tiers: ['shared'] });
+    await gate.entered;
+    db.raw.prepare('DELETE FROM agentos_emergent_tools WHERE id = ?').run('raw-1');
+    gate.release();
+    const summary = await loading;
+
+    expect(summary.outcomes).toEqual([{ toolId: 'raw-1', name: 'double_it', state: 'demoted', reason: 'removed' }]);
+    expect(await hostA.orchestrator.getTool('double_it')).toBeUndefined();
+    expect(readStateRow(db, 'raw-1')).toBeUndefined();
   });
 
   it("a session's stored tools load for that session only", async () => {
@@ -940,7 +979,7 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
 
     // The row reads active with its request, so host A has nothing to write;
     // its second read of the state row is held open while host B suspends.
-    const gate = db.gateNext('FROM agentos_emergent_tool_state\n        WHERE tool_id = ?');
+    const gate = db.gateNext('FROM agentos_emergent_tool_state s\n        WHERE s.tool_id = ?');
     const loading = hostA.engine.loadPersistedTools({ tiers: ['shared'] });
     await gate.entered;
     expect(await hostB.engine.suspendTool('raw-1', 'operator_hold')).toBe(true);
