@@ -1343,8 +1343,10 @@ export class OpenRouterProvider implements IProvider {
         modelId: apiChunk.model || requestedModelId,
         ...(apiChunk.provider ? { servingProvider: apiChunk.provider } : {}),
         choices: finalChoices,
-        responseTextDelta: isFinal ? undefined : responseTextDelta,
-        toolCallsDeltas: isFinal ? undefined : toolCallsDeltas,
+        // The finish chunk can carry the last text or tool-argument fragment,
+        // and deltas are append-only (StreamingReconstructor), so it keeps them.
+        responseTextDelta,
+        toolCallsDeltas,
         isFinal,
         usage: finalUsage,
       };

@@ -19,6 +19,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Readable } from 'node:stream';
 import { OpenRouterProvider } from '../implementations/OpenRouterProvider.js';
+import { reconstructStream } from '../../streaming/StreamingReconstructor.js';
 
 interface MockClient {
   request: ReturnType<typeof vi.fn>;
@@ -237,5 +238,51 @@ describe('OpenRouterProvider streaming final message', () => {
 
     expect(finals).toHaveLength(1);
     expect(finals[0].choices[0].message.role).toBe('tool');
+  });
+
+  it('keeps the text and tool-argument fragments the finish chunk carries', async () => {
+    const { provider, client } = await mountProvider();
+    const chunk = (delta: Record<string, unknown>, finish: string | null) =>
+      `data: ${JSON.stringify({
+        id: 'gen-3',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: 'openai/gpt-4o',
+        choices: [{ index: 0, delta, finish_reason: finish }],
+      })}\n\n`;
+    const call = (args: string, first = false) => ({
+      tool_calls: [
+        {
+          index: 0,
+          ...(first ? { id: 'call_1', type: 'function' } : {}),
+          function: { ...(first ? { name: 'lookup' } : {}), arguments: args },
+        },
+      ],
+    });
+    client.request.mockResolvedValueOnce({
+      data: makeReadableSse([
+        chunk({ role: 'assistant', content: 'Hello ' }, null),
+        chunk({ content: 'world' }, 'stop'),
+        'data: [DONE]\n\n',
+      ]),
+    });
+    client.request.mockResolvedValueOnce({
+      data: makeReadableSse([
+        chunk({ role: 'assistant', ...call('{"q":', true) }, null),
+        chunk(call('"x"}'), 'tool_calls'),
+        'data: [DONE]\n\n',
+      ]),
+    });
+
+    const text = await reconstructStream(
+      provider.generateCompletionStream('openai/gpt-4o', [{ role: 'user', content: 'hi' }], {}),
+    );
+    const tools = await reconstructStream(
+      provider.generateCompletionStream('openai/gpt-4o', [{ role: 'user', content: 'hi' }], {}),
+    );
+
+    expect(text.fullText).toBe('Hello world');
+    expect(tools.toolCalls).toHaveLength(1);
+    expect(tools.toolCalls[0].arguments).toEqual({ q: 'x' });
   });
 });
