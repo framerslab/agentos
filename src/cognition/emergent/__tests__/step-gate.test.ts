@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { ITool, ToolExecutionContext } from '../../../core/tools/ITool.js';
+import type { ApprovalDecision, PendingAction } from '../../../orchestration/hitl/IHumanInteractionManager.js';
 import { ComposableToolBuilder } from '../ComposableToolBuilder.js';
 import { checkChainable, createStepGate, MAX_COMPOSITION_DEPTH } from '../StepGate.js';
 import type { ComposableToolSpec } from '../types.js';
@@ -102,11 +103,15 @@ describe('createStepGate', () => {
 
   it('a side-effecting step asks approval for that registration, and a rejection stops it', async () => {
     const ran = vi.fn();
-    const requestApproval = vi.fn(async (action: { actionId: string }) => ({
-      actionId: action.actionId,
-      approved: false,
-      rejectionReason: 'no sending today',
-    }));
+    const requestApproval = vi.fn(
+      async (action: PendingAction): Promise<ApprovalDecision> => ({
+        actionId: action.actionId,
+        approved: false,
+        rejectionReason: 'no sending today',
+        decidedBy: 'reviewer',
+        decidedAt: new Date(0),
+      }),
+    );
     const gate = createStepGate({
       resolve: () => undefined,
       hitlManager: { requestApproval },
