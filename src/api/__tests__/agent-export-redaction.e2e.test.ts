@@ -145,3 +145,104 @@ describe('export redacts by default', () => {
     expect((exportAgentConfig(a).config as Record<string, any>).baseUrl).toBe('https://proxy.local/v1?publicKey=abc');
   });
 });
+
+describe('import restores what export redacted', () => {
+  it('a redacted provider key comes from the environment and the call carries it', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-env-restored-0012');
+    routeOpenAI();
+    const a = agent({ provider: 'openai', model: 'gpt-4.1', apiKey: KEY, fallbackProviders: [] });
+    const restored = importAgent(exportAgentConfig(a));
+    await restored.generate('hi');
+    expect(authHeaderOf(/chat\/completions/)).toBe('Bearer sk-env-restored-0012');
+  });
+
+  it('a redacted channel credential with no secrets throws and lists its path; with secrets the value is restored', () => {
+    const { team } = buildAgency();
+    const doc = exportAgentConfig(team);
+    expect(() => importAgent(doc, { values: { '/config/router': {} } })).toThrow(/\/agents\/support\/channels\/slack\/credential/);
+    const restored = importAgent(doc, {
+      values: { '/config/router': { selectModel: async () => null } },
+      secrets: {
+        '/agents/support/channels/slack/credential': CRED,
+        '/agents/support/channels/slack/params/webhookUrl': `https://hooks.example/${WEBHOOK_PATH}`,
+        '/agents/support/channels/discord/botToken': TOKEN,
+        '/agents/support/channels/discord/signing_secret': SIGNING,
+        '/agents/support/fallbackProviders/0/apiKey': SECRET_KEY,
+        '/agents/audit/customModelParams/secretKey': SECRET_KEY,
+        '/agents/audit/customModelParams/aws_secret_access_key': AWS,
+        '/agents/audit/customModelParams/headers/Authorization': AUTHZ,
+        '/config/baseUrl': `https://${USERINFO}@proxy.local/v1`,
+        '/config/rag/vectorStore/url': `https://vec.local/x?api_key=${RAG_KEY}&publicKey=abc`,
+        // The seat's key sits beside no provider or model, so import does not drop it for the environment: it must be supplied.
+        '/agents/support/apiKey': SEAT_KEY,
+      },
+    });
+    // No channel adapter is built from an agency config at the tip (S13): an unredacted re-export is the observable check that the restored config carries each value.
+    const raw = exportAgentConfig(restored, undefined, { redactSecrets: false });
+    expect((raw.agents!.support as Record<string, any>).apiKey).toBe(SEAT_KEY);
+    expect((raw.agents!.support as Record<string, any>).channels.slack.credential).toBe(CRED);
+    expect((raw.config as Record<string, any>).rag.vectorStore.url).toContain(RAG_KEY);
+  });
+
+  it('a redacted baseUrl imports when the provider URL variable or a same-provider default URL is set, resolves as an unset one does, and throws with neither', async () => {
+    const a = agent({ provider: 'openai', model: 'gpt-4.1', apiKey: KEY, baseUrl: `https://${USERINFO}@proxy.local/v1`, fallbackProviders: [] });
+    const doc = exportAgentConfig(a);
+    expect(() => importAgent(doc)).toThrow(/\/config\/baseUrl/);
+    try {
+      // Both set: the dropped key and URL resolve as unset ones do, the applicable default first (model.ts:117-129), so the
+      // request goes to the default's URL, which differs from the variable's, with the environment key (the default has none).
+      vi.stubEnv('OPENAI_BASE_URL', 'https://proxy.local/v1');
+      vi.stubEnv('OPENAI_API_KEY', 'sk-env-restored-0012');
+      setDefaultProvider({ provider: 'openai', baseUrl: 'https://default.local/v1' });
+      routeOpenAI();
+      const restored = importAgent(doc);
+      expect((restored.export!(undefined, { redactSecrets: false }) as Record<string, any>).config.baseUrl).toBeUndefined();
+      expect((restored.export!(undefined, { redactSecrets: false }) as Record<string, any>).config.apiKey).toBeUndefined();
+      await restored.generate('hi');
+      expect(fetchMock.mock.calls.some(([u, i]) => /^https:\/\/default\.local\/v1\/chat\/completions/.test(String(u)) && (i as { method?: string })?.method === 'POST')).toBe(true);
+      expect(authHeaderOf(/default\.local\/v1\/chat\/completions/)).toBe('Bearer sk-env-restored-0012');
+      expect(JSON.stringify(fetchMock.mock.calls.map(([u]) => String(u)))).not.toContain('proxy.local');
+      // The default alone, the variable unset: import passes on the default's URL. Neither: it throws and lists the path.
+      vi.stubEnv('OPENAI_BASE_URL', '');
+      expect(() => importAgent(doc)).not.toThrow();
+      clearDefaultProvider();
+      expect(() => importAgent(doc)).toThrow(/\/config\/baseUrl/);
+    } finally {
+      clearDefaultProvider();
+    }
+  });
+
+  it('a redacted rag url or webhook url with no secrets throws and lists the path', () => {
+    const { team } = buildAgency();
+    const doc = exportAgentConfig(team);
+    expect(() => importAgent(doc, { values: { '/config/router': {} } })).toThrow(/\/config\/rag\/vectorStore\/url/);
+    expect(() => importAgent(doc, { values: { '/config/router': {} } })).toThrow(/\/agents\/support\/channels\/slack\/params\/webhookUrl/);
+  });
+
+  it('an instance marker with no values entry throws; with one the object is put back', () => {
+    class StubRouter { async selectModel(): Promise<null> { return null; } }
+    const router = new StubRouter();
+    const a = agent({ provider: 'openai', model: 'gpt-4.1', apiKey: KEY, router: router as never });
+    const doc = exportAgentConfig(a);
+    expect(() => importAgent(doc)).toThrow(/\/config\/router/);
+    const restored = importAgent(doc, { values: { '/config/router': router } });
+    expect((restored.export!(undefined, { redactSecrets: false }) as Record<string, any>).config.router).toBe(router);
+  });
+
+  it('settings survive export and import; secret containers do not', () => {
+    const { team } = buildAgency();
+    const doc = exportAgentConfig(team);
+    const support = doc.agents!.support as Record<string, any>;
+    expect(support.channels.slack.credentials).toBe('include');
+    expect(support.channels.slack.authorization).toBe('bearer');
+    expect(support.channels.discord.stopTokens).toEqual(['###']);
+    expect(support.channels.discord.botToken).toBe(REDACTED);
+  });
+
+  it('import matches an encoded placeholder in a URL too', () => {
+    const { team } = buildAgency();
+    const doc = exportAgentConfig(team);
+    (doc.config as Record<string, any>).rag.vectorStore.url = 'https://vec.local/x?api_key=%3C%3CREDACTED%3E%3E';
+    expect(() => importAgent(doc, { values: { '/config/router': {} } })).toThrow(/\/config\/rag\/vectorStore\/url/);
+  });
+});
