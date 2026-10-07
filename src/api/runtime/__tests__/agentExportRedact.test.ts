@@ -5,6 +5,7 @@ import {
   isSecretName,
   isSecretContainerName,
   isKeptSettingValue,
+  isWebhookUrlName,
   copyExportTree,
 } from '../../agentExportRedact.js';
 import { redactUrlForExport } from '../../../core/llm/providers/url-secrets.js';
@@ -15,6 +16,8 @@ describe('the property-name rule', () => {
     'credentials', 'secretKey', 'aws_secret_access_key', 'Authorization', 'cookie', 'password', 'passwd',
     'privateKey', 'accessKey', 'authKey', 'tokens', 'secrets', 'passwords', 'cookies', 'apiKeys',
     'privateKeys', 'secretKeys', 'accessKeys', 'apikey', 'accesstoken', 'secretkey', 'APIKEY', 'apikeys',
+    'botTokens', 'refreshTokens', 'clientSecrets', 'dbPasswords', 'sessionCookies', 'encryptionKey', 'signingKey',
+    'serviceRoleKey', 'accountKey', 'Ocp-Apim-Subscription-Key', 'openAIAPIKey',
   ])('%s is a secret name', (name) => {
     expect(isSecretName(name)).toBe(true);
   });
@@ -22,6 +25,7 @@ describe('the property-name rule', () => {
   it.each([
     'maxTokens', 'promptTokens', 'tokenLimit', 'envKey', 'promptCacheKey', 'primaryKey', 'publicKey',
     'sessionKey', 'stopTokens', 'cookieName', 'authorizationHeader', 'model', 'baseUrl', 'key', 'auth',
+    'completionTokens', 'reasoningTokens', 'maxTokenLimit',
   ])('%s is not a secret name', (name) => {
     expect(isSecretName(name)).toBe(false);
   });
@@ -33,6 +37,15 @@ describe('the property-name rule', () => {
   it.each(['stopTokens', 'maxTokens', 'channels', 'controls'])('%s does not name a container', (name) =>
     expect(isSecretContainerName(name)).toBe(false),
   );
+
+  it('reads a webhook URL by its name, its plural, a spaced hook, or a url under an object named webhook', () => {
+    for (const [name, parent] of [['webhookUrl', ''], ['webhookUrls', ''], ['webHookUrl', ''], ['WEBHOOK_URL', ''], ['webhook', ''], ['url', 'webhook']]) {
+      expect(isWebhookUrlName(name, parent)).toBe(true);
+    }
+    for (const [name, parent] of [['callbackUrl', ''], ['url', 'slack'], ['webhookSecret', ''], ['hookUrl', '']]) {
+      expect(isWebhookUrlName(name, parent)).toBe(false);
+    }
+  });
 
   it('keeps the setting values under the new words', () => {
     for (const v of ['include', 'same-origin', 'omit', 'none', 'oauth', 'bearer', 'basic', 'strict', 'lax']) {
@@ -94,6 +107,26 @@ describe('copyExportTree', () => {
     expect(out.hook).toBe(tree.hook);
     expect(out).not.toBe(tree);
     expect(out.rag).not.toBe(tree.rag);
+  });
+
+  it('treats a seat or tool named like a secret container as a name, and keeps an empty secret string empty', () => {
+    const out = copyExportTree(
+      { agents: { authorization: { instructions: 'Decide.' } }, tools: { credentials: { description: 'Look up.' } }, botToken: '' },
+      { redactSecrets: true, form: 'serialized', redactUrl: url },
+    ) as Record<string, any>;
+    expect(out.agents.authorization.instructions).toBe('Decide.');
+    expect(out.tools.credentials.description).toBe('Look up.');
+    expect(out.botToken).toBe('');
+  });
+
+  it('redacts every webhook form by its path', () => {
+    const out = copyExportTree(
+      { webhookUrls: ['https://hooks.example/a/b'], webhook: 'https://discord.example/api/webhooks/1/t', slack: { webhook: { url: 'https://hooks.example/c' } } },
+      { redactSecrets: true, form: 'serialized', redactUrl: (u, n, p) => redactUrlForExport(u, { webhook: isWebhookUrlName(n, p), isSecretParam: isSecretName }) },
+    ) as Record<string, any>;
+    expect(out.webhookUrls).toEqual([`https://hooks.example/${REDACTED}`]);
+    expect(out.webhook).toBe(`https://discord.example/${REDACTED}`);
+    expect(out.slack.webhook.url).toBe(`https://hooks.example/${REDACTED}`);
   });
 
   it('writes a function inside an array as null in the serialized form, so later items keep their index', () => {

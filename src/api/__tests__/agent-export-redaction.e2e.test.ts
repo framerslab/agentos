@@ -251,6 +251,53 @@ describe('import restores what export redacted', () => {
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 
+  it('an entry with no value restores nothing: an unset secret, an undefined value and a null pre-built seat are listed or named', () => {
+    const a = agent({ provider: 'openai', model: 'gpt-4.1', apiKey: KEY, baseUrl: `https://${USERINFO}@proxy.local/v1`, router: new StubRouter() as never });
+    const doc = exportAgentConfig(a);
+    expect(() => importAgent(doc, { secrets: { '/config/baseUrl': undefined as unknown as string }, values: { '/config/router': new StubRouter() } })).toThrow(/\/config\/baseUrl/);
+    expect(() => importAgent(doc, { secrets: { '/config/baseUrl': '' }, values: { '/config/router': new StubRouter() } })).toThrow(/\/config\/baseUrl/);
+    expect(() => importAgent(doc, { secrets: { '/config/baseUrl': `https://${USERINFO}@proxy.local/v1` }, values: { '/config/router': undefined } })).toThrow(/\/config\/router/);
+    const inner = agent({ provider: 'openai', model: 'gpt-4.1', apiKey: KEY });
+    const team = agency({ agents: { inner, other: { instructions: 'x' } }, provider: 'openai', model: 'gpt-4.1', apiKey: KEY });
+    expect(() => importAgent(exportAgentConfig(team), { values: { '/agents/inner': null } })).toThrow(/pre-built seat "inner"/);
+  });
+
+  it("a non-model provider block's redacted key and a roster seat's own key are listed, not dropped", () => {
+    const a = agent({ provider: 'openai', model: 'gpt-4.1', apiKey: KEY, customModelParams: { search: { provider: 'serper', apiKey: 'sk-serper-sentinel-0013' } } } as never);
+    expect(() => importAgent(exportAgentConfig(a))).toThrow(/\/config\/customModelParams\/search\/apiKey/);
+    const team = agency({
+      provider: 'openai', model: 'gpt-4.1', apiKey: KEY,
+      agents: { checker: { provider: 'anthropic', model: 'claude-opus-5-5', apiKey: SEAT_KEY, instructions: 'Check.' } },
+    } as never);
+    expect(() => importAgent(exportAgentConfig(team))).toThrow(/\/agents\/checker\/apiKey/);
+    const restored = importAgent(exportAgentConfig(team), { secrets: { '/agents/checker/apiKey': SEAT_KEY } });
+    expect((exportAgentConfig(restored, undefined, { redactSecrets: false }).agents!.checker as Record<string, any>).apiKey).toBe(SEAT_KEY);
+  });
+
+  it('a seat named like a secret container keeps its config in both roster copies and imports', () => {
+    const team = agency({ provider: 'openai', model: 'gpt-4.1', agents: { authorization: { instructions: 'Decide whether the request is allowed.' } } });
+    const doc = exportAgentConfig(team);
+    expect((doc.agents!.authorization as Record<string, any>).instructions).toBe('Decide whether the request is allowed.');
+    expect(((doc.config as Record<string, any>).agents.authorization as Record<string, any>).instructions).toBe('Decide whether the request is allowed.');
+    expect(() => importAgent(doc)).not.toThrow();
+  });
+
+  it('text that only mentions the placeholder imports as it is', () => {
+    const a = agent({ provider: 'openai', model: 'gpt-4.1', instructions: `Write ${REDACTED} in place of any key you see.` });
+    const restored = importAgent(exportAgentConfig(a));
+    expect((restored.export!(undefined, { redactSecrets: false }) as Record<string, any>).config.instructions).toBe(`Write ${REDACTED} in place of any key you see.`);
+  });
+
+  it('the object form of an unredacted export imports with a cyclic instance put back through values', () => {
+    class LoopRouter { self: unknown = null; async selectModel(): Promise<null> { return null; } constructor() { this.self = this; } }
+    const router = new LoopRouter();
+    const a = agent({ provider: 'openai', model: 'gpt-4.1', apiKey: KEY, router: router as never });
+    const raw = exportAgentConfig(a, undefined, { redactSecrets: false });
+    expect(() => importAgent(raw)).toThrow(/\/config\/router/);
+    const restored = importAgent(raw, { values: { '/config/router': router } });
+    expect((restored.export!(undefined, { redactSecrets: false }) as Record<string, any>).config.router).toBe(router);
+  });
+
   it('settings survive export and import; secret containers do not', () => {
     const { team } = buildAgency();
     const doc = exportAgentConfig(team);

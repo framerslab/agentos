@@ -68,7 +68,7 @@ export function redactUrlSecrets(
 
 /** Options for {@link redactUrlForExport}. */
 export interface RedactUrlForExportOptions {
-  /** The URL belongs to a `...webhookUrl` property: keep the origin, replace the path and the query. */
+  /** The URL is a webhook URL (by its property's name): keep the origin, replace the path and the query. */
   webhook?: boolean;
   /** The export's property-name rule; a query or fragment parameter whose name matches is a secret. */
   isSecretParam?: (name: string) => boolean;

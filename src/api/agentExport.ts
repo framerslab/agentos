@@ -13,9 +13,10 @@
  * Security note: secrets are redacted on export by default. Every string whose
  * property name ends with a secret word or pair (token, secret, password,
  * passwd, credential, credentials, authorization, cookie, api key, private key,
- * secret key, access key, auth key; a pair's plural anywhere, a single word's
- * plural as the whole name), and every string under an object or array named
- * by one, becomes `<<REDACTED>>`. URL credentials and secret query parameters
+ * secret key, access key, auth key, encryption key, signing key, subscription
+ * key, master key, account key, role key, and their plurals, apart from
+ * settings and counts such as stopTokens and maxTokens), and every string
+ * under an object or array named by one, becomes `<<REDACTED>>`. URL credentials and secret query parameters
  * are removed, and a class instance becomes an `<<instance>>` marker.
  * `importAgent(config, { secrets, values })` restores them by JSON Pointer; a
  * provider key with no entry resolves as an unset one does (an applicable
@@ -50,7 +51,8 @@ import {
 export { exportAgentConfig, exportAgentConfigJSON };
 export type { AgentExportConfig, ExportAgentConfigOptions, PrebuiltSeatMarker } from './agentExportCore.js';
 import type { AgentExportConfig } from './agentExportCore.js';
-import { REDACTED, REDACTED_ENCODED, INSTANCE_MARKER_KEY } from './agentExportRedact.js';
+import { REDACTED, REDACTED_ENCODED, INSTANCE_MARKER_KEY, copyExportTree, isUrlString } from './agentExportRedact.js';
+import { PROVIDER_DEFAULTS } from './runtime/provider-defaults.js';
 import { providerEnvVars } from './model.js';
 import { getDefaultProvider } from './runtime/global-default.js';
 import { isAgent } from './runtime/strategies/shared.js';
@@ -131,17 +133,33 @@ function isInstanceMarker(value: unknown): boolean {
   );
 }
 
+/**
+ * Whether export redacted this string: a redacted string is exactly the
+ * placeholder, and a redacted URL holds it spliced in (raw or percent-encoded).
+ * Other text that merely mentions the placeholder is left alone.
+ */
 function holdsPlaceholder(value: string): boolean {
-  return value.includes(REDACTED) || value.toUpperCase().includes(REDACTED_ENCODED);
+  if (value === REDACTED) return true;
+  return isUrlString(value) && (value.includes(REDACTED) || value.toUpperCase().includes(REDACTED_ENCODED));
 }
+
+/** Whether a block names a model provider agentos resolves keys and URLs for. */
+function isModelProviderBlock(siblings: Record<string, unknown>): boolean {
+  if (typeof siblings.provider === 'string') return Object.prototype.hasOwnProperty.call(PROVIDER_DEFAULTS, siblings.provider);
+  return typeof siblings.model === 'string';
+}
+
+/** A roster seat's own key or URL (`/agents/<seat>/apiKey`), which an agency seat would otherwise inherit. */
+const SEAT_KEY_POINTER = /^\/agents\/[^/]+\/(apiKey|baseUrl)$/;
 
 /**
  * Walks the document, filling every redacted string from `secrets`. A
- * `<<REDACTED>>` provider key (an `apiKey` beside a `provider` or `model`) with
- * no entry is dropped and resolves as an unset key does (an applicable
- * `setDefaultProvider()` default, then the environment). A redacted `baseUrl`
- * beside one is dropped when a default naming that provider carries a
- * `baseUrl` or the provider's URL variable is set, and listed otherwise.
+ * `<<REDACTED>>` provider key (an `apiKey` beside a model provider agentos
+ * knows, not a roster seat's own) with no entry is dropped and resolves as an
+ * unset key does (an applicable `setDefaultProvider()` default, then the
+ * environment). A redacted `baseUrl` beside one is dropped when a default
+ * naming that provider carries a `baseUrl` or the provider's URL variable is
+ * set, and listed otherwise.
  * Every other unrestored placeholder and every unrestored instance marker is
  * collected in `unresolved`. An object put in through `values` is the
  * caller's own and is not walked (it may be a class instance with cycles).
@@ -157,12 +175,18 @@ function restoreDocument(
 ): void {
   if (typeof node === 'string') {
     if (!holdsPlaceholder(node)) return;
-    if (pointer in secrets) {
-      (parent as Record<string, unknown>)[key as string] = secrets[pointer];
+    // Only a non-empty string restores a value: an entry such as
+    // `process.env.X!` with X unset stays unrestored and is listed.
+    const restored = Object.prototype.hasOwnProperty.call(secrets, pointer) ? secrets[pointer] : undefined;
+    if (typeof restored === 'string' && restored !== '') {
+      (parent as Record<string, unknown>)[key as string] = restored;
       return;
     }
     const siblings = parent && !Array.isArray(parent) ? parent : undefined;
-    const besideProvider = !!siblings && (typeof siblings.provider === 'string' || typeof siblings.model === 'string');
+    // A key or URL beside a model provider is dropped and resolved as an unset
+    // one is, except a roster seat's own: an agency seat would then inherit the
+    // agency's key or URL, which may belong to another vendor, so it is listed.
+    const besideProvider = !!siblings && isModelProviderBlock(siblings) && !SEAT_KEY_POINTER.test(pointer);
     if (siblings && besideProvider && key === 'apiKey' && node === REDACTED) {
       // Dropped, the key resolves as an unset one does on every other call: an
       // applicable setDefaultProvider() default first, then the environment.
@@ -191,7 +215,10 @@ function restoreDocument(
     return;
   }
   if (node === null || typeof node !== 'object') return;
+  // Objects put in through `values` are the caller's own, and the copy may hold
+  // a cycle: each object is walked once.
   if (supplied.has(node)) return;
+  supplied.add(node);
   if (isInstanceMarker(node)) {
     unresolved.push(`${pointer} (instance ${String((node as Record<string, unknown>)[INSTANCE_MARKER_KEY])})`);
     return;
@@ -216,15 +243,19 @@ function restoreDocument(
  * Exports redact secrets and replace class instances by default, so import
  * restores them: `options.secrets` maps the JSON Pointer of each redacted
  * string to its value, and `options.values` maps the pointer of each
- * `<<instance>>` marker (or dropped function) to the object to put there. A
- * redacted provider key with no entry resolves as an unset key does (an
- * applicable `setDefaultProvider()` default, then the environment). A
- * redacted `baseUrl` with no entry is dropped when a default naming that
- * provider carries a `baseUrl` or the provider's URL variable is set.
+ * `<<instance>>` marker (or dropped function) to the object to put there;
+ * only a non-empty string restores a secret, and an undefined or null value
+ * puts nothing back. A redacted provider key beside a model provider agentos
+ * knows, with no entry, resolves as an unset key does (an applicable
+ * `setDefaultProvider()` default, then the environment). A redacted `baseUrl`
+ * beside one, with no entry, is dropped when a default naming that provider
+ * carries a `baseUrl` or the provider's URL variable is set. A roster seat's
+ * own key or URL, and a key beside any other provider, is listed.
  *
- * The document is copied through JSON first, so importing the object form of
- * an unredacted export loses its functions and instances exactly as JSON does;
- * pass them through `values`.
+ * The document is copied in the serialized form (functions left out, class
+ * instances as markers), so importing the object form of an unredacted
+ * export lists its instances and drops its functions: pass them through
+ * `values`.
  *
  * @param exportConfig - A validated export config object.
  * @param options - Values for what the export redacted or replaced.
@@ -249,17 +280,27 @@ export function importAgent(exportConfig: AgentExportConfig, options: ImportAgen
   if (!validation.valid) {
     throw new Error(`Invalid agent export config: ${validation.errors.join('; ')}`);
   }
-  // Work on a copy: the caller's document is not written.
-  const doc = JSON.parse(JSON.stringify(exportConfig)) as AgentExportConfig & Record<string, unknown>;
+  // Work on a copy: the caller's document is not written. The copy is the
+  // serialized form (functions left out, `null` in their place in arrays, class
+  // instances as markers), which also holds when the caller passes the object
+  // form of an unredacted export, cycles included.
+  const doc = copyExportTree(exportConfig, {
+    redactSecrets: false,
+    form: 'serialized',
+    redactUrl: (url) => url,
+  }) as AgentExportConfig & Record<string, unknown>;
   // Import reads only the roster copy it builds the agency from.
   delete (doc.config as Record<string, unknown>).agents;
   const supplied = new WeakSet<object>();
   for (const [pointer, value] of Object.entries(options.values ?? {})) {
+    // An entry with no value (`values: { '/config/router': undefined }`) puts
+    // nothing back, so the marker it would replace stays and is listed.
+    if (value === undefined || value === null) continue;
     setAtPointer(doc as Record<string, unknown>, pointer, value);
-    if (value !== null && typeof value === 'object') supplied.add(value as object);
+    if (typeof value === 'object') supplied.add(value as object);
   }
   const prebuilt = Object.entries(doc.agents ?? {}).filter(
-    ([, seat]) => (seat as { prebuilt?: unknown }).prebuilt === true,
+    ([, seat]) => (seat as { prebuilt?: unknown } | null)?.prebuilt === true,
   );
   if (prebuilt.length > 0) {
     throw new Error(

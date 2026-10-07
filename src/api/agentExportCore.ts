@@ -108,8 +108,8 @@ function extractAgencyFields(agentInstance: Agent):
   return undefined;
 }
 
-function redactUrl(url: string, name: string): string {
-  return redactUrlForExport(url, { webhook: isWebhookUrlName(name), isSecretParam: isSecretName });
+function redactUrl(url: string, name: string, parent: string): string {
+  return redactUrlForExport(url, { webhook: isWebhookUrlName(name, parent), isSecretParam: isSecretName });
 }
 
 /**
@@ -143,7 +143,9 @@ export function buildExportDocument(
   };
 
   if (isAgency && agencyFields) {
-    exportConfig.agents = copy(agencyFields.agents) as AgentExportConfig['agents'];
+    // Copied under its own name, so a seat named like a secret container
+    // (`authorization`, `credentials`) is read as a name here too.
+    exportConfig.agents = (copy({ agents: agencyFields.agents }) as { agents: AgentExportConfig['agents'] }).agents;
     exportConfig.strategy = agencyFields.strategy;
     exportConfig.adaptive = agencyFields.adaptive;
     exportConfig.maxRounds = agencyFields.maxRounds;
