@@ -64,6 +64,22 @@ const ENV_URL_MAP: Record<string, string> = {
 const KEYLESS_PROVIDER_IDS = new Set(['claude-code-cli', 'gemini-cli']);
 
 /**
+ * The provider id a `provider:model` string names, when its prefix is a key of
+ * {@link PROVIDER_DEFAULTS}; undefined for a plain id and for a colon whose
+ * prefix is not a provider (`qwen2.5:7b`, `meta-llama/llama-3.3-70b-instruct:free`).
+ *
+ * @param model - A model id, possibly `provider:model`.
+ * @returns The provider id, or undefined.
+ */
+export function knownProviderPrefixOf(model: string | undefined): string | undefined {
+  if (!model) return undefined;
+  const colon = model.indexOf(':');
+  if (colon <= 0 || colon === model.length - 1) return undefined;
+  const prefix = model.slice(0, colon);
+  return Object.prototype.hasOwnProperty.call(PROVIDER_DEFAULTS, prefix) ? prefix : undefined;
+}
+
+/**
  * Splits a `provider:model` string into its constituent parts.
  *
  * The format is strict: the provider portion must be non-empty, separated from
@@ -252,7 +268,11 @@ export interface ModelOption {
   provider?: string;
   /**
    * Explicit model identifier.  Accepted in two formats:
-   * - `"provider:model"` — legacy format (e.g. `"openai:gpt-4o"`).  `provider` is ignored.
+   * - `"provider:model"` (e.g. `"openai:gpt-4o"`), split only when the prefix
+   *   is a provider id agentos knows; the prefix then wins over `provider`.
+   *   Under `provider: 'ollama'` an id is never split (Ollama tags carry
+   *   colons: `"qwen2.5:7b"`), and an id whose prefix is not a provider
+   *   (`"meta-llama/llama-3.3-70b-instruct:free"`) is kept whole.
    * - `"model"` — plain name (e.g. `"gpt-4o-mini"`).  Requires `provider` or env-var auto-detect.
    */
   model?: string;
@@ -266,10 +286,11 @@ export interface ModelOption {
  * Resolves a `{ providerId, modelId }` pair from flexible caller-supplied options.
  *
  * Resolution priority:
- * 1. **Explicit `model` string** — if it contains `":"` it is split directly
- *    (backwards-compatible `provider:model` format).  If it is a plain name and
- *    `provider` is set, the pair is used as-is.  If neither, auto-detection
- *    from env vars is attempted.
+ * 1. **Explicit `model` string** — a `provider:model` id is split when its
+ *    prefix is a known provider id (a key of {@link PROVIDER_DEFAULTS}),
+ *    whatever `provider` says, except under `provider: 'ollama'`, where an id
+ *    is never split. Any other id is kept whole: with `provider` set, the pair
+ *    is used as-is; without it, auto-detection from env vars is attempted.
  * 2. **`provider` only** — default model for the requested `task` is looked up
  *    in {@link PROVIDER_DEFAULTS}.
  * 3. **Neither** — auto-detect the first provider with a set API key/URL env
@@ -311,8 +332,13 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
 
   // 1. Explicit model string (backwards compat and direct override)
   if (opts.model) {
-    // Canonical "provider:model" format
-    if (opts.model.includes(':')) return parseModelString(opts.model);
+    // A colon splits the id only when its prefix is a known provider id, and
+    // never under provider 'ollama', whose tags carry colons and may be named
+    // after providers (`mistral:7b`). A known prefix wins over `provider`.
+    if (opts.provider !== 'ollama') {
+      const prefixed = knownProviderPrefixOf(opts.model);
+      if (prefixed) return { providerId: prefixed, modelId: opts.model.slice(prefixed.length + 1) };
+    }
     // Alternative "provider/model" format — check if the prefix before the
     // first "/" is a known provider ID. This avoids misinterpreting OpenRouter
     // model paths like "meta-llama/llama-3.1-8b" as provider "meta-llama".

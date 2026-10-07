@@ -12,6 +12,7 @@
  */
 import { agent as createAgent } from '../agent.js';
 import { mergeAdaptableTools } from '../toolAdapter.js';
+import { knownProviderPrefixOf } from '../../model.js';
 import type {
   AgencyOptions,
   AgencyQuorumConfig,
@@ -225,14 +226,23 @@ export function mergeDefaults(
   agentConfig: BaseAgentConfig,
   agencyConfig: AgencyOptions
 ): BaseAgentConfig {
+  // A seat whose own model names a provider (`anthropic:claude-opus-5-5`) does
+  // not inherit the agency's provider, so the prefix never meets an inherited
+  // `ollama`, under which a colon is never split. When the agency's provider
+  // is known and differs, the seat does not inherit the agency's key or URL
+  // either: they belong to the agency's provider, and sending them to the
+  // seat's would leak the key to another vendor.
+  const seatPrefix = agentConfig.provider ? undefined : knownProviderPrefixOf(agentConfig.model);
+  const agencyProvider = agencyConfig.provider ?? knownProviderPrefixOf(agencyConfig.model);
+  const otherVendor = seatPrefix !== undefined && agencyProvider !== undefined && seatPrefix !== agencyProvider;
   return {
     // Agency-level model/provider/apiKey/baseUrl serve as defaults.
     // They are placed BEFORE the spread of agentConfig so that agent-level
     // values override them when present.
     model: agentConfig.model ?? agencyConfig.model,
-    provider: agentConfig.provider ?? agencyConfig.provider,
-    apiKey: agentConfig.apiKey ?? agencyConfig.apiKey,
-    baseUrl: agentConfig.baseUrl ?? agencyConfig.baseUrl,
+    provider: agentConfig.provider ?? (seatPrefix !== undefined ? undefined : agencyConfig.provider),
+    apiKey: agentConfig.apiKey ?? (otherVendor ? undefined : agencyConfig.apiKey),
+    baseUrl: agentConfig.baseUrl ?? (otherVendor ? undefined : agencyConfig.baseUrl),
     ...agentConfig,
     // Tools are merged separately because we want additive merging
     // (agency tools + agent tools) rather than wholesale replacement.
