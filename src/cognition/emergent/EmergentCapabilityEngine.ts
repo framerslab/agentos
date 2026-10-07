@@ -276,6 +276,13 @@ interface ToolIndex {
  * }
  * ```
  */
+/**
+ * How long after a state row is written the pair "active state, flag off"
+ * reads as an activation in flight (its flag write follows its state write)
+ * rather than as a host that turned the tool off with its own SQL.
+ */
+const ACTIVATION_IN_FLIGHT_MS = 10_000;
+
 /** Whether two stored requests grant the same thing. */
 function sameGrant(a: StoredRequest | null | undefined, b: StoredRequest | null | undefined): boolean {
   if (!a || !b) {
@@ -920,7 +927,12 @@ export class EmergentCapabilityEngine {
     // 1. A tool a host turned off stays off. A row with is_active = 0 and no
     //    suspension on record was turned off by a host (its own SQL, or
     //    demote()); loading never undoes that, so it is recorded as the host's.
-    const hostTurnedOff = !legacyActive && stored?.state !== 'suspended';
+    //    An active state row written moments ago is the exception: its flag
+    //    write follows its state write, and a load between the two must not
+    //    record a host's disable; a host that turns a tool off within that
+    //    window is read at the next load after it.
+    const inFlight = stored?.state === 'active' && Date.now() - stored.at < ACTIVATION_IN_FLIGHT_MS;
+    const hostTurnedOff = !legacyActive && stored?.state !== 'suspended' && !inFlight;
     if ((stored?.state === 'demoted' || hostTurnedOff) && !options.force) {
       const reason = stored?.state === 'demoted' ? stored.reason : 'legacy_inactive';
       if (stored?.state === 'demoted') {

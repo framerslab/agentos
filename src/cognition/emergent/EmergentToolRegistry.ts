@@ -310,37 +310,11 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
   updated_at BIGINT NOT NULL
 );`;
 
-    // The legacy flag hosts query follows the state row in the same statement:
-    // a state row written or changed sets is_active on its tool row before the
-    // write returns, so the two never disagree and no moment shows one without
-    // the other. A write the state row refuses changes nothing, flag included.
-    const stateInsertTrigger = `
-CREATE TRIGGER IF NOT EXISTS trg_emergent_tool_state_insert
-AFTER INSERT ON agentos_emergent_tool_state
-BEGIN
-  UPDATE agentos_emergent_tools
-     SET is_active = CASE WHEN NEW.state = 'active' THEN 1 ELSE 0 END
-   WHERE id = NEW.tool_id;
-END;`;
-    const stateUpdateTrigger = `
-CREATE TRIGGER IF NOT EXISTS trg_emergent_tool_state_update
-AFTER UPDATE OF state ON agentos_emergent_tool_state
-BEGIN
-  UPDATE agentos_emergent_tools
-     SET is_active = CASE WHEN NEW.state = 'active' THEN 1 ELSE 0 END
-   WHERE id = NEW.tool_id;
-END;`;
-
-    const statements = [
-      toolsTable,
-      toolsTierIndex,
-      toolsAgentIndex,
-      auditTable,
-      auditIndex,
-      stateTable,
-      stateInsertTrigger,
-      stateUpdateTrigger,
-    ];
+    // Tables and indexes only: the flag on the tool row is written by the
+    // library's own statements, never by a trigger, so the schema stays
+    // portable (PostgreSQL has no SQLite trigger syntax) and every write to the
+    // tool row passes through the storage adapter's hooks.
+    const statements = [toolsTable, toolsTierIndex, toolsAgentIndex, auditTable, auditIndex, stateTable];
     // Prefer `exec` for multi-statement DDL; fall back to individual `run` calls.
     if (this.db.exec) {
       await this.db.exec(statements.join('\n'));
@@ -571,14 +545,16 @@ END;`;
   }
 
   /**
-   * The one statement of a state change: the state row upsert. The legacy
-   * flag follows it inside the same statement, through the state table's
-   * triggers, so the two never disagree and no moment shows an active state
-   * with the flag off (which a concurrent load would read as a host's
-   * disable). With `ifRow`, an existing row is changed only while its state,
-   * setter and time are the ones given (`'absent'`: never); a refused write
-   * changes nothing, flag included, and the row as it stands afterwards is
-   * returned, so it shows as a record other than the one given.
+   * The two statements of a state change: the state row upsert, then the
+   * legacy flag, read from the state row inside its own statement so the two
+   * agree whatever other processes write in between. Between the two a row
+   * can read as an active state with the flag off; the loader reads that
+   * pair, with a state row written in the last ten seconds, as an activation
+   * in flight rather than a host's disable. With `ifRow`, an existing row is
+   * changed only while its state, setter and time are the ones given
+   * (`'absent'`: never); a refused write changes nothing, and the row as it
+   * stands afterwards is returned, so it shows as a record other than the one
+   * given.
    */
   private async writeStateRow(
     toolId: string,
@@ -616,7 +592,6 @@ END;`;
              AND agentos_emergent_tool_state.state_at = ?`;
       params.push(ifRow.state, ifRow.setBy, ifRow.at);
     }
-    // The tool row's is_active follows inside this statement (the triggers).
     await db.run(
       `INSERT INTO agentos_emergent_tool_state
          (tool_id, state, state_reason, set_by, state_at, request_json, updated_at)
@@ -624,6 +599,15 @@ END;`;
        ON CONFLICT (tool_id) DO UPDATE SET
          ${setList}${guard}`,
       params,
+    );
+    // The legacy flag hosts query follows the state row, read inside the
+    // statement; a refused upsert leaves the row as it was, and so the flag.
+    await db.run(
+      `UPDATE agentos_emergent_tools
+          SET is_active = COALESCE((SELECT CASE WHEN state = 'active' THEN 1 ELSE 0 END
+                                      FROM agentos_emergent_tool_state WHERE tool_id = ?), ?)
+        WHERE id = ?`,
+      [toolId, record.state === 'active' ? 1 : 0, toolId],
     );
     if (ifRow === undefined) {
       return record;

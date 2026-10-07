@@ -754,7 +754,7 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect(JSON.stringify(called)).toMatch(/fetch/);
   });
 
-  it('a reactivation changes the state row and the flag together, so a load that runs meanwhile sees the old pair or the new', async () => {
+  it('a load between the two writes of a reactivation reads an activation in flight, not a disable by the host', async () => {
     const db = createSqliteAdapter();
     const hostA = await makeForgeHost({ db });
     const hostB = await makeForgeHost({ db });
@@ -772,17 +772,17 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
       state: 'suspended',
     });
 
-    // The reactivation's one write is held open: nothing has changed yet, in
-    // either table, and a load meanwhile reads the old pair.
-    const gate = db.gateNext('INSERT INTO agentos_emergent_tool_state');
+    // The reactivation's flag write is held open after its state row write:
+    // the row reads active with the flag off, which a load does not take for
+    // a host's disable while the state row is this fresh.
+    const gate = db.gateNext('SET is_active = COALESCE(');
     const reactivating = hostA.engine.reactivateTool('raw-1');
     await gate.entered;
     expect(readToolRow(db, 'raw-1')?.is_active).toBe(0);
-    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'suspended' });
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active' });
     const meanwhile = await hostB.engine.loadPersistedTools({ tiers: ['shared'] });
-    expect(meanwhile.outcomes).toEqual([
-      { toolId: 'raw-1', name: 'double_it', state: 'suspended', reason: 'operator_hold' },
-    ]);
+    expect(meanwhile.outcomes).toEqual([{ toolId: 'raw-1', name: 'double_it', state: 'active', reason: null }]);
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active' });
     gate.release();
     expect(await reactivating).toMatchObject({ state: 'active' });
 
