@@ -10,20 +10,27 @@
  * personality, guardrails, memory, RAG, voice, channels, etc. — as well as
  * agency-specific fields (sub-agent roster, strategy, rounds).
  *
- * Security note: API keys and base URLs are intentionally **included** in the
- * export for self-contained portability. Callers that publish or share exports
- * should strip sensitive fields first, or use `validateAgentExport()` to
- * inspect the payload before distribution.
+ * Security note: secrets are redacted on export by default. Every string whose
+ * property name ends with a secret word or pair (token, secret, password,
+ * passwd, credential, credentials, authorization, cookie, api key, private key,
+ * secret key, access key, auth key; a pair's plural anywhere, a single word's
+ * plural as the whole name), and every string under an object or array named
+ * by one, becomes `<<REDACTED>>`. URL credentials and secret query parameters
+ * are removed, and a class instance becomes an `<<instance>>` marker.
+ * `importAgent(config, { secrets, values })` restores them by JSON Pointer; a
+ * provider key with no entry resolves as an unset one does (an applicable
+ * `setDefaultProvider()` default, then the importing process's environment).
+ * Pass `{ redactSecrets: false }` to export raw values for a trusted pipeline.
  *
  * @example
  * ```ts
  * import { agent } from '@framers/agentos';
- * import { exportAgentConfig, importAgent, exportAgentConfigJSON } from '@framers/agentos/api/agentExport';
+ * import { exportAgentConfigJSON, importAgentFromJSON } from '@framers/agentos/api/agentExport';
  *
  * const myAgent = agent({ provider: 'openai', model: 'gpt-4o', instructions: 'Be helpful.' });
  * const json = exportAgentConfigJSON(myAgent);
  *
- * // Later, in another process:
+ * // Later, in another process; the redacted key resolves from OPENAI_API_KEY there:
  * const restored = importAgentFromJSON(json);
  * const reply = await restored.generate('Hello!');
  * ```
@@ -33,7 +40,7 @@ import YAML from 'yaml';
 
 import { agent as createAgent } from './agent.js';
 import { agency as createAgency } from './agency.js';
-import type { AgencyOptions, Agent } from './types.js';
+import type { AgencyOptions, Agent, BaseAgentConfig } from './types.js';
 import {
   exportAgentConfig,
   exportAgentConfigJSON,
@@ -46,6 +53,7 @@ import type { AgentExportConfig } from './agentExportCore.js';
 import { REDACTED, REDACTED_ENCODED, INSTANCE_MARKER_KEY } from './agentExportRedact.js';
 import { providerEnvVars } from './model.js';
 import { getDefaultProvider } from './runtime/global-default.js';
+import { isAgent } from './runtime/strategies/shared.js';
 
 /**
  * Exports an agent's configuration as a YAML string.
@@ -271,14 +279,20 @@ export function importAgent(exportConfig: AgentExportConfig, options: ImportAgen
     const agencyInstance = createAgency(agencyOpts);
     // The export writes the roster twice (inside config and as agents); the
     // re-stash carries the restored roster so an export of the imported agency
-    // matches the file.
+    // matches the file. A pre-built agent put back through `values` is written
+    // as the marker again, as agency() writes it, so a re-export can never turn
+    // it into an empty config seat.
+    const roster: Record<string, unknown> = {};
+    for (const [name, seat] of Object.entries(doc.agents)) {
+      roster[name] = isAgent(seat as BaseAgentConfig) ? { prebuilt: true } : seat;
+    }
     Object.defineProperty(agencyInstance, '__config', {
       value: { ...doc.config, agents: doc.agents },
       enumerable: false,
       configurable: true,
     });
     Object.defineProperty(agencyInstance, '__agencyConfig', {
-      value: { agents: doc.agents, strategy: doc.strategy, adaptive: doc.adaptive, maxRounds: doc.maxRounds },
+      value: { agents: roster, strategy: doc.strategy, adaptive: doc.adaptive, maxRounds: doc.maxRounds },
       enumerable: false,
       configurable: true,
     });

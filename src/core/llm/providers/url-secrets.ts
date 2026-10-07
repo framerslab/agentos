@@ -82,8 +82,8 @@ const EXPORT_PLACEHOLDER = '<<REDACTED>>';
  * becomes `<<REDACTED>>@`; the value of every query or fragment parameter
  * whose name is a secret (the export's property rule, or `key`, `sig`,
  * `signature`, `auth`, `password`) becomes `<<REDACTED>>`; a webhook URL keeps
- * its origin and has its path and query replaced, except when it has no path
- * and no query. A URL with nothing to remove comes back byte for byte. The
+ * its origin and has its path and query replaced (its secret fragment
+ * parameters too), except when it has no path and no query. A URL with nothing to remove comes back byte for byte. The
  * placeholder is spliced in literally, so import can find it again.
  *
  * @param url The URL string found in the config.
@@ -103,11 +103,6 @@ export function redactUrlForExport(url: string, opts: RedactUrlForExportOptions 
   if (at !== -1) authority = `${EXPORT_PLACEHOLDER}@${authority.slice(at + 1)}`;
   const origin = url.slice(0, authorityStart) + authority;
   const rest = url.slice(pathStart);
-  if (opts.webhook) {
-    if (rest === '' || rest === '/') return origin + rest;
-    const hash = rest.indexOf('#');
-    return `${origin}/${EXPORT_PLACEHOLDER}${hash === -1 ? '' : rest.slice(hash)}`;
-  }
   const isSecret = (name: string): boolean =>
     URL_SECRET_PARAM_NAMES.has(name.toLowerCase()) || (opts.isSecretParam?.(name) ?? false);
   const redactParams = (params: string): string =>
@@ -121,6 +116,12 @@ export function redactUrlForExport(url: string, opts: RedactUrlForExportOptions 
       })
       .join('&');
   const hash = rest.indexOf('#');
+  if (opts.webhook) {
+    if (rest === '' || rest === '/') return origin + rest;
+    // The path and the query carry the webhook's secret; secret fragment
+    // parameters are replaced as on any other URL.
+    return `${origin}/${EXPORT_PLACEHOLDER}${hash === -1 ? '' : `#${redactParams(rest.slice(hash + 1))}`}`;
+  }
   const beforeHash = hash === -1 ? rest : rest.slice(0, hash);
   const fragment = hash === -1 ? '' : rest.slice(hash + 1);
   const q = beforeHash.indexOf('?');

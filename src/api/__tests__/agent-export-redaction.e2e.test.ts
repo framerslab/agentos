@@ -12,7 +12,7 @@ vi.stubGlobal('fetch', fetchMock);
 
 import { agent } from '../agent.js';
 import { agency } from '../agency.js';
-import { exportAgentConfig, exportAgentConfigJSON, exportAgentConfigYAML, importAgent } from '../agentExport.js';
+import { exportAgentConfig, exportAgentConfigJSON, exportAgentConfigYAML, importAgent, importAgentFromJSON } from '../agentExport.js';
 import { REDACTED, INSTANCE_MARKER_KEY } from '../agentExportRedact.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
 import type { IModelRouter } from '../../core/llm/routing/IModelRouter.js';
@@ -138,6 +138,14 @@ describe('export redacts by default', () => {
     const team = agency({ agents: { inner, other: { instructions: 'x' } }, provider: 'openai', model: 'gpt-4.1', apiKey: KEY });
     expect(exportAgentConfig(team).agents!.inner).toEqual({ prebuilt: true });
     expect(() => importAgent(exportAgentConfig(team))).toThrow(/pre-built seat "inner"/);
+  });
+
+  it('a pre-built seat put back through values is written as the marker again on re-export', () => {
+    const inner = agent({ provider: 'openai', model: 'gpt-4.1', apiKey: KEY });
+    const team = agency({ agents: { inner, other: { instructions: 'x' } }, provider: 'openai', model: 'gpt-4.1', apiKey: KEY });
+    const restored = importAgent(exportAgentConfig(team), { values: { '/agents/inner': inner } });
+    expect(exportAgentConfig(restored).agents!.inner).toEqual({ prebuilt: true });
+    expect(() => importAgentFromJSON(exportAgentConfigJSON(restored))).toThrow(/pre-built seat "inner"/);
   });
 
   it('a URL with nothing to redact exports byte for byte', () => {

@@ -128,6 +128,9 @@ describe('redactUrlForExport', () => {
     expect(redactUrlForExport('https://hooks.example/services/T/B/x?y=1', { webhook: true, isSecretParam: secret })).toBe(`https://hooks.example/${REDACTED}`);
     expect(redactUrlForExport('https://hooks.example', { webhook: true, isSecretParam: secret })).toBe('https://hooks.example');
     expect(redactUrlForExport('https://hooks.example/', { webhook: true, isSecretParam: secret })).toBe('https://hooks.example/');
+    expect(redactUrlForExport('https://hooks.example/services/T/B/x#access_token=t&state=s', { webhook: true, isSecretParam: secret })).toBe(
+      `https://hooks.example/${REDACTED}#access_token=${REDACTED}&state=s`,
+    );
   });
   it('does not percent-encode the placeholder', () => {
     expect(redactUrlForExport('https://h/x?token=a%20b', { isSecretParam: secret })).toBe(`https://h/x?token=${REDACTED}`);
