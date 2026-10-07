@@ -258,7 +258,10 @@ so an OpenAI key never reaches Anthropic through such a seat. A colon splits an
 id only when its prefix is a provider agentos knows: `qwen2.5:7b` under
 `provider: 'ollama'` and `meta-llama/llama-3.3-70b-instruct:free` under
 `provider: 'openrouter'` stay whole, and under `provider: 'ollama'` an id is
-never split.
+never split. An Ollama tag named after a provider (`mistral:7b`) is the one
+case to watch: as a seat `model` under an Ollama agency it names the Mistral
+provider and goes to Mistral's API, so a seat that means the local tag writes
+`provider: 'ollama'` itself.
 
 Keys resolve per seat: the seat's `apiKey`, else the agency's `apiKey`, else a
 key set with `setDefaultProvider()` (used when that default names no provider

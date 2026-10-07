@@ -336,6 +336,10 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
     // never under provider 'ollama', whose tags carry colons and may be named
     // after providers (`mistral:7b`). A known prefix wins over `provider`.
     if (opts.provider !== 'ollama') {
+      // A first colon with nothing before or after it (`openai:`, `:gpt-4.1`)
+      // is a malformed id, rejected as parseModelString always has.
+      const colon = opts.model.indexOf(':');
+      if (colon === 0 || (colon > 0 && colon === opts.model.length - 1)) return parseModelString(opts.model);
       const prefixed = knownProviderPrefixOf(opts.model);
       if (prefixed) return { providerId: prefixed, modelId: opts.model.slice(prefixed.length + 1) };
     }

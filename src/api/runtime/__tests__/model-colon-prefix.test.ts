@@ -29,6 +29,11 @@ describe('a colon in a model id', () => {
     vi.stubEnv('OPENROUTER_API_KEY', '');
     expect(resolveModelOption({ model: 'ft:gpt-4.1:org:suffix' })).toEqual({ providerId: 'openai', modelId: 'ft:gpt-4.1:org:suffix' });
   });
+  it('rejects a colon with nothing on one side, except under ollama', () => {
+    expect(() => resolveModelOption({ provider: 'openai', model: 'openai:' })).toThrow(/Invalid model/);
+    expect(() => resolveModelOption({ provider: 'openai', model: ':gpt-4.1' })).toThrow(/Invalid model/);
+    expect(resolveModelOption({ provider: 'ollama', model: 'llama3:' })).toEqual({ providerId: 'ollama', modelId: 'llama3:' });
+  });
   it('knownProviderPrefixOf reads the table', () => {
     expect(knownProviderPrefixOf('anthropic:claude-opus-5-5')).toBe('anthropic');
     expect(knownProviderPrefixOf('qwen2.5:7b')).toBeUndefined();
