@@ -201,7 +201,9 @@ export async function sendFetch(
       }
     }
     return {
-      response: new Response(body, {
+      // The body's own ArrayBuffer (it was allocated whole above): a typed
+      // array is not a BodyInit under TypeScript 5.7 and later.
+      response: new Response(body === null ? null : (body.buffer as ArrayBuffer), {
         status: response.status,
         statusText: response.statusText,
         headers: response.headers,
