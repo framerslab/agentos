@@ -475,7 +475,10 @@ per-seat map in `rag.agentAccess`) are names the user chose, a seat or a
 tool, so an object or array under one of those keys is never a container:
 a seat named `credentials` keeps its `instructions`, in `config.agents` and
 in the document's `agents` alike, and a tool named `credentials` keeps its
-`description`.
+`description`. This holds for an object of that name, not for an array: the
+items of a tools list (`tools: [{ name: 'post', credentials: { slack: '...' } }]`)
+are tool definitions whose keys are properties, so the `credentials` object
+inside one is a container and its strings are redacted.
 
 | In the config | Exported as |
 | --- | --- |

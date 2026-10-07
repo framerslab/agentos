@@ -119,6 +119,15 @@ describe('copyExportTree', () => {
     expect(out.botToken).toBe('');
   });
 
+  it('reads the keys of a tools list item as properties: its credentials object is a container', () => {
+    const out = copyExportTree(
+      { tools: [{ name: 'post', credentials: { slack: 'xoxb-1' } }], agents: { a: { tools: [{ name: 'credentials', description: 'Look up.' }] } } },
+      { redactSecrets: true, form: 'serialized', redactUrl: url },
+    ) as Record<string, any>;
+    expect(out.tools[0]).toEqual({ name: 'post', credentials: { slack: REDACTED } });
+    expect(out.agents.a.tools[0]).toEqual({ name: 'credentials', description: 'Look up.' });
+  });
+
   it('redacts every webhook form by its path', () => {
     const out = copyExportTree(
       { webhookUrls: ['https://hooks.example/a/b'], webhook: 'https://discord.example/api/webhooks/1/t', slack: { webhook: { url: 'https://hooks.example/c' } } },
