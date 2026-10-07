@@ -163,8 +163,16 @@ function hasImageSignature(bytes: Buffer): boolean {
  * The XML prolog items that may come before the root element: the XML
  * declaration and other processing instructions, comments, and a DOCTYPE
  * (internal subset included), each with the whitespace before it.
+ *
+ * A DOCTYPE's quoted literals and its subset's comments are read whole, so a
+ * `>` in a system identifier or a `]>` in an entity value does not end it.
+ * Every part has one way to match (a subset comment ends at its first `-->`),
+ * which keeps a failed match linear in the input: a lazy `[\s\S]*?` comment
+ * body inside the repeated subset could end at any later `-->` and backtrack
+ * exponentially on input that has many comments and no closing `]`.
  */
-const XML_PROLOG_ITEM = /^\s*(?:<\?[\s\S]*?\?>|<!--[\s\S]*?-->|<!DOCTYPE[^>[]*(?:\[[\s\S]*?\])?\s*>)/i;
+const XML_PROLOG_ITEM =
+  /^\s*(?:<\?[\s\S]*?\?>|<!--[\s\S]*?-->|<!DOCTYPE(?:[^>["']|"[^"]*"|'[^']*')*(?:\[(?:<!--(?:[^-]|-(?!->))*-->|"[^"]*"|'[^']*'|<(?!!--)|[^\]"'<])*\])?\s*>)/i;
 
 /**
  * True when `bytes` are SVG markup: after the XML prolog (declaration,

@@ -68,6 +68,10 @@ describe('imageToBuffer', () => {
   it.each([
     ['a comment', '<!--???--><svg></svg>'],
     ['a declaration and a DOCTYPE', '<?xml version="1.0"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg><!--???--></svg>'],
+    [
+      'a DOCTYPE whose quoted literals hold its delimiters',
+      '<!DOCTYPE svg SYSTEM "http://example.com/a>b.dtd" [<!ENTITY e "x]>y"><!-- it\'s ] a comment -->]><svg><!--???--></svg>',
+    ],
   ])('decodes raw base64 SVG markup after %s', async (_prolog, markup) => {
     const svg = Buffer.from(markup);
     const raw = svg.toString('base64');
@@ -85,6 +89,14 @@ describe('imageToBuffer', () => {
 
     await expect(imageToBuffer(raw)).rejects.toThrow('not base64 of a recognised image format');
   });
+
+  it('rejects a DOCTYPE with hundreds of comments and no closing bracket in linear time', async () => {
+    // A subset comment that could end at any later '-->' made this input backtrack exponentially.
+    const raw = Buffer.from(`<!DOCTYPE x [${'<!-- -->'.repeat(500)}<???`).toString('base64');
+    expect(raw).toContain('/');
+
+    await expect(imageToBuffer(raw)).rejects.toThrow('not base64 of a recognised image format');
+  }, 2000);
 
   it('quotes at most 40 characters of a short unrecognised payload', async () => {
     // 00 11 FF repeated: 60 characters of base64 "ABH/", a relative path that names nothing.
