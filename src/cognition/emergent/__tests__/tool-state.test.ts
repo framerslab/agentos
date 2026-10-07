@@ -85,11 +85,55 @@ describe('EmergentToolRegistry state', () => {
     expect(readToolRow(db, tool.id)?.is_active).toBe(0);
     expect(held.isActive).toBe(false);
 
+    // A whole-row replacement from an object that says nothing, or the wrong
+    // thing, about state: the property follows the held state.
+    registry.upsert({ ...tool, description: 'Doubles a number, edited.' });
+    expect((registry.get(tool.id) as EmergentTool & { isActive?: boolean }).isActive).toBe(false);
+    registry.upsert({ ...tool, isActive: true } as EmergentTool);
+    expect((registry.get(tool.id) as EmergentTool & { isActive?: boolean }).isActive).toBe(false);
+    await settle();
+
     // Reactivated: the property follows, and the row says who did it.
     await registry.setState(tool.id, 'active', null, { setBy: 'host' });
-    expect(held.isActive).toBe(true);
+    expect((registry.get(tool.id) as EmergentTool & { isActive?: boolean }).isActive).toBe(true);
     expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active', set_by: 'host' });
     expect(readToolRow(db, tool.id)?.is_active).toBe(1);
+  });
+
+  it('a whole-row write takes is_active at write time, so a state change during its reads is kept', async () => {
+    const tool = makeTool({ id: 'emergent_test_6' });
+    registry.register(tool, 'agent');
+    await settle();
+    await registry.suspend(tool.id, 'operator_hold');
+
+    // The promotion's row read is held open; the reactivation lands meanwhile.
+    const gate = db.gateNext('SELECT promoted_at');
+    const promotion = registry.promote(tool.id, 'shared', 'admin');
+    await gate.entered;
+    await registry.setState(tool.id, 'active', null, { setBy: 'host' });
+    gate.release();
+    await promotion;
+
+    expect(readToolRow(db, tool.id)?.is_active).toBe(1);
+    expect(readToolRow(db, tool.id)?.tier).toBe('shared');
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active' });
+
+    // The other direction: a suspension during the reads is kept too.
+    const gate2 = db.gateNext('SELECT promoted_at');
+    const rewrite = (async () => {
+      registry.upsert({ ...registry.get(tool.id)!, description: 'Doubles a number, again.' });
+      await settle();
+      await settle();
+    })();
+    await gate2.entered;
+    await registry.suspend(tool.id, 'operator_hold');
+    gate2.release();
+    await rewrite;
+    await settle();
+
+    expect(readToolRow(db, tool.id)?.is_active).toBe(0);
+    expect(readToolRow(db, tool.id)?.description).toBe('Doubles a number, again.');
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'suspended' });
   });
 
   it('leaves a stored request it holds nothing for alone when the state changes', async () => {

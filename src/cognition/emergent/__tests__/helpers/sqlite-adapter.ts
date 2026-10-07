@@ -6,15 +6,30 @@ export type SqliteTestAdapter = IStorageAdapter & {
   raw: Database.Database;
   /** Makes the next statement whose SQL contains `fragment` reject once. */
   failNext(fragment: string): void;
+  /**
+   * Holds the next read whose SQL contains `fragment` until `release` is
+   * called; `entered` resolves when that read has started. For interleaving a
+   * state change with a whole-row write.
+   */
+  gateNext(fragment: string): { entered: Promise<void>; release: () => void };
 };
 
 export function createSqliteAdapter(): SqliteTestAdapter {
   const raw = new Database(':memory:');
   let failFragment: string | null = null;
+  let gate: { fragment: string; entered: () => void; released: Promise<void> } | null = null;
   const guard = (sql: string): void => {
     if (failFragment && sql.includes(failFragment)) {
       failFragment = null;
       throw new Error('simulated storage failure');
+    }
+  };
+  const waitAtGate = async (sql: string): Promise<void> => {
+    if (gate && sql.includes(gate.fragment)) {
+      const g = gate;
+      gate = null;
+      g.entered();
+      await g.released;
     }
   };
   return {
@@ -22,12 +37,25 @@ export function createSqliteAdapter(): SqliteTestAdapter {
     failNext(fragment: string) {
       failFragment = fragment;
     },
+    gateNext(fragment: string) {
+      let entered!: () => void;
+      let release!: () => void;
+      const enteredPromise = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      gate = { fragment, entered, released };
+      return { entered: enteredPromise, release };
+    },
     async run(sql: string, params: unknown[] = []) {
       guard(sql);
       return raw.prepare(sql).run(...params);
     },
     async get(sql: string, params: unknown[] = []) {
       guard(sql);
+      await waitAtGate(sql);
       return raw.prepare(sql).get(...params);
     },
     async all(sql: string, params: unknown[] = []) {

@@ -371,8 +371,10 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       }
     }
 
-    // Stamp the tier on the tool object.
+    // Stamp the tier on the tool object; a fresh registration is active, so the
+    // convention property says so whatever the given object carried.
     const registered: EmergentTool = { ...tool, tier };
+    (registered as EmergentTool & { isActive?: boolean }).isActive = true;
 
     if (tier === 'session') {
       this.sessionTools.set(registered.id, registered);
@@ -678,6 +680,8 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     this.persistedTools.delete(tool.id);
 
     const normalized: EmergentTool = { ...tool };
+    // The convention property follows the held state, not the given object.
+    (normalized as EmergentTool & { isActive?: boolean }).isActive = this.isActive(normalized.id);
     if (normalized.tier === 'session') {
       this.sessionTools.set(normalized.id, normalized);
     } else {
@@ -1140,13 +1144,15 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
         (row.promoted_by != null ? String(row.promoted_by) : null);
     }
 
-    // The legacy flag equals state = 'active' for a state this process holds;
-    // with none held, a stored suspension or demotion stays.
-    const isActive = held
-      ? held.state === 'active' ? 1 : 0
-      : existing?.is_active === 0 || existing?.is_active === false ? 0 : 1;
-
     const implementationSource = await this.resolveSourceToStore(tool);
+
+    // The legacy flag equals state = 'active' for a state this process holds,
+    // read at write time: a state change that landed during the reads above
+    // is the newer word. With none held, a stored suspension or demotion stays.
+    const heldNow = this.states.get(tool.id);
+    const isActive = heldNow
+      ? heldNow.state === 'active' ? 1 : 0
+      : existing?.is_active === 0 || existing?.is_active === false ? 0 : 1;
 
     await this.db.run(
       `INSERT OR REPLACE INTO agentos_emergent_tools

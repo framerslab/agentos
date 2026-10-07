@@ -267,6 +267,35 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect((await callTool(host.orchestrator, 'double_it', { n: 3 })).output).toEqual({ doubled: 6 });
   });
 
+  it('a row whose state write fails at load is reported failed and is not registered, and loads at the next start', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'raw-1',
+      name: 'double_it',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      tier: 'agent',
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+    });
+    // The full statement text: the loader's own row read joins the state table.
+    db.failNext('INSERT INTO agentos_emergent_tool_state');
+
+    const summary = await host.engine.loadPersistedTools({ tiers: ['agent'] });
+
+    expect(summary.failed).toEqual([{ toolId: 'raw-1', name: 'double_it', error: 'simulated storage failure' }]);
+    expect(summary.outcomes).toEqual([]);
+    expect(host.engine.getAgentTools('agent-seed')).toEqual([]);
+    expect(await host.orchestrator.getTool('double_it')).toBeUndefined();
+    expect(readToolRow(db, 'raw-1')?.is_active).toBe(1);
+    expect(readStateRow(db, 'raw-1')).toBeUndefined();
+
+    const again = await host.engine.loadPersistedTools({ tiers: ['agent'] });
+    expect(again.outcomes).toEqual([{ toolId: 'raw-1', name: 'double_it', state: 'active', reason: null }]);
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
+  });
+
   it('a row whose input_schema does not read loads suspended as unreadable instead of accepting any input', async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db });
