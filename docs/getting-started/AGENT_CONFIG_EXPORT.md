@@ -549,7 +549,8 @@ marker until `values` supplies the object.
 
 A function stays in the object form (`exportAgentConfig()`,
 `agent.export()`) and is left out of JSON and YAML. There, a function inside
-an array is removed, so the items after it move up one index.
+an array is written as `null`, so every later item keeps its index and
+`values` can put the function back at the path where it stood.
 
 ### Exporting Without Redaction
 

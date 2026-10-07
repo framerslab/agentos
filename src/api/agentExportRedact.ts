@@ -127,7 +127,8 @@ function instanceMarker(value: object): Record<string, string> {
 /**
  * Copies a config tree for export. Plain objects and arrays are copied; a
  * string is redacted by the rules above; a function is kept in the object
- * form and dropped otherwise; any other object becomes an instance marker
+ * form and dropped otherwise (written as `null` inside an array, so later
+ * items keep their index); any other object becomes an instance marker
  * (kept by reference only in the object form with `redactSecrets: false`).
  */
 export function copyExportTree(value: unknown, opts: CopyExportTreeOptions): unknown {
@@ -165,7 +166,10 @@ function copyNode(
     const inner = isSecretContainerName(name) ? name : container;
     for (const item of value) {
       const copied = copyNode(item, name, inner, opts, seen);
-      if (copied !== undefined || typeof item !== 'function') out.push(copied);
+      // A function left out of JSON and YAML leaves `null` in its place, as
+      // JSON.stringify writes it, so every later item keeps its index and
+      // import can put the function back at the path where it stood.
+      out.push(copied === undefined && typeof item === 'function' ? null : copied);
     }
     return out;
   }

@@ -101,12 +101,18 @@ function escapeToken(token: string): string {
   return token.replace(/~/g, '~0').replace(/\//g, '~1');
 }
 
+const FORBIDDEN_POINTER_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
+
 function setAtPointer(root: Record<string, unknown>, pointer: string, value: unknown): void {
   const parts = parsePointer(pointer);
   if (parts.length === 0) throw new Error('Cannot set the document root');
+  const forbidden = parts.find((part) => FORBIDDEN_POINTER_SEGMENTS.has(part));
+  if (forbidden !== undefined) {
+    throw new Error(`Invalid JSON Pointer "${pointer}": the segment "${forbidden}" is not allowed`);
+  }
   let node: Record<string, unknown> = root;
   for (const part of parts.slice(0, -1)) {
-    const next = node[part];
+    const next = Object.prototype.hasOwnProperty.call(node, part) ? node[part] : undefined;
     if (next === null || typeof next !== 'object') {
       node[part] = {};
     }
@@ -137,7 +143,8 @@ function holdsPlaceholder(value: string): boolean {
  * beside one is dropped when a default naming that provider carries a
  * `baseUrl` or the provider's URL variable is set, and listed otherwise.
  * Every other unrestored placeholder and every unrestored instance marker is
- * collected in `unresolved`.
+ * collected in `unresolved`. An object put in through `values` is the
+ * caller's own and is not walked (it may be a class instance with cycles).
  */
 function restoreDocument(
   node: unknown,
@@ -146,6 +153,7 @@ function restoreDocument(
   key: string | number | undefined,
   secrets: Record<string, string>,
   unresolved: string[],
+  supplied: WeakSet<object>,
 ): void {
   if (typeof node === 'string') {
     if (!holdsPlaceholder(node)) return;
@@ -183,16 +191,17 @@ function restoreDocument(
     return;
   }
   if (node === null || typeof node !== 'object') return;
+  if (supplied.has(node)) return;
   if (isInstanceMarker(node)) {
     unresolved.push(`${pointer} (instance ${String((node as Record<string, unknown>)[INSTANCE_MARKER_KEY])})`);
     return;
   }
   if (Array.isArray(node)) {
-    node.forEach((item, i) => restoreDocument(item, `${pointer}/${i}`, node, i, secrets, unresolved));
+    node.forEach((item, i) => restoreDocument(item, `${pointer}/${i}`, node, i, secrets, unresolved, supplied));
     return;
   }
   for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
-    restoreDocument(v, `${pointer}/${escapeToken(k)}`, node as Record<string, unknown>, k, secrets, unresolved);
+    restoreDocument(v, `${pointer}/${escapeToken(k)}`, node as Record<string, unknown>, k, secrets, unresolved, supplied);
   }
 }
 
@@ -244,8 +253,10 @@ export function importAgent(exportConfig: AgentExportConfig, options: ImportAgen
   const doc = JSON.parse(JSON.stringify(exportConfig)) as AgentExportConfig & Record<string, unknown>;
   // Import reads only the roster copy it builds the agency from.
   delete (doc.config as Record<string, unknown>).agents;
+  const supplied = new WeakSet<object>();
   for (const [pointer, value] of Object.entries(options.values ?? {})) {
     setAtPointer(doc as Record<string, unknown>, pointer, value);
+    if (value !== null && typeof value === 'object') supplied.add(value as object);
   }
   const prebuilt = Object.entries(doc.agents ?? {}).filter(
     ([, seat]) => (seat as { prebuilt?: unknown }).prebuilt === true,
@@ -258,8 +269,8 @@ export function importAgent(exportConfig: AgentExportConfig, options: ImportAgen
   }
   const secrets = options.secrets ?? {};
   const unresolved: string[] = [];
-  restoreDocument(doc.config, '/config', doc as Record<string, unknown>, 'config', secrets, unresolved);
-  if (doc.agents) restoreDocument(doc.agents, '/agents', doc as Record<string, unknown>, 'agents', secrets, unresolved);
+  restoreDocument(doc.config, '/config', doc as Record<string, unknown>, 'config', secrets, unresolved, supplied);
+  if (doc.agents) restoreDocument(doc.agents, '/agents', doc as Record<string, unknown>, 'agents', secrets, unresolved, supplied);
   if (unresolved.length > 0) {
     throw new Error(
       `Cannot import: ${unresolved.length} value(s) were redacted or replaced on export and have no entry in ` +

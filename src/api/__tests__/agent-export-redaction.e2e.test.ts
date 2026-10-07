@@ -237,6 +237,20 @@ describe('import restores what export redacted', () => {
     expect((restored.export!(undefined, { redactSecrets: false }) as Record<string, any>).config.router).toBe(router);
   });
 
+  it('a cyclic object put back through values is restored and not walked', () => {
+    class LoopRouter { self: unknown = null; async selectModel(): Promise<null> { return null; } constructor() { this.self = this; } }
+    const router = new LoopRouter();
+    const a = agent({ provider: 'openai', model: 'gpt-4.1', apiKey: KEY, router: router as never });
+    const restored = importAgent(exportAgentConfig(a), { values: { '/config/router': router } });
+    expect((restored.export!(undefined, { redactSecrets: false }) as Record<string, any>).config.router).toBe(router);
+  });
+
+  it('a values pointer through __proto__ is refused', () => {
+    const a = agent({ provider: 'openai', model: 'gpt-4.1', apiKey: KEY });
+    expect(() => importAgent(exportAgentConfig(a), { values: { '/__proto__/polluted': true } })).toThrow(/not allowed/);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
   it('settings survive export and import; secret containers do not', () => {
     const { team } = buildAgency();
     const doc = exportAgentConfig(team);

@@ -103,8 +103,19 @@ export function redactUrlForExport(url: string, opts: RedactUrlForExportOptions 
   if (at !== -1) authority = `${EXPORT_PLACEHOLDER}@${authority.slice(at + 1)}`;
   const origin = url.slice(0, authorityStart) + authority;
   const rest = url.slice(pathStart);
-  const isSecret = (name: string): boolean =>
-    URL_SECRET_PARAM_NAMES.has(name.toLowerCase()) || (opts.isSecretParam?.(name) ?? false);
+  // A parameter name is read percent-decoded (`api%5Fkey` is `api_key`); one
+  // that does not decode is read as written.
+  const decodeName = (name: string): string => {
+    try {
+      return decodeURIComponent(name.replace(/\+/g, ' '));
+    } catch {
+      return name;
+    }
+  };
+  const isSecret = (raw: string): boolean => {
+    const name = decodeName(raw);
+    return URL_SECRET_PARAM_NAMES.has(name.toLowerCase()) || (opts.isSecretParam?.(name) ?? false);
+  };
   const redactParams = (params: string): string =>
     params
       .split('&')

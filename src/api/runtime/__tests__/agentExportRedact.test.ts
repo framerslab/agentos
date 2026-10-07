@@ -96,6 +96,11 @@ describe('copyExportTree', () => {
     expect(out.rag).not.toBe(tree.rag);
   });
 
+  it('writes a function inside an array as null in the serialized form, so later items keep their index', () => {
+    const out = copyExportTree({ handlers: [() => 1, 'kept'] }, { redactSecrets: true, form: 'serialized', redactUrl: url }) as Record<string, any>;
+    expect(out.handlers).toEqual([null, 'kept']);
+  });
+
   it('marks an instance in the serialized form even with redactSecrets false', () => {
     const out = copyExportTree(tree, { redactSecrets: false, form: 'serialized', redactUrl: url }) as Record<string, any>;
     expect(out.router).toEqual({ [INSTANCE_MARKER_KEY]: 'Router' });
@@ -131,6 +136,10 @@ describe('redactUrlForExport', () => {
     expect(redactUrlForExport('https://hooks.example/services/T/B/x#access_token=t&state=s', { webhook: true, isSecretParam: secret })).toBe(
       `https://hooks.example/${REDACTED}#access_token=${REDACTED}&state=s`,
     );
+  });
+  it('reads a parameter name percent-decoded', () => {
+    expect(redactUrlForExport('https://h/x?api%5Fkey=k&ok=1', { isSecretParam: secret })).toBe(`https://h/x?api%5Fkey=${REDACTED}&ok=1`);
+    expect(redactUrlForExport('https://h/x?%E0%A4%A=1', { isSecretParam: secret })).toBe('https://h/x?%E0%A4%A=1');
   });
   it('does not percent-encode the placeholder', () => {
     expect(redactUrlForExport('https://h/x?token=a%20b', { isSecretParam: secret })).toBe(`https://h/x?token=${REDACTED}`);
