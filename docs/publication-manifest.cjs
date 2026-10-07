@@ -157,6 +157,7 @@ const publicationManifest = [
 
   // Cognitive deep-dive
   agentosDoc('COGNITIVE_MEMORY.md', 'features/cognitive-memory.md', 'Cognitive Memory', 'Memory', 3),
+  agentosDoc('PERSONAS.md', 'features/personas.md', 'Defining and Loading Personas', 'Personas', 1),
   agentosDoc('HEXACO_PERSONALITY.md', 'features/hexaco-personality.md', 'HEXACO Personality', 'Personas', 4),
   agentosDoc('SOUL_FILES.md', 'features/soul-files.md', 'Soul Files & the Markdown Memory Wiki', 'Personas', 5),
   agentosDoc('ADAPTIVE_PROMPT_INTELLIGENCE.md', 'features/adaptive-prompt-intelligence.md', 'Adaptive Prompt Intelligence', 'Personas', 5.5),

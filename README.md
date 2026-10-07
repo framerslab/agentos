@@ -116,17 +116,12 @@ On the full runtime, every session is served by a **GMI**: a persistent agent wi
 - **A reasoning trace** of the last 500 decisions, and persona overlays per session.
 
 ```ts
-import { AgentOS, AgentOSResponseChunkType, BUILT_IN_PERSONAS, getBuiltInPersona } from '@framers/agentos';
+import { AgentOS, AgentOSResponseChunkType, BUILT_IN_PERSONAS } from '@framers/agentos';
 
-// AgentOS.create() loads persona files from ./personas. A package install has
-// no such directory, so seed a loader from the personas the package ships.
-const personaLoader = {
-  async initialize() {},
-  async loadPersonaById(id: string) { return getBuiltInPersona(id); },
-  async loadAllPersonaDefinitions() { return BUILT_IN_PERSONAS; },
-};
-
-const agentos = await AgentOS.create({ personaLoader });
+// AgentOS.create() reads persona files from ./personas by default. Personas can
+// also be given inline, as parsed JSON or code-built objects; here, the five the
+// package ships. A custom loader covers any other source.
+const agentos = await AgentOS.create({ personas: BUILT_IN_PERSONAS });
 for await (const chunk of agentos.processRequest({
   userId: 'user-42', sessionId: 'research-q1', selectedPersonaId: 'v_researcher',
   textInput: 'Summarize the open incidents from this week.',
