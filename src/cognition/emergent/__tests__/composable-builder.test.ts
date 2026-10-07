@@ -15,6 +15,23 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ComposableToolBuilder } from '../ComposableToolBuilder.js';
 import type { ComposableToolSpec } from '../types.js';
 import type { ToolExecutionResult, ToolExecutionContext } from '../../../core/tools/ITool.js';
+import type { StepGate } from '../StepGate.js';
+
+/** A gate over one mock: every step resolves to a tool with no side effects and runs through `executeTool`. */
+function gateOver(executeTool: ReturnType<typeof vi.fn>): StepGate {
+  return {
+    resolve: (name) => ({
+      id: name,
+      name,
+      displayName: name,
+      description: name,
+      inputSchema: {},
+      hasSideEffects: false,
+      execute: (args: Record<string, unknown>, context) => executeTool(name, args, context),
+    }),
+    run: (tool, args, context) => executeTool(tool.name, args, context),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -50,7 +67,7 @@ describe('ComposableToolBuilder', () => {
 
   beforeEach(() => {
     executeTool = vi.fn();
-    builder = new ComposableToolBuilder(executeTool as any);
+    builder = new ComposableToolBuilder(gateOver(executeTool));
   });
 
   // -------------------------------------------------------------------------
@@ -78,10 +95,11 @@ describe('ComposableToolBuilder', () => {
 
     // Executor must have been called with the resolved argument.
     expect(executeTool).toHaveBeenCalledOnce();
+    // The step's context is the caller's, with the composition depth added.
     expect(executeTool).toHaveBeenCalledWith(
       'web_search',
       { query: 'quantum computing', maxResults: 5 },
-      ctx,
+      expect.objectContaining({ ...ctx, sessionData: { emergentDepth: 1 } }),
     );
   });
 
@@ -274,7 +292,7 @@ describe('ComposableToolBuilder', () => {
   // 8. Strict mode throws on unresolved reference
   // -------------------------------------------------------------------------
   it('strict mode throws on unresolved reference expression', async () => {
-    const strictBuilder = new ComposableToolBuilder(executeTool as any, { strictMode: true });
+    const strictBuilder = new ComposableToolBuilder(gateOver(executeTool), { strictMode: true });
 
     const spec: ComposableToolSpec = {
       mode: 'compose',
@@ -326,7 +344,7 @@ describe('ComposableToolBuilder', () => {
     expect(executeTool).toHaveBeenCalledWith(
       'tool_a',
       { bad: '$typo.value' },
-      ctx,
+      expect.objectContaining(ctx),
     );
     // A warning should have been logged.
     expect(warnSpy).toHaveBeenCalledWith(

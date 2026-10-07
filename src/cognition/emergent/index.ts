@@ -14,6 +14,8 @@
 export * from './types.js';
 export { type SelfImprovementConfig, DEFAULT_SELF_IMPROVEMENT_CONFIG } from './SelfImprovementConfig.js';
 export { ComposableToolBuilder } from './ComposableToolBuilder.js';
+export { createStepGate, checkChainable, COMPOSE_NEEDS_GATE_MESSAGE, MAX_COMPOSITION_DEPTH } from './StepGate.js';
+export type { StepGate, StepGateOptions, Chainability, ChainRefusalCode } from './StepGate.js';
 export { SandboxedToolForge } from './SandboxedToolForge.js';
 export type { SandboxedToolForgeConfig } from './SandboxedToolForge.js';
 export { CAPABILITY_NAMES, CAPABILITY_ALIASES, normalizeAllowlist, toSandboxApis } from './capabilities.js';
