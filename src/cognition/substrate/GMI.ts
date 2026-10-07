@@ -89,6 +89,18 @@ function pickCompletionOptions(source: Record<string, unknown> | undefined): Par
   return picked as Partial<ModelCompletionOptions>;
 }
 
+/**
+ * The `cacheDiagnostics` a turn's first model step sends, or undefined when the
+ * turn did not opt in. Takes generateText's forms beside the provider's: `true`
+ * opts in with nothing to compare, an object compares against its
+ * `previousMessageId` (nothing when it names none), and `false` stays off.
+ */
+function cacheDiagnosticsSeed(value: unknown): { previousMessageId: string | null } | undefined {
+  if (!value) return undefined;
+  const id = typeof value === 'object' ? (value as { previousMessageId?: unknown }).previousMessageId : undefined;
+  return { previousMessageId: typeof id === 'string' && id.length > 0 ? id : null };
+}
+
 /** Adds one provider usage report to the turn's total. */
 function addUsage(total: CostAggregator, usage: ModelUsage): void {
   total.promptTokens += usage.promptTokens || 0;
@@ -941,6 +953,15 @@ export class GMI implements IGMI {
       // -------------------------------------------------------------------
       let safetyBreak = 0;
       const maxToolLoopIterations = this.config.maxToolLoopIterations ?? 5;
+      // Prompt-cache diagnostics run through the turn's steps as they run through
+      // generateText's: the first step compares against the message the turn (or
+      // the persona) names, each later step against the previous step's response.
+      const requestedCacheDiagnostics = (turnInput.metadata?.options as Record<string, unknown> | undefined)?.cacheDiagnostics;
+      let stepCacheDiagnostics = cacheDiagnosticsSeed(
+        requestedCacheDiagnostics !== undefined
+          ? requestedCacheDiagnostics
+          : (this.activePersona.defaultModelCompletionOptions as Record<string, unknown> | undefined)?.cacheDiagnostics,
+      );
       let lastRagSources: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[] | undefined;
       main_processing_loop: while (safetyBreak < maxToolLoopIterations) {
         safetyBreak++;
@@ -1119,6 +1140,7 @@ export class GMI implements IGMI {
         const llmOptions: ModelCompletionOptions = {
           ...pickCompletionOptions(personaOptions),
           ...pickCompletionOptions(turnOptions),
+          ...(stepCacheDiagnostics ? { cacheDiagnostics: { ...stepCacheDiagnostics } } : {}),
           temperature: (turnOptions.temperature as number | undefined) ?? (personaOptions.temperature as number | undefined) ?? 0.7,
           maxTokens: (turnOptions.maxTokens as number | undefined) ?? (personaOptions.maxTokens as number | undefined) ?? 2048,
           tools: toolsForLLM.length > 0 ? toolsForLLM.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema }})) : undefined,
@@ -1218,10 +1240,35 @@ export class GMI implements IGMI {
           }
           this.addTraceEntry(ReasoningEntryType.PROMPT_CONSTRUCTION_COMPLETE, `Prompt constructed for model ${modelTargetInfo.modelId}.`);
 
+          // The host's hook sees each attempt's prompt, a fallback hop's rebuilt one
+          // included, and may replace it for that attempt; the history is untouched.
+          let sendMessages: ChatMessage[] = promptMessages;
+          if (this.config.beforeModelCall) {
+            try {
+              const replaced = await this.config.beforeModelCall({
+                turnId,
+                stepIndex: safetyBreak - 1,
+                hop: resolution?.hop ?? 0,
+                providerId: modelTargetInfo.providerId,
+                modelId: modelTargetInfo.modelId,
+                messages: [...promptMessages],
+              });
+              if (Array.isArray(replaced)) {
+                if (replaced.length > 0) {
+                  sendMessages = replaced;
+                } else {
+                  this.addTraceEntry(ReasoningEntryType.WARNING, 'beforeModelCall returned no messages; the built prompt is sent.');
+                }
+              }
+            } catch (hookError) {
+              this.addTraceEntry(ReasoningEntryType.WARNING, `beforeModelCall hook failed: ${hookError instanceof Error ? hookError.message : String(hookError)}`);
+            }
+          }
+
           let attempt: AsyncIterable<ModelCompletionResponse>;
           let attemptOutcome: Promise<CompletionOutcome> | undefined;
           if (gateway && resolution) {
-            const gatewayAttempt: CompletionAttempt = gateway.stream(resolution, promptMessages, llmOptions, responseSchema, schemaName);
+            const gatewayAttempt: CompletionAttempt = gateway.stream(resolution, sendMessages, llmOptions, responseSchema, schemaName);
             attempt = gatewayAttempt;
             attemptOutcome = gatewayAttempt.outcome;
           } else {
@@ -1229,7 +1276,7 @@ export class GMI implements IGMI {
             if (!provider) {
                 throw new GMIError(`LLM Provider '${modelTargetInfo.providerId}' not found or not initialized.`, GMIErrorCode.LLM_PROVIDER_UNAVAILABLE);
             }
-            attempt = provider.generateCompletionStream(modelTargetInfo.modelId, promptMessages, llmOptions);
+            attempt = provider.generateCompletionStream(modelTargetInfo.modelId, sendMessages, llmOptions);
           }
           this.addTraceEntry(ReasoningEntryType.LLM_CALL_START, `Streaming from ${modelTargetInfo.modelId}${resolution ? ` (hop ${resolution.hop})` : ''}. Tools: ${toolsForLLM.length}.`);
 
@@ -1344,6 +1391,12 @@ export class GMI implements IGMI {
         // The step's usage, counted once (D4c).
         if (stepUsage) addUsage(aggregatedUsage, stepUsage);
 
+        // The next step's diagnostics compare against this step's response.
+        if (stepCacheDiagnostics) {
+          const responseId = stepFinalChunk?.id;
+          stepCacheDiagnostics = { previousMessageId: typeof responseId === 'string' && responseId.length > 0 ? responseId : null };
+        }
+
         // The step boundary (D4d): the step's own text, finish reason, hop and usage.
         const stepPayload: StepFinishedChunkPayload = {
           stepIndex: safetyBreak - 1,
@@ -1358,6 +1411,7 @@ export class GMI implements IGMI {
           ...(stepFinalChunk?.id ? { providerMessageId: stepFinalChunk.id } : {}),
           ...(stepFinalChunk?.cacheDiagnostics !== undefined ? { cacheDiagnostics: stepFinalChunk.cacheDiagnostics } : {}),
           ...(stepStructuredOutput !== undefined ? { structuredOutput: stepStructuredOutput } : {}),
+          ...(currentIterationThinkingBlocks.length > 0 ? { thinkingBlocks: [...currentIterationThinkingBlocks] } : {}),
         };
         yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.STEP_FINISHED, stepPayload, {
           ...(stepFinishReason ? { finishReason: stepFinishReason } : {}),
