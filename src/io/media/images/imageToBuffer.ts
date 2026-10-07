@@ -17,12 +17,17 @@ import * as fs from 'node:fs/promises';
  * - **`Buffer`** — returned as-is.
  * - **Base64 data URL** — e.g. `data:image/png;base64,iVBOR...`.  The base64
  *   payload is extracted and decoded.
- * - **Raw base64 string** — a string that does not look like a URL or file
- *   path is assumed to be raw base64 data.
+ * - **Raw base64 string** — a string in the base64 alphabet (standard or
+ *   URL-safe) whose decoded bytes start with a PNG, JPEG, GIF, WebP, AVIF or
+ *   HEIC signature is decoded, even when it contains `/`, which standard
+ *   base64 uses (RFC 4648, Table 1). Any other string that does not look
+ *   like a URL or a file path is decoded as base64 too.
  * - **`file://` URL** — resolved to a local filesystem path and read.
  * - **HTTP/HTTPS URL** — fetched via `globalThis.fetch` and buffered.
- * - **Local file path** — any other string is treated as an absolute or
- *   relative filesystem path and read with `fs.readFile`.
+ * - **Local file path** — any other string that contains `/` or `\`, or ends
+ *   in a file extension, is read with `fs.readFile`. A string from an
+ *   untrusted caller can name any file the process can read, so pass such
+ *   input as a `Buffer` or a data URL.
  *
  * @param input - The image in any supported format.
  * @returns A `Buffer` containing the raw image bytes.
@@ -77,6 +82,13 @@ export async function imageToBuffer(input: string | Buffer): Promise<Buffer> {
     return Buffer.from(await response.arrayBuffer());
   }
 
+  // Raw base64 image data. It comes before the path check because standard
+  // base64 contains `/`, and that check would send it to fs.readFile.
+  const decoded = decodeImageBase64(trimmed);
+  if (decoded) {
+    return decoded;
+  }
+
   // Heuristic: if the string contains path separators or a file extension,
   // treat it as a filesystem path.  Otherwise assume raw base64.
   const looksLikePath =
@@ -87,6 +99,41 @@ export async function imageToBuffer(input: string | Buffer): Promise<Buffer> {
 
   // Fallback: raw base64 string (no data URL prefix).
   return Buffer.from(trimmed, 'base64');
+}
+
+/** The standard and URL-safe base64 alphabets of RFC 4648, with optional padding. */
+const BASE64_PATTERN = /^[A-Za-z0-9+/_-]+={0,2}$/;
+
+/**
+ * Decodes `value` when it is base64 whose bytes start with an image signature.
+ *
+ * @param value - A trimmed string that is not a data URL or a URL.
+ * @returns The decoded image bytes, or `null` when `value` is not base64 or its
+ *   bytes do not start with a PNG, JPEG, GIF, WebP, AVIF or HEIC signature.
+ */
+function decodeImageBase64(value: string): Buffer | null {
+  const compact = value.replace(/\s+/g, '');
+  if (compact.length < 8 || !BASE64_PATTERN.test(compact)) {
+    return null;
+  }
+  const bytes = Buffer.from(compact, 'base64');
+  return hasImageSignature(bytes) ? bytes : null;
+}
+
+/**
+ * True when `bytes` start with the signature of an image format the image
+ * providers accept: PNG, JPEG, GIF, WebP, or an ISO media file such as AVIF or
+ * HEIC (`ftyp` at offset 4).
+ */
+function hasImageSignature(bytes: Buffer): boolean {
+  const startsWith = (...signature: number[]) => signature.every((byte, i) => bytes[i] === byte);
+  return (
+    startsWith(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a) || // PNG
+    startsWith(0xff, 0xd8, 0xff) || // JPEG
+    startsWith(0x47, 0x49, 0x46, 0x38) || // GIF8
+    (startsWith(0x52, 0x49, 0x46, 0x46) && bytes.subarray(8, 12).toString('latin1') === 'WEBP') ||
+    bytes.subarray(4, 8).toString('latin1') === 'ftyp'
+  );
 }
 
 /**
