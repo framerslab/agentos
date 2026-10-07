@@ -242,12 +242,23 @@ the key together on every seat of a multi-vendor roster:
   Anthropic seat that inherits `gpt-6-astra` gets a 404 from Anthropic, which is
   not retried on another provider, and the seat fails.
 - An agency-level `apiKey` or `baseUrl` is inherited by every config seat that
-  sets none, whatever that seat's provider. An OpenAI key sent to Anthropic gets
-  a 401; that error is retryable, so the seat silently fails over to another
-  provider. The inherited key also disables the Anthropic-through-OpenRouter
-  route described below.
+  sets none, whatever provider the seat sets with `provider`. An OpenAI key sent
+  to Anthropic gets a 401; that error is retryable, so the seat silently fails
+  over to another provider. The inherited key also disables the
+  Anthropic-through-OpenRouter route described below. A seat whose `model` names
+  another provider is the exception, described next.
 - A seat value set explicitly to `undefined` (for example
   `apiKey: process.env.UNSET_VAR`) counts as set and blocks inheritance.
+
+A seat `model` written as `provider:model` (`anthropic:claude-opus-5-5`) names
+its provider and does not inherit the agency's `provider`. When the agency's
+provider is known (its `provider`, or the prefix of its own `model`) and
+differs, the seat does not inherit the agency's `apiKey` or `baseUrl` either,
+so an OpenAI key never reaches Anthropic through such a seat. A colon splits an
+id only when its prefix is a provider agentos knows: `qwen2.5:7b` under
+`provider: 'ollama'` and `meta-llama/llama-3.3-70b-instruct:free` under
+`provider: 'openrouter'` stay whole, and under `provider: 'ollama'` an id is
+never split.
 
 Keys resolve per seat: the seat's `apiKey`, else the agency's `apiKey`, else a
 key set with `setDefaultProvider()` (used when that default names no provider
