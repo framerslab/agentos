@@ -428,6 +428,22 @@ describe('EmergentToolRegistry state', () => {
     expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active', request: { kind: 'sandbox', capabilities: ['crypto'] } });
   });
 
+  it('cleaning up a session leaves the tools of a session whose id merely begins the same way', async () => {
+    const one = { ...makeTool({ id: 'emergent_sess_1' }), source: 'forged by agent a during session sess-1' };
+    const ten = { ...makeTool({ id: 'emergent_sess_10' }), source: 'forged by agent a during session sess-10' };
+    registry.register(one, 'session');
+    registry.register(ten, 'session');
+    await settle();
+
+    expect(registry.cleanupSession('sess-1')).toBe(1);
+
+    expect(registry.get(one.id)).toBeUndefined();
+    expect(registry.get(ten.id)).toBeDefined();
+    await registry.settled(one.id);
+    expect(readToolRow(db, one.id)).toBeUndefined();
+    expect(readToolRow(db, ten.id)).toBeDefined();
+  });
+
   it('refuses to record a use of a tool that is not active', async () => {
     const tool = makeTool();
     registry.register(tool, 'agent');

@@ -209,6 +209,12 @@ export class EmergentToolRegistry {
 
   /** Whether `ensureSchema()` has been called and completed. */
   private schemaReady = false;
+  /**
+   * Ids removed in this process whose rows are not yet gone: an admission or
+   * a forge that was mid-flight does not put one back. Cleared when the
+   * deletes land, or when a new row is written for the id.
+   */
+  private readonly removedIds = new Set<string>();
 
   /**
    * Cached promise from the first `ensureSchemaReady()` call.
@@ -385,6 +391,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       }
     }
 
+    this.removedIds.delete(tool.id);
     // Stamp the tier on the tool object; a fresh registration is active, so the
     // convention property says so whatever the given object carried.
     const registered: EmergentTool = { ...tool, tier };
@@ -786,14 +793,47 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
    * rewritten by a load.
    */
   async writeToolRow(tool: EmergentTool): Promise<void> {
+    this.removedIds.delete(tool.id);
     await this.persistToolToDb(tool);
+  }
+
+  /** Whether the tool was removed in this process and its rows are not yet gone. */
+  wasRemoved(toolId: string): boolean {
+    return this.removedIds.has(toolId);
+  }
+
+  /**
+   * The rows of a tool, deleted after every queued state write of the tool,
+   * so a write still in the queue cannot recreate the state row once it is
+   * deleted; the removal is forgotten once they are gone. Best-effort.
+   */
+  private queueRowDeletes(toolId: string): void {
+    const db = this.db;
+    if (!db) {
+      this.removedIds.delete(toolId);
+      return;
+    }
+    this.queueStateWrite(toolId, async () => {
+      await db.run(`DELETE FROM agentos_emergent_tools WHERE id = ?`, [toolId]);
+      await db.run(`DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?`, [toolId]);
+    })
+      .catch(() => {
+        // Best-effort cleanup only.
+      })
+      .finally(() => {
+        this.removedIds.delete(toolId);
+      });
   }
 
   /**
    * Take a tool read from storage into memory without rewriting its row.
    * `upsert` re-serialises the source; a loaded tool must keep the row it has.
    */
-  adopt(tool: EmergentTool, record: ToolStateRecord): void {
+  adopt(tool: EmergentTool, record: ToolStateRecord): boolean {
+    if (this.removedIds.has(tool.id)) {
+      // Removed in this process while the caller had the tool in hand.
+      return false;
+    }
     this.sessionTools.delete(tool.id);
     this.persistedTools.delete(tool.id);
     if (tool.tier === 'session') {
@@ -803,6 +843,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     }
     (tool as EmergentTool & { isActive?: boolean }).isActive = record.state === 'active';
     this.states.set(tool.id, record);
+    return true;
   }
 
   private static readonly ROW_COLUMNS = `
@@ -950,20 +991,13 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
   remove(toolId: string): boolean {
     const removed =
       this.sessionTools.delete(toolId) || this.persistedTools.delete(toolId);
-
+    this.states.delete(toolId);
+    // The rows go whether or not this process held the tool, so a host can
+    // remove a stored tool it never loaded; the removal is remembered until
+    // they are gone.
+    this.removedIds.add(toolId);
+    this.queueRowDeletes(toolId);
     if (removed) {
-      this.states.delete(toolId);
-      if (this.db && this.schemaReady) {
-        const db = this.db;
-        // After every queued state write of the tool, so a write still in the
-        // queue cannot recreate the state row once it is deleted.
-        this.queueStateWrite(toolId, async () => {
-          await db.run(`DELETE FROM agentos_emergent_tools WHERE id = ?`, [toolId]);
-          await db.run(`DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?`, [toolId]);
-        }).catch(() => {
-          // Best-effort cleanup only.
-        });
-      }
       this.logAudit(toolId, 'remove');
     }
 
@@ -1230,9 +1264,9 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
   /**
    * Remove all session-tier tools associated with a specific session.
    *
-   * Iterates the session map and deletes every tool whose `source` string
-   * contains the given session ID. Logs a cleanup audit event for each
-   * removed tool.
+   * Iterates the session map and deletes every tool whose `source` names the
+   * given session; the rows go after the tool's queued writes. Logs a cleanup
+   * audit event for each removed tool.
    *
    * @param sessionId - The session identifier to match against tool `source`
    *   strings.
@@ -1242,21 +1276,12 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     let removedCount = 0;
 
     for (const [id, tool] of this.sessionTools) {
-      if (tool.source.includes(sessionId)) {
+      // The session the source names, whole: "sess-1" is not "sess-10".
+      if (sessionFromSource(tool.source) === sessionId) {
         this.sessionTools.delete(id);
         this.states.delete(id);
-        if (this.db && this.schemaReady) {
-          this.db
-            .run(`DELETE FROM agentos_emergent_tools WHERE id = ?`, [id])
-            .catch(() => {
-              // Best-effort cleanup only.
-            });
-          this.db
-            .run(`DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?`, [id])
-            .catch(() => {
-              // Best-effort cleanup only.
-            });
-        }
+        this.removedIds.add(id);
+        this.queueRowDeletes(id);
         this.logAudit(id, 'cleanup', { sessionId });
         removedCount += 1;
       }

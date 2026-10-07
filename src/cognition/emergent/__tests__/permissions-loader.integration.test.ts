@@ -1042,6 +1042,39 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect((await callTool(host.orchestrator, 'double_it', { n: 5 })).output).toEqual({ doubled: 10 });
   });
 
+  it('removing a stored tool this process never loaded deletes its rows', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, { id: 'raw-1', name: 'double_it', mode: 'sandbox', source: RAW_DOUBLE, inputSchema: NUMBER_IN, outputSchema: DOUBLED_OUT });
+    seedStateRow(db, { toolId: 'raw-1', state: 'active', setBy: 'library', requestJson: null });
+
+    expect(await host.engine.removeTool('raw-1')).toBeUndefined();
+
+    expect(readToolRow(db, 'raw-1')).toBeUndefined();
+    expect(readStateRow(db, 'raw-1')).toBeUndefined();
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([]);
+  });
+
+  it('a tool removed while a load had it in hand is not put back, and its rows go', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, { id: 'raw-1', name: 'double_it', mode: 'sandbox', source: RAW_DOUBLE, inputSchema: NUMBER_IN, outputSchema: DOUBLED_OUT });
+
+    // The load's flag write is held open; the host removes the tool meanwhile.
+    const gate = db.gateNext('SET is_active = COALESCE(');
+    const loading = host.engine.loadPersistedTools({ tiers: ['shared'] });
+    await gate.entered;
+    const removing = host.engine.removeTool('raw-1');
+    gate.release();
+    const summary = await loading;
+    await removing;
+
+    expect(summary.outcomes).toEqual([{ toolId: 'raw-1', name: 'double_it', state: 'demoted', reason: 'removed' }]);
+    expect(await host.orchestrator.getTool('double_it')).toBeUndefined();
+    expect(readToolRow(db, 'raw-1')).toBeUndefined();
+    expect(readStateRow(db, 'raw-1')).toBeUndefined();
+  });
+
   it("a session's stored tools load for that session only", async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db });

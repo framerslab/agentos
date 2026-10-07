@@ -520,13 +520,17 @@ export class EmergentCapabilityEngine {
           error instanceof Error ? error.message : error,
         );
       }
-      if (written && written.state !== 'active') {
-        // The row did not take the state (its tool row never landed, or another
-        // word arrived first): the tool still runs in this process, held active
-        // here, and the next load re-derives its request from its source.
+      if (this.registry.wasRemoved(toolId)) {
+        // Removed while it was being forged: nothing is registered.
+        return { success: false, error: 'the tool was removed while it was being forged' };
+      }
+      if (written && written.state === 'demoted' && written.reason === 'removed') {
+        // The row did not take the state (its tool row never landed): the tool
+        // still runs in this process, held active here, and the next load
+        // re-derives its request from its source.
         console.warn(
-          `[agentos:emergent] the state of "${request.name}" (${toolId}) was not stored ` +
-            `(${written.reason ?? written.state}); the tool runs in this process only`,
+          `[agentos:emergent] the state of "${request.name}" (${toolId}) was not stored; ` +
+            'the tool runs in this process only',
         );
         this.registry.adopt(tool, {
           toolId,
@@ -536,6 +540,13 @@ export class EmergentCapabilityEngine {
           at: Date.now(),
           request: requestFromImplementation(request.implementation),
         });
+      } else if (written && written.state !== 'active') {
+        // Another word arrived first (a host's suspension): it holds, and the
+        // executable refuses calls until the host lifts it.
+        console.warn(
+          `[agentos:emergent] "${request.name}" (${toolId}) was ${written.state} before its forge finished ` +
+            `(${written.reason ?? 'no reason recorded'})`,
+        );
       }
       this.indexTool(toolId, context.agentId, context.sessionId);
 
@@ -735,16 +746,13 @@ export class EmergentCapabilityEngine {
    */
   async removeTool(toolId: string): Promise<EmergentTool | undefined> {
     const tool = this.registry.get(toolId);
-    if (!tool) {
-      return undefined;
-    }
-
+    // The rows go whether or not the tool is loaded here, after the tool's
+    // queued state writes; a sync of the same id after this returns finds no
+    // row, as a removal promises.
     this.registry.remove(toolId);
-    // The rows go after the tool's queued state writes; a sync of the same
-    // id after this returns finds no row, as a removal promises.
     await this.registry.settled(toolId);
     this.removeIndexedToolEverywhere(toolId);
-    if (this.onToolRemoved) {
+    if (tool && this.onToolRemoved) {
       await this.onToolRemoved(tool);
     }
     return tool;
@@ -1169,7 +1177,7 @@ export class EmergentCapabilityEngine {
     if (live && live.name !== tool.name) {
       await this.unregisterIfLive(toolId);
     }
-    this.registry.adopt(tool, {
+    const adopted = this.registry.adopt(tool, {
       toolId,
       state: 'active',
       reason: null,
@@ -1177,6 +1185,10 @@ export class EmergentCapabilityEngine {
       at: Date.now(),
       request,
     });
+    if (!adopted) {
+      // Removed in this process while the row was being admitted.
+      return { toolId, name, state: 'demoted', reason: 'removed' };
+    }
     this.indexTool(
       tool.id,
       tool.createdBy,
@@ -1192,6 +1204,14 @@ export class EmergentCapabilityEngine {
         this.registry.forget(toolId);
         this.removeIndexedToolEverywhere(toolId);
         throw error;
+      }
+      if (this.registry.wasRemoved(toolId)) {
+        // Removed while the host was registering it: the registration goes.
+        if (this.onToolRemoved) {
+          await this.onToolRemoved(tool);
+        }
+        this.removeIndexedToolEverywhere(toolId);
+        return { toolId, name, state: 'demoted', reason: 'removed' };
       }
     }
     return { toolId, name, state: 'active', reason: null };
