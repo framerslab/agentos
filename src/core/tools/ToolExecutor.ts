@@ -54,6 +54,19 @@ export interface ToolExecutionRequestDetails {
   userContext: UserContext;
   correlationId?: string;
   sessionData?: Record<string, any>;
+  /**
+   * The tool instance the caller already resolved and checked (a composed
+   * step). `ToolOrchestrator.processToolCall` runs its checks against it and
+   * refuses the call (`STEP_REPLACED`) when the name resolves to another
+   * instance by the time the call is delegated.
+   */
+  tool?: ITool;
+  /**
+   * An expiry signal (a workflow step's timer). When it is aborted after the
+   * checks and the approval, the call is refused (`STEP_ABORTED`) and nothing
+   * runs.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -157,6 +170,15 @@ export class ToolExecutor {
   */
   public getTool(toolName: string): ITool | undefined {
     return this.toolRegistry.getActive(toolName)?.payload;
+  }
+
+  /**
+   * Calls `listener` with the name of every tool registered from now on,
+   * by any path that ends in this executor's registry. Returns a function
+   * that removes the listener.
+   */
+  public onToolRegistered(listener: (toolName: string) => void): () => void {
+    return this.toolRegistry.onRegister((descriptor) => listener(descriptor.id));
   }
 
   /**
@@ -303,6 +325,7 @@ export class ToolExecutor {
       userContext,
       correlationId: correlationId || `tool-exec-${uuidv4()}`,
       ...(sessionData ? { sessionData } : {}),
+      ...(personaCapabilities ? { personaCapabilities } : {}),
     };
 
     try {

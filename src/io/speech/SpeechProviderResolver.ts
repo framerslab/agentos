@@ -446,10 +446,14 @@ export class SpeechProviderResolver extends EventEmitter {
     // Check local/cloud deployment match
     if (req.local !== undefined && reg.catalogEntry.local !== req.local) return false;
 
-    // Check that the provider supports ALL requested features (AND semantics)
+    // Check that the provider supports ALL requested features (AND semantics).
+    // A 'streaming' feature is the streaming capability above, which the
+    // provider instance can override, not the catalog's feature list: AssemblyAI's
+    // catalog entry lists 'streaming', while its core provider uploads and polls.
     if (req.features?.length) {
       const providerFeatures = reg.catalogEntry.features ?? [];
-      if (!req.features.every((f) => providerFeatures.includes(f))) return false;
+      const streams = reg.catalogEntry.streaming ?? false;
+      if (!req.features.every((f) => (f === 'streaming' ? streams : providerFeatures.includes(f)))) return false;
     }
 
     return true;

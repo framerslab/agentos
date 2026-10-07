@@ -161,7 +161,7 @@ interface ProviderRequirements {
   streaming?: boolean;
   /** Only match providers whose catalog entry declares local === true/false. */
   local?: boolean;
-  /** Only match providers that declare all listed features. */
+  /** Only match providers that declare all listed features. 'streaming' here means the streaming capability above. */
   features?: string[];
   /** Return only these provider ids, in this order. */
   preferredIds?: string[];

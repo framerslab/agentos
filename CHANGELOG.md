@@ -1,3 +1,43 @@
+## [0.12.3](https://github.com/framerslab/agentos/compare/v0.12.2...v0.12.3) (2026-10-07)
+
+### fix
+
+* **images:** a DOCTYPE's quoted literals no longer end it early (#133) ([b2c3646](https://github.com/framerslab/agentos/commit/b2c3646bfa1cebe8dba749ab5b0507299274f9f2))
+
+## [0.12.2](https://github.com/framerslab/agentos/compare/v0.12.1...v0.12.2) (2026-10-07)
+
+### fix
+
+* **images:** SVG detection reads the root element, and error previews stop at 40 characters (#132) ([9b0fb44](https://github.com/framerslab/agentos/commit/9b0fb44bcd4ca98a3a4185c75e087391fa150b24))
+* **speech:** a streaming feature requirement follows the streaming capability (#131) ([2ddb996](https://github.com/framerslab/agentos/commit/2ddb9963ee70b18b67692967a82f7dde0072bda3))
+
+## [0.12.1](https://github.com/framerslab/agentos/compare/v0.12.0...v0.12.1) (2026-10-07)
+
+### fix
+
+* **emergent:** stored chains load at any depth, admissions of a tool run in turn, and inner refusals stay inner ([d853bfd](https://github.com/framerslab/agentos/commit/d853bfd67a25a32ac8ff3f459bf32b18986d2455))
+
+## [0.12.0](https://github.com/framerslab/agentos/compare/v0.11.7...v0.12.0) (2026-10-07)
+
+### ⚠ BREAKING CHANGE
+
+* **emergent:** a composition or workflow step no longer chains a tool
+with side effects unless the host lists it in
+emergent.compose.sideEffectingTools, and never chains a tool whose
+hasSideEffects is unset; ComposableToolBuilder needs a StepGate to compose
+(a bare callback still constructs but composes nothing, compose_needs_gate);
+allowSandboxTools: false now also loads stored code tools suspended
+(sandbox_tools_off); a composed tool's approval moves from the composed
+call to its side-effecting steps.
+
+### feat
+
+* **emergent:** compose mode runs every step through a gate ([0c637aa](https://github.com/framerslab/agentos/commit/0c637aadf07b1126d20afe776ccb897dff2f0ee9))
+
+### test
+
+* **openrouter:** streamText keeps the text that arrives with the finish reason (#127) ([04df6e8](https://github.com/framerslab/agentos/commit/04df6e8f5238376c48a7ce1cc3035bc9a21f2259))
+
 ## [0.11.7](https://github.com/framerslab/agentos/compare/v0.11.6...v0.11.7) (2026-10-07)
 
 ### fix

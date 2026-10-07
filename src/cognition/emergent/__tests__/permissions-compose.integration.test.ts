@@ -1,0 +1,725 @@
+import { describe, it, expect, vi } from 'vitest';
+import type { ITool, ToolExecutionContext } from '../../../core/tools/ITool.js';
+import type { PermissionCheckContext } from '../../../core/tools/permissions/IToolPermissionManager.js';
+import type { IHumanInteractionManager, PendingAction } from '../../../orchestration/hitl/IHumanInteractionManager.js';
+import { ExtensionRegistry, EXTENSION_KIND_TOOL } from '../../../extensions/index.js';
+import { ComposableToolBuilder } from '../ComposableToolBuilder.js';
+import { EmergentCapabilityEngine } from '../EmergentCapabilityEngine.js';
+import { EmergentJudge } from '../EmergentJudge.js';
+import { EmergentToolRegistry } from '../EmergentToolRegistry.js';
+import { SandboxedToolForge } from '../SandboxedToolForge.js';
+import { createStepGate } from '../StepGate.js';
+import { DEFAULT_EMERGENT_CONFIG } from '../types.js';
+import type { EmergentConfig, ForgeToolRequest } from '../types.js';
+import { createSqliteAdapter, readStateRow } from './helpers/sqlite-adapter.js';
+import {
+  APPROVED_VERDICT,
+  approvingHitl,
+  callTool,
+  echoTool,
+  makeForgeHost,
+  sendMessageTool,
+  type ForgeHost,
+} from './helpers/forge-host.js';
+import { DOUBLED_OUT, NUMBER_IN, RAW_DOUBLE, TEXT_IN, TEXT_OUT, seedToolRow } from './helpers/seed-rows.js';
+
+/** A composition that sends a message, then echoes what the send returned. */
+const NOTIFY_AND_ECHO = {
+  name: 'notify_and_echo',
+  description: 'Sends a message, then echoes what was sent.',
+  inputSchema: TEXT_IN,
+  outputSchema: TEXT_OUT,
+  implementation: {
+    mode: 'compose',
+    steps: [
+      { name: 'send', tool: 'send_message', inputMapping: { text: '$input.text' } },
+      { name: 'echo', tool: 'echo', inputMapping: { text: '$prev.text' } },
+    ],
+  },
+  testCases: [
+    { input: { text: 'hi' }, expectedOutput: { text: 'sent: hi' }, stepOutputs: { send: { text: 'sent: hi' } } },
+  ],
+};
+
+/** Allows a call only when the caller holds every capability the tool requires. */
+async function capabilityCheck(ctx: PermissionCheckContext) {
+  const missing = (ctx.tool.requiredCapabilities ?? []).filter(
+    (capability) => !ctx.personaCapabilities.includes(capability),
+  );
+  return missing.length === 0
+    ? { isAllowed: true }
+    : { isAllowed: false, reason: `missing capability: ${missing.join(', ')}` };
+}
+
+/** A host tool with no side effects that needs the `reading` capability. */
+function readTool(): ITool {
+  return {
+    id: 'read-it-v1',
+    name: 'read_it',
+    displayName: 'read_it',
+    description: 'Returns the text it is given, for a reader.',
+    inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+    requiredCapabilities: ['reading'],
+    hasSideEffects: false,
+    execute: async (args: Record<string, unknown>) => ({ success: true, output: { text: String(args.text) } }),
+  };
+}
+
+/** A one-step composition over `tool`, named `name`. */
+function composeOver(name: string, tool: string, extra: Record<string, unknown> = {}) {
+  return {
+    name,
+    description: `Runs ${tool}.`,
+    inputSchema: TEXT_IN,
+    outputSchema: TEXT_OUT,
+    implementation: { mode: 'compose', steps: [{ name: 's', tool, inputMapping: { text: '$input.text' } }] },
+    testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'hi' } }],
+    ...extra,
+  };
+}
+
+describe('compositions and workflows: one gate, one rule', () => {
+  it('refuses to chain a tool with side effects that the host has not listed, before any test case runs', async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const host = await makeForgeHost({ tools: [sendMessageTool(sent), echoTool()] });
+
+    const forged = await callTool(host.orchestrator, 'forge_tool', NOTIFY_AND_ECHO, {
+      personaCapabilities: ['messaging'],
+    });
+
+    expect(forged.isError).toBe(true);
+    expect(String(forged.errorDetails?.message)).toContain('step_not_chainable');
+    expect(sent).toEqual([]);
+    expect(host.judge).not.toHaveBeenCalled();
+  });
+
+  it('chains nothing whose flag is unset, even when listed', async () => {
+    const host = await makeForgeHost({
+      tools: [sendMessageTool([], 'unset'), echoTool()],
+      config: { compose: { sideEffectingTools: ['send_message'] } },
+    });
+
+    const forged = await callTool(host.orchestrator, 'forge_tool', NOTIFY_AND_ECHO);
+
+    expect(forged.isError).toBe(true);
+    expect(String(forged.errorDetails?.message)).toContain('side_effects_undeclared');
+  });
+
+  it('a listed step is not run while forging, and at call time meets the permission check as the caller and one approval', async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const hitl = approvingHitl();
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({
+      db,
+      tools: [sendMessageTool(sent), echoTool()],
+      hitlManager: hitl.manager,
+      orchestratorConfig: { hitl: { enabled: true } },
+      config: { compose: { sideEffectingTools: ['send_message'] } },
+    });
+    host.permissionManager.isExecutionAllowed.mockImplementation(capabilityCheck);
+
+    // Forging: the side-effecting step takes its output from the test case.
+    const forged = await callTool(host.orchestrator, 'forge_tool', NOTIFY_AND_ECHO, {
+      personaCapabilities: ['messaging'],
+    });
+    expect(forged.isError).toBeFalsy();
+    expect(sent).toEqual([]);
+    const prompt = String(host.judge.mock.calls[0][1]);
+    expect(prompt).toContain('wouldRun');
+    expect(prompt).toContain('sent: hi');
+
+    // A test case that reaches that step without an output refuses the forge.
+    const missingOutput = await callTool(
+      host.orchestrator,
+      'forge_tool',
+      { ...NOTIFY_AND_ECHO, name: 'notify_again', testCases: [{ input: { text: 'hi' } }] },
+      { personaCapabilities: ['messaging'] },
+    );
+    expect(missingOutput.isError).toBe(true);
+    expect(String(missingOutput.errorDetails?.message)).toContain('dry_run_needs_output');
+
+    // Calling: the step is checked as the caller, and asked once, at the step.
+    hitl.requestApproval.mockClear();
+    const called = await callTool(host.orchestrator, 'notify_and_echo', { text: 'hello' }, {
+      personaCapabilities: ['messaging'],
+    });
+    expect(called.isError).toBeFalsy();
+    expect(called.output).toEqual({ text: 'sent: hello' });
+    expect(sent).toEqual([{ text: 'hello' }]);
+    expect(host.permissionManager.isExecutionAllowed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tool: expect.objectContaining({ name: 'send_message' }),
+        personaCapabilities: ['messaging'],
+      }),
+    );
+    expect(hitl.requestApproval).toHaveBeenCalledTimes(1);
+    expect((hitl.requestApproval.mock.calls[0][0] as PendingAction).context).toMatchObject({
+      toolName: 'send_message',
+    });
+
+    // A caller without the capability is refused at the step; nothing is sent.
+    const refused = await callTool(host.orchestrator, 'notify_and_echo', { text: 'nope' }, {
+      personaCapabilities: [],
+    });
+    expect(refused.isError).toBe(true);
+    expect(String(refused.errorDetails?.message)).toContain('missing capability: messaging');
+    expect(sent).toEqual([{ text: 'hello' }]);
+
+    // The step tool is replaced by one that no longer declares its side effects.
+    await host.orchestrator.registerTool(sendMessageTool(sent, 'unset'));
+    const afterReplace = await callTool(host.orchestrator, 'notify_and_echo', { text: 'again' }, {
+      personaCapabilities: ['messaging'],
+    });
+    expect(afterReplace.isError).toBe(true);
+    expect(String(afterReplace.errorDetails?.message)).toContain('side_effects_undeclared');
+    const toolId = String((forged.output as { toolId: string }).toolId);
+    expect(readStateRow(db, toolId)).toMatchObject({ state: 'suspended', state_reason: 'step_replaced' });
+    expect(await host.orchestrator.getTool('notify_and_echo')).toBeUndefined();
+
+    // A tool that declares itself again brings the composition back.
+    await host.orchestrator.registerTool(sendMessageTool(sent, true));
+    await vi.waitFor(async () => {
+      expect(await host.orchestrator.getTool('notify_and_echo')).toBeDefined();
+    });
+    expect(readStateRow(db, toolId)).toMatchObject({ state: 'active' });
+  });
+
+  it('a composition stored with a missing step comes back when an extension pack registers that tool', async () => {
+    const registry = new ExtensionRegistry<ITool>(EXTENSION_KIND_TOOL);
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, registry });
+    seedToolRow(db, {
+      id: 'compose-late',
+      name: 'echo_later',
+      mode: 'compose',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 's1', tool: 'late_echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+
+    const summary = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(summary.outcomes).toEqual([
+      { toolId: 'compose-late', name: 'echo_later', state: 'suspended', reason: 'step_missing' },
+    ]);
+
+    // Straight into the registry the executor reads, as a pack does; not through registerTool.
+    await registry.register({ id: 'late_echo', kind: EXTENSION_KIND_TOOL, payload: echoTool('late_echo') });
+
+    await vi.waitFor(async () => {
+      expect(await host.orchestrator.getTool('echo_later')).toBeDefined();
+    });
+    expect((await callTool(host.orchestrator, 'echo_later', { text: 'ok' })).output).toEqual({ text: 'ok' });
+  });
+
+  it('with allowSandboxTools off, stored code tools load suspended and compositions load; turning it on brings them back', async () => {
+    const db = createSqliteAdapter();
+    const off = await makeForgeHost({ db, config: { allowSandboxTools: false }, tools: [echoTool()] });
+    seedToolRow(db, {
+      id: 'raw-1',
+      name: 'double_it',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+    });
+    seedToolRow(db, {
+      id: 'compose-1',
+      name: 'echo_once',
+      mode: 'compose',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 's1', tool: 'echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+
+    const first = await off.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(first.outcomes).toEqual(
+      expect.arrayContaining([
+        { toolId: 'raw-1', name: 'double_it', state: 'suspended', reason: 'sandbox_tools_off' },
+        { toolId: 'compose-1', name: 'echo_once', state: 'active', reason: null },
+      ]),
+    );
+    expect(await off.orchestrator.getTool('double_it')).toBeUndefined();
+
+    // Another process with the flag on: the library's own reason is re-checked.
+    const on = await makeForgeHost({ db, tools: [echoTool()] });
+    const second = await on.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(second.outcomes).toEqual(
+      expect.arrayContaining([{ toolId: 'raw-1', name: 'double_it', state: 'active', reason: null }]),
+    );
+    expect((await callTool(on.orchestrator, 'double_it', { n: 3 })).output).toEqual({ doubled: 6 });
+  });
+
+  it('an engine built directly with a bare callback forges code and refuses to compose; with a gate it composes', async () => {
+    const config: EmergentConfig = { ...DEFAULT_EMERGENT_CONFIG, enabled: true, allowSandboxTools: true };
+    const judge = new EmergentJudge({
+      judgeModel: 'judge',
+      promotionModel: 'judge',
+      generateText: async () => APPROVED_VERDICT,
+    });
+    const context = { agentId: 'agent-1', sessionId: 'sess-1' };
+    const composeRequest: ForgeToolRequest = {
+      name: 'echo_once',
+      description: 'Echoes once.',
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+      implementation: {
+        mode: 'compose',
+        steps: [{ name: 's1', tool: 'echo', inputMapping: { text: '$input.text' } }],
+      },
+      testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'hi' } }],
+    };
+
+    const bare = new EmergentCapabilityEngine({
+      config,
+      composableBuilder: new ComposableToolBuilder(async () => ({ success: true, output: {} })),
+      sandboxForge: new SandboxedToolForge(),
+      judge,
+      registry: new EmergentToolRegistry(config),
+    });
+    const code = await bare.forge(
+      {
+        name: 'double_it',
+        description: 'Doubles a number.',
+        inputSchema: NUMBER_IN,
+        outputSchema: DOUBLED_OUT,
+        implementation: { mode: 'sandbox', code: RAW_DOUBLE, allowlist: [] },
+        testCases: [{ input: { n: 2 }, expectedOutput: { doubled: 4 } }],
+      },
+      context,
+    );
+    expect(code.success).toBe(true);
+    const refused = await bare.forge(composeRequest, context);
+    expect(refused.success).toBe(false);
+    expect(refused.error).toContain('compose_needs_gate');
+
+    const tools = new Map<string, ITool>([['echo', echoTool()]]);
+    const gated = new EmergentCapabilityEngine({
+      config,
+      composableBuilder: new ComposableToolBuilder(createStepGate({ resolve: (name) => tools.get(name) })),
+      sandboxForge: new SandboxedToolForge(),
+      judge,
+      registry: new EmergentToolRegistry(config),
+    });
+    const composed = await gated.forge(composeRequest, context);
+    expect(composed.success).toBe(true);
+    const callContext: ToolExecutionContext = {
+      gmiId: 'gmi-1',
+      personaId: 'persona-1',
+      userContext: { userId: 'user-1' } as ToolExecutionContext['userContext'],
+    };
+    const run = await gated.createExecutableTool(composed.tool!).execute({ text: 'hello' }, callContext);
+    expect(run.output).toEqual({ text: 'hello' });
+  });
+
+  it('a workflow step meets the rule at create, and the permission check and approval when it runs', async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const hitl = approvingHitl();
+    const workflow = {
+      action: 'create',
+      name: 'notify',
+      description: 'Sends a note.',
+      steps: [{ tool: 'send_message', args: { text: '$input' } }],
+    };
+
+    const strict = await makeForgeHost({
+      selfImprovement: true,
+      tools: [sendMessageTool(sent)],
+      hitlManager: hitl.manager,
+      orchestratorConfig: { hitl: { enabled: true } },
+    });
+    const refused = await callTool(strict.orchestrator, 'create_workflow', workflow, {
+      personaCapabilities: ['messaging'],
+      correlationId: 'wf-strict',
+    });
+    expect(refused.isError).toBe(true);
+    expect(String(refused.errorDetails?.message)).toContain('step_not_chainable');
+
+    const listed = await makeForgeHost({
+      selfImprovement: true,
+      tools: [sendMessageTool(sent)],
+      hitlManager: hitl.manager,
+      orchestratorConfig: { hitl: { enabled: true } },
+      config: { compose: { sideEffectingTools: ['send_message'] } },
+    });
+    const created = await callTool(listed.orchestrator, 'create_workflow', workflow, {
+      personaCapabilities: ['messaging'],
+      correlationId: 'wf-listed',
+    });
+    expect(created.isError).toBeFalsy();
+
+    hitl.requestApproval.mockClear();
+    const run = await callTool(
+      listed.orchestrator,
+      'create_workflow',
+      { action: 'run', workflowId: (created.output as { workflowId: string }).workflowId, input: 'hello' },
+      { personaCapabilities: ['messaging'], correlationId: 'wf-listed' },
+    );
+    expect(run.isError).toBeFalsy();
+    expect(sent).toEqual([{ text: 'hello' }]);
+    expect(listed.permissionManager.isExecutionAllowed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tool: expect.objectContaining({ name: 'send_message' }),
+        personaCapabilities: ['messaging'],
+      }),
+    );
+    // create_workflow has side effects of its own, so its run call is asked; the step is asked at the step.
+    expect(
+      hitl.requestApproval.mock.calls.map((call) => (call[0] as PendingAction).context.toolName),
+    ).toEqual(['create_workflow', 'send_message']);
+  });
+
+  it('a step tool replaced after it was checked is not run, and the composition is checked again at once', async () => {
+    const first: Array<Record<string, unknown>> = [];
+    const second: Array<Record<string, unknown>> = [];
+    const db = createSqliteAdapter();
+    let host: ForgeHost | undefined;
+    let swapDuringApproval = false;
+    const requestApproval = vi.fn(async (action: PendingAction) => {
+      if (swapDuringApproval && action.context.toolName === 'send_message' && host) {
+        // Another registration under the name lands while the approval is pending.
+        await host.orchestrator.registerTool(sendMessageTool(second, true));
+      }
+      return { actionId: action.actionId, approved: true, decidedBy: 'test', decidedAt: new Date() };
+    });
+    host = await makeForgeHost({
+      db,
+      tools: [sendMessageTool(first), echoTool()],
+      hitlManager: { requestApproval } as unknown as IHumanInteractionManager,
+      orchestratorConfig: { hitl: { enabled: true } },
+      config: { compose: { sideEffectingTools: ['send_message'] } },
+    });
+    const forged = await callTool(host.orchestrator, 'forge_tool', NOTIFY_AND_ECHO, {
+      personaCapabilities: ['messaging'],
+    });
+    expect(forged.isError).toBeFalsy();
+
+    swapDuringApproval = true;
+    const called = await callTool(host.orchestrator, 'notify_and_echo', { text: 'hello' }, {
+      personaCapabilities: ['messaging'],
+    });
+    swapDuringApproval = false;
+
+    expect(called.isError).toBe(true);
+    expect(String(called.errorDetails?.message)).toContain('step_replaced');
+    expect(first).toEqual([]);
+    expect(second).toEqual([]);
+    // The replacement fits the rule, so the composition is checked again and back.
+    const toolId = String((forged.output as { toolId: string }).toolId);
+    expect(readStateRow(db, toolId)).toMatchObject({ state: 'active' });
+    const again = await callTool(host.orchestrator, 'notify_and_echo', { text: 'again' }, {
+      personaCapabilities: ['messaging'],
+    });
+    expect(again.output).toEqual({ text: 'sent: again' });
+    expect(first).toEqual([]);
+    expect(second).toEqual([{ text: 'again' }]);
+  });
+
+  it('a stored chain of compositions loads in any row order', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, tools: [echoTool()], config: { compose: { sideEffectingTools: ['middle_c'] } } });
+    const composition = (id: string, name: string, step: string, createdAt: number) => {
+      seedToolRow(db, {
+        id,
+        name,
+        mode: 'compose',
+        source: JSON.stringify({ mode: 'compose', steps: [{ name: 's', tool: step, inputMapping: { text: '$input.text' } }] }),
+        inputSchema: TEXT_IN,
+        outputSchema: TEXT_OUT,
+      });
+      db.raw.prepare('UPDATE agentos_emergent_tools SET created_at = ? WHERE id = ?').run(createdAt, id);
+    };
+    // Outer first: each step's composition is stored after the one that chains it.
+    composition('c-outer', 'outer_c', 'middle_c', 1_700_000_000_001);
+    composition('c-middle', 'middle_c', 'inner_c', 1_700_000_000_002);
+    composition('c-inner', 'inner_c', 'echo', 1_700_000_000_003);
+
+    const summary = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+
+    expect(summary.outcomes).toEqual([
+      { toolId: 'c-outer', name: 'outer_c', state: 'active', reason: null },
+      { toolId: 'c-middle', name: 'middle_c', state: 'active', reason: null },
+      { toolId: 'c-inner', name: 'inner_c', state: 'active', reason: null },
+    ]);
+    expect((await callTool(host.orchestrator, 'outer_c', { text: 'deep' })).output).toEqual({ text: 'deep' });
+  });
+
+  it("a nested composition's refusal suspends that composition only", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, tools: [echoTool('base')] });
+    const inner = await callTool(host.orchestrator, 'forge_tool', composeOver('inner_echo', 'base'));
+    expect(inner.isError).toBeFalsy();
+    const outer = await callTool(
+      host.orchestrator,
+      'forge_tool',
+      composeOver('outer_echo', 'inner_echo', {
+        testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'hi' }, stepOutputs: { s: { text: 'hi' } } }],
+      }),
+    );
+    expect(outer.isError).toBeFalsy();
+
+    // The inner composition's own step tool goes away.
+    await host.orchestrator.unregisterTool('base');
+    const called = await callTool(host.orchestrator, 'outer_echo', { text: 'x' });
+
+    expect(called.isError).toBe(true);
+    const innerId = String((inner.output as { toolId: string }).toolId);
+    const outerId = String((outer.output as { toolId: string }).toolId);
+    expect(readStateRow(db, innerId)).toMatchObject({ state: 'suspended', state_reason: 'step_missing' });
+    expect(readStateRow(db, outerId)).toMatchObject({ state: 'active' });
+  });
+
+  it('a workflow step runs the instance its check resolved, never a replacement registered meanwhile', async () => {
+    const replacementCalls: Array<Record<string, unknown>> = [];
+    const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()] });
+    let swapped = false;
+    host.permissionManager.isExecutionAllowed.mockImplementation(async (ctx: PermissionCheckContext) => {
+      if (!swapped && ctx.tool.name === 'echo') {
+        swapped = true;
+        // A tool with side effects takes the name while the step's check is awaited.
+        await host.orchestrator.registerTool({ ...sendMessageTool(replacementCalls, true), name: 'echo', requiredCapabilities: [] });
+      }
+      return { isAllowed: true };
+    });
+    const workflowTool = await host.orchestrator.getTool('create_workflow');
+    const caller: ToolExecutionContext = {
+      gmiId: 'gmi-test',
+      personaId: 'persona-test',
+      personaCapabilities: [],
+      userContext: { userId: 'user-test' } as ToolExecutionContext['userContext'],
+      correlationId: 'wf-swap',
+    };
+    const created = await workflowTool!.execute(
+      { action: 'create', name: 'echo_flow', description: 'Echoes.', steps: [{ tool: 'echo', args: { text: '$input' } }] },
+      caller,
+    );
+    expect(created.success).toBe(true);
+
+    const run = await workflowTool!.execute(
+      { action: 'run', workflowId: (created.output as { workflowId: string }).workflowId, input: 'hi' },
+      caller,
+    );
+
+    expect(run.success).toBe(false);
+    expect(run.error).toContain('step_replaced');
+    expect(replacementCalls).toEqual([]);
+  });
+
+  it('an approval that arrives after a workflow step expired starts nothing', async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    let releaseApproval!: () => void;
+    const approvalHeld = new Promise<void>((resolve) => {
+      releaseApproval = resolve;
+    });
+    const requestApproval = vi.fn(async (action: PendingAction) => {
+      if (action.context.toolName === 'send_message') {
+        await approvalHeld;
+      }
+      return { actionId: action.actionId, approved: true, decidedBy: 'test', decidedAt: new Date() };
+    });
+    const host = await makeForgeHost({
+      selfImprovement: true,
+      tools: [sendMessageTool(sent)],
+      hitlManager: { requestApproval } as unknown as IHumanInteractionManager,
+      orchestratorConfig: { hitl: { enabled: true } },
+      config: { compose: { sideEffectingTools: ['send_message'] } },
+    });
+    const workflowTool = await host.orchestrator.getTool('create_workflow');
+    expect(workflowTool).toBeDefined();
+    const caller: ToolExecutionContext = {
+      gmiId: 'gmi-test',
+      personaId: 'persona-test',
+      personaCapabilities: ['messaging'],
+      userContext: { userId: 'user-test' } as ToolExecutionContext['userContext'],
+      correlationId: 'wf-late',
+    };
+    const created = await workflowTool!.execute(
+      {
+        action: 'create',
+        name: 'notify',
+        description: 'Sends a note.',
+        steps: [{ tool: 'send_message', args: { text: '$input' } }],
+      },
+      caller,
+    );
+    expect(created.success).toBe(true);
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const running = workflowTool!.execute(
+        { action: 'run', workflowId: (created.output as { workflowId: string }).workflowId, input: 'hello' },
+        caller,
+      );
+      // Past the step's limit while its approval is still pending.
+      await vi.advanceTimersByTimeAsync(31_000);
+      const run = await running;
+
+      expect(run.success).toBe(false);
+      expect(run.error).toContain('timed out');
+      expect((run.output as { stepResults: unknown[] }).stepResults).toEqual([
+        { status: 'expired', effect: 'unknown' },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // The approval arrives late: the step's run was revoked, so nothing starts.
+    releaseApproval();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(requestApproval).toHaveBeenCalledTimes(1);
+    expect(sent).toEqual([]);
+  });
+
+  it('a nested composition is not run while forging, and a composition that reaches itself is refused', async () => {
+    const host = await makeForgeHost({
+      tools: [echoTool()],
+      config: { compose: { sideEffectingTools: ['loop_b'] } },
+    });
+
+    const echoTwice = {
+      name: 'echo_twice',
+      description: 'Echoes twice.',
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+      implementation: {
+        mode: 'compose',
+        steps: [
+          { name: 'a', tool: 'echo', inputMapping: { text: '$input.text' } },
+          { name: 'b', tool: 'echo', inputMapping: { text: '$prev.text' } },
+        ],
+      },
+      testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'hi' } }],
+    };
+    expect((await callTool(host.orchestrator, 'forge_tool', echoTwice)).isError).toBeFalsy();
+
+    // A step that is itself a composition takes its output from the test case.
+    const noOutput = await callTool(host.orchestrator, 'forge_tool', composeOver('wrap_echo', 'echo_twice'));
+    expect(noOutput.isError).toBe(true);
+    expect(String(noOutput.errorDetails?.message)).toContain('dry_run_needs_output');
+
+    host.judge.mockClear();
+    const withOutput = await callTool(
+      host.orchestrator,
+      'forge_tool',
+      composeOver('wrap_echo', 'echo_twice', {
+        testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'hi' }, stepOutputs: { s: { text: 'hi' } } }],
+      }),
+    );
+    expect(withOutput.isError).toBeFalsy();
+    expect(String(host.judge.mock.calls[0][1])).toContain('"nested":true');
+    // At run time the nested composition runs for real.
+    expect((await callTool(host.orchestrator, 'wrap_echo', { text: 'yo' })).output).toEqual({ text: 'yo' });
+
+    // loop_a over echo; loop_b over loop_a; a new loop_a over loop_b reaches itself.
+    expect((await callTool(host.orchestrator, 'forge_tool', composeOver('loop_a', 'echo'))).isError).toBeFalsy();
+    expect(
+      (
+        await callTool(
+          host.orchestrator,
+          'forge_tool',
+          composeOver('loop_b', 'loop_a', {
+            testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'hi' }, stepOutputs: { s: { text: 'hi' } } }],
+          }),
+        )
+      ).isError,
+    ).toBeFalsy();
+    host.judge.mockClear();
+    const cycle = await callTool(
+      host.orchestrator,
+      'forge_tool',
+      composeOver('loop_a', 'loop_b', {
+        testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'hi' }, stepOutputs: { s: { text: 'hi' } } }],
+      }),
+    );
+    expect(cycle.isError).toBe(true);
+    expect(String(cycle.errorDetails?.message)).toContain('step_cycle');
+    expect(host.judge).not.toHaveBeenCalled();
+  });
+
+  it("a composition's test steps run as the forging caller", async () => {
+    const host = await makeForgeHost({ tools: [readTool()] });
+    host.permissionManager.isExecutionAllowed.mockImplementation(capabilityCheck);
+
+    const reader = await callTool(host.orchestrator, 'forge_tool', composeOver('read_twice', 'read_it'), {
+      personaCapabilities: ['reading'],
+    });
+    expect(reader.isError).toBeFalsy();
+    expect(host.permissionManager.isExecutionAllowed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tool: expect.objectContaining({ name: 'read_it' }),
+        personaCapabilities: ['reading'],
+      }),
+    );
+
+    // Without the capability the test step is refused, and the judge sees why.
+    host.judge.mockClear();
+    await callTool(host.orchestrator, 'forge_tool', composeOver('read_again', 'read_it'), {
+      personaCapabilities: [],
+    });
+    expect(String(host.judge.mock.calls[0][1])).toContain('missing capability: reading');
+
+    // An engine built directly, forging without the caller, asks for it.
+    const config: EmergentConfig = { ...DEFAULT_EMERGENT_CONFIG, enabled: true };
+    const tools = new Map<string, ITool>([['read_it', readTool()]]);
+    const direct = new EmergentCapabilityEngine({
+      config,
+      composableBuilder: new ComposableToolBuilder(
+        createStepGate({ resolve: (name) => tools.get(name), permissionManager: { isExecutionAllowed: capabilityCheck } }),
+      ),
+      sandboxForge: new SandboxedToolForge(),
+      judge: new EmergentJudge({ judgeModel: 'judge', promotionModel: 'judge', generateText: async () => APPROVED_VERDICT }),
+      registry: new EmergentToolRegistry(config),
+    });
+    const withoutCaller = await direct.forge(
+      composeOver('read_direct', 'read_it') as unknown as ForgeToolRequest,
+      { agentId: 'agent-1', sessionId: 'sess-1' },
+    );
+    expect(withoutCaller.success).toBe(false);
+    expect(withoutCaller.error).toContain('caller_context_required');
+  });
+
+  it("a composed step that is another agent's tool is refused as the caller", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, config: { compose: { sideEffectingTools: ['double_it'] } } });
+    seedToolRow(db, {
+      id: 'agent-a-1',
+      name: 'double_it',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      tier: 'agent',
+      createdBy: 'agent-a',
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+    });
+    const loaded = await host.engine.loadPersistedTools({ tiers: ['agent'], agentId: 'agent-a' });
+    expect(loaded.outcomes).toEqual([{ toolId: 'agent-a-1', name: 'double_it', state: 'active', reason: null }]);
+
+    const forged = await callTool(
+      host.orchestrator,
+      'forge_tool',
+      {
+        name: 'double_via',
+        description: 'Doubles through the stored tool.',
+        inputSchema: NUMBER_IN,
+        outputSchema: DOUBLED_OUT,
+        implementation: { mode: 'compose', steps: [{ name: 'd', tool: 'double_it', inputMapping: { n: '$input.n' } }] },
+        testCases: [{ input: { n: 2 }, expectedOutput: { doubled: 4 }, stepOutputs: { d: { doubled: 4 } } }],
+      },
+      { personaId: 'agent-a' },
+    );
+    expect(forged.isError).toBeFalsy();
+
+    const asOther = await callTool(host.orchestrator, 'double_via', { n: 2 }, { personaId: 'agent-b' });
+    expect(asOther.isError).toBe(true);
+    expect(String(asOther.errorDetails?.message)).toContain('belongs to agent agent-a');
+
+    const asOwner = await callTool(host.orchestrator, 'double_via', { n: 2 }, { personaId: 'agent-a' });
+    expect(asOwner.output).toEqual({ doubled: 4 });
+  });
+});

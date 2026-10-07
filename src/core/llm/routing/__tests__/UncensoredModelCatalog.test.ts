@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
+  MATURE_TEXT_RANKING,
+  PRIVATE_ADULT_TEXT_RANKING,
+  canonicalCapability,
+  catalogEntryHasCapability,
   createUncensoredModelCatalog,
+  findCatalogTextModel,
   type UncensoredModelCatalog,
 } from '../UncensoredModelCatalog';
 
@@ -193,5 +198,86 @@ describe('UncensoredModelCatalog', () => {
     const hermes = catalog.getTextModels().find((m) => m.modelId === 'nousresearch/hermes-3-llama-3.1-70b');
     expect(hermes).toBeDefined();
     expect(hermes!.capabilities).not.toContain('tool_use');
+  });
+});
+
+const LLAMA = 'meta-llama/llama-3.3-70b-instruct';
+const MAGNUM = 'anthracite-org/magnum-v4-72b';
+const HERMES = 'nousresearch/hermes-3-llama-3.1-70b';
+const EIGHT_B = 'meta-llama/llama-3.1-8b-instruct';
+const ids = (entries: Array<{ modelId: string }>) => entries.map((e) => e.modelId);
+
+describe('getFallbackLadder', () => {
+  const catalog = createUncensoredModelCatalog();
+
+  it('ranks the mature tier llama-3.3-70b, magnum, hermes-3-70b, 8B', () => {
+    expect(ids(catalog.getFallbackLadder('mature'))).toEqual([LLAMA, MAGNUM, HERMES, EIGHT_B]);
+  });
+
+  it('ranks the private-adult tier magnum first', () => {
+    expect(ids(catalog.getFallbackLadder('private-adult'))).toEqual([MAGNUM, LLAMA, HERMES, EIGHT_B]);
+  });
+
+  it('keeps only the models that permit a content intent', () => {
+    expect(ids(catalog.getFallbackLadder('private-adult', { contentIntent: 'erotic' }))).toEqual([MAGNUM, HERMES]);
+  });
+
+  it('has no ladder for safe and standard', () => {
+    expect(catalog.getFallbackLadder('safe')).toEqual([]);
+    expect(catalog.getFallbackLadder('standard')).toEqual([]);
+  });
+
+  it('never lists a removed model', () => {
+    for (const tier of ['mature', 'private-adult'] as const) {
+      expect(ids(catalog.getFallbackLadder(tier))).not.toContain('nousresearch/hermes-3-llama-3.1-405b');
+    }
+  });
+
+  it('ranks every catalog text model on both tiers, and only catalog models', () => {
+    const textIds = ids(catalog.getTextModels()).sort();
+    expect([...MATURE_TEXT_RANKING].sort()).toEqual(textIds);
+    expect([...PRIVATE_ADULT_TEXT_RANKING].sort()).toEqual(textIds);
+  });
+});
+
+describe('getPreferredTextModel is the first ladder entry', () => {
+  const catalog = createUncensoredModelCatalog();
+
+  it.each([
+    ['mature', undefined, LLAMA],
+    ['private-adult', undefined, MAGNUM],
+    ['mature', 'erotic', MAGNUM],
+    ['private-adult', 'erotic', MAGNUM],
+    ['mature', 'violent', LLAMA],
+  ] as const)('%s / %s -> %s', (tier, intent, expected) => {
+    expect(catalog.getPreferredTextModel(tier, intent)?.modelId).toBe(expected);
+    expect(catalog.getPreferredTextModel(tier, intent)).toBe(catalog.getFallbackLadder(tier, { contentIntent: intent })[0]);
+  });
+});
+
+describe('context windows and capabilities', () => {
+  const catalog = createUncensoredModelCatalog();
+
+  it('lists the context window of every text model', () => {
+    const windows = Object.fromEntries(catalog.getTextModels().map((e) => [e.modelId, e.contextWindow]));
+    expect(windows).toEqual({ [MAGNUM]: 32_768, [LLAMA]: 131_072, [HERMES]: 131_072, [EIGHT_B]: 131_072 });
+  });
+
+  it('reads function_calling and tool_use as one capability', () => {
+    expect(canonicalCapability('function_calling')).toBe('tool_use');
+    expect(canonicalCapability('json_mode')).toBe('json_mode');
+    const llama = findCatalogTextModel(LLAMA, 'openrouter')!;
+    const magnum = findCatalogTextModel(MAGNUM, 'openrouter')!;
+    expect(catalogEntryHasCapability(llama, 'function_calling')).toBe(true);
+    expect(catalogEntryHasCapability(llama, 'tool_use')).toBe(true);
+    expect(catalogEntryHasCapability(magnum, 'function_calling')).toBe(false);
+    expect(catalogEntryHasCapability(magnum, 'json_mode')).toBe(true);
+  });
+
+  it('finds a text model by id and provider', () => {
+    expect(findCatalogTextModel(MAGNUM, 'openrouter')?.contextWindow).toBe(32_768);
+    expect(findCatalogTextModel(MAGNUM)?.modelId).toBe(MAGNUM);
+    expect(findCatalogTextModel(MAGNUM, 'openai')).toBeUndefined();
+    expect(findCatalogTextModel('openai/gpt-5.6-sol', 'openrouter')).toBeUndefined();
   });
 });

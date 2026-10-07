@@ -60,7 +60,11 @@ export interface ForgeToolInput extends Record<string, any> {
    * One or more test cases for the judge to evaluate.
    * Each has an `input` object and optional `expectedOutput`.
    */
-  testCases: Array<{ input: Record<string, unknown>; expectedOutput?: unknown }>;
+  testCases: Array<{
+    input: Record<string, unknown>;
+    expectedOutput?: unknown;
+    stepOutputs?: Record<string, unknown>;
+  }>;
 }
 
 // ============================================================================
@@ -196,6 +200,12 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
           properties: {
             input: { type: 'object' },
             expectedOutput: {},
+            stepOutputs: {
+              type: 'object',
+              description:
+                'For a composition: the output of each step whose tool has side effects, keyed by step name. ' +
+                'Those steps are not executed while the tool is forged.',
+            },
           },
           required: ['input'],
         },
@@ -254,6 +264,8 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
       // an empty string is kept as given.
       agentId: context.personaId ?? 'unknown',
       sessionId: context.correlationId ?? 'unknown',
+      // A composition's test steps run as this caller.
+      caller: context,
     });
 
     return {

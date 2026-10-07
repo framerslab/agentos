@@ -125,9 +125,9 @@ export async function imageToBuffer(input: string | Buffer): Promise<Buffer> {
 /** The standard and URL-safe base64 alphabets of RFC 4648, with optional padding. */
 const BASE64_PATTERN = /^[A-Za-z0-9+/_-]+={0,2}$/;
 
-/** A short, quoted form of `value` for an error message. */
+/** A short, quoted form of `value` for an error message: at most its first 40 characters. */
 function preview(value: string): string {
-  return value.length <= 80
+  return value.length <= 40
     ? JSON.stringify(value)
     : `${JSON.stringify(value.slice(0, 40))}... (${value.length} characters)`;
 }
@@ -159,10 +159,31 @@ function hasImageSignature(bytes: Buffer): boolean {
   );
 }
 
-/** True when `bytes` are SVG markup: `<svg`, or an XML declaration followed by `<svg`. */
+/**
+ * The XML prolog items that may come before the root element: the XML
+ * declaration and other processing instructions, comments, and a DOCTYPE
+ * (internal subset included), each with the whitespace before it.
+ *
+ * A DOCTYPE's quoted literals and its subset's comments are read whole, so a
+ * `>` in a system identifier or a `]>` in an entity value does not end it.
+ * Every part has one way to match (a subset comment ends at its first `-->`),
+ * which keeps a failed match linear in the input: a lazy `[\s\S]*?` comment
+ * body inside the repeated subset could end at any later `-->` and backtrack
+ * exponentially on input that has many comments and no closing `]`.
+ */
+const XML_PROLOG_ITEM =
+  /^\s*(?:<\?[\s\S]*?\?>|<!--[\s\S]*?-->|<!DOCTYPE(?:[^>["']|"[^"]*"|'[^']*')*(?:\[(?:<!--(?:[^-]|-(?!->))*-->|"[^"]*"|'[^']*'|<(?!!--)|[^\]"'<])*\])?\s*>)/i;
+
+/**
+ * True when `bytes` are SVG markup: after the XML prolog (declaration,
+ * comments, DOCTYPE), the root element is `<svg>`.
+ */
 function isSvgText(bytes: Buffer): boolean {
-  const head = bytes.subarray(0, 1024).toString('utf8').replace(/^\uFEFF/, '').trimStart();
-  return head.startsWith('<svg') || (head.startsWith('<?xml') && head.includes('<svg'));
+  let head = bytes.subarray(0, 4096).toString('utf8').replace(/^\uFEFF/, '');
+  for (let item = XML_PROLOG_ITEM.exec(head); item; item = XML_PROLOG_ITEM.exec(head)) {
+    head = head.slice(item[0].length);
+  }
+  return /^\s*<svg[\s/>]/.test(head);
 }
 
 /**
