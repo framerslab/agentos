@@ -38,7 +38,7 @@ import {
   toolFromRow,
   type PersistedSource,
 } from './persisted-source.js';
-import { normalizeAllowlist } from './capabilities.js';
+import { normalizeAllowlist, toSandboxApis } from './capabilities.js';
 import type { ToolCandidate } from './EmergentJudge.js';
 import type { ITool, ToolExecutionContext, ToolExecutionResult } from '../../core/tools/ITool.js';
 import type { PersonalityMutationStore } from './PersonalityMutationStore.js';
@@ -876,7 +876,9 @@ export class EmergentCapabilityEngine {
     const hostTurnedOff = !legacyActive && stored?.state !== 'suspended';
     if ((stored?.state === 'demoted' || hostTurnedOff) && !options.force) {
       const reason = stored?.state === 'demoted' ? stored.reason : 'legacy_inactive';
-      if (stored?.state !== 'demoted') {
+      if (stored?.state === 'demoted') {
+        this.holdStored(toolId, stored);
+      } else {
         await this.registry.setState(toolId, 'demoted', 'legacy_inactive', {
           request: requestToWrite,
           setBy: 'host',
@@ -889,12 +891,16 @@ export class EmergentCapabilityEngine {
     // 2. A suspension the host set is cleared only by the host, whatever its
     //    reason says. One the library set is re-checked below.
     if (stored?.state === 'suspended' && !options.force && stored.setBy === 'host') {
+      // Another process may have set it: this one takes it in and lets go of
+      // the executable, so the suspension holds wherever the tool is loaded.
+      this.holdStored(toolId, stored);
+      await this.unregisterIfLive(toolId);
       return { toolId, name, state: 'suspended', reason: stored.reason };
     }
 
     // 3. Can the source be rebuilt, and may it run under the configuration in force?
     let implementation: ToolImplementation | undefined;
-    let refusal: string | null;
+    let refusal: string | null = null;
     if (source.format === 'unreadable') {
       refusal = 'source_unreadable';
     } else if (source.format === 'redacted') {
@@ -904,12 +910,24 @@ export class EmergentCapabilityEngine {
       const held = this.registry.get(toolId)?.implementation;
       if (held && held.mode === 'sandbox' && held.code.trim() !== '') {
         implementation = held;
-        refusal = this.refusalFor(implementation);
       } else {
         refusal = 'source_not_persisted';
       }
     } else {
       implementation = source.implementation;
+    }
+    if (
+      implementation &&
+      implementation.mode === 'sandbox' &&
+      source.format === 'raw-code' &&
+      request?.kind === 'sandbox'
+    ) {
+      // The request is what the tool was granted. For a raw-code row the
+      // code's text was read only to derive a request where none was stored;
+      // a stored request says what the code may reach whatever its text shows.
+      implementation = { ...implementation, allowlist: toSandboxApis(request.capabilities) };
+    }
+    if (implementation && !refusal) {
       refusal = this.refusalFor(implementation);
     }
 
@@ -930,7 +948,9 @@ export class EmergentCapabilityEngine {
     // 4. Active: the state row first, so a write that fails leaves the tool
     //    off; then into memory without rewriting the row; then into the executor.
     const tool = candidate.buildTool(implementation);
-    if (stored?.state !== 'active' || !requestStored) {
+    // A reactivation always writes: the row may already read active while this
+    // process holds a restriction whose own write failed.
+    if (options.force || stored?.state !== 'active' || !requestStored) {
       await this.registry.setState(toolId, 'active', null, { request: requestToWrite, setBy: 'library' });
     }
     // A suspension or demotion that arrived while the row was being written
@@ -975,6 +995,14 @@ export class EmergentCapabilityEngine {
     const live = this.registry.get(toolId);
     if (live && this.onToolRemoved) {
       await this.onToolRemoved(live);
+    }
+  }
+
+  /** A stored restriction, held in this process too when the tool is live here. */
+  private holdStored(toolId: string, record: ToolStateRecord): void {
+    const live = this.registry.get(toolId);
+    if (live) {
+      this.registry.adopt(live, record);
     }
   }
 

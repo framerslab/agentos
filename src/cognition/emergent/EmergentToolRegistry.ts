@@ -1161,7 +1161,9 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
         created_at, promoted_at, promoted_by, judge_verdicts, confidence_score,
         total_uses, success_count, failure_count, avg_execution_ms, last_used_at,
         is_active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+         COALESCE((SELECT CASE WHEN state = 'active' THEN 1 ELSE 0 END
+                     FROM agentos_emergent_tool_state WHERE tool_id = ?), ?))`,
       [
         tool.id,
         tool.name,
@@ -1185,8 +1187,10 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
         tool.usageStats.lastUsedAt
           ? new Date(tool.usageStats.lastUsedAt).getTime()
           : null,
-        // Never a literal: a rewrite must not turn a suspended tool back on,
-        // and a process that holds no state for the tool keeps its stored flag.
+        // The flag is read from the state row inside the statement, so the row
+        // gets the state as it is when the write runs, whatever happened while
+        // it was prepared; with no state row, the held state, else the stored flag.
+        tool.id,
         isActive,
       ],
     );

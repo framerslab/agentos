@@ -331,7 +331,12 @@ export class ToolOrchestrator implements IToolOrchestrator {
         // Suspending or removing a forged tool takes its executable out of the
         // executor; before this hook was wired the tool stayed callable.
         onToolRemoved: async (tool) => {
-          await this.toolExecutor.unregisterTool(tool.name);
+          // Only this tool's own executable: a later tool of the same name
+          // replaced it in the executor, and that one stays.
+          const current = this.toolExecutor.getTool(tool.name);
+          if (current && current.id === `emergent-tool:${tool.id}`) {
+            await this.toolExecutor.unregisterTool(tool.name);
+          }
         },
       });
 
@@ -953,7 +958,14 @@ export class ToolOrchestrator implements IToolOrchestrator {
   public cleanupEmergentSession(sessionId: string): void {
     if (this.emergentEngine) {
       const removedTools = this.emergentEngine.cleanupSession(sessionId);
-      void Promise.allSettled(removedTools.map((tool) => this.unregisterTool(tool.name)));
+      void Promise.allSettled(
+        removedTools.map((tool) => {
+          const current = this.toolExecutor.getTool(tool.name);
+          return current && current.id === `emergent-tool:${tool.id}`
+            ? this.unregisterTool(tool.name)
+            : Promise.resolve(false);
+        }),
+      );
       console.log(
         `ToolOrchestrator (ID: ${this.orchestratorId}): Cleaned up emergent session "${sessionId}".`
       );

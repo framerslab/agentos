@@ -296,6 +296,119 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
   });
 
+  it('a suspension or a demotion another process stored is taken in at the next load, and the executable goes', async () => {
+    const db = createSqliteAdapter();
+    const hostA = await makeForgeHost({ db });
+    const hostB = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'raw-1',
+      name: 'double_it',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+    });
+    await hostA.engine.loadPersistedTools({ tiers: ['shared'] });
+    await hostB.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect((await callTool(hostA.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
+
+    expect(await hostB.engine.suspendTool('raw-1', 'operator_hold')).toBe(true);
+
+    const again = await hostA.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(again.outcomes).toEqual([
+      { toolId: 'raw-1', name: 'double_it', state: 'suspended', reason: 'operator_hold' },
+    ]);
+    expect(await hostA.orchestrator.getTool('double_it')).toBeUndefined();
+    expect((await callTool(hostA.orchestrator, 'double_it', { n: 2 })).isError).toBe(true);
+
+    // The host clears it on one side; the other takes a demotion in the same way.
+    expect(await hostB.engine.reactivateTool('raw-1')).toMatchObject({ state: 'active' });
+    expect((await hostA.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes[0]).toMatchObject({ state: 'active' });
+    expect((await callTool(hostA.orchestrator, 'double_it', { n: 3 })).output).toEqual({ doubled: 6 });
+    expect(await hostB.engine.demoteTool('raw-1', 'bad output')).toBe(true);
+    const demoted = await hostA.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(demoted.outcomes).toEqual([{ toolId: 'raw-1', name: 'double_it', state: 'demoted', reason: 'bad output' }]);
+    expect(await hostA.orchestrator.getTool('double_it')).toBeUndefined();
+  });
+
+  it("a raw-code row's stored request, not the text of its code, is what the rebuilt tool may reach", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    // The text scan reads `crypto.` only; this code reaches crypto another way,
+    // and the request stored when it was forged says what it was granted.
+    const code = 'function execute(input) { const c = crypto; return { id: c.randomUUID() }; }';
+    seedToolRow(db, { id: 'raw-3', name: 'make_id', mode: 'sandbox', source: code, outputSchema: ID_OUT });
+    seedStateRow(db, {
+      toolId: 'raw-3',
+      state: 'active',
+      setBy: 'library',
+      requestJson: '{"kind":"sandbox","capabilities":["crypto"]}',
+    });
+
+    const summary = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+
+    expect(summary.outcomes).toEqual([{ toolId: 'raw-3', name: 'make_id', state: 'active', reason: null }]);
+    const made = await callTool(host.orchestrator, 'make_id', {});
+    expect(made.isError).toBeFalsy();
+    expect(typeof made.output.id).toBe('string');
+    // The stored request is untouched by the load.
+    expect(readStateRow(db, 'raw-3')?.request).toEqual({ kind: 'sandbox', capabilities: ['crypto'] });
+  });
+
+  it('a reactivation recovers a tool whose suspension failed to store', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'raw-1',
+      name: 'double_it',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+    });
+    await host.engine.loadPersistedTools({ tiers: ['shared'] });
+
+    db.failNext('INSERT INTO agentos_emergent_tool_state');
+    await expect(host.engine.suspendTool('raw-1', 'operator_hold')).rejects.toThrow('simulated storage failure');
+    // Held off in this process while the row still reads active.
+    expect((await callTool(host.orchestrator, 'double_it', { n: 1 })).isError).toBe(true);
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active' });
+
+    expect(await host.engine.reactivateTool('raw-1')).toMatchObject({ state: 'active' });
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
+  });
+
+  it('demoting a tool leaves a later tool of the same name callable', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    const first = await callTool(host.orchestrator, 'forge_tool', {
+      name: 'make_id',
+      description: 'Returns a fresh identifier.',
+      inputSchema: { type: 'object', properties: {} },
+      outputSchema: ID_OUT,
+      implementation: { mode: 'sandbox', code: RAW_ID, allowlist: ['crypto'] },
+      testCases: [{ input: {}, expectedOutput: {} }],
+    });
+    const second = await callTool(host.orchestrator, 'forge_tool', {
+      name: 'make_id',
+      description: 'Returns a fixed identifier.',
+      inputSchema: { type: 'object', properties: {} },
+      outputSchema: ID_OUT,
+      implementation: { mode: 'sandbox', code: "function execute(input) { return { id: 'fixed-id' }; }", allowlist: [] },
+      testCases: [{ input: {}, expectedOutput: { id: 'fixed-id' } }],
+    });
+    expect(first.isError).toBeFalsy();
+    expect(second.isError).toBeFalsy();
+    const older = String(first.output.toolId);
+
+    // The newer tool holds the name in the executor; demoting the older one
+    // must not take the newer one's executable away.
+    expect(await host.engine.demoteTool(older, 'superseded')).toBe(true);
+    const made = await callTool(host.orchestrator, 'make_id', {});
+    expect(made.isError).toBeFalsy();
+    expect(made.output).toEqual({ id: 'fixed-id' });
+  });
+
   it('a row whose input_schema does not read loads suspended as unreadable instead of accepting any input', async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db });
