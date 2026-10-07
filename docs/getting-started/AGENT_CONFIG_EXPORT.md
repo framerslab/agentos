@@ -41,9 +41,9 @@ API keys, tokens, passwords, and credentials inside URLs become
 becomes an `<<instance>>` marker, and functions are left out of JSON and
 YAML. Import takes the missing values back through two maps keyed by JSON
 Pointer: `secrets` for redacted strings and `values` for objects. A redacted
-provider key needs no entry: it resolves from the importing process's
-default provider or environment. Sessions, conversation history and usage
-totals are not part of the export.
+key beside a model provider needs no entry, except a roster seat's own: it
+resolves from the importing process's default provider or environment.
+Sessions, conversation history and usage totals are not part of the export.
 
 ---
 
@@ -148,8 +148,9 @@ Both take the same arguments as `exportAgentConfig()` and build the same
 document in its serialized form, written with
 `JSON.stringify(document, null, 2)` and `YAML.stringify(document)` from the
 [`yaml`](https://www.npmjs.com/package/yaml) package. Functions are left
-out, and a class instance is written as an `<<instance>>` marker even with
-`redactSecrets: false`, since an instance cannot be serialized.
+out (an array keeps `null` in a function's place), and a class instance is
+written as an `<<instance>>` marker even with `redactSecrets: false`, since
+an instance cannot be serialized.
 
 ### agent.export() and agent.exportJSON()
 
@@ -193,15 +194,22 @@ console.log(Object.keys(teamDoc.agents ?? {})); // [ 'researcher', 'writer' ]
 1. Validates the document with `validateAgentExport()`. When that fails it
    throws `Invalid agent export config: ` followed by the errors joined with
    `; `.
-2. Copies the document through JSON. The document you pass is not changed.
+2. Copies the document in its serialized form, as JSON and YAML export
+   writes it: functions are left out (`null` in an array) and every class
+   instance becomes an `<<instance>>` marker. The document you pass is not
+   changed, and a document with a cycle imports: the copy keeps the cycle
+   and import reads each object once.
 3. Drops `config.agents`: an agency is built from the `agents` copy of the
    roster.
-4. Puts each `values` entry at its path.
+4. Puts each `values` entry at its path. An entry of `undefined` or `null`
+   puts nothing back.
 5. Throws if a roster seat still reads `{ prebuilt: true }`.
-6. Fills each redacted string that has a `secrets` entry, drops a redacted
-   provider key, and drops a redacted provider `baseUrl` when the importing
-   process supplies a URL of its own. It collects every value it cannot
-   restore and, if any remain, throws one error that lists every path.
+6. Fills each redacted value that has a non-empty string in `secrets`, drops
+   a redacted key beside a model provider agentos knows, and drops such a
+   provider's redacted `baseUrl` when the importing process supplies a URL
+   of its own. A roster seat's own key and URL are never dropped. It
+   collects every value it cannot restore and, if any remain, throws one
+   error that lists every path.
 7. Calls `agency()` with the config plus `agents`, `strategy`, `adaptive` and
    `maxRounds` when `type` is `'agency'`, or `agent()` with the config.
 
@@ -243,7 +251,7 @@ structure without importing it, and returns `{ valid, errors }`.
 | `exportedAt` | always | The time of the export as an ISO 8601 string (`new Date().toISOString()`). |
 | `type` | always | `"agency"` for an instance built by `agency()` or imported from an agency export, `"agent"` otherwise. |
 | `config` | always | A copy of the options object given to `agent()` or `agency()`, redacted unless `redactSecrets` is `false`. An agency's copy holds its roster too, under `config.agents`. |
-| `agents` | agency | The roster again, keyed by seat name: each seat's config, redacted the same way, or `{ prebuilt: true }` for an `Agent` instance placed in the roster. Import builds the agency from this copy. |
+| `agents` | agency | The roster again, keyed by seat name: each seat's config, redacted, or `{ prebuilt: true }` for an `Agent` instance placed in the roster. Import builds the agency from this copy. |
 | `strategy` | agency | As given to `agency()`. JSON and YAML omit it when it was not set. |
 | `adaptive` | agency | As given to `agency()`. JSON and YAML omit it when it was not set. |
 | `maxRounds` | agency | As given to `agency()`. JSON and YAML omit it when it was not set. |
@@ -419,37 +427,38 @@ Every secret string becomes `<<REDACTED>>`.
 ### Secret Property Names
 
 A string is a secret when the name of its property, read as words, ends
-with one of eight words or five word pairs:
+with one of eight words or eleven word pairs:
 
 | Words | Pairs |
 | --- | --- |
-| `token`, `secret`, `password`, `passwd`, `credential`, `credentials`, `authorization`, `cookie` | `api key`, `private key`, `secret key`, `access key`, `auth key` |
+| `token`, `secret`, `password`, `passwd`, `credential`, `credentials`, `authorization`, `cookie` | `api key`, `private key`, `secret key`, `access key`, `auth key`, `encryption key`, `signing key`, `subscription key`, `master key`, `account key`, `role key` |
 
 A name is split into words at camelCase humps, underscores, hyphens, dots
 and spaces, and read in lower case. These names are secrets: `apiKey`,
 `api_key`, `x-api-key`, `ANTHROPIC_API_KEY`, `botToken`, `signing_secret`,
-`secretKey`, `aws_secret_access_key`, `credential`, `Authorization`,
-`dbPassword`, `Cookie`.
+`secretKey`, `aws_secret_access_key`, `encryptionKey`, `serviceRoleKey`,
+`Ocp-Apim-Subscription-Key`, `credential`, `Authorization`, `dbPassword`,
+`Cookie`.
 
-Plurals:
+The plural of a word or a pair counts at the end of any name too: `tokens`,
+`apiKeys`, `botTokens`, `refreshTokens`, `clientSecrets`, `dbPasswords`,
+`sessionCookies`. The exception is a name whose last two words are one of
+these settings and counts: `stop tokens`, `max tokens`, `prompt tokens`,
+`completion tokens`, `total tokens`, `input tokens`, `output tokens`,
+`reasoning tokens`, `thinking tokens`, `cached tokens` and `cache tokens`.
+Such a name is not a secret, so `stopTokens`, `maxTokens` and
+`maxOutputTokens` stay.
 
-- The plural of a pair counts at the end of any name: `apiKeys`,
-  `providerApiKeys`, `privateKeys`.
-- The plural of a single word counts only as the whole name: `tokens`,
-  `secrets`, `passwords`, `cookies`. A longer name that ends in such a plural
-  is a setting: `maxTokens`, `promptTokens` and `stopTokens` stay, and so do
-  `botTokens` and `sessionCookies`.
-- `credentials` is one of the eight words, so it counts at the end of any
-  name: `awsCredentials`.
-
-A name with no word break is also compared with the joined forms of the
-pairs (`apikey`, `privatekey`, `secretkey`, `accesskey`, `authkey`) and with
-the eight words, plurals included. The comparison reads the end of the name:
-`apikey`, `APIKEY`, `xapikey`, `accesstoken` and `clientsecret` are secrets,
-and so is a one-word lower-case `stoptokens`, where `stopTokens` is not.
+Names are also compared without separators. The joined form of a pair
+(`apikey`, `privatekey`, `rolekey` and so on), or its plural, counts at the
+end of any name: `apikey`, `APIKEY`, `x-apikey`, and `openAIAPIKey`, whose
+run of capitals hides the word break, are secrets. The joined form of a
+word, or its plural, counts only for a name that is one word: `accesstoken`
+and `clientsecret` are secrets, `x-accesstoken` is not, and a one-word
+lower-case `stoptokens` is a secret where `stopTokens` is not.
 
 Only strings are redacted. A number, a boolean or `null` stays whatever its
-name.
+name, and an empty string stays empty, since it holds nothing to protect.
 
 ### Secret Containers
 
@@ -458,8 +467,15 @@ the words or pairs, singular or plural, is a secret whatever its own key, at
 any depth, apart from the [kept setting values](#kept-setting-values). The
 container's name is read in lower case without separators:
 `secrets`, `credentials`, `tokens`, `apiKey`, `apiKeys`, `api_keys`,
-`authorization`. A name that only ends with a secret word does not make a
-container.
+`signingKeys`, `authorization`. A name that only ends with a secret word
+does not make a container.
+
+The keys of an object named `agents`, `tools` or `agentAccess` (the
+per-seat map in `rag.agentAccess`) are names the user chose, a seat or a
+tool, so an object or array under one of those keys is never a container:
+a seat named `credentials` keeps its `instructions`, in `config.agents` and
+in the document's `agents` alike, and a tool named `credentials` keeps its
+`description`.
 
 | In the config | Exported as |
 | --- | --- |
@@ -468,6 +484,7 @@ container.
 | `tokens: ['t1']` | `tokens: ['<<REDACTED>>']` |
 | `credentials: { slack: 'xoxb-1' }` | `credentials: { slack: '<<REDACTED>>' }` |
 | `stopTokens: ['###']` | unchanged |
+| `tools: { credentials: { description: 'Look up a login.' } }` | unchanged |
 
 ### Kept Setting Values
 
@@ -492,14 +509,16 @@ words and pairs no value is kept.
 ### What Is Not a Secret
 
 The rule reads property names, not values. These names are not secrets:
-`maxTokens`, `promptTokens`, `stopTokens`, `tokenLimit`, `envKey`,
-`promptCacheKey`, `primaryKey`, `publicKey`, `sessionKey`. Neither are:
+`maxTokens`, `promptTokens`, `completionTokens`, `stopTokens`,
+`tokenLimit`, `maxTokenLimit`, `envKey`, `promptCacheKey`, `primaryKey`,
+`publicKey`, `sessionKey`, `cookieName`, `authorizationHeader`. Neither
+are:
 
 - `key`, `auth` and `passphrase`;
-- a longer name whose last word is a joined form, such as `x-apikey` or
-  `myApikey`, since the joined forms are compared only for a one-word name;
-- a name that ends with a digit (`apiKey2` ends with the word `key2`);
-- a longer name that ends with the plural of a single word (`botTokens`).
+- a longer name whose last word is the joined form of a single word, such
+  as `x-accesstoken`, since a word's joined form counts only for a one-word
+  name;
+- a name that ends with a digit (`apiKey2` ends with the word `key2`).
 
 A secret placed under a name that is not a secret, such as a key pasted
 into `instructions`, is written as it is. Read an export before you share
@@ -525,12 +544,17 @@ text, so a URL with nothing to remove comes back byte for byte:
   property rule (`api_key`, `apikey`, `access_token`, `token`,
   `client_secret`) or is `key`, `sig`, `signature`, `auth` or `password` in
   any case. `key`, `sig`, `signature` and `auth` count only as the whole
-  parameter name, so `X-Amz-Signature` and `cacheKey` stay.
-- A URL under a property whose name ends with the words `webhook url`
-  (`webhookUrl`, `slackWebhookUrl`, `WEBHOOK_URL`) carries its secret in the
-  path. It keeps its origin, its path and query become `/<<REDACTED>>`, and
-  its secret fragment parameters are replaced as on any other URL. A webhook
-  URL with no path and no query
+  parameter name, so `X-Amz-Signature` and `cacheKey` stay. A parameter's
+  name is read percent-decoded and written back as it was:
+  `api%5Fkey=abc` becomes `api%5Fkey=<<REDACTED>>`.
+- A webhook URL carries its secret in the path. A URL is a webhook URL when
+  its property's name is `webhook` or `webhooks`; when the name ends with the
+  words `webhook url` or `web hook url`, or their plurals (`webhookUrl`,
+  `slackWebhookUrl`, `WEBHOOK_URL`, `webHookUrl`, `webhookUrls`); or when it
+  is a `url` or `urls` inside an object named `webhook` or `webhooks`
+  (`slack: { webhook: { url } }`). It keeps its origin, its path and query
+  become `/<<REDACTED>>`, and its secret fragment parameters are replaced as
+  on any other URL. A webhook URL with no path and no query
   (`https://hooks.example` or `https://hooks.example/`) stays as it is.
 - A string under a secret name or inside a secret container is replaced
   whole, URL or not. A URL anywhere else is never blanked whole.
@@ -561,8 +585,9 @@ encrypted backup pipeline.
 - The object form copies plain objects and arrays, keeps functions, and
   keeps class instances by reference: `doc.config.router` is the agent's own
   router.
-- JSON and YAML leave functions out and still write each class instance as
-  an `<<instance>>` marker, since an instance cannot be serialized.
+- JSON and YAML leave functions out (`null` inside an array) and still
+  write each class instance as an `<<instance>>` marker, since an instance
+  cannot be serialized.
 
 ```typescript
 import { agent, exportAgentConfigJSON } from '@framers/agentos';
@@ -605,17 +630,25 @@ by index; a `/` inside a key is written `~1`, and a `~` is written `~0`.
 - An agency's roster is read from `agents`, so a seat's paths begin with
   `/agents/<seat>`. Paths into `config.agents` are never read.
 - A `secrets` entry is the whole value: for a redacted URL, the whole URL.
-  `secrets` fills only strings that hold the placeholder; an entry for any
-  other path, or for a path the document does not have, is ignored.
+  It restores only when it is a non-empty string, and only at a
+  [redacted value](#every-other-redacted-value); an entry for any other
+  path, or for a path the document does not have, is ignored.
 - A `values` entry is put at its path as it is (a function, a class
-  instance, any value), and missing parents are created. A `values` path
-  must start with `/`, or import throws.
+  instance, any value), and missing parents are created. An entry of
+  `undefined` or `null` puts nothing back. Import does not read inside an
+  object it put in through `values`.
+- A `values` path must start with `/` and cannot pass through `__proto__`,
+  `constructor` or `prototype`; import throws otherwise.
 
 ### Provider Keys
 
-An `apiKey` that reads exactly `<<REDACTED>>` in an object that also has a
-string `provider` or `model` is a provider key. With no `secrets` entry,
-import deletes it, and the key resolves on each call as an unset key does:
+An `apiKey` that is exactly `<<REDACTED>>` is a provider key when its
+object names a model provider agentos knows: a `provider` that is one of
+`openai`, `anthropic`, `openrouter`, `gemini`, `groq`, `together`,
+`mistral`, `xai`, `ollama`, `claude-code-cli`, `gemini-cli`, `stability`,
+`replicate`, `stable-diffusion-local`, `bfl` and `fal`, or, with no
+`provider`, a string `model`. With no usable `secrets` entry, import deletes
+it, and the key resolves on each call as an unset key does:
 from the `apiKey` of the `setDefaultProvider()` default when that default
 names no provider or this provider, then from the provider's key variable
 in the importing process's environment (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
@@ -625,20 +658,24 @@ not check that a key resolves; a call that finds none fails when the
 provider needs one. Import never writes the environment's key into the
 config, so a later export of the imported agent has no `apiKey` there.
 
-The rule applies to any object in the document with a string `provider` or
-`model`, such as the top-level config or a roster seat that names its own:
-in a seat with `provider: 'anthropic'`, a redacted
-`/agents/researcher/apiKey` resolves from `ANTHROPIC_API_KEY`. A seat with
-no `provider` or `model` of its own has no provider key by this rule: its
-redacted `apiKey` needs a `secrets` entry, or import throws.
+The rule covers the top-level `/config/apiKey` and any other object shaped
+this way, except a roster seat itself. These keys are listed instead, and
+need a `secrets` entry or import throws:
+
+- A roster seat's own key, `/agents/<seat>/apiKey`, whatever provider the
+  seat names. A seat without a key of its own inherits the agency's, which
+  may belong to another vendor, so import does not drop it.
+- A key beside a provider agentos does not know, such as a search,
+  telephony or vector-store key (`provider: 'serper'`).
 
 ### Provider Base URLs
 
 A `baseUrl` that holds the placeholder (its userinfo or a secret parameter
-was redacted) in an object with a string `provider` or `model` is a provider
-URL. Its provider is `provider`, or else the part of `model` before the
-first `:`. With no `secrets` entry, import deletes it when the importing
-process supplies a URL of its own for that provider:
+was redacted) in an object that names a model provider agentos knows, as
+for keys, is a provider URL. Its provider is `provider`, or else the part
+of `model` before the first `:`. With no usable `secrets` entry, import
+deletes it when the importing process supplies a URL of its own for that
+provider:
 
 - a `setDefaultProvider()` default that names the provider and carries a
   non-empty `baseUrl`, or
@@ -657,10 +694,18 @@ process supplies a URL of its own for that provider:
 The deleted URL then resolves as an unset one does: the applicable default's
 `baseUrl` first, then the variable. With neither, import throws and lists
 the path, because dropping the URL would send the call, with the importer's
-key, to the provider's public endpoint in place of the configured one. For
-any other provider a redacted `baseUrl` needs a `secrets` entry or a default
-that names the provider, and for a `model` with no `provider:` prefix and no
-`provider` beside it, it needs a `secrets` entry.
+key, to the provider's public endpoint in place of the configured one.
+
+A redacted `baseUrl` needs a `secrets` entry, or import throws, in these
+cases:
+
+- a roster seat's own URL, `/agents/<seat>/baseUrl`, listed like its key;
+- beside a provider agentos does not know;
+- beside a `model` with no `provider:` prefix and no `provider`.
+
+For a provider agentos knows that has no URL variable (`anthropic`,
+`gemini` and the rest), only a default that names the provider and carries
+a `baseUrl` lets import drop it; without one it needs a `secrets` entry.
 
 ```typescript
 import { importAgentFromYAML, setDefaultProvider } from '@framers/agentos';
@@ -674,11 +719,16 @@ await assistant.generate('Summarize the open incidents.');
 
 ### Every Other Redacted Value
 
-Nothing else has a fallback. Import collects every other string that still
-holds `<<REDACTED>>`, or its percent-encoded form `%3C%3CREDACTED%3E%3E` in
-any letter case, with no `secrets` entry, and every `<<instance>>` marker
-with no `values` entry. Then it throws one error that lists every path, a
-marker's path with its class. Importing the
+Nothing else has a fallback. A redacted value is a string that is exactly
+`<<REDACTED>>`, or a URL that holds it, raw or percent-encoded as
+`%3C%3CREDACTED%3E%3E` in any letter case. Text that mentions the
+placeholder, such as instructions that quote it, is not a redacted value
+and imports as it is. Import collects every redacted value with no usable
+`secrets` entry and every `<<instance>>` marker with no `values` entry, then
+throws one error that lists every path, a marker's path with its class. A
+`secrets` entry is usable only when it is a non-empty string:
+`process.env.SLACK_BOT_TOKEN!` with the variable unset is `undefined`, so
+the path stays in the list. Importing the
 [single-agent YAML](#a-single-agent-in-yaml) with no options throws:
 
 ```text
@@ -726,10 +776,10 @@ with the agent itself or with a config for the seat. An export of the
 imported agency writes a seat filled with an agent object as
 `{ prebuilt: true }` again, so the next import asks for it the same way.
 
-The [agency JSON](#an-agency-in-json) needs two entries: the `writer` seat has
-no `provider` or `model` of its own, so its key needs a `secrets` entry, and
-the `reviewer` seat is pre-built. `/config/apiKey` sits beside a
-`provider` and resolves from `OPENAI_API_KEY`.
+The [agency JSON](#an-agency-in-json) needs two entries: the `writer` seat's
+own key is never dropped, so it needs a `secrets` entry, and the `reviewer`
+seat is pre-built. `/config/apiKey` sits beside `provider: 'openai'` and
+resolves from `OPENAI_API_KEY`.
 
 ```typescript
 import { agent, importAgentFromJSON } from '@framers/agentos';
@@ -759,28 +809,44 @@ console.log(prebuilt); // [ 'reviewer' ]
 
 ### Functions and Unredacted Objects
 
-Import copies the document through JSON before it reads it:
+Import copies the document in its serialized form, as JSON and YAML export
+writes it, before it reads it:
 
-- Every function is lost, whichever form you pass, and leaves no marker, so
-  import does not report it. Put each handler, hook or tool function back
-  through `values` at the path where it stood.
-- In the object form of an unredacted export, a class instance is the live
-  object. The JSON copy turns it into a plain object of its own fields with
-  no marker, and import does not report that either. Pass instances through
-  `values` too.
+- Every function is left out, whichever form you pass; inside an array,
+  `null` takes its place, so later items keep their index. A function
+  leaves no marker, so import does not report it: put each handler, hook or
+  tool function back through `values` at the path where it stood.
+- Every class instance becomes an `<<instance>>` marker, including one that
+  the object form of an unredacted export holds by reference. Import lists
+  it unless `values` supplies it.
+- A cycle is copied as a cycle, and import reads each object once.
 
 ```typescript
-import { agent, exportAgentConfig, importAgent } from '@framers/agentos';
+import { agent, exportAgentConfig, importAgent, type AgentMemoryProvider } from '@framers/agentos';
+
+class NotesMemory implements AgentMemoryProvider {
+  notes: string[] = [];
+  async getContext() {
+    return { contextText: this.notes.join('\n') };
+  }
+}
 
 const onFallback = (error: Error, provider: string) => {
   console.warn(`Falling back to ${provider}: ${error.message}`);
 };
-const primary = agent({ provider: 'openai', model: 'gpt-4o', onFallback });
+const memory = new NotesMemory();
+const primary = agent({ provider: 'openai', model: 'gpt-4o', onFallback, memoryProvider: memory });
 
 const doc = exportAgentConfig(primary, undefined, { redactSecrets: false });
-const copy = importAgent(doc, { values: { '/config/onFallback': onFallback } });
+const copy = importAgent(doc, {
+  values: { '/config/onFallback': onFallback, '/config/memoryProvider': memory },
+});
 await copy.generate('Draft the weekly status update.');
 ```
+
+Without the `/config/memoryProvider` entry, import throws and lists
+`/config/memoryProvider (instance NotesMemory)`. Without the
+`/config/onFallback` entry, the copy imports with no fallback handler.
 
 ---
 
@@ -880,8 +946,9 @@ await researchBot.generate('Summarize this week of retrieval papers.');
 ### Export for CI/CD
 
 CI exports the agency as JSON, validates the file and hands it to the deploy
-step. Both keys sit beside a `provider`, so the deploy step supplies them
-from its own environment and passes no options:
+step. The agency's key sits beside `provider: 'openai'`, so it resolves from
+the deploy step's `OPENAI_API_KEY`. The `responder` seat's own key is never
+dropped, so the deploy step passes it in `secrets`:
 
 ```typescript
 // ci/export-agent.ts
@@ -915,7 +982,9 @@ writeFileSync('./deploy/support-team.json', json);
 import { importAgentFromJSON } from '@framers/agentos';
 import { readFileSync } from 'node:fs';
 
-const supportTeam = importAgentFromJSON(readFileSync('./deploy/support-team.json', 'utf8'));
+const supportTeam = importAgentFromJSON(readFileSync('./deploy/support-team.json', 'utf8'), {
+  secrets: { '/agents/responder/apiKey': process.env.ANTHROPIC_API_KEY! },
+});
 await supportTeam.generate('Customer reports a failed card payment on checkout.');
 ```
 
