@@ -14,15 +14,18 @@ import type { AIModelProviderManager } from '../../core/llm/providers/AIModelPro
 import type { ITool } from '../../core/tools/ITool.js';
 import type { IModelRouter, ModelRouteParams } from '../../core/llm/routing/IModelRouter.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
+import { lowerZodToJsonSchema } from '../../orchestration/compiler/SchemaLowering.js';
 import { resolveModelOption, resolveProvider, createProviderManager } from '../model.js';
 import {
   buildPolicyAwareFallbackChain,
   fallbackHopOverrides,
+  isContentPolicyRefusal,
   isRetryableError,
   type FallbackProviderEntry,
   type GenerateTextOptions,
 } from '../generateText.js';
 import { hostPolicyToRouteParams, mergeRequiredCapabilities, type HostLLMPolicy } from './hostPolicy.js';
+import { buildResponseFormatForProvider } from './responseFormatForProvider.js';
 
 /** What a turn asks the gateway for. Unset fields take the gateway's defaults. */
 export interface CompletionRoute {
@@ -171,6 +174,88 @@ async function selectPrimary(route: CompletionRoute): Promise<{ provider: string
   return { provider: providerId, model: modelId };
 }
 
+type InBandError = NonNullable<ModelCompletionResponse['error']>;
+
+/**
+ * The HTTP status an in-band error names in a numeric code (Gemini's stream
+ * errors carry `code: 500` beside `type: 'INTERNAL'`), read as streamText reads
+ * it: a 401 or 403 inside a stream describes an upstream attempt, not this
+ * key, so it is not taken as a status.
+ */
+function statusOfChunkCode(code: unknown): number | undefined {
+  return typeof code === 'number' && Number.isInteger(code) && code >= 400 && code <= 599 && code !== 401 && code !== 403
+    ? code
+    : undefined;
+}
+
+/** An in-band provider error as an Error that `isRetryableError` and the health registry can judge (type, code, HTTP status kept). */
+function errorFromChunk(e: InBandError): Error {
+  const status = statusOfChunkCode(e.code);
+  return Object.assign(new Error(e.message), {
+    name: 'ProviderStreamError',
+    ...(e.type !== undefined ? { type: e.type } : {}),
+    ...(e.code !== undefined ? { code: e.code } : {}),
+    ...(status !== undefined ? { httpStatus: status } : {}),
+    ...(e.details !== undefined ? { details: e.details } : {}),
+  });
+}
+
+function terminalErrorChunk(resolution: CompletionResolution, error: Error): ModelCompletionResponse {
+  return {
+    id: `gateway-error-${resolution.providerId}-${resolution.hop}`,
+    object: 'chat.completion.chunk',
+    created: Math.floor(Date.now() / 1000),
+    modelId: resolution.modelId,
+    choices: [],
+    isFinal: true,
+    error: { message: error.message, type: (error as { type?: string }).type ?? 'provider_error', details: { terminal: true, providerId: resolution.providerId, hop: resolution.hop } },
+  };
+}
+
+/** Text, tool activity or a lifted schema answer: the first such chunk ends the buffering. */
+function carriesContent(chunk: ModelCompletionResponse): boolean {
+  if (chunk.responseTextDelta) return true;
+  if (chunk.toolCallsDeltas && chunk.toolCallsDeltas.length > 0) return true;
+  if ((chunk.choices?.[0]?.message?.tool_calls?.length ?? 0) > 0) return true;
+  return (chunk as { structuredOutput?: unknown }).structuredOutput !== undefined;
+}
+
+/** The provider-native schema payload for this hop, built as session.send builds it. */
+function lowerForHop(resolution: CompletionResolution, schema: ZodType, schemaName: string): { responseFormat: Record<string, unknown> | undefined; toolName?: string } {
+  const responseFormat = buildResponseFormatForProvider({
+    providerId: resolution.providerId,
+    modelId: resolution.modelId,
+    jsonSchema: lowerZodToJsonSchema(schema),
+    effectiveSchema: schema,
+    schemaName,
+  });
+  const marker = responseFormat as { _agentosUseToolForStructuredOutput?: boolean; tool?: { name?: string } } | undefined;
+  return { responseFormat, toolName: marker?._agentosUseToolForStructuredOutput ? marker.tool?.name : undefined };
+}
+
+/** A streamed forced schema tool call becomes `structuredOutput` on the chunk, never a tool call the GMI would dispatch. */
+function liftSchemaToolCall(chunk: ModelCompletionResponse, toolName: string): ModelCompletionResponse {
+  const choice = chunk.choices?.[0];
+  const calls = choice?.message?.tool_calls;
+  if (!choice || !calls?.length) return chunk;
+  const schemaCall = calls.find((call) => call.function?.name === toolName);
+  if (!schemaCall) return chunk;
+  let structuredOutput: unknown = schemaCall.function.arguments;
+  if (typeof structuredOutput === 'string') {
+    try {
+      structuredOutput = JSON.parse(structuredOutput);
+    } catch {
+      // Kept as the raw string; the session reports the parse failure.
+    }
+  }
+  const rest = calls.filter((call) => call !== schemaCall);
+  return {
+    ...chunk,
+    choices: [{ ...choice, message: { ...choice.message, tool_calls: rest.length > 0 ? rest : undefined } }, ...chunk.choices.slice(1)],
+    structuredOutput,
+  } as ModelCompletionResponse & { structuredOutput: unknown };
+}
+
 export function createCompletionGateway(defaults: Partial<CompletionRoute> = {}): CompletionGateway {
   async function resolve(input: CompletionRoute, after?: CompletionResolution): Promise<CompletionResolution | null> {
     const route: CompletionRoute = { ...defaults, ...definedOnly(input as unknown as Record<string, unknown>) } as CompletionRoute;
@@ -232,8 +317,109 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     return null;
   }
 
-  function stream(): CompletionAttempt {
-    throw new Error('CompletionGateway.stream lands in the next task');
+  function stream(
+    resolution: CompletionResolution,
+    messages: ChatMessage[],
+    options: ModelCompletionOptions,
+    responseSchema?: ZodType,
+    schemaName = 'response',
+  ): CompletionAttempt {
+    let settle!: (outcome: CompletionOutcome) => void;
+    const outcome = new Promise<CompletionOutcome>((resolveOutcome) => {
+      settle = resolveOutcome;
+    });
+    let settled = false;
+    const finish = (o: CompletionOutcome): void => {
+      if (!settled) {
+        settled = true;
+        settle(o);
+      }
+    };
+    const failed = (error: Error, retryable = isRetryableError(error) || isContentPolicyRefusal(error)): CompletionOutcome => ({
+      kind: 'hopFailed',
+      error,
+      retryable,
+    });
+
+    const structured = responseSchema ? lowerForHop(resolution, responseSchema, schemaName) : undefined;
+    const callOptions: ModelCompletionOptions = {
+      ...options,
+      ...resolution.optionOverrides,
+      ...(structured
+        ? { responseFormat: structured.responseFormat as ModelCompletionOptions['responseFormat'], tools: undefined, toolChoice: undefined }
+        : {}),
+      stream: true,
+    };
+
+    async function* run(): AsyncGenerator<ModelCompletionResponse, void, undefined> {
+      let delivered = false;
+      let completed = false;
+      const buffer: ModelCompletionResponse[] = [];
+      try {
+        const provider = resolution.providerManager.getProvider(resolution.providerId);
+        if (!provider) {
+          const error = Object.assign(new Error(`Provider '${resolution.providerId}' is not available.`), { name: 'ProviderInitializationError' });
+          globalLLMProviderHealth.recordFailure(resolution.providerId, error);
+          finish(failed(error));
+          return;
+        }
+        for await (const raw of provider.generateCompletionStream(resolution.modelId, messages, callOptions)) {
+          const chunk = structured?.toolName ? liftSchemaToolCall(raw, structured.toolName) : raw;
+          if (chunk.error) {
+            // An abort is the caller's own stop: it is never walked to another
+            // hop and says nothing about the provider's health (as in streamText).
+            const aborted = chunk.error.type === 'abort';
+            const error = errorFromChunk(chunk.error);
+            if (!aborted) globalLLMProviderHealth.recordFailure(resolution.providerId, error);
+            if (!delivered) {
+              finish(aborted ? failed(error, false) : failed(error));
+              return;
+            }
+            // After content the step ends with the provider's error chunk. The
+            // outcome settles first, so a consumer that stops reading at the
+            // error still finds the attempt delivered.
+            completed = true;
+            finish({ kind: 'delivered' });
+            yield chunk;
+            return;
+          }
+          if (!delivered) {
+            buffer.push(chunk);
+            if (carriesContent(chunk)) {
+              delivered = true;
+              yield* buffer.splice(0);
+            }
+            continue;
+          }
+          yield chunk;
+        }
+        // A normal end with no content chunk (an empty reply, a content-filter stop,
+        // a usage-only trailing chunk) still reaches the GMI.
+        if (!delivered) {
+          delivered = true;
+          yield* buffer.splice(0);
+        }
+        completed = true;
+        globalLLMProviderHealth.recordSuccess(resolution.providerId);
+        finish({ kind: 'delivered' });
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        globalLLMProviderHealth.recordFailure(resolution.providerId, error);
+        if (!delivered) {
+          finish(failed(error));
+          return;
+        }
+        completed = true;
+        finish({ kind: 'delivered' });
+        yield terminalErrorChunk(resolution, error);
+      } finally {
+        // Only an attempt that neither delivered nor failed gets here unsettled:
+        // the consumer stopped reading. `finish` ignores every later call.
+        if (!completed) finish({ kind: 'abandoned' });
+      }
+    }
+
+    return { [Symbol.asyncIterator]: () => run(), outcome };
   }
 
   return { resolve, stream };
