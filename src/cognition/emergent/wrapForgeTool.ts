@@ -70,7 +70,10 @@ export type ForgeLogEvent =
 export interface WrapForgeToolOptions {
   /** The raw ForgeToolMetaTool instance from EmergentCapabilityEngine. */
   raw: ForgeToolMetaTool;
-  /** GMI / agent id patched onto the tool execution context. */
+  /**
+   * The identity recorded as the owner of every tool forged through this
+   * wrapper (its `personaId` and `gmiId` on the forge call), whoever calls.
+   */
   agentId: string;
   /** Session id patched onto the tool execution context under sessionData. */
   sessionId: string;
@@ -221,7 +224,10 @@ export function wrapForgeTool(options: WrapForgeToolOptions): ITool {
       log?.({ kind: 'start', scope, toolName, mode });
       const patched = {
         ...(ctx as Record<string, unknown>),
+        // The identity the wrapper is given is the forging agent's: the
+        // forge records the persona as a tool's owner, so both are set.
         gmiId: agentId,
+        personaId: agentId,
         sessionData: {
           ...((ctx as { sessionData?: Record<string, unknown> })?.sessionData ?? {}),
           sessionId,

@@ -61,6 +61,18 @@ const ENV_URL_MAP: Record<string, string> = {
   'stable-diffusion-local': 'STABLE_DIFFUSION_LOCAL_BASE_URL',
 };
 
+/**
+ * The environment variables a provider's API key and base URL are read from,
+ * when it has them. `importAgent` uses it to decide whether a redacted base URL
+ * can be dropped and resolved the way an unset one is.
+ *
+ * @param providerId - A provider id such as `'openai'`.
+ * @returns The variable names; either is undefined when the provider has none.
+ */
+export function providerEnvVars(providerId: string): { key?: string; url?: string } {
+  return { key: ENV_KEY_MAP[providerId], url: ENV_URL_MAP[providerId] };
+}
+
 const KEYLESS_PROVIDER_IDS = new Set(['claude-code-cli', 'gemini-cli']);
 
 /**

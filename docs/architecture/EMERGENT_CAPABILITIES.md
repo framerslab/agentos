@@ -28,13 +28,18 @@ node examples/emergent-hierarchical-spawning.mjs
 ```typescript
 import { AgentOS } from '@framers/agentos';
 
-const agent = await AgentOS.create({
-  provider: 'openai',
+const agentos = await AgentOS.create({
   emergent: true,
+  // Compose mode (chaining existing tools) is always available once emergent is on.
+  // Sandbox mode (agent-written code) stays off until you set
+  // emergentConfig.allowSandboxTools. Read "Sandbox allowlists" below first:
+  // sandboxed fetch is unrestricted, and reads cover the working directory.
 });
 
-// The agent now has forge_tool in its tool list.
-// When it encounters a task with no matching tool, it can create one.
+// Every GMI on this runtime now has forge_tool in its tool list. Providers
+// come from the environment keys (OPENAI_API_KEY and the others), not from
+// a `provider` option.
+// When an agent meets a task with no matching tool, it can create one.
 ```
 
 ## How It Works
@@ -261,7 +266,7 @@ These are rejected at code validation time (before execution):
 | `eval`, `Function` | Arbitrary code execution escape |
 | `require`, `import()` | Module system escape |
 | `process`, `child_process` | System access |
-| `fs.writeFile`, `fs.unlink`, `fs.mkdir` | Filesystem mutation |
+| `fs.write*`, `fs.appendFile`, `fs.truncate`, `fs.unlink`, `fs.rm`, `fs.rmdir` | Filesystem mutation (only `fs.readFile` is ever exposed, and only when the request's allowlist names it) |
 
 ### Allowed APIs (opt-in via `allowlist`)
 
@@ -279,6 +284,7 @@ These are rejected at code validation time (before execution):
 | Memory observed (heap delta heuristic, NOT preempted) | 128 MB nominal | `sandboxMemoryMB` |
 | Session tools | 10 | `maxSessionTools` |
 | Agent tools | 50 | `maxAgentTools` |
+| Sandbox mode | off: a `mode: 'sandbox'` request is rejected until it is enabled; compose mode needs no switch | `allowSandboxTools` |
 
 ## LLM-as-Judge Verification
 
@@ -297,14 +303,30 @@ If no LLM callback is configured for the judge, **creation review fails closed**
 Tools start at session tier in the [`EmergentToolRegistry`](/api/classes/EmergentToolRegistry) and can be promoted as they prove reliability:
 
 ```
-session ──(5+ uses, >0.8 confidence, panel approved)──→ agent ──(human approval)──→ shared
+session ──(5 or more uses, confidence 0.8 or higher, panel approved)──→ agent ──(explicit promote() call; approvedBy optional)──→ shared
 ```
 
 | Tier | Scope | Lifetime | Promotion rule |
 |---|---|---|---|
 | **Session** | Current conversation only | Discarded on session end | Auto on creation + judge approval |
-| **Agent** | Persisted for the creating agent | Survives restarts | 5+ uses, confidence > 0.8, two-reviewer panel |
-| **Shared** | All agents in the runtime | Permanent until demoted | Human approval required (HITL gate) |
+| **Agent** | Persisted for the creating agent | Survives restarts | 5 or more uses, confidence 0.8 or higher, two-reviewer panel |
+| **Shared** | All agents in the runtime | Permanent until demoted | An explicit `promote()` call; `approvedBy` is optional and recorded when passed (null otherwise); the runtime ships no human-in-the-loop gate for it |
+
+### Stored tools: state, loading and suspension
+
+Agent and shared tier tools live in `agentos_emergent_tools`. Their state lives beside them in `agentos_emergent_tool_state`: one row per tool with `state` (`active`, `suspended` or `demoted`), `state_reason`, `set_by` (who recorded the state: `library` or `host`), `state_at` and `request_json`, the capabilities the tool was forged with (catalogue names: `fetch`, `fs.read`, `crypto`; `fs.readFile` is accepted as an alias of `fs.read`). The state row is its own table because the tool row is rewritten whole on every persist, which would reset any column added to it. Every path that writes `state` writes `is_active` on the tool row to match, so a host that reads `is_active` with its own SQL sees the same values as before.
+
+A host loads stored tools at start, after its own tools are registered:
+
+```typescript
+const engine = orchestrator.getEmergentEngine();
+const loaded = await engine.loadPersistedTools({ tiers: ['agent', 'shared'], agentId: 'gmi-42' });
+// loaded.active, loaded.suspended, loaded.demoted, loaded.outcomes (one per row), loaded.failed
+```
+
+`shared` rows load for every caller; `agent` rows load for the `agentId` given and `session` rows for the `sessionId` given, and naming either tier without its selector throws `selector_required`, so one agent's private tools never reach another's executor. The agent identity is the persona: `forge_tool` records the forging caller's `personaId` as `created_by_agent`, `agentId` is that id, and an `agent` tool, loaded or forged, refuses a call from any other `personaId` before anything runs or a use is recorded (a GMI instance id is minted per session, so it cannot own a tool meant to outlive one). A row written by an earlier release holds the forging instance's id instead, which no persona can match: loaded by that id, such a tool runs for any caller of the host that loaded it, as before; re-forging makes it the persona's. A session tool is callable by name within its process until `cleanupSession`, as before: the execution context carries no session identifier. Every row goes through one path. A demoted row stays off. A row a host turned off with its own SQL (`is_active = 0` and no suspension on record) is recorded demoted. A suspension the host set stays until the host clears it, whatever words its reason uses; one the library set is re-checked at every load and lifted when its cause is gone. A source that cannot be rebuilt is suspended with its reason: a redacted record (`source_not_persisted`, see `persistSandboxSource`), or a composition with no runnable steps, JSON of an unknown shape, a stored list naming a capability outside the catalogue, or a schema column that is not a JSON object (`source_unreadable`). Nothing is narrowed to the part that could be read. Three stored forms of a code tool are read: the raw code, `{ "mode": "sandbox", "code": ..., "allowlist": [...] }`, and the redacted record. For a raw-code row with no stored request, the request is inferred from the code with the same text scan `validateCode` applies and stored with `inferred: true`. A load also takes in a suspension or a demotion another process stored, and lets go of the executable; its own active write lands only while the row is still as it read it, so a restriction stored in between stays. Every state write writes the state row with its flag write marked pending (`flag_synced = 0`), sets `is_active` from the state row inside the flag's own statement, then clears the mark; a write the state row refuses changes nothing, flag included. A load that finds the mark still pending finishes the flag write itself before deciding anything about the row, so a crash or a failed write between the two never leaves the pair apart beyond the next load, and a lowered flag beside an active state row whose mark is clear is the host's own disable. A host that lowers the flag with its own SQL during the few milliseconds of a library state write, or between a crash that cut a state write short and the next load, can have it overwritten by that write or by the load that finishes it; `suspendTool` and `demoteTool` are never overwritten. A whole-row write never raises a flag the host lowered. A load with nothing to write for a row reads its state row again before adopting the tool, so a restriction another process stored after the first read is taken in. Every state write reads its row back, after the upsert and after the flag write, and a state another process stored meanwhile is what the caller gets and holds; a tool another process removed while a load or a write had it in hand reads as `demoted` with the reason `removed`, is not registered, and gets no orphan state row (a new state row is inserted only while the tool row exists, and every read of a state row checks the tool row is still there). A load's own writes (a demotion for a lowered flag, a suspension for a source that does not read, an activation) land only while the row is as the load read it; a refused one admits the tool again from the row as it stands. A rebuilt code tool may reach what its stored request names, not what its text, its stored list or the list held in memory shows, and never more than a stored list names. Loading never rewrites a row, and a stored request is replaced only where the row holds none.
+
+The host's controls are `suspendTool(toolId, reason)`, `demoteTool(toolId, reason)` and `reactivateTool(toolId)`; `removeTool(toolId)` deletes a stored tool's rows whether or not it is loaded in the process, and a load or a forge that had the tool in hand when it was removed does not put it back. A suspension or a demotion is an awaited write of the state row, and the orchestrator takes the tool's executable out of the executor; the executable also refuses a call to a tool that is not active. `recordUse` records nothing for a suspended or demoted tool and returns `false`. State writes for one tool run in call order; a reactivation overtaken by a suspension or demotion while its write runs yields to it, in memory and in the row. `syncPersistedTool(tool)` remains for hosts that hydrate one tool at a time; it reads the tool's stored row when there is one, writes the row first when there is none (so the tool's uses are recorded and the next load finds it), and returns the outcome. A call to a tool the registry no longer holds (removed, or its session cleaned up) is refused even when its executable is still registered. The registry's `upsert(tool)` rewrites the tool's row from the object it is given and is not a way to load stored tools; a tool whose state the process does not hold keeps the `is_active` its row has.
 
 ## Forge Observability
 
@@ -533,9 +555,8 @@ await importEmergentTool('./slugify.emergent-tool.yaml', { seedId: agentSeedId }
       confidence: 0.8,             // Minimum judge confidence score
     },
 
-    // Sandbox allowlists
-    allowedSandboxAPIs: [],        // e.g. ['fetch', 'crypto']
-    fetchDomainAllowlist: [],      // e.g. ['api.example.com']
+    // Sandbox mode
+    allowSandboxTools: false,      // Sandbox mode (agent-written code) stays off until enabled
 
     // Persistence
     persistSandboxSource: false,   // Store raw code at rest (enables export)
@@ -543,13 +564,15 @@ await importEmergentTool('./slugify.emergent-tool.yaml', { seedId: agentSeedId }
 }
 ```
 
+Sandbox allowlists are not part of `emergentConfig`: a forge request names the APIs it needs in `implementation.allowlist` (`fetch`, `fs.readFile`, `crypto`), but the runtime constructs the `SandboxedToolForge` with `sandboxMemoryMB` and `sandboxTimeoutMs` only ([`ToolOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts)): `fetchDomainAllowlist` stays empty, so a tool whose request allowlists `fetch` can reach any host, and `fsReadRoots` stays at the process working directory (`.env` files included). Neither can be set through `emergentConfig`.
+
 ## Safety Invariants
 
 - Emergent tools **cannot** modify the guardrail pipeline
 - Emergent tools get no memory or credential API. With `fs.readFile` granted they read any file under `fsReadRoots`, which defaults to the working directory, so a `.env` kept there is readable
 - Sandbox code runs in an in-process `node:vm` context (own realm, `process` / `globalThis` / `require` set to undefined, `codeGeneration: { strings: false, wasm: false }` blocks runtime `eval`/`Function` reflection). `node:vm` is not a security mechanism (Node's documentation), and runaway memory is not preempted.
-- All forge decisions and metadata are logged to the provenance audit trail
-- Human approval is required for shared-tier promotion
+- Forge, promotion and removal decisions are written to the `agentos_emergent_audit_log` table when a storage adapter is configured, and kept in memory otherwise
+- Shared-tier promotion needs an explicit `promote()` call; the approver is recorded only when the caller passes `approvedBy`; there is no built-in human-in-the-loop gate
 - Raw sandbox source is redacted at rest by default
 - If no LLM is configured, all forge requests are rejected (fail-closed)
 
@@ -594,7 +617,7 @@ await exportToolAsSkillPack(forgedTool, './skills/slugify');
 - [Adaptive Prompt Intelligence](/features/adaptive-prompt-intelligence) -- the per-turn metaprompt loop that runs on state-mutating triggers, with the `adapt_personality` tool, `PersonaDriftMechanism`, and concrete cost numbers
 - [Adaptive vs. Emergent Intelligence](https://agentos.sh/blog/adaptive-vs-emergent) -- how adaptive and emergent behavior differ in the AgentOS architecture
 - [Self-Improving Agents](/features/self-improving-agents) -- broader patterns for agents that improve over time
-- [Recursive Self-Building](/features/recursive-self-building) -- recursive tool creation and agent spawning
+- [Self-Extension](/architecture/self-extension) -- forged tools, self-improvement tools and specialist spawning
 - [Guardrails](/features/guardrails) -- safety mechanisms that constrain emergent behavior
 - [Agency API](/features/agency-api) -- multi-agent coordination strategies
 - **API Reference:** [`EmergentCapabilityEngine`](/api/classes/EmergentCapabilityEngine) | [`EmergentJudge`](/api/classes/EmergentJudge) | [`EmergentToolRegistry`](/api/classes/EmergentToolRegistry) | [`ForgeToolMetaTool`](/api/classes/ForgeToolMetaTool) | [`ComposableToolBuilder`](/api/classes/ComposableToolBuilder) | [`CodeSandbox`](/api/classes/CodeSandbox) | [`AdaptPersonalityTool`](/api/classes/AdaptPersonalityTool) | [`ManageSkillsTool`](/api/classes/ManageSkillsTool) | [`SelfEvaluateTool`](/api/classes/SelfEvaluateTool) | [`CreateWorkflowTool`](/api/classes/CreateWorkflowTool) | [`exportToolAsSkill`](/api/functions/exportToolAsSkill)

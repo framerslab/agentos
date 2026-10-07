@@ -50,6 +50,13 @@ export type ToolTier = 'session' | 'agent' | 'shared';
  */
 export type SandboxAPI = 'fetch' | 'fs.readFile' | 'crypto';
 
+/**
+ * A capability a code-forged tool can be granted, by its catalogue name.
+ * `fs.read` is the catalogue name of the `fs.readFile` function injected into
+ * forged code; `SandboxAPI` keeps the injected names.
+ */
+export type CapabilityName = 'fetch' | 'fs.read' | 'crypto';
+
 // ============================================================================
 // TOOL IMPLEMENTATIONS
 // ============================================================================
@@ -418,6 +425,84 @@ export interface ToolUsageStats {
   confidenceScore: number;
 }
 
+/** Whether a stored tool may run. `demoted` is a host's decision and is never undone by loading. */
+export type ToolState = 'active' | 'suspended' | 'demoted';
+
+/**
+ * Who recorded a tool's state. The library re-checks a suspension its own
+ * checks set at the next load and lifts it when the cause is gone; a state the
+ * host set stays until the host clears it, whatever words its reason uses.
+ */
+export type StateSetter = 'library' | 'host';
+
+/** What a tool asked for when it was forged, kept so a rebuilt tool carries the same request. */
+export type StoredRequest =
+  | { kind: 'sandbox'; capabilities: CapabilityName[]; inferred?: boolean }
+  | { kind: 'compose'; steps: Array<{ name: string; tool: string }> };
+
+/**
+ * A tool's state as this process holds it. It mirrors the tool's row in
+ * `agentos_emergent_tool_state`, except for `request`, which can be `null`
+ * while the row stores a request this release cannot read.
+ */
+export interface ToolStateRecord {
+  toolId: string;
+  state: ToolState;
+  /**
+   * The reason for a state other than `active`. The library's reasons are
+   * catalogue words (`source_not_persisted`, `source_unreadable`,
+   * `legacy_inactive`); a host's reason is the text it gave.
+   */
+  reason: string | null;
+  /** Who recorded the state. */
+  setBy: StateSetter;
+  /** Unix epoch milliseconds of the last state change. */
+  at: number;
+  /** The id of the write that set this state, when the row carries one. */
+  writeId?: string;
+  /**
+   * The request this process holds for the tool: the stored one when it could
+   * be read, else the one derived from the source, else `null`. A state change
+   * that names no request leaves the stored column as it is.
+   */
+  request: StoredRequest | null;
+}
+
+/**
+ * One row of `agentos_emergent_tools` joined with its state row. The five
+ * state columns are null for a row written before state was kept.
+ */
+export interface PersistedToolRow {
+  id: string;
+  name: string;
+  description: string;
+  input_schema: string;
+  output_schema: string | null;
+  implementation_mode: string;
+  implementation_source: string;
+  tier: ToolTier;
+  created_by_agent: string;
+  created_by_session: string;
+  created_at: number | string;
+  judge_verdicts: string | null;
+  confidence_score: number | null;
+  total_uses: number | null;
+  success_count: number | null;
+  failure_count: number | null;
+  avg_execution_ms: number | null;
+  last_used_at: number | string | null;
+  is_active: number | boolean | null;
+  state: ToolState | null;
+  state_reason: string | null;
+  set_by: string | null;
+  state_at: number | string | null;
+  request_json: string | null;
+  /** Whether the state row's flag write finished (0 while pending); null for a row with no state row. */
+  flag_synced: number | boolean | null;
+  /** The id of the last state write; null for a row with no state row, or one written without an id. */
+  write_id: string | null;
+}
+
 // ============================================================================
 // EMERGENT TOOL
 // ============================================================================
@@ -474,7 +559,10 @@ export interface EmergentTool {
   tier: ToolTier;
 
   /**
-   * Identifier of the entity (agent ID or `'system'`) that created this tool.
+   * The agent that created this tool, or `'system'`. The agent identity is the
+   * persona: `forge_tool` passes the caller's `personaId`, and an `agent`-tier
+   * tool runs only for a caller with that `personaId`. (A GMI instance id is
+   * minted per session and cannot own a tool meant to outlive one.)
    */
   createdBy: string;
 

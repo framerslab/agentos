@@ -97,6 +97,20 @@ export interface PersonaConversationContextConfig {
 }
 
 /**
+ * Per-persona limits for the GMI's reasoning trace: the ring buffer of decision
+ * entries the turn loop writes and the self-reflection metaprompt reads as
+ * evidence. Omitted values fall back to the runtime's `GMIBaseConfig` defaults
+ * (`defaultReasoningTraceMaxEntries`, `defaultReasoningTraceMaxMessageLength`),
+ * then to 500 entries and 1000 characters per message.
+ */
+export interface PersonaReasoningTraceConfig {
+  /** Entries kept; the oldest is dropped when the next arrives. A positive integer. */
+  maxEntries?: number;
+  /** Characters kept per entry message; longer messages are truncated. A positive integer. */
+  maxMessageLength?: number;
+}
+
+/**
  * Configuration for a specific RAG (Retrieval Augmented Generation) data source
  * @interface PersonaRagDataSourceConfig
  */
@@ -438,6 +452,8 @@ export interface IPersonaDefinition {
   cognitiveMemoryConfig?: import('../../memory/core/config.js').CognitiveMemoryPersonaConfig;
   /** Conversation context override strategy (message importance heuristics, summarization triggers). */
   conversationContextConfig?: PersonaConversationContextConfig;
+  /** Reasoning-trace limits for GMIs built from this persona; see PersonaReasoningTraceConfig. */
+  reasoningTraceConfig?: PersonaReasoningTraceConfig;
 
   /** System or self-reflective prompts guiding meta-cognition, self-correction, or planning loops. */
   metaPrompts?: MetaPromptDefinition[];
