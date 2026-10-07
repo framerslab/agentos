@@ -329,6 +329,10 @@ describe('EmergentToolRegistry', () => {
     registry.register(tool, 'session');
     await registry.promote(tool.id, 'agent', 'admin');
     const firstPromotedAt = adapter.rows.get(tool.id)?.promoted_at;
+    expect(firstPromotedAt).not.toBeNull();
+    // A stored stamp a fresh Date.now() cannot equal, so a writer that stamps
+    // again is caught even within the same millisecond.
+    adapter.rows.get(tool.id)!.promoted_at = 1_000;
 
     // A whole-row rewrite with no approver named: the stored promotion stays.
     // (recordUse no longer rewrites the row, so it cannot drive this case.)
@@ -336,8 +340,7 @@ describe('EmergentToolRegistry', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     const secondPromotedAt = adapter.rows.get(tool.id)?.promoted_at;
 
-    expect(firstPromotedAt).not.toBeNull();
-    expect(secondPromotedAt).toBe(firstPromotedAt);
+    expect(secondPromotedAt).toBe(1_000);
   });
 
   it('redacts sandbox source at rest by default', async () => {

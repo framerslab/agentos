@@ -222,7 +222,11 @@ export function requestFromSource(source: PersistedSource): StoredRequest | null
   }
 }
 
-/** The request to store for an implementation held in memory (a fresh forge, or a host-built tool). */
+/**
+ * The request to store for an implementation held in memory. The caller has
+ * checked the list (`forge` refuses a name outside the catalogue), so nothing
+ * here is narrowed.
+ */
 export function requestFromImplementation(implementation: ToolImplementation): StoredRequest {
   if (implementation.mode === 'compose') {
     return {
@@ -242,10 +246,16 @@ export function sourceFromImplementation(implementation: ToolImplementation): Pe
       ? { format: 'unreadable', error: read.error }
       : { format: 'compose', implementation };
   }
+  // The same reading a stored list gets: a name outside the catalogue makes
+  // the source unreadable, and nothing is narrowed to the readable part.
+  const list = readAllowlist(implementation.allowlist);
+  if ('error' in list) {
+    return { format: 'unreadable', error: list.error };
+  }
   return {
     format: 'code-with-list',
     implementation,
-    capabilities: normalizeAllowlist(implementation.allowlist).capabilities,
+    capabilities: list.capabilities,
     inferred: false,
   };
 }

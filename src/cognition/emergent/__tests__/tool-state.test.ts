@@ -114,9 +114,42 @@ describe('EmergentToolRegistry state', () => {
     await registry.setState('emergent_unloaded', 'suspended', 'operator_hold', { request: null });
     expect(readStateRow(db, 'emergent_unloaded')?.request).toBeNull();
 
-    // A first write that names no request stores none, whatever this process holds.
-    await registry.setState('emergent_first', 'suspended', 'operator_hold');
-    expect(readStateRow(db, 'emergent_first')).toMatchObject({ state: 'suspended', request_json: null });
+    // A first write that names no request stores none, whatever this process
+    // holds: the registry holds a request for the tool, its state row is gone,
+    // and the write that recreates the row leaves request_json empty.
+    const tool = makeTool({ id: 'emergent_first' });
+    registry.register(tool, 'agent');
+    await settle();
+    await registry.setState(tool.id, 'active', null, {
+      request: { kind: 'sandbox', capabilities: ['fetch'] },
+      setBy: 'library',
+    });
+    db.raw.prepare('DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?').run(tool.id);
+    expect(registry.getState(tool.id)?.request).toEqual({ kind: 'sandbox', capabilities: ['fetch'] });
+    await registry.setState(tool.id, 'suspended', 'operator_hold');
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'suspended', request_json: null });
+  });
+
+  it('a restriction made while a reactivation is being written is the word that stays', async () => {
+    const tool = makeTool();
+    registry.register(tool, 'agent');
+    await settle();
+    await registry.suspend(tool.id, 'operator_hold');
+
+    // Not awaited in between: the demotion arrives while the reactivation's
+    // writes run.
+    const reactivation = registry.setState(tool.id, 'active', null, { setBy: 'host' });
+    const demotion = registry.demote(tool.id, 'bad output');
+    const [returned] = await Promise.all([reactivation, demotion]);
+
+    expect(returned.state).toBe('demoted');
+    expect(registry.isActive(tool.id)).toBe(false);
+    expect((registry.get(tool.id) as EmergentTool & { isActive?: boolean }).isActive).toBe(false);
+    expect(registry.recordUse(tool.id, {}, {}, true, 1)).toBe(false);
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'demoted', state_reason: 'bad output' });
+    expect(readToolRow(db, tool.id)?.is_active).toBe(0);
+    const states = registry.getAuditLog(tool.id).filter((e) => e.eventType === 'state').map((e) => (e.data as { state: string }).state);
+    expect(states[states.length - 1]).toBe('demoted');
   });
 
   it('a reactivation whose write fails leaves the tool off, in memory and in storage', async () => {
@@ -135,6 +168,9 @@ describe('EmergentToolRegistry state', () => {
     expect(registry.recordUse(tool.id, {}, {}, true, 1)).toBe(false);
     expect(readStateRow(db, tool.id)).toMatchObject({ state: 'suspended' });
     expect(readToolRow(db, tool.id)?.is_active).toBe(0);
+    // The trail records no change to active that never took effect.
+    const states = registry.getAuditLog(tool.id).filter((e) => e.eventType === 'state').map((e) => (e.data as { state: string }).state);
+    expect(states).not.toContain('active');
   });
 
   it('a whole-row write by a process that holds no state for the tool keeps its stored suspension', async () => {

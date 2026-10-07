@@ -38,6 +38,7 @@ import {
   toolFromRow,
   type PersistedSource,
 } from './persisted-source.js';
+import { normalizeAllowlist } from './capabilities.js';
 import type { ToolCandidate } from './EmergentJudge.js';
 import type { ITool, ToolExecutionContext, ToolExecutionResult } from '../../core/tools/ITool.js';
 import type { PersonalityMutationStore } from './PersonalityMutationStore.js';
@@ -391,7 +392,18 @@ export class EmergentCapabilityEngine {
 
       source = request.implementation.code;
 
-      // Step 2a: Static code validation before any execution.
+      // Step 2a: the list must name catalogue capabilities (or the alias), so
+      // the request stored for the tool is the list the judge reviews, never a
+      // narrowed reading of it.
+      const list = normalizeAllowlist(request.implementation.allowlist);
+      if (list.unknown.length > 0) {
+        return {
+          success: false,
+          error: `allowlist names capabilities outside the catalogue: ${list.unknown.join(', ')}`,
+        };
+      }
+
+      // Step 2b: Static code validation before any execution.
       const validation = this.sandboxForge.validateCode(
         request.implementation.code,
         request.implementation.allowlist
@@ -731,8 +743,9 @@ export class EmergentCapabilityEngine {
   /**
    * Suspend a tool and take it out of the executor. The state write is
    * awaited, so the suspension survives a restart, and no later use, rewrite
-   * or load turns the tool back on. A reason the library does not own stays
-   * until {@link reactivateTool} is called.
+   * or load turns the tool back on. The suspension is recorded as the host's,
+   * so it stays, whatever its reason says, until {@link reactivateTool} is
+   * called.
    *
    * @returns `false` when the tool is unknown.
    */
@@ -902,7 +915,9 @@ export class EmergentCapabilityEngine {
 
     if (refusal || !implementation) {
       const reason = refusal ?? 'source_unreadable';
-      if (stored?.state !== 'suspended' || stored.reason !== reason) {
+      // Written as the library's even when a host's suspension already carries
+      // the same words, so a later load re-checks it (the words decide nothing).
+      if (stored?.state !== 'suspended' || stored.reason !== reason || stored.setBy !== 'library') {
         await this.registry.setState(toolId, 'suspended', reason, {
           request: requestToWrite,
           setBy: 'library',
@@ -917,6 +932,13 @@ export class EmergentCapabilityEngine {
     const tool = candidate.buildTool(implementation);
     if (stored?.state !== 'active' || !requestStored) {
       await this.registry.setState(toolId, 'active', null, { request: requestToWrite, setBy: 'library' });
+    }
+    // A suspension or demotion that arrived while the row was being written
+    // is the newer word: the tool is not registered.
+    const held = this.registry.getState(toolId);
+    if (held && held.state !== 'active') {
+      await this.unregisterIfLive(toolId);
+      return { toolId, name, state: held.state, reason: held.reason };
     }
     this.registry.adopt(tool, {
       toolId,

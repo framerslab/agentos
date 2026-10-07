@@ -150,6 +150,17 @@ describe('parsePersistedSource', () => {
     });
   });
 
+  it('reads an in-memory list the same way: a name outside the catalogue makes the source unreadable', () => {
+    const code = 'async function execute(i) { return { t: await fs.readFile(i.p) }; }';
+    const read = sourceFromImplementation({ mode: 'sandbox', code, allowlist: ['fetch', 'fs.write'] as never });
+    expect(read.format).toBe('unreadable');
+    expect(requestFromSource(read)).toBeNull();
+    expect(sourceFromImplementation({ mode: 'sandbox', code, allowlist: ['fs.readFile'] })).toMatchObject({
+      format: 'code-with-list',
+      capabilities: ['fs.read'],
+    });
+  });
+
   it('reports a code row that is JSON of neither stored shape', () => {
     const unknownShapes = [
       '{"mode":"sandbox","allowlist":["fetch"]}',

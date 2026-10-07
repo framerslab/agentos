@@ -240,6 +240,33 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
   });
 
+  it("a refused reactivation of a host's suspension leaves it the host's, whatever words it uses", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'raw-1',
+      name: 'double_it',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+    });
+    await host.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(await host.engine.suspendTool('raw-1', 'source_unreadable')).toBe(true);
+
+    // The source breaks; the host's reactivation is refused for the same words.
+    db.raw.prepare('UPDATE agentos_emergent_tools SET implementation_source = ? WHERE id = ?').run('{"v":2}', 'raw-1');
+    expect(await host.engine.reactivateTool('raw-1')).toMatchObject({ state: 'suspended', reason: 'source_unreadable' });
+    // The refusal is the library's finding, so a later load re-checks it.
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'suspended', set_by: 'library' });
+
+    // Repaired: the next load lifts the library's suspension.
+    db.raw.prepare('UPDATE agentos_emergent_tools SET implementation_source = ? WHERE id = ?').run(RAW_DOUBLE, 'raw-1');
+    const again = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(again.outcomes).toEqual([{ toolId: 'raw-1', name: 'double_it', state: 'active', reason: null }]);
+    expect((await callTool(host.orchestrator, 'double_it', { n: 3 })).output).toEqual({ doubled: 6 });
+  });
+
   it('a row whose input_schema does not read loads suspended as unreadable instead of accepting any input', async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db });

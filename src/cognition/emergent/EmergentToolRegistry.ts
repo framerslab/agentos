@@ -182,6 +182,13 @@ export class EmergentToolRegistry {
   /** Held state per tool. A tool with no entry counts as active. */
   private readonly states = new Map<string, ToolStateRecord>();
 
+  /**
+   * One chain of state writes per tool. A later `setState` starts its writes
+   * after an earlier one's have finished, so storage sees state changes in
+   * call order whatever the adapter's connections do.
+   */
+  private readonly stateWrites = new Map<string, Promise<void>>();
+
   /** Resolved configuration, merged with defaults. */
   private readonly config: EmergentConfig;
 
@@ -434,15 +441,18 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
    * library re-checks only its own suspensions at the next load; a host's
    * stays until the host clears it, whatever words its reason uses.
    *
-   * The write is one statement, so two processes recording a first state for
-   * the same tool both succeed instead of one failing on the primary key. The
-   * `isActive` convention property of a tool held in memory follows the state.
+   * Writes for one tool run in call order, one after another. The `isActive`
+   * convention property of a tool held in memory follows the state.
    *
-   * @throws If the storage adapter rejects. For `suspended` and `demoted` the
-   *   held state is already updated by then, so the running process honours
-   *   the restriction either way. For `active` the held state changes only
-   *   after both writes succeed, so a reactivation that did not land leaves
-   *   the tool off.
+   * A restriction (`suspended`, `demoted`) is held in memory at call time, so
+   * the running process honours it whatever its write does. A reactivation
+   * (`active`) is held only once both writes have succeeded, and only when no
+   * other state change arrived while they ran: a suspension or demotion made
+   * meanwhile is the newer word, it stays, and this call returns that record
+   * instead of its own.
+   *
+   * @returns the record now held for the tool.
+   * @throws If the storage adapter rejects.
    */
   async setState(
     toolId: string,
@@ -467,56 +477,86 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
       if (held) {
         (held as EmergentTool & { isActive?: boolean }).isActive = state === 'active';
       }
+      this.logAudit(toolId, 'state', { state, reason, setBy });
     };
-    // A restriction holds in memory whatever its write does; a reactivation
-    // holds only once it is stored.
     if (state !== 'active') {
       hold();
     }
-    this.logAudit(toolId, 'state', { state, reason, setBy });
 
     if (this.db) {
-      await this.ensureSchemaReady();
-      const requestJson = named && record.request ? JSON.stringify(record.request) : null;
-      const params = [toolId, state, reason, setBy, record.at, requestJson, record.at];
-      if (!named) {
-        await this.db.run(
-          `INSERT INTO agentos_emergent_tool_state
-             (tool_id, state, state_reason, set_by, state_at, request_json, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT (tool_id) DO UPDATE SET
-             state = excluded.state,
-             state_reason = excluded.state_reason,
-             set_by = excluded.set_by,
-             state_at = excluded.state_at,
-             updated_at = excluded.updated_at`,
-          params,
-        );
-      } else {
-        await this.db.run(
-          `INSERT INTO agentos_emergent_tool_state
-             (tool_id, state, state_reason, set_by, state_at, request_json, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT (tool_id) DO UPDATE SET
-             state = excluded.state,
-             state_reason = excluded.state_reason,
-             set_by = excluded.set_by,
-             state_at = excluded.state_at,
-             request_json = excluded.request_json,
-             updated_at = excluded.updated_at`,
-          params,
-        );
-      }
-      // The legacy flag hosts query stays equal to state = 'active'.
-      await this.db.run(`UPDATE agentos_emergent_tools SET is_active = ? WHERE id = ?`, [
-        state === 'active' ? 1 : 0,
-        toolId,
-      ]);
+      await this.queueStateWrite(toolId, () => this.writeStateRow(toolId, record, named));
     }
+
     if (state === 'active') {
+      const current = this.states.get(toolId);
+      if (current !== previous) {
+        // A later restriction landed while this reactivation was being
+        // written; it is the newer word and stays.
+        this.logAudit(toolId, 'state_superseded', { state, reason, setBy, by: current?.state ?? null });
+        return current ?? record;
+      }
       hold();
     }
     return record;
+  }
+
+  /** Runs `write` after every earlier state write of the same tool has settled. */
+  private queueStateWrite(toolId: string, write: () => Promise<void>): Promise<void> {
+    const prior = this.stateWrites.get(toolId) ?? Promise.resolve();
+    const next = prior.catch(() => undefined).then(write);
+    this.stateWrites.set(toolId, next);
+    next
+      .finally(() => {
+        if (this.stateWrites.get(toolId) === next) {
+          this.stateWrites.delete(toolId);
+        }
+      })
+      .catch(() => undefined);
+    return next;
+  }
+
+  /** The two statements of a state change: the state row upsert and the legacy flag. */
+  private async writeStateRow(toolId: string, record: ToolStateRecord, named: boolean): Promise<void> {
+    const db = this.db;
+    if (!db) {
+      return;
+    }
+    await this.ensureSchemaReady();
+    const requestJson = named && record.request ? JSON.stringify(record.request) : null;
+    const params = [toolId, record.state, record.reason, record.setBy, record.at, requestJson, record.at];
+    if (!named) {
+      await db.run(
+        `INSERT INTO agentos_emergent_tool_state
+           (tool_id, state, state_reason, set_by, state_at, request_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (tool_id) DO UPDATE SET
+           state = excluded.state,
+           state_reason = excluded.state_reason,
+           set_by = excluded.set_by,
+           state_at = excluded.state_at,
+           updated_at = excluded.updated_at`,
+        params,
+      );
+    } else {
+      await db.run(
+        `INSERT INTO agentos_emergent_tool_state
+           (tool_id, state, state_reason, set_by, state_at, request_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (tool_id) DO UPDATE SET
+           state = excluded.state,
+           state_reason = excluded.state_reason,
+           set_by = excluded.set_by,
+           state_at = excluded.state_at,
+           request_json = excluded.request_json,
+           updated_at = excluded.updated_at`,
+        params,
+      );
+    }
+    // The legacy flag hosts query stays equal to state = 'active'.
+    await db.run(`UPDATE agentos_emergent_tools SET is_active = ? WHERE id = ?`, [
+      record.state === 'active' ? 1 : 0,
+      toolId,
+    ]);
   }
 
   /**
