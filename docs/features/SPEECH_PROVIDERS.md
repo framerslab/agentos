@@ -190,9 +190,10 @@ npm install @framers/agentos-ext-google-cloud-tts
 import { ExtensionManager } from '@framers/agentos/extensions';
 import { SpeechRuntime } from '@framers/agentos/speech';
 
-// The Google Cloud TTS pack reads its credentials as the GOOGLE_CLOUD_TTS_CREDENTIALS secret.
+// The Google Cloud TTS pack reads its credentials as the GOOGLE_CLOUD_TTS_CREDENTIALS
+// secret; GOOGLE_TTS_CREDENTIALS is the variable the provider table above names.
 const em = new ExtensionManager({
-  secrets: { GOOGLE_CLOUD_TTS_CREDENTIALS: process.env.GOOGLE_CLOUD_TTS_CREDENTIALS ?? '' },
+  secrets: { GOOGLE_CLOUD_TTS_CREDENTIALS: process.env.GOOGLE_TTS_CREDENTIALS ?? '' },
 });
 await em.loadPackFromPackage('@framers/agentos-ext-google-cloud-tts');
 

@@ -8,6 +8,7 @@ import type {
   SpeechResolverConfig,
   ProviderRequirements,
   ProviderRegistration,
+  SpeechProviderCatalogEntry,
 } from './types.js';
 import { FallbackSTTProxy, FallbackTTSProxy } from './FallbackProxy.js';
 import { findSpeechProviderCatalogEntry } from './providerCatalog.js';
@@ -439,7 +440,8 @@ export class SpeechProviderResolver extends EventEmitter {
     if (!req) return true;
 
     // Check streaming capability match
-    if (req.streaming !== undefined && reg.catalogEntry.streaming !== req.streaming) return false;
+    // A catalog entry that does not say it streams counts as not streaming.
+    if (req.streaming !== undefined && (reg.catalogEntry.streaming ?? false) !== req.streaming) return false;
 
     // Check local/cloud deployment match
     if (req.local !== undefined && reg.catalogEntry.local !== req.local) return false;
@@ -582,22 +584,24 @@ export class SpeechProviderResolver extends EventEmitter {
         const provider = desc?.payload;
         if (!provider) continue;
         const id = typeof provider.id === 'string' && provider.id ? provider.id : desc.id;
-        // Known providers keep their catalog entry (capabilities); others get a
-        // synthetic one.
-        const catalogEntry = findSpeechProviderCatalogEntry(id);
+        // Known providers keep their catalog entry (capabilities), when it is of
+        // the same kind; others get a synthetic one. The provider's own
+        // supportsStreaming, when it declares one, decides streaming.
+        const listed = findSpeechProviderCatalogEntry(id);
+        const entry: SpeechProviderCatalogEntry =
+          listed?.kind === kind
+            ? listed
+            : { id, kind, label: id, envVars: [], local: false, description: '' };
+        const catalogEntry =
+          typeof provider.supportsStreaming === 'boolean'
+            ? { ...entry, streaming: provider.supportsStreaming }
+            : entry;
 
         found.push({
           id,
           kind,
           provider,
-          catalogEntry: catalogEntry ?? {
-            id,
-            kind,
-            label: id,
-            envVars: [],
-            local: false,
-            description: '',
-          },
+          catalogEntry,
           isConfigured: true,
           priority: 200, // Extensions rank below core by default
           source: 'extension',

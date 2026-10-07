@@ -163,4 +163,19 @@ describe('SpeechProviderResolver.refresh and provider instances', () => {
 
     expect(resolver.listProviders('tts').find((r) => r.id === 'openai-tts')?.priority).toBe(100);
   });
+
+  it("matches a streaming requirement against a pack provider's own supportsStreaming", async () => {
+    const manager = new ExtensionManager();
+    // The catalog lists AssemblyAI as streaming; this pack's provider does not stream.
+    const stt = { id: 'assemblyai', supportsStreaming: false, getProviderName: () => 'Pack', transcribe: vi.fn() };
+    await manager
+      .getRegistry(EXTENSION_KIND_STT_PROVIDER)
+      .register({ id: 'assemblyai', kind: EXTENSION_KIND_STT_PROVIDER, payload: stt });
+    const resolver = new SpeechProviderResolver(undefined, {});
+
+    await resolver.refresh(manager);
+
+    expect(resolver.resolveSTT({ streaming: false })).toBe(stt);
+    expect(() => resolver.resolveSTT({ streaming: true })).toThrow('No configured STT provider matches requirements');
+  });
 });

@@ -201,4 +201,27 @@ describe('SpeechRuntime providers built from the environment', () => {
 
     expect(runtime.getSTT()).toBe(custom);
   });
+
+  it('matches a streaming requirement against what the provider instance does', () => {
+    // The catalog lists AssemblyAI as streaming; this provider uploads and polls.
+    const runtime = new SpeechRuntime({ env: { ASSEMBLYAI_API_KEY: 'aai' } });
+
+    expect(runtime.getSTT({ streaming: true })).toBeUndefined();
+    expect(runtime.getSTT({ streaming: false })?.id).toBe('assemblyai');
+  });
+
+  it('ignores a catalog entry of another kind, and treats an undeclared provider as not streaming', () => {
+    // 'elevenlabs' is a text-to-speech id in the catalog, listed as streaming.
+    const runtime = new SpeechRuntime({ autoRegisterFromEnv: false });
+    const custom = {
+      id: 'elevenlabs',
+      getProviderName: () => 'Custom',
+      transcribe: async () => ({ text: 'custom', cost: 0 }),
+    };
+
+    runtime.registerSttProvider(custom);
+
+    expect(runtime.getSTT({ streaming: false })).toBe(custom);
+    expect(runtime.getSTT({ streaming: true })).toBeUndefined();
+  });
 });

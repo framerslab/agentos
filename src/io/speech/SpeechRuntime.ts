@@ -277,18 +277,28 @@ export class SpeechRuntime {
    * sensible defaults derived from the static catalog.
    */
   private registerProviderInResolver(
-    provider: { id: string; getProviderName?: () => string },
+    provider: { id: string; getProviderName?: () => string; supportsStreaming?: boolean },
     kind: 'stt' | 'tts' | 'vad' | 'wake-word',
     source: 'core' | 'extension' = 'core'
   ): void {
-    const catalogEntry = findSpeechProviderCatalogEntry(provider.id) ?? {
-      id: provider.id,
-      kind,
-      label: provider.getProviderName?.() ?? provider.id,
-      envVars: [],
-      local: false,
-      description: '',
-    };
+    // A catalog entry of another kind under the same id describes another provider.
+    const listed = findSpeechProviderCatalogEntry(provider.id);
+    const entry: SpeechProviderCatalogEntry =
+      listed?.kind === kind
+        ? listed
+        : {
+            id: provider.id,
+            kind,
+            label: provider.getProviderName?.() ?? provider.id,
+            envVars: [],
+            local: false,
+            description: '',
+          };
+    // The catalog describes the vendor; the instance says whether it streams.
+    const catalogEntry =
+      typeof provider.supportsStreaming === 'boolean'
+        ? { ...entry, streaming: provider.supportsStreaming }
+        : entry;
     this.resolver.register({
       id: provider.id,
       kind,
