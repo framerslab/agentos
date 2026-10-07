@@ -1251,8 +1251,10 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     // register() and a slow ensureSchema() could produce "table not found".
     await this.ensureSchemaReady();
 
-    // Extract the session ID from the source string if present.
-    const sessionMatch = tool.source.match(/session\s+([\w-]+)/);
+    // The session the tool was forged in, from the source line the forge and
+    // the row reader write ("forged by agent X during session Y"), kept whole:
+    // the loader's session selector compares it with the id the host gives.
+    const sessionMatch = tool.source.match(/during session (.+)$/);
     const sessionId = sessionMatch?.[1] ?? 'unknown';
 
     let promotedAt: number | null = null;

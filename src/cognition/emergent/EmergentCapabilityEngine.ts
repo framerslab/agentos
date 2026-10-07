@@ -1346,7 +1346,8 @@ export class EmergentCapabilityEngine {
   }
 
   private extractSessionId(source: string): string | null {
-    const match = /session\s+([A-Za-z0-9._:-]+)/i.exec(source);
+    // The whole id after "during session", as the row keeps it.
+    const match = /during session (.+)$/.exec(source);
     return match?.[1] ?? null;
   }
 

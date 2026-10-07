@@ -654,6 +654,35 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect((await callTool(host.orchestrator, 'double_it', { n: 4 })).output).toEqual({ doubled: 8 });
   });
 
+  it("a tool forged in a session loads again for that session, whatever characters its id holds, and for no other", async () => {
+    const db = createSqliteAdapter();
+    const hostA = await makeForgeHost({ db });
+    const forged = await callTool(
+      hostA.orchestrator,
+      'forge_tool',
+      {
+        name: 'double_it',
+        description: 'Doubles a number.',
+        inputSchema: NUMBER_IN,
+        outputSchema: DOUBLED_OUT,
+        implementation: { mode: 'sandbox', code: RAW_DOUBLE, allowlist: [] },
+        testCases: [{ input: { n: 2 }, expectedOutput: { doubled: 4 } }],
+      },
+      { sessionId: 'sess:a.1' },
+    );
+    expect(forged.isError).toBeFalsy();
+    const toolId = String(forged.output.toolId);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(readToolRow(db, toolId)).toMatchObject({ tier: 'session', created_by_session: 'sess:a.1' });
+
+    const hostB = await makeForgeHost({ db });
+    expect((await hostB.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess' })).outcomes).toEqual([]);
+    expect(await hostB.orchestrator.getTool('double_it')).toBeUndefined();
+    const loaded = await hostB.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess:a.1' });
+    expect(loaded.outcomes).toEqual([{ toolId, name: 'double_it', state: 'active', reason: null }]);
+    expect((await callTool(hostB.orchestrator, 'double_it', { n: 3 })).output).toEqual({ doubled: 6 });
+  });
+
   it('a row read active before another process suspended it is not registered: the row is read again before the tool is adopted', async () => {
     const db = createSqliteAdapter();
     const hostA = await makeForgeHost({ db });
