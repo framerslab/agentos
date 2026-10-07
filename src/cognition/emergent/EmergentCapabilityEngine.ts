@@ -741,6 +741,8 @@ export class EmergentCapabilityEngine {
       stored,
       requestStored: stored?.request != null,
       legacyActive: (tool as EmergentTool & { isActive?: boolean }).isActive ?? true,
+      tier: tool.tier,
+      createdBy: tool.createdBy,
       buildTool: () => tool,
     });
   }
