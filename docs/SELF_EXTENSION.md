@@ -1,0 +1,23 @@
+# Self-extension: forging and self-improvement
+
+An agent on the runtime can add to itself in three ways, each behind its own switch: it can forge a tool, it can adjust its own personality, skills, workflows and parameters, and a hierarchical agency's manager can spawn a specialist.
+
+## Forging a tool
+
+With `emergent: true` on the runtime config, the tool orchestrator registers the `forge_tool` meta-tool ([`ToolOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts), [`ForgeToolMetaTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/ForgeToolMetaTool.ts)). A request names the tool, its input and output JSON Schemas, test cases and an implementation: `compose` chains existing tools through [`ComposableToolBuilder`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/ComposableToolBuilder.ts); `sandbox` runs agent-written JavaScript in a `node:vm` context through [`SandboxedToolForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/SandboxedToolForge.ts), and is rejected until `emergentConfig.allowSandboxTools` is true. The [`EmergentCapabilityEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentCapabilityEngine.ts) builds the candidate, runs its tests, submits it to the [`EmergentJudge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentJudge.ts) (one model call scoring safety, correctness, determinism and boundedness; approval needs safety and correctness to pass; with no judge model call configured every request is rejected) and registers an approved tool at the session tier of the [`EmergentToolRegistry`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentToolRegistry.ts).
+
+Session-tier tools live in memory for the session (mirrored to SQLite when a storage adapter exists). After five successful uses with a judge confidence of at least 0.8, a two-reviewer promotion panel can move a tool to the agent tier, persisted in the `agentos_emergent_tools` table; the shared tier needs an explicit promotion call that records the approver. Forge, promotion and removal decisions go to the `agentos_emergent_audit_log` table when a storage adapter is configured. Raw sandbox source is not stored unless `persistSandboxSource` is set.
+
+The sandbox bans `eval`, `Function`, `require`, `import`, `process`, `child_process` and the file-writing calls at validation time, exposes `fetch`, `fs.readFile` and `crypto` only when a request's allowlist names them, enforces a five-second wall clock, and reads files only under `fsReadRoots`, which defaults to the working directory.
+
+## Self-improvement tools
+
+With `emergentConfig.selfImprovement.enabled`, four more tools are registered: `adapt_personality` (HEXACO deltas clamped to the 0 to 1 range and a per-session budget, recorded in the [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts) when a storage adapter exists), `manage_skills`, `create_workflow` and `self_evaluate` (scores a response with a model call, records adjustments to runtime parameters in its own session state, and reports on them). Stored mutations are not reloaded into a later GMI; a trait change lasts for the instance that made it.
+
+## Spawning a specialist
+
+In an agency running the hierarchical strategy with emergent planning enabled, the manager gets a `spawn_specialist` tool: [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts) turns the manager's spec into an agent config, [`EmergentAgentJudge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentJudge.ts) reviews it, and the new agent joins the roster as a `delegate_to_<role>` tool for the manager's next turn ([`hierarchical.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/strategies/hierarchical.ts)). At most five specialists per run by default; spawned specialists are reset between `send()` calls.
+
+## What is not there
+
+No weights are updated anywhere; no evaluation result changes a later turn's policy on its own; no loop rewrites the agent's own code or prompts persistently. [Emergent Capabilities](./architecture/EMERGENT_CAPABILITIES.md) is the full guide.
