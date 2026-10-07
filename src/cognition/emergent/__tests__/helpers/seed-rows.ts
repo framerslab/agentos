@@ -64,6 +64,8 @@ export interface SeedStateRow {
   setBy?: 'library' | 'host';
   /** The raw column text, so a test can write a request this release does not read. */
   requestJson: string | null;
+  /** 0 for a row whose flag write never finished. */
+  flagSynced?: 0 | 1;
 }
 
 /** Inserts a state row as another release or process would have written it. */
@@ -71,8 +73,8 @@ export function seedStateRow(db: SqliteTestAdapter, row: SeedStateRow): void {
   db.raw
     .prepare(
       `INSERT INTO agentos_emergent_tool_state
-         (tool_id, state, state_reason, set_by, state_at, request_json, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         (tool_id, state, state_reason, set_by, state_at, request_json, updated_at, flag_synced)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       row.toolId,
@@ -82,6 +84,7 @@ export function seedStateRow(db: SqliteTestAdapter, row: SeedStateRow): void {
       1_700_000_000_000,
       row.requestJson,
       1_700_000_000_000,
+      row.flagSynced ?? 1,
     );
 }
 

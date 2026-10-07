@@ -196,8 +196,8 @@ interface AdmissionCandidate {
   requestStored: boolean;
   /** The tool row's `is_active`, or a host-built object's `isActive`. */
   legacyActive: boolean;
-  /** When the state row was last written, for a row read from storage. */
-  stateWrittenAt?: number;
+  /** False when the row's last state write did not finish its flag write; undefined for a host-built object. */
+  flagSynced?: boolean;
   buildTool: (implementation: ToolImplementation) => EmergentTool;
 }
 
@@ -278,14 +278,6 @@ interface ToolIndex {
  * }
  * ```
  */
-/**
- * How long after a state row is written (its own write time, not the call's)
- * the pair "active state, flag off" reads as an activation in flight (its
- * flag write follows its state write) rather than as a host that turned the
- * tool off with its own SQL.
- */
-const ACTIVATION_IN_FLIGHT_MS = 10_000;
-
 /** Whether two stored requests grant the same thing. */
 function sameGrant(a: StoredRequest | null | undefined, b: StoredRequest | null | undefined): boolean {
   if (!a || !b) {
@@ -906,7 +898,7 @@ export class EmergentCapabilityEngine {
         stored,
         requestStored: row.request_json != null,
         legacyActive: !(row.is_active === 0 || row.is_active === false),
-        stateWrittenAt: row.state_updated_at != null ? Number(row.state_updated_at) : undefined,
+        flagSynced: row.flag_synced == null ? undefined : !(row.flag_synced === 0 || row.flag_synced === false),
         buildTool: (implementation) => toolFromRow(row, implementation),
       },
       options,
@@ -921,7 +913,16 @@ export class EmergentCapabilityEngine {
     candidate: AdmissionCandidate,
     options: { force?: boolean; readmitted?: boolean } = {},
   ): Promise<LoadedToolOutcome> {
-    const { toolId, name, source, stored, legacyActive, requestStored } = candidate;
+    const { toolId, name, source, stored, requestStored } = candidate;
+    let legacyActive = candidate.legacyActive;
+    // A row whose last state write did not finish its flag write: finish it
+    // first, so the flag reads what the state row says before anything is
+    // decided. A crash or a failed write between a state row and its flag
+    // never leaves the two apart beyond the next load.
+    if (stored && candidate.flagSynced === false) {
+      await this.registry.syncLegacyFlag(toolId, stored);
+      legacyActive = stored.state === 'active';
+    }
     // The request this process works with: the stored one when it can be read,
     // else one derived from the source. It is written to the row only when the
     // row holds none; a stored request this release cannot read stays as it is.
@@ -931,15 +932,9 @@ export class EmergentCapabilityEngine {
     // 1. A tool a host turned off stays off. A row with is_active = 0 and no
     //    suspension on record was turned off by a host (its own SQL, or
     //    demote()); loading never undoes that, so it is recorded as the host's.
-    //    An active state row written moments ago is the exception: its flag
-    //    write follows its state write, and a load between the two must not
-    //    record a host's disable; a host that turns a tool off within that
-    //    window is read at the next load after it.
-    const inFlight =
-      stored?.state === 'active' &&
-      candidate.stateWrittenAt !== undefined &&
-      Date.now() - candidate.stateWrittenAt < ACTIVATION_IN_FLIGHT_MS;
-    const hostTurnedOff = !legacyActive && stored?.state !== 'suspended' && !inFlight;
+    //    (A flag write the library had not finished was finished above, so a
+    //    lowered flag here is the host's own.)
+    const hostTurnedOff = !legacyActive && stored?.state !== 'suspended';
     if ((stored?.state === 'demoted' || hostTurnedOff) && !options.force) {
       const reason = stored?.state === 'demoted' ? stored.reason : 'legacy_inactive';
       if (stored?.state === 'demoted') {

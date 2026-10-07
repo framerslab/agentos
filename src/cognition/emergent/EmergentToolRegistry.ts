@@ -316,7 +316,8 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
   set_by TEXT NOT NULL DEFAULT 'host',
   state_at BIGINT NOT NULL,
   request_json TEXT,
-  updated_at BIGINT NOT NULL
+  updated_at BIGINT NOT NULL,
+  flag_synced INTEGER NOT NULL DEFAULT 1
 );`;
 
     // Tables and indexes only: the flag on the tool row is written by the
@@ -554,17 +555,16 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
   }
 
   /**
-   * The two statements of a state change: the state row upsert, then the
-   * legacy flag, read from the state row inside its own statement so the two
-   * agree whatever other processes write in between. Between the two a row
-   * can read as an active state with the flag off; the loader reads that
-   * pair, with a state row written in the last ten seconds, as an activation
-   * in flight rather than a host's disable. With `ifRow`, an existing row is
-   * changed only while its state, setter and time are the ones given
-   * (`'absent'`: never); a refused write changes nothing, flag included, and
-   * the row as it stands afterwards is returned, so it shows as a record
-   * other than the one given. A flag write that fails puts the state row back
-   * as it was, so the pair never stays half-changed.
+   * The statements of a state change: the state row upsert, with its flag
+   * write marked pending; the legacy flag, read from the state row inside its
+   * own statement so the two agree whatever other processes write in between;
+   * then the mark cleared. A failure after the state row leaves the mark
+   * pending, and the next state write or load finishes the flag write, so a
+   * crash or a failed write between the two never leaves the pair apart
+   * beyond the next load. With `ifRow`, an existing row is changed only while
+   * its state, setter and time are the ones given (`'absent'`: never); a
+   * refused write changes nothing, flag included, and the row as it stands
+   * afterwards is returned, so it shows as a record other than the one given.
    */
   private async writeStateRow(
     toolId: string,
@@ -591,8 +591,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
              state_at = excluded.state_at,
              updated_at = excluded.updated_at`;
     let guard = '';
-    // state_at is the call's time; updated_at the write's own, which the
-    // loader reads to tell an activation in flight from a host's disable.
+    // state_at is the call's time; updated_at the write's own.
     const params: unknown[] = [toolId, record.state, record.reason, record.setBy, record.at, requestJson, Date.now()];
     if (ifRow === 'absent') {
       guard = `
@@ -611,83 +610,90 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
           WHERE tool_id = ?`,
         [toolId],
       )) as StateRowRead | undefined;
-    // The row before this write, put back if the flag write that follows fails.
-    const before = await readRow();
+    const rowRecord = (row: StateRowRead): ToolStateRecord => ({
+      toolId,
+      state: row.state as ToolState,
+      reason: row.state_reason ?? null,
+      setBy: stateSetterFromColumn(row.set_by),
+      at: Number(row.state_at ?? 0),
+      request: parseStoredRequest(row.request_json),
+    });
+    // Applied when the row reads what was written; the time alone cannot tell
+    // two writes in one millisecond apart.
+    const matches = (row: StateRowRead | undefined): boolean =>
+      !row?.state ||
+      (row.state === record.state &&
+        (row.state_reason ?? null) === record.reason &&
+        stateSetterFromColumn(row.set_by) === record.setBy &&
+        Number(row.state_at) === record.at);
+
+    // The state row, its flag write marked pending until it is done.
     await db.run(
       `INSERT INTO agentos_emergent_tool_state
-         (tool_id, state, state_reason, set_by, state_at, request_json, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+         (tool_id, state, state_reason, set_by, state_at, request_json, updated_at, flag_synced)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0)
        ON CONFLICT (tool_id) DO UPDATE SET
-         ${setList}${guard}`,
+         ${setList},
+         flag_synced = 0${guard}`,
       params,
     );
     if (ifRow !== undefined) {
       const row = await readRow();
-      // Applied when the row now reads what was written; the time alone cannot
-      // tell two writes in one millisecond apart.
-      const applied =
-        !row?.state ||
-        (row.state === record.state &&
-          (row.state_reason ?? null) === record.reason &&
-          stateSetterFromColumn(row.set_by) === record.setBy &&
-          Number(row.state_at) === record.at);
-      if (!applied) {
+      if (!matches(row)) {
         // Refused: the row and its flag are as another process left them.
-        return {
-          toolId,
-          state: row.state as ToolState,
-          reason: row.state_reason ?? null,
-          setBy: stateSetterFromColumn(row.set_by),
-          at: Number(row.state_at ?? 0),
-          request: parseStoredRequest(row.request_json),
-        };
+        return rowRecord(row as StateRowRead);
       }
     }
-    // The legacy flag hosts query follows the state row, read inside the statement.
-    try {
-      await db.run(
-        `UPDATE agentos_emergent_tools
-            SET is_active = COALESCE((SELECT CASE WHEN state = 'active' THEN 1 ELSE 0 END
-                                        FROM agentos_emergent_tool_state WHERE tool_id = ?), ?)
-          WHERE id = ?`,
-        [toolId, record.state === 'active' ? 1 : 0, toolId],
-      );
-    } catch (error) {
-      // The state row landed and the flag did not: the row goes back to what
-      // it was, under this write's own guard, so the pair never stays
-      // half-changed. The flag write's failure is the one reported.
-      try {
-        if (!before?.state) {
-          await db.run(
-            `DELETE FROM agentos_emergent_tool_state
-              WHERE tool_id = ? AND state = ? AND set_by = ? AND state_at = ?`,
-            [toolId, record.state, record.setBy, record.at],
-          );
-        } else {
-          await db.run(
-            `UPDATE agentos_emergent_tool_state
-                SET state = ?, state_reason = ?, set_by = ?, state_at = ?, request_json = ?, updated_at = ?
-              WHERE tool_id = ? AND state = ? AND set_by = ? AND state_at = ?`,
-            [
-              before.state,
-              before.state_reason ?? null,
-              before.set_by ?? 'host',
-              Number(before.state_at ?? 0),
-              before.request_json ?? null,
-              Date.now(),
-              toolId,
-              record.state,
-              record.setBy,
-              record.at,
-            ],
-          );
-        }
-      } catch {
-        // Reported through the first failure.
+    // The legacy flag follows the state row, then the mark is cleared. A
+    // failure here leaves the mark pending for the next write or load.
+    await this.writeLegacyFlag(toolId, record.state);
+    await db.run(
+      `UPDATE agentos_emergent_tool_state
+          SET flag_synced = 1
+        WHERE tool_id = ? AND state = ? AND set_by = ? AND state_at = ?`,
+      [toolId, record.state, record.setBy, record.at],
+    );
+    if (ifRow !== undefined) {
+      // The row's word after the flag write: a restriction another process
+      // stored meanwhile is what holds, not the record written here.
+      const after = await readRow();
+      if (!matches(after)) {
+        return rowRecord(after as StateRowRead);
       }
-      throw error;
     }
     return record;
+  }
+
+  /** The legacy flag hosts query, read from the state row inside the statement. */
+  private async writeLegacyFlag(toolId: string, state: ToolState): Promise<void> {
+    await this.db!.run(
+      `UPDATE agentos_emergent_tools
+          SET is_active = COALESCE((SELECT CASE WHEN state = 'active' THEN 1 ELSE 0 END
+                                      FROM agentos_emergent_tool_state WHERE tool_id = ?), ?)
+        WHERE id = ?`,
+      [toolId, state === 'active' ? 1 : 0, toolId],
+    );
+  }
+
+  /**
+   * Finish a state write whose flag write did not: the legacy flag from the
+   * state row, then the row's mark cleared, under the record the row holds so
+   * a newer write's mark is left alone. The loader calls it for a row whose
+   * mark is pending, before anything about the row is decided.
+   */
+  async syncLegacyFlag(toolId: string, record: Pick<ToolStateRecord, 'state' | 'setBy' | 'at'>): Promise<void> {
+    const db = this.db;
+    if (!db) {
+      return;
+    }
+    await this.ensureSchemaReady();
+    await this.writeLegacyFlag(toolId, record.state);
+    await db.run(
+      `UPDATE agentos_emergent_tool_state
+          SET flag_synced = 1
+        WHERE tool_id = ? AND state = ? AND set_by = ? AND state_at = ?`,
+      [toolId, record.state, record.setBy, record.at],
+    );
   }
 
   /**
@@ -729,7 +735,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
         t.failure_count, t.avg_execution_ms, t.last_used_at, t.is_active,
         s.state AS state, s.state_reason AS state_reason, s.set_by AS set_by,
         s.state_at AS state_at, s.request_json AS request_json,
-        s.updated_at AS state_updated_at
+        s.flag_synced AS flag_synced
    FROM agentos_emergent_tools t
    LEFT JOIN agentos_emergent_tool_state s ON s.tool_id = t.id`;
 

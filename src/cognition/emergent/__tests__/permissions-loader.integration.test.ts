@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import type { EmergentTool } from '../types.js';
 import { createSqliteAdapter, readStateRow, readToolRow } from './helpers/sqlite-adapter.js';
 import { callTool, echoTool, makeForgeHost } from './helpers/forge-host.js';
@@ -486,28 +486,16 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     });
 
     db.raw.prepare('UPDATE agentos_emergent_tools SET is_active = 0 WHERE id = ?').run('compose-1');
-    // Within ten seconds of the state row's write the pair reads as an
-    // activation in flight, so the disable is read at the next load after that.
-    const soon = await host.engine.loadPersistedTools({ tiers: ['shared'] });
-    expect(soon.outcomes).toEqual([{ toolId: 'compose-1', name: 'echo_once', state: 'active', reason: null }]);
-    expect(readToolRow(db, 'compose-1')?.is_active).toBe(0);
+    const again = await host.engine.loadPersistedTools({ tiers: ['shared'] });
 
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      vi.setSystemTime(Date.now() + 11_000);
-      const again = await host.engine.loadPersistedTools({ tiers: ['shared'] });
-
-      expect(again.outcomes).toEqual([
-        { toolId: 'compose-1', name: 'echo_once', state: 'demoted', reason: 'legacy_inactive' },
-      ]);
-      expect(await host.orchestrator.getTool('echo_once')).toBeUndefined();
-      expect(readStateRow(db, 'compose-1')).toMatchObject({ state: 'demoted' });
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(again.outcomes).toEqual([
+      { toolId: 'compose-1', name: 'echo_once', state: 'demoted', reason: 'legacy_inactive' },
+    ]);
+    expect(await host.orchestrator.getTool('echo_once')).toBeUndefined();
+    expect(readStateRow(db, 'compose-1')).toMatchObject({ state: 'demoted' });
   });
 
-  it('a load whose flag write fails leaves no state row behind, is reported failed, and loads at the next start', async () => {
+  it('a load whose flag write fails is reported failed, and the next load finishes the flag write', async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db });
     seedToolRow(db, {
@@ -524,12 +512,52 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
 
     expect(summary.failed).toEqual([{ toolId: 'raw-1', name: 'double_it', error: 'simulated storage failure' }]);
     expect(await host.orchestrator.getTool('double_it')).toBeUndefined();
-    expect(readStateRow(db, 'raw-1')).toBeUndefined();
-    expect(readToolRow(db, 'raw-1')?.is_active).toBe(1);
+    // The state row landed with its flag write still marked pending.
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active', flag_synced: 0 });
 
     const again = await host.engine.loadPersistedTools({ tiers: ['shared'] });
     expect(again.outcomes).toEqual([{ toolId: 'raw-1', name: 'double_it', state: 'active', reason: null }]);
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active', flag_synced: 1 });
+    expect(readToolRow(db, 'raw-1')?.is_active).toBe(1);
     expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
+  });
+
+  it('a state row whose flag write never finished is finished at the next load, in either direction', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'raw-1',
+      name: 'double_it',
+      mode: 'sandbox',
+      source: RAW_DOUBLE,
+      isActive: 0,
+      inputSchema: NUMBER_IN,
+      outputSchema: DOUBLED_OUT,
+    });
+    seedStateRow(db, {
+      toolId: 'raw-1',
+      state: 'active',
+      setBy: 'library',
+      requestJson: '{"kind":"sandbox","capabilities":[]}',
+      flagSynced: 0,
+    });
+    seedToolRow(db, { id: 'raw-2', name: 'sum_it', mode: 'sandbox', source: SUM_CODE, inputSchema: SUM_IN, outputSchema: SUM_OUT });
+    seedStateRow(db, { toolId: 'raw-2', state: 'suspended', reason: 'operator_hold', setBy: 'host', requestJson: null, flagSynced: 0 });
+
+    const summary = await host.engine.loadPersistedTools({ tiers: ['shared'] });
+
+    expect(summary.outcomes).toEqual(
+      expect.arrayContaining([
+        { toolId: 'raw-1', name: 'double_it', state: 'active', reason: null },
+        { toolId: 'raw-2', name: 'sum_it', state: 'suspended', reason: 'operator_hold' },
+      ]),
+    );
+    expect(readToolRow(db, 'raw-1')?.is_active).toBe(1);
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active', flag_synced: 1 });
+    expect(readToolRow(db, 'raw-2')?.is_active).toBe(0);
+    expect(readStateRow(db, 'raw-2')).toMatchObject({ state: 'suspended', flag_synced: 1 });
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
+    expect(await host.orchestrator.getTool('sum_it')).toBeUndefined();
   });
 
   it('a code row holding JSON of neither stored shape loads suspended as unreadable', async () => {
@@ -791,7 +819,7 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect(JSON.stringify(called)).toMatch(/fetch/);
   });
 
-  it('a load between the two writes of a reactivation reads an activation in flight, not a disable by the host', async () => {
+  it("a load between a reactivation's state write and its flag write finishes the flag write, and reads the reactivation", async () => {
     const db = createSqliteAdapter();
     const hostA = await makeForgeHost({ db });
     const hostB = await makeForgeHost({ db });
@@ -810,22 +838,23 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     });
 
     // The reactivation's flag write is held open after its state row write:
-    // the row reads active with the flag off, which a load does not take for
-    // a host's disable while the state row is this fresh.
+    // the row reads active with the flag off and its flag write marked pending.
     const gate = db.gateNext('SET is_active = COALESCE(');
     const reactivating = hostA.engine.reactivateTool('raw-1');
     await gate.entered;
     expect(readToolRow(db, 'raw-1')?.is_active).toBe(0);
-    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active' });
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active', flag_synced: 0 });
+
+    // Host B's load finishes the flag write and reads the reactivation.
     const meanwhile = await hostB.engine.loadPersistedTools({ tiers: ['shared'] });
     expect(meanwhile.outcomes).toEqual([{ toolId: 'raw-1', name: 'double_it', state: 'active', reason: null }]);
-    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active' });
+    expect(readToolRow(db, 'raw-1')?.is_active).toBe(1);
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active', flag_synced: 1 });
     gate.release();
     expect(await reactivating).toMatchObject({ state: 'active' });
 
-    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active' });
+    expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active', flag_synced: 1 });
     expect(readToolRow(db, 'raw-1')?.is_active).toBe(1);
-    expect((await hostB.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes[0]).toMatchObject({ state: 'active' });
     expect((await callTool(hostA.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
   });
 });

@@ -286,7 +286,7 @@ describe('EmergentToolRegistry state', () => {
     expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active' });
   });
 
-  it('a reactivation whose flag write fails puts the state row back, so the tool stays off', async () => {
+  it('a reactivation whose flag write fails is not held in memory, and its row says the flag write is pending', async () => {
     const tool = makeTool({ id: 'emergent_test_9' });
     registry.register(tool, 'agent');
     await settle();
@@ -298,8 +298,14 @@ describe('EmergentToolRegistry state', () => {
     );
 
     expect(registry.isActive(tool.id)).toBe(false);
-    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'suspended', state_reason: 'operator_hold', set_by: 'host' });
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active', flag_synced: 0 });
     expect(readToolRow(db, tool.id)?.is_active).toBe(0);
+
+    // The next state write finishes the flag write.
+    await registry.setState(tool.id, 'active', null, { setBy: 'host' });
+    expect(registry.isActive(tool.id)).toBe(true);
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active', flag_synced: 1 });
+    expect(readToolRow(db, tool.id)?.is_active).toBe(1);
   });
 
   it("a refused write leaves the flag as the host set it, even when the row's state is active", async () => {
