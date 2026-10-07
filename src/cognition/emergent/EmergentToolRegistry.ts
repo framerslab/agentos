@@ -362,11 +362,6 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     this.schemaReady = true;
   }
 
-  /** Whether a storage adapter was given: agent and shared tiers, state rows and effect records persist. */
-  hasStorage(): boolean {
-    return this.db !== undefined;
-  }
-
   // --------------------------------------------------------------------------
   // REGISTER
   // --------------------------------------------------------------------------
