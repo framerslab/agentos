@@ -10,6 +10,7 @@ import {
 } from '../../generateText.js';
 import { PolicyAwareRouter } from '../../../core/llm/routing/PolicyAwareRouter.js';
 import { createUncensoredModelCatalog } from '../../../core/llm/routing/UncensoredModelCatalog.js';
+import { PROVIDER_DEFAULTS } from '../provider-defaults.js';
 
 const LLAMA = 'meta-llama/llama-3.3-70b-instruct';
 const MAGNUM = 'anthracite-org/magnum-v4-72b';
@@ -109,6 +110,21 @@ describe('resolveFallbackChain', () => {
       excludedModelIds: [MAGNUM],
     });
     expect(roles(chain).slice(0, 2)).toEqual([`${LLAMA}(standing)`, `${HERMES}(standing)`]);
+  });
+
+  it('checks a leg as it will be sent: a provider default model, a provider-qualified id', () => {
+    const skipped: string[] = [];
+    const chain = resolveFallbackChain(
+      [{ provider: 'openai' }, { provider: 'openrouter', model: `openrouter:${MAGNUM}` }, { provider: 'openrouter', model: LLAMA }],
+      {
+        primary: { provider: 'anthropic', model: 'claude-sonnet-5-5' },
+        excludedModelIds: [PROVIDER_DEFAULTS.openai!.text!],
+        requiredCapabilities: ['function_calling'],
+        onSkip: (entry, reason) => skipped.push(`${entry.model ?? `${entry.provider} default`}:${reason}`),
+      },
+    );
+    expect(chain.map((e) => e.model)).toEqual([LLAMA]);
+    expect(skipped).toEqual(['openai default:excluded_model', `openrouter:${MAGNUM}:missing_capability`]);
   });
 
   it('walks a safe chain verbatim', () => {

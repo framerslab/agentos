@@ -1718,13 +1718,28 @@ export function explicitRequiredCapabilities(
 }
 
 /**
+ * The provider and model a fallback entry is sent as: resolved the way the
+ * leg's own call resolves it (a provider's default model when the entry
+ * names none, a `provider:model` id split), or the entry as written when it
+ * does not resolve.
+ */
+function fallbackEntrySentAs(entry: FallbackProviderEntry): { provider: string; model?: string } {
+  try {
+    const { providerId, modelId } = resolveModelOption({ provider: entry.provider, model: entry.model }, 'text');
+    return { provider: providerId, model: modelId };
+  } catch {
+    return { provider: entry.provider, model: entry.model };
+  }
+}
+
+/**
  * Resolve a call's fallback chain once, at the start of the top-level walk.
  * Policy-chain entries (`origin: 'policy-default'`) naming the failed first
- * model are dropped; every entry is checked against the call's explicitly
- * required capabilities and excluded models (a model outside the catalog
- * counts as capable); the uncensored group's first two remaining entries
- * become standing legs and the rest refills. Caller-written entries keep
- * their order.
+ * model are dropped; every entry is checked, as the provider and model it
+ * will be sent as, against the call's explicitly required capabilities and
+ * excluded models (a model outside the catalog counts as capable); the
+ * uncensored group's first two remaining entries become standing legs and
+ * the rest refills. Caller-written entries keep their order.
  *
  * @internal
  */
@@ -1750,11 +1765,12 @@ export function resolveFallbackChain(
       ctx.onSkip?.(entry, 'failed_primary');
       continue;
     }
-    if (entry.model !== undefined && excluded.has(entry.model)) {
+    const sentAs = fallbackEntrySentAs(entry);
+    if (sentAs.model !== undefined && excluded.has(sentAs.model)) {
       ctx.onSkip?.(entry, 'excluded_model');
       continue;
     }
-    const catalogEntry = entry.model !== undefined ? findCatalogTextModel(entry.model, entry.provider) : undefined;
+    const catalogEntry = sentAs.model !== undefined ? findCatalogTextModel(sentAs.model, sentAs.provider) : undefined;
     if (catalogEntry && required.some((capability) => !catalogEntryHasCapability(catalogEntry, capability))) {
       ctx.onSkip?.(entry, 'missing_capability');
       continue;

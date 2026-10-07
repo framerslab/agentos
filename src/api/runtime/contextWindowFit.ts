@@ -4,7 +4,9 @@
  *
  * The input estimate is characters / 4 plus a 10% margin, over the text the
  * request sends: message content (system blocks included), tool-call fields,
- * and tool schemas or the tool text a prompt shim renders. Image parts and
+ * and tool schemas or the tool text a prompt shim renders; on OpenRouter a
+ * `customModelParams.messages` or `.tools` override replaces them, as it does
+ * in the payload. Image parts and
  * replayed reasoning fields (Anthropic thinking blocks and signatures, Gemini
  * thought signatures) are not counted. The output allowance is the one the
  * provider will send. A call that enables OpenRouter's context-compression
@@ -114,11 +116,14 @@ function compressesToFit(provider: string, customModelParams: Record<string, unk
  * a call that enables OpenRouter's context compression.
  */
 export function checkContextFit(request: ContextFitRequest): ContextFit {
-  const chars =
-    textChars(request.messages) +
-    textChars(request.system) +
-    textChars(request.prompt) +
-    (request.tools === undefined ? 0 : (JSON.stringify(request.tools) ?? '').length);
+  // OpenRouterProvider spreads customModelParams over its payload last, so a
+  // `messages` or `tools` override there is what the model is sent.
+  const overrides = request.provider === 'openrouter' ? request.customModelParams : undefined;
+  const sentTools = overrides?.tools !== undefined ? overrides.tools : request.tools;
+  const messageChars = Array.isArray(overrides?.messages)
+    ? textChars(overrides?.messages)
+    : textChars(request.messages) + textChars(request.system) + textChars(request.prompt);
+  const chars = messageChars + (sentTools === undefined ? 0 : (JSON.stringify(sentTools) ?? '').length);
   const estimatedInputTokens = Math.ceil((chars / CHARS_PER_TOKEN) * ESTIMATE_MARGIN);
   const outputTokens = outputAllowance(request.provider, request.model, request.maxTokens, request.customModelParams);
   const contextWindow = findCatalogTextModel(request.model, request.provider)?.contextWindow;
