@@ -7,7 +7,7 @@
  *   forge request → build tool → run tests → judge review → register
  *
  * Supports two creation modes:
- * - **Compose**: chains existing tools via {@link ComposableToolBuilder} (safe by construction).
+ * - **Compose**: chains existing tools via {@link ComposableToolBuilder}.
  * - **Sandbox**: runs agent-written code via {@link SandboxedToolForge} (judge-gated).
  *
  * After registration the engine tracks usage and auto-promotes tools that
@@ -179,7 +179,7 @@ interface ToolIndex {
  * Pipeline: forge request → build tool → run tests → judge review → register.
  *
  * Supports two creation modes:
- * - **Compose**: chains existing tools via {@link ComposableToolBuilder} (safe by construction).
+ * - **Compose**: chains existing tools via {@link ComposableToolBuilder}.
  * - **Sandbox**: runs agent-written code via {@link SandboxedToolForge} (judge-gated).
  *
  * @example

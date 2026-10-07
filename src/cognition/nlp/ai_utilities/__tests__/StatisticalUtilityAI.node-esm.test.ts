@@ -57,4 +57,17 @@ describe.skipIf(!inCI && !existsSync(builtModule))('StatisticalUtilityAI built f
     expect(result.tokens).toBeGreaterThan(0);
     expect(result.language).toBe('fr');
   });
+
+  it('decides a Japanese passage by its script', () => {
+    const out = runInNode(`
+      const results = await utility.detectLanguage(
+        '古い灯台の下で、少女は毎晩ひとりで海の音を聞いていた。嵐が近づくと、彼女は窓を閉めて静かに祈った。',
+        { maxCandidates: 32 },
+      );
+      process.stdout.write('\\n${RESULT_MARK}' + JSON.stringify(results) + '\\n');
+    `);
+    const results = readResult<Array<{ language: string; confidence: number }>>(out);
+    expect(results).toHaveLength(1);
+    expect(results[0].language).toBe('ja');
+  });
 });

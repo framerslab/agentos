@@ -266,7 +266,7 @@ Each seat keeps the default provider failover. When a seat's call fails with a
 retryable error (HTTP 401, 402, 403, 429, 500, 502, 503, 504 or 529, a network
 error or a timeout), the call is retried on the providers whose keys are in the
 environment. With no `policyTier` set, the order and models are: OpenAI
-`gpt-5.6-sol`, Anthropic `claude-sonnet-5`, OpenRouter `openai/gpt-5.6-sol`,
+`gpt-5.6-sol`, Anthropic `claude-sonnet-5-5` (effort `low`), OpenRouter `openai/gpt-5.6-sol`,
 Gemini `gemini-3.1-pro-preview`; the seat's own provider is skipped. The
 seat's result then reports the provider that answered, but
 `agentCalls` does not record it. To pin every seat and the chair to their
@@ -551,8 +551,8 @@ When enabled, the orchestrator may synthesise new specialist agents at runtime
 to handle tasks not covered by the statically defined roster. Mechanically, the
 hierarchical manager gets one extra tool — `spawn_specialist({ role,
 instructions, justification? })` — alongside its `delegate_to_<name>` tools.
-Calling it forges a new sub-agent via [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/emergent/EmergentAgentForge.ts)
-and (when `judge: true`) gates it through [`EmergentAgentJudge`](https://github.com/framerslab/agentos/blob/master/src/emergent/EmergentAgentJudge.ts)
+Calling it forges a new sub-agent via [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts)
+and (when `judge: true`) gates it through [`EmergentAgentJudge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentJudge.ts)
 before it joins the live roster. Emergent agents are also subject to HITL
 approval when `hitl.approvals.beforeEmergent` is set.
 
@@ -761,7 +761,7 @@ const withRag = agency({
 When `voice.enabled` is `true` the agency exposes a `listen()` method that
 starts a local WebSocket server.  Callers receive the bound port and URL and can
 connect any audio client.  The full STT → LLM → TTS pipeline is provided by
-`src/voice-pipeline/`; the agency wires `generate()` as the LLM backend.
+`src/io/voice-pipeline/`; the agency wires `generate()` as the LLM backend.
 
 ```typescript
 const voiceAgent = agency({
@@ -791,10 +791,12 @@ Requires the `ws` package (`npm install ws`).
 ### Channel adapters
 
 When `channels` contains at least one entry the agency exposes a `connect()`
-method.  Calling it logs each configured channel and defers real adapter
-initialisation to the runtime.  Full adapter wiring (Discord, Telegram, Slack,
-etc.) is handled by the channel adapter infrastructure in
-`src/channels/`; `connect()` is the hook point for that wiring.
+method so the surface matches the full runtime. The lightweight `agency()`
+constructs no channel adapters: `connect()` rejects with the configured
+channel names. Channel wiring (Discord, Telegram, Slack and the rest) is done
+with `ChannelRouter` and the adapters in `src/io/channels/` (the Channels guide
+shows the standalone form), or by the full AgentOS runtime with its
+`messaging-channel` extension packs; `connect()` never does it.
 
 ```typescript
 const social = agency({
@@ -807,7 +809,13 @@ const social = agency({
   },
 });
 
-await social.connect(); // logs each channel; real adapter connection is a follow-up
+try {
+  await social.connect();
+} catch (error) {
+  // agency().connect() cannot connect "discord", "telegram", "slack": the
+  // lightweight agency() helper constructs no channel adapters ...
+  console.error((error as Error).message);
+}
 ```
 
 ---
@@ -1079,7 +1087,7 @@ console.log(result.text);
 
 Enable `emergent` so the manager can spawn ad-hoc specialists via the
 `spawn_specialist` tool when the predefined roster does not cover a sub-task.
-With `judge: true`, [`EmergentAgentJudge`](https://github.com/framerslab/agentos/blob/master/src/emergent/EmergentAgentJudge.ts)
+With `judge: true`, [`EmergentAgentJudge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentJudge.ts)
 runs one LLM-as-judge call evaluating the spec on safety / scope / risk
 before it joins the roster.
 
@@ -1270,6 +1278,6 @@ await contentPipeline.close();
 - [`docs/OBSERVABILITY.md`](./OBSERVABILITY.md) — OTEL integration and trace event reference
 - [`docs/STRUCTURED_OUTPUT.md`](./STRUCTURED_OUTPUT.md) — Zod schema output and extraction patterns
 - [`docs/AGENT_GRAPH.md`](./AGENT_GRAPH.md) — [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) programmatic graph builder (advanced)
-- [`src/api/types.ts`](../src/api/types.ts) — canonical TypeScript type definitions
-- [`src/api/agency.ts`](../src/api/agency.ts) — `agency()` implementation
-- [`src/api/hitl.ts`](../src/api/hitl.ts) — HITL handler factories
+- [`src/api/types.ts`](../../src/api/types.ts) — canonical TypeScript type definitions
+- [`src/api/agency.ts`](../../src/api/agency.ts) — `agency()` implementation
+- [`src/api/hitl.ts`](../../src/api/hitl.ts) — HITL handler factories

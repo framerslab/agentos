@@ -12,8 +12,9 @@ import { z } from 'zod';
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
-import { generateText, isContentPolicyRefusal } from '../../generateText.js';
+import { buildFallbackChain, generateText, isContentPolicyRefusal } from '../../generateText.js';
 import { generateObject } from '../../generateObject.js';
+import { streamObject } from '../../streamObject.js';
 import { streamText, type StreamPart } from '../../streamText.js';
 import { agent } from '../../agent.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
@@ -538,5 +539,86 @@ describe('Claude thinking off and effort through the public API', () => {
     await generateText({ provider: 'anthropic', model: 'claude-opus-4-8', prompt: 'x', effort: 'xhigh', fallbackProviders: [] });
 
     expect(postedBodies().map((b) => b.output_config?.effort)).toEqual(['high', 'high', 'max', 'xhigh']);
+  });
+});
+
+describe('structured calls carry thinking and effort to the wire', () => {
+  it('generateObject on Sonnet 5.5 with thinking off sends between_tools at the given effort', async () => {
+    route({ 'claude-sonnet-5-5': [textTurn('claude-sonnet-5-5', '{"answer":"ok"}')] });
+
+    const result = await generateObject({
+      model: 'anthropic:claude-sonnet-5-5',
+      schema: z.object({ answer: z.string() }),
+      prompt: 'Answer with ok.',
+      thinking: false,
+      effort: 'low',
+      fallbackProviders: [],
+    });
+
+    expect(result.object).toEqual({ answer: 'ok' });
+    const [body] = postedBodies();
+    expect(body.thinking).toEqual({ type: 'between_tools' });
+    expect(body.output_config).toEqual({ effort: 'low' });
+  });
+
+  it('streamObject on Sonnet 5.5 with thinking off sends between_tools at the given effort', async () => {
+    route({ 'claude-sonnet-5-5': [textTurn('claude-sonnet-5-5', '{"answer":"ok"}')] });
+
+    const result = streamObject({
+      model: 'anthropic:claude-sonnet-5-5',
+      schema: z.object({ answer: z.string() }),
+      prompt: 'Answer with ok.',
+      thinking: false,
+      effort: 'low',
+    });
+    for await (const _partial of result.partialObjectStream) {
+      // drain the stream so the request is made
+    }
+
+    await expect(result.object).resolves.toEqual({ answer: 'ok' });
+    const [body] = postedBodies();
+    expect(body.thinking).toEqual({ type: 'between_tools' });
+    expect(body.output_config).toEqual({ effort: 'low' });
+  });
+});
+
+describe('the Anthropic rescue leg of buildFallbackChain on the wire', () => {
+  it('runs Sonnet 5.5 at effort low with 1024 tokens of headroom and keeps the caller\'s thinking off', async () => {
+    const saved = { openai: process.env.OPENAI_API_KEY, gemini: process.env.GEMINI_API_KEY };
+    // The chain an OpenAI-primary call builds; with no OpenAI, OpenRouter or
+    // Gemini key its only leg is Anthropic's.
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const chain = buildFallbackChain('openai');
+      expect(chain.map((entry) => entry.model)).toEqual(['claude-sonnet-5-5']);
+      route({
+        'claude-opus-5-5': [refusalTurn('claude-opus-5-5')],
+        'claude-sonnet-5-5': [textTurn('claude-sonnet-5-5', 'Rescued.')],
+      });
+
+      const result = await generateText({
+        provider: 'anthropic',
+        model: 'claude-opus-5-5',
+        prompt: 'Say something.',
+        maxTokens: 500,
+        thinking: false,
+        fallbackProviders: chain,
+      });
+
+      expect(result.text).toBe('Rescued.');
+      const leg = postedBodies().find((body) => body.model === 'claude-sonnet-5-5');
+      expect(leg).toBeDefined();
+      expect(leg!.max_tokens).toBe(1524);
+      expect(leg!.output_config).toEqual({ effort: 'low' });
+      expect(leg!.thinking).toEqual({ type: 'between_tools' });
+    } finally {
+      warn.mockRestore();
+      if (saved.openai === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = saved.openai;
+      if (saved.gemini === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = saved.gemini;
+    }
   });
 });

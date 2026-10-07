@@ -100,6 +100,22 @@ describe('generateObject', () => {
     expect(providerOptions.effort).toBe('max');
   });
 
+  it('forwards thinking through generateText to the provider options', async () => {
+    hoisted.generateCompletion.mockResolvedValue(mockResponse('{"name": "Alice", "age": 28}'));
+
+    await generateObject({
+      schema: personSchema,
+      prompt: 'Extract person info',
+      thinking: false,
+    });
+
+    // Without the forward, a structured call on a model that thinks by default
+    // (Sonnet 5.5) cannot turn thinking off and spends its JSON budget on it.
+    const callArgs = hoisted.generateCompletion.mock.calls[0];
+    const providerOptions = callArgs[2] as { thinking?: unknown };
+    expect(providerOptions.thinking).toBe(false);
+  });
+
   it('forwards sessionId from generateObject through generateText to the provider options', async () => {
     hoisted.generateCompletion.mockResolvedValue(mockResponse('{"name": "Alice", "age": 28}'));
 

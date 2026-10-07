@@ -668,7 +668,7 @@ export interface EmergentConfig {
    * 'sandbox'` is rejected before validation or execution.
    *
    * This is intentionally disabled by default because sandboxed code carries
-   * higher review and persistence risk than safe-by-construction composition.
+   * higher review and persistence risk than composing tools that are already registered.
    *
    * @default false
    */

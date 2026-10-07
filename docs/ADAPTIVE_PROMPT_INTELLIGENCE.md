@@ -89,7 +89,7 @@ Both happen without the host code doing anything. The GMI integrates the changes
 
 ## The metaprompt definition
 
-The full interface lives at [`packages/agentos/src/cognition/substrate/personas/IPersonaDefinition.ts:323-336`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts):
+The full interface lives at [`src/cognition/substrate/personas/IPersonaDefinition.ts:323-336`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts):
 
 ```typescript
 export interface MetaPromptDefinition {
@@ -391,7 +391,7 @@ HEXACO trait mutation is **not** a metaprompt surface. The metaprompt loop edits
 
 Per-session budgets are enforced in code. The default `maxDeltaPerSession: 0.3` means the sum of `|delta|` values applied to any single trait across one session cannot exceed 0.3. The runtime clamps any delta that would exceed the remaining budget to `remainingBudget * sign(delta)` and sets `clamped: true` on the output. Trait values themselves stay clamped to `[0, 1]`.
 
-This is the emergent self-modification path. The agent decides, with reasoning, that it should be more open or less assertive. The tool is auto-constructed by [`ToolOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ToolOrchestrator.ts) when `emergent.enabled === true` (no host-side `new AdaptPersonalityTool(...)` needed). Hosts that want the mutation history persisted across sessions inject a [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) into the orchestrator setup.
+This is the emergent self-modification path. The agent decides, with reasoning, that it should be more open or less assertive. The tool is auto-constructed by [`ToolOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts) when `emergent.enabled === true` (no host-side `new AdaptPersonalityTool(...)` needed). Hosts that want the mutation history persisted across sessions inject a [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) into the orchestrator setup.
 
 ### `PersonaDriftMechanism` (heuristic, offline)
 
@@ -597,7 +597,7 @@ The executor checks triggers at the end of a turn, after the regular completion 
 
 ### Personality structure
 
-- Ashton, M. C., & Lee, K. (2007). [*Empirical, theoretical, and practical advantages of the HEXACO model of personality structure.*](https://journals.sagepub.com/doi/10.1207/S15327957PSPR0701_2) *Personality and Social Psychology Review*, 11(2), 150-166. The six-factor model both the `AdaptPersonalityTool` and `PersonaDriftMechanism` mutate.
+- Ashton, M. C., & Lee, K. (2007). [*Empirical, theoretical, and practical advantages of the HEXACO model of personality structure.*](https://doi.org/10.1177/1088868306294907) *Personality and Social Psychology Review*, 11(2), 150-166. The six-factor model both the `AdaptPersonalityTool` and `PersonaDriftMechanism` mutate.
 
 ### Agent self-improvement and reflection
 

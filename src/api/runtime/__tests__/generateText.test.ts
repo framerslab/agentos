@@ -626,7 +626,7 @@ describe('generateText', () => {
       // The default chain's anthropic leg — present in any rebuilt chain
       // (the explicit chain has no anthropic entry), so its absence proves
       // the explicit chain was preserved verbatim.
-      expect(requestedModels).not.toContain('claude-sonnet-5');
+      expect(requestedModels).not.toContain('claude-sonnet-5-5');
     } finally {
       // Restore the fixed resolvers so later tests see the default behavior.
       (resolveModelOption as unknown as Mock).mockImplementation(() => ({
@@ -1149,6 +1149,28 @@ describe('buildFallbackChain — OpenRouter link pins a cheap model', () => {
       else process.env.OPENROUTER_API_KEY = originalOrKey;
       if (originalOaKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = originalOaKey;
+    }
+  });
+});
+
+describe('buildFallbackChain — the Anthropic leg runs the current Sonnet', () => {
+  it('pins claude-sonnet-5-5 at effort low with output headroom for its thinking', () => {
+    const original = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'test-anthropic-key';
+    try {
+      const leg = buildFallbackChain('openai').find((e) => e.provider === 'anthropic');
+      // Sonnet 5.5 thinks by default and its thinking shares max_tokens, so the
+      // rescue hop states its depth and gets room over the caller's budget.
+      expect(leg).toEqual({
+        provider: 'anthropic',
+        model: 'claude-sonnet-5-5',
+        effort: 'low',
+        maxTokensHeadroom: 1024,
+        cache: false,
+      });
+    } finally {
+      if (original === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = original;
     }
   });
 });

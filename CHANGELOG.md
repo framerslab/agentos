@@ -1,3 +1,40 @@
+## [0.10.37](https://github.com/framerslab/agentos/compare/v0.10.36...v0.10.37) (2026-10-07)
+
+### fix
+
+* **api:** let structured calls turn thinking off and run the Anthropic rescue leg on Sonnet 5.5 (#88) ([1c9afbf](https://github.com/framerslab/agentos/commit/1c9afbf27f8bcc3d33f1d929921a37efbc48d757))
+
+## [0.10.36](https://github.com/framerslab/agentos/compare/v0.10.35...v0.10.36) (2026-10-07)
+
+### fix
+
+* **nlp:** decide language by script before trigram scoring (#80) ([84ea2d0](https://github.com/framerslab/agentos/commit/84ea2d04412618be243efe2a7e1529afd2569926))
+
+## [0.10.35](https://github.com/framerslab/agentos/compare/v0.10.34...v0.10.35) (2026-10-07)
+
+### fix
+
+* **api:** agent() warns on cognitiveMechanisms, agency().connect() rejects (#95) ([6f53042](https://github.com/framerslab/agentos/commit/6f53042df5f4033b358afe33581a471d255707f2))
+
+### docs
+
+* correct the GMI page and repair moved source links (#92) ([fc799ec](https://github.com/framerslab/agentos/commit/fc799ecb2ee69c8c56935f763f84a042983bdaa9))
+* say how sponsors are featured in the provider list (#81) ([d9ae8e9](https://github.com/framerslab/agentos/commit/d9ae8e9da4df099580b35b1d8689a3103c0994b7))
+* say that a failed publish is not retried (#73) ([c32014c](https://github.com/framerslab/agentos/commit/c32014c13c33d8fdd3703163f3443babcca29893))
+* say what the in-process executor does and does not do (#82) ([15e411e](https://github.com/framerslab/agentos/commit/15e411e0129118cd048bdbed21b01030ee836633))
+
+### chore
+
+* **deps:** move every dependency to the newest version its range admits (#71) ([f3871c2](https://github.com/framerslab/agentos/commit/f3871c23f7f96018fe6c46486c698124264befd3))
+* **deps:** runtime majors: execa 10, minimatch 10, pino 10, uuid 14 (#78) ([d487abf](https://github.com/framerslab/agentos/commit/d487abf0eb6c2fa1cb8c1b8844aca6d77a114661))
+* **deps:** semantic-release 25 and its plugins (#77) ([42ab9ad](https://github.com/framerslab/agentos/commit/42ab9ad92ae7de5b2c0108e9452d250a6a3c7bb0))
+* **deps:** tooling majors: eslint 10, rimraf 6, better-sqlite3 13, Node 22 types (#75) ([a61fca1](https://github.com/framerslab/agentos/commit/a61fca1b59ca52730e82688a5640ede5e282a2ec))
+* **deps:** vitest 5 (#76) ([f2bc9a2](https://github.com/framerslab/agentos/commit/f2bc9a29a8eaf07350d324d8754f51c354767a41))
+
+### ci
+
+* run on Node 22 (#72) ([9a96ded](https://github.com/framerslab/agentos/commit/9a96ded74fda4b8ff5b52a5f0396fca4b8ea4591))
+
 ## <small>0.10.34 (2026-10-05)</small>
 
 * fix(streamText): a failed fallback leg hands the walk to the next one (#67) ([34eeac494485eda2d110674fde5ca457e0fb40c5](https://github.com/framerslab/agentos/commit/34eeac494485eda2d110674fde5ca457e0fb40c5))

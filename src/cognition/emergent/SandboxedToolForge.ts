@@ -1,24 +1,24 @@
 /**
  * @fileoverview SandboxedToolForge runs agent-generated JavaScript code in a
- * hardened node:vm sandbox with wall-clock timeouts and API allowlisting.
+ * in-process node:vm context with wall-clock timeouts and API allowlisting.
  *
  * @module @framers/agentos/emergent/SandboxedToolForge
  *
  * Overview:
  * - Delegates the actual VM execution to {@link CodeSandbox}, which provides
- *   the hardened node:vm context (`codeGeneration: { strings: false, wasm: false }`,
+ *   the in-process node:vm context (`codeGeneration: { strings: false, wasm: false }`,
  *   frozen console, explicit `process`/`globalThis`/`require`/etc. set to undefined).
  * - Adds the forge-specific contract: code must define `function execute(input)`
  *   or `function run(input)`, and the resolved value is JSON-serialized back to
  *   the caller via a marker-prefixed stdout convention.
  * - Allowlisted APIs (`fetch`, `fs.readFile`, `crypto`) are injected via
- *   `CodeSandbox`'s `extraGlobals` config so the hardened defaults stay intact.
+ *   `CodeSandbox`'s `extraGlobals` config so the minimal defaults stay intact.
  *
  * Security model:
  * 1. **Static validation** (`validateCode()`) rejects dangerous patterns (regex
  *    scan) before any code reaches the runtime.
  * 2. **Runtime isolation** executes validated code inside `CodeSandbox`'s
- *    hardened minimal context, which exposes only JSON/Math/Date/etc. plus the
+ *    minimal context, which exposes only JSON/Math/Date/etc. plus the
  *    explicitly opted-in APIs from this forge's allowlist.
  * 3. **Resource bounding** enforces a wall-clock timeout via node:vm. Memory is
  *    NOT preemptively enforced (node:vm shares the host heap); `memoryUsedBytes`
@@ -27,7 +27,7 @@
  *    dependency would be required (deferred until hosted multi-tenant ships).
  *
  * Allowlisted APIs (each requires explicit opt-in via {@link SandboxAPI}):
- * - `fetch` — HTTP requests, domain-restricted via {@link SandboxedToolForgeConfig.fetchDomainAllowlist}.
+ * - `fetch` — HTTP requests; {@link SandboxedToolForgeConfig.fetchDomainAllowlist} checks the first URL's host when set.
  * - `fs.readFile` — Read-only file access, max 1 MB, restricted to the
  *   configured roots after symlink resolution (a link inside a root cannot
  *   be used to reach a file outside one).
@@ -118,7 +118,9 @@ const ALWAYS_BANNED: ReadonlyArray<[RegExp, string]> = [
 // ============================================================================
 
 /**
- * Runs agent-generated code in a hardened node:vm sandbox via {@link CodeSandbox}.
+ * Runs agent-generated code in an in-process node:vm context via {@link CodeSandbox}.
+ * `node:vm` is not a security mechanism (Node's documentation): the checks here hold for
+ * code that acts through the injected functions, and memory is reported, not limited.
  *
  * Runtime bounds:
  * - Memory: observed as a heap delta, not preemptively capped
@@ -126,7 +128,7 @@ const ALWAYS_BANNED: ReadonlyArray<[RegExp, string]> = [
  * - Blocked APIs: eval, Function, process, require, import, child_process, fs.write*
  *
  * Allowlisted APIs (each requires explicit opt-in):
- * - `fetch`: HTTP requests (domain-restricted)
+ * - `fetch`: HTTP requests (the first URL's host is checked when `fetchDomainAllowlist` is set)
  * - `fs.readFile`: Read-only file access (path-restricted, max 1 MB)
  * - `crypto`: Hashing and HMAC only
  *
@@ -174,7 +176,7 @@ export class SandboxedToolForge {
   private readonly realFsReadRootCache = new Map<string, Promise<string>>();
 
   /**
-   * Hardened node:vm sandbox shared across all execute() calls. Owns the
+   * The node:vm sandbox shared across all execute() calls. Owns the
    * codeGeneration restriction, frozen console, and explicit-undefined
    * dangerous globals. Reused per forge instance to amortize stats bookkeeping.
    */
@@ -422,7 +424,7 @@ export class SandboxedToolForge {
     `;
 
     // Step 4: Build allowlisted-API extras. CodeSandbox provides the safe
-    // builtins + hardened-undefined dangerous globals; this only adds the
+    // builtins + removed dangerous globals; this only adds the
     // explicit forge allowlist (fetch / fs.readFile / crypto).
     const extraGlobals = this.buildExtraGlobals(request.allowlist);
 
@@ -431,7 +433,7 @@ export class SandboxedToolForge {
     // Not preemptive enforcement; node:vm cannot enforce memory limits.
     const heapBefore = process.memoryUsage().heapUsed;
 
-    // Step 6: Delegate to the hardened CodeSandbox for the actual VM call.
+    // Step 6: Delegate to CodeSandbox for the actual VM call.
     const codeResult = await this.codeSandbox.execute({
       language: 'javascript',
       code: wrappedCode,
@@ -494,9 +496,9 @@ export class SandboxedToolForge {
 
   /**
    * Build the allowlist-injected globals to layer on top of CodeSandbox's
-   * hardened defaults. Only the three forge allowlist APIs (fetch, fs,
+   * minimal defaults. Only the three forge allowlist APIs (fetch, fs,
    * crypto) are injected here; CodeSandbox provides JSON/Math/Date/etc.
-   * and the hardened-undefined process/globalThis/require/etc.
+   * and the removed process/globalThis/require/etc.
    */
   private buildExtraGlobals(allowlist: SandboxAPI[]): Record<string, unknown> {
     /* eslint-disable @typescript-eslint/no-explicit-any */
