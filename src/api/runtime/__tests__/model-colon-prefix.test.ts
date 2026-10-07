@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { resolveModelOption, knownProviderPrefixOf } from '../../model.js';
+import { resolveModelOption, knownProviderPrefixOf, routedProviderOf } from '../../model.js';
 import { mergeDefaults } from '../strategies/shared.js';
 import type { AgencyOptions } from '../../types.js';
 
@@ -24,10 +24,21 @@ describe('a colon in a model id', () => {
   it('keeps an unknown prefix whole and takes the explicit provider', () => {
     expect(resolveModelOption({ provider: 'openai', model: 'ft:gpt-4.1:org:suffix' })).toEqual({ providerId: 'openai', modelId: 'ft:gpt-4.1:org:suffix' });
   });
-  it('an unknown prefix with no provider auto-detects', () => {
+  it('an unknown prefix with no provider is rejected, never auto-detected', () => {
+    // Auto-detection would send an Ollama tag, and the detected vendor's key, to that vendor.
     vi.stubEnv('OPENAI_API_KEY', 'sk-x');
     vi.stubEnv('OPENROUTER_API_KEY', '');
-    expect(resolveModelOption({ model: 'ft:gpt-4.1:org:suffix' })).toEqual({ providerId: 'openai', modelId: 'ft:gpt-4.1:org:suffix' });
+    expect(() => resolveModelOption({ model: 'ft:gpt-4.1:org:suffix' })).toThrow(/not a provider agentos knows/);
+    expect(() => resolveModelOption({ model: 'qwen2.5:7b' })).toThrow(/provider: 'ollama'/);
+  });
+  it('routedProviderOf names the provider a call goes to, without auto-detection', () => {
+    expect(routedProviderOf({ model: 'anthropic:claude-opus-5-5' })).toBe('anthropic');
+    expect(routedProviderOf({ provider: 'openai', model: 'anthropic:claude-opus-5-5' })).toBe('anthropic');
+    expect(routedProviderOf({ model: 'anthropic/claude-sonnet-5-5' })).toBe('anthropic');
+    expect(routedProviderOf({ provider: 'openrouter', model: 'anthropic/claude-sonnet-5-5' })).toBe('openrouter');
+    expect(routedProviderOf({ provider: 'ollama', model: 'mistral:7b' })).toBe('ollama');
+    expect(routedProviderOf({ provider: 'gemini', model: 'gemini-3.1-pro' })).toBe('gemini');
+    expect(routedProviderOf({ model: 'gpt-4.1' })).toBeUndefined();
   });
   it('rejects a colon with nothing on one side, except under ollama', () => {
     expect(() => resolveModelOption({ provider: 'openai', model: 'openai:' })).toThrow(/Invalid model/);
@@ -66,6 +77,19 @@ describe('mergeDefaults and a prefixed seat model', () => {
     expect(mergeDefaults({ model: 'anthropic:claude-opus-5-5' }, anthropicAgency).apiKey).toBe('sk-ant-agency');
     const keyOnly = { agents: {}, apiKey: 'sk-any' } as unknown as AgencyOptions;
     expect(mergeDefaults({ model: 'openai:gpt-4.1' }, keyOnly).apiKey).toBe('sk-any');
+  });
+  it('withholds the agency key from a seat whose own provider or slash prefix goes elsewhere, and keeps it for a gateway id', () => {
+    const openaiAgency = { agents: {}, provider: 'openai', model: 'gpt-4.1', apiKey: 'sk-openai', baseUrl: 'https://proxy.local/v1' } as unknown as AgencyOptions;
+    const explicit = mergeDefaults({ provider: 'anthropic', model: 'claude-opus-5-5' }, openaiAgency);
+    expect(explicit.apiKey).toBeUndefined();
+    expect(explicit.baseUrl).toBeUndefined();
+    expect(mergeDefaults({ provider: 'openai', model: 'gpt-4.1-mini' }, openaiAgency).apiKey).toBe('sk-openai');
+    const routerAgency = { agents: {}, model: 'openrouter:openai/gpt-4o', apiKey: 'sk-or' } as unknown as AgencyOptions;
+    expect(mergeDefaults({ model: 'anthropic/claude-sonnet-5-5' }, routerAgency).apiKey).toBeUndefined();
+    const gateway = { agents: {}, provider: 'openrouter', apiKey: 'sk-or' } as unknown as AgencyOptions;
+    const viaGateway = mergeDefaults({ model: 'anthropic/claude-sonnet-5-5' }, gateway);
+    expect(viaGateway.provider).toBe('openrouter');
+    expect(viaGateway.apiKey).toBe('sk-or');
   });
   it('compares the providers resolveModelOption picks: a model prefix wins over provider, except under ollama', () => {
     const openaiAgency = { agents: {}, provider: 'openai', model: 'gpt-4.1', apiKey: 'sk-openai' } as unknown as AgencyOptions;

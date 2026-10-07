@@ -80,6 +80,29 @@ export function knownProviderPrefixOf(model: string | undefined): string | undef
 }
 
 /**
+ * The provider {@link resolveModelOption} sends these options to, without
+ * auto-detection: a known `provider:` prefix (never under `ollama`), else a
+ * known `provider/` prefix when `provider` is unset or repeats it, else
+ * `provider`. Undefined when the provider would come from auto-detection.
+ *
+ * @param opts - A `provider` and a `model`, either of which may be unset.
+ * @returns The provider id, or undefined.
+ */
+export function routedProviderOf(opts: { provider?: string; model?: string }): string | undefined {
+  const { provider, model } = opts;
+  if (model && provider !== 'ollama') {
+    const prefixed = knownProviderPrefixOf(model);
+    if (prefixed) return prefixed;
+    const slash = model.indexOf('/');
+    if (slash > 0) {
+      const maybe = model.slice(0, slash);
+      if (Object.prototype.hasOwnProperty.call(PROVIDER_DEFAULTS, maybe) && (!provider || provider === maybe)) return maybe;
+    }
+  }
+  return provider;
+}
+
+/**
  * Splits a `provider:model` string into its constituent parts.
  *
  * The format is strict: the provider portion must be non-empty, separated from
@@ -359,6 +382,15 @@ export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): 
     }
     // Plain model name with explicit provider
     if (opts.provider) return { providerId: opts.provider, modelId: opts.model };
+    // A colon id whose prefix is not a provider agentos knows (an Ollama tag,
+    // a fine-tune id) needs `provider`: auto-detection would send it, with
+    // the detected vendor's key, to whichever provider the environment names.
+    if (opts.model.includes(':')) {
+      throw new Error(
+        `Model "${opts.model}" has a colon, but "${opts.model.slice(0, opts.model.indexOf(':'))}" is not a provider agentos knows; ` +
+          `pass \`provider\` (for an Ollama tag, provider: 'ollama').`,
+      );
+    }
     // Plain model name — try auto-detect for provider
     const detected = autoDetectProvider(task);
     if (detected) return { providerId: detected, modelId: opts.model };

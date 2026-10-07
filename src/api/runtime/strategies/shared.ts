@@ -12,7 +12,7 @@
  */
 import { agent as createAgent } from '../agent.js';
 import { mergeAdaptableTools } from '../toolAdapter.js';
-import { knownProviderPrefixOf } from '../../model.js';
+import { knownProviderPrefixOf, routedProviderOf } from '../../model.js';
 import type {
   AgencyOptions,
   AgencyQuorumConfig,
@@ -228,24 +228,24 @@ export function mergeDefaults(
 ): BaseAgentConfig {
   // A seat whose own model names a provider (`anthropic:claude-opus-5-5`) does
   // not inherit the agency's provider, so the prefix never meets an inherited
-  // `ollama`, under which a colon is never split. The seat and the agency each
-  // go to the provider resolveModelOption picks (a known model prefix wins
-  // over `provider`, except under `ollama`); when both are known and differ,
-  // the seat does not inherit the agency's key or URL either: they belong to
-  // the agency's provider, and sending them to the seat's would leak the key
-  // to another vendor.
-  const prefixOf = (cfg: { provider?: string; model?: string }) =>
-    cfg.provider === 'ollama' ? undefined : knownProviderPrefixOf(cfg.model);
-  const seatPrefix = prefixOf(agentConfig);
-  const seatProvider = seatPrefix ?? agentConfig.provider;
-  const agencyProvider = prefixOf(agencyConfig) ?? agencyConfig.provider;
-  const otherVendor = seatPrefix !== undefined && agencyProvider !== undefined && seatProvider !== agencyProvider;
+  // `ollama`, under which a colon is never split.
+  const seatPrefix = agentConfig.provider === 'ollama' ? undefined : knownProviderPrefixOf(agentConfig.model);
+  const model = agentConfig.model ?? agencyConfig.model;
+  const provider = agentConfig.provider ?? (seatPrefix !== undefined ? undefined : agencyConfig.provider);
+  // The agency's key and URL belong to the provider the agency's own calls go
+  // to. A seat whose calls go to another provider (named by a model prefix in
+  // either form, or by its own `provider`) does not inherit them: sending them
+  // there would leak the key to another vendor. When the agency's provider
+  // comes from auto-detection, it is unknown and the seat inherits them.
+  const seatRouted = routedProviderOf({ provider, model });
+  const agencyRouted = routedProviderOf(agencyConfig);
+  const otherVendor = seatRouted !== undefined && agencyRouted !== undefined && seatRouted !== agencyRouted;
   return {
     // Agency-level model/provider/apiKey/baseUrl serve as defaults.
     // They are placed BEFORE the spread of agentConfig so that agent-level
     // values override them when present.
-    model: agentConfig.model ?? agencyConfig.model,
-    provider: agentConfig.provider ?? (seatPrefix !== undefined ? undefined : agencyConfig.provider),
+    model,
+    provider,
     apiKey: agentConfig.apiKey ?? (otherVendor ? undefined : agencyConfig.apiKey),
     baseUrl: agentConfig.baseUrl ?? (otherVendor ? undefined : agencyConfig.baseUrl),
     ...agentConfig,
