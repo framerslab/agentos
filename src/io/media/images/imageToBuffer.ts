@@ -105,14 +105,15 @@ export async function imageToBuffer(input: string | Buffer): Promise<Buffer> {
         return bytes;
       }
       // Node's error names the whole string as the path, which for a base64
-      // payload can run to megabytes in a message or a log line.
+      // payload can run to megabytes in a message or a log line. It is not
+      // attached as `cause` either: Node prints an error's cause with it.
       throw Object.assign(
         new Error(
           `imageToBuffer: no file exists at ${preview(trimmed)}, and it is not base64 of a ` +
             'recognised image format (PNG, JPEG, GIF, WebP, TIFF, AVIF, HEIC, BMP, ICO, ' +
             'JPEG 2000, JPEG XL or SVG). Pass the image as a data URL or a Buffer.',
         ),
-        { code: (error as NodeJS.ErrnoException).code, cause: error },
+        { code: (error as NodeJS.ErrnoException).code },
       );
     }
   }

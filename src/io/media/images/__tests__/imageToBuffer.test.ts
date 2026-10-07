@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { inspect } from 'node:util';
 
 import { describe, expect, it } from 'vitest';
 
@@ -61,6 +62,8 @@ describe('imageToBuffer', () => {
     expect(error!.message).toContain('Pass the image as a data URL or a Buffer');
     expect(error!.message).toContain('(4000 characters)');
     expect(error!.message.length).toBeLessThan(400);
+    // What console.error prints, causes included, does not carry the payload.
+    expect(inspect(error)).not.toContain(raw.slice(0, 200));
   });
 
   it('rejects a missing path made only of base64 characters', async () => {
