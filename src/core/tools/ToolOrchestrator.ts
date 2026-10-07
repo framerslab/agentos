@@ -105,6 +105,8 @@ export class ToolOrchestrator implements IToolOrchestrator {
    * @private
    */
   private emergentEngine?: EmergentCapabilityEngine;
+  /** Which forged tool owns the executable registered under each name (the newest wins). */
+  private readonly emergentExecutables = new Map<string, string>();
   private emergentDiscoveryIndexer?: (tools: EmergentTool[]) => Promise<void>;
 
   /**
@@ -322,11 +324,24 @@ export class ToolOrchestrator implements IToolOrchestrator {
         sandboxForge,
         judge,
         registry,
-        onToolForged: async (_tool, executable) => {
+        onToolForged: async (tool, executable) => {
           await this.registerInitialTool(executable);
+          // The executor holds one executable per name; the newest forged tool
+          // of a name owns it.
+          this.emergentExecutables.set(executable.name, tool.id);
         },
         onToolPromoted: async (tool) => {
           await this.emergentDiscoveryIndexer?.([tool]);
+        },
+        // Suspending or removing a forged tool takes its executable out of the
+        // executor; before this hook was wired the tool stayed callable.
+        onToolRemoved: async (tool) => {
+          // Only this tool's own executable: a later tool of the same name
+          // replaced it in the executor, and that one stays.
+          if (this.emergentExecutables.get(tool.name) === tool.id) {
+            this.emergentExecutables.delete(tool.name);
+            await this.toolExecutor.unregisterTool(tool.name);
+          }
         },
       });
 
@@ -948,7 +963,17 @@ export class ToolOrchestrator implements IToolOrchestrator {
   public cleanupEmergentSession(sessionId: string): void {
     if (this.emergentEngine) {
       const removedTools = this.emergentEngine.cleanupSession(sessionId);
-      void Promise.allSettled(removedTools.map((tool) => this.unregisterTool(tool.name)));
+      void Promise.allSettled(
+        removedTools.map((tool) => {
+          if (this.emergentExecutables.get(tool.name) !== tool.id) {
+            return Promise.resolve(false);
+          }
+          this.emergentExecutables.delete(tool.name);
+          // Through the executor, as onToolRemoved does: this cleanup is the
+          // library's own and does not depend on allowDynamicRegistration.
+          return this.toolExecutor.unregisterTool(tool.name);
+        }),
+      );
       console.log(
         `ToolOrchestrator (ID: ${this.orchestratorId}): Cleaned up emergent session "${sessionId}".`
       );

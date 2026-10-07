@@ -86,7 +86,7 @@ class MockStorageAdapter implements IStorageAdapter {
   >();
 
   async run(sql: string, params: unknown[] = []): Promise<unknown> {
-    if (sql.includes('INSERT OR REPLACE INTO agentos_emergent_tools')) {
+    if (sql.includes('INTO agentos_emergent_tools')) {
       const id = String(params[0]);
       this.rows.set(id, {
         promoted_at:
@@ -317,7 +317,7 @@ describe('EmergentToolRegistry', () => {
     expect(demoted.isActive).toBe(false);
   });
 
-  it('preserves promoted_at when a promoted tool is persisted again after usage', async () => {
+  it("preserves promoted_at when a promoted tool's row is rewritten", async () => {
     const adapter = new MockStorageAdapter();
     const registry = new EmergentToolRegistry(
       { ...DEFAULT_EMERGENT_CONFIG, enabled: true },
@@ -329,13 +329,18 @@ describe('EmergentToolRegistry', () => {
     registry.register(tool, 'session');
     await registry.promote(tool.id, 'agent', 'admin');
     const firstPromotedAt = adapter.rows.get(tool.id)?.promoted_at;
+    expect(firstPromotedAt).not.toBeNull();
+    // A stored stamp a fresh Date.now() cannot equal, so a writer that stamps
+    // again is caught even within the same millisecond.
+    adapter.rows.get(tool.id)!.promoted_at = 1_000;
 
-    registry.recordUse(tool.id, {}, {}, true, 10);
+    // A whole-row rewrite with no approver named: the stored promotion stays.
+    // (recordUse no longer rewrites the row, so it cannot drive this case.)
+    registry.upsert({ ...registry.get(tool.id)! });
     await new Promise((resolve) => setTimeout(resolve, 0));
     const secondPromotedAt = adapter.rows.get(tool.id)?.promoted_at;
 
-    expect(firstPromotedAt).not.toBeNull();
-    expect(secondPromotedAt).toBe(firstPromotedAt);
+    expect(secondPromotedAt).toBe(1_000);
   });
 
   it('redacts sandbox source at rest by default', async () => {

@@ -865,13 +865,15 @@ console.log(result.text);
 
 ---
 
-## 15. Agency with Shared Memory + RAG
+## 15. Agency with a Sequential Hand-off
 
-Three brains in one agency. `memory: { shared: true }` gives every agent
-read+write access to one cognitive memory store. `rag: { ... }` points the
-whole roster at one retrieval corpus. The strategy picks the order;
-the shared layer means each brain reads what the previous one wrote
-without an explicit handoff payload.
+Three agents in one agency. `strategy: 'sequential'` runs the roster in
+order and gives each agent the previous agent's output as its input. Nothing
+else is shared: `agency()` builds no shared memory store and runs no
+retrieval of its own (its `memory` and `rag` options are accepted and
+deferred on the lightweight path; `injectRagContext()` returns the prompt
+unchanged because no store is initialised), so what flows between agents is
+the text each one returns.
 
 ```typescript
 import { agency } from '@framers/agentos';
@@ -880,39 +882,30 @@ const team = agency({
   provider: 'openai',
   model: 'gpt-4o',
   strategy: 'sequential',
-  memory: { shared: true },                  // cognitive memory shared across brains
-  rag: {                                     // shared retrieval corpus (RAG)
-    vectorStore: 'in-memory',
-    documents: ['./docs/quic-rfc-9000.md', './docs/tcp-rfc-9293.md'],
-    topK: 5,
-  },
   agents: {
-    researcher: { instructions: 'Pull factual claims from the RAG corpus.' },
-    writer:     { instructions: "Compose a briefing from the researcher's notes." },
-    reviewer:   { instructions: 'Verify the briefing against the same RAG corpus.' },
+    researcher: { instructions: 'List the factual claims that matter for the comparison, one per line.' },
+    writer:     { instructions: "Compose a two-paragraph briefing from the researcher's notes you receive." },
+    reviewer:   { instructions: 'Review the briefing you receive: flag any claim that needs a source and any sentence a reader could misread.' },
   },
 });
 
-// Same .generate() surface as a single agent. The agency routes outputs
-// between brains; the shared memory + RAG layer means each brain reads
-// what the previous one wrote without an explicit handoff payload.
+// Same .generate() surface as a single agent. The agency routes each
+// agent's output into the next agent's prompt; result.agentCalls lists
+// who ran, in what order, with what input.
 const result = await team.generate(
   'Compare QUIC and TCP for low-latency game networking.',
 );
 console.log(result.text);
-console.log(result.agentCalls);              // who read which chunks, in what order
+console.log(result.agentCalls);
 ```
 
-Scope to keep in mind: `memory: { shared: true }` is scoped to a single
-`generate()` call. Across `session().send()` turns only the message
-history persists; the shared cognitive memory store, the shared RAG
-context, and any runtime-spawned specialists reset on every turn. See
-[Agency API: Memory and RAG](/features/agency-api#memory-and-rag) for
-the full scope rules and the cross-turn workaround using a hand-wired
-[`Brain`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts) and [`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts).
+To give a roster memory, pass built agents as members: an
+[`agent()`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) with a `memoryProvider` keeps its own hooks when it
+sits in a roster. Cognitive memory and the RAG pipeline run on the full
+runtime (see [Memory Model](../MEMORY_MODEL.md) and [Agencies](../AGENCIES.md)).
 
 The companion runnable file
-[`examples/agency-shared-memory.mjs`](https://github.com/framerslab/agentos/blob/master/examples/agency-shared-memory.mjs)
+[`examples/agency-sequential-handoff.mjs`](https://github.com/framerslab/agentos/blob/master/examples/agency-sequential-handoff.mjs)
 runs this exact agency against the OpenAI API. Diff it against
 [`examples/single-agent-briefing.mjs`](https://github.com/framerslab/agentos/blob/master/examples/single-agent-briefing.mjs)
 (the single-`agent()` baseline) and
@@ -1034,7 +1027,7 @@ npx tsx examples/<file>.mjs
 |------|-------------|----------|
 | [`high-level-api.mjs`](../../examples/high-level-api.mjs) | One-shot text, streaming, image generation, agent sessions | `generateText`, [`streamText`](https://github.com/framerslab/agentos/blob/master/src/api/streamText.ts), `generateImage`, [`agent`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) |
 | [`single-agent-briefing.mjs`](../../examples/single-agent-briefing.mjs) | Single-agent baseline before agency. One brain, no team, no shared state. | [`agent`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts), `.generate()` |
-| [`agency-shared-memory.mjs`](../../examples/agency-shared-memory.mjs) | Three agents share one cognitive memory store and one RAG corpus across a sequential run | [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts), `memory: { shared: true }`, `rag: { ... }` |
+| [`agency-sequential-handoff.mjs`](../../examples/agency-sequential-handoff.mjs) | Three agents in a sequential hand-off: each agent's output is the next agent's input | [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts), `strategy: 'sequential'`, `result.agentCalls` |
 | [`emergent-hierarchical-spawning.mjs`](../../examples/emergent-hierarchical-spawning.mjs) | Hierarchical agency that mints a specialist at runtime when the static roster falls short | [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts), `emergent`, `spawn_specialist`, [`EmergentAgentJudge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentJudge.ts) |
 | [`agency-graph.mjs`](../../examples/agency-graph.mjs) | Multi-agent agency with graph strategy | [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts), graph edges, parallel execution |
 | [`agency-streaming.mjs`](../../examples/agency-streaming.mjs) | Streaming agency output with real-time chunks | [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts), `onChunk` callbacks |

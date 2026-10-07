@@ -31,12 +31,14 @@
  *
  * @example
  * ```typescript
- * import { SpeechProviderResolver } from '../../speech/SpeechProviderResolver.js';
+ * import { SpeechRuntime } from '@framers/agentos/speech';
  * import { createVisionPipeline } from '../../vision/index.js';
  * import { createMultimodalIndexerFromResolver } from './createMultimodalIndexerFromResolver.js';
  *
- * const resolver = new SpeechProviderResolver(config, process.env);
- * await resolver.refresh();
+ * // SpeechRuntime builds the STT provider its keys allow and registers it in its resolver.
+ * const runtime = new SpeechRuntime({ env: process.env });
+ * await runtime.resolver.refresh();
+ * const resolver = runtime.resolver;
  *
  * const visionPipeline = await createVisionPipeline({ strategy: 'progressive' });
  *

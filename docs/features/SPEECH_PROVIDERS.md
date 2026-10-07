@@ -18,21 +18,23 @@ This document describes the provider resolver system in `src/io/speech/`, which 
 
 ## Quick Start
 
-Set the environment variables for the providers you want, then call `refresh()`:
+Set the environment variables for the providers you want, then build a `SpeechRuntime` and call `refresh()` on its resolver:
 
 ```typescript
-import { SpeechProviderResolver } from '@agentos/agentos/speech';
+import { SpeechRuntime } from '@framers/agentos/speech';
 
-const resolver = new SpeechProviderResolver();
-await resolver.refresh();
+// Builds OpenAI Whisper and OpenAI TTS when OPENAI_API_KEY is set, ElevenLabs when
+// ELEVENLABS_API_KEY is set, and AgentOS Adaptive VAD, and registers them in its resolver.
+const runtime = new SpeechRuntime({ env: process.env });
+await runtime.resolver.refresh(); // adds the other core ids and any extension providers
 
-const stt = resolver.resolveSTT();   // best configured STT provider
-const tts = resolver.resolveTTS();   // best configured TTS provider
-const vad = resolver.resolveVAD();   // always returns AgentOS Adaptive VAD
-const wakeWord = resolver.resolveWakeWord(); // null if none configured
+const stt = runtime.resolver.resolveSTT();   // best configured STT provider
+const tts = runtime.resolver.resolveTTS();   // best configured TTS provider
+const vad = runtime.resolver.resolveVAD();   // AgentOS Adaptive VAD
+const wakeWord = runtime.resolver.resolveWakeWord(); // null if none configured
 ```
 
-Providers are detected automatically — no explicit registration required for core providers.
+`refresh()` records every core provider id and whether its keys are set, and keeps any provider instance already registered under that id. The resolve methods return only providers that have an instance: the ones `SpeechRuntime` builds, the ones you pass to `register()`, and the ones an extension manager supplies. A `SpeechProviderResolver` used on its own throws `No configured STT provider matches requirements` (or the TTS or VAD equivalent) until a provider instance is registered.
 
 ---
 

@@ -70,9 +70,8 @@ import type {
   BaseAgentConfig,
   CompiledStrategy,
   ResourceControls,
-  ApprovalRequest,
-  ApprovalDecision,
   AgentCallRecord,
+  GuardrailEvent,
   RagConfig,
   AgencyStreamPart,
   AgencyStreamResult,
@@ -83,7 +82,15 @@ import {
   exportAgentConfig,
   exportAgentConfigJSON,
   type AgentExportConfig,
+  type ExportAgentConfigOptions,
 } from './agentExport.js';
+import {
+  createApprovalGate,
+  createApprovalSlot,
+  composeReceivedGate,
+  resolveApprovalDecision,
+  type ApprovalSlot,
+} from './runtime/approval-gate.js';
 import { createBufferedAsyncReplay } from './runtime/streamBuffer';
 import {
   createAgencyProvenanceRecorder,
@@ -131,16 +138,13 @@ export function agency(opts: AgencyOptions): Agent {
     );
   }
 
-  // 1b. Forward agency-level `beforeTool` to sub-agent permissions.
-  //     This ensures that tool-level HITL approval is enforced at the
-  //     individual agent layer via `permissions.requireApproval`.
-  const resolvedAgents = forwardBeforeToolToSubAgents(opts.agents, opts);
-
   // 2. Compile the orchestration strategy into an executable CompiledStrategy.
   //    When `adaptive` is true the strategy dispatcher wraps the chosen strategy
   //    with an implicit hierarchical manager.
   //    Auto-detect 'graph' when any sub-agent declares `dependsOn`.
-  const hasDependsOn = Object.values(resolvedAgents).some(
+  //    `hitl.approvals.beforeTool` is not copied into the roster: it is
+  //    enforced per call by the approval gate (see buildCallOptions below).
+  const hasDependsOn = Object.values(opts.agents).some(
     (a) => !isAgent(a) && Array.isArray((a as BaseAgentConfig).dependsOn) && (a as BaseAgentConfig).dependsOn!.length > 0,
   );
   const chosenStrategy = opts.adaptive
@@ -149,7 +153,7 @@ export function agency(opts: AgencyOptions): Agent {
 
   const strategy: CompiledStrategy = compileStrategy(
     chosenStrategy,
-    resolvedAgents,
+    opts.agents,
     opts,
   );
 
@@ -174,6 +178,46 @@ export function agency(opts: AgencyOptions): Agent {
   // 4. In-memory session store keyed by session ID.
   const sessions = new Map<string, AgencySession>();
   const sessionUsage = new Map<string, UsageTotals>();
+
+  // 5. Tool-approval gate. It exists only when `beforeTool` is listed (the
+  //    handler's presence was checked by validateAgencyOptions); each call
+  //    gets its own gate and slot.
+  const gateEnabled = (opts.hitl?.approvals?.beforeTool?.length ?? 0) > 0;
+
+  /**
+   * The per-call options the strategy receives: the caller's, with
+   * `__approvalGate` set after them when a gate exists (this agency's own,
+   * composed with one received from a parent agency, or the received one
+   * alone), so nothing a caller passes can remove or replace it. With no gate
+   * to set, the caller's options pass through unchanged.
+   */
+  const buildCallOptions = (
+    execOpts: Record<string, unknown> | undefined,
+    slot: ApprovalSlot,
+  ): Record<string, unknown> | undefined => {
+    const received = composeReceivedGate(execOpts?.__approvalGate);
+    if (!gateEnabled && received === execOpts?.__approvalGate) return execOpts;
+    const callOpts: Record<string, unknown> = { ...execOpts };
+    delete callOpts.__approvalGate;
+    const gate = gateEnabled
+      ? createApprovalGate({ hitl: opts.hitl!, agentName: agencyName, on: opts.on, slot, received })
+      : received;
+    if (gate) callOpts.__approvalGate = gate;
+    return callOpts;
+  };
+
+  /** The error a call takes from its slot: the gate already reported it to `on.error`. */
+  const isSlotError = (slot: ApprovalSlot, error: unknown): boolean =>
+    slot.error !== undefined && error === slot.error;
+
+  /** Adds a run's usage to the agency and session totals before the call rejects with its slot's error. */
+  const billBeforeRejecting = (result: Record<string, unknown>, sessionId?: string): void => {
+    const usage = normalizeUsage(result.usage);
+    addUsageTotals(agencyUsage, usage);
+    if (sessionId) {
+      addUsageTotals(getSessionUsage(sessionUsage, sessionId), usage);
+    }
+  };
 
   type FinalizedExecutionResult = Record<string, unknown> & {
     text?: string;
@@ -300,6 +344,8 @@ export function agency(opts: AgencyOptions): Agent {
     sessionId?: string,
   ): Promise<Record<string, unknown>> => {
     const start = Date.now();
+    const slot = createApprovalSlot();
+    const callOpts = buildCallOptions(execOpts, slot);
     opts.on?.agentStart?.({
       agent: agencyName,
       input: prompt,
@@ -321,12 +367,21 @@ export function agency(opts: AgencyOptions): Agent {
       const maxAttempts = hasValidation ? maxValidationRetries + 1 : 1;
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        const result = (await strategy.execute(currentPrompt, execOpts)) as Record<string, unknown>;
+        const result = (await strategy.execute(currentPrompt, callOpts)) as Record<string, unknown>;
+        if (slot.error !== undefined) {
+          // A handler error or an 'error' timeout inside a tool loop: the run
+          // is billed and the call rejects with the handler's own error,
+          // before any finalization step and before a validation retry.
+          slot.settled = true;
+          billBeforeRejecting(result, sessionId);
+          throw slot.error;
+        }
         const finalized = await finalizeExecutionResult(result, start, sessionId);
         lastFinalized = finalized;
 
         // Success path: no validation required, OR validation produced a `parsed` value
         if (!hasValidation || finalized.parsed !== undefined) {
+          slot.settled = true;
           return finalized;
         }
 
@@ -341,13 +396,17 @@ export function agency(opts: AgencyOptions): Agent {
       }
 
       // All attempts exhausted — return the last result (parsed will be undefined).
+      slot.settled = true;
       return lastFinalized!;
     } catch (error) {
-      opts.on?.error?.({
-        agent: agencyName,
-        error: error instanceof Error ? error : new Error(String(error)),
-        timestamp: Date.now(),
-      });
+      slot.settled = true;
+      if (!isSlotError(slot, error)) {
+        opts.on?.error?.({
+          agent: agencyName,
+          error: error instanceof Error ? error : new Error(String(error)),
+          timestamp: Date.now(),
+        });
+      }
       throw error;
     }
   };
@@ -358,11 +417,14 @@ export function agency(opts: AgencyOptions): Agent {
     sessionId?: string,
   ): AgencyStreamResult => {
     const start = Date.now();
+    const slot = createApprovalSlot();
+    const callOpts = buildCallOptions(streamOpts, slot);
     let errorReported = false;
     const postStreamParts: AgencyStreamPart[] = [];
 
     const reportError = (error: unknown): void => {
-      if (errorReported) return;
+      // The slot's error was reported by the gate that stored it.
+      if (errorReported || isSlotError(slot, error)) return;
       errorReported = true;
       opts.on?.error?.({
         agent: agencyName,
@@ -379,7 +441,7 @@ export function agency(opts: AgencyOptions): Agent {
 
     const deferredStream = (async () => {
       const preparedPrompt = await prepareExecutionPrompt(prompt);
-      return strategy.stream(preparedPrompt, streamOpts) as CompiledStrategyStreamResult;
+      return strategy.stream(preparedPrompt, callOpts) as CompiledStrategyStreamResult;
     })();
 
     const rawPartReplay = createBufferedAsyncReplay<AgencyStreamPart>((async function* () {
@@ -459,12 +521,32 @@ export function agency(opts: AgencyOptions): Agent {
           agentCalls: Array.isArray(agentCalls) ? agentCalls : [],
         };
 
-        return await finalizeExecutionResult(result, start, sessionId, postStreamParts);
+        if (slot.error !== undefined) {
+          // As on the generate path: billed, then rejected with the
+          // handler's own error, before any finalization step.
+          slot.settled = true;
+          billBeforeRejecting(result, sessionId);
+          throw slot.error;
+        }
+        const finalized = await finalizeExecutionResult(result, start, sessionId, postStreamParts);
+        slot.settled = true;
+        return finalized;
       } catch (error) {
+        slot.settled = true;
         reportError(error);
         throw error;
       }
     })();
+
+    /**
+     * A promise built from the finalized result. It still rejects for whoever
+     * awaits it, but it is marked handled when created, so a caller that
+     * reads only the streams never leaves a rejection unhandled.
+     */
+    const derived = <T>(promise: Promise<T>): Promise<T> => {
+      promise.catch(() => undefined);
+      return promise;
+    };
 
     return {
       textStream: (async function* () {
@@ -477,6 +559,13 @@ export function agency(opts: AgencyOptions): Agent {
         } catch (error) {
           reportError(error);
           throw error;
+        }
+        // A handler error or an 'error' timeout ends the call: a consumer
+        // that reads only this stream gets that error here, once the run is
+        // billed. fullStream ends the same way, through the finalized result.
+        if (slot.error !== undefined) {
+          await finalizedResultPromise.catch(() => undefined);
+          throw slot.error;
         }
       })(),
       fullStream: (async function* () {
@@ -508,15 +597,15 @@ export function agency(opts: AgencyOptions): Agent {
           throw error;
         }
       })(),
-      text: finalizedResultPromise.then((result) => (result.text as string) ?? ''),
-      usage: finalizedResultPromise.then((result) => result.usage as {
+      text: derived(finalizedResultPromise.then((result) => (result.text as string) ?? '')),
+      usage: derived(finalizedResultPromise.then((result) => result.usage as {
         promptTokens: number;
         completionTokens: number;
         totalTokens: number;
         costUSD?: number;
-      }),
-      agentCalls: finalizedResultPromise.then((result) => (result.agentCalls ?? []) as AgentCallRecord[]),
-      parsed: finalizedResultPromise.then((result) => result.parsed),
+      })),
+      agentCalls: derived(finalizedResultPromise.then((result) => (result.agentCalls ?? []) as AgentCallRecord[])),
+      parsed: derived(finalizedResultPromise.then((result) => result.parsed)),
       finalTextStream: (async function* () {
         const finalResult = await finalizedResultPromise;
         const finalText = (finalResult.text as string) ?? '';
@@ -682,19 +771,21 @@ export function agency(opts: AgencyOptions): Agent {
     /**
      * Exports this agency's configuration as a portable object.
      * @param metadata - Optional human-readable metadata to attach.
+     * @param options - Redaction options; secrets are redacted unless `redactSecrets` is `false`.
      * @returns A portable {@link AgentExportConfig} object.
      */
-    export(metadata?: AgentExportConfig['metadata']): AgentExportConfig {
-      return exportAgentConfig(agentObj, metadata);
+    export(metadata?: AgentExportConfig['metadata'], options?: ExportAgentConfigOptions): AgentExportConfig {
+      return exportAgentConfig(agentObj, metadata, options);
     },
 
     /**
      * Exports this agency's configuration as a pretty-printed JSON string.
      * @param metadata - Optional human-readable metadata to attach.
+     * @param options - Redaction options; secrets are redacted unless `redactSecrets` is `false`.
      * @returns JSON string with 2-space indentation.
      */
-    exportJSON(metadata?: AgentExportConfig['metadata']): string {
-      return exportAgentConfigJSON(agentObj, metadata);
+    exportJSON(metadata?: AgentExportConfig['metadata'], options?: ExportAgentConfigOptions): string {
+      return exportAgentConfigJSON(agentObj, metadata, options);
     },
   };
 
@@ -708,11 +799,11 @@ export function agency(opts: AgencyOptions): Agent {
 
   // Separate stash for agency-specific fields (sub-agent roster, strategy).
   // Needed by the export system to distinguish agency from single agent.
-  const agencySubAgentConfigs: Record<string, BaseAgentConfig> = {};
+  const agencySubAgentConfigs: Record<string, BaseAgentConfig | { prebuilt: true }> = {};
   for (const [name, agentOrConfig] of Object.entries(opts.agents)) {
     if (isAgent(agentOrConfig)) {
-      // Pre-built agents don't carry exportable config — store empty placeholder
-      agencySubAgentConfigs[name] = {};
+      // A pre-built agent carries no exportable config; import refuses the marker.
+      agencySubAgentConfigs[name] = { prebuilt: true };
     } else {
       agencySubAgentConfigs[name] = agentOrConfig as BaseAgentConfig;
     }
@@ -836,54 +927,6 @@ interface AgencySession {
   messages(): Array<{ role: 'user' | 'assistant'; content: string }>;
   usage(): Promise<{ promptTokens: number; completionTokens: number; totalTokens: number; costUSD?: number }>;
   clear(): void;
-}
-
-// ---------------------------------------------------------------------------
-// beforeTool forwarding
-// ---------------------------------------------------------------------------
-
-/**
- * Forwards agency-level `hitl.approvals.beforeTool` into each sub-agent's
- * `permissions.requireApproval` list.
- *
- * Pre-built {@link Agent} instances are returned as-is (their config is
- * immutable). For raw `BaseAgentConfig` objects, the tool names are merged
- * into the existing `requireApproval` array, deduplicating entries.
- *
- * @param agents - The original agent roster from the agency options.
- * @param opts - Agency-level options containing the HITL config.
- * @returns A new roster with `beforeTool` names injected into sub-agent permissions.
- */
-function forwardBeforeToolToSubAgents(
-  agents: Record<string, BaseAgentConfig | Agent>,
-  opts: AgencyOptions,
-): Record<string, BaseAgentConfig | Agent> {
-  const toolsRequiringApproval = opts.hitl?.approvals?.beforeTool;
-  if (!toolsRequiringApproval?.length) return agents;
-
-  const result: Record<string, BaseAgentConfig | Agent> = {};
-
-  for (const [name, agentOrConfig] of Object.entries(agents)) {
-    /* Pre-built Agent instances are opaque — cannot inject config. */
-    if (isAgent(agentOrConfig)) {
-      result[name] = agentOrConfig;
-      continue;
-    }
-
-    const config = agentOrConfig as BaseAgentConfig;
-    const existing = config.permissions?.requireApproval ?? [];
-    const merged = [...new Set([...existing, ...toolsRequiringApproval])];
-
-    result[name] = {
-      ...config,
-      permissions: {
-        ...config.permissions,
-        requireApproval: merged,
-      },
-    };
-  }
-
-  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1473,38 +1516,6 @@ async function maybeApproveFinalResult(
   return result;
 }
 
-async function resolveApprovalDecision(
-  hitlConfig: NonNullable<AgencyOptions['hitl']>,
-  request: ApprovalRequest,
-): Promise<ApprovalDecision> {
-  const timeoutMs = hitlConfig.timeoutMs ?? 30_000;
-  const onTimeout = hitlConfig.onTimeout ?? 'reject';
-
-  return await new Promise<ApprovalDecision>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      if (onTimeout === 'approve') {
-        resolve({ approved: true, reason: 'Auto-approved after HITL timeout' });
-        return;
-      }
-      if (onTimeout === 'error') {
-        reject(new AgencyConfigError('HITL approval timed out'));
-        return;
-      }
-      resolve({ approved: false, reason: 'Auto-rejected after HITL timeout' });
-    }, timeoutMs);
-
-    hitlConfig.handler!(request)
-      .then((decision) => {
-        clearTimeout(timer);
-        resolve(decision);
-      })
-      .catch((error) => {
-        clearTimeout(timer);
-        reject(error);
-      });
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Post-approval guardrail override
 // ---------------------------------------------------------------------------
@@ -1555,7 +1566,18 @@ export async function runPostApprovalGuardrails(
    */
   const payload = `Tool: ${toolName}\nArguments: ${JSON.stringify(args, null, 2)}`;
 
+  // A notification never changes the decision: a callback that throws is
+  // logged, and a block is returned whatever the callback did.
+  const notify = (event: GuardrailEvent): void => {
+    try {
+      callbacks?.guardrailResult?.(event);
+    } catch (err) {
+      console.warn(`[Guardrail] guardrailResult callback threw for tool "${toolName}":`, err);
+    }
+  };
+
   for (const guardId of guardrailIds) {
+    let result: { action: 'allow' | 'block'; reason?: string };
     try {
       /*
        * Guardrail evaluation is intentionally lightweight here. Each
@@ -1563,36 +1585,7 @@ export async function runPostApprovalGuardrails(
        * the payload text. In a full runtime the IDs would be resolved
        * against a guardrail registry.
        */
-      const result = evaluatePostApprovalGuardrail(guardId, payload);
-
-      if (result.action === 'block') {
-        const reason = result.reason ?? `Blocked by guardrail ${guardId}`;
-        console.warn(
-          `[Guardrail] Overrode HITL approval for tool "${toolName}" — ${guardId}: ${reason}`,
-        );
-
-        callbacks?.guardrailResult?.({
-          agent: '__agency__',
-          guardrailId: guardId,
-          passed: false,
-          enforced: true,
-          action: 'block',
-          reason,
-          timestamp: Date.now(),
-        });
-
-        return { passed: false, guardrailId: guardId, reason };
-      }
-
-      // Non-blocking result: log and continue to the next guardrail.
-      callbacks?.guardrailResult?.({
-        agent: '__agency__',
-        guardrailId: guardId,
-        passed: true,
-        enforced: true,
-        action: result.action,
-        timestamp: Date.now(),
-      });
+      result = evaluatePostApprovalGuardrail(guardId, payload);
     } catch {
       /*
        * Individual guardrail failure is non-fatal — fail open for that
@@ -1601,7 +1594,37 @@ export async function runPostApprovalGuardrails(
       console.warn(
         `[Guardrail] Post-approval guardrail "${guardId}" threw for tool "${toolName}" — skipping`,
       );
+      continue;
     }
+
+    if (result.action === 'block') {
+      const reason = result.reason ?? `Blocked by guardrail ${guardId}`;
+      console.warn(
+        `[Guardrail] Overrode HITL approval for tool "${toolName}" — ${guardId}: ${reason}`,
+      );
+
+      notify({
+        agent: '__agency__',
+        guardrailId: guardId,
+        passed: false,
+        enforced: true,
+        action: 'block',
+        reason,
+        timestamp: Date.now(),
+      });
+
+      return { passed: false, guardrailId: guardId, reason };
+    }
+
+    // Non-blocking result: notify and continue to the next guardrail.
+    notify({
+      agent: '__agency__',
+      guardrailId: guardId,
+      passed: true,
+      enforced: true,
+      action: result.action,
+      timestamp: Date.now(),
+    });
   }
 
   return { passed: true };
