@@ -135,6 +135,15 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     }
   });
 
+  it("sends the provider's end-user field only for a user id the caller passed, never the session id or a call id", async () => {
+    const k = key(); const s = script('openai', k, { replies: ['One.', 'Two.', 'Three.'].map((text) => reply.text(text)) });
+    const a = agent(base(k));
+    await a.session('s1').send('hi');
+    await a.generate('hi');
+    await a.session('s2', { userId: 'user-hash-1' }).send('hi');
+    expect(s.seen.map((call) => call.options.userId)).toEqual([undefined, undefined, 'user-hash-1']);
+  });
+
   it('reports the provider message id only when the call opted into cache diagnostics, as agent() does', async () => {
     const k = key(); script('openai', k, { replies: [reply.text('One.'), reply.text('Two.'), reply.text('Three.')] });
     const session = agent(base(k)).session('s');
