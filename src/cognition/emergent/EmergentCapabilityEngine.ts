@@ -965,14 +965,20 @@ export class EmergentCapabilityEngine {
    * Clean up all session tools for a given session.
    *
    * Delegates to the registry's `EmergentToolRegistry.cleanupSession()`
-   * method and clears the local session index.
+   * method and clears the local session index. A tool forged in the session
+   * and promoted out of it since (now at the agent tier) is not the
+   * session's any more: it stays held, registered and indexed under its
+   * agent.
    *
    * @param sessionId - The session identifier to clean up.
+   * @returns the tools the cleanup removed.
    */
   cleanupSession(sessionId: string): EmergentTool[] {
-    const removedTools = this.getSessionTools(sessionId);
+    const indexed = this.getSessionTools(sessionId);
     this.registry.cleanupSession(sessionId);
     this.index.bySession.delete(sessionId);
+    // Only the tools the registry removed go; a promoted tool is still held.
+    const removedTools = indexed.filter((tool) => !this.registry.get(tool.id));
     for (const tool of removedTools) {
       // The agent index too, so a lookup by agent never names a tool that is gone.
       this.removeIndexedToolEverywhere(tool.id);

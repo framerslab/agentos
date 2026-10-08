@@ -1478,4 +1478,36 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect((await callTool(host.orchestrator, 'double_it', { n: 3 })).output).toEqual({ doubled: 6 });
     expect(host.engine.getSessionTools('sess-m1').map((tool) => tool.name)).toEqual(['double_it']);
   });
+
+  it("a tool promoted out of its session stays registered, and callable by its agent, after the session's cleanup", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    const forged = await callTool(
+      host.orchestrator,
+      'forge_tool',
+      {
+        name: 'double_it',
+        description: 'Doubles a number.',
+        inputSchema: NUMBER_IN,
+        outputSchema: DOUBLED_OUT,
+        implementation: { mode: 'sandbox', code: RAW_DOUBLE, allowlist: [] },
+        testCases: [{ input: { n: 2 }, expectedOutput: { doubled: 4 } }],
+      },
+      { sessionId: 'sess-m2', personaId: 'agent-m2' },
+    );
+    expect(forged.isError).toBeFalsy();
+    const toolId = String(forged.output.toolId);
+    const registry = (host.engine as unknown as { registry: EmergentToolRegistry }).registry;
+    await registry.promote(toolId, 'agent');
+
+    host.orchestrator.cleanupEmergentSession('sess-m2');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(host.engine.getSessionTools('sess-m2')).toEqual([]);
+    expect(host.engine.getAgentTools('agent-m2').map((tool) => tool.id)).toEqual([toolId]);
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'agent-m2' })).output).toEqual({
+      doubled: 4,
+    });
+    expect(readToolRow(db, toolId)).toMatchObject({ tier: 'agent' });
+  });
 });
