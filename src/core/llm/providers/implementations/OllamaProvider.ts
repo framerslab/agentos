@@ -30,7 +30,7 @@ import {
   ProviderEmbeddingResponse,
   EmbeddingObject,
 } from '../IProvider';
-import { stripOpenRouterOnlyParams } from '../openrouter-only-params';
+import { stripForeignVendorParams } from '../openrouter-only-params';
 import { OllamaProviderError } from '../errors/OllamaProviderError';
 
 /**
@@ -363,8 +363,8 @@ export class OllamaProvider implements IProvider {
         ...(options.presencePenalty !== undefined && { presence_penalty: options.presencePenalty }),
         ...(options.frequencyPenalty !== undefined && { frequency_penalty: options.frequencyPenalty }),
         ...(options.stopSequences !== undefined && { stop: options.stopSequences }),
-        // OpenRouter-only routing controls never reach Ollama's options bag.
-        ...(stripOpenRouterOnlyParams(options.customModelParams) || {}),
+        // OpenRouter routing controls and Gemini request fields never reach Ollama's options bag.
+        ...(stripForeignVendorParams(options.customModelParams) || {}),
       },
       format: options.responseFormat?.type === 'json_object' ? 'json' : undefined,
       ...(ollamaTools.length > 0 && { tools: ollamaTools }),
@@ -448,8 +448,8 @@ export class OllamaProvider implements IProvider {
         ...(options.presencePenalty !== undefined && { presence_penalty: options.presencePenalty }),
         ...(options.frequencyPenalty !== undefined && { frequency_penalty: options.frequencyPenalty }),
         ...(options.stopSequences !== undefined && { stop: options.stopSequences }),
-        // OpenRouter-only routing controls never reach Ollama's options bag.
-        ...(stripOpenRouterOnlyParams(options.customModelParams) || {}),
+        // OpenRouter routing controls and Gemini request fields never reach Ollama's options bag.
+        ...(stripForeignVendorParams(options.customModelParams) || {}),
       },
       format: options.responseFormat?.type === 'json_object' ? 'json' : undefined,
       ...(ollamaTools.length > 0 && { tools: ollamaTools }),
@@ -598,8 +598,8 @@ export class OllamaProvider implements IProvider {
       const payload: OllamaEmbeddingRequest = {
         model: modelId,
         prompt: text,
-        // Pass through custom model options minus OpenRouter routing controls.
-        options: stripOpenRouterOnlyParams(options?.customModelParams),
+        // Pass through custom model options minus OpenRouter routing controls and Gemini request fields.
+        options: stripForeignVendorParams(options?.customModelParams),
       };
 
       try {

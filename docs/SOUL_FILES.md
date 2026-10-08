@@ -3,9 +3,8 @@
 AgentOS supports a markdown-based identity convention for agents, modeled after
 the OpenClaw workspace pattern and the [aaronjmars/soul.md](https://github.com/aaronjmars/soul.md)
 spec. Identity, voice, procedural rules, and long-term memory all live in plain
-markdown files inside a per-agent workspace directory. The runtime loads them at
-boot, parses YAML frontmatter into structured [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts) fields, and
-injects the prose as system messages.
+markdown files inside a per-agent workspace directory. The loader parses YAML frontmatter into structured [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts) fields, and
+`agent({ soul })` puts the prose at the head of the system prompt.
 
 The `memory/` directory is the agent's **LLM wiki**: a markdown knowledge base the agent reads and rewrites itself (the "LLM keeps a wiki" pattern). Markdown is the source of truth and the vector/graph index is rebuilt from it; [`souledAgent()`](https://docs.agentos.sh/getting-started/high-level-api) wires it end to end. Full detail in [The `memory/` Wiki](#the-memory-wiki) below.
 
@@ -28,20 +27,20 @@ The cognitive-memory mechanisms layered on top (decay, retrieval-induced forgett
 ~/.agentos/agents/<agent-id>/
 ├── SOUL.md       identity, values, tone, hard limits         (REQUIRED)
 ├── STYLE.md      voice, syntax, vocabulary patterns           (optional)
-├── IDENTITY.md   display card: name, role, agent-ID, avatar   (optional, derived from SOUL frontmatter when absent)
+├── IDENTITY.md   display card: name, role, agent-ID, avatar   (optional)
 ├── AGENTS.md     procedural rules: workflows, file access     (optional)
 ├── memory/       long-term memory wiki: index.md + entities/ + concepts/ + log/  (auto-managed)
 └── examples/     good-outputs.md + bad-outputs.md             (optional)
 ```
 
-| File | What it controls | What happens if you skip it |
+| File | What it holds | What AgentOS does with it |
 |---|---|---|
-| **SOUL.md** | Personality, values, tone, behavioral boundaries | Agent runs as a generic LLM with no character |
-| **STYLE.md** | Voice patterns, vocabulary, register | Default style from `SOUL.md` body only |
-| **IDENTITY.md** | Display card: name, role, agent-ID, avatar | Derived from SOUL.md frontmatter |
-| **AGENTS.md** | Procedural rules, session-start checks, workflow steps | No proactive behavior; manual triggers only |
-| **memory/** | Long-term memory wiki (markdown pages the agent compiles and reads) | Cold start every session |
-| **examples/** | Good/bad output calibration for emergent training | No automated voice calibration |
+| **SOUL.md** | Personality, values, tone, behavioral boundaries | The body opens the system prompt; the frontmatter becomes `personaDefinition`. Without it, `loadSoul()` throws and `agent({ soul })` boots without a soul. |
+| **STYLE.md** | Voice patterns, vocabulary, register | Appended to the system prompt as a `## Style` section. |
+| **IDENTITY.md** | Display card: name, role, agent-ID, avatar | Returned as `identityContent`; nothing in the runtime reads it. |
+| **AGENTS.md** | Procedural rules, session-start checks, workflow steps | Returned as `agentsContent`; nothing in the runtime reads or runs it. |
+| **memory/** | Long-term memory wiki (markdown pages the agent compiles and reads) | `index.md` joins the system prompt; [`souledAgent()`](./getting-started/HIGH_LEVEL_API.md) wires the wiki end to end. Without it, each session starts cold. |
+| **examples/** | Good/bad output calibration | Not read by the loader. |
 
 The principle from OpenClaw: **personality in SOUL.md, procedures in AGENTS.md.**
 Don't mix them.
@@ -66,7 +65,7 @@ Pages are markdown with YAML frontmatter and `[[wikilinks]]`. The agent reads
 The LLM folds new conversation into pages when memory consolidates: a
 [`souledAgent`](getting-started/HIGH_LEVEL_API.md) runs this on the agent's `close()`,
 and `agent.memory.compileWiki()` triggers it mid-session. Merges integrate new facts
-rather than clobbering human edits; git versions every change.
+rather than clobbering human edits. The runtime does not version the pages.
 
 A legacy single-file `MEMORY.md` auto-migrates into `memory/index.md` on first load
 and is left untouched on disk.
@@ -75,7 +74,7 @@ and is left untouched on disk.
 
 SOUL.md is markdown with YAML frontmatter. The frontmatter holds structured
 config (HEXACO scores, voice, mood, hard limits) that maps to existing AgentOS
-persona machinery. The body is prose injected as the first system message.
+persona machinery. The body is prose placed at the head of the system prompt.
 
 ```markdown
 ---
@@ -120,58 +119,73 @@ You teach first and recommend a human handoff when an issue
 exceeds your scope.
 ```
 
-A starter template ships at [`packages/agentos/src/cognition/substrate/personas/SOUL.template.md`](../src/cognition/substrate/personas/SOUL.template.md).
+A starter template ships at [`src/cognition/substrate/personas/SOUL.template.md`](../src/cognition/substrate/personas/SOUL.template.md).
 
 ## Loading a Soul
 
 ```ts
-import { loadSoul } from '@framers/agentos/cognition/substrate/personas/SoulLoader';
 import { agent } from '@framers/agentos';
 
+// agent() loads the workspace: SOUL.md opens the system prompt, STYLE.md and
+// memory/index.md follow it.
+const aria = agent({ provider: 'anthropic', soul: '~/.agentos/agents/aria' });
+
+const reply = await aria.session('customer-42').send('I need help with my invoice.');
+console.log(reply.text);
+```
+
+`agent()` uses the prose; the structured fields (HEXACO scores, voice, mood, hard limits) live on the `personaDefinition` that `loadSoul()` returns, which the full runtime takes as a persona:
+
+```ts
+import { loadSoul } from '@framers/agentos/cognition/substrate/personas/SoulLoader';
+import { AgentOS } from '@framers/agentos';
+
 const soul = await loadSoul({ source: '~/.agentos/agents/aria' });
-
-const aria = agent({
-  provider: 'anthropic',
-  instructions: soul.soulContent,    // SOUL.md prose as system prompt
-  persona: soul.personaDefinition,    // structured fields (HEXACO, voice, mood, hardLimits)
-});
-
-await aria.send('I need help with my invoice.');
+const agentos = await AgentOS.create({ personas: [soul.personaDefinition] });
 ```
 
 `loadSoul` accepts either a workspace directory or a direct file path:
 
 ```ts
-// Directory: scans all 6 standard files
+// Directory: reads SOUL.md, STYLE.md, IDENTITY.md, AGENTS.md and MEMORY.md
 await loadSoul({ source: '~/.agentos/agents/aria' });
 
-// Direct file: loads SOUL.md only
+// Direct file: reads that file as SOUL.md and the companion files beside it
 await loadSoul({ source: '~/.agentos/agents/aria/SOUL.md' });
 
 // Inline: for tests and ephemeral agents
-const soulMarkdown = `---\nname: Tester\n---\nYou are a test agent.`;
-// ... write to temp file then loadSoul; or use IPersonaDefinition directly
+import { parseSoul } from '@framers/agentos/cognition/substrate/personas/SoulLoader';
+const inline = parseSoul(`---\nname: Tester\n---\nYou are a test agent.`);
 ```
+
+Both file forms create `memory/` beside SOUL.md (seeding `memory/index.md` from a legacy `MEMORY.md`) when it does not exist.
 
 ## Loading Order at Agent Boot
 
-1. **SOUL.md** → first system message (the "character sheet")
-2. **STYLE.md** → second system message (appended)
-3. **IDENTITY.md** → display surfaces (UI, multi-agent routing)
-4. **AGENTS.md** → session-start procedures and workflow rules
-5. **MEMORY.md** → seeded into long-term memory store
-6. **examples/** → fed to emergent calibration (when enabled)
+1. **SOUL.md** → the first section of the system prompt (the "character sheet")
+2. **STYLE.md** → a `## Style` section after it
+3. **memory/index.md** → a "Long-Term Memory (index)" section, when the index holds more than its heading; a legacy **MEMORY.md** seeds it on first load
+4. `instructions`, `name`, `personality` and `skills` from the agent options follow
+5. **IDENTITY.md** and **AGENTS.md** → returned on the loaded soul (`identityContent`, `agentsContent`); nothing in the runtime reads them
+6. **examples/** → not read
 
 ## HEXACO + AgentOS Persona Machinery
 
 The `hexaco:` block in SOUL.md frontmatter maps directly to AgentOS's existing
-[HEXACO personality model](./HEXACO_PERSONALITY.md). The same six-trait scores
-flow into:
+[HEXACO personality model](./memory/HEXACO_PERSONALITY.md). The scores land in
+`personaDefinition.personalityTraits`. On the full runtime they are the GMI's traits:
 
-- `PersonaDriftMechanism`: long-term trait drift across sessions
-- [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts): per-trait mutation history
-- [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts): runtime personality adjustment via emergent capabilities
-- [`PersonaOverlayManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/persona_overlays/PersonaOverlayManager.ts): mood-based system-prompt overlays
+- [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts): with `emergentConfig.selfImprovement.enabled`, changes a trait for the session's GMI within a per-session budget
+- [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts): records those changes when a storage adapter is configured
+- [`PersonaOverlayManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/persona_overlays/PersonaOverlayManager.ts): patches traits and mood when a workflow agency's persona evolution rules fire
+
+`agent({ soul })` does not read the scores; pass `personality` for its trait paragraph. `PersonaDriftMechanism` works from the traits a cognitive memory manager is configured with.
+
+Loaded personas store Honesty-Humility as `personalityTraits.honesty`, the key
+that `agent({ personality })`, `AdaptPersonalityTool`, and the memory system read.
+The frontmatter accepts either `honestyHumility` or `honesty`; when both are set,
+`honesty` wins. `renderSoulMarkdown` writes the trait back as `honestyHumility`,
+so a render-then-load round trip keeps every score.
 
 All existing persona surfaces (mood adaptation, voice routing, avatar generation)
 work identically whether the persona was loaded from JSON or from SOUL.md.
@@ -184,19 +198,25 @@ both produce the same [`IPersonaDefinition`](https://github.com/framerslab/agent
 ```ts
 import { renderSoulMarkdown } from '@framers/agentos/cognition/substrate/personas/SoulLoader';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 const persona = JSON.parse(await fs.readFile('legacy-persona.json', 'utf-8'));
-const soulMarkdown = renderSoulMarkdown(persona);
-await fs.writeFile('~/.agentos/agents/migrated/SOUL.md', soulMarkdown);
+const dir = path.join(os.homedir(), '.agentos', 'agents', 'migrated');
+await fs.mkdir(dir, { recursive: true });
+await fs.writeFile(path.join(dir, 'SOUL.md'), renderSoulMarkdown(persona));
 ```
 
-The renderer preserves all structured fields in YAML frontmatter and uses
-`baseSystemPrompt` as the markdown body.
+The renderer writes the name, id (as `agentId`), description (as `role`), HEXACO
+traits, voice, mood defaults, reasoning-trace limits, hard limits, avatar and
+metadata to the frontmatter, and `baseSystemPrompt` as the body. Other fields
+(model defaults, metaprompts, sentiment tracking, tools, contextual elements) are
+not written.
 
 ## Cross-Framework Compatibility
 
 SOUL.md files are plain markdown. Any agent runtime that reads files can embody
-the same identity. Tested compatible:
+the same identity. For example:
 
 - **OpenClaw**: same workspace convention
 - **OpenSouls Soul Engine**: Tanaki and similar agents accept SOUL.md as input
@@ -225,4 +245,4 @@ the agent IS; AGENTS.md describes what the agent DOES.
 - [SOUL.template.md](../src/cognition/substrate/personas/SOUL.template.md)
 - [aaronjmars/soul.md spec](https://github.com/aaronjmars/soul.md)
 - [OpenClaw workspace files explained](https://capodieci.medium.com/ai-agents-003-openclaw-workspace-files-explained-soul-md-agents-md-heartbeat-md-and-more-5bdfbee4827a)
-- [HEXACO Personality model in AgentOS](./HEXACO_PERSONALITY.md)
+- [HEXACO Personality model in AgentOS](./memory/HEXACO_PERSONALITY.md)

@@ -32,13 +32,15 @@ import {
   ProviderEmbeddingOptions,
   ProviderEmbeddingResponse,
 } from '../IProvider';
-import { stripOpenRouterOnlyParams } from '../openrouter-only-params';
+import { stripForeignVendorParams } from '../openrouter-only-params';
+import { resolveOpenAiCacheRetentionParams, resolvePromptCacheKey } from '../openai-cache-params';
 import { OpenAIProviderError } from '../errors/OpenAIProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
-import { toOpenAiResponseFormat } from './openai-response-format-guard';
+import { toOpenAiResponseFormat, toOpenAiResponsesTextFormat } from './openai-response-format-guard';
 import { clampMaxOutputTokens } from '../model-output-limits.js';
-import { mapEffortToOpenAiReasoningEffort, mapEffortToOpenAiResponsesEffort } from '../model-effort.js';
+import { mapEffortToOpenAiReasoningEffort, mapEffortToOpenAiReasoningEffortForModel, mapEffortToOpenAiResponsesEffort } from '../model-effort.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
+import { redactUrlSecrets } from '../url-secrets.js';
 // Assuming a fetch-like interface is available globally or polyfilled (e.g., node-fetch)
 // For Node.js, ensure 'node-fetch' is a dependency or use Node's built-in fetch from v18+.
 // import fetch, { RequestInit, Response as FetchResponse, AbortController } from 'node-fetch'; // Example for Node
@@ -55,6 +57,15 @@ namespace OpenAIAPITypes {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    /**
+     * OpenAI automatic prompt caching (gpt-4o and newer): prompt tokens
+     * served from cache at the discounted rate, plus — on GPT-5.6+ —
+     * tokens written to cache (billed 1.25x). Normalized into
+     * {@link ModelUsage.cacheReadInputTokens} / cacheCreationInputTokens
+     * so caching is visible platform-wide (OpenRouterProvider already
+     * normalizes the same fields).
+     */
+    prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
   }
   /** Complete tool call as returned on a non-streaming message. */
   export interface ToolCall {
@@ -87,6 +98,12 @@ namespace OpenAIAPITypes {
     model: string;
     choices: ChatChoice[];
     usage?: Usage;
+    /** Service tier the call actually ran at (present when service_tier was requested or defaulted). */
+    service_tier?: string;
+  }
+  export interface StreamChunkExtras {
+    /** Service tier the call actually ran at (present on chunks when requested/defaulted). */
+    service_tier?: string;
   }
   export interface StreamDelta {
     role?: string;
@@ -99,7 +116,7 @@ namespace OpenAIAPITypes {
     finish_reason: string | null;
     logprobs?: unknown;
   }
-  export interface ChatCompletionStreamResponse {
+  export interface ChatCompletionStreamResponse extends StreamChunkExtras {
     id: string;
     object: string;
     created: number;
@@ -144,6 +161,8 @@ namespace OpenAIAPITypes {
     input_tokens: number;
     output_tokens: number;
     total_tokens: number;
+    /** Responses-API spelling of the cached-prompt-token detail. */
+    input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
   }
   export interface ResponsesOutputContentPart {
     type: string; // 'output_text' | …
@@ -151,6 +170,9 @@ namespace OpenAIAPITypes {
   }
   export interface ResponsesOutputItem {
     type: string; // 'message' | 'function_call' | 'reasoning' | …
+    /** Item id; stream events name the item by it (`item_id`). */
+    id?: string;
+    status?: string;
     // message item
     role?: string;
     content?: ResponsesOutputContentPart[];
@@ -166,8 +188,37 @@ namespace OpenAIAPITypes {
     model?: string;
     status?: string; // 'completed' | 'incomplete' | …
     output?: ResponsesOutputItem[];
-    usage?: ResponsesUsage;
+    usage?: ResponsesUsage | null;
     incomplete_details?: { reason?: string } | null;
+    /** Why a `failed` response failed. */
+    error?: { code?: string; message?: string } | null;
+    /** Service tier the call actually ran at. */
+    service_tier?: string;
+  }
+  /**
+   * One `/v1/responses` stream event (the JSON `data` of an SSE message; its
+   * `type` repeats the SSE `event` name). Only the fields the stream mapper
+   * reads, per the streaming-events reference retrieved 2026-09-30.
+   */
+  export interface ResponsesStreamEvent {
+    type: string;
+    sequence_number?: number;
+    /** response.created / in_progress / completed / incomplete / failed. */
+    response?: ResponsesResponse;
+    /** Position of the item in `response.output`. */
+    output_index?: number;
+    /** output_item.added / output_item.done. */
+    item?: ResponsesOutputItem;
+    /** Item id on the delta and done events. */
+    item_id?: string;
+    /** output_text.delta and function_call_arguments.delta. */
+    delta?: string;
+    /** function_call_arguments.done: the complete argument text. */
+    arguments?: string;
+    /** The `error` event. */
+    code?: string | null;
+    message?: string;
+    param?: string | null;
   }
 }
 
@@ -321,41 +372,212 @@ export function modelRequiresMaxCompletionTokens(modelId: string): boolean {
 }
 
 /**
- * Whether `modelId` is an OpenAI reasoning model — the o1/o3/o4 series or the
- * GPT-5 family. These models reject custom sampling params (`temperature`,
- * `top_p`) with HTTP 400 in addition to requiring `max_completion_tokens`;
- * they run only at their fixed defaults. Single source of truth for the
- * o-series/gpt-5 detection used by both the param guards.
+ * Context-window size for the GPT-5, GPT-6 and o-series reasoning families.
  *
- * @param modelId Provider-side model identifier (e.g. `'o3'`, `'gpt-5.4-mini'`).
+ * From the first-party model pages and GET /v1/models, 2026-09-23 to 29. The
+ * family prefix alone does not decide the size: `gpt-5.4` is a 1.05M model
+ * while its `-mini` and `-nano` siblings are 400K.
+ *
+ *   - 1,050,000: the GPT-6 family (`gpt-6.1-sol` included, per the
+ *     2026-09-29 changelog), the GPT-5.6 family except `gpt-5.6-cyber`,
+ *     `gpt-5.5`, `gpt-5.5-pro`, `gpt-5.4` and `gpt-5.4-pro` (max input
+ *     922,000 on GPT-6).
+ *   - 400,000: `gpt-5.6-cyber`, `gpt-5.4-mini` / `-nano`, `gpt-5.3-codex`,
+ *     `gpt-5.2*`, `gpt-5.1*`, `gpt-5`, and `gpt-5-mini` / `-nano` / `-pro`.
+ *   - 200,000: the o-series other than `o1-mini` and `o1-preview`.
+ *   - 128,000: `o1-mini`, `o1-preview` and the `gpt-5*-chat-latest` snapshots.
+ *
+ * @param modelId Provider-side model identifier (e.g. `'gpt-6-sol'`).
+ * @returns Context window in tokens.
  */
-export function isOpenAIReasoningModel(modelId: string): boolean {
-  // o1 / o3 / o4 reasoning models, plus GPT-5 family.
-  return /^(o\d|gpt-5)/i.test(modelId);
+export function openAiReasoningContextWindow(modelId: string): number {
+  const id = modelId.toLowerCase();
+  if (/^o1-(mini|preview)/.test(id)) return 128000;
+  if (/^o\d/.test(id)) return 200000;
+  if (/^gpt-5(\.\d+)?-chat-latest$/.test(id)) return 128000;
+  if (/^gpt-5\.6-cyber/.test(id)) return 400000;
+  if (/^gpt-6/.test(id)) return 1050000;
+  if (/^gpt-5\.[56]/.test(id)) return 1050000;
+  // gpt-5.4 and gpt-5.4-pro, bare or dated, are 1.05M; -mini and -nano are 400K.
+  if (/^gpt-5\.4(-pro)?(-\d{4}-\d{2}-\d{2})?$/.test(id)) return 1050000;
+  return 400000;
 }
 
 /**
- * Whether OpenAI rejects `reasoning_effort` sent ALONGSIDE function tools on
- * the `/v1/chat/completions` endpoint for `modelId`. The GPT-5 family enforces
- * this — "Function tools with reasoning_effort are not supported for gpt-5.5
- * in /v1/chat/completions. Please use /v1/responses instead." (live-observed
- * 2026-07-08 when the codegen frontier fallback chain routed a tool-carrying,
- * effort:xhigh orchestrator turn to gpt-5.5, hard-erroring the whole build).
+ * Prompt size, in input tokens, above which OpenAI bills a call on a
+ * long-context model at the long-context rates. The pricing page splits its
+ * flagship table into "<=272K" and ">272K" input tokens, and the comparison is
+ * strict: a prompt of exactly 272,000 tokens bills at the standard rates. The
+ * count includes cached tokens, and output size never triggers the tier.
+ */
+export const OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS = 272_000;
+
+/**
+ * Factor OpenAI applies to the input rate of a long-context call. The cached
+ * input and cache write rates double as well.
+ */
+export const OPENAI_LONG_CONTEXT_INPUT_MULTIPLIER = 2;
+
+/** Factor OpenAI applies to the output rate of a long-context call. */
+export const OPENAI_LONG_CONTEXT_OUTPUT_MULTIPLIER = 1.5;
+
+/**
+ * Whether OpenAI bills `modelId` at the long-context rates when a prompt
+ * exceeds {@link OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS} input tokens. Such a
+ * call bills its whole input at {@link OPENAI_LONG_CONTEXT_INPUT_MULTIPLIER}
+ * times the input rate and its whole output at
+ * {@link OPENAI_LONG_CONTEXT_OUTPUT_MULTIPLIER} times the output rate.
  *
- * agentos has no `/v1/responses` code path, so a tool-carrying reasoning call
- * must DROP `reasoning_effort` (the model then reasons at its default depth)
- * rather than 400 the entire request. Scoped to the GPT-5 family: the o-series
- * (o1/o3/o4) still accepts `reasoning_effort` + tools on chat/completions, so
- * dropping it there would be a needless reasoning-depth regression. Widen this
- * predicate if a future o-series enforces the same Responses-API requirement.
+ * OpenAI states the rule for its models with a 1.05M context window, so this
+ * reuses {@link openAiReasoningContextWindow}. That covers the GPT-6 family
+ * (`gpt-6.1-sol` included), the GPT-5.6 family except `gpt-5.6-cyber`,
+ * `gpt-5.5`, `gpt-5.5-pro`, `gpt-5.4` and `gpt-5.4-pro`, bare or dated.
+ * Everything else bills flat at every prompt size: the GPT-5 models with a
+ * smaller window (`gpt-5.6-cyber`, which the pricing page lists without a
+ * long-context rate, `gpt-5.4-mini` / `-nano`, `gpt-5.3` and older, and the
+ * chat-latest snapshots), the o-series, and the pre-GPT-5 models, `gpt-4.1`
+ * included despite its 1M window. Checked against
+ * developers.openai.com/api/docs/pricing and the model pages on 2026-09-30.
  *
- * Proper long-term fix (separate, larger): add a `/v1/responses` request path
- * and route reasoning + function-tool calls there, preserving both.
+ * @param modelId Model id as requested or as echoed by the API.
+ * @returns `true` when a prompt above the threshold bills at the long-context rates.
+ */
+export function openAiHasLongContextPricing(modelId: string): boolean {
+  return isOpenAIReasoningModel(modelId) && openAiReasoningContextWindow(modelId) === 1050000;
+}
+
+/**
+ * Whether OpenAI serves `modelId` only through the Responses API. OpenAI lists
+ * the `-pro` tiers, the codex models, `gpt-5.6-cyber` and the deep-research
+ * models as Responses-only; on /v1/chat/completions they fail (gpt-5.3-codex
+ * answers 404). OpenAIProvider sends every call to these ids to /v1/responses
+ * (see {@link openAiRequiresResponsesApi}).
  *
- * @param modelId Provider-side model identifier (e.g. `'gpt-5.5'`).
+ * Only OpenAI's own families (`gpt-`, the o-series, `codex-`) qualify. Groq,
+ * xAI, Together and Mistral delegate to this class with their own model ids,
+ * and an id such as `grok-4-pro` on one of those endpoints is served by its
+ * Chat Completions route.
+ *
+ * @param modelId Provider-side model identifier.
+ * @returns `true` when the model has no Chat Completions endpoint.
+ */
+export function isOpenAIResponsesOnlyModel(modelId: string): boolean {
+  return /^(gpt-|o\d|codex-)/i.test(modelId)
+    && /-pro(-\d{4}-\d{2}-\d{2})?$|codex|^gpt-5\.6-cyber|deep-research/i.test(modelId);
+}
+
+/**
+ * Whether a call to `modelId` can be served only by `/v1/responses`:
+ *
+ *   - any call to a Responses-only model ({@link isOpenAIResponsesOnlyModel});
+ *   - a GPT-6 call carrying function tools. Chat Completions does not serve
+ *     it: `gpt-6-astra` rejects tool calls there with or without a
+ *     `reasoning_effort` (probed 2026-09-10 and 2026-09-30), the `gpt-6.1-sol` model page lists
+ *     tool calling on Responses only, and the `gpt-6-sol` / `gpt-6-luna`
+ *     pages allow chat tool calls only with `reasoning_effort: 'none'`. A
+ *     2026-09-30 probe of a GPT-6 tool call with no `reasoning_effort` on
+ *     /v1/chat/completions returned HTTP 400.
+ *
+ * {@link shouldRouteToOpenAiResponsesApi} applies this rule to streamed and
+ * non-streamed calls alike.
+ *
+ * @param modelId Provider-side model identifier.
+ * @param options The request's tools.
+ * @returns `true` when the call has no Chat Completions route.
+ */
+export function openAiRequiresResponsesApi(
+  modelId: string,
+  options: Pick<ModelCompletionOptions, 'tools'>,
+): boolean {
+  return (
+    isOpenAIResponsesOnlyModel(modelId) ||
+    (/^gpt-6/i.test(modelId) && requestHasFunctionTools(options.tools))
+  );
+}
+
+/**
+ * ModelInfo capabilities for a GPT-5, GPT-6 or o-series id, limited to what
+ * OpenAIProvider can serve.
+ *
+ *   - Responses-only models ({@link isOpenAIResponsesOnlyModel}) list as
+ *     `chat` only. Tool and streaming support vary from model to model on
+ *     that tier, and the refresh leaves the Responses-only o-series ids out.
+ *   - GPT-6 lists `tool_use`: every GPT-6 tool call, streamed or not, goes to
+ *     `/v1/responses` ({@link openAiRequiresResponsesApi}).
+ *   - `o1-mini` and `o1-preview` have no function calling or structured
+ *     outputs. They and `o3-mini` take text only, and every other id takes
+ *     images (per model input modalities, checked 2026-09-29).
+ *
+ * @param modelId Provider-side model identifier (e.g. `'gpt-6-sol'`).
+ * @returns Capability strings for ModelInfo.
+ */
+export function openAiReasoningCapabilities(modelId: string): string[] {
+  const id = modelId.toLowerCase();
+  if (isOpenAIResponsesOnlyModel(id) || /^o1-(mini|preview)/.test(id)) return ['chat'];
+  const caps = ['chat', 'json_mode', 'tool_use'];
+  if (!/^o3-mini/.test(id)) caps.push('vision_input');
+  return caps;
+}
+
+/**
+ * Whether `modelId` is an OpenAI reasoning model — the o1/o3/o4 series or the
+ * GPT-5 / GPT-6 families. These models reject custom sampling params
+ * (`temperature`, `top_p`) with HTTP 400 in addition to requiring
+ * `max_completion_tokens`; they run only at their fixed defaults. Single
+ * source of truth for the o-series/gpt-5/gpt-6 detection used by both the
+ * param guards.
+ *
+ * GPT-6 live-probed 2026-09-10 (chat.completions, `gpt-6-astra`):
+ * `temperature: 0.5` → HTTP 400 `unsupported_value` ("Unsupported value:
+ * 'temperature' does not support 0.5 with this model. Only the default (1)
+ * value is supported."); `max_tokens: 16` → HTTP 400
+ * `unsupported_parameter` ("Unsupported parameter: 'max_tokens' is not
+ * supported with this model. Use 'max_completion_tokens' instead."). The
+ * family therefore behaves exactly like GPT-5 on both guards.
+ *
+ * `gpt-6` is matched as a bare family prefix (mirroring `gpt-5`) so dated
+ * snapshots of `gpt-6-astra` are covered. It is deliberately NOT generalized
+ * to `gpt-\d` — a future family's param contract is unknown, and the
+ * conservative default for an unrecognized id is the legacy `max_tokens`
+ * path. Widen only for a family that has actually shipped and been probed.
+ *
+ * @param modelId Provider-side model identifier (e.g. `'o3'`, `'gpt-6-astra'`).
+ */
+export function isOpenAIReasoningModel(modelId: string): boolean {
+  // o1 / o3 / o4 reasoning models, plus the GPT-5 and GPT-6 families.
+  return /^(o\d|gpt-5|gpt-6)/i.test(modelId);
+}
+
+/**
+ * Whether OpenAI rejects `reasoning_effort` sent alongside function tools on
+ * the `/v1/chat/completions` endpoint for `modelId`. The GPT-5 family does:
+ * "Function tools with reasoning_effort are not supported for gpt-5.5 in
+ * /v1/chat/completions. Please use /v1/responses instead." (live-observed
+ * 2026-07-08, when the codegen frontier fallback chain sent a tool-carrying,
+ * effort:xhigh orchestrator turn to gpt-5.5 and the whole build failed).
+ *
+ * GPT-6 does as well. Live-probed 2026-09-10 (chat.completions,
+ * `gpt-6-astra`, `reasoning_effort: 'xhigh'` and one function tool): HTTP 400
+ * `invalid_request_error`, "Function tools with reasoning_effort are not
+ * supported for gpt-6-astra in /v1/chat/completions. To use function tools,
+ * use /v1/responses or set reasoning_effort to 'none'." The 2026-09-30 probe
+ * found that `gpt-6-sol` and `gpt-6-luna` accept `'none'` there while
+ * `gpt-6-astra` rejects it, and that a GPT-6 tool call with no
+ * `reasoning_effort` also returns 400, so every GPT-6 tool call goes to
+ * `/v1/responses` ({@link openAiRequiresResponsesApi}).
+ *
+ * {@link shouldRouteToOpenAiResponsesApi} sends a GPT-5 tool call that
+ * carries an effort to `/v1/responses`, which keeps both the effort and the
+ * tools. A call whose message content Responses cannot carry stays on
+ * chat/completions, where the chat builder drops `reasoning_effort` so the
+ * call succeeds at the model's default depth. The o-series (o1/o3/o4) accepts
+ * `reasoning_effort` with tools on chat/completions, so it stays outside this
+ * predicate; widen it if a future o-series model enforces the same rule.
+ *
+ * @param modelId Provider-side model identifier (e.g. `'gpt-5.5'`, `'gpt-6-astra'`).
  */
 export function openAiRejectsReasoningEffortWithTools(modelId: string): boolean {
-  return /^gpt-5/i.test(modelId);
+  return /^gpt-(5|6)/i.test(modelId);
 }
 
 /**
@@ -367,31 +589,299 @@ function requestHasFunctionTools(tools: unknown): boolean {
   return Array.isArray(tools) ? tools.length > 0 : tools != null;
 }
 
+/** Whether one content part is a plain text block the Responses mapper can carry. */
+function isTextPart(part: unknown): part is { type: 'text'; text: string } {
+  return (
+    part != null &&
+    typeof part === 'object' &&
+    (part as { type?: unknown }).type === 'text' &&
+    typeof (part as { text?: unknown }).text === 'string'
+  );
+}
+
 /**
- * Whether a NON-streaming call must use `/v1/responses` instead of
- * `/v1/chat/completions`: a gpt-5 reasoning model carrying function tools AND a
- * requested effort — the ONLY combination chat/completions 400s on
- * ("Function tools with reasoning_effort are not supported … Please use
- * /v1/responses instead") and the only case where the Responses path buys
- * anything (preserved reasoning depth). Excludes, per the 2026-07-08 Codex
- * review, requests that carry a `responseFormat` (the Responses path maps no
- * structured output — those stay on chat/completions where R4 drops effort) or
- * any non-string (multimodal) message content (the Responses input mapper is
- * text-only). Every excluded case stays on chat/completions; R4's effort-drop
- * remains the defense-in-depth floor there.
+ * Whether a message's `content` can be carried to `/v1/responses` by
+ * {@link flattenResponsesTextContent} WITHOUT losing information.
+ *
+ * Accepts a plain string, `null`/absent content, or an array whose parts are
+ * ALL text blocks. Anthropic-style `cache_control` markers on those blocks are
+ * fine to drop: OpenAI has no equivalent request field and caches long prefixes
+ * automatically, so the marker carries no payload.
+ *
+ * Rejects genuinely multimodal content (images, `tool_result` blocks, any
+ * non-text part) because the mapper still cannot represent it — flattening
+ * those would silently discard the payload.
+ *
+ * This is the SINGLE source of truth shared by
+ * {@link shouldRouteToOpenAiResponsesApi} (which refuses to route what the
+ * mapper cannot carry) and the mapper itself, so the two cannot drift into the
+ * state that caused the silent-empty-system-prompt hazard this guard replaced.
+ */
+export function isResponsesMappableContent(content: ChatMessage['content']): boolean {
+  if (content == null || typeof content === 'string') return true;
+  if (!Array.isArray(content)) return false;
+  return content.every(isTextPart);
+}
+
+/**
+ * Flatten a message's content to the plain text `/v1/responses` receives.
+ *
+ * A string passes through; an all-text block array is joined with `\n` (the
+ * shape `systemBlocks` / `SystemContentBlock[]` produces, where each block is
+ * an independently cache-markable slab of one logical prompt); anything else
+ * yields `''`.
+ *
+ * Callers MUST gate on {@link isResponsesMappableContent} first — the `''`
+ * fallback is a defensive floor for unmappable content, not a licence to send
+ * it. Sending unmappable content here is exactly the silent-empty-prompt bug
+ * the paired predicate exists to prevent.
+ */
+export function flattenResponsesTextContent(content: ChatMessage['content']): string {
+  if (typeof content === 'string') return content;
+  if (content == null || !Array.isArray(content)) return '';
+  return content.filter(isTextPart).map((p) => p.text).join('\n');
+}
+
+/** Whether one content part is an image URL block, which `/v1/responses` takes as `input_image`. */
+function isImageUrlPart(
+  part: unknown,
+): part is { type: 'image_url'; image_url: { url: string; detail?: string } } {
+  if (part == null || typeof part !== 'object') return false;
+  const p = part as { type?: unknown; image_url?: unknown };
+  return (
+    p.type === 'image_url' &&
+    p.image_url != null &&
+    typeof p.image_url === 'object' &&
+    typeof (p.image_url as { url?: unknown }).url === 'string'
+  );
+}
+
+/**
+ * Whether the `/v1/responses` builder can carry message `m` without losing
+ * content. Text-only content ({@link isResponsesMappableContent}) maps on
+ * every role. User and tool messages may also carry image parts: a user turn
+ * sends them as `input_image`, and a tool result becomes a
+ * `function_call_output` whose output is an `input_text` / `input_image`
+ * array (the form OpenAI's function-calling reference gives for it). Any other
+ * part, such as audio, a file or an Anthropic `tool_result` block, has no
+ * mapping.
+ *
+ * @param m A request message.
+ * @returns `true` when the message maps onto Responses input losslessly.
+ */
+export function isResponsesMappableMessage(m: ChatMessage): boolean {
+  if (isResponsesMappableContent(m.content)) return true;
+  return (
+    (m.role === 'user' || m.role === 'tool') &&
+    Array.isArray(m.content) &&
+    m.content.every((part) => isTextPart(part) || isImageUrlPart(part))
+  );
+}
+
+/**
+ * The `/v1/responses` form of a user or tool message's content. Text-only
+ * content stays the flattened string {@link flattenResponsesTextContent}
+ * builds; content with images becomes `input_text` and `input_image` parts.
+ * Every image carries a `detail`, `'auto'` (the API's default) when the source
+ * part set none. Callers gate on {@link isResponsesMappableMessage} first.
+ */
+function toResponsesInputContent(
+  content: ChatMessage['content'],
+): string | Array<Record<string, unknown>> {
+  if (!Array.isArray(content) || isResponsesMappableContent(content)) {
+    return flattenResponsesTextContent(content);
+  }
+  return content.map((part) =>
+    isImageUrlPart(part)
+      ? { type: 'input_image', image_url: part.image_url.url, detail: part.image_url.detail ?? 'auto' }
+      : { type: 'input_text', text: isTextPart(part) ? part.text : '' },
+  );
+}
+
+/**
+ * Whether a call goes to `/v1/responses` instead of `/v1/chat/completions`.
+ * Streamed and non-streamed calls follow this one rule.
+ *
+ *   - Every call {@link openAiRequiresResponsesApi} names: Responses-only
+ *     models and GPT-6 tool calls.
+ *   - A GPT-5 or GPT-6 call that carries function tools and an effort, when
+ *     every message maps ({@link isResponsesMappableMessage}). Chat
+ *     Completions rejects `reasoning_effort` alongside function tools for
+ *     these families ("Function tools with reasoning_effort are not supported
+ *     ... Please use /v1/responses instead"); Responses keeps both, and a
+ *     `responseFormat` travels as `text.format`.
+ *
+ * Content gating goes through {@link isResponsesMappableMessage}, which
+ * accepts Anthropic-style cache-marked system blocks (`systemBlocks` reach the
+ * provider as an all-text content array) and flattens them without loss. A
+ * GPT-5 tool call whose content does not map stays on chat/completions, where
+ * the chat builder drops the effort (see
+ * {@link openAiRejectsReasoningEffortWithTools}).
+ *
+ * @param modelId Provider-side model identifier.
+ * @param messages The request messages.
+ * @param options The request's tools, effort and response format.
+ * @returns `true` when the call goes to `/v1/responses`.
  */
 export function shouldRouteToOpenAiResponsesApi(
   modelId: string,
   messages: ChatMessage[],
   options: Pick<ModelCompletionOptions, 'tools' | 'effort' | 'responseFormat'>,
 ): boolean {
+  if (openAiRequiresResponsesApi(modelId, options)) return true;
   return (
     openAiRejectsReasoningEffortWithTools(modelId) &&
     requestHasFunctionTools(options.tools) &&
     mapEffortToOpenAiReasoningEffort(options.effort) !== undefined &&
-    options.responseFormat === undefined &&
-    messages.every((m) => typeof m.content === 'string' || m.content == null)
+    messages.every(isResponsesMappableMessage)
   );
+}
+
+/** Assistant text, function calls and item count read from a `/v1/responses` `output` array. */
+interface ResponsesOutputSummary {
+  /** Concatenated `output_text` of every message item. */
+  text: string;
+  /** Function calls in output order. */
+  toolCalls: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>;
+  /** Number of output items of any type, reasoning included. */
+  itemCount: number;
+}
+
+/**
+ * Reads a `/v1/responses` `output` array: assistant text from the
+ * `output_text` parts of message items and tool calls from `function_call`
+ * items (`call_id` becomes the call id). Reasoning and other item types count
+ * toward `itemCount` only.
+ */
+function summarizeResponsesOutput(
+  output: ReadonlyArray<OpenAIAPITypes.ResponsesOutputItem> | undefined,
+): ResponsesOutputSummary {
+  const items = output ?? [];
+  let text = '';
+  const toolCalls: ResponsesOutputSummary['toolCalls'] = [];
+  for (const item of items) {
+    if (item.type === 'message') {
+      for (const part of item.content ?? []) {
+        if (part.type === 'output_text' && typeof part.text === 'string') text += part.text;
+      }
+    } else if (item.type === 'function_call') {
+      toolCalls.push({
+        id: item.call_id ?? '',
+        type: 'function',
+        function: { name: item.name ?? '', arguments: item.arguments ?? '' },
+      });
+    }
+  }
+  return { text, toolCalls, itemCount: items.length };
+}
+
+/**
+ * HTTP-equivalent statuses of the `/v1/responses` error codes that mean the
+ * request may succeed later or elsewhere. A stream that fails with one of them
+ * before any output throws with this status, so the fallback walker treats it
+ * like the HTTP error a failed request returns.
+ */
+const RESPONSES_RETRYABLE_ERROR_STATUS: Record<string, number> = {
+  server_error: 500,
+  rate_limit_exceeded: 429,
+  vector_store_timeout: 504,
+};
+
+/** The HTTP-equivalent status of a `/v1/responses` error code, when it is a retryable one. */
+function responsesErrorStatus(code: string | null | undefined): number | undefined {
+  return typeof code === 'string' ? RESPONSES_RETRYABLE_ERROR_STATUS[code] : undefined;
+}
+
+/**
+ * The chat-style finish reason of a `/v1/responses` result, shared by the
+ * streamed and non-streamed mappings. An incomplete response reports why it
+ * stopped, as Chat Completions does, even when it holds a function call (the
+ * call may be cut off): `length` when the output budget ran out and
+ * `content_filter` when a filter stopped it. Otherwise `tool_calls` when the
+ * turn called tools, else `stop`.
+ */
+function responsesFinishReason(
+  status: string | undefined,
+  incompleteReason: string | undefined,
+  hasToolCalls: boolean,
+): string {
+  if (status === 'incomplete') {
+    if (incompleteReason === 'max_output_tokens' || incompleteReason === 'max_tokens') return 'length';
+    if (incompleteReason === 'content_filter') return 'content_filter';
+  }
+  return hasToolCalls ? 'tool_calls' : 'stop';
+}
+
+/** One incremental tool-call entry of a streamed chunk. */
+type ToolCallDelta = NonNullable<ModelCompletionResponse['toolCallsDeltas']>[number];
+
+/** A function call assembled from a `/v1/responses` stream. */
+interface StreamedResponsesCall {
+  /** Dense tool-call index, in order of first appearance. */
+  index: number;
+  /** Call id, name and argument text the emitted deltas have carried. */
+  id: string;
+  name: string;
+  arguments: string;
+  /** Authoritative arguments that do not extend the streamed text (see {@link reconcileStreamedCall}). */
+  finalArguments?: string;
+}
+
+/**
+ * Brings a streamed call in line with its authoritative form (the item on
+ * `response.output_item.done`, the text on
+ * `response.function_call_arguments.done`, or the call in the terminal
+ * response) and returns the delta that carries the difference, or
+ * `undefined` when the emitted deltas already match.
+ *
+ * Argument deltas only append, so when the authoritative arguments extend
+ * the streamed text the missing suffix goes out as `arguments_delta`, and a
+ * consumer that rebuilds calls from deltas (StreamingReconstructor) ends with
+ * the same arguments as the final chunk. Arguments that do not extend the
+ * streamed text cannot be corrected by appending; they are kept in
+ * `finalArguments` for the final chunk and logged.
+ *
+ * @param call The streamed call, updated in place.
+ * @param authoritative The call's final id, name and arguments; absent
+ *   fields are left as streamed.
+ * @returns The correcting delta, or `undefined`.
+ */
+function reconcileStreamedCall(
+  call: StreamedResponsesCall,
+  authoritative: { id?: string; name?: string; arguments?: string },
+): ToolCallDelta | undefined {
+  const delta: ToolCallDelta = { index: call.index };
+  const fn: NonNullable<ToolCallDelta['function']> = {};
+  let changed = false;
+  if (authoritative.id && authoritative.id !== call.id) {
+    call.id = authoritative.id;
+    delta.id = authoritative.id;
+    delta.type = 'function';
+    changed = true;
+  }
+  if (authoritative.name && authoritative.name !== call.name) {
+    call.name = authoritative.name;
+    fn.name = authoritative.name;
+    changed = true;
+  }
+  const args = authoritative.arguments;
+  if (typeof args === 'string' && args !== call.arguments) {
+    if (args.startsWith(call.arguments)) {
+      fn.arguments_delta = args.slice(call.arguments.length);
+      call.arguments = args;
+      call.finalArguments = undefined;
+      changed = true;
+    } else if (call.finalArguments !== args) {
+      call.finalArguments = args;
+      console.warn(
+        `OpenAIProvider: streamed arguments for tool call ${call.id || `#${call.index}`} ` +
+          'do not match the final function_call item; the final chunk carries the final arguments.',
+      );
+    }
+  }
+  if (!changed) return undefined;
+  if (fn.name !== undefined || fn.arguments_delta !== undefined) delta.function = fn;
+  return delta;
 }
 
 export class OpenAIProvider implements IProvider {
@@ -411,11 +901,44 @@ export class OpenAIProvider implements IProvider {
   // on 2026-04-16. Values are standard (non-batch, non-regional) rates.
   // Input: cost for prompt tokens. Output: cost for completion tokens.
   // For embedding models, 'input' is total tokens.
+  // A prompt of more than 272,000 input tokens on a 1.05M-context model bills
+  // the whole call at 2x input and 1.5x output
+  // (developers.openai.com/api/docs/pricing, 2026-09-30). Rows hold the rates
+  // below that threshold, and calculateCost applies the tier from
+  // openAiHasLongContextPricing.
   private readonly modelPricing: Record<string, { input: number; output: number }> = {
-    // GPT-5.5 family (current flagship, Jun 2026 — $5 / $30 per 1M tokens, a 2x
+    // GPT-6 family (current flagship, Sep 2026). Astra $10/$50, Sol $2/$10,
+    // Luna $0.10/$0.50 per 1M, from developers.openai.com/api/docs/models on
+    // 2026-09-23; all three ids are on the first-party GET /v1/models listing.
+    // A model with no row here gets costUSD undefined from calculateCost, so
+    // its calls go unmetered. "GPT-6 Pro" is a ChatGPT plan tier, and the
+    // first-party pro tier is `reasoning.mode: 'pro'` on Sol, so neither has an
+    // id here.
+    'gpt-6-astra': { input: 0.01, output: 0.05 },
+    'gpt-6-sol': { input: 0.002, output: 0.01 },
+    'gpt-6-luna': { input: 0.0001, output: 0.0005 },
+    // gpt-6.1-sol (developers.openai.com/api/docs/changelog, 2026-09-29): $2
+    // input and $10 output per 1M like gpt-6-sol, with cached input at $0.10
+    // (5% of input, where the other GPT-6 models charge 10%) and cache writes
+    // at $2.50. This table carries no cached or cache-write column.
+    'gpt-6.1-sol': { input: 0.002, output: 0.01 },
+    // GPT-5.5 family (previous flagship, Jun 2026 — $5 / $30 per 1M tokens, a 2x
     // increase over gpt-5.4; verified against OpenAI's published pricing 2026-06-27)
     'gpt-5.5': { input: 0.005, output: 0.03 },
     'gpt-5.5-pro': { input: 0.03, output: 0.18 },
+    // GPT-5.6 family (Aug 2026), per the first-party model pages on
+    // 2026-09-23: Sol $4/$20 (promotional through at least 2026-11-21),
+    // Terra $2/$12 and Luna $0.20/$1.20 per 1M. OpenRouter's listing carries
+    // OpenRouter's resale rates, which differ, so first-party providers are
+    // priced from first-party pages. The bare `gpt-5.6` alias routes to Sol and
+    // is priced with it. It is absent from the 2026-09-23 /v1/models listing,
+    // but aliases are often unlisted and this repo records a direct HTTP 200 on
+    // it from 2026-08-06 (see RESPONSES_MAX_EFFORT_MODELS), so it stays until an
+    // inference probe shows it gone.
+    'gpt-5.6': { input: 0.004, output: 0.02 },
+    'gpt-5.6-sol': { input: 0.004, output: 0.02 },
+    'gpt-5.6-terra': { input: 0.002, output: 0.012 },
+    'gpt-5.6-luna': { input: 0.0002, output: 0.0012 },
     // GPT-5.4 family (previous flagship and siblings, Mar 2026)
     'gpt-5.4': { input: 0.0025, output: 0.015 },
     'gpt-5.4-mini': { input: 0.00075, output: 0.0045 },
@@ -437,6 +960,9 @@ export class OpenAIProvider implements IProvider {
     'gpt-4.1-nano': { input: 0.0001, output: 0.0004 },
     // GPT-4o family (legacy, repriced to current list at $2.50/$10 per 1M)
     'gpt-4o': { input: 0.0025, output: 0.010 },
+    // The first GPT-4o snapshot kept its $5 / $15 launch price. Without this
+    // row the dated-snapshot fallback would price it at the gpt-4o alias rate.
+    'gpt-4o-2024-05-13': { input: 0.005, output: 0.015 },
     'gpt-4o-mini': { input: 0.00015, output: 0.0006 },
     // Deprecated but still potentially referenced
     'gpt-4-turbo': { input: 0.01, output: 0.03 },
@@ -448,8 +974,10 @@ export class OpenAIProvider implements IProvider {
     'gpt-3.5-turbo-16k': { input: 0.001, output: 0.002 },
     // o-series reasoning models
     'o3': { input: 0.002, output: 0.008 },
+    'o3-mini': { input: 0.0011, output: 0.0044 },
+    'o3-pro': { input: 0.020, output: 0.080 },
     'o3-pro-2025-06-10': { input: 0.020, output: 0.080 },
-    'o4-mini': { input: 0.001, output: 0.004 },
+    'o4-mini': { input: 0.0011, output: 0.0044 },
     'o1': { input: 0.015, output: 0.060 },
     'o1-pro': { input: 0.150, output: 0.600 },
     // Embedding models (per 1K tokens, input only)
@@ -524,7 +1052,16 @@ export class OpenAIProvider implements IProvider {
     this.availableModelsCache.clear();
     response.data.forEach((apiModel: OpenAIAPITypes.ModelAPIObject) => {
       // Basic filtering for generally usable models, can be expanded.
-      if (apiModel.id.startsWith('gpt-') || apiModel.id.includes('embedding')) {
+      // The o-series ids neither start with `gpt-` nor contain `embedding`,
+      // so they are admitted on their own terms: priced in `modelPricing`
+      // (dated snapshots resolve to their base row) and reachable on Chat
+      // Completions. That admits `o1`, `o3`, `o3-mini` and `o4-mini`, and
+      // leaves out the Responses-only `o1-pro` / `o3-pro` and the unpriced
+      // `o1-mini` / `o1-preview`, which would fail when called or list as free.
+      const admitOSeries = /^o\d/.test(apiModel.id)
+        && !isOpenAIResponsesOnlyModel(apiModel.id)
+        && this.resolvePricing(apiModel.id) !== undefined;
+      if (apiModel.id.startsWith('gpt-') || admitOSeries || apiModel.id.includes('embedding')) {
         const modelInfo = this.mapApiToModelInfo(apiModel);
         this.availableModelsCache.set(modelInfo.modelId, modelInfo);
       }
@@ -544,8 +1081,19 @@ export class OpenAIProvider implements IProvider {
     let _supportsVision = false;
     let isEmbeddingModel = false;
 
-    // Infer capabilities and context window from model ID (common OpenAI patterns)
-    if (apiModel.id.startsWith('gpt-4o')) {
+    // Infer capabilities and context window from model ID (common OpenAI patterns).
+    //
+    // The GPT-5, GPT-6 and o-series branch comes first. Without it these
+    // families fall through to the trailing `else`, which publishes them as
+    // `capabilities: ['chat']` with no context window, and
+    // `listAvailableModels({ capability: 'tool_use' })` then omits every
+    // current OpenAI model while still returning gpt-4o.
+    if (/^(gpt-5|gpt-6|o\d)/i.test(apiModel.id)) {
+        capabilities.push(...openAiReasoningCapabilities(apiModel.id));
+        contextWindowSize = openAiReasoningContextWindow(apiModel.id);
+        _supportsTools = capabilities.includes('tool_use');
+        _supportsVision = capabilities.includes('vision_input');
+    } else if (apiModel.id.startsWith('gpt-4o')) {
         capabilities.push('chat', 'vision_input', 'tool_use', 'json_mode');
         contextWindowSize = 128000; _supportsTools = true; _supportsVision = true;
     } else if (apiModel.id.startsWith('gpt-4-turbo')) {
@@ -577,7 +1125,12 @@ export class OpenAIProvider implements IProvider {
         capabilities.push('chat'); // Assume chat at least
     }
 
-    const pricing = this.modelPricing[apiModel.id] || { input: 0, output: 0 };
+    const pricing = this.resolvePricing(apiModel.id) || { input: 0, output: 0 };
+    // modelPricing holds USD per 1K tokens and ModelInfo carries USD per 1M,
+    // so every rate is scaled by 1000 here. Cost metering reads modelPricing
+    // directly and is unaffected; this conversion is what callers of
+    // listAvailableModels() and getModelInfo() see.
+    const per1M = (per1K: number) => Math.round(per1K * 1000 * 1e6) / 1e6;
 
     return {
       modelId: apiModel.id,
@@ -586,9 +1139,9 @@ export class OpenAIProvider implements IProvider {
       description: `OpenAI model: ${apiModel.id}`,
       capabilities,
       contextWindowSize,
-      pricePer1MTokensInput: pricing.input,
-      pricePer1MTokensOutput: pricing.output,
-      pricePer1MTokensTotal: isEmbeddingModel ? pricing.input : undefined,
+      pricePer1MTokensInput: per1M(pricing.input),
+      pricePer1MTokensOutput: per1M(pricing.output),
+      pricePer1MTokensTotal: isEmbeddingModel ? per1M(pricing.input) : undefined,
       supportsStreaming: capabilities.includes('chat'), // Generally, chat models support streaming
       // OpenAI specific details can be added to metadata
       embeddingDimension: apiModel.id.includes('embedding-3-large') ? 3072 :
@@ -642,9 +1195,9 @@ export class OpenAIProvider implements IProvider {
     this.ensureInitialized();
     const apiKey = await this.getApiKey(options.apiKeyOverride);
 
-    // GPT-5 rejects `reasoning_effort` + function tools on /chat/completions
-    // and demands /v1/responses. Route ONLY that exact case there (preserving
-    // BOTH reasoning depth and tools); everything else keeps the chat path.
+    // Responses-only models, GPT-6 tool calls and GPT-5/6 tool calls that
+    // carry an effort go to /v1/responses; every other call takes the chat
+    // path. generateCompletionStream applies the same rule.
     if (shouldRouteToOpenAiResponsesApi(modelId, messages, options)) {
       const responsesBody = this.buildResponsesPayload(modelId, messages, options);
       const responsesApiResponse = await this.makeApiRequest<OpenAIAPITypes.ResponsesResponse>(
@@ -679,73 +1232,414 @@ export class OpenAIProvider implements IProvider {
     options: ModelCompletionOptions
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     this.ensureInitialized();
-    const apiKey = await this.getApiKey(options.apiKeyOverride);
-
-    const requestBody = this.buildChatCompletionPayload(modelId, messages, options, true);
-
-    const stream = (await this.makeApiRequest(
-      '/chat/completions',
-      'POST',
-      apiKey,
-      requestBody,
-      true, // Indicate streaming response is expected
-      options.requestTimeout
-    )) as ReadableStream<Uint8Array>;
-
-    // Accumulators for streaming tool calls
-    const accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }> = new Map();
-
     const abortSignal = options.abortSignal;
+    // Checked before any network work, so an aborted call never reaches the
+    // OAuth token fetch or the POST.
     if (abortSignal?.aborted) {
-      yield {
-        id: `openai-abort-${Date.now()}`,
-        object: 'chat.completion.chunk',
-        created: Math.floor(Date.now()/1000),
-        modelId,
-        choices: [],
-        error: { message: 'Stream aborted prior to first chunk', type: 'abort' },
-        isFinal: true,
-      };
+      yield this.abortedStreamChunk(modelId, 'Stream aborted prior to first chunk');
       return;
     }
+    const apiKey = await this.getApiKey(options.apiKeyOverride);
 
-    const abortHandler = () => {
-      // Emit final abort chunk and ensure generator completes.
-      // We cannot directly cancel the underlying ReadableStream cleanly cross-platform here; consumer side will stop.
-      // Provide a terminal chunk for consistent teardown.
-      // Note: We don't attempt to read further chunks after abort.
-    };
-    abortSignal?.addEventListener('abort', abortHandler, { once: true });
+    // The routing rule generateCompletion uses, so a streamed call reaches the
+    // same endpoint with the same effort as its non-streamed twin.
+    const viaResponses = shouldRouteToOpenAiResponsesApi(modelId, messages, options);
+    const endpoint = viaResponses ? '/responses' : '/chat/completions';
+    const requestBody = viaResponses
+      ? this.buildResponsesPayload(modelId, messages, options, true)
+      : this.buildChatCompletionPayload(modelId, messages, options, true);
 
-    for await (const chunk of this.parseSseStream(stream)) {
+    let stream: ReadableStream<Uint8Array>;
+    try {
+      stream = await this.makeApiRequest(
+        endpoint,
+        'POST',
+        apiKey,
+        requestBody,
+        true,
+        options.requestTimeout,
+        abortSignal,
+      );
+    } catch (error: unknown) {
+      // An abort during the request surfaces as the abort chunk, not a throw.
       if (abortSignal?.aborted) {
-        yield {
-          id: `openai-abort-${Date.now()}`,
-          object: 'chat.completion.chunk',
-          created: Math.floor(Date.now()/1000),
-          modelId,
-          choices: [],
-          error: { message: 'Stream aborted by caller', type: 'abort' },
-          isFinal: true,
-        };
-        break;
-      }
-      if (chunk === '[DONE]') {
-        // The [DONE] message is a signal for the end of the stream from OpenAI.
-        // A final response chunk with isFinal=true and potential usage should be yielded by the parser if data exists.
-        // If OpenAI includes usage in the last data chunk before [DONE], parseSseStream handles it.
+        yield this.abortedStreamChunk(modelId, 'Stream aborted by caller');
         return;
       }
+      throw error;
+    }
+
+    if (viaResponses) {
+      yield* this.mapResponsesStream(stream, modelId, abortSignal);
+      return;
+    }
+    yield* this.mapChatStream(stream, modelId, abortSignal);
+  }
+
+  /**
+   * The terminal chunk a stream yields when the caller's signal aborts it.
+   * @private
+   */
+  private abortedStreamChunk(modelId: string, message: string): ModelCompletionResponse {
+    return {
+      id: `openai-abort-${Date.now()}`,
+      object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000),
+      modelId,
+      choices: [],
+      error: { message, type: 'abort' },
+      isFinal: true,
+    };
+  }
+
+  /**
+   * Maps a `/v1/chat/completions` SSE stream onto
+   * {@link ModelCompletionResponse} chunks, accumulating streamed tool calls
+   * by index. A caller abort ends the stream with the abort chunk.
+   * @private
+   */
+  private async *mapChatStream(
+    stream: ReadableStream<Uint8Array>,
+    modelId: string,
+    abortSignal: AbortSignal | undefined,
+  ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
+    const accumulatedToolCalls: Map<number, { id?: string; type?: 'function'; function?: { name?: string; arguments?: string; } }> = new Map();
+
+    for await (const data of this.parseSseStream(stream, abortSignal)) {
+      if (abortSignal?.aborted) break;
+      // OpenAI ends the stream with [DONE]; the finish and usage chunks come before it.
+      if (data === '[DONE]') return;
+      let mapped: ModelCompletionResponse;
       try {
-        const apiChunk = JSON.parse(chunk) as OpenAIAPITypes.ChatCompletionStreamResponse;
-        yield this.mapApiToStreamChunkResponse(apiChunk, accumulatedToolCalls);
+        const apiChunk = JSON.parse(data) as OpenAIAPITypes.ChatCompletionStreamResponse;
+        mapped = this.mapApiToStreamChunkResponse(apiChunk, accumulatedToolCalls);
       } catch (error: unknown) {
-        console.warn('OpenAIProvider: Failed to parse stream chunk JSON:', chunk, error);
-        // Decide if to yield an error chunk or continue if minor parsing issue
+        console.warn('OpenAIProvider: Failed to parse stream chunk JSON:', data, error);
+        continue;
+      }
+      yield mapped;
+    }
+
+    if (abortSignal?.aborted) {
+      yield this.abortedStreamChunk(modelId, 'Stream aborted by caller');
+    }
+  }
+
+  /**
+   * Maps a `/v1/responses` SSE stream onto the {@link ModelCompletionResponse}
+   * chunks the chat stream produces.
+   *
+   *   - `response.output_text.delta` yields a text chunk.
+   *   - A `function_call` item yields a tool-call delta with its id and name
+   *     (`response.output_item.added`), then its argument fragments
+   *     (`response.function_call_arguments.delta`). Tool-call indexes are
+   *     dense in order of appearance, so a reasoning item ahead of the calls
+   *     leaves no gap.
+   *   - The item's final form (`response.function_call_arguments.done`,
+   *     `response.output_item.done`) and the terminal response are
+   *     authoritative. Text, a call id or name, or an argument suffix that the
+   *     deltas did not carry goes out as one more delta, exactly once, before
+   *     the final chunk. A consumer that rebuilds the turn from deltas
+   *     (StreamingReconstructor) and one that reads the final chunk
+   *     (streamText, GMI) therefore see the same text and calls, including
+   *     when a proxy strips the delta events.
+   *   - `response.completed` and `response.incomplete` yield exactly one final
+   *     chunk with the finish reason, tool calls and usage.
+   *   - Before any text or tool call has gone out, `response.failed`, an
+   *     `error` event, and a body that ends or fails to read before a terminal
+   *     event throw an {@link OpenAIProviderError}, as a failed HTTP request
+   *     does: the status of a retryable error code
+   *     ({@link RESPONSES_RETRYABLE_ERROR_STATUS}) or `NETWORK_ERROR` for the
+   *     cut-off or failed body, and a failed response's billed usage in
+   *     `details.usage`. Callers can then fail over and meter the attempt.
+   *   - After output, those failures and a caller abort each yield one final
+   *     chunk carrying an error instead, so the partial answer stays with the
+   *     caller.
+   *
+   * Reasoning summaries, content-part events and refusals carry nothing this
+   * mapping surfaces and are skipped.
+   * @private
+   */
+  private async *mapResponsesStream(
+    stream: ReadableStream<Uint8Array>,
+    modelId: string,
+    abortSignal: AbortSignal | undefined,
+  ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
+    let responseId = `openai-resp-${Date.now()}`;
+    let created = Math.floor(Date.now() / 1000);
+    let responseModel = modelId;
+    let emittedText = '';
+    const calls: StreamedResponsesCall[] = [];
+    const callByOutputIndex = new Map<number, StreamedResponsesCall>();
+    const callByItemId = new Map<string, StreamedResponsesCall>();
+    // Whether any text or tool call has gone out to the caller.
+    const deliveredOutput = (): boolean => emittedText.length > 0 || calls.length > 0;
+    // A read that failed mid-body (a dropped connection) ends the event loop
+    // like a body cut off before its terminal event.
+    const reading: { failure?: OpenAIProviderError } = {};
+
+    const noteResponse = (response: OpenAIAPITypes.ResponsesResponse | undefined): void => {
+      if (!response) return;
+      if (typeof response.id === 'string' && response.id) responseId = response.id;
+      if (typeof response.created_at === 'number') created = response.created_at;
+      if (typeof response.model === 'string' && response.model) responseModel = response.model;
+    };
+    const chunk = (fields: Partial<ModelCompletionResponse>): ModelCompletionResponse => ({
+      id: responseId,
+      object: 'chat.completion.chunk',
+      created,
+      modelId: responseModel,
+      choices: [{ index: 0, message: { role: 'assistant', content: null }, finishReason: null }],
+      ...fields,
+    });
+    const textChunk = (delta: string): ModelCompletionResponse =>
+      chunk({
+        choices: [{ index: 0, message: { role: 'assistant', content: delta }, finishReason: null }],
+        responseTextDelta: delta,
+      });
+    // Finds the call an event names, by call id first, then output position,
+    // then item id, and starts a new one when none matches.
+    const trackCall = (
+      outputIndex: number | undefined,
+      itemId: string | undefined,
+      callId?: string,
+    ): StreamedResponsesCall => {
+      let call =
+        (callId ? calls.find((c) => c.id === callId) : undefined) ??
+        (outputIndex !== undefined ? callByOutputIndex.get(outputIndex) : undefined) ??
+        (itemId ? callByItemId.get(itemId) : undefined);
+      if (!call) {
+        call = { index: calls.length, id: '', name: '', arguments: '' };
+        calls.push(call);
+      }
+      if (outputIndex !== undefined) callByOutputIndex.set(outputIndex, call);
+      if (itemId) callByItemId.set(itemId, call);
+      return call;
+    };
+
+    for await (const data of this.readResponsesSse(stream, abortSignal, reading)) {
+      if (abortSignal?.aborted) break;
+      // /v1/responses sends no [DONE]; treat one as the end of the body.
+      if (data === '[DONE]') break;
+      let event: OpenAIAPITypes.ResponsesStreamEvent;
+      try {
+        event = JSON.parse(data) as OpenAIAPITypes.ResponsesStreamEvent;
+      } catch (error: unknown) {
+        console.warn('OpenAIProvider: Failed to parse /responses stream event JSON:', data, error);
+        continue;
+      }
+
+      switch (event.type) {
+        case 'response.created':
+        case 'response.in_progress':
+          noteResponse(event.response);
+          break;
+
+        case 'response.output_text.delta':
+          if (typeof event.delta === 'string' && event.delta) {
+            emittedText += event.delta;
+            yield textChunk(event.delta);
+          }
+          break;
+
+        case 'response.output_item.added':
+        case 'response.output_item.done': {
+          const item = event.item;
+          if (item?.type !== 'function_call') break;
+          const call = trackCall(event.output_index, item.id, item.call_id);
+          const delta = reconcileStreamedCall(call, {
+            id: item.call_id,
+            name: item.name,
+            // An added item's arguments are normally '' and carry nothing yet.
+            arguments: event.type === 'response.output_item.done' ? item.arguments : item.arguments || undefined,
+          });
+          if (delta) yield chunk({ toolCallsDeltas: [delta] });
+          break;
+        }
+
+        case 'response.function_call_arguments.delta': {
+          if (typeof event.delta !== 'string' || !event.delta) break;
+          const call = trackCall(event.output_index, event.item_id);
+          if (call.finalArguments !== undefined) break;
+          call.arguments += event.delta;
+          yield chunk({ toolCallsDeltas: [{ index: call.index, function: { arguments_delta: event.delta } }] });
+          break;
+        }
+
+        case 'response.function_call_arguments.done': {
+          if (typeof event.arguments !== 'string') break;
+          const delta = reconcileStreamedCall(trackCall(event.output_index, event.item_id), {
+            arguments: event.arguments,
+          });
+          if (delta) yield chunk({ toolCallsDeltas: [delta] });
+          break;
+        }
+
+        case 'response.completed':
+        case 'response.incomplete': {
+          const response = event.response;
+          noteResponse(response);
+          const output = response?.output ?? [];
+          const summary = summarizeResponsesOutput(output);
+
+          // The terminal output is authoritative: send whatever the deltas left out.
+          const corrections: ToolCallDelta[] = [];
+          output.forEach((item, outputIndex) => {
+            if (item.type !== 'function_call') return;
+            const delta = reconcileStreamedCall(trackCall(outputIndex, item.id, item.call_id), {
+              id: item.call_id,
+              name: item.name,
+              arguments: item.arguments,
+            });
+            if (delta) corrections.push(delta);
+          });
+          let missingText = '';
+          if (summary.text && summary.text !== emittedText) {
+            if (summary.text.startsWith(emittedText)) {
+              missingText = summary.text.slice(emittedText.length);
+            } else {
+              console.warn(
+                'OpenAIProvider: streamed /responses text does not match the final output; keeping the streamed text.',
+              );
+            }
+          }
+          if (missingText || corrections.length > 0) {
+            emittedText += missingText;
+            const correction = missingText ? textChunk(missingText) : chunk({});
+            if (corrections.length > 0) correction.toolCallsDeltas = corrections;
+            yield correction;
+          }
+
+          const usage = response?.usage
+            ? this.mapResponsesUsage(response.usage, response.model ?? modelId)
+            : undefined;
+          const status = response?.status ?? (event.type === 'response.incomplete' ? 'incomplete' : 'completed');
+          if (summary.itemCount === 0 && emittedText.length === 0 && calls.length === 0) {
+            // Nothing streamed and nothing in the output: the malformed body
+            // the non-streamed mapping throws INVALID_RESPONSE for.
+            yield chunk({
+              choices: [],
+              error: {
+                message: `OpenAI /responses returned no usable output (status: ${status})`,
+                type: 'invalid_response',
+              },
+              ...(usage ? { usage } : {}),
+              isFinal: true,
+            });
+            return;
+          }
+
+          const toolCalls = calls
+            .filter((c) => c.id && c.name)
+            .map((c) => ({
+              id: c.id,
+              type: 'function' as const,
+              function: { name: c.name, arguments: c.finalArguments ?? c.arguments },
+            }));
+          const finishReason = responsesFinishReason(
+            status,
+            response?.incomplete_details?.reason,
+            toolCalls.length > 0,
+          );
+          if (emittedText.length === 0 && toolCalls.length === 0) {
+            this.warnReasoningOnlyOutput(response ?? { id: responseId, status }, modelId, finishReason);
+          }
+          yield chunk({
+            ...(typeof response?.service_tier === 'string' ? { serviceTier: response.service_tier } : {}),
+            choices: [{
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+              },
+              finishReason,
+              logprobs: null,
+            }],
+            usage,
+            isFinal: true,
+          });
+          return;
+        }
+
+        case 'response.failed': {
+          const response = event.response;
+          noteResponse(response);
+          const message = response?.error?.message ?? 'OpenAI /responses reported the response as failed';
+          const usage = response?.usage ? this.mapResponsesUsage(response.usage, response.model ?? modelId) : undefined;
+          if (!deliveredOutput()) {
+            throw new OpenAIProviderError(
+              message,
+              'RESPONSES_FAILED',
+              response?.error?.code ?? undefined,
+              'response_failed',
+              responsesErrorStatus(response?.error?.code),
+              { error: response?.error, ...(usage ? { usage } : {}) },
+            );
+          }
+          yield chunk({
+            choices: [],
+            error: {
+              message,
+              type: 'response_failed',
+              ...(response?.error?.code ? { code: response.error.code } : {}),
+              ...(response?.error ? { details: response.error } : {}),
+            },
+            ...(usage ? { usage } : {}),
+            isFinal: true,
+          });
+          return;
+        }
+
+        case 'error': {
+          const message = event.message ?? 'OpenAI /responses stream error';
+          if (!deliveredOutput()) {
+            throw new OpenAIProviderError(
+              message,
+              'RESPONSES_STREAM_ERROR',
+              event.code ?? undefined,
+              'stream_error',
+              responsesErrorStatus(event.code),
+            );
+          }
+          yield chunk({
+            choices: [],
+            error: {
+              message,
+              type: 'stream_error',
+              ...(event.code ? { code: event.code } : {}),
+            },
+            isFinal: true,
+          });
+          return;
+        }
+
+        default:
+          // Reasoning summaries, content parts, output_text.done, refusals.
+          break;
       }
     }
 
-    abortSignal?.removeEventListener('abort', abortHandler);
+    if (abortSignal?.aborted) {
+      yield this.abortedStreamChunk(modelId, 'Stream aborted by caller');
+      return;
+    }
+    const endMessage = reading.failure
+      ? `OpenAI /responses stream failed before response.completed: ${reading.failure.message}`
+      : 'OpenAI /responses stream ended before response.completed';
+    if (!deliveredOutput()) {
+      // A connection cut before anything arrived, which a retry or another
+      // provider can serve.
+      throw new OpenAIProviderError(endMessage, 'NETWORK_ERROR', undefined, 'stream_truncated', undefined, reading.failure);
+    }
+    yield chunk({
+      choices: [],
+      error: {
+        message: endMessage,
+        type: 'stream_truncated',
+      },
+      isFinal: true,
+    });
   }
 
   /** @inheritdoc */
@@ -773,8 +1667,8 @@ export class OpenAIProvider implements IProvider {
         // For now, customModelParams is the way for non-standard things.
     }
     {
-      // Strip OpenRouter-only routing controls; see openrouter-only-params.
-      const passthrough = stripOpenRouterOnlyParams(options?.customModelParams);
+      // Strip OpenRouter routing controls and Gemini request fields; see openrouter-only-params.
+      const passthrough = stripForeignVendorParams(options?.customModelParams);
       if (passthrough) {
         Object.assign(payload, passthrough);
       }
@@ -865,7 +1759,10 @@ export class OpenAIProvider implements IProvider {
           role: m.role,
           content: m.content, // OpenAI allows null content for assistant tool_calls message
           name: m.name,
-          tool_calls: m.tool_calls,
+          // Only the standard tool-call fields go on the wire. A tool call can
+          // carry provider-specific extras, such as Gemini's thoughtSignature,
+          // that the Chat Completions schema does not define.
+          tool_calls: m.tool_calls?.map(({ id, type, function: fn }) => ({ id, type, function: fn })),
           tool_call_id: m.tool_call_id,
       })),
       stream: stream,
@@ -888,16 +1785,17 @@ export class OpenAIProvider implements IProvider {
       if (options.temperature !== undefined) payload.temperature = options.temperature;
       if (options.topP !== undefined) payload.top_p = options.topP;
     } else {
-      // Reasoning models (o-series, GPT-5) take `reasoning_effort`
+      // Reasoning models (o-series, GPT-5, GPT-6) take `reasoning_effort`
       // (none|low|medium|high|xhigh) in place of the sampling params they
-      // reject. Map the agentos effort scale onto it so `effort: 'max'` actually
-      // drives gpt-5.x at its xhigh ceiling instead of being silently dropped.
-      // customModelParams (below) can still override.
-      // GPT-5 rejects `reasoning_effort` + function tools on chat/completions
-      // (it demands the Responses API, which agentos doesn't implement). When
-      // the request carries tools, DROP the effort param instead of 400ing —
-      // the model reasons at its default depth and the tool call succeeds.
-      const reasoningEffort = mapEffortToOpenAiReasoningEffort(options.effort);
+      // reject. Map the agentos effort scale onto it so `effort: 'max'` drives
+      // them at their xhigh ceiling. customModelParams (below) can still
+      // override.
+      // GPT-5 and GPT-6 reject `reasoning_effort` with function tools on
+      // chat/completions. shouldRouteToOpenAiResponsesApi sends those calls to
+      // /v1/responses; one that still arrives here (its content cannot go to
+      // Responses) drops the effort, so the model reasons at its default
+      // depth and the tool call succeeds.
+      const reasoningEffort = mapEffortToOpenAiReasoningEffortForModel(options.effort, modelId);
       const dropEffortForTools =
         requestHasFunctionTools(options.tools) &&
         openAiRejectsReasoningEffortWithTools(modelId);
@@ -938,10 +1836,15 @@ export class OpenAIProvider implements IProvider {
       const coerced = toOpenAiResponseFormat(options.responseFormat);
       if (coerced !== undefined) payload.response_format = coerced;
     }
-    
+
+    // Typed OpenAI prompt-cache / service-tier policy (spec batch-1 C2).
+    // customModelParams (below) keeps last-write precedence — it is the
+    // raw escape hatch and intentionally overrides these typed fields.
+    this.applyCacheAndTierParams(payload, modelId, options);
+
     {
-      // Strip OpenRouter-only routing controls; see openrouter-only-params.
-      const passthrough = stripOpenRouterOnlyParams(options.customModelParams);
+      // Strip OpenRouter routing controls and Gemini request fields; see openrouter-only-params.
+      const passthrough = stripForeignVendorParams(options.customModelParams);
       if (passthrough) {
         Object.assign(payload, passthrough);
       }
@@ -951,26 +1854,124 @@ export class OpenAIProvider implements IProvider {
   }
 
   /**
-   * Build a `/v1/responses` request body for a gpt-5 reasoning + function-tool
-   * call (the only case {@link shouldRouteToOpenAiResponsesApi} routes here).
-   * Preserves BOTH `reasoning.effort` and `tools`, which chat/completions
-   * rejects together. Text-only + no structured output by construction (the
-   * router excludes multimodal + responseFormat). Live-probed 2026-07-08.
+   * True when requests target api.openai.com rather than an
+   * OpenAI-compatible gateway (the Groq/xAI/Together/Mistral wrappers pass
+   * their own baseURL). Gates zero-config defaults that emit request
+   * fields some gateways reject, so the match is an exact parsed-hostname
+   * comparison — a substring test would classify look-alike gateway hosts
+   * (api.openai.com.example.net) as native. Tolerates an uninitialized
+   * provider (payload builders are unit-tested without initialize()) and
+   * malformed URLs: anything unparseable is not native, never a throw.
+   * @private
+   */
+  private isNativeOpenAiEndpoint(): boolean {
+    try {
+      const url = new URL(this.config?.baseURL ?? '');
+      return (
+        url.protocol === 'https:' &&
+        url.hostname.toLowerCase() === 'api.openai.com' &&
+        (url.port === '' || url.port === '443')
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Apply the typed prompt-cache key/retention and service-tier options to
+   * an outgoing payload (Chat and Responses builders share this; spec
+   * batch-1 C2). Unsupported retention combinations are omitted fail-closed
+   * with a debug log — never a hard error.
+   * @private
+   */
+  private applyCacheAndTierParams(
+    payload: Record<string, unknown>,
+    modelId: string,
+    options: ModelCompletionOptions,
+  ): void {
+    // Zero-config default: on the native OpenAI endpoint the shard key
+    // derives from the session id ('auto' semantics) unless the caller
+    // opted out via promptCacheKey or cache: false. OpenAI-compatible
+    // gateways (Groq/xAI/Together/Mistral wrappers pass their own baseURL)
+    // keep the omit default — some reject unknown request fields.
+    const defaultCacheKeyMode =
+      options.cache !== false && this.isNativeOpenAiEndpoint() ? ('auto' as const) : undefined;
+    const cacheKey = resolvePromptCacheKey(
+      options.promptCacheKey ?? defaultCacheKeyMode,
+      options.promptCacheSessionId ?? options.sessionId,
+    );
+    if (cacheKey) payload.prompt_cache_key = cacheKey;
+    if (options.promptCacheRetention) {
+      const retention = resolveOpenAiCacheRetentionParams(modelId, options.promptCacheRetention);
+      if (retention) {
+        Object.assign(payload, retention);
+      } else {
+        console.debug(
+          `OpenAIProvider: promptCacheRetention '${options.promptCacheRetention}' unsupported on ${modelId}; omitted`,
+        );
+      }
+    }
+    if (options.serviceTier) payload.service_tier = options.serviceTier;
+  }
+
+  /**
+   * Build a `/v1/responses` request body for a call
+   * {@link shouldRouteToOpenAiResponsesApi} sends there: a Responses-only
+   * model, a GPT-6 tool call, or a GPT-5/GPT-6 tool call that carries an
+   * effort.
+   *
+   *   - System, assistant and text-only turns carry flattened text
+   *     ({@link flattenResponsesTextContent}), so cache-marked `systemBlocks`
+   *     arrive joined instead of empty. A user turn with images carries
+   *     `input_text` / `input_image` parts, and a tool result with images
+   *     becomes a `function_call_output` whose output is that part array.
+   *   - `tools`, `reasoning` and `text.format` appear only when the call has
+   *     function tools, an effort the model maps, or an OpenAI-shaped
+   *     `responseFormat`. `stream: true` marks a streamed call; Responses has
+   *     no `stream_options.include_usage` and reports usage on the terminal
+   *     event.
+   *   - A chat-style `reasoning_effort` in `customModelParams` moves to
+   *     `reasoning.effort`, because Responses rejects the top-level key.
+   *
+   * Live-probed 2026-07-08; block-content path live-probed 2026-09-12.
+   *
+   * @throws {OpenAIProviderError} `RESPONSES_UNMAPPABLE_CONTENT` when a
+   *   message carries a part Responses cannot represent (audio, a file, an
+   *   Anthropic `tool_result` block). Only a call with no Chat Completions
+   *   route reaches here with such content; the error is not retryable, like
+   *   the 400 or 404 Chat Completions would return for it.
    * @private
    */
   private buildResponsesPayload(
     modelId: string,
     messages: ChatMessage[],
-    options: ModelCompletionOptions
+    options: ModelCompletionOptions,
+    stream: boolean = false,
   ): Record<string, unknown> {
+    const unmappable = messages.find((m) => !isResponsesMappableMessage(m));
+    if (unmappable) {
+      const partTypes = Array.isArray(unmappable.content)
+        ? Array.from(new Set(unmappable.content.map((part) => String((part as { type?: unknown })?.type))))
+        : [typeof unmappable.content];
+      throw new OpenAIProviderError(
+        `OpenAI serves ${modelId} for this call only on /v1/responses, which cannot carry a ` +
+          `'${unmappable.role}' message with content parts [${partTypes.join(', ')}]`,
+        'RESPONSES_UNMAPPABLE_CONTENT',
+      );
+    }
+
     const input: Array<Record<string, unknown>> = [];
     for (const m of messages) {
-      const text = typeof m.content === 'string' ? m.content : m.content == null ? '' : '';
       if (m.role === 'tool') {
         // Tool result → function_call_output paired by call_id.
-        input.push({ type: 'function_call_output', call_id: m.tool_call_id, output: text });
+        input.push({ type: 'function_call_output', call_id: m.tool_call_id, output: toResponsesInputContent(m.content) });
         continue;
       }
+      if (m.role === 'user') {
+        input.push({ role: 'user', content: toResponsesInputContent(m.content) });
+        continue;
+      }
+      const text = flattenResponsesTextContent(m.content);
       if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
         // Optional assistant text first, then one function_call item per call.
         if (text.length > 0) input.push({ role: 'assistant', content: text });
@@ -984,19 +1985,21 @@ export class OpenAIProvider implements IProvider {
         }
         continue;
       }
-      // system / user / plain assistant. Drop an empty assistant turn (no text,
-      // no tool_calls carries nothing); keep empty system/user defensively.
+      // system / plain assistant. Drop an empty assistant turn (no text, no
+      // tool_calls carries nothing); keep an empty system turn defensively.
       if (m.role === 'assistant' && text.length === 0) continue;
       input.push({ role: m.role, content: text });
     }
 
-    const payload: Record<string, unknown> = {
-      model: modelId,
-      input,
-      tools: this.toResponsesTools(options.tools),
-      reasoning: { effort: mapEffortToOpenAiResponsesEffort(modelId, options.effort) },
-      store: false,
-    };
+    const payload: Record<string, unknown> = { model: modelId, input, store: false };
+    // A Responses-only model can be called without tools, and a
+    // `reasoning: {}` or `tools: undefined` key has no meaning on the wire.
+    if (requestHasFunctionTools(options.tools)) payload.tools = this.toResponsesTools(options.tools);
+    const effort = mapEffortToOpenAiResponsesEffort(modelId, options.effort);
+    if (effort !== undefined) payload.reasoning = { effort };
+    const textFormat = toOpenAiResponsesTextFormat(options.responseFormat);
+    if (textFormat) payload.text = { format: textFormat };
+    if (stream) payload.stream = true;
     if (options.toolChoice !== undefined) {
       payload.tool_choice = this.toResponsesToolChoice(options.toolChoice);
     }
@@ -1007,14 +2010,70 @@ export class OpenAIProvider implements IProvider {
     // presence/frequency penalties + stop are intentionally OMITTED — reasoning
     // models don't meaningfully use them and the orchestrator sets none;
     // temperature/top_p omitted (reasoning models reject them). See spec §D3.
+
+    // Typed prompt-cache / service-tier policy — same helper as the Chat
+    // builder; customModelParams below keeps last-write precedence.
+    this.applyCacheAndTierParams(payload, modelId, options);
+
     {
-      // Strip OpenRouter-only routing controls; see openrouter-only-params.
+      // Strip OpenRouter routing controls and Gemini request fields; see openrouter-only-params.
       // The /responses body rejects unknown top-level fields just like
       // /chat/completions.
-      const passthrough = stripOpenRouterOnlyParams(options.customModelParams);
+      const passthrough = stripForeignVendorParams(options.customModelParams);
       if (passthrough) {
         Object.assign(payload, passthrough);
       }
+    }
+
+    // customModelParams is shared with the chat path, whose effort key is the
+    // top-level `reasoning_effort`. Responses rejects that key and takes the
+    // value as `reasoning.effort`, so move it there.
+    if ('reasoning_effort' in payload) {
+      const passedEffort = payload.reasoning_effort;
+      delete payload.reasoning_effort;
+      if (passedEffort !== undefined && passedEffort !== null) {
+        const reasoning =
+          payload.reasoning && typeof payload.reasoning === 'object'
+            ? (payload.reasoning as Record<string, unknown>)
+            : {};
+        payload.reasoning = { ...reasoning, effort: passedEffort };
+      }
+    }
+    // The chat path's output limits (`max_completion_tokens`, `max_tokens`)
+    // are `max_output_tokens` here; Responses rejects the chat names. An
+    // explicit `max_output_tokens` in customModelParams wins.
+    for (const chatLimit of ['max_completion_tokens', 'max_tokens'] as const) {
+      if (!(chatLimit in payload)) continue;
+      const limit = payload[chatLimit];
+      delete payload[chatLimit];
+      const passedOutputLimit = (options.customModelParams as Record<string, unknown> | undefined)?.max_output_tokens;
+      if (typeof limit === 'number' && passedOutputLimit === undefined) {
+        payload.max_output_tokens = limit;
+      }
+    }
+    // Chat-only stream settings have no Responses counterpart.
+    delete payload.stream_options;
+    // Other chat-shaped overrides, reshaped because Responses rejects them as
+    // written for /chat/completions: a named-function `tool_choice` (its name
+    // sits under `function`), chat-style function `tools`, `response_format`
+    // (Responses reads `text.format`) and a top-level `verbosity` (Responses
+    // reads `text.verbosity`). Values already in the Responses shape pass
+    // through unchanged.
+    if (payload.tool_choice !== undefined) payload.tool_choice = this.toResponsesToolChoice(payload.tool_choice);
+    if (payload.tools !== undefined) payload.tools = this.toResponsesTools(payload.tools);
+    if ('response_format' in payload || 'verbosity' in payload) {
+      const text: Record<string, unknown> =
+        payload.text && typeof payload.text === 'object' ? { ...(payload.text as Record<string, unknown>) } : {};
+      if ('response_format' in payload) {
+        const format = toOpenAiResponsesTextFormat(payload.response_format);
+        if (format) text.format = format;
+        delete payload.response_format;
+      }
+      if ('verbosity' in payload) {
+        if (payload.verbosity !== undefined && payload.verbosity !== null) text.verbosity = payload.verbosity;
+        delete payload.verbosity;
+      }
+      if (Object.keys(text).length > 0) payload.text = text;
     }
     return payload;
   }
@@ -1023,14 +2082,23 @@ export class OpenAIProvider implements IProvider {
   private toResponsesTools(tools: unknown): unknown {
     if (!Array.isArray(tools)) return tools;
     return tools.map((t) => {
-      const tool = t as { type?: string; function?: { name?: string; description?: string; parameters?: unknown }; name?: string };
+      const tool = t as {
+        type?: string;
+        function?: { name?: string; description?: string; parameters?: unknown; strict?: boolean };
+        name?: string;
+      };
       if (tool?.type === 'function' && tool.function) {
         return {
           type: 'function',
           name: tool.function.name,
           description: tool.function.description,
-          parameters: tool.function.parameters,
-          strict: false,
+          // Responses requires `parameters` on a function tool, so an
+          // argument-less tool gets the empty object schema.
+          parameters: tool.function.parameters ?? { type: 'object', properties: {} },
+          // A caller's explicit `strict` is kept. Otherwise false: strict mode
+          // needs a schema most tools do not have (every property required,
+          // no additional properties).
+          strict: tool.function.strict ?? false,
         };
       }
       return t; // already-flat or non-function tool: pass through
@@ -1040,9 +2108,35 @@ export class OpenAIProvider implements IProvider {
   /** Map chat-completions tool_choice → the Responses tool_choice shape. */
   private toResponsesToolChoice(toolChoice: unknown): unknown {
     if (typeof toolChoice === 'string') return toolChoice; // 'auto' | 'required' | 'none'
-    const tc = toolChoice as { type?: string; function?: { name?: string } };
+    const tc = toolChoice as {
+      type?: string;
+      function?: { name?: string };
+      allowed_tools?: { mode?: unknown; tools?: unknown };
+    };
     if (tc?.type === 'function' && tc.function?.name) {
       return { type: 'function', name: tc.function.name };
+    }
+    // Chat nests an allowed-tools choice under `allowed_tools`, with
+    // `{type:'function', function:{name}}` entries; Responses takes `mode` and
+    // `tools` at the top level, with flat function names.
+    if (tc?.type === 'allowed_tools' && tc.allowed_tools && typeof tc.allowed_tools === 'object') {
+      const { mode, tools } = tc.allowed_tools;
+      return {
+        type: 'allowed_tools',
+        ...(mode !== undefined ? { mode } : {}),
+        ...(tools !== undefined
+          ? {
+              tools: Array.isArray(tools)
+                ? tools.map((entry) => {
+                    const tool = entry as { type?: string; function?: { name?: string } };
+                    return tool?.type === 'function' && tool.function?.name
+                      ? { type: 'function', name: tool.function.name }
+                      : entry;
+                  })
+                : tools,
+            }
+          : {}),
+      };
     }
     return toolChoice;
   }
@@ -1051,34 +2145,40 @@ export class OpenAIProvider implements IProvider {
    * Map a `/v1/responses` response into the same {@link ModelCompletionResponse}
    * shape the rest of agentos consumes from chat/completions: assistant text
    * from `output_text` message parts, tool calls from `function_call` items
-   * (call_id → id). A body with no usable output THROWS (→ fallback advances)
-   * rather than returning an empty success (Codex-Medium-2). @private
+   * (call_id → id).
+   *
+   * An output array with NO items at all THROWS (→ fallback advances) rather
+   * than returning an empty success (Codex-Medium-2). Output that holds items
+   * but no `message`/`function_call` does NOT throw: a reasoning model returns
+   * reasoning-only output when reasoning exhausts the output budget, which is
+   * a legitimate `length` finish. It maps to an empty turn (`content: null`)
+   * carrying the real finishReason, so the caller can retry with a larger
+   * budget instead of losing a whole multi-step build to one capped turn.
+   * @private
    */
   private mapResponsesToCompletionResponse(
     apiResponse: OpenAIAPITypes.ResponsesResponse,
     modelId: string
   ): ModelCompletionResponse {
-    const output = apiResponse.output ?? [];
-    let assistantText = '';
-    const toolCalls: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> = [];
-    for (const item of output) {
-      if (item.type === 'message') {
-        for (const part of item.content ?? []) {
-          if (part.type === 'output_text' && typeof part.text === 'string') assistantText += part.text;
-        }
-      } else if (item.type === 'function_call') {
-        toolCalls.push({
-          id: item.call_id ?? '',
-          type: 'function',
-          function: { name: item.name ?? '', arguments: item.arguments ?? '' },
-        });
-      }
-      // reasoning + any other item type: ignored.
-    }
+    const { text: assistantText, toolCalls, itemCount } = summarizeResponsesOutput(apiResponse.output);
+    const finishReason = responsesFinishReason(
+      apiResponse.status,
+      apiResponse.incomplete_details?.reason,
+      toolCalls.length > 0,
+    );
 
-    if (assistantText.length === 0 && toolCalls.length === 0) {
-      // Malformed / empty 2xx — throw so generateText's fallback advances
-      // instead of treating an empty turn as a successful result.
+    if (itemCount === 0) {
+      // GENUINELY empty 2xx — no output items at all. This is the malformed
+      // body the guard was written for: throw so generateText's fallback
+      // advances instead of treating it as a successful empty turn.
+      //
+      // Deliberately NOT triggered by "items present but none usable": a
+      // reasoning model returns output holding ONLY a `reasoning` item when
+      // reasoning consumes the whole output budget. That is a well-formed
+      // `length` finish, not a malformed body, and this check used to sit
+      // ABOVE the finishReason computation — so it threw before the code that
+      // already knew how to express it could run, hard-erroring entire builds
+      // over one budget-capped turn.
       throw new OpenAIProviderError(
         `OpenAI /responses returned no usable output (status: ${apiResponse.status ?? 'unknown'})`,
         'INVALID_RESPONSE',
@@ -1089,20 +2189,16 @@ export class OpenAIProvider implements IProvider {
       );
     }
 
-    const incompleteReason = apiResponse.incomplete_details?.reason;
-    const finishReason = toolCalls.length > 0
-      ? 'tool_calls'
-      : apiResponse.status === 'incomplete'
-        ? (incompleteReason === 'max_output_tokens' ? 'length'
-          : incompleteReason === 'content_filter' ? 'content_filter'
-          : 'stop')
-        : 'stop';
+    if (assistantText.length === 0 && toolCalls.length === 0) {
+      this.warnReasoningOnlyOutput(apiResponse, modelId, finishReason);
+    }
 
     return {
       id: apiResponse.id,
       object: 'chat.completion',
       created: apiResponse.created_at ?? Math.floor(Date.now() / 1000),
       modelId: apiResponse.model ?? modelId,
+      ...(typeof apiResponse.service_tier === 'string' ? { serviceTier: apiResponse.service_tier } : {}),
       choices: [{
         index: 0,
         message: {
@@ -1114,16 +2210,60 @@ export class OpenAIProvider implements IProvider {
         logprobs: null,
       }],
       usage: apiResponse.usage
-        ? this.calculateUsage(
-            {
-              prompt_tokens: apiResponse.usage.input_tokens,
-              completion_tokens: apiResponse.usage.output_tokens,
-              total_tokens: apiResponse.usage.total_tokens,
-            },
-            apiResponse.model ?? modelId
-          )
+        ? this.mapResponsesUsage(apiResponse.usage, apiResponse.model ?? modelId)
         : undefined,
     };
+  }
+
+  /**
+   * Logs a `/v1/responses` turn that holds output items but no message and
+   * no function call: reasoning-only output. It is returned as an empty turn
+   * carrying the real finish reason (`length` when max_output_tokens capped
+   * it), so the caller can retry with a larger budget. Reasoning tokens come
+   * out of the same output budget as the visible answer, so a reasoning model
+   * needs a materially larger maxTokens than a non-reasoning one to leave
+   * room for a reply.
+   * @private
+   */
+  private warnReasoningOnlyOutput(
+    apiResponse: OpenAIAPITypes.ResponsesResponse,
+    modelId: string,
+    finishReason: string,
+  ): void {
+    const incompleteReason = apiResponse.incomplete_details?.reason;
+    console.warn(
+      `OpenAIProvider: /responses returned reasoning-only output for ${apiResponse.model ?? modelId} ` +
+      `(status: ${apiResponse.status ?? 'unknown'}${incompleteReason ? `, reason: ${incompleteReason}` : ''}` +
+      `${apiResponse.usage?.output_tokens !== undefined ? `, output_tokens: ${apiResponse.usage.output_tokens}` : ''}` +
+      `); returning an empty turn with finishReason '${finishReason}'. ` +
+      `Raise max output tokens: reasoning tokens consume the same budget as the reply.`
+    );
+  }
+
+  /**
+   * Token usage and cost for a `/v1/responses` result. The Responses API
+   * spells the counts `input_tokens` / `output_tokens` and the cached detail
+   * `input_tokens_details`; they are re-keyed to the chat spelling so both
+   * endpoints meter through {@link calculateUsage}.
+   * @private
+   */
+  private mapResponsesUsage(usage: OpenAIAPITypes.ResponsesUsage, modelId: string): ModelUsage {
+    return this.calculateUsage(
+      {
+        prompt_tokens: usage.input_tokens,
+        completion_tokens: usage.output_tokens,
+        total_tokens: usage.total_tokens,
+        ...(usage.input_tokens_details
+          ? {
+              prompt_tokens_details: {
+                cached_tokens: usage.input_tokens_details.cached_tokens,
+                cache_write_tokens: usage.input_tokens_details.cache_write_tokens,
+              },
+            }
+          : {}),
+      },
+      modelId,
+    );
   }
 
   /**
@@ -1149,6 +2289,7 @@ export class OpenAIProvider implements IProvider {
         logprobs: c.logprobs,
       })),
       usage: apiResponse.usage ? this.calculateUsage(apiResponse.usage, apiResponse.model) : undefined,
+      ...(typeof apiResponse.service_tier === 'string' ? { serviceTier: apiResponse.service_tier } : {}),
       // No deltas for non-streaming response
     };
   }
@@ -1182,6 +2323,9 @@ export class OpenAIProvider implements IProvider {
                 choices: [],
                 isFinal: true,
                 usage: usageOnlyUsage,
+                ...(typeof apiChunk.service_tier === 'string'
+                  ? { serviceTier: apiChunk.service_tier }
+                  : {}),
             };
         }
 
@@ -1307,19 +2451,73 @@ export class OpenAIProvider implements IProvider {
    * @private
    */
   private calculateUsage(
-    usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number },
+    usage: {
+      prompt_tokens: number;
+      completion_tokens: number;
+      total_tokens: number;
+      prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+    },
     modelId: string
   ): ModelUsage {
+    // OpenAI automatic caching reports cached prompt tokens as detail
+    // fields (reads AND — on GPT-5.6+, billed 1.25x — writes; both remain
+    // INCLUDED in prompt_tokens, unlike Anthropic's exclusive accounting).
+    // Normalize into cacheReadInputTokens / cacheCreationInputTokens so
+    // caching stops being invisible in platform telemetry; cost stays
+    // computed off the full prompt_tokens (the discount/premium is a
+    // billing-side rate, not a token-count change). Because prompt_tokens
+    // is already inclusive here, inclusiveInputTokens is prompt_tokens
+    // as-is (Anthropic computes input + cache_read + cache_creation).
+    const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
+    const cacheWriteTokens = usage.prompt_tokens_details?.cache_write_tokens;
     return {
       promptTokens: usage.prompt_tokens,
       completionTokens: usage.completion_tokens,
       totalTokens: usage.total_tokens,
       costUSD: this.calculateCost(usage.prompt_tokens, usage.completion_tokens, modelId),
+      ...(typeof usage.prompt_tokens === 'number'
+        ? { inclusiveInputTokens: usage.prompt_tokens }
+        : {}),
+      ...(typeof cachedTokens === 'number' && cachedTokens >= 0
+        ? { cacheReadInputTokens: cachedTokens }
+        : {}),
+      ...(typeof cacheWriteTokens === 'number' && cacheWriteTokens >= 0
+        ? { cacheCreationInputTokens: cacheWriteTokens }
+        : {}),
     };
   }
 
   /**
-   * Calculates the estimated cost of an API call.
+   * Price-table row for a model id. OpenAI responses name the dated snapshot
+   * that served the call (`gpt-4.1-2025-04-14` for a `gpt-4.1` request), and
+   * usage is costed from that response id, so an exact miss retries with a
+   * trailing `-YYYY-MM-DD` removed. An exact row still wins, which keeps
+   * snapshots priced apart from their alias (`gpt-4o-2024-05-13`,
+   * `o3-pro-2025-06-10`).
+   *
+   * @param modelId Model id as requested or as echoed by the API.
+   * @returns USD per 1K tokens, or undefined when no row matches.
+   */
+  private resolvePricing(modelId: string | undefined): { input: number; output: number } | undefined {
+    if (!modelId) return undefined;
+    return this.modelPricing[modelId] ?? this.modelPricing[modelId.replace(/-\d{4}-\d{2}-\d{2}$/, '')];
+  }
+
+  /**
+   * Estimated USD cost of one API call, from the per-1K rates in
+   * `modelPricing`. When the model has long-context pricing
+   * ({@link openAiHasLongContextPricing}) and the prompt exceeds
+   * {@link OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS} input tokens, the whole call
+   * bills at the long-context rates: every input token at 2x and every output
+   * token at 1.5x.
+   *
+   * @param promptTokens Input tokens, cached tokens included. OpenAI compares
+   *   this same count against the long-context threshold.
+   * @param completionTokens Output tokens, reasoning tokens included.
+   * @param modelId Model id as echoed by the API; a dated snapshot without its
+   *   own row resolves to its base row.
+   * @param isEmbedding Prices `promptTokens` alone at the embedding rate.
+   * @returns Cost in USD, or undefined when the model has no price row.
    * @private
    */
   private calculateCost(
@@ -1328,15 +2526,19 @@ export class OpenAIProvider implements IProvider {
     modelId: string,
     isEmbedding: boolean = false
   ): number | undefined {
-    const pricing = this.modelPricing[modelId];
+    const pricing = this.resolvePricing(modelId);
     if (!pricing) return undefined; // Pricing info not available
 
     if (isEmbedding) {
       return (promptTokens / 1000) * pricing.input;
     }
-    const inputCost = (promptTokens / 1000) * pricing.input;
-    const outputCost = (completionTokens / 1000) * pricing.output;
-    return inputCost + outputCost;
+    // A long prompt moves the output onto the higher rate too, because
+    // OpenAI prices the full request at the long-context tier.
+    const isLong =
+      promptTokens > OPENAI_LONG_CONTEXT_THRESHOLD_TOKENS && openAiHasLongContextPricing(modelId);
+    const inputRate = isLong ? pricing.input * OPENAI_LONG_CONTEXT_INPUT_MULTIPLIER : pricing.input;
+    const outputRate = isLong ? pricing.output * OPENAI_LONG_CONTEXT_OUTPUT_MULTIPLIER : pricing.output;
+    return (promptTokens / 1000) * inputRate + (completionTokens / 1000) * outputRate;
   }
 
   /**
@@ -1348,8 +2550,12 @@ export class OpenAIProvider implements IProvider {
    * @param {string} apiKey - The API key to use.
    * @param {Record<string, unknown>} [body] - The request body for POST requests.
    * @param {boolean} [expectStream] - Whether the response is expected to be a stream.
+   * @param {number} [requestTimeoutOverride] - Per-call timeout in ms, over the configured default.
+   * @param {AbortSignal} [abortSignal] - Caller's signal. It aborts the fetch in flight, and once
+   *   it has fired no further attempt is sent.
    * @returns {Promise<T | ReadableStream<Uint8Array>>} The API response or stream.
-   * @throws {OpenAIProviderError} If the request fails after retries or for non-retryable errors.
+   * @throws {OpenAIProviderError} If the request fails after retries or for non-retryable errors;
+   *   `REQUEST_ABORTED` when the caller's signal ends it.
    */
   private async makeApiRequest<T = unknown>(
     endpoint: string,
@@ -1357,7 +2563,8 @@ export class OpenAIProvider implements IProvider {
     apiKey: string,
     body?: Record<string, unknown>,
     expectStream?: false,
-    requestTimeoutOverride?: number
+    requestTimeoutOverride?: number,
+    abortSignal?: AbortSignal
   ): Promise<T>;
   private async makeApiRequest(
     endpoint: string,
@@ -1365,7 +2572,8 @@ export class OpenAIProvider implements IProvider {
     apiKey: string,
     body: Record<string, unknown> | undefined,
     expectStream: true,
-    requestTimeoutOverride?: number
+    requestTimeoutOverride?: number,
+    abortSignal?: AbortSignal
   ): Promise<ReadableStream<Uint8Array>>;
   private async makeApiRequest<T = unknown>(
     endpoint: string,
@@ -1373,7 +2581,8 @@ export class OpenAIProvider implements IProvider {
     apiKey: string,
     body?: Record<string, unknown>,
     expectStream: boolean = false,
-    requestTimeoutOverride?: number
+    requestTimeoutOverride?: number,
+    abortSignal?: AbortSignal
   ): Promise<T | ReadableStream<Uint8Array>> {
     const url = `${this.config.baseURL}${endpoint}`;
     const headers: Record<string, string> = {
@@ -1391,6 +2600,9 @@ export class OpenAIProvider implements IProvider {
     let lastError: Error = new OpenAIProviderError('Request failed after all retries.', 'MAX_RETRIES_REACHED');
 
     for (let attempt = 0; attempt < this.config.maxRetries!; attempt++) {
+      if (abortSignal?.aborted) {
+        throw new OpenAIProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
       const controller = new AbortController();
       // CR8: honor a per-call requestTimeout override (e.g. long codegen) over
       // the provider's default; only Anthropic read this before.
@@ -1399,6 +2611,11 @@ export class OpenAIProvider implements IProvider {
           ? requestTimeoutOverride
           : this.config.requestTimeout;
       const timeoutId = setTimeout(() => controller.abort(), effectiveTimeout);
+      // The caller's signal aborts this attempt's fetch as the timer does. The
+      // listener is removed when the attempt settles; a returned stream body
+      // is cancelled by parseSseStream instead.
+      const abortAttempt = () => controller.abort();
+      abortSignal?.addEventListener('abort', abortAttempt, { once: true });
 
       try {
         const requestOptions: RequestInit = {
@@ -1449,13 +2666,23 @@ export class OpenAIProvider implements IProvider {
 
       } catch (error: unknown) {
         clearTimeout(timeoutId);
+        // A caller abort ends the request here; it is not a timeout to retry.
+        if (abortSignal?.aborted) {
+          throw new OpenAIProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+        }
         if (error instanceof OpenAIProviderError) { // If already our custom error, re-throw if not retryable
              if (error.code === 'API_CLIENT_ERROR') throw error;
              lastError = error;
         } else if (error instanceof Error && error.name === 'AbortError') {
           lastError = new OpenAIProviderError(`Request timed out after ${effectiveTimeout}ms.`, 'REQUEST_TIMEOUT', undefined, undefined, undefined, error);
         } else {
-          lastError = new OpenAIProviderError(error instanceof Error ? error.message : 'Network or unknown error', 'NETWORK_ERROR', undefined, undefined, undefined, error);
+          // fetch quotes a URL it rejects (base URL credentials included) and
+          // a header value it rejects (the key), so the message is masked and
+          // the raw error is not kept.
+          lastError = new OpenAIProviderError(
+            redactUrlSecrets(error instanceof Error ? error.message : 'Network or unknown error', this.config.baseURL, [apiKey]),
+            'NETWORK_ERROR',
+          );
         }
         
         if (attempt === this.config.maxRetries! - 1) {
@@ -1468,12 +2695,18 @@ export class OpenAIProvider implements IProvider {
         const shortMsg = isNetwork ? 'Network unreachable' : lastError.message;
         console.warn(`[LLM] Retry ${attempt + 1}/${this.config.maxRetries! - 1} in ${(delay / 1000).toFixed(1)}s — ${shortMsg}`);
         await new Promise(resolve => setTimeout(resolve, delay));
+      } finally {
+        abortSignal?.removeEventListener('abort', abortAttempt);
       }
     }
     // For network errors, replace the cryptic cause chain with a clean message
     if (lastError instanceof OpenAIProviderError && lastError.code === 'NETWORK_ERROR') {
       throw new OpenAIProviderError(
-        `Network error: unable to reach ${this.config.baseURL}. Check your internet connection.`,
+        redactUrlSecrets(
+          `Network error: unable to reach ${this.config.baseURL}. Check your internet connection.`,
+          this.config.baseURL,
+          [apiKey],
+        ),
         'NETWORK_ERROR',
       );
     }
@@ -1481,18 +2714,52 @@ export class OpenAIProvider implements IProvider {
   }
 
   /**
-   * Parses an SSE (Server-Sent Events) stream.
+   * {@link parseSseStream} for the /v1/responses mapper: a read that fails
+   * mid-body (parseSseStream's `STREAM_PARSING_ERROR`) ends the stream and is
+   * recorded on `reading.failure` instead of propagating, so the mapper
+   * handles it like a body cut off before its terminal event.
    * @private
    */
-  private async *parseSseStream(stream: ReadableStream<Uint8Array>): AsyncGenerator<string, void, undefined> {
+  private async *readResponsesSse(
+    stream: ReadableStream<Uint8Array>,
+    abortSignal: AbortSignal | undefined,
+    reading: { failure?: OpenAIProviderError },
+  ): AsyncGenerator<string, void, undefined> {
+    try {
+      yield* this.parseSseStream(stream, abortSignal);
+    } catch (error: unknown) {
+      if (error instanceof OpenAIProviderError && error.code === 'STREAM_PARSING_ERROR') {
+        reading.failure = error;
+        return;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Parses an SSE (Server-Sent Events) stream and yields each `data:` payload.
+   *
+   * When `abortSignal` fires, the reader is cancelled at once, which settles
+   * a read that is waiting on the network, and the generator ends without
+   * yielding more; the caller then emits its abort chunk.
+   * @private
+   */
+  private async *parseSseStream(
+    stream: ReadableStream<Uint8Array>,
+    abortSignal?: AbortSignal,
+  ): AsyncGenerator<string, void, undefined> {
     const reader = stream.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    const cancelOnAbort = () => {
+      reader.cancel().catch(() => undefined);
+    };
+    abortSignal?.addEventListener('abort', cancelOnAbort, { once: true });
 
     try {
-      while (true) {
+      while (!abortSignal?.aborted) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done || abortSignal?.aborted) break;
 
         buffer += decoder.decode(value, { stream: true });
         
@@ -1514,20 +2781,35 @@ export class OpenAIProvider implements IProvider {
             }
         }
       }
-      // Process any remaining data in the buffer (e.g. if stream ends without \n\n)
-      if (buffer.startsWith('data: ')) {
-        const dataContent = buffer.substring('data: '.length).trim();
-        if (dataContent) yield dataContent;
-      } else if (buffer.trim()) { // Sometimes final [DONE] might not be prefixed by "data: "
-          if (buffer.trim() === "[DONE]") yield "[DONE]";
-          else console.warn("OpenAIProvider: Trailing stream data not processed:", buffer);
+      if (abortSignal?.aborted) return;
+      // A body that ends without the closing blank line leaves its last block
+      // in the buffer. Treat it as one block, so a terminal `event:` +
+      // `data:` pair (the /v1/responses framing) is read like any other.
+      buffer += decoder.decode();
+      const trailing = buffer.trim();
+      if (trailing) {
+        let sawData = false;
+        for (const line of buffer.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          sawData = true;
+          const dataContent = line.substring('data: '.length).trim();
+          if (dataContent) yield dataContent;
+        }
+        // Sometimes the final [DONE] is not prefixed by "data: ".
+        if (!sawData) {
+          if (trailing === '[DONE]') yield '[DONE]';
+          else console.warn('OpenAIProvider: Trailing stream data not processed:', buffer);
+        }
       }
 
     } catch (error: unknown) {
+        // A read that fails because the caller aborted is the abort, not a stream error.
+        if (abortSignal?.aborted) return;
         const message = error instanceof Error ? error.message : 'Stream parsing error';
         console.error('OpenAIProvider: Error reading or parsing SSE stream:', message, error);
         throw new OpenAIProviderError(message, 'STREAM_PARSING_ERROR', undefined, undefined, undefined, error);
     } finally {
+      abortSignal?.removeEventListener('abort', cancelOnAbort);
       // Ensure stream is closed if `break` or `return` is called within the generator
       if (!reader.closed) {
           await reader.cancel().catch(err => console.error("OpenAIProvider: Error cancelling stream reader:", err));

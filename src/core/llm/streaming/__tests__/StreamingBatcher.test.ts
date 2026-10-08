@@ -39,6 +39,45 @@ describe('StreamingBatcher', () => {
     expect(out[1].usage?.totalTokens).toBe(10);
   });
 
+  it('merges reasoning deltas apart from the answer text', async () => {
+    async function* source() {
+      yield makeDelta('r1', '', { responseTextDelta: undefined, reasoningTextDelta: 'Plan' });
+      yield makeDelta('r2', '', { responseTextDelta: undefined, reasoningTextDelta: 'ning' });
+      yield makeDelta('t1', 'Answer');
+      yield makeDelta('f1', '', { isFinal: true });
+    }
+
+    const out = await collect(batchStream(source(), { maxTextDeltaChars: 1000, maxLatencyMs: 1000 }));
+
+    expect(out[0].reasoningTextDelta).toBe('Planning');
+    expect(out[0].responseTextDelta).toBe('Answer');
+    expect(out[out.length - 1].isFinal).toBe(true);
+  });
+
+  it('flushes reasoning text that reaches the size limit without waiting for the next chunk', async () => {
+    let release!: () => void;
+    const nextChunkHeld = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    async function* source() {
+      yield makeDelta('r1', '', { responseTextDelta: undefined, reasoningTextDelta: 'x'.repeat(30) });
+      await nextChunkHeld;
+      yield makeDelta('f1', 'Answer', { isFinal: true });
+    }
+    const batched = batchStream(source(), { maxTextDeltaChars: 20, maxLatencyMs: 60_000 });
+
+    const first = await Promise.race([
+      batched.next(),
+      new Promise<'still buffered'>((resolve) => setTimeout(() => resolve('still buffered'), 200)),
+    ]);
+    release();
+
+    expect(first).not.toBe('still buffered');
+    expect((first as IteratorResult<ModelCompletionResponse>).value?.reasoningTextDelta).toBe('x'.repeat(30));
+    const rest = await collect(batched);
+    expect(rest[rest.length - 1].isFinal).toBe(true);
+  });
+
   it('flushes on latency even if size small', async () => {
     async function* source() {
       yield makeDelta('c1','A');

@@ -12,6 +12,7 @@
 
 import { ToolCallRequest as GMIToolCallRequest } from '../../cognition/substrate/IGMI'; // Use the one from IGMI
 import { SentimentResult } from '../../cognition/nlp/ai_utilities/IUtilityAI';
+import type { ThinkingBlock } from '../llm/providers/IProvider';
 import { uuidv4 } from '../utils/uuid.js';
 
 /**
@@ -167,6 +168,15 @@ export interface ConversationMessage {
    * Arguments within `ConversationToolCallRequest.arguments` are expected to be objects (pre-parsed).
    */
   tool_calls?: ConversationToolCallRequest[];
+
+  /**
+   * Optional. For `role: ASSISTANT` messages from a model that thinks
+   * (Anthropic extended thinking). The signed or redacted thinking blocks the
+   * model emitted on this turn, kept verbatim and in order so the next request
+   * of a tool loop can replay them, as Anthropic requires. See
+   * `ChatMessage.thinkingBlocks`.
+   */
+  thinkingBlocks?: ThinkingBlock[];
 
   /**
    * Optional. For `role: TOOL` messages.

@@ -3,6 +3,7 @@
  * Tests for ModelRouter integration into generateText/streamText/agent.
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
 
 const mockGenerateCompletion = vi.hoisted(() =>
   vi.fn().mockResolvedValue({
@@ -50,8 +51,15 @@ vi.mock('../../model.js', () => ({
 
 vi.mock('../../observability.js', () => ({
   attachUsageAttributes: vi.fn(),
+  attachGenAiAttributes: vi.fn(),
   toTurnMetricUsage: vi.fn().mockReturnValue({}),
 }));
+
+// The provider-health circuit is module-global state: one test's intentional
+// failure burst must not open the breaker for the rest of the file.
+beforeEach(() => {
+  globalLLMProviderHealth.reset();
+});
 
 vi.mock('../../../evaluation/observability/otel.js', () => ({
   withAgentOSSpan: vi.fn((_name: string, _attrs: unknown, fn?: Function) => {

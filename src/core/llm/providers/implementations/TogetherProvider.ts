@@ -33,7 +33,7 @@ import { OpenAIProvider } from './OpenAIProvider';
  * @example
  * const config: TogetherProviderConfig = {
  *   apiKey: process.env.TOGETHER_API_KEY!,
- *   defaultModelId: 'meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo',
+ *   defaultModelId: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
  * };
  */
 export interface TogetherProviderConfig {
@@ -46,7 +46,7 @@ export interface TogetherProviderConfig {
   baseURL?: string;
   /**
    * Default model to use when none is specified.
-   * @default "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"
+   * @default "meta-llama/Llama-3.3-70B-Instruct-Turbo"
    */
   defaultModelId?: string;
   /** Request timeout in milliseconds. @default 60000 */
@@ -57,35 +57,47 @@ export interface TogetherProviderConfig {
 // Known model catalog
 // ---------------------------------------------------------------------------
 
-/** Static catalog of well-known Together AI models. */
+/**
+ * Static catalog of Together AI serverless chat models (served per Together's
+ * model list, checked 2026-09-30). The Llama 3.1 Turbo and Mixtral 8x7B ids
+ * were removed from serverless in February to April 2026. Llama 3.3 70B is
+ * the only served chat model that neither reasons by default nor lacks
+ * function calling or structured outputs, so it is the default.
+ */
 const TOGETHER_MODELS: ModelInfo[] = [
   {
-    modelId: 'meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo',
+    modelId: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
     providerId: 'together',
-    displayName: 'Llama 3.1 70B Instruct Turbo',
-    description: 'Meta Llama 3.1 70B optimized for fast instruction-following on Together.',
+    displayName: 'Llama 3.3 70B Instruct Turbo',
+    description: 'Meta Llama 3.3 70B on Together serverless; function calling and structured outputs.',
     capabilities: ['chat', 'tool_use'],
     contextWindowSize: 131072,
+    pricePer1MTokensInput: 1.04,
+    pricePer1MTokensOutput: 1.04,
     supportsStreaming: true,
     status: 'active',
   },
   {
-    modelId: 'meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo',
+    modelId: 'openai/gpt-oss-120b',
     providerId: 'together',
-    displayName: 'Llama 3.1 8B Instruct Turbo',
-    description: 'Meta Llama 3.1 8B — cost-effective instruction model on Together.',
+    displayName: 'GPT-OSS 120B',
+    description: 'OpenAI open-weight reasoning model on Together serverless (always reasons).',
     capabilities: ['chat', 'tool_use'],
     contextWindowSize: 131072,
+    pricePer1MTokensInput: 0.15,
+    pricePer1MTokensOutput: 0.6,
     supportsStreaming: true,
     status: 'active',
   },
   {
-    modelId: 'mistralai/Mixtral-8x7B-Instruct-v0.1',
+    modelId: 'zai-org/GLM-5.3-Flash',
     providerId: 'together',
-    displayName: 'Mixtral 8x7B Instruct v0.1',
-    description: 'Mistral AI Mixtral MoE instruction-tuned on Together.',
+    displayName: 'GLM-5.3 Flash',
+    description: 'Z.ai GLM-5.3 Flash on Together serverless (thinking on by default).',
     capabilities: ['chat', 'tool_use'],
-    contextWindowSize: 32768,
+    contextWindowSize: 1048575,
+    pricePer1MTokensInput: 0.15,
+    pricePer1MTokensOutput: 0.5,
     supportsStreaming: true,
     status: 'active',
   },
@@ -107,7 +119,7 @@ const TOGETHER_MODELS: ModelInfo[] = [
  * const together = new TogetherProvider();
  * await together.initialize({ apiKey: process.env.TOGETHER_API_KEY! });
  * const res = await together.generateCompletion(
- *   'meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo', messages, {},
+ *   'meta-llama/Llama-3.3-70B-Instruct-Turbo', messages, {},
  * );
  */
 export class TogetherProvider implements IProvider {
@@ -139,7 +151,7 @@ export class TogetherProvider implements IProvider {
       throw new Error('API key is required for TogetherProvider. Set TOGETHER_API_KEY.');
     }
 
-    this.defaultModelId = config.defaultModelId ?? 'meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo';
+    this.defaultModelId = config.defaultModelId ?? 'meta-llama/Llama-3.3-70B-Instruct-Turbo';
 
     // Delegate to OpenAI provider with Together's endpoint
     await this.delegate.initialize({

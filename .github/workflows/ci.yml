@@ -34,7 +34,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install PNPM
         uses: pnpm/action-setup@v6
@@ -47,18 +47,105 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      - name: Package exports point at built files
+        run: pnpm run verify:exports
+
       - name: Lint
         run: pnpm run lint
+
+      - name: Documentation states only what the code enforces
+        run: |
+          set -euo pipefail
+          # Words the published pages may not use for the in-process node:vm executor.
+          if grep -rn -i -E 'hardened|domain-restricted|host-realm escape is blocked|isolated context|security guarantees|safe[- ]by[- ]construction' \
+              docs/architecture/EMERGENT_CAPABILITIES.md docs/architecture/ARCHITECTURE.md \
+              src/cognition/emergent/SandboxedToolForge.ts src/cognition/emergent/ComposableToolBuilder.ts \
+              src/cognition/emergent/EmergentCapabilityEngine.ts src/cognition/emergent/types.ts \
+              src/safety/sandbox/executor/CodeSandbox.ts src/safety/sandbox/executor/ICodeSandbox.ts \
+              src/cognition/emergent/executor/types.ts src/cognition/emergent/executor/InProcessExecutor.ts; then
+            echo "::error::the documentation claims an isolation the executor does not provide (see docs/architecture/EMERGENT_CAPABILITIES.md, Sandbox Mode)"
+            exit 1
+          fi
 
       - name: Type check
         run: pnpm run typecheck
 
       - name: Test with coverage
         run: pnpm run test -- --coverage
-        continue-on-error: true
 
       - name: Upload coverage to Codecov
         if: always()
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  # Fast targeted gate for the batch-1 hardening test set: fails in minutes
+  # without waiting on the coverage matrix. The full suite above is
+  # failure-gating too (44-red burn-down completed 2026-07-20).
+  batch1-tests:
+    name: Batch-1 gated tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install PNPM
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Batch-1 tests (failure-gating)
+        run: >-
+          pnpm vitest run
+          src/core/llm/providers/__tests__/openai-cache-params.test.ts
+          src/core/llm/providers/__tests__/default-judge.test.ts
+          src/core/llm/providers/__tests__/openai-streaming-usage.test.ts
+          src/core/llm/providers/implementations/__tests__/openai-typed-cache-options.test.ts
+          src/api/__tests__/observability.genai.test.ts
+          src/api/__tests__/inclusive-input-tokens.test.ts
+          src/api/__tests__/hitl.llmJudge.test.ts
+          src/cognition/emergent/__tests__/decay-for-agent.test.ts
+          src/cognition/emergent/__tests__/adapt-personality.test.ts
+          src/cognition/rag/__tests__/neo4j-graphrag-export.test.ts
+
+  # Exercises the release configuration without tagging or publishing: the
+  # commit analyser and the release-notes generator read the commits since
+  # the last release tag, fed the way the Release workflow feeds them.
+  release-dry-run:
+    name: Release dry run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install PNPM
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Analyse the commits since the last release tag
+        run: node scripts/release-dry-run.mjs

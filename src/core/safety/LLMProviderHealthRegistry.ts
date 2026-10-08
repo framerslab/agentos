@@ -80,6 +80,8 @@
  * ```
  */
 
+import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../llm/providers/errors/errorCodes.js';
+
 /** Snapshot of breaker state for a single provider. */
 export interface LLMProviderHealthStats {
   /** Provider id this snapshot describes. */
@@ -140,7 +142,12 @@ const POLICY_TRANSIENT: ErrorPolicy = { threshold: 5, cooldownMs: 60_000 };
  */
 export function classifyErrorStatus(error: unknown): number | null {
   if (!error || typeof error !== 'object') return null;
-  const obj = error as { message?: unknown; statusCode?: unknown; status?: unknown };
+  const obj = error as {
+    message?: unknown;
+    statusCode?: unknown;
+    status?: unknown;
+    httpStatus?: unknown;
+  };
   // 1. Prefix in message
   if (typeof obj.message === 'string') {
     const match = obj.message.match(/^\[(\d{3})\]/);
@@ -157,7 +164,61 @@ export function classifyErrorStatus(error: unknown): number | null {
   if (typeof obj.status === 'number' && obj.status >= 100 && obj.status < 600) {
     return obj.status;
   }
+  // 4. httpStatus property: OpenAIProviderError carries the HTTP status
+  //    here (and no [NNN] message prefix) — without this shape a direct
+  //    OpenAI failure classified null/transient, which is exactly how
+  //    the 2026-07-20..26 quota outage dodged the billing breaker.
+  if (typeof obj.httpStatus === 'number' && obj.httpStatus >= 100 && obj.httpStatus < 600) {
+    return obj.httpStatus;
+  }
   return null;
+}
+
+/**
+ * Detect billing/quota exhaustion hiding behind a 429. OpenAI reports a
+ * dead account (`insufficient_quota`) with HTTP 429 — the same status as
+ * a transient rate limit — but the semantics are a billing outage: it
+ * does not lift until a human tops up the account. Left in the 429
+ * class the breaker flaps on a 30s cooldown forever (observed 6 days of
+ * quiet cross-provider divert, 2026-07-20..26, thousands of uncacheable
+ * fallback-leg calls), so it must ride the 402 billing class instead:
+ * single-failure trip, minutes-long window, error-level loud event.
+ *
+ * Reads the OpenAI SDK error shape (`code` / `type`, incl. the nested
+ * `error.error.code` body) and falls back to the distinctive message.
+ * Anthropic reports the same billing outage as HTTP 400
+ * invalid_request_error ("credit balance is too low"; some surfaces use
+ * a `billing_error` type) — matched here so a client-error transport
+ * status cannot smuggle a dead account past the breaker as a caller bug.
+ *
+ * @internal
+ */
+export function isQuotaExhaustion(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const obj = error as {
+    code?: unknown;
+    type?: unknown;
+    message?: unknown;
+    error?: { code?: unknown; type?: unknown } | null;
+    openaiErrorCode?: unknown;
+    openaiErrorType?: unknown;
+  };
+  const marks = [
+    obj.code,
+    obj.type,
+    obj.error?.code,
+    obj.error?.type,
+    // OpenAIProviderError's own field names for the same signals.
+    obj.openaiErrorCode,
+    obj.openaiErrorType,
+  ];
+  if (marks.some((m) => m === 'insufficient_quota' || m === 'billing_error')) return true;
+  return (
+    typeof obj.message === 'string' &&
+    /insufficient_quota|exceeded your current quota|credit balance is too low/i.test(
+      obj.message,
+    )
+  );
 }
 
 function policyForStatus(status: number | null): ErrorPolicy {
@@ -180,6 +241,42 @@ function policyForStatus(status: number | null): ErrorPolicy {
 function isNonHealthClientError(status: number | null): boolean {
   if (status === null || status < 400 || status >= 500) return false;
   return status !== 401 && status !== 402 && status !== 403 && status !== 408 && status !== 429;
+}
+
+/** `code` / `type` values a provider puts on a content-policy decline. */
+const CONTENT_POLICY_MARKS: ReadonlySet<string> = new Set([
+  'content_filter',
+  'content_policy_violation',
+  'safety_violations',
+]);
+
+/**
+ * A request larger than the model's context window is a verdict on the
+ * request: the provider answered, or was never asked. Counting it would trip
+ * a healthy provider's breaker on long conversations.
+ */
+function isRequestTooLarge(error: unknown): boolean {
+  return (
+    !!error &&
+    typeof error === 'object' &&
+    (error as { code?: unknown }).code === CONTEXT_WINDOW_EXCEEDED_CODE
+  );
+}
+
+/**
+ * A content-policy decline (an Anthropic refusal, a Gemini safety block, an
+ * OpenAI content-policy rejection) is a verdict on the request: the provider
+ * is up and answered. These errors often carry no HTTP status, which
+ * classifies as the transient class, so without this check five refused
+ * prompts in a row would open the breaker and divert every later call away
+ * from a healthy provider.
+ */
+function isContentPolicyDecline(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const { code, type } = error as { code?: unknown; type?: unknown };
+  return [code, type].some(
+    (mark) => typeof mark === 'string' && CONTENT_POLICY_MARKS.has(mark.toLowerCase()),
+  );
 }
 
 /**
@@ -223,14 +320,29 @@ export class LLMProviderHealthRegistry {
    * Safe to call regardless of whether the breaker is already open:
    * a repeat failure on an open breaker just refreshes the
    * cooldown for the new error class.
+   *
+   * A content-policy decline and a context-window rejection are ignored
+   * entirely (see {@link isContentPolicyDecline} and
+   * {@link isRequestTooLarge}): they neither trip the breaker nor count
+   * toward a streak.
    */
   recordFailure(providerId: string, error: unknown): void {
+    if (isContentPolicyDecline(error)) return;
+    if (isRequestTooLarge(error)) return;
     const status = classifyErrorStatus(error);
+    // Billing/quota exhaustion is provider health regardless of the
+    // transport status it wears: OpenAI reports it as 429, Anthropic as
+    // 400 invalid_request_error ("credit balance is too low"). Detect it
+    // BEFORE the client-error drop — classifying by status first routed
+    // Anthropic credit exhaustion into the 4xx ignore branch, leaving the
+    // breaker fully blind to an Anthropic billing outage.
+    const quotaExhausted = isQuotaExhaustion(error);
     // A client-error 4xx (bad request / unknown model / unprocessable) is the
     // caller's fault, not a provider-health signal — ignore it entirely so it
-    // neither trips the breaker nor inflates the streak.
-    if (isNonHealthClientError(status)) return;
-    const policy = policyForStatus(status);
+    // neither trips the breaker nor inflates the streak. Quota exhaustion is
+    // exempt: it wears client-error statuses but is an account-level outage.
+    if (!quotaExhausted && isNonHealthClientError(status)) return;
+    const policy = quotaExhausted ? POLICY_402 : policyForStatus(status);
     const record = this.records.get(providerId) ?? this.makeRecord();
     record.failureCount += 1;
     record.lastStatusCode = status;
@@ -240,6 +352,34 @@ export class LLMProviderHealthRegistry {
       // breaker was previously closed.
       if (record.openUntil === 0 || Date.now() >= record.openUntil) {
         record.totalTrips += 1;
+        // Loud, structured trip event. The policy classes (401/403 bad
+        // key, 402 billing) open a 5-30 minute breaker after a SINGLE
+        // failure and silently divert every call cross-provider for the
+        // whole cooldown — ops must see the moment it opens, not
+        // discover the divert in cost attribution later. Availability
+        // trips stay at warn.
+        const isPolicyClass =
+          quotaExhausted || status === 401 || status === 402 || status === 403;
+        const detail = {
+          event: 'provider_breaker_open',
+          providerId,
+          statusCode: status ?? null,
+          cooldownMs: policy.cooldownMs,
+          totalTrips: record.totalTrips,
+        };
+        if (isPolicyClass) {
+          const classLabel = quotaExhausted ? 'quota exhausted' : `auth/billing class ${status}`;
+          console.error(
+            `[agentos] provider breaker OPEN for '${providerId}' (${classLabel}): ` +
+              `ALL traffic diverts to fallbacks for ${Math.round(policy.cooldownMs / 60_000)} min`,
+            detail,
+          );
+        } else {
+          console.warn(
+            `[agentos] provider breaker OPEN for '${providerId}' (status ${status ?? 'network'})`,
+            detail,
+          );
+        }
       }
       record.openUntil = Date.now() + policy.cooldownMs;
     }

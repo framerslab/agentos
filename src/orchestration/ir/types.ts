@@ -10,6 +10,9 @@
  *   primitive enums/constants → condition/executor unions → policy interfaces →
  *   view interfaces → GraphNode / GraphEdge / GraphState → CompiledExecutionGraph
  */
+import type { JudgeNodeConfig } from '../../core/llm/providers/judge-config.js';
+
+export type { JudgeNodeConfig } from '../../core/llm/providers/judge-config.js';
 
 // ---------------------------------------------------------------------------
 // Sentinels
@@ -207,16 +210,7 @@ export type NodeExecutorConfig =
        * When the judge's confidence falls below `confidenceThreshold`, execution
        * falls through to the normal human interrupt.
        */
-      judge?: {
-        /** LLM model to use for the judge call. Defaults to `'gpt-4o-mini'`. */
-        model?: string;
-        /** LLM provider. Defaults to `'openai'`. */
-        provider?: string;
-        /** Custom evaluation criteria/rubric. */
-        criteria?: string;
-        /** Confidence threshold (0–1). Below this, fall through to human interrupt. Defaults to `0.7`. */
-        confidenceThreshold?: number;
-      };
+      judge?: JudgeNodeConfig;
       /**
        * Behaviour when the node's `timeout` expires.
        * - `'accept'` — auto-accept.

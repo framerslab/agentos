@@ -331,9 +331,9 @@ See `IAgentCommunicationBus.ts` for complete type definitions.
 ## Related Documentation
 
 - [Architecture Overview](./ARCHITECTURE.md)
-- [Planning Engine](./PLANNING_ENGINE.md)
-- [Human-in-the-Loop](./HUMAN_IN_THE_LOOP.md)
-- [Guardrails Usage Guide](./GUARDRAILS_USAGE.md)
+- [Planning Engine](../orchestration/PLANNING_ENGINE.md)
+- [Human-in-the-Loop](../safety/HUMAN_IN_THE_LOOP.md)
+- [Guardrails Usage Guide](../safety/GUARDRAILS_USAGE.md)
 
 
 

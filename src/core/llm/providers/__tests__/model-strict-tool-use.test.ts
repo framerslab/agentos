@@ -8,6 +8,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  STRICT_MAX_OPTIONAL_PARAMETERS,
+  STRICT_MAX_UNION_TYPED_PARAMETERS,
   modelSupportsStrictToolUse,
   toolInputSchemaSupportsStrict,
   toolInputSchemaWithExplicitNoExtraProps,
@@ -26,6 +28,12 @@ describe('modelSupportsStrictToolUse', () => {
     expect(modelSupportsStrictToolUse('claude-sonnet-5')).toBe(true);
     expect(modelSupportsStrictToolUse('claude-fable-5')).toBe(true);
     expect(modelSupportsStrictToolUse('claude-fable-5-20260601')).toBe(true);
+    // Opus 5.5 and Fable 5.1 reject a forced tool_choice, which leaves strict
+    // tool use as the provider-side constraint on their tool inputs. Both
+    // accept `strict: true` (probed 2026-09-29).
+    expect(modelSupportsStrictToolUse('claude-opus-5-5')).toBe(true);
+    expect(modelSupportsStrictToolUse('claude-opus-5-5-20260901')).toBe(true);
+    expect(modelSupportsStrictToolUse('claude-fable-5-1')).toBe(true);
   });
 
   it('rejects pre-4.5 models that 400 on the unknown strict field', () => {
@@ -340,5 +348,40 @@ describe('empty / any-JSON node rejection (2026-07-08)', () => {
         $defs: { x: { type: 'number' } },
       }),
     ).toBe(true);
+  });
+});
+
+describe('strict schema complexity limits (Anthropic: 16 union-typed, 24 optional parameters)', () => {
+  /** An object schema with `n` required fields built by `field(i)`. */
+  const objectOf = (n: number, field: (i: number) => Record<string, unknown>, required = true) => {
+    const properties = Object.fromEntries(Array.from({ length: n }, (_, i) => [`f${i}`, field(i)]));
+    return { type: 'object', properties, ...(required ? { required: Object.keys(properties) } : {}) };
+  };
+
+  it('pins the documented limits', () => {
+    expect(STRICT_MAX_UNION_TYPED_PARAMETERS).toBe(16);
+    expect(STRICT_MAX_OPTIONAL_PARAMETERS).toBe(24);
+  });
+
+  it('accepts 16 union-typed parameters and rejects 17', () => {
+    const nullable = () => ({ type: ['string', 'null'] });
+    expect(toolInputSchemaSupportsStrict(objectOf(16, nullable))).toBe(true);
+    expect(toolInputSchemaSupportsStrict(objectOf(17, nullable))).toBe(false);
+  });
+
+  it('counts anyOf parameters inside nested objects toward the same total', () => {
+    const union = () => ({ anyOf: [{ type: 'string' }, { type: 'number' }] });
+    const schema = {
+      type: 'object',
+      properties: { ...objectOf(10, union).properties, inner: objectOf(7, union) },
+      required: [...Array.from({ length: 10 }, (_, i) => `f${i}`), 'inner'],
+    };
+    expect(toolInputSchemaSupportsStrict(schema)).toBe(false);
+  });
+
+  it('accepts 24 optional parameters and rejects 25', () => {
+    const text = () => ({ type: 'string' });
+    expect(toolInputSchemaSupportsStrict(objectOf(24, text, false))).toBe(true);
+    expect(toolInputSchemaSupportsStrict(objectOf(25, text, false))).toBe(false);
   });
 });

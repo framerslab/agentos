@@ -97,6 +97,20 @@ export interface PersonaConversationContextConfig {
 }
 
 /**
+ * Per-persona limits for the GMI's reasoning trace: the ring buffer of decision
+ * entries the turn loop writes and the self-reflection metaprompt reads as
+ * evidence. Omitted values fall back to the runtime's `GMIBaseConfig` defaults
+ * (`defaultReasoningTraceMaxEntries`, `defaultReasoningTraceMaxMessageLength`),
+ * then to 500 entries and 1000 characters per message.
+ */
+export interface PersonaReasoningTraceConfig {
+  /** Entries kept; the oldest is dropped when the next arrives. A positive integer. */
+  maxEntries?: number;
+  /** Characters kept per entry message; longer messages are truncated. A positive integer. */
+  maxMessageLength?: number;
+}
+
+/**
  * Configuration for a specific RAG (Retrieval Augmented Generation) data source
  * @interface PersonaRagDataSourceConfig
  */
@@ -329,9 +343,14 @@ export interface MetaPromptDefinition {
     maxOutputTokens?: number;
     temperature?: number;
     outputSchema?: Record<string, any>; // Expected JSON schema of the output, for validation/parsing
-    trigger?: // How this meta-prompt is triggered
-      | { type: 'turn_interval'; intervalTurns: number }
-      | { type: 'event_based'; eventName: string } // e.g., 'error_threshold_reached', 'user_sentiment_negative'
+    /**
+     * How this meta-prompt is triggered. The executor fires only these three
+     * types; PersonaValidation warns about any other type, an intervalTurns
+     * below 1, or an eventName that is not a GMIEventType value.
+     */
+    trigger?:
+      | { type: 'turn_interval'; intervalTurns: number } // Fires on every intervalTurns-th user turn
+      | { type: 'event_based'; eventName: string } // A GMIEventType value, e.g. 'user_frustrated' or 'error_threshold_exceeded'
       | { type: 'manual' }; // Triggered explicitly by system or user
 }
 
@@ -433,6 +452,8 @@ export interface IPersonaDefinition {
   cognitiveMemoryConfig?: import('../../memory/core/config.js').CognitiveMemoryPersonaConfig;
   /** Conversation context override strategy (message importance heuristics, summarization triggers). */
   conversationContextConfig?: PersonaConversationContextConfig;
+  /** Reasoning-trace limits for GMIs built from this persona; see PersonaReasoningTraceConfig. */
+  reasoningTraceConfig?: PersonaReasoningTraceConfig;
 
   /** System or self-reflective prompts guiding meta-cognition, self-correction, or planning loops. */
   metaPrompts?: MetaPromptDefinition[];

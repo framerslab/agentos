@@ -9,7 +9,7 @@ import type {
   ToolUsageStats,
   SandboxedToolSpec,
   ComposableToolSpec,
-  SandboxAPI,
+  AllowlistName,
   CreationVerdict,
   PromotionVerdict,
 } from './types.js';
@@ -20,7 +20,7 @@ export const EMERGENT_TOOL_PACKAGE_SCHEMA_VERSION = 'agentos.emergent-tool.v1' a
 
 export interface PortableSandboxImplementation {
   mode: 'sandbox';
-  allowlist: SandboxAPI[];
+  allowlist: AllowlistName[];
   sourcePersisted: boolean;
   redactedAtRest: boolean;
   code?: string;

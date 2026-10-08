@@ -17,6 +17,10 @@ Diagnostics are observability only: they never block, alter, or fail a
 request, and fingerprints stored by the API contain hashes and token-count
 estimates, never prompt content.
 
+Cache mechanics themselves — the zero-config defaults, per-call `cache`
+options, TTLs, floors, and per-provider behavior — live in
+[Prompt Caching](PROMPT_CACHING.md).
+
 ## Agentic loops: one flag
 
 For `generateText` (and every agent built on it), set `cacheDiagnostics:
@@ -48,6 +52,15 @@ result.cacheDiagnostics; // null = prefix stable | { cacheMissReason: {...} }
 Per-step verdicts surface on the `onAfterGeneration` hook
 (`GenerationHookResult.cacheDiagnostics`); the final result carries the last
 step's verdict (`GenerateTextResult.cacheDiagnostics`).
+
+## GMI turns
+
+A [GMI](../GMI.md) turn threads the same way. Set `cacheDiagnostics` in the
+turn's `metadata.options`: `true` opts in with nothing to compare, and
+`{ previousMessageId }` compares the first step against an earlier response.
+Each later step of the turn compares against the previous step's response,
+and each step's verdict and message id arrive on its `STEP_FINISHED` chunk
+(`cacheDiagnostics`, `providerMessageId`).
 
 ## Single calls: thread the id yourself
 

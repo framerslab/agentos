@@ -80,6 +80,7 @@ vi.mock('../../../io/media/video/index.js', () => {
 
 vi.mock('../../observability.js', () => ({
   attachUsageAttributes: vi.fn(),
+  attachGenAiAttributes: vi.fn(),
   toTurnMetricUsage: vi.fn().mockReturnValue(undefined),
 }));
 

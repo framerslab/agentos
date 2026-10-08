@@ -48,7 +48,7 @@ describe('ProviderAssignmentEngine', () => {
       const assignments = engine.assign(nodes, { strategy: 'best' });
 
       expect(assignments[0]!.provider).toBe('anthropic');
-      expect(assignments[0]!.model).toBe('claude-sonnet-4-20250514');
+      expect(assignments[0]!.model).toBe('claude-sonnet-4-6');
     });
   });
 

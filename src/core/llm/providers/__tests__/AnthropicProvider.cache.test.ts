@@ -1,4 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  AnthropicProvider,
+  estimateAnthropicCostUSD,
+  type AnthropicUsageForCost,
+} from '../implementations/AnthropicProvider';
+import { resetCacheLeakDetector } from '../implementations/cacheLeakDetector';
+import type { ModelCompletionOptions } from '../IProvider';
 
 /**
  * Test the system block extraction logic that AnthropicProvider.buildRequestPayload
@@ -120,100 +127,132 @@ describe('AnthropicProvider system prompt cache control', () => {
 });
 
 /**
- * Verify the cache-tier cost estimation math. Anthropic bills at three
- * different rates for input tokens:
- *   non-cached input       × 1.00 × base input rate
- *   cache_read_input_tokens × 0.10 × base input rate
- *   cache_creation_input_tokens × 1.25 × base input rate (5-min TTL)
- *
- * The previous AnthropicProvider.estimateCost signature only took
- * (inputTokens, outputTokens, modelId), which silently under-reported
- * cost when caching was active. We replicate the current math here so a
- * regression to the old formula trips the test.
+ * Anthropic cost math, through the exported estimateAnthropicCostUSD that both
+ * response paths use. Input is billed in four parts:
+ *   input_tokens                 x the input price
+ *   cache_read_input_tokens      x the row's cache-read price (0.1x input by default)
+ *   5-minute cache writes        x 1.25 x the input price
+ *   1-hour cache writes          x 2 x the input price
  */
-function estimateCacheAwareCost(
-  inputTokens: number,
-  outputTokens: number,
-  inputPricePerM: number,
-  outputPricePerM: number,
-  cacheReadTokens?: number,
-  cacheCreationTokens?: number,
-): number {
-  const nonCachedInput = (inputTokens / 1_000_000) * inputPricePerM;
-  const cachedRead = ((cacheReadTokens ?? 0) / 1_000_000) * inputPricePerM * 0.10;
-  const cachedCreate = ((cacheCreationTokens ?? 0) / 1_000_000) * inputPricePerM * 1.25;
-  const output = (outputTokens / 1_000_000) * outputPricePerM;
-  return nonCachedInput + cachedRead + cachedCreate + output;
-}
-
 describe('AnthropicProvider cache-aware cost estimation', () => {
-  // Claude Sonnet 4.6 prices — same as production
-  const SONNET_INPUT = 3.00;
-  const SONNET_OUTPUT = 15.00;
+  /** Cost of a Claude Sonnet 4.6 call ($3 input / $15 output per 1M tokens). */
+  const sonnet46 = (usage: AnthropicUsageForCost): number => {
+    const cost = estimateAnthropicCostUSD('claude-sonnet-4-6', usage);
+    if (cost === undefined) throw new Error('claude-sonnet-4-6 has no catalog price');
+    return cost;
+  };
+  const calls = (input: number, output: number, read = 0, created = 0): AnthropicUsageForCost => ({
+    input_tokens: input,
+    output_tokens: output,
+    cache_read_input_tokens: read,
+    cache_creation_input_tokens: created,
+  });
 
   it('matches the base-rate formula when caching is inactive', () => {
-    const cost = estimateCacheAwareCost(1000, 500, SONNET_INPUT, SONNET_OUTPUT);
-    // 1000 × $3/M + 500 × $15/M = $0.003 + $0.0075 = $0.0105
-    expect(cost).toBeCloseTo(0.0105, 6);
+    // 1000 x $3/M + 500 x $15/M = $0.003 + $0.0075 = $0.0105
+    expect(sonnet46(calls(1000, 500))).toBeCloseTo(0.0105, 6);
   });
 
-  it('bills cache_read tokens at 0.1× the input rate', () => {
-    // 1000 non-cached input + 5000 cache-read + 500 output
-    const cost = estimateCacheAwareCost(1000, 500, SONNET_INPUT, SONNET_OUTPUT, 5000);
-    // Non-cached:  1000 × $3/M     = $0.003
-    // Cache read:  5000 × $3/M × 0.1 = $0.0015
-    // Output:      500 × $15/M    = $0.0075
-    // Total:                        $0.012
-    expect(cost).toBeCloseTo(0.012, 6);
+  it('bills cache_read tokens at 0.1x the input rate', () => {
+    // Non-cached 1000 x $3/M = $0.003, cache read 5000 x $3/M x 0.1 = $0.0015,
+    // output 500 x $15/M = $0.0075: $0.012 in all.
+    expect(sonnet46(calls(1000, 500, 5000))).toBeCloseTo(0.012, 6);
   });
 
-  it('bills cache_creation tokens at 1.25× the input rate', () => {
-    // 1000 non-cached + 5000 cache-created + 500 output (no read)
-    const cost = estimateCacheAwareCost(1000, 500, SONNET_INPUT, SONNET_OUTPUT, 0, 5000);
-    // Non-cached:  1000 × $3/M       = $0.003
-    // Cache create: 5000 × $3/M × 1.25 = $0.01875
-    // Output:       500 × $15/M     = $0.0075
-    // Total:                          $0.02925
-    expect(cost).toBeCloseTo(0.02925, 6);
+  it('bills cache_creation tokens at 1.25x the input rate', () => {
+    // Non-cached $0.003, cache write 5000 x $3/M x 1.25 = $0.01875, output
+    // $0.0075: $0.02925 in all.
+    expect(sonnet46(calls(1000, 500, 0, 5000))).toBeCloseTo(0.02925, 6);
   });
 
   it('surfaces the savings when most input is a cache read vs fully non-cached', () => {
-    // First call pays full price for 10000 input tokens (no cache yet)
-    const firstCall = estimateCacheAwareCost(10000, 500, SONNET_INPUT, SONNET_OUTPUT);
-    // Second call hits the cache: only 100 non-cached + 9900 cache reads
-    const secondCall = estimateCacheAwareCost(100, 500, SONNET_INPUT, SONNET_OUTPUT, 9900);
-    // Second call should cost significantly less than first.
+    const firstCall = sonnet46(calls(10000, 500));
+    const secondCall = sonnet46(calls(100, 500, 9900));
     expect(secondCall).toBeLessThan(firstCall * 0.5);
-    // Specifically: firstCall = 10000 × $3/M + 500 × $15/M = $0.0375
+    // 10000 x $3/M + 500 x $15/M = $0.0375
     expect(firstCall).toBeCloseTo(0.0375, 6);
-    // secondCall = 100 × $3/M + 9900 × $3/M × 0.1 + 500 × $15/M
-    //            = $0.0003 + $0.00297 + $0.0075 = $0.01077
+    // 100 x $3/M + 9900 x $3/M x 0.1 + 500 x $15/M = $0.0003 + $0.00297 + $0.0075
     expect(secondCall).toBeCloseTo(0.01077, 6);
   });
 
   it('a cache-heavy run saves roughly 80% on input cost vs no cache', () => {
-    // 1 initial cache-create (expensive) + 9 cache reads (cheap), same token shape each call
     const PROMPT_PREFIX = 5000;
     const DYNAMIC = 500;
     const OUTPUT = 200;
-
-    // Cold run: 10 calls, all non-cached
     let coldTotal = 0;
-    for (let i = 0; i < 10; i++) {
-      coldTotal += estimateCacheAwareCost(PROMPT_PREFIX + DYNAMIC, OUTPUT, SONNET_INPUT, SONNET_OUTPUT);
-    }
+    for (let i = 0; i < 10; i++) coldTotal += sonnet46(calls(PROMPT_PREFIX + DYNAMIC, OUTPUT));
+    let cachedTotal = sonnet46(calls(DYNAMIC, OUTPUT, 0, PROMPT_PREFIX));
+    for (let i = 0; i < 9; i++) cachedTotal += sonnet46(calls(DYNAMIC, OUTPUT, PROMPT_PREFIX));
+    // With a 5500:200 input:output ratio the total saving clears 50%.
+    expect((coldTotal - cachedTotal) / coldTotal).toBeGreaterThan(0.5);
+  });
 
-    // Cached run: first call creates, next 9 read
-    let cachedTotal = estimateCacheAwareCost(DYNAMIC, OUTPUT, SONNET_INPUT, SONNET_OUTPUT, 0, PROMPT_PREFIX);
-    for (let i = 0; i < 9; i++) {
-      cachedTotal += estimateCacheAwareCost(DYNAMIC, OUTPUT, SONNET_INPUT, SONNET_OUTPUT, PROMPT_PREFIX);
-    }
+  it('prices a 1-hour cache write at 2x and a 5-minute write at 1.25x', () => {
+    // 6000 x $3/M x 1.25 + 4000 x $3/M x 2 = $0.0225 + $0.024
+    expect(
+      sonnet46({
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 10000,
+        cache_creation: { ephemeral_5m_input_tokens: 6000, ephemeral_1h_input_tokens: 4000 },
+      }),
+    ).toBeCloseTo(0.0465, 6);
+    // The split alone, without the total, prices the same.
+    expect(
+      sonnet46({
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation: { ephemeral_5m_input_tokens: 6000, ephemeral_1h_input_tokens: 4000 },
+      }),
+    ).toBeCloseTo(0.0465, 6);
+  });
 
-    const savings = (coldTotal - cachedTotal) / coldTotal;
-    // Caching should save 60-90% of INPUT cost on cache-heavy workloads.
-    // Output cost is identical so the total savings depend on input:output ratio.
-    // With 5500:200 input:output ratio here, total savings should be 50%+.
-    expect(savings).toBeGreaterThan(0.5);
+  it('prices writes without a TTL split as 5-minute writes and caps the 1-hour share at the total', () => {
+    expect(sonnet46(calls(0, 0, 0, 10000))).toBeCloseTo(0.0375, 6);
+    expect(
+      sonnet46({
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 10000,
+        cache_creation: { ephemeral_1h_input_tokens: 20000 },
+      }),
+    ).toBeCloseTo(0.06, 6);
+  });
+
+  it('prices Claude Opus 5.5 cache reads at 0.05x the input price', () => {
+    // 1000 x $4/M + 100000 x $0.20/M + 500 x $20/M = $0.004 + $0.02 + $0.01.
+    // At the flat 0.1x rate the reads alone would cost $0.04.
+    expect(
+      estimateAnthropicCostUSD('claude-opus-5-5', {
+        input_tokens: 1000,
+        output_tokens: 500,
+        cache_read_input_tokens: 100000,
+      }),
+    ).toBeCloseTo(0.034, 6);
+  });
+
+  it('prices Claude Fable 5.1 cache reads at 0.025x, bare and dated', () => {
+    const reads = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 1_000_000 };
+    expect(estimateAnthropicCostUSD('claude-fable-5-1', reads)).toBeCloseTo(0.25, 6);
+    expect(estimateAnthropicCostUSD('claude-fable-5-1-20261001', reads)).toBeCloseTo(0.25, 6);
+  });
+
+  it('keeps Claude Fable 5 cache reads at 0.1x: the Fable 5.1 rate does not leak through prefix resolution', () => {
+    const reads = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 1_000_000 };
+    expect(estimateAnthropicCostUSD('claude-fable-5', reads)).toBeCloseTo(1, 6);
+    expect(estimateAnthropicCostUSD('claude-fable-5-20260601', reads)).toBeCloseTo(1, 6);
+  });
+
+  it('prices Sonnet 5.5 and Opus 4.5 cache reads at the standard 0.1x', () => {
+    const reads = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 1_000_000 };
+    expect(estimateAnthropicCostUSD('claude-sonnet-5-5', reads)).toBeCloseTo(0.2, 6);
+    expect(estimateAnthropicCostUSD('claude-opus-4-5', reads)).toBeCloseTo(0.5, 6);
+  });
+
+  it('returns undefined for an unknown or empty model id', () => {
+    const usage = { input_tokens: 1000, output_tokens: 1000 };
+    expect(estimateAnthropicCostUSD('claude-nova-9', usage)).toBeUndefined();
+    expect(estimateAnthropicCostUSD('', usage)).toBeUndefined();
   });
 });
 
@@ -229,7 +268,6 @@ describe('AnthropicProvider cache-aware cost estimation', () => {
  * down entirely. Exercises the REAL private buildRequestPayload (the single
  * chokepoint feeding both the streaming and non-streaming /v1/messages paths).
  */
-import { AnthropicProvider } from '../implementations/AnthropicProvider';
 
 describe('AnthropicProvider automatic prompt caching', () => {
   const ENV_KEY = 'AGENTOS_ANTHROPIC_AUTO_CACHE';
@@ -727,5 +765,524 @@ describe('AnthropicProvider automatic prompt caching', () => {
     } else {
       expect(typeof lastContent).toBe('string');
     }
+  });
+
+  /**
+   * Tool cache markers count against the hard 4-breakpoint cap. 3 marked
+   * system blocks + 1 marked tool = 4 (at the cap); the tail must NOT be
+   * added, or the request 400s with a 5th marker. Tools are injected via
+   * customModelParams — the exact vector where a marked tool can reach the
+   * wire payload after passthrough.
+   */
+  it('folds tool cache markers into the cap and skips the tail at 4 wire markers', async () => {
+    const payload = await buildPayload(
+      [
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'p1', cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: 'p2', cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: 'p3', cache_control: { type: 'ephemeral' } },
+          ],
+        },
+        { role: 'user', content: 'hi' },
+      ],
+      {
+        customModelParams: {
+          tools: [
+            {
+              name: 't',
+              description: 'd',
+              input_schema: { type: 'object', properties: {} },
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      },
+    );
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content;
+    if (Array.isArray(lastContent)) {
+      for (const block of lastContent as Array<{ cache_control?: unknown }>) {
+        expect(block.cache_control).toBeUndefined();
+      }
+    } else {
+      expect(typeof lastContent).toBe('string');
+    }
+  });
+
+  it('still pins the tail with tool markers present when there is headroom (< 4)', async () => {
+    const payload = await buildPayload(
+      [
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'p1', cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: 'p2', cache_control: { type: 'ephemeral' } },
+          ],
+        },
+        { role: 'user', content: 'hi' },
+      ],
+      {
+        customModelParams: {
+          tools: [
+            {
+              name: 't',
+              description: 'd',
+              input_schema: { type: 'object', properties: {} },
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      },
+    );
+    // 2 system + 1 tool = 3 < 4 → tail lands on the final message.
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content as Array<{
+      cache_control?: unknown;
+    }>;
+    expect(Array.isArray(lastContent)).toBe(true);
+    expect(lastContent[lastContent.length - 1].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  /**
+   * The forced-tool reconciliation runs AFTER the customModelParams
+   * passthrough, so a tool_choice injected through customModelParams under
+   * extended thinking is clamped to 'auto' rather than reaching the wire as
+   * the forbidden thinking + forced-tool combination (Anthropic 400s on it).
+   */
+  it('reconciles a forced tool_choice injected via customModelParams under thinking', async () => {
+    const payload = await buildPayload(
+      [{ role: 'user', content: 'hi' }],
+      {
+        thinking: { budgetTokens: 1 },
+        customModelParams: { tool_choice: { type: 'tool', name: 'x' } },
+      },
+      'claude-opus-4-8',
+    );
+    expect(payload.tool_choice).toEqual({ type: 'auto' });
+  });
+});
+
+describe('AnthropicProvider per-call cache option (options.cache)', () => {
+  const ENV_KEY = 'AGENTOS_ANTHROPIC_AUTO_CACHE';
+  let savedEnv: string | undefined;
+
+  beforeEach(() => {
+    savedEnv = process.env[ENV_KEY];
+    delete process.env[ENV_KEY];
+  });
+
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = savedEnv;
+  });
+
+  async function buildPayload(
+    messages: Array<Record<string, unknown>>,
+    options: Record<string, unknown> = {},
+    modelId: string = 'claude-sonnet-4-6',
+  ): Promise<Record<string, unknown>> {
+    const provider = new AnthropicProvider();
+    await provider.initialize({ apiKey: 'test-anthropic-key' });
+    return (provider as unknown as {
+      buildRequestPayload: (
+        modelId: string,
+        messages: unknown,
+        options: unknown,
+        stream: boolean,
+      ) => Record<string, unknown>;
+    }).buildRequestPayload(modelId, messages, options, false);
+  }
+
+  /** Every cache_control reachable from the payload, flattened for asserts. */
+  function collectMarkers(payload: Record<string, unknown>): unknown[] {
+    const found: unknown[] = [];
+    if (payload.cache_control) found.push(payload.cache_control);
+    const system = payload.system;
+    if (Array.isArray(system)) {
+      for (const b of system as Array<{ cache_control?: unknown }>) {
+        if (b.cache_control) found.push(b.cache_control);
+      }
+    }
+    for (const msg of (payload.messages as Array<{ content?: unknown }>) ?? []) {
+      if (!Array.isArray(msg.content)) continue;
+      for (const b of msg.content as Array<{ cache_control?: unknown }>) {
+        if (b.cache_control) found.push(b.cache_control);
+      }
+    }
+    if (Array.isArray(payload.tools)) {
+      for (const t of payload.tools as Array<{ cache_control?: unknown }>) {
+        if (t.cache_control) found.push(t.cache_control);
+      }
+    }
+    return found;
+  }
+
+  /**
+   * `cache: false` is the per-call hard-off for true one-shots: unlike the
+   * process-global env kill switch (auto path only), it also strips
+   * caller-placed markers so the request pays no cache-write premium
+   * anywhere. A one-shot's write (1.25x at 5m, 2x at 1h) is never read back.
+   */
+  it('cache:false emits zero cache_control — auto suppressed AND caller markers stripped', async () => {
+    const payload = await buildPayload([
+      {
+        role: 'system',
+        content: [
+          { type: 'text', text: 'Stable prefix', cache_control: { type: 'ephemeral', ttl: '1h' } },
+          { type: 'text', text: 'Dynamic tail' },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'few-shot context', cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: 'question' },
+        ],
+      },
+      { role: 'user', content: 'follow-up' },
+    ], { cache: false });
+    expect(collectMarkers(payload)).toEqual([]);
+    // With every marker stripped, system falls back to the joined-string emission.
+    expect(typeof payload.system).toBe('string');
+  });
+
+  it('cache:false also clears markers injected via customModelParams (tools + request-level)', async () => {
+    const payload = await buildPayload(
+      [{ role: 'user', content: 'hi' }],
+      {
+        cache: false,
+        customModelParams: {
+          cache_control: { type: 'ephemeral' },
+          tools: [
+            {
+              name: 'x',
+              description: 'd',
+              input_schema: { type: 'object' },
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      },
+    );
+    expect(collectMarkers(payload)).toEqual([]);
+  });
+
+  it('cache:false beats the default auto marker on a bare request', async () => {
+    const payload = await buildPayload([{ role: 'user', content: 'hi' }], { cache: false });
+    expect(payload.cache_control).toBeUndefined();
+    expect(collectMarkers(payload)).toEqual([]);
+  });
+
+  /**
+   * `cache: { ttl: '1h' }` on a marker-free non-thinking request: the TTL is
+   * a block-level attribute, so the auto path switches from the request-level
+   * marker to explicit placement — system-end breakpoint + moving message
+   * tail — both carrying the 1h TTL. Slow loops (codegen tool calls gap
+   * 2-14 min; human turns routinely exceed 5m) stop expiring between steps.
+   */
+  it('cache ttl 1h without thinking places block-level markers carrying the TTL', async () => {
+    const payload = await buildPayload([
+      { role: 'system', content: 'You are a stable, reusable system prompt.' },
+      { role: 'user', content: 'hi' },
+    ], { cache: { ttl: '1h' } });
+    expect(payload.cache_control).toBeUndefined();
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    expect(Array.isArray(system)).toBe(true);
+    expect(system[system.length - 1].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content as Array<{ cache_control?: unknown }>;
+    expect(Array.isArray(lastContent)).toBe(true);
+    expect(lastContent[lastContent.length - 1].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+
+  it('cache ttl 1h under thinking carries the TTL on both auto breakpoints', async () => {
+    const payload = await buildPayload(
+      [
+        { role: 'system', content: 'Primary system prompt.' },
+        { role: 'user', content: 'hi' },
+      ],
+      { thinking: { budgetTokens: 1 }, cache: { ttl: '1h' } },
+      'claude-opus-4-8',
+    );
+    expect(payload.cache_control).toBeUndefined();
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    expect(system[system.length - 1].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content as Array<{ cache_control?: unknown }>;
+    expect(lastContent[lastContent.length - 1].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+
+  it('cache ttl 1h composes with a caller-marked system: caller marker raised to 1h, tail gets 1h', async () => {
+    const payload = await buildPayload([
+      {
+        role: 'system',
+        content: [
+          { type: 'text', text: 'Stable persona prefix', cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: 'Dynamic per-turn state' },
+        ],
+      },
+      { role: 'user', content: 'hi' },
+    ], { cache: { ttl: '1h' } });
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    // Anthropic requires every 1h marker to PRECEDE every 5m marker in cache
+    // order — a 5m system marker ahead of the 1h tail 400s the request. The
+    // per-call TTL declares the whole call's pacing, so the caller's
+    // default-TTL marker is raised to 1h alongside the tail.
+    expect(system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    expect(system[1].cache_control).toBeUndefined();
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content as Array<{ cache_control?: unknown }>;
+    expect(lastContent[lastContent.length - 1].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+
+  it('cache ttl 1h raises an explicit 5m caller system marker too (mixed order would 400)', async () => {
+    const payload = await buildPayload([
+      {
+        role: 'system',
+        content: [
+          { type: 'text', text: 'Prefix', cache_control: { type: 'ephemeral', ttl: '5m' } },
+        ],
+      },
+      { role: 'user', content: 'hi' },
+    ], { cache: { ttl: '1h' } });
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    expect(system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+  });
+
+  it('cache ttl 1h with a marked tool present: tail falls back to the default TTL (order stays valid)', async () => {
+    const payload = await buildPayload(
+      [
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'Prefix', cache_control: { type: 'ephemeral' } },
+          ],
+        },
+        { role: 'user', content: 'hi' },
+      ],
+      {
+        cache: { ttl: '1h' },
+        customModelParams: {
+          tools: [
+            {
+              name: 'x',
+              description: 'd',
+              input_schema: { type: 'object' },
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      },
+    );
+    // Marked tools are raw caller objects the provider never mutates, and
+    // tools render before system: a 1h tail after a 5m tool marker would
+    // 400, so the tail keeps the default TTL and the system marker stays.
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    expect(system[0].cache_control).toEqual({ type: 'ephemeral' });
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content as Array<{ cache_control?: unknown }>;
+    expect(lastContent[lastContent.length - 1].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('customModelParams system override + cache 1h: override preserved verbatim, request-level marker only', async () => {
+    const payload = await buildPayload(
+      [
+        { role: 'system', content: 'Original system that the override replaces.' },
+        { role: 'user', content: 'hi' },
+      ],
+      {
+        cache: { ttl: '1h' },
+        customModelParams: { system: 'CUSTOM OVERRIDE SYSTEM' },
+      },
+    );
+    // The explicit-placement path must not restructure regions it no longer
+    // owns: the pre-override locals would clobber the custom system.
+    expect(payload.system).toBe('CUSTOM OVERRIDE SYSTEM');
+    expect(payload.cache_control).toEqual({ type: 'ephemeral' });
+    const messages = payload.messages as Array<{ content: unknown }>;
+    for (const m of messages) {
+      if (!Array.isArray(m.content)) continue;
+      for (const b of m.content as Array<{ cache_control?: unknown }>) {
+        expect(b.cache_control).toBeUndefined();
+      }
+    }
+  });
+
+  it('customModelParams messages override carrying a marker: full stand-down (caller owns the wire)', async () => {
+    const payload = await buildPayload(
+      [{ role: 'user', content: 'original' }],
+      {
+        cache: { ttl: '1h' },
+        customModelParams: {
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: 'custom', cache_control: { type: 'ephemeral' } },
+              ],
+            },
+          ],
+        },
+      },
+    );
+    expect(payload.cache_control).toBeUndefined();
+    // The override rides the wire untouched; its own marker is the only one.
+    expect(collectMarkers(payload)).toEqual([{ type: 'ephemeral' }]);
+  });
+
+  it('cache ttl 1h does not override the caller-owns-messages stand-down', async () => {
+    const payload = await buildPayload([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'shared context', cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: 'varying question' },
+        ],
+      },
+      { role: 'user', content: 'follow-up' },
+    ], { cache: { ttl: '1h' } });
+    expect(payload.cache_control).toBeUndefined();
+    const messages = payload.messages as Array<{ content: unknown }>;
+    const lastContent = messages[messages.length - 1].content;
+    expect(typeof lastContent).toBe('string');
+  });
+
+  it('cache ttl 5m keeps the default request-level marker (no behavior change)', async () => {
+    const payload = await buildPayload([
+      { role: 'system', content: 'A system prompt.' },
+      { role: 'user', content: 'hi' },
+    ], { cache: { ttl: '5m' } });
+    expect(payload.cache_control).toEqual({ type: 'ephemeral' });
+    expect(typeof payload.system).toBe('string');
+  });
+});
+
+describe('AnthropicProvider cache:false sanitizes customModelParams-injected regions', () => {
+  async function buildPayload(
+    messages: Array<Record<string, unknown>>,
+    options: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>> {
+    const provider = new AnthropicProvider();
+    await provider.initialize({ apiKey: 'test-anthropic-key' });
+    return (provider as unknown as {
+      buildRequestPayload: (
+        modelId: string,
+        messages: unknown,
+        options: unknown,
+        stream: boolean,
+      ) => Record<string, unknown>;
+    }).buildRequestPayload('claude-sonnet-4-6', messages, options, false);
+  }
+
+  it('strips markers from a customModelParams system/messages override', async () => {
+    const injectedSystem = [
+      { type: 'text', text: 'injected stable', cache_control: { type: 'ephemeral', ttl: '1h' } },
+    ];
+    const injectedMessages = [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'injected turn', cache_control: { type: 'ephemeral' } },
+        ],
+      },
+    ];
+    const payload = await buildPayload(
+      [{ role: 'user', content: 'hi' }],
+      {
+        cache: false,
+        customModelParams: { system: injectedSystem, messages: injectedMessages },
+      },
+    );
+    const system = payload.system as Array<{ cache_control?: unknown }>;
+    expect(system[0].cache_control).toBeUndefined();
+    const messages = payload.messages as Array<{ content: Array<{ cache_control?: unknown }> }>;
+    expect(messages[0].content[0].cache_control).toBeUndefined();
+    // The caller's own customModelParams objects are never mutated.
+    expect(injectedSystem[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    expect(injectedMessages[0].content[0].cache_control).toEqual({ type: 'ephemeral' });
+  });
+});
+
+/**
+ * The cacheable-prefix floor decides when the leak detector reports a callsite
+ * that never caches. Driven through generateCompletion with only fetch
+ * stubbed: eight calls from one callsite at 700 uncached input tokens and no
+ * cache activity. That sits above Sonnet 5.5's 512-token floor and below
+ * Sonnet 5's 1024.
+ */
+describe('AnthropicProvider cache-leak floors via generateCompletion', () => {
+  const fetchMock = vi.fn();
+  /** First argument of every console.warn call in the current test. */
+  const warned: string[] = [];
+
+  /** A completed SSE reply whose usage reports 700 uncached input tokens. */
+  function uncachedReply(model: string): Response {
+    const events = [
+      {
+        type: 'message_start',
+        message: {
+          id: 'msg_floor', type: 'message', role: 'assistant', content: [], model,
+          stop_reason: null, stop_sequence: null, usage: { input_tokens: 700, output_tokens: 1 },
+        },
+      },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 1 } },
+      { type: 'message_stop' },
+    ];
+    return new Response(events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(''), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+  }
+
+  /** Makes eight calls from one callsite and returns the `unmarked` warnings. */
+  async function unmarkedWarnings(model: string, options: ModelCompletionOptions = {}): Promise<string[]> {
+    const provider = new AnthropicProvider();
+    await provider.initialize({ apiKey: 'test-anthropic-key' });
+    fetchMock.mockImplementation(async () => uncachedReply(model));
+    for (let i = 0; i < 8; i++) {
+      await provider.generateCompletion(
+        model,
+        [
+          { role: 'system', content: `Floor probe system prompt for ${model}.` },
+          { role: 'user', content: `turn ${i}` },
+        ],
+        options,
+      );
+    }
+    return warned.filter((message) => /cache-leak\] unmarked/.test(message));
+  }
+
+  beforeEach(() => {
+    resetCacheLeakDetector();
+    warned.length = 0;
+    fetchMock.mockReset();
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warned.push(String(args[0]));
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('reports a Sonnet 5.5 callsite that pays 700 uncached tokens a call (512-token floor)', async () => {
+    const warnings = await unmarkedWarnings('claude-sonnet-5-5');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/model=claude-sonnet-5-5/);
+  });
+
+  it('stays quiet for the same prompts on Sonnet 5 (1024-token floor)', async () => {
+    expect(await unmarkedWarnings('claude-sonnet-5')).toHaveLength(0);
+  });
+
+  it('stays quiet when the caller turned caching off (cache: false)', async () => {
+    expect(await unmarkedWarnings('claude-sonnet-5-5', { cache: false })).toHaveLength(0);
   });
 });

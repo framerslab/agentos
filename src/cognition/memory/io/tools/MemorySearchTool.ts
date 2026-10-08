@@ -198,9 +198,11 @@ export class MemorySearchTool implements ITool<MemorySearchInput, MemorySearchOu
 
       const limit = args.limit ?? 10;
 
-      // Build WHERE clause additions for optional filters.
-      const extraClauses: string[] = [];
-      const extraParams: unknown[] = [];
+      // Build WHERE clause additions for optional filters. A database can
+      // hold several brains and the full-text index spans all of them, so a
+      // search always reads only this brain's traces.
+      const extraClauses: string[] = ['mt.brain_id = ?'];
+      const extraParams: unknown[] = [this.brain.brainId];
 
       if (args.type !== undefined) {
         extraClauses.push('mt.type = ?');

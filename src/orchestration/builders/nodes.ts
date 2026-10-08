@@ -1,4 +1,4 @@
-import type { GraphNode, GraphCondition, NodeExecutionMode, EffectClass, MemoryPolicy, DiscoveryPolicy, PersonaPolicy, GuardrailPolicy, RetryPolicy, CompiledExecutionGraph, NodeExecutorConfig } from '../ir/types.js';
+import type { GraphNode, GraphCondition, NodeExecutionMode, EffectClass, MemoryPolicy, DiscoveryPolicy, PersonaPolicy, GuardrailPolicy, RetryPolicy, CompiledExecutionGraph, NodeExecutorConfig, JudgeNodeConfig } from '../ir/types.js';
 import { lowerZodToJsonSchema } from '../compiler/SchemaLowering.js';
 
 export interface NodePolicies {
@@ -92,13 +92,8 @@ export function humanNode(config: {
   autoAccept?: boolean;
   /** Auto-reject without human input. */
   autoReject?: boolean | string;
-  /** Delegate to LLM judge instead of human. */
-  judge?: {
-    model?: string;
-    provider?: string;
-    criteria?: string;
-    confidenceThreshold?: number;
-  };
+  /** Delegate to LLM judge instead of human (default model via the central judge resolver). */
+  judge?: JudgeNodeConfig;
   /** What to do when timeout expires. @default 'error' */
   onTimeout?: 'accept' | 'reject' | 'error';
   /**

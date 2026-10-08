@@ -135,7 +135,7 @@ const m = mission('deep-research')
 
 ## Detailed Guides
 
-- [AgentGraph](./AGENT_GRAPH.md)
+- [AgentGraph](../architecture/AGENT_GRAPH.md)
 - [workflow() DSL](./WORKFLOW_DSL.md)
 - [mission() API](./MISSION_API.md)
 - [Checkpointing](./CHECKPOINTING.md)

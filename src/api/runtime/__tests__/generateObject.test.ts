@@ -100,6 +100,93 @@ describe('generateObject', () => {
     expect(providerOptions.effort).toBe('max');
   });
 
+  it('forwards thinking through generateText to the provider options', async () => {
+    hoisted.generateCompletion.mockResolvedValue(mockResponse('{"name": "Alice", "age": 28}'));
+
+    await generateObject({
+      schema: personSchema,
+      prompt: 'Extract person info',
+      thinking: false,
+    });
+
+    // Without the forward, a structured call on a model that thinks by default
+    // (Sonnet 5.5) cannot turn thinking off and spends its JSON budget on it.
+    const callArgs = hoisted.generateCompletion.mock.calls[0];
+    const providerOptions = callArgs[2] as { thinking?: unknown };
+    expect(providerOptions.thinking).toBe(false);
+  });
+
+  it('forwards sessionId from generateObject through generateText to the provider options', async () => {
+    hoisted.generateCompletion.mockResolvedValue(mockResponse('{"name": "Alice", "age": 28}'));
+
+    await generateObject({
+      schema: personSchema,
+      prompt: 'Extract person info',
+      sessionId: 'bp-1234',
+    });
+
+    // Same forwarding contract as effort/cache: generateObject -> generateText
+    // -> ModelCompletionOptions.sessionId (OpenRouter emits it as session_id
+    // for provider sticky routing; other providers ignore it).
+    const callArgs = hoisted.generateCompletion.mock.calls[0];
+    const providerOptions = callArgs[2] as { sessionId?: string };
+    expect(providerOptions.sessionId).toBe('bp-1234');
+  });
+
+  it("honors an explicit schemaCacheTtl of '5m' on a string system (block emission, default-TTL marker)", async () => {
+    hoisted.generateCompletion.mockResolvedValue(mockResponse('{"name": "Alice", "age": 28}'));
+
+    await generateObject({
+      schema: personSchema,
+      system: 'You extract people.',
+      prompt: 'Extract person info',
+      schemaCacheTtl: '5m',
+    });
+
+    // Explicit '5m' must not fall through to the joined-string branch
+    // (which carries no marker at all): the system reaches the provider
+    // as blocks whose schema block asks for the default-TTL breakpoint.
+    const callArgs = hoisted.generateCompletion.mock.calls[0];
+    const messages = callArgs[1] as Array<{ role: string; content: unknown }>;
+    const systemMsg = messages.find((m) => m.role === 'system');
+    expect(Array.isArray(systemMsg?.content)).toBe(true);
+    const blocks = systemMsg?.content as Array<Record<string, unknown>>;
+    const schemaBlock = blocks[blocks.length - 1];
+    expect(schemaBlock.cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('surfaces the source label on the global usage observer event', async () => {
+    hoisted.generateCompletion.mockResolvedValue(mockResponse('{"name": "Alice", "age": 28}'));
+    const { setGlobalLlmObserver } = await import('../../observers.js');
+    const seen: Array<{ source?: string; surface?: string }> = [];
+    setGlobalLlmObserver((e) => {
+      seen.push({ source: e.source, surface: e.surface });
+    });
+    try {
+      await generateObject({
+        schema: personSchema,
+        prompt: 'Extract person info',
+        source: 'codegen_tool',
+      });
+      expect(seen.some((e) => e.source === 'codegen_tool')).toBe(true);
+    } finally {
+      setGlobalLlmObserver(null);
+    }
+  });
+
+  it('omits sessionId from provider options when the caller did not set it', async () => {
+    hoisted.generateCompletion.mockResolvedValue(mockResponse('{"name": "Alice", "age": 28}'));
+
+    await generateObject({
+      schema: personSchema,
+      prompt: 'Extract person info',
+    });
+
+    const callArgs = hoisted.generateCompletion.mock.calls[0];
+    const providerOptions = callArgs[2] as { sessionId?: string };
+    expect(providerOptions.sessionId).toBeUndefined();
+  });
+
   it('surfaces fallback.fired when the underlying generateText fell back', async () => {
     globalLLMProviderHealth.reset();
     hoisted.generateCompletion
@@ -787,5 +874,223 @@ describe('generateObject fallback-leg responseFormat rebuild (2026-07-07)', () =
       }));
       globalLLMProviderHealth.reset();
     }
+  });
+});
+
+describe('string-encoded container repair', () => {
+  // Claude's tool-use / structured-output path intermittently DOUBLE-ENCODES
+  // a nested container — `{"verdicts": "[{...}]"}` instead of
+  // `{"verdicts": [{...}]}` — most often on long, deeply nested payloads.
+  // The JSON extracts fine, Zod rejects `expected array, received string`
+  // on every attempt, and the call burns its full retry budget for nothing:
+  // the 2026-07-10..16 outage where every wilds converge chain exhausted on
+  // visual_evidence_missing was exactly this shape.
+  const verdictsSchema = z.object({
+    verdicts: z.array(z.object({ trackId: z.string(), verdict: z.string() })),
+  });
+
+  beforeEach(() => {
+    hoisted.generateCompletion.mockReset();
+  });
+
+  it('repairs a container field the model double-encoded as a JSON string, without burning a retry', async () => {
+    hoisted.generateCompletion.mockResolvedValue(
+      mockResponse('{"verdicts":"[{\\"trackId\\":\\"hud_renders\\",\\"verdict\\":\\"red\\"}]"}'),
+    );
+
+    const result = await generateObject({
+      schema: verdictsSchema,
+      prompt: 'grade the tracks',
+    });
+
+    expect(result.object.verdicts).toEqual([{ trackId: 'hud_renders', verdict: 'red' }]);
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it('repairs a nested string-encoded OBJECT as well', async () => {
+    const schema = z.object({ meta: z.object({ tags: z.array(z.string()) }) });
+    hoisted.generateCompletion.mockResolvedValue(
+      mockResponse('{"meta":"{\\"tags\\":[\\"a\\",\\"b\\"]}"}'),
+    );
+
+    const result = await generateObject({ schema, prompt: 'x' });
+
+    expect(result.object.meta.tags).toEqual(['a', 'b']);
+  });
+
+  it('a string that is not JSON for the expected container still retries as before', async () => {
+    hoisted.generateCompletion
+      .mockResolvedValueOnce(mockResponse('{"verdicts":"not json at all"}'))
+      .mockResolvedValueOnce(
+        mockResponse('{"verdicts":[{"trackId":"a","verdict":"green"}]}'),
+      );
+
+    const result = await generateObject({
+      schema: verdictsSchema,
+      prompt: 'x',
+      maxRetries: 1,
+    });
+
+    expect(result.object.verdicts[0]?.trackId).toBe('a');
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(2);
+  });
+
+  it('surfaces the INNER validation error when the unwrapped container still fails', async () => {
+    // The residual failure class: the unwrap works, but the content inside
+    // the string was genuinely invalid (here: a verdict outside the enum).
+    // The retry feedback and the terminal error must carry the inner issue,
+    // not the misleading pre-repair "expected array, received string".
+    const verdictsSchema2 = z.object({
+      verdicts: z.array(
+        z.object({ trackId: z.string(), verdict: z.enum(['green', 'yellow', 'red']) }),
+      ),
+    });
+    hoisted.generateCompletion.mockResolvedValue(
+      mockResponse('{"verdicts":"[{\\"trackId\\":\\"t\\",\\"verdict\\":\\"purple\\"}]"}'),
+    );
+
+    const err = await generateObject({
+      schema: verdictsSchema2,
+      prompt: 'x',
+      maxRetries: 1,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(ObjectGenerationError);
+    const issues = (err as ObjectGenerationError).validationErrors?.issues ?? [];
+    const paths = issues.map((i) => i.path.join('.'));
+    expect(paths.some((p) => p.startsWith('verdicts.0.verdict'))).toBe(true);
+    expect(issues.some((i) => i.message.includes('received string'))).toBe(false);
+  });
+
+  it('an unrepairable string still exhausts retries into ObjectGenerationError', async () => {
+    hoisted.generateCompletion.mockResolvedValue(mockResponse('{"verdicts":"nope"}'));
+
+    await expect(
+      generateObject({ schema: verdictsSchema, prompt: 'x', maxRetries: 0 }),
+    ).rejects.toThrow(ObjectGenerationError);
+  });
+
+  it('names the container-as-string mistake in the retry feedback when the inner string does not parse', async () => {
+    const verdictsSchema2 = z.object({
+      verdicts: z.array(z.object({ trackId: z.string(), verdict: z.string() })),
+    });
+    hoisted.generateCompletion
+      // Complete outer JSON; the quoted inner content is broken JSON, so the
+      // in-place repair declines and the call must burn a retry — with a
+      // feedback line that names the exact mistake.
+      .mockResolvedValueOnce(mockResponse('{"verdicts":"[{ broken"}'))
+      .mockResolvedValueOnce(
+        mockResponse('{"verdicts":[{"trackId":"t","verdict":"green"}]}'),
+      );
+
+    const result = await generateObject({
+      schema: verdictsSchema2,
+      prompt: 'x',
+      maxRetries: 1,
+    });
+
+    expect(result.object).toEqual({ verdicts: [{ trackId: 't', verdict: 'green' }] });
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(2);
+    const secondCall = JSON.stringify(hoisted.generateCompletion.mock.calls[1]);
+    expect(secondCall).toContain('NEVER a quoted or stringified JSON value');
+    expect(secondCall).toContain('verdicts');
+  });
+});
+
+describe('generateObject — the schema text carries the Zod size checks (2026-10-03)', () => {
+  // Provider structured-output modes accept different JSON Schema keyword
+  // subsets, so the payload lowering drops every size check. On the
+  // prompt-only path (Anthropic models that reject a forced tool_choice) the
+  // schema text in the system prompt is the only place the model can learn a
+  // limit; without it a reply over any `.max()` failed validation on every
+  // attempt (the wilds design contract, 15 of 46 fast passes in 2026-09).
+  const boundedSchema = z.object({
+    title: z.string().max(40),
+    tags: z.array(z.string()).min(1).max(3),
+  });
+
+  beforeEach(() => {
+    hoisted.generateCompletion.mockReset();
+  });
+
+  function systemText(): string {
+    const messages = hoisted.generateCompletion.mock.calls[0][1];
+    const systemMsg = messages.find((m: Record<string, unknown>) => m.role === 'system');
+    const content = systemMsg?.content;
+    return typeof content === 'string' ? content : JSON.stringify(content);
+  }
+
+  it('prompt-only path: the limits are in the system prompt and no payload carries them', async () => {
+    const { resolveModelOption } = await import('../../model.js');
+    vi.mocked(resolveModelOption).mockReturnValueOnce({
+      providerId: 'anthropic',
+      modelId: 'claude-fable-5',
+    });
+    hoisted.generateCompletion.mockResolvedValueOnce(mockResponse('{"title": "T", "tags": ["a"]}'));
+
+    const { object } = await generateObject({
+      provider: 'anthropic',
+      model: 'claude-fable-5',
+      schema: boundedSchema,
+      schemaName: 'Bounded',
+      prompt: 'Make one',
+    });
+
+    expect(object).toEqual({ title: 'T', tags: ['a'] });
+    const args = hoisted.generateCompletion.mock.calls[0][2];
+    expect(args.responseFormat).toBeUndefined();
+    const text = systemText();
+    expect(text).toContain('"maxLength": 40');
+    expect(text).toContain('"minItems": 1');
+    expect(text).toContain('"maxItems": 3');
+  });
+
+  it('OpenAI strict payload stays free of size keywords while the text has them', async () => {
+    // The openai and openrouter branches are the ones that consume the lowered
+    // `jsonSchema` for their payload (the Anthropic branch lowers the schema
+    // again itself), so this is the case that fails if the bounded lowering is
+    // ever handed to the payload builder: strict mode accepts `maxLength` and
+    // the request would carry it.
+    const { resolveModelOption } = await import('../../model.js');
+    vi.mocked(resolveModelOption).mockReturnValueOnce({ providerId: 'openai', modelId: 'gpt-4o' });
+    hoisted.generateCompletion.mockResolvedValueOnce(mockResponse('{"title": "T", "tags": ["a"]}'));
+
+    await generateObject({
+      schema: boundedSchema,
+      schemaName: 'Bounded',
+      prompt: 'Make one',
+    });
+
+    const args = hoisted.generateCompletion.mock.calls[0][2];
+    const payload = JSON.stringify(args.responseFormat);
+    expect(payload).toContain('"json_schema"');
+    expect(payload).not.toMatch(/maxLength|minItems|maxItems/);
+    expect(systemText()).toContain('"maxLength": 40');
+  });
+
+  it('forced-tool path: the provider payload stays free of size keywords while the text has them', async () => {
+    const { resolveModelOption } = await import('../../model.js');
+    vi.mocked(resolveModelOption).mockReturnValueOnce({
+      providerId: 'anthropic',
+      modelId: 'claude-sonnet-4-6',
+    });
+    hoisted.generateCompletion.mockResolvedValueOnce(mockResponse('{"title": "T", "tags": ["a"]}'));
+
+    await generateObject({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      schema: boundedSchema,
+      schemaName: 'Bounded',
+      prompt: 'Make one',
+    });
+
+    const args = hoisted.generateCompletion.mock.calls[0][2];
+    const payload = JSON.stringify(args.responseFormat);
+    expect(payload).toContain('"input_schema"');
+    expect(payload).not.toMatch(/maxLength|minItems|maxItems/);
+    expect(systemText()).toContain('"maxLength": 40');
   });
 });

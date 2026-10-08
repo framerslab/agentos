@@ -4,7 +4,7 @@ You can't operate an agent runtime in production without observability, and the 
 
 What AgentOS owns is the *emit side*: opt-in spans around turns and tool-result handling, opt-in counters and histograms for the operations worth measuring, optional trace-correlation in logs and streamed response metadata, and an optional path to export application logs as OTEL `LogRecord`s. All defaults are off. Turning them on is a single config change, and the runtime will surface to whatever exporter your host has wired (OTLP to Honeycomb, Tempo, Jaeger, Grafana Cloud — the runtime doesn't care, because your host SDK is what does the export).
 
-The implementation lives in [`src/evaluation/observability/`](https://github.com/framerslab/agentos/tree/master/src/evaluation/observability) and uses [`@opentelemetry/api`](https://www.npmjs.com/package/@opentelemetry/api) directly — never bundled, always peer-dep-style imported, so your host SDK is the one and only OTEL provider in the process.
+The implementation lives in [`src/safety/evaluation/observability/`](https://github.com/framerslab/agentos/tree/master/src/safety/evaluation/observability) and uses [`@opentelemetry/api`](https://www.npmjs.com/package/@opentelemetry/api) directly — never bundled, always peer-dep-style imported, so your host SDK is the one and only OTEL provider in the process.
 
 ---
 
@@ -287,7 +287,7 @@ Common library choices:
 - W3C. (2021). *Trace Context Level 1.* W3C Recommendation. — The W3C standard for distributed-trace context propagation across process boundaries; AgentOS uses it to correlate spans across microservices. [w3.org/TR/trace-context-1](https://www.w3.org/TR/trace-context-1/)
 - OpenTelemetry Specification (current). *OpenTelemetry signal specifications: traces, metrics, and logs.* — The protocol contract AgentOS emits against. [opentelemetry.io/docs/specs/otel](https://opentelemetry.io/docs/specs/otel/)
 - OpenTelemetry. (current). *Semantic conventions.* — Naming and attribute schema for spans/metrics/logs; AgentOS follows the GenAI semantic conventions for LLM-call attributes. [opentelemetry.io/docs/specs/semconv](https://opentelemetry.io/docs/specs/semconv/)
-- OpenTelemetry GenAI working group. (current). *Generative AI semantic conventions.* — The schema for `gen_ai.*` attributes (request.model, usage.input_tokens, etc.) AgentOS sets on LLM-call spans. [opentelemetry.io/docs/specs/semconv/gen-ai](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
+- OpenTelemetry GenAI working group. *Generative AI semantic conventions.* — The schema for `gen_ai.*` attributes (provider.name, request.model, usage.input_tokens, usage.cache_read.input_tokens, etc.) AgentOS sets on LLM-call spans. **Pinned revision:** the semantic-conventions-genai repository has no release tags; AgentOS emits the attribute set as of commit [`c26a2c21d1ee70d5231bd440c7b48d3c94ee506a`](https://github.com/open-telemetry/semantic-conventions-genai/commit/c26a2c21d1ee70d5231bd440c7b48d3c94ee506a) (no schema URL is referenced — upstream's is still TODO). Attribute tests assert the names enumerated in `src/api/observability.ts`, not a moving upstream. [opentelemetry.io/docs/specs/semconv/gen-ai](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
 
 ### Distributed tracing foundations
 
@@ -301,7 +301,7 @@ Common library choices:
 
 ### Implementation references
 
-- `packages/agentos/src/evaluation/observability/Tracer.ts` — span creation around turn / tool / guardrail / LLM-call boundaries
-- `packages/agentos/src/evaluation/observability/otel.ts` — OpenTelemetry API peer-dep wiring
-- `packages/agentos/src/logging/PinoLogger.ts` — structured logger with trace-id / span-id field injection
-- `packages/agentos/src/evaluation/SqlTaskOutcomeTelemetryStore.ts` — persisted per-turn outcome KPIs for rolling-quality dashboards
+- `src/safety/evaluation/observability/Tracer.ts` — span creation around turn / tool / guardrail / LLM-call boundaries
+- `src/safety/evaluation/observability/otel.ts` — OpenTelemetry API peer-dep wiring
+- `src/core/logging/PinoLogger.ts` — structured logger with trace-id / span-id field injection
+- `src/orchestration/turn-planner/SqlTaskOutcomeTelemetryStore.ts` — persisted per-turn outcome KPIs for rolling-quality dashboards

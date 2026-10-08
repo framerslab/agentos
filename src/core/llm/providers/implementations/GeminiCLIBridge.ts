@@ -179,7 +179,7 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
       return new GeminiCLIProviderError(
         'Gemini CLI timed out.',
         'TIMEOUT',
-        'Gemini CLI did not respond in time. Try again or use a smaller model (gemini-2.0-flash-lite).',
+        'Gemini CLI did not respond in time. Try again or use a smaller model (gemini-2.5-flash-lite).',
         true,
         { exitCode, stderr },
       );

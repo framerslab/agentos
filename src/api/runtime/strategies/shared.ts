@@ -12,14 +12,17 @@
  */
 import { agent as createAgent } from '../agent.js';
 import { mergeAdaptableTools } from '../toolAdapter.js';
+import { knownProviderPrefixOf, routedProviderOf } from '../../model.js';
 import type {
   AgencyOptions,
+  AgencyQuorumConfig,
   Agent,
   BaseAgentConfig,
   AgentCallRecord,
   ApprovalRequest,
   ApprovalDecision,
 } from '../types.js';
+import { AgencyQuorumError } from '../types.js';
 
 /**
  * Type guard that checks whether a value is a pre-built {@link Agent} instance
@@ -45,6 +48,44 @@ import type {
  */
 export function isAgent(value: BaseAgentConfig | Agent): value is Agent {
   return typeof (value as Agent).generate === 'function';
+}
+
+/**
+ * Enforce a post-fan-out panel quorum (parallel strategy).
+ *
+ * Checked against the agents that actually SUCCEEDED: `minAgents` is a
+ * simple count; `minProviders` counts distinct resolved `provider` values on
+ * the results — a multi-model panel that quietly collapsed to a single
+ * vendor must not synthesize a false consensus.
+ *
+ * @param quorum - The agency's quorum config; `undefined` is a no-op.
+ * @param settled - Successful fan-out results (name + generate result).
+ * @param rosterSize - Total agents attempted, for the error message.
+ * @throws {AgencyQuorumError} On shortfall when `onShortfall` is `'error'`
+ *   (the default).
+ */
+export function enforceQuorum(
+  quorum: AgencyQuorumConfig | undefined,
+  settled: Array<{ name: string; result: Record<string, unknown> }>,
+  rosterSize: number,
+): void {
+  if (!quorum) return;
+  const minAgents = quorum.minAgents ?? 0;
+  const minProviders = quorum.minProviders ?? 0;
+  const providers = new Set(
+    settled
+      .map((s) => String((s.result as { provider?: unknown }).provider ?? ''))
+      .filter((p) => p !== ''),
+  );
+  if (settled.length >= minAgents && providers.size >= minProviders) return;
+  const detail =
+    `panel quorum shortfall: ${settled.length}/${rosterSize} agents succeeded ` +
+    `(need ${minAgents}), ${providers.size} distinct providers (need ${minProviders})`;
+  if ((quorum.onShortfall ?? 'error') === 'proceed') {
+    console.warn(`[AgentOS][Parallel] ${detail} — proceeding (onShortfall=proceed)`);
+    return;
+  }
+  throw new AgencyQuorumError(detail);
 }
 
 /**
@@ -185,14 +226,34 @@ export function mergeDefaults(
   agentConfig: BaseAgentConfig,
   agencyConfig: AgencyOptions
 ): BaseAgentConfig {
+  // A seat whose own model names a provider (`anthropic:claude-opus-5-5`) does
+  // not inherit the agency's provider, so the prefix never meets an inherited
+  // `ollama`, under which a colon is never split.
+  const seatPrefix = agentConfig.provider === 'ollama' ? undefined : knownProviderPrefixOf(agentConfig.model);
+  const model = agentConfig.model ?? agencyConfig.model;
+  const provider = agentConfig.provider ?? (seatPrefix !== undefined ? undefined : agencyConfig.provider);
+  // The agency's key and URL belong to the provider the agency's own calls go
+  // to. A seat inherits them only when its calls go to that same provider: a
+  // seat whose calls go to another provider (named by a model prefix in either
+  // form, or by its own `provider`), or to auto-detection, which may pick any
+  // vendor, does not, since sending them there would leak the key to another
+  // vendor. When the agency's provider comes from auto-detection, it is
+  // unknown and the seat inherits them. The check reads the provider and
+  // model the merged config below carries: a seat value set explicitly to
+  // undefined (`provider: undefined`) counts as set, since the spread of
+  // agentConfig writes it over the agency's.
+  const used: BaseAgentConfig = { model, provider, ...agentConfig };
+  const seatRouted = routedProviderOf({ provider: used.provider, model: used.model });
+  const agencyRouted = routedProviderOf(agencyConfig);
+  const otherVendor = agencyRouted !== undefined && seatRouted !== agencyRouted;
   return {
     // Agency-level model/provider/apiKey/baseUrl serve as defaults.
     // They are placed BEFORE the spread of agentConfig so that agent-level
     // values override them when present.
-    model: agentConfig.model ?? agencyConfig.model,
-    provider: agentConfig.provider ?? agencyConfig.provider,
-    apiKey: agentConfig.apiKey ?? agencyConfig.apiKey,
-    baseUrl: agentConfig.baseUrl ?? agencyConfig.baseUrl,
+    model,
+    provider,
+    apiKey: agentConfig.apiKey ?? (otherVendor ? undefined : agencyConfig.apiKey),
+    baseUrl: agentConfig.baseUrl ?? (otherVendor ? undefined : agencyConfig.baseUrl),
     ...agentConfig,
     // Tools are merged separately because we want additive merging
     // (agency tools + agent tools) rather than wholesale replacement.

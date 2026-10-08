@@ -1,7 +1,7 @@
 # Guardrails Usage Guide
 
 :::tip See also
-For creating custom guardrails, see [Creating Custom Guardrails](./creating-guardrails). For the underlying safety primitives, see [Safety Primitives](./safety-primitives).
+For creating custom guardrails, see [Creating Custom Guardrails](./CREATING_GUARDRAILS.md). For the underlying safety primitives, see [Safety Primitives](./SAFETY_PRIMITIVES.md).
 :::
 
 Guardrails are safety mechanisms that intercept and evaluate content before it enters or exits the AgentOS pipeline. They enable content filtering, PII redaction, policy enforcement, and mid-stream decision overrides.
@@ -649,7 +649,7 @@ const stats = await guardrails.getViolationStats('agent-123', {
 
 ## Related Documentation
 
-- [Architecture Overview](./ARCHITECTURE.md)
+- [Architecture Overview](../architecture/ARCHITECTURE.md)
 - [Human-in-the-Loop](./HUMAN_IN_THE_LOOP.md)
-- [Agent Communication](./AGENT_COMMUNICATION.md)
+- [Agent Communication](../architecture/AGENT_COMMUNICATION.md)
 - [Safety Primitives](./SAFETY_PRIMITIVES.md)

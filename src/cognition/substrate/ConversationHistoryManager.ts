@@ -129,9 +129,10 @@ export class ConversationHistoryManager {
    * distinguish success from failure.
    *
    * @param toolCallResult - The result from a tool execution.
+   * @returns The tool-role message that was appended.
    */
-  public updateWithToolResult(toolCallResult: ToolCallResult): void {
-    this.conversationHistory.push({
+  public updateWithToolResult(toolCallResult: ToolCallResult): ChatMessage {
+    const message: ChatMessage = {
       role: 'tool',
       tool_call_id: toolCallResult.toolCallId,
       name: toolCallResult.toolName,
@@ -140,7 +141,9 @@ export class ConversationHistoryManager {
         : typeof toolCallResult.output === 'string'
           ? toolCallResult.output
           : JSON.stringify(toolCallResult.output),
-    });
+    };
+    this.conversationHistory.push(message);
+    return message;
   }
 
   /**
@@ -148,7 +151,8 @@ export class ConversationHistoryManager {
    * for injection into the PromptEngine's `PromptComponents`.
    *
    * Each ChatMessage is converted to the richer ConversationMessage format,
-   * preserving tool_calls, role mappings, and content normalization.
+   * preserving tool_calls, thinking blocks, role mappings, and content
+   * normalization.
    *
    * @returns An array of ConversationMessage objects mirroring the current history.
    */
@@ -178,7 +182,9 @@ export class ConversationHistoryManager {
    * (AgentOS internal format).
    *
    * Handles role mapping, content normalization, and tool_calls conversion
-   * (string arguments are parsed to objects).
+   * (string arguments are parsed to objects). An assistant turn's thinking
+   * blocks are kept as they are, because Anthropic rejects a tool-loop
+   * request that does not replay them verbatim.
    *
    * @param chatMsg - The ChatMessage to convert.
    * @returns The equivalent ConversationMessage.
@@ -200,7 +206,12 @@ export class ConversationHistoryManager {
           id: tc.id,
           name: tc.function.name,
           arguments: this.parseToolCallArguments(tc.function.arguments),
+          ...(tc.thoughtSignature ? { thoughtSignature: tc.thoughtSignature } : {}),
         }));
+    }
+
+    if (chatMsg.thinkingBlocks && chatMsg.thinkingBlocks.length > 0) {
+      conversationMessage.thinkingBlocks = [...chatMsg.thinkingBlocks];
     }
 
     return conversationMessage;
@@ -212,7 +223,7 @@ export class ConversationHistoryManager {
    *
    * Messages with roles ERROR or THOUGHT return `null` as they have no
    * meaningful ChatMessage representation. SUMMARY messages are prefixed
-   * with `[Conversation Summary]`.
+   * with `[Conversation Summary]`. Thinking blocks carry over unchanged.
    *
    * @param message - The ConversationMessage to convert.
    * @returns The equivalent ChatMessage, or null if the role is not representable.
@@ -251,8 +262,12 @@ export class ConversationHistoryManager {
               name: toolCall.name,
               arguments: JSON.stringify(toolCall.arguments ?? {}),
             },
+            ...(toolCall.thoughtSignature ? { thoughtSignature: toolCall.thoughtSignature } : {}),
           }))
         : undefined,
+      ...(Array.isArray(message.thinkingBlocks) && message.thinkingBlocks.length > 0
+        ? { thinkingBlocks: [...message.thinkingBlocks] }
+        : {}),
     };
   }
 

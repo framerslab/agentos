@@ -28,7 +28,15 @@
 export interface GlobalDefaultProvider {
   /** Provider identifier (e.g. `"openai"`, `"anthropic"`, `"openrouter"`, `"ollama"`). */
   provider?: string;
-  /** Default model identifier for this provider (e.g. `"gpt-4o-mini"`). */
+  /**
+   * Default text model for this provider (e.g. `"gpt-4o-mini"`), used by
+   * `generateText`, `streamText` and agents. Embedding and image calls use it
+   * too unless it is recognizably a chat model (GPT, Claude, Gemini, Llama and
+   * similar families) sent to the provider's own endpoint, in which case the
+   * provider's default model for the task applies. With a custom endpoint
+   * (`baseUrl` here, inline, or the provider's base-URL env var), and for
+   * `embedText` on Ollama, it is always used.
+   */
   model?: string;
   /** API key used when no inline override is supplied. */
   apiKey?: string;

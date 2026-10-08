@@ -11,12 +11,14 @@ import { IWorkingMemory } from './memory/IWorkingMemory';
 import { IPromptEngine } from '../../core/llm/IPromptEngine';
 import { IRetrievalAugmentor } from '../rag/IRetrievalAugmentor';
 import type { ConversationMessage } from '../../core/conversation/ConversationMessage';
+import type { NormalizedUserFeedback } from './userFeedback';
 // Assuming AIModelProviderManager is correctly exported from this path
 import { AIModelProviderManager } from '../../core/llm/providers/AIModelProviderManager';
 import { IUtilityAI } from '../nlp/ai_utilities/IUtilityAI';
 // Assuming IToolOrchestrator is correctly exported from this path
 import { IToolOrchestrator } from '../../core/tools/IToolOrchestrator';
-import { ModelUsage } from '../../core/llm/providers/IProvider';
+import type { ToolEffectRecord } from '../../core/tools/ITool';
+import type { ChatMessage, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
 
 /**
  * Defines the possible moods a GMI can be in, influencing its behavior and responses.
@@ -86,6 +88,11 @@ export interface ToolCallRequest {
   id: string;
   name: string;
   arguments: Record<string, any>;
+  /**
+   * Gemini thought signature for this call, kept so the next Gemini 3 turn can
+   * replay it. See `ChatMessage.tool_calls[].thoughtSignature`.
+   */
+  thoughtSignature?: string;
 }
 
 /**
@@ -98,6 +105,8 @@ export interface ToolCallResult {
   output: any;
   isError?: boolean;
   errorDetails?: any;
+  /** The call's effects, as the tool's result carried them (see `ToolExecutionResult.effects`). */
+  effects?: ToolEffectRecord[];
 }
 
 /**
@@ -155,6 +164,19 @@ export interface CostAggregator {
 }
 
 
+/** What `GMIBaseConfig.beforeModelCall` receives for one model attempt. */
+export interface GMIModelCallContext {
+  turnId: string;
+  /** 0-based model step within the turn, as on the step's STEP_FINISHED. */
+  stepIndex: number;
+  /** 0 for the primary, n for the n-th fallback hop. */
+  hop: number;
+  providerId: string;
+  modelId: string;
+  /** The attempt's prompt, system messages included. A copy: return the messages to send instead. */
+  messages: ChatMessage[];
+}
+
 /**
  * Base configuration required to initialize a GMI instance.
  * @interface GMIBaseConfig
@@ -175,7 +197,30 @@ export interface GMIBaseConfig {
    * Prevents runaway tool loops in `processTurnStream()`. Defaults to `5`.
    */
   maxToolLoopIterations?: number;
+  /**
+   * Runtime default for the reasoning trace's entry cap when the persona sets no
+   * `reasoningTraceConfig.maxEntries`. Defaults to `500`.
+   */
+  defaultReasoningTraceMaxEntries?: number;
+  /** Runtime default for the characters kept per trace message. Defaults to `1000`. */
+  defaultReasoningTraceMaxMessageLength?: number;
   customSettings?: Record<string, any>;
+  /**
+   * One model layer for the turn. When set, the GMI resolves the hop through it
+   * before it builds the prompt, streams through it, and moves to the next hop
+   * when an attempt fails before any output with a retryable error.
+   * `llmProviderManager` is then a
+   * `GatewayProviderManager` (see `src/api/runtime/gatewayProviderManager.ts`).
+   */
+  completionGateway?: import('../../api/runtime/completionGateway.js').CompletionGateway;
+  /**
+   * Called for every model attempt after its prompt is built and before it is
+   * sent, a fallback hop's rebuilt prompt included. Messages it returns replace
+   * that attempt's prompt and do not enter the history; a hook that throws or
+   * returns an empty list is recorded on the reasoning trace and the built
+   * prompt is sent. `agent({ runtime: 'gmi' })` routes `onBeforeGeneration` here.
+   */
+  beforeModelCall?: (context: GMIModelCallContext) => Promise<ChatMessage[] | void> | ChatMessage[] | void;
 }
 
 /**
@@ -268,6 +313,16 @@ export enum GMIOutputChunkType {
    * The chunk content is `{ ragSources: RagRetrievedChunk[] }`.
    */
   RAG_SOURCES_AVAILABLE = 'rag_sources_available',
+  /**
+   * One per model step that completes: the step's text, finish reason, provider, model, hop and usage.
+   * A step that fails emits none; the turn's ERROR chunk follows. Content: StepFinishedChunkPayload.
+   */
+  STEP_FINISHED = 'step_finished',
+  /**
+   * One per result the GMI records for a call of its own tool round, failures included. Results a host
+   * passes to `handleToolResults()` produce none. Content: ToolResultChunkPayload.
+   */
+  TOOL_RESULT = 'tool_result',
 }
 
 /**
@@ -285,6 +340,42 @@ export interface GMIOutputChunk {
   usage?: ModelUsage;
   errorDetails?: any; // Can hold GMIError.toPlainObject()
   metadata?: Record<string, any>;
+}
+
+/** Content of a STEP_FINISHED chunk. */
+export interface StepFinishedChunkPayload {
+  /** 0-based index of the model step within the turn. */
+  stepIndex: number;
+  /** The step's text: its deltas joined, or the final message content when the provider sent no deltas. */
+  text: string;
+  finishReason: string | null;
+  providerId: string;
+  modelId: string;
+  /** 0 for the primary, n for the n-th fallback hop. */
+  hop: number;
+  usage?: ModelUsage;
+  /** Model id the provider reported serving the step. */
+  responseModel?: string;
+  serviceTier?: string;
+  /** Provider message id of the step's final chunk. */
+  providerMessageId?: string;
+  cacheDiagnostics?: unknown;
+  /**
+   * The step's schema answer when the turn asked for structured output and a completion-gateway hop
+   * returned it as a forced tool call (Anthropic); other hops return the JSON as the step's text.
+   */
+  structuredOutput?: unknown;
+  /** The step's extended-thinking blocks (Anthropic), so a session store can replay the step. */
+  thinkingBlocks?: ThinkingBlock[];
+}
+
+/** Content of a TOOL_RESULT chunk. */
+export interface ToolResultChunkPayload {
+  toolCallId: string;
+  name: string;
+  result: unknown;
+  isError: boolean;
+  errorDetails?: unknown;
 }
 
 /**
@@ -551,6 +642,11 @@ export interface IGMI {
     conversationHistory: ConversationMessage[],
   ): void;
 
+  /** Makes `messages` the whole conversation history. An empty array is authoritative. */
+  replaceHistory?(messages: ConversationMessage[]): void;
+  /** Empties the conversation history. */
+  clearHistory?(): void;
+
   hydrateTurnContext?(
     context: {
       sessionId?: string;
@@ -559,6 +655,27 @@ export interface IGMI {
     },
   ): void;
 
+  /**
+   * Records user feedback on this instance's session: a reasoning-trace entry
+   * and, when cognitive memory is configured, memories scoped to the user.
+   * GMIManager calls it with feedback normalized by `normalizeUserFeedback`.
+   * Optional so that custom IGMI implementations keep compiling.
+   *
+   * @param feedback - Normalized feedback plus the id of the user who sent it.
+   */
+  recordUserFeedback?(feedback: NormalizedUserFeedback & { userId: string }): Promise<void>;
+
+  /**
+   * Sets one personality trait on this instance without mutating the persona
+   * definition shared with other sessions. Used by the self-improvement
+   * `adapt_personality` tool. Optional so that custom IGMI implementations
+   * keep compiling; without it, personality adaptation reports that the
+   * caller could not be resolved.
+   *
+   * @param trait - Trait key, e.g. `openness` or `honesty`.
+   * @param value - New trait value.
+   */
+  setPersonalityTrait?(trait: string, value: number): void;
 
   getReasoningTrace(): Readonly<ReasoningTrace>;
   getWorkingMemorySnapshot(): Promise<Record<string, any>>;

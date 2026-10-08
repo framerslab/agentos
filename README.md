@@ -78,6 +78,14 @@ await session.send('Can you expand on that?'); // remembers context
 
 [Full quickstart](https://docs.agentos.sh/getting-started) * [Examples cookbook](https://docs.agentos.sh/getting-started/examples) * [API reference](https://docs.agentos.sh/api)
 
+**Sessions.** A session keeps the whole conversation whether memory is on or off: each `send()` records its tool calls, their results and the model's signed thinking, and every later request replays them. `stream()` records its turn as the prompt and the final text. History is capped at about 120K tokens by default. Set `history: false` for a stateless session, set `history: { maxTokens }` to change the cap, and call `reseed()` to replace the history with a shorter set of messages you build yourself. `close()` ends a session and frees its history: the next `session(id)` with that id starts empty, and `agent.usage(id)` still reports what the id spent.
+
+```ts
+const stateless = agent({ model, memory: false, history: false }).session('job-1');
+const bounded = agent({ model, history: { maxTokens: 60_000 } }).session('job-2');
+bounded.reseed([{ role: 'user', content: 'compact resume snapshot' }]);
+```
+
 ---
 
 ## Emergent Design
@@ -98,6 +106,34 @@ const aria = await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents
 
 ---
 
+## Generalized Mind Instances (GMIs)
+
+On the full runtime, every session is served by a **GMI**: a persistent agent with its own persona, mood, conversation history and reasoning trace. `agent()` is the lightweight helper; it calls the model with a prompt and keeps session history. A GMI runs a turn loop around the same model, tools, guardrails and cognitive memory:
+
+- **Sentiment → metaprompts.** When a persona enables sentiment tracking, every user turn is scored; sustained frustration or confusion fires recovery metaprompts, and a self-reflection metaprompt re-reads the GMI's mood and task context from evidence.
+- **Mood-weighted memory.** With cognitive memory attached, each exchange is encoded with the GMI's current mood and recalled with emotional congruence in the score.
+- **Self-modification tools.** With `selfImprovement.enabled`, the runtime registers `adapt_personality`, `manage_skills`, `create_workflow` and `self_evaluate`; `adapt_personality` changes the running GMI's traits within bounds, and a mutation store records the changes when a storage adapter and `persistWithDecay` are configured.
+- **A reasoning trace** of the last 500 decisions by default (`reasoningTraceConfig` on the persona or the runtime's default), and persona overlays per session.
+
+```ts
+import { AgentOS, AgentOSResponseChunkType, BUILT_IN_PERSONAS } from '@framers/agentos';
+
+// AgentOS.create() reads persona files from ./personas by default. Personas can
+// also be given inline, as parsed JSON or code-built objects; here, the five the
+// package ships. A custom loader covers any other source.
+const agentos = await AgentOS.create({ personas: BUILT_IN_PERSONAS });
+for await (const chunk of agentos.processRequest({
+  userId: 'user-42', sessionId: 'research-q1', selectedPersonaId: 'v_researcher',
+  textInput: 'Summarize the open incidents from this week.',
+})) {
+  if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA) process.stdout.write(chunk.textDelta);
+}
+```
+
+[What a GMI adds over a plain agent →](https://docs.agentos.sh/architecture/gmi)
+
+---
+
 ## Memory Benchmarks
 
 `gpt-4o` reader, `gpt-4o-2024-08-06` judge, full N=500, single-CLI reproduction with bootstrap 95% CIs and per-benchmark judge-FPR probes.
@@ -114,7 +150,7 @@ const aria = await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents
 | vs. | AgentOS differentiator |
 |---|---|
 | **LangChain / LangGraph** | Cognitive memory ([8 neuroscience-backed mechanisms](https://docs.agentos.sh/features/cognitive-memory)), HEXACO personality, runtime tool forging |
-| **Vercel AI SDK** | Multi-agent teams (6 strategies), 7 vector backends, [guardrails](https://docs.agentos.sh/features/guardrails-architecture), voice/telephony |
+| **Vercel AI SDK** | Multi-agent teams (6 strategies), 7 vector backends, [guardrails](https://docs.agentos.sh/features/guardrails-architecture), voice/telephony, [zero-config prompt caching](https://docs.agentos.sh/features/prompt-caching) |
 | **CrewAI / Mastra** | Unified orchestration (DAGs + graphs + missions), personality-driven routing, **published reproducible numbers on LongMemEval-S (85.6%) and LongMemEval-M (70.2%) with full methodology disclosure** |
 
 [Full framework comparison ->](https://docs.agentos.sh/blog/2026/02/20/agentos-vs-langgraph-vs-crewai)
@@ -126,10 +162,12 @@ const aria = await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents
 | Category | Highlights |
 |---|---|
 | **LLM Providers** | 11 (9 API-key + 2 local CLI): OpenAI, Anthropic, Gemini, Groq, Ollama, OpenRouter, Together, Mistral, xAI, Claude CLI, Gemini CLI. Plus image/video/audio generation providers. |
+| **Prompt Caching** | Zero config on every provider: automatic Anthropic breakpoints incl. multi-turn history (direct + OpenRouter) * OpenAI cache-key routing * normalized cache usage + leak detection * per-call TTL/opt-out * [guide](https://docs.agentos.sh/features/prompt-caching) |
 | **Cognitive Memory** | 8 mechanisms: reconsolidation, retrieval-induced forgetting, involuntary recall, FOK, gist extraction, schema encoding, source decay, emotion regulation |
 | **HEXACO Personality** | 6 traits modulate memory, retrieval bias, response style |
+| **GMI Runtime** | Per-session persona, mood and reasoning trace * sentiment-triggered metaprompts (opt-in per persona) * mood-weighted memory bridge * bounded `adapt_personality` trait changes (opt-in) |
 | **RAG Pipeline** | 7 vector backends * 4 retrieval strategies * GraphRAG * HyDE * Cohere rerank-v3.5 |
-| **Multi-Agent Teams** | 6 coordination strategies * shared memory * inter-agent messaging * HITL gates |
+| **Multi-Agent Teams** | 6 coordination strategies * manager delegation and specialist spawning * panel quorum on the parallel strategy * HITL approval gates |
 | **Orchestration** | `workflow()` DAGs * `AgentGraph` cycles * `mission()` goal-driven planning * checkpointing |
 | **Guardrails** | 5 security tiers * 6 packs (PII, ML classifiers, topicality, code safety, grounding, content policy) |
 | **Emergent Capabilities** | Runtime tool forging * 4 self-improvement tools * tiered promotion * skill export |
@@ -156,7 +194,7 @@ const team = agency({
 const result = await team.generate('Compare TCP vs UDP for game networking.');
 ```
 
-Strategies: `sequential`, `parallel`, `debate`, `review-loop`, `hierarchical`, `graph`. With `hierarchical` + `emergent: { enabled: true }`, the manager forges new sub-agents at runtime. [Multi-agent docs ->](https://docs.agentos.sh/features/agency-api)
+Strategies: `sequential`, `parallel`, `debate`, `review-loop`, `hierarchical`, `graph`. With `hierarchical` + `emergent: { enabled: true }`, the manager forges new sub-agents at runtime. Every roster agent can set its own `provider`, `model`, `apiKey` and `effort`; a `parallel` agency can require a provider quorum (`quorum: { minProviders: 2 }`) before it synthesizes. [Multi-agent docs ->](https://docs.agentos.sh/features/agency-api)
 
 ---
 
@@ -189,11 +227,11 @@ Three layers, highest priority first: inline `apiKey` on the call, a module-leve
 ## API Surfaces
 
 - **`agent()`**: lightweight stateful agent. Prompts, sessions, personality, hooks, tools, memory.
-- **`agency()`**: multi-agent teams + full runtime. Emergent tooling, guardrails, RAG, voice, channels, HITL.
+- **`agency()`**: multi-agent teams built from `agent()` members, with emergent tooling, guardrails, RAG, voice and HITL. It wires no channels; channel adapters run on the full runtime or with `ChannelRouter`.
 - **`generateText()` / `streamText()` / `generateObject()` / `generateImage()` / `generateVideo()` / `generateMusic()` / `performOCR()` / `embedText()`**: low-level multi-modal helpers with native tool calling.
 - **`workflow()` / `AgentGraph` / `mission()`**: three orchestration authoring APIs over one graph runtime.
 
-Provider fallback is an explicit opt-in via `agent({ fallbackProviders: [...] })`; the runtime never silently retries against a different provider unless you configure a chain.
+Provider fallback is on by default for `generateText()`, `streamText()`, `agent()` and `agency()`: when a call fails with a retryable error, it is retried on the other providers whose keys are in the environment. Pass `fallbackProviders: []` to turn it off, or a list to set the chain yourself. The GMIs of the full runtime (`processRequest()`) call their provider without a fallback chain.
 
 [Full API reference ->](https://docs.agentos.sh/api) * [High-Level API guide ->](https://docs.agentos.sh/getting-started/high-level-api)
 
@@ -223,13 +261,15 @@ We use [Conventional Commits](https://www.conventionalcommits.org/). Project gui
 
 | Guide | What |
 |---|---|
-| [Contributing](https://github.com/framerslab/agentos/blob/master/CONTRIBUTING.md) | Dev setup, PR checklist, commit conventions, contribution licensing |
-| [Adding an LLM provider](https://github.com/framerslab/agentos/blob/master/docs/contributing/new-provider.md) | Provider interface, acceptance checklist, vendor-neutrality policy |
+| [Contributing](https://github.com/framerslab/agentos/blob/master/CONTRIBUTING.md) | Development setup, commit and pull request rules, review threads, contribution licensing |
+| [Adding an LLM provider](https://github.com/framerslab/agentos/blob/master/docs/contributing/new-provider.md) | Provider interface, acceptance checklist, sponsorship and disclosure |
+| [Release guide](https://github.com/framerslab/agentos/blob/master/docs/getting-started/RELEASING.md) | How a merge to master becomes an npm release |
+| [Agent instructions](https://github.com/framerslab/agentos/blob/master/AGENTS.md) | Commands and conventions for coding agents |
 | [Maintainers](https://github.com/framerslab/agentos/blob/master/MAINTAINERS.md) | Who reviews and merges changes |
 | [Code of Conduct](https://github.com/framerslab/agentos/blob/master/.github/CODE_OF_CONDUCT.md) | Community standards |
 | [Security Policy](https://github.com/framerslab/agentos/blob/master/.github/SECURITY.md) | Reporting vulnerabilities privately |
 | [Support](https://github.com/framerslab/agentos/blob/master/SUPPORT.md) | Where to get help |
-| [Sponsors](https://github.com/framerslab/agentos/blob/master/SPONSORS.md) | Funding and the vendor-neutral placement policy |
+| [Sponsors](https://github.com/framerslab/agentos/blob/master/SPONSORS.md) | Funding, sponsor placement and disclosure |
 
 ---
 

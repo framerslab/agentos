@@ -432,7 +432,7 @@ The social safety components (`SafetyEngine`, `ActionAuditLog`, `ContentSimilari
 
 ### Implementation references
 
-- [`packages/agentos/src/safety/runtime/CircuitBreaker.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CircuitBreaker.ts) — three-state circuit breaker
-- [`packages/agentos/src/safety/runtime/CostGuard.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts) — cost-cap enforcement with graceful degradation
-- [`packages/agentos/src/safety/runtime/StuckDetector.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/StuckDetector.ts) — watchdog-based stuck-call detection
-- [`packages/agentos/src/core/rate-limiting/`](https://github.com/framerslab/agentos/tree/master/src/core/rate-limiting) — token-bucket + leaky-bucket implementations
+- [`src/safety/runtime/CircuitBreaker.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CircuitBreaker.ts) — three-state circuit breaker
+- [`src/safety/runtime/CostGuard.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts) — cost-cap enforcement with graceful degradation
+- [`src/safety/runtime/StuckDetector.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/StuckDetector.ts) — watchdog-based stuck-call detection
+- [`src/core/rate-limiting/`](https://github.com/framerslab/agentos/tree/master/src/core/rate-limiting) — token-bucket + leaky-bucket implementations

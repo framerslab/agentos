@@ -18,14 +18,14 @@ export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 /**
  * Whether the given Claude model id accepts `output_config.effort`.
  *
- * Allow-by-explicit-family: Opus 4.5/4.6/4.7/4.8, Sonnet 5, Sonnet 4.6, and Fable/Mythos 5.
+ * Allow-by-explicit-family: Opus 4.5/4.6/4.7/4.8, Opus 5, Sonnet 5, Sonnet 4.6, and Fable/Mythos 5.
  * Matches both the bare (`claude-opus-4-8`) and provider-prefixed
  * (`anthropic/claude-opus-4-8`) forms, with no `^` anchor.
  *
  * @param modelId Anthropic-side model id.
  */
 export function modelSupportsEffort(modelId: string): boolean {
-  return /claude-(opus-4-(5|6|7|8)|sonnet-(4-6|5)|fable-5|mythos-5)/i.test(modelId);
+  return /claude-(opus-4-(5|6|7|8)|opus-5|sonnet-(4-6|5)|fable-5|mythos-5)/i.test(modelId);
 }
 
 /** Whether a value is a valid effort level. */
@@ -34,10 +34,32 @@ export function isEffortLevel(v: unknown): v is EffortLevel {
 }
 
 /**
- * OpenAI reasoning models (o-series, GPT-5 family) take `reasoning_effort`
- * (none|low|medium|high|xhigh) — the OpenAI analogue of Anthropic's
- * `output_config.effort`. This maps the agentos effort scale onto it; `max`
- * clamps to `xhigh`, the GPT-5.x ceiling (there is no higher OpenAI tier).
+ * The `output_config.effort` to send to a Claude model, or undefined to omit
+ * it. Each model accepts its own ladder (Anthropic's model docs): Opus 4.5
+ * takes low, medium and high; Opus 4.6 and Sonnet 4.6 add max but not xhigh,
+ * which arrived with Opus 4.7; Opus 4.7 and later, Sonnet 5 and later, Fable
+ * and Mythos take all five. A level the model does not take is sent as
+ * `high` instead of returning 400. Matches bare and provider-prefixed ids,
+ * like {@link modelSupportsEffort}.
+ *
+ * @param modelId Anthropic-side model id.
+ * @param effort Caller-supplied effort value.
+ * @returns The level to send, or undefined for an unsupported model or value.
+ */
+export function resolveAnthropicEffort(modelId: string, effort: unknown): EffortLevel | undefined {
+  if (!isEffortLevel(effort) || !modelSupportsEffort(modelId)) return undefined;
+  if (/claude-opus-4-5/i.test(modelId) && (effort === 'xhigh' || effort === 'max')) return 'high';
+  if (/claude-(opus|sonnet)-4-6/i.test(modelId) && effort === 'xhigh') return 'high';
+  return effort;
+}
+
+/**
+ * OpenAI reasoning models (o-series, GPT-5 and GPT-6 families) take
+ * `reasoning_effort` (none|low|medium|high|xhigh) — the OpenAI analogue of
+ * Anthropic's `output_config.effort`. This maps the agentos effort scale onto
+ * it; `max` clamps to `xhigh`, the proven Chat Completions ceiling for both
+ * families (a real `max` tier exists, but only on `/v1/responses` — see
+ * {@link mapEffortToOpenAiResponsesEffort}).
  * Returns undefined for unknown / empty / non-string values so the request
  * payload omits `reasoning_effort` entirely (the model then runs at its default).
  */
@@ -59,26 +81,133 @@ export function mapEffortToOpenAiReasoningEffort(effort: unknown): string | unde
  *
  * Live-probed 2026-07-08: `POST /v1/responses {model:'gpt-5.5', tools:[…],
  * reasoning:{effort:'xhigh'}}` → HTTP 200 (status: completed). gpt-5.5 (and its
- * point/`-pro` variants) accept it. The codegen frontier-fallback chain uses
- * gpt-5.5 today; widen the allow-list only after probing the new id.
+ * point/`-pro` variants) accept it. Live-probed 2026-07-14: `gpt-5.6` and
+ * `gpt-5.6-sol` with `reasoning:{effort:'xhigh'}` → HTTP 200 (status:
+ * completed) — the 5.6 family joins the allow-list. Live-probed 2026-09-10:
+ * `gpt-6-astra` with `reasoning:{effort:'xhigh'}` → HTTP 200 (status:
+ * completed) — GPT-6 joins the allow-list. Widen further only after
+ * probing the new id.
+ *
+ * Live-probed 2026-09-30: `POST /v1/responses` with function tools and
+ * `reasoning: {effort: 'xhigh'}` returned HTTP 200 with a `function_call`
+ * output on `gpt-6-sol`, `gpt-6-luna` and `gpt-6-astra`. OpenAI's 2026-09-29
+ * changelog lists reasoning effort `low` through `max` for `gpt-6.1-sol` on
+ * `/v1/responses` and says it rejects `none` and `minimal`, which the agentos
+ * effort scale never produces.
  */
 export function modelAcceptsXhighResponsesEffort(modelId: string): boolean {
-  return /^gpt-5\.5/i.test(modelId);
+  return /^(gpt-5\.[56]|gpt-6-(astra|sol|luna)|gpt-6\.1-sol)/i.test(modelId);
+}
+
+/**
+ * Responses-API models whose `reasoning.effort` accepts `'max'` — the tier
+ * ABOVE `xhigh`, and a Responses-API-only surface (Chat Completions rejects
+ * `max` for the same family; see {@link CHAT_MAX_EFFORT_MODELS} below).
+ * Live-probed per entry — record request shape, status, response summary,
+ * date, and the exact model alias in this comment when adding one.
+ *
+ * 2026-08-06 probe (POST /v1/responses, `reasoning: {effort: 'max'}`,
+ * max_output_tokens 2000): HTTP 200 `status: completed` on `gpt-5.6` (bare
+ * alias), on `gpt-5.6-sol`, and on `gpt-5.6-sol` WITH function tools
+ * attached (the agentic shape). Boundary probes the same day: `'ultra'` is
+ * rejected on both aliases (`Invalid value: 'ultra'. Supported values are:
+ * 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'.`), and
+ * chat.completions still 400s on `max` for the family. Widen only after a
+ * fresh Responses probe returns HTTP 200 on the new id.
+ *
+ * 2026-09-10 probe (POST /v1/responses, `reasoning: {effort: 'max'}`,
+ * max_output_tokens 16): HTTP 200 `status: completed` on `gpt-6-astra`, and
+ * also on `gpt-5.6-terra` and `gpt-5.6-luna` — the two shipped 5.6 siblings
+ * that the 2026-08-06 sweep never probed. All three join the list. Note the
+ * asymmetry this preserves: the same ids reject `'max'` on chat.completions
+ * (see {@link CHAT_MAX_EFFORT_MODELS}), so `max` stays a Responses-only tier.
+ *
+ * 2026-09-30 probe (POST /v1/responses with function tools,
+ * `reasoning: {effort: 'max'}`): HTTP 200 with a `function_call` output on
+ * `gpt-6-sol`, `gpt-6-luna` and `gpt-6-astra`, so Sol and Luna join Astra.
+ * `gpt-6.1-sol` joins on OpenAI's 2026-09-29 changelog, which lists `max`
+ * among its `/v1/responses` efforts.
+ */
+const RESPONSES_MAX_EFFORT_MODELS: ReadonlySet<string> = new Set([
+  'gpt-5.6', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
+  'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6.1-sol',
+]);
+
+/**
+ * Whether `modelId` is on the probe-verified Responses `max` allow-list.
+ * EXACT ids only — a prefix match would auto-admit unprobed siblings
+ * (`gpt-5.6-luna`, `gpt-5.6-terra`, a future `gpt-5.6-mini`) and hand them a
+ * `max` their surface may reject, recreating the 400 this mapper exists to
+ * prevent. Probe the new id on /v1/responses first, then add it verbatim.
+ */
+export function modelAcceptsMaxResponsesEffort(modelId: string): boolean {
+  return RESPONSES_MAX_EFFORT_MODELS.has(modelId.toLowerCase());
 }
 
 /**
  * Map the agentos effort scale onto OpenAI's `/v1/responses` `reasoning.effort`
- * for `modelId`. Identical to {@link mapEffortToOpenAiReasoningEffort} EXCEPT it
- * caps `xhigh` → `high` for any model NOT on
- * {@link modelAcceptsXhighResponsesEffort} — a model-aware guard so a request
+ * for `modelId`. Identical to {@link mapEffortToOpenAiReasoningEffort} EXCEPT:
+ * `max` passes through as the real `'max'` tier on models probe-verified via
+ * {@link modelAcceptsMaxResponsesEffort} (elsewhere it clamps to `'xhigh'` as
+ * before), and `xhigh` caps to `high` for any model NOT on
+ * {@link modelAcceptsXhighResponsesEffort} — model-aware guards so a request
  * for maximum depth degrades one step instead of 400ing the whole Responses
- * call on a model that rejects `xhigh`.
+ * call on a model that rejects the tier.
  */
 export function mapEffortToOpenAiResponsesEffort(
   modelId: string,
   effort: unknown,
 ): string | undefined {
+  if (effort === 'max' && modelAcceptsMaxResponsesEffort(modelId)) return 'max';
   const base = mapEffortToOpenAiReasoningEffort(effort);
   if (base === undefined) return undefined;
   return base === 'xhigh' && !modelAcceptsXhighResponsesEffort(modelId) ? 'high' : base;
+}
+
+/**
+ * Chat-completions models whose `reasoning_effort` accepts `'max'`.
+ * Live-probed per entry — record request shape, status, response summary,
+ * date, and the exact model alias in this comment when adding one.
+ *
+ * 2026-07-20 probe (chat.completions, top-level `reasoning_effort: 'max'`,
+ * max_completion_tokens 16): DEFINITIVE REFUSAL on BOTH `gpt-5.6` and
+ * `gpt-5.6-sol` — HTTP 400 `invalid_request_error`,
+ * `code: 'unsupported_value'`, `param: 'reasoning_effort'`, message
+ * enumerating the supported set: `'none', 'low', 'medium', 'high', 'xhigh'`.
+ * `xhigh` is therefore the PROVEN hard ceiling for the gpt-5.6 family on
+ * Chat Completions (matching the 2026-07-14 xhigh probe above; the model
+ * catalog's `max` listing does not apply to this API surface). The list
+ * stays empty until a future family probe returns HTTP 200.
+ *
+ * 2026-09-10 probe (chat.completions, `gpt-6-astra`, top-level
+ * `reasoning_effort: 'max'`, max_completion_tokens 16): REFUSED — HTTP 400
+ * `unsupported_value`, "Unsupported value: 'reasoning_effort' does not
+ * support 'max' with this model. Supported values are: 'low', 'medium',
+ * 'high', and 'xhigh'." GPT-6 does NOT join this list. This directly
+ * contradicts the published model page and several third-party guides, which
+ * list `max` among the model's effort levels without noting that it is
+ * Responses-only — do not re-add `gpt-6-astra` here on the strength of a doc
+ * page; only a fresh HTTP 200 chat probe justifies it. (`'none'` is likewise
+ * unsupported on this family, per the same probe run.)
+ */
+const CHAT_MAX_EFFORT_MODELS: readonly string[] = [];
+
+/**
+ * Model-aware Chat `reasoning_effort` mapping (spec batch-1 C3): `max`
+ * stays `'max'` on probe-verified models, else falls back to the standard
+ * mapping (which clamps `max` → `'xhigh'`).
+ */
+export function mapEffortToOpenAiReasoningEffortForModel(
+  effort: unknown,
+  modelId: string,
+): string | undefined {
+  const base = mapEffortToOpenAiReasoningEffort(effort);
+  if (
+    effort === 'max'
+    && base === 'xhigh'
+    && CHAT_MAX_EFFORT_MODELS.some((f) => modelId.toLowerCase().startsWith(f))
+  ) {
+    return 'max';
+  }
+  return base;
 }

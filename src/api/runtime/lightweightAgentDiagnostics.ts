@@ -4,6 +4,7 @@ import {
   BASE_AGENT_CONFIG_CAPABILITY_CONTRACT,
   CAPABILITY_KEYS,
   type CapabilityKey,
+  type CapabilitySurface,
 } from './capabilityContract.js';
 
 function isMeaningfullyConfigured(value: unknown): boolean {
@@ -21,13 +22,24 @@ function isMeaningfullyConfigured(value: unknown): boolean {
   return true;
 }
 
+/**
+ * The config fields that are set but that `surface` accepts without enforcing
+ * (`accepted_but_deferred` in {@link BASE_AGENT_CONFIG_CAPABILITY_CONTRACT}).
+ */
+export function getDeferredCapabilities(
+  config: Partial<BaseAgentConfig>,
+  surface: CapabilitySurface,
+): CapabilityKey[] {
+  return CAPABILITY_KEYS.filter((key) =>
+    BASE_AGENT_CONFIG_CAPABILITY_CONTRACT[key][surface] === 'accepted_but_deferred'
+    && isMeaningfullyConfigured(config[key]),
+  );
+}
+
 export function getDeferredLightweightAgentCapabilities(
   config: Partial<BaseAgentConfig>,
 ): CapabilityKey[] {
-  return CAPABILITY_KEYS.filter((key) =>
-    BASE_AGENT_CONFIG_CAPABILITY_CONTRACT[key].agent === 'accepted_but_deferred'
-    && isMeaningfullyConfigured(config[key]),
-  );
+  return getDeferredCapabilities(config, 'agent');
 }
 
 export function warnOnDeferredLightweightAgentCapabilities(

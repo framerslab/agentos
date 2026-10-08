@@ -16,7 +16,7 @@ describe('CartesiaBatchTTS', () => {
     vi.unstubAllGlobals();
   });
 
-  it('sends Bearer auth + pinned version header + sonic-3.5 default', async () => {
+  it('sends Bearer auth + pinned version header + the dated sonic-3.6 snapshot by default', async () => {
     const tts = new CartesiaBatchTTS({ apiKey: 'sk_car_x', voiceId: 'v1' });
     await tts.synthesize('hello');
     const [url, init] = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
@@ -25,7 +25,7 @@ describe('CartesiaBatchTTS', () => {
     expect(headers.Authorization).toBe('Bearer sk_car_x');
     expect(headers['Cartesia-Version']).toBe(CARTESIA_VERSION);
     const body = JSON.parse(init.body as string);
-    expect(body.model_id).toBe('sonic-3.5');
+    expect(body.model_id).toBe('sonic-3.6-2026-08-27');
     expect(body.transcript).toBe('hello');
     expect(body.voice).toEqual({ mode: 'id', id: 'v1' });
     expect(body.output_format.container).toBe('mp3');

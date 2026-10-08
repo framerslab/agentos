@@ -81,12 +81,86 @@ export function modelSupportsStrictToolUse(modelId: string): boolean {
  * `not` / `contains` / `unevaluatedProperties`) — a FIELD literally named
  * `additionalProperties` inside `properties` must not trip the check.
  *
+ * The check also applies Anthropic's explicit complexity limits (see
+ * {@link STRICT_MAX_UNION_TYPED_PARAMETERS}): a schema over them 400s on every
+ * attempt, so it degrades to the non-strict forced tool too.
+ *
  * @param inputSchema Lowered JSON Schema destined for `tool.input_schema`.
  * @returns `true` when no reachable node carries a non-`false`
- *   `additionalProperties`; `false` otherwise (caller must omit `strict`).
+ *   `additionalProperties` and the schema is within the complexity limits;
+ *   `false` otherwise (caller must omit `strict`).
  */
 export function toolInputSchemaSupportsStrict(inputSchema: unknown): boolean {
-  return nodeSupportsStrict(inputSchema, 0);
+  if (!nodeSupportsStrict(inputSchema, 0)) return false;
+  const counts = { unionTyped: 0, optional: 0 };
+  countStrictParameters(inputSchema, 0, counts);
+  return (
+    counts.unionTyped <= STRICT_MAX_UNION_TYPED_PARAMETERS &&
+    counts.optional <= STRICT_MAX_OPTIONAL_PARAMETERS
+  );
+}
+
+/**
+ * Anthropic's explicit limit on parameters that use `anyOf` or a type array
+ * (`"type": ["string", "null"]`), summed over every strict schema in a request:
+ * https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+ * ("Schema complexity limits"). The forced structured-output tool is the only
+ * strict schema in its request, so its own count is the request's total.
+ */
+export const STRICT_MAX_UNION_TYPED_PARAMETERS = 16;
+
+/**
+ * Anthropic's explicit limit on parameters left out of `required`, summed over
+ * every strict schema in a request (same page as
+ * {@link STRICT_MAX_UNION_TYPED_PARAMETERS}).
+ */
+export const STRICT_MAX_OPTIONAL_PARAMETERS = 24;
+
+/**
+ * Count, below the root, the nodes that use `anyOf` / `oneOf` or a type array,
+ * and the object properties left out of `required`. It walks the positions
+ * {@link nodeSupportsStrict} walks. A node reached twice (a shared `$defs`
+ * entry) counts once per position, which can only over-count, and an
+ * over-count only costs strict mode, never the request.
+ */
+function countStrictParameters(
+  node: unknown,
+  depth: number,
+  counts: { unionTyped: number; optional: number },
+): void {
+  if (depth > MAX_STRICT_SCAN_DEPTH) return;
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+  const schema = node as Record<string, unknown>;
+  if (
+    depth > 0 &&
+    (Array.isArray(schema.type) || Array.isArray(schema.anyOf) || Array.isArray(schema.oneOf))
+  ) {
+    counts.unionTyped += 1;
+  }
+  const properties = schema.properties;
+  if (properties && typeof properties === 'object' && !Array.isArray(properties)) {
+    const required = new Set(Array.isArray(schema.required) ? (schema.required as unknown[]) : []);
+    for (const name of Object.keys(properties as Record<string, unknown>)) {
+      if (!required.has(name)) counts.optional += 1;
+    }
+  }
+  const subschemas: unknown[] = [];
+  for (const key of ['properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas'] as const) {
+    const map = schema[key];
+    if (map && typeof map === 'object' && !Array.isArray(map)) {
+      subschemas.push(...Object.values(map as Record<string, unknown>));
+    }
+  }
+  for (const key of ['items', 'prefixItems', 'anyOf', 'oneOf', 'allOf'] as const) {
+    const value = schema[key];
+    if (Array.isArray(value)) subschemas.push(...value);
+    else if (value && typeof value === 'object') subschemas.push(value);
+  }
+  for (const key of ['if', 'then', 'else', 'not', 'contains', 'unevaluatedProperties'] as const) {
+    const value = schema[key];
+    if (value && typeof value === 'object' && !Array.isArray(value)) subschemas.push(value);
+  }
+  for (const sub of subschemas) countStrictParameters(sub, depth + 1, counts);
 }
 
 /** Defensive recursion bound — lowered schemas are shallow trees; anything

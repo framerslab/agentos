@@ -16,6 +16,8 @@ vi.stubGlobal(
 
 import {
   OPENROUTER_ONLY_PARAM_KEYS,
+  stripForeignVendorParams,
+  stripGeminiOnlyParams,
   stripOpenRouterOnlyParams,
 } from '../openrouter-only-params';
 import { AnthropicProvider } from '../implementations/AnthropicProvider';
@@ -74,6 +76,31 @@ describe('stripOpenRouterOnlyParams', () => {
       'route',
       'transforms',
     ]);
+  });
+});
+
+describe('Gemini request fields', () => {
+  const GEMINI_AND_ROUTING = {
+    ...LEAKY_PARAMS,
+    thinkingConfig: { thinkingBudget: 256 },
+    topK: 32,
+    safetySettings: [],
+    generationConfig: { candidateCount: 1 },
+  };
+
+  it('stripForeignVendorParams drops both vendors\' fields and keeps the rest', () => {
+    expect(stripForeignVendorParams(GEMINI_AND_ROUTING)).toEqual({ metadata: { user_id: 'u1' } });
+  });
+
+  it('stripGeminiOnlyParams keeps OpenRouter\'s routing controls for OpenRouter', () => {
+    expect(stripGeminiOnlyParams(GEMINI_AND_ROUTING)).toEqual(LEAKY_PARAMS);
+  });
+
+  it('never mutates the caller\'s object and yields undefined when nothing survives', () => {
+    const params = { ...GEMINI_AND_ROUTING };
+    void stripForeignVendorParams(params);
+    expect(params).toEqual(GEMINI_AND_ROUTING);
+    expect(stripForeignVendorParams({ topK: 1, route: 'fallback' })).toBeUndefined();
   });
 });
 

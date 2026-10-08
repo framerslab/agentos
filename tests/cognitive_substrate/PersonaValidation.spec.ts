@@ -1,6 +1,7 @@
 ﻿import { describe, it, expect } from 'vitest';
-import { IPersonaDefinition } from '../../src/cognition/substrate/personas/IPersonaDefinition.js';
+import { IPersonaDefinition, MetaPromptDefinition } from '../../src/cognition/substrate/personas/IPersonaDefinition.js';
 import { validatePersona, validatePersonas, personaIsValid, allPersonasValid, formatAggregateReport } from '../../src/cognition/substrate/personas/PersonaValidation.js';
+import { ALL_METAPROMPT_PRESETS } from '../../src/cognition/substrate/personas/metaprompt_presets.js';
 
 function makeBasePersona(overrides: Partial<IPersonaDefinition> = {}): IPersonaDefinition {
   return {
@@ -117,5 +118,31 @@ describe('PersonaValidation', () => {
       tokenEstimator: (text: string) => Math.ceil(text.length / 10) // simplistic 10 chars per token
     });
     expect(res.issues.some(issue => issue.code === 'system_prompt_too_many_tokens')).toBe(true);
+  });
+
+  it.each([
+    ['unsupported_metaprompt_trigger', { type: 'pre_response' }],
+    ['invalid_metaprompt_interval', { type: 'turn_interval', intervalTurns: 0 }],
+    ['unknown_metaprompt_event', { type: 'event_based', eventName: 'voice_command_received' }],
+  ])('warns with %s about a metaprompt trigger that never fires', async (code, trigger) => {
+    const p = makeBasePersona({
+      metaPrompts: [{ id: 'mp', promptTemplate: 'x', trigger: trigger as unknown as MetaPromptDefinition['trigger'] }],
+    });
+    const res = await validatePersona(p);
+    expect(res.issues.filter(issue => issue.field === 'metaPrompts[0].trigger')).toEqual([
+      expect.objectContaining({ severity: 'warning', code }),
+    ]);
+  });
+
+  it('accepts the supported metaprompt triggers, including every preset', async () => {
+    const p = makeBasePersona({
+      metaPrompts: [
+        ...ALL_METAPROMPT_PRESETS,
+        { id: 'periodic', promptTemplate: 'x', trigger: { type: 'turn_interval', intervalTurns: 5 } },
+        { id: 'on_demand', promptTemplate: 'x', trigger: { type: 'manual' } },
+      ],
+    });
+    const res = await validatePersona(p);
+    expect(res.issues.filter(issue => issue.field?.startsWith('metaPrompts'))).toEqual([]);
   });
 });

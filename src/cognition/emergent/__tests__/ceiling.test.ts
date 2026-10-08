@@ -1,0 +1,166 @@
+import { describe, it, expect } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { checkRequest, narrowToForge, resolveCeiling } from '../ceiling.js';
+
+const storage = { hasStorage: true };
+
+describe('resolveCeiling', () => {
+  it('applies the defaults and keeps only the keys given', () => {
+    const ceiling = resolveCeiling({ fetch: { domains: ['API.example.com'] }, crypto: {} }, undefined, storage);
+    expect(ceiling.fetch).toEqual({
+      domains: ['api.example.com'],
+      methods: ['GET', 'HEAD'],
+      maxResponseBytes: 5 * 1024 * 1024,
+      maxRedirects: 5,
+      timeoutMs: 30_000,
+    });
+    expect(ceiling['fs.read']).toBeUndefined();
+    expect(ceiling.crypto).toBe(true);
+    expect(ceiling.audit).toEqual({ store: 'storage', content: 'digest' });
+  });
+
+  it('an empty list grants nothing', () => {
+    const ceiling = resolveCeiling({ fetch: { domains: [] }, 'fs.read': { roots: [] } }, undefined, storage);
+    expect(ceiling.fetch).toBeUndefined();
+    expect(ceiling['fs.read']).toBeUndefined();
+  });
+
+  it('names each failure with its key', () => {
+    const cases: Array<[unknown, string]> = [
+      [{ 'fs.write': { roots: ['/tmp'] } }, 'unknown_capability: capabilities.fs.write'],
+      [{ 'fs.read': { roots: ['relative/dir'] } }, 'root_not_absolute: capabilities.fs.read.roots'],
+      [{ fetch: { domains: '*', methods: ['POST'] } }, 'method_not_allowed: capabilities.fetch.methods'],
+      [{ fetch: { domains: ['https://a.example/'] } }, 'invalid_domain: capabilities.fetch.domains'],
+      [{ fetch: { domains: '*', maxRedirects: -1 } }, 'invalid_bound: capabilities.fetch.maxRedirects'],
+    ];
+    for (const [capabilities, message] of cases) {
+      expect(() => resolveCeiling(capabilities as never, undefined, storage)).toThrow(message);
+    }
+  });
+
+  it('names the key of an audit value, a list of the wrong shape, and a bound out of range', () => {
+    const cases: Array<[unknown, unknown, string]> = [
+      [{ crypto: {} }, { store: 'storge' }, 'invalid_audit: audit.store'],
+      [{ crypto: {} }, { content: 'hash' }, 'invalid_audit: audit.content'],
+      [{ fetch: {} }, undefined, 'invalid_domain: capabilities.fetch.domains'],
+      [{ fetch: { domains: 'api.example.com' } }, undefined, 'invalid_domain: capabilities.fetch.domains'],
+      [{ fetch: { domains: ['api.example.com', 7] } }, undefined, 'invalid_domain: capabilities.fetch.domains'],
+      [{ 'fs.read': {} }, undefined, 'root_not_absolute: capabilities.fs.read.roots'],
+      [{ 'fs.read': { roots: '/srv' } }, undefined, 'root_not_absolute: capabilities.fs.read.roots'],
+      [{ 'fs.read': { roots: ['/srv', null] } }, undefined, 'root_not_absolute: capabilities.fs.read.roots'],
+      [{ fetch: { domains: '*', methods: 'GET' } }, undefined, 'method_not_allowed: capabilities.fetch.methods'],
+      // Node keeps a timer delay of at most 2^31 - 1 ms: above it a timeout
+      // fires at once, and from 2^32 AbortSignal.timeout throws.
+      [{ fetch: { domains: '*', timeoutMs: 3_000_000_000 } }, undefined, 'invalid_bound: capabilities.fetch.timeoutMs'],
+      [{ 'fs.read': { roots: ['/srv'], timeoutMs: 2 ** 32 } }, undefined, 'invalid_bound: capabilities.fs.read.timeoutMs'],
+      [{ fetch: { domains: '*', maxResponseBytes: 2 ** 53 } }, undefined, 'invalid_bound: capabilities.fetch.maxResponseBytes'],
+      [{ 'fs.read': { roots: ['/srv'], maxBytesPerRead: 1e21 } }, undefined, 'invalid_bound: capabilities.fs.read.maxBytesPerRead'],
+      // A capability an empty list removes is validated all the same.
+      [{ fetch: { domains: [], timeoutMs: 0 } }, undefined, 'invalid_bound: capabilities.fetch.timeoutMs'],
+    ];
+    for (const [capabilities, audit, message] of cases) {
+      expect(() => resolveCeiling(capabilities as never, audit as never, storage)).toThrow(message);
+    }
+
+    // The largest bounds are accepted.
+    const widest = resolveCeiling(
+      { fetch: { domains: '*', timeoutMs: 2_147_483_647, maxResponseBytes: Number.MAX_SAFE_INTEGER } },
+      { store: 'none', content: 'full' },
+      storage,
+    );
+    expect(widest.fetch).toMatchObject({ timeoutMs: 2_147_483_647, maxResponseBytes: Number.MAX_SAFE_INTEGER });
+    expect(widest.audit).toEqual({ store: 'none', content: 'full' });
+  });
+
+  it('a ceiling that records needs storage, and one that does not, does not', () => {
+    expect(() => resolveCeiling({ crypto: {} }, undefined, { hasStorage: false })).toThrow(
+      'audit_needs_storage: audit.store',
+    );
+    expect(resolveCeiling({ crypto: {} }, { store: 'none' }, { hasStorage: false }).audit.store).toBe('none');
+  });
+});
+
+describe('checkRequest', () => {
+  const ceiling = resolveCeiling({ 'fs.read': { roots: ['/srv/data'] }, crypto: {} }, undefined, storage);
+
+  it('allows a request inside the ceiling', () => {
+    expect(checkRequest(['fs.read', 'crypto'], ceiling)).toEqual({ ok: true });
+  });
+
+  it('refuses a request outside it, naming what the ceiling allows', () => {
+    expect(checkRequest(['fetch', 'crypto'], ceiling)).toEqual({
+      ok: false,
+      refused: ['fetch'],
+      allowed: ['fs.read', 'crypto'],
+    });
+  });
+});
+
+describe('narrowToForge', () => {
+  const ceiling = resolveCeiling(
+    { fetch: { domains: ['a.example', 'b.example'] }, 'fs.read': { roots: ['/srv/data'] } },
+    undefined,
+    storage,
+  );
+
+  it('a forge with every domain is wider than a list', () => {
+    expect(() => narrowToForge(ceiling, { fetchDomainAllowlist: [], fsReadRoots: ['/srv/data'] })).toThrow(
+      'forge_wider_than_ceiling: sandboxForge.fetchDomainAllowlist',
+    );
+  });
+
+  it('a narrower forge narrows the ceiling', () => {
+    const narrowed = narrowToForge(ceiling, { fetchDomainAllowlist: ['a.example'], fsReadRoots: ['/srv/data/sub'] });
+    expect(narrowed.fetch?.domains).toEqual(['a.example']);
+    expect(narrowed['fs.read']?.roots).toEqual(['/srv/data/sub']);
+  });
+
+  it('disjoint lists never widen', () => {
+    expect(() => narrowToForge(ceiling, { fetchDomainAllowlist: ['c.example'], fsReadRoots: ['/srv/data'] })).toThrow(
+      'forge_wider_than_ceiling',
+    );
+    expect(() => narrowToForge(ceiling, { fetchDomainAllowlist: ['a.example'], fsReadRoots: ['/etc'] })).toThrow(
+      'forge_wider_than_ceiling: sandboxForge.fsReadRoots',
+    );
+  });
+
+  it('a forge with no read roots removes fs.read: an empty intersection grants nothing', () => {
+    const narrowed = narrowToForge(ceiling, { fetchDomainAllowlist: ['a.example'], fsReadRoots: [] });
+    expect(narrowed['fs.read']).toBeUndefined();
+    expect(checkRequest(['fs.read'], narrowed)).toEqual({ ok: false, refused: ['fs.read'], allowed: ['fetch'] });
+  });
+
+  it('compares read roots after symlinks are resolved: a forge root that links out of a ceiling root is wider', () => {
+    const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ceiling-roots-')));
+    const data = path.join(base, 'data');
+    const release = path.join(base, 'releases', 'v42');
+    fs.mkdirSync(path.join(data, 'v1'), { recursive: true });
+    fs.mkdirSync(release, { recursive: true });
+    // A link inside the ceiling root to a directory outside it, a link that
+    // stays inside it, and the ceiling root reached through a link.
+    fs.symlinkSync(release, path.join(data, 'current'));
+    fs.symlinkSync(path.join(data, 'v1'), path.join(data, 'latest'));
+    fs.symlinkSync(data, path.join(base, 'data-link'));
+    const ceiling = resolveCeiling({ 'fs.read': { roots: [data] } }, undefined, storage);
+
+    expect(() =>
+      narrowToForge(ceiling, { fetchDomainAllowlist: [], fsReadRoots: [path.join(data, 'current')] }),
+    ).toThrow('forge_wider_than_ceiling: sandboxForge.fsReadRoots');
+
+    // A link that resolves inside the ceiling narrows it, kept as the forge names it.
+    const inside = narrowToForge(ceiling, { fetchDomainAllowlist: [], fsReadRoots: [path.join(data, 'latest')] });
+    expect(inside['fs.read']?.roots).toEqual([path.join(data, 'latest')]);
+
+    // The ceiling's roots are resolved too.
+    const throughLink = resolveCeiling({ 'fs.read': { roots: [path.join(base, 'data-link')] } }, undefined, storage);
+    const under = narrowToForge(throughLink, { fetchDomainAllowlist: [], fsReadRoots: [path.join(data, 'v1')] });
+    expect(under['fs.read']?.roots).toEqual([path.join(data, 'v1')]);
+  });
+
+  it('the forge options of a capability the ceiling does not grant are not compared', () => {
+    const cryptoOnly = resolveCeiling({ crypto: {} }, undefined, storage);
+    expect(narrowToForge(cryptoOnly, { fetchDomainAllowlist: [], fsReadRoots: [process.cwd()] }).crypto).toBe(true);
+  });
+});

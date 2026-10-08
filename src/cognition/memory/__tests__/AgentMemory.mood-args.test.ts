@@ -2,21 +2,17 @@ import { describe, it, expect, vi } from 'vitest';
 import { AgentMemory } from '../AgentMemory.js';
 
 /**
- * Build an AgentMemory whose private `manager` is a spy object so we can assert
- * the exact call shape AgentMemory forwards. Mirrors the private-field
- * injection pattern used across the memory __tests__ suite.
+ * Build an initialized AgentMemory around a manager spy so we can assert the
+ * exact call shape AgentMemory forwards.
  */
 function cognitiveMemoryWithManagerSpy() {
-  const mem = Object.create(AgentMemory.prototype) as AgentMemory;
   const manager = {
     observe: vi.fn().mockResolvedValue(null),
     retrieve: vi.fn().mockResolvedValue({ retrieved: [], partiallyRetrieved: [], diagnostics: {} }),
     assembleForPrompt: vi.fn().mockResolvedValue({ contextText: '', retrievedTraces: [] }),
     encode: vi.fn().mockResolvedValue({ id: 'x' }),
   };
-  (mem as unknown as { manager: unknown }).manager = manager;
-  (mem as unknown as { standalone: unknown }).standalone = undefined;
-  (mem as unknown as { _initialized: boolean })._initialized = true;
+  const mem = AgentMemory.wrap(manager as never);
   return { mem, manager };
 }
 
@@ -51,12 +47,12 @@ describe('AgentMemory.getContext mood arg', () => {
   it('omitted → NEUTRAL passed to assembleForPrompt', async () => {
     const { mem, manager } = cognitiveMemoryWithManagerSpy();
     await mem.getContext('q', { tokenBudget: 1000 });
-    expect(manager.assembleForPrompt).toHaveBeenCalledWith('q', 1000, { valence: 0, arousal: 0, dominance: 0 });
+    expect(manager.assembleForPrompt).toHaveBeenCalledWith('q', 1000, { valence: 0, arousal: 0, dominance: 0 }, { maxTierRank: undefined });
   });
   it('supplied currentMood passes through; default budget 2000 preserved', async () => {
     const { mem, manager } = cognitiveMemoryWithManagerSpy();
     await mem.getContext('q', { currentMood: { valence: 0.4, arousal: 0.2, dominance: 0 } });
-    expect(manager.assembleForPrompt).toHaveBeenCalledWith('q', 2000, { valence: 0.4, arousal: 0.2, dominance: 0 });
+    expect(manager.assembleForPrompt).toHaveBeenCalledWith('q', 2000, { valence: 0.4, arousal: 0.2, dominance: 0 }, { maxTierRank: undefined });
   });
 });
 

@@ -810,29 +810,30 @@ const CHEAP_MODELS: Record<string, string> = {
   openai: 'gpt-4o-mini',
   anthropic: 'claude-haiku-4-5-20251001',
   openrouter: 'openai/gpt-4o-mini',
-  gemini: 'gemini-2.0-flash',
+  // gemini-2.0-flash and gemini-2.0-flash-lite are retired (probed 2026-09-29).
+  gemini: 'gemini-2.5-flash-lite',
   groq: 'gemma2-9b-it',
-  together: 'meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo',
+  together: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
   mistral: 'mistral-small-latest',
   xai: 'grok-2-mini',
   ollama: 'llama3.2',
   'claude-code-cli': 'claude-haiku-4-5-20251001',
-  'gemini-cli': 'gemini-2.0-flash-lite',
+  'gemini-cli': 'gemini-2.5-flash-lite',
 };
 
 /** Provider → strong model mapping for T2/T3 deep generation. */
 const STRONG_MODELS: Record<string, string> = {
   openai: 'gpt-4o',
-  anthropic: 'claude-sonnet-5',
+  anthropic: 'claude-sonnet-4-6',
   openrouter: 'openai/gpt-4o',
   gemini: 'gemini-2.5-flash',
   groq: 'llama-3.3-70b-versatile',
-  together: 'meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo',
+  together: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
   mistral: 'mistral-large-latest',
   xai: 'grok-2',
   ollama: 'llama3.2',
-  'claude-code-cli': 'claude-sonnet-5',
-  'gemini-cli': 'gemini-2.5-flash',
+  'claude-code-cli': 'claude-sonnet-4-6',
+  'gemini-cli': 'gemini-3.5-flash',
 };
 
 export const DEFAULT_QUERY_ROUTER_CONFIG = {

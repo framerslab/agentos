@@ -1,8 +1,10 @@
 /**
  * @module voice-pipeline/providers/OpenAIWhisperBatchSTT
  *
- * Batch speech-to-text via OpenAI's Whisper transcription endpoint. Implements
+ * Batch speech-to-text via OpenAI's transcription endpoint. Implements
  * {@link IBatchSTT} using a multipart upload of the complete audio buffer.
+ * The default model is `gpt-transcribe`, which OpenAI recommends for recorded
+ * speech; OpenAI removes `whisper-1` from the API on 2027-02-26.
  * Positioned as a fallback behind {@link DeepgramPreRecordedBatchSTT} in a
  * {@link BatchSTTFallback} chain.
  *
@@ -16,16 +18,27 @@ import { EmptyTranscriptError } from './BatchSTTFallback.js';
 /** Injectable fetch for tests; defaults to the global. */
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
-interface WhisperVerboseResponse {
+interface TranscriptionResponse {
   text?: string;
+  /** Audio length in seconds, returned by `whisper-1` in `verbose_json`. */
   duration?: number;
+  /** `gpt-transcribe` reports the audio length as `{ type: 'duration', seconds }`. */
+  usage?: { type?: string; seconds?: number };
 }
 
-/** Configuration for the OpenAI Whisper batch STT provider. */
+/** The model OpenAI recommends for transcribing recorded speech. */
+const DEFAULT_MODEL = 'gpt-transcribe';
+
+/** `gpt-transcribe` takes language hints as a `languages` list in place of `language`. */
+function takesLanguageList(model: string): boolean {
+  return model === 'gpt-transcribe' || model.startsWith('gpt-transcribe-');
+}
+
+/** Configuration for the OpenAI batch STT provider. */
 export interface OpenAIWhisperBatchSTTConfig {
   /** OpenAI API key. */
   apiKey: string;
-  /** Model to use. @default 'whisper-1' */
+  /** Model to use. @default 'gpt-transcribe' */
   model?: string;
   /** BCP-47 language hint. @default 'en' */
   language?: string;
@@ -51,7 +64,7 @@ export class OpenAIWhisperBatchSTT implements IBatchSTT {
 
   constructor(config: OpenAIWhisperBatchSTTConfig) {
     this.apiKey = config.apiKey;
-    this.model = config.model ?? 'whisper-1';
+    this.model = config.model ?? DEFAULT_MODEL;
     this.language = config.language ?? 'en';
     this.baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -67,9 +80,16 @@ export class OpenAIWhisperBatchSTT implements IBatchSTT {
       new Blob([audio as unknown as BlobPart], { type: mimeType }),
       `voice-note.${ext}`,
     );
-    form.append('model', config?.model ?? this.model);
-    form.append('language', config?.language ?? this.language);
-    form.append('response_format', 'verbose_json');
+    const model = config?.model ?? this.model;
+    const language = config?.language ?? this.language;
+    form.append('model', model);
+    // gpt-transcribe reads its language hint from `languages`; OpenAI asks
+    // callers not to send both fields.
+    if (takesLanguageList(model)) form.append('languages[]', language);
+    else form.append('language', language);
+    // whisper-1 answers in verbose_json, which carries the duration; the newer
+    // models answer in json and report the duration under `usage`.
+    form.append('response_format', model.startsWith('whisper') ? 'verbose_json' : 'json');
 
     const res = await this.fetchImpl(this.baseUrl, {
       method: 'POST',
@@ -83,12 +103,13 @@ export class OpenAIWhisperBatchSTT implements IBatchSTT {
       throw new Error(`whisper_http_${res.status}${body ? `: ${body.slice(0, 240)}` : ''}`);
     }
 
-    const data = (await res.json()) as WhisperVerboseResponse;
+    const data = (await res.json()) as TranscriptionResponse;
     const transcript = (data.text ?? '').trim();
     if (!transcript) {
       throw new EmptyTranscriptError(this.providerId);
     }
-    const duration = data.duration ?? 0;
+    const usageSeconds = data.usage?.type === 'duration' ? data.usage.seconds : undefined;
+    const duration = data.duration ?? usageSeconds ?? 0;
     return {
       transcript,
       durationMs: Math.round(duration * 1000),

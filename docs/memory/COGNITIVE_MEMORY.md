@@ -52,7 +52,7 @@ Each model below has a one-to-one analogue in the source. The point of the table
 | Mood-congruent encoding | [Bower, 1981](https://psycnet.apa.org/doi/10.1037/0003-066X.36.2.129) | Content matching current mood valence encodes more strongly |
 | Spreading activation | [Anderson, 1983](https://psycnet.apa.org/record/1984-00248-001) (ACT-R) | BFS through associative graph with activation decay |
 | Hebbian learning | [Hebb, 1949](https://en.wikipedia.org/wiki/Organization_of_Behavior) | Co-retrieval strengthens graph edges |
-| HEXACO personality | [Ashton & Lee, 2007](https://journals.sagepub.com/doi/10.1207/S15327957PSPR0701_2) | Trait-driven encoding weights and memory capacity modulation |
+| HEXACO personality | [Ashton & Lee, 2007](https://doi.org/10.1177/1088868306294907) | Trait-driven encoding weights and memory capacity modulation |
 | Source-monitoring framework | [Johnson, Hashtroudi & Lindsay, 1993](https://psycnet.apa.org/record/1993-18254-001) | Different memory sources decay at different rates (provenance-aware) |
 | HyDE retrieval | [Gao et al., 2022](https://arxiv.org/abs/2212.10496) | Generate hypothetical answer, embed *that*, search for matches |
 | GraphRAG | [Microsoft Research, 2024](https://arxiv.org/abs/2404.16130) | Entity-graph + community summaries for multi-hop retrieval |
@@ -66,14 +66,17 @@ Each model below has a one-to-one analogue in the source. The point of the table
 **Per-turn data flow (GMI integration):**
 
 ```
-User Message arrives
-  1. encode()          — Create MemoryTrace from input (personality-modulated strength)
-  2. retrieve()        — Query vector store + score with 6-signal composite
-  3. assembleForPrompt — Token-budgeted context assembly → inject into system prompt
-  4. [LLM generates response]
-  5. observe()         — Feed response to observer buffer (Batch 2)
-  6. checkProspective  — Check time/event/context triggers (Batch 2)
-  7. runConsolidation   — Periodic background sweep (Batch 2, timer-based)
+User message arrives
+  1. assembleForPrompt — retrieve() (vector store + 6-signal composite score), then
+                         token-budgeted context assembly → the prompt's retrieved
+                         context, in front of the user's message (first model call)
+  2. [LLM generates the response; tool rounds run]
+  3. observe() + encode() — after the turn: the user's message, then the reply
+                         (personality-modulated strength)
+
+Outside the turn:
+  - checkProspective   — time/event/context triggers; the host calls it
+  - runConsolidation   — periodic background sweep (timer-based when consolidation is enabled)
 ```
 
 ---
@@ -127,7 +130,7 @@ Source types: `user_statement`, `agent_inference`, `tool_result`, `observation`,
 
 ## Encoding Model
 
-Source: `src/memory/core/encoding/EncodingModel.ts`
+Source: `src/cognition/memory/core/encoding/EncodingModel.ts`
 
 Encoding decides **how hard a new trace gets stamped in**. Four cognitive mechanisms compose into one strength score:
 
@@ -211,7 +214,7 @@ Configure via `featureDetectionStrategy` in [`CognitiveMemoryConfig`](https://gi
 
 ## Forgetting & Decay
 
-Source: `src/memory/core/decay/DecayModel.ts`
+Source: `src/cognition/memory/core/decay/DecayModel.ts`
 
 ### Ebbinghaus Forgetting Curve
 
@@ -256,7 +259,7 @@ participate fully in lifecycle enforcement.
 
 ## Retrieval Priority Scoring
 
-Source: `src/memory/core/decay/RetrievalPriorityScorer.ts`
+Source: `src/cognition/memory/core/decay/RetrievalPriorityScorer.ts`
 
 Retrieval combines six signals into a composite score:
 
@@ -292,7 +295,7 @@ Traces with high vector similarity (>0.6) but low strength (<0.3) or low confide
 
 ## Working Memory (Baddeley's Model)
 
-Source: `src/memory/core/working/CognitiveWorkingMemory.ts`
+Source: `src/cognition/memory/core/working/CognitiveWorkingMemory.ts`
 
 Working memory is a **slot-based, capacity-limited** buffer that tracks what the agent is currently "thinking about."
 
@@ -336,7 +339,7 @@ Each [`WorkingMemorySlot`](https://github.com/framerslab/agentos/blob/master/src
 
 ## Memory Store
 
-Source: `src/memory/retrieval/store/MemoryStore.ts`
+Source: `src/cognition/memory/retrieval/store/MemoryStore.ts`
 
 The [`MemoryStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/MemoryStore.ts) wraps [`IVectorStore`](https://github.com/framerslab/agentos/blob/master/src/core/vector-store/IVectorStore.ts) + [`IKnowledgeGraph`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/knowledge/IKnowledgeGraph.ts) into a unified persistence layer:
 
@@ -360,7 +363,7 @@ cogmem_organization_acme-org
 
 ## Memory Graph
 
-Source: `src/memory/retrieval/graph/IMemoryGraph.ts`
+Source: `src/cognition/memory/retrieval/graph/IMemoryGraph.ts`
 
 The [`IMemoryGraph`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/IMemoryGraph.ts) interface abstracts over two backends:
 
@@ -388,7 +391,7 @@ Configure via `graph.backend` (default: `'knowledge-graph'`).
 
 ## Spreading Activation
 
-Source: `src/memory/retrieval/graph/SpreadingActivation.ts`
+Source: `src/cognition/memory/retrieval/graph/SpreadingActivation.ts`
 
 Implements Anderson's ACT-R spreading activation model. Given seed nodes (top retrieval results), activation spreads through the graph to surface associated memories.
 
@@ -421,7 +424,7 @@ The learning rate (default 0.1) controls how quickly edge weights grow.
 
 ### Memory Observer
 
-Source: `src/memory/pipeline/observation/MemoryObserver.ts`
+Source: `src/cognition/memory/pipeline/observation/MemoryObserver.ts`
 
 The observer monitors accumulated conversation tokens via a buffer. When the threshold is reached (default: 30,000 tokens), it extracts concise observation notes via a persona-configured LLM.
 
@@ -439,7 +442,7 @@ Observation notes are typed: `factual`, `emotional`, `commitment`, `preference`,
 
 ### Memory Reflector
 
-Source: `src/memory/pipeline/observation/MemoryReflector.ts`
+Source: `src/cognition/memory/pipeline/observation/MemoryReflector.ts`
 
 The reflector consolidates accumulated observation notes into long-term memory traces. Activates when note tokens exceed threshold (default: 40,000 tokens).
 
@@ -463,7 +466,7 @@ Personality also controls **memory style**:
 
 ## Prospective Memory
 
-Source: `src/memory/retrieval/prospective/ProspectiveMemoryManager.ts`
+Source: `src/cognition/memory/retrieval/prospective/ProspectiveMemoryManager.ts`
 
 Prospective memory handles **future intentions** — "remember to do X when Y happens."
 
@@ -497,7 +500,7 @@ Context-based triggers use cosine similarity between the cue embedding and the c
 
 ## Consolidation Pipeline
 
-Source: `src/memory/pipeline/consolidation/ConsolidationPipeline.ts`
+Source: `src/cognition/memory/pipeline/consolidation/ConsolidationPipeline.ts`
 
 Runs periodically (default: every hour) to maintain memory health. Five steps:
 
@@ -543,7 +546,7 @@ interface ConsolidationResult {
 
 ## Prompt Assembly
 
-Source: `src/memory/core/prompt/MemoryPromptAssembler.ts`
+Source: `src/cognition/memory/core/prompt/MemoryPromptAssembler.ts`
 
 Assembles memory context into a single formatted string within a token budget, split across six sections with overflow redistribution.
 
@@ -753,41 +756,41 @@ console.log(`Pruned ${result.prunedCount}, created ${result.schemasCreated} sche
 
 ## Integration with GMI
 
-The Cognitive Memory System integrates into the GMI turn loop at three points:
+A GMI with cognitive memory calls the manager through [`CognitiveMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts) at two points of its turn. The calls below are the bridge's, in outline; `mood` is the GMI's PAD state and `gmiMood` its mood label.
 
-### After User Message (Encode)
+### Before Prompt Construction (Retrieve + Assemble)
 
 ```typescript
-// In the GMI turn handler, after receiving user input:
-const mood = moodEngine.getCurrentState();
+// Before the turn's first model call, with the user's message as the query:
+const memoryContext = await cognitiveMemory.assembleForPrompt(
+  userMessage,
+  1600, // token budget
+  mood,
+  { scopes }, // the scopes of the turn's user, session, conversation, persona and organization
+);
+// memoryContext.contextText joins the prompt's retrieved context
+```
+
+### After the Turn (Observe + Encode)
+
+```typescript
+// After the turn, for the user's message:
+await cognitiveMemory.observe('user', userMessage, mood);
 await cognitiveMemory.encode(userMessage, mood, gmiMood, {
   type: 'episodic',
   scope: 'user',
   scopeId: userId,
   sourceType: 'user_statement',
 });
-```
 
-### Before Prompt Construction (Retrieve + Assemble)
-
-```typescript
-// Before building the system prompt:
-const memoryContext = await cognitiveMemory.assembleForPrompt(
-  userMessage,
-  tokenBudget,
-  mood,
-);
-// Inject memoryContext.contextText into the prompt via PromptBuilder
-```
-
-### After Response (Observe)
-
-```typescript
-// After the LLM generates a response:
+// Then for the reply:
 await cognitiveMemory.observe('assistant', assistantResponse, mood);
-
-// Also feed user messages to observer for conversation monitoring:
-await cognitiveMemory.observe('user', userMessage, mood);
+await cognitiveMemory.encode(assistantResponse, mood, gmiMood, {
+  type: 'semantic',
+  scope: 'user',
+  scopeId: sessionId,
+  sourceType: 'agent_inference',
+});
 ```
 
 ---
@@ -815,7 +818,7 @@ Twelve specific gaps in Mastra's memory architecture that the cognitive memory l
 
 ## Source Files
 
-All source lives in `packages/agentos/src/memory/`:
+All source lives in `src/cognition/memory/`:
 
 | File | Export |
 |------|--------|
@@ -860,12 +863,12 @@ Both are injected into the system prompt simultaneously. The persistent memory a
 
 ## Mechanism Implementation Reference {#mechanism-implementation-reference}
 
-The eight cognitive mechanisms live under `packages/agentos/src/memory/mechanisms/`. Each mechanism is a pure function with one mutation responsibility on a [`MemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/SelfEvaluateTool.ts). The [`CognitiveMechanismsEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/CognitiveMechanismsEngine.ts) binds them to lifecycle hooks on [`MemoryStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/MemoryStore.ts) and `MemoryPromptAssembler`.
+The eight cognitive mechanisms live under `src/cognition/memory/mechanisms/`. Each mechanism is a pure function with one mutation responsibility on a [`MemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/SelfEvaluateTool.ts). The [`CognitiveMechanismsEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/CognitiveMechanismsEngine.ts) binds them to lifecycle hooks on [`MemoryStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/MemoryStore.ts) and `MemoryPromptAssembler`.
 
 ### Source-tree layout
 
 ```
-packages/agentos/src/memory/mechanisms/
+src/cognition/memory/mechanisms/
 ├── types.ts                          # CognitiveMechanismsConfig + shared types
 ├── defaults.ts                       # DEFAULT_MECHANISMS_CONFIG + resolveConfig()
 ├── CognitiveMechanismsEngine.ts      # Lifecycle hook orchestrator
@@ -947,11 +950,11 @@ Mechanism metadata is stored in `trace.structuredData.mechanismMetadata` (type [
 Each mechanism is a pure function testable in isolation:
 
 ```bash
-npx vitest run src/memory/mechanisms/
-npx vitest run src/memory/mechanisms/__tests__/retrieval.test.ts
-npx vitest run src/memory/mechanisms/__tests__/consolidation.test.ts
-npx vitest run src/memory/mechanisms/__tests__/engine.test.ts
-npx vitest run src/memory/mechanisms/__tests__/types.test.ts
+npx vitest run src/cognition/memory/mechanisms/
+npx vitest run src/cognition/memory/mechanisms/__tests__/retrieval.test.ts
+npx vitest run src/cognition/memory/mechanisms/__tests__/consolidation.test.ts
+npx vitest run src/cognition/memory/mechanisms/__tests__/engine.test.ts
+npx vitest run src/cognition/memory/mechanisms/__tests__/types.test.ts
 ```
 
 ---
@@ -976,7 +979,7 @@ The runtime constants, formulas, weights, and design decisions in this page are 
 
 ### Personality structure
 
-- Ashton, M. C., & Lee, K. (2007). [*Empirical, theoretical, and practical advantages of the HEXACO model of personality structure.*](https://journals.sagepub.com/doi/10.1207/S15327957PSPR0701_2) *Personality and Social Psychology Review*, 11(2), 150–166. — HEXACO six-factor model.
+- Ashton, M. C., & Lee, K. (2007). [*Empirical, theoretical, and practical advantages of the HEXACO model of personality structure.*](https://doi.org/10.1177/1088868306294907) *Personality and Social Psychology Review*, 11(2), 150–166. — HEXACO six-factor model.
 
 ### Retrieval-augmented generation
 
@@ -997,8 +1000,8 @@ The runtime constants, formulas, weights, and design decisions in this page are 
 
 Source files cited inline:
 
-- [`packages/agentos/src/memory/CognitiveMemoryManager.ts`](https://github.com/framerslab/agentos/blob/master/src/memory/CognitiveMemoryManager.ts) — top-level orchestrator
-- [`packages/agentos/src/memory/core/decay/DecayModel.ts`](https://github.com/framerslab/agentos/blob/master/src/memory/core/decay/DecayModel.ts) — Ebbinghaus formula + spaced repetition
-- [`packages/agentos/src/memory/mechanisms/defaults.ts`](https://github.com/framerslab/agentos/blob/master/src/memory/mechanisms/defaults.ts) — eight cognitive mechanism defaults
-- [`packages/agentos/src/memory/retrieval/hyde/MemoryHydeRetriever.ts`](https://github.com/framerslab/agentos/blob/master/src/memory/retrieval/hyde/MemoryHydeRetriever.ts) — HyDE retriever
-- [`packages/agentos/src/memory/retrieval/graph/graphrag/GraphRAGEngine.ts`](https://github.com/framerslab/agentos/blob/master/src/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) — GraphRAG implementation
+- [`src/cognition/memory/CognitiveMemoryManager.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/CognitiveMemoryManager.ts) — top-level orchestrator
+- [`src/cognition/memory/core/decay/DecayModel.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/DecayModel.ts) — Ebbinghaus formula + spaced repetition
+- [`src/cognition/memory/mechanisms/defaults.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/defaults.ts) — eight cognitive mechanism defaults
+- [`src/cognition/memory/retrieval/hyde/MemoryHydeRetriever.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hyde/MemoryHydeRetriever.ts) — HyDE retriever
+- [`src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) — GraphRAG implementation

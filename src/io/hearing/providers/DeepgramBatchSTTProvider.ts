@@ -20,9 +20,10 @@ export interface DeepgramBatchSTTProviderConfig {
   apiKey: string;
 
   /**
-   * Deepgram model to use for transcription.
-   * See https://developers.deepgram.com/docs/models for available models.
-   * @default 'nova-2'
+   * Deepgram model to use for transcription. `nova-3` is Deepgram's
+   * general-purpose model.
+   * See https://developers.deepgram.com/docs/models-languages-overview for available models.
+   * @default 'nova-3'
    */
   model?: string;
 
@@ -32,6 +33,14 @@ export interface DeepgramBatchSTTProviderConfig {
    * @default 'en-US' (set at transcribe-time if not configured here)
    */
   language?: string;
+
+  /**
+   * Opt requests out of Deepgram's Model Improvement Program by sending
+   * `mip_opt_out=true`. Off by default because Deepgram notes that opting out
+   * has pricing impacts.
+   * @default false
+   */
+  mipOptOut?: boolean;
 
   /**
    * Custom fetch implementation for dependency injection in tests.
@@ -168,7 +177,7 @@ function wordsToSegments(words: DeepgramWord[]): SpeechTranscriptionSegment[] {
  * ```ts
  * const provider = new DeepgramBatchSTTProvider({
  *   apiKey: process.env.DEEPGRAM_API_KEY!,
- *   model: 'nova-2',
+ *   model: 'nova-3',
  * });
  * const result = await provider.transcribe(
  *   { data: audioBuffer, mimeType: 'audio/wav' },
@@ -200,7 +209,7 @@ export class DeepgramBatchSTTProvider implements SpeechToTextProvider {
    * ```ts
    * const provider = new DeepgramBatchSTTProvider({
    *   apiKey: 'dg-xxxx',
-   *   model: 'nova-2',
+   *   model: 'nova-3',
    *   language: 'en-US',
    * });
    * ```
@@ -255,7 +264,7 @@ export class DeepgramBatchSTTProvider implements SpeechToTextProvider {
     options: SpeechTranscriptionOptions = {}
   ): Promise<SpeechTranscriptionResult> {
     // Resolve configuration with fallback chain: options > config > defaults
-    const model = options.model ?? this.config.model ?? 'nova-2';
+    const model = options.model ?? this.config.model ?? 'nova-3';
     const lang = options.language ?? this.config.language ?? 'en-US';
     const diarize = options.enableSpeakerDiarization ?? false;
 
@@ -266,7 +275,8 @@ export class DeepgramBatchSTTProvider implements SpeechToTextProvider {
       `?model=${encodeURIComponent(model)}` +
       `&punctuate=true` +
       `&diarize=${diarize}` +
-      `&language=${encodeURIComponent(lang)}`;
+      `&language=${encodeURIComponent(lang)}` +
+      (this.config.mipOptOut === true ? '&mip_opt_out=true' : '');
 
     // Use the audio's actual MIME type so Deepgram can decode correctly.
     // Deepgram supports wav, mp3, ogg, flac, webm, and many other formats.

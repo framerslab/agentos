@@ -181,4 +181,26 @@ describe('DeepgramBatchSTTProvider', () => {
     expect(provider.supportsStreaming).toBe(false);
     expect(provider.getProviderName()).toBe('Deepgram (Batch)');
   });
+
+  it('should default to nova-3 and send mip_opt_out only when configured', async () => {
+    const defaultsFetch = makeFetch(makeDeepgramResponse('hello world'));
+    const defaults = new DeepgramBatchSTTProvider({
+      apiKey: 'test-key',
+      fetchImpl: defaultsFetch as unknown as typeof fetch,
+    });
+    await defaults.transcribe(AUDIO);
+    const [defaultUrl] = defaultsFetch.mock.calls[0] as [string, RequestInit];
+    expect(defaultUrl).toContain('model=nova-3');
+    expect(defaultUrl).not.toContain('mip_opt_out');
+
+    const optedOutFetch = makeFetch(makeDeepgramResponse('hello world'));
+    const optedOut = new DeepgramBatchSTTProvider({
+      apiKey: 'test-key',
+      mipOptOut: true,
+      fetchImpl: optedOutFetch as unknown as typeof fetch,
+    });
+    await optedOut.transcribe(AUDIO);
+    const [optedOutUrl] = optedOutFetch.mock.calls[0] as [string, RequestInit];
+    expect(optedOutUrl).toContain('mip_opt_out=true');
+  });
 });

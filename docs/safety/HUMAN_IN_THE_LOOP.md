@@ -59,7 +59,7 @@ const guarded = agency({
 
 | Trigger | Pauses before | Typical use |
 |---|---|---|
-| `beforeTool: string[]` | Any tool whose name appears in the list | Destructive or high-cost tool calls (`delete-file`, `send-email`, `purchase`). |
+| `beforeTool: string[]` | Any tool whose name appears in the list (`'*'`: every tool), on every tool loop of the agency's seats and nested agencies, after `onBeforeToolExecution` has run | Destructive or high-cost tool calls (`delete-file`, `send-email`, `purchase`). |
 | `beforeAgent: string[]` | Any agent in the agency whose name appears in the list | Specialists that should only run after human go-ahead (`billing-agent`, `legal-review`). |
 | `beforeEmergent: boolean` | Runtime synthesis of a new specialist via `spawn_specialist` | Production agencies that allow emergent capabilities but require approval before the roster grows. |
 | `beforeReturn: boolean` | The final answer leaves the agency | Customer-facing channels where the last response gets a human or judge review. |
@@ -75,7 +75,7 @@ Source: [`src/api/hitl.ts`](https://github.com/framerslab/agentos/blob/master/sr
 
 ### `hitl.cli()`
 
-Interactive terminal prompt. Reads from `process.stdin`. Use locally and in interactive scripts; **not safe for CI or serverless**.
+Interactive terminal prompt. Reads from `process.stdin`. Before it asks, it prints the request's description, agent, action, type and details; for a tool call the details hold the arguments the tool will run with, so the approver sees the recipient, the path or the query being approved. Use locally and in interactive scripts; **not safe for CI or serverless**.
 
 ```typescript
 handler: hitl.cli();
@@ -158,14 +158,14 @@ interface ApprovalDecision {
   approved: boolean;
   reason?: string;
   modifications?: {
-    toolArgs?: unknown;     // overridden tool arguments
-    output?: string;        // overridden final text
-    instructions?: string;  // appended to the system prompt
+    toolArgs?: unknown;     // never applied: a beforeTool approval that carries it is refused
+    output?: string;        // replaces the final text (beforeReturn)
+    instructions?: string;  // added to the agent's input (beforeAgent)
   };
 }
 ```
 
-When `approved: true` and `modifications` are set, the orchestrator merges them over the original action before proceeding. This is the path for "approve but with these changes" — the human edits tool args, the LLM judge rewrites the final answer, the webhook returns a sanitized version.
+When `approved: true` and `modifications` are set, the orchestrator applies them before proceeding. This is the path for "approve but with these changes": `output` on a `beforeReturn` approval replaces the final text (the LLM judge rewrites the final answer, the webhook returns a sanitized version), and `instructions` on a `beforeAgent` approval are added to the input of the agent it lets run, under the sequential, parallel and hierarchical strategies. Tool arguments are the exception. A `beforeTool` approval approves or refuses the arguments the call will run with; it never applies `modifications.toolArgs`, and it refuses an approval that carries them (anything but `undefined` or `null`), so the call is skipped rather than run with the arguments the approver meant to replace. Rewrite tool arguments in `onBeforeToolExecution`, which runs before the handler is asked.
 
 ## Timeout policy
 
@@ -331,13 +331,14 @@ console.log(result.text);
 Running from a terminal pauses before the draft is returned and prints:
 
 ```
-[APPROVAL NEEDED] Final output for return to caller
-Agent: drafter | Action: return
+[APPROVAL NEEDED] Approve the final agency response before returning it.
+Agent: __agency__ | Action: return
 Type: output
+Details: { output: '<the drafted paragraph>' }
 Approve? (y/n):
 ```
 
-Approve and the draft returns. Reject and the run ends with the timeout policy applied.
+The agent line names the agency (`__agency__` when it has no `name`), and the details hold the draft being approved. Approve and the draft returns. Answer `n`, or nothing within the 60 seconds of `timeoutMs` (`onTimeout: 'reject'`), and `generate()` rejects with an `AgencyConfigError` whose message starts `Final output rejected by HITL`.
 
 ## Worked example — LLM judge with CLI fallback (production default)
 
@@ -446,7 +447,7 @@ For agencies that already use the higher-level `agency({ hitl: { approvals: { be
 
 **Does `beforeReturn` block streaming?** Yes — when `beforeReturn: true`, the agency's `stream.finalTextStream` does not emit until the handler resolves. `stream.textStream` (raw live chunks) continues unaffected.
 
-**Can a handler modify the action without rejecting it?** Yes. Return `{ approved: true, modifications: { toolArgs: { ... } } }` and the orchestrator merges those over the original tool arguments before invocation. Same for `output` (overrides the final text) and `instructions` (injected into the system prompt).
+**Can a handler modify the action without rejecting it?** For the final answer and for an agent run, yes. Return `{ approved: true, modifications: { output: '...' } }` from a `beforeReturn` approval to replace the final text, or `{ approved: true, modifications: { instructions: '...' } }` from a `beforeAgent` approval to add instructions to that agent's input. For a tool call, no: a `beforeTool` approval does not apply `modifications.toolArgs`, and it refuses an approval that carries them, so a handler that redacts or redirects an argument gets a skipped call, never the original one. Rewrite tool arguments in `onBeforeToolExecution`, which runs before the handler is asked.
 
 **Do agency callbacks (`approvalRequested`, `approvalDecided`) fire for workflow `human` steps?** No — those callbacks are on [`AgencyCallbacks`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) and only fire for [`HitlConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts)-driven pauses. Workflow `human` nodes emit graph events instead. Subscribe via `workflow.compile({ on: { ... } })`.
 

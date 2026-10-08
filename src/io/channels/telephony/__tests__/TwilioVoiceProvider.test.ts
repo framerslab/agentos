@@ -42,9 +42,10 @@ function makeResponse(body: unknown, status = 200): Response {
  */
 function twilioSignature(url: string, body: string): string {
   const params = new URLSearchParams(body);
-  const sorted = [...params.entries()].sort(([a], [b]) => a.localeCompare(b));
   let data = url;
-  for (const [k, v] of sorted) data += k + v;
+  for (const key of [...new Set(params.keys())].sort()) {
+    for (const value of [...new Set(params.getAll(key))].sort()) data += key + value;
+  }
   return createHmac('sha1', AUTH_TOKEN).update(data).digest('base64');
 }
 
@@ -208,6 +209,56 @@ describe('TwilioVoiceProvider', () => {
       const result = provider.verifyWebhook(ctx);
       expect(result.valid).toBe(false);
       expect(result.error).toMatch(/mismatch/i);
+    });
+
+    it('accepts the signature twilio-node computes when case-sensitive and locale order differ', () => {
+      // Expected value from twilio-node 5.13.1's getExpectedTwilioSignature
+      // (src/webhooks/webhooks.ts), which sorts keys with the default sort:
+      // CallSid and CallStatus come before Called and Caller.
+      const signed = new TwilioVoiceProvider({
+        accountSid: ACCOUNT_SID,
+        authToken: 'twilio-test-token',
+        fetchImpl: fetchMock as typeof fetch,
+      });
+      const ctx: WebhookContext = {
+        method: 'POST',
+        url: 'https://example.com/twilio/voice',
+        headers: { 'x-twilio-signature': 'vTMYeb4FrYjNFHkuYMDv271CgVI=' },
+        body:
+          'AccountSid=AC123&CallSid=CA123&CallStatus=ringing&Called=%2B14155550199' +
+          '&Caller=%2B14155550100&From=%2B14155550100&To=%2B14155550199',
+      };
+      expect(signed.verifyWebhook(ctx)).toEqual({ valid: true });
+    });
+
+    it('accepts a signature over the URL with or without its standard port', () => {
+      const withPort = makeWebhookCtx('https://example.com:443/twilio/webhook', body);
+      expect(provider.verifyWebhook({ ...withPort, url })).toEqual({ valid: true });
+      const withoutPort = makeWebhookCtx(url, body);
+      expect(provider.verifyWebhook({ ...withoutPort, url: 'https://example.com:443/twilio/webhook' })).toEqual({
+        valid: true,
+      });
+    });
+
+    it('refuses a webhook whose CallStatus repeats with different values', () => {
+      // The signed string sorts repeated values, so swapping their order
+      // would keep the signature valid while changing the status read.
+      const ctx = makeWebhookCtx(url, 'CallSid=CA001&CallStatus=ringing&CallStatus=completed');
+      expect(provider.verifyWebhook(ctx)).toEqual({ valid: false, error: 'Conflicting repeated event fields' });
+      expect(provider.parseWebhookEvent(ctx).events).toEqual([]);
+    });
+
+    it('rejects an unsigned query parameter added after 1,000 empty entries', () => {
+      const signedUrl = 'https://example.com/twilio/webhook?tenant=a';
+      const signed = makeWebhookCtx(signedUrl, body);
+      const padded = `${signedUrl}${'&'.repeat(1000)}extra=unsigned`;
+      expect(provider.verifyWebhook({ ...signed, url: padded }).valid).toBe(false);
+      expect(provider.verifyWebhook(signed)).toEqual({ valid: true });
+    });
+
+    it('rejects a signature over a different path', () => {
+      const otherPath = makeWebhookCtx('https://example.com/twilio/other', body);
+      expect(provider.verifyWebhook({ ...otherPath, url }).valid).toBe(false);
     });
 
     it('should return valid: false when the x-twilio-signature header is missing', () => {

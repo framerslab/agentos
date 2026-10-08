@@ -33,20 +33,21 @@ import {
   ProviderEmbeddingResponse,
   CacheDiagnostics,
 } from '../IProvider';
-import { stripOpenRouterOnlyParams } from '../openrouter-only-params';
+import { stripForeignVendorParams } from '../openrouter-only-params';
 import { AnthropicProviderError } from '../errors/AnthropicProviderError';
 import { ApiKeyPool } from '../../../providers/ApiKeyPool.js';
-import { resolveThinkingPayload } from '../model-thinking.js';
+import { resolveThinkingOff, resolveThinkingPayload } from '../model-thinking.js';
 import { modelSupportsForcedToolChoice } from '../model-forced-tool-choice.js';
 import {
   modelSupportsStrictToolUse,
   toolInputSchemaSupportsStrict,
   toolInputSchemaWithExplicitNoExtraProps,
 } from '../model-strict-tool-use.js';
-import { modelSupportsEffort, isEffortLevel } from '../model-effort.js';
+import { resolveAnthropicEffort } from '../model-effort.js';
 import { computeRetryBackoffMs } from './retry-backoff.js';
 import { recordCacheUsage } from './cacheLeakDetector.js';
 import { resolveCacheCapabilities } from '../model-cache-capabilities.js';
+import { redactUrlSecrets } from '../url-secrets';
 
 // Re-export so callers that already reach for Anthropic model-capability
 // predicates (modelSupportsTemperature lives here too) find this one next to
@@ -64,7 +65,7 @@ export { modelSupportsForcedToolChoice };
  * @example
  * const config: AnthropicProviderConfig = {
  *   apiKey: process.env.ANTHROPIC_API_KEY!,
- *   defaultModelId: 'claude-sonnet-4-20250514',
+ *   defaultModelId: 'claude-sonnet-4-6',
  *   maxRetries: 3,
  * };
  */
@@ -81,7 +82,7 @@ export interface AnthropicProviderConfig {
   baseURL?: string;
   /**
    * Default model ID to use if not specified in a request.
-   * @example "claude-sonnet-4-20250514"
+   * @example "claude-sonnet-4-6"
    */
   defaultModelId?: string;
   /**
@@ -132,8 +133,13 @@ export interface AnthropicProviderConfig {
  * Whether the given Claude model id accepts the `temperature` parameter.
  *
  * Anthropic deprecated `temperature` on reasoning-default models. Opus 4.7,
- * Opus 4.8, Sonnet 5, and Fable 5 (extended-thinking by default) reject requests
- * that include it with HTTP 400 "`temperature` is deprecated for this model."
+ * Opus 4.8, Opus 5, Opus 5.5, Sonnet 5, Sonnet 5.5, Fable 5 and Fable 5.1
+ * reject requests that include it with HTTP 400 "`temperature` is deprecated
+ * for this model." Opus 5, Opus 5.5 and Fable 5.1 were live-probed on
+ * 2026-09-29 and Sonnet 5.5 on 2026-09-30. Opus 5.5, Sonnet 5.5 and Fable 5.1
+ * match the existing `opus-5`, `sonnet-5` and `fable-5` alternatives on
+ * purpose, because `\b` matches at the hyphen before their trailing version
+ * digit.
  * Every earlier Claude model (Opus ≤ 4.6, Sonnet 4.6 and earlier, Haiku) still accepts it.
  * The same family also rejects `top_p` / `top_k`, so {@link buildRequestPayload}
  * gates `top_p` on this predicate too.
@@ -150,11 +156,11 @@ export interface AnthropicProviderConfig {
  *   model, `true` otherwise.
  */
 export function modelSupportsTemperature(modelId: string): boolean {
-  // Claude Opus 4.7 / 4.8, Sonnet 5, Fable 5, and any dated variant — reasoning-default
-  // models that reject `temperature` (and `top_p` / `top_k`). Future
-  // reasoning-first siblings get added here as Anthropic releases them, in
-  // lockstep with modelSupportsThinking.
-  return !/^claude-(opus-4-(7|8)|sonnet-5|fable-5)\b/i.test(modelId);
+  // Reasoning-default models that reject `temperature` (and `top_p` / `top_k`):
+  // Claude Opus 4.7 / 4.8 / 5 / 5.5, Sonnet 5 / 5.5, Fable 5 / 5.1, and any
+  // dated variant. Future reasoning-first siblings get added here as Anthropic
+  // releases them, in lockstep with modelSupportsThinking.
+  return !/^claude-(opus-4-(7|8)|opus-5|sonnet-5|fable-5)\b/i.test(modelId);
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +190,29 @@ interface AnthropicContentBlock {
   source?: { type: 'base64'; media_type: string; data: string };
 }
 
+/**
+ * Prompt-cache writes on one response, split by cache TTL: the
+ * `usage.cache_creation` object of the Messages API. The two counts add up to
+ * `cache_creation_input_tokens`.
+ */
+export interface AnthropicCacheCreationBreakdown {
+  /** Tokens written with the default 5-minute TTL. */
+  ephemeral_5m_input_tokens?: number;
+  /** Tokens written with the 1-hour TTL (`cache_control.ttl: '1h'`). */
+  ephemeral_1h_input_tokens?: number;
+}
+
+/**
+ * Why the model declined, sent beside `stop_reason: 'refusal'`. Kept verbatim
+ * on the content-policy error the provider raises.
+ */
+interface AnthropicStopDetails {
+  type?: string;
+  /** The policy area the request fell under, such as `cyber`. */
+  category?: string | null;
+  explanation?: string | null;
+}
+
 /** The Anthropic Messages API response shape. */
 interface AnthropicMessagesResponse {
   id: string;
@@ -191,13 +220,28 @@ interface AnthropicMessagesResponse {
   role: 'assistant';
   content: AnthropicContentBlock[];
   model: string;
-  stop_reason: 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' | null;
+  stop_reason:
+    | 'end_turn'
+    | 'max_tokens'
+    | 'stop_sequence'
+    | 'tool_use'
+    | 'pause_turn'
+    | 'refusal'
+    | 'model_context_window_exceeded'
+    | null;
   stop_sequence: string | null;
+  /** Present with `stop_reason: 'refusal'`. */
+  stop_details?: AnthropicStopDetails | null;
   usage: {
     input_tokens: number;
     output_tokens: number;
     cache_creation_input_tokens?: number;
     cache_read_input_tokens?: number;
+    /**
+     * Split of `cache_creation_input_tokens` by cache TTL. 5-minute writes
+     * bill at 1.25x the input price and 1-hour writes at 2x.
+     */
+    cache_creation?: AnthropicCacheCreationBreakdown | null;
   };
   /**
    * Cache-diagnostics verdict (beta `cache-diagnosis-2026-04-07`). Returned
@@ -290,6 +334,8 @@ interface AnthropicStreamMessageDelta {
   delta: {
     stop_reason: string | null;
     stop_sequence: string | null;
+    /** Present with `stop_reason: 'refusal'`. */
+    stop_details?: AnthropicStopDetails | null;
   };
   usage: {
     output_tokens: number;
@@ -317,28 +363,79 @@ type AnthropicStreamEvent =
 /**
  * Static catalog of well-known Anthropic models and their metadata.
  *
- * Pricing verified against anthropic.com/pricing on 2026-04-16 (USD per 1M tokens).
- * Update when Anthropic publishes new rate cards.
+ * Prices are USD per 1M tokens, verified against Anthropic's pricing page and
+ * model pages on 2026-09-30. A cache hit costs 0.1x the input price except
+ * where a row sets `pricePer1MTokensCacheRead`: Opus 5.5 (0.05x) and Fable 5.1
+ * (0.025x) differ, and Fable 5 states its standard 0.1x rate explicitly so
+ * the Fable 5.1 rate is not mistaken for it. Cache writes cost 1.25x the input
+ * price at the 5-minute TTL and 2x at the 1-hour TTL on every model; see
+ * {@link estimateAnthropicCostUSD}.
  *
  * `outputTokenLimit` is the model's real max output ceiling, surfaced via
- * getModelInfo for callers that want to size requests. It is informational —
- * NOT the per-request default: when a caller omits `maxTokens`, the request
- * falls back to `config.defaultMaxTokens`, not this value — but a per-call
- * `maxTokens` IS clamped to it via {@link clampAnthropicMaxTokens}. Anthropic
- * specs: Fable 5 = 128K output / 1M context, Opus 4.x = 128K output / 1M
- * context, Sonnet 4.x = 64K output / 1M context, Haiku 4.5 = 64K output / 200K.
+ * getModelInfo for callers that want to size requests. It is informational,
+ * not the per-request default: when a caller omits `maxTokens`, the request
+ * falls back to `config.defaultMaxTokens`, but a per-call `maxTokens` is
+ * clamped to it via {@link clampAnthropicMaxTokens}. Anthropic's limits:
+ * Opus 5.5, Opus 5, Opus 4.6-4.8, Fable 5.1, Fable 5, Sonnet 5.5, Sonnet 5 and
+ * Sonnet 4.6 take 128K output with a 1M context; Opus 4.5, Sonnet 4.5 and
+ * Haiku 4.5 take 64K output with a 200K context.
  */
 const ANTHROPIC_MODELS: ModelInfo[] = [
   {
-    modelId: 'claude-fable-5',
+    modelId: 'claude-opus-5-5',
     providerId: 'anthropic',
-    displayName: 'Claude Fable 5',
-    description: "Anthropic's most capable widely released model, for the most demanding reasoning and long-horizon agentic work.",
+    displayName: 'Claude Opus 5.5',
+    description: "Anthropic's recommended starting model for most workloads. Frontier Opus for agents and coding, priced below Claude Opus 5.",
+    capabilities: ['chat', 'tool_use', 'vision_input'],
+    contextWindowSize: 1000000,
+    outputTokenLimit: 128000,
+    pricePer1MTokensInput: 4,
+    pricePer1MTokensOutput: 20,
+    // Cache hits and refreshes bill at 0.05x the input price.
+    pricePer1MTokensCacheRead: 0.2,
+    supportsStreaming: true,
+    status: 'active',
+  },
+  {
+    modelId: 'claude-fable-5-1',
+    providerId: 'anthropic',
+    displayName: 'Claude Fable 5.1',
+    description: "Anthropic's most capable model, for demanding reasoning and long-horizon agentic work.",
     capabilities: ['chat', 'tool_use', 'vision_input'],
     contextWindowSize: 1000000,
     outputTokenLimit: 128000,
     pricePer1MTokensInput: 10,
     pricePer1MTokensOutput: 50,
+    // Cache hits and refreshes bill at 0.025x the input price.
+    pricePer1MTokensCacheRead: 0.25,
+    supportsStreaming: true,
+    status: 'active',
+  },
+  {
+    modelId: 'claude-fable-5',
+    providerId: 'anthropic',
+    displayName: 'Claude Fable 5',
+    description: 'Previous Fable generation, superseded by Claude Fable 5.1.',
+    capabilities: ['chat', 'tool_use', 'vision_input'],
+    contextWindowSize: 1000000,
+    outputTokenLimit: 128000,
+    pricePer1MTokensInput: 10,
+    pricePer1MTokensOutput: 50,
+    // The standard 0.1x rate. Fable 5.1's 0.025x does not apply to Fable 5.
+    pricePer1MTokensCacheRead: 1,
+    supportsStreaming: true,
+    status: 'active',
+  },
+  {
+    modelId: 'claude-opus-5',
+    providerId: 'anthropic',
+    displayName: 'Claude Opus 5',
+    description: 'Frontier Opus for agents and coding; drop-in successor to Claude Opus 4.8 at the same pricing.',
+    capabilities: ['chat', 'tool_use', 'vision_input'],
+    contextWindowSize: 1000000,
+    outputTokenLimit: 128000,
+    pricePer1MTokensInput: 5,
+    pricePer1MTokensOutput: 25,
     supportsStreaming: true,
     status: 'active',
   },
@@ -382,13 +479,64 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
     status: 'active',
   },
   {
+    // The dated id is the canonical row: the bare alias `claude-opus-4-5`
+    // resolves to it through the prefix fallback in resolveModelCatalogEntry,
+    // as `claude-haiku-4-5` resolves to the dated Haiku row.
+    modelId: 'claude-opus-4-5-20251101',
+    providerId: 'anthropic',
+    displayName: 'Claude Opus 4.5',
+    description: 'Legacy Opus, still served. Superseded by Claude Opus 5.5.',
+    capabilities: ['chat', 'tool_use', 'vision_input'],
+    contextWindowSize: 200000,
+    outputTokenLimit: 64000,
+    pricePer1MTokensInput: 5,
+    pricePer1MTokensOutput: 25,
+    supportsStreaming: true,
+    status: 'active',
+  },
+  {
+    modelId: 'claude-sonnet-5-5',
+    providerId: 'anthropic',
+    displayName: 'Claude Sonnet 5.5',
+    description: 'Current Sonnet for everyday coding, agent and enterprise work; adaptive thinking on by default.',
+    capabilities: ['chat', 'tool_use', 'vision_input'],
+    contextWindowSize: 1000000,
+    outputTokenLimit: 128000,
+    pricePer1MTokensInput: 2,
+    pricePer1MTokensOutput: 10,
+    supportsStreaming: true,
+    status: 'active',
+  },
+  {
+    modelId: 'claude-sonnet-5',
+    providerId: 'anthropic',
+    displayName: 'Claude Sonnet 5',
+    description: 'Near-Opus coding/agentic Sonnet; adaptive thinking on by default.',
+    capabilities: ['chat', 'tool_use', 'vision_input'],
+    contextWindowSize: 1000000,
+    outputTokenLimit: 128000,
+    // $2/$10 is the standard price: Anthropic kept its launch pricing and
+    // cancelled the increase to $3/$15 scheduled for 2026-09-01 (pricing
+    // page, 2026-09-30). The row must stay in this table: without it the
+    // model prices as costUSD undefined, which turned the 2026-07-20..26
+    // quota-outage fallback traffic (thousands of sonnet-5 leg calls a day)
+    // into unmetered spend.
+    pricePer1MTokensInput: 2,
+    pricePer1MTokensOutput: 10,
+    supportsStreaming: true,
+    status: 'active',
+  },
+  {
     modelId: 'claude-sonnet-4-6',
     providerId: 'anthropic',
     displayName: 'Claude Sonnet 4.6',
     description: 'Optimal balance of intelligence, cost, and speed.',
     capabilities: ['chat', 'tool_use', 'vision_input'],
     contextWindowSize: 1000000,
-    outputTokenLimit: 64000,
+    // 128K per current Anthropic specs (every current-generation model
+    // streams to 128K; only Haiku 4.5 and legacy Sonnet 4.5 cap at 64K).
+    // The old 64000 silently halved caller budgets via the clamp.
+    outputTokenLimit: 128000,
     pricePer1MTokensInput: 3,
     pricePer1MTokensOutput: 15,
     supportsStreaming: true,
@@ -422,31 +570,37 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
   },
   // Legacy entries retained for model-ID back-compat. Prices reflect the
   // original rate card for those specific snapshots.
+  // Claude Opus 4 and Claude Sonnet 4 (the 2025-05-14 snapshots) were retired
+  // by Anthropic on 2026-06-15. Both ids return HTTP 404 not_found_error on the
+  // Messages API (probed 2026-09-29, with a claude-sonnet-5 control returning
+  // 200). They stay in the catalog as `deprecated` so a caller still holding
+  // one of them gets limits, a price and a status from the catalog. Anthropic's
+  // documented replacements are claude-opus-4-8 and claude-sonnet-4-6.
   {
     modelId: 'claude-opus-4-20250514',
     providerId: 'anthropic',
     displayName: 'Claude Opus 4 (2025-05-14)',
-    description: 'Original Opus 4 snapshot. Legacy pricing retained.',
+    description: 'Retired 2026-06-15 and no longer served. Use claude-opus-4-8.',
     capabilities: ['chat', 'tool_use', 'vision_input'],
     contextWindowSize: 200000,
     outputTokenLimit: 32000,
     pricePer1MTokensInput: 15,
     pricePer1MTokensOutput: 75,
     supportsStreaming: true,
-    status: 'active',
+    status: 'deprecated',
   },
   {
     modelId: 'claude-sonnet-4-20250514',
     providerId: 'anthropic',
     displayName: 'Claude Sonnet 4 (2025-05-14)',
-    description: 'Original Sonnet 4 snapshot.',
+    description: 'Retired 2026-06-15 and no longer served. Use claude-sonnet-4-6.',
     capabilities: ['chat', 'tool_use', 'vision_input'],
     contextWindowSize: 200000,
     outputTokenLimit: 64000,
     pricePer1MTokensInput: 3,
     pricePer1MTokensOutput: 15,
     supportsStreaming: true,
-    status: 'active',
+    status: 'deprecated',
   },
 ];
 
@@ -460,16 +614,139 @@ const ANTHROPIC_MODELS: ModelInfo[] = [
  * matched by prefix. Unknown models pass through unchanged (no catalog ceiling).
  */
 export function clampAnthropicMaxTokens(modelId: string, requested: number): number {
-  const entry =
-    ANTHROPIC_MODELS.find((m) => m.modelId === modelId) ??
-    ANTHROPIC_MODELS.find((m) => modelId.startsWith(m.modelId) || m.modelId.startsWith(modelId));
-  const ceiling = entry?.outputTokenLimit;
+  const ceiling = resolveAnthropicModelEntry(modelId)?.outputTokenLimit;
   return typeof ceiling === 'number' && ceiling > 0 ? Math.min(requested, ceiling) : requested;
+}
+
+/**
+ * Resolves a caller-supplied model id to its ANTHROPIC_MODELS catalog row.
+ * Exact id match wins; otherwise a dated snapshot (`claude-sonnet-5-20260101`)
+ * or bare alias is matched by prefix — the SAME resolution the max-tokens
+ * clamp uses, shared so pricing ({@link estimateAnthropicCostUSD}) and
+ * clamping can never disagree about which row a model id means (an
+ * exact-only match prices every dated snapshot id as costUSD undefined:
+ * unmetered spend).
+ *
+ * The longest catalog id that prefixes `modelId` wins. Catalog ids nest:
+ * `claude-opus-5` is a prefix of `claude-opus-5-5`. A first-match scan makes
+ * the answer depend on array order and can resolve a dated
+ * `claude-opus-5-5-…` snapshot to Opus 5's row, pricing it at $5/$25 instead
+ * of $4/$20. An id that is itself a prefix of a catalog id, such as the bare
+ * alias `claude-haiku-4-5`, resolves to the first catalog id it prefixes.
+ */
+export function resolveAnthropicModelEntry(modelId: string): ModelInfo | undefined {
+  return resolveModelCatalogEntry(ANTHROPIC_MODELS, modelId);
+}
+
+/**
+ * Catalog lookup behind {@link resolveAnthropicModelEntry}, taking the catalog
+ * as a parameter so the ordering behavior can be tested against a catalog
+ * whose shorter id comes first.
+ *
+ * @param catalog Model rows to search, in any order.
+ * @param modelId Caller-supplied model id, bare or dated.
+ * @returns The exact row, else the row with the longest id that prefixes
+ *   `modelId`, else the first row whose id starts with `modelId`. An empty id
+ *   resolves to nothing: every catalog id starts with `''`, so the last rule
+ *   would otherwise price a response with no model echo as the first row.
+ */
+export function resolveModelCatalogEntry(
+  catalog: readonly ModelInfo[],
+  modelId: string,
+): ModelInfo | undefined {
+  if (!modelId) return undefined;
+  const exact = catalog.find((m) => m.modelId === modelId);
+  if (exact) return exact;
+  let longest: ModelInfo | undefined;
+  for (const m of catalog) {
+    if (modelId.startsWith(m.modelId) && (!longest || m.modelId.length > longest.modelId.length)) {
+      longest = m;
+    }
+  }
+  return longest ?? catalog.find((m) => m.modelId.startsWith(modelId));
+}
+
+/**
+ * Token counts that decide what one Messages API call costs, under the API's
+ * own `usage` field names.
+ */
+export interface AnthropicUsageForCost {
+  /** Input tokens billed at the full input price (cache reads and writes excluded). */
+  input_tokens: number;
+  /** Output tokens, thinking included. */
+  output_tokens: number;
+  /** Tokens read from the prompt cache. */
+  cache_read_input_tokens?: number;
+  /** Tokens written to the prompt cache, both TTLs together. */
+  cache_creation_input_tokens?: number;
+  /** The same writes split by TTL, when the response reports the split. */
+  cache_creation?: AnthropicCacheCreationBreakdown | null;
+}
+
+/**
+ * Estimates the USD cost of one Anthropic Messages API call from its usage.
+ *
+ * | Tokens | Price |
+ * | --- | --- |
+ * | `input_tokens` | the input price |
+ * | `cache_read_input_tokens` | the row's `pricePer1MTokensCacheRead`, else 0.1x the input price |
+ * | 5-minute cache writes | 1.25x the input price |
+ * | 1-hour cache writes | 2x the input price |
+ * | `output_tokens` | the output price |
+ *
+ * `input_tokens` excludes cached tokens, so the input components add up
+ * without double counting. The 1-hour share of the writes comes from
+ * `cache_creation.ephemeral_1h_input_tokens`: a response without that split
+ * is priced as 5-minute writes only, and a 1-hour count above the write total
+ * is capped at the total.
+ *
+ * @param modelId Model id, bare or dated, resolved with
+ *   {@link resolveAnthropicModelEntry}.
+ * @param usage Token counts from the response.
+ * @returns The cost in USD, or `undefined` when the catalog has no price for
+ *   the model (unknown, empty or unpriced id).
+ */
+export function estimateAnthropicCostUSD(
+  modelId: string,
+  usage: AnthropicUsageForCost,
+): number | undefined {
+  const info = resolveAnthropicModelEntry(modelId);
+  const inputPrice = info?.pricePer1MTokensInput;
+  const outputPrice = info?.pricePer1MTokensOutput;
+  if (!inputPrice || !outputPrice) return undefined;
+  const cacheReadPrice = info?.pricePer1MTokensCacheRead ?? inputPrice * 0.1;
+  const split = usage.cache_creation ?? undefined;
+  const written =
+    usage.cache_creation_input_tokens
+    ?? ((split?.ephemeral_5m_input_tokens ?? 0) + (split?.ephemeral_1h_input_tokens ?? 0));
+  const writtenOneHour = Math.min(Math.max(split?.ephemeral_1h_input_tokens ?? 0, 0), written);
+  // Tokens times USD per 1M tokens: the sum is in millionths of a dollar.
+  const microDollars =
+    usage.input_tokens * inputPrice
+    + (usage.cache_read_input_tokens ?? 0) * cacheReadPrice
+    + (written - writtenOneHour) * inputPrice * 1.25
+    + writtenOneHour * inputPrice * 2
+    + usage.output_tokens * outputPrice;
+  return microDollars / 1_000_000;
 }
 
 // ---------------------------------------------------------------------------
 // Provider implementation
 // ---------------------------------------------------------------------------
+
+/** Keys of warnings already printed by {@link warnOnce}. */
+const warnedKeys = new Set<string>();
+
+/**
+ * Prints `message` once per process for `key`, so a setting applied to every
+ * request (thinking off on an always-on model, a capped effort) warns once
+ * rather than on every call.
+ */
+function warnOnce(key: string, message: string): void {
+  if (warnedKeys.has(key)) return;
+  warnedKeys.add(key);
+  console.warn(message);
+}
 
 /**
  * @class AnthropicProvider
@@ -484,7 +761,7 @@ export function clampAnthropicMaxTokens(modelId: string, requested: number): num
  * const provider = new AnthropicProvider();
  * await provider.initialize({ apiKey: 'sk-ant-...' });
  * const response = await provider.generateCompletion(
- *   'claude-sonnet-4-20250514',
+ *   'claude-sonnet-4-6',
  *   [{ role: 'user', content: 'Hello!' }],
  *   { maxTokens: 1024 },
  * );
@@ -575,13 +852,16 @@ export class AnthropicProvider implements IProvider {
    * to Anthropic's `input_schema` format, and normalizes the response back
    * to IProvider conventions.
    *
-   * @param {string} modelId - The Anthropic model to use (e.g., "claude-sonnet-4-20250514").
+   * @param {string} modelId - The Anthropic model to use (e.g., "claude-sonnet-4-6").
    * @param {ChatMessage[]} messages - Conversation messages. System-role messages are
    *   extracted and sent as the top-level `system` parameter.
    * @param {ModelCompletionOptions} options - Completion options. `maxTokens` is strongly
    *   recommended; defaults to {@link AnthropicProviderConfig.defaultMaxTokens} if omitted.
    * @returns {Promise<ModelCompletionResponse>} A normalized completion response.
-   * @throws {AnthropicProviderError} On authentication, validation, or network errors.
+   * @throws {AnthropicProviderError} On authentication, validation, or network
+   *   errors, and with code `content_filter` when the model refuses
+   *   (`stop_reason: 'refusal'`); partial output from a refused turn is
+   *   discarded.
    */
   public async generateCompletion(
     modelId: string,
@@ -609,8 +889,8 @@ export class AnthropicProvider implements IProvider {
         payload,
         options.requestTimeout,
       );
-      this.recordCacheLeakSample(modelId, payload, apiResponse);
-      return this.mapResponseToCompletion(apiResponse, structuredOutputName);
+      this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
+      return this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId);
     }
 
     // Default: ride the SSE path so parseSseStream's idle watchdog bounds
@@ -622,8 +902,8 @@ export class AnthropicProvider implements IProvider {
     // let the caller (or the retry loop below) recover in seconds.
     const payload = this.buildRequestPayload(modelId, messages, options, true);
     const apiResponse = await this.streamMessagesToResponse(payload, options.requestTimeout);
-    this.recordCacheLeakSample(modelId, payload, apiResponse);
-    return this.mapResponseToCompletion(apiResponse, structuredOutputName);
+    this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
+    return this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId);
   }
 
   /**
@@ -633,12 +913,16 @@ export class AnthropicProvider implements IProvider {
    * 256 chars of the system prompt, read from the just-built payload so it
    * reflects what actually went to the wire. Fail-open by construction.
    *
+   * @param cacheOptOut True when the caller turned caching off for this
+   *   request (`options.cache === false`). Its uncached input is deliberate,
+   *   so the detector does not count it toward the `unmarked` warning.
    * @private
    */
   private recordCacheLeakSample(
     modelId: string,
     payload: Record<string, unknown>,
-    apiResponse: AnthropicMessagesResponse,
+    apiResponse: Pick<AnthropicMessagesResponse, 'usage'>,
+    cacheOptOut = false,
   ): void {
     try {
       const system = payload.system as
@@ -659,6 +943,7 @@ export class AnthropicProvider implements IProvider {
         uncachedInputTokens: apiResponse.usage?.input_tokens ?? 0,
         cacheReadTokens: apiResponse.usage?.cache_read_input_tokens ?? 0,
         cacheCreationTokens: apiResponse.usage?.cache_creation_input_tokens ?? 0,
+        ...(cacheOptOut ? { cacheOptOut: true } : {}),
       });
     } catch {
       // Telemetry must never break a request.
@@ -754,6 +1039,11 @@ export class AnthropicProvider implements IProvider {
    * {@link mapResponseToCompletion} stays the single mapping path
    * (structured output, stop reasons, cost, thinking blocks).
    *
+   * A refusal returns normally with `stop_reason: 'refusal'` and its
+   * `stop_details`, even when it cut a tool_use input off mid-JSON:
+   * {@link mapResponseToCompletion} raises it as a content-policy error, and
+   * a transport error here would be retried instead.
+   *
    * @throws {AnthropicProviderError} `STREAM_ERROR_EVENT` on an SSE error
    *   event, `STREAM_INCOMPLETE` when the stream ends before `message_delta`
    *   or a tool_use input JSON is truncated, plus whatever
@@ -777,10 +1067,12 @@ export class AnthropicProvider implements IProvider {
     let id = `anthropic-stream-${Date.now()}`;
     let model = '';
     let stopReason: AnthropicMessagesResponse['stop_reason'] = null;
+    let stopDetails: AnthropicStopDetails | null | undefined;
     let inputTokens = 0;
     let outputTokens = 0;
     let cacheCreationTokens: number | undefined;
     let cacheReadTokens: number | undefined;
+    let cacheCreationSplit: AnthropicCacheCreationBreakdown | null | undefined;
     let diagnostics: AnthropicMessagesResponse['diagnostics'];
     let sawMessageDelta = false;
     const blocks = new Map<number, AccumBlock>();
@@ -801,6 +1093,8 @@ export class AnthropicProvider implements IProvider {
           inputTokens = event.message.usage?.input_tokens ?? 0;
           cacheCreationTokens = event.message.usage?.cache_creation_input_tokens;
           cacheReadTokens = event.message.usage?.cache_read_input_tokens;
+          // The 5m/1h split of the cache writes prices the 1h share at 2x.
+          cacheCreationSplit = event.message.usage?.cache_creation;
           // Cache diagnostics ride message_start in streaming responses.
           diagnostics = event.message.diagnostics;
           break;
@@ -844,6 +1138,7 @@ export class AnthropicProvider implements IProvider {
         case 'message_delta': {
           sawMessageDelta = true;
           stopReason = (event.delta.stop_reason ?? null) as AnthropicMessagesResponse['stop_reason'];
+          stopDetails = event.delta.stop_details ?? stopDetails;
           // Anthropic reports the cumulative output total here — latest wins.
           outputTokens = event.usage?.output_tokens ?? outputTokens;
           break;
@@ -870,6 +1165,9 @@ export class AnthropicProvider implements IProvider {
     }
 
     const content: AnthropicContentBlock[] = Array.from(blocks.entries())
+      // A refusal can cut a tool input off mid-JSON. The refused turn is
+      // discarded whole, so its tool calls are dropped rather than parsed.
+      .filter(([, block]) => stopReason !== 'refusal' || block.type !== 'tool_use')
       .sort((a, b) => a[0] - b[0])
       .map(([, block]) => {
         if (block.type === 'tool_use') {
@@ -901,11 +1199,13 @@ export class AnthropicProvider implements IProvider {
       model,
       stop_reason: stopReason,
       stop_sequence: null,
+      ...(stopDetails !== undefined && { stop_details: stopDetails }),
       usage: {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
         ...(cacheCreationTokens !== undefined && { cache_creation_input_tokens: cacheCreationTokens }),
         ...(cacheReadTokens !== undefined && { cache_read_input_tokens: cacheReadTokens }),
+        ...(cacheCreationSplit != null && { cache_creation: cacheCreationSplit }),
       },
       ...(diagnostics !== undefined && { diagnostics }),
     };
@@ -929,7 +1229,10 @@ export class AnthropicProvider implements IProvider {
    * @param {ChatMessage[]} messages - Conversation messages.
    * @param {ModelCompletionOptions} options - Completion options.
    * @returns {AsyncGenerator<ModelCompletionResponse>} Incremental response chunks.
-   * @throws {AnthropicProviderError} On connection or stream errors.
+   * @throws {AnthropicProviderError} On connection errors, and with code
+   *   `content_filter` when the model refuses (`stop_reason: 'refusal'`),
+   *   before or after text has streamed. Other stream errors end the stream
+   *   with an error chunk.
    */
   public async *generateCompletionStream(
     modelId: string,
@@ -956,6 +1259,8 @@ export class AnthropicProvider implements IProvider {
     let outputTokens = 0;
     let cacheCreationTokens: number | undefined;
     let cacheReadTokens: number | undefined;
+    /** The 5m/1h split of the cache writes, reported on message_start. */
+    let cacheCreationSplit: AnthropicCacheCreationBreakdown | null | undefined;
     /**
      * Cache-diagnostics verdict, delivered ONLY on message_start (no later
      * SSE event repeats it). `undefined` = the API sent none (not opted in);
@@ -1001,6 +1306,7 @@ export class AnthropicProvider implements IProvider {
             // accumulate path at streamToCompletion does the same).
             cacheCreationTokens = event.message.usage?.cache_creation_input_tokens;
             cacheReadTokens = event.message.usage?.cache_read_input_tokens;
+            cacheCreationSplit = event.message.usage?.cache_creation;
             // Cache diagnostics ride message_start in streaming responses
             // (mirrors the streamToCompletion aggregate path).
             streamDiagnostics = event.message.diagnostics;
@@ -1123,21 +1429,59 @@ export class AnthropicProvider implements IProvider {
               // Cache-aware like the non-streaming path: input_tokens
               // excludes cached tokens, so dropping the cache counts here
               // undercosted every streamed turn once automatic caching
-              // landed (reads 0.10x + writes 1.25x are real spend).
-              costUSD: this.estimateCost(
-                inputTokens,
-                outputTokens,
-                modelId,
-                cacheReadTokens,
-                cacheCreationTokens,
-              ),
+              // landed (cache reads and writes are real spend).
+              costUSD: estimateAnthropicCostUSD(modelId, {
+                input_tokens: inputTokens,
+                output_tokens: outputTokens,
+                cache_read_input_tokens: cacheReadTokens,
+                cache_creation_input_tokens: cacheCreationTokens,
+                cache_creation: cacheCreationSplit,
+              }),
               ...(cacheCreationTokens !== undefined && {
                 cacheCreationInputTokens: cacheCreationTokens,
               }),
               ...(cacheReadTokens !== undefined && {
                 cacheReadInputTokens: cacheReadTokens,
               }),
+              // Inclusive input total (input_tokens excludes cache on Anthropic).
+              ...(typeof inputTokens === 'number'
+                ? {
+                    inclusiveInputTokens:
+                      inputTokens + (cacheReadTokens ?? 0) + (cacheCreationTokens ?? 0),
+                  }
+                : {}),
             };
+
+            // Sample the leak detector on the STREAMING path too. This was
+            // the RC9 blind spot: only generateCompletion sampled, so the
+            // streamed conversation surfaces (narrator, companion) — where
+            // the 2026-07 history-caching regressions actually lived — were
+            // invisible to the zero-read / unmarked tripwires.
+            this.recordCacheLeakSample(
+              modelId,
+              payload,
+              {
+                usage: {
+                  input_tokens: inputTokens,
+                  output_tokens: outputTokens,
+                  ...(cacheCreationTokens !== undefined && {
+                    cache_creation_input_tokens: cacheCreationTokens,
+                  }),
+                  ...(cacheReadTokens !== undefined && {
+                    cache_read_input_tokens: cacheReadTokens,
+                  }),
+                },
+              },
+              options.cache === false,
+            );
+
+            // A refusal ends the turn unsuccessfully, whatever streamed before
+            // it. Anthropic's contract is to discard the partial output; a
+            // final chunk would let the caller keep it as the answer and run
+            // tool calls parsed out of it.
+            if (event.delta.stop_reason === 'refusal') {
+              throw this.refusalError(modelId, event.delta.stop_details, accumulatedContent, usage);
+            }
 
             yield {
               id: responseId,
@@ -1188,6 +1532,12 @@ export class AnthropicProvider implements IProvider {
         }
       }
     } catch (streamError: unknown) {
+      // A refusal propagates as a thrown content-policy error, as
+      // GeminiProvider's safety block does, so the fallback chain can act on
+      // it instead of reading an error chunk.
+      if (streamError instanceof AnthropicProviderError && streamError.code === 'content_filter') {
+        throw streamError;
+      }
       const message = streamError instanceof Error ? streamError.message : 'Anthropic stream processing error';
       console.error(`AnthropicProvider stream error for model ${modelId}:`, message);
       yield {
@@ -1254,7 +1604,7 @@ export class AnthropicProvider implements IProvider {
   /**
    * Retrieves metadata for a specific model from the static catalog.
    *
-   * @param {string} modelId - Model identifier (e.g., "claude-sonnet-4-20250514").
+   * @param {string} modelId - Model identifier (e.g., "claude-sonnet-4-6").
    * @returns {Promise<ModelInfo | undefined>} Model info or undefined if not found.
    */
   public async getModelInfo(modelId: string): Promise<ModelInfo | undefined> {
@@ -1335,7 +1685,7 @@ export class AnthropicProvider implements IProvider {
     // Anthropic treats system as a top-level field, not a conversation role.
     // When cache_control markers are present on content parts, emit system
     // as an array of content blocks (required for Anthropic prompt caching).
-    type SystemBlock = { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } };
+    type SystemBlock = { type: 'text'; text: string; cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' } };
     const systemBlocks: SystemBlock[] = [];
     const conversationMessages: ChatMessage[] = [];
     // Index one past the last block contributed by the FIRST system message
@@ -1412,6 +1762,27 @@ export class AnthropicProvider implements IProvider {
       ),
     );
 
+    // --- Per-call cache opt-out: options.cache === false (region strip) ---
+    // Strip caller-placed markers from the system and message regions BEFORE
+    // payload assembly, so system falls back to the joined-string emission
+    // and the auto-cache gate below stands down entirely. Markers that ride
+    // in via customModelParams (raw tools, request-level cache_control) are
+    // cleared at the gate itself. One switch, zero cache_control on the
+    // wire — the hard guarantee a true one-shot needs: a cache write there
+    // is pure premium (1.25x/2x), never read back.
+    if (options.cache === false) {
+      for (const b of systemBlocks) delete b.cache_control;
+      for (const msg of anthropicMessages) {
+        const content = msg.content;
+        if (!Array.isArray(content)) continue;
+        for (const block of content) {
+          if (block && typeof block === 'object') {
+            delete (block as Record<string, unknown>).cache_control;
+          }
+        }
+      }
+    }
+
     const payload: Record<string, unknown> = {
       model: modelId,
       // max_tokens is REQUIRED by Anthropic — enforce a sane default
@@ -1473,14 +1844,45 @@ export class AnthropicProvider implements IProvider {
       delete payload.top_p;
     }
 
+    // --- Thinking off (options.thinking === false) ---
+    // Leaving the field out keeps the model's default, which is thinking ON
+    // for Opus 5 and Sonnet 5+, so turning it off takes the model's own
+    // shape. Some models accept that shape only at effort high or below; the
+    // effort block below caps it there.
+    let thinkingOffEffortCap: 'high' | undefined;
+    if (!thinkingResolved && options.thinking === false) {
+      const off = resolveThinkingOff(modelId);
+      if (off.kind === 'send') {
+        payload.thinking = off.thinking;
+        thinkingOffEffortCap = off.maxEffort;
+      } else if (off.kind === 'always_on') {
+        warnOnce(
+          `thinking-always-on:${modelId}`,
+          `[agentos] AnthropicProvider: thinking cannot be turned off on ${modelId}; the request runs ` +
+            `with adaptive thinking. Lower options.effort to reduce it.`,
+        );
+      }
+    }
+
     // --- Effort (output_config.effort) ---
     // Reasoning depth + token-spend control on effort-capable Claude models
     // (Opus 4.5+/Sonnet 4.6/Fable/Mythos). Independent of thinking + tool_choice
-    // — it rides on output_config. Dropped on unsupported models OR invalid
-    // values so an out-of-range effort can never 400 the request.
-    if (options.effort && isEffortLevel(options.effort) && modelSupportsEffort(modelId)) {
+    // — it rides on output_config. Dropped on unsupported models or invalid
+    // values, and lowered to a level the model takes, so an out-of-range
+    // effort never returns 400 (see resolveAnthropicEffort).
+    let effort = resolveAnthropicEffort(modelId, options.effort);
+    if (thinkingOffEffortCap && (effort === 'xhigh' || effort === 'max')) {
+      warnOnce(
+        `thinking-off-effort:${modelId}`,
+        `[agentos] AnthropicProvider: ${modelId} turns thinking off only at effort ` +
+          `${thinkingOffEffortCap} or below; sending effort '${thinkingOffEffortCap}' ` +
+          `instead of '${effort}'.`,
+      );
+      effort = thinkingOffEffortCap;
+    }
+    if (effort) {
       const oc = (payload.output_config as Record<string, unknown> | undefined) ?? {};
-      payload.output_config = { ...oc, effort: options.effort };
+      payload.output_config = { ...oc, effort };
     }
 
     // --- Cache diagnostics (beta cache-diagnosis-2026-04-07) ---
@@ -1579,6 +1981,32 @@ export class AnthropicProvider implements IProvider {
       payload.tool_choice = { type: 'tool', name: sf.tool.name };
     }
 
+    // Pass through any custom model params — minus OpenRouter's routing
+    // controls and Gemini's request fields, which only those vendors' bodies
+    // accept (a fallback leg reuses the same params object across hosts; see
+    // openrouter-only-params).
+    //
+    // This runs BEFORE the forced tool_choice reconciliation below so that a
+    // `tool_choice` injected through customModelParams is reconciled too —
+    // otherwise it merges in after the clamp and can send the forbidden
+    // thinking + forced-tool combination (or a Fable-rejected forced tool),
+    // which Anthropic 400s on.
+    // Track whether the passthrough replaced whole payload regions: the
+    // auto-cache block below must never restructure a region it no longer
+    // owns — mutating the stale pre-override locals would clobber the
+    // caller's system override, and a tail marker written into the stale
+    // message array never reaches the wire.
+    let customSystemOverride = false;
+    let customMessagesOverride = false;
+    {
+      const passthrough = stripForeignVendorParams(options.customModelParams);
+      if (passthrough) {
+        customSystemOverride = Object.prototype.hasOwnProperty.call(passthrough, 'system');
+        customMessagesOverride = Object.prototype.hasOwnProperty.call(passthrough, 'messages');
+        Object.assign(payload, passthrough);
+      }
+    }
+
     // --- Forced tool_choice reconciliation ---
     // A FORCED tool_choice ({type:'any'} or {type:'tool'}) is incompatible with
     // two situations, and Anthropic 400s on either:
@@ -1590,12 +2018,16 @@ export class AnthropicProvider implements IProvider {
     // letting the request 400. The model still chooses tools on 'auto' —
     // strongest with prescriptive tool descriptions — but forced tool use is no
     // longer guaranteed. Centralizing this means no caller has to special-case
-    // the thinking or Fable quirks. Catches both the convertToolChoice path and
-    // the structured-output forced tool.
+    // the thinking or Fable quirks. Catches the convertToolChoice path, the
+    // structured-output forced tool, AND a tool_choice injected via
+    // customModelParams (which is why this runs after the passthrough above).
     {
       const tc = payload.tool_choice as { type?: string } | undefined;
       if (tc && (tc.type === 'any' || tc.type === 'tool')) {
-        const thinkingActive = Boolean(payload.thinking);
+        // Only a thinking-on shape conflicts with a forced tool_choice; the
+        // off shapes (disabled, between_tools) do not.
+        const thinkingType = (payload.thinking as { type?: string } | undefined)?.type;
+        const thinkingActive = thinkingType === 'adaptive' || thinkingType === 'enabled';
         const modelRejectsForced = !modelSupportsForcedToolChoice(modelId);
         if (thinkingActive || modelRejectsForced) {
           const reason = thinkingActive
@@ -1608,16 +2040,6 @@ export class AnthropicProvider implements IProvider {
           );
           payload.tool_choice = { type: 'auto' };
         }
-      }
-    }
-
-    // Pass through any custom model params — minus OpenRouter's routing
-    // controls, which only OpenRouter's body accepts (a fallback leg reuses
-    // the same params object across hosts; see openrouter-only-params).
-    {
-      const passthrough = stripOpenRouterOnlyParams(options.customModelParams);
-      if (passthrough) {
-        Object.assign(payload, passthrough);
       }
     }
 
@@ -1652,10 +2074,55 @@ export class AnthropicProvider implements IProvider {
     //  - MESSAGE markers: the caller owns the whole messages region — the auto
     //    tail stands down entirely.
     //
-    // Callers that need it off (single-shot prompts where the cache-write
-    // premium can't amortize) set AGENTOS_ANTHROPIC_AUTO_CACHE=0.
+    // Per-call control (ModelCompletionOptions.cache):
+    //
+    //  - `cache: false` — zero cache_control on the wire for this request:
+    //    the region strip above already cleared caller system/message
+    //    markers, and the block below clears customModelParams-injected
+    //    tools/request markers + stands the auto path down. For true
+    //    one-shots (unique-suffix judges, single-call enrichment) where a
+    //    write can never be read back.
+    //  - `cache: { ttl: '1h' }` — the auto markers (system-end + moving
+    //    tail) carry `ttl: '1h'` and are placed as explicit block markers so
+    //    the TTL reaches the wire. For loops whose step gaps exceed the
+    //    5-minute default TTL (codegen tool calls run 2-14 min; human
+    //    think-time between conversation turns regularly exceeds 5m).
+    //
+    // Process-global kill switch (single-shot batch processes):
+    // AGENTOS_ANTHROPIC_AUTO_CACHE=0 — disables the auto path only; caller
+    // markers still pass through there (use `cache: false` for a per-call
+    // hard-off including caller markers).
     const autoCacheEnv = process.env.AGENTOS_ANTHROPIC_AUTO_CACHE;
-    if (
+    if (options.cache === false) {
+      // customModelParams passthrough ran above and may have injected ANY
+      // marked region — raw tools, a request-level cache_control, or even a
+      // wholesale system/messages override. Sanitize all of them so the
+      // opt-out holds regardless of how a marker arrived. Regions are
+      // rebuilt as copies (never mutated in place): after the spread these
+      // may be the caller's own customModelParams objects.
+      delete payload.cache_control;
+      const stripBlockMarkers = (value: unknown): unknown =>
+        Array.isArray(value)
+          ? value.map((block) => {
+              if (!block || typeof block !== 'object') return block;
+              const { cache_control: _stripped, ...rest } = block as Record<string, unknown>;
+              return rest;
+            })
+          : value;
+      payload.system = stripBlockMarkers(payload.system);
+      if (payload.system === undefined) delete payload.system;
+      if (Array.isArray(payload.messages)) {
+        payload.messages = (payload.messages as Array<Record<string, unknown>>).map((message) => {
+          if (!message || typeof message !== 'object') return message;
+          const copy = { ...message };
+          copy.content = stripBlockMarkers(copy.content);
+          return copy;
+        });
+      }
+      if (Array.isArray(payload.tools)) {
+        payload.tools = stripBlockMarkers(payload.tools);
+      }
+    } else if (
       autoCacheEnv !== '0'
       && autoCacheEnv !== 'false'
       && payload.cache_control === undefined
@@ -1664,15 +2131,64 @@ export class AnthropicProvider implements IProvider {
       // Explicit caller markers above still pass through untouched.
       && resolveCacheCapabilities(modelId).supportsPromptCaching
     ) {
+      if (customSystemOverride || customMessagesOverride) {
+        // customModelParams replaced payload.system/messages wholesale, so
+        // the locals below (systemBlocks / anthropicMessages and their
+        // marker counts) describe regions that are no longer on the wire.
+        // Never restructure here. Count markers on the ACTUAL payload:
+        // any marker means the caller owns the wire (full stand-down);
+        // none means the request-level auto marker — valid on any payload
+        // shape — keeps the pre-override caching behavior.
+        const overrideMarkers =
+          this.countWireBlockMarkers(payload.system) +
+          this.countMessageCacheMarkers(
+            Array.isArray(payload.messages)
+              ? (payload.messages as Array<Record<string, unknown>>)
+              : [],
+          ) +
+          this.countWireBlockMarkers(payload.tools);
+        if (overrideMarkers === 0) {
+          payload.cache_control = { type: 'ephemeral' };
+        }
+        return payload;
+      }
       const explicitBreakpoints = systemBlocks.filter(b => b.cache_control).length;
       const messageBreakpoints = this.countMessageCacheMarkers(anthropicMessages);
-      if (explicitBreakpoints === 0 && messageBreakpoints === 0) {
-        if (payload.thinking !== undefined) {
-          // Extended thinking: the request-level auto marker measurably
-          // produces ZERO cache creation on thinking-enabled calls
-          // (2026-07: 900+ agent-loop calls, ~12M prompt tokens/day,
-          // 0.000 hit rate). Place explicit block-level breakpoints
-          // instead:
+      // Tool definitions can carry their own cache_control (tool-use prompt
+      // caching), and those markers count against Anthropic's hard
+      // 4-breakpoint-per-request cap. Fold them into the accounting so a
+      // request with e.g. 3 marked system blocks + 1 marked tool (4, at the
+      // cap) does not get a 5th tail marker here and 400. agentos does not
+      // emit marked tools today (adaptTools adds none, and a customModelParams
+      // tools override is raw), so toolBreakpoints is 0 for every current
+      // caller — this is forward-safety, not a behavior change. Any caller
+      // that DOES mark tools also stands the auto path down entirely (below),
+      // matching the caller-owns-the-region philosophy.
+      const toolBreakpoints = Array.isArray(payload.tools)
+        ? (payload.tools as Array<{ cache_control?: unknown }>).filter(
+            (t) => t && typeof t === 'object' && (t as { cache_control?: unknown }).cache_control,
+          ).length
+        : 0;
+      // Per-call TTL for the AUTO-placed markers only (caller markers keep
+      // their own TTLs). '1h' writes at 2x instead of 1.25x, so it is opt-in
+      // per call site — worth it exactly when step gaps exceed the 5m TTL.
+      const autoTtl: '1h' | undefined =
+        options.cache && options.cache.ttl === '1h' ? '1h' : undefined;
+      if (explicitBreakpoints === 0 && messageBreakpoints === 0 && toolBreakpoints === 0) {
+        if (payload.thinking !== undefined || autoTtl !== undefined) {
+          // Two reasons to use explicit block-level breakpoints instead of
+          // the request-level auto marker:
+          //
+          //  - Extended thinking: the request-level auto marker measurably
+          //    produces ZERO cache creation on thinking-enabled calls
+          //    (2026-07: 900+ agent-loop calls, ~12M prompt tokens/day,
+          //    0.000 hit rate).
+          //  - A per-call TTL (`cache: { ttl: '1h' }`): the TTL is a
+          //    block-level attribute, so honoring it requires explicit
+          //    placement. Opt-in only — callers without a TTL keep the
+          //    request-level marker exactly as before.
+          //
+          // Placement:
           //
           //  1. On the last block of the FIRST system message — the
           //     primary system prompt precedes the thinking-bearing
@@ -1692,11 +2208,14 @@ export class AnthropicProvider implements IProvider {
           // Two breakpoints total, under the API cap of 4.
           let placed = false;
           if (firstSystemMsgBlockEnd > 0) {
-            systemBlocks[firstSystemMsgBlockEnd - 1].cache_control = { type: 'ephemeral' };
+            systemBlocks[firstSystemMsgBlockEnd - 1].cache_control = {
+              type: 'ephemeral',
+              ...(autoTtl ? { ttl: autoTtl } : {}),
+            };
             payload.system = systemBlocks;
             placed = true;
           }
-          if (this.markLastCacheableMessageBlock(anthropicMessages)) {
+          if (this.markLastCacheableMessageBlock(anthropicMessages, autoTtl)) {
             placed = true;
           }
           if (!placed) {
@@ -1711,19 +2230,65 @@ export class AnthropicProvider implements IProvider {
       } else if (
         messageBreakpoints === 0 &&
         explicitBreakpoints > 0 &&
-        explicitBreakpoints < 4
+        explicitBreakpoints + toolBreakpoints < 4
       ) {
-        // Caller marked the system prefix only: keep their placement + TTL
+        // Caller marked the system prefix only: keep their placement
         // verbatim and pin just the moving message tail (the API cap is 4
-        // breakpoints per request — the tail adds one, so require headroom).
+        // breakpoints per request — the tail adds one, so require headroom
+        // across ALL wire markers, tools included).
         // Applies on thinking AND non-thinking requests alike — the streamed
         // conversation surfaces (caller-marked system, no thinking) were the
         // last shape whose per-turn history went permanently uncached.
-        this.markLastCacheableMessageBlock(anthropicMessages);
+        //
+        // TTL ordering (Anthropic hard rule): every 1h marker must precede
+        // every 5m marker in cache order (tools → system → messages), or
+        // the request 400s. A 1h moving tail therefore requires the
+        // caller's system markers to be 1h too — `cache: { ttl: '1h' }`
+        // declares the whole call's pacing, so RAISE shorter/unset system
+        // marker TTLs to 1h (a codegen call's 5m-marked system + 1h tail
+        // was the rejected shape). Marked tools are raw caller objects we
+        // never mutate — with one present the tail falls back to the 5m
+        // default instead, keeping the order valid.
+        let tailTtl = autoTtl;
+        if (autoTtl === '1h') {
+          if (toolBreakpoints > 0) {
+            tailTtl = undefined;
+          } else {
+            for (const block of systemBlocks) {
+              if (block.cache_control && block.cache_control.ttl !== '1h') {
+                block.cache_control = { ...block.cache_control, ttl: '1h' };
+              }
+            }
+          }
+        }
+        this.markLastCacheableMessageBlock(anthropicMessages, tailTtl);
       }
     }
 
     return payload;
+  }
+
+  /**
+   * Count `cache_control` markers on a raw wire-shaped block array (a
+   * customModelParams `system` or `tools` override). Non-arrays (joined
+   * string systems, absent regions) count zero. Used by the override
+   * stand-down in the auto-cache block: with an override on the wire the
+   * pre-override locals cannot be trusted, so marker ownership is decided
+   * from the actual payload regions.
+   *
+   * @param value - The payload region as it will hit the wire.
+   * @returns Number of blocks carrying a `cache_control` marker.
+   * @private
+   */
+  private countWireBlockMarkers(value: unknown): number {
+    if (!Array.isArray(value)) return 0;
+    let count = 0;
+    for (const block of value) {
+      if (block && typeof block === 'object' && (block as Record<string, unknown>).cache_control) {
+        count += 1;
+      }
+    }
+    return count;
   }
 
   /**
@@ -1762,19 +2327,25 @@ export class AnthropicProvider implements IProvider {
    * carry `cache_control` and are skipped.
    *
    * @param anthropicMessages - Messages already converted to Anthropic wire format.
+   * @param ttl - Optional non-default TTL for the marker (per-call
+   *   `cache: { ttl: '1h' }`); omitted = the 5-minute default.
    * @returns True when a marker was placed.
    * @private
    */
   private markLastCacheableMessageBlock(
     anthropicMessages: Array<Record<string, unknown>>,
+    ttl?: '1h',
   ): boolean {
+    const marker = ttl
+      ? { type: 'ephemeral' as const, ttl }
+      : { type: 'ephemeral' as const };
     if (anthropicMessages.length === 0) return false;
     const last = anthropicMessages[anthropicMessages.length - 1];
     const content = last.content;
     if (typeof content === 'string') {
       if (!content) return false;
       last.content = [
-        { type: 'text', text: content, cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: content, cache_control: { ...marker } },
       ];
       return true;
     }
@@ -1783,7 +2354,7 @@ export class AnthropicProvider implements IProvider {
       for (let i = content.length - 1; i >= 0; i--) {
         const block = content[i] as Record<string, unknown>;
         if (block && typeof block === 'object' && CACHEABLE.has(block.type as string)) {
-          block.cache_control = { type: 'ephemeral' };
+          block.cache_control = { ...marker };
           return true;
         }
       }
@@ -1854,6 +2425,32 @@ export class AnthropicProvider implements IProvider {
           content: resultContent,
         }],
       };
+    }
+
+    // --- Assistant text turn that carries thinking ---
+    // A session transcript records a final answer's signed thinking; it
+    // replays verbatim ahead of the answer's content, like a tool turn's.
+    // The content converts exactly as it would without thinking, so text
+    // parts keep their cache_control breakpoints. For models that do not
+    // retain prior thinking, the caller strips it from every assistant turn
+    // but the last one before this runs.
+    if (msg.role === 'assistant' && msg.thinkingBlocks?.length) {
+      const rest = this.toAnthropicMessage({ ...msg, thinkingBlocks: undefined });
+      const restContent = rest.content;
+      const blocks: Array<Record<string, unknown>> = Array.isArray(restContent)
+        ? (restContent as Array<Record<string, unknown>>)
+        : typeof restContent === 'string' && restContent
+          ? [{ type: 'text', text: restContent }]
+          : [];
+      // An answer with no content keeps the plain shape: Anthropic rejects an
+      // assistant turn that holds only thinking.
+      if (blocks.length === 0) return rest;
+      const thinking = msg.thinkingBlocks.map((tb) =>
+        tb.type === 'thinking'
+          ? { type: 'thinking', thinking: tb.thinking, signature: tb.signature }
+          : { type: 'redacted_thinking', data: tb.data },
+      );
+      return { role: 'assistant', content: [...thinking, ...blocks] };
     }
 
     // --- Multimodal content (vision) ---
@@ -1965,18 +2562,51 @@ export class AnthropicProvider implements IProvider {
    * the stop reason from Anthropic's vocabulary to IProvider conventions.
    *
    * @param {AnthropicMessagesResponse} apiResponse - Raw Anthropic response.
+   * @param structuredOutputName - Name of the forced structured-output tool,
+   *   whose input becomes the message content.
+   * @param requestedModelId - The model the request named. Prices the call
+   *   when the response carries no model echo.
    * @returns {ModelCompletionResponse} Normalized completion response.
+   * @throws {AnthropicProviderError} With code `content_filter` when the model
+   *   refused (`stop_reason: 'refusal'`), whether or not it wrote any output
+   *   first.
    * @private
    */
   private mapResponseToCompletion(
     apiResponse: AnthropicMessagesResponse,
     structuredOutputName?: string,
+    requestedModelId?: string,
   ): ModelCompletionResponse {
+    const pricedModelId = apiResponse.model || requestedModelId || '';
+
     // Collect text content
     const textParts = apiResponse.content
       .filter(block => block.type === 'text' && block.text)
       .map(block => block.text!);
     let fullText = textParts.join('');
+
+    const usage: ModelUsage = {
+      promptTokens: apiResponse.usage.input_tokens,
+      completionTokens: apiResponse.usage.output_tokens,
+      totalTokens: apiResponse.usage.input_tokens + apiResponse.usage.output_tokens,
+      costUSD: estimateAnthropicCostUSD(pricedModelId, apiResponse.usage),
+      cacheCreationInputTokens: apiResponse.usage.cache_creation_input_tokens,
+      cacheReadInputTokens: apiResponse.usage.cache_read_input_tokens,
+      // Anthropic's input_tokens EXCLUDES cache reads/writes; the
+      // provider-independent inclusive input total adds them back
+      // (OpenAI/OpenRouter report prompt_tokens already inclusive).
+      inclusiveInputTokens:
+        apiResponse.usage.input_tokens
+        + (apiResponse.usage.cache_read_input_tokens ?? 0)
+        + (apiResponse.usage.cache_creation_input_tokens ?? 0),
+    };
+
+    // A refused turn is discarded whole, even when the model wrote text or
+    // tool_use blocks before refusing, so it never reaches tool-call mapping
+    // and the caller can never run a tool from it.
+    if (apiResponse.stop_reason === 'refusal') {
+      throw this.refusalError(pricedModelId, apiResponse.stop_details, fullText, usage);
+    }
 
     // Collect tool_use blocks and convert to OpenAI-style tool_calls
     const toolCalls = apiResponse.content
@@ -2025,21 +2655,6 @@ export class AnthropicProvider implements IProvider {
     const hasToolCalls = toolCalls.length > 0;
     const finishReason = this.mapStopReason(apiResponse.stop_reason);
 
-    const usage: ModelUsage = {
-      promptTokens: apiResponse.usage.input_tokens,
-      completionTokens: apiResponse.usage.output_tokens,
-      totalTokens: apiResponse.usage.input_tokens + apiResponse.usage.output_tokens,
-      costUSD: this.estimateCost(
-        apiResponse.usage.input_tokens,
-        apiResponse.usage.output_tokens,
-        apiResponse.model,
-        apiResponse.usage.cache_read_input_tokens,
-        apiResponse.usage.cache_creation_input_tokens,
-      ),
-      cacheCreationInputTokens: apiResponse.usage.cache_creation_input_tokens,
-      cacheReadInputTokens: apiResponse.usage.cache_read_input_tokens,
-    };
-
     const choice: ModelCompletionChoice = {
       index: 0,
       message: {
@@ -2070,7 +2685,14 @@ export class AnthropicProvider implements IProvider {
    * - `end_turn` → `"stop"` (natural completion)
    * - `tool_use` → `"tool_calls"` (model wants to invoke tools)
    * - `max_tokens` → `"length"` (hit token limit)
+   * - `model_context_window_exceeded` → `"length"` (output cut off at the
+   *   context window)
    * - `stop_sequence` → `"stop"` (hit a caller-specified stop sequence)
+   * - `refusal` → `"content_filter"`, the name GeminiProvider and
+   *   OpenAIProvider use. Both response paths raise a refusal as an error
+   *   before a finish reason is reported; the mapping keeps the vocabulary
+   *   complete.
+   * - anything else (such as `pause_turn`) passes through unchanged.
    *
    * @param {string | null} stopReason - Anthropic's stop_reason value.
    * @returns {string} Normalized finish reason.
@@ -2081,9 +2703,45 @@ export class AnthropicProvider implements IProvider {
       case 'end_turn': return 'stop';
       case 'tool_use': return 'tool_calls';
       case 'max_tokens': return 'length';
+      case 'model_context_window_exceeded': return 'length';
       case 'stop_sequence': return 'stop';
+      case 'refusal': return 'content_filter';
       default: return stopReason ?? 'stop';
     }
+  }
+
+  /**
+   * The error a refused turn raises. Code `content_filter` is what
+   * `isContentPolicyRefusal` recognizes, so the generateText and streamText
+   * fallback chains act on it, and the provider-health registry does not
+   * count it as a provider failure. The message carries no HTTP status or
+   * rate-limit wording, which retry classifiers grep for.
+   *
+   * @param modelId Model that refused.
+   * @param stopDetails The response's `stop_details`, kept verbatim.
+   * @param partialText Text the model wrote before refusing, discarded as an
+   *   answer but kept for diagnostics.
+   * @param usage Tokens the refused call consumed.
+   * @returns An error with code `content_filter` and Anthropic error type
+   *   `refusal`.
+   * @private
+   */
+  private refusalError(
+    modelId: string,
+    stopDetails: AnthropicStopDetails | null | undefined,
+    partialText: string,
+    usage: ModelUsage,
+  ): AnthropicProviderError {
+    const category = stopDetails?.category;
+    return new AnthropicProviderError(
+      `Claude declined the request on ${modelId || 'the requested model'} (stop_reason refusal${
+        category ? `, category ${category}` : ''
+      }).`,
+      'content_filter',
+      undefined,
+      'refusal',
+      { stopReason: 'refusal', stopDetails: stopDetails ?? null, partialText, usage },
+    );
   }
 
   /**
@@ -2105,59 +2763,6 @@ export class AnthropicProvider implements IProvider {
         arguments: tc.argsJson || '{}',
       },
     }));
-  }
-
-  /**
-   * Estimates USD cost for a given model and token counts.
-   *
-   * Looks up pricing from the static model catalog. Returns undefined
-   * if the model is not found in the catalog.
-   *
-   * @param {number} inputTokens - Number of input tokens.
-   * @param {number} outputTokens - Number of output tokens.
-   * @param {string} modelId - Model identifier for pricing lookup.
-   * @returns {number | undefined} Estimated cost in USD.
-   * @private
-   */
-  /**
-   * Estimate cost in USD for a completion, including Anthropic's prompt-
-   * caching tier pricing.
-   *
-   * Anthropic billing tiers (as of 2025):
-   *   input_tokens            × 1.00 × base input rate  (non-cached input)
-   *   cache_read_input_tokens × 0.10 × base input rate  (cache hit)
-   *   cache_creation_input_tokens × 1.25 × base input rate  (5-min TTL write)
-   *   output_tokens           × 1.00 × base output rate
-   *
-   * The API's `input_tokens` field already EXCLUDES cached tokens, so we
-   * sum three separate components for total input cost. Previous
-   * implementation used only `input_tokens` × rate, which happened to
-   * be correct for the non-cached portion but hid cache creation cost
-   * and ignored cache read cost entirely — meaning reported costUSD
-   * was always BELOW true billed amount whenever caching was active.
-   *
-   * 1-hour TTL cache-creation rate is 2× the base input rate, not 1.25×.
-   * We can't tell which TTL was used from the response, so we assume
-   * the default 5-minute tier. For long-lived cached contexts the
-   * reported cost will under-estimate by the 0.75× difference on
-   * creation tokens (minor; mostly one-shot at run start).
-   */
-  private estimateCost(
-    inputTokens: number,
-    outputTokens: number,
-    modelId: string,
-    cacheReadTokens?: number,
-    cacheCreationTokens?: number,
-  ): number | undefined {
-    const info = ANTHROPIC_MODELS.find(m => m.modelId === modelId);
-    if (!info?.pricePer1MTokensInput || !info?.pricePer1MTokensOutput) return undefined;
-    const inputPrice = info.pricePer1MTokensInput;
-    const outputPrice = info.pricePer1MTokensOutput;
-    const nonCachedInput = (inputTokens / 1_000_000) * inputPrice;
-    const cachedRead = ((cacheReadTokens ?? 0) / 1_000_000) * inputPrice * 0.10;
-    const cachedCreate = ((cacheCreationTokens ?? 0) / 1_000_000) * inputPrice * 1.25;
-    const output = (outputTokens / 1_000_000) * outputPrice;
-    return nonCachedInput + cachedRead + cachedCreate + output;
   }
 
   /**
@@ -2326,8 +2931,14 @@ export class AnthropicProvider implements IProvider {
             'REQUEST_TIMEOUT',
           );
         } else {
+          // fetch names the URL (credentials included) when it rejects one,
+          // and quotes a header value it rejects, which carries the key.
           lastError = new AnthropicProviderError(
-            error instanceof Error ? error.message : 'Network or unknown error',
+            redactUrlSecrets(
+              error instanceof Error ? error.message : 'Network or unknown error',
+              this.config.baseURL,
+              [apiKey],
+            ),
             'NETWORK_ERROR',
           );
         }
@@ -2439,8 +3050,14 @@ export class AnthropicProvider implements IProvider {
     } catch (error: unknown) {
       clearTimeout(timeoutId);
       if (error instanceof AnthropicProviderError) throw error;
+      // Masked like makeApiRequest's network failures: fetch's rejection
+      // can name a credential-bearing base URL or quote the key header.
       throw new AnthropicProviderError(
-        error instanceof Error ? error.message : 'Failed to connect to Anthropic stream.',
+        redactUrlSecrets(
+          error instanceof Error ? error.message : 'Failed to connect to Anthropic stream.',
+          this.config.baseURL,
+          [apiKey],
+        ),
         'STREAM_CONNECTION_FAILED',
       );
     }
@@ -2555,9 +3172,14 @@ export class AnthropicProvider implements IProvider {
     }
   }
 
-  /** True when the request enables extended thinking or replays thinking blocks. */
+  /**
+   * True when the request enables extended thinking or replays thinking
+   * blocks. `{ type: 'disabled' }` turns thinking off; `between_tools` still
+   * returns thinking blocks between tool calls, so it counts.
+   */
   private payloadUsesThinking(body: Record<string, unknown>): boolean {
-    if (body.thinking != null) return true;
+    const thinkingType = (body.thinking as { type?: unknown } | null | undefined)?.type;
+    if (body.thinking != null && thinkingType !== 'disabled') return true;
     const messages = body.messages;
     if (!Array.isArray(messages)) return false;
     return messages.some(m => {

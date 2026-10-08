@@ -269,10 +269,10 @@ export class MissionBuilder {
   /**
    * Set the model used for Tree of Thought planning phases.
    *
-   * Use a strong reasoning model here (e.g., claude-opus-4-6, gpt-4o) for
+   * Use a strong reasoning model here (e.g., claude-opus-5, gpt-4o) for
    * better plan quality. Defaults to the same model as execution if not set.
    *
-   * @param model - Model identifier string (e.g., 'claude-opus-4-6').
+   * @param model - Model identifier string (e.g., 'claude-opus-5').
    */
   plannerModel(model: string): this {
     this._plannerModel = model;

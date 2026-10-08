@@ -37,12 +37,12 @@
  *
  * @example
  * ```typescript
- * import { SpeechProviderResolver } from '../../speech/SpeechProviderResolver.js';
+ * import { SpeechRuntime } from '../../../io/speech/SpeechRuntime.js';
  * import { SpeechProviderAdapter } from './SpeechProviderAdapter.js';
  *
- * const resolver = new SpeechProviderResolver();
- * await resolver.refresh();
- * const stt = resolver.resolveSTT();
+ * // SpeechRuntime builds the STT providers whose keys are set.
+ * const stt = new SpeechRuntime({ env: process.env }).getSTT();
+ * if (!stt) throw new Error('No speech-to-text provider is configured');
  * const adapter = new SpeechProviderAdapter(stt);
  *
  * const indexer = new MultimodalIndexer({ sttProvider: adapter, ... });

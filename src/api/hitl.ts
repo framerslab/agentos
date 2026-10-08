@@ -13,7 +13,7 @@
  *
  * // Auto-approve everything (useful in tests and CI environments)
  * const testAgency = agency({
- *   agents: { worker: { provider: 'openai', model: 'gpt-4o-mini' } },
+ *   agents: { worker: { provider: 'openai', model: 'gpt-5.5' } },
  *   hitl: {
  *     approvals: { beforeTool: ['delete-file'] },
  *     handler: hitl.autoApprove(),
@@ -33,6 +33,8 @@
 
 import type { ApprovalRequest, ApprovalDecision } from './types.js';
 import type { GenerateTextResult } from './generateText.js';
+import { resolveJudgeLlm } from '../core/llm/providers/judge-config.js';
+import type { EffortLevel } from '../core/llm/providers/model-effort.js';
 
 // ---------------------------------------------------------------------------
 // Public type
@@ -113,8 +115,9 @@ export const hitl = {
    * Returns a handler that pauses execution and prompts the user interactively
    * via `stdin`/`stdout`.
    *
-   * Displays the approval request summary (description, agent, action, type)
-   * and waits for the user to type `y` (approve) or `n` (reject).
+   * Prints the request's description, agent, action, type and details (for a
+   * tool call, the arguments it will run with), then waits for the user to
+   * type `y` (approve) or `n` (reject).
    *
    * **Important**: This handler reads from `process.stdin`, so it must only be
    * used in interactive terminal environments (not in CI/CD pipelines or
@@ -130,6 +133,7 @@ export const hitl = {
   cli(): HitlHandler {
     return async (request: ApprovalRequest): Promise<ApprovalDecision> => {
       const readline = await import('node:readline');
+      const { inspect } = await import('node:util');
       const rl = readline.createInterface({
         input: process.stdin,
         output: process.stdout,
@@ -139,6 +143,12 @@ export const hitl = {
         console.log(`\n[APPROVAL NEEDED] ${request.description}`);
         console.log(`Agent: ${request.agent} | Action: ${request.action}`);
         console.log(`Type: ${request.type}`);
+        // What is being approved: for a tool call, the arguments it will run
+        // with, in full. They are printed here and kept out of the
+        // description, which hitl.slack posts to a channel.
+        console.log(
+          `Details: ${inspect(request.details, { depth: null, maxArrayLength: null, maxStringLength: null, breakLength: 100 })}`,
+        );
         rl.question('Approve? (y/n): ', (answer) => {
           rl.close();
           resolve({ approved: answer.toLowerCase().startsWith('y') });
@@ -262,7 +272,7 @@ export const hitl = {
    *   hitl: {
    *     approvals: { beforeTool: ['delete-file'] },
    *     handler: hitl.llmJudge({
-   *       model: 'gpt-4o-mini',
+   *       model: 'gpt-5.6',
    *       criteria: 'Is this action safe and non-destructive?',
    *       confidenceThreshold: 0.8,
    *       fallback: hitl.cli(), // escalate uncertain decisions to human
@@ -272,10 +282,16 @@ export const hitl = {
    * ```
    */
   llmJudge(config: {
-    /** LLM model to use. @default 'gpt-4o-mini' */
+    /** LLM model to use. @default the central judge resolver (`resolveDefaultJudgeModel()` — gpt-5.6) */
     model?: string;
-    /** LLM provider. @default 'openai' */
+    /** LLM provider. @default 'openai'; pinning a non-openai provider requires an explicit `model` */
     provider?: string;
+    /**
+     * Reasoning effort. When omitted, the resolver's default (`max`) applies
+     * only when the resolver's model was also selected — a caller-pinned
+     * model gets no injected effort.
+     */
+    effort?: EffortLevel;
     /** Custom evaluation criteria/rubric. @default 'Evaluate whether this action is safe, relevant, and appropriate.' */
     criteria?: string;
     /** Confidence threshold — below this, escalate to fallback handler. @default 0.7 */
@@ -285,8 +301,9 @@ export const hitl = {
     /** API key override. */
     apiKey?: string;
   } = {}): HitlHandler {
-    const model = config.model ?? 'gpt-4o-mini';
-    const provider = config.provider ?? 'openai';
+    const judgeSel = resolveJudgeLlm({ model: config.model, provider: config.provider, effort: config.effort });
+    const model = judgeSel.model;
+    const provider = judgeSel.provider;
     const criteria = config.criteria ?? 'Evaluate whether this action is safe, relevant, and appropriate.';
     const threshold = config.confidenceThreshold ?? 0.7;
     const fallback = config.fallback ?? hitl.autoReject('LLM judge confidence too low');
@@ -327,6 +344,7 @@ export const hitl = {
           system: systemPrompt,
           prompt: userPrompt,
           temperature: 0.1,
+          ...(judgeSel.effort !== undefined ? { effort: judgeSel.effort } : {}),
           apiKey: config.apiKey,
         });
 
