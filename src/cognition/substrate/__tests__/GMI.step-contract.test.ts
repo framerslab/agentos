@@ -64,6 +64,20 @@ describe('GMI step contract (runtime path)', () => {
     expect(options[0]).not.toHaveProperty('preferredModelId');
   });
 
+  it('sets no temperature and no output budget of its own: unset, neither is sent; a persona value is sent, and a turn value replaces it', async () => {
+    const bare = scriptedProvider([textReply('ok')]);
+    const { gmi: plain } = await createScriptedGmi({ provider: bare.provider });
+    await runTurn(plain, textTurn('t1', 'Hi.'));
+    expect(bare.options[0]).not.toHaveProperty('temperature');
+    expect(bare.options[0]).not.toHaveProperty('maxTokens');
+
+    const { provider, options } = scriptedProvider([textReply('ok'), textReply('ok')]);
+    const { gmi } = await createScriptedGmi({ provider, persona: { defaultModelCompletionOptions: { temperature: 0.2, maxTokens: 900 } as never } });
+    await runTurn(gmi, textTurn('t1', 'Hi.'));
+    await runTurn(gmi, textTurn('t2', 'Again.', { options: { temperature: 0.9, maxTokens: 300 } }));
+    expect(options.map((o) => [o.temperature, o.maxTokens])).toEqual([[0.2, 900], [0.9, 300]]);
+  });
+
   it('an in-band provider error keeps LLM_PROVIDER_ERROR through the outer catch', async () => {
     const { provider } = scriptedProvider([errorReply('rate limited')]);
     const { gmi } = await createScriptedGmi({ provider });

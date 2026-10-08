@@ -88,6 +88,16 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(s.seen[0].options.tools).toBeUndefined();
   });
 
+  it('sends no temperature and no output budget unless the agent or the call sets one, as agent() does', async () => {
+    const k = key(); const s = script('openai', k, { replies: [reply.text('ok'), reply.text('ok')] });
+    const a = agent(base(k));
+    await a.session('s').send('hi');
+    expect(s.seen[0].options).not.toHaveProperty('temperature');
+    expect(s.seen[0].options).not.toHaveProperty('maxTokens');
+    await a.generate('hi', { temperature: 0.3, maxTokens: 64 });
+    expect(s.seen[1].options).toMatchObject({ temperature: 0.3, maxTokens: 64 });
+  });
+
   it("an agent tool named getCurrentDateTime is the one that runs, not the executor's built-in", async () => {
     const k = key(); script('openai', k, { replies: [reply.tools([{ id: 'c1', name: 'getCurrentDateTime', args: {} }]), reply.text('Noon.')] });
     const execute = vi.fn(async () => ({ success: true, output: 'noon' }));
