@@ -440,6 +440,21 @@ export interface AgentSession {
 }
 
 /**
+ * Options for {@link Agent.session}.
+ */
+export interface AgentSessionOptions {
+  /**
+   * The user the session serves. With `runtime: 'gmi'` it scopes the session's
+   * cognitive memory: sessions opened with the same user id recall each other's
+   * facts, and a session opened without one has a scope of its own, its session
+   * id. The GMI also sends it with each model request as the end user's id
+   * (OpenAI's `user` or `safety_identifier`). Asking for an open session with
+   * another user id throws. The legacy runtime ignores it.
+   */
+  userId?: string;
+}
+
+/**
  * A stateful agent instance returned by {@link agent}.
  *
  * @category Core
@@ -467,9 +482,10 @@ export interface Agent {
    * Returns (or creates) a named {@link AgentSession} with its own conversation history.
    *
    * @param id - Optional session ID. A unique ID is generated when omitted.
+   * @param options - The session's user; see {@link AgentSessionOptions}.
    * @returns The session object for this ID.
    */
-  session(id?: string): AgentSession;
+  session(id?: string, options?: AgentSessionOptions): AgentSession;
   /** Returns persisted usage totals for the whole agent or a single session. */
   usage(sessionId?: string): Promise<AgentOSUsageAggregate>;
   /** Releases all in-memory session state held by this agent. */
