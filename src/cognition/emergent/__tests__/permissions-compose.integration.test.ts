@@ -317,6 +317,52 @@ describe('compositions and workflows: one gate, one rule', () => {
     expect(run.output).toEqual({ text: 'hello' });
   });
 
+  it('a gate built with createStepGate asks no approval at a nested composed call, only at the steps that have side effects', async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const tools = new Map<string, ITool>([
+      ['send_email', { ...sendMessageTool(sent), id: 'send-email-v1', name: 'send_email', requiredCapabilities: [] }],
+    ]);
+    const hitl = approvingHitl();
+    const config: EmergentConfig = {
+      ...DEFAULT_EMERGENT_CONFIG,
+      enabled: true,
+      compose: { sideEffectingTools: ['send_email', 'notify'] },
+    };
+    const engine = new EmergentCapabilityEngine({
+      config,
+      composableBuilder: new ComposableToolBuilder(
+        createStepGate({ resolve: (name) => tools.get(name), hitlManager: hitl.manager, hitl: { enabled: true } }),
+      ),
+      judge: new EmergentJudge({ judgeModel: 'judge', promotionModel: 'judge', generateText: async () => APPROVED_VERDICT }),
+      registry: new EmergentToolRegistry(config),
+      onToolForged: async (_tool, executable) => {
+        tools.set(executable.name, executable);
+      },
+    });
+    const context = { agentId: 'agent-1', sessionId: 'sess-1' };
+    const nestedCase = {
+      testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'sent: hi' }, stepOutputs: { s: { text: 'sent: hi' } } }],
+    };
+    const notify = await engine.forge(composeOver('notify', 'send_email', nestedCase) as unknown as ForgeToolRequest, context);
+    expect(notify.success).toBe(true);
+    const campaign = await engine.forge(composeOver('campaign', 'notify', nestedCase) as unknown as ForgeToolRequest, context);
+    expect(campaign.success).toBe(true);
+
+    hitl.requestApproval.mockClear();
+    const callContext: ToolExecutionContext = {
+      gmiId: 'gmi-1',
+      personaId: 'persona-1',
+      userContext: { userId: 'user-1' } as ToolExecutionContext['userContext'],
+    };
+    const run = await tools.get('campaign')!.execute({ text: 'hello' }, callContext);
+
+    expect(run.success).toBe(true);
+    expect(sent).toEqual([{ text: 'hello' }]);
+    // Asked once, at the step that sends; not at notify, the composed step.
+    expect(hitl.requestApproval).toHaveBeenCalledTimes(1);
+    expect((hitl.requestApproval.mock.calls[0][0] as PendingAction).context).toMatchObject({ toolName: 'send_email' });
+  });
+
   it('a workflow step meets the rule at create, and the permission check and approval when it runs', async () => {
     const sent: Array<Record<string, unknown>> = [];
     const hitl = approvingHitl();

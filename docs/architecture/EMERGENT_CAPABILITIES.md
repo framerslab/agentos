@@ -601,7 +601,7 @@ import {
 const gate = createStepGate({
   resolve: (name) => myTools.get(name),   // the step's tool as registered now
   permissionManager,                        // optional: each step is checked with the caller's capabilities
-  hitlManager,                              // optional, with hitl.enabled: a side-effecting step asks approval
+  hitlManager,                              // optional, with hitl.enabled: a side-effecting step asks approval (a nested composition is not asked; its own steps are)
   hitl: { enabled: true },
 });
 
