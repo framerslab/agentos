@@ -23,6 +23,37 @@ const SUM_IN = {
 };
 const SUM_OUT = { type: 'object', properties: { sum: { type: 'number' } }, required: ['sum'] };
 
+/**
+ * A composition over the host's echo, loaded; a run that meets its step
+ * missing suspends it (the row reads the library's step_missing), then the
+ * host suspends it and that write fails: the row still reads the library's
+ * suspension, and the host's is held in this process only. The step's tool
+ * is unregistered when this returns.
+ */
+async function hostSuspensionFailedOverLibraryRow() {
+  const db = createSqliteAdapter();
+  const host = await makeForgeHost({ db, tools: [echoTool()] });
+  seedToolRow(db, {
+    id: 'c-echo',
+    name: 'echo_once',
+    mode: 'compose',
+    source: JSON.stringify({
+      mode: 'compose',
+      steps: [{ name: 'e', tool: 'echo', inputMapping: { text: '$input.text' } }],
+    }),
+    inputSchema: TEXT_IN,
+    outputSchema: TEXT_OUT,
+  });
+  expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).active).toBe(1);
+  await host.orchestrator.unregisterTool('echo');
+  expect((await callTool(host.orchestrator, 'echo_once', { text: 'x' })).isError).toBe(true);
+  expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'suspended', state_reason: 'step_missing', set_by: 'library' });
+  db.failNext('INSERT INTO agentos_emergent_tool_state');
+  await expect(host.engine.suspendTool('c-echo', 'policy_hold')).rejects.toThrow('simulated storage failure');
+  expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'suspended', state_reason: 'step_missing', set_by: 'library' });
+  return { db, host };
+}
+
 describe('stored tools: the loader, legacy rows and suspension', () => {
   it('loads the three stored forms, keeps a row a host turned off, and never rewrites a row', async () => {
     const db = createSqliteAdapter();
@@ -379,6 +410,44 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
 
     expect(await host.engine.reactivateTool('raw-1')).toMatchObject({ state: 'active' });
     expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
+  });
+
+  it("a host's suspension whose write failed stays over a row that reads the library's step suspension: a load with the step still missing keeps it, and the step's return lifts nothing", async () => {
+    const { db, host } = await hostSuspensionFailedOverLibraryRow();
+
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'c-echo', name: 'echo_once', state: 'suspended', reason: 'policy_hold' },
+    ]);
+    // The step's tool comes back: a host's suspension is not re-checked.
+    await host.orchestrator.registerTool(echoTool());
+    await host.engine.onHostToolRegistered('echo');
+    expect(await host.orchestrator.getTool('echo_once')).toBeUndefined();
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'x' })).isError).toBe(true);
+    // Nothing was written over the row.
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'suspended', state_reason: 'step_missing', set_by: 'library' });
+
+    // The host clears it.
+    expect(await host.engine.reactivateTool('c-echo')).toMatchObject({ state: 'active' });
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'back' })).output).toEqual({ text: 'back' });
+  });
+
+  it("a host's suspension whose write failed stays over a row that reads the library's step suspension: a load with the step back keeps it", async () => {
+    const { db, host } = await hostSuspensionFailedOverLibraryRow();
+
+    // The step's tool is back before the load; its registration re-checks
+    // nothing, and the load writes nothing over the row.
+    await host.orchestrator.registerTool(echoTool());
+    await host.engine.onHostToolRegistered('echo');
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'c-echo', name: 'echo_once', state: 'suspended', reason: 'policy_hold' },
+    ]);
+    expect(await host.orchestrator.getTool('echo_once')).toBeUndefined();
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'x' })).isError).toBe(true);
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'suspended', state_reason: 'step_missing', set_by: 'library' });
+
+    // The host clears it.
+    expect(await host.engine.reactivateTool('c-echo')).toMatchObject({ state: 'active' });
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'back' })).output).toEqual({ text: 'back' });
   });
 
   it('demoting a tool leaves a later tool of the same name callable', async () => {

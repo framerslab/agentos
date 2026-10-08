@@ -1469,14 +1469,18 @@ export class EmergentCapabilityEngine {
       });
     }
     // Nothing is written; the tool is held off here until the next load.
-    this.holdStored(toolId, {
+    this.holdStored(
       toolId,
-      state: 'suspended',
-      reason: 'contended',
-      setBy: 'library',
-      at: Date.now(),
-      request: null,
-    });
+      {
+        toolId,
+        state: 'suspended',
+        reason: 'contended',
+        setBy: 'library',
+        at: Date.now(),
+        request: null,
+      },
+      options.readAt,
+    );
     await this.unregisterIfLive(toolId);
     return { toolId, name, state: 'suspended', reason: 'contended' };
   }
@@ -1490,6 +1494,18 @@ export class EmergentCapabilityEngine {
     // it here: the session's cleanup lets go of that state before it returns.
     if (candidate.tier === 'session' && candidate.session) {
       this.registry.noteStoredSession(toolId, candidate.session);
+    }
+    // 0. A restriction the host set in this process that the row this
+    //    admission read may not show (its write is under way, landed after
+    //    the read, or failed) stays in force until the host reactivates the
+    //    tool, whatever the row reads, the library's own suspension included:
+    //    nothing is written, and the executable goes.
+    if (!options.force) {
+      const hostHeld = this.unreadHostRestriction(toolId, readAt);
+      if (hostHeld) {
+        await this.unregisterIfLive(toolId);
+        return { toolId, name, state: hostHeld.state, reason: hostHeld.reason };
+      }
     }
     let legacyActive = candidate.legacyActive;
     // A row whose last state write did not finish its flag write: finish it
@@ -1515,7 +1531,7 @@ export class EmergentCapabilityEngine {
     if ((stored?.state === 'demoted' || hostTurnedOff) && !options.force) {
       const reason = stored?.state === 'demoted' ? stored.reason : 'legacy_inactive';
       if (stored?.state === 'demoted') {
-        this.holdStored(toolId, stored);
+        this.holdStored(toolId, stored, readAt);
       } else {
         // Written only while the row is as it was read: a host that
         // reactivated the tool meanwhile is not written over.
@@ -1537,7 +1553,7 @@ export class EmergentCapabilityEngine {
     if (stored?.state === 'suspended' && !options.force && stored.setBy === 'host') {
       // Another process may have set it: this one takes it in and lets go of
       // the executable, so the suspension holds wherever the tool is loaded.
-      this.holdStored(toolId, stored);
+      this.holdStored(toolId, stored, readAt);
       await this.unregisterIfLive(toolId);
       return { toolId, name, state: 'suspended', reason: stored.reason };
     }
@@ -1619,7 +1635,7 @@ export class EmergentCapabilityEngine {
         // The row already says so; this process holds it too. A row that
         // holds no request it can read is held with the one derived from its
         // source, so a registration of a step tool it names finds it.
-        this.holdStored(toolId, stored.request ? stored : { ...stored, request });
+        this.holdStored(toolId, stored.request ? stored : { ...stored, request }, readAt);
       }
       await this.unregisterIfLive(toolId);
       return { toolId, name, state: 'suspended', reason };
@@ -1665,7 +1681,7 @@ export class EmergentCapabilityEngine {
     // row and gives way to it.
     const held = written && written.state !== 'active' ? written : this.newerRestrictionHeld(toolId, readAt);
     if (held && held.state !== 'active') {
-      this.holdStored(toolId, held);
+      this.holdStored(toolId, held, readAt);
       await this.unregisterIfLive(toolId);
       return { toolId, name, state: held.state, reason: held.reason };
     }
@@ -1997,8 +2013,28 @@ export class EmergentCapabilityEngine {
     return this.registry.restrictionUnread(toolId, readAt) ? memory : undefined;
   }
 
-  /** A stored restriction, held in this process too when the tool is live here. */
-  private holdStored(toolId: string, record: ToolStateRecord): void {
+  /**
+   * A host's restriction (its suspension, or a demotion) this process holds
+   * that the row read from `readAt` on may not show: its write is still under
+   * way, landed after the read began, or failed. Only `reactivateTool` lifts
+   * it; nothing read from that row replaces it.
+   */
+  private unreadHostRestriction(toolId: string, readAt: number): ToolStateRecord | undefined {
+    const memory = this.registry.getState(toolId);
+    return memory && isHostRestriction(memory) && this.registry.restrictionUnread(toolId, readAt) ? memory : undefined;
+  }
+
+  /**
+   * A stored restriction, held in this process too when the tool is live
+   * here. With `readAt`, the point the record's row was read at, a host's
+   * restriction this process holds that the row may not show stays instead
+   * (see {@link unreadHostRestriction}).
+   */
+  private holdStored(toolId: string, record: ToolStateRecord, readAt?: number): void {
+    const kept = readAt === undefined ? undefined : this.unreadHostRestriction(toolId, readAt);
+    if (kept && kept !== record) {
+      return;
+    }
     const live = this.registry.get(toolId);
     if (live) {
       this.registry.adopt(live, record);
