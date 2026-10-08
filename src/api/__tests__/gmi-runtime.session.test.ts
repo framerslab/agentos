@@ -251,6 +251,13 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(systemText(s.seen[1])).toContain(DEFAULT_COT_INSTRUCTION);
   });
 
+  it('chainOfThought: false sends no chain-of-thought instruction, tools or not', async () => {
+    const k = key(); const s = script('openai', k, { replies: [reply.text('Hi.')] });
+    await agent(base(k, { tools: [lookupTool(async () => ({ success: true }))], chainOfThought: false })).session('s').send('hi');
+    expect(s.seen[0].options.tools).toBeDefined();
+    expect(systemText(s.seen[0])).not.toContain(DEFAULT_COT_INSTRUCTION);
+  });
+
   it('generate keeps no history; close releases sessions', async () => {
     const k = key(); const s = script('openai', k, { replies: [reply.text('A.'), reply.text('B.')] });
     const a = agent(base(k));

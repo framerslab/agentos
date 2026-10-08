@@ -77,6 +77,8 @@ export interface GmiTurnContext {
   memoryContext: string | undefined;
   /** Called before every model call of the turn with the provider and model its hop was routed to. */
   onModelCall?: (route: { providerId: string; modelId: string }) => void;
+  /** True for a structured send: its model calls go without tools. */
+  structured?: boolean;
 }
 
 /** The GMI that serves one turn. */
@@ -296,6 +298,7 @@ export async function* runGmiTurn(
       prompt: typeof input === 'string' ? input : undefined,
       memoryContext,
       onModelCall: ({ providerId, modelId }) => folder.route(providerId, modelId),
+      structured: turn.responseSchema !== undefined,
     });
     writer = deps.history?.beginTurn(turn.blockLabel, epochAtStart);
 

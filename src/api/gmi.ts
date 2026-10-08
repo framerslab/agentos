@@ -14,7 +14,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { Agent, AgentOptions, AgentSession, AgentSessionOptions, SessionSendOptions } from './agent.js';
-import type { GenerateTextOptions, GenerateTextResult, Message, MessageContent } from './generateText.js';
+import { resolveChainOfThought, type GenerateTextOptions, type GenerateTextResult, type Message, type MessageContent } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import { GMI } from '../cognition/substrate/GMI.js';
 import type { GMIBaseConfig, IGMI } from '../cognition/substrate/IGMI.js';
@@ -97,6 +97,20 @@ function retryingOnce<T>(build: () => Promise<T>): { get(): Promise<T>; peek(): 
     },
     peek: () => pending,
   };
+}
+
+/**
+ * `messages` with `text` first in the system prompt: before the first system
+ * message's content, joined by a blank line, or as a system message of its
+ * own when the prompt has none.
+ */
+function withLeadingSystemText(messages: ChatMessage[], text: string): ChatMessage[] {
+  const first = messages[0];
+  if (first?.role !== 'system') return [{ role: 'system', content: text }, ...messages];
+  const content = first.content;
+  if (typeof content === 'string') return [{ ...first, content: content ? `${text}\n\n${content}` : text }, ...messages.slice(1)];
+  if (Array.isArray(content)) return [{ ...first, content: [{ type: 'text', text }, ...content] }, ...messages.slice(1)];
+  return [{ ...first, content: text }, ...messages.slice(1)];
 }
 
 /** `target` with some members replaced; every other method runs on `target` itself. */
@@ -266,6 +280,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
     console.warn('[agentos] gmi(): cognitive memory supplies the memory context; memoryProvider.getContext is skipped (observe still runs).');
   }
   const tools: ITool[] = adaptTools(opts.tools);
+  // Put first in the system prompt of every call that offers tools, as generateText puts it.
+  const chainOfThought = tools.length > 0 ? resolveChainOfThought(opts.chainOfThought ?? true) : undefined;
   const ledger = mergeLedger((opts.observability?.usageLedger as AgentOSUsageLedgerOptions | undefined) ?? opts.usageLedger);
   const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
   const gateway = gatewayFor(opts);
@@ -354,6 +370,13 @@ export function gmi(opts: GmiOptions): GmiHandle {
             const { name: _name, ...unnamed } = message;
             return unnamed;
           });
+          changed = true;
+        }
+        // A structured send's calls go without tools, and agent() then sends
+        // no chain-of-thought instruction; every other call of an agent with
+        // tools gets it first in its system prompt.
+        if (chainOfThought && !turn.structured) {
+          messages = withLeadingSystemText(messages, chainOfThought);
           changed = true;
         }
         if (turn.memoryContext) {
