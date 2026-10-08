@@ -64,6 +64,13 @@ describe('TranscriptLedger', () => {
     expect(ledger.get('i9')).toMatchObject({ text: '', isFinal: true, failed: 'audio_unintelligible' });
   });
 
+  it('takes an empty failure reason for none, as the LiveKit stream does, so the line is taken back', () => {
+    const ledger = new TranscriptLedger();
+    ledger.apply(line('i1', 'Ha', false));
+    expect(ledger.apply({ itemId: 'i1', text: '', isFinal: true, failed: '' })).toBe(true);
+    expect(ledger.items()).toEqual([]);
+  });
+
   it('hides a line an empty final takes back, and ignores one for a line never shown', () => {
     const ledger = new TranscriptLedger();
     ledger.apply(line('i1', 'One.', true));

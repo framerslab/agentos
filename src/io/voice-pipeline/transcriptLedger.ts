@@ -66,7 +66,7 @@ export interface LedgerEvent {
   endMs?: number;
   /** The line's language, when the provider gives it. */
   language?: string;
-  /** Why the provider could not transcribe the line; its text is then empty. */
+  /** Why the provider could not transcribe the line; its text is then empty. An empty reason counts as none. */
   failed?: string;
 }
 
@@ -114,7 +114,9 @@ export class TranscriptLedger {
     if (!itemId) return false;
     const held = this.lines.get(itemId);
     if (held?.isFinal) return false;
-    if (event.isFinal && event.text === '' && event.failed === undefined) {
+    // An empty reason is no reason: the LiveKit stream carries none, so a reader takes such a line back.
+    const failed = event.failed || undefined;
+    if (event.isFinal && event.text === '' && failed === undefined) {
       if (held === undefined) return false;
       this.retracted.add(itemId);
       this.lines.set(itemId, { itemId, text: '', isFinal: true });
@@ -125,7 +127,7 @@ export class TranscriptLedger {
     if (event.startMs !== undefined) line.startMs = event.startMs;
     if (event.endMs !== undefined) line.endMs = event.endMs;
     if (event.language !== undefined) line.language = event.language;
-    if (event.failed !== undefined) line.failed = event.failed;
+    if (failed !== undefined) line.failed = failed;
     // Setting a key a Map already holds keeps its place, so a line stays where it was first seen.
     this.lines.set(itemId, line);
     this.trim(itemId);
