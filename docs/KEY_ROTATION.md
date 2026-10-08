@@ -1,6 +1,6 @@
 # API Key Rotation
 
-AgentOS provides automatic round-robin API key rotation for every provider. Set any API key environment variable to a comma-separated list and rotation happens transparently.
+AgentOS rotates API keys for the providers listed under [Supported Providers](#supported-providers). Set the provider's API key environment variable (or the `apiKey` you pass) to a comma-separated list and each provider instance rotates through it.
 
 ## Usage
 
@@ -11,55 +11,47 @@ ELEVENLABS_API_KEY=sk_primary
 # Multiple keys with automatic rotation:
 ELEVENLABS_API_KEY=sk_primary,sk_backup,sk_overflow
 
-# Works for any provider:
+# LLM providers that rotate:
 OPENAI_API_KEY=sk-key1,sk-key2
 ANTHROPIC_API_KEY=sk-ant-key1,sk-ant-key2
 ```
 
 ## How It Works
 
-**Weighted round-robin:** The first key is selected ~2x more often than subsequent keys. In a 3-key pool, selection frequency is roughly 50% / 25% / 25%.
+**Weighted round-robin:** Each provider instance builds its own [`ApiKeyPool`](https://github.com/framerslab/agentos/blob/master/src/core/providers/ApiKeyPool.ts) from its key string. The first key fills two rotation slots and every other key one, so in a 3-key pool the selection frequency is 50% / 25% / 25%. A single key is used as given.
 
-**Quota detection:** When an API call returns a rate-limit or quota error, the key is automatically marked as exhausted and removed from rotation for 15 minutes. The next available key is tried immediately.
+**Resting a key:** A key marked exhausted leaves rotation for 15 minutes; when every key is resting, the pool returns the one whose rest ends first. Which failures mark a key depends on the provider:
 
-Detected error signals:
-- HTTP 429 (rate limited)
-- HTTP 402 (payment required)
-- HTTP 456 (DeepL quota)
-- `quota_exceeded` (ElevenLabs)
-- `insufficient_quota` (OpenAI)
-- `overloaded_error` (Anthropic)
-- `RESOURCE_EXHAUSTED` (Google/Gemini)
+| Provider | Marks the key on | Then |
+|---|---|---|
+| Anthropic, Gemini (LLM) | HTTP 429 | The next attempt or request draws another key. |
+| OpenRouter (LLM) | HTTP 402 or 429 | The next attempt or request draws another key. |
+| ElevenLabs TTS and SFX, Deepgram TTS, and the voice pipeline's batch TTS for OpenAI, ElevenLabs, Cartesia, Hume and Deepgram Aura | An error `isQuotaError()` recognizes, when the pool holds more than one key | The request is retried once on the next key. |
 
-**Shared pools:** Providers that share an environment variable share a single key pool. If ElevenLabs TTS exhausts a key, ElevenLabs STT and SFX also skip it.
+Every other provider in the list below rotates its keys but never marks one exhausted.
 
-| Env Var | Shared By |
-|---|---|
-| `OPENAI_API_KEY` | LLM, TTS, STT, Image, Realtime |
-| `ELEVENLABS_API_KEY` | TTS (batch + streaming), STT, SFX |
-| `FAL_API_KEY` | Image, Video, Audio |
-| `REPLICATE_API_TOKEN` | Image, Video, Audio |
-| `STABILITY_API_KEY` | Image, Audio |
-| `OPENROUTER_API_KEY` | LLM, Image |
+`isQuotaError()` recognizes HTTP 429, 402 and 456, and response bodies that contain `quota_exceeded`, `rate_limit_exceeded`, `insufficient_quota`, `overloaded_error`, `resource_exhausted` or `rate_limit` (case-insensitive).
+
+**Pools are per instance:** two providers that read the same environment variable keep separate pools, so a key one of them rests stays in the other's rotation. `getKeyPool()` in `ApiKeyPoolRegistry.ts` returns one shared pool per environment variable; no built-in provider calls it.
 
 ## Supported Providers
 
-Every AgentOS provider that accepts an API key supports rotation:
-
-- **LLM:** OpenAI, Anthropic, OpenRouter, Gemini, Groq, Mistral, Together, xAI
-- **Speech TTS:** ElevenLabs, OpenAI TTS, Azure Speech
-- **Speech STT:** OpenAI Whisper, Deepgram, AssemblyAI, ElevenLabs
-- **Voice Pipeline:** ElevenLabs Streaming TTS/STT, OpenAI Realtime, Deepgram Streaming
-- **Image:** OpenAI DALL-E, Stability, Flux, Fal, Replicate, OpenRouter
+- **LLM:** OpenAI, Anthropic, Gemini, OpenRouter
+- **Speech TTS:** ElevenLabs, OpenAI TTS, Deepgram
+- **Speech STT:** OpenAI Whisper, Deepgram, AssemblyAI
+- **Voice Pipeline:** OpenAI batch TTS and Realtime, ElevenLabs batch and streaming TTS and streaming STT, Cartesia batch and streaming TTS, Hume batch and streaming TTS, Deepgram Aura batch and streaming TTS and Deepgram streaming STT
+- **Image:** OpenAI, Stability, Flux, Fal, Replicate, OpenRouter
 - **Video:** Fal, Replicate, Runway
 - **Audio:** ElevenLabs SFX, Suno, Udio, Stable Audio, Fal, Replicate
+- **Segmentation:** Replicate
 - **Web Search:** Serper, Tavily, Brave, Firecrawl
-- **NLP:** DeepL, OpenAI Translation
+
+Groq, Mistral, Together and xAI (LLM), Azure Speech (TTS and STT), DeepL and OpenAI translation send the configured key as given, so give them a single key.
 
 ## Implementation
 
 The key pool is implemented in [`src/core/providers/`](https://github.com/framerslab/agentos/tree/master/src/core/providers):
 
 - `ApiKeyPool.ts` — Weighted round-robin with exhaustion cooldown
-- `ApiKeyPoolRegistry.ts` — Singleton pools keyed by env var name
-- `quotaErrors.ts` — Cross-provider quota error detection
+- `ApiKeyPoolRegistry.ts` — One shared pool per environment variable (`getKeyPool()`), not used by the built-in providers
+- `quotaErrors.ts` — Cross-provider quota error detection (`isQuotaError()`)
