@@ -491,6 +491,10 @@ interface TranscriptEvent {
     label: 'positive' | 'negative' | 'neutral';
     confidence: number;
   };
+  itemId?: string;   // the provider's key for the utterance (OpenAI Realtime's item_id)
+  startMs?: number;  // the utterance's start on the session's audio clock
+  endMs?: number;    // the utterance's end on the session's audio clock
+  language?: string; // the detected language, or the session's configured one
 }
 ```
 
