@@ -1041,6 +1041,7 @@ npx tsx examples/<file>.mjs
 | [`query-router-host-hooks.mjs`](../../examples/query-router-host-hooks.mjs) | Query router with host lifecycle hooks | `QueryRouter`, `onRoute`, `onFallback` hooks |
 | [`generate-image.mjs`](../../examples/generate-image.mjs) | Image generation across providers | `generateImage`, provider selection |
 | [`agentos-config-tools.mjs`](../../examples/agentos-config-tools.mjs) | Full AgentOS runtime with tool registration | [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts), `processRequest`, custom tools |
+| [`gmi-completion-gateway.mjs`](../../examples/gmi-completion-gateway.mjs) | A GMI built with a completion gateway: the primary fails before any output, a fallback hop serves the turn, and the script prints each `USAGE_UPDATE`, `STEP_FINISHED` and `TOOL_RESULT` chunk and the turn's usage total | [`createCompletionGateway`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/completionGateway.ts), [`GatewayProviderManager`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gatewayProviderManager.ts), [`GMI`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMI.ts) `processTurnStream()` |
 | [`schema-on-demand-local-module.mjs`](../../examples/schema-on-demand-local-module.mjs) | Dynamic extension loading from local modules | [`createCuratedManifest`](https://github.com/framerslab/agentos/blob/master/src/core/types/vendor.d.ts), lazy imports |
 
 ---

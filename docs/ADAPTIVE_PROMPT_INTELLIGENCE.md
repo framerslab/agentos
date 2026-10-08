@@ -21,7 +21,7 @@ keywords:
 
 # Adaptive Prompt Intelligence
 
-Every turn, AgentOS reassembles the system prompt in local code from the GMI's current state. That reassembly is template merging and criteria matching — no LLM call. Metaprompts are a *separate*, *conditional* loop that runs on top: on most turns, nothing fires. When a trigger does fire (every Nth turn for periodic self-reflection, on a SentimentTracker event, or on a host-set flag), a single extra LLM call runs in parallel with the main turn and writes back changes to mood, inferred user skill, task complexity, working-memory imprints, or HEXACO traits. The next turn's local prompt assembly then reflects those changes.
+Every turn, AgentOS reassembles the system prompt in local code from the GMI's current state. That reassembly is template merging and criteria matching — no LLM call. Metaprompts are a *separate*, *conditional* loop that runs on top: on most turns, nothing fires. When a trigger does fire (every Nth turn for periodic self-reflection, on a SentimentTracker event, or on a host-set flag), a single extra LLM call runs in the background once the turn's response has streamed and writes back changes to mood, inferred user skill, task complexity, working-memory imprints, or HEXACO traits. The next turn's local prompt assembly then reflects those changes.
 
 The agent stays the same persona; how it sounds, what it remembers, and how confidently it speaks evolve across the messages where triggers actually fire.
 
@@ -116,6 +116,8 @@ export interface MetaPromptDefinition {
     | { type: 'manual' };
 }
 ```
+
+A metaprompt's provider is looked up through the GMI's provider manager. On a GMI with a [completion gateway](./GMI.md#model-calls-through-a-completion-gateway), that manager answers only for the hop serving the turn: when a fallback hop on another provider served the turn, a metaprompt that names the persona's provider finds none, and the failure is recorded in the reasoning trace.
 
 A persona's `metaPrompts?: MetaPromptDefinition[]` lives at [`IPersonaDefinition.ts:438`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts). The runtime merges these with the active preset list (see [Built-in presets](#built-in-presets) below); persona-defined entries override preset entries on matching ID.
 
