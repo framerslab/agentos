@@ -68,6 +68,8 @@ const INTL_METHODS: Readonly<Record<IntlServiceName, readonly string[]>> = {
 };
 
 const DATE_LOCALE_METHODS = ['toLocaleString', 'toLocaleDateString', 'toLocaleTimeString'] as const;
+/** The case conversions of String that take a locale. */
+const STRING_CASE_METHODS = ['toLocaleLowerCase', 'toLocaleUpperCase'] as const;
 
 type IntlService = Record<string, (...args: unknown[]) => unknown>;
 type IntlConstructor = {
@@ -218,6 +220,14 @@ export function guestBindings(
         orUndefined(locales) as string | string[] | undefined,
         orUndefined(options) as Intl.CollatorOptions | undefined,
       ),
+    string_case: (method, text, locales) => {
+      const methodName = String(method);
+      if (!(STRING_CASE_METHODS as readonly string[]).includes(methodName)) {
+        throw new TypeError(`String.prototype.${methodName} is not available`);
+      }
+      const given = orUndefined(locales) as string | string[] | undefined;
+      return methodName === 'toLocaleLowerCase' ? String(text).toLocaleLowerCase(given) : String(text).toLocaleUpperCase(given);
+    },
   };
 
   const fetchFn = globals.fetch;

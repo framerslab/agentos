@@ -178,9 +178,18 @@ async function loadEngine(): Promise<QuickJSEngine> {
   }
 }
 
-/** The pages of the call's memory: its `memoryMB`, held between the build's initial and maximum memory. */
+/**
+ * The pages of the call's memory: its `memoryMB`, held between the build's
+ * initial and maximum memory. A budget past the maximum, `Infinity` included,
+ * runs at the maximum; one that is not a positive number runs at the initial.
+ */
 function maximumPagesFor(memoryMB: number): number {
-  const requested = Number.isFinite(memoryMB) && memoryMB > 0 ? Math.ceil((memoryMB * MIB) / PAGE_BYTES) : 0;
+  const requested =
+    memoryMB === Number.POSITIVE_INFINITY
+      ? MAXIMUM_PAGES
+      : Number.isFinite(memoryMB) && memoryMB > 0
+        ? Math.ceil((memoryMB * MIB) / PAGE_BYTES)
+        : 0;
   return Math.min(MAXIMUM_PAGES, Math.max(INITIAL_PAGES, requested));
 }
 
@@ -388,7 +397,7 @@ class GuestRun {
     if (4 * wrapped.length > CHECKED_COPY_BYTES) {
       const room = this.allocateGuest(4 * wrapped.length + 64);
       if (!room) {
-        return { status: 'memory_exceeded', memoryUsedBytes: this.memoryUsed() };
+        return this.noRoom();
       }
       room.dispose();
     }
@@ -461,6 +470,21 @@ class GuestRun {
     return this.memory?.buffer.byteLength ?? 0;
   }
 
+  /**
+   * How a probe that found no room ends the call. The probe runs guest code,
+   * so the interrupt handler can stop it at the deadline or on the call's
+   * signal; the handler marks that first, and the call then ends as timed
+   * out, not out of memory.
+   */
+  private noRoom(): ExecutorRunResult {
+    const memoryUsedBytes = this.memoryUsed();
+    if (this.interrupted) {
+      return { status: 'timeout', memoryUsedBytes };
+    }
+    this.exhausted = true;
+    return { status: 'memory_exceeded', memoryUsedBytes };
+  }
+
   /** An ArrayBuffer of `bytes` made by QuickJS's checked allocator, or undefined when the guest's memory cannot hold it. */
   private allocateGuest(bytes: number): QuickJSHandle | undefined {
     const { context } = this.live;
@@ -495,7 +519,7 @@ class GuestRun {
     if (bytes > CHECKED_COPY_BYTES) {
       const room = this.allocateGuest(bytes);
       if (!room) {
-        this.exhausted = true;
+        this.noRoom();
         return context.undefined;
       }
       room.dispose();
@@ -605,8 +629,7 @@ class GuestRun {
     if (3 * length > CHECKED_COPY_BYTES) {
       const room = this.allocateGuest(3 * length + 64);
       if (!room) {
-        this.exhausted = true;
-        throw new RangeError('out of memory');
+        throw new RangeError(this.noRoom().status === 'timeout' ? 'interrupted' : 'out of memory');
       }
       room.dispose();
     }
@@ -780,7 +803,7 @@ class GuestRun {
     if (3 * length > CHECKED_COPY_BYTES) {
       const room = this.allocateGuest(3 * length + 64);
       if (!room) {
-        return { status: 'memory_exceeded', memoryUsedBytes: this.memoryUsed() };
+        return this.noRoom();
       }
       room.dispose();
     }
