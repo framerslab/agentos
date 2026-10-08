@@ -1,3 +1,17 @@
+## [0.13.2](https://github.com/framerslab/agentos/compare/v0.13.1...v0.13.2) (2026-10-08)
+
+### fix
+
+* **api:** gmi() follow-ups (session privacy, stream stop, usage on errors) ([4e80849](https://github.com/framerslab/agentos/commit/4e8084965307e042a6ae39ce9eda051b6b6a2901))
+
+### ci
+
+* a gate that holds a breaking change until a maintainer approves it (#170) ([c288e60](https://github.com/framerslab/agentos/commit/c288e602b4569b238ed12a0a7bf773b59f7f0f11))
+
+### docs
+
+* fourth round of audit follow-ups to the guides (#162) ([a7ab6c2](https://github.com/framerslab/agentos/commit/a7ab6c2bf102c79cb87c72adf51d17471eb005a9))
+
 ## [0.13.1](https://github.com/framerslab/agentos/compare/v0.13.0...v0.13.1) (2026-10-08)
 
 ### fix
