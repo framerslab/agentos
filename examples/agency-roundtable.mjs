@@ -116,8 +116,7 @@ async function main() {
     agents: seated,
     controls: { maxTotalTokens: 120_000, onLimitReached: 'warn' },
     on: {
-      agentStart: (e) => console.log(`— ${e.agent} deliberating…`),
-      agentEnd: (e) => console.log(`— ${e.agent} done (${e.durationMs}ms)`),
+      limitReached: (e) => console.warn(`⚠️  ${e.metric} ${e.value} over the limit ${e.limit}`),
     },
   });
 
@@ -126,6 +125,11 @@ async function main() {
       Object.keys(SEATS).filter((n) => !seated[n]).join(',') || 'none'
     }.`,
   );
+
+  // One record per seat that answered; a seat whose call failed is not in it.
+  for (const call of result.agentCalls ?? []) {
+    console.log(`— ${call.agent} answered (${call.durationMs}ms, ${call.usage?.totalTokens ?? 0} tokens)`);
+  }
 
   console.log('\n================ TABLE VERDICT ================\n');
   console.log(result.text);

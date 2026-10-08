@@ -227,7 +227,7 @@ Three layers, highest priority first: inline `apiKey` on the call, a module-leve
 ## API Surfaces
 
 - **`agent()`**: lightweight stateful agent. Prompts, sessions, personality, hooks, tools, memory.
-- **`agency()`**: multi-agent teams built from `agent()` members, with emergent tooling, guardrails, RAG, voice and HITL. It wires no channels; channel adapters run on the full runtime or with `ChannelRouter`.
+- **`agency()`**: multi-agent teams built from `agent()` members, with HITL approval gates, run limits, structured output, provenance and, on the hierarchical strategy, specialists spawned at runtime. Its `guardrails` and `rag` options are reported or logged and not applied, and `voice.enabled` serves the agency as JSON text over a local WebSocket. It wires no channels; channel adapters run on the full runtime or with `ChannelRouter`.
 - **`generateText()` / `streamText()` / `generateObject()` / `generateImage()` / `generateVideo()` / `generateMusic()` / `performOCR()` / `embedText()`**: low-level multi-modal helpers with native tool calling.
 - **`workflow()` / `AgentGraph` / `mission()`**: three orchestration authoring APIs over one graph runtime.
 
