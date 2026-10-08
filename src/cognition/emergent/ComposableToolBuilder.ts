@@ -25,6 +25,7 @@ import {
 } from './StepGate.js';
 import type {
   ITool,
+  ToolEffectRecord,
   ToolExecutionResult,
   ToolExecutionContext,
   JSONSchemaObject,
@@ -269,7 +270,7 @@ export class ComposableToolBuilder {
 
     const pipelineCtx: PipelineContext = { input: args, prev: null, steps: {} };
     const completed: string[] = [];
-    const effects: Array<Record<string, unknown>> = [];
+    const effects: ToolEffectRecord[] = [];
     let lastOutput: unknown = null;
 
     for (const step of spec.steps) {
@@ -281,7 +282,8 @@ export class ComposableToolBuilder {
         return {
           success: false,
           error: `Step "${step.name}" (tool: "${step.tool}") refused: ${code}: ${message}`,
-          details: { code, step: step.name, tool: step.tool, completed, effects },
+          details: { code, step: step.name, tool: step.tool, completed },
+          ...(effects.length > 0 ? { effects } : {}),
         };
       }
 
@@ -296,20 +298,25 @@ export class ComposableToolBuilder {
               `dry_run_needs_output: step "${step.name}" (tool: "${step.tool}") ` +
               (nested ? 'is a composition' : 'has side effects') +
               ` and is not executed while forging; give its output in testCases[].stepOutputs["${step.name}"]`,
-            details: { code: 'dry_run_needs_output', step: step.name, tool: step.tool, completed, effects },
+            details: { code: 'dry_run_needs_output', step: step.name, tool: step.tool, completed },
+            ...(effects.length > 0 ? { effects } : {}),
           };
         }
         lastOutput = options.dry.stepOutputs[step.name];
         effects.push({
+          kind: 'step',
           step: step.name,
           tool: step.tool,
           wouldRun: true,
-          ...(nested ? { nested: true } : {}),
+          ...(nested ? { nested: true as const } : {}),
           args: resolvedArgs,
         });
       } else {
         const result = await gate.run(tool, resolvedArgs, stepContext, options.signal);
         if (!result.success) {
+          if (result.effects && result.effects.length > 0) {
+            effects.push(...result.effects);
+          }
           return {
             success: false,
             error: `Step "${step.name}" (tool: "${step.tool}") failed: ${result.error ?? 'unknown error'}`,
@@ -318,18 +325,20 @@ export class ComposableToolBuilder {
               step: step.name,
               tool: step.tool,
               completed,
-              effects,
               // Whether a refused or failed side-effecting step took effect is not known here.
               ...(verdict.sideEffects ? { unknownEffect: step.name } : {}),
             },
+            ...(effects.length > 0 ? { effects } : {}),
           };
         }
         lastOutput = result.output;
-        const inner = (result.details as { effects?: unknown } | undefined)?.effects;
-        if (Array.isArray(inner)) {
-          effects.push(...(inner as Array<Record<string, unknown>>));
+        // A step that reports its own effects (a code tool under a ceiling, a
+        // nested composition) is listed by them; one with side effects that
+        // reports none is listed as having run.
+        if (result.effects && result.effects.length > 0) {
+          effects.push(...result.effects);
         } else if (verdict.sideEffects) {
-          effects.push({ step: step.name, tool: step.tool, ran: true });
+          effects.push({ kind: 'step', step: step.name, tool: step.tool, ran: true });
         }
       }
 
@@ -339,7 +348,7 @@ export class ComposableToolBuilder {
     }
 
     return effects.length > 0
-      ? { success: true, output: lastOutput, details: { effects } }
+      ? { success: true, output: lastOutput, effects }
       : { success: true, output: lastOutput };
   }
 

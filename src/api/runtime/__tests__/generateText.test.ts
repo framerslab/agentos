@@ -1070,10 +1070,14 @@ describe('generateText', () => {
         });
         expect(result.text).toBe('uncensored reply');
         // This file's model mocks return a fixed model, so the leg's requested
-        // provider and model are read from the options it was called with.
-        const legOptions = vi.mocked(resolveModelOption).mock.calls[1]?.[0] as
-          | { provider?: string; model?: string }
-          | undefined;
+        // provider and model are read from the options it was called with:
+        // the one call made at fallback depth 1. (The walk resolves each
+        // chain entry through the same function before any leg runs.)
+        const legOptions = vi
+          .mocked(resolveModelOption)
+          .mock.calls.map((c) => c[0] as { provider?: string; model?: string; __fallbackDepth?: number })
+          .find((o) => o.__fallbackDepth === 1);
+        expect(legOptions).toBeDefined();
         expect([legOptions?.provider, legOptions?.model]).toEqual([
           'openrouter',
           'meta-llama/llama-3.3-70b-instruct',

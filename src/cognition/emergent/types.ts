@@ -57,6 +57,58 @@ export type SandboxAPI = 'fetch' | 'fs.readFile' | 'crypto';
  */
 export type CapabilityName = 'fetch' | 'fs.read' | 'crypto';
 
+/**
+ * A name a request's list may hold: a catalogue name, or the injected name it
+ * stands for (`fs.readFile` for `fs.read`). Lists keep the names as written;
+ * every reader normalises them with `normalizeAllowlist`.
+ */
+export type AllowlistName = SandboxAPI | CapabilityName;
+
+/** The scope a host grants `fetch` under (stage 1: reads only). */
+export interface FetchCeiling {
+  /** Hosts a forged tool may reach, matched exactly and case-insensitively; `'*'` is every host; `[]` grants nothing. */
+  domains: string[] | '*';
+  /** Methods a forged tool may send. Stage 1 allows GET and HEAD only. @default ['GET', 'HEAD'] */
+  methods?: Array<'GET' | 'HEAD'>;
+  /** A response body larger than this is refused while it streams. @default 5_242_880 */
+  maxResponseBytes?: number;
+  /** Redirects the broker follows, each one checked like the first request. @default 5 */
+  maxRedirects?: number;
+  /** One request's time bound, redirects included. @default 30_000 */
+  timeoutMs?: number;
+}
+
+/** The scope a host grants `fs.read` under. */
+export interface FsReadCeiling {
+  /** Absolute directories a forged tool may read under, after symlinks are resolved; `[]` grants nothing. */
+  roots: string[];
+  /** A file larger than this is refused while it streams. @default 1_048_576 */
+  maxBytesPerRead?: number;
+  /** One read's time bound. @default 30_000 */
+  timeoutMs?: number;
+}
+
+/**
+ * What a host lets code-forged tools have. A key that is absent grants
+ * nothing; with this set, a forging agent's `allowlist` is a request the
+ * ceiling must cover, and every capability call goes through the broker.
+ */
+export interface ForgedCapabilities {
+  fetch?: FetchCeiling;
+  'fs.read'?: FsReadCeiling;
+  crypto?: Record<string, never>;
+}
+
+/** Where a ceiling's effect records go. */
+export interface EmergentAuditConfig {
+  /** `'storage'` writes a record per capability call and needs a storage adapter. @default 'storage' */
+  store?: 'storage' | 'none';
+  /** What a record keeps of a call's target: a SHA-256 digest, or the target itself. @default 'digest' */
+  content?: 'digest' | 'full';
+  /** Days effect records are kept; unset keeps them. Prunes the effect table only. */
+  retainDays?: number;
+}
+
 // ============================================================================
 // TOOL IMPLEMENTATIONS
 // ============================================================================
@@ -160,7 +212,7 @@ export interface SandboxedToolSpec {
    * Explicit allowlist of sandbox APIs the code may invoke.
    * Any call to an API not in this list will throw at runtime.
    */
-  allowlist: SandboxAPI[];
+  allowlist: AllowlistName[];
 }
 
 /**
@@ -171,6 +223,20 @@ export type ToolImplementation = ComposableToolSpec | SandboxedToolSpec;
 // ============================================================================
 // SANDBOX EXECUTION
 // ============================================================================
+
+/**
+ * One run of a code-forged tool, as the broker sees it: the run's id, the
+ * tool and the agent it runs for, and the signal that ends it. Under a
+ * ceiling the engine makes one for every forge test and every call; the
+ * broker checks it before every capability call and again just before the
+ * effect, and keys what is in flight by its id.
+ */
+export interface CallHandle {
+  id: string;
+  toolId: string;
+  agentId: string;
+  signal: AbortSignal;
+}
 
 /**
  * Input to the sandbox executor for running a single sandboxed tool invocation.
@@ -189,7 +255,7 @@ export interface SandboxExecutionRequest {
   /**
    * APIs the sandbox is permitted to call. Anything not listed is blocked.
    */
-  allowlist: SandboxAPI[];
+  allowlist: AllowlistName[];
 
   /**
    * Nominal heap budget in megabytes for the sandbox execution.
@@ -205,6 +271,12 @@ export interface SandboxExecutionRequest {
    * @default 5000
    */
   timeoutMs: number;
+
+  /**
+   * The run's handle. Required when the forge has a broker attached (a host
+   * with `EmergentConfig.capabilities`); the engine fills it.
+   */
+  call?: CallHandle;
 }
 
 /**
@@ -853,6 +925,16 @@ export interface EmergentConfig {
    * @default { sideEffectingTools: [] }
    */
   compose?: { sideEffectingTools?: string[] };
+
+  /**
+   * The ceiling for code-forged tools (see {@link ForgedCapabilities}).
+   * Absent: the legacy path, where a forged tool takes the APIs it asks for,
+   * unscoped. Validated at engine construction; each failure names its key.
+   */
+  capabilities?: ForgedCapabilities;
+
+  /** Effect records under a ceiling. Ignored without one. */
+  audit?: EmergentAuditConfig;
 }
 
 /**

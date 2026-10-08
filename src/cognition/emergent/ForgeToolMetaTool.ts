@@ -185,7 +185,11 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
               },
               allowlist: {
                 type: 'array',
-                items: { type: 'string', enum: ['fetch', 'fs.readFile', 'crypto'] },
+                description:
+                  'The capabilities the code uses: fetch, fs.read (in code, the function fs.readFile; ' +
+                  'the name fs.readFile is accepted too) and crypto. The host decides what it grants: ' +
+                  'a name it does not grant refuses the forge, and the refusal names what it grants.',
+                items: { type: 'string', enum: ['fetch', 'fs.read', 'fs.readFile', 'crypto'] },
               },
             },
             required: ['mode', 'code', 'allowlist'],

@@ -52,6 +52,54 @@ export interface ToolExecutionResult<TOutput = any> {
   error?: string;
   contentType?: string; 
   details?: Record<string, any>;
+  /**
+   * The call's effects: a code-forged tool's capability calls under a
+   * ceiling, or a composition's steps. Attached by AgentOS, never by the
+   * tool's own code.
+   */
+  effects?: ToolEffectRecord[];
+}
+
+/**
+ * One effect a tool call had, carried on its result: a capability call of a
+ * code-forged tool under a ceiling, or a step of a composition.
+ */
+export type ToolEffectRecord = CapabilityEffect | StepEffect;
+
+/** A capability call of a code-forged tool under a ceiling. */
+export interface CapabilityEffect {
+  kind: 'capability';
+  toolId: string;
+  callId: string;
+  capability: string;
+  /** The URL or path as the record keeps it: a SHA-256 hex digest, or the target itself when `audit.content` is `'full'`. */
+  target: string;
+  decision: 'allowed' | 'refused';
+  /** `'ceiling'` for an allowed call; the refusal's code otherwise. */
+  decidedBy: string;
+  /** `pending`: the call had not settled when the result was returned; its record completes when it settles. */
+  outcome: 'ok' | 'error' | 'aborted' | 'timed_out' | 'refused' | 'pending';
+  /** The code a refusal or an end carried during the call (`host_not_allowed` at a redirect, `response_too_large`, `call_ended`). */
+  code?: string;
+  bytes?: number;
+  /** For `crypto`: the number of calls in the run, which has one entry. */
+  uses?: number;
+  /** What storage holds: both halves, the intent only (the terminal write failed; the row reads unknown), or nothing. */
+  record: 'written' | 'intent_only' | 'none';
+}
+
+/** A step of a composition that has side effects, or is a composition. */
+export interface StepEffect {
+  kind: 'step';
+  step: string;
+  tool: string;
+  /** In a forge test: the step was not executed; its output came from the test case. */
+  wouldRun?: true;
+  /** The step ran. */
+  ran?: true;
+  /** The step is a composition. */
+  nested?: true;
+  args?: Record<string, unknown>;
 }
 
 /**

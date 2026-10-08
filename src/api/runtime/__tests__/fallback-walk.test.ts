@@ -127,6 +127,29 @@ describe('resolveFallbackChain', () => {
     expect(skipped).toEqual(['openai default:excluded_model', `openrouter:${MAGNUM}:missing_capability`]);
   });
 
+  it('matches an exclusion by the model as written and as sent, with or without a provider prefix', () => {
+    const skipped: string[] = [];
+    const chain = resolveFallbackChain(
+      [
+        { provider: 'openrouter', model: `openrouter:${MAGNUM}` },
+        { provider: 'openrouter', model: MAGNUM },
+        { provider: 'openrouter', model: `openrouter:${HERMES}` },
+        { provider: 'openrouter', model: LLAMA },
+      ],
+      {
+        primary: { provider: 'anthropic', model: 'claude-sonnet-5-5' },
+        excludedModelIds: [`openrouter:${MAGNUM}`, HERMES],
+        onSkip: (entry, reason) => skipped.push(`${entry.model}:${reason}`),
+      },
+    );
+    expect(chain.map((e) => e.model)).toEqual([LLAMA]);
+    expect(skipped).toEqual([
+      `openrouter:${MAGNUM}:excluded_model`,
+      `${MAGNUM}:excluded_model`,
+      `openrouter:${HERMES}:excluded_model`,
+    ]);
+  });
+
   it('walks a safe chain verbatim', () => {
     const chain = buildPolicyAwareFallbackChain('safe', 'openai');
     expect(resolveFallbackChain(chain, { primary: { provider: 'openai', model: 'gpt-5.5' } })).toEqual(chain);

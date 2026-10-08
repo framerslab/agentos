@@ -50,7 +50,6 @@ import { DEFAULT_EMERGENT_CONFIG } from '../../cognition/emergent/types.js';
 import { DEFAULT_SELF_IMPROVEMENT_CONFIG } from '../../cognition/emergent/SelfImprovementConfig.js';
 import { EmergentCapabilityEngine } from '../../cognition/emergent/EmergentCapabilityEngine.js';
 import { ComposableToolBuilder } from '../../cognition/emergent/ComposableToolBuilder.js';
-import { SandboxedToolForge } from '../../cognition/emergent/SandboxedToolForge.js';
 import { EmergentJudge } from '../../cognition/emergent/EmergentJudge.js';
 import { EmergentToolRegistry } from '../../cognition/emergent/EmergentToolRegistry.js';
 import type { IStorageAdapter as EmergentStorageAdapter } from '../../cognition/emergent/EmergentToolRegistry.js';
@@ -287,12 +286,6 @@ export class ToolOrchestrator implements IToolOrchestrator {
       const stepGate = this.buildStepGate();
       const composableBuilder = new ComposableToolBuilder(stepGate);
 
-      // SandboxedToolForge — uses config-driven resource limits.
-      const sandboxForge = new SandboxedToolForge({
-        memoryMB: emergentConfig.sandboxMemoryMB,
-        timeoutMs: emergentConfig.sandboxTimeoutMs,
-      });
-
       // EmergentJudge — wired to the provided generateText callback, or a
       // no-op stub that rejects all tools when no LLM is configured.
       const generateText: (model: string, prompt: string) => Promise<string> =
@@ -314,7 +307,6 @@ export class ToolOrchestrator implements IToolOrchestrator {
       this.emergentEngine = new EmergentCapabilityEngine({
         config: emergentConfig,
         composableBuilder,
-        sandboxForge,
         judge,
         registry,
         stepGate,
@@ -677,8 +669,9 @@ export class ToolOrchestrator implements IToolOrchestrator {
           tool: step,
           ...(signal ? { signal } : {}),
         });
+        const effects = result.effects ? { effects: result.effects } : {};
         if (!result.isError) {
-          return { success: true, output: result.output };
+          return { success: true, output: result.output, ...effects };
         }
         const errorDetails = (result.errorDetails ?? {}) as {
           message?: string;
@@ -700,6 +693,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
             ...(code ? { code } : {}),
             ...(errorDetails.code ? { orchestratorCode: errorDetails.code } : {}),
           },
+          ...effects,
         };
       },
     };
@@ -1028,6 +1022,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
             details: coreExecutorResult.details,
           }
         : undefined,
+      ...(coreExecutorResult.effects ? { effects: coreExecutorResult.effects } : {}),
     };
   }
 

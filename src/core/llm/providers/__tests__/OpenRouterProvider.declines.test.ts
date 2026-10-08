@@ -674,4 +674,58 @@ describe('streams', () => {
     const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { code?: unknown } }>;
     expect(out.at(-1)?.error?.code).toBeUndefined();
   });
+
+  // The error on the choice a `finish_reason: 'error'` ended, with no error
+  // on the event itself: read as the event's error is, and as the 200-body
+  // path reads a choice-level error.
+  const choiceError = (error: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+    chunk({ choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error', error }], ...extra });
+
+  it('a choice-level upstream error yields the upstream_error chunk and ends the stream', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: sse([choiceError({ code: 502, message: 'Provider disconnected', metadata: { error_type: 'provider_unavailable' } }), textChunk('never'), 'data: [DONE]']),
+    });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { type?: string; message?: string }; isFinal?: boolean; choices?: unknown[] }>;
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ isFinal: true, choices: [], error: { type: 'upstream_error', message: '[502] Provider disconnected' } });
+  });
+
+  it('a choice-level refusal before text throws the decline, with the usage the chunk carries', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: sse([choiceError({ code: 403, message: 'refused', metadata: { error_type: 'refusal' } }, { usage: USAGE }), 'data: [DONE]']),
+    });
+    const err = await thrown(drain(makeProvider(request).generateCompletionStream(MODEL, messages, {})));
+    expect(err.code).toBe('content_filter');
+    expect((err.details as { httpStatus?: number; usage?: { promptTokens: number } })).toMatchObject({ httpStatus: 403, usage: { promptTokens: 120 } });
+  });
+
+  it('a choice-level context-window error carries the context-window code', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: sse([choiceError({ code: 400, message: 'too long', metadata: { error_type: 'context_length_exceeded' } })]),
+    });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { code?: unknown } }>;
+    expect(out.at(-1)?.error?.code).toBe('CONTEXT_WINDOW_EXCEEDED');
+  });
+
+  it('a choice ended by finish_reason error with no error object is mapped as a finish, as before', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: sse([textChunk('half'), chunk({ choices: [{ index: 0, delta: {}, finish_reason: 'error' }] }), usageChunk, 'data: [DONE]']),
+    });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: unknown; choices?: Array<{ finishReason?: string | null }>; usage?: { promptTokens: number } }>;
+    expect(out.some((c) => c.error !== undefined)).toBe(false);
+    expect(out[1]?.choices?.[0]?.finishReason).toBe('error');
+    expect(out.at(-1)?.usage?.promptTokens).toBe(120);
+  });
+
+  it('an error event that carries usage keeps it on the error chunk', async () => {
+    const withUsage = chunk({ error: { code: 502, message: 'Provider disconnected', metadata: { error_type: 'provider_unavailable' } }, choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error' }], usage: USAGE });
+    const request = vi.fn().mockResolvedValueOnce({ data: sse([withUsage, 'data: [DONE]']) });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { type?: string }; isFinal?: boolean; usage?: { promptTokens: number; completionTokens: number; costUSD?: number } }>;
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ isFinal: true, error: { type: 'upstream_error' }, usage: { promptTokens: 120, completionTokens: 7, costUSD: 0.0004 } });
+    // An event without usage yields a chunk without one, as before.
+    const bare = vi.fn().mockResolvedValueOnce({ data: sse([upstreamEvent, 'data: [DONE]']) });
+    const out2 = (await drain(makeProvider(bare).generateCompletionStream(MODEL, messages, {}))) as Array<{ usage?: unknown }>;
+    expect(out2[0]).not.toHaveProperty('usage');
+  });
 });

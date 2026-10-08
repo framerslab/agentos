@@ -27,6 +27,9 @@ import type {
   ToolState,
   ToolStateRecord,
   ToolTier,
+  CallHandle,
+  SandboxExecutionResult,
+  SandboxedToolSpec,
 } from './types.js';
 import { GMI_INSTANCE_ID_PREFIX } from './types.js';
 import {
@@ -42,8 +45,11 @@ import {
   type PersistedSource,
 } from './persisted-source.js';
 import { normalizeAllowlist, toSandboxApis } from './capabilities.js';
+import { randomUUID } from 'node:crypto';
+import { checkRequest, narrowToForge, resolveCeiling, type ResolvedCeiling } from './ceiling.js';
+import { CapabilityBroker } from './broker/CapabilityBroker.js';
 import type { ToolCandidate } from './EmergentJudge.js';
-import type { ITool, ToolExecutionContext, ToolExecutionResult } from '../../core/tools/ITool.js';
+import type { ITool, ToolEffectRecord, ToolExecutionContext, ToolExecutionResult } from '../../core/tools/ITool.js';
 import type { PersonalityMutationStore } from './PersonalityMutationStore.js';
 import type { AdaptPersonalityTool } from './AdaptPersonalityTool.js';
 import { ComposableToolBuilder } from './ComposableToolBuilder.js';
@@ -156,7 +162,26 @@ const REASON_CONFIG_KEYS: Readonly<Record<string, string>> = {
   step_not_chainable: 'emergent.compose.sideEffectingTools',
   side_effects_undeclared: "the step tool's hasSideEffects",
   step_cycle: "the composition's steps (a step reaches the composition itself)",
+  capability_not_granted: 'emergent.capabilities',
+  request_unreadable: "the tool's stored request (a release that reads it)",
 };
+
+/**
+ * The start-up line of an engine that runs code-forged tools without a
+ * ceiling: what runs unscoped, and the ceiling that comes closest.
+ */
+function legacyLine(options: { fetchDomainAllowlist: string[]; fsReadRoots: string[] }): string {
+  const everyHost = options.fetchDomainAllowlist.length === 0;
+  const hosts = everyHost ? 'any host' : options.fetchDomainAllowlist.join(', ');
+  const domains = everyHost ? "'*'" : JSON.stringify(options.fetchDomainAllowlist);
+  return (
+    '[agentos:emergent] code-forged tools run without a ceiling: a tool granted fetch sends any method to ' +
+    `${hosts} (only the first host is checked; redirects go anywhere), fs.readFile reads under ` +
+    `${options.fsReadRoots.join(', ')}, and crypto is unscoped. The closest ceiling: ` +
+    `capabilities: { fetch: { domains: ${domains} }, 'fs.read': { roots: ${JSON.stringify(options.fsReadRoots)} }, crypto: {} } ` +
+    '(a ceiling sends GET and HEAD only, checks every redirect, and bounds bodies, reads and time).'
+  );
+}
 
 /**
  * The library's suspensions of a composition that a change in what is
@@ -275,8 +300,15 @@ export interface EmergentCapabilityEngineDeps {
   /** Builder for composable (tool-chaining) implementations. */
   composableBuilder: ComposableToolBuilder;
 
-  /** Sandboxed code executor for arbitrary-code implementations. */
-  sandboxForge: SandboxedToolForge;
+  /**
+   * The executor for code-forged tools. Optional: without it the engine
+   * builds one from `config.sandboxMemoryMB` and `config.sandboxTimeoutMs`.
+   * Under a ceiling (`config.capabilities`) a forge given here must be no
+   * wider than the ceiling (construction fails with
+   * `forge_wider_than_ceiling` naming the option), narrows it where it is
+   * narrower, and serves this engine only.
+   */
+  sandboxForge?: SandboxedToolForge;
 
   /** LLM-as-judge evaluator for creation and promotion reviews. */
   judge: EmergentJudge;
@@ -372,6 +404,12 @@ export class EmergentCapabilityEngine {
   private readonly onToolPromoted?: (tool: EmergentTool) => Promise<void>;
   private readonly onToolRemoved?: (tool: EmergentTool) => Promise<void>;
 
+  /** The host's ceiling for code-forged tools, resolved; absent on the legacy path. */
+  private readonly ceiling?: ResolvedCeiling;
+
+  /** The broker the forge's injected functions come from under a ceiling. */
+  private readonly broker?: CapabilityBroker;
+
   /** Internal index for fast session/agent → tool lookups. */
   private readonly index: ToolIndex = {
     bySession: new Map(),
@@ -393,7 +431,6 @@ export class EmergentCapabilityEngine {
   constructor(deps: EmergentCapabilityEngineDeps) {
     this.config = deps.config;
     this.composableBuilder = deps.composableBuilder;
-    this.sandboxForge = deps.sandboxForge;
     this.judge = deps.judge;
     this.registry = deps.registry;
     this.onToolForged = deps.onToolForged;
@@ -405,6 +442,30 @@ export class EmergentCapabilityEngine {
     this.composableBuilder.bind({
       sideEffectingTools: this.config.compose?.sideEffectingTools ?? [],
     });
+
+    const forge =
+      deps.sandboxForge ??
+      new SandboxedToolForge({ memoryMB: this.config.sandboxMemoryMB, timeoutMs: this.config.sandboxTimeoutMs });
+    if (this.config.capabilities) {
+      // Throws a CeilingError naming the key of the first failure.
+      const resolved = resolveCeiling(this.config.capabilities, this.config.audit, {
+        hasStorage: this.registry.hasStorage(),
+      });
+      this.ceiling = deps.sandboxForge ? narrowToForge(resolved, deps.sandboxForge.effectiveOptions()) : resolved;
+      const store =
+        this.ceiling.audit.store === 'storage'
+          ? this.registry.effectsStore({
+              content: this.ceiling.audit.content,
+              ...(this.ceiling.audit.retainDays !== undefined ? { retainDays: this.ceiling.audit.retainDays } : {}),
+            })
+          : undefined;
+      this.broker = new CapabilityBroker(this.ceiling, store);
+      forge.attachBroker(this.broker);
+    } else if (this.config.allowSandboxTools) {
+      // A direct host never calls the loader, so the line comes from here.
+      console.warn(legacyLine(forge.effectiveOptions()));
+    }
+    this.sandboxForge = forge;
   }
 
   // --------------------------------------------------------------------------
@@ -500,7 +561,7 @@ export class EmergentCapabilityEngine {
           });
           continue;
         }
-        const details = result.details as { code?: string; effects?: unknown[] } | undefined;
+        const details = result.details as { code?: string } | undefined;
         if (details?.code === 'dry_run_needs_output') {
           return { success: false, error: result.error };
         }
@@ -520,7 +581,7 @@ export class EmergentCapabilityEngine {
           output: result.output,
           success: result.success,
           error: result.error,
-          ...(details?.effects && details.effects.length > 0 ? { effects: details.effects } : {}),
+          ...(result.effects && result.effects.length > 0 ? { effects: result.effects } : {}),
         });
       }
     } else {
@@ -546,7 +607,22 @@ export class EmergentCapabilityEngine {
         };
       }
 
-      // Step 2b: Static code validation before any execution.
+      // Step 2b: under a ceiling the list is a request, and a name the ceiling
+      // does not grant refuses the forge before any test case runs.
+      if (this.ceiling) {
+        const fit = checkRequest(list.capabilities, this.ceiling);
+        if (!fit.ok) {
+          return {
+            success: false,
+            error:
+              `capability_not_granted: ${fit.refused.join(', ')}; this host grants ` +
+              (fit.allowed.length > 0 ? fit.allowed.join(', ') : 'no capability') +
+              ' to code-forged tools',
+          };
+        }
+      }
+
+      // Step 2c: Static code validation before any execution.
       const validation = this.sandboxForge.validateCode(
         request.implementation.code,
         request.implementation.allowlist
@@ -559,14 +635,11 @@ export class EmergentCapabilityEngine {
         };
       }
 
-      // Step 3: Execute test cases in the sandbox.
+      // Step 3: Execute test cases in the sandbox, each as a run of its own.
       for (const tc of request.testCases) {
-        const sandboxResult = await this.sandboxForge.execute({
-          code: request.implementation.code,
-          input: tc.input,
-          allowlist: request.implementation.allowlist,
-          memoryMB: this.config.sandboxMemoryMB,
-          timeoutMs: this.config.sandboxTimeoutMs,
+        const sandboxResult = await this.runSandboxed(request.implementation, tc.input, {
+          toolId,
+          agentId: context.agentId,
         });
 
         testResults.push({
@@ -574,6 +647,7 @@ export class EmergentCapabilityEngine {
           output: sandboxResult.output,
           success: sandboxResult.success,
           error: sandboxResult.error,
+          ...(sandboxResult.effects ? { effects: sandboxResult.effects } : {}),
         });
       }
     }
@@ -1383,6 +1457,12 @@ export class EmergentCapabilityEngine {
     if (!refusal && candidate.tier === 'agent' && candidate.createdBy.startsWith(GMI_INSTANCE_ID_PREFIX)) {
       refusal = 'legacy_owner';
     }
+    // 3b. Under a ceiling, a stored request this release cannot read is not
+    //     replaced by one derived from the source, which could narrow the
+    //     tool silently: it waits, suspended, for a release that reads it.
+    if (!refusal && this.ceiling && implementation?.mode === 'sandbox' && requestStored && !stored?.request) {
+      refusal = 'request_unreadable';
+    }
     if (implementation && !refusal) {
       refusal = this.refusalFor(implementation, name);
     }
@@ -1606,6 +1686,15 @@ export class EmergentCapabilityEngine {
       }
       if (implementation.code.trim() === '') {
         return 'source_not_persisted';
+      }
+      if (this.ceiling) {
+        // The grant must fit the ceiling in force: a lowered ceiling
+        // suspends the tool, and the next load under a ceiling that covers
+        // it again lifts the suspension (the library's, so it is re-checked).
+        const list = normalizeAllowlist(implementation.allowlist);
+        if (list.unknown.length > 0 || !checkRequest(list.capabilities, this.ceiling).ok) {
+          return 'capability_not_granted';
+        }
       }
       return null;
     }
@@ -1924,6 +2013,7 @@ export class EmergentCapabilityEngine {
             output: result.output,
             error: result.error ?? 'A step of this composition can no longer be chained.',
             details: result.details,
+            ...(result.effects ? { effects: result.effects } : {}),
           };
         }
 
@@ -1959,6 +2049,7 @@ export class EmergentCapabilityEngine {
               output: result.output,
               error: error ?? 'Emergent tool execution failed.',
               ...(result.details ? { details: result.details } : {}),
+              ...(result.effects ? { effects: result.effects } : {}),
             };
       },
     };
@@ -2017,7 +2108,10 @@ export class EmergentCapabilityEngine {
       outputSchema: tool.outputSchema,
       category: 'emergent',
       hasSideEffects: true,
-      execute: async (args: Record<string, unknown>): Promise<ToolExecutionResult> => {
+      execute: async (
+        args: Record<string, unknown>,
+        context?: ToolExecutionContext,
+      ): Promise<ToolExecutionResult> => {
         if (tool.implementation.mode !== 'sandbox') {
           return {
             success: false,
@@ -2025,18 +2119,62 @@ export class EmergentCapabilityEngine {
           };
         }
 
-        const sandboxResult = await this.sandboxForge.execute({
-          code: tool.implementation.code,
-          input: args,
-          allowlist: tool.implementation.allowlist,
-          memoryMB: this.config.sandboxMemoryMB,
-          timeoutMs: this.config.sandboxTimeoutMs,
+        const sandboxResult = await this.runSandboxed(tool.implementation, args, {
+          toolId: tool.id,
+          agentId: context?.personaId ?? 'unknown',
         });
 
+        const effects = sandboxResult.effects ? { effects: sandboxResult.effects } : {};
         return sandboxResult.success
-          ? { success: true, output: sandboxResult.output }
-          : { success: false, error: sandboxResult.error };
+          ? { success: true, output: sandboxResult.output, ...effects }
+          : { success: false, error: sandboxResult.error, ...effects };
       },
     };
+  }
+
+  /**
+   * One run of forged code, as a forge test or a call. Under a ceiling the
+   * run has its own call handle, which ends when the run does, however it
+   * ends (it returns, throws or times out): the broker refuses capability
+   * calls from then on, aborts the ones in flight, waits up to a second for
+   * them, and hands back the run's effects. The handle is per run, so ending
+   * one never touches a concurrent run of the same tool.
+   */
+  private async runSandboxed(
+    implementation: SandboxedToolSpec,
+    input: unknown,
+    who: { toolId: string; agentId: string },
+  ): Promise<SandboxExecutionResult & { effects?: ToolEffectRecord[] }> {
+    const request = {
+      code: implementation.code,
+      input,
+      allowlist: implementation.allowlist,
+      memoryMB: this.config.sandboxMemoryMB,
+      timeoutMs: this.config.sandboxTimeoutMs,
+    };
+    if (!this.broker) {
+      return this.sandboxForge.execute(request);
+    }
+    const controller = new AbortController();
+    const call: CallHandle = {
+      id: randomUUID(),
+      toolId: who.toolId,
+      agentId: who.agentId,
+      signal: controller.signal,
+    };
+    let result: SandboxExecutionResult;
+    try {
+      result = await this.sandboxForge.execute({ ...request, call });
+    } catch (error: unknown) {
+      result = {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        executionTimeMs: 0,
+        memoryUsedBytes: 0,
+      };
+    }
+    controller.abort();
+    const effects = await this.broker.endCall(call.id);
+    return effects.length > 0 ? { ...result, effects } : result;
   }
 }

@@ -26,7 +26,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
   EmergentTool,
-  SandboxAPI,
+  AllowlistName,
   ToolTier,
   ToolUsageStats,
   EmergentConfig,
@@ -37,6 +37,7 @@ import type {
   ToolStateRecord,
 } from './types.js';
 import { DEFAULT_EMERGENT_CONFIG, GMI_INSTANCE_ID_PREFIX } from './types.js';
+import { EffectsStore } from './EffectsStore.js';
 import { parsePersistedSource, parseStoredRequest, sessionFromSource, stateSetterFromColumn } from './persisted-source.js';
 
 // ============================================================================
@@ -127,7 +128,7 @@ export interface AuditEntry {
 type PersistedSandboxMetadata = {
   redacted: true;
   reason: 'sandbox-source-not-persisted';
-  allowlist: SandboxAPI[];
+  allowlist: AllowlistName[];
   codeBytes: number;
 };
 
@@ -181,6 +182,8 @@ type StateRowRead = {
   tool_exists?: number | boolean | null;
 };
 
+const AUDIT_RING_SIZE = 1000;
+
 export class EmergentToolRegistry {
   /** In-memory store for session-tier tools, keyed by tool ID. */
   private readonly sessionTools = new Map<string, EmergentTool>();
@@ -188,7 +191,7 @@ export class EmergentToolRegistry {
   /** In-memory store for agent/shared-tier tools when no DB is available. */
   private readonly persistedTools = new Map<string, EmergentTool>();
 
-  /** In-memory audit log. Always populated regardless of DB availability. */
+  /** In-memory audit log: the newest {@link AUDIT_RING_SIZE} entries, kept with or without storage. A log, never read for state. */
   private readonly auditLog: AuditEntry[] = [];
 
   /** Held state per tool. A tool with no entry counts as active. */
@@ -276,8 +279,8 @@ export class EmergentToolRegistry {
   /**
    * Initialize the database schema for emergent tool persistence.
    *
-   * Creates the `agentos_emergent_tools`, `agentos_emergent_audit_log` and
-   * `agentos_emergent_tool_state` tables along with their indexes. Safe to
+   * Creates the `agentos_emergent_tools`, `agentos_emergent_audit_log`,
+   * `agentos_emergent_tool_state` and `agentos_emergent_effects` tables along with their indexes. Safe to
    * call multiple times — all statements use `CREATE TABLE IF NOT EXISTS` /
    * `CREATE INDEX IF NOT EXISTS`.
    *
@@ -345,11 +348,45 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
   write_id TEXT
 );`;
 
+    // One row per capability call of a code-forged tool under a ceiling: the
+    // intent before the call, the outcome after it (a row with no outcome is
+    // unknown). Pruned by `audit.retainDays`; tool rows and state never are.
+    const effectsTable = `
+CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
+  id TEXT PRIMARY KEY,
+  tool_id TEXT NOT NULL,
+  call_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  capability TEXT NOT NULL,
+  target TEXT NOT NULL,
+  target_form TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  decided_by TEXT NOT NULL,
+  intent_at BIGINT NOT NULL,
+  outcome TEXT,
+  code TEXT,
+  bytes BIGINT,
+  uses INTEGER,
+  terminal_at BIGINT
+);`;
+    const effectsToolIndex = `CREATE INDEX IF NOT EXISTS idx_emergent_effects_tool ON agentos_emergent_effects(tool_id, intent_at);`;
+    const effectsCallIndex = `CREATE INDEX IF NOT EXISTS idx_emergent_effects_call ON agentos_emergent_effects(call_id);`;
+
     // Tables and indexes only: the flag on the tool row is written by the
     // library's own statements, never by a trigger, so the schema stays
     // portable (PostgreSQL has no SQLite trigger syntax) and every write to the
     // tool row passes through the storage adapter's hooks.
-    const statements = [toolsTable, toolsTierIndex, toolsAgentIndex, auditTable, auditIndex, stateTable];
+    const statements = [
+      toolsTable,
+      toolsTierIndex,
+      toolsAgentIndex,
+      auditTable,
+      auditIndex,
+      stateTable,
+      effectsTable,
+      effectsToolIndex,
+      effectsCallIndex,
+    ];
     // Prefer `exec` for multi-statement DDL; fall back to individual `run` calls.
     if (this.db.exec) {
       await this.db.exec(statements.join('\n'));
@@ -844,6 +881,16 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
   /** Whether a storage adapter is configured. */
   hasStorage(): boolean {
     return this.db !== undefined;
+  }
+
+  /**
+   * The writer of effect records over this registry's storage, or undefined
+   * without a storage adapter. The schema is made ready before its first write.
+   */
+  effectsStore(options: { content: 'digest' | 'full'; retainDays?: number }): EffectsStore | undefined {
+    return this.db
+      ? new EffectsStore(this.db, { ...options, ensureSchema: () => this.ensureSchemaReady() })
+      : undefined;
   }
 
   /**
@@ -1417,6 +1464,9 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
     };
 
     this.auditLog.push(entry);
+    if (this.auditLog.length > AUDIT_RING_SIZE) {
+      this.auditLog.splice(0, this.auditLog.length - AUDIT_RING_SIZE);
+    }
 
     // Best-effort DB write — do not await or throw if it fails.
     if (this.db && this.schemaReady) {
