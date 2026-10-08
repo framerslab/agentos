@@ -476,36 +476,67 @@ export const GUEST_PRELUDE = String.raw`(() => {
               ? { url: String(input.url) }
               : String(input);
       let options;
+      // The body crosses as its own string argument, so the host reads its
+      // length before it copies it: text as it is, bytes as latin1, form
+      // parameters as their text with the form type, anything else as its
+      // string, as fetch reads a body.
+      let body;
+      let bodyKind;
       if (init !== undefined && init !== null) {
         options = {};
         if (init.method !== undefined) options.method = String(init.method);
         const headers = headerPairs(init.headers);
         if (headers !== undefined) options.headers = headers;
-        // A body crosses as data, as fetch reads it: bytes as latin1, form
-        // parameters as their text with the form type, anything else as its
-        // string.
-        const body = init.body;
-        if (typeof body === 'string') {
-          options.body = body;
-        } else if (body instanceof URLSearchParams) {
-          options.body = body.toString();
-          const given = options.headers || [];
-          if (!given.some((pair) => pair[0].toLowerCase() === 'content-type')) {
-            options.headers = given.concat([['content-type', 'application/x-www-form-urlencoded;charset=UTF-8']]);
+        const given = init.body;
+        if (typeof given === 'string') {
+          body = given;
+          bodyKind = 'text';
+        } else if (given instanceof URLSearchParams) {
+          body = given.toString();
+          bodyKind = 'text';
+          const named = options.headers || [];
+          if (!named.some((pair) => pair[0].toLowerCase() === 'content-type')) {
+            options.headers = named.concat([['content-type', 'application/x-www-form-urlencoded;charset=UTF-8']]);
           }
-        } else if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
-          options.bodyBytes = bytesToLatin1(toBytes(body));
-        } else if (body !== undefined && body !== null) {
-          options.body = String(body);
+        } else if (given instanceof ArrayBuffer || ArrayBuffer.isView(given)) {
+          body = bytesToLatin1(toBytes(given));
+          bodyKind = 'bytes';
+        } else if (given !== undefined && given !== null) {
+          body = String(given);
+          bodyKind = 'text';
         }
         if (init.redirect !== undefined) options.redirect = String(init.redirect);
       }
-      return new Response(await host.fetch(target, options));
+      return new Response(await host.fetch(target, options, body, bodyKind));
     };
   }
 
+  // The file functions the grant holds; the data a write carries crosses as
+  // its own string argument (bytes as latin1), as a request body does.
+  const fsFunctions = {};
   if (host.fs_readFile) {
-    g.fs = Object.freeze({ readFile: (filePath) => host.fs_readFile(String(filePath)) });
+    fsFunctions.readFile = (filePath) => host.fs_readFile(String(filePath));
+  }
+  if (host.fs_writeFile) {
+    fsFunctions.writeFile = (filePath, data, options) => {
+      const encoding = typeof options === 'string' ? options : options && options.encoding;
+      if (encoding !== undefined && encoding !== null && encoding !== 'utf8' && encoding !== 'utf-8') {
+        return Promise.reject(new TypeError('fs.writeFile writes text as UTF-8 or bytes as they are; other options are not available'));
+      }
+      if (typeof data === 'string') {
+        return host.fs_writeFile(String(filePath), data, 'text');
+      }
+      if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+        return host.fs_writeFile(String(filePath), bytesToLatin1(toBytes(data)), 'bytes');
+      }
+      return Promise.reject(new TypeError('fs.writeFile takes a string, an ArrayBuffer or a typed array'));
+    };
+  }
+  if (host.fs_unlink) {
+    fsFunctions.unlink = (filePath) => host.fs_unlink(String(filePath));
+  }
+  if (Object.keys(fsFunctions).length > 0) {
+    g.fs = Object.freeze(fsFunctions);
   }
 
   if (host.crypto_randomUUID) {

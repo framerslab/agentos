@@ -69,7 +69,11 @@ export type PersistedSource =
 export function inferRequestFromCode(code: string): CapabilityName[] {
   const found: CapabilityName[] = [];
   if (/\bfetch\s*\(/.test(code)) found.push('fetch');
-  if (/\bfs\s*\./.test(code)) found.push('fs.read');
+  // The same three rules as validateCode: fs.writeFile is fs.write, fs.unlink
+  // is fs.delete, any other fs reference is fs.read.
+  if (/\bfs\s*\.(?!\s*(?:writeFile|unlink)\b)/.test(code)) found.push('fs.read');
+  if (/\bfs\s*\.\s*writeFile\b/.test(code)) found.push('fs.write');
+  if (/\bfs\s*\.\s*unlink\b/.test(code)) found.push('fs.delete');
   if (/\bcrypto\s*\./.test(code)) found.push('crypto');
   return found;
 }

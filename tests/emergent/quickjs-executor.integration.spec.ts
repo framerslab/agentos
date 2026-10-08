@@ -487,6 +487,17 @@ describe('what the guest hands the host', () => {
     expect(ran).toMatchObject({ status: 'ok', output: 'TypeError: intl_call takes data only: symbol values are not data' });
   });
 
+  it('carries a string with a zero character whole, from the guest to the host and back', async () => {
+    const ran = await executor.run(
+      direct(
+        'async function execute() { const t = new TextDecoder().decode(new Uint8Array([0, 65, 0, 66])); const r = await fs.readFile("z"); return [t.length, t.charCodeAt(0), t.charCodeAt(1), t.charCodeAt(3), r.length, r.charCodeAt(1)]; }',
+        {},
+        { globals: { fs: { readFile: async () => 'a\u0000b' } } },
+      ),
+    );
+    expect(ran).toMatchObject({ status: 'ok', output: [4, 0, 65, 66, 3, 0] });
+  });
+
   it('reads only the JSON text the wrapper makes as the result', async () => {
     const ran = await executor.run(
       direct("function execute() { JSON.stringify = () => ({ big: 'z'.repeat(1000) }); return { a: 1 }; }"),

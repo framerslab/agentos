@@ -31,7 +31,12 @@ export interface EffectIntent {
 
 /** The half written after the call. */
 export interface EffectTerminal {
-  outcome: EffectOutcome;
+  /**
+   * How the call ended; `null` keeps the row's outcome empty, the store's
+   * unknown, for a state-changing request cut after it was sent (its code
+   * is `cut_in_flight`).
+   */
+  outcome: EffectOutcome | null;
   /** The code a refusal or an end carried (`host_not_allowed`, `response_too_large`, `call_ended`...). */
   code?: string;
   bytes?: number;

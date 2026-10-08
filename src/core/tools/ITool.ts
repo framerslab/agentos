@@ -82,8 +82,13 @@ export interface CapabilityEffect {
   decision: 'allowed' | 'refused';
   /** `'ceiling'` for an allowed call; the refusal's code otherwise. */
   decidedBy: string;
-  /** `pending`: the call had not settled when the result was returned; its record completes when it settles. */
-  outcome: 'ok' | 'error' | 'aborted' | 'timed_out' | 'refused' | 'pending';
+  /**
+   * `pending`: the call had not settled when the result was returned; its
+   * record completes when it settles. `unknown`: a state-changing request
+   * cut after it was sent, which the server may have acted on (its record
+   * keeps no outcome, the store's unknown, and the code `cut_in_flight`).
+   */
+  outcome: 'ok' | 'error' | 'aborted' | 'timed_out' | 'refused' | 'pending' | 'unknown';
   /** The code a refusal or an end carried during the call (`host_not_allowed` at a redirect, `response_too_large`, `call_ended`). */
   code?: string;
   bytes?: number;
@@ -91,6 +96,11 @@ export interface CapabilityEffect {
   uses?: number;
   /** What storage holds: both halves, the intent only (the terminal write failed; the row reads unknown), or nothing. */
   record: 'written' | 'intent_only' | 'none';
+  /**
+   * A write, delete or state-changing request in a forge test's run: checked
+   * as in a real call and not carried out (the record's code is `dry_run`).
+   */
+  dryRun?: true;
 }
 
 /** A step of a composition that has side effects, or is a composition. */
