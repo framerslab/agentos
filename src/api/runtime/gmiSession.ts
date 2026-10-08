@@ -194,7 +194,7 @@ export async function* runGmiTurn(
   };
 
   try {
-    // What the turn starts from, read together (D-h item 6).
+    // What the turn starts from, read together before any wait.
     const epochAtStart = deps.history?.epoch();
     const priorMessages = deps.history ? deps.history.messages() : [];
     const userText = typeof input === 'string' ? input : extractTextFromContent(input);

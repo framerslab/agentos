@@ -80,7 +80,8 @@ function isSet(value: unknown): boolean {
 
 /**
  * A memoised async build that is not kept when it fails: the next call after a
- * rejection builds again (D-f). `reset()` drops a kept result.
+ * rejection builds again, so one transient failure does not fail every later
+ * call. `reset()` drops a kept result.
  */
 function retryingOnce<T>(build: () => Promise<T>): { get(): Promise<T>; peek(): Promise<T> | undefined; reset(): void } {
   let pending: Promise<T> | undefined;
@@ -285,7 +286,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
   const gateway = gatewayFor(opts);
 
   const shared = retryingOnce<Shared>(async () => {
-    // Throws, as generateText throws, when no provider or model resolves (D-b).
+    // Throws, as generateText throws, when no provider or model resolves.
     const persona = personaFromAgentOptions(opts, cognition, tools);
     const lightPersona = personaFromAgentOptions(opts, lightCognition, tools);
     const promptEngine = new PromptEngine();
@@ -307,7 +308,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
   const memory = retryingOnce<AgentCognitiveMemory | undefined>(async () => {
     if (!cognition.memory) return undefined;
     const { persona } = await shared.get();
-    // Reads the environment for the embedding provider when memory.embedding names none (D-e).
+    // Reads the environment for the embedding provider when memory.embedding names none.
     return createAgentCognitiveMemory({ persona, memory: cognition.memory, mechanisms: cognition.mechanisms });
   });
 
@@ -432,7 +433,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
         }
         return existing.session;
       }
-      // Each session's memory scope is its own unless the caller names the user (D-g).
+      // Each session's memory scope is its own unless the caller names the user:
+      // sessions are often different people, and one person's facts must not
+      // reach another's replies.
       const userId = sessionOptions?.userId ?? sessionId;
       const history = opts.history === false ? null : new SessionHistoryBuffer({ ...SESSION_HISTORY_DEFAULTS, ...(opts.history ?? {}) });
       if (!sessionTallies.has(sessionId)) sessionTallies.set(sessionId, createEmptyUsageAggregate(sessionId));
@@ -458,13 +461,16 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
       /** Brings the session GMI's own history in line with the store once the running turn ends, so a cleared fact never reaches its sentiment tracker or metaprompts. */
       const syncGmiHistory = (): void => {
-        void lock.acquire().then((release) => {
-          try {
-            ownBuilt?.gmi.replaceHistory?.(transcriptToConversation(history?.messages() ?? []));
-          } finally {
-            release();
-          }
-        });
+        void lock
+          .acquire()
+          .then((release) => {
+            try {
+              ownBuilt?.gmi.replaceHistory?.(transcriptToConversation(history?.messages() ?? []));
+            } finally {
+              release();
+            }
+          })
+          .catch((error: unknown) => console.warn('[agentos] gmi(): could not clear the session GMI history:', error));
       };
 
       const deps = (source: 'agent.session.send' | 'agent.session.stream'): GmiSessionDeps => ({
@@ -545,13 +551,14 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
     /**
      * Closes every session (each after its running turn), then the cognitive
-     * memory. The tools stay as the caller passed them: the orchestrator is not
-     * shut down, because shutting it down would shut down the caller's tools.
+     * memory; a session opened from now on builds a new one. The tools stay as
+     * the caller passed them: the orchestrator is not shut down, because
+     * shutting it down would shut down the caller's tools.
      */
     async close(): Promise<void> {
-      await Promise.all([...sessions.values()].map(({ session }) => session.close()));
       const pending = memory.peek();
       memory.reset();
+      await Promise.all([...sessions.values()].map(({ session }) => session.close()));
       const mem = await pending?.catch(() => undefined);
       await mem?.close();
     },

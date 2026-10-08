@@ -174,7 +174,7 @@ describe('gmi() sessions', () => {
     expect(a.session('s').messages()).toEqual([]);
   });
 
-  it('a clear while the turn waits for its memory context keeps that turn out of the history (D-h item 6)', async () => {
+  it('a clear while the turn waits for its memory context keeps that turn out of the history', async () => {
     const k = key(); script('openai', k, { replies: [reply.text('Late reply.')] });
     let releaseContext!: () => void;
     const held = new Promise<void>((resolve) => {
@@ -270,7 +270,7 @@ describe('gmi() sessions', () => {
 });
 
 describe('gmi() resolves the model and builds memory on first use', () => {
-  it('construction reads no environment: the first call fails as agent() fails, and a key set before a call is used (D-b)', async () => {
+  it('construction reads no environment: the first call fails as agent() fails, and a key set before a call is used', async () => {
     // Only OPENAI_API_KEY is probed, so a CLI on the runner's PATH cannot answer.
     setProviderPriority(['openai']);
     vi.stubEnv('OPENAI_API_KEY', '');
@@ -287,7 +287,7 @@ describe('gmi() resolves the model and builds memory on first use', () => {
     expect((await early.generate('hi')).text).toBe('Again.');
   });
 
-  it('memory checks that need the environment wait for the first call, which names memory.embedding; the others run at construction (D-e)', async () => {
+  it('memory checks that need the environment wait for the first call, which names memory.embedding; the others run at construction', async () => {
     vi.stubEnv('OPENAI_API_KEY', '');
     vi.stubEnv('OLLAMA_BASE_URL', '');
     expect(() => agent(base(key(), { memory: { embedding: { provider: 'anthropic' } } }))).toThrow(/Anthropic has no embedding models/);
@@ -305,7 +305,7 @@ describe('gmi() resolves the model and builds memory on first use', () => {
     expect(e.embedCalls).toBeGreaterThan(0);
   });
 
-  it('a memory build that fails is not kept: the next send builds it again (D-f)', async () => {
+  it('a memory build that fails is not kept: the next send builds it again', async () => {
     const k = key(); const emb = key();
     const s = script('openai', k, { replies: [reply.text('Hello.')] });
     const e = script('openai', emb, { initThrows: Object.assign(new Error('503 upstream unavailable'), { httpStatus: 503 }) });
@@ -318,7 +318,7 @@ describe('gmi() resolves the model and builds memory on first use', () => {
     expect(s.seen).toHaveLength(1);
   });
 
-  it("each session's memory is its own unless sessions share a user id; closing one session leaves the shared memory to the others (D-g)", async () => {
+  it("each session's memory is its own unless sessions share a user id; closing one session leaves the shared memory to the others", async () => {
     const k = key(); const emb = key();
     const s = script('openai', k, { replies: [reply.text('Noted.'), reply.text('No idea.'), reply.text('Noted.'), reply.text('In the vault.')] });
     script('openai', emb);
