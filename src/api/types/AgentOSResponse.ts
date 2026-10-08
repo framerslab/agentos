@@ -147,6 +147,9 @@ export interface AgentOSFinalResponseChunk extends AgentOSResponseChunk {
    * Undefined when no RAG retrieval was performed.
    */
   ragSources?: import('../../cognition/rag').RagRetrievedChunk[];
+
+  /** On a structured turn (`ProcessingOptions.structuredReply`): the parsed value and how it was checked. */
+  structured?: import('../runtime/structuredReply').StructuredReplyOutput;
 }
 
 /**

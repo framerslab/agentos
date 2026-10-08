@@ -143,4 +143,10 @@ export interface ProcessingOptions {
   debugMode?: boolean;
   forceNewConversation?: boolean;
   customFlags?: Record<string, any>;
+  /**
+   * A reply that must match a schema: the model is instructed, its reply parsed and checked, a reply that does not
+   * match asked for again inside the turn, and the final chunk carries the parsed value (`structured`). See
+   * `src/api/runtime/structuredReply.ts`.
+   */
+  structuredReply?: import('../runtime/structuredReply').StructuredReplySpec;
 }

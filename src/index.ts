@@ -397,6 +397,15 @@ export type { DetectScenesOptions } from './api/detectScenes.js';
 export { performOCR } from './api/performOCR.js';
 export type { PerformOCROptions, OCRResult } from './api/performOCR.js';
 export { generateObject, ObjectGenerationError } from './api/generateObject.js';
+export {
+  resolveStructuredReply,
+  resolveStructuredReplySpec,
+  checkStructuredReply,
+  recheckStructuredReply,
+  structuredRepairMessage,
+  StructuredReplyConfigError,
+} from './api/runtime/structuredReply.js';
+export type { StructuredReplySpec, StructuredOutputMeta, StructuredReplyOutput, IStructuredSchemaRegistry, ResolvedStructuredReply } from './api/runtime/structuredReply.js';
 export type { GenerateObjectOptions, GenerateObjectResult } from './api/generateObject.js';
 export { streamObject } from './api/streamObject.js';
 export type { StreamObjectOptions, StreamObjectResult, DeepPartial } from './api/streamObject.js';
