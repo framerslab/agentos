@@ -198,6 +198,53 @@ describe('agent', () => {
     expect(session.messages()).toEqual([]);
   });
 
+  it('session.close() ends the session: the id starts empty, a reply after close stays out of history, usage stays readable', async () => {
+    let releaseSlow: () => void = () => {};
+    hoisted.generateText.mockImplementation(async (opts: { prompt?: string }) => {
+      if (opts.prompt === 'slow') {
+        await new Promise<void>((resolve) => {
+          releaseSlow = resolve;
+        });
+      }
+      return {
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        text: 'ok',
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        toolCalls: [],
+        finishReason: 'stop',
+        transcriptDelta: [
+          { role: 'user', content: opts.prompt ?? '' },
+          { role: 'assistant', content: 'ok' },
+        ],
+      };
+    });
+    hoisted.getRecordedAgentOSUsage.mockResolvedValue({
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      costUSD: 0,
+      calls: 0,
+    });
+    const assistant = agent({ model: 'openai:gpt-4.1-mini' });
+
+    const first = assistant.session('demo');
+    await first.send('the code word is heron');
+    const slow = first.send('slow');
+    await first.close();
+    releaseSlow();
+    await slow;
+    expect(first.messages()).toEqual([]);
+
+    const again = assistant.session('demo');
+    expect(again.messages()).toEqual([]);
+    await again.send('what is the code word?');
+    expect(hoisted.generateText).toHaveBeenLastCalledWith(
+      expect.objectContaining({ prompt: 'what is the code word?', messages: [] }),
+    );
+    expect(await assistant.usage('demo')).toMatchObject({ totalTokens: 6, calls: 3 });
+  });
+
   it('tracks session usage through the durable usage ledger', async () => {
     const assistant = agent({
       model: 'openai:gpt-4.1-mini',
