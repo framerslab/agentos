@@ -210,6 +210,7 @@ describe('createSttChain from entries', () => {
     expect(openAITranscriptionPricing('gpt-live-transcribe')).toBe(0.017);
     expect(sttEntryPricePerMinute('openai:gpt-4o-mini-transcribe')).toBe(0.003);
     expect(sttEntryPricePerMinute('openai:no-such-model')).toBeUndefined();
+    expect(sttEntryPricePerMinute('openai:constructor')).toBeUndefined();
     expect(sttEntryPricePerMinute('deepgram:nova-3')).toBeUndefined();
   });
 });

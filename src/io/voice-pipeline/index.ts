@@ -192,4 +192,11 @@ export {
   NoVoiceProvidersAvailableError,
   type VoiceProviderEnvConfig,
   type VoiceProviderBundle,
+  createSttChain,
+  sttEntryPricePerMinute,
+  parseSttEntry,
+  STT_CHAIN_VENDORS,
+  type SttChainEntryOptions,
+  type SttChainVendor,
+  type SttEntry,
 } from './env-constructor.js';
