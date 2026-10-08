@@ -10,6 +10,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => (
 vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
 import { z } from 'zod';
 import { agent, type AgentOptions } from '../agent';
+import { DEFAULT_COT_INSTRUCTION } from '../generateText';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { GMIErrorCode } from '../../core/utils/errors';
@@ -236,6 +237,18 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(strict.object).toEqual({ city: 'Lyon' });
     expect((s.seen[1].options.responseFormat as { type?: string }).type).toBe('json_schema');
     expect(systemText(s.seen[1])).not.toContain(SCHEMA_LINE);
+  });
+
+  it('a structured send on an agent with tools carries no chain-of-thought instruction, as agent() sends none once the tools are stripped; a plain send keeps it', async () => {
+    const k = key(); const s = script('openai', k, { replies: [reply.text('{"city":"Lyon"}'), reply.text('Hi.')] });
+    const session = agent(base(k, { tools: [lookupTool(async () => ({ success: true }))] })).session('s');
+    expect((await session.send('where?', { responseSchema: z.object({ city: z.string() }) })).object).toEqual({ city: 'Lyon' });
+    // The step goes without tools, and an instruction to reason about which tool to pick invites prose before the JSON.
+    expect(s.seen[0].options.tools).toBeUndefined();
+    expect(systemText(s.seen[0])).not.toContain(DEFAULT_COT_INSTRUCTION);
+    await session.send('hi');
+    expect(s.seen[1].options.tools).toBeDefined();
+    expect(systemText(s.seen[1])).toContain(DEFAULT_COT_INSTRUCTION);
   });
 
   it('generate keeps no history; close releases sessions', async () => {
