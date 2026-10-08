@@ -453,6 +453,8 @@ describe('AgentOS.processRequest guardrail integration', () => {
     const streamingManager = new FakeStreamingManager();
     const orchestrator = new StubOrchestrator(streamingManager, streamId, [buildFinalChunk(streamId, 'persona-default', 'you will pass')]);
     const context = new ConversationContext('conversation-1');
+    context.addMessage({ role: MessageRole.USER, content: 'How is the week?' });
+    const earlier = context.addMessage({ role: MessageRole.ASSISTANT, content: 'Two drills and a rest day.', metadata: { source: 'agentos_output' } });
     context.addMessage({ role: MessageRole.USER, content: 'Will I pass?' });
     const stored = context.addMessage({ role: MessageRole.ASSISTANT, content: 'you will pass', metadata: { source: 'agentos_output' } });
     const saveConversation = vi.fn(async () => undefined);
@@ -465,6 +467,7 @@ describe('AgentOS.processRequest guardrail integration', () => {
     expect(getConversation).toHaveBeenCalledWith('conversation-1');
     expect(context.getMessageById(stored.id)?.content).toBe('No promise is made.');
     expect(context.getMessageById(stored.id)?.metadata?.modificationInfo).toMatchObject({ strategy: 'filtered', reason: 'guardrail:outcome_promise' });
+    expect(context.getMessageById(earlier.id)?.content).toBe('Two drills and a rest day.');
     expect(saveConversation).toHaveBeenCalledWith(context);
   });
 });

@@ -28,7 +28,12 @@ import {
 
 export interface PhraseEntry {
   phrase: string;
-  /** `word`: the phrase between word boundaries; `substring`: anywhere; `regex`: the phrase is a regular expression. */
+  /**
+   * `word`: the phrase between word boundaries; `substring`: anywhere; `regex`: the phrase is a regular expression.
+   * Every entry runs over the normalised text (lower case, marks and zero-width characters removed, look-alike
+   * letters mapped to Latin, quotes straightened): a word or substring phrase is normalised the same way before it is
+   * compiled, while a regex source is compiled as written, so write a regex in that normalised form.
+   */
   match: 'word' | 'substring' | 'regex';
   /** `block`: a match blocks; `judge`: the judge decides whether the match, in context, crosses the rule. */
   onMatch: 'block' | 'judge';
@@ -76,7 +81,7 @@ export interface PhraseListGuardrailOptions {
   normalize?(text: string): string;
 }
 
-const ZERO_WIDTH = /[­᠎​-‏‪-‮⁠-⁤﻿]/g;
+const ZERO_WIDTH = /[\u00AD\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g;
 const LOOKALIKES: Record<string, string> = {
   а: 'a', в: 'b', е: 'e', ё: 'e', к: 'k', м: 'm', н: 'h', о: 'o', р: 'p', с: 'c', т: 't', у: 'y', х: 'x', і: 'i', ї: 'i', ј: 'j', ѕ: 's', ԁ: 'd', һ: 'h', ӏ: 'l', ԛ: 'q', ԝ: 'w',
   α: 'a', β: 'b', ε: 'e', η: 'n', ι: 'i', κ: 'k', ν: 'v', ο: 'o', ρ: 'p', τ: 't', υ: 'u', χ: 'x', ϲ: 'c', ɡ: 'g',

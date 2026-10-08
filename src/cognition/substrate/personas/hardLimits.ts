@@ -6,8 +6,11 @@
  * guardrails hold the same rules in code.
  */
 
-/** The priority the block sorts under: past every other system prompt the runtime adds (the base prompt is 1, the skill context 57). */
-export const HARD_LIMITS_PRIORITY = 1000;
+/**
+ * The priority the block sorts under: the largest a number can be, so it closes the system prompt whatever priority
+ * a persona's fragments or the turn's own blocks carry (the prompt engine sorts ascending and keeps order among equals).
+ */
+export const HARD_LIMITS_PRIORITY = Number.MAX_SAFE_INTEGER;
 
 export const HARD_LIMITS_HEADING = 'Hard limits';
 

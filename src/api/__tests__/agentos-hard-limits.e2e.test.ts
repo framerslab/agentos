@@ -39,9 +39,14 @@ const limited = {
   hardLimits: ['Never name a diagnosis or a condition.', ' Never promise an outcome or a date. ', ''],
 } as unknown as IPersonaDefinition;
 const plain = { id: 'plain', name: 'Plain', description: 'A persona without limits.', version: '1.0.0', baseSystemPrompt: 'You are terse.' } as unknown as IPersonaDefinition;
+const fragmented = {
+  id: 'fragmented', name: 'Fragmented', description: 'A persona whose prompt fragment outranks a thousand.', version: '1.0.0',
+  baseSystemPrompt: [{ content: 'You keep to the plan.', priority: 1 }, { content: 'LATE FRAGMENT: this one sorts after a thousand.', priority: 1001 }],
+  hardLimits: ['Never promise an outcome or a date.'],
+} as unknown as IPersonaDefinition;
 
 async function boot(): Promise<AgentOS> {
-  return AgentOS.create({ modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey: 'test' } }] }, turnPlanning: { enabled: false }, personas: [limited, plain] } as any);
+  return AgentOS.create({ modelProviderManagerConfig: { providers: [{ providerId: 'openai', enabled: true, isDefault: true, config: { apiKey: 'test' } }] }, turnPlanning: { enabled: false }, personas: [limited, plain, fragmented] } as any);
 }
 
 const systemTextOf = (messages: Array<{ role: string; content: unknown }>): string =>
@@ -74,5 +79,14 @@ describe("a persona's hard limits in the system prompt", () => {
     expect(system.indexOf('You plan one long goal')).toBeLessThan(system.indexOf(`## ${HARD_LIMITS_HEADING}`));
     for await (const _chunk of booted.processRequest({ userId: 'u', sessionId: 's-plain', selectedPersonaId: 'plain', textInput: 'Hello.' } as any)) { /* drain */ }
     expect(systemTextOf(provider.seenMessages.at(-1) ?? [])).not.toContain(HARD_LIMITS_HEADING);
+  });
+
+  it('closes the prompt after a fragment whose priority outranks a thousand', async () => {
+    booted = await boot();
+    for await (const _chunk of booted.processRequest({ userId: 'u', sessionId: 's-fragmented', selectedPersonaId: 'fragmented', textInput: 'Will I pass?' } as any)) { /* drain */ }
+    const system = systemTextOf(provider.seenMessages.at(-1) ?? []);
+    expect(system.indexOf('LATE FRAGMENT')).toBeGreaterThan(system.indexOf('You keep to the plan.'));
+    expect(system.indexOf(`## ${HARD_LIMITS_HEADING}`)).toBeGreaterThan(system.indexOf('LATE FRAGMENT'));
+    expect(system.trimEnd().endsWith('- Never promise an outcome or a date.')).toBe(true);
   });
 });

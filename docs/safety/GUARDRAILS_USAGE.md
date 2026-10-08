@@ -358,7 +358,7 @@ const agentos = await AgentOS.create({
 - **Posture.** A required guard runs under its id, fail-closed (a throw, a timeout past `timeoutMs`, or an answer whose action is not a `GuardrailAction` blocks, as `GUARDRAIL_ERROR` or `GUARDRAIL_MALFORMED`), whatever its own `config` says.
 - **Hold mode.** A guard required on `output`, or `guardrailOutputMode: 'hold'`, holds every `TEXT_DELTA` until the final guards have judged the whole reply. Allowed or flagged, the deltas go out before the final chunk; blocked or sanitized, they are dropped. An actionable tool call closes the window: the text so far is judged as a final reply before the tool call goes out. The same guards run on the continuation after an external tool result.
 - **Replacement replies.** A `BLOCK` whose evaluation carries `replacementText` reaches the caller as a `FINAL_RESPONSE` holding that text in both text fields, with `metadata.guardrail.output[0].action === 'block'` and the guard's `reasonCode`, in place of an error chunk. A block without one yields the error chunk as before.
-- **The stored reply.** With conversational persistence on, a reply a guard blocked with a replacement or sanitized is rewritten in the conversation's history before the turn ends, so the history holds what the person saw. The message's `metadata.modificationInfo` records the guard's reason code.
+- **The stored reply.** With conversational persistence on, a reply a guard blocked with a replacement or sanitized is rewritten in the conversation's history before the final chunk leaves, so the history holds what the person saw: the stored message is matched by the text the guards judged, never by position, on a turn and on a tool continuation alike. The message's `metadata.modificationInfo` records the guard's reason code. A block on a streamed delta judges no whole reply and rewrites nothing; hold mode is where nothing streams before the final verdict.
 - **Every verdict names its guard.** `metadata.guardrailId` is set on each evaluation and on the error chunk when the guard has an `id`.
 
 ### `PhraseListGuardrail`
@@ -387,7 +387,7 @@ const neverDo = await PhraseListGuardrail.create({
 
 ### Hard limits in the persona
 
-`IPersonaDefinition.hardLimits` (and `hardLimits:` in a SOUL file's front matter) renders as the last block of every system prompt, under the heading "Hard limits", after everything the turn added. The guards hold the same rules in code; the block tells the model.
+`IPersonaDefinition.hardLimits` (and `hardLimits:` in a SOUL file's front matter) renders as the last block of every system prompt, under the heading "Hard limits", after everything the turn added and after every fragment of the persona's own prompt whatever priority it carries. The guards hold the same rules in code; the block tells the model.
 
 ## Using Multiple Guardrails
 

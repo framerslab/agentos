@@ -1403,8 +1403,13 @@ export class AgentOS implements IAgentOS {
     }
   }
 
+  /** True when the overrides disable the guard given in `config.guardrailService`. */
+  private configGuardrailDisabled(): boolean {
+    return this.config.extensionOverrides?.guardrails?.['config-guardrail-service']?.enabled === false;
+  }
+
   private async registerConfigGuardrailService(context: ExtensionLifecycleContext): Promise<void> {
-    if (!this.config.guardrailService) {
+    if (!this.config.guardrailService || this.configGuardrailDisabled()) {
       return;
     }
     const registry = this.extensionManager.getRegistry<IGuardrailService>(EXTENSION_KIND_GUARDRAIL);
@@ -1432,7 +1437,7 @@ export class AgentOS implements IAgentOS {
       }
     }
 
-    if (this.guardrailService && !active.some((a) => a.service === this.guardrailService)) {
+    if (this.guardrailService && !this.configGuardrailDisabled() && !active.some((a) => a.service === this.guardrailService)) {
       active.push({ id: this.guardrailService.id ?? 'config-guardrail-service', service: this.guardrailService });
     }
 
@@ -1459,13 +1464,17 @@ export class AgentOS implements IAgentOS {
    * a guard replaced or rewrote it, the stored message is made to hold what the person saw, so the history never
    * carries a reply the guards refused. A reply blocked with no replacement is emptied, with the reason recorded.
    */
-  private async recordGuardedReply(input: AgentOSInput, verdict: GuardrailOutputVerdict): Promise<void> {
+  private async recordGuardedReply(conversationKey: string, verdict: GuardrailOutputVerdict): Promise<void> {
     const rewritten = verdict.action === GuardrailAction.SANITIZE || verdict.action === GuardrailAction.BLOCK;
-    if (!rewritten || !this.config.orchestratorConfig?.enableConversationalPersistence || !this.conversationManager) return;
+    // a verdict on a streamed delta judged no whole reply, and the orchestrator stores the reply only once the turn
+    // ends: that case is left to hold mode, where nothing streams before the final verdict
+    if (!rewritten || verdict.originalText === null || !this.config.orchestratorConfig?.enableConversationalPersistence || !this.conversationManager) return;
     try {
-      const context = await this.conversationManager.getConversation(input.conversationId || input.sessionId);
+      const context = await this.conversationManager.getConversation(conversationKey);
       if (!context) return;
-      const stored = [...context.getAllMessages()].reverse().find((m) => m.role === MessageRole.ASSISTANT && m.metadata?.source === 'agentos_output');
+      // the message the verdict was about, by its text (the orchestrator stored the same string the guards judged):
+      // the newest such message is this turn's, and an earlier turn's reply is never touched
+      const stored = [...context.getAllMessages()].reverse().find((m) => m.role === MessageRole.ASSISTANT && m.metadata?.source === 'agentos_output' && m.content === verdict.originalText);
       if (!stored) return;
       context.replaceMessageContent(stored.id, verdict.finalText ?? '', {
         modificationInfo: { strategy: 'filtered', reason: `guardrail:${verdict.reasonCode ?? verdict.action}` },
@@ -1893,7 +1902,7 @@ export class AgentOS implements IAgentOS {
           personaId: effectivePersonaId,
           inputEvaluations: guardrailInputOutcome.evaluations ?? [],
           holdUntilFinal: this.holdsOutputUntilFinal(),
-          onVerdict: (verdict) => this.recordGuardedReply(orchestratorInput, verdict),
+          onVerdict: (verdict) => this.recordGuardedReply(orchestratorInput.conversationId || orchestratorInput.sessionId, verdict),
         }
       );
       if (orchestratorInput.workflowRequest) {
@@ -2070,11 +2079,8 @@ export class AgentOS implements IAgentOS {
         `AgentOS.handleToolResults: Bridge client ${bridge.id} registered to stream ${streamId}.`
       );
 
-      // This call is `async Promise<void>`; it triggers the orchestrator to process the tool result(s)
-      // and push new chunks to the StreamingManager for the given streamId.
-      await this.agentOSOrchestrator.orchestrateToolResults(streamId, toolResults);
-
-      // Yield new chunks received by our bridge client on the same stream, through the same output guards a turn has
+      // The stream's identity and the required guards, before the continuation starts: a missing guard means no
+      // model call, and a continuation that ends the turn removes the stream's context when it finishes.
       const identity = this.agentOSOrchestrator.getStreamIdentity(streamId);
       const continuationContext: GuardrailContext = {
         userId: identity?.userId ?? 'unknown_user',
@@ -2087,10 +2093,18 @@ export class AgentOS implements IAgentOS {
         yield this.requiredGuardrailMissingChunk(continuationReport, streamId, identity?.personaId ?? 'unknown_persona');
         return;
       }
+
+      // This call is `async Promise<void>`; it triggers the orchestrator to process the tool result(s)
+      // and push new chunks to the StreamingManager for the given streamId.
+      await this.agentOSOrchestrator.orchestrateToolResults(streamId, toolResults);
+
+      // Yield new chunks received by our bridge client on the same stream, through the same output guards a turn has
+      const continuationKey = identity?.conversationId || identity?.sessionId || streamId;
       const guardedContinuation = wrapOutputGuardrails(this.getActiveGuardrailServices(), continuationContext, bridge.consume(), {
         streamId,
         personaId: identity?.personaId,
         holdUntilFinal: this.holdsOutputUntilFinal(),
+        onVerdict: (verdict) => this.recordGuardedReply(continuationKey, verdict),
       });
       for await (const chunk of guardedContinuation) {
         yield chunk;
@@ -2309,6 +2323,12 @@ export class AgentOS implements IAgentOS {
     );
 
     try {
+      // the required guards, before the resumed turn starts: a missing guard means no model call
+      const resumeReport = this.requiredGuardrailReport();
+      if (resumeReport && !resumeReport.ok) {
+        yield this.requiredGuardrailMissingChunk(resumeReport, pendingRequest.streamId, pendingRequest.personaId);
+        return;
+      }
       streamIdToListen = await this.agentOSOrchestrator.orchestrateResumedToolResults(
         pendingRequest,
         toolResults,
@@ -2322,15 +2342,11 @@ export class AgentOS implements IAgentOS {
         personaId: pendingRequest.personaId,
         conversationId: pendingRequest.conversationId,
       };
-      const resumeReport = this.requiredGuardrailReport();
-      if (resumeReport && !resumeReport.ok) {
-        yield this.requiredGuardrailMissingChunk(resumeReport, streamIdToListen, pendingRequest.personaId);
-        return;
-      }
       const guardedResume = wrapOutputGuardrails(this.getActiveGuardrailServices(), resumeContext, bridge.consume(), {
         streamId: streamIdToListen,
         personaId: pendingRequest.personaId,
         holdUntilFinal: this.holdsOutputUntilFinal(),
+        onVerdict: (verdict) => this.recordGuardedReply(pendingRequest.conversationId, verdict),
       });
       for await (const chunk of guardedResume) {
         yield chunk;

@@ -129,6 +129,8 @@ export interface GuardrailOutputVerdict {
   reasonCode?: string;
   /** The text the caller receives: the replacement after a block with one, the reply after a pass, else null. */
   finalText: string | null;
+  /** The reply's text as the guards judged it, before any rewrite; null for a verdict on a streamed delta, which judged no whole reply. */
+  originalText: string | null;
 }
 
 /**

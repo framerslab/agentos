@@ -641,7 +641,7 @@ export class ParallelGuardrailDispatcher {
           // BLOCK terminates the stream immediately
           if (evaluation.action === GuardrailAction.BLOCK) {
             held = [];
-            await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(evaluation), reasonCode: evaluation.reasonCode, finalText: evaluation.replacementText ?? null });
+            await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(evaluation), reasonCode: evaluation.reasonCode, finalText: evaluation.replacementText ?? null, originalText: null });
             yield* blockedOutput(context, evaluation, options);
             return;
           }
@@ -701,7 +701,7 @@ export class ParallelGuardrailDispatcher {
             // BLOCK terminates the stream immediately
             if (evaluation.action === GuardrailAction.BLOCK) {
               held = [];
-              await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(evaluation), reasonCode: evaluation.reasonCode, finalText: evaluation.replacementText ?? null });
+              await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(evaluation), reasonCode: evaluation.reasonCode, finalText: evaluation.replacementText ?? null, originalText: null });
               yield* blockedOutput(context, evaluation, options);
               return;
             }
@@ -741,7 +741,7 @@ export class ParallelGuardrailDispatcher {
         const verdict = await evaluateFinal(synthetic);
         if (verdict.outcome === 'block') {
           held = [];
-          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null });
+          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null, originalText: text });
           yield* blockedOutput(context, verdict.evaluation, options);
           return;
         }
@@ -761,10 +761,11 @@ export class ParallelGuardrailDispatcher {
         chunk.isFinal &&
         (finalSanitizers.length > 0 || finalParallel.length > 0)
       ) {
+        const originalText = finalTextOf(currentChunk);
         const verdict = await evaluateFinal(currentChunk);
         if (verdict.outcome === 'block') {
           held = [];
-          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null });
+          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null, originalText });
           yield* blockedOutput(context, verdict.evaluation, options);
           return;
         }
@@ -774,6 +775,7 @@ export class ParallelGuardrailDispatcher {
           streamId: options.streamId,
           action: verdict.sanitized ? GuardrailAction.SANITIZE : verdict.worst,
           finalText: finalTextOf(verdict.chunk),
+          originalText,
         });
         currentChunk = verdict.chunk;
       }
