@@ -139,34 +139,32 @@ function toolExecutorWithoutBuiltIns(): ToolExecutor {
 
 /**
  * The agent's `onBeforeToolExecution` around the shared orchestrator, for one
- * GMI: `null` skips the tool as `generateText` skips it, returned arguments
- * replace the call's, and a hook that throws is warned about and the tool runs.
+ * GMI, as `generateText` runs it: `null` skips the tool, returned arguments
+ * replace the call's, and a hook that throws, or resolves with no result to
+ * read arguments from, is warned about and the tool runs with the arguments
+ * the model sent.
  */
 function hookTools(base: IToolOrchestrator, hook: AgentOptions['onBeforeToolExecution'], step: { index: number }): IToolOrchestrator {
   if (!hook) return base;
   const processToolCall: IToolOrchestrator['processToolCall'] = async (details) => {
     const req = details.toolCallRequest;
-    let info: Awaited<ReturnType<NonNullable<AgentOptions['onBeforeToolExecution']>>> = {
-      name: req.name,
-      args: (req.arguments ?? {}) as Record<string, unknown>,
-      id: req.id,
-      step: step.index,
-    };
+    let args = (req.arguments ?? {}) as Record<string, unknown>;
     try {
-      info = await hook(info);
+      const hookResult = await hook({ name: req.name, args, id: req.id, step: step.index });
+      if (hookResult === null) {
+        return {
+          toolCallId: req.id,
+          toolName: req.name,
+          output: { skipped: true },
+          isError: true,
+          errorDetails: { message: 'Skipped by onBeforeToolExecution hook' },
+        };
+      }
+      args = hookResult.args;
     } catch (hookError) {
       console.warn('[agentos] onBeforeToolExecution hook error:', hookError);
     }
-    if (info === null) {
-      return {
-        toolCallId: req.id,
-        toolName: req.name,
-        output: { skipped: true },
-        isError: true,
-        errorDetails: { message: 'Skipped by onBeforeToolExecution hook' },
-      };
-    }
-    return base.processToolCall({ ...details, toolCallRequest: { ...req, arguments: info.args } });
+    return base.processToolCall({ ...details, toolCallRequest: { ...req, arguments: args } });
   };
   return withMembers(base, { processToolCall });
 }
