@@ -205,6 +205,31 @@ room.registerTextStreamHandler(LIVEKIT_TRANSCRIPTION_TOPIC, async (reader) => {
 
 A line the provider could not transcribe arrives as an empty final with `agentos.transcription_failed` holding a short reason; an empty final without it takes back the text the line showed, and the ledger hides the line.
 
+## Speech-to-text in the browser
+
+`@framers/agentos/io/voice-pipeline/browser` is the entry a browser bundle imports: its modules import no Node built-in and no package. `@framers/agentos/io/voice-pipeline` exports them as well.
+
+### Input level
+
+```typescript
+import { InputSilenceWatch, inputLevelDb } from '@framers/agentos/io/voice-pipeline/browser';
+
+const watch = new InputSilenceWatch(); // heard above -60 dBFS, dead at or below -150 dBFS, after 5 seconds
+watch.reset(performance.now()); // a new input, not heard yet
+
+// for each block of samples the page captures:
+const level = inputLevelDb(block); // dBFS; -Infinity for a block of zeros
+drawMeter(level);
+showNoSoundNotice(watch.push(level, performance.now()));
+```
+
+`inputLevelDb(samples)` is a block's level in decibels of full scale, from its root mean square: `0` for samples at full scale, `-Infinity` for an empty block or a block of zeros. `InputSilenceWatch` takes each block's level with its time and answers whether no sound reaches the page from the input in use, by two rules:
+
+- nothing above `heardAboveDb` (`-60` unless set) for `afterMs` (`5000` unless set) since the input was chosen;
+- a dead signal, at or below `deadAtOrBelowDb` (`-150` unless set), for `afterMs` at any time.
+
+A quiet pause after the input was heard is not silence, since a capture with noise suppression reads low between words. `reset(atMs)` starts a new input, not heard yet; `restart(atMs)` counts afresh on the same input, after a pause in listening, and keeps whether it was heard.
+
 ## Error Recovery
 
 | Failure | Recovery |
