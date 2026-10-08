@@ -290,7 +290,7 @@ describe('the ceiling at load', () => {
     const host = await makeForgeHost({ db, config: { capabilities: { 'fs.read': { roots: [root] } } } });
     seedReader(db);
     // A later release wrote a capability this one does not know.
-    const foreign = '{"kind":"sandbox","capabilities":["fs.read","fs.write"]}';
+    const foreign = '{"kind":"sandbox","capabilities":["fs.read","process.spawn"]}';
     seedStateRow(db, { toolId: 'reader-1', state: 'active', requestJson: foreign });
 
     expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([

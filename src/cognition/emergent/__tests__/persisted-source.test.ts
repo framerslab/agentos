@@ -135,10 +135,10 @@ describe('parsePersistedSource', () => {
   it('reports a code row or a redacted record whose list it cannot read in full, and stores no request for it', () => {
     const code = 'async function execute(i) { return { t: await fs.readFile(i.p) }; }';
     const sources = [
-      JSON.stringify({ mode: 'sandbox', code, allowlist: ['fetch', 'fs.write'] }),
+      JSON.stringify({ mode: 'sandbox', code, allowlist: ['fetch', 'process.spawn'] }),
       JSON.stringify({ mode: 'sandbox', code, allowlist: ['fetch', 7] }),
       JSON.stringify({ mode: 'sandbox', code, allowlist: 'fetch' }),
-      JSON.stringify({ redacted: true, allowlist: ['fetch', 'fs.write'], codeBytes: 64 }),
+      JSON.stringify({ redacted: true, allowlist: ['fetch', 'process.spawn'], codeBytes: 64 }),
     ];
     for (const source of sources) {
       const read = parsePersistedSource('sandbox', source);
@@ -148,7 +148,7 @@ describe('parsePersistedSource', () => {
     }
     expect(parsePersistedSource('sandbox', sources[0])).toEqual({
       format: 'unreadable',
-      error: 'allowlist names capabilities outside the catalogue: fs.write',
+      error: 'allowlist names capabilities outside the catalogue: process.spawn',
     });
     // No list at all is an empty one.
     expect(parsePersistedSource('sandbox', JSON.stringify({ mode: 'sandbox', code }))).toMatchObject({
@@ -159,7 +159,7 @@ describe('parsePersistedSource', () => {
 
   it('reads an in-memory list the same way: a name outside the catalogue makes the source unreadable', () => {
     const code = 'async function execute(i) { return { t: await fs.readFile(i.p) }; }';
-    const read = sourceFromImplementation({ mode: 'sandbox', code, allowlist: ['fetch', 'fs.write'] as never });
+    const read = sourceFromImplementation({ mode: 'sandbox', code, allowlist: ['fetch', 'process.spawn'] as never });
     expect(read.format).toBe('unreadable');
     expect(requestFromSource(read)).toBeNull();
     expect(sourceFromImplementation({ mode: 'sandbox', code, allowlist: ['fs.readFile'] })).toMatchObject({
