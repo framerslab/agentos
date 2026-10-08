@@ -254,6 +254,23 @@ describe('a listed tool waits for the handler', () => {
     expect(search.execute).toHaveBeenCalledWith({ q: 'rewritten' });
   });
 
+  it('an approval that carries modifications.toolArgs is refused: the call never runs with the arguments the approver meant to replace', async () => {
+    serve([() => toolCall('search', { q: 'key: sk-live-abc123' }), () => text('done'), () => toolCall('search', { q: 'y' }), () => text('done again')]);
+    const approvalDecided = vi.fn();
+    const handler = vi.fn(async (): Promise<ApprovalDecision> => ({ approved: true, modifications: { toolArgs: { q: 'key: [REDACTED]' } } }));
+    const team = base({ approvals: { beforeTool: ['search'] }, handler }, { on: { approvalDecided } });
+    const r = (await team.generate('send the key')) as Json;
+    expect(r.text).toBe('done');
+    expect(search.execute).not.toHaveBeenCalled();
+    expect(approvalDecided).toHaveBeenCalledWith(expect.objectContaining({ approved: true }));
+    const toolMsg = chatBodies()[1].messages.find((m: Json) => m.role === 'tool');
+    expect(JSON.parse(toolMsg.content)).toMatchObject({ skipped: true, reason: expect.stringContaining('onBeforeToolExecution') });
+    // A null toolArgs names no arguments: that approval runs the call as asked.
+    handler.mockImplementationOnce(async () => ({ approved: true, modifications: { toolArgs: null } }));
+    await team.generate('find y');
+    expect(search.execute).toHaveBeenCalledWith({ q: 'y' });
+  });
+
   it('a hook that returns null skips the tool and the handler is never asked', async () => {
     serve([() => toolCall('search', { q: 'x' }), () => text('done')]);
     const handler = vi.fn(async () => ({ approved: true }));

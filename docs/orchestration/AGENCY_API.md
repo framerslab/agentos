@@ -681,8 +681,11 @@ hierarchical manager and the specialists it spawns, and nested agencies.
 - The handler is asked after the seat's or the caller's
   `onBeforeToolExecution` has run, so it approves the arguments the tool will
   run with. A hook that returns `null` skips the tool without asking; a hook
-  that throws is logged and the handler is asked. A `modifications.toolArgs` on
-  the decision is not applied: rewrite arguments in the hook.
+  that throws is logged and the handler is asked. The gate never applies a
+  decision's `modifications.toolArgs`: an approval that carries them (anything
+  but `undefined` or `null`) is refused, so the call is skipped rather than run
+  with the arguments the approver meant to replace. Rewrite arguments in the
+  hook.
 - A rejection skips the tool and the model is told; the run goes on.
 - A handler that throws, and a timeout under `onTimeout: 'error'`, skip the
   tool, go to `on.error`, and reject the call with that error once the

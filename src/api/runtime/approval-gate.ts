@@ -66,6 +66,9 @@ export function composeReceivedGate(value: unknown): ApprovalGateFn | undefined 
 
 const refusal = (reason: string): ApprovalRefusal => ({ skipped: true, reason });
 
+/** Why an approval that names other arguments is refused: the gate approves or refuses, and never applies them. */
+const TOOL_ARGS_NOT_APPLIED = 'the arguments the approval names (modifications.toolArgs) are not applied; rewrite them in onBeforeToolExecution';
+
 /** Anything but the exact approval is a refusal; a refusal keeps its own string reason. */
 function asVerdict(verdict: unknown, fallback: string): typeof APPROVAL_GRANTED | ApprovalRefusal {
   if (verdict === APPROVAL_GRANTED) return APPROVAL_GRANTED;
@@ -143,11 +146,13 @@ export interface CreateApprovalGateOptions {
  * (or every tool, for `'*'`), the handler is asked through
  * {@link resolveApprovalDecision}; an approved decision runs the post-approval
  * guardrails over the arguments unless `hitl.guardrailOverride` is `false`.
- * A `modifications.toolArgs` on the decision is not applied: argument
- * rewriting belongs to `onBeforeToolExecution`, which ran first. Once the
- * slot holds an error (the call will reject) or its owner has settled, the
- * gate skips every tool without asking the handler or firing approval
- * events; after settlement it also drops any later error.
+ * An approval that carries `modifications.toolArgs` (anything but `undefined`
+ * or `null`) is refused: the gate never applies other arguments, so the call
+ * is skipped rather than run with the ones the approver meant to replace.
+ * Argument rewriting belongs to `onBeforeToolExecution`, which ran first.
+ * Once the slot holds an error (the call will reject) or its owner has
+ * settled, the gate skips every tool without asking the handler or firing
+ * approval events; after settlement it also drops any later error.
  */
 export function createApprovalGate(o: CreateApprovalGateOptions): ApprovalGateFn {
   const listed = o.hitl.approvals?.beforeTool ?? [];
@@ -200,6 +205,10 @@ export function createApprovalGate(o: CreateApprovalGateOptions): ApprovalGateFn
     if (late) return late;
     safeCall(o.on?.approvalDecided, decision);
     if (!decision.approved) return refusal(decision.reason ?? 'rejected by the approval handler');
+    // Arguments are rewritten in onBeforeToolExecution, never by a decision:
+    // an approval that names other arguments is refused, so the call never
+    // runs with the ones the approver meant to replace.
+    if (decision.modifications?.toolArgs != null) return refusal(TOOL_ARGS_NOT_APPLIED);
     if (o.hitl.guardrailOverride !== false) {
       const { runPostApprovalGuardrails } = await import('../agency.js');
       const result = await runPostApprovalGuardrails(

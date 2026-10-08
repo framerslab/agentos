@@ -704,20 +704,25 @@ export interface ApprovalDecision {
   /** Optional human-provided rationale for the decision. */
   reason?: string;
   /**
-   * Optional in-line modifications the approver wishes to apply.
-   * The orchestrator merges these on top of the original action before
-   * proceeding (only when `approved` is `true`).
+   * Optional changes the approver asks for, read only when `approved` is
+   * `true`: `output` on a `beforeReturn` approval and `instructions` on a
+   * `beforeAgent` approval. `toolArgs` is never applied.
    */
   modifications?: {
     /**
-     * Overridden tool arguments. The `beforeTool` approval gate does not apply
-     * them: it approves or refuses the arguments `onBeforeToolExecution` left,
-     * so rewrite arguments in that hook, which runs first.
+     * Not applied. The `beforeTool` approval gate approves or refuses the
+     * arguments `onBeforeToolExecution` left, and it refuses an approval that
+     * carries `toolArgs` (anything but `undefined` or `null`), so the call is
+     * skipped rather than run with the arguments the approver meant to
+     * replace. Rewrite arguments in that hook, which runs first.
      */
     toolArgs?: unknown;
-    /** Overridden output text. */
+    /** Replaces the final text, on a `beforeReturn` approval. */
     output?: string;
-    /** Additional instructions injected into the agent's system prompt. */
+    /**
+     * Added to the input of the agent a `beforeAgent` approval lets run, under
+     * the sequential, parallel and hierarchical strategies.
+     */
     instructions?: string;
   };
 }

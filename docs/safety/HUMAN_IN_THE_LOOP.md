@@ -158,14 +158,14 @@ interface ApprovalDecision {
   approved: boolean;
   reason?: string;
   modifications?: {
-    toolArgs?: unknown;     // overridden tool arguments
-    output?: string;        // overridden final text
-    instructions?: string;  // appended to the system prompt
+    toolArgs?: unknown;     // never applied: a beforeTool approval that carries it is refused
+    output?: string;        // replaces the final text (beforeReturn)
+    instructions?: string;  // added to the agent's input (beforeAgent)
   };
 }
 ```
 
-When `approved: true` and `modifications` are set, the orchestrator merges them over the original action before proceeding. This is the path for "approve but with these changes": the LLM judge rewrites the final answer, the webhook returns a sanitized version. A `beforeTool` approval is the exception: it approves or refuses the arguments the call will run with and does not apply `modifications.toolArgs`. Rewrite tool arguments in `onBeforeToolExecution`, which runs before the handler is asked.
+When `approved: true` and `modifications` are set, the orchestrator applies them before proceeding. This is the path for "approve but with these changes": `output` on a `beforeReturn` approval replaces the final text (the LLM judge rewrites the final answer, the webhook returns a sanitized version), and `instructions` on a `beforeAgent` approval are added to the input of the agent it lets run, under the sequential, parallel and hierarchical strategies. Tool arguments are the exception. A `beforeTool` approval approves or refuses the arguments the call will run with; it never applies `modifications.toolArgs`, and it refuses an approval that carries them (anything but `undefined` or `null`), so the call is skipped rather than run with the arguments the approver meant to replace. Rewrite tool arguments in `onBeforeToolExecution`, which runs before the handler is asked.
 
 ## Timeout policy
 
@@ -446,7 +446,7 @@ For agencies that already use the higher-level `agency({ hitl: { approvals: { be
 
 **Does `beforeReturn` block streaming?** Yes — when `beforeReturn: true`, the agency's `stream.finalTextStream` does not emit until the handler resolves. `stream.textStream` (raw live chunks) continues unaffected.
 
-**Can a handler modify the action without rejecting it?** Yes. Return `{ approved: true, modifications: { toolArgs: { ... } } }` and the orchestrator merges those over the original tool arguments before invocation. Same for `output` (overrides the final text) and `instructions` (injected into the system prompt).
+**Can a handler modify the action without rejecting it?** For the final answer and for an agent run, yes. Return `{ approved: true, modifications: { output: '...' } }` from a `beforeReturn` approval to replace the final text, or `{ approved: true, modifications: { instructions: '...' } }` from a `beforeAgent` approval to add instructions to that agent's input. For a tool call, no: a `beforeTool` approval does not apply `modifications.toolArgs`, and it refuses an approval that carries them, so a handler that redacts or redirects an argument gets a skipped call, never the original one. Rewrite tool arguments in `onBeforeToolExecution`, which runs before the handler is asked.
 
 **Do agency callbacks (`approvalRequested`, `approvalDecided`) fire for workflow `human` steps?** No — those callbacks are on [`AgencyCallbacks`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) and only fire for [`HitlConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts)-driven pauses. Workflow `human` nodes emit graph events instead. Subscribe via `workflow.compile({ on: { ... } })`.
 
