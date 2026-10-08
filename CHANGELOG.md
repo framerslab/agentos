@@ -1,3 +1,9 @@
+## [0.12.16](https://github.com/framerslab/agentos/compare/v0.12.15...v0.12.16) (2026-10-08)
+
+### fix
+
+* **llm:** Gemini sends image parts; transferStyle sends a key only to a provider the call names (#156) ([e8b4d5f](https://github.com/framerslab/agentos/commit/e8b4d5f6636878aa825fe688620750f192f7264d))
+
 ## [0.12.15](https://github.com/framerslab/agentos/compare/v0.12.14...v0.12.15) (2026-10-08)
 
 ### fix
