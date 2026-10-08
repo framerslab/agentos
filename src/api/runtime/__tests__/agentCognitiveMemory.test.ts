@@ -71,11 +71,35 @@ const fixtures = vi.hoisted(() => {
     async checkHealth() { return { isHealthy: true }; }
     async shutdown() {}
   }
-  return { hashEmbed, embedCalls, OpenAIProvider, pulledOllamaModels, OllamaProvider };
+  /** Stands in for GeminiProvider: embeds 3072 wide, as gemini-embedding-2 does, and records each call like the OpenAI stub. */
+  class GeminiProvider {
+    readonly providerId = 'gemini';
+    isInitialized = false;
+    private apiKey?: string;
+    async initialize(config: { apiKey?: string }) {
+      this.apiKey = config.apiKey;
+      this.isInitialized = true;
+    }
+    async listAvailableModels() { return []; }
+    async getModelInfo() { return undefined; }
+    async generateEmbeddings(modelId: string, texts: string[]) {
+      embedCalls.push({ apiKey: this.apiKey, modelId, count: texts.length });
+      return {
+        object: 'list',
+        data: texts.map((text, index) => ({ object: 'embedding', embedding: hashEmbed(text, 3072), index })),
+        model: modelId,
+        usage: { prompt_tokens: 0, total_tokens: 0 },
+      };
+    }
+    async checkHealth() { return { isHealthy: true }; }
+    async shutdown() {}
+  }
+  return { hashEmbed, embedCalls, OpenAIProvider, pulledOllamaModels, OllamaProvider, GeminiProvider };
 });
 
 vi.mock('../../../core/llm/providers/implementations/OpenAIProvider', () => ({ OpenAIProvider: fixtures.OpenAIProvider }));
 vi.mock('../../../core/llm/providers/implementations/OllamaProvider', () => ({ OllamaProvider: fixtures.OllamaProvider }));
+vi.mock('../../../core/llm/providers/implementations/GeminiProvider', () => ({ GeminiProvider: fixtures.GeminiProvider }));
 
 import { assertEmbeddingAvailable, createAgentCognitiveMemory } from '../agentCognitiveMemory.js';
 
@@ -193,6 +217,18 @@ describe('createAgentCognitiveMemory', () => {
     );
   });
 
+  it("memory.embedding: { provider: 'gemini' } with no model embeds through gemini-embedding-2, embedText's Gemini default", async () => {
+    vi.stubEnv('GEMINI_API_KEY', 'k-agent-memory-gemini');
+    fixtures.embedCalls.length = 0;
+    const mem = await createAgentCognitiveMemory({ persona, memory: { embedding: { provider: 'gemini' } } });
+    await mem.manager.encode(FACT, neutral, 'neutral', { type: 'episodic' });
+    const hits = await mem.manager.retrieve('where is the deploy key', neutral, { topK: 3 });
+    expect(hits.retrieved.map((trace) => trace.content).join('\n')).toContain('vault');
+    expect(fixtures.embedCalls.length).toBeGreaterThan(0);
+    expect(fixtures.embedCalls.every((call) => call.modelId === 'gemini-embedding-2' && call.apiKey === 'k-agent-memory-gemini')).toBe(true);
+    await mem.close();
+  });
+
   it('an embedding model that returns another size than memory expects fails the build, naming the size it returns', async () => {
     vi.stubEnv('OPENAI_API_KEY', 'k-agent-memory-dimension');
     // The size memory.embedding.dimension declares.
@@ -220,7 +256,8 @@ describe('assertEmbeddingAvailable', () => {
     const env = {};
     expect(() => assertEmbeddingAvailable({ embedding: { provider: 'groq' } }, env)).toThrow(/Groq has no embedding models/);
     expect(() => assertEmbeddingAvailable({ embedding: { provider: 'openai', model: 'anthropic:claude-x' } }, env)).toThrow(/Anthropic/);
-    expect(() => assertEmbeddingAvailable({ embedding: { provider: 'gemini' } }, env)).toThrow(/memory\.embedding: .*no default embedding model/);
+    // Gemini without a model takes embedText's default, gemini-embedding-2.
+    expect(() => assertEmbeddingAvailable({ embedding: { provider: 'gemini' } }, env)).not.toThrow();
     expect(() => assertEmbeddingAvailable({ embedding: { provider: 'ollama', model: 'mxbai-embed-large' } }, env)).toThrow(/memory\.embedding\.dimension/);
     expect(() => assertEmbeddingAvailable({ embedding: { provider: 'ollama', model: 'mxbai-embed-large', dimension: 0 } }, env)).toThrow(/positive integer/);
     expect(() => assertEmbeddingAvailable({ embedding: { provider: 'ollama', model: 'mxbai-embed-large', dimension: 1024 } }, env)).not.toThrow();
