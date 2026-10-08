@@ -112,6 +112,7 @@ import {
   type AgentOSObservabilityConfig,
 } from '../safety/evaluation/observability/otel';
 import type { IGuardrailService, GuardrailContext } from '../safety/guardrails/IGuardrailService';
+import { SpendMeterUnavailableError, type ISpendMeter, type SpendDenyReason } from '../safety/runtime/SpendMeter';
 import type { EmergentConfig } from '../cognition/emergent/types.js';
 // SelfImprovementToolDeps reserved for emergent capability integration
 import { GuardrailAction } from '../safety/guardrails/IGuardrailService';
@@ -410,6 +411,33 @@ export interface AgentOSStandaloneMemoryConfig {
  * the `AgentOS` service. This configuration object aggregates settings for all major
  * sub-components and dependencies of the AgentOS platform.
  */
+/** The spend meter `processRequest` reserves against, and how a request maps to an account and units. */
+export interface AgentOSSpendMeterConfig {
+  meter: ISpendMeter;
+  /** The account a request is metered under. Default: the organization, else the user. */
+  accountIdOf?(input: AgentOSInput): string;
+  /** The units a request reserves. Default 1. */
+  unitsOf?(input: AgentOSInput): number;
+}
+
+/** The error code a refused reservation answers with. */
+const SPEND_DENIAL_CODE: Record<SpendDenyReason, GMIErrorCode> = {
+  allowance_exhausted: GMIErrorCode.ALLOWANCE_EXHAUSTED,
+  in_flight: GMIErrorCode.ALREADY_EXISTS,
+  already_consumed: GMIErrorCode.ALREADY_EXISTS,
+  retries_exhausted: GMIErrorCode.RATE_LIMIT_EXCEEDED,
+};
+
+/**
+ * True when an output guardrail stopped the reply on this chunk: the error chunk a BLOCK yields, or a final response
+ * whose guardrail metadata records an output BLOCK (a guard that answers a block with a fixed reply).
+ */
+function isOutputGuardrailBlock(chunk: AgentOSResponse): boolean {
+  if (chunk.type === AgentOSResponseChunkType.ERROR && chunk.gmiInstanceId === 'guardrail') return true;
+  const output = (chunk.metadata as { guardrail?: { output?: Array<{ action?: unknown }> } } | undefined)?.guardrail?.output;
+  return chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE && Array.isArray(output) && output.some((e) => String(e?.action).toLowerCase() === 'block');
+}
+
 export interface AgentOSConfig {
   /** Configuration for the {@link GMIManager}. */
   gmiManagerConfig: GMIManagerConfig;
@@ -430,6 +458,12 @@ export interface AgentOSConfig {
    * When provided, rolling task-outcome telemetry survives orchestrator restarts.
    */
   taskOutcomeTelemetryStore?: ITaskOutcomeTelemetryStore;
+  /**
+   * A persisted per-account allowance. With one set, every `processRequest` needs an `operationId` and reserves its
+   * units before any provider is called: a refusal or a meter that cannot answer ends the request with an error chunk
+   * and no model call. The turn settles the reservation when it ends; a reply an output guardrail blocks is refunded.
+   */
+  spendMeter?: AgentOSSpendMeterConfig;
   /**
    * Optional retrieval augmentor enabling vector-based RAG and/or GraphRAG.
    * When provided, it is passed into GMIs via the GMIManager.
@@ -1191,6 +1225,7 @@ export class AgentOS implements IAgentOS {
         rollingSummaryMemorySink: this.config.rollingSummaryMemorySink,
         longTermMemoryRetriever: this.config.longTermMemoryRetriever,
         taskOutcomeTelemetryStore: this.config.taskOutcomeTelemetryStore,
+        spendMeter: this.config.spendMeter?.meter,
       };
       this.agentOSOrchestrator = new AgentOSOrchestrator();
       await this.agentOSOrchestrator.initialize(
@@ -1684,6 +1719,54 @@ export class AgentOS implements IAgentOS {
       personaId: orchestratorInput.selectedPersonaId,
     });
 
+    // The spend meter: the request's units are reserved before anything reaches a provider. A refusal, a missing
+    // operation id or a meter that cannot answer ends the request here with an error chunk and no model call.
+    const metering = this.config.spendMeter;
+    let meteredOperationId: string | undefined;
+    if (metering) {
+      const refuse = (code: GMIErrorCode, message: string, details: Record<string, unknown>): AgentOSErrorChunk => ({
+        type: AgentOSResponseChunkType.ERROR,
+        streamId: baseStreamDebugId,
+        gmiInstanceId: 'spend_meter',
+        personaId: effectivePersonaId,
+        isFinal: true,
+        timestamp: new Date().toISOString(),
+        code,
+        message,
+        details,
+      });
+      const operationId = typeof orchestratorInput.operationId === 'string' ? orchestratorInput.operationId.trim() : '';
+      if (!operationId) {
+        yield refuse(GMIErrorCode.VALIDATION_ERROR, 'A metered request needs an operationId.', {});
+        return;
+      }
+      try {
+        const reservation = await metering.meter.reserve({
+          accountId: metering.accountIdOf?.(orchestratorInput) ?? orchestratorInput.organizationId ?? orchestratorInput.userId,
+          operationId,
+          units: metering.unitsOf?.(orchestratorInput) ?? 1,
+        });
+        if (reservation.status === 'denied') {
+          yield refuse(SPEND_DENIAL_CODE[reservation.reason], `The request was not run: ${reservation.reason.replace(/_/g, ' ')}.`, {
+            reason: reservation.reason,
+            period: reservation.period,
+            remaining: reservation.remaining,
+          });
+          return;
+        }
+        meteredOperationId = operationId;
+      } catch (meterError) {
+        this.logger.error('The spend meter could not reserve; the request was not run', {
+          error: meterError instanceof Error ? meterError.message : String(meterError),
+        });
+        yield refuse(GMIErrorCode.SPEND_METER_UNAVAILABLE, 'The request could not be counted, so it was not run.', {
+          unavailable: meterError instanceof SpendMeterUnavailableError,
+        });
+        return;
+      }
+    }
+    let replacedByGuardrail = false;
+
     let streamIdToListen: StreamId | undefined;
     // Temporary client bridge to adapt push-based StreamingManager to pull-based AsyncGenerator
     const bridge = new AsyncStreamClientBridge(`client-processReq-${baseStreamDebugId}`);
@@ -1738,6 +1821,7 @@ export class AgentOS implements IAgentOS {
 
       // Yield chunks from the guardrail-wrapped stream
       for await (const chunk of guardrailWrappedStream) {
+        if (meteredOperationId && isOutputGuardrailBlock(chunk)) replacedByGuardrail = true;
         if (languageNegotiation) {
           if (!chunk.metadata) chunk.metadata = {};
           chunk.metadata.language = languageNegotiation;
@@ -1778,6 +1862,19 @@ export class AgentOS implements IAgentOS {
       };
       yield errorChunk; // Yield the processed error
     } finally {
+      // The turn settles its own reservation when it ends. Two cases are this method's: a turn that never started
+      // (nothing reached a provider) is released, and a reply an output guardrail stopped is refunded.
+      if (meteredOperationId && metering) {
+        const outcome = !streamIdToListen ? 'released' : replacedByGuardrail ? 'replaced' : null;
+        if (outcome) {
+          await metering.meter.settle({ operationId: meteredOperationId, outcome }).catch((settleError: unknown) => {
+            this.logger.warn('The spend meter could not settle; its reconciler will', {
+              outcome,
+              error: settleError instanceof Error ? settleError.message : String(settleError),
+            });
+          });
+        }
+      }
       if (streamIdToListen) {
         const activeStreamIds = await this.streamingManager
           .getActiveStreamIds()

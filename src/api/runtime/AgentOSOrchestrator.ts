@@ -40,6 +40,7 @@ import { MessageRole } from '../../core/conversation/ConversationMessage';
 // IToolOrchestrator — referenced via AgentOSOrchestratorDependencies
 // uuidv4 — now used by GMIChunkTransformer
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
+import type { SpendOutcome } from '../../safety/runtime/SpendMeter';
 import { type StreamId } from '../../core/streaming/StreamingManager';
 import { normalizeUsage, snapshotPersonaDetails } from '../../orchestration/turn-planner/helpers';
 import type { WorkflowProgressUpdate } from '../../orchestration/workflows/WorkflowTypes';
@@ -687,6 +688,10 @@ export class AgentOSOrchestrator {
     let lifecycleDegraded = false;
     let keepStreamContextActive = false;
     let streamedToolCallRequest = false;
+    // the spend meter: processRequest reserved this turn under input.operationId; the turn keeps the lease alive and settles it
+    const spendMeter = this.dependencies.spendMeter;
+    const meteredOperationId = spendMeter && typeof input.operationId === 'string' && input.operationId.trim() ? input.operationId.trim() : undefined;
+    let outputReached = false;
 
     try {
       // --- Pre-LLM pipeline (phases 1-12) delegated to TurnExecutionPipeline ---
@@ -720,6 +725,11 @@ export class AgentOSOrchestrator {
 
       while (continueProcessing && currentToolCallIteration < this.config.maxToolCallIterations) {
         currentToolCallIteration++;
+        if (spendMeter && meteredOperationId) {
+          await spendMeter.heartbeat(meteredOperationId).catch((heartbeatError: unknown) => {
+            console.warn(`AgentOSOrchestrator: the spend meter's heartbeat failed for stream ${agentOSStreamId}.`, heartbeatError);
+          });
+        }
 
         if (lastGMIOutput?.toolCalls && lastGMIOutput.toolCalls.length > 0) {
           // This case should be handled by external call to orchestrateToolResult.
@@ -778,6 +788,9 @@ export class AgentOSOrchestrator {
             }
 
             const gmiChunk = value;
+            if (gmiChunk.type === GMIOutputChunkType.TEXT_DELTA && typeof gmiChunk.content === 'string' && gmiChunk.content.length > 0) {
+              outputReached = true;
+            }
             if (
               gmiChunk.type === GMIOutputChunkType.TOOL_CALL_REQUEST &&
               Array.isArray(gmiChunk.content) &&
@@ -1112,6 +1125,16 @@ export class AgentOSOrchestrator {
         'Error during turn processing.'
       );
     } finally {
+      // The turn counts when it finished, when it asked for a tool (its continuation reserves nothing) or when any of
+      // its text reached the stream before an error; a turn that failed before any output is released.
+      if (spendMeter && meteredOperationId) {
+        const outcome: SpendOutcome = keepStreamContextActive || turnMetricsStatus === 'ok' || outputReached ? 'consumed' : 'released';
+        try {
+          await spendMeter.settle({ operationId: meteredOperationId, outcome, usage: outcome === 'consumed' ? turnMetricsUsage : undefined });
+        } catch (settleError) {
+          console.warn(`AgentOSOrchestrator: the spend meter could not settle stream ${agentOSStreamId}; its reconciler will.`, settleError);
+        }
+      }
       recordAgentOSTurnMetrics({
         durationMs: Date.now() - turnStartedAt,
         status: turnMetricsStatus,

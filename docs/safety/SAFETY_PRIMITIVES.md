@@ -277,6 +277,75 @@ guard.resetSession('agent-1');
 guard.resetDailyAll();
 ```
 
+## Spend meter
+
+A persisted allowance per account and period, for a product that sells a number of turns a month. `CostGuard` caps one process's spending in memory; the spend meter keeps the count in a database several processes share, so two servers cannot both sell the last turn, and a restart loses nothing.
+
+`processRequest` reserves before anything reaches a provider and the turn settles the reservation when it ends:
+
+| What happens | The request | The reservation |
+|---|---|---|
+| No `operationId` on the input | One error chunk, `SYS_VALIDATION_ERROR` | none |
+| The period has no room | One error chunk, `BILLING_ALLOWANCE_EXHAUSTED` (402), with `reason`, `period` and `remaining` in `details` | none |
+| The same `operationId` again, still running or already counted | One error chunk, `SYS_ALREADY_EXISTS` | unchanged |
+| The meter's store does not answer within its retry policy | One error chunk, `SYS_SPEND_METER_UNAVAILABLE` (503) | none |
+| The turn finishes, or asks for a tool | The reply | `consumed`, with the turn's usage |
+| The turn fails before any text reached the stream | The error | `released` |
+| The turn fails after some text reached the stream | The error | `consumed` |
+| An output guardrail blocks the reply | The guardrail's error chunk | refunded (`released`, outcome `replaced`) |
+| The process dies mid-turn | nothing more | settled by `reconcile()` once its lease runs out |
+
+Each refusal reaches the caller before any model call. The turn settles in the orchestrator, so a caller that stops reading early still has its turn counted.
+
+### Config
+
+`SqlSpendMeter` runs on a `@framers/sql-storage-adapter` store. Give it a Postgres adapter of its own (or the product's pool), never AgentOS's provenance-wrapped storage adapter.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `db` | required | The store. It must offer transactions, persistence and concurrent access unless `requireShared: false` |
+| `allowanceFor(accountId, period)` | required | The account's allowance in units for the period, read at every reservation |
+| `periodOf(now, accountId)` | required | The period a moment falls in for the account, such as its calendar month in its own time zone |
+| `leaseMs` | `45000` | How long a reservation lives without a heartbeat; the turn heartbeats on each tool iteration |
+| `maxAttemptsPerOperation` | `3` | Reservations one operation may take, its retries after a release included |
+| `retry` | 3 tries, 50 to 400 ms, 2 s deadline | Retries of transient store errors before `SpendMeterUnavailableError` |
+| `resolveUnknown(reservation)` | none | Asked by `reconcile()` what became of an expired reservation: `consumed`, `released` or `unknown` |
+| `unknownAfterLease` | `'release'` | How an expired reservation settles when the answer is `unknown` |
+| `ensureSchema` | `true` | Create the two tables when missing; a product that runs its own migrations copies `SPEND_METER_DDL` and passes `false` |
+
+### Usage
+
+```typescript
+import { AgentOS, SqlSpendMeter } from '@framers/agentos';
+import { createPostgresAdapter } from '@framers/sql-storage-adapter';
+
+const db = createPostgresAdapter({ connectionString: process.env.DATABASE_URL!, max: 3 });
+await db.open();
+
+const meter = new SqlSpendMeter({
+  db,
+  allowanceFor: async (accountId) => (await plans.planOf(accountId)).turnsPerMonth,
+  periodOf: async (now, accountId) => monthIn(await accounts.timeZoneOf(accountId), now), // "2026-10"
+  resolveUnknown: async ({ operationId }) => ((await replies.storedFor(operationId)) ? 'consumed' : 'unknown'),
+});
+meter.startReconciler(); // every 15 seconds
+
+const agentos = await AgentOS.create({ spendMeter: { meter, accountIdOf: (input) => input.userId } });
+
+for await (const chunk of agentos.processRequest({
+  userId, sessionId, textInput,
+  operationId: messageId, // the product's durable id of this message: a retry with it is never charged twice
+})) {
+  // ...
+}
+
+// The month so far, for the product's own meter line
+const { used, remaining } = await meter.snapshot(userId);
+
+// A plan change mid-period: the units used carry over, the new allowance applies at once
+await meter.setAllowance(userId, 600);
+```
+
 ## ToolExecutionGuard
 
 Wraps tool execution with a timeout and per-tool circuit breaker. Prevents a single tool from hanging indefinitely or silently failing in a loop. Each tool gets its own circuit breaker instance and health tracking.
