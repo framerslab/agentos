@@ -182,20 +182,25 @@ interface AggregateMetrics {
 
 ## Integration with GMI
 
-Evaluate GMI responses:
+Evaluate GMI responses through the runtime. Each test case runs on a session of its own, so one case's history does not reach the next:
 
 ```typescript
-import { GMIManager } from '@framers/agentos';
+import { AgentOS, AgentOSResponseChunkType, BUILT_IN_PERSONAS } from '@framers/agentos';
 
-const gmiManager = new GMIManager();
-const gmi = await gmiManager.createGMI(myPersona);
+const agentos = await AgentOS.create({ personas: BUILT_IN_PERSONAS });
+let caseNumber = 0;
 
 // Create wrapper function for evaluation
 async function gmiAgent(input: string): Promise<string> {
   let response = '';
-  for await (const chunk of gmi.processTurnStream({ message: input })) {
-    if (chunk.content) {
-      response += chunk.content;
+  for await (const chunk of agentos.processRequest({
+    userId: 'eval-user',
+    sessionId: `eval-case-${++caseNumber}`,
+    selectedPersonaId: 'v_researcher',
+    textInput: input,
+  })) {
+    if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA) {
+      response += chunk.textDelta;
     }
   }
   return response;

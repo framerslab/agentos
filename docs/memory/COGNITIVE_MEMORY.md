@@ -66,14 +66,17 @@ Each model below has a one-to-one analogue in the source. The point of the table
 **Per-turn data flow (GMI integration):**
 
 ```
-User Message arrives
-  1. encode()          — Create MemoryTrace from input (personality-modulated strength)
-  2. retrieve()        — Query vector store + score with 6-signal composite
-  3. assembleForPrompt — Token-budgeted context assembly → inject into system prompt
-  4. [LLM generates response]
-  5. observe()         — Feed response to observer buffer (Batch 2)
-  6. checkProspective  — Check time/event/context triggers (Batch 2)
-  7. runConsolidation   — Periodic background sweep (Batch 2, timer-based)
+User message arrives
+  1. assembleForPrompt — retrieve() (vector store + 6-signal composite score), then
+                         token-budgeted context assembly → the prompt's retrieved
+                         context, in front of the user's message (first model call)
+  2. [LLM generates the response; tool rounds run]
+  3. observe() + encode() — after the turn: the user's message, then the reply
+                         (personality-modulated strength)
+
+Outside the turn:
+  - checkProspective   — time/event/context triggers; the host calls it
+  - runConsolidation   — periodic background sweep (timer-based when consolidation is enabled)
 ```
 
 ---
@@ -753,41 +756,41 @@ console.log(`Pruned ${result.prunedCount}, created ${result.schemasCreated} sche
 
 ## Integration with GMI
 
-The Cognitive Memory System integrates into the GMI turn loop at three points:
+A GMI with cognitive memory calls the manager through [`CognitiveMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts) at two points of its turn. The calls below are the bridge's, in outline; `mood` is the GMI's PAD state and `gmiMood` its mood label.
 
-### After User Message (Encode)
+### Before Prompt Construction (Retrieve + Assemble)
 
 ```typescript
-// In the GMI turn handler, after receiving user input:
-const mood = moodEngine.getCurrentState();
+// Before the turn's first model call, with the user's message as the query:
+const memoryContext = await cognitiveMemory.assembleForPrompt(
+  userMessage,
+  1600, // token budget
+  mood,
+  { scopes }, // the scopes of the turn's user, session, conversation, persona and organization
+);
+// memoryContext.contextText joins the prompt's retrieved context
+```
+
+### After the Turn (Observe + Encode)
+
+```typescript
+// After the turn, for the user's message:
+await cognitiveMemory.observe('user', userMessage, mood);
 await cognitiveMemory.encode(userMessage, mood, gmiMood, {
   type: 'episodic',
   scope: 'user',
   scopeId: userId,
   sourceType: 'user_statement',
 });
-```
 
-### Before Prompt Construction (Retrieve + Assemble)
-
-```typescript
-// Before building the system prompt:
-const memoryContext = await cognitiveMemory.assembleForPrompt(
-  userMessage,
-  tokenBudget,
-  mood,
-);
-// Inject memoryContext.contextText into the prompt via PromptBuilder
-```
-
-### After Response (Observe)
-
-```typescript
-// After the LLM generates a response:
+// Then for the reply:
 await cognitiveMemory.observe('assistant', assistantResponse, mood);
-
-// Also feed user messages to observer for conversation monitoring:
-await cognitiveMemory.observe('user', userMessage, mood);
+await cognitiveMemory.encode(assistantResponse, mood, gmiMood, {
+  type: 'semantic',
+  scope: 'user',
+  scopeId: sessionId,
+  sourceType: 'agent_inference',
+});
 ```
 
 ---

@@ -116,6 +116,18 @@ describe('export redacts by default', () => {
     expect(JSON.stringify((obj.config as Record<string, any>).agents)).not.toContain(SEAT_KEY);
   });
 
+  it('a credentials object inside an item of a tools list is redacted in every form', () => {
+    const post = {
+      name: 'post', description: 'Post a message.', inputSchema: { type: 'object', properties: {} },
+      credentials: { slack: CRED }, execute: async () => ({ success: true, output: 'ok' }),
+    };
+    const a = agent({ provider: 'openai', model: 'gpt-4.1', instructions: 'Post.', tools: [post] } as never);
+    for (const doc of [JSON.stringify(a.export()), a.exportJSON(), exportAgentConfigYAML(a)]) expect(doc).not.toContain(CRED);
+    const tool = ((a.export().config as Record<string, any>).tools as Record<string, any>[])[0];
+    expect(tool.credentials).toEqual({ slack: REDACTED });
+    expect(tool.name).toBe('post');
+  });
+
   it('redactSecrets: false shows every sentinel and keeps the router by reference in the object form', () => {
     const { team, router } = buildAgency();
     const obj = exportAgentConfig(team, undefined, { redactSecrets: false });

@@ -72,7 +72,12 @@ export interface CapabilityEffect {
   toolId: string;
   callId: string;
   capability: string;
-  /** The URL or path as the record keeps it: a SHA-256 hex digest, or the target itself when `audit.content` is `'full'`. */
+  /**
+   * The URL sent (the first request's, as parsed) or the path read (resolved),
+   * or for a call refused before its checks passed the value the tool passed
+   * (`crypto` names none), as the record keeps it: a SHA-256 hex digest, or
+   * the target itself when `audit.content` is `'full'`.
+   */
   target: string;
   decision: 'allowed' | 'refused';
   /** `'ceiling'` for an allowed call; the refusal's code otherwise. */
@@ -130,6 +135,13 @@ export interface ToolExecutionContext {
    * workflow) passes them on, so each step is checked as the caller.
    */
   personaCapabilities?: string[];
+  /**
+   * The call's expiry signal, when the call carries one (a workflow step's
+   * timer: `ToolExecutionRequestDetails.signal`). A tool that runs other
+   * tools on the caller's behalf (a composed tool) passes it on, so a step
+   * whose call expired starts nothing, however late its approval arrives.
+   */
+  signal?: AbortSignal;
 }
 
 /**

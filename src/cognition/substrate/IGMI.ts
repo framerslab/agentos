@@ -208,7 +208,8 @@ export interface GMIBaseConfig {
   /**
    * One model layer for the turn. When set, the GMI resolves the hop through it
    * before it builds the prompt, streams through it, and moves to the next hop
-   * when an attempt fails before any output. `llmProviderManager` is then a
+   * when an attempt fails before any output with a retryable error.
+   * `llmProviderManager` is then a
    * `GatewayProviderManager` (see `src/api/runtime/gatewayProviderManager.ts`).
    */
   completionGateway?: import('../../api/runtime/completionGateway.js').CompletionGateway;
@@ -312,9 +313,15 @@ export enum GMIOutputChunkType {
    * The chunk content is `{ ragSources: RagRetrievedChunk[] }`.
    */
   RAG_SOURCES_AVAILABLE = 'rag_sources_available',
-  /** One per model step: the step's text, finish reason, provider, model, hop and usage. Content: StepFinishedChunkPayload. */
+  /**
+   * One per model step that completes: the step's text, finish reason, provider, model, hop and usage.
+   * A step that fails emits none; the turn's ERROR chunk follows. Content: StepFinishedChunkPayload.
+   */
   STEP_FINISHED = 'step_finished',
-  /** One per tool result recorded in the history, failures included. Content: ToolResultChunkPayload. */
+  /**
+   * One per result the GMI records for a call of its own tool round, failures included. Results a host
+   * passes to `handleToolResults()` produce none. Content: ToolResultChunkPayload.
+   */
   TOOL_RESULT = 'tool_result',
 }
 
@@ -353,7 +360,10 @@ export interface StepFinishedChunkPayload {
   /** Provider message id of the step's final chunk. */
   providerMessageId?: string;
   cacheDiagnostics?: unknown;
-  /** The step's schema answer when the turn asked for structured output. */
+  /**
+   * The step's schema answer when the turn asked for structured output and a completion-gateway hop
+   * returned it as a forced tool call (Anthropic); other hops return the JSON as the step's text.
+   */
   structuredOutput?: unknown;
   /** The step's extended-thinking blocks (Anthropic), so a session store can replay the step. */
   thinkingBlocks?: ThinkingBlock[];

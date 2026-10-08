@@ -28,6 +28,7 @@ import type {
   ToolStateRecord,
   ToolTier,
   CallHandle,
+  ComposableToolSpec,
   SandboxExecutionResult,
   SandboxedToolSpec,
 } from './types.js';
@@ -393,6 +394,22 @@ function sameGrant(a: StoredRequest | null | undefined, b: StoredRequest | null 
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+/** A restriction only the host clears: its own suspension, or a demotion. */
+function isHostRestriction(record: ToolStateRecord): boolean {
+  return record.state === 'demoted' || (record.state === 'suspended' && record.setBy === 'host');
+}
+
+/**
+ * The ids of the emergent compositions running further up a call, outermost
+ * first. Each composition's executable adds its own before its steps run;
+ * the list travels in `sessionData.emergentChain`, through every step's
+ * call, as the depth does.
+ */
+function compositionChain(context: ToolExecutionContext): string[] {
+  const chain = context.sessionData?.emergentChain;
+  return Array.isArray(chain) ? chain.filter((id): id is string => typeof id === 'string') : [];
+}
+
 export class EmergentCapabilityEngine {
   /** Injected dependencies. */
   private readonly config: EmergentConfig;
@@ -513,24 +530,11 @@ export class EmergentCapabilityEngine {
       // ---- COMPOSE MODE ----
       source = JSON.stringify(request.implementation);
 
-      // Every step must be chainable before any test case runs.
-      for (const step of request.implementation.steps) {
-        const verdict = this.composableBuilder.check(step.tool);
-        if (!verdict.ok) {
-          return {
-            success: false,
-            error: `${verdict.code}: step "${step.name}" (tool "${step.tool}"): ${verdict.message}`,
-          };
-        }
-      }
-
-      // A composition must not reach itself, through any nesting.
-      const cycle = this.compositionCycle(request.name, request.implementation.steps);
-      if (cycle) {
-        return {
-          success: false,
-          error: `step_cycle: "${request.name}" reaches itself through ${cycle.join(' -> ')}`,
-        };
+      // Every step must be chainable before any test case runs, and the
+      // composition must not reach itself, through any nesting.
+      const refused = this.composeRefusal(request.name, request.implementation);
+      if (refused) {
+        return { success: false, error: refused };
       }
 
       // The test steps run as the forging caller, so they meet the checks the
@@ -561,11 +565,18 @@ export class EmergentCapabilityEngine {
           });
           continue;
         }
-        const details = result.details as { code?: string } | undefined;
+        const details = result.details as { code?: string; missingCapabilities?: unknown } | undefined;
         if (details?.code === 'dry_run_needs_output') {
           return { success: false, error: result.error };
         }
-        if (details?.code === 'permission_denied' && !context.caller) {
+        // Refused a capability by the permission manager (permission_denied),
+        // or by the executor's own check, which names what is missing and
+        // carries no code (a manager that does not check capabilities lets
+        // the call through to it).
+        const missing = details?.missingCapabilities;
+        const capabilityRefused =
+          details?.code === 'permission_denied' || (Array.isArray(missing) && missing.length > 0);
+        if (capabilityRefused && !context.caller) {
           // A step needs a capability the stand-in context does not carry:
           // the test says nothing about the tool, so the forge asks for the
           // caller instead of recording a failed test.
@@ -669,6 +680,17 @@ export class EmergentCapabilityEngine {
 
     // Step 5: Register if approved.
     if (verdict.approved) {
+      if (request.implementation.mode === 'compose') {
+        // The tests and the judge took time, and what the steps name may have
+        // changed meanwhile (another forge registered a composition that
+        // closes a cycle with this one, say): checked again before anything
+        // is registered.
+        const refused = this.composeRefusal(request.name, request.implementation);
+        if (refused) {
+          return { success: false, verdict, error: refused };
+        }
+      }
+
       const now = new Date().toISOString();
 
       const usageStats: ToolUsageStats = {
@@ -696,7 +718,6 @@ export class EmergentCapabilityEngine {
       };
 
       this.registry.register(tool, 'session');
-      const registered = this.registry.generation(toolId);
       let written: ToolStateRecord | undefined;
       try {
         written = await this.registry.setState(toolId, 'active', null, {
@@ -711,8 +732,11 @@ export class EmergentCapabilityEngine {
           error instanceof Error ? error.message : error,
         );
       }
-      if (this.registry.generation(toolId) !== registered) {
-        // Removed while it was being forged: nothing is registered.
+      if (!this.registry.get(toolId)) {
+        // Removed while it was being forged: nothing is registered. (Another
+        // change while the state was written, such as a load of the session
+        // that adopted the tool from its row, leaves it registered: the forge
+        // goes on with the object the registry holds.)
         return { success: false, error: 'the tool was removed while it was being forged' };
       }
       if (written && written.state === 'demoted' && written.reason === 'removed') {
@@ -771,6 +795,27 @@ export class EmergentCapabilityEngine {
         }
       }
 
+      if (request.implementation.mode === 'compose') {
+        // A composition registered between the check above and this one's own
+        // registration can close a cycle with it, and neither check saw the
+        // other: checked once more now that this one resolves by its name, and
+        // taken out again when it reaches itself.
+        const cycle = this.compositionCycle(request.name, request.implementation.steps);
+        if (cycle) {
+          const held = this.registry.get(toolId);
+          if (held) {
+            await this.dropExecutable(held);
+          }
+          this.registry.remove(toolId);
+          this.removeIndexedToolEverywhere(toolId);
+          return {
+            success: false,
+            verdict,
+            error: `step_cycle: "${request.name}" reaches itself through ${cycle.join(' -> ')}`,
+          };
+        }
+      }
+
       return {
         success: true,
         toolId,
@@ -815,6 +860,12 @@ export class EmergentCapabilityEngine {
       return null;
     }
 
+    // A suspended or demoted tool is neither promoted nor suspended again
+    // here: the restriction in force stays, whoever set it.
+    if (!this.registry.isActive(toolId)) {
+      return null;
+    }
+
     // A tool that no longer fits what is in force is suspended, not promoted.
     const refusal = this.refusalFor(tool.implementation, tool.name);
     if (refusal) {
@@ -843,6 +894,15 @@ export class EmergentCapabilityEngine {
     // Submit to the promotion panel.
     const promotionVerdict = await this.judge.reviewPromotion(tool);
     tool.judgeVerdicts.push(promotionVerdict);
+
+    // Suspended, demoted or removed while the panel reviewed it: not promoted.
+    if (this.registry.get(toolId) !== tool || !this.registry.isActive(toolId)) {
+      return {
+        success: false,
+        verdict: promotionVerdict,
+        error: 'The tool was suspended, demoted or removed during its review and was not promoted.',
+      };
+    }
 
     if (promotionVerdict.approved) {
       await this.registry.promote(toolId, 'agent');
@@ -912,14 +972,20 @@ export class EmergentCapabilityEngine {
    * Clean up all session tools for a given session.
    *
    * Delegates to the registry's `EmergentToolRegistry.cleanupSession()`
-   * method and clears the local session index.
+   * method and clears the local session index. A tool forged in the session
+   * and promoted out of it since (now at the agent tier) is not the
+   * session's any more: it stays held, registered and indexed under its
+   * agent.
    *
    * @param sessionId - The session identifier to clean up.
+   * @returns the tools the cleanup removed.
    */
   cleanupSession(sessionId: string): EmergentTool[] {
-    const removedTools = this.getSessionTools(sessionId);
+    const indexed = this.getSessionTools(sessionId);
     this.registry.cleanupSession(sessionId);
     this.index.bySession.delete(sessionId);
+    // Only the tools the registry removed go; a promoted tool is still held.
+    const removedTools = indexed.filter((tool) => !this.registry.get(tool.id));
     for (const tool of removedTools) {
       // The agent index too, so a lookup by agent never names a tool that is gone.
       this.removeIndexedToolEverywhere(tool.id);
@@ -1220,6 +1286,12 @@ export class EmergentCapabilityEngine {
       }
       const tool = this.registry.get(toolId);
       if (!tool) {
+        // Neither a row nor a tool: a state held for it here (a stored
+        // suspension another process has since removed) is let go, so no
+        // later registration re-checks it.
+        if (this.registry.getState(toolId)) {
+          this.registry.forget(toolId);
+        }
         return undefined;
       }
       const held = this.registry.getState(toolId);
@@ -1440,14 +1512,14 @@ export class EmergentCapabilityEngine {
       // text was read only to derive a request where none was stored, and a
       // stored request narrower than a stored list is the grant. Never wider
       // than a stored list: a request widened by hand grants nothing the list
-      // did not.
-      const listed = implementation;
-      const granted = toSandboxApis(request.capabilities);
-      implementation = {
-        ...implementation,
-        allowlist:
-          source.format === 'code-with-list' ? granted.filter((api) => listed.allowlist.includes(api)) : granted,
-      };
+      // did not. The two are compared in catalogue names, since a list a host
+      // built, or one held in memory, may name `fs.read` or `fs.readFile`.
+      const listed = normalizeAllowlist(implementation.allowlist).capabilities;
+      const names =
+        source.format === 'code-with-list'
+          ? request.capabilities.filter((name) => listed.includes(name))
+          : request.capabilities;
+      implementation = { ...implementation, allowlist: toSandboxApis(names) };
     }
     // 3a. An agent-tier row from an earlier release is owned by the forging
     //     GMI instance's id, which no persona can match, so no caller could
@@ -1486,8 +1558,10 @@ export class EmergentCapabilityEngine {
           return this.readmit(candidate, options);
         }
       } else {
-        // The row already says so; this process holds it too when the tool is live here.
-        this.holdStored(toolId, stored);
+        // The row already says so; this process holds it too. A row that
+        // holds no request it can read is held with the one derived from its
+        // source, so a registration of a step tool it names finds it.
+        this.holdStored(toolId, stored.request ? stored : { ...stored, request });
       }
       await this.unregisterIfLive(toolId);
       return { toolId, name, state: 'suspended', reason };
@@ -1528,9 +1602,10 @@ export class EmergentCapabilityEngine {
     }
     // A suspension or demotion that arrived while the row was being written,
     // in this process or in another, is the newer word: the tool is not
-    // registered. A restriction this process holds from an earlier read is
-    // older than the row and gives way to it.
-    const held = written && written.state !== 'active' ? written : this.newerRestrictionHeld(toolId, stored);
+    // registered. A restriction this process holds from an earlier read, or
+    // whose write has settled (or failed) before this read, is older than the
+    // row and gives way to it.
+    const held = written && written.state !== 'active' ? written : this.newerRestrictionHeld(toolId, readAt);
     if (held && held.state !== 'active') {
       this.holdStored(toolId, held);
       await this.unregisterIfLive(toolId);
@@ -1675,6 +1750,22 @@ export class EmergentCapabilityEngine {
   }
 
   /**
+   * The forge's refusal of a composition under what is registered now: a step
+   * that may not be chained, or a chain that reaches the composition itself,
+   * with the step or the path named; `null` when it may be forged.
+   */
+  private composeRefusal(name: string, implementation: ComposableToolSpec): string | null {
+    for (const step of implementation.steps) {
+      const verdict = this.composableBuilder.check(step.tool);
+      if (!verdict.ok) {
+        return `${verdict.code}: step "${step.name}" (tool "${step.tool}"): ${verdict.message}`;
+      }
+    }
+    const cycle = this.compositionCycle(name, implementation.steps);
+    return cycle ? `step_cycle: "${name}" reaches itself through ${cycle.join(' -> ')}` : null;
+  }
+
+  /**
    * The library's reason for not running an implementation under the
    * configuration in force, or `null`. Later steps add their checks here, so
    * forging, loading and promotion all ask the same question.
@@ -1749,18 +1840,45 @@ export class EmergentCapabilityEngine {
   /**
    * A suspension the library sets from a run or a promotion check: written as
    * the library's (so a later load, or a registration of the missing step
-   * tool, re-checks it), held here, and the executable taken out.
+   * tool, re-checks it), held here, and the executable taken out. It gives
+   * way to the host's word: when this process holds a host's suspension or a
+   * demotion nothing is written, and a row another process restricted that
+   * way is left as it is and held here (`yieldToHost`), so the library never
+   * turns a host's restriction into one of its own that a re-check lifts.
+   *
+   * It takes its turn with the tool's admissions (`serializeAdmission`): a
+   * re-check that a registration starts while the suspension is written runs
+   * after it, reads the row it leaves and lifts it when the step fits again,
+   * instead of reading the row from before it and holding the suspension
+   * whose write was still under way.
+   *
+   * @returns whether the library's suspension is what holds now.
    */
-  private async suspendAsLibrary(toolId: string, reason: string): Promise<void> {
-    try {
-      await this.registry.setState(toolId, 'suspended', reason, { setBy: 'library' });
-    } catch (error: unknown) {
-      console.warn(
-        `[agentos:emergent] could not store the suspension of "${toolId}" (${reason}):`,
-        error instanceof Error ? error.message : error,
-      );
+  private suspendAsLibrary(toolId: string, reason: string): Promise<boolean> {
+    return this.serializeAdmission(toolId, () => this.suspendAsLibraryNow(toolId, reason));
+  }
+
+  private async suspendAsLibraryNow(toolId: string, reason: string): Promise<boolean> {
+    const held = this.registry.getState(toolId);
+    let suspended = false;
+    if (!held || !isHostRestriction(held)) {
+      try {
+        const inForce = await this.registry.setState(toolId, 'suspended', reason, {
+          setBy: 'library',
+          yieldToHost: true,
+        });
+        suspended = inForce.state === 'suspended' && inForce.setBy === 'library';
+      } catch (error: unknown) {
+        // Held here even though the row did not take it.
+        suspended = true;
+        console.warn(
+          `[agentos:emergent] could not store the suspension of "${toolId}" (${reason}):`,
+          error instanceof Error ? error.message : error,
+        );
+      }
     }
     await this.unregisterIfLive(toolId);
+    return suspended;
   }
 
   private async unregisterIfLive(toolId: string): Promise<void> {
@@ -1771,17 +1889,21 @@ export class EmergentCapabilityEngine {
   }
 
   /**
-   * A restriction this process holds that is newer than the row it just read:
-   * its write is in flight, so the row does not yet show it.
+   * A restriction this process holds that the row read from `readAt` on may
+   * not show: one requested here whose write is still queued or running, or
+   * settled after the read began, or a host's whose write failed (it stays
+   * in force here until the host reactivates the tool). Decided by the
+   * registry's record of its own writes, not by timestamps, so a contended
+   * hold, a library suspension whose write failed and a record taken from an
+   * earlier row read give way to the row, and so does a restriction another
+   * process lifted after it, whatever the processes' clocks say.
    */
-  private newerRestrictionHeld(toolId: string, stored: ToolStateRecord | undefined): ToolStateRecord | undefined {
+  private newerRestrictionHeld(toolId: string, readAt: number): ToolStateRecord | undefined {
     const memory = this.registry.getState(toolId);
     if (!memory || memory.state === 'active') {
       return undefined;
     }
-    // At the row's own time the restriction is the later of the two: two
-    // writes in one millisecond are told apart by nothing else.
-    return !stored || memory.at >= stored.at ? memory : undefined;
+    return this.registry.restrictionUnread(toolId, readAt) ? memory : undefined;
   }
 
   /** A stored restriction, held in this process too when the tool is live here. */
@@ -1789,6 +1911,11 @@ export class EmergentCapabilityEngine {
     const live = this.registry.get(toolId);
     if (live) {
       this.registry.adopt(live, record);
+    } else if (record.state !== 'active') {
+      // Held without a tool: a stored step suspension must reach
+      // onHostToolRegistered, which walks the held states, on every start
+      // and in every process that reads it, not only where it was written.
+      this.registry.holdState(record);
     }
   }
 
@@ -1921,6 +2048,8 @@ export class EmergentCapabilityEngine {
    * `agent`-tier tool, a call from any agent but its own, before anything
    * runs or a use is recorded; it then performs runtime output validation,
    * usage tracking, and promotion checks after each successful execution.
+   * A call whose tool was removed, or replaced under its id, while it ran
+   * returns its result, effects included, and records no use.
    */
   createExecutableTool(tool: EmergentTool): EmergentExecutableTool {
     const baseTool =
@@ -1983,8 +2112,28 @@ export class EmergentCapabilityEngine {
             error: `Emergent tool "${tool.name}" belongs to agent ${owner}; it is not callable as ${caller}.`,
           };
         }
+        // A composition already running further up this call reaches itself:
+        // the call is refused before any step runs, and this composition is
+        // suspended for the cycle. A long chain without a cycle is refused at
+        // the depth limit (nesting_too_deep) and suspends nothing.
+        let runContext = context;
+        if (tool.implementation.mode === 'compose') {
+          const chain = compositionChain(context);
+          if (chain.includes(tool.id)) {
+            await this.suspendAsLibrary(tool.id, 'step_cycle');
+            return {
+              success: false,
+              error: `step_cycle: "${tool.name}" reaches itself at run time; it was suspended`,
+              details: { code: 'step_cycle' },
+            };
+          }
+          runContext = {
+            ...context,
+            sessionData: { ...(context.sessionData ?? {}), emergentChain: [...chain, tool.id] },
+          };
+        }
         const startTime = performance.now();
-        const result = await baseTool.execute(args, context);
+        const result = await baseTool.execute(args, runContext);
         const executionTimeMs = Math.round(performance.now() - startTime);
 
         // A step that can no longer be chained (its tool was removed or
@@ -1993,17 +2142,20 @@ export class EmergentCapabilityEngine {
         const refused = (result.details as { code?: string } | undefined)?.code;
         const suspendFor = !result.success && refused ? RUN_REFUSAL_REASONS[refused] : undefined;
         if (suspendFor) {
-          await this.suspendAsLibrary(tool.id, suspendFor);
-          if (refused === 'step_replaced') {
+          const suspended = await this.suspendAsLibrary(tool.id, suspendFor);
+          const implementation = this.registry.get(tool.id)?.implementation ?? tool.implementation;
+          if (suspended && (refused === 'step_replaced' || this.refusalFor(implementation, tool.name) === null)) {
             // The step's tool changed hands between its check and its run (the
-            // gate's refusal; nothing ran). The registration that swapped it ran
-            // before this suspension existed, so it did not re-check this
-            // composition: check it now against the tool that holds the name.
+            // gate's refusal; nothing ran), or a fitting tool was registered
+            // before this suspension was held (it may have waited for an
+            // admission of this tool). The registration ran before the
+            // suspension existed, so it did not re-check this composition:
+            // check it now against the tools registered now.
             try {
               await this.recheck(tool.id, false);
             } catch (recheckError: unknown) {
               console.warn(
-                `[agentos:emergent] could not re-check "${tool.name}" (${tool.id}) after its step was replaced:`,
+                `[agentos:emergent] could not re-check "${tool.name}" (${tool.id}) after its step was refused:`,
                 recheckError instanceof Error ? recheckError.message : recheckError,
               );
             }
@@ -2033,13 +2185,20 @@ export class EmergentCapabilityEngine {
           }
         }
 
-        this.registry.recordUse(tool.id, args, result.output, success, executionTimeMs);
+        // A use is recorded, and promotion checked, only while the registry
+        // still holds the tool this call checked: a tool removed while it ran
+        // (removeTool, cleanupSession) records nothing, and one replaced
+        // under its id is not credited with a run of the code it replaced.
+        // The call's result, effects included, is returned either way.
+        if (this.registry.get(tool.id) === current) {
+          this.registry.recordUse(tool.id, args, result.output, success, executionTimeMs);
 
-        // Only check promotion when execution succeeded AND output passed
-        // validation. Promoting after validation failure would reward tools
-        // that produce structurally invalid output.
-        if (success && validationPassed) {
-          await this.checkPromotion(tool.id);
+          // Only check promotion when execution succeeded AND output passed
+          // validation. Promoting after validation failure would reward tools
+          // that produce structurally invalid output.
+          if (success && validationPassed) {
+            await this.checkPromotion(tool.id);
+          }
         }
 
         return success

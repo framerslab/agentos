@@ -18,7 +18,11 @@ export interface EffectIntent {
   callId: string;
   agentId: string;
   capability: string;
-  /** The URL or path the call named; stored as a SHA-256 digest unless `content` is `'full'`. */
+  /**
+   * The URL the broker sent (the first request's, as parsed) or the path it
+   * read (resolved); for a call refused before its checks passed, the value
+   * the tool passed. Stored as a SHA-256 digest unless `content` is `'full'`.
+   */
   target: string;
   decision: 'allowed' | 'refused';
   /** What decided it: `'ceiling'` for an allowed call, the refusal's code otherwise. */
@@ -120,9 +124,11 @@ export class EffectsStore {
 
   /**
    * The schema made ready, then, once per store, the rows older than
-   * `retainDays` deleted from this table (never tool rows or state). A failed
-   * preparation is tried again by the next write; a failed prune is logged
-   * and not tried again.
+   * `retainDays` deleted from this table (never tool rows or state), through
+   * the `intent_at` index the schema creates, so the delete the first record
+   * of each engine waits on costs what it deletes, not the table's size. A
+   * failed preparation is tried again by the next write; a failed prune is
+   * logged and not tried again.
    */
   private prepare(): Promise<void> {
     if (!this.ready) {

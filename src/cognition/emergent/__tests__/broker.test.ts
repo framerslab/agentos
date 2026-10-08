@@ -279,6 +279,61 @@ describe('CapabilityBroker records and ends runs', () => {
     ]);
   });
 
+  it('records the target it checked and acted on: the URL it sent, read once from the argument, and the path it read, resolved', async () => {
+    const { port, seen } = await serve((_req, res) => res.end('ok'));
+    const root = tempDir();
+    fs.writeFileSync(path.join(root, 'a.txt'), 'A');
+    const db = createSqliteAdapter();
+    const store = new EmergentToolRegistry({}, db).effectsStore({ content: 'full' });
+    const broker = new CapabilityBroker(
+      resolveCeiling(
+        { fetch: { domains: ['localhost'] }, 'fs.read': { roots: [root] } },
+        { content: 'full' },
+        { hasStorage: true },
+      ),
+      store,
+    );
+    const controller = new AbortController();
+    const fns = broker.functionsFor(['fetch', 'fs.read'], {
+      id: 'run-t',
+      toolId: 'tool-1',
+      agentId: 'agent-1',
+      signal: controller.signal,
+    });
+    const fetchFn = fns.fetch as (input: unknown) => Promise<Response>;
+    const readFile = (fns.fs as { readFile(p: string): Promise<string> }).readFile;
+    const report = `http://localhost:${port}/report`;
+
+    // A host written in mixed case: the record names the URL as sent.
+    expect(await (await fetchFn(`http://LocalHost:${port}/report`)).text()).toBe('ok');
+    // An argument whose url answers differently on later reads: it is read
+    // once, and that URL is the one checked, sent and recorded.
+    let reads = 0;
+    const shifting = {
+      get url(): string {
+        reads += 1;
+        return reads <= 2 ? report : `http://localhost:${port}/x?d=SECRET`;
+      },
+    };
+    expect(await (await fetchFn(shifting)).text()).toBe('ok');
+    expect(reads).toBe(1);
+    // A path with a dot-dot segment: the record names the path read.
+    expect(await readFile(`${root}/sub/../a.txt`)).toBe('A');
+
+    controller.abort();
+    expect(seen.map((s) => s.url)).toEqual(['/report', '/report']);
+    expect(await broker.endCall('run-t')).toEqual([
+      expect.objectContaining({ capability: 'fetch', target: report, outcome: 'ok' }),
+      expect.objectContaining({ capability: 'fetch', target: report, outcome: 'ok' }),
+      expect.objectContaining({ capability: 'fs.read', target: path.join(root, 'a.txt'), outcome: 'ok' }),
+    ]);
+    expect(db.raw.prepare('SELECT target FROM agentos_emergent_effects ORDER BY rowid').all()).toEqual([
+      { target: report },
+      { target: report },
+      { target: path.join(root, 'a.txt') },
+    ]);
+  });
+
   it('records a refusal with what decided it, and refuses a call whose intent cannot be written', async () => {
     const { port, seen } = await serve((_req, res) => res.end('ok'));
     const db = createSqliteAdapter();

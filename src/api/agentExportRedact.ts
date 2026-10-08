@@ -173,6 +173,9 @@ export function copyExportTree(value: unknown, opts: CopyExportTreeOptions): unk
  * @param parent The name of the object or array that holds this value.
  * @param container The name of the nearest enclosing secret container, whose
  *   setting values stay kept inside it (`authorization: { type: 'bearer' }`).
+ * @param keyIsName `name` is a key of a seat or tool map, which the user
+ *   chose, not a property name.
+ * @param inArray The value is an item of an array named `name`.
  */
 function copyNode(
   value: unknown,
@@ -181,6 +184,8 @@ function copyNode(
   container: string | undefined,
   opts: CopyExportTreeOptions,
   seen: WeakMap<object, unknown>,
+  keyIsName = false,
+  inArray = false,
 ): unknown {
   if (typeof value === 'string') {
     if (!opts.redactSecrets) return value;
@@ -201,9 +206,9 @@ function copyNode(
   if (Array.isArray(value)) {
     const out: unknown[] = [];
     seen.set(value, out);
-    const inner = isSecretContainerName(name) && !USER_NAMED_MAPS.has(parent) ? name : container;
+    const inner = isSecretContainerName(name) && !keyIsName ? name : container;
     for (const item of value) {
-      const copied = copyNode(item, name, parent, inner, opts, seen);
+      const copied = copyNode(item, name, parent, inner, opts, seen, false, true);
       // A function left out of JSON and YAML leaves `null` in its place, as
       // JSON.stringify writes it, so every later item keeps its index and
       // import can put the function back at the path where it stood.
@@ -218,10 +223,13 @@ function copyNode(
   const out: Record<string, unknown> = {};
   seen.set(value, out);
   // A seat or tool named `authorization` or `credentials` is a name, not a
-  // secret container: the container rule skips the keys of those maps.
-  const inner = isSecretContainerName(name) && !USER_NAMED_MAPS.has(parent) ? name : container;
+  // secret container: the container rule skips the keys of those maps. The
+  // items of an array (a tools list) are definitions, whose keys are
+  // property names however the array is named.
+  const inner = isSecretContainerName(name) && !keyIsName ? name : container;
+  const childrenAreNames = USER_NAMED_MAPS.has(name) && !inArray;
   for (const [key, item] of Object.entries(value)) {
-    const copied = copyNode(item, key, name, inner, opts, seen);
+    const copied = copyNode(item, key, name, inner, opts, seen, childrenAreNames);
     if (copied === undefined && typeof item === 'function') continue;
     out[key] = copied;
   }

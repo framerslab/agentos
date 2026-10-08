@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { EmergentTool } from '../types.js';
+import type { EmergentToolRegistry } from '../EmergentToolRegistry.js';
 import { createSqliteAdapter, readStateRow, readToolRow } from './helpers/sqlite-adapter.js';
 import { callTool, echoTool, makeForgeHost } from './helpers/forge-host.js';
 import {
@@ -1403,5 +1404,144 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active', flag_synced: 1 });
     expect(readToolRow(db, 'raw-1')?.is_active).toBe(1);
     expect((await callTool(hostA.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
+  });
+
+  it("a promotion while a load has the tool's session row in hand is kept: the load reads the row again, and the owner check holds", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    const forged = await callTool(
+      host.orchestrator,
+      'forge_tool',
+      {
+        name: 'double_it',
+        description: 'Doubles a number.',
+        inputSchema: NUMBER_IN,
+        outputSchema: DOUBLED_OUT,
+        implementation: { mode: 'sandbox', code: RAW_DOUBLE, allowlist: [] },
+        testCases: [{ input: { n: 2 }, expectedOutput: { doubled: 4 } }],
+      },
+      { sessionId: 'sess-p', personaId: 'agent-p' },
+    );
+    expect(forged.isError).toBeFalsy();
+    const toolId = String(forged.output.toolId);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const registry = (host.engine as unknown as { registry: EmergentToolRegistry }).registry;
+
+    // The session load has read the row (session tier, active with its
+    // request) and is held at its second read; the tool is promoted meanwhile.
+    const gate = db.gateNext('FROM agentos_emergent_tool_state s\n        WHERE s.tool_id = ?');
+    const loading = host.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess-p' });
+    await gate.entered;
+    await registry.promote(toolId, 'agent');
+    gate.release();
+    const summary = await loading;
+
+    expect(summary.outcomes).toEqual([{ toolId, name: 'double_it', state: 'active', reason: null }]);
+    expect(registry.get(toolId)?.tier).toBe('agent');
+    expect(readToolRow(db, toolId)).toMatchObject({ tier: 'agent' });
+    const asOther = await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'agent-q' });
+    expect(asOther.isError).toBe(true);
+    expect(JSON.stringify(asOther)).toMatch(/belongs to agent agent-p/);
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'agent-p' })).output).toEqual({
+      doubled: 4,
+    });
+  });
+
+  it("a forge whose tool a load of its session adopted while the state was being written reports success, and the tool runs", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+
+    // The forge's state row has landed and its flag write is held open; a
+    // load of the session reads the row and adopts the tool meanwhile.
+    const gate = db.gateNext('SET is_active = COALESCE(');
+    const forging = callTool(
+      host.orchestrator,
+      'forge_tool',
+      {
+        name: 'double_it',
+        description: 'Doubles a number.',
+        inputSchema: NUMBER_IN,
+        outputSchema: DOUBLED_OUT,
+        implementation: { mode: 'sandbox', code: RAW_DOUBLE, allowlist: [] },
+        testCases: [{ input: { n: 2 }, expectedOutput: { doubled: 4 } }],
+      },
+      { sessionId: 'sess-m1' },
+    );
+    await gate.entered;
+    const loaded = await host.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess-m1' });
+    expect(loaded.outcomes).toEqual([{ toolId: expect.any(String), name: 'double_it', state: 'active', reason: null }]);
+    gate.release();
+    const forged = await forging;
+
+    expect(forged.isError).toBeFalsy();
+    expect(String(forged.output.toolId)).toBe(loaded.outcomes[0].toolId);
+    expect((await callTool(host.orchestrator, 'double_it', { n: 3 })).output).toEqual({ doubled: 6 });
+    expect(host.engine.getSessionTools('sess-m1').map((tool) => tool.name)).toEqual(['double_it']);
+  });
+
+  it("a tool promoted out of its session stays registered, and callable by its agent, after the session's cleanup", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    const forged = await callTool(
+      host.orchestrator,
+      'forge_tool',
+      {
+        name: 'double_it',
+        description: 'Doubles a number.',
+        inputSchema: NUMBER_IN,
+        outputSchema: DOUBLED_OUT,
+        implementation: { mode: 'sandbox', code: RAW_DOUBLE, allowlist: [] },
+        testCases: [{ input: { n: 2 }, expectedOutput: { doubled: 4 } }],
+      },
+      { sessionId: 'sess-m2', personaId: 'agent-m2' },
+    );
+    expect(forged.isError).toBeFalsy();
+    const toolId = String(forged.output.toolId);
+    const registry = (host.engine as unknown as { registry: EmergentToolRegistry }).registry;
+    await registry.promote(toolId, 'agent');
+
+    host.orchestrator.cleanupEmergentSession('sess-m2');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(host.engine.getSessionTools('sess-m2')).toEqual([]);
+    expect(host.engine.getAgentTools('agent-m2').map((tool) => tool.id)).toEqual([toolId]);
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'agent-m2' })).output).toEqual({
+      doubled: 4,
+    });
+    expect(readToolRow(db, toolId)).toMatchObject({ tier: 'agent' });
+  });
+
+  it("a session's cleanup deletes the rows of its tools a load admitted suspended, and lets their held states go", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'ss-1',
+      name: 'echo_later',
+      mode: 'compose',
+      tier: 'session',
+      createdBySession: 'sess-m3',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 's', tool: 'late_echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    expect((await host.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess-m3' })).outcomes).toEqual([
+      { toolId: 'ss-1', name: 'echo_later', state: 'suspended', reason: 'step_missing' },
+    ]);
+
+    host.orchestrator.cleanupEmergentSession('sess-m3');
+
+    await vi.waitFor(() => {
+      expect(readToolRow(db, 'ss-1')).toBeUndefined();
+      expect(readStateRow(db, 'ss-1')).toBeUndefined();
+    });
+    const registry = (host.engine as unknown as { registry: EmergentToolRegistry }).registry;
+    expect(registry.getState('ss-1')).toBeUndefined();
+    // The step's tool arriving later brings nothing of the ended session back.
+    await host.orchestrator.registerTool(echoTool('late_echo'));
+    await host.engine.onHostToolRegistered('late_echo');
+    expect(await host.orchestrator.getTool('echo_later')).toBeUndefined();
   });
 });

@@ -184,10 +184,20 @@ const writer = agent({
 ## Fallback Behavior
 
 AgentOS supports automatic fallback when a provider request fails on a
-retryable error: HTTP 401/402/403/429/5xx, a network failure or request
-timeout, or a primary provider that cannot initialize (for example a revoked
-key that its model listing rejects). Fallback is **on by default** with an
-auto-built chain — to disable it, pass an empty array.
+retryable error: HTTP 401, 402, 403, 429, 500, 502, 503, 504 or 529, a
+network failure or request timeout, a primary provider that cannot initialize
+(for example a revoked key that its model listing rejects), a request larger
+than the model's context window, or a content-policy refusal
+([`isRetryableError()`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts)).
+Fallback is **on by default** with an auto-built chain — to disable it, pass
+an empty array.
+
+The chain serves `generateText()` and `streamText()`, and `agent()` and
+`agency()` through them. The GMIs of the full runtime (`processRequest()`)
+call their provider without a fallback chain; a GMI built with a completion
+gateway moves to the next hop when a hop cannot start or an attempt fails
+with a retryable error before any output
+([Model calls through a completion gateway](../GMI.md#model-calls-through-a-completion-gateway)).
 
 A failover never repeats work the caller already received or that had side
 effects. A stream that has delivered text or tool activity is not restarted
@@ -205,14 +215,28 @@ another vendor accepts: OpenRouter's routing controls (`provider`, `models`,
 [`GEMINI_ONLY_PARAM_KEYS`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/openrouter-only-params.ts)) reach only Gemini.
 
 ```
-Primary Provider (e.g., Anthropic)
-  ↓ fails (rate limit, timeout, error)
-OpenRouter Fallback (if OPENROUTER_API_KEY is set)
+Primary provider (e.g., Anthropic)
+  ↓ fails with a retryable error
+OpenAI gpt-5.6-sol               (if OPENAI_API_KEY is set)
   ↓ fails
-Ollama Local Fallback (if OLLAMA_BASE_URL is set)
+OpenRouter openai/gpt-5.6-sol    (if OPENROUTER_API_KEY is set)
+  ↓ fails
+Gemini gemini-3.1-pro-preview    (if GEMINI_API_KEY is set)
   ↓ fails
 Error returned to caller
 ```
+
+The auto-built chain ([`buildFallbackChain()`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts))
+takes these legs in this order, each when its key is set, and leaves out the
+primary's own provider: OpenAI `gpt-5.6-sol`, Anthropic `claude-sonnet-5-5`
+(effort `low`, 1024 tokens of output headroom), OpenRouter
+`openai/gpt-5.6-sol`, and Gemini `gemini-3.1-pro-preview` (effort `low`, 1024
+tokens of output headroom). Every leg runs with prompt caching off
+(`cache: false`). Ollama is not in the auto-built chain; list it in
+`fallbackProviders` to use it. For a call whose policy tier is `mature` or
+`private-adult`, the chain starts with the policy catalog's fallback ladder for
+that tier when `OPENROUTER_API_KEY` is set
+([`buildPolicyAwareFallbackChain()`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts)).
 
 ### Configuring Fallback
 

@@ -5,6 +5,7 @@
  * @module @framers/agentos/emergent/ceiling
  */
 
+import { realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { CAPABILITY_NAMES } from './capabilities.js';
 import type { CapabilityName, EmergentAuditConfig, ForgedCapabilities } from './types.js';
@@ -29,6 +30,7 @@ export type CeilingErrorCode =
   | 'method_not_allowed'
   | 'invalid_domain'
   | 'invalid_bound'
+  | 'invalid_audit'
   | 'audit_needs_storage'
   | 'forge_wider_than_ceiling';
 
@@ -54,19 +56,70 @@ export const CEILING_DEFAULTS = {
 
 const HOSTNAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$|^\d{1,3}(\.\d{1,3}){3}$/;
 
-function bound(value: number | undefined, fallback: number, key: string, min: number): number {
+/**
+ * The longest delay Node's timers keep (2^31 - 1 ms). Above it `setTimeout`
+ * and `AbortSignal.timeout` fire at once, and from 2^32 `AbortSignal.timeout`
+ * throws, so a time bound above it would end or fail every call.
+ */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/** A value as an error message shows it. */
+function shown(value: unknown): string {
+  if (typeof value === 'string') {
+    return `"${value}"`;
+  }
+  if (Array.isArray(value)) {
+    return 'a list';
+  }
+  if (typeof value === 'object' && value !== null) {
+    return 'an object';
+  }
+  return typeof value === 'function' ? 'a function' : String(value);
+}
+
+/**
+ * An integer bound from `min` to `max`, or the fallback when it is not set.
+ * Byte bounds and counts stop at `Number.MAX_SAFE_INTEGER`, and time bounds
+ * at {@link MAX_TIMER_MS}.
+ */
+function bound(
+  value: number | undefined,
+  fallback: number,
+  key: string,
+  min: number,
+  max: number = Number.MAX_SAFE_INTEGER,
+): number {
   if (value === undefined) {
     return fallback;
   }
-  if (!Number.isInteger(value) || value < min) {
-    throw new CeilingError('invalid_bound', key, `expected an integer of at least ${min}, got ${String(value)}`);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new CeilingError('invalid_bound', key, `expected an integer from ${min} to ${max}, got ${shown(value)}`);
   }
   return value;
 }
 
+/** An audit setting: one of the values allowed, or the fallback when it is not set. */
+function auditValue<T extends string>(value: unknown, allowed: readonly T[], fallback: T, key: string): T {
+  if (value === undefined) {
+    return fallback;
+  }
+  if (typeof value !== 'string' || !(allowed as readonly string[]).includes(value)) {
+    throw new CeilingError(
+      'invalid_audit',
+      key,
+      `expected ${allowed.map((option) => `'${option}'`).join(' or ')}, got ${shown(value)}`,
+    );
+  }
+  return value as T;
+}
+
 /**
  * Validates a host's ceiling and applies its defaults. An empty `domains` or
- * `roots` list removes its capability (an empty list grants nothing).
+ * `roots` list removes its capability (an empty list grants nothing); the
+ * capability's other settings are validated all the same. A configuration
+ * read from JSON gets no type check, so each value's kind is checked here:
+ * a mistyped audit setting, a list of the wrong shape or a bound out of its
+ * range fails here, naming its key, never later at a call.
  *
  * @throws CeilingError naming the code and the key of the first failure.
  */
@@ -86,8 +139,8 @@ export function resolveCeiling(
   }
   const resolved: ResolvedCeiling = {
     audit: {
-      store: audit?.store ?? 'storage',
-      content: audit?.content ?? 'digest',
+      store: auditValue(audit?.store, ['storage', 'none'] as const, 'storage', 'audit.store'),
+      content: auditValue(audit?.content, ['digest', 'full'] as const, 'digest', 'audit.content'),
       ...(audit?.retainDays !== undefined
         ? { retainDays: bound(audit.retainDays, 0, 'audit.retainDays', 1) }
         : {}),
@@ -96,45 +149,77 @@ export function resolveCeiling(
 
   const fetch = capabilities.fetch;
   if (fetch) {
-    const methods = fetch.methods ?? [...CEILING_DEFAULTS.methods];
-    for (const method of methods) {
+    const givenMethods: unknown = fetch.methods ?? [...CEILING_DEFAULTS.methods];
+    if (!Array.isArray(givenMethods)) {
+      throw new CeilingError(
+        'method_not_allowed',
+        'capabilities.fetch.methods',
+        `expected a list of methods, got ${shown(givenMethods)}`,
+      );
+    }
+    for (const method of givenMethods) {
       if (method !== 'GET' && method !== 'HEAD') {
         throw new CeilingError('method_not_allowed', 'capabilities.fetch.methods', `${String(method)}: stage 1 allows GET and HEAD`);
       }
     }
+    const methods = givenMethods as Array<'GET' | 'HEAD'>;
+    const givenDomains: unknown = fetch.domains;
     let domains: string[] | '*' = '*';
-    if (fetch.domains !== '*') {
-      domains = fetch.domains.map((domain) => domain.toLowerCase());
+    if (givenDomains !== '*') {
+      if (!Array.isArray(givenDomains)) {
+        throw new CeilingError(
+          'invalid_domain',
+          'capabilities.fetch.domains',
+          `expected '*' or a list of host names, got ${shown(givenDomains)}`,
+        );
+      }
+      const odd = givenDomains.findIndex((domain) => typeof domain !== 'string');
+      if (odd >= 0) {
+        throw new CeilingError(
+          'invalid_domain',
+          'capabilities.fetch.domains',
+          `entry ${odd} is ${shown(givenDomains[odd])}, not a host name`,
+        );
+      }
+      domains = (givenDomains as string[]).map((domain) => domain.toLowerCase());
       for (const domain of domains) {
         if (!HOSTNAME.test(domain)) {
           throw new CeilingError('invalid_domain', 'capabilities.fetch.domains', `"${domain}" is not a host name (no scheme, port or path)`);
         }
       }
     }
+    const scope = {
+      domains,
+      methods,
+      maxResponseBytes: bound(fetch.maxResponseBytes, CEILING_DEFAULTS.maxResponseBytes, 'capabilities.fetch.maxResponseBytes', 1),
+      maxRedirects: bound(fetch.maxRedirects, CEILING_DEFAULTS.maxRedirects, 'capabilities.fetch.maxRedirects', 0),
+      timeoutMs: bound(fetch.timeoutMs, CEILING_DEFAULTS.timeoutMs, 'capabilities.fetch.timeoutMs', 1, MAX_TIMER_MS),
+    };
     if (domains === '*' || domains.length > 0) {
-      resolved.fetch = {
-        domains,
-        methods,
-        maxResponseBytes: bound(fetch.maxResponseBytes, CEILING_DEFAULTS.maxResponseBytes, 'capabilities.fetch.maxResponseBytes', 1),
-        maxRedirects: bound(fetch.maxRedirects, CEILING_DEFAULTS.maxRedirects, 'capabilities.fetch.maxRedirects', 0),
-        timeoutMs: bound(fetch.timeoutMs, CEILING_DEFAULTS.timeoutMs, 'capabilities.fetch.timeoutMs', 1),
-      };
+      resolved.fetch = scope;
     }
   }
 
   const read = capabilities['fs.read'];
   if (read) {
-    for (const root of read.roots) {
-      if (!path.isAbsolute(root)) {
-        throw new CeilingError('root_not_absolute', 'capabilities.fs.read.roots', `"${root}" is not an absolute path`);
+    const givenRoots: unknown = read.roots;
+    if (!Array.isArray(givenRoots)) {
+      throw new CeilingError(
+        'root_not_absolute',
+        'capabilities.fs.read.roots',
+        `expected a list of absolute paths, got ${shown(givenRoots)}`,
+      );
+    }
+    for (const root of givenRoots) {
+      if (typeof root !== 'string' || !path.isAbsolute(root)) {
+        throw new CeilingError('root_not_absolute', 'capabilities.fs.read.roots', `${shown(root)} is not an absolute path`);
       }
     }
-    if (read.roots.length > 0) {
-      resolved['fs.read'] = {
-        roots: read.roots.map((root) => path.resolve(root)),
-        maxBytesPerRead: bound(read.maxBytesPerRead, CEILING_DEFAULTS.maxBytesPerRead, 'capabilities.fs.read.maxBytesPerRead', 1),
-        timeoutMs: bound(read.timeoutMs, CEILING_DEFAULTS.timeoutMs, 'capabilities.fs.read.timeoutMs', 1),
-      };
+    const roots = givenRoots as string[];
+    const maxBytesPerRead = bound(read.maxBytesPerRead, CEILING_DEFAULTS.maxBytesPerRead, 'capabilities.fs.read.maxBytesPerRead', 1);
+    const timeoutMs = bound(read.timeoutMs, CEILING_DEFAULTS.timeoutMs, 'capabilities.fs.read.timeoutMs', 1, MAX_TIMER_MS);
+    if (roots.length > 0) {
+      resolved['fs.read'] = { roots: roots.map((root) => path.resolve(root)), maxBytesPerRead, timeoutMs };
     }
   }
 
@@ -173,11 +258,28 @@ function within(candidate: string, root: string): boolean {
 }
 
 /**
+ * A path with its symlinks resolved, as the broker resolves read roots (the
+ * native realpath, as `fs/promises` uses), or the path as given when it does
+ * not resolve: a path that does not exist reads nothing.
+ */
+function realOrGiven(candidate: string): string {
+  try {
+    return realpathSync.native(candidate);
+  } catch {
+    return candidate;
+  }
+}
+
+/**
  * A host-built forge under a ceiling: its options may be narrower than the
  * ceiling, and then they narrow it; they may never be wider. Only the
  * capabilities the ceiling grants are compared, since the broker injects no
  * other. An intersection is taken in the ceiling's terms and never widens:
- * disjoint lists are wider, not empty.
+ * disjoint lists are wider, not empty. Read roots are compared after their
+ * symlinks are resolved, the forge's and the ceiling's alike, since the
+ * broker reads by real path: a forge root that is a link inside a ceiling
+ * root to a directory outside it is wider. The narrowed roots are the
+ * forge's, as it names them.
  *
  * @throws CeilingError (`forge_wider_than_ceiling`) naming the forge option.
  */
@@ -203,9 +305,15 @@ export function narrowToForge(
     }
   }
   if (ceiling['fs.read']) {
-    const ceilingRoots = ceiling['fs.read'].roots;
+    const ceilingRoots = ceiling['fs.read'].roots.map(realOrGiven);
     const forgeRoots = forge.fsReadRoots.map((root) => path.resolve(root));
-    const wider = forgeRoots.filter((root) => !ceilingRoots.some((ceilingRoot) => within(root, ceilingRoot)));
+    const wider: string[] = [];
+    for (const root of forgeRoots) {
+      const real = realOrGiven(root);
+      if (!ceilingRoots.some((ceilingRoot) => within(real, ceilingRoot))) {
+        wider.push(real === root ? root : `${root} (resolves to ${real})`);
+      }
+    }
     if (wider.length > 0) {
       throw new CeilingError('forge_wider_than_ceiling', 'sandboxForge.fsReadRoots', `outside the ceiling: ${wider.join(', ')}`);
     }

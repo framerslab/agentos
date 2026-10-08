@@ -254,7 +254,7 @@ not persisted in conversation metadata.
 
 ### TOOL_RESULT_EMISSION
 
-The result of a tool execution, emitted after the tool runs.
+The result of an external tool call, emitted when the host returns it (`handleToolResult()`, `handleToolResults()` or a resumed request). The results of tools the runtime runs itself do not reach this stream: the GMI reports them as `TOOL_RESULT` chunks on its own stream, which `processRequest()` does not forward.
 
 ```typescript
 {
@@ -284,8 +284,8 @@ The result of a tool execution, emitted after the tool runs.
 
 Every chunk has an `isFinal: boolean` field.
 
-- **`isFinal: false`** -- more chunks will follow in this stream.
-- **`isFinal: true`** -- this is the last chunk. For `FINAL_RESPONSE` it is always true. For `TEXT_DELTA` the last streaming delta before the final response also has `isFinal: true`.
+- **`isFinal: false`** -- more chunks will follow in this stream. Every `TEXT_DELTA` of a GMI turn carries `false`.
+- **`isFinal: true`** -- `FINAL_RESPONSE` and `ERROR` chunks carry it, and so does an `AGENCY_UPDATE` once every seat of the agency has completed or failed. A GMI turn that fails on a `processRequest()` stream yields its `ERROR` and then the turn's `FINAL_RESPONSE`, which carries the error, so an `ERROR` is not always the stream's last chunk.
 
 If your guardrail buffers streaming text, use `isFinal: true` as the signal to **flush your buffer** and perform a final evaluation.
 

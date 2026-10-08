@@ -10,7 +10,7 @@ AgentOS exposes two ways to run a model, and they do not share a runtime. The li
 
 ## The runtime path
 
-[`AgentOS.create()`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) builds the runtime and [`processRequest()`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) serves each session with a GMI: a persona, a mood, a reasoning trace, sentiment-triggered metaprompts, a memory bridge when cognitive memory is attached, and the runtime's guardrails, capability discovery, retrieval, emergent tools, permissions, human-in-the-loop and channels. [Generalized Mind Instances](./GMI.md) describes the GMI; [The turn lifecycle](./TURN_LIFECYCLE.md) describes what a request goes through.
+[`AgentOS.create()`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) builds the runtime and [`processRequest()`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) serves each session with a GMI: a persona, a mood, a reasoning trace, sentiment-triggered metaprompts, a memory bridge when cognitive memory is attached, and the runtime's guardrails, capability discovery, retrieval, emergent tools, permissions, human-in-the-loop and channels. The runtime's GMIs call the provider of the turn's model directly, with no fallback chain; a host that builds a GMI itself can give it a completion gateway, which routes each model step and falls back across providers ([Model calls through a completion gateway](./GMI.md#model-calls-through-a-completion-gateway)). [Generalized Mind Instances](./GMI.md) describes the GMI; [The turn lifecycle](./TURN_LIFECYCLE.md) describes what a request goes through.
 
 ## The capability contract
 

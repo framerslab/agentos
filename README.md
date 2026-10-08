@@ -227,11 +227,11 @@ Three layers, highest priority first: inline `apiKey` on the call, a module-leve
 ## API Surfaces
 
 - **`agent()`**: lightweight stateful agent. Prompts, sessions, personality, hooks, tools, memory.
-- **`agency()`**: multi-agent teams + full runtime. Emergent tooling, guardrails, RAG, voice, channels, HITL.
+- **`agency()`**: multi-agent teams built from `agent()` members, with emergent tooling, guardrails, RAG, voice and HITL. It wires no channels; channel adapters run on the full runtime or with `ChannelRouter`.
 - **`generateText()` / `streamText()` / `generateObject()` / `generateImage()` / `generateVideo()` / `generateMusic()` / `performOCR()` / `embedText()`**: low-level multi-modal helpers with native tool calling.
 - **`workflow()` / `AgentGraph` / `mission()`**: three orchestration authoring APIs over one graph runtime.
 
-Provider fallback is on by default: when a call fails with a retryable error, it is retried on the other providers whose keys are in the environment. Pass `fallbackProviders: []` to turn it off, or a list to set the chain yourself.
+Provider fallback is on by default for `generateText()`, `streamText()`, `agent()` and `agency()`: when a call fails with a retryable error, it is retried on the other providers whose keys are in the environment. Pass `fallbackProviders: []` to turn it off, or a list to set the chain yourself. The GMIs of the full runtime (`processRequest()`) call their provider without a fallback chain.
 
 [Full API reference ->](https://docs.agentos.sh/api) * [High-Level API guide ->](https://docs.agentos.sh/getting-started/high-level-api)
 

@@ -866,7 +866,9 @@ export class ToolOrchestrator implements IToolOrchestrator {
           };
         }
       } else {
-        // The tool's id is in the action id: an approval is for this registration.
+        // The tool's id is in the action id: an approval is for this
+        // registration, and the call runs only that registration (checked
+        // before delegation below).
         const actionId = `tool:${gmiId}:${personaId}:${toolName}:${tool.id}:${llmProvidedCallId || uuidv4()}`;
         const severity = (hitlConfig?.defaultSideEffectsSeverity ?? 'high') as ActionSeverity;
 
@@ -960,17 +962,23 @@ export class ToolOrchestrator implements IToolOrchestrator {
         errorDetails: { message: errorMsg, code: 'STEP_ABORTED' },
       };
     }
-    // No await between this check and the executor's own lookup of the name,
-    // which happens synchronously when executeTool is entered.
-    if (resolvedForStep && this.toolExecutor.getTool(toolName) !== resolvedForStep) {
-      const errorMsg = `step_replaced: the tool registered as '${toolName}' changed after it was checked; nothing ran.`;
+    // Every call runs the instance its checks and approval were for: a
+    // composed step the one its pipeline checked, a direct call the one
+    // resolved when the call began. A registration that replaces the name
+    // meanwhile (while an approval is pending, say) is refused. No await
+    // between this check and the executor's own lookup of the name, which
+    // happens synchronously when executeTool is entered.
+    if (this.toolExecutor.getTool(toolName) !== tool) {
+      const errorMsg = resolvedForStep
+        ? `step_replaced: the tool registered as '${toolName}' changed after it was checked; nothing ran.`
+        : `tool_replaced: the tool registered as '${toolName}' is not the one this call's checks and approval were for (it was replaced or unregistered meanwhile); nothing ran.`;
       console.warn(`${logPrefix} ${errorMsg}`);
       return {
         toolCallId: llmProvidedCallId,
         toolName,
         output: null,
         isError: true,
-        errorDetails: { message: errorMsg, code: 'STEP_REPLACED' },
+        errorDetails: { message: errorMsg, code: resolvedForStep ? 'STEP_REPLACED' : 'TOOL_REPLACED' },
       };
     }
 

@@ -21,7 +21,7 @@ import {
   sendMessageTool,
   type ForgeHost,
 } from './helpers/forge-host.js';
-import { DOUBLED_OUT, NUMBER_IN, RAW_DOUBLE, TEXT_IN, TEXT_OUT, seedToolRow } from './helpers/seed-rows.js';
+import { DOUBLED_OUT, NUMBER_IN, RAW_DOUBLE, TEXT_IN, TEXT_OUT, seedStateRow, seedToolRow } from './helpers/seed-rows.js';
 
 /** A composition that sends a message, then echoes what the send returned. */
 const NOTIFY_AND_ECHO = {
@@ -317,6 +317,52 @@ describe('compositions and workflows: one gate, one rule', () => {
     expect(run.output).toEqual({ text: 'hello' });
   });
 
+  it('a gate built with createStepGate asks no approval at a nested composed call, only at the steps that have side effects', async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const tools = new Map<string, ITool>([
+      ['send_email', { ...sendMessageTool(sent), id: 'send-email-v1', name: 'send_email', requiredCapabilities: [] }],
+    ]);
+    const hitl = approvingHitl();
+    const config: EmergentConfig = {
+      ...DEFAULT_EMERGENT_CONFIG,
+      enabled: true,
+      compose: { sideEffectingTools: ['send_email', 'notify'] },
+    };
+    const engine = new EmergentCapabilityEngine({
+      config,
+      composableBuilder: new ComposableToolBuilder(
+        createStepGate({ resolve: (name) => tools.get(name), hitlManager: hitl.manager, hitl: { enabled: true } }),
+      ),
+      judge: new EmergentJudge({ judgeModel: 'judge', promotionModel: 'judge', generateText: async () => APPROVED_VERDICT }),
+      registry: new EmergentToolRegistry(config),
+      onToolForged: async (_tool, executable) => {
+        tools.set(executable.name, executable);
+      },
+    });
+    const context = { agentId: 'agent-1', sessionId: 'sess-1' };
+    const nestedCase = {
+      testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'sent: hi' }, stepOutputs: { s: { text: 'sent: hi' } } }],
+    };
+    const notify = await engine.forge(composeOver('notify', 'send_email', nestedCase) as unknown as ForgeToolRequest, context);
+    expect(notify.success).toBe(true);
+    const campaign = await engine.forge(composeOver('campaign', 'notify', nestedCase) as unknown as ForgeToolRequest, context);
+    expect(campaign.success).toBe(true);
+
+    hitl.requestApproval.mockClear();
+    const callContext: ToolExecutionContext = {
+      gmiId: 'gmi-1',
+      personaId: 'persona-1',
+      userContext: { userId: 'user-1' } as ToolExecutionContext['userContext'],
+    };
+    const run = await tools.get('campaign')!.execute({ text: 'hello' }, callContext);
+
+    expect(run.success).toBe(true);
+    expect(sent).toEqual([{ text: 'hello' }]);
+    // Asked once, at the step that sends; not at notify, the composed step.
+    expect(hitl.requestApproval).toHaveBeenCalledTimes(1);
+    expect((hitl.requestApproval.mock.calls[0][0] as PendingAction).context).toMatchObject({ toolName: 'send_email' });
+  });
+
   it('a workflow step meets the rule at create, and the permission check and approval when it runs', async () => {
     const sent: Array<Record<string, unknown>> = [];
     const hitl = approvingHitl();
@@ -576,6 +622,80 @@ describe('compositions and workflows: one gate, one rule', () => {
     expect(sent).toEqual([]);
   });
 
+  it("an approval that arrives after a workflow step expired starts nothing inside a composed step either", async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    let releaseApproval!: () => void;
+    const approvalHeld = new Promise<void>((resolve) => {
+      releaseApproval = resolve;
+    });
+    const requestApproval = vi.fn(async (action: PendingAction) => {
+      if (action.context.toolName === 'send_message') {
+        await approvalHeld;
+      }
+      return { actionId: action.actionId, approved: true, decidedBy: 'test', decidedAt: new Date() };
+    });
+    const host = await makeForgeHost({
+      selfImprovement: true,
+      tools: [sendMessageTool(sent)],
+      hitlManager: { requestApproval } as unknown as IHumanInteractionManager,
+      orchestratorConfig: { hitl: { enabled: true } },
+      config: { compose: { sideEffectingTools: ['send_message', 'notify_customer'] } },
+    });
+    // A composition whose one step sends: the workflow step is the composed call.
+    const forged = await callTool(
+      host.orchestrator,
+      'forge_tool',
+      composeOver('notify_customer', 'send_message', {
+        testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'sent: hi' }, stepOutputs: { s: { text: 'sent: hi' } } }],
+      }),
+      { personaCapabilities: ['messaging'] },
+    );
+    expect(forged.isError).toBeFalsy();
+    requestApproval.mockClear();
+    const workflowTool = await host.orchestrator.getTool('create_workflow');
+    const caller: ToolExecutionContext = {
+      gmiId: 'gmi-test',
+      personaId: 'persona-test',
+      personaCapabilities: ['messaging'],
+      userContext: { userId: 'user-test' } as ToolExecutionContext['userContext'],
+      correlationId: 'wf-composed',
+    };
+    const created = await workflowTool!.execute(
+      {
+        action: 'create',
+        name: 'notify',
+        description: 'Notifies a customer.',
+        steps: [{ tool: 'notify_customer', args: { text: '$input' } }],
+      },
+      caller,
+    );
+    expect(created.success).toBe(true);
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const running = workflowTool!.execute(
+        { action: 'run', workflowId: (created.output as { workflowId: string }).workflowId, input: 'hello' },
+        caller,
+      );
+      // Past the step's limit while the composed step's own approval is pending.
+      await vi.advanceTimersByTimeAsync(31_000);
+      const run = await running;
+
+      expect(run.success).toBe(false);
+      expect(run.error).toContain('timed out');
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // The approval arrives late: the composed call expired, so its step starts nothing.
+    releaseApproval();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(requestApproval).toHaveBeenCalledTimes(1);
+    expect((requestApproval.mock.calls[0][0] as PendingAction).context).toMatchObject({ toolName: 'send_message' });
+    expect(sent).toEqual([]);
+  });
+
   it('a nested composition is not run while forging, and a composition that reaches itself is refused', async () => {
     const host = await makeForgeHost({
       tools: [echoTool()],
@@ -684,6 +804,21 @@ describe('compositions and workflows: one gate, one rule', () => {
     expect(withoutCaller.error).toContain('caller_context_required');
   });
 
+  it('a direct forge without a caller is asked for the caller when the executor, not the permission manager, refuses a capability', async () => {
+    // The permission manager lets every call through (as one that does not
+    // check capabilities does); the executor's own check refuses the step.
+    const host = await makeForgeHost({ tools: [readTool()] });
+
+    const withoutCaller = await host.engine.forge(composeOver('read_direct', 'read_it') as unknown as ForgeToolRequest, {
+      agentId: 'agent-1',
+      sessionId: 'sess-1',
+    });
+
+    expect(withoutCaller.success).toBe(false);
+    expect(withoutCaller.error).toContain('caller_context_required');
+    expect(host.judge).not.toHaveBeenCalled();
+  });
+
   it("a composed step that is another agent's tool is refused as the caller", async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db, config: { compose: { sideEffectingTools: ['double_it'] } } });
@@ -721,5 +856,428 @@ describe('compositions and workflows: one gate, one rule', () => {
 
     const asOwner = await callTool(host.orchestrator, 'double_via', { n: 2 }, { personaId: 'agent-a' });
     expect(asOwner.output).toEqual({ doubled: 4 });
+  });
+
+  it("a run's refused step never replaces a host's suspension, made in this process or in another, and the step's return does not lift it", async () => {
+    const db = createSqliteAdapter();
+    let reached!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const waitTool: ITool = {
+      id: 'wait-it-v1',
+      name: 'wait_it',
+      displayName: 'wait_it',
+      description: 'Waits, then returns the text it is given.',
+      inputSchema: TEXT_IN,
+      hasSideEffects: false,
+      execute: async (args: Record<string, unknown>) => {
+        reached();
+        await released;
+        return { success: true, output: { text: String(args.text) } };
+      },
+    };
+    const hostA = await makeForgeHost({ db, tools: [waitTool, echoTool()] });
+    const hostB = await makeForgeHost({ db, tools: [echoTool()] });
+    seedToolRow(db, {
+      id: 'c-wait',
+      name: 'wait_then_echo',
+      mode: 'compose',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [
+          { name: 'w', tool: 'wait_it', inputMapping: { text: '$input.text' } },
+          { name: 'e', tool: 'echo', inputMapping: { text: '$prev.text' } },
+        ],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    seedToolRow(db, {
+      id: 'c-echo',
+      name: 'echo_once',
+      mode: 'compose',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 'e', tool: 'echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    db.raw.prepare('UPDATE agentos_emergent_tools SET created_at = ? WHERE id = ?').run(1_700_000_000_001, 'c-echo');
+    expect((await hostA.engine.loadPersistedTools({ tiers: ['shared'] })).active).toBe(2);
+
+    // In this process: a call is under way when the host suspends the
+    // composition and takes its second step's tool away.
+    const calling = callTool(hostA.orchestrator, 'wait_then_echo', { text: 'x' });
+    await waiting;
+    expect(await hostA.engine.suspendTool('c-wait', 'policy')).toBe(true);
+    await hostA.orchestrator.unregisterTool('echo');
+    release();
+    expect((await calling).isError).toBe(true);
+    expect(readStateRow(db, 'c-wait')).toMatchObject({ state: 'suspended', state_reason: 'policy', set_by: 'host' });
+
+    // In another process: the host suspends a composition this process still
+    // holds active, and a call here meets the missing step.
+    expect(await hostB.engine.suspendTool('c-echo', 'policy')).toBe(true);
+    expect((await callTool(hostA.orchestrator, 'echo_once', { text: 'y' })).isError).toBe(true);
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'suspended', state_reason: 'policy', set_by: 'host' });
+
+    // The step's tool returns: the host's suspensions stay, here and in the rows.
+    await hostA.orchestrator.registerTool(echoTool());
+    await hostA.engine.onHostToolRegistered('echo');
+    expect(await hostA.orchestrator.getTool('wait_then_echo')).toBeUndefined();
+    expect(await hostA.orchestrator.getTool('echo_once')).toBeUndefined();
+    expect(readStateRow(db, 'c-wait')).toMatchObject({ state: 'suspended', state_reason: 'policy', set_by: 'host' });
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'suspended', state_reason: 'policy', set_by: 'host' });
+    const again = await hostA.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(again.outcomes).toEqual([
+      { toolId: 'c-wait', name: 'wait_then_echo', state: 'suspended', reason: 'policy' },
+      { toolId: 'c-echo', name: 'echo_once', state: 'suspended', reason: 'policy' },
+    ]);
+  });
+
+  it('a composition whose row already holds the step suspension is re-checked when its step tool registers, on a later start too', async () => {
+    const db = createSqliteAdapter();
+    // First start: the step's tool is not there yet, so the load suspends the
+    // composition and stores the library's step suspension.
+    const first = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'c-echo',
+      name: 'echo_once',
+      mode: 'compose',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 'e', tool: 'echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    expect((await first.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'c-echo', name: 'echo_once', state: 'suspended', reason: 'step_missing' },
+    ]);
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'suspended', state_reason: 'step_missing', set_by: 'library' });
+
+    // A later start reads that suspension from the row, then the step's tool
+    // arrives: the composition is checked again and comes back.
+    const later = await makeForgeHost({ db });
+    expect((await later.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'c-echo', name: 'echo_once', state: 'suspended', reason: 'step_missing' },
+    ]);
+    await later.orchestrator.registerTool(echoTool());
+    await later.engine.onHostToolRegistered('echo');
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'active' });
+    expect((await callTool(later.orchestrator, 'echo_once', { text: 'back' })).output).toEqual({ text: 'back' });
+  });
+
+  it('a stored step suspension whose row holds no request is re-checked from its source, and one whose rows are gone is let go', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    const source = JSON.stringify({
+      mode: 'compose',
+      steps: [{ name: 'e', tool: 'echo', inputMapping: { text: '$input.text' } }],
+    });
+    seedToolRow(db, { id: 'c-plain', name: 'echo_once', mode: 'compose', source, inputSchema: TEXT_IN, outputSchema: TEXT_OUT });
+    seedStateRow(db, { toolId: 'c-plain', state: 'suspended', reason: 'step_missing', setBy: 'library', requestJson: null });
+    seedToolRow(db, { id: 'c-gone', name: 'echo_again', mode: 'compose', source, inputSchema: TEXT_IN, outputSchema: TEXT_OUT });
+    seedStateRow(db, { toolId: 'c-gone', state: 'suspended', reason: 'step_missing', setBy: 'library', requestJson: null });
+    db.raw.prepare('UPDATE agentos_emergent_tools SET created_at = ? WHERE id = ?').run(1_700_000_000_001, 'c-gone');
+
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'c-plain', name: 'echo_once', state: 'suspended', reason: 'step_missing' },
+      { toolId: 'c-gone', name: 'echo_again', state: 'suspended', reason: 'step_missing' },
+    ]);
+    // Another process removes one of the two.
+    db.raw.prepare('DELETE FROM agentos_emergent_tools WHERE id = ?').run('c-gone');
+    db.raw.prepare('DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?').run('c-gone');
+
+    await host.orchestrator.registerTool(echoTool());
+    await host.engine.onHostToolRegistered('echo');
+
+    expect(readStateRow(db, 'c-plain')).toMatchObject({ state: 'active' });
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'back' })).output).toEqual({ text: 'back' });
+    const registry = (host.engine as unknown as { registry: EmergentToolRegistry }).registry;
+    expect(registry.getState('c-gone')).toBeUndefined();
+    expect(await host.orchestrator.getTool('echo_again')).toBeUndefined();
+  });
+
+  it("a run's suspension whose write failed gives way to the row at the next re-check, and the composition comes back with its step", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, tools: [echoTool()] });
+    seedToolRow(db, {
+      id: 'c-echo',
+      name: 'echo_once',
+      mode: 'compose',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 'e', tool: 'echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).active).toBe(1);
+
+    // The step's tool goes away, and the run's suspension does not reach the
+    // row: it is held here only, and the row still reads active.
+    await host.orchestrator.unregisterTool('echo');
+    db.failNext('INSERT INTO agentos_emergent_tool_state');
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'x' })).isError).toBe(true);
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'active' });
+    expect(await host.orchestrator.getTool('echo_once')).toBeUndefined();
+
+    // The step's tool returns: the row reads active and the composition fits,
+    // so the suspension held here, whose write is no longer under way, gives way.
+    await host.orchestrator.registerTool(echoTool());
+    await host.engine.onHostToolRegistered('echo');
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'back' })).output).toEqual({ text: 'back' });
+    // And the next load agrees.
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'c-echo', name: 'echo_once', state: 'active', reason: null },
+    ]);
+  });
+
+  it("a re-check a registration starts while a run's suspension is being written reads that suspension, and lifts it", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, tools: [echoTool()] });
+    seedToolRow(db, {
+      id: 'c-echo',
+      name: 'echo_once',
+      mode: 'compose',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 'e', tool: 'echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).active).toBe(1);
+
+    // The host replaces the step's tool: unregistered, then registered again.
+    // A call in the gap meets the missing step, and its suspension's write is
+    // held while the new tool's registration starts a re-check.
+    await host.orchestrator.unregisterTool('echo');
+    const gate = db.gateNext('INSERT INTO agentos_emergent_tool_state');
+    const calling = callTool(host.orchestrator, 'echo_once', { text: 'x' });
+    await gate.entered;
+    await host.orchestrator.registerTool(echoTool());
+    // The re-check runs as far as it can while the suspension's write is held.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    gate.release();
+    expect((await calling).isError).toBe(true);
+
+    // The composition comes back with its step present.
+    await vi.waitFor(async () => {
+      expect(await host.orchestrator.getTool('echo_once')).toBeDefined();
+    });
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'active' });
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'back' })).output).toEqual({ text: 'back' });
+
+    // The same through a promotion check, which suspends a composition that
+    // no longer fits: the registration's re-check waits for that suspension.
+    await host.orchestrator.unregisterTool('echo');
+    const gate2 = db.gateNext('INSERT INTO agentos_emergent_tool_state');
+    const checking = host.engine.checkPromotion('c-echo');
+    await gate2.entered;
+    await host.orchestrator.registerTool(echoTool());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    gate2.release();
+    expect(await checking).toMatchObject({ success: false });
+    await vi.waitFor(async () => {
+      expect(await host.orchestrator.getTool('echo_once')).toBeDefined();
+    });
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'active' });
+  });
+
+  it('a forge whose judge was out while another forge closed a cycle with it is refused before it is registered', async () => {
+    const host = await makeForgeHost({ tools: [echoTool('loop_a'), echoTool('loop_b')] });
+    let releaseJudge!: () => void;
+    const judgeHeld = new Promise<void>((resolve) => {
+      releaseJudge = resolve;
+    });
+    host.judge.mockImplementationOnce(async () => {
+      await judgeHeld;
+      return APPROVED_VERDICT;
+    });
+
+    // loop_a over the host's loop_b is with the judge when loop_b is forged
+    // over the host's loop_a; each check saw only the host's tools.
+    const forgingA = callTool(host.orchestrator, 'forge_tool', composeOver('loop_a', 'loop_b'));
+    await vi.waitFor(() => expect(host.judge).toHaveBeenCalledTimes(1));
+    const forgedB = await callTool(host.orchestrator, 'forge_tool', composeOver('loop_b', 'loop_a'));
+    expect(forgedB.isError).toBeFalsy();
+    releaseJudge();
+    const forgedA = await forgingA;
+
+    expect(forgedA.isError).toBe(true);
+    expect(String(forgedA.errorDetails?.message)).toContain('step_cycle');
+    // loop_b chains the host's loop_a, which was never replaced.
+    expect((await callTool(host.orchestrator, 'loop_b', { text: 'hi' })).output).toEqual({ text: 'hi' });
+  });
+
+  it('a forge registered while another forge closed a cycle with it is taken out again', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, tools: [echoTool('loop_a'), echoTool('loop_b')] });
+
+    // loop_a has passed its checks and is registered in the registry; its
+    // state write is held while loop_b is forged and registered in full.
+    const gate = db.gateNext('INSERT INTO agentos_emergent_tool_state');
+    const forgingA = callTool(host.orchestrator, 'forge_tool', composeOver('loop_a', 'loop_b'), {
+      sessionId: 'sess-cycle',
+    });
+    await gate.entered;
+    const forgedB = await callTool(host.orchestrator, 'forge_tool', composeOver('loop_b', 'loop_a'), {
+      sessionId: 'sess-cycle',
+    });
+    expect(forgedB.isError).toBeFalsy();
+    gate.release();
+    const forgedA = await forgingA;
+
+    expect(forgedA.isError).toBe(true);
+    expect(String(forgedA.errorDetails?.message)).toContain('step_cycle');
+    // Only loop_b is held, and no composition holds the name loop_a: the
+    // cycle is not registered.
+    expect(host.engine.getSessionTools('sess-cycle').map((tool) => tool.name)).toEqual(['loop_b']);
+    const loopA = await host.orchestrator.getTool('loop_a');
+    expect((loopA as { emergentMode?: string } | undefined)?.emergentMode).toBeUndefined();
+  });
+
+  it('a chain nested deeper than the limit is refused, and the composition at the limit, which has no cycle, stays active', async () => {
+    const db = createSqliteAdapter();
+    const names = Array.from({ length: 9 }, (_, i) => `c${i + 1}`);
+    const host = await makeForgeHost({ db, tools: [echoTool()], config: { compose: { sideEffectingTools: names } } });
+    // c1 chains c2, c2 chains c3, ..., c9 chains the host's echo; stored innermost first.
+    names.forEach((name, i) => {
+      const step = i + 1 < names.length ? names[i + 1] : 'echo';
+      seedToolRow(db, {
+        id: `id-${name}`,
+        name,
+        mode: 'compose',
+        source: JSON.stringify({ mode: 'compose', steps: [{ name: 's', tool: step, inputMapping: { text: '$input.text' } }] }),
+        inputSchema: TEXT_IN,
+        outputSchema: TEXT_OUT,
+      });
+      db.raw
+        .prepare('UPDATE agentos_emergent_tools SET created_at = ? WHERE id = ?')
+        .run(1_700_000_000_000 + (names.length - i), `id-${name}`);
+    });
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).active).toBe(9);
+
+    const deep = await callTool(host.orchestrator, 'c1', { text: 'deep' });
+    expect(deep.isError).toBe(true);
+    expect(String(deep.errorDetails?.message)).toContain('nesting_too_deep');
+    // c9, where the limit was met, reaches nothing of its own: it stays active and runs.
+    expect(readStateRow(db, 'id-c9')).toMatchObject({ state: 'active' });
+    expect((await callTool(host.orchestrator, 'c9', { text: 'near' })).output).toEqual({ text: 'near' });
+    expect((await callTool(host.orchestrator, 'c2', { text: 'within' })).output).toEqual({ text: 'within' });
+  });
+
+  it('a composition that reaches itself at run time is refused at the repeat, before its steps run again, and suspended', async () => {
+    const db = createSqliteAdapter();
+    const counted: Array<Record<string, unknown>> = [];
+    const countTool: ITool = {
+      id: 'count-it-v1',
+      name: 'count_it',
+      displayName: 'count_it',
+      description: 'Counts its calls and returns the text it is given.',
+      inputSchema: TEXT_IN,
+      hasSideEffects: false,
+      execute: async (args: Record<string, unknown>) => {
+        counted.push(args);
+        return { success: true, output: { text: String(args.text) } };
+      },
+    };
+    const host = await makeForgeHost({
+      db,
+      tools: [countTool, echoTool('alias_step')],
+      config: { compose: { sideEffectingTools: ['alias_step'] } },
+    });
+    const outer = await callTool(host.orchestrator, 'forge_tool', {
+      name: 'outer_loop',
+      description: 'Counts, then runs the alias step.',
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+      implementation: {
+        mode: 'compose',
+        steps: [
+          { name: 'count', tool: 'count_it', inputMapping: { text: '$input.text' } },
+          { name: 'alias', tool: 'alias_step', inputMapping: { text: '$prev.text' } },
+        ],
+      },
+      testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'hi' } }],
+    });
+    expect(outer.isError).toBeFalsy();
+    const inner = await callTool(
+      host.orchestrator,
+      'forge_tool',
+      composeOver('inner_loop', 'outer_loop', {
+        testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'hi' }, stepOutputs: { s: { text: 'hi' } } }],
+      }),
+    );
+    expect(inner.isError).toBeFalsy();
+    // The host registers inner_loop's executable under the alias step's name
+    // too: outer_loop now reaches itself through a name no forge-time check
+    // follows.
+    const innerExecutable = await host.orchestrator.getTool('inner_loop');
+    await host.orchestrator.registerTool({ ...innerExecutable!, id: 'alias-of-inner-loop', name: 'alias_step' });
+
+    counted.length = 0;
+    const called = await callTool(host.orchestrator, 'outer_loop', { text: 'x' });
+
+    expect(called.isError).toBe(true);
+    // Its first step ran once: the repeat was refused before running anything.
+    expect(counted).toEqual([{ text: 'x' }]);
+    const outerId = String((outer.output as { toolId: string }).toolId);
+    const innerId = String((inner.output as { toolId: string }).toolId);
+    expect(readStateRow(db, outerId)).toMatchObject({ state: 'suspended', state_reason: 'step_cycle', set_by: 'library' });
+    expect(readStateRow(db, innerId)).toMatchObject({ state: 'active' });
+  });
+
+  it('an approval for a direct call runs only the registration it named, never a tool registered under the name while it waited', async () => {
+    const first: Array<Record<string, unknown>> = [];
+    const second: Array<Record<string, unknown>> = [];
+    const report = (calls: Array<Record<string, unknown>>, id: string): ITool => ({
+      id,
+      name: 'report',
+      displayName: 'report',
+      description: 'Files a report.',
+      inputSchema: TEXT_IN,
+      hasSideEffects: true,
+      execute: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        return { success: true, output: { text: String(args.text) } };
+      },
+    });
+    let host: ForgeHost | undefined;
+    let swapped = false;
+    const requestApproval = vi.fn(async (action: PendingAction) => {
+      if (!swapped && action.context.toolName === 'report' && host) {
+        swapped = true;
+        // Another registration takes the name while this approval is pending.
+        await host.orchestrator.registerTool(report(second, 'report-v2'));
+      }
+      return { actionId: action.actionId, approved: true, decidedBy: 'test', decidedAt: new Date() };
+    });
+    host = await makeForgeHost({
+      tools: [report(first, 'report-v1')],
+      hitlManager: { requestApproval } as unknown as IHumanInteractionManager,
+      orchestratorConfig: { hitl: { enabled: true } },
+    });
+
+    const called = await callTool(host.orchestrator, 'report', { text: 'q3' });
+
+    expect(called.isError).toBe(true);
+    expect(called.errorDetails?.code).toBe('TOOL_REPLACED');
+    // The approval named the first registration; neither tool ran.
+    expect((requestApproval.mock.calls[0][0] as PendingAction).actionId).toContain('report-v1');
+    expect(first).toEqual([]);
+    expect(second).toEqual([]);
+    // The tool that holds the name now runs after an approval of its own.
+    expect((await callTool(host.orchestrator, 'report', { text: 'q4' })).output).toEqual({ text: 'q4' });
+    expect(second).toEqual([{ text: 'q4' }]);
+    expect((requestApproval.mock.calls[1][0] as PendingAction).actionId).toContain('report-v2');
   });
 });

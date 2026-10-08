@@ -47,6 +47,9 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      - name: Package exports point at built files
+        run: pnpm run verify:exports
+
       - name: Lint
         run: pnpm run lint
 

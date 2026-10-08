@@ -101,6 +101,14 @@ describe('mergeDefaults and a prefixed seat model', () => {
     expect(viaGateway.provider).toBe('openrouter');
     expect(viaGateway.apiKey).toBe('sk-or');
   });
+  it('reads a seat provider set explicitly to undefined as set, as the merged config does', () => {
+    const openaiAgency = { agents: {}, provider: 'openai', model: 'gpt-4.1', apiKey: 'sk-openai', baseUrl: 'https://proxy.local/v1' } as unknown as AgencyOptions;
+    const merged = mergeDefaults({ model: 'claude-opus-5-5', provider: undefined } as never, openaiAgency);
+    // The spread keeps the explicit undefined, so the seat goes to auto-detection, which may pick any vendor.
+    expect(merged.provider).toBeUndefined();
+    expect(merged.apiKey).toBeUndefined();
+    expect(merged.baseUrl).toBeUndefined();
+  });
   it('withholds the agency key from a plain-model seat when the agency names its provider only by a model prefix', () => {
     const prefixAgency = { agents: {}, model: 'openai:gpt-4.1', apiKey: 'sk-openai', baseUrl: 'https://proxy.local/v1' } as unknown as AgencyOptions;
     // The plain model goes to auto-detection, which may pick another vendor.
