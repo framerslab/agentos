@@ -16,6 +16,12 @@ describe('InputSilenceWatch', () => {
     watch.reset(0);
     expect(watch.push(-70, 4_999)).toBe(false);
     expect(watch.push(-70, 5_000)).toBe(true);
+    // A level above the floor clears it. Another input, chosen at 6 s, is not heard yet
+    // and gets its own five seconds.
+    expect(watch.push(-30, 5_100)).toBe(false);
+    watch.reset(6_000);
+    expect(watch.push(-70, 10_999)).toBe(false);
+    expect(watch.push(-70, 11_000)).toBe(true);
   });
 
   it('is not silent in a quiet pause once the input was heard, but is after five seconds of a dead signal', () => {
@@ -34,5 +40,16 @@ describe('InputSilenceWatch', () => {
     watch.push(-20, 10);
     watch.restart(5_000);
     expect(watch.push(-80, 7_000)).toBe(false);
+    // After a restart a dead signal counts from the restart, not from the last block
+    // that carried a signal.
+    watch.restart(9_000);
+    expect(watch.push(-Infinity, 9_999)).toBe(false);
+    expect(watch.push(-Infinity, 10_000)).toBe(true);
+    // An input not heard yet counts its time below the floor from the restart, and is still not heard.
+    const unheard = new InputSilenceWatch({ afterMs: 1_000 });
+    unheard.reset(0);
+    unheard.restart(5_000);
+    expect(unheard.push(-70, 5_999)).toBe(false);
+    expect(unheard.push(-70, 6_000)).toBe(true);
   });
 });
