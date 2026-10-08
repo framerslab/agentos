@@ -82,4 +82,14 @@ describe('LiveKitTranscriptionOutput', () => {
     const bare = Object.assign(new FakeRoom(), { localParticipant: undefined });
     await expect(new LiveKitTranscriptionOutput({ room: bare }).write(final('i1', 'x'))).rejects.toThrow('no local participant');
   });
+
+  it('keeps a final whose send failed, so writing it again sends nothing and a replay still carries it', async () => {
+    const room = new FakeRoom();
+    room.localParticipant.sendText.mockRejectedValueOnce(new Error('data channel closed'));
+    const output = new LiveKitTranscriptionOutput({ room });
+    await expect(output.write(final('i1', 'One.'))).rejects.toThrow('data channel closed');
+    expect(await output.write(final('i1', 'One.'))).toBe(false);
+    expect(await output.replayAfter(undefined, 'user-1')).toBe(1);
+    expect(room.localParticipant.sendText).toHaveBeenLastCalledWith('One.', expect.objectContaining({ destinationIdentities: ['user-1'] }));
+  });
 });
