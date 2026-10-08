@@ -18,7 +18,11 @@ export interface EffectIntent {
   callId: string;
   agentId: string;
   capability: string;
-  /** The URL or path the call named; stored as a SHA-256 digest unless `content` is `'full'`. */
+  /**
+   * The URL the broker sent (the first request's, as parsed) or the path it
+   * read (resolved); for a call refused before its checks passed, the value
+   * the tool passed. Stored as a SHA-256 digest unless `content` is `'full'`.
+   */
   target: string;
   decision: 'allowed' | 'refused';
   /** What decided it: `'ceiling'` for an allowed call, the refusal's code otherwise. */

@@ -72,7 +72,12 @@ export interface CapabilityEffect {
   toolId: string;
   callId: string;
   capability: string;
-  /** The URL or path as the record keeps it: a SHA-256 hex digest, or the target itself when `audit.content` is `'full'`. */
+  /**
+   * The URL sent (the first request's, as parsed) or the path read (resolved),
+   * or for a call refused before its checks passed the value the tool passed
+   * (`crypto` names none), as the record keeps it: a SHA-256 hex digest, or
+   * the target itself when `audit.content` is `'full'`.
+   */
   target: string;
   decision: 'allowed' | 'refused';
   /** `'ceiling'` for an allowed call; the refusal's code otherwise. */

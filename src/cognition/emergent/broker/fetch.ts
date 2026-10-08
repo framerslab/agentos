@@ -31,7 +31,11 @@ const NULL_BODY_STATUSES = new Set([204, 205, 304]);
 /** Dropped when a redirect changes the origin, as fetch itself does. */
 const CROSS_ORIGIN_DROPPED = ['authorization', 'proxy-authorization', 'cookie', 'host'];
 
-/** The URL a forged tool's first argument names: a string, a URL, or an object with a `url` string. */
+/**
+ * The URL a forged tool's first argument names: a string, a URL, or an object
+ * with a `url` string. A property is read once, so the value checked is the
+ * value returned (a getter in forged code can answer each read differently).
+ */
 export function fetchTarget(input: unknown): string | undefined {
   if (typeof input === 'string') {
     return input;
@@ -39,8 +43,9 @@ export function fetchTarget(input: unknown): string | undefined {
   if (input instanceof URL) {
     return input.href;
   }
-  if (input && typeof input === 'object' && typeof (input as { url?: unknown }).url === 'string') {
-    return (input as { url: string }).url;
+  if (input && typeof input === 'object') {
+    const url: unknown = (input as { url?: unknown }).url;
+    return typeof url === 'string' ? url : undefined;
   }
   return undefined;
 }

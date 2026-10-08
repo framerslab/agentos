@@ -3,8 +3,9 @@
  * It hands each run the functions the run's grant names, scoped by the
  * ceiling. Before every capability call it checks, in this order: the run is
  * live, the capability is in the grant, the target fits the scope. It then
- * writes the intent record, checks the run is still live, performs the call
- * while tracking it under the run's id, and writes the terminal record. When
+ * writes the intent record, naming the target as checked (the URL it sends,
+ * the path it reads), checks the run is still live, performs the call while
+ * tracking it under the run's id, and writes the terminal record. When
  * the run ends, `endCall` waits up to {@link CALL_SETTLE_MS} for what is in
  * flight and returns the run's effects. On `node:vm` these checks are a
  * guardrail for code that acts through these functions; Node's documentation
@@ -34,6 +35,13 @@ interface RunLedger {
 }
 
 type Operation<T> = (signal: AbortSignal) => Promise<{ value: T; bytes: number }>;
+
+/** A capability call whose checks passed: the target they checked, and the call. */
+interface Prepared<T> {
+  /** What the records name: the URL sent (the first request's, as parsed) or the path read, resolved. */
+  target: string;
+  operation: Operation<T>;
+}
 
 /** The terminal half for a call that threw. */
 function endOf(error: unknown): EffectTerminal {
@@ -75,14 +83,23 @@ export class CapabilityBroker {
 
     const fetchScope = this.ceiling.fetch;
     if (grant.includes('fetch') && fetchScope) {
-      functions.fetch = (input: unknown, init?: unknown): Promise<Response> =>
-        this.perform(run, grant, 'fetch', fetchTarget(input) ?? String(input), () => {
-          const prepared = prepareFetch(input, init, fetchScope);
-          return async (signal) => {
-            const sent = await sendFetch(prepared, fetchScope, signal);
-            return { value: sent.response, bytes: sent.bytes };
+      functions.fetch = (input: unknown, init?: unknown): Promise<Response> => {
+        // The forged code's argument is read once: the URL checked and sent
+        // is parsed from this read, and a call refused before its checks
+        // passed is recorded with it.
+        const given = fetchTarget(input);
+        return this.perform(run, grant, 'fetch', given ?? String(input), () => {
+          const prepared = prepareFetch(given, init, fetchScope);
+          return {
+            // The first request's URL, as parsed: what was checked and sent.
+            target: prepared.url.href,
+            operation: async (signal) => {
+              const sent = await sendFetch(prepared, fetchScope, signal);
+              return { value: sent.response, bytes: sent.bytes };
+            },
           };
         });
+      };
     }
 
     const readScope = this.ceiling['fs.read'];
@@ -92,9 +109,14 @@ export class CapabilityBroker {
         readFile: (filePath: unknown): Promise<string> =>
           this.perform(run, grant, 'fs.read', String(filePath), () => {
             const resolved = prepareRead(filePath, roots);
-            return async (signal) => {
-              const read = await readPrepared(resolved, roots, readScope, signal);
-              return { value: read.text, bytes: read.bytes };
+            return {
+              // The path as resolved and checked against the roots (the read
+              // follows its links, and checks the real path again).
+              target: resolved,
+              operation: async (signal) => {
+                const read = await readPrepared(resolved, roots, readScope, signal);
+                return { value: read.text, bytes: read.bytes };
+              },
             };
           }),
       };
@@ -196,27 +218,30 @@ export class CapabilityBroker {
   }
 
   /**
-   * One capability call: the checks (a refusal is recorded as one row), then
-   * the recorded call, tracked in flight from its intent write to its
-   * terminal write, so ending the run waits for both.
+   * One capability call: the checks, then the recorded call, tracked in
+   * flight from its intent write to its terminal write, so ending the run
+   * waits for both. The records name the target the checks passed (the URL
+   * sent, the path read); a call refused before they passed is recorded as
+   * one row naming `given`, the value the tool passed, read once.
    */
   private async perform<T>(
     run: RunLedger,
     grant: readonly CapabilityName[],
     capability: CapabilityName,
-    target: string,
-    prepare: () => Operation<T>,
+    given: string,
+    prepare: () => Prepared<T>,
   ): Promise<T> {
-    let operation: Operation<T>;
+    let prepared: Prepared<T>;
     try {
       this.admit(run, grant, capability);
-      operation = prepare();
+      prepared = prepare();
     } catch (error: unknown) {
       if (error instanceof CapabilityRefusal) {
-        await this.recordRefusal(run, capability, target, error.code);
+        await this.recordRefusal(run, capability, given, error.code);
       }
       throw error;
     }
+    const { target, operation } = prepared;
     const effect: CapabilityEffect = {
       kind: 'capability',
       toolId: run.call.toolId,
