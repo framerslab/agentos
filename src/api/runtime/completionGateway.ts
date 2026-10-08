@@ -27,7 +27,7 @@ import {
   type GenerateTextOptions,
 } from '../generateText.js';
 import { hostPolicyToRouteParams, mergeRequiredCapabilities, type HostLLMPolicy } from './hostPolicy.js';
-import { buildResponseFormatForProvider } from './responseFormatForProvider.js';
+import { buildResponseFormatForProvider, buildSchemaInstructionText, responseFormatCarriesSchema } from './responseFormatForProvider.js';
 
 /** What a turn asks the gateway for. Unset fields take the gateway's defaults. */
 export interface CompletionRoute {
@@ -260,17 +260,38 @@ function billedUsage(buffered: ReadonlyArray<ModelCompletionResponse>, error: Er
   return undefined;
 }
 
-/** The provider-native schema payload for this hop, built as session.send builds it. */
-function lowerForHop(resolution: CompletionResolution, schema: ZodType, schemaName: string): { responseFormat: Record<string, unknown> | undefined; toolName?: string } {
+/**
+ * The provider-native schema payload for this hop, built as session.send builds
+ * it, and, when that payload carries no schema (no payload for the provider or
+ * model, or a JSON mode without one), the schema instructions for the hop's
+ * system prompt, in generateObject's words.
+ */
+function lowerForHop(
+  resolution: CompletionResolution,
+  schema: ZodType,
+  schemaName: string,
+): { responseFormat: Record<string, unknown> | undefined; toolName?: string; schemaInstruction?: string } {
+  const jsonSchema = lowerZodToJsonSchema(schema);
   const responseFormat = buildResponseFormatForProvider({
     providerId: resolution.providerId,
     modelId: resolution.modelId,
-    jsonSchema: lowerZodToJsonSchema(schema),
+    jsonSchema,
     effectiveSchema: schema,
     schemaName,
   });
   const marker = responseFormat as { _agentosUseToolForStructuredOutput?: boolean; tool?: { name?: string } } | undefined;
-  return { responseFormat, toolName: marker?._agentosUseToolForStructuredOutput ? marker.tool?.name : undefined };
+  return {
+    responseFormat,
+    toolName: marker?._agentosUseToolForStructuredOutput ? marker.tool?.name : undefined,
+    ...(responseFormatCarriesSchema(responseFormat) ? {} : { schemaInstruction: buildSchemaInstructionText(jsonSchema, schemaName) }),
+  };
+}
+
+/** `messages` with a system message of `text` after the leading system messages. */
+function withSystemMessage(messages: ChatMessage[], text: string): ChatMessage[] {
+  let at = 0;
+  while (at < messages.length && messages[at].role === 'system') at += 1;
+  return [...messages.slice(0, at), { role: 'system', content: text }, ...messages.slice(at)];
 }
 
 /** A streamed forced schema tool call becomes `structuredOutput` on the chunk, never a tool call the GMI would dispatch. */
@@ -382,6 +403,8 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     ): CompletionOutcome => ({ kind: 'hopFailed', error, retryable, ...(usage ? { usage } : {}) });
 
     const structured = responseSchema ? lowerForHop(resolution, responseSchema, schemaName) : undefined;
+    // A hop whose payload carries no schema gets it in its system prompt.
+    const hopMessages = structured?.schemaInstruction ? withSystemMessage(messages, structured.schemaInstruction) : messages;
     const callOptions: ModelCompletionOptions = {
       ...options,
       ...resolution.optionOverrides,
@@ -403,7 +426,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
           finish(failed(error, undefined));
           return;
         }
-        for await (const raw of provider.generateCompletionStream(resolution.modelId, messages, callOptions)) {
+        for await (const raw of provider.generateCompletionStream(resolution.modelId, hopMessages, callOptions)) {
           const chunk = structured?.toolName ? liftSchemaToolCall(raw, structured.toolName) : raw;
           if (chunk.error) {
             // An abort is the caller's own stop: it is never walked to another

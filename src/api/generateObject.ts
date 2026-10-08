@@ -18,7 +18,7 @@ import type { Message, SystemContentBlock, TokenUsage } from './generateText.js'
 import { resolveModelOption } from './model.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { estimateMaxTokensForZodSchema } from './runtime/schemaTokenEstimate.js';
-import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
+import { buildResponseFormatForProvider, buildSchemaInstructionText } from './runtime/responseFormatForProvider.js';
 import { buildResponseFormat } from '../core/llm/providers/structuredOutputFormat.js';
 
 /**
@@ -330,26 +330,6 @@ export interface GenerateObjectResult<T> {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Builds the schema-specific instruction text appended to every
- * generateObject call. Kept free of caller context so it can be composed
- * with either a plain string system prompt or a structured block array.
- */
-function buildSchemaInstructionText(
-  jsonSchema: Record<string, unknown>,
-  schemaName?: string,
-  schemaDescription?: string,
-): string {
-  const parts: string[] = [];
-  parts.push('You MUST respond with ONLY a valid JSON object — no markdown, no code fences, no explanation.');
-  if (schemaName) parts.push(`The JSON object should be a "${schemaName}".`);
-  if (schemaDescription) parts.push(schemaDescription);
-  parts.push('');
-  parts.push('The JSON MUST conform to this JSON Schema:');
-  parts.push(JSON.stringify(jsonSchema, null, 2));
-  return parts.join('\n');
-}
 
 /**
  * Builds the system prompt passed to generateText.

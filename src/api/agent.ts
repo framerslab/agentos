@@ -24,7 +24,7 @@ import {
   type MessageContent,
   type ToolCallHookInfo,
 } from './generateText.js';
-import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
+import { buildResponseFormatForProvider, buildSchemaInstructionText } from './runtime/responseFormatForProvider.js';
 import { resolveModelOption } from './model.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { ObjectGenerationError } from './generateObject.js';
@@ -997,6 +997,9 @@ export function agent(opts: AgentOptions): Agent {
           // passes the payload through to the provider via _responseFormat.
           let responseFormat: Record<string, unknown> | undefined;
           let responseFormatBuilder: GenerateTextOptions['_responseFormatBuilder'];
+          // The schema in generateObject's words, for a call or fallback leg
+          // whose payload carries none (generateText decides per leg).
+          let schemaInstruction: string | undefined;
           if (sendOpts?.responseSchema) {
             // Resolve the primary the same way generateText will (explicit
             // provider/model fields, then env auto-detect) so the payload is
@@ -1012,6 +1015,7 @@ export function agent(opts: AgentOptions): Agent {
             const schema = sendOpts.responseSchema;
             const schemaName = sendOpts.schemaName ?? 'response';
             const jsonSchema = lowerZodToJsonSchema(schema);
+            schemaInstruction = buildSchemaInstructionText(jsonSchema, schemaName);
             responseFormat = buildResponseFormatForProvider({
               providerId,
               modelId,
@@ -1071,6 +1075,7 @@ export function agent(opts: AgentOptions): Agent {
               ...(responseFormatBuilder
                 ? { _responseFormatBuilder: responseFormatBuilder }
                 : {}),
+              ...(schemaInstruction ? { _schemaInstruction: schemaInstruction } : {}),
             },
             opts.memoryProvider,
             textForMemory,
