@@ -104,6 +104,49 @@ interface GeminiPart {
    * Gemini 3 requires it back, verbatim, on the replayed call.
    */
   thoughtSignature?: string;
+  /** An image (or other media) sent inline: its MIME type and base64 bytes. */
+  inlineData?: { mimeType: string; data: string };
+}
+
+/**
+ * The largest image fetched for inlining. Gemini caps a request that carries
+ * inline data at 20 MB in all
+ * (https://ai.google.dev/gemini-api/docs/image-understanding).
+ */
+const MAX_INLINE_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/** Whether a message part is an image given by an http(s) URL. */
+function isRemoteImagePart(part: unknown): part is { type: 'image_url'; image_url: { url: string; detail?: string } } {
+  const candidate = part as { type?: unknown; image_url?: { url?: unknown } } | null;
+  return (
+    candidate?.type === 'image_url' &&
+    typeof candidate.image_url?.url === 'string' &&
+    /^https?:\/\//i.test(candidate.image_url.url)
+  );
+}
+
+/**
+ * A data URL as Gemini inline data. Gemini takes images as inline bytes or
+ * File API uploads, not as URLs to fetch, so any other URL is an error here;
+ * http(s) URLs are fetched and inlined before the request is built.
+ */
+function inlineDataOf(url: string): { mimeType: string; data: string } {
+  const match = /^data:([^;,]+)[^,]*?(;base64)?,(.*)$/is.exec(url);
+  if (!match) {
+    throw new GeminiProviderError(
+      'Gemini takes an image as a data URL or an http(s) URL; this image_url is neither.',
+      'INVALID_IMAGE_URL',
+    );
+  }
+  const [, mimeType, base64, payload] = match;
+  if (base64) return { mimeType, data: payload.replace(/\s+/g, '') };
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(payload);
+  } catch {
+    throw new GeminiProviderError('An image data URL has an invalid percent escape.', 'INVALID_IMAGE_URL');
+  }
+  return { mimeType, data: Buffer.from(decoded, 'utf8').toString('base64') };
 }
 
 /** A single message in the Gemini contents array. */
@@ -695,7 +738,7 @@ export class GeminiProvider implements IProvider {
   ): Promise<ModelCompletionResponse> {
     this.ensureInitialized();
 
-    const payload = this.buildRequestPayload(modelId, messages, options);
+    const payload = this.buildRequestPayload(modelId, await this.inlineImageUrls(messages), options);
     // Gemini uses model-scoped endpoints: /models/{model}:generateContent
     const endpoint = `/models/${modelId}:generateContent`;
     let apiResponse: GeminiResponse;
@@ -759,7 +802,7 @@ export class GeminiProvider implements IProvider {
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
     this.ensureInitialized();
 
-    const payload = this.buildRequestPayload(modelId, messages, options);
+    const payload = this.buildRequestPayload(modelId, await this.inlineImageUrls(messages), options);
     const responseId = `gemini-${modelId}-${Date.now()}`;
 
     // Handle pre-aborted signals
@@ -1147,6 +1190,62 @@ export class GeminiProvider implements IProvider {
    * @returns {Record<string, unknown>} The request body for Gemini's API.
    * @private
    */
+  /**
+   * The messages with each http(s) `image_url` part replaced by a data URL of
+   * the fetched image: Gemini does not fetch image URLs itself.
+   *
+   * @throws {GeminiProviderError} When an image cannot be fetched, is not an
+   *   image, or is larger than 20 MB.
+   */
+  private async inlineImageUrls(messages: ChatMessage[]): Promise<ChatMessage[]> {
+    if (!messages.some((message) => Array.isArray(message.content) && message.content.some(isRemoteImagePart))) {
+      return messages;
+    }
+    return Promise.all(
+      messages.map(async (message) => {
+        if (!Array.isArray(message.content) || !message.content.some(isRemoteImagePart)) return message;
+        const content = await Promise.all(
+          message.content.map(async (part) =>
+            isRemoteImagePart(part)
+              ? { ...part, image_url: { ...part.image_url, url: await this.fetchImageAsDataUrl(part.image_url.url) } }
+              : part,
+          ),
+        );
+        return { ...message, content } as ChatMessage;
+      }),
+    );
+  }
+
+  /** Fetches an image and returns it as a data URL. */
+  private async fetchImageAsDataUrl(url: string): Promise<string> {
+    const shown = redactUrlSecrets(url);
+    let response: Response;
+    try {
+      response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+    } catch (error) {
+      throw new GeminiProviderError(
+        `Fetching the image ${shown} for Gemini failed: ${error instanceof Error ? error.message : String(error)}`,
+        'IMAGE_FETCH_FAILED',
+      );
+    }
+    if (!response.ok) {
+      throw new GeminiProviderError(`Fetching the image ${shown} for Gemini failed: HTTP ${response.status}.`, 'IMAGE_FETCH_FAILED', response.status);
+    }
+    const mimeType = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
+    if (!mimeType.startsWith('image/')) {
+      throw new GeminiProviderError(`${shown} is not an image (content-type ${mimeType || 'none'}).`, 'IMAGE_FETCH_FAILED');
+    }
+    const declared = Number(response.headers.get('content-length') ?? 0);
+    if (declared > MAX_INLINE_IMAGE_BYTES) {
+      throw new GeminiProviderError(`The image ${shown} is larger than Gemini's 20 MB inline limit.`, 'IMAGE_TOO_LARGE');
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length > MAX_INLINE_IMAGE_BYTES) {
+      throw new GeminiProviderError(`The image ${shown} is larger than Gemini's 20 MB inline limit.`, 'IMAGE_TOO_LARGE');
+    }
+    return `data:${mimeType};base64,${bytes.toString('base64')}`;
+  }
+
   private buildRequestPayload(
     modelId: string,
     messages: ChatMessage[],
@@ -1383,12 +1482,14 @@ export class GeminiProvider implements IProvider {
         if (typeof msg.content === 'string') {
           parts.push({ text: msg.content });
         } else if (Array.isArray(msg.content)) {
-          // Multimodal content — extract text parts
+          // Multimodal content: text parts as text, images as inline data
+          // (http(s) images were fetched and inlined by inlineImageUrls).
           for (const part of msg.content) {
             if (part.type === 'text') {
               parts.push({ text: (part as { text: string }).text });
+            } else if (part.type === 'image_url') {
+              parts.push({ inlineData: inlineDataOf((part as { image_url: { url: string } }).image_url.url) });
             }
-            // Image support could be added here via inlineData parts
           }
         }
 

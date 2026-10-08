@@ -330,6 +330,60 @@ describe('GeminiProvider', () => {
       expect(requestBody.contents[0].parts).toEqual([{ text: 'Hello world' }]);
     });
 
+    it('sends a data URL image as inline data beside the text', async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse()));
+
+      await provider.generateCompletion('gemini-2.5-flash', [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'What is in this image?' },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } },
+          ],
+        },
+      ], {});
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(requestBody.contents[0].parts).toEqual([
+        { text: 'What is in this image?' },
+        { inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' } },
+      ]);
+    });
+
+    it('fetches an https image and sends it inline, since Gemini does not fetch URLs', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'image/jpeg' }),
+        arrayBuffer: () => Promise.resolve(Uint8Array.from([0xff, 0xd8, 0xff]).buffer),
+      } as unknown as Response);
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse()));
+
+      await provider.generateCompletion('gemini-2.5-flash', [
+        { role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.com/cat.jpg' } }] },
+      ], {});
+
+      expect(fetchMock.mock.calls[0][0]).toBe('https://example.com/cat.jpg');
+      const requestBody = JSON.parse(fetchMock.mock.calls[1][1].body);
+      expect(requestBody.contents[0].parts).toEqual([{ inlineData: { mimeType: 'image/jpeg', data: '/9j/' } }]);
+    });
+
+    it('refuses an image URL that does not serve an image, before calling Gemini', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'text/html; charset=utf-8' }),
+        arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
+      } as unknown as Response);
+
+      await expect(
+        provider.generateCompletion('gemini-2.5-flash', [
+          { role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.com/page' } }] },
+        ], {}),
+      ).rejects.toThrow('is not an image');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
     it('maps generation config fields correctly', async () => {
       fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse()));
 
