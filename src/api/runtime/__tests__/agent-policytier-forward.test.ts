@@ -169,13 +169,13 @@ describe('agent policyTier passthrough', () => {
     expect(selectModel.mock.calls[0]![0].policyTier).toBe('standard');
   });
 
-  it('rescues a mature-tier failed stream onto the uncensored prefix first', async () => {
+  it('rescues a private-adult failed stream onto the catalog ladder first', async () => {
     hoisted.generateCompletionStream
       .mockImplementationOnce(async function* () {
         throw new Error('[429] rate limited');
       })
       .mockImplementationOnce(async function* () {
-        yield finalChunk('served by leg', 'nousresearch/hermes-3-llama-3.1-405b');
+        yield finalChunk('served by leg', 'anthracite-org/magnum-v4-72b');
       });
     const a = agent({
       provider: 'openai',
@@ -185,10 +185,10 @@ describe('agent policyTier passthrough', () => {
     });
     const text = await drain(a.stream('hello').textStream);
     expect(text).toBe('served by leg');
-    // Call 0 is the primary; call 1 must be the policy-aware chain's
-    // uncensored OpenRouter lead, not the availability-only leg.
+    // Call 0 is the primary; call 1 must be the private-adult ladder's
+    // lead (magnum), not the availability-only leg.
     expect(hoisted.resolveProvider.mock.calls[1]![0]).toBe('openrouter');
-    expect(hoisted.resolveProvider.mock.calls[1]![1]).toBe('nousresearch/hermes-3-llama-3.1-405b');
+    expect(hoisted.resolveProvider.mock.calls[1]![1]).toBe('anthracite-org/magnum-v4-72b');
   });
 
   it('keeps the availability-only chain when policyTier is absent (legacy)', async () => {
@@ -203,7 +203,14 @@ describe('agent policyTier passthrough', () => {
     const text = await drain(a.stream('hello').textStream);
     expect(text).toBe('served by leg');
     const legModels = hoisted.resolveProvider.mock.calls.map((call) => call[1]);
-    expect(legModels).not.toContain('nousresearch/hermes-3-llama-3.1-405b');
+    for (const uncensored of [
+      'anthracite-org/magnum-v4-72b',
+      'meta-llama/llama-3.3-70b-instruct',
+      'nousresearch/hermes-3-llama-3.1-70b',
+      'meta-llama/llama-3.1-8b-instruct',
+    ]) {
+      expect(legModels).not.toContain(uncensored);
+    }
     expect(hoisted.resolveProvider.mock.calls[1]![0]).toBe('openrouter');
     expect(hoisted.resolveProvider.mock.calls[1]![1]).toBe('openai/gpt-5.6-sol');
   });

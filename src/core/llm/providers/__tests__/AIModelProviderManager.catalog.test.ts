@@ -20,7 +20,9 @@ const bridgeMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../implementations/GeminiCLIBridge', () => ({
-  GeminiCLIBridge: vi.fn().mockImplementation(() => bridgeMocks),
+  GeminiCLIBridge: vi.fn().mockImplementation(function () {
+    return bridgeMocks;
+  }),
 }));
 
 import { AIModelProviderManager } from '../AIModelProviderManager';

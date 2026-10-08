@@ -374,5 +374,5 @@ console.log(report.summary);
 ## Related Guides
 
 - [CHANNELS.md](./CHANNELS.md) — channel adapter setup
-- [EXAMPLES.md](./EXAMPLES.md) — content pipeline and blog publisher examples
-- [GETTING_STARTED.md](./GETTING_STARTED.md) — installing and first steps
+- [EXAMPLES.md](../getting-started/EXAMPLES.md) — content pipeline and blog publisher examples
+- [GETTING_STARTED.md](../getting-started/GETTING_STARTED.md) — installing and first steps

@@ -219,7 +219,8 @@ export async function* createGuardrailBlockedStream(
  *
  * **Evaluation Strategy:**
  * - Guardrails with `config.evaluateStreamingChunks === true` evaluate TEXT_DELTA chunks
- * - All guardrails evaluate FINAL_RESPONSE chunks (final safety check)
+ * - All guardrails evaluate the chunks that carry `isFinal: true` (the
+ *   FINAL_RESPONSE, an ERROR); other chunks pass through unevaluated
  * - Rate limiting via `config.maxStreamingEvaluations` per guardrail
  *
  * **Actions:**

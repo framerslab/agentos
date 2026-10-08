@@ -52,12 +52,12 @@ export interface SandboxConfig {
   maxCpuTimeMs?: number;
   /**
    * Extra global bindings to inject into the sandbox context alongside the
-   * hardened defaults. Use this when a higher-level wrapper (such as
+   * minimal defaults. Use this when a higher-level wrapper (such as
    * SandboxedToolForge) needs to expose allowlisted APIs (`fetch`, `fs`,
    * `crypto`) without forking a second sandbox implementation.
    *
    * Security-critical keys are silently dropped from this map at merge time
-   * so callers cannot accidentally undo the sandbox's hardenings:
+   * so callers cannot accidentally undo the sandbox's minimal defaults:
    *   - Host-state escape: `process`, `global`, `globalThis`, `require`
    *   - Code-generation reflection: `eval`, `Function`
    *   - Realm-reflection / introspection: `Reflect`, `Proxy`

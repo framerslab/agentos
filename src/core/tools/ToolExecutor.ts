@@ -54,6 +54,21 @@ export interface ToolExecutionRequestDetails {
   userContext: UserContext;
   correlationId?: string;
   sessionData?: Record<string, any>;
+  /**
+   * The tool instance the caller already resolved and checked (a composed
+   * step). `ToolOrchestrator.processToolCall` runs its checks against it and
+   * refuses the call (`STEP_REPLACED`) when the name resolves to another
+   * instance by the time the call is delegated. A call without it is bound
+   * the same way to the instance resolved when the call began
+   * (`TOOL_REPLACED`).
+   */
+  tool?: ITool;
+  /**
+   * An expiry signal (a workflow step's timer). When it is aborted after the
+   * checks and the approval, the call is refused (`STEP_ABORTED`) and nothing
+   * runs.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -160,6 +175,15 @@ export class ToolExecutor {
   }
 
   /**
+   * Calls `listener` with the name of every tool registered from now on,
+   * by any path that ends in this executor's registry. Returns a function
+   * that removes the listener.
+   */
+  public onToolRegistered(listener: (toolName: string) => void): () => void {
+    return this.toolRegistry.onRegister((descriptor) => listener(descriptor.id));
+  }
+
+  /**
   * Unregisters a tool from the executor using its functional name.
   * If the tool has a `shutdown` method, it is called prior to removal from the registry.
   *
@@ -233,6 +257,7 @@ export class ToolExecutor {
       userContext,
       correlationId,
       sessionData,
+      signal,
     } = requestDetails;
     
     if (!toolCallRequest || !toolCallRequest.name || typeof toolCallRequest.name !== 'string') {
@@ -303,6 +328,9 @@ export class ToolExecutor {
       userContext,
       correlationId: correlationId || `tool-exec-${uuidv4()}`,
       ...(sessionData ? { sessionData } : {}),
+      ...(personaCapabilities ? { personaCapabilities } : {}),
+      // A composed tool passes the expiry on to its own steps.
+      ...(signal ? { signal } : {}),
     };
 
     try {

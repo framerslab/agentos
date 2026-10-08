@@ -743,26 +743,26 @@ For readers who want to trace the architecture into code:
 
 | Subsystem | Path |
 |---|---|
-| Memory facade | `packages/agentos/src/memory/io/facade/Memory.ts` |
-| Brain (SQLite + Postgres + adapter entry points) | `packages/agentos/src/memory/retrieval/store/Brain.ts` |
+| Memory facade | `src/cognition/memory/io/facade/Memory.ts` |
+| Brain (SQLite + Postgres + adapter entry points) | `src/cognition/memory/retrieval/store/Brain.ts` |
 | Storage adapter (cross-platform substrate) | [`packages/sql-storage-adapter/src/`](https://github.com/framerslab/sql-storage-adapter/tree/master/src/) ([repo](https://github.com/framerslab/sql-storage-adapter)) |
 | SQL Dialect / FTS abstraction / BLOB codec | `packages/sql-storage-adapter/src/dialect/`, `src/fts/`, `src/blob/` |
-| Cognitive memory orchestrator | `packages/agentos/src/memory/CognitiveMemoryManager.ts` |
-| Encoding model | `packages/agentos/src/memory/core/encoding/EncodingModel.ts` |
-| Decay model (Ebbinghaus) | `packages/agentos/src/memory/core/decay/DecayModel.ts` |
-| Working memory (Baddeley) | `packages/agentos/src/memory/core/working/CognitiveWorkingMemory.ts` |
-| Memory graph + spreading activation | `packages/agentos/src/memory/retrieval/store/SqlMemoryGraph.ts` |
-| Eight cognitive mechanisms | `packages/agentos/src/memory/mechanisms/` |
-| Consolidation loop (6-step) | `packages/agentos/src/memory/pipeline/consolidation/ConsolidationLoop.ts` |
-| Verbatim archive | `packages/agentos/src/memory/archive/SqlStorageMemoryArchive.ts` |
-| Hybrid retriever (BM25 + dense + Cohere) | `packages/agentos/src/memory/retrieval/hybrid/HybridRetriever.ts` |
-| HyDE retriever | `packages/agentos/src/rag/HydeRetriever.ts` |
-| Multimodal indexer | `packages/agentos/src/rag/multimodal/MultimodalIndexer.ts` |
-| Ingest router (`IngestRouter.ts`) | `packages/agentos/src/ingest-router/` |
-| Memory router + adaptive variant (`MemoryRouter.ts`, `adaptive.ts`) | `packages/agentos/src/memory-router/` |
-| Reader router model dispatch (`reader-router.ts`) | `packages/agentos/src/memory-router/reader-router.ts` |
-| Read router strategy dispatch (`ReadRouter.ts`) | `packages/agentos/src/read-router/` |
-| Cognitive pipeline (composition) | `packages/agentos/src/cognitive-pipeline/` |
+| Cognitive memory orchestrator | `src/cognition/memory/CognitiveMemoryManager.ts` |
+| Encoding model | `src/cognition/memory/core/encoding/EncodingModel.ts` |
+| Decay model (Ebbinghaus) | `src/cognition/memory/core/decay/DecayModel.ts` |
+| Working memory (Baddeley) | `src/cognition/memory/core/working/CognitiveWorkingMemory.ts` |
+| Memory graph + spreading activation | `src/cognition/memory/retrieval/store/SqlMemoryGraph.ts` |
+| Eight cognitive mechanisms | `src/cognition/memory/mechanisms/` |
+| Consolidation loop (6-step) | `src/cognition/memory/pipeline/consolidation/ConsolidationLoop.ts` |
+| Verbatim archive | `src/cognition/memory/archive/SqlStorageMemoryArchive.ts` |
+| Hybrid retriever (BM25 + dense + Cohere) | `src/cognition/memory/retrieval/hybrid/HybridRetriever.ts` |
+| HyDE retriever | `src/cognition/rag/HydeRetriever.ts` |
+| Multimodal indexer | `src/cognition/rag/multimodal/MultimodalIndexer.ts` |
+| Ingest router (`IngestRouter.ts`) | `src/orchestration/pipeline/ingest/` |
+| Memory router + adaptive variant (`MemoryRouter.ts`, `adaptive.ts`) | `src/orchestration/pipeline/memory/` |
+| Reader router model dispatch (`reader-router.ts`) | `src/orchestration/pipeline/memory/reader-router.ts` |
+| Read router strategy dispatch (`ReadRouter.ts`) | `src/orchestration/pipeline/read/` |
+| Cognitive pipeline (composition) | `src/orchestration/pipeline/` |
 | Bench harness | `packages/agentos-bench/src/` |
 | Run JSONs | `packages/agentos-bench/results/runs/` |
 | Leaderboard | `packages/agentos-bench/results/LEADERBOARD.md` |

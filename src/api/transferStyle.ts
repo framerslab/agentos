@@ -82,6 +82,14 @@ export interface TransferStyleOptions {
   policyTier?: 'safe' | 'standard' | 'mature' | 'private-adult';
   /** Provider-specific options passthrough. */
   providerOptions?: Record<string, unknown>;
+  /**
+   * API key for the provider, instead of its environment variable. It applies
+   * to the provider named in `provider` (or `model`), or to the one detected
+   * from the environment when neither is set.
+   */
+  apiKey?: string;
+  /** Base URL for the provider, instead of its default or its environment variable. */
+  baseUrl?: string;
   /** Usage ledger configuration. */
   usageLedger?: AgentOSUsageLedgerOptions;
 }
@@ -156,7 +164,10 @@ export async function transferStyle(opts: TransferStyleOptions): Promise<Transfe
         modelId = opts.model ?? match.modelId;
       }
 
-      const resolved = resolveMediaProvider(providerId, modelId);
+      const resolved = resolveMediaProvider(providerId, modelId, {
+        apiKey: opts.apiKey,
+        baseUrl: opts.baseUrl,
+      });
       span?.setAttribute('llm.provider', resolved.providerId);
       span?.setAttribute('llm.model', resolved.modelId);
 

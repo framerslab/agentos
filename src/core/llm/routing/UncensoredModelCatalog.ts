@@ -40,6 +40,11 @@ export interface CatalogEntry {
   contentPermissions: ContentIntent[];
   /** Provider-specific capability tags (e.g. 'face-consistency', 'video'). */
   capabilities: string[];
+  /**
+   * Context window in tokens, for text models (OpenRouter's model listing,
+   * 2026-10-03). A fallback walk skips a leg whose request does not fit.
+   */
+  contextWindow?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -62,6 +67,19 @@ export interface UncensoredModelCatalog {
    * @param filter - Optional capability filter.
    */
   getImageModels(filter?: { capabilities?: string[] }): CatalogEntry[];
+
+  /**
+   * The tier's ranked text models, best first: the order a policy fallback
+   * chain runs its uncensored legs in. `safe` and `standard` have none. A
+   * content intent keeps only the models that permit it.
+   * {@link getPreferredTextModel} returns the first entry.
+   * @param tier - Content policy tier.
+   * @param opts.contentIntent - Keep only models permitting this intent.
+   */
+  getFallbackLadder(
+    tier: PolicyTier,
+    opts?: { contentIntent?: ContentIntent },
+  ): CatalogEntry[];
 
   /**
    * Return the preferred text model for a given policy tier.
@@ -116,6 +134,7 @@ const TEXT_MODELS: CatalogEntry[] = [
     quality: 'high',
     contentPermissions: ['general', 'romantic', 'erotic', 'violent', 'horror'],
     capabilities: ['chat', 'json_mode'],
+    contextWindow: 32_768,
   },
   {
     modelId: 'meta-llama/llama-3.3-70b-instruct',
@@ -125,6 +144,7 @@ const TEXT_MODELS: CatalogEntry[] = [
     quality: 'high',
     contentPermissions: ['general', 'romantic', 'violent', 'horror'],
     capabilities: ['chat', 'tool_use', 'json_mode'],
+    contextWindow: 131_072,
   },
   {
     modelId: 'nousresearch/hermes-3-llama-3.1-70b',
@@ -133,7 +153,9 @@ const TEXT_MODELS: CatalogEntry[] = [
     modality: 'text',
     quality: 'medium',
     contentPermissions: ['general', 'romantic', 'erotic', 'violent', 'horror'],
-    capabilities: ['chat', 'tool_use', 'json_mode'],
+    // No tool_use: OpenRouter serves this model without tool support.
+    capabilities: ['chat', 'json_mode'],
+    contextWindow: 131_072,
   },
   {
     modelId: 'meta-llama/llama-3.1-8b-instruct',
@@ -143,6 +165,7 @@ const TEXT_MODELS: CatalogEntry[] = [
     quality: 'low',
     contentPermissions: ['general', 'romantic', 'violent'],
     capabilities: ['chat', 'json_mode'],
+    contextWindow: 131_072,
   },
   // Removed `nousresearch/hermes-3-llama-3.1-405b` on 2026-07-06: the
   // 2026-06-28 3-arm production eval showed it collapsing into
@@ -170,6 +193,61 @@ const TEXT_MODELS: CatalogEntry[] = [
   // production as Cleopatra VII responses and made a $10 companion
   // chat look like a broken chatbot demo.
 ];
+
+/**
+ * Text models for the private-adult tier, best first. Magnum v4 72B is the
+ * strongest vetted uncensored model (2026-06-28 production eval: consistent
+ * in-character prose, zero quality flags); llama-3.3-70b is the reliable
+ * multi-provider second; Hermes 3 70B adds breadth; llama-3.1-8b is the
+ * cheap last resort.
+ */
+export const PRIVATE_ADULT_TEXT_RANKING: readonly string[] = [
+  'anthracite-org/magnum-v4-72b',
+  'meta-llama/llama-3.3-70b-instruct',
+  'nousresearch/hermes-3-llama-3.1-70b',
+  'meta-llama/llama-3.1-8b-instruct',
+];
+
+/**
+ * Text models for the mature tier, best first. The fast multi-provider
+ * llama-3.3-70b leads: on mature narration its quality is within noise of
+ * magnum's, and its latency and host availability are better (production
+ * report 2026-05-05). Magnum, Hermes 3 70B and llama-3.1-8b follow.
+ */
+export const MATURE_TEXT_RANKING: readonly string[] = [
+  'meta-llama/llama-3.3-70b-instruct',
+  'anthracite-org/magnum-v4-72b',
+  'nousresearch/hermes-3-llama-3.1-70b',
+  'meta-llama/llama-3.1-8b-instruct',
+];
+
+/**
+ * Capability names that mean the same thing: the model router requires
+ * `function_calling` on a call that carries tools, and catalog entries list
+ * `tool_use`.
+ */
+const CAPABILITY_ALIASES: Readonly<Record<string, string>> = { function_calling: 'tool_use' };
+
+/** The one spelling of a capability name. */
+export function canonicalCapability(capability: string): string {
+  return CAPABILITY_ALIASES[capability] ?? capability;
+}
+
+/** Whether a catalog entry lists a capability, under either spelling. */
+export function catalogEntryHasCapability(
+  entry: Pick<CatalogEntry, 'capabilities'>,
+  capability: string,
+): boolean {
+  const wanted = canonicalCapability(capability);
+  return entry.capabilities.some((listed) => canonicalCapability(listed) === wanted);
+}
+
+/** The catalog's text entry for a model, when the catalog lists it. */
+export function findCatalogTextModel(modelId: string, providerId?: string): CatalogEntry | undefined {
+  return TEXT_MODELS.find(
+    (entry) => entry.modelId === modelId && (providerId === undefined || entry.providerId === providerId),
+  );
+}
 
 /** Curated image models available via Replicate. */
 const IMAGE_MODELS: CatalogEntry[] = [
@@ -238,6 +316,20 @@ const IMAGE_MODELS: CatalogEntry[] = [
  * OpenRouter text models and Replicate image models.
  */
 export function createUncensoredModelCatalog(): UncensoredModelCatalog {
+  const getFallbackLadder: UncensoredModelCatalog['getFallbackLadder'] = (tier, opts) => {
+    const ranking =
+      tier === 'private-adult' ? PRIVATE_ADULT_TEXT_RANKING : tier === 'mature' ? MATURE_TEXT_RANKING : [];
+    const intent = opts?.contentIntent;
+    const ladder: CatalogEntry[] = [];
+    for (const modelId of ranking) {
+      const entry = TEXT_MODELS.find((e) => e.modelId === modelId);
+      if (!entry) continue;
+      if (intent && !entry.contentPermissions.includes(intent)) continue;
+      ladder.push(entry);
+    }
+    return ladder;
+  };
+
   return {
     getTextModels(filter) {
       let results = [...TEXT_MODELS];
@@ -264,85 +356,10 @@ export function createUncensoredModelCatalog(): UncensoredModelCatalog {
       return results;
     },
 
+    getFallbackLadder,
+
     getPreferredTextModel(tier, contentIntent) {
-      if (tier === 'safe' || tier === 'standard') {
-        return null;
-      }
-
-      let candidates = [...TEXT_MODELS];
-
-      // Filter by content intent when provided
-      if (contentIntent) {
-        candidates = candidates.filter((e) =>
-          e.contentPermissions.includes(contentIntent),
-        );
-      }
-
-      // For private-adult tier, prioritize models that are both genuinely
-      // uncensored AND high quality. Magnum v4 72B is the strongest vetted
-      // uncensored model (2026-06-28 3-arm prod eval: consistent
-      // in-character prose, zero quality flags); llama-3.3-70b is the
-      // reliable multi-provider second link; Hermes 3 70B is mid-tier
-      // breadth; llama-3.1-8b is the cheap last resort.
-      if (tier === 'private-adult') {
-        const preferred = [
-          'anthracite-org/magnum-v4-72b',
-          'meta-llama/llama-3.3-70b-instruct',
-          'nousresearch/hermes-3-llama-3.1-70b',
-          'meta-llama/llama-3.1-8b-instruct',
-          // hermes-3-405b removed 2026-07-06 (continuity collapse in the
-          // 3-arm eval); Dolphin Mixtral 8x22B, Dolphin 3.0 8B, and
-          // MythoMax L2 13B removed earlier — see TEXT_MODELS for each
-          // removal's rationale.
-        ];
-        candidates.sort((a, b) => {
-          const aIdx = preferred.indexOf(a.modelId);
-          const bIdx = preferred.indexOf(b.modelId);
-          if (aIdx !== -1 && bIdx !== -1) return aIdx - bIdx;
-          if (aIdx !== -1) return -1;
-          if (bIdx !== -1) return 1;
-          return 0;
-        });
-        return candidates[0] ?? null;
-      }
-
-      // For `mature` tier, prefer the fast multi-provider llama-3.3-70b
-      // over the single-provider magnum. The quality delta on mature
-      // (non-explicit) narration is below the noise floor for most
-      // readers; the latency + host-availability delta dominates UX
-      // (production report 2026-05-05: "resolving turn seems to take way
-      // too long"). private-adult users above explicitly opt into the
-      // magnum quality path; mature users — the broad consumer case —
-      // get the fast path.
-      if (tier === 'mature') {
-        const matureRanking = [
-          'meta-llama/llama-3.3-70b-instruct',
-          'anthracite-org/magnum-v4-72b',
-          'nousresearch/hermes-3-llama-3.1-70b',
-          'meta-llama/llama-3.1-8b-instruct',
-        ];
-        candidates.sort((a, b) => {
-          const aIdx = matureRanking.indexOf(a.modelId);
-          const bIdx = matureRanking.indexOf(b.modelId);
-          if (aIdx !== -1 && bIdx !== -1) return aIdx - bIdx;
-          if (aIdx !== -1) return -1;
-          if (bIdx !== -1) return 1;
-          return 0;
-        });
-        return candidates[0] ?? null;
-      }
-
-      // Other tiers: stable-sort by quality high → medium → low.
-      const qualityOrder: Record<string, number> = {
-        high: 0,
-        medium: 1,
-        low: 2,
-      };
-      candidates.sort(
-        (a, b) => qualityOrder[a.quality] - qualityOrder[b.quality],
-      );
-
-      return candidates[0] ?? null;
+      return getFallbackLadder(tier, { contentIntent })[0] ?? null;
     },
 
     getPreferredImageModel(tier, capabilities) {

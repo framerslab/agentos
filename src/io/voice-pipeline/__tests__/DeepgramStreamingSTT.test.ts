@@ -184,4 +184,37 @@ describe('DeepgramStreamingSTT', () => {
       MockCtl.nextBehavior = 'open';
     }
   });
+
+  it('defaults to nova-3 and leaves the training opt-out off', async () => {
+    const defaults = new DeepgramStreamingSTT({ apiKey: 'test-key-123' });
+    const session = await defaults.startSession({ language: 'en-US' });
+    const params = new URL((session as any).ws.url).searchParams;
+    expect(params.get('model')).toBe('nova-3');
+    expect(params.has('mip_opt_out')).toBe(false);
+  });
+
+  it('sends mip_opt_out when the provider or a single session opts out', async () => {
+    const optedOut = new DeepgramStreamingSTT({ apiKey: 'test-key-123', mipOptOut: true });
+    const providerSession = await optedOut.startSession();
+    expect(new URL((providerSession as any).ws.url).searchParams.get('mip_opt_out')).toBe('true');
+
+    const sessionOnly = await stt.startSession({ providerOptions: { mip_opt_out: true } });
+    expect(new URL((sessionOnly as any).ws.url).searchParams.get('mip_opt_out')).toBe('true');
+  });
+
+  it('sends keywords as plain keyterm values on nova-3 and as keywords on nova-2', async () => {
+    const keywords = ['snuffleupagus:5', 'AC-42', 'customer service:1.5'];
+
+    const nova3 = new DeepgramStreamingSTT({ apiKey: 'test-key-123' });
+    const nova3Session = await nova3.startSession({ providerOptions: { keywords } });
+    const nova3Params = new URL((nova3Session as any).ws.url).searchParams;
+    expect(nova3Params.getAll('keyterm')).toEqual(['snuffleupagus', 'AC-42', 'customer service']);
+    expect(nova3Params.has('keywords')).toBe(false);
+
+    // The shared `stt` instance is configured with nova-2, which keeps `keywords`.
+    const nova2Session = await stt.startSession({ providerOptions: { keywords } });
+    const nova2Params = new URL((nova2Session as any).ws.url).searchParams;
+    expect(nova2Params.getAll('keywords')).toEqual(keywords);
+    expect(nova2Params.has('keyterm')).toBe(false);
+  });
 });

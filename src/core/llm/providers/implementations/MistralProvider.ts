@@ -21,7 +21,7 @@ import {
   ProviderEmbeddingOptions,
   ProviderEmbeddingResponse,
 } from '../IProvider';
-import { createHash } from 'node:crypto';
+import { sha256Hex } from '../../../utils/sha256';
 import { OpenAIProvider } from './OpenAIProvider';
 
 /** Mistral accepts only tool call ids made of nine letters and digits. */
@@ -39,7 +39,7 @@ const MISTRAL_TOOL_CALL_ID = /^[A-Za-z0-9]{9}$/;
  */
 export function toMistralToolCallId(id: string): string {
   if (MISTRAL_TOOL_CALL_ID.test(id)) return id;
-  return createHash('sha256').update(id).digest('hex').slice(0, 9);
+  return sha256Hex(id).slice(0, 9);
 }
 
 /** The messages with every tool call id in Mistral's form. */

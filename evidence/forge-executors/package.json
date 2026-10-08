@@ -1,0 +1,9 @@
+{
+  "name": "agentos-forge-executor-evidence",
+  "private": true,
+  "type": "module",
+  "description": "The CI evidence run for forged-code executors. Never published; installed only in its CI job.",
+  "dependencies": {
+    "quickjs-emscripten": "0.32.0"
+  }
+}

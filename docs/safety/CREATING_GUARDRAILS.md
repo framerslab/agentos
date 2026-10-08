@@ -12,7 +12,7 @@ This guide walks you through everything you need to create, package, test, and d
 Guardrails intercept content at two points in the AgentOS pipeline:
 
 1. **Input** -- before user messages enter the orchestration pipeline.
-2. **Output** -- before agent responses are streamed to the client.
+2. **Output** -- on the stream `processRequest()` returns, before its chunks reach the client.
 
 ```
 User Input --> [Input Guardrails] --> Orchestration --> [Output Guardrails] --> Client
@@ -20,7 +20,7 @@ User Input --> [Input Guardrails] --> Orchestration --> [Output Guardrails] --> 
 
 ### When to create a custom guardrail
 
-AgentOS ships with five first-class guardrail packs (PII Redaction, ML Classifiers, Topicality, Code Safety, Grounding Guard). Create a custom guardrail when:
+The extensions registry has six guardrail packs (PII Redaction, ML Classifiers, Topicality, Code Safety, Grounding Guard, Content Policy Rewriter). Create a custom guardrail when:
 
 - You need **domain-specific policy enforcement** (e.g., financial compliance, medical disclaimers).
 - You want to enforce **custom word lists, regex patterns, or proprietary classifiers**.
@@ -58,9 +58,10 @@ The optional `config` object controls **when** and **how** your guardrail is cal
 
 ```typescript
 interface GuardrailConfig {
-  // When true, evaluateOutput is called for every TEXT_DELTA chunk during
-  // streaming. When false (default), it is only called for FINAL_RESPONSE
-  // chunks. Enable this for real-time PII redaction or immediate blocking.
+  // When true, evaluateOutput is also called for each TEXT_DELTA chunk
+  // during streaming. Either way it is called for every chunk that carries
+  // isFinal: true (the FINAL_RESPONSE, an ERROR). Enable this for real-time
+  // PII redaction or immediate blocking.
   evaluateStreamingChunks?: boolean; // default: false
 
   // Rate-limits how many streaming evaluations happen per request.
@@ -75,12 +76,17 @@ interface GuardrailConfig {
   canSanitize?: boolean; // default: false
 
   // Maximum time (ms) to wait for this guardrail's evaluation.
-  // On timeout the evaluation is abandoned (fail-open) and a warning is logged.
+  // On timeout the evaluation is abandoned and a warning is logged; the
+  // guardrail is skipped (fail-open) unless failClosed is true.
   //
-  // SAFETY WARNING: Do NOT set timeoutMs on safety-critical guardrails
-  // (e.g., CSAM detection, compliance-mandatory filters) because fail-open
-  // on timeout means content passes unchecked.
+  // SAFETY WARNING: Do NOT set timeoutMs on a safety-critical guardrail
+  // (e.g., CSAM detection, compliance-mandatory filters) without failClosed,
+  // because fail-open on timeout means content passes unchecked.
   timeoutMs?: number; // default: undefined (wait indefinitely)
+
+  // When true, an evaluation that throws or times out yields a BLOCK
+  // (reasonCode 'GUARDRAIL_ERROR') instead of skipping this guardrail.
+  failClosed?: boolean; // default: false
 }
 ```
 
@@ -109,10 +115,12 @@ interface GuardrailContext {
 
 ### evaluateOutput(payload)
 
-Called for response chunks. The timing depends on `config.evaluateStreamingChunks`:
+Called for chunks of the turn's output stream, the stream that `processRequest()` passes through the output guardrails. Which chunks depends on `config.evaluateStreamingChunks`:
 
-- **`false` (default)** -- called only for FINAL_RESPONSE chunks.
-- **`true`** -- called for every TEXT_DELTA chunk during streaming.
+- **`false` (default)** -- each chunk that carries `isFinal: true`: the `FINAL_RESPONSE`, and an `ERROR` the turn yields.
+- **`true`** -- those, and each `TEXT_DELTA` chunk during streaming, up to `maxStreamingEvaluations` per stream. The dispatcher counts these evaluations by the guardrail object's `id` property: streaming sanitizers (`canSanitize: true`) without an `id` share one count, so give each of them an `id`.
+
+Other chunks (`TOOL_CALL_REQUEST`, `METADATA_UPDATE`, `SYSTEM_PROGRESS` and the rest that carry `isFinal: false`) are never passed to `evaluateOutput`. Two `ERROR` chunks never reach it either: the one `processRequest()` yields when an exception reaches its own `catch` (errors inside the turn arrive on the turn's stream and are evaluated), and the one an input guardrail's `BLOCK` produces. The streams that `handleToolResult()`, `handleToolResults()` and `resumeExternalToolRequest()` return do not pass through output guardrails.
 
 ```typescript
 interface GuardrailOutputPayload {
@@ -178,7 +186,7 @@ interface GuardrailEvaluationResult {
 
 ## Understanding the Chunk Lifecycle
 
-When `evaluateOutput` is called, the `chunk` field is a union of all AgentOS response types. Your guardrail will typically care about a subset of these.
+The `chunk` field is typed as the union of all AgentOS response types, but `evaluateOutput` receives only `TEXT_DELTA` chunks (with `evaluateStreamingChunks: true`) and chunks that carry `isFinal: true`. The sections below describe the chunks of a `processRequest()` stream and say which ones reach your guardrail.
 
 ### TEXT_DELTA
 
@@ -216,7 +224,7 @@ The complete, assembled response emitted at the end of a turn.
 
 ### TOOL_CALL_REQUEST
 
-Emitted when the LLM requests a tool call. Useful for guardrails that want to approve or deny tool invocations.
+Emitted when the model requests a tool call. It carries `isFinal: false`, so `evaluateOutput` never receives it: an output guardrail cannot approve or deny a tool call.
 
 ```typescript
 {
@@ -254,7 +262,7 @@ not persisted in conversation metadata.
 
 ### TOOL_RESULT_EMISSION
 
-The result of a tool execution, emitted after the tool runs.
+The result of an external tool call, emitted when the host returns it (`handleToolResult()`, `handleToolResults()` or a resumed request). The results of tools the runtime runs itself do not reach this stream: the GMI reports them as `TOOL_RESULT` chunks on its own stream, which `processRequest()` does not forward. `evaluateOutput` never receives this chunk: it arrives on the stream that continues the turn, which does not pass through output guardrails.
 
 ```typescript
 {
@@ -264,30 +272,31 @@ The result of a tool execution, emitted after the tool runs.
   toolName: 'web_search',
   toolResult: { ... },
   isSuccess: true,
+  errorMessage: undefined,         // the host's error message when isSuccess is false
   isFinal: false,
 }
 ```
 
 ### Other chunk types
 
-| Type               | Typical guardrail action                                      |
-| ------------------ | ------------------------------------------------------------- |
-| `SYSTEM_PROGRESS`  | Usually ignored. Informational progress updates.              |
-| `UI_COMMAND`       | Rarely intercepted. Contains frontend rendering instructions. |
-| `ERROR`            | Usually ignored. The stream is already in an error state.     |
-| `METADATA_UPDATE`  | Usually ignored. Session metadata changes.                    |
-| `WORKFLOW_UPDATE`  | Usually ignored. Multi-step workflow progress.                |
-| `AGENCY_UPDATE`    | Usually ignored. Multi-agent coordination state.              |
-| `PROVENANCE_EVENT` | Usually ignored. Signed ledger entries.                       |
+| Type               | Reaches `evaluateOutput`                                                                                                                                            |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SYSTEM_PROGRESS`  | No (`isFinal: false`). Progress updates.                                                                                                                            |
+| `UI_COMMAND`       | No (`isFinal: false`). Frontend rendering instructions.                                                                                                             |
+| `ERROR`            | Yes (`isFinal: true`) when the turn yields it. Not evaluated: the `ERROR` a guardrail's own BLOCK produces, and the `ERROR` that `processRequest()` yields when an exception reaches its own `catch`. |
+| `METADATA_UPDATE`  | No (`isFinal: false`). Lifecycle and task-outcome metadata, and the turn's RAG sources, which the dispatcher passes to later evaluations as `ragSources`.           |
+| `WORKFLOW_UPDATE`  | No (`isFinal: false`). Workflow progress.                                                                                                                           |
+| `AGENCY_UPDATE`    | Only the update that carries `isFinal: true`, once every seat of the agency has completed or failed.                                                                |
+| `PROVENANCE_EVENT` | Defined in `AgentOSResponseChunkType`; the runtime does not emit it.                                                                                                |
 
 ### The isFinal flag
 
-Every chunk has an `isFinal: boolean` field.
+Every chunk has an `isFinal: boolean` field. The flag describes its own chunk; `isFinal: false` does not mean another chunk follows.
 
-- **`isFinal: false`** -- more chunks will follow in this stream.
-- **`isFinal: true`** -- this is the last chunk. For `FINAL_RESPONSE` it is always true. For `TEXT_DELTA` the last streaming delta before the final response also has `isFinal: true`.
+- **`isFinal: false`** -- every `TEXT_DELTA` of a GMI turn carries it, and so does every `TOOL_CALL_REQUEST`. When the request is actionable (`executionMode: 'external'` and `requiresExternalToolResult: true`), `processRequest()` returns right after it: the turn waits for the host's tool results, and the rest of it comes from `handleToolResult()`, `handleToolResults()` or `resumeExternalToolRequest()`.
+- **`isFinal: true`** -- `FINAL_RESPONSE` and `ERROR` chunks carry it, and so does an `AGENCY_UPDATE` once every seat of the agency has completed or failed. A GMI turn that fails on a `processRequest()` stream yields its `ERROR` and then the turn's `FINAL_RESPONSE`, which carries the error, so an `ERROR` is not always the stream's last chunk.
 
-If your guardrail buffers streaming text, use `isFinal: true` as the signal to **flush your buffer** and perform a final evaluation.
+`evaluateOutput` receives every chunk with `isFinal: true` on the turn's output stream, whatever `evaluateStreamingChunks` is set to. If your guardrail buffers streaming text, use `isFinal: true` as the signal to **flush your buffer** and perform a final evaluation. A turn that stops for an external tool ends its `processRequest()` stream with that `TOOL_CALL_REQUEST`, which has no `isFinal: true`, and output guardrails do not run on the streams that `handleToolResult()`, `handleToolResults()` and `resumeExternalToolRequest()` return. Text your guardrail buffered before the tool request gets no final evaluation from the runtime.
 
 ---
 
@@ -431,7 +440,8 @@ class ProfanityFilterGuardrail implements IGuardrailService {
    * Blocks the response if profanity is detected in the final text.
    *
    * Because evaluateStreamingChunks is false (default), this method is
-   * only called for FINAL_RESPONSE chunks.
+   * called only for chunks that carry isFinal: true (the FINAL_RESPONSE,
+   * an ERROR).
    */
   async evaluateOutput({
     chunk,
@@ -1032,7 +1042,7 @@ async evaluateOutput(
   // Example: check that the response references at least one source.
   // A real implementation would use NLI cross-encoders or LLM-as-judge
   // (see the built-in Grounding Guard extension for a production example).
-  const sourceTexts = ragSources.map((s) => s.text);
+  const sourceTexts = ragSources.map((s) => s.content);
   const mentionsSource = sourceTexts.some((src) =>
     responseText.toLowerCase().includes(src.toLowerCase().slice(0, 50))
   );
@@ -1055,9 +1065,9 @@ async evaluateOutput(
 
 ### When ragSources is available
 
-- `ragSources` is populated on **every output chunk** in a RAG-enabled conversation (not just the final chunk).
-- It is `undefined` when no RAG retrieval was performed for the current request.
-- Each [`RagRetrievedChunk`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/IRetrievalAugmentor.ts) contains `text`, `score`, `metadata`, and source identifiers.
+- `ragSources` comes with every evaluation after the turn's retrieval: the GMI's sources reach the stream as a `METADATA_UPDATE` before the first `TEXT_DELTA`, and the `FINAL_RESPONSE` carries them too.
+- It is `undefined` when the turn retrieved no sources.
+- Each [`RagRetrievedChunk`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/IRetrievalAugmentor.ts) contains `content`, `relevanceScore`, `metadata`, and source identifiers (`originalDocumentId`, `dataSourceId`, `source`).
 
 ---
 
@@ -1250,8 +1260,8 @@ describe('Integration: ParallelGuardrailDispatcher + MyGuardrail', () => {
 
 ### Reference test files
 
-- `packages/agentos/tests/safety/guardrails/ParallelGuardrailDispatcher.spec.ts` -- comprehensive dispatcher tests.
-- `packages/agentos/tests/safety/guardrails.integration.spec.ts` -- integration tests for the full guardrail pipeline.
+- `tests/core/guardrails/ParallelGuardrailDispatcher.spec.ts` -- comprehensive dispatcher tests.
+- `tests/core/guardrails.integration.spec.ts` -- integration tests for the full guardrail pipeline.
 
 ---
 
@@ -1263,7 +1273,7 @@ describe('Integration: ParallelGuardrailDispatcher + MyGuardrail', () => {
 
 3. **Use specific reasonCodes for analytics.** Codes like `'PII_SSN_REDACTED'`, `'TOXICITY_HIGH'`, or `'COST_CEILING_EXCEEDED'` are far more useful than generic codes. These are machine-readable and can drive dashboards.
 
-4. **Fail-open on errors.** Always wrap your evaluation logic in try/catch and return `null` on unexpected errors. The dispatcher does this at the top level too, but defense-in-depth is important:
+4. **Fail-open on errors, unless the guardrail is safety-critical.** The dispatcher skips a guardrail that throws, with a logged warning, unless its config sets `failClosed: true`, which turns the throw into a BLOCK. A safety-critical guardrail sets `failClosed` and lets its errors propagate; any other guardrail wraps its evaluation logic in try/catch and returns `null` on unexpected errors:
 
    ```typescript
    async evaluateInput(payload) {
@@ -1276,7 +1286,7 @@ describe('Integration: ParallelGuardrailDispatcher + MyGuardrail', () => {
    }
    ```
 
-5. **Do NOT set timeoutMs on safety-critical guardrails.** Fail-open on timeout means content passes unchecked. Only use timeoutMs on guardrails where a missed evaluation is acceptable (e.g., quality flags, analytics).
+5. **Do NOT set timeoutMs on safety-critical guardrails without `failClosed: true`.** Fail-open on timeout means content passes unchecked. Without `failClosed`, use timeoutMs only on guardrails where a missed evaluation is acceptable (e.g., quality flags, analytics).
 
 6. **Keep guardrails focused.** One concern per guardrail. A PII guardrail should not also check for toxicity. This makes them independently testable, configurable, and composable.
 
@@ -1284,7 +1294,7 @@ describe('Integration: ParallelGuardrailDispatcher + MyGuardrail', () => {
 
 8. **Use ISharedServiceRegistry for anything >1MB.** ML models, NLP libraries, large dictionaries -- always go through the shared registry so multiple extensions can share the same instance.
 
-9. **Clean up stream buffers.** If you maintain per-stream state for streaming guardrails, always delete the buffer on `isFinal` and implement a stale-cleanup mechanism for abandoned streams.
+9. **Clean up stream buffers.** If you maintain per-stream state for streaming guardrails, always delete the buffer on `isFinal` and implement a stale-cleanup mechanism for abandoned streams and for turns that stop for an external tool, whose `processRequest()` stream carries no `isFinal: true` chunk.
 
 10. **Test with partial patterns.** When testing streaming guardrails, send patterns split across multiple TEXT_DELTA chunks to verify your buffer logic detects them correctly.
 

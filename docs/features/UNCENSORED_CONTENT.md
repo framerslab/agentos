@@ -30,11 +30,11 @@ instructions for weapons, explosives, or poisons.
 ## Text — uncensored chat and structured output
 
 Set `policyTier` on any text call. The [`PolicyAwareRouter`](https://github.com/framerslab/agentos/blob/master/src/core/llm/routing/PolicyAwareRouter.ts) picks from the
-[`UncensoredModelCatalog`](https://github.com/framerslab/agentos/blob/master/src/core/llm/routing/UncensoredModelCatalog.ts) (Hermes 3, Dolphin, MythoMax on OpenRouter) and
+[`UncensoredModelCatalog`](https://github.com/framerslab/agentos/blob/master/src/core/llm/routing/UncensoredModelCatalog.ts) (Magnum v4 72B, Llama 3.3 70B, Hermes 3 70B and Llama 3.1 8B on OpenRouter) and
 bypasses the default OpenAI/Anthropic chain.
 
 ```typescript
-import { generateText, PolicyAwareRouter, createUncensoredModelCatalog } from '@framers/agentos';
+import { generateText, PolicyAwareRouter, createUncensoredModelCatalog } from '@framers/agentos/api';
 
 // Option 1 — explicit router (most control)
 const router = new PolicyAwareRouter(
@@ -60,16 +60,39 @@ const reply = await a.generate('Tell me about the court intrigue.');
 
 ### Catalog entries (text)
 
-Tier `mature` / `private-adult` routes to OpenRouter text models in this
-priority order (high quality first):
+`createUncensoredModelCatalog().getFallbackLadder(tier)` returns each tier's
+ranked OpenRouter text models; `getPreferredTextModel(tier)` is its first entry.
 
-1. `nousresearch/hermes-3-llama-3.1-405b` — flagship, follows system prompts reliably
-2. `nousresearch/hermes-3-llama-3.1-70b` — faster, same instruction-following
-3. `cognitivecomputations/dolphin-mixtral-8x22b` — fully uncensored MoE
-4. `cognitivecomputations/dolphin3.0-llama3.1-8b` — cheap tail-end fallback
-5. `gryphe/mythomax-l2-13b` — last-resort creative-writing model
+| Tier | Ranking, best first | Context windows |
+|---|---|---|
+| `mature` | `meta-llama/llama-3.3-70b-instruct`, `anthracite-org/magnum-v4-72b`, `nousresearch/hermes-3-llama-3.1-70b`, `meta-llama/llama-3.1-8b-instruct` | 131,072; 32,768; 131,072; 131,072 |
+| `private-adult` | `anthracite-org/magnum-v4-72b`, `meta-llama/llama-3.3-70b-instruct`, `nousresearch/hermes-3-llama-3.1-70b`, `meta-llama/llama-3.1-8b-instruct` | 32,768; 131,072; 131,072; 131,072 |
 
-Safe/standard tiers ignore the router and use the default provider chain.
+Pass `{ contentIntent: 'erotic' }` to keep only the models that permit it
+(Magnum and Hermes 3 70B). Safe/standard tiers ignore the router and use the
+default provider chain.
+
+### Fallback chain
+
+A failed `mature` or `private-adult` call walks
+`buildPolicyAwareFallbackChain(tier)`: the tier's ladder (private-adult keeps
+the models that permit `erotic`; `llama-3.1-8b-instruct` is never a leg), then
+the availability chain. The walk:
+
+- drops the leg that names the model that just failed;
+- runs two uncensored legs, and the next ranked model only in place of one that
+  failed on availability or could not hold the request;
+- after a model refusal, passes over the chain's own Claude legs, while legs the
+  caller wrote run as written;
+- runs each leg as named: a router on the call picks only the first model;
+- skips any catalog model whose context window cannot hold the request
+  (`checkContextFit`), the first model included, which is then never sent the
+  turn. The check counts the output the provider will be asked for (a leg's
+  `maxTokensHeadroom` and a `customModelParams.max_tokens` override included)
+  and, on the prompt shim, the tool text it renders. With `planning` on, the
+  planning call goes out before the check. A call that enables OpenRouter's
+  context compression (`customModelParams: { plugins: [{ id: 'context-compression' }] }`)
+  is sent as is: OpenRouter trims the prompt to the window.
 
 ### Refusal-retry
 
@@ -79,7 +102,7 @@ retry on its own — refusal detection is the caller's responsibility. The
 wilds-ai `CompanionOrchestrator` wraps this into a
 `runRefusalRetry` helper that iterates the full uncensored catalog on
 detection; cooperating apps can use the same pattern via
-`createUncensoredModelCatalog().getTextModels()`.
+`createUncensoredModelCatalog().getFallbackLadder(tier)`.
 
 ## Image — uncensored generation and editing
 

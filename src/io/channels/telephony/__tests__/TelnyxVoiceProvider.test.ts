@@ -3,7 +3,8 @@
  *
  * All HTTP calls are intercepted via an injected `fetchImpl` -- no real
  * network traffic is made. Tests cover:
- * - Ed25519 webhook verification (no public key, missing headers, bad key format).
+ * - Ed25519 webhook verification (portal and DER keys, tampering, replay
+ *   window, no public key, missing headers, bad key format).
  * - Event mapping for all supported Telnyx Call Control event types.
  * - Hangup cause mapping (`normal_clearing` vs. other causes).
  * - Voicemail detection via `call.machine.detection.ended`.
@@ -14,6 +15,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { generateKeyPairSync, sign } from 'node:crypto';
 import { TelnyxVoiceProvider } from '../providers/telnyx.js';
 import type { WebhookContext } from '../types.js';
 
@@ -58,7 +60,7 @@ function makeWebhookCtx(body: string, overrideHeaders?: Record<string, string>):
   return {
     method: 'POST',
     url: 'https://example.com/telnyx/webhook',
-    headers: { 'x-telnyx-timestamp': '1234567890', ...overrideHeaders },
+    headers: { 'telnyx-timestamp': '1234567890', ...overrideHeaders },
     body,
   };
 }
@@ -219,6 +221,67 @@ describe('TelnyxVoiceProvider', () => {
       expect(result.valid).toBe(false);
     });
 
+    describe('with a signing key pair', () => {
+      const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+      const spkiDer = publicKey.export({ format: 'der', type: 'spki' });
+      // The portal's form: base64 of the 32 raw key bytes, the tail of the SPKI DER.
+      const portalKey = spkiDer.subarray(-32).toString('base64');
+      const body = JSON.stringify({ data: { event_type: 'call.answered', payload: { call_control_id: 'ctrl-1' } } });
+
+      function signedCtx(timestamp: string, signedBody = body): WebhookContext {
+        const signature = sign(null, Buffer.from(`${timestamp}|${signedBody}`), privateKey).toString('base64');
+        return {
+          method: 'POST',
+          url: 'https://example.com/wh',
+          headers: { 'telnyx-timestamp': timestamp, 'telnyx-signature-ed25519': signature },
+          body,
+        };
+      }
+
+      function providerWithKey(key: string, webhookToleranceSec?: number): TelnyxVoiceProvider {
+        return new TelnyxVoiceProvider({
+          apiKey: API_KEY,
+          connectionId: CONNECTION_ID,
+          publicKey: key,
+          webhookToleranceSec,
+          fetchImpl: fetchMock as typeof fetch,
+        });
+      }
+
+      const now = () => String(Math.floor(Date.now() / 1000));
+
+      it('accepts a signed webhook with the 32-byte key the Telnyx portal shows', () => {
+        expect(providerWithKey(portalKey).verifyWebhook(signedCtx(now()))).toEqual({ valid: true });
+      });
+
+      it('accepts a signed webhook with a DER SPKI key', () => {
+        expect(providerWithKey(spkiDer.toString('base64')).verifyWebhook(signedCtx(now()))).toEqual({ valid: true });
+      });
+
+      it('rejects a body that differs from the signed one', () => {
+        const result = providerWithKey(portalKey).verifyWebhook(signedCtx(now(), '{"data":{}}'));
+        expect(result).toEqual({ valid: false, error: 'Signature mismatch' });
+      });
+
+      it('reads the X- prefixed header names as well', () => {
+        const ctx = signedCtx(now());
+        const headers = {
+          'x-telnyx-timestamp': ctx.headers['telnyx-timestamp'],
+          'x-telnyx-signature-ed25519': ctx.headers['telnyx-signature-ed25519'],
+        };
+        expect(providerWithKey(portalKey).verifyWebhook({ ...ctx, headers })).toEqual({ valid: true });
+      });
+
+      it('rejects a timestamp older than the tolerance window, unless the window is off', () => {
+        const stale = String(Math.floor(Date.now() / 1000) - 301);
+        expect(providerWithKey(portalKey).verifyWebhook(signedCtx(stale))).toEqual({
+          valid: false,
+          error: 'Timestamp outside the tolerance window',
+        });
+        expect(providerWithKey(portalKey, 0).verifyWebhook(signedCtx(stale))).toEqual({ valid: true });
+      });
+    });
+
     it('should return valid: false when Ed25519 verification throws due to bad key format', () => {
       // Malformed public key will cause crypto.verify() to throw,
       // which the provider catches and returns as a verification failure.
@@ -232,8 +295,8 @@ describe('TelnyxVoiceProvider', () => {
         method: 'POST',
         url: 'https://example.com/wh',
         headers: {
-          'x-telnyx-timestamp': '12345',
-          'x-telnyx-signature-ed25519': 'fakesig',
+          'telnyx-timestamp': '12345',
+          'telnyx-signature-ed25519': 'fakesig',
         },
         body: '{}',
       };

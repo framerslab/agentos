@@ -36,7 +36,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -104,9 +104,6 @@ jobs:
 
           # Create .nojekyll to prevent GitHub Pages from ignoring _* files
           touch docs-deploy/.nojekyll
-
-          # Create CNAME for custom domain
-          echo "docs.agentos.sh" > docs-deploy/CNAME
 
       - name: Deploy to agentos-live-docs branch
         uses: peaceiris/actions-gh-pages@v4

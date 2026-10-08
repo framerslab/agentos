@@ -46,8 +46,20 @@ export type SessionTranscriptMessage =
        * precedence over `thinking` when both are present.
        */
       thinkingBlocks?: ThinkingBlock[];
+      /**
+       * Set on the last message of a turn that failed after these steps
+       * completed (GMI path, `agent({ runtime: 'gmi' })`). Never sent to a
+       * provider.
+       */
+      partial?: true;
     }
-  | { role: 'tool'; tool_call_id: string; content: string };
+  | {
+      role: 'tool';
+      tool_call_id: string;
+      content: string;
+      /** As on the assistant message: the last message of a turn that failed. Never sent to a provider. */
+      partial?: true;
+    };
 
 export type PairingVerdict = { ok: true } | { ok: false; reason: string };
 

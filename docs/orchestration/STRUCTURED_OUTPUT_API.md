@@ -33,7 +33,7 @@ with a simpler, type-safe interface:
 | `embedText()` | Generate embedding vectors for text (semantic search, RAG) |
 
 All three are top-level exports from `@framers/agentos` and work with any
-configured [LLM Provider](./LLM_PROVIDERS.md).
+configured [LLM Provider](../features/LLM_PROVIDERS.md).
 
 ---
 
@@ -448,6 +448,6 @@ strategies or parallel function calling.
 ## Related Documentation
 
 - [Structured Output Manager](./STRUCTURED_OUTPUT.md) — JSON Schema-based structured output
-- [LLM Providers](./LLM_PROVIDERS.md) — Provider configuration and capabilities
-- [Cost Optimization](./COST_OPTIMIZATION.md) — Budget management for structured generation
-- [High-Level API](./HIGH_LEVEL_API.md) — Full API reference
+- [LLM Providers](../features/LLM_PROVIDERS.md) — Provider configuration and capabilities
+- [Cost Optimization](../safety/COST_OPTIMIZATION.md) — Budget management for structured generation
+- [High-Level API](../getting-started/HIGH_LEVEL_API.md) — Full API reference

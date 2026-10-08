@@ -43,6 +43,8 @@ console.log(result.model);     // 'black-forest-labs/flux-redux-dev'
 | `negativePrompt` | `string` | — | Content to avoid |
 | `seed` | `number` | — | Reproducibility seed |
 | `policyTier` | `string` | — | Content policy tier for provider routing |
+| `apiKey` | `string` | the provider's env var | Key for the provider named, or for the one auto-detected |
+| `baseUrl` | `string` | provider default | Base URL for the provider |
 
 ## Provider Routing
 

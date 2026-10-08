@@ -11,6 +11,11 @@ tsconfig.build.tsbuildinfo
 
 node_modules/
 
+# Local environment files; examples stay tracked
+.env
+.env.*
+!.env*.example
+
 # Prisma generated client
 src/generated/
 
@@ -48,3 +53,6 @@ docs/*-plan-phase*.md
 
 # Example run output — large LLM artifacts, not part of the published surface
 examples/*/output/*.json
+
+# The forge executor evidence run's report (its node_modules/ is covered by the rule above)
+evidence/forge-executors/out/

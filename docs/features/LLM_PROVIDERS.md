@@ -65,7 +65,7 @@ AgentOS abstracts LLM access behind a unified [`IProvider`](https://github.com/f
 *CLI providers use your existing subscription — $0 per token.
 **Gemini CLI tool calling uses XML prompt-based parsing (less reliable than native API tool calling).
 
-> **Gemini CLI ToS Warning**: Google's Gemini CLI ToS may prohibit third-party subprocess invocation with OAuth auth. Use `gemini` with API key for production. See [CLI Providers](./CLI_PROVIDERS.md) for details.
+> **Gemini CLI ToS Warning**: Google's Gemini CLI ToS may prohibit third-party subprocess invocation with OAuth auth. Use `gemini` with API key for production. See [CLI Providers](../getting-started/CLI_PROVIDERS.md) for details.
 
 *OpenRouter capabilities depend on the underlying model selected.
 
@@ -184,10 +184,20 @@ const writer = agent({
 ## Fallback Behavior
 
 AgentOS supports automatic fallback when a provider request fails on a
-retryable error: HTTP 401/402/403/429/5xx, a network failure or request
-timeout, or a primary provider that cannot initialize (for example a revoked
-key that its model listing rejects). Fallback is **on by default** with an
-auto-built chain — to disable it, pass an empty array.
+retryable error: HTTP 401, 402, 403, 429, 500, 502, 503, 504 or 529, a
+network failure or request timeout, a primary provider that cannot initialize
+(for example a revoked key that its model listing rejects), a request larger
+than the model's context window, or a content-policy refusal
+([`isRetryableError()`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts)).
+Fallback is **on by default** with an auto-built chain — to disable it, pass
+an empty array.
+
+The chain serves `generateText()` and `streamText()`, and `agent()` and
+`agency()` through them. The GMIs of the full runtime (`processRequest()`)
+call their provider without a fallback chain; a GMI built with a completion
+gateway moves to the next hop when a hop cannot start or an attempt fails
+with a retryable error before any output
+([Model calls through a completion gateway](../GMI.md#model-calls-through-a-completion-gateway)).
 
 A failover never repeats work the caller already received or that had side
 effects. A stream that has delivered text or tool activity is not restarted
@@ -205,14 +215,28 @@ another vendor accepts: OpenRouter's routing controls (`provider`, `models`,
 [`GEMINI_ONLY_PARAM_KEYS`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/openrouter-only-params.ts)) reach only Gemini.
 
 ```
-Primary Provider (e.g., Anthropic)
-  ↓ fails (rate limit, timeout, error)
-OpenRouter Fallback (if OPENROUTER_API_KEY is set)
+Primary provider (e.g., Anthropic)
+  ↓ fails with a retryable error
+OpenAI gpt-5.6-sol               (if OPENAI_API_KEY is set)
   ↓ fails
-Ollama Local Fallback (if OLLAMA_BASE_URL is set)
+OpenRouter openai/gpt-5.6-sol    (if OPENROUTER_API_KEY is set)
+  ↓ fails
+Gemini gemini-3.1-pro-preview    (if GEMINI_API_KEY is set)
   ↓ fails
 Error returned to caller
 ```
+
+The auto-built chain ([`buildFallbackChain()`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts))
+takes these legs in this order, each when its key is set, and leaves out the
+primary's own provider: OpenAI `gpt-5.6-sol`, Anthropic `claude-sonnet-5-5`
+(effort `low`, 1024 tokens of output headroom), OpenRouter
+`openai/gpt-5.6-sol`, and Gemini `gemini-3.1-pro-preview` (effort `low`, 1024
+tokens of output headroom). Every leg runs with prompt caching off
+(`cache: false`). Ollama is not in the auto-built chain; list it in
+`fallbackProviders` to use it. For a call whose policy tier is `mature` or
+`private-adult`, the chain starts with the policy catalog's fallback ladder for
+that tier when `OPENROUTER_API_KEY` is set
+([`buildPolicyAwareFallbackChain()`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts)).
 
 ### Configuring Fallback
 
@@ -280,7 +304,7 @@ const myAgent = agent({
 
 For cheap-first routing across multiple models, attach a custom [`IModelRouter`](https://github.com/framerslab/agentos/blob/master/src/core/llm/routing/IModelRouter.ts)
 via `agent({ router })` — the router decides which provider/model to call per
-request. See [Cost Optimization](./COST_OPTIMIZATION.md) for the full guide.
+request. See [Cost Optimization](../safety/COST_OPTIMIZATION.md) for the full guide.
 
 ---
 
@@ -325,7 +349,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 Reasoning-default models (`claude-opus-5-5`, `claude-fable-5-1`, `claude-sonnet-5-5`, `claude-opus-5`, `claude-fable-5`, `claude-sonnet-5`, `claude-opus-4-8`, `claude-opus-4-7`) reject `temperature` and `top_p` with HTTP 400; the provider drops both automatically for these models and sends adaptive thinking when a thinking budget is requested. Claude Opus 5.5, Claude Sonnet 5.5, Claude Mythos 5.1 and the Fable models also reject a forced `tool_choice`, so the provider sends `auto` for them and structured output uses the prompt-based JSON path. Anthropic retired `claude-opus-4-20250514` and `claude-sonnet-4-20250514` on 2026-06-15.
 
-Opus 5 and later, Sonnet 5 and later, Fable and Mythos think by default. Pass `thinking: false` to turn thinking off: the provider sends `{ type: 'between_tools' }` on `claude-sonnet-5-5` and `{ type: 'disabled' }` on `claude-opus-5` and `claude-sonnet-5`, and lowers `effort` to `high` on Sonnet 5.5 and Opus 5, which turn thinking off only at that level or below. `claude-opus-5-5`, the Fable models and Mythos always think; `thinking: false` sends nothing there and logs a warning once. Older models think only when asked, so `thinking: false` leaves the field out. `effort` follows each model's ladder: `claude-opus-4-5` takes `low`, `medium` and `high`, `claude-opus-4-6` and `claude-sonnet-4-6` add `max`, and later models take all five levels; a level a model does not take is sent as `high`.
+Opus 5 and later, Sonnet 5 and later, Fable and Mythos think by default. Pass `thinking: false` to turn thinking off: the provider sends `{ type: 'between_tools' }` on `claude-sonnet-5-5` and `{ type: 'disabled' }` on `claude-opus-5` and `claude-sonnet-5`, and lowers `effort` to `high` on Sonnet 5.5 and Opus 5, which turn thinking off only at that level or below. `claude-opus-5-5`, the Fable models and Mythos always think; `thinking: false` sends nothing there and logs a warning once. Older models think only when asked, so `thinking: false` leaves the field out. `effort` follows each model's ladder: `claude-opus-4-5` takes `low`, `medium` and `high`, `claude-opus-4-6` and `claude-sonnet-4-6` add `max`, and later models take all five levels; a level a model does not take is sent as `high`. `generateObject` and `streamObject` take the same `thinking` and `effort` options and forward them unchanged; a structured call on a model that thinks by default needs `thinking: false` or room in `maxTokens` for the thinking.
 
 `usage.costUSD` prices cache reads at 0.1x the input price, except Claude Opus 5.5 (0.05x) and Claude Fable 5.1 (0.025x), and cache writes at 1.25x for the 5-minute TTL and 2x for the 1-hour TTL, read from the response's `cache_creation` split.
 
@@ -505,7 +529,7 @@ class MyProvider implements IProvider {
   readonly name = 'My Custom LLM';
 
   // ... implement generateCompletion / streamCompletion / listModels / etc.
-  // See packages/agentos/src/core/llm/providers/IProvider.ts for the full
+  // See src/core/llm/providers/IProvider.ts for the full
   // contract; the existing OpenAI / Anthropic / Ollama implementations are
   // good references.
 }
@@ -546,10 +570,10 @@ exercised paths.
 
 ## Related Documentation
 
-- [Getting Started](./GETTING_STARTED.md) — Initial setup and configuration
-- [Cost Optimization](./COST_OPTIMIZATION.md) — Budget management and routing
-- [Architecture](./ARCHITECTURE.md) — System architecture overview
-- [Structured Output](./STRUCTURED_OUTPUT.md) — JSON schema enforcement per provider
+- [Getting Started](../getting-started/GETTING_STARTED.md) — Initial setup and configuration
+- [Cost Optimization](../safety/COST_OPTIMIZATION.md) — Budget management and routing
+- [Architecture](../architecture/ARCHITECTURE.md) — System architecture overview
+- [Structured Output](../orchestration/STRUCTURED_OUTPUT.md) — JSON schema enforcement per provider
 
 ## Prompt caching
 

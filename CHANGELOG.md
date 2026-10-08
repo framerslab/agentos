@@ -1,3 +1,298 @@
+## [0.12.13](https://github.com/framerslab/agentos/compare/v0.12.12...v0.12.13) (2026-10-08)
+
+### fix
+
+* **hitl:** close the review findings on the approval gate (#153) ([53547bc](https://github.com/framerslab/agentos/commit/53547bccdea440518a2c68e44e3266e44561ac9e))
+
+## [0.12.12](https://github.com/framerslab/agentos/compare/v0.12.11...v0.12.12) (2026-10-08)
+
+### fix
+
+* **sandbox:** the output limit is measured in bytes, and a forged call that passes it on either stream fails (#151) ([b83f058](https://github.com/framerslab/agentos/commit/b83f058ece33de2ef188649d556e36b64c5f1e92))
+
+## [0.12.11](https://github.com/framerslab/agentos/compare/v0.12.10...v0.12.11) (2026-10-08)
+
+### fix
+
+* **emergent:** a forged tool's result past the in-process output limit fails the call instead of coming back cut (#149) ([45570bb](https://github.com/framerslab/agentos/commit/45570bb0c2afc99a789b4117179c2f72b5a27227))
+
+## [0.12.10](https://github.com/framerslab/agentos/compare/v0.12.9...v0.12.10) (2026-10-08)
+
+### feat
+
+* **emergent:** forged code runs through an executor interface, and a CI run measures QuickJS (#148) ([3c5832a](https://github.com/framerslab/agentos/commit/3c5832ac978a511a03397201ec1a3c3379deceba))
+
+### docs
+
+* audit follow-ups to the GMI step contract and gateway docs (#147) ([000547a](https://github.com/framerslab/agentos/commit/000547a77f2fe57fd8c3f61fbb7008d490e41106))
+* **gmi:** correct the step contract and document completion options, history and the gateway (#145) ([ff883a4](https://github.com/framerslab/agentos/commit/ff883a43926dd46f1052d365d13cad969e5421da))
+
+### ci
+
+* check that package exports point at built files (#146) ([fee43be](https://github.com/framerslab/agentos/commit/fee43be4142aefe488667bbbd54d05f00a60074e))
+
+## [0.12.9](https://github.com/framerslab/agentos/compare/v0.12.8...v0.12.9) (2026-10-08)
+
+### fix
+
+* **emergent:** six hardening fixes for the forged-tool ceiling (#144) ([06a8a96](https://github.com/framerslab/agentos/commit/06a8a96ecf5479b81b2847d395c8e77a889fb4a3))
+
+## [0.12.8](https://github.com/framerslab/agentos/compare/v0.12.7...v0.12.8) (2026-10-08)
+
+### fix
+
+* **agency:** a seat that sets provider: undefined is judged by the provider its calls use before it inherits the agency key (#120) ([65b1be1](https://github.com/framerslab/agentos/commit/65b1be13af68b86e027846733a6c63385ae766c0))
+* **export:** a credentials object inside an item of a tools list is redacted (#119) ([d95b5cf](https://github.com/framerslab/agentos/commit/d95b5cf8fc104eb949960f346b5734eac4c0b99d))
+* **openrouter:** the wait for a choice-level error's usage line is bounded, ends on the error event, and reads the abort line (#143) ([f4479cd](https://github.com/framerslab/agentos/commit/f4479cd79c7deb78fd475013e523fd60453dc020))
+
+## [0.12.7](https://github.com/framerslab/agentos/compare/v0.12.6...v0.12.7) (2026-10-08)
+
+### fix
+
+* **emergent:** fifteen defects from a cold read of the stored-tool and composition code (#140) ([f515e1b](https://github.com/framerslab/agentos/commit/f515e1b3bfb5254ced50d424eb9cc4f43d23dd18))
+* **openrouter:** a choice-level stream error waits for its usage line, and the written-id exclusion is pinned (#141) ([91dce0d](https://github.com/framerslab/agentos/commit/91dce0d7714dc58e4e8109fe1e59b0f80492f0f9))
+
+## [0.12.6](https://github.com/framerslab/agentos/compare/v0.12.5...v0.12.6) (2026-10-08)
+
+### chore
+
+* **examples:** the Mars example's forged code runs under a ceiling (#138) ([a95ce08](https://github.com/framerslab/agentos/commit/a95ce0890564b2be918049ae813f825c84ca5743))
+
+### fix
+
+* **images:** a processing instruction in a DOCTYPE subset is read whole (#137) ([1452648](https://github.com/framerslab/agentos/commit/1452648735ecc62f92fcc1a87b260f8faddde035))
+
+## [0.12.5](https://github.com/framerslab/agentos/compare/v0.12.4...v0.12.5) (2026-10-08)
+
+### fix
+
+* **openrouter:** a choice-level stream error walks on, an error event keeps its usage, and leg checks read the sent model (#136) ([5815f26](https://github.com/framerslab/agentos/commit/5815f261f6b2a428fb909881657d70b41f0688fe))
+
+### feat
+
+* **emergent:** a ceiling for forged code, a broker for its capabilities, and a record of every capability call (#134) ([52f1f83](https://github.com/framerslab/agentos/commit/52f1f83ed05bb7139ab7328c32ef53d5fa2cff5e))
+
+## [0.12.4](https://github.com/framerslab/agentos/compare/v0.12.3...v0.12.4) (2026-10-07)
+
+### feat
+
+* **fallback:** the policy chain follows the catalog ladder, legs run as named, oversized requests skip small models ([547973d](https://github.com/framerslab/agentos/commit/547973da9beb305a536c7ee2cde6439925b8bf72))
+* **runtime:** completion gateway and the GMI step contract (#129) ([fa936a7](https://github.com/framerslab/agentos/commit/fa936a72d0793fc9c624070dcf8c87a3a0f98447))
+
+## [0.12.3](https://github.com/framerslab/agentos/compare/v0.12.2...v0.12.3) (2026-10-07)
+
+### fix
+
+* **images:** a DOCTYPE's quoted literals no longer end it early (#133) ([b2c3646](https://github.com/framerslab/agentos/commit/b2c3646bfa1cebe8dba749ab5b0507299274f9f2))
+
+## [0.12.2](https://github.com/framerslab/agentos/compare/v0.12.1...v0.12.2) (2026-10-07)
+
+### fix
+
+* **images:** SVG detection reads the root element, and error previews stop at 40 characters (#132) ([9b0fb44](https://github.com/framerslab/agentos/commit/9b0fb44bcd4ca98a3a4185c75e087391fa150b24))
+* **speech:** a streaming feature requirement follows the streaming capability (#131) ([2ddb996](https://github.com/framerslab/agentos/commit/2ddb9963ee70b18b67692967a82f7dde0072bda3))
+
+## [0.12.1](https://github.com/framerslab/agentos/compare/v0.12.0...v0.12.1) (2026-10-07)
+
+### fix
+
+* **emergent:** stored chains load at any depth, admissions of a tool run in turn, and inner refusals stay inner ([d853bfd](https://github.com/framerslab/agentos/commit/d853bfd67a25a32ac8ff3f459bf32b18986d2455))
+
+## [0.12.0](https://github.com/framerslab/agentos/compare/v0.11.7...v0.12.0) (2026-10-07)
+
+### ⚠ BREAKING CHANGE
+
+* **emergent:** a composition or workflow step no longer chains a tool
+with side effects unless the host lists it in
+emergent.compose.sideEffectingTools, and never chains a tool whose
+hasSideEffects is unset; ComposableToolBuilder needs a StepGate to compose
+(a bare callback still constructs but composes nothing, compose_needs_gate);
+allowSandboxTools: false now also loads stored code tools suspended
+(sandbox_tools_off); a composed tool's approval moves from the composed
+call to its side-effecting steps.
+
+### feat
+
+* **emergent:** compose mode runs every step through a gate ([0c637aa](https://github.com/framerslab/agentos/commit/0c637aadf07b1126d20afe776ccb897dff2f0ee9))
+
+### test
+
+* **openrouter:** streamText keeps the text that arrives with the finish reason (#127) ([04df6e8](https://github.com/framerslab/agentos/commit/04df6e8f5238376c48a7ce1cc3035bc9a21f2259))
+
+## [0.11.7](https://github.com/framerslab/agentos/compare/v0.11.6...v0.11.7) (2026-10-07)
+
+### fix
+
+* **emergent:** a load adopts only rows unchanged since its read, and settlement re-checks ([d1bda8e](https://github.com/framerslab/agentos/commit/d1bda8ee0298ea8381166bd158abd3dbe61573b0))
+
+## [0.11.6](https://github.com/framerslab/agentos/compare/v0.11.5...v0.11.6) (2026-10-07)
+
+### fix
+
+* **emergent:** legacy owners load suspended, and a per-tool generation guards adoption ([b6b61c9](https://github.com/framerslab/agentos/commit/b6b61c99e874fdb97055b2e24aae85b1de2d6b5b))
+* **images:** do not attach the payload-carrying read error as cause (#124) ([a3eb89e](https://github.com/framerslab/agentos/commit/a3eb89ef1f0b537de9e45463411ee800bdd8cc8f))
+* **openrouter:** keep the text and tool-argument deltas of the finish chunk (#125) ([eb5fc8d](https://github.com/framerslab/agentos/commit/eb5fc8d6a57320ea4c5cd935f4ecf7fc6f315784))
+* **speech:** take a provider's streaming capability from the instance, and a catalog entry only of its own kind (#126) ([0f0bfbc](https://github.com/framerslab/agentos/commit/0f0bfbc6a3221e9c7bb6f0343c112d5d1ef722cc))
+
+## [0.11.5](https://github.com/framerslab/agentos/compare/v0.11.4...v0.11.5) (2026-10-07)
+
+### fix
+
+* **speech:** build every keyed core provider in SpeechRuntime, and make its register methods reach the resolver (#123) ([346b2f7](https://github.com/framerslab/agentos/commit/346b2f73810a35b4b236514415173abce8515819))
+
+## [0.11.4](https://github.com/framerslab/agentos/compare/v0.11.3...v0.11.4) (2026-10-07)
+
+### fix
+
+* **anthropic:** drop strict mode for a schema over the strict complexity limits (#121) ([88507ea](https://github.com/framerslab/agentos/commit/88507ea12120e62ab7ed5d95177f570634ea9c86))
+* **images:** decode raw base64 BMP, ICO, JPEG 2000, JPEG XL and SVG, and stop echoing base64 in errors (#122) ([ed6bf45](https://github.com/framerslab/agentos/commit/ed6bf4535a1e0f9574a0bb78d6b81eb189ddbe8f))
+
+## [0.11.3](https://github.com/framerslab/agentos/compare/v0.11.2...v0.11.3) (2026-10-07)
+
+### fix
+
+* **speech:** read a real ExtensionManager on refresh, and drop stale preference boosts (#117) ([a10a51f](https://github.com/framerslab/agentos/commit/a10a51f94f5d19f8f2aa4072a094724f029ea060))
+
+## [0.11.2](https://github.com/framerslab/agentos/compare/v0.11.1...v0.11.2) (2026-10-07)
+
+### fix
+
+* **llm:** keep every variant's schema for a property the Anthropic union merge shares (#114) ([ca60ae1](https://github.com/framerslab/agentos/commit/ca60ae1a376096e1d06e1af5f138d8a2934e5f9a))
+
+## [0.11.1](https://github.com/framerslab/agentos/compare/v0.11.0...v0.11.1) (2026-10-07)
+
+### fix
+
+* **images:** decode raw base64 that contains "/" instead of reading it as a file path (#110) ([3bc42c1](https://github.com/framerslab/agentos/commit/3bc42c161b428b033fd5c72bcba027b6cc88f9b6))
+* **model:** split a colon-qualified model id only on a known provider prefix, never under ollama (#106) ([6f68209](https://github.com/framerslab/agentos/commit/6f682096a97874548fb09d053c905db2492d4e47))
+* **openrouter:** keep the role of the final streamed message (#112) ([ffeb2f1](https://github.com/framerslab/agentos/commit/ffeb2f198bc5350649cdffe33d71494d6366e2d6))
+* **speech:** keep registered providers on refresh and never resolve one without an instance (#109) ([48b5e53](https://github.com/framerslab/agentos/commit/48b5e5325ef3b9fd8ed20a41702169bd56d7b0ce))
+
+### feat
+
+* **speech:** current provider defaults for speech and transcription (#115) ([c9147b6](https://github.com/framerslab/agentos/commit/c9147b6b0ecfd4c6f1b491543c2e3837448d29bc))
+
+### docs
+
+* **agency:** describe what agency() shares (#111) ([5b9f428](https://github.com/framerslab/agentos/commit/5b9f428023003f3a6868e33bdb5ad76783ef93eb))
+
+## [0.11.0](https://github.com/framerslab/agentos/compare/v0.10.40...v0.11.0) (2026-10-07)
+
+### ⚠ BREAKING CHANGE
+
+* **export:** redact secrets by default, mark instances and pre-built seats, take secrets and values on import (#99)
+
+### fix
+
+* **emergent:** stored tools load through one checked path, and a suspension holds ([d640311](https://github.com/framerslab/agentos/commit/d64031113364e1234f55696a67c42867e95fd1a4))
+* **export:** redact secrets by default, mark instances and pre-built seats, take secrets and values on import (#99) ([7afad92](https://github.com/framerslab/agentos/commit/7afad924fd9bda013104bafa5a6033bf5e1ca1cf))
+* **hitl:** enforce approvals.beforeTool through a per-call gate on every tool loop (#107) ([6ed4ed9](https://github.com/framerslab/agentos/commit/6ed4ed91acdf8ef2b900142674f823a88bafb6d0))
+
+## [0.10.40](https://github.com/framerslab/agentos/compare/v0.10.39...v0.10.40) (2026-10-07)
+
+### feat
+
+* **gmi:** reasoning trace size set per persona or runtime config (#98) ([b544794](https://github.com/framerslab/agentos/commit/b544794973d5a7d70b92c7b284ed4778c64b873a))
+
+### docs
+
+* concept pages for the two API paths, the turn lifecycle, memory, self-extension and agencies; architecture and emergent pages corrected (#100) ([abdf22e](https://github.com/framerslab/agentos/commit/abdf22e239f990aad2d91e7f3a48ea03d69c3747))
+
+## [0.10.39](https://github.com/framerslab/agentos/compare/v0.10.38...v0.10.39) (2026-10-07)
+
+### fix
+
+* **hierarchical:** delegate and spawn tools return output the manager can read (#101) ([4be9e5f](https://github.com/framerslab/agentos/commit/4be9e5fea639c8d58e113a070b2468f4412eacc5))
+
+## [0.10.38](https://github.com/framerslab/agentos/compare/v0.10.37...v0.10.38) (2026-10-07)
+
+### feat
+
+* **personas:** define personas inline with a built-in in-memory loader (#97) ([6785eb2](https://github.com/framerslab/agentos/commit/6785eb2df86505b4fe922e35f6d35b3928c47bd2))
+
+### docs
+
+* say what a GMI adds over a plain agent and put GMIs first in Concepts (#96) ([f38e5fc](https://github.com/framerslab/agentos/commit/f38e5fc5f6a9cb04523b1e4c68f136b2c8b0803f))
+
+## [0.10.37](https://github.com/framerslab/agentos/compare/v0.10.36...v0.10.37) (2026-10-07)
+
+### fix
+
+* **api:** let structured calls turn thinking off and run the Anthropic rescue leg on Sonnet 5.5 (#88) ([1c9afbf](https://github.com/framerslab/agentos/commit/1c9afbf27f8bcc3d33f1d929921a37efbc48d757))
+
+## [0.10.36](https://github.com/framerslab/agentos/compare/v0.10.35...v0.10.36) (2026-10-07)
+
+### fix
+
+* **nlp:** decide language by script before trigram scoring (#80) ([84ea2d0](https://github.com/framerslab/agentos/commit/84ea2d04412618be243efe2a7e1529afd2569926))
+
+## [0.10.35](https://github.com/framerslab/agentos/compare/v0.10.34...v0.10.35) (2026-10-07)
+
+### fix
+
+* **api:** agent() warns on cognitiveMechanisms, agency().connect() rejects (#95) ([6f53042](https://github.com/framerslab/agentos/commit/6f53042df5f4033b358afe33581a471d255707f2))
+
+### docs
+
+* correct the GMI page and repair moved source links (#92) ([fc799ec](https://github.com/framerslab/agentos/commit/fc799ecb2ee69c8c56935f763f84a042983bdaa9))
+* say how sponsors are featured in the provider list (#81) ([d9ae8e9](https://github.com/framerslab/agentos/commit/d9ae8e9da4df099580b35b1d8689a3103c0994b7))
+* say that a failed publish is not retried (#73) ([c32014c](https://github.com/framerslab/agentos/commit/c32014c13c33d8fdd3703163f3443babcca29893))
+* say what the in-process executor does and does not do (#82) ([15e411e](https://github.com/framerslab/agentos/commit/15e411e0129118cd048bdbed21b01030ee836633))
+
+### chore
+
+* **deps:** move every dependency to the newest version its range admits (#71) ([f3871c2](https://github.com/framerslab/agentos/commit/f3871c23f7f96018fe6c46486c698124264befd3))
+* **deps:** runtime majors: execa 10, minimatch 10, pino 10, uuid 14 (#78) ([d487abf](https://github.com/framerslab/agentos/commit/d487abf0eb6c2fa1cb8c1b8844aca6d77a114661))
+* **deps:** semantic-release 25 and its plugins (#77) ([42ab9ad](https://github.com/framerslab/agentos/commit/42ab9ad92ae7de5b2c0108e9452d250a6a3c7bb0))
+* **deps:** tooling majors: eslint 10, rimraf 6, better-sqlite3 13, Node 22 types (#75) ([a61fca1](https://github.com/framerslab/agentos/commit/a61fca1b59ca52730e82688a5640ede5e282a2ec))
+* **deps:** vitest 5 (#76) ([f2bc9a2](https://github.com/framerslab/agentos/commit/f2bc9a29a8eaf07350d324d8754f51c354767a41))
+
+### ci
+
+* run on Node 22 (#72) ([9a96ded](https://github.com/framerslab/agentos/commit/9a96ded74fda4b8ff5b52a5f0396fca4b8ea4591))
+
+## <small>0.10.34 (2026-10-05)</small>
+
+* fix(streamText): a failed fallback leg hands the walk to the next one (#67) ([34eeac494485eda2d110674fde5ca457e0fb40c5](https://github.com/framerslab/agentos/commit/34eeac494485eda2d110674fde5ca457e0fb40c5))
+
+## <small>0.10.33 (2026-10-05)</small>
+
+* fix(nlp): read natural's members when the built package runs under plain Node (#68) ([66c76ce7c94c6fe33579d0e6c399e6df1ba8a8a1](https://github.com/framerslab/agentos/commit/66c76ce7c94c6fe33579d0e6c399e6df1ba8a8a1))
+* docs: contributor guides, issue and pull request templates, agent instructions (#65) ([1546eb18252b76316bb8b5b1dc2eec032710dd9e](https://github.com/framerslab/agentos/commit/1546eb18252b76316bb8b5b1dc2eec032710dd9e))
+
+## <small>0.10.32 (2026-10-05)</small>
+
+* fix(llm): context-window rejections walk, server stream errors are retryable, hermes-3-70b lists no tools (#66) ([b34e7d41354e8b9f320f2139a50b3ef018bb43e3](https://github.com/framerslab/agentos/commit/b34e7d41354e8b9f320f2139a50b3ef018bb43e3))
+
+## <small>0.10.31 (2026-10-04)</small>
+
+* fix(openrouter): declines and in-body errors reach the fallback walkers as typed errors (#62) ([11b2ce673afcccb491ecdf6d4c215dea729719ba](https://github.com/framerslab/agentos/commit/11b2ce673afcccb491ecdf6d4c215dea729719ba))
+
+## <small>0.10.30 (2026-10-04)</small>
+
+* fix(storage): read a column before altering its table ([3878831610983d76a87d678063372ab3cda6eb44](https://github.com/framerslab/agentos/commit/3878831610983d76a87d678063372ab3cda6eb44))
+* docs(agency): show per-agent providers, the chair and the provider quorum in the examples (#61) ([c593081e321c919a038910e7b57c2fb6d565abf9](https://github.com/framerslab/agentos/commit/c593081e321c919a038910e7b57c2fb6d565abf9))
+
+## <small>0.10.29 (2026-10-04)</small>
+
+* fix(generateObject): the schema text the model reads carries the Zod size checks ([52680b4a3e05b1244bc1a463e628404365b23fdb](https://github.com/framerslab/agentos/commit/52680b4a3e05b1244bc1a463e628404365b23fdb))
+* fix(SchemaLowering): per-position tuple bounds and an integer type in the bounded lowering; a payload test that can fail ([2d3f7510d18bdca31e074d2dba82b51309761df4](https://github.com/framerslab/agentos/commit/2d3f7510d18bdca31e074d2dba82b51309761df4))
+* fix(SchemaLowering): read the size bounds from the node's checks, not the bag ([dbc5e5913c51dcf16a3a7b2e836cab6f6fc6376b](https://github.com/framerslab/agentos/commit/dbc5e5913c51dcf16a3a7b2e836cab6f6fc6376b))
+* fix(streamObject): the schema text carries the Zod size checks ([a61ed33a4ba3758746a9c231710c65cf55fdee03](https://github.com/framerslab/agentos/commit/a61ed33a4ba3758746a9c231710c65cf55fdee03))
+
+## <small>0.10.28 (2026-10-02)</small>
+
+* fix(generateText): try each fallback leg once, and fail over on HTTP 529 ([9bffd8f11a19dde255716129e986e1ad0f7af402](https://github.com/framerslab/agentos/commit/9bffd8f11a19dde255716129e986e1ad0f7af402))
+
+## <small>0.10.27 (2026-10-02)</small>
+
+* fix(llm): hash the OpenAI cache key and Mistral tool ids without node:crypto ([cb21c8221df0f9416d80ad8cda79fd8f2cdaa747](https://github.com/framerslab/agentos/commit/cb21c8221df0f9416d80ad8cda79fd8f2cdaa747))
+* fix(openrouter): keep API keys out of error details and logs ([0c1b0e4f044720ddef7e6888c7ac6d4ad5ffd90c](https://github.com/framerslab/agentos/commit/0c1b0e4f044720ddef7e6888c7ac6d4ad5ffd90c))
+* fix(telephony): read Telnyx webhook headers and portal keys correctly ([799b65606f1dc2186543e668f365de3a5a920d2a](https://github.com/framerslab/agentos/commit/799b65606f1dc2186543e668f365de3a5a920d2a))
+* fix(telephony): sort Twilio webhook params the way Twilio signs them ([4d2cd0e44a289447f263bd0e37d5ba13cc262bcf](https://github.com/framerslab/agentos/commit/4d2cd0e44a289447f263bd0e37d5ba13cc262bcf))
+* fix(telephony): verify Plivo webhooks with the V3 signature Plivo sends ([bf05ec30fc1a45e1a4dd8d3b52f3606c41da9ba6](https://github.com/framerslab/agentos/commit/bf05ec30fc1a45e1a4dd8d3b52f3606c41da9ba6))
+* docs(telephony): correct the webhook signature table ([4860248af62cca0f6aa008094c1c0f91513b30c7](https://github.com/framerslab/agentos/commit/4860248af62cca0f6aa008094c1c0f91513b30c7))
+
 ## <small>0.10.26 (2026-10-01)</small>
 
 * Merge branch 'master' into fix/cwe22-sandboxedtoolforge-sandboxed-772c ([54d1ccea3523efb50a302aae7ce947e0076419c3](https://github.com/framerslab/agentos/commit/54d1ccea3523efb50a302aae7ce947e0076419c3))

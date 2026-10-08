@@ -1,52 +1,58 @@
 /**
- * @fileoverview SandboxedToolForge runs agent-generated JavaScript code in a
- * hardened node:vm sandbox with wall-clock timeouts and API allowlisting.
+ * @fileoverview SandboxedToolForge validates agent-generated JavaScript and
+ * runs it on an executor; by default in an in-process node:vm context with a
+ * wall-clock timeout and the granted functions.
  *
  * @module @framers/agentos/emergent/SandboxedToolForge
  *
  * Overview:
- * - Delegates the actual VM execution to {@link CodeSandbox}, which provides
- *   the hardened node:vm context (`codeGeneration: { strings: false, wasm: false }`,
- *   frozen console, explicit `process`/`globalThis`/`require`/etc. set to undefined).
- * - Adds the forge-specific contract: code must define `function execute(input)`
- *   or `function run(input)`, and the resolved value is JSON-serialized back to
- *   the caller via a marker-prefixed stdout convention.
- * - Allowlisted APIs (`fetch`, `fs.readFile`, `crypto`) are injected via
- *   `CodeSandbox`'s `extraGlobals` config so the hardened defaults stay intact.
+ * - Validates the source (`validateCode()`, a regex blocklist) and pre-parses
+ *   it, builds the functions the request's list grants, and hands the run to a
+ *   {@link ForgedCodeExecutor}.
+ * - The contract with forged code: it defines `function execute(input)` or
+ *   `function run(input)`, and the value it resolves to comes back after a
+ *   JSON round trip.
+ * - The default executor, {@link InProcessExecutor}, runs the code through
+ *   CodeSandbox: a node:vm context inside the host's process, with
+ *   `codeGeneration: { strings: false, wasm: false }` on the context's own
+ *   intrinsics, a frozen console, and `process`/`globalThis`/`require` and
+ *   others set to undefined. A host may pass another executor (`executor`).
  *
  * Security model:
  * 1. **Static validation** (`validateCode()`) rejects dangerous patterns (regex
- *    scan) before any code reaches the runtime.
- * 2. **Runtime isolation** executes validated code inside `CodeSandbox`'s
- *    hardened minimal context, which exposes only JSON/Math/Date/etc. plus the
- *    explicitly opted-in APIs from this forge's allowlist.
- * 3. **Resource bounding** enforces a wall-clock timeout via node:vm. Memory is
- *    NOT preemptively enforced (node:vm shares the host heap); `memoryUsedBytes`
- *    is reported as a best-effort `process.memoryUsage().heapUsed` delta around
- *    the sandbox call. For real per-isolate memory limits, an isolated-vm soft
- *    dependency would be required (deferred until hosted multi-tenant ships).
+ *    scan) before any code reaches an executor.
+ * 2. **The executor** runs the validated code. The in-process executor declares
+ *    `isolates: false`: node:vm is not a security mechanism (Node's
+ *    documentation), and the context is handed the host's own constructors.
+ *    Another executor's `isolates` is its author's claim.
+ * 3. **Resource bounding**: the in-process executor enforces a wall-clock
+ *    timeout. Memory is NOT preemptively enforced (node:vm shares the host
+ *    heap); `memoryUsedBytes` is a best-effort `process.memoryUsage().heapUsed`
+ *    delta around the call.
  *
- * Allowlisted APIs (each requires explicit opt-in via {@link SandboxAPI}):
- * - `fetch` — HTTP requests, domain-restricted via {@link SandboxedToolForgeConfig.fetchDomainAllowlist}.
+ * Allowlisted APIs (each requires explicit opt-in; a list may name `fs.read`,
+ * the catalogue name, or `fs.readFile`, the function it injects):
+ * - `fetch` — HTTP requests; {@link SandboxedToolForgeConfig.fetchDomainAllowlist} checks the first URL's host when set.
  * - `fs.readFile` — Read-only file access, max 1 MB, restricted to the
  *   configured roots after symlink resolution (a link inside a root cannot
  *   be used to reach a file outside one).
  * - `crypto` — Hashing and HMAC only (`createHash`, `createHmac`).
+ *
+ * Under a ceiling (`EmergentConfig.capabilities`) the engine attaches a
+ * `CapabilityBroker`: the injected functions are then the broker's, scoped
+ * by the ceiling and checked per call, and this forge's own
+ * `fetchDomainAllowlist` and `fsReadRoots` are not used.
  */
 
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
 import * as path from 'node:path';
-import type { SandboxExecutionRequest, SandboxExecutionResult, SandboxAPI } from './types.js';
-import { CodeSandbox } from '../../safety/sandbox/executor/CodeSandbox.js';
-
-/**
- * Sentinel marker prefixed onto the JSON-serialized forge result inside the
- * sandbox's stdout. Lets the caller separate the forge result from any
- * incidental `console.log` output the user code may produce. Multi-byte
- * NUL-bracketed marker so it cannot collide with normal text content.
- */
-const FORGE_RESULT_MARKER = '\u0000__SANDBOX_FORGE_RESULT__\u0000';
+import type { AllowlistName, CapabilityName, SandboxExecutionRequest, SandboxExecutionResult } from './types.js';
+import { normalizeAllowlist } from './capabilities.js';
+import type { CapabilityBroker } from './broker/CapabilityBroker.js';
+import { ReadRoots, withinRoots } from './broker/fs-read.js';
+import { InProcessExecutor } from './executor/InProcessExecutor.js';
+import type { ExecutorRunResult, ForgedCodeExecutor } from './executor/types.js';
 
 // ============================================================================
 // CONFIGURATION
@@ -59,12 +65,18 @@ const FORGE_RESULT_MARKER = '\u0000__SANDBOX_FORGE_RESULT__\u0000';
  */
 export interface SandboxedToolForgeConfig {
   /**
-   * Nominal heap budget in megabytes for telemetry and future isolate-backed
-   * execution. The current node:vm implementation cannot preemptively enforce
-   * memory limits.
+   * Memory budget in megabytes, handed to the executor with each call. The
+   * in-process executor reports the memory used and does not limit it; an
+   * executor that can limit memory uses it as the limit.
    * @default 128
    */
   memoryMB?: number;
+
+  /**
+   * What runs forged code. Defaults to an {@link InProcessExecutor} (node:vm
+   * inside this process; `isolates: false`).
+   */
+  executor?: ForgedCodeExecutor;
 
   /**
    * Maximum wall-clock execution time in milliseconds.
@@ -118,7 +130,10 @@ const ALWAYS_BANNED: ReadonlyArray<[RegExp, string]> = [
 // ============================================================================
 
 /**
- * Runs agent-generated code in a hardened node:vm sandbox via {@link CodeSandbox}.
+ * Validates agent-generated code and runs it on an executor, by default in an in-process
+ * node:vm context ({@link InProcessExecutor}). `node:vm` is not a security mechanism
+ * (Node's documentation): the checks here hold for
+ * code that acts through the injected functions, and memory is reported, not limited.
  *
  * Runtime bounds:
  * - Memory: observed as a heap delta, not preemptively capped
@@ -126,7 +141,7 @@ const ALWAYS_BANNED: ReadonlyArray<[RegExp, string]> = [
  * - Blocked APIs: eval, Function, process, require, import, child_process, fs.write*
  *
  * Allowlisted APIs (each requires explicit opt-in):
- * - `fetch`: HTTP requests (domain-restricted)
+ * - `fetch`: HTTP requests (the first URL's host is checked when `fetchDomainAllowlist` is set)
  * - `fs.readFile`: Read-only file access (path-restricted, max 1 MB)
  * - `crypto`: Hashing and HMAC only
  *
@@ -158,27 +173,14 @@ export class SandboxedToolForge {
   /** Filesystem roots sandboxed reads may access. */
   private readonly fsReadRoots: string[];
 
-  /**
-   * Real path of each configured root, resolved lazily and cached PER ROOT.
-   *
-   * Both sides of a containment check have to be real paths: a configured
-   * root is frequently itself a link (on macOS `/tmp` is a link to
-   * `/private/tmp`), so comparing a resolved file against an unresolved root
-   * would deny perfectly legitimate reads.
-   *
-   * Per root, not per set: a set-wide cache that is dropped whenever ANY
-   * root fails to resolve would re-resolve the roots that DID succeed, and a
-   * root symlink repointed in between would then be followed to its new
-   * target — losing the pinning this cache exists to provide.
-   */
-  private readonly realFsReadRootCache = new Map<string, Promise<string>>();
+  /** The roots' real paths, pinned per root on first success (see `ReadRoots`). */
+  private readonly readRoots: ReadRoots;
 
-  /**
-   * Hardened node:vm sandbox shared across all execute() calls. Owns the
-   * codeGeneration restriction, frozen console, and explicit-undefined
-   * dangerous globals. Reused per forge instance to amortize stats bookkeeping.
-   */
-  private readonly codeSandbox: CodeSandbox;
+  /** The engine's broker under a ceiling; absent on the legacy path. */
+  private broker: CapabilityBroker | undefined;
+
+  /** What runs forged code: the in-process executor unless the host passed one. */
+  readonly executor: ForgedCodeExecutor;
 
   /**
    * Create a new SandboxedToolForge instance.
@@ -191,41 +193,41 @@ export class SandboxedToolForge {
     this.timeoutMs = config?.timeoutMs ?? 5000;
     this.fetchDomainAllowlist = (config?.fetchDomainAllowlist ?? []).map((d) => d.toLowerCase());
     this.fsReadRoots = (config?.fsReadRoots ?? [process.cwd()]).map((root) => path.resolve(root));
-    this.codeSandbox = new CodeSandbox({ timeoutMs: this.timeoutMs });
+    this.readRoots = new ReadRoots(this.fsReadRoots);
+    this.executor = config?.executor ?? new InProcessExecutor();
+  }
+
+  /**
+   * The options this forge runs with, defaults applied. The engine reads them
+   * to check a host-built forge against a ceiling.
+   */
+  effectiveOptions(): { memoryMB: number; timeoutMs: number; fetchDomainAllowlist: string[]; fsReadRoots: string[] } {
+    return {
+      memoryMB: this.memoryMB,
+      timeoutMs: this.timeoutMs,
+      fetchDomainAllowlist: [...this.fetchDomainAllowlist],
+      fsReadRoots: [...this.fsReadRoots],
+    };
+  }
+
+  /**
+   * Under a ceiling the engine attaches its broker: from then on the
+   * functions injected into forged code are the broker's, and every
+   * execution needs a call handle. A forge serves one broker.
+   *
+   * @throws Error when a different broker is already attached.
+   */
+  attachBroker(broker: CapabilityBroker): void {
+    if (this.broker && this.broker !== broker) {
+      throw new Error('broker_already_attached: a forge under a ceiling serves one engine');
+    }
+    this.broker = broker;
   }
 
   // --------------------------------------------------------------------------
-  // PUBLIC: validateCode
+  // PRIVATE: describeSyntaxError
   // --------------------------------------------------------------------------
 
-  /**
-   * Static analysis of code — reject dangerous patterns before execution.
-   *
-   * Scans the source string for banned API usage patterns using regex matching.
-   * If an API is not present in the allowlist, references to it are also flagged.
-   *
-   * Checked patterns (always banned):
-   * - `eval()`, `new Function()`, `require()`, `import`, `process.*`
-   * - `child_process`, `fs.write*`, `fs.unlink`, `fs.rm`, `fs.rmdir`
-   *
-   * Conditionally banned (when not in allowlist):
-   * - `fetch(` — when `'fetch'` is not in the allowlist
-   * - `fs.*` — when `'fs.readFile'` is not in the allowlist
-   * - `crypto.*` — when `'crypto'` is not in the allowlist
-   *
-   * @param code - The raw source code string to validate.
-   * @param allowlist - The set of APIs the code is permitted to use.
-   * @returns An object with `valid: true` if no violations were found, or
-   *   `valid: false` with a `violations` array describing each flagged pattern.
-   *
-   * @example
-   * ```ts
-   * const forge = new SandboxedToolForge();
-   * const result = forge.validateCode('eval("exploit")', []);
-   * // result.valid === false
-   * // result.violations === ['eval() is forbidden']
-   * ```
-   */
   /**
    * Translate a raw V8 SyntaxError message into a concrete hint that
    * points the LLM (or the retry loop) at the likely cause. Returns
@@ -233,36 +235,6 @@ export class SandboxedToolForge {
    * the raw message in that case. The hints map to the 4 most common
    * LLM forge mistakes observed in production.
    */
-  private resolveReadRoots(): Promise<string[]> {
-    return Promise.all(this.fsReadRoots.map((root) => this.resolveReadRoot(root)));
-  }
-
-  /**
-   * Resolve one configured root, pinning the first success.
-   *
-   * A resolved root is pinned for the life of the forge, deliberately:
-   * re-resolving it per read would let a root symlink be repointed
-   * underneath a running sandbox, which is the move this containment check
-   * exists to stop. A caller that needs to follow a retargeted root builds a
-   * new forge. A FAILED resolution is not pinned, so a root that becomes
-   * readable later is picked up — and because each root is cached on its
-   * own, one unreadable root can never un-pin a sibling that resolved.
-   */
-  private resolveReadRoot(root: string): Promise<string> {
-    const cached = this.realFsReadRootCache.get(root);
-    if (cached !== undefined) return cached;
-
-    const pending = realpath(root).catch(() => {
-      // Drop the failure so the next read retries this root. Its lexical
-      // form never matches a real path, so an unresolvable root cannot
-      // widen the sandbox while it stays unreadable.
-      this.realFsReadRootCache.delete(root);
-      return root;
-    });
-    this.realFsReadRootCache.set(root, pending);
-    return pending;
-  }
-
   private describeSyntaxError(message: string): string {
     const m = message || '';
     if (/Unexpected token 'const'/.test(m) || /Unexpected token 'let'/.test(m)) {
@@ -296,8 +268,42 @@ export class SandboxedToolForge {
     return '';
   }
 
-  validateCode(code: string, allowlist: SandboxAPI[]): { valid: boolean; violations: string[] } {
+  // --------------------------------------------------------------------------
+  // PUBLIC: validateCode
+  // --------------------------------------------------------------------------
+
+  /**
+   * Static analysis of code — reject dangerous patterns before execution.
+   *
+   * Scans the source string for banned API usage patterns using regex
+   * matching. The list is read in catalogue names first (`fs.readFile`
+   * stands for `fs.read`), so a list naming either one allows `fs.` access.
+   *
+   * Checked patterns (always banned):
+   * - `eval()`, `new Function()`, `require()`, `import`, `process.*`
+   * - `child_process`, `fs.write*`, `fs.unlink`, `fs.rm`, `fs.rmdir`
+   *
+   * Conditionally banned (when the list does not grant them):
+   * - `fetch(` — without `fetch`
+   * - `fs.*` — without `fs.read` (or its alias `fs.readFile`)
+   * - `crypto.*` — without `crypto`
+   *
+   * @param code - The raw source code string to validate.
+   * @param allowlist - The capabilities the code may use, in either name.
+   * @returns `valid: true` with no violations, or `valid: false` with a
+   *   `violations` array describing each flagged pattern.
+   *
+   * @example
+   * ```ts
+   * const forge = new SandboxedToolForge();
+   * const result = forge.validateCode('eval("exploit")', []);
+   * // result.valid === false
+   * // result.violations === ['eval() is forbidden']
+   * ```
+   */
+  validateCode(code: string, allowlist: readonly AllowlistName[]): { valid: boolean; violations: string[] } {
     const violations: string[] = [];
+    const granted = normalizeAllowlist(allowlist).capabilities;
 
     // Check always-banned patterns.
     for (const [pattern, message] of ALWAYS_BANNED) {
@@ -306,15 +312,14 @@ export class SandboxedToolForge {
       }
     }
 
-    // Conditionally ban `fetch(` when not allowed.
-    if (!allowlist.includes('fetch') && /\bfetch\s*\(/.test(code)) {
+    // Conditionally ban `fetch(` when not granted.
+    if (!granted.includes('fetch') && /\bfetch\s*\(/.test(code)) {
       violations.push('fetch() is not in the allowlist');
     }
 
-    // Conditionally ban all `fs.*` when fs.readFile is not allowed.
-    // We already caught write/unlink/rm above, but if fs.readFile is not in
-    // the allowlist, ban any fs reference.
-    if (!allowlist.includes('fs.readFile') && /\bfs\s*\./.test(code)) {
+    // Without fs.read, ban any fs reference (writes, unlinks and removals
+    // were caught above).
+    if (!granted.includes('fs.read') && /\bfs\s*\./.test(code)) {
       // Only add if we haven't already flagged a more specific fs violation.
       const hasFsViolation = violations.some((v) => v.startsWith('fs.'));
       if (!hasFsViolation) {
@@ -322,8 +327,8 @@ export class SandboxedToolForge {
       }
     }
 
-    // Conditionally ban `crypto` when not allowed.
-    if (!allowlist.includes('crypto') && /\bcrypto\s*\./.test(code)) {
+    // Conditionally ban `crypto` when not granted.
+    if (!granted.includes('crypto') && /\bcrypto\s*\./.test(code)) {
       violations.push('crypto access is not in the allowlist');
     }
 
@@ -346,9 +351,9 @@ export class SandboxedToolForge {
    *
    * Execution flow:
    * 1. Run `validateCode()` — reject immediately if violations are found.
-   * 2. Wrap the agent's code into a self-contained expression that calls `execute`.
-   * 3. Run in a Node.js `vm` sandbox with a restricted global context.
-   * 4. Parse the output, measure execution time, and return the result.
+   * 2. Pre-parse the source; a syntax error comes back with a hint.
+   * 3. Build the functions the list grants (the broker's under a ceiling).
+   * 4. Hand the run to the executor and turn its answer into the result.
    *
    * @param request - The execution request containing code, input, allowlist,
    *   and resource limits.
@@ -371,6 +376,17 @@ export class SandboxedToolForge {
   async execute(request: SandboxExecutionRequest): Promise<SandboxExecutionResult> {
     const timeout = request.timeoutMs ?? this.timeoutMs;
     const startTime = performance.now();
+
+    // Under a ceiling every run carries its call handle: the broker keys what
+    // is in flight by it and refuses capability calls once it has ended.
+    if (this.broker && !request.call) {
+      return {
+        success: false,
+        error: 'call_handle_required: under a ceiling every execution carries a call handle (request.call)',
+        executionTimeMs: Math.round(performance.now() - startTime),
+        memoryUsedBytes: 0,
+      };
+    }
 
     // Step 1: Static validation (regex blocklist).
     const validation = this.validateCode(request.code, request.allowlist);
@@ -404,88 +420,58 @@ export class SandboxedToolForge {
       };
     }
 
-    // Step 3: Wrap the code so it supports `execute(input)` or `run(input)`
-    // and emits the JSON-serialized result with a sentinel marker so the
-    // caller can pluck it out of stdout (which may also contain incidental
-    // user console output).
-    const wrappedCode = `
-      ${request.code};
-      const __entry =
-        typeof execute === 'function'
-          ? execute
-          : (typeof run === 'function' ? run : null);
-      if (!__entry) {
-        throw new Error('Sandboxed tool must define execute(input) or run(input).');
-      }
-      const __out = await __entry(${JSON.stringify(request.input)});
-      return ${JSON.stringify(FORGE_RESULT_MARKER)} + (__out === undefined ? 'undefined' : JSON.stringify(__out));
-    `;
+    // Step 3: The injected functions, for the list read in catalogue names.
+    // Under a ceiling they are the broker's, scoped and checked per call;
+    // otherwise this forge's own.
+    const granted = normalizeAllowlist(request.allowlist).capabilities;
+    const globals =
+      this.broker && request.call
+        ? this.broker.functionsFor(granted, request.call)
+        : this.buildExtraGlobals(granted);
 
-    // Step 4: Build allowlisted-API extras. CodeSandbox provides the safe
-    // builtins + hardened-undefined dangerous globals; this only adds the
-    // explicit forge allowlist (fetch / fs.readFile / crypto).
-    const extraGlobals = this.buildExtraGlobals(request.allowlist);
-
-    // Step 5: Heap snapshot before delegation. Best-effort observability
-    // (over-approximates because other event-loop activity allocates too).
-    // Not preemptive enforcement; node:vm cannot enforce memory limits.
-    const heapBefore = process.memoryUsage().heapUsed;
-
-    // Step 6: Delegate to the hardened CodeSandbox for the actual VM call.
-    const codeResult = await this.codeSandbox.execute({
-      language: 'javascript',
-      code: wrappedCode,
-      config: { timeoutMs: timeout, extraGlobals },
-    });
-
-    const heapAfter = process.memoryUsage().heapUsed;
-    const memoryUsedBytes = Math.max(0, heapAfter - heapBefore);
+    // Step 4: The executor runs the code and calls its entry point; by
+    // default in-process, through CodeSandbox. A rejection is a fault in the
+    // executor and reads as an execution error.
+    const memoryMB = request.memoryMB ?? this.memoryMB;
+    let ran: ExecutorRunResult;
+    try {
+      ran = await this.executor.run({
+        code: request.code,
+        input: request.input,
+        globals,
+        timeoutMs: timeout,
+        memoryMB,
+        signal: request.call?.signal,
+      });
+    } catch (err: unknown) {
+      ran = {
+        status: 'error',
+        error: `Execution error: ${err instanceof Error ? err.message : String(err)}`,
+        memoryUsedBytes: 0,
+      };
+    }
     const executionTimeMs = Math.round(performance.now() - startTime);
 
-    if (codeResult.status !== 'success') {
-      const stderr = codeResult.output?.stderr ?? '';
-      const baseError = codeResult.error ?? stderr ?? 'Sandbox execution failed';
-      const errorMessage =
-        codeResult.status === 'timeout'
-          ? `Execution timed out after ${timeout}ms`
-          : `Execution error: ${baseError}`;
-      return {
-        success: false,
-        error: errorMessage,
-        executionTimeMs,
-        memoryUsedBytes,
-      };
+    switch (ran.status) {
+      case 'ok':
+        return { success: true, output: ran.output, executionTimeMs, memoryUsedBytes: ran.memoryUsedBytes };
+      case 'timeout':
+        return {
+          success: false,
+          error: `Execution timed out after ${timeout}ms`,
+          executionTimeMs,
+          memoryUsedBytes: ran.memoryUsedBytes,
+        };
+      case 'memory_exceeded':
+        return {
+          success: false,
+          error: `Execution exceeded its memory limit of ${memoryMB} MB`,
+          executionTimeMs,
+          memoryUsedBytes: ran.memoryUsedBytes,
+        };
+      case 'error':
+        return { success: false, error: ran.error, executionTimeMs, memoryUsedBytes: ran.memoryUsedBytes };
     }
-
-    // Step 7: Pluck the marker-prefixed JSON result out of stdout.
-    const stdout = codeResult.output?.stdout ?? '';
-    const idx = stdout.lastIndexOf(FORGE_RESULT_MARKER);
-    if (idx < 0) {
-      return {
-        success: false,
-        error: 'Sandbox returned no recognizable forge result',
-        executionTimeMs,
-        memoryUsedBytes,
-      };
-    }
-    const json = stdout.slice(idx + FORGE_RESULT_MARKER.length);
-    let output: unknown;
-    if (json === 'undefined' || json === '') {
-      output = undefined;
-    } else {
-      try {
-        output = JSON.parse(json);
-      } catch {
-        output = json;
-      }
-    }
-
-    return {
-      success: true,
-      output,
-      executionTimeMs,
-      memoryUsedBytes,
-    };
   }
 
   // --------------------------------------------------------------------------
@@ -493,16 +479,18 @@ export class SandboxedToolForge {
   // --------------------------------------------------------------------------
 
   /**
-   * Build the allowlist-injected globals to layer on top of CodeSandbox's
-   * hardened defaults. Only the three forge allowlist APIs (fetch, fs,
-   * crypto) are injected here; CodeSandbox provides JSON/Math/Date/etc.
-   * and the hardened-undefined process/globalThis/require/etc.
+   * The legacy path's injected functions (no ceiling), for a list in
+   * catalogue names: `fetch` checks only the first URL's host against
+   * `fetchDomainAllowlist` and follows redirects; `fs.readFile` reads under
+   * `fsReadRoots` with a 1 MB limit; `crypto` is unscoped. The in-process
+   * executor's CodeSandbox provides JSON/Math/Date/etc. and the removed
+   * process/globalThis/require.
    */
-  private buildExtraGlobals(allowlist: SandboxAPI[]): Record<string, unknown> {
+  private buildExtraGlobals(granted: readonly CapabilityName[]): Record<string, unknown> {
     /* eslint-disable @typescript-eslint/no-explicit-any */
     const extras: Record<string, unknown> = {};
 
-    if (allowlist.includes('fetch')) {
+    if (granted.includes('fetch')) {
       const domainAllowlist = this.fetchDomainAllowlist;
       extras.fetch = async (
         urlOrRequest: string | { url: string },
@@ -518,30 +506,10 @@ export class SandboxedToolForge {
       };
     }
 
-    if (allowlist.includes('fs.readFile')) {
+    if (granted.includes('fs.read')) {
       extras.fs = {
         readFile: async (filePath: string) => {
           const resolvedPath = path.resolve(filePath);
-          // Containment via path.relative, not a string prefix: a root that
-          // already ends in a separator (the filesystem root `/`, a Windows
-          // drive root `C:\`) would otherwise be compared against a doubled
-          // separator and deny every file beneath it. path.relative also
-          // applies the platform's own case rules.
-          const withinRoots = (candidate: string, roots: readonly string[]): boolean =>
-            roots.some((root) => {
-              const relative = path.relative(root, candidate);
-              // '' means the candidate IS the root. A relative path that
-              // climbs out ('..' or '../x') or stays absolute (a different
-              // Windows drive) is outside it. Checking for the '..' segment
-              // rather than the '..' prefix keeps a sibling named '..foo'
-              // from reading as an escape.
-              return (
-                relative === '' ||
-                (relative !== '..' &&
-                  !relative.startsWith(`..${path.sep}`) &&
-                  !path.isAbsolute(relative))
-              );
-            });
 
           // Lexical pass: rejects the obvious `../../etc/passwd` shape before
           // the sandbox pays for any filesystem call.
@@ -562,7 +530,7 @@ export class SandboxedToolForge {
           // filesystem's own error (ENOENT and friends) rather than masking
           // a missing file as a containment failure.
           const realPath = await realpath(resolvedPath);
-          if (!withinRoots(realPath, await this.resolveReadRoots())) {
+          if (!withinRoots(realPath, await this.readRoots.real())) {
             throw new Error(
               `fs.readFile blocked: path "${resolvedPath}" resolves outside the allowed roots`,
             );
@@ -586,7 +554,7 @@ export class SandboxedToolForge {
       };
     }
 
-    if (allowlist.includes('crypto')) {
+    if (granted.includes('crypto')) {
       extras.crypto = {
         randomUUID: () => randomUUID(),
         createHash: (algorithm: string) => createHash(algorithm),

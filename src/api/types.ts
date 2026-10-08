@@ -88,6 +88,13 @@ export interface MemoryConfig {
     /** Cron-style or ISO-duration interval between consolidation passes (e.g. `"PT1H"`). */
     interval?: string;
   };
+  /**
+   * Embedding model for cognitive memory on the GMI path (`agent({ runtime: 'gmi' })`).
+   * Default: OpenAI's default embedding model when OPENAI_API_KEY is set, else Ollama's when
+   * OLLAMA_BASE_URL is set. Anthropic has no embedding models. `dimension` is required for a
+   * model whose dimension agentos does not know.
+   */
+  embedding?: { provider: string; model?: string; dimension?: number };
 }
 
 /**
@@ -208,7 +215,20 @@ export interface HitlConfig {
    * no pause at that lifecycle point.
    */
   approvals?: {
-    /** Tool names whose invocations require approval before execution. */
+    /**
+     * Tool names whose invocations require approval before execution; `'*'`
+     * covers every tool. Enforced on every tool loop of a config seat, a
+     * pre-built seat that forwards per-call options, a spawned specialist and
+     * a nested agency, after `onBeforeToolExecution` has run. A rejection skips
+     * the tool and the run goes on; a handler error (a throw, a decision whose
+     * `approved` is not a boolean, a failure after the handler answered), or
+     * a timeout under `onTimeout: 'error'`, skips that tool and every later
+     * one unasked, and rejects the call once the strategy settles, after the
+     * run's usage is counted; the model is told only that the approval
+     * handler failed. A strategy that fails after it does not replace that
+     * error: the strategy's error goes to `on.error`, and with no result
+     * returned, that run adds no usage.
+     */
     beforeTool?: string[];
     /** Agent names whose invocations require approval before execution. */
     beforeAgent?: string[];
@@ -695,16 +715,25 @@ export interface ApprovalDecision {
   /** Optional human-provided rationale for the decision. */
   reason?: string;
   /**
-   * Optional in-line modifications the approver wishes to apply.
-   * The orchestrator merges these on top of the original action before
-   * proceeding (only when `approved` is `true`).
+   * Optional changes the approver asks for, read only when `approved` is
+   * `true`: `output` on a `beforeReturn` approval and `instructions` on a
+   * `beforeAgent` approval. `toolArgs` is never applied.
    */
   modifications?: {
-    /** Overridden tool arguments. */
+    /**
+     * Not applied. The `beforeTool` approval gate approves or refuses the
+     * arguments `onBeforeToolExecution` left, and it refuses an approval that
+     * carries `toolArgs` (anything but `undefined` or `null`), so the call is
+     * skipped rather than run with the arguments the approver meant to
+     * replace. Rewrite arguments in that hook, which runs first.
+     */
     toolArgs?: unknown;
-    /** Overridden output text. */
+    /** Replaces the final text, on a `beforeReturn` approval. */
     output?: string;
-    /** Additional instructions injected into the agent's system prompt. */
+    /**
+     * Added to the input of the agent a `beforeAgent` approval lets run, under
+     * the sequential, parallel and hierarchical strategies.
+     */
     instructions?: string;
   };
 }
@@ -1203,16 +1232,18 @@ export interface Agent {
    * can be serialized to JSON or YAML and re-imported via `importAgent()`.
    *
    * @param metadata - Optional human-readable metadata to attach.
+   * @param options - Redaction options; secrets are redacted unless `redactSecrets` is `false`.
    * @returns A portable config object.
    */
-  export?(metadata?: Record<string, unknown>): unknown;
+  export?(metadata?: Record<string, unknown>, options?: { redactSecrets?: boolean }): unknown;
   /**
    * Exports the agent's full configuration as a pretty-printed JSON string.
    *
    * @param metadata - Optional human-readable metadata to attach.
+   * @param options - Redaction options; secrets are redacted unless `redactSecrets` is `false`.
    * @returns JSON string with 2-space indentation.
    */
-  exportJSON?(metadata?: Record<string, unknown>): string;
+  exportJSON?(metadata?: Record<string, unknown>, options?: { redactSecrets?: boolean }): string;
 }
 
 /**
@@ -1434,18 +1465,19 @@ export interface BaseAgentConfig {
   dependsOn?: string[];
 
   /**
-   * Cognitive mechanisms config — 8 neuroscience-backed memory mechanisms.
-   * All HEXACO-modulated (emotionality, conscientiousness, openness, etc.).
+   * Cognitive mechanisms config: the eight memory mechanisms of
+   * `CognitiveMemoryManager` (reconsolidation, retrieval-induced forgetting,
+   * involuntary recall, feeling of knowing, temporal gist, schema encoding,
+   * source-confidence decay and emotion regulation). Pass `{}` for the
+   * defaults, or override fields per mechanism.
    *
-   * - Pass `{}` for sensible defaults (all 8 mechanisms enabled).
-   * - Omit entirely to disable (zero overhead — no code paths execute).
-   * - Provide per-mechanism overrides to tune individual parameters.
+   * The mechanisms run inside a `CognitiveMemoryManager` initialized with this
+   * config (`CognitiveMemoryConfig.cognitiveMechanisms`). The lightweight
+   * `agent()` and `agency()` helpers construct no memory manager, so they log
+   * a warning and leave this field unused. On the full runtime, a
+   * `gmiManagerConfig.cognitiveMemoryFactory` builds the manager for each GMI.
    *
-   * Requires `memory` to be enabled (`true` or a `MemoryConfig` object).
-   * If `cognitiveMechanisms` is set but `memory` is disabled, a warning is logged
-   * and the mechanisms config is ignored.
-   *
-   * @see {@link https://docs.agentos.sh/memory/cognitive-mechanisms | Cognitive Mechanisms Docs}
+   * @see {@link https://docs.agentos.sh/features/cognitive-memory | Cognitive Memory}
    */
   cognitiveMechanisms?: import('../cognition/memory/mechanisms/types.js').CognitiveMechanismsConfig;
 

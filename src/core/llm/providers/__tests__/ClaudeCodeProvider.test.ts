@@ -9,7 +9,9 @@ const bridgeMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../implementations/ClaudeCodeCLIBridge', () => ({
-  ClaudeCodeCLIBridge: vi.fn().mockImplementation(() => bridgeMocks),
+  ClaudeCodeCLIBridge: vi.fn().mockImplementation(function () {
+    return bridgeMocks;
+  }),
 }));
 
 import { ClaudeCodeProvider } from '../implementations/ClaudeCodeProvider';

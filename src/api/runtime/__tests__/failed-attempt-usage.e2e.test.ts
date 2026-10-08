@@ -4,11 +4,12 @@
  * error the provider throws, and it must be metered once: in the call's
  * usage, as its own usage event and as its own usage-ledger row, beside the
  * fallback leg's. The outer call must not write the leg's usage to the ledger
- * a second time.
+ * a second time. A GMI turn through the completion gateway counts it once in
+ * the turn's usage and reports it on its own USAGE_UPDATE.
  *
- * Runs generateText and streamText against the real AnthropicProvider with
- * only fetch stubbed; the stub answers per model, so the fallback hop gets its
- * own reply.
+ * Runs generateText, streamText and a GMI turn against the real
+ * AnthropicProvider with only fetch stubbed; the stub answers per model, so
+ * the fallback hop gets its own reply.
  */
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,6 +24,9 @@ import { generateText } from '../../generateText.js';
 import { streamText } from '../../streamText.js';
 import { setGlobalLlmObserver, type LlmUsageEvent } from '../../observers.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
+import { createCompletionGateway } from '../completionGateway.js';
+import { GMIOutputChunkType } from '../../../cognition/substrate/IGMI.js';
+import { createScriptedGmi, runTurn, textTurn as userTurn } from '../../../cognition/substrate/__tests__/helpers/scriptedGmi.js';
 
 type Json = Record<string, any>;
 type Reply = () => Response;
@@ -232,5 +236,31 @@ describe('usage of a refused attempt', () => {
       ['claude-opus-4-8', 10, 3],
       ['claude-opus-5-5', 12, 4],
     ]);
+  });
+});
+
+describe('usage of a refused attempt in a GMI turn', () => {
+  it('a GMI turn through the completion gateway counts the refusal once and reports it on its own USAGE_UPDATE', async () => {
+    route({
+      'claude-opus-5-5': [refusalTurn('claude-opus-5-5')],
+      'claude-opus-4-8': [textTurn('claude-opus-4-8', 'Recovered.')],
+    });
+    const gateway = createCompletionGateway({ fallbackProviders: [{ provider: 'anthropic', model: 'claude-opus-4-8' }] });
+    const { gmi } = await createScriptedGmi({ gateway, persona: { defaultProviderId: 'anthropic', defaultModelId: 'claude-opus-5-5' } });
+
+    const { chunks, output } = await runTurn(gmi, userTurn('t1', 'Hello?'));
+
+    expect(chunks.filter((c) => c.type === GMIOutputChunkType.TEXT_DELTA).map((c) => c.content)).toEqual(['Recovered.']);
+    expect(chunks.find((c) => c.type === GMIOutputChunkType.STEP_FINISHED)?.content).toMatchObject({
+      hop: 1,
+      providerId: 'anthropic',
+      modelId: 'claude-opus-4-8',
+      usage: { promptTokens: 10, completionTokens: 3 },
+    });
+    const refused = chunks.filter((c) => c.type === GMIOutputChunkType.USAGE_UPDATE && c.metadata?.attemptFailed === true);
+    expect(refused.map((c) => [c.content.promptTokens, c.content.completionTokens, c.metadata])).toEqual([
+      [12, 4, { attemptFailed: true, hop: 0, providerId: 'anthropic', modelId: 'claude-opus-5-5' }],
+    ]);
+    expect(output.usage).toMatchObject({ promptTokens: 22, completionTokens: 7, totalTokens: 29 });
   });
 });

@@ -12,13 +12,20 @@
  * - Steps execute sequentially; the first failure aborts the pipeline and surfaces
  *   the error immediately.
  * - The composite tool's final output is the last step's raw output value.
- * - Safe by construction: all tool invocations are delegated to a caller-supplied
- *   `executeTool` callback, so the builder never touches an external registry directly.
+ * - Every step runs through a {@link StepGate}; the builder holds no registry.
  */
 
 import type { ComposableToolSpec, ComposableStep } from './types.js';
+import {
+  COMPOSE_NEEDS_GATE_MESSAGE,
+  MAX_COMPOSITION_DEPTH,
+  checkChainable,
+  type Chainability,
+  type StepGate,
+} from './StepGate.js';
 import type {
   ITool,
+  ToolEffectRecord,
   ToolExecutionResult,
   ToolExecutionContext,
   JSONSchemaObject,
@@ -68,16 +75,17 @@ interface PipelineContext {
  * Reference expressions nested inside plain objects are resolved recursively, so
  * `{ query: "$input.topic", limit: 10 }` becomes `{ query: "actual-topic", limit: 10 }`.
  *
- * Safe by construction — all tool invocations are delegated to the `executeTool`
- * callback supplied at construction time. The builder never holds a reference to
- * any tool registry.
+ * Every step runs through a {@link StepGate}, which is where the host's checks
+ * live, and is checked first against the chainability rule: a tool that
+ * declares no side effects is chained freely, a tool with side effects only
+ * when the host lists it, and a tool that declares nothing by no one.
  *
  * @example
  * ```ts
- * const builder = new ComposableToolBuilder(async (toolName, args, ctx) => {
- *   const tool = registry.get(toolName);
- *   return tool.execute(args, ctx);
- * });
+ * const builder = new ComposableToolBuilder(
+ *   createStepGate({ resolve: (name) => registry.get(name) }),
+ * );
+ * builder.bind({ sideEffectingTools: ['send_email'] });
  *
  * const spec: ComposableToolSpec = {
  *   mode: 'compose',
@@ -99,25 +107,73 @@ export class ComposableToolBuilder {
    */
   readonly strictMode: boolean;
 
+  private gate: StepGate | undefined;
+  private sideEffectingTools: readonly string[] = [];
+
   /**
-   * @param executeTool - Callback invoked for each pipeline step. Receives the
-   *   target tool name, the resolved argument object, and the outer execution
-   *   context forwarded from the composite tool's own `execute` call.
-   *   Must return a {@link ToolExecutionResult}; a `success: false` result aborts
-   *   the remainder of the pipeline.
+   * @param gateOrExecute - A {@link StepGate}. A bare `(toolName, args, context)`
+   *   callback is still accepted so existing construction keeps working, but
+   *   nothing can be composed through one: it cannot say what a step tool is,
+   *   so no step can be checked. Bind a gate with {@link bind}.
    * @param options - Optional builder configuration.
    * @param options.strictMode - When true, unresolved reference expressions
    *   throw an error instead of falling through as literal strings.
    */
   constructor(
-    private readonly executeTool: (
-      toolName: string,
-      args: unknown,
-      context: ToolExecutionContext
-    ) => Promise<ToolExecutionResult>,
-    options?: { strictMode?: boolean }
+    gateOrExecute:
+      | StepGate
+      | ((toolName: string, args: unknown, context: ToolExecutionContext) => Promise<ToolExecutionResult>),
+    options?: { strictMode?: boolean },
   ) {
     this.strictMode = options?.strictMode ?? false;
+    this.gate = typeof gateOrExecute === 'function' ? undefined : gateOrExecute;
+  }
+
+  /**
+   * Bind the gate and the host's list of side-effecting tools that may be
+   * chained. The engine calls this from its configuration; a host that uses
+   * the builder on its own may call it too.
+   */
+  bind(options: { gate?: StepGate; sideEffectingTools?: readonly string[] }): void {
+    if (options.gate) {
+      this.gate = options.gate;
+    }
+    if (options.sideEffectingTools) {
+      this.sideEffectingTools = options.sideEffectingTools;
+    }
+  }
+
+  /** Whether steps can be resolved and checked at all. */
+  hasGate(): boolean {
+    return this.gate !== undefined;
+  }
+
+  /** The tool a step names, as the gate resolves it now; undefined without a gate. */
+  resolve(stepTool: string): ITool | undefined {
+    return this.gate?.resolve(stepTool);
+  }
+
+  /** Whether a step naming this tool may be chained right now. */
+  check(stepTool: string): Chainability {
+    if (!this.gate) {
+      return { ok: false, code: 'compose_needs_gate', message: COMPOSE_NEEDS_GATE_MESSAGE };
+    }
+    return checkChainable(stepTool, this.gate.resolve(stepTool), this.sideEffectingTools);
+  }
+
+  /**
+   * Whether any step of the spec names a tool that has side effects right now,
+   * or a tool that is itself a composition (whose own steps may).
+   */
+  hasSideEffectingStep(spec: ComposableToolSpec): boolean {
+    const gate = this.gate;
+    if (!gate) {
+      return true;
+    }
+    return spec.steps.some((step) => {
+      const tool = gate.resolve(step.tool);
+      return tool?.hasSideEffects !== false || isComposition(tool);
+    });
   }
 
   // --------------------------------------------------------------------------
@@ -153,63 +209,151 @@ export class ComposableToolBuilder {
     inputSchema: JSONSchemaObject,
     spec: ComposableToolSpec
   ): ITool {
-    // Capture instance fields in local bindings so that the returned object's
-    // `execute` closure does not retain a reference to `this` beyond what is needed.
-    const executeTool = this.executeTool;
-    const strictMode = this.strictMode;
-
     return {
-      // -----------------------------------------------------------------------
-      // Identity fields required by ITool
-      // -----------------------------------------------------------------------
       id: `composable:${name}`,
       name,
       displayName: name,
       description,
       inputSchema,
       hasSideEffects: true,
-
-      // -----------------------------------------------------------------------
-      // Core execution — runs the pipeline defined in spec
-      // -----------------------------------------------------------------------
-      async execute(
-        args: Record<string, unknown>,
-        context: ToolExecutionContext
-      ): Promise<ToolExecutionResult> {
-        /** Shared evaluation context threaded through each step. */
-        const pipelineCtx: PipelineContext = {
-          input: args,
-          prev: null,
-          steps: {},
-        };
-
-        let lastOutput: unknown = null;
-
-        for (const step of spec.steps) {
-          // Resolve the step's inputMapping against the current pipeline context.
-          const resolvedArgs = resolveMapping(step.inputMapping, pipelineCtx, strictMode);
-
-          // Invoke the underlying tool via the caller-supplied executor.
-          const result = await executeTool(step.tool, resolvedArgs, context);
-
-          if (!result.success) {
-            // Abort the pipeline on first failure, surfacing the step's error.
-            return {
-              success: false,
-              error: `Step "${step.name}" (tool: "${step.tool}") failed: ${result.error ?? 'unknown error'}`,
-            };
-          }
-
-          lastOutput = result.output;
-
-          // Advance the pipeline context so subsequent steps can reference this step.
-          pipelineCtx.prev = lastOutput;
-          pipelineCtx.steps[step.name] = lastOutput;
-        }
-
-        return { success: true, output: lastOutput };
-      },
+      // The call's expiry reaches every step's run, so a step whose approval
+      // arrives after the call expired starts nothing.
+      execute: (args: Record<string, unknown>, context: ToolExecutionContext): Promise<ToolExecutionResult> =>
+        this.runPipeline(spec, args, context, context.signal ? { signal: context.signal } : {}),
     };
+  }
+
+  /**
+   * Run a pipeline. Every step is re-checked against the chainability rule
+   * before it runs, because a tool is replaced by name, and the instance that
+   * was checked is the one the gate runs. With `options.dry` (forge-time
+   * tests), a step whose tool has side effects, or is itself a composition,
+   * is not executed: its output is taken from `stepOutputs`, and the step is
+   * listed as an effect that would have run. `options.signal`, when given,
+   * reaches every step's run.
+   *
+   * Compositions nest no deeper than {@link MAX_COMPOSITION_DEPTH}: the depth
+   * travels in `context.sessionData.emergentDepth`, and a run at the limit is
+   * refused with `nesting_too_deep`, a code no composition is suspended for (a
+   * chain that long is not a cycle; the engine refuses a composition that
+   * reaches itself at its own call).
+   *
+   * A refusal or a failure ends the run; `details` then names the step, the
+   * steps that completed before it, and the effects so far.
+   */
+  async runPipeline(
+    spec: ComposableToolSpec,
+    args: Record<string, unknown>,
+    context: ToolExecutionContext,
+    options: { dry?: { stepOutputs: Record<string, unknown> }; signal?: AbortSignal } = {},
+  ): Promise<ToolExecutionResult> {
+    const gate = this.gate;
+    if (!gate) {
+      return {
+        success: false,
+        error: `compose_needs_gate: ${COMPOSE_NEEDS_GATE_MESSAGE}`,
+        details: { code: 'compose_needs_gate' },
+      };
+    }
+
+    const depthValue = context.sessionData?.emergentDepth;
+    const depth = typeof depthValue === 'number' && depthValue >= 0 ? depthValue : 0;
+    if (depth >= MAX_COMPOSITION_DEPTH) {
+      return {
+        success: false,
+        error:
+          `nesting_too_deep: compositions nest more than ${MAX_COMPOSITION_DEPTH} deep; ` +
+          'a chain that long does not run',
+        details: { code: 'nesting_too_deep', depth },
+      };
+    }
+    const stepContext: ToolExecutionContext = {
+      ...context,
+      sessionData: { ...(context.sessionData ?? {}), emergentDepth: depth + 1 },
+    };
+
+    const pipelineCtx: PipelineContext = { input: args, prev: null, steps: {} };
+    const completed: string[] = [];
+    const effects: ToolEffectRecord[] = [];
+    let lastOutput: unknown = null;
+
+    for (const step of spec.steps) {
+      const tool = gate.resolve(step.tool);
+      const verdict = checkChainable(step.tool, tool, this.sideEffectingTools);
+      if (!verdict.ok || !tool) {
+        const code = verdict.ok ? 'step_missing' : verdict.code;
+        const message = verdict.ok ? `step tool "${step.tool}" is not registered` : verdict.message;
+        return {
+          success: false,
+          error: `Step "${step.name}" (tool: "${step.tool}") refused: ${code}: ${message}`,
+          details: { code, step: step.name, tool: step.tool, completed },
+          ...(effects.length > 0 ? { effects } : {}),
+        };
+      }
+
+      const resolvedArgs = resolveMapping(step.inputMapping, pipelineCtx, this.strictMode);
+      const nested = isComposition(tool);
+
+      if (options.dry && (verdict.sideEffects || nested)) {
+        if (!(step.name in options.dry.stepOutputs)) {
+          return {
+            success: false,
+            error:
+              `dry_run_needs_output: step "${step.name}" (tool: "${step.tool}") ` +
+              (nested ? 'is a composition' : 'has side effects') +
+              ` and is not executed while forging; give its output in testCases[].stepOutputs["${step.name}"]`,
+            details: { code: 'dry_run_needs_output', step: step.name, tool: step.tool, completed },
+            ...(effects.length > 0 ? { effects } : {}),
+          };
+        }
+        lastOutput = options.dry.stepOutputs[step.name];
+        effects.push({
+          kind: 'step',
+          step: step.name,
+          tool: step.tool,
+          wouldRun: true,
+          ...(nested ? { nested: true as const } : {}),
+          args: resolvedArgs,
+        });
+      } else {
+        const result = await gate.run(tool, resolvedArgs, stepContext, options.signal);
+        if (!result.success) {
+          if (result.effects && result.effects.length > 0) {
+            effects.push(...result.effects);
+          }
+          return {
+            success: false,
+            error: `Step "${step.name}" (tool: "${step.tool}") failed: ${result.error ?? 'unknown error'}`,
+            details: {
+              ...(result.details ?? {}),
+              step: step.name,
+              tool: step.tool,
+              completed,
+              // Whether a refused or failed side-effecting step took effect is not known here.
+              ...(verdict.sideEffects ? { unknownEffect: step.name } : {}),
+            },
+            ...(effects.length > 0 ? { effects } : {}),
+          };
+        }
+        lastOutput = result.output;
+        // A step that reports its own effects (a code tool under a ceiling, a
+        // nested composition) is listed by them; one with side effects that
+        // reports none is listed as having run.
+        if (result.effects && result.effects.length > 0) {
+          effects.push(...result.effects);
+        } else if (verdict.sideEffects) {
+          effects.push({ kind: 'step', step: step.name, tool: step.tool, ran: true });
+        }
+      }
+
+      completed.push(step.name);
+      pipelineCtx.prev = lastOutput;
+      pipelineCtx.steps[step.name] = lastOutput;
+    }
+
+    return effects.length > 0
+      ? { success: true, output: lastOutput, effects }
+      : { success: true, output: lastOutput };
   }
 
   /**
@@ -256,6 +400,11 @@ export class ComposableToolBuilder {
 // ============================================================================
 // INTERNAL HELPERS — not exported
 // ============================================================================
+
+/** Whether a resolved step tool is itself an emergent composition (the engine marks its executables). */
+function isComposition(tool: ITool | undefined): boolean {
+  return (tool as { emergentMode?: string } | undefined)?.emergentMode === 'compose';
+}
 
 /**
  * Resolve an entire `inputMapping` object against the current pipeline context.

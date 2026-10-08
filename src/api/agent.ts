@@ -47,7 +47,12 @@ import {
 } from './runtime/usageAccumulator.js';
 import { warnOnDeferredLightweightAgentCapabilities } from './runtime/lightweightAgentDiagnostics.js';
 import type { BaseAgentConfig } from './types.js';
-import { exportAgentConfig, exportAgentConfigJSON, type AgentExportConfig } from './agentExportCore.js';
+import {
+  exportAgentConfig,
+  exportAgentConfigJSON,
+  type AgentExportConfig,
+  type ExportAgentConfigOptions,
+} from './agentExportCore.js';
 import { applyMemoryProvider, type MemoryProviderHookOptions } from './runtime/memoryProviderHooks.js';
 import {
   SessionHistoryBuffer,
@@ -56,6 +61,7 @@ import {
   type SessionHistoryConfig,
 } from './sessionHistory.js';
 import type { SessionTranscriptMessage } from './sessionTranscript.js';
+import type { CognitionConfig, CognitionProfile } from './runtime/gmiCognition.js';
 
 /**
  * Provider hook interface consumed by `agent()` for memory integration.
@@ -151,11 +157,13 @@ export interface AgentOptions extends BaseAgentConfig {
    * `stream()` / session call this agent makes (same contract as
    * {@link GenerateTextOptions.policyTier}): on `'mature'` / `'private-adult'`
    * with no explicit `fallbackProviders`, the auto-built fallback chain
-   * prepends uncensored legs so a content-policy refusal from the primary
-   * re-routes to a model that can complete the request, and the model router
-   * receives the tier as a routing hint. Unset keeps the availability-only
-   * chain and tier-agnostic routing. A per-call `policyTier` in `extra`
-   * overrides this value.
+   * leads with the tier's uncensored legs so a content-policy refusal from
+   * the primary re-routes to a model that can complete the request, and the
+   * model router receives the tier as a routing hint. Unset, the chain
+   * follows the tier the call otherwise resolves to (a host policy's tier or
+   * the router's default tier); with no tier anywhere it is the
+   * availability-only chain. A per-call `policyTier` in `extra` overrides
+   * this value.
    */
   policyTier?: GenerateTextOptions['policyTier'];
   /**
@@ -290,6 +298,17 @@ export interface AgentOptions extends BaseAgentConfig {
    * @see https://github.com/aaronjmars/soul.md for the cross-framework convention.
    */
   soul?: string | { content: string } | { path: string };
+  /**
+   * Which engine serves this agent. `'legacy'` (the default) calls the model through
+   * generateText and streamText; `'gmi'` serves every session with a Generalized Mind
+   * Instance (docs/GMI.md, "GMIs from agent()").
+   */
+  runtime?: 'legacy' | 'gmi';
+  /**
+   * GMI profile when `runtime` is `'gmi'`: `'light'` (the default), `'full'`, or each
+   * switch set in a {@link CognitionConfig}.
+   */
+  cognition?: CognitionProfile | CognitionConfig;
 }
 
 /**
@@ -411,6 +430,28 @@ export interface AgentSession {
   usage(): Promise<AgentOSUsageAggregate>;
   /** Clears all messages from this session's history. */
   clear(): void;
+  /**
+   * Ends this session and releases its history. A send still running is returned
+   * to its caller but added to no history, and the next `agent.session(id)` with
+   * this id starts empty. The id's usage totals stay readable through
+   * `agent.usage(id)`. With `runtime: 'gmi'`, the session's GMI is shut down too.
+   */
+  close(): Promise<void>;
+}
+
+/**
+ * Options for {@link Agent.session}.
+ */
+export interface AgentSessionOptions {
+  /**
+   * The user the session serves. With `runtime: 'gmi'` it scopes the session's
+   * cognitive memory: sessions opened with the same user id recall each other's
+   * facts, and a session opened without one has a scope of its own, its session
+   * id. The GMI also sends it with each model request as the end user's id
+   * (OpenAI's `user` or `safety_identifier`). Asking for an open session with
+   * another user id throws. The legacy runtime ignores it.
+   */
+  userId?: string;
 }
 
 /**
@@ -441,25 +482,30 @@ export interface Agent {
    * Returns (or creates) a named {@link AgentSession} with its own conversation history.
    *
    * @param id - Optional session ID. A unique ID is generated when omitted.
+   * @param options - The session's user; see {@link AgentSessionOptions}.
    * @returns The session object for this ID.
    */
-  session(id?: string): AgentSession;
+  session(id?: string, options?: AgentSessionOptions): AgentSession;
   /** Returns persisted usage totals for the whole agent or a single session. */
   usage(sessionId?: string): Promise<AgentOSUsageAggregate>;
   /** Releases all in-memory session state held by this agent. */
   close(): Promise<void>;
   /**
-   * Exports the agent's configuration as a portable object.
+   * Exports the agent's configuration as a portable object. Secrets are
+   * redacted unless `options.redactSecrets` is `false`.
    * @param metadata - Optional human-readable metadata to attach.
+   * @param options - Redaction options.
    * @returns A portable {@link AgentExportConfig} object.
    */
-  export(metadata?: AgentExportConfig['metadata']): AgentExportConfig;
+  export(metadata?: AgentExportConfig['metadata'], options?: ExportAgentConfigOptions): AgentExportConfig;
   /**
-   * Exports the agent's configuration as a pretty-printed JSON string.
+   * Exports the agent's configuration as a pretty-printed JSON string. Secrets
+   * are redacted unless `options.redactSecrets` is `false`.
    * @param metadata - Optional human-readable metadata to attach.
+   * @param options - Redaction options.
    * @returns JSON string.
    */
-  exportJSON(metadata?: AgentExportConfig['metadata']): string;
+  exportJSON(metadata?: AgentExportConfig['metadata'], options?: ExportAgentConfigOptions): string;
   /** Read current avatar binding state (auto-populated from mood/voice/relationship). */
   getAvatarBindings(): import('./types').AvatarBindingInputs & Record<string, unknown>;
   /** Inject game-specific binding overrides (healthBand, combatMode, etc.). */
@@ -747,21 +793,18 @@ export function agent(opts: AgentOptions): Agent {
   const sessionUsageTallies = new Map<string, AgentOSUsageAggregate>();
   const agentUsageTally: AgentOSUsageAggregate = createEmptyUsageAggregate();
   let avatarBindingOverrides: Record<string, unknown> = {};
-  const useMemory = opts.memory !== false;
-
   warnOnDeferredLightweightAgentCapabilities(opts);
 
   /*
-   * Cognitive mechanisms validation.  When the caller provides a
-   * `cognitiveMechanisms` config but has memory disabled, the mechanisms
-   * cannot be wired (they depend on CognitiveMemoryManager which needs an
-   * active memory subsystem).  Log a warning and drop the config.
+   * The cognitive mechanisms run inside a CognitiveMemoryManager, which this
+   * lightweight helper never constructs, so a `cognitiveMechanisms` config
+   * cannot take effect here. Say so instead of accepting it silently.
    */
-  if (opts.cognitiveMechanisms && !useMemory) {
+  if (opts.cognitiveMechanisms != null) {
     console.warn(
-      '[AgentOS] cognitiveMechanisms config was provided but memory is disabled. ' +
-      'Mechanisms require memory to be enabled (set `memory: true` or pass a MemoryConfig). ' +
-      'The cognitiveMechanisms config will be ignored.',
+      '[AgentOS] agent() accepted a cognitiveMechanisms config, but the lightweight helper does not run ' +
+      'the cognitive mechanisms. Initialize a CognitiveMemoryManager with `cognitiveMechanisms`, or supply ' +
+      'one through gmiManagerConfig.cognitiveMemoryFactory on the full runtime, to use them.',
     );
   }
 
@@ -1170,6 +1213,14 @@ export function agent(opts: AgentOptions): Agent {
         clear() {
           historyBuffer?.reseed([]);
         },
+
+        async close(): Promise<void> {
+          // The reseed bumps the epoch, so a send still in flight drops its
+          // append; the next session(id) builds a new buffer. The usage tally
+          // stays, as agent.close() keeps it, so agent.usage(id) still counts.
+          historyBuffer?.reseed([]);
+          if (sessionBuffers.get(sessionId) === historyBuffer) sessionBuffers.delete(sessionId);
+        },
       };
       // The send() implementation returns a union (GenerateTextResult |
       // SessionSendStructuredResult<unknown>) to cover both interface
@@ -1203,19 +1254,21 @@ export function agent(opts: AgentOptions): Agent {
     /**
      * Exports this agent's configuration as a portable object.
      * @param metadata - Optional human-readable metadata to attach.
+     * @param options - Redaction options; secrets are redacted unless `redactSecrets` is `false`.
      * @returns A portable {@link AgentExportConfig} object.
      */
-    export(metadata?: AgentExportConfig['metadata']): AgentExportConfig {
-      return exportAgentConfig(agentInstance, metadata);
+    export(metadata?: AgentExportConfig['metadata'], options?: ExportAgentConfigOptions): AgentExportConfig {
+      return exportAgentConfig(agentInstance, metadata, options);
     },
 
     /**
      * Exports this agent's configuration as a pretty-printed JSON string.
      * @param metadata - Optional human-readable metadata to attach.
+     * @param options - Redaction options; secrets are redacted unless `redactSecrets` is `false`.
      * @returns JSON string with 2-space indentation.
      */
-    exportJSON(metadata?: AgentExportConfig['metadata']): string {
-      return exportAgentConfigJSON(agentInstance, metadata);
+    exportJSON(metadata?: AgentExportConfig['metadata'], options?: ExportAgentConfigOptions): string {
+      return exportAgentConfigJSON(agentInstance, metadata, options);
     },
 
     getAvatarBindings() {

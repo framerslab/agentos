@@ -219,7 +219,7 @@ Use:
 - `finalTextStream` or `text` for the finalized approved answer
 - `fullStream` when you also need structured events like `final-output`
 
-See [Agency API](./AGENCY_API.md) and [Streaming Semantics](./STREAMING_SEMANTICS.md)
+See [Agency API](../orchestration/AGENCY_API.md) and [Streaming Semantics](../architecture/STREAMING_SEMANTICS.md)
 for the full contract.
 
 ## [`QueryRouter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/query/QueryRouter.ts)
@@ -559,9 +559,9 @@ One `Memory` facade backs both the live memory and the wiki, so the markdown sta
 
 Runnable examples in the package source:
 
-- [`packages/agentos/examples/high-level-api.mjs`](https://github.com/framerslab/agentos/blob/master/examples/high-level-api.mjs)
-- [`packages/agentos/examples/generate-image.mjs`](https://github.com/framerslab/agentos/blob/master/examples/generate-image.mjs)
-- [`packages/agentos/examples/agentos-config-tools.mjs`](https://github.com/framerslab/agentos/blob/master/examples/agentos-config-tools.mjs)
+- [`examples/high-level-api.mjs`](https://github.com/framerslab/agentos/blob/master/examples/high-level-api.mjs)
+- [`examples/generate-image.mjs`](https://github.com/framerslab/agentos/blob/master/examples/generate-image.mjs)
+- [`examples/agentos-config-tools.mjs`](https://github.com/framerslab/agentos/blob/master/examples/agentos-config-tools.mjs)
 
 ## Full runtime: [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts)
 

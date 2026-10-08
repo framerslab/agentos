@@ -200,6 +200,8 @@ export async function createVisionPipeline(
     embedding,
     cloudProvider,
     cloudModel: config?.cloudModel,
+    cloudApiKey: config?.cloudApiKey,
+    cloudBaseUrl: config?.cloudBaseUrl,
     confidenceThreshold: config?.confidenceThreshold,
     preprocessing: config?.preprocessing,
   };

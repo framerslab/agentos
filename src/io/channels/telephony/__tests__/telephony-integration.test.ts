@@ -91,9 +91,10 @@ function twilioStop(streamSid = 'MX_STREAM_001'): string {
  */
 function twilioSig(authToken: string, url: string, body: string): string {
   const params = new URLSearchParams(body);
-  const sorted = [...params.entries()].sort(([a], [b]) => a.localeCompare(b));
   let data = url;
-  for (const [k, v] of sorted) data += k + v;
+  for (const key of [...new Set(params.keys())].sort()) {
+    for (const value of [...new Set(params.getAll(key))].sort()) data += key + value;
+  }
   return createHmac('sha1', authToken).update(data).digest('base64');
 }
 

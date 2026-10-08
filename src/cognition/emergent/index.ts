@@ -14,8 +14,22 @@
 export * from './types.js';
 export { type SelfImprovementConfig, DEFAULT_SELF_IMPROVEMENT_CONFIG } from './SelfImprovementConfig.js';
 export { ComposableToolBuilder } from './ComposableToolBuilder.js';
+export { createStepGate, checkChainable, COMPOSE_NEEDS_GATE_MESSAGE, MAX_COMPOSITION_DEPTH } from './StepGate.js';
+export type { StepGate, StepGateOptions, Chainability, ChainRefusalCode } from './StepGate.js';
 export { SandboxedToolForge } from './SandboxedToolForge.js';
 export type { SandboxedToolForgeConfig } from './SandboxedToolForge.js';
+export { InProcessExecutor } from './executor/InProcessExecutor.js';
+export type { ExecutorRunRequest, ExecutorRunResult, ForgedCodeExecutor } from './executor/types.js';
+export { CAPABILITY_NAMES, CAPABILITY_ALIASES, normalizeAllowlist, toSandboxApis } from './capabilities.js';
+export { CeilingError, checkRequest, grantedCapabilities, narrowToForge, resolveCeiling, CEILING_DEFAULTS } from './ceiling.js';
+export type { CeilingErrorCode, ResolvedCeiling } from './ceiling.js';
+export {
+  parsePersistedSource,
+  inferRequestFromCode,
+  requestFromImplementation,
+  parseStoredRequest,
+} from './persisted-source.js';
+export type { PersistedSource } from './persisted-source.js';
 export { EmergentToolRegistry } from './EmergentToolRegistry.js';
 export type {
   IStorageAdapter as EmergentRegistryStorageAdapter,
@@ -38,7 +52,14 @@ export type {
 export { EmergentJudge } from './EmergentJudge.js';
 export type { ToolCandidate, EmergentJudgeConfig } from './EmergentJudge.js';
 export { EmergentCapabilityEngine } from './EmergentCapabilityEngine.js';
-export type { EmergentCapabilityEngineDeps } from './EmergentCapabilityEngine.js';
+export type {
+  EmergentCapabilityEngineDeps,
+  EmergentExecutableTool,
+  FailedToolLoad,
+  LoadedToolOutcome,
+  LoadPersistedToolsOptions,
+  LoadPersistedToolsResult,
+} from './EmergentCapabilityEngine.js';
 export { ForgeToolMetaTool } from './ForgeToolMetaTool.js';
 export type { ForgeToolInput } from './ForgeToolMetaTool.js';
 export {

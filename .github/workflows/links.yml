@@ -1,0 +1,38 @@
+name: Links
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Links within this repository
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: >-
+            --offline --include-fragments --hidden --no-progress
+            --root-dir ${{ github.workspace }}
+            --remap "^https://github\.com/framerslab/agentos/(blob|tree)/master/ file://${{ github.workspace }}/"
+            --exclude-path CHANGELOG.md
+            './*.md' './.github/**/*.md' './docs/contributing/**/*.md' './docs/getting-started/RELEASING.md'
+      - name: Links to other first-party repositories
+        if: github.event_name != 'pull_request'
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: >-
+            --no-progress
+            --include '^https://github\.com/(framerslab|jddunn|manicinc)/[^/]+/(blob|tree)/'
+            --exclude-path CHANGELOG.md
+            './*.md' './.github/**/*.md' './.github/ISSUE_TEMPLATE/*.yml' './docs/contributing/**/*.md' './docs/getting-started/RELEASING.md'

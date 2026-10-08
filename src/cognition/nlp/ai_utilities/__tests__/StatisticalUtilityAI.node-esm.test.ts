@@ -1,0 +1,73 @@
+/**
+ * The built package under plain Node.
+ *
+ * The other StatisticalUtilityAI suites import the TypeScript source through
+ * Vitest, whose interop hands a CommonJS dependency's members to a namespace
+ * import. Plain Node does not: a consumer that keeps `@framers/agentos` out of
+ * its bundle loads `dist/` with Node's own ESM loader, where `natural` (CommonJS,
+ * exports built at run time) arrives as `default` only. This suite runs the
+ * built module in a child Node process, the way such a consumer does.
+ *
+ * CI builds before it tests, and there the suite always runs: a missing build
+ * fails it instead of skipping it. On a machine without a build it is skipped
+ * (run `pnpm run build` first to check the current source).
+ */
+import { describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const builtModule = path.resolve(here, '../../../../../dist/cognition/nlp/ai_utilities/StatisticalUtilityAI.js');
+
+function runInNode(body: string): string {
+  const script = `
+    const { StatisticalUtilityAI } = await import(${JSON.stringify(pathToFileURL(builtModule).href)});
+    const utility = new StatisticalUtilityAI('node-esm-check');
+    await utility.initialize({ defaultLanguage: 'en' });
+    ${body}
+  `;
+  return execFileSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8' });
+}
+
+/** The class logs to stdout as it works, so the script marks its own result line. */
+const RESULT_MARK = 'NODE_ESM_RESULT ';
+
+function readResult<T>(stdout: string): T {
+  const line = stdout.split('\n').find((l) => l.startsWith(RESULT_MARK));
+  if (!line) throw new Error(`no result line in the child's output:\n${stdout}`);
+  return JSON.parse(line.slice(RESULT_MARK.length)) as T;
+}
+
+const inCI = Boolean(process.env.CI);
+
+describe.skipIf(!inCI && !existsSync(builtModule))('StatisticalUtilityAI built for plain Node ESM', () => {
+  it('constructs, tokenizes with natural, and detects a French passage', () => {
+    const out = runInNode(`
+      const tokens = await utility.tokenize('The quick brown fox jumps');
+      const [top] = await utility.detectLanguage(
+        'Tous les êtres humains naissent libres et égaux en dignité et en droits. ' +
+          'Ils sont doués de raison et de conscience et doivent agir les uns envers les autres.',
+        { maxCandidates: 1 },
+      );
+      process.stdout.write('\\n${RESULT_MARK}' + JSON.stringify({ tokens: tokens.length, language: top.language }) + '\\n');
+    `);
+    const result = readResult<{ tokens: number; language: string }>(out);
+    expect(result.tokens).toBeGreaterThan(0);
+    expect(result.language).toBe('fr');
+  });
+
+  it('decides a Japanese passage by its script', () => {
+    const out = runInNode(`
+      const results = await utility.detectLanguage(
+        '古い灯台の下で、少女は毎晩ひとりで海の音を聞いていた。嵐が近づくと、彼女は窓を閉めて静かに祈った。',
+        { maxCandidates: 32 },
+      );
+      process.stdout.write('\\n${RESULT_MARK}' + JSON.stringify(results) + '\\n');
+    `);
+    const results = readResult<Array<{ language: string; confidence: number }>>(out);
+    expect(results).toHaveLength(1);
+    expect(results[0].language).toBe('ja');
+  });
+});

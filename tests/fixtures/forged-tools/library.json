@@ -1,0 +1,236 @@
+[
+  {
+    "id": "lib-sum",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: executes a simple pure function and returns the output",
+    "code": "function execute(input) { return { sum: input.a + input.b }; }",
+    "input": { "a": 2, "b": 3 },
+    "allowlist": [],
+    "expect": { "success": true, "output": { "sum": 5 } }
+  },
+  {
+    "id": "lib-async-sum",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: supports async sandbox entrypoints",
+    "code": "async function execute(input) { return { sum: input.a + input.b }; }",
+    "input": { "a": 4, "b": 5 },
+    "allowlist": [],
+    "expect": { "success": true, "output": { "sum": 9 } }
+  },
+  {
+    "id": "lib-infinite-loop",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: kills infinite loops via timeout",
+    "code": "function execute(input) { while(true) {} }",
+    "input": {},
+    "allowlist": [],
+    "timeoutMs": 100,
+    "expect": { "success": false, "errorIncludes": "timed out" }
+  },
+  {
+    "id": "lib-ok",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: measures and returns execution time",
+    "code": "function execute(input) { return { ok: true }; }",
+    "input": {},
+    "allowlist": [],
+    "expect": { "success": true, "output": { "ok": true } }
+  },
+  {
+    "id": "lib-throws",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: returns a failure result when code throws at runtime",
+    "code": "function execute(input) { throw new Error(\"runtime boom\"); }",
+    "input": {},
+    "allowlist": [],
+    "expect": { "success": false, "errorIncludes": "runtime boom" }
+  },
+  {
+    "id": "lib-no-entry",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: returns a failure result when no execute/run entrypoint is defined",
+    "code": "function notTheRightName(input) { return input; }",
+    "input": {},
+    "allowlist": [],
+    "expect": { "success": false, "errorIncludes": "must define execute(input) or run(input)" }
+  },
+  {
+    "id": "lib-string",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: handles string return values",
+    "code": "function execute(input) { return \"hello \" + input.name; }",
+    "input": { "name": "world" },
+    "allowlist": [],
+    "expect": { "success": true, "output": "hello world" }
+  },
+  {
+    "id": "lib-number",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: handles number return values",
+    "code": "function execute(input) { return input.x * input.y; }",
+    "input": { "x": 6, "y": 7 },
+    "allowlist": [],
+    "expect": { "success": true, "output": 42 }
+  },
+  {
+    "id": "lib-null",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: always returns memoryUsedBytes in the result",
+    "code": "function execute(input) { return null; }",
+    "input": {},
+    "allowlist": [],
+    "expect": { "success": true, "output": null }
+  },
+  {
+    "id": "lib-objects",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: supports complex object manipulation in sandboxed code",
+    "code": "\n      function execute(input) {\n        var items = input.items;\n        var total = 0;\n        for (var i = 0; i < items.length; i++) {\n          total += items[i].price * items[i].qty;\n        }\n        return { total: total, count: items.length };\n      }\n    ",
+    "input": { "items": [{ "price": 10, "qty": 2 }, { "price": 5, "qty": 3 }, { "price": 20, "qty": 1 }] },
+    "allowlist": [],
+    "expect": { "success": true, "output": { "total": 55, "count": 3 } }
+  },
+  {
+    "id": "lib-es2020",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: pre-parse passes valid ES2020 code through to execution",
+    "code": "async function execute(input) { return { doubled: input.n * 2 }; }",
+    "input": { "n": 7 },
+    "allowlist": [],
+    "expect": { "success": true, "output": { "doubled": 14 } }
+  },
+  {
+    "id": "lib-function-constructor",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: blocks Function-constructor escape via codeGeneration restriction",
+    "code": "function execute() { const F = ({}).constructor.constructor; return F(\"return 42\")(); }",
+    "input": {},
+    "allowlist": [],
+    "expect": { "success": false }
+  },
+  {
+    "id": "lib-allocation",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: reports a non-zero memoryUsedBytes after a meaningful allocation",
+    "code": "function execute() {\n        const chunks = [];\n        for (let i = 0; i < 50; i++) {\n          chunks.push(\"x\".repeat(100000));\n        }\n        return chunks.length;\n      }",
+    "input": {},
+    "allowlist": [],
+    "expect": { "success": true, "output": 50 }
+  },
+  {
+    "id": "lib-read-file",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: reads an ordinary file inside an allowed root",
+    "code": "async function execute(input) { return await fs.readFile(input.p); }",
+    "input": { "p": "{{root}}/notes.txt" },
+    "allowlist": ["fs.readFile"],
+    "expect": { "success": true, "output": "alpha\nbeta\ngamma\n" }
+  },
+  {
+    "id": "lib-read-catalogue-name",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: both of the forge's readers take fs.read for fs.readFile",
+    "code": "async function execute(input) { return { text: await fs.readFile(input.path) }; }",
+    "input": { "path": "{{root}}/notes.txt" },
+    "allowlist": ["fs.read"],
+    "expect": { "success": true, "output": { "text": "alpha\nbeta\ngamma\n" } }
+  },
+  {
+    "id": "lib-uuid-type",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: with a broker attached, injects the broker's functions and needs a call handle",
+    "code": "function execute() { return { id: typeof crypto.randomUUID() }; }",
+    "input": {},
+    "allowlist": ["crypto"],
+    "expect": { "success": true, "output": { "id": "string" } }
+  },
+  {
+    "id": "lib-fetch-type",
+    "from": "src/cognition/emergent/__tests__/sandboxed-forge.test.ts: with a broker attached, injects the broker's functions and needs a call handle",
+    "note": "The test's ceiling holds no fetch and expects 'undefined'; this corpus's ceiling holds fetch.",
+    "code": "function execute() { return { kind: typeof fetch }; }",
+    "input": {},
+    "allowlist": ["fetch"],
+    "expect": { "success": true, "output": { "kind": "function" } }
+  },
+  {
+    "id": "lib-score",
+    "from": "src/cognition/emergent/__tests__/wrap-forge-tool.test.ts (landing_site_suitability_score)",
+    "code": "function execute(input) { return { score: (input.ice || 0) * 100 }; }",
+    "input": { "terrain": "flat", "ice": 0.8 },
+    "allowlist": [],
+    "expect": { "success": true, "output": { "score": 80 } }
+  },
+  {
+    "id": "lib-field",
+    "from": "src/cognition/emergent/__tests__/wrap-forge-tool.test.ts",
+    "code": "function execute(i){ return { x: i.a }; }",
+    "input": { "a": 1 },
+    "allowlist": [],
+    "expect": { "success": true, "output": { "x": 1 } }
+  },
+  {
+    "id": "lib-empty-object",
+    "from": "src/cognition/emergent/__tests__/wrap-forge-tool.test.ts",
+    "code": "function execute(){ return {}; }",
+    "input": {},
+    "allowlist": [],
+    "expect": { "success": true, "output": {} }
+  },
+  {
+    "id": "lib-identity",
+    "from": "src/cognition/emergent/__tests__/permissions-loader.integration.test.ts",
+    "code": "function execute(i){return i}",
+    "input": { "q": "x" },
+    "allowlist": [],
+    "expect": { "success": true, "output": { "q": "x" } }
+  },
+  {
+    "id": "lib-uuid",
+    "from": "src/cognition/emergent/__tests__/permissions-loader.integration.test.ts",
+    "code": "function execute(input) { const c = crypto; return { id: c.randomUUID() }; }",
+    "input": {},
+    "allowlist": ["crypto"],
+    "expect": { "success": true, "outputMatches": { "id": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" } }
+  },
+  {
+    "id": "lib-text",
+    "from": "src/cognition/emergent/__tests__/permissions-loader.integration.test.ts",
+    "code": "function execute(input) { return { text: input.text }; }",
+    "input": { "text": "carried" },
+    "allowlist": [],
+    "expect": { "success": true, "output": { "text": "carried" } }
+  },
+  {
+    "id": "lib-fetch-ok",
+    "from": "src/cognition/emergent/__tests__/permissions-loader.integration.test.ts",
+    "code": "function execute(input) { return fetch(input.url).then((r) => ({ ok: r.ok })); }",
+    "input": { "url": "{{server}}/ok" },
+    "allowlist": ["fetch"],
+    "expect": { "success": true, "output": { "ok": true } }
+  },
+  {
+    "id": "lib-fetch-body",
+    "from": "src/cognition/emergent/__tests__/permissions-ceiling.integration.test.ts",
+    "code": "async function execute(input) { const r = await fetch(input.url); return { status: r.status, body: await r.text() }; }",
+    "input": { "url": "{{server}}/ok" },
+    "allowlist": ["fetch"],
+    "expect": { "success": true, "output": { "status": 200, "body": "ok" } }
+  },
+  {
+    "id": "lib-refused-then-fetch",
+    "from": "src/cognition/emergent/__tests__/permissions-ceiling.integration.test.ts",
+    "code": "async function execute(input) { try { await fetch(input.first); } catch (e) {} await fetch(input.then); return { done: true }; }",
+    "input": { "first": "{{otherServer}}/x", "then": "{{server}}/ok" },
+    "allowlist": ["fetch"],
+    "expect": { "success": true, "output": { "done": true } }
+  },
+  {
+    "id": "lib-unawaited-fetch",
+    "from": "src/cognition/emergent/__tests__/permissions-ceiling.integration.test.ts",
+    "code": "async function execute(input) { fetch(input.url).catch(() => undefined); return { started: true }; }",
+    "input": { "url": "{{server}}/ok" },
+    "allowlist": ["fetch"],
+    "expect": { "success": true, "output": { "started": true } }
+  },
+  {
+    "id": "lib-run-entry",
+    "from": "src/cognition/emergent/__tests__/discovery-integration.test.ts",
+    "code": "async function run(input) { return input; }",
+    "input": { "k": 1 },
+    "allowlist": [],
+    "expect": { "success": true, "output": { "k": 1 } }
+  },
+  {
+    "id": "lib-doubled",
+    "from": "src/cognition/emergent/__tests__/emergent-judge.test.ts",
+    "code": "function execute(input) { return { doubled: input.x * 2 }; }",
+    "input": { "x": 21 },
+    "allowlist": [],
+    "expect": { "success": true, "output": { "doubled": 42 } }
+  }
+]

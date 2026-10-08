@@ -23,18 +23,20 @@ const shutdownMock = vi.fn().mockResolvedValue(undefined);
 const checkHealthMock = vi.fn().mockResolvedValue({ isHealthy: true });
 
 vi.mock('../implementations/OpenAIProvider', () => ({
-  OpenAIProvider: vi.fn().mockImplementation(() => ({
-    providerId: 'openai',
-    isInitialized: true,
-    initialize: initializeMock,
-    generateCompletion: generateCompletionMock,
-    generateCompletionStream: generateCompletionStreamMock,
-    shutdown: shutdownMock,
-    checkHealth: checkHealthMock,
-    listAvailableModels: vi.fn().mockResolvedValue([]),
-    getModelInfo: vi.fn().mockResolvedValue(undefined),
-    generateEmbeddings: vi.fn(),
-  })),
+  OpenAIProvider: vi.fn().mockImplementation(function () {
+    return {
+      providerId: 'openai',
+      isInitialized: true,
+      initialize: initializeMock,
+      generateCompletion: generateCompletionMock,
+      generateCompletionStream: generateCompletionStreamMock,
+      shutdown: shutdownMock,
+      checkHealth: checkHealthMock,
+      listAvailableModels: vi.fn().mockResolvedValue([]),
+      getModelInfo: vi.fn().mockResolvedValue(undefined),
+      generateEmbeddings: vi.fn(),
+    };
+  }),
 }));
 
 import { GroqProvider } from '../implementations/GroqProvider';

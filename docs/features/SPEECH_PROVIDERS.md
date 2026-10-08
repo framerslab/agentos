@@ -1,6 +1,6 @@
 # Speech Provider Ecosystem
 
-This document describes the provider resolver system in `packages/agentos/src/speech/`, which auto-discovers and manages speech-to-text (STT), text-to-speech (TTS), voice activity detection (VAD), and wake-word providers.
+This document describes the provider resolver system in `src/io/speech/`, which auto-discovers and manages speech-to-text (STT), text-to-speech (TTS), voice activity detection (VAD), and wake-word providers.
 
 ---
 
@@ -18,21 +18,28 @@ This document describes the provider resolver system in `packages/agentos/src/sp
 
 ## Quick Start
 
-Set the environment variables for the providers you want, then call `refresh()`:
+Set the environment variables for the providers you want, then build a `SpeechRuntime` and call `refresh()` on its resolver:
 
 ```typescript
-import { SpeechProviderResolver } from '@agentos/agentos/speech';
+import { SpeechRuntime } from '@framers/agentos/speech';
 
-const resolver = new SpeechProviderResolver();
-await resolver.refresh();
+// Builds, and registers in its resolver: OpenAI Whisper and OpenAI TTS when
+// OPENAI_API_KEY is set, ElevenLabs when ELEVENLABS_API_KEY is set, Deepgram batch
+// STT and Deepgram Aura TTS when DEEPGRAM_API_KEY is set, AssemblyAI when
+// ASSEMBLYAI_API_KEY is set, Azure Speech STT and TTS when AZURE_SPEECH_KEY and
+// AZURE_SPEECH_REGION are set, and AgentOS Adaptive VAD.
+const runtime = new SpeechRuntime({ env: process.env });
+// Records the other core ids. Pass an ExtensionManager to add the speech
+// providers its packs registered: runtime.resolver.refresh(extensionManager).
+await runtime.resolver.refresh();
 
-const stt = resolver.resolveSTT();   // best configured STT provider
-const tts = resolver.resolveTTS();   // best configured TTS provider
-const vad = resolver.resolveVAD();   // always returns AgentOS Adaptive VAD
-const wakeWord = resolver.resolveWakeWord(); // null if none configured
+const stt = runtime.resolver.resolveSTT();   // best configured STT provider
+const tts = runtime.resolver.resolveTTS();   // best configured TTS provider
+const vad = runtime.resolver.resolveVAD();   // AgentOS Adaptive VAD
+const wakeWord = runtime.resolver.resolveWakeWord(); // null if none configured
 ```
 
-Providers are detected automatically — no explicit registration required for core providers.
+`refresh()` records every core provider id and whether its keys are set, and keeps any provider instance already registered under that id. The resolve methods return only providers that have an instance: the ones `SpeechRuntime` builds, the ones you pass to `register()`, and the ones an extension manager supplies. A `SpeechProviderResolver` used on its own throws `No configured STT provider matches requirements` (or the TTS or VAD equivalent) until a provider instance is registered.
 
 ---
 
@@ -154,7 +161,7 @@ interface ProviderRequirements {
   streaming?: boolean;
   /** Only match providers whose catalog entry declares local === true/false. */
   local?: boolean;
-  /** Only match providers that declare all listed features. */
+  /** Only match providers that declare all listed features. 'streaming' here means the streaming capability above. */
   features?: string[];
   /** Return only these provider ids, in this order. */
   preferredIds?: string[];
@@ -173,24 +180,31 @@ If no configured provider matches the requirements, `resolveSTT()` / `resolveTTS
 
 ## Installing Extension Providers
 
-Extension providers ship as npm packages under the `@framers/agentos-ext-*` namespace and expose their provider implementation via an [`ExtensionPack`](https://github.com/framerslab/agentos/blob/master/src/extensions/manifest.ts). Install the package and pass your [`ExtensionManager`](https://github.com/framerslab/agentos/blob/master/src/extensions/ExtensionManager.ts) to `refresh()`:
+Extension providers ship as npm packages under the `@framers/agentos-ext-*` namespace and expose their provider implementation via an [`ExtensionPack`](https://github.com/framerslab/agentos/blob/master/src/extensions/manifest.ts). Install the package, load it into an [`ExtensionManager`](https://github.com/framerslab/agentos/blob/master/src/extensions/ExtensionManager.ts), and pass the manager to `refresh()`:
 
 ```bash
-npm install @framers/agentos-ext-voice-synthesis
+npm install @framers/agentos-ext-google-cloud-tts
 ```
 
 ```typescript
-import { ExtensionManager } from '@agentos/agentos';
+import { ExtensionManager } from '@framers/agentos/extensions';
+import { SpeechRuntime } from '@framers/agentos/speech';
 
-const em = new ExtensionManager();
-await em.loadPack('@framers/agentos-ext-voice-synthesis');
+// The Google Cloud TTS pack reads its credentials as the GOOGLE_CLOUD_TTS_CREDENTIALS
+// secret; GOOGLE_TTS_CREDENTIALS is the variable the provider table above names.
+const em = new ExtensionManager({
+  secrets: { GOOGLE_CLOUD_TTS_CREDENTIALS: process.env.GOOGLE_TTS_CREDENTIALS ?? '' },
+});
+await em.loadPackFromPackage('@framers/agentos-ext-google-cloud-tts');
 
-const resolver = new SpeechProviderResolver();
-await resolver.refresh(em);
+const runtime = new SpeechRuntime({ env: process.env });
+await runtime.resolver.refresh(em);
 
-// ElevenLabs and any other TTS providers from the pack are now available
-const tts = resolver.resolveTTS();
+// The pack's provider resolves under its own id, beside the ones SpeechRuntime built.
+const tts = runtime.resolver.resolveTTS({ preferredIds: ['google-cloud-tts'] });
 ```
+
+A later `refresh(em)` drops a provider the manager no longer lists as active, such as one from an unloaded pack.
 
 Extension providers default to priority 200. Add them to `tts.preferred` to promote them above core providers.
 
@@ -201,7 +215,7 @@ Extension providers default to priority 200. Add them to `tts.preferred` to prom
 ### 1. Implement the interface
 
 ```typescript
-import type { SpeechToTextProvider, TranscribeInput, TranscribeResult } from '@agentos/agentos/speech';
+import type { SpeechToTextProvider, TranscribeInput, TranscribeResult } from '@framers/agentos/speech';
 
 export class MyCustomSTT implements SpeechToTextProvider {
   readonly id = 'my-custom-stt';
@@ -221,7 +235,7 @@ For TTS implement [`TextToSpeechProvider`](https://github.com/framerslab/agentos
 ### 2. Register it directly
 
 ```typescript
-import { findSpeechProviderCatalogEntry } from '@agentos/agentos/speech';
+import { findSpeechProviderCatalogEntry } from '@framers/agentos/speech';
 
 resolver.register({
   id: 'my-custom-stt',
@@ -261,12 +275,12 @@ export function createExtensionPack(): ExtensionPack {
 }
 ```
 
-See [RFC_EXTENSION_STANDARDS.md](./RFC_EXTENSION_STANDARDS.md) for the full extension pack specification.
+See [RFC_EXTENSION_STANDARDS.md](../extensions/RFC_EXTENSION_STANDARDS.md) for the full extension pack specification.
 
 ---
 
 ## Related Documentation
 
 - [VOICE_PIPELINE.md](./VOICE_PIPELINE.md) — end-to-end voice session orchestration
-- [RFC_EXTENSION_STANDARDS.md](./RFC_EXTENSION_STANDARDS.md) — extension pack authoring guide
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — high-level package architecture
+- [RFC_EXTENSION_STANDARDS.md](../extensions/RFC_EXTENSION_STANDARDS.md) — extension pack authoring guide
+- [ARCHITECTURE.md](../architecture/ARCHITECTURE.md) — high-level package architecture

@@ -193,4 +193,4 @@ The reference integration follows the pattern above:
 See:
 
 - [Provenance & Immutability](./PROVENANCE_IMMUTABILITY.md)
-- [RAG Memory Configuration](./RAG_MEMORY_CONFIGURATION.md)
+- [RAG Memory Configuration](../memory/RAG_MEMORY_CONFIGURATION.md)

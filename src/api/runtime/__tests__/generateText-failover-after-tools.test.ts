@@ -351,6 +351,49 @@ describe('generateText failover after a tool ran', () => {
     expect(shimMessages.some((m) => m.role === 'user' && m.content.startsWith('<tool_response>'))).toBe(true);
   });
 
+  it('continues a fallback leg\'s native tool round on the next leg instead of running the tool again', async () => {
+    // The primary cannot initialize; the first leg makes a native send_email
+    // call, then times out. That leg's own walk carries the completed round
+    // to the second leg, which answers from it.
+    hoisted.createProviderManager.mockImplementation(async (resolved: { providerId: string }) => {
+      if (resolved.providerId === 'openai') {
+        throw Object.assign(new Error("Provider 'openai' failed to initialize: 401"), {
+          name: 'ProviderInitializationError',
+          httpStatus: 401,
+        });
+      }
+      return { getProvider: hoisted.getProvider };
+    });
+    hoisted.generateCompletion
+      .mockResolvedValueOnce(nativeToolCall())
+      .mockRejectedValueOnce(timeout())
+      .mockResolvedValueOnce(textStep('mistral-large-latest', 'Sent it.'));
+
+    const result = await generateText({
+      provider: 'openai',
+      model: 'gpt-4.1',
+      prompt: 'Email Sam.',
+      tools: [sendEmail] as never,
+      maxSteps: 5,
+      fallbackProviders: [
+        { provider: 'anthropic', model: 'claude-opus-5-5' },
+        { provider: 'mistral', model: 'mistral-large-latest' },
+      ],
+    });
+
+    expect(sendEmail.execute).toHaveBeenCalledTimes(1);
+    expect(result.text).toBe('Sent it.');
+    expect(result.provider).toBe('mistral');
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(3);
+    const legMessages = (hoisted.generateCompletion.mock.calls[2] as unknown[])[1] as Array<Record<string, unknown>>;
+    expect(legMessages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: 'assistant', tool_calls: [expect.objectContaining({ id: 'call_1' })] }),
+        expect.objectContaining({ role: 'tool', tool_call_id: 'call_1' }),
+      ]),
+    );
+  });
+
   it('stops walking the chain when a fallback leg ran tools before it failed', async () => {
     // The primary cannot initialize; the first leg runs a prompt-shim tool
     // and then times out. The second leg must not start over and send again.

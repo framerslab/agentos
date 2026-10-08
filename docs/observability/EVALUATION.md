@@ -371,5 +371,5 @@ console.log(data.summary);
 ## Related Guides
 
 - [EVALUATION_FRAMEWORK.md](./EVALUATION_FRAMEWORK.md) — full framework reference and internals
-- [GETTING_STARTED.md](./GETTING_STARTED.md) — first steps with AgentOS
-- [EXAMPLES.md](./EXAMPLES.md) — code review bot and Q&A evaluation examples
+- [GETTING_STARTED.md](../getting-started/GETTING_STARTED.md) — first steps with AgentOS
+- [EXAMPLES.md](../getting-started/EXAMPLES.md) — code review bot and Q&A evaluation examples
