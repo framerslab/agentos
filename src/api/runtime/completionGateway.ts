@@ -351,7 +351,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         route.onHopFailure?.({ providerId: servingProviderId ?? h.provider, hop, error: lastError });
         // The primary's configuration error (no credentials, unknown provider) is the caller's to see.
         // A fallback leg that cannot start is skipped.
-        if (hop === 0 && !isRetryableError(lastError)) throw lastError;
+        if (hop > 0 || !isRetryableError(lastError)) throw lastError;
       }
     }
     return null;
