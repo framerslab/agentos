@@ -21,15 +21,17 @@ keywords:
 
 # Adaptive Prompt Intelligence
 
-Every turn, AgentOS reassembles the system prompt in local code from the GMI's current state. That reassembly is template merging and criteria matching — no LLM call. Metaprompts are a *separate*, *conditional* loop that runs on top: on most turns, nothing fires. When a trigger does fire (every Nth turn for periodic self-reflection, on a SentimentTracker event, or on a host-set flag), a single extra LLM call runs in the background once the turn's response has streamed and writes back changes to mood, inferred user skill, task complexity, working-memory imprints, or HEXACO traits. The next turn's local prompt assembly then reflects those changes.
+Every turn, a GMI on the full AgentOS runtime reassembles the system prompt in local code from its current state. That reassembly is template merging and criteria matching, with no LLM call. Metaprompts are a *separate*, *conditional* loop that runs on top: on most turns, nothing fires. When a trigger does fire (every Nth turn for periodic self-reflection, on a SentimentTracker event, or on a host-set flag), one extra LLM call per fired metaprompt runs in the background once the turn's response has streamed and writes back changes to mood, inferred user skill, task complexity or working-memory imprints. The next turn's prompt assembly then picks the persona's contextual prompt elements whose criteria match the new state.
 
 The agent stays the same persona; how it sounds, what it remembers, and how confidently it speaks evolve across the messages where triggers actually fire.
 
-The dollar math, in one line: the only adaptive surface that adds an LLM call on *every* user turn is `sentimentTracking.method: 'llm'`, and that defaults to `'lexicon_based'` (free). Everything else either costs nothing extra (contextual elements, lexicon sentiment) or fires occasionally (one extra call every N turns or on detected emotional thresholds). See [Operational notes](#operational-notes) below for a concrete per-1000-turn cost table.
+The dollar math, in one line: the only adaptive surface that can add an LLM call on *every* user turn is sentiment scoring, and the runtime's utility AI decides whether it does, not `sentimentTracking.method`: the default `LLMUtilityAI` makes one call per scored user turn, while a `StatisticalUtilityAI` (or a `HybridUtilityAI` with a statistical part) scores with a lexicon at no cost. Everything else either costs nothing extra (contextual elements) or fires occasionally (one extra call every N turns or on detected emotional thresholds). See [Operational notes](#operational-notes) below for a concrete per-1000-turn cost table.
 
 ![Adaptive Prompt Intelligence: per-turn assembly loop on top (user message → PromptEngine.assemble → MetapromptExecutor.checkAndTriggerMetaprompts → state updates → LLM call); three trigger lanes in the middle (turn_interval periodic self-regulation, event_based SentimentTracker-driven, manual host or tool-driven flags); and the five state surfaces at the bottom (GMI mood, user context, task context, working-memory imprints, HEXACO traits) that metaprompts mutate via callbacks and that re-enter the next turn's prompt.](/img/diagrams/adaptive-intelligence.svg)
 
-This page is the source-verified map of that loop. Every class, interface, trigger name, and handler ID below corresponds to a real surface in [`packages/agentos`](https://github.com/framerslab/agentos/tree/master). If you only need one mental model: the persona definition is the static contract, and the metaprompt executor is the dynamic editor that mutates parts of that contract turn over turn.
+This page is the source-verified map of that loop. Every class, interface, trigger name, and handler ID below corresponds to a real surface in [`packages/agentos`](https://github.com/framerslab/agentos/tree/master). If you only need one mental model: the persona definition is the static contract, and the metaprompt executor is the dynamic editor of the GMI's state turn over turn.
+
+All of it runs inside a GMI, so it applies to the sessions of the full runtime (`AgentOS.processRequest()`) and to a GMI a host builds itself. `agent()` and `agency()` do not create GMIs ([GMIs](./GMI.md)), and their options have no sentiment, metaprompt or contextual-element fields; the examples below are persona definitions.
 
 ## What's actually adaptive
 
@@ -37,22 +39,25 @@ Three things change between turns without persona reload, model swap, or operato
 
 | Surface | Where it lives | What edits it |
 |---|---|---|
-| **Per-turn system prompt** | Composed by [`PromptEngine.assemble()`](https://github.com/framerslab/agentos/blob/master/src/core/llm/PromptEngine.ts) | `ContextualPromptElement[]` whose [`criteria`](https://github.com/framerslab/agentos/blob/master/src/core/llm/PromptEngine.ts) match the current [`PromptExecutionContext`](https://github.com/framerslab/agentos/blob/master/src/core/llm/IPromptEngine.ts) |
-| **GMI state** (mood, user context, task context, working memory) | The [`GMI`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMI.ts) coordinator | [`MetapromptExecutor`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts) callbacks (`onMoodUpdate`, `onUserContextUpdate`, `onTaskContextUpdate`, `onMemoryImprint`) |
-| **HEXACO traits** | [`PersonaOverlayManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/persona_overlays/PersonaOverlayManager.ts) | The [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) (emergent, agent-driven) and the offline [`PersonaDriftMechanism`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/PersonaDriftMechanism.ts) (heuristic, consolidation-cycle) |
+| **Per-turn system prompt** | Composed by [`PromptEngine.constructPrompt()`](https://github.com/framerslab/agentos/blob/master/src/core/llm/PromptEngine.ts) | `ContextualPromptElement[]` whose [`criteria`](https://github.com/framerslab/agentos/blob/master/src/core/llm/PromptEngine.ts) match the current [`PromptExecutionContext`](https://github.com/framerslab/agentos/blob/master/src/core/llm/IPromptEngine.ts) |
+| **GMI state** (mood, user context, task context, working memory) | The [`GMI`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMI.ts) coordinator | [`MetapromptExecutor`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts) callbacks (`onMoodUpdate`, `onUserContextUpdate`, `onTaskContextUpdate`) and working-memory writes |
+| **HEXACO traits** | The GMI's copy of its persona (`personalityTraits`) | The [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) (`adapt_personality`, called by the model). The offline [`PersonaDriftMechanism`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/PersonaDriftMechanism.ts) computes proposals that nothing applies. |
 
-Each surface has its own latency profile and its own gate. The contextual prompt elements run on every turn and cost nothing extra. Metaprompts run when their trigger fires and cost one extra LLM call each. Trait drift requires explicit agent action (the tool) or a consolidation cycle (the mechanism) and is bounded by per-session budgets.
+Each surface has its own latency profile and its own gate. The contextual prompt elements run on every turn and cost nothing extra. Metaprompts run when their trigger fires and cost one extra LLM call each. A trait changes only when the model calls `adapt_personality`, within a per-session budget.
 
 ## The shortest useful example
 
 ```typescript
-import { agent } from '@framers/agentos';
+import { AgentOS, AgentOSResponseChunkType, type IPersonaDefinition } from '@framers/agentos';
 
-const tutor = agent({
-  provider: 'openai',
-  model: 'gpt-4o-mini',
-  instructions: 'You are a patient programming tutor.',
-  personality: { conscientiousness: 0.85, agreeableness: 0.8 },
+const tutor: IPersonaDefinition = {
+  id: 'tutor',
+  name: 'Tutor',
+  description: 'A patient programming tutor.',
+  version: '1.0.0',
+  baseSystemPrompt: 'You are a patient programming tutor.',
+  defaultProviderId: 'openai',
+  defaultModelId: 'gpt-4o-mini',
   sentimentTracking: {
     enabled: true,
     presets: [
@@ -74,22 +79,30 @@ Respond JSON with optional fields: updatedGmiMood, updatedUserSkillLevel, update
     temperature: 0.3,
     maxOutputTokens: 512,
   }],
-});
+};
 
-const session = tutor.session('user-42');
-await session.send('I keep getting confused about recursion.');
+const agentos = await AgentOS.create({ personas: [tutor] });
+
+for await (const chunk of agentos.processRequest({
+  userId: 'user-42',
+  sessionId: 'tutor-session-1',
+  selectedPersonaId: 'tutor',
+  textInput: 'I keep getting confused about recursion.',
+})) {
+  if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA) process.stdout.write(chunk.textDelta);
+}
 ```
 
 The persona ships with two adaptive surfaces wired up:
 
-1. **`sentimentTracking.presets`** subscribes the GMI to three of the five event-based preset metaprompts. The [`SentimentTracker`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/SentimentTracker.ts) analyzes every user message and emits `USER_FRUSTRATED`, `USER_CONFUSED`, or `USER_SATISFIED` events when score patterns cross thresholds. When one fires, the matching preset (`gmi_frustration_recovery`, `gmi_confusion_clarification`, `gmi_satisfaction_reinforcement`) executes and updates the GMI's mood, the inferred user skill level, or the task complexity.
-2. **`metaPrompts[].trigger.type === 'turn_interval'`** schedules a periodic self-reflection every five turns. After every five user messages, the GMI calls an internal LLM with the last ten conversation turns, the last twenty reasoning-trace entries, and its current mood and context, then applies any returned changes.
+1. **`sentimentTracking.presets`** merges three of the five event-based preset metaprompts into the persona when it loads. The [`SentimentTracker`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/SentimentTracker.ts) analyzes every user message and emits `USER_FRUSTRATED`, `USER_CONFUSED`, or `USER_SATISFIED` events when score patterns cross thresholds. When one fires, the matching preset (`gmi_frustration_recovery`, `gmi_confusion_clarification`, `gmi_satisfaction_reinforcement`) executes and updates the GMI's mood, the inferred user skill level, or the task complexity.
+2. **`metaPrompts[].trigger.type === 'turn_interval'`** schedules a periodic self-reflection every five turns. After every five user messages, the GMI calls the model with the last ten conversation messages, the last twenty reasoning-trace entries, and its current mood and context, then applies any returned changes.
 
-Both happen without the host code doing anything. The GMI integrates the changes into the next turn's prompt.
+Both run without host code. A changed mood, skill level or task complexity reaches the next turn's prompt only through contextual prompt elements whose criteria match it ([ContextualPromptElement](#contextualpromptelement-per-turn-fine-grained-adaptation)). This persona declares none, so the changes stay in the GMI's state and reasoning trace; the [worked example](#worked-example-tutor-that-adapts-across-turns) adds them.
 
 ## The metaprompt definition
 
-The full interface lives at [`src/cognition/substrate/personas/IPersonaDefinition.ts:323-336`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts):
+The full interface lives in [`src/cognition/substrate/personas/IPersonaDefinition.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts):
 
 ```typescript
 export interface MetaPromptDefinition {
@@ -119,7 +132,7 @@ export interface MetaPromptDefinition {
 
 A metaprompt's provider is looked up through the GMI's provider manager. On a GMI with a [completion gateway](./GMI.md#model-calls-through-a-completion-gateway), that manager answers only for the hop serving the turn: when a fallback hop on another provider served the turn, a metaprompt that names the persona's provider finds none, and the failure is recorded in the reasoning trace.
 
-A persona's `metaPrompts?: MetaPromptDefinition[]` lives at [`IPersonaDefinition.ts:438`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts). The runtime merges these with the active preset list (see [Built-in presets](#built-in-presets) below); persona-defined entries override preset entries on matching ID.
+A persona's `metaPrompts?: MetaPromptDefinition[]` is a field of [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts). The persona loaders merge these with the presets `sentimentTracking.presets` names (see [Built-in presets](#built-in-presets) below); persona-defined entries override preset entries on matching ID.
 
 The template uses `{{variable}}` placeholders that the executor substitutes with values from the running context. Every handler has its own variable set, documented inline alongside the preset definitions in [`metaprompt_presets.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/metaprompt_presets.ts). The `gmi_self_trait_adjustment` handler supplies `evidence`, `current_mood`, `user_skill` and `task_complexity`. A placeholder outside the handler's set reaches the model unreplaced. On the response side, `applyMetapromptUpdates` applies `updatedGmiMood`, `updatedUserSkillLevel`, `updatedTaskComplexity` and `newMemoryImprints`; any other field is ignored.
 
@@ -129,8 +142,8 @@ The template uses `{{variable}}` placeholders that the executor substitutes with
 
 ```mermaid
 flowchart TD
-  start([User message arrives]) --> assemble[PromptEngine.assemble]
-  assemble --> check{checkAndTriggerMetaprompts}
+  start([User message arrives]) --> turn[Turn: prompt, model call, reply streamed]
+  turn --> check{checkAndTriggerMetaprompts}
 
   check -- "user-turn count reaches intervalTurns" --> interval[turn_interval fires]
   check -- pendingEvents.has eventName --> event[event_based fires]
@@ -195,35 +208,36 @@ Periodic self-reflection covers steady-state adaptation. It is the loop that let
 ### `event_based` — SentimentTracker-driven
 
 ```typescript
-{ trigger: { type: 'event_based', eventName: GMIEventType.USER_FRUSTRATED } }
+{ trigger: { type: 'event_based', eventName: GMIEventType.USER_FRUSTRATED } } // the value 'user_frustrated'
 ```
 
-Event-based metaprompts fire when the GMI's pending-events set contains the named event. The pending-events set is owned by the GMI and populated by the [`SentimentTracker`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/SentimentTracker.ts). Each turn, after the metaprompt executor consumes an event, it removes the event from the pending set so the same event does not fire twice for the same trigger.
+Event-based metaprompts fire when the GMI's pending-events set contains the named event. `eventName` takes a [`GMIEventType`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMIEvent.ts) value (`'user_frustrated'`), not the member name (`'USER_FRUSTRATED'`); `GMIEventType` is exported from `@framers/agentos/cognition/substrate`. The pending-events set is owned by the GMI and populated by the [`SentimentTracker`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/SentimentTracker.ts). Each turn, after the metaprompt executor consumes an event, it removes the event from the pending set so the same event does not fire twice for the same trigger.
 
-The five built-in event types ([`GMIEvent.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMIEvent.ts)) that the SentimentTracker emits:
+The SentimentTracker emits five of the [`GMIEventType`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMIEvent.ts) values, and checks all five on every user turn it scores. Each turn adds one to one counter and resets the other two: `consecutiveFrustration` when the score is below `frustrationThreshold` (default -0.3), `consecutiveSatisfaction` when it is above `satisfactionThreshold` (default 0.3), and `consecutiveConfusion` otherwise, so that counter counts neutral turns.
 
-| Event | Fires when |
+| Event (value) | Fires when |
 |---|---|
-| `USER_FRUSTRATED` | `consecutiveFrustration` reaches `consecutiveTurnsForTrigger` (default 2) with score below `frustrationThreshold` (default -0.3). |
-| `USER_CONFUSED` | Confusion keywords detected (lexicon mode) or LLM classifier returns `confused` (LLM mode) for the configured consecutive turns. |
-| `USER_SATISFIED` | `consecutiveSatisfaction` reaches the trigger count with score above `satisfactionThreshold` (default 0.3). |
-| `ERROR_THRESHOLD_EXCEEDED` | Multiple `ERROR` trace entries inside a short window (driven by the reasoning trace, not the SentimentTracker). |
-| `LOW_ENGAGEMENT` | `consecutiveConfusion`-style counter for neutral-with-short-responses patterns (sentiment analysis pathway). |
+| `USER_FRUSTRATED` (`user_frustrated`) | The turn scores below `frustrationThreshold` with an intensity above 0.6, or `consecutiveFrustration` reaches `consecutiveTurnsForTrigger` (default 2). |
+| `USER_CONFUSED` (`user_confused`) | The message contains a confusion phrase (`confused`, `don't understand`, `unclear`, `what do you mean`, `explain`, `clarify`, `huh`, `??`, `doesn't make sense`, `not sure`), or it scores neutral with more than two negative tokens. One message is enough. |
+| `USER_SATISFIED` (`user_satisfied`) | The turn scores above `satisfactionThreshold` with an intensity above 0.5, or `consecutiveSatisfaction` reaches `consecutiveTurnsForTrigger` + 1. |
+| `ERROR_THRESHOLD_EXCEEDED` (`error_threshold_exceeded`) | Two or more of the last ten reasoning-trace entries are `ERROR` entries. |
+| `LOW_ENGAGEMENT` (`low_engagement`) | `consecutiveConfusion` reaches 4 and the user messages among the last five history messages average under 50 characters. |
 
-Sentiment analysis is **opt-in** via the persona's [`sentimentTracking: { enabled: true }`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts) config. When `enabled: false` (default), no sentiment analysis runs, no events fire, and `event_based` metaprompts simply never trigger. Turn-interval metaprompts like `gmi_self_trait_adjustment` continue to fire regardless.
+Sentiment analysis is **opt-in** via the persona's [`sentimentTracking: { enabled: true }`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts) config. When `enabled: false` (default), no sentiment analysis runs, none of the five events fires (`ERROR_THRESHOLD_EXCEEDED` included), and `event_based` metaprompts never trigger. Turn-interval metaprompts like `gmi_self_trait_adjustment` continue to fire regardless.
 
 ### `manual` — host- or tool-driven
 
 ```typescript
 { trigger: { type: 'manual' } }
 
-// To trigger from host code:
-await gmi.workingMemory.set('manual_trigger_<metaprompt_id>', true);
+// The flag lives in the GMI's working memory: the IWorkingMemory a host passes
+// as GMIBaseConfig.workingMemory when it builds the GMI.
+await workingMemory.set('manual_trigger_<metaprompt_id>', true);
 ```
 
-Manual triggers are flags in the working-memory store. The executor reads `workingMemory.get('manual_trigger_<id>')` each turn and fires when the value is truthy, deleting the flag immediately after queueing the metaprompt.
+Manual triggers are flags in the working-memory store. The executor reads `workingMemory.get('manual_trigger_<id>')` at the end of each turn and fires when the value is truthy, deleting the flag immediately after queueing the metaprompt.
 
-This is the integration point for host-level adaptation logic: a tool that just returned an unexpected result can set the flag to force a re-plan; a UI control labeled "re-think this" can set the flag from a user action; the [`adapt_personality`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) emergent tool can chain a manual trigger to schedule follow-on reflection after a trait mutation.
+Nothing in the runtime sets these flags. The GMI keeps its working memory private, and on the full runtime `GMIManager` gives each GMI an `InMemoryWorkingMemory` the host never receives, so a manual metaprompt fires for a host that builds the GMI itself and keeps the store it passed in. A metaprompt's `newMemoryImprints` cannot set the flag: keys that hold GMI state, `manual_trigger_*` among them, are skipped.
 
 ## Built-in presets
 
@@ -231,48 +245,54 @@ This is the integration point for host-level adaptation logic: a tool that just 
 
 | Preset ID | Trigger | What the handler edits |
 |---|---|---|
-| `gmi_frustration_recovery` | `USER_FRUSTRATED` event | Switches mood toward empathetic/patient/helpful, lowers task complexity, may downgrade assumed user skill level. |
-| `gmi_confusion_clarification` | `USER_CONFUSED` event | Switches mood toward analytical/helpful/patient, lowers task complexity, records clarification strategy. |
-| `gmi_satisfaction_reinforcement` | `USER_SATISFIED` event | May upgrade skill level, may raise task complexity, switches mood toward curious/creative/focused. |
-| `gmi_error_recovery` | `ERROR_THRESHOLD_EXCEEDED` event | Switches mood toward analytical/focused/careful, lowers complexity, records mitigation strategy. |
-| `gmi_engagement_boost` | `LOW_ENGAGEMENT` event | Switches mood toward curious/creative/engaging/playful, may adjust complexity, records engagement strategy. |
+| `gmi_frustration_recovery` | `USER_FRUSTRATED` event | Can switch mood to empathetic, lowers task complexity, may downgrade assumed user skill level. |
+| `gmi_confusion_clarification` | `USER_CONFUSED` event | Can switch mood to analytical, lowers task complexity, records clarification strategy. |
+| `gmi_satisfaction_reinforcement` | `USER_SATISFIED` event | May upgrade skill level, may raise task complexity, can switch mood to curious, creative or focused. |
+| `gmi_error_recovery` | `ERROR_THRESHOLD_EXCEEDED` event | Can switch mood to analytical or focused, lowers complexity, records mitigation strategy. |
+| `gmi_engagement_boost` | `LOW_ENGAGEMENT` event | Can switch mood to creative or curious, may adjust complexity, records engagement strategy. |
+
+A mood is applied only when it is a [`GMIMood`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts) value: `neutral`, `focused`, `empathetic`, `curious`, `assertive`, `analytical`, `frustrated` or `creative`. The preset templates also suggest `helpful`, `patient`, `careful` and `engaging`; a reply with one of those changes no mood.
 
 A sixth built-in handler `gmi_self_trait_adjustment` is **not** a preset (no preset definition is shipped) but is the canonical `turn_interval` self-reflection handler. Persona authors define their own metaprompt entry with that ID and a `turn_interval` trigger; the executor routes it to [`handleTraitAdjustment`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts) automatically. Any metaprompt ID the executor does not recognize falls through to [`handleGenericMetaprompt`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts), which provides the full context-variable set and applies the same update shape.
 
 ### Enabling presets
 
 ```typescript
-import { agent } from '@framers/agentos';
+import type { IPersonaDefinition } from '@framers/agentos';
 
-const supportAgent = agent({
-  provider: 'openai',
+const supportAgent: IPersonaDefinition = {
+  id: 'support_agent',
+  name: 'Support Agent',
+  description: 'Answers product questions from the docs.',
+  version: '1.0.0',
+  baseSystemPrompt: 'You are the support agent for Acme.',
   sentimentTracking: {
     enabled: true,
-    method: 'lexicon_based', // fast, ~10-50ms per turn, no LLM cost
     presets: ['frustration_recovery', 'confusion_clarification', 'error_recovery'],
   },
-});
+};
 ```
 
-The `presets` array names which presets to merge into the persona's metaprompt list. Omitting it (and not setting `enabled: false`) merges all five presets. Setting it to an empty array disables presets while still leaving sentiment analysis running for any custom `event_based` metaprompts the persona defines.
+The `presets` array names which presets the loader merges into the persona's metaprompt list ([`normalizePersonaDefinition()`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/personaNormalization.ts)); `['all']` merges all five. Omitting it, or an empty array, merges none, while sentiment analysis still runs for any custom `event_based` metaprompts the persona defines.
 
 ### Overriding presets
 
-A persona's `metaPrompts` array takes precedence over presets when IDs match. To override the frustration-recovery template without changing the trigger:
+A persona's `metaPrompts` array takes precedence over presets when IDs match. The persona's entry replaces the preset whole, so an override of the frustration-recovery template restates its trigger:
 
 ```typescript
-const custom = agent({
+const custom: IPersonaDefinition = {
+  ...supportAgent,
   metaPrompts: [{
     id: 'gmi_frustration_recovery',
     promptTemplate: `Custom frustration-recovery prompt for this product domain.
 Evidence: {{recent_conversation}}
 Errors: {{recent_errors}}
 Respond JSON: { updatedGmiMood, adjustmentRationale, recoveryStrategy }.`,
-    trigger: { type: 'event_based', eventName: 'USER_FRUSTRATED' },
+    trigger: { type: 'event_based', eventName: 'user_frustrated' },
     temperature: 0.3,
   }],
   sentimentTracking: { enabled: true, presets: ['frustration_recovery'] },
-});
+};
 ```
 
 The merge logic ([`mergeMetapromptPresets()`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/metaprompt_presets.ts)) puts presets in first, then overlays persona-defined entries on top. The override keeps the same handler routing (still `handleFrustrationRecovery` because the ID matches) but uses the persona's template, model, and provider settings.
@@ -298,36 +318,36 @@ sentimentTracking: {
 | Field | Effect |
 |---|---|
 | `enabled` | Master switch. Default `false`. No sentiment analysis, no event emission when off. |
-| `method` | `'lexicon_based'` runs a VADER-style lexical scan (~10-50ms, no LLM cost). `'llm'` calls the configured model for a per-turn classification (~500-1000ms, costs tokens). `'trained_classifier'` plugs in a custom classifier when one is registered. |
+| `method` | Passed to the runtime's utility AI, and neither built-in utility AI reads it. The runtime's default `LLMUtilityAI` classifies every scored turn with one LLM call (~500-1000ms, costs tokens) on `modelId`, else the persona's `defaultModelId`. A `StatisticalUtilityAI`, or a `HybridUtilityAI` with a statistical part, set as the runtime's `utilityAIService`, runs a lexical scan (~10-50ms, no LLM cost). |
 | `historyWindow` | Sliding window of recent sentiment scores kept in `workingMemory.gmi_sentiment_history`. Larger windows catch slower trends; smaller windows react faster. |
 | `frustrationThreshold` / `satisfactionThreshold` | Score thresholds below/above which a single turn counts toward the consecutive counter. |
 | `consecutiveTurnsForTrigger` | How many consecutive matching turns before the event fires. Prevents over-triggering on outlier messages. |
-| `presets` | Which preset metaprompts to enable. |
+| `presets` | Which preset metaprompts to merge when the persona loads; `['all']` merges all five, and none are merged when it is omitted or empty. |
 
 The sentiment history record persists between turns and survives GMI rehydration via working memory. The `consecutiveFrustration`, `consecutiveConfusion`, and `consecutiveSatisfaction` counters are the values the preset handlers consume as `{{consecutive_frustration}}` etc. in their templates.
 
 ## State surfaces metaprompts can mutate
 
-[`applyMetapromptUpdates(updates, metapromptId)`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts) consumes the parsed JSON response and routes each field to the matching GMI callback. Five surfaces, five callbacks:
+[`applyMetapromptUpdates(updates, metapromptId)`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts) consumes the parsed JSON response, routes mood, skill level and task complexity to the matching GMI callback, and writes imprints to working memory:
 
 ```typescript
-// All from MetapromptExecutorConfig — the executor never mutates GMI internals directly.
+// From MetapromptExecutorConfig: the executor changes mood and context through these callbacks.
 onMoodUpdate: (mood: GMIMood) => void;
 onUserContextUpdate: (updates: Partial<UserContext>) => void;
 onTaskContextUpdate: (updates: Partial<TaskContext>) => void;
-onMemoryImprint: (content: string, tags: string[]) => Promise<void>;
-// HEXACO traits are mutated via the AdaptPersonalityTool (emergent) and PersonaDriftMechanism (mechanism), not the metaprompt callbacks.
+// Imprints: workingMemory.set(key, value) for each { key, value } in newMemoryImprints.
+// HEXACO traits are not a metaprompt surface; only the adapt_personality tool changes them.
 ```
 
 | Surface | Field name in metaprompt response | Where it surfaces in next turn |
 |---|---|---|
-| **GMI mood** | `updatedGmiMood` | The mood string is appended to the system prompt and read by the LLM as voice/tone guidance. Mood values are validated against the [`GMIMood`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts) enum; unknown values are dropped. |
-| **User context** | `updatedUserSkillLevel` | The inferred user profile injected into the prompt and consumed by `ContextualPromptElement.criteria.userSkillLevel` matching. |
-| **Task context** | `updatedTaskComplexity` | The task profile injected into the prompt and consumed by `ContextualPromptElement.criteria.taskComplexity` matching. |
-| **Working memory imprints** | `newMemoryImprints: [{ key, value, description? }]` | Set on working memory via `workingMemory.set(key, value)`. Imprints persist across turns within the session and are readable by any subsequent prompt assembly or tool. |
-| **HEXACO traits** | (Not a metaprompt surface — mutated by [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) and `PersonaDriftMechanism`.) | The trait values modulate three cognitive memory mechanisms (involuntary recall, consolidation, schema encoding) and the trait paragraph appended to the system prompt. |
+| **GMI mood** | `updatedGmiMood` | Matched against `criteria.mood` on the persona's contextual prompt elements; the prompt carries no other mood text. Mood values are lowercased and validated against the [`GMIMood`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts) enum; unknown values are dropped. |
+| **User context** | `updatedUserSkillLevel` | Matched against `criteria.userSkillLevel` on contextual prompt elements. |
+| **Task context** | `updatedTaskComplexity` | Matched against `criteria.taskComplexity` on contextual prompt elements. |
+| **Working memory imprints** | `newMemoryImprints: [{ key, value, description? }]` | Set on working memory via `workingMemory.set(key, value)`. Imprints persist across turns within the session; prompt assembly does not read them. A key that holds GMI state (`currentGmiMood`, `manual_trigger_*` and the like) is skipped. |
+| **HEXACO traits** | (Not a metaprompt surface; only the [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) changes them, on the GMI's copy of its persona.) | A GMI does not write traits into its prompt. The cognitive memory manager takes its traits from its own configuration (`traits`) when the host builds it. |
 
-A metaprompt that returns `{ updatedGmiMood: 'EMPATHETIC' }` does not edit the persona definition. It edits the GMI's current mood state, which is a separate field on the running coordinator. Persona reload at next session start resets mood to the persona default. Working-memory imprints are scoped to the session and survive across turns; trait drift is scoped to the persona overlay and survives across sessions.
+A metaprompt that returns `{ updatedGmiMood: 'EMPATHETIC' }` does not edit the persona definition. It edits the GMI's current mood state, which is a separate field on the running coordinator. Persona reload at next session start resets mood to the persona default. Working-memory imprints are scoped to the session and survive across turns; trait changes from `adapt_personality` last as long as the GMI and are not reloaded into later GMIs.
 
 ## ContextualPromptElement: per-turn fine-grained adaptation
 
@@ -366,12 +386,12 @@ The criteria evaluator at [`PromptEngine.evaluateCriteria()`](https://github.com
 |---|---|---|
 | `mood` | `context.currentMood` | GMI's `currentGmiMood`, edited by metaprompts. |
 | `userSkillLevel` | `context.userSkillLevel` | `UserContext.skillLevel`, edited by metaprompts. |
-| `taskHint` (substring match) | `context.taskHint` | Task hint passed in via `session.send({ taskHint })` or derived. |
+| `taskHint` (substring match) | `context.taskHint` | `TaskContext.domain`. |
 | `taskComplexity` | `context.taskComplexity` | `TaskContext.complexity`, edited by metaprompts. |
-| `language` | `context.language` | Target reply language. |
-| `conversationSignals` (all must match) | `context.conversationSignals[]` | Signals derived from sentiment, error, and conversation analysis. |
+| `language` | `context.language` | Not set by the GMI, so an element with a `language` criterion never matches on a GMI turn. |
+| `conversationSignals` (all must match) | `context.conversationSignals[]` | Not set by the GMI, so an element with `conversationSignals` never matches on a GMI turn. |
 
-The eleven [`ContextualElementType`](https://github.com/framerslab/agentos/blob/master/src/core/llm/IPromptEngine.ts) slots (`SYSTEM_INSTRUCTION_ADDON`, `BEHAVIORAL_GUIDANCE`, `TASK_SPECIFIC_INSTRUCTION`, `ERROR_HANDLING_GUIDANCE`, `INTERACTION_STYLE_MODIFIER`, `DOMAIN_CONTEXT`, `ETHICAL_GUIDELINE`, `OUTPUT_FORMAT_SPEC`, `REASONING_PROTOCOL`, `FEW_SHOT_EXAMPLE`, `USER_PROMPT_AUGMENTATION`, `ASSISTANT_PROMPT_AUGMENTATION`) determine where in the assembled prompt the element lands. The combined effect is that contextual elements give you cheap, deterministic per-turn changes, while metaprompts give you expensive, LLM-driven multi-turn changes. The two compose: a metaprompt edits the GMI mood, the contextual element matching that mood is then automatically picked up by the next assembly.
+The twelve [`ContextualElementType`](https://github.com/framerslab/agentos/blob/master/src/core/llm/IPromptEngine.ts) values decide where a selected element lands. `type` takes the value (`'behavioral_guidance'`), not the member name. `system_instruction_addon`, `behavioral_guidance`, `task_specific_instruction`, `error_handling_guidance`, `ethical_guideline`, `output_format_spec` and `reasoning_protocol` become system prompts (priority 100 unless the element sets `priority`); `user_prompt_augmentation` is appended to the user input; `few_shot_example`, `interaction_style_modifier`, `domain_context` and `assistant_prompt_augmentation` are collected in `customComponents`, which the built-in templates do not render, so they never reach the model. At most ten elements are selected per turn, highest `priority` first. The combined effect is that contextual elements give you cheap, deterministic per-turn changes, while metaprompts give you expensive, LLM-driven multi-turn changes. The two compose: a metaprompt edits the GMI mood, the contextual element matching that mood is then automatically picked up by the next assembly.
 
 ## HEXACO trait drift
 
@@ -379,10 +399,10 @@ HEXACO trait mutation is **not** a metaprompt surface. The metaprompt loop edits
 
 ### [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) (emergent, agent-driven)
 
-[`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) is an [`ITool`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ITool.ts) the runtime exposes to the LLM when `emergent.enabled` is true on the agency config. The agent calls it like any other tool, with a reasoning argument the runtime persists to the mutation store:
+[`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) is an [`ITool`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ITool.ts) the full runtime registers as `adapt_personality` when `emergentConfig.selfImprovement.enabled` is true in its configuration. The model calls it like any other tool, with a reasoning argument the mutation store records when one is configured:
 
 ```typescript
-// Tool input shape (from src/cognition/emergent/AdaptPersonalityTool.ts:176)
+// Tool input shape (the inputSchema in src/cognition/emergent/AdaptPersonalityTool.ts)
 {
   trait: 'openness' | 'conscientiousness' | 'extraversion' |
          'agreeableness' | 'honesty' | 'emotionality',
@@ -391,13 +411,13 @@ HEXACO trait mutation is **not** a metaprompt surface. The metaprompt loop edits
 }
 ```
 
-Per-session budgets are enforced in code. The default `maxDeltaPerSession: 0.3` means the sum of `|delta|` values applied to any single trait across one session cannot exceed 0.3. The runtime clamps any delta that would exceed the remaining budget to `remainingBudget * sign(delta)` and sets `clamped: true` on the output. Trait values themselves stay clamped to `[0, 1]`.
+Per-session budgets are enforced in code. `selfImprovement.personality.maxDeltaPerSession` (default 0.15) caps the sum of `|delta|` values applied to any single trait across one session. The runtime clamps any delta that would exceed the remaining budget to `remainingBudget * sign(delta)` and sets `clamped: true` on the output. Trait values themselves stay clamped to `[0, 1]`.
 
-This is the emergent self-modification path. The agent decides, with reasoning, that it should be more open or less assertive. The tool is auto-constructed by [`ToolOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts) when `emergent.enabled === true` (no host-side `new AdaptPersonalityTool(...)` needed). Hosts that want the mutation history persisted across sessions inject a [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) into the orchestrator setup.
+This is the emergent self-modification path. The agent decides, with reasoning, that it should be more open or less assertive. The runtime builds the tool itself (`EmergentCapabilityEngine.createSelfImprovementTools()`, registered by [`ToolOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts)), so no host-side `new AdaptPersonalityTool(...)` is needed. The tool changes the trait on the calling GMI's copy of its persona. With a storage adapter configured and `selfImprovement.personality.persistWithDecay` on (the default), a [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts) records each mutation; stored mutations are not reloaded into later GMIs.
 
 ### `PersonaDriftMechanism` (heuristic, offline)
 
-[`PersonaDriftMechanism`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/PersonaDriftMechanism.ts) is the ninth cognitive memory mechanism. It runs as part of the periodic memory consolidation cycle, not per turn. Given a batch of accumulated episodic memory traces and the accumulated relationship deltas (trust, affection, tension, respect), it analyzes pattern distributions and proposes bounded trait mutations. Heuristic only — no LLM call. Source comments document the trait-to-pattern map.
+[`PersonaDriftMechanism`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/PersonaDriftMechanism.ts) is the ninth cognitive memory mechanism. With `cognitiveMechanisms.personaDrift.enabled` set on the cognitive memory manager, every consolidation run passes its traces to `analyzePersonaDrift()`, which returns up to two bounded trait proposals once there are at least `minTracesForAnalysis` traces. Heuristic only, no LLM call. Source comments document the trait-to-pattern map.
 
 ```typescript
 // From src/cognition/memory/mechanisms/PersonaDriftMechanism.ts
@@ -414,23 +434,25 @@ export interface PersonaDriftConfig {
 }
 ```
 
-Drift is **off by default** (`enabled: false`). Turn it on when the deployment wants slow, mechanism-driven personality change from accumulated experience independent of any agent-side reasoning. The mechanism is bounded both per-cycle (`maxDeltaPerCycle: 0.05`) and per-trace-count (`minTracesForAnalysis: 10`), so it cannot run away from a quiet session.
+Drift is **off by default** (`enabled: false`). Turning it on changes no trait: `ConsolidationPipeline` discards the proposals `onConsolidation()` returns, and `analysisInterval` is not read.
 
 ## Worked example: tutor that adapts across turns
 
 ```typescript
-import { agent } from '@framers/agentos';
+import { AgentOS, AgentOSResponseChunkType, type IPersonaDefinition } from '@framers/agentos';
 
-const tutor = agent({
-  provider: 'openai',
-  model: 'gpt-4o-mini',
-  instructions: 'You are a patient programming tutor. Confirm understanding after each concept.',
-  personality: { conscientiousness: 0.85, agreeableness: 0.75 },
+const tutor: IPersonaDefinition = {
+  id: 'tutor',
+  name: 'Tutor',
+  description: 'A patient programming tutor.',
+  version: '1.0.0',
+  baseSystemPrompt: 'You are a patient programming tutor. Confirm understanding after each concept.',
+  defaultProviderId: 'openai',
+  defaultModelId: 'gpt-4o-mini',
 
   // Adaptive surface 1: opt-in sentiment with three event-based presets
   sentimentTracking: {
     enabled: true,
-    method: 'lexicon_based',
     historyWindow: 10,
     consecutiveTurnsForTrigger: 2,
     presets: ['frustration_recovery', 'confusion_clarification', 'satisfaction_reinforcement'],
@@ -448,7 +470,7 @@ Assumed task complexity: {{task_complexity}}
 
 If the evidence suggests my assumptions are off, propose updates.
 Respond JSON with optional fields:
-- updatedGmiMood: one of [focused, empathetic, curious, analytical, helpful, patient]
+- updatedGmiMood: one of [neutral, focused, empathetic, curious, analytical, creative]
 - updatedUserSkillLevel: one of [novice, beginner, intermediate, advanced, expert]
 - updatedTaskComplexity: one of [simple, moderate, complex, advanced]
 - adjustmentRationale: brief explanation
@@ -474,32 +496,44 @@ Respond JSON with optional fields:
     },
     {
       id: 'empathetic-tone',
-      type: 'interaction_style_modifier',
+      type: 'behavioral_guidance',
       content: 'Acknowledge the difficulty. Offer one concrete next step instead of a list.',
       criteria: { mood: 'empathetic' },
     },
   ],
-});
+};
 
-const session = tutor.session('user-42');
+const agentos = await AgentOS.create({ personas: [tutor] });
+
+async function send(textInput: string) {
+  for await (const chunk of agentos.processRequest({
+    userId: 'user-42',
+    sessionId: 'tutor-session-1',
+    selectedPersonaId: 'tutor',
+    textInput,
+  })) {
+    if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA) process.stdout.write(chunk.textDelta);
+  }
+}
 
 // Turn 1: simple question
-await session.send('What is a function?');
+await send('What is a function?');
 
 // Turns 2-4: user keeps getting it wrong → SentimentTracker emits USER_FRUSTRATED
 // → gmi_frustration_recovery fires → mood becomes 'empathetic', complexity becomes 'simple'
 // → 'empathetic-tone' contextual element activates for next turn
 
-// Turn 5: user_self_trait_adjustment also fires (5-turn interval)
-// → may further adjust skill level to 'novice' based on accumulated evidence
+// Turn 5: gmi_self_trait_adjustment also fires (5-turn interval)
+// → may set the skill level to 'beginner' based on accumulated evidence
 // → may imprint { key: 'user_struggling_with', value: 'function_basics' }
 
 // Turn 6: tutor opens with acknowledgment + one concrete step (empathetic-tone),
-// pitched at novice level (beginner-pace activates since skill ≤ beginner),
-// and remembers the user is working on function basics (working-memory imprint).
+// pitched for a beginner when the skill level is exactly 'beginner' (criteria
+// match exact values, so 'novice' matches neither pace element). The imprint
+// stays in working memory; the prompt does not include it.
 ```
 
-Three surfaces, each acting independently, each composing into the next turn's prompt. No host code rewrites between turns. The persona definition is the same.
+Three surfaces, each acting independently: sentiment and metaprompts change the state, and the contextual elements turn that state into prompt text. No host code rewrites between turns. The persona definition is the same.
 
 ## Operational notes
 
@@ -509,23 +543,23 @@ Most adaptive surfaces add zero extra LLM cost. Only two paths add LLM calls bey
 
 | Surface | When it costs | Per-firing cost |
 |---|---|---|
-| **`PromptEngine.assemble()` (every turn)** | Never. Local template merging + criteria evaluation, no LLM. | $0 |
+| **`PromptEngine.constructPrompt()` (every turn)** | Never. Local template merging + criteria evaluation, no LLM. | $0 |
 | **`ContextualPromptElement[]` (every turn)** | Never. Same local assembly pass. | $0 |
-| **`sentimentTracking.method: 'lexicon_based'` (every turn when enabled)** | Never. VADER-style lexical scan in code, ~10-50ms. | $0 |
-| **`sentimentTracking.method: 'llm'` (every turn when enabled)** | Every user turn. | One small LLM call (~200 in / ~100 out). |
+| **Sentiment scoring by a `StatisticalUtilityAI` or `HybridUtilityAI` (every turn when enabled)** | Never. Lexical scan in code, ~10-50ms. | $0 |
+| **Sentiment scoring by the default `LLMUtilityAI` (every turn when enabled)** | Every user turn. | One small LLM call (~200 in / ~100 out). |
 | **`turn_interval` metaprompt fires** | Once every `intervalTurns` user turns. | One LLM call (~1500 in / ≤512 out at temperature 0.3). |
 | **`event_based` metaprompt fires** | Only when the SentimentTracker emits the matching event (requires `consecutiveTurnsForTrigger` consecutive matches). | One LLM call per event. |
 | **`manual` metaprompt fires** | Only when the host writes the trigger flag. | One LLM call. |
 | **[`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) invocation** | Only when the LLM decides to call it. Tool body is local (clamping and budget enforcement); no separate LLM call. | $0 (folded into the regular completion's tool-call round). |
 | **`PersonaDriftMechanism` analysis** | Per consolidation cycle (default every 5 cycles, gated by `minTracesForAnalysis: 10`). Heuristic only. | $0 |
 
-The defaults out of the box are: sentiment off, drift off, no metaprompts defined. A vanilla `agent({...})` adds nothing to the regular per-turn LLM cost.
+The defaults out of the box are: sentiment off, drift off, no metaprompts defined. A persona that sets none of these fields adds nothing to the regular per-turn LLM cost.
 
 ### Cost math worked out
 
 Concrete example. Take a tutor agent running on `gpt-4o-mini` (Oct-2024 prices: $0.150 per 1M input tokens, $0.600 per 1M output tokens), configured with:
 
-- `sentimentTracking: { enabled: true, method: 'lexicon_based', presets: ['frustration_recovery', 'confusion_clarification', 'satisfaction_reinforcement'] }`
+- `sentimentTracking: { enabled: true, presets: ['frustration_recovery', 'confusion_clarification', 'satisfaction_reinforcement'] }`, scored by a `StatisticalUtilityAI`
 - One `turn_interval` self-trait-adjustment metaprompt with `intervalTurns: 5`
 
 Over 1000 user turns:
@@ -538,9 +572,9 @@ Over 1000 user turns:
 | Event-based presets (typical: ~5% of turns trigger an event) | ~50 | 1500 in / 400 out | $0.011 + $0.012 = **$0.023** |
 | **Total adaptive overhead** | **~250 extra LLM calls** | | **~$0.12 per 1000 turns** |
 
-Swap `method: 'llm'` for sentiment and you add 1000 small classification calls (~200 in / 100 out each) at ~$0.030 + $0.060 = **$0.09** more per 1000 turns. Swap `gpt-4o-mini` for `gpt-4o` (10x the unit price) and the same overhead becomes ~$1.20 per 1000 turns.
+Score sentiment with the runtime's default `LLMUtilityAI` instead and you add 1000 small classification calls (~200 in / 100 out each) at ~$0.030 + $0.060 = **$0.09** more per 1000 turns. Swap `gpt-4o-mini` for `gpt-4o` (10x the unit price) and the same overhead becomes ~$1.20 per 1000 turns.
 
-The order of magnitude: with `lexicon_based` sentiment and a 5-turn self-reflection cadence, adaptive overhead lands at roughly **5-15% of a turn's regular cost on a cheap model**, **0.5-1.5% on a frontier model**, and **0%** if you disable both surfaces.
+The order of magnitude: with lexicon sentiment and a 5-turn self-reflection cadence, adaptive overhead lands at roughly **5-15% of a turn's regular cost on a cheap model**, **0.5-1.5% on a frontier model**, and **0%** if you disable both surfaces.
 
 ### Cost controls
 
@@ -549,18 +583,18 @@ Three knobs change the cost curve directly:
 | Knob | Effect |
 |---|---|
 | `intervalTurns` on the self-reflection metaprompt | Linear. Doubling from 5 to 10 halves the periodic-reflection cost. |
-| `consecutiveTurnsForTrigger` on `sentimentTracking` | Reduces event firings. Default 2; raise to 3-4 to require more sustained signal before paying for a recovery metaprompt. |
+| `consecutiveTurnsForTrigger` on `sentimentTracking` | Reduces frustration and satisfaction firings (confusion fires on a single message). Default 2; raise to 3-4 to require more sustained signal before paying for a recovery metaprompt. |
 | `metaPrompt.modelId` per metaprompt | Override the persona's model with a cheaper one for reflection. The presets ship with `modelId: undefined` so they fall back to the persona default, or to the GMI's default model when the persona sets none; setting them to a small model isolates adaptive overhead from your main completion model. |
 
 ### Latency
 
-The executor checks triggers at the end of a turn, after the regular completion has streamed, and queues the metaprompts that fire as a background batch. The turn does not wait for the batch's LLM calls, so the user-visible latency on turn N is unaffected. A batch applies its updates when its calls return: a metaprompt firing on turn N shapes the first prompt assembled after that, normally turn N+1, and a slow call can land during a later turn. Batches for one GMI run one at a time, so their updates apply in trigger order. `GMI.shutdown()` waits up to five seconds for a running batch before it closes working memory. Lexicon-based sentiment analysis adds 10-50ms to the per-turn local work; LLM-based adds the full provider round-trip to background work but still does not block the user-visible reply.
+The executor checks triggers at the end of a turn, after the regular completion has streamed, and queues the metaprompts that fire as a background batch. The turn does not wait for the batch's LLM calls, so the user-visible latency on turn N is unaffected. A batch applies its updates when its calls return: a metaprompt firing on turn N shapes the first prompt assembled after that, normally turn N+1, and a slow call can land during a later turn. Batches for one GMI run one at a time, so their updates apply in trigger order. `GMI.shutdown()` waits up to five seconds for a running batch before it closes working memory. Sentiment scoring runs before the turn's first model call and is awaited: a lexicon score adds 10-50ms, and an LLM score (the default `LLMUtilityAI`) delays the reply by one provider round trip.
 
-**Failure modes.** A failed metaprompt is logged to the reasoning trace as an `ERROR` entry and does not block the user-visible reply. A JSON parsing failure on the metaprompt response is auto-recovered via [`IUtilityAI.parseJsonSafe()`](https://github.com/framerslab/agentos/blob/master/src/cognition/nlp/ai_utilities/IUtilityAI.ts), which prompts a cheaper model to fix malformed JSON before giving up. An unknown mood value is dropped silently (validated against the [`GMIMood`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts) enum).
+**Failure modes.** A failed metaprompt is logged to the reasoning trace as an `ERROR` entry and does not block the user-visible reply. When the metaprompt's reply is not valid JSON, [`IUtilityAI.parseJsonSafe()`](https://github.com/framerslab/agentos/blob/master/src/cognition/nlp/ai_utilities/IUtilityAI.ts) asks the metaprompt's model to repair it (the default `LLMUtilityAI` does; `StatisticalUtilityAI` does not repair); when repair fails, the metaprompt applies nothing. An unknown mood value is dropped silently (validated against the [`GMIMood`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts) enum).
 
-**State scope.** Mood, user context, task context, and the metaprompt turn counters live in the GMI's working memory and persist across turns within the session. They reset when the session ends and a new session starts on the same agent. HEXACO trait mutations from `AdaptPersonalityTool` and `PersonaDriftMechanism` persist via the persona overlay and survive across sessions.
+**State scope.** Mood, user context, task context, and the metaprompt turn counters live in the GMI's working memory and persist across turns within the session. They reset when the session ends and a new session starts on the same agent. HEXACO trait changes from `adapt_personality` last as long as the GMI; they are not reloaded into later GMIs, and drift proposals are not applied.
 
-**Opt-in everywhere.** Sentiment tracking is `enabled: false` by default. The drift mechanism is `enabled: false` by default. Metaprompts only run if the persona defines them or the runtime merges presets. None of this is implicit. The default agent has no adaptive surfaces wired up beyond the prompt engine itself.
+**Opt-in everywhere.** Sentiment tracking is `enabled: false` by default. The drift mechanism is `enabled: false` by default. Metaprompts only run if the persona defines them or the runtime merges presets. None of this is implicit. A default persona has no adaptive surfaces wired up beyond the prompt engine itself.
 
 ## Where things live
 
@@ -581,7 +615,7 @@ The executor checks triggers at the end of a turn, after the regular completion 
 
 - [Generalized Mind Instances (GMIs)](/architecture/gmi) for the coordinator class that owns this whole loop.
 - [HEXACO Personality](/features/hexaco-personality) for the trait model the drift mechanism mutates.
-- [Cognitive Memory](/features/cognitive-memory) for the eight mechanisms that consume the trait values once they change.
+- [Cognitive Memory](/features/cognitive-memory) for the eight mechanisms that read the trait values the memory manager is configured with.
 - [Emergent Capabilities](/features/emergent-capabilities) for the runtime layer that exposes `adapt_personality` and the rest of the emergent tools.
 - [Human-in-the-Loop (HITL)](/features/human-in-the-loop) for adding approval gates around emergent mutations like trait adjustments.
 
