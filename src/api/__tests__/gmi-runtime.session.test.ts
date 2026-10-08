@@ -117,6 +117,24 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect([await failed.provider, await failed.model]).toEqual(['openai', 'stub-model']);
   });
 
+  it('abandoning stream() stops the turn: the model request is aborted, and the promises settle with what was delivered', async () => {
+    const k = key(); const g = gate();
+    const delta = { id: 'stub', object: 'chat.completion.chunk', created: 0, modelId: 'stub-model', choices: [], responseTextDelta: 'First' };
+    const s = script('openai', k, { replies: [reply.hold([delta], g.opened, reply.text(' and the rest.'))] });
+    const session = agent(base(k)).session('s');
+    try {
+      const r = session.stream('go');
+      for await (const _text of r.textStream) break;
+      // Nobody opens the gate: the turn ends only because the abandoned stream aborted its request.
+      expect(await Promise.race([r.text, sleep(2_000).then(() => 'still running')])).toBe('First');
+      expect(s.aborts).toBe(1);
+      // As streamText reports an abandoned stream: the reason of the latest finished step, not the abort.
+      expect(await r.finishReason).toBe('stop');
+    } finally {
+      g.open();
+    }
+  });
+
   it('reports the provider message id only when the call opted into cache diagnostics, as agent() does', async () => {
     const k = key(); script('openai', k, { replies: [reply.text('One.'), reply.text('Two.'), reply.text('Three.')] });
     const session = agent(base(k)).session('s');
