@@ -83,10 +83,18 @@ describe('TranscriptLedger', () => {
     expect(ledger.items().map((item) => item.itemId)).toEqual(['i1', 'i3']);
   });
 
+  it('keeps the line it just took when every other line is still being heard, dropping the oldest of those', () => {
+    const ledger = new TranscriptLedger({ maxItems: 2 });
+    ledger.apply(line('i1', 'Open', false));
+    ledger.apply(line('i2', 'Also open', false));
+    expect(ledger.apply(line('i3', 'Three.', true))).toBe(true);
+    expect(ledger.items().map((item) => item.itemId)).toEqual(['i2', 'i3']);
+  });
+
   it('survives its JSON and skips a malformed line', () => {
     const ledger = new TranscriptLedger();
     ledger.apply({ itemId: 'i1', text: 'One.', isFinal: true, startMs: 0, endMs: 900, language: 'en' });
-    const copy = TranscriptLedger.fromJSON({ ...ledger.toJSON(), items: [...ledger.toJSON().items, { itemId: 7 }] });
+    const copy = TranscriptLedger.fromJSON({ ...ledger.toJSON(), items: [...ledger.toJSON().items, { itemId: 7 }, null] });
     expect(copy.items()).toEqual(ledger.items());
   });
 });

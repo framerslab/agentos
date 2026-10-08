@@ -55,7 +55,12 @@ export type LedgerEvent = Pick<TranscriptEvent, 'text' | 'isFinal'> &
 
 /** Options of {@link TranscriptLedger}. */
 export interface TranscriptLedgerOptions {
-  /** The most lines kept; beyond it the oldest final lines are dropped. @defaultValue 20000 */
+  /**
+   * The most lines held, a line taken back among them (it stays, hidden, so a
+   * later event for its id changes nothing); beyond it the oldest final lines
+   * are dropped, never the line just applied.
+   * @defaultValue 20000
+   */
   maxItems?: number;
 }
 
@@ -104,7 +109,7 @@ export class TranscriptLedger {
     if (event.failed !== undefined) line.failed = event.failed;
     // Setting a key a Map already holds keeps its place, so a line stays where it was first seen.
     this.lines.set(itemId, line);
-    this.trim();
+    this.trim(itemId);
     return true;
   }
 
@@ -157,6 +162,7 @@ export class TranscriptLedger {
     const items = (value as { items?: unknown } | null)?.items;
     if (!Array.isArray(items)) return ledger;
     for (const item of items) {
+      if (typeof item !== 'object' || item === null) continue;
       const line = item as Partial<Record<keyof LedgerItem, unknown>>;
       if (typeof line.itemId !== 'string' || typeof line.text !== 'string' || typeof line.isFinal !== 'boolean') continue;
       ledger.apply({
@@ -172,17 +178,24 @@ export class TranscriptLedger {
     return ledger;
   }
 
-  /** Drops the oldest final lines while the ledger is over its size; the oldest line of all when none is final. */
-  private trim(): void {
+  /**
+   * Drops the oldest final lines while the ledger is over its size, never the
+   * line just applied; the oldest other line when no other line is final.
+   */
+  private trim(keep: string): void {
     while (this.lines.size > this.maxItems) {
+      let oldest: string | undefined;
       let drop: string | undefined;
       for (const line of this.lines.values()) {
+        if (line.itemId === keep) continue;
+        if (oldest === undefined) oldest = line.itemId;
         if (line.isFinal) {
           drop = line.itemId;
           break;
         }
       }
-      const id = drop ?? this.lines.keys().next().value!;
+      // Over a size of at least 1 the ledger holds two lines or more, so one other than `keep` is there.
+      const id = (drop ?? oldest)!;
       this.lines.delete(id);
       this.retracted.delete(id);
     }
