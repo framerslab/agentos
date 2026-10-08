@@ -1,0 +1,45 @@
+name: Lockfile
+
+# Resolves the dependency ranges in package.json and offers pnpm-lock.yaml as
+# an artifact, for a branch whose package.json changed. Installs never run on a
+# developer's machine: run this, download the artifact, commit it to the branch.
+#
+#   gh workflow run lockfile.yml -R framerslab/agentos --ref <branch>
+#   gh run download <run-id> -R framerslab/agentos -n pnpm-lock
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve the lockfile
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      # package.json names no packageManager, so the version is the one ci.yml installs with.
+      - name: Install PNPM
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Resolve
+        run: pnpm install --lockfile-only
+
+      - name: Upload the lockfile
+        uses: actions/upload-artifact@v4
+        with:
+          name: pnpm-lock
+          path: pnpm-lock.yaml
+          if-no-files-found: error
