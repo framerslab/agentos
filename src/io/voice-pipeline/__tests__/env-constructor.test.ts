@@ -2,7 +2,12 @@ import { describe, it, expect } from 'vitest';
 import {
   createVoiceProvidersFromEnv,
   NoVoiceProvidersAvailableError,
+  createSttChain,
+  parseSttEntry,
+  sttEntryPricePerMinute,
+  STT_CHAIN_VENDORS,
 } from '../env-constructor.js';
+import { openAITranscriptionPricing } from '../../../core/llm/providers/implementations/openaiPricing.js';
 
 describe('createVoiceProvidersFromEnv', () => {
   it('builds chains with only ELEVENLABS_API_KEY', () => {
@@ -164,5 +169,47 @@ describe('cartesia + hume env wiring', () => {
       'elevenlabs-streaming',
       'openai-realtime',
     ]);
+  });
+});
+
+describe('createSttChain from entries', () => {
+  it('keeps the entries in order as the chain tries them, each with its vendor and model', () => {
+    const chain = createSttChain(['openai:gpt-4o-transcribe', 'openai:gpt-4o-mini-transcribe', 'deepgram:nova-3'], {
+      openai: { apiKey: 'sk-test-not-a-real-key' },
+      deepgram: { apiKey: 'dg-test' },
+    });
+    expect(chain.providers.map((provider) => [provider.providerId, provider.priority])).toEqual([
+      ['openai-realtime-transcription', 10],
+      ['openai-realtime-transcription', 20],
+      ['deepgram-streaming', 30],
+    ]);
+    expect(chain.providers.map((provider) => (provider as unknown as { config: { model?: string } }).config.model)).toEqual([
+      'gpt-4o-transcribe',
+      'gpt-4o-mini-transcribe',
+      'nova-3',
+    ]);
+  });
+
+  it('refuses an empty list, an entry twice, a device entry, an unknown vendor and a vendor with no options', () => {
+    expect(() => createSttChain([], {})).toThrow(RangeError);
+    expect(() => createSttChain(['openai:gpt-4o-transcribe', 'openai:gpt-4o-transcribe'], { openai: { apiKey: 'k' } })).toThrow('twice');
+    expect(() => createSttChain(['device:moonshine-auto'], {})).toThrow(RangeError);
+    expect(() => createSttChain(['whisper:large'], {})).toThrow(RangeError);
+    expect(() => createSttChain(['openai:gpt-4o-transcribe'], {})).toThrow('openai');
+  });
+
+  it('parses an entry and refuses another shape', () => {
+    expect(parseSttEntry('openai:gpt-4o-mini-transcribe')).toEqual({ vendor: 'openai', model: 'gpt-4o-mini-transcribe' });
+    for (const bad of ['openai', 'openai:', ':model', 'device:moonshine-auto', 'open ai:x']) expect(() => parseSttEntry(bad)).toThrow(RangeError);
+    expect(STT_CHAIN_VENDORS).toEqual(['openai', 'deepgram', 'elevenlabs']);
+  });
+
+  it("prices an entry from AgentOS's rows, OpenAI's transcription models among them, and knows no price without a row", () => {
+    expect(openAITranscriptionPricing('gpt-4o-transcribe')).toBe(0.006);
+    expect(openAITranscriptionPricing('gpt-transcribe')).toBe(0.0045);
+    expect(openAITranscriptionPricing('gpt-live-transcribe')).toBe(0.017);
+    expect(sttEntryPricePerMinute('openai:gpt-4o-mini-transcribe')).toBe(0.003);
+    expect(sttEntryPricePerMinute('openai:no-such-model')).toBeUndefined();
+    expect(sttEntryPricePerMinute('deepgram:nova-3')).toBeUndefined();
   });
 });
