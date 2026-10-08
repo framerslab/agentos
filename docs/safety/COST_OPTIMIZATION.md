@@ -109,17 +109,20 @@ const guard = new CostGuard({
 
 const assistant = agent({ provider: 'openai', model: 'gpt-4o-mini' });
 
+const ESTIMATED_COST_USD = 0.01; // a conservative estimate for one call
+
 async function ask(userId: string, prompt: string): Promise<string> {
-  const check = guard.canAfford(userId, 0.01); // your estimate for one call
+  const check = guard.canAfford(userId, ESTIMATED_COST_USD);
   if (!check.allowed) throw new Error(check.reason);
 
   const result = await assistant.generate(prompt);
-  guard.recordCost(userId, result.usage.costUSD ?? 0);
+  // An absent costUSD means the cost is unknown, not zero: record the estimate.
+  guard.recordCost(userId, result.usage.costUSD ?? ESTIMATED_COST_USD);
   return result.text;
 }
 ```
 
-`getSnapshot(key)` returns the current totals and whether a cap is reached, `resetSession(key)` clears the session total, and the daily total resets at local midnight. The totals are in process memory. [Safety Primitives](./SAFETY_PRIMITIVES.md) covers the guard with the circuit breaker and the stuck detector.
+`canAfford()` and `recordCost()` are separate calls, so two calls for one key that run at the same time can both pass the check before either records its cost. When a cap must hold exactly, run one call per key at a time. `getSnapshot(key)` returns the current totals and whether a cap is reached, `resetSession(key)` clears the session total, and the daily total resets at local midnight. The totals are in process memory. [Safety Primitives](./SAFETY_PRIMITIVES.md) covers the guard with the circuit breaker and the stuck detector.
 
 ## Choose a cheaper model
 

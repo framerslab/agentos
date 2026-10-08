@@ -518,7 +518,10 @@ const { text } = await generateText({
 ```
 
 `provider: 'litellm'` without `model` throws `Unknown provider "litellm"`, and
-without `apiKey` it throws `No API key for litellm`. LiteLLM is not part of
+without `apiKey` it throws `No API key for litellm`. The provider class has a
+default model of its own, `gpt-4o-mini`, used only when the class is driven
+directly without a model id; `generateText()`, `streamText()` and `agent()`
+never reach it. LiteLLM is not part of
 auto-detection or of the auto-built fallback chain; add it to
 `fallbackProviders` with its `model`, `apiKey` and `baseUrl` to use it as a
 fallback.
