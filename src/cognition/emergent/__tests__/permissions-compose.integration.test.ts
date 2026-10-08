@@ -722,4 +722,87 @@ describe('compositions and workflows: one gate, one rule', () => {
     const asOwner = await callTool(host.orchestrator, 'double_via', { n: 2 }, { personaId: 'agent-a' });
     expect(asOwner.output).toEqual({ doubled: 4 });
   });
+
+  it("a run's refused step never replaces a host's suspension, made in this process or in another, and the step's return does not lift it", async () => {
+    const db = createSqliteAdapter();
+    let reached!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const waitTool: ITool = {
+      id: 'wait-it-v1',
+      name: 'wait_it',
+      displayName: 'wait_it',
+      description: 'Waits, then returns the text it is given.',
+      inputSchema: TEXT_IN,
+      hasSideEffects: false,
+      execute: async (args: Record<string, unknown>) => {
+        reached();
+        await released;
+        return { success: true, output: { text: String(args.text) } };
+      },
+    };
+    const hostA = await makeForgeHost({ db, tools: [waitTool, echoTool()] });
+    const hostB = await makeForgeHost({ db, tools: [echoTool()] });
+    seedToolRow(db, {
+      id: 'c-wait',
+      name: 'wait_then_echo',
+      mode: 'compose',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [
+          { name: 'w', tool: 'wait_it', inputMapping: { text: '$input.text' } },
+          { name: 'e', tool: 'echo', inputMapping: { text: '$prev.text' } },
+        ],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    seedToolRow(db, {
+      id: 'c-echo',
+      name: 'echo_once',
+      mode: 'compose',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 'e', tool: 'echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    db.raw.prepare('UPDATE agentos_emergent_tools SET created_at = ? WHERE id = ?').run(1_700_000_000_001, 'c-echo');
+    expect((await hostA.engine.loadPersistedTools({ tiers: ['shared'] })).active).toBe(2);
+
+    // In this process: a call is under way when the host suspends the
+    // composition and takes its second step's tool away.
+    const calling = callTool(hostA.orchestrator, 'wait_then_echo', { text: 'x' });
+    await waiting;
+    expect(await hostA.engine.suspendTool('c-wait', 'policy')).toBe(true);
+    await hostA.orchestrator.unregisterTool('echo');
+    release();
+    expect((await calling).isError).toBe(true);
+    expect(readStateRow(db, 'c-wait')).toMatchObject({ state: 'suspended', state_reason: 'policy', set_by: 'host' });
+
+    // In another process: the host suspends a composition this process still
+    // holds active, and a call here meets the missing step.
+    expect(await hostB.engine.suspendTool('c-echo', 'policy')).toBe(true);
+    expect((await callTool(hostA.orchestrator, 'echo_once', { text: 'y' })).isError).toBe(true);
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'suspended', state_reason: 'policy', set_by: 'host' });
+
+    // The step's tool returns: the host's suspensions stay, here and in the rows.
+    await hostA.orchestrator.registerTool(echoTool());
+    await hostA.engine.onHostToolRegistered('echo');
+    expect(await hostA.orchestrator.getTool('wait_then_echo')).toBeUndefined();
+    expect(await hostA.orchestrator.getTool('echo_once')).toBeUndefined();
+    expect(readStateRow(db, 'c-wait')).toMatchObject({ state: 'suspended', state_reason: 'policy', set_by: 'host' });
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'suspended', state_reason: 'policy', set_by: 'host' });
+    const again = await hostA.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(again.outcomes).toEqual([
+      { toolId: 'c-wait', name: 'wait_then_echo', state: 'suspended', reason: 'policy' },
+      { toolId: 'c-echo', name: 'echo_once', state: 'suspended', reason: 'policy' },
+    ]);
+  });
 });

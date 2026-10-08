@@ -393,6 +393,11 @@ function sameGrant(a: StoredRequest | null | undefined, b: StoredRequest | null 
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+/** A restriction only the host clears: its own suspension, or a demotion. */
+function isHostRestriction(record: ToolStateRecord): boolean {
+  return record.state === 'demoted' || (record.state === 'suspended' && record.setBy === 'host');
+}
+
 export class EmergentCapabilityEngine {
   /** Injected dependencies. */
   private readonly config: EmergentConfig;
@@ -815,6 +820,12 @@ export class EmergentCapabilityEngine {
       return null;
     }
 
+    // A suspended or demoted tool is neither promoted nor suspended again
+    // here: the restriction in force stays, whoever set it.
+    if (!this.registry.isActive(toolId)) {
+      return null;
+    }
+
     // A tool that no longer fits what is in force is suspended, not promoted.
     const refusal = this.refusalFor(tool.implementation, tool.name);
     if (refusal) {
@@ -843,6 +854,15 @@ export class EmergentCapabilityEngine {
     // Submit to the promotion panel.
     const promotionVerdict = await this.judge.reviewPromotion(tool);
     tool.judgeVerdicts.push(promotionVerdict);
+
+    // Suspended, demoted or removed while the panel reviewed it: not promoted.
+    if (this.registry.get(toolId) !== tool || !this.registry.isActive(toolId)) {
+      return {
+        success: false,
+        verdict: promotionVerdict,
+        error: 'The tool was suspended, demoted or removed during its review and was not promoted.',
+      };
+    }
 
     if (promotionVerdict.approved) {
       await this.registry.promote(toolId, 'agent');
@@ -1749,18 +1769,35 @@ export class EmergentCapabilityEngine {
   /**
    * A suspension the library sets from a run or a promotion check: written as
    * the library's (so a later load, or a registration of the missing step
-   * tool, re-checks it), held here, and the executable taken out.
+   * tool, re-checks it), held here, and the executable taken out. It gives
+   * way to the host's word: when this process holds a host's suspension or a
+   * demotion nothing is written, and a row another process restricted that
+   * way is left as it is and held here (`yieldToHost`), so the library never
+   * turns a host's restriction into one of its own that a re-check lifts.
+   *
+   * @returns whether the library's suspension is what holds now.
    */
-  private async suspendAsLibrary(toolId: string, reason: string): Promise<void> {
-    try {
-      await this.registry.setState(toolId, 'suspended', reason, { setBy: 'library' });
-    } catch (error: unknown) {
-      console.warn(
-        `[agentos:emergent] could not store the suspension of "${toolId}" (${reason}):`,
-        error instanceof Error ? error.message : error,
-      );
+  private async suspendAsLibrary(toolId: string, reason: string): Promise<boolean> {
+    const held = this.registry.getState(toolId);
+    let suspended = false;
+    if (!held || !isHostRestriction(held)) {
+      try {
+        const inForce = await this.registry.setState(toolId, 'suspended', reason, {
+          setBy: 'library',
+          yieldToHost: true,
+        });
+        suspended = inForce.state === 'suspended' && inForce.setBy === 'library';
+      } catch (error: unknown) {
+        // Held here even though the row did not take it.
+        suspended = true;
+        console.warn(
+          `[agentos:emergent] could not store the suspension of "${toolId}" (${reason}):`,
+          error instanceof Error ? error.message : error,
+        );
+      }
     }
     await this.unregisterIfLive(toolId);
+    return suspended;
   }
 
   private async unregisterIfLive(toolId: string): Promise<void> {
@@ -1993,8 +2030,8 @@ export class EmergentCapabilityEngine {
         const refused = (result.details as { code?: string } | undefined)?.code;
         const suspendFor = !result.success && refused ? RUN_REFUSAL_REASONS[refused] : undefined;
         if (suspendFor) {
-          await this.suspendAsLibrary(tool.id, suspendFor);
-          if (refused === 'step_replaced') {
+          const suspended = await this.suspendAsLibrary(tool.id, suspendFor);
+          if (suspended && refused === 'step_replaced') {
             // The step's tool changed hands between its check and its run (the
             // gate's refusal; nothing ran). The registration that swapped it ran
             // before this suspension existed, so it did not re-check this

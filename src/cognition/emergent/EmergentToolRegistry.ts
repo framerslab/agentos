@@ -540,6 +540,12 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
    * another process stored meanwhile is what is returned and held, and a tool
    * another process removed reads as `demoted` with the reason `removed`.
    *
+   * `options.yieldToHost` makes the write give way to the host's word: a row
+   * that holds a host's suspension, or a demotion, is not changed, and its
+   * record is returned and held instead. The library's suspensions from a run
+   * or a promotion check use it, so they never replace a restriction a host
+   * set, in this process or in another.
+   *
    * @returns the record now in force for the tool.
    * @throws If the storage adapter rejects.
    */
@@ -551,6 +557,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
       request?: StoredRequest | null;
       setBy?: StateSetter;
       ifRow?: { at: number; state: ToolState; setBy: StateSetter } | 'absent';
+      yieldToHost?: boolean;
     } = {},
   ): Promise<ToolStateRecord> {
     const previous = this.states.get(toolId);
@@ -579,7 +586,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
     let inForce: ToolStateRecord = record;
     if (this.db) {
       inForce = await this.queueStateWrite(toolId, () =>
-        this.writeStateRow(toolId, record, named, options.ifRow),
+        this.writeStateRow(toolId, record, named, options.ifRow, options.yieldToHost === true),
       );
     }
     if (inForce !== record) {
@@ -635,7 +642,8 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
    * pending, and the next state write or load finishes the flag write, so a
    * crash or a failed write between the two never leaves the pair apart
    * beyond the next load. With `ifRow`, an existing row is changed only while
-   * its state, setter and time are the ones given (`'absent'`: never); a
+   * its state, setter and time are the ones given (`'absent'`: never); with
+   * `yieldToHost`, only while it is active or the library's suspension. A
    * refused write changes nothing, flag included, and the row as it stands
    * afterwards is returned, so it shows as a record other than the one given.
    */
@@ -644,6 +652,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
     record: ToolStateRecord,
     named: boolean,
     ifRow?: { at: number; state: ToolState; setBy: StateSetter } | 'absent',
+    yieldToHost = false,
   ): Promise<ToolStateRecord> {
     const db = this.db;
     if (!db) {
@@ -665,24 +674,37 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
              state_at = excluded.state_at,
              updated_at = excluded.updated_at,
              write_id = excluded.write_id`;
-    let guard = '';
     // state_at is the call's time; updated_at the write's own.
     // Every write has an id of its own: the row read back tells this write
     // from another of the same content in the same millisecond.
     const writeId = randomUUID();
     record.writeId = writeId;
     const values: unknown[] = [toolId, record.state, record.reason, record.setBy, record.at, requestJson, Date.now(), writeId];
+    const conditions: string[] = [];
     const guardParams: unknown[] = [];
     if (ifRow === 'absent') {
-      guard = `
-           WHERE 0 = 1`;
+      conditions.push('0 = 1');
     } else if (ifRow !== undefined) {
-      guard = `
-           WHERE agentos_emergent_tool_state.state = ?
+      conditions.push(
+        `agentos_emergent_tool_state.state = ?
              AND agentos_emergent_tool_state.set_by = ?
-             AND agentos_emergent_tool_state.state_at = ?`;
+             AND agentos_emergent_tool_state.state_at = ?`,
+      );
       guardParams.push(ifRow.state, ifRow.setBy, ifRow.at);
     }
+    if (yieldToHost) {
+      // A host's suspension and a demotion stay; only an active row or the
+      // library's own suspension is changed.
+      conditions.push(
+        `(agentos_emergent_tool_state.state = 'active'
+               OR (agentos_emergent_tool_state.state = 'suspended' AND agentos_emergent_tool_state.set_by = 'library'))`,
+      );
+    }
+    const guard =
+      conditions.length > 0
+        ? `
+           WHERE ${conditions.join('\n             AND ')}`
+        : '';
     const readRow = async (): Promise<StateRowRead | undefined> =>
       (await db.get(
         `SELECT s.state, s.state_reason, s.set_by, s.state_at, s.request_json, s.write_id,
