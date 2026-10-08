@@ -1,3 +1,13 @@
+## [0.13.3](https://github.com/framerslab/agentos/compare/v0.13.2...v0.13.3) (2026-10-08)
+
+### feat
+
+* **guardrails:** required guards, hold-until-final output, phrase lists and hard limits (#169) ([032fcbf](https://github.com/framerslab/agentos/commit/032fcbf29d7c6ff2f3faded78765ced9fdd68d71))
+
+### fix
+
+* **emergent:** QuickJSExecutor follow-ups from the cold read of #160 (#178) ([2ec4535](https://github.com/framerslab/agentos/commit/2ec45351d794dcd69e54b4127097ed83ffc8bc7f))
+
 ## [0.13.2](https://github.com/framerslab/agentos/compare/v0.13.1...v0.13.2) (2026-10-08)
 
 ### fix
