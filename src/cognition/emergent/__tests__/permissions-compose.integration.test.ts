@@ -869,4 +869,39 @@ describe('compositions and workflows: one gate, one rule', () => {
     expect(registry.getState('c-gone')).toBeUndefined();
     expect(await host.orchestrator.getTool('echo_again')).toBeUndefined();
   });
+
+  it("a run's suspension whose write failed gives way to the row at the next re-check, and the composition comes back with its step", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, tools: [echoTool()] });
+    seedToolRow(db, {
+      id: 'c-echo',
+      name: 'echo_once',
+      mode: 'compose',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 'e', tool: 'echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).active).toBe(1);
+
+    // The step's tool goes away, and the run's suspension does not reach the
+    // row: it is held here only, and the row still reads active.
+    await host.orchestrator.unregisterTool('echo');
+    db.failNext('INSERT INTO agentos_emergent_tool_state');
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'x' })).isError).toBe(true);
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'active' });
+    expect(await host.orchestrator.getTool('echo_once')).toBeUndefined();
+
+    // The step's tool returns: the row reads active and the composition fits,
+    // so the suspension held here, whose write is no longer under way, gives way.
+    await host.orchestrator.registerTool(echoTool());
+    await host.engine.onHostToolRegistered('echo');
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'back' })).output).toEqual({ text: 'back' });
+    // And the next load agrees.
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'c-echo', name: 'echo_once', state: 'active', reason: null },
+    ]);
+  });
 });

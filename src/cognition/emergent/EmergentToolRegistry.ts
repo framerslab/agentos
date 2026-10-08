@@ -234,6 +234,13 @@ export class EmergentToolRegistry {
   private readonly removing = new Map<string, number>();
   /** Rewrites of the tool row from memory that have not landed yet, counted per tool. */
   private readonly rewriting = new Map<string, number>();
+  /**
+   * Restrictions this process requested, per tool: how many of their writes
+   * are queued or running, and the read point at which the tool's last state
+   * write settled (`Infinity` while a host's restriction whose write failed
+   * is in force here). See {@link restrictionUnread}.
+   */
+  private readonly restrictionWrites = new Map<string, { pending: number; settledAt: number }>();
   /** Reads in flight; change points are forgotten only when none is. */
   private openReads = 0;
 
@@ -582,16 +589,29 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
       }
       this.logAudit(toolId, 'state', { state, reason, setBy });
     };
-    if (state !== 'active') {
+    const restriction = state !== 'active';
+    if (restriction) {
       hold();
+      const entry = this.restrictionWrites.get(toolId);
+      if (entry) {
+        entry.pending += 1;
+      } else {
+        this.restrictionWrites.set(toolId, { pending: 1, settledAt: 0 });
+      }
     }
 
     let inForce: ToolStateRecord = record;
-    if (this.db) {
-      inForce = await this.queueStateWrite(toolId, () =>
-        this.writeStateRow(toolId, record, named, options.ifRow, options.yieldToHost === true),
-      );
+    try {
+      if (this.db) {
+        inForce = await this.queueStateWrite(toolId, () =>
+          this.writeStateRow(toolId, record, named, options.ifRow, options.yieldToHost === true),
+        );
+      }
+    } catch (error: unknown) {
+      this.noteStateWriteSettled(toolId, restriction, false, setBy);
+      throw error;
     }
+    this.noteStateWriteSettled(toolId, restriction, true, setBy);
     if (inForce !== record) {
       // The row changed under the condition: the write was refused, and the
       // row's own state is what holds. A restriction read that way is held here.
@@ -620,6 +640,43 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
       hold();
     }
     return record;
+  }
+
+  /**
+   * Book a settled state write of a tool requested here: a restriction's
+   * write is no longer pending; a write that landed (applied, or refused by
+   * the row, whose word is then held) moves the tool's settle point to a new
+   * read point; a host's restriction whose write failed stays in force here
+   * until a later write of the tool lands. A library restriction whose write
+   * failed leaves the settle point where it was, so the row decides.
+   */
+  private noteStateWriteSettled(toolId: string, restriction: boolean, landed: boolean, setBy: StateSetter): void {
+    const entry = this.restrictionWrites.get(toolId);
+    if (!entry) {
+      return;
+    }
+    if (restriction) {
+      entry.pending = Math.max(0, entry.pending - 1);
+    }
+    if (landed) {
+      this.epoch += 1;
+      entry.settledAt = this.epoch;
+    } else if (restriction && setBy === 'host') {
+      entry.settledAt = Number.POSITIVE_INFINITY;
+    }
+  }
+
+  /**
+   * Whether a restriction this process requested for a tool may be missing
+   * from a row read that began at `readAt` (a {@link beginRead} point): its
+   * write is still queued or running, or settled after the read began, or it
+   * is a host's restriction whose write failed. A held restriction for which
+   * none of these is true is older than the row the read saw, whatever the
+   * clocks of the processes that wrote them say: the row decides.
+   */
+  restrictionUnread(toolId: string, readAt: number): boolean {
+    const entry = this.restrictionWrites.get(toolId);
+    return entry !== undefined && (entry.pending > 0 || entry.settledAt > readAt);
   }
 
   /** Runs `write` after every earlier state write of the same tool has settled. */
@@ -857,6 +914,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
     this.sessionTools.delete(toolId);
     this.persistedTools.delete(toolId);
     this.states.delete(toolId);
+    this.restrictionWrites.delete(toolId);
     this.bump(toolId);
   }
 
@@ -901,6 +959,12 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
         !this.rewriting.has(toolId)
       ) {
         this.changedAt.delete(toolId);
+      }
+    }
+    // A settle point matters only to a read that began before it.
+    for (const [toolId, entry] of [...this.restrictionWrites]) {
+      if (entry.pending === 0 && Number.isFinite(entry.settledAt)) {
+        this.restrictionWrites.delete(toolId);
       }
     }
   }
@@ -1187,6 +1251,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
     const removed =
       this.sessionTools.delete(toolId) || this.persistedTools.delete(toolId);
     this.states.delete(toolId);
+    this.restrictionWrites.delete(toolId);
     // The rows go whether or not this process held the tool, so a host can
     // remove a stored tool it never loaded; the generation moves, so an
     // admission that read the tool before this does not put it back.
@@ -1488,6 +1553,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
       if (sessionFromSource(tool.source) === sessionId) {
         this.sessionTools.delete(id);
         this.states.delete(id);
+        this.restrictionWrites.delete(id);
         this.bump(id);
         this.queueRowDeletes(id);
         this.logAudit(id, 'cleanup', { sessionId });

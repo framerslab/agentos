@@ -1556,9 +1556,10 @@ export class EmergentCapabilityEngine {
     }
     // A suspension or demotion that arrived while the row was being written,
     // in this process or in another, is the newer word: the tool is not
-    // registered. A restriction this process holds from an earlier read is
-    // older than the row and gives way to it.
-    const held = written && written.state !== 'active' ? written : this.newerRestrictionHeld(toolId, stored);
+    // registered. A restriction this process holds from an earlier read, or
+    // whose write has settled (or failed) before this read, is older than the
+    // row and gives way to it.
+    const held = written && written.state !== 'active' ? written : this.newerRestrictionHeld(toolId, readAt);
     if (held && held.state !== 'active') {
       this.holdStored(toolId, held);
       await this.unregisterIfLive(toolId);
@@ -1816,17 +1817,21 @@ export class EmergentCapabilityEngine {
   }
 
   /**
-   * A restriction this process holds that is newer than the row it just read:
-   * its write is in flight, so the row does not yet show it.
+   * A restriction this process holds that the row read from `readAt` on may
+   * not show: one requested here whose write is still queued or running, or
+   * settled after the read began, or a host's whose write failed (it stays
+   * in force here until the host reactivates the tool). Decided by the
+   * registry's record of its own writes, not by timestamps, so a contended
+   * hold, a library suspension whose write failed and a record taken from an
+   * earlier row read give way to the row, and so does a restriction another
+   * process lifted after it, whatever the processes' clocks say.
    */
-  private newerRestrictionHeld(toolId: string, stored: ToolStateRecord | undefined): ToolStateRecord | undefined {
+  private newerRestrictionHeld(toolId: string, readAt: number): ToolStateRecord | undefined {
     const memory = this.registry.getState(toolId);
     if (!memory || memory.state === 'active') {
       return undefined;
     }
-    // At the row's own time the restriction is the later of the two: two
-    // writes in one millisecond are told apart by nothing else.
-    return !stored || memory.at >= stored.at ? memory : undefined;
+    return this.registry.restrictionUnread(toolId, readAt) ? memory : undefined;
   }
 
   /** A stored restriction, held in this process too when the tool is live here. */
