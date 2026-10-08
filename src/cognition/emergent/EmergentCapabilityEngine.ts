@@ -49,7 +49,7 @@ import { randomUUID } from 'node:crypto';
 import { checkRequest, narrowToForge, resolveCeiling, type ResolvedCeiling } from './ceiling.js';
 import { CapabilityBroker } from './broker/CapabilityBroker.js';
 import type { ToolCandidate } from './EmergentJudge.js';
-import type { ITool, ToolExecutionContext, ToolExecutionResult } from '../../core/tools/ITool.js';
+import type { ITool, ToolEffectRecord, ToolExecutionContext, ToolExecutionResult } from '../../core/tools/ITool.js';
 import type { PersonalityMutationStore } from './PersonalityMutationStore.js';
 import type { AdaptPersonalityTool } from './AdaptPersonalityTool.js';
 import { ComposableToolBuilder } from './ComposableToolBuilder.js';
@@ -452,7 +452,14 @@ export class EmergentCapabilityEngine {
         hasStorage: this.registry.hasStorage(),
       });
       this.ceiling = deps.sandboxForge ? narrowToForge(resolved, deps.sandboxForge.effectiveOptions()) : resolved;
-      this.broker = new CapabilityBroker(this.ceiling);
+      const store =
+        this.ceiling.audit.store === 'storage'
+          ? this.registry.effectsStore({
+              content: this.ceiling.audit.content,
+              ...(this.ceiling.audit.retainDays !== undefined ? { retainDays: this.ceiling.audit.retainDays } : {}),
+            })
+          : undefined;
+      this.broker = new CapabilityBroker(this.ceiling, store);
       forge.attachBroker(this.broker);
     } else if (this.config.allowSandboxTools) {
       // A direct host never calls the loader, so the line comes from here.
@@ -640,6 +647,7 @@ export class EmergentCapabilityEngine {
           output: sandboxResult.output,
           success: sandboxResult.success,
           error: sandboxResult.error,
+          ...(sandboxResult.effects ? { effects: sandboxResult.effects } : {}),
         });
       }
     }
@@ -2005,6 +2013,7 @@ export class EmergentCapabilityEngine {
             output: result.output,
             error: result.error ?? 'A step of this composition can no longer be chained.',
             details: result.details,
+            ...(result.effects ? { effects: result.effects } : {}),
           };
         }
 
@@ -2040,6 +2049,7 @@ export class EmergentCapabilityEngine {
               output: result.output,
               error: error ?? 'Emergent tool execution failed.',
               ...(result.details ? { details: result.details } : {}),
+              ...(result.effects ? { effects: result.effects } : {}),
             };
       },
     };
@@ -2114,25 +2124,27 @@ export class EmergentCapabilityEngine {
           agentId: context?.personaId ?? 'unknown',
         });
 
+        const effects = sandboxResult.effects ? { effects: sandboxResult.effects } : {};
         return sandboxResult.success
-          ? { success: true, output: sandboxResult.output }
-          : { success: false, error: sandboxResult.error };
+          ? { success: true, output: sandboxResult.output, ...effects }
+          : { success: false, error: sandboxResult.error, ...effects };
       },
     };
   }
 
   /**
    * One run of forged code, as a forge test or a call. Under a ceiling the
-   * run has its own call handle, which ends when the run does (it returns,
-   * throws or times out): the broker refuses capability calls from then on
-   * and aborts the ones in flight. The handle is per run, so ending one never
-   * touches a concurrent run of the same tool.
+   * run has its own call handle, which ends when the run does, however it
+   * ends (it returns, throws or times out): the broker refuses capability
+   * calls from then on, aborts the ones in flight, waits up to a second for
+   * them, and hands back the run's effects. The handle is per run, so ending
+   * one never touches a concurrent run of the same tool.
    */
   private async runSandboxed(
     implementation: SandboxedToolSpec,
     input: unknown,
     who: { toolId: string; agentId: string },
-  ): Promise<SandboxExecutionResult> {
+  ): Promise<SandboxExecutionResult & { effects?: ToolEffectRecord[] }> {
     const request = {
       code: implementation.code,
       input,
@@ -2150,10 +2162,19 @@ export class EmergentCapabilityEngine {
       agentId: who.agentId,
       signal: controller.signal,
     };
+    let result: SandboxExecutionResult;
     try {
-      return await this.sandboxForge.execute({ ...request, call });
-    } finally {
-      controller.abort();
+      result = await this.sandboxForge.execute({ ...request, call });
+    } catch (error: unknown) {
+      result = {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        executionTimeMs: 0,
+        memoryUsedBytes: 0,
+      };
     }
+    controller.abort();
+    const effects = await this.broker.endCall(call.id);
+    return effects.length > 0 ? { ...result, effects } : result;
   }
 }

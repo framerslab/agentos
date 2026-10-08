@@ -85,7 +85,7 @@ export interface ToolCandidate {
     output: unknown;
     success: boolean;
     error?: string;
-    /** Steps with side effects that were not executed while forging, with their arguments. */
+    /** The test run's effects: a composition's steps that were not executed while forging, or a code tool's capability calls under a ceiling. */
     effects?: unknown[];
   }>;
 }

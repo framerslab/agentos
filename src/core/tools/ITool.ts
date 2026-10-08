@@ -52,6 +52,12 @@ export interface ToolExecutionResult<TOutput = any> {
   error?: string;
   contentType?: string; 
   details?: Record<string, any>;
+  /**
+   * The call's effects: a code-forged tool's capability calls under a
+   * ceiling, or a composition's steps. Attached by AgentOS, never by the
+   * tool's own code.
+   */
+  effects?: ToolEffectRecord[];
 }
 
 /**
