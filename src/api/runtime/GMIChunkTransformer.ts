@@ -259,7 +259,7 @@ export class GMIChunkTransformer {
    * - UI_COMMAND -> AgentOSResponseChunkType.UI_COMMAND
    * - ERROR -> pushError (with optional stream close on isFinal)
    * - FINAL_RESPONSE_MARKER -> no-op (consumed internally)
-   * - USAGE_UPDATE -> logged to console
+   * - USAGE_UPDATE, STEP_FINISHED, TOOL_RESULT -> not forwarded
    *
    * @param agentOSStreamId - The orchestrator stream ID.
    * @param streamContext - Active stream context.
@@ -384,10 +384,12 @@ export class GMIChunkTransformer {
         break;
       }
       case GMIOutputChunkType.USAGE_UPDATE:
-        console.log(
-          `AgentOSOrchestrator: UsageUpdate from GMI on stream ${agentOSStreamId}:`,
-          gmiChunk.content,
-        );
+      case GMIOutputChunkType.STEP_FINISHED:
+      case GMIOutputChunkType.TOOL_RESULT:
+        // Usage reaches the runtime stream on the turn's final output
+        // (FINAL_RESPONSE.usage); step boundaries and tool results serve
+        // hosts that read the GMI's own stream. The runtime stream does not
+        // forward them.
         break;
       default:
         console.warn(

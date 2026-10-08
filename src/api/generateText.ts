@@ -12,7 +12,7 @@
  * the system prompt so the tool loop executes with awareness of the strategy.
  */
 import { randomUUID } from 'node:crypto';
-import { resolveModelOption, resolveProvider, createProviderManager } from './model.js';
+import { resolveModelOption, resolveProvider, createProviderManager, knownProviderPrefixOf } from './model.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { fireLlmUsageObserver } from './observers.js';
 import {
@@ -31,6 +31,14 @@ import { createLogger } from '../core/logging/loggerFactory.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../core/llm/providers/errors/errorCodes.js';
+import { ContextWindowExceededError } from '../core/llm/providers/errors/ContextWindowExceededError.js';
+import {
+  catalogEntryHasCapability,
+  createUncensoredModelCatalog,
+  findCatalogTextModel,
+  type PolicyTier,
+} from '../core/llm/routing/UncensoredModelCatalog.js';
+import { checkContextFit } from './runtime/contextWindowFit.js';
 import { describeResponseFormatShape } from './runtime/responseFormatForProvider.js';
 
 const fallbackLogger = createLogger('fallback');
@@ -316,6 +324,21 @@ export interface FallbackProviderEntry {
    * headroom runs at the original.
    */
   maxTokensHeadroom?: number;
+  /**
+   * Who wrote this entry. `'policy-default'` marks an entry the policy chain
+   * built for a mature or private-adult tier; a walk may pass over only such
+   * entries (one that names the failed first model, and Claude legs after a
+   * refusal). Absent on caller-written entries, which keep their order and
+   * contents.
+   */
+  origin?: 'policy-default';
+  /**
+   * The entry's group in a policy chain. `'uncensored'` marks the catalog
+   * ladder legs; a walk runs the first two as standing legs and the rest only
+   * to replace a standing leg that failed on availability or did not fit the
+   * request.
+   */
+  group?: 'uncensored';
 }
 
 /**
@@ -665,6 +688,15 @@ export interface GenerateTextOptions {
    */
   __hopBase?: FallbackHopBase;
   /**
+   * Internal — DO NOT set from application code. The fallback walk's state
+   * before this leg ran, and the leg's role, handed down the recursion. Its
+   * presence marks `fallbackProviders` as already resolved, so a nested walk
+   * never resolves it again.
+   *
+   * @internal
+   */
+  __fallbackWalk?: FallbackWalkContext;
+  /**
    * Optional model router for intelligent provider/model selection.
    * When provided, the router's `selectModel()` is called before provider
    * resolution.  The router result overrides `model`/`provider`.
@@ -682,23 +714,24 @@ export interface GenerateTextOptions {
    */
   hostPolicy?: HostLLMPolicy;
   /**
-   * Caller's intended content policy tier. When set to `'mature'` or
-   * `'private-adult'` AND no explicit `fallbackProviders` was supplied,
-   * the auto-built fallback chain is constructed via
-   * {@link buildPolicyAwareFallbackChain} instead of the default
-   * availability chain: prepending an uncensored OpenRouter model
-   * (Hermes 3 405B) so a content-policy refusal from the primary
-   * (gpt-4o, Claude, etc.) re-routes to a model that can complete
-   * the request rather than hard-failing.
+   * Caller's intended content policy tier. On `'mature'` or
+   * `'private-adult'` with no explicit `fallbackProviders`, the auto-built
+   * fallback chain is {@link buildPolicyAwareFallbackChain}: the tier's
+   * ranked uncensored OpenRouter models, then the availability chain, so a
+   * content-policy refusal from the primary (an OpenAI or Anthropic model)
+   * re-routes to a model that can complete the request rather than
+   * hard-failing.
    *
    * Combined with the {@link isContentPolicyRefusal} branch in
-   * {@link isRetryableError}, this also makes the existing fallback
-   * loop fire on OpenAI's 400 + `code: 'content_policy_violation'`
-   *: which the network-only retryable matrix would otherwise treat
-   * as a hard error.
+   * {@link isRetryableError}, this also makes the fallback loop fire on
+   * OpenAI's 400 + `code: 'content_policy_violation'`, which the
+   * network-only retryable matrix would otherwise treat as a hard error.
    *
-   * Has no effect for `safe`/`standard` tiers (or when omitted):
-   * those keep the existing availability-only fallback behavior.
+   * When omitted, the chain follows the tier the call resolves to
+   * ({@link resolvePolicyTier}): `routerParams.policyTier`, then this field,
+   * then `hostPolicy` (a host policy without a tier counts as `standard`),
+   * then the router's default tier. `safe` and `standard` keep the
+   * availability-only chain.
    *
    * Mirrors the existing `policyTier` parameter on
    * {@link import('./generateImage.js').GenerateImageOptions} and
@@ -1231,7 +1264,7 @@ export function addModelUsage(target: TokenUsage, usage: unknown): void {
  * The usage a provider error reports for the request it ended, such as the
  * billed tokens of a refused turn (`details.usage`).
  *
- * @internal Shared with streamText.
+ * @internal Shared with streamText and the completion gateway.
  */
 export function usageOfError(error: unknown): unknown {
   return (error as { details?: { usage?: unknown } } | null | undefined)?.details?.usage;
@@ -1601,89 +1634,278 @@ export function fallbackHopOverrides(
 }
 
 /**
- * Build a policy-tier-aware fallback chain. Used by callers that pass
- * `policyTier: 'mature' | 'private-adult'` so refusals from the
- * primary model (typically gpt-4o, Claude, Gemini: all of which
- * moderate explicit content) re-route to an uncensored OpenRouter
- * model instead of hard-failing the request.
+ * The policy tier a call's fallback chain is built for: the explicit route
+ * tier, the call's tier, the host policy's tier (`standard` when a host
+ * policy names none), then the router's default. The primary's route block
+ * sends the first three terms only, so a delegated base router still sees no
+ * tier when no explicit source set one.
+ */
+export function resolvePolicyTier(opts: {
+  routerParams?: { policyTier?: PolicyTier };
+  policyTier?: PolicyTier;
+  hostPolicy?: HostLLMPolicy;
+  router?: { readonly policyTier?: PolicyTier };
+}): PolicyTier | undefined {
+  return (
+    opts.routerParams?.policyTier ??
+    opts.policyTier ??
+    hostPolicyToRouteParams(opts.hostPolicy).policyTier ??
+    opts.router?.policyTier
+  );
+}
+
+/** Why a fallback walk passed over an entry. */
+export type FallbackSkipReason =
+  | 'failed_primary'
+  | 'missing_capability'
+  | 'excluded_model'
+  | 'refill_not_owed'
+  | 'claude_after_refusal';
+
+/**
+ * A fallback entry after the walk's one-time resolution: the uncensored
+ * group's first two entries are standing legs, the rest refills.
  *
- * Chain order for mature / private-adult:
- *   1. `nousresearch/hermes-3-llama-3.1-405b` on OpenRouter: leads
- *      the uncensored leaderboard for instruction-following + long-
- *      context comprehension. Same model the wilds-ai
- *      companion-pipeline uses for identity generation on mature+
- *      companions; battle-tested on real workloads.
- *   2. `anthropic/claude-sonnet-4` on OpenRouter: Claude refuses
- *      hard NSFW but is markedly more permissive than gpt-4o for
- *      narrative analysis of explicit fiction (extracting characters
- *      from a CAI-export with mild adult content, etc.). Acts as the
- *      headroom band when Hermes 3 is rate-limited or down.
- *   3. The standard {@link buildFallbackChain} suffix: keeps
- *      availability fallback on top of the policy fallback so a
- *      mature request that hits a Hermes 3 outage AND a Sonnet
- *      outage still has gpt-4o-mini etc. to fall back to (which
- *      will refuse on the explicit case but at least surfaces a
- *      moderation error rather than a network error).
+ * @internal
+ */
+export interface ResolvedFallbackEntry extends FallbackProviderEntry {
+  walkRole?: 'standing' | 'refill';
+}
+
+/**
+ * What a fallback walk has seen. It travels with the resolved slice into
+ * every nested walk.
  *
- * For `safe` / `standard` tiers, this is identical to
- * {@link buildFallbackChain}: no uncensored prefix needed. Callers
- * that don't pass a tier should keep using the original builder.
+ * @internal
+ */
+export interface FallbackWalkState {
+  /** Standing legs that failed on availability or did not fit, not yet replaced. */
+  refillsOwed: number;
+  /** A model refusal (error code `content_filter`) ended an attempt in this walk. */
+  refusalSeen: boolean;
+}
+
+/**
+ * Handed to every fallback leg: the walk's state before the leg ran, and the
+ * leg's role.
  *
- * Auto-built fallbacks always require their own env keys; missing
- * keys silently drop the entry rather than throwing, so a partial
- * deploy still produces a usable (shorter) chain.
+ * @internal
+ */
+export interface FallbackWalkContext {
+  state: FallbackWalkState;
+  role?: 'standing' | 'refill';
+}
+
+/** @internal */
+export const INITIAL_FALLBACK_WALK: Readonly<FallbackWalkState> = Object.freeze({
+  refillsOwed: 0,
+  refusalSeen: false,
+});
+
+/** Claude, direct or through OpenRouter. */
+function isClaudeEntry(entry: FallbackProviderEntry): boolean {
+  return (
+    entry.provider === 'anthropic' ||
+    (entry.provider === 'openrouter' && (entry.model ?? '').startsWith('anthropic/'))
+  );
+}
+
+/**
+ * The capabilities a call names explicitly (host policy and route params).
+ * Native tool calling is not inferred from the presence of tools: a model
+ * without it serves a tool-carrying call through the prompt shim.
  *
- * @param tier - Caller's intended content tier. Mature/private-adult
- *   triggers the uncensored prefix; safe/standard returns the
- *   availability-only chain.
- * @param excludeProvider - Provider to omit (typically the primary
- *   that already failed). Mirrors {@link buildFallbackChain}.
- * @returns Ordered fallback entries: uncensored prefix (when tier
- *   warrants it) + availability suffix.
+ * @internal
+ */
+export function explicitRequiredCapabilities(
+  opts: Pick<GenerateTextOptions, 'hostPolicy' | 'routerParams'>,
+): string[] {
+  return (
+    mergeRequiredCapabilities(
+      hostPolicyToRouteParams(opts.hostPolicy).requiredCapabilities,
+      opts.routerParams?.requiredCapabilities,
+    ) ?? []
+  );
+}
+
+/**
+ * The provider and model a fallback entry is sent as: resolved the way the
+ * leg's own call resolves it (a provider's default model when the entry
+ * names none, a `provider:model` id split), or the entry as written when it
+ * does not resolve.
+ *
+ * @internal Shared with streamText.
+ */
+export function fallbackEntrySentAs(entry: FallbackProviderEntry): { provider: string; model?: string } {
+  try {
+    const { providerId, modelId } = resolveModelOption({ provider: entry.provider, model: entry.model }, 'text');
+    return { provider: providerId, model: modelId };
+  } catch {
+    return { provider: entry.provider, model: entry.model };
+  }
+}
+
+/**
+ * Resolve a call's fallback chain once, at the start of the top-level walk.
+ * Policy-chain entries (`origin: 'policy-default'`) naming the failed first
+ * model are dropped; every entry is checked, as the provider and model it
+ * will be sent as, against the call's explicitly required capabilities and
+ * excluded models (a model outside the catalog counts as capable); the
+ * uncensored group's first two remaining entries become standing legs and
+ * the rest refills. Caller-written entries keep their order.
+ *
+ * @internal
+ */
+export function resolveFallbackChain(
+  chain: readonly FallbackProviderEntry[],
+  ctx: {
+    primary: { provider?: string; model?: string };
+    requiredCapabilities?: readonly string[];
+    excludedModelIds?: readonly string[];
+    onSkip?: (entry: FallbackProviderEntry, reason: FallbackSkipReason) => void;
+  },
+): ResolvedFallbackEntry[] {
+  const required = ctx.requiredCapabilities ?? [];
+  // An exclusion names a model as written or as a `provider:model` id; a leg
+  // matches by its model as written and as it is sent.
+  const excluded = new Set<string>();
+  for (const id of ctx.excludedModelIds ?? []) {
+    excluded.add(id);
+    const prefix = knownProviderPrefixOf(id);
+    if (prefix) excluded.add(id.slice(prefix.length + 1));
+  }
+  const isExcluded = (model: string | undefined): boolean => model !== undefined && excluded.has(model);
+  const resolved: ResolvedFallbackEntry[] = [];
+  let uncensoredLegs = 0;
+  for (const entry of chain) {
+    if (
+      entry.origin === 'policy-default' &&
+      entry.provider === ctx.primary.provider &&
+      entry.model === ctx.primary.model
+    ) {
+      ctx.onSkip?.(entry, 'failed_primary');
+      continue;
+    }
+    const sentAs = fallbackEntrySentAs(entry);
+    if (isExcluded(entry.model) || isExcluded(sentAs.model)) {
+      ctx.onSkip?.(entry, 'excluded_model');
+      continue;
+    }
+    const catalogEntry = sentAs.model !== undefined ? findCatalogTextModel(sentAs.model, sentAs.provider) : undefined;
+    if (catalogEntry && required.some((capability) => !catalogEntryHasCapability(catalogEntry, capability))) {
+      ctx.onSkip?.(entry, 'missing_capability');
+      continue;
+    }
+    if (entry.origin === 'policy-default' && entry.group === 'uncensored') {
+      resolved.push({ ...entry, walkRole: uncensoredLegs < 2 ? 'standing' : 'refill' });
+      uncensoredLegs += 1;
+    } else {
+      resolved.push(entry);
+    }
+  }
+  return resolved;
+}
+
+/**
+ * Whether the walk runs `entry` now: a refill only while a standing leg is
+ * owed one, and none of the policy chain's Claude legs after a refusal.
+ *
+ * @internal
+ */
+export function gateFallbackEntry(
+  state: FallbackWalkState,
+  entry: ResolvedFallbackEntry,
+): { run: true; state: FallbackWalkState } | { run: false; reason: FallbackSkipReason } {
+  if (state.refusalSeen && entry.origin === 'policy-default' && isClaudeEntry(entry)) {
+    return { run: false, reason: 'claude_after_refusal' };
+  }
+  if (entry.walkRole === 'refill') {
+    if (state.refillsOwed < 1) return { run: false, reason: 'refill_not_owed' };
+    return { run: true, state: { ...state, refillsOwed: state.refillsOwed - 1 } };
+  }
+  return { run: true, state };
+}
+
+/**
+ * The walk's state after an attempt failed with `error`: a standing leg that
+ * failed for anything but a content decline (a timeout, an open breaker and
+ * the context check's refusal included) is owed a refill, and a model
+ * refusal (code `content_filter`; a filter's `content_policy_violation`
+ * does not count) is recorded for the rest of the walk.
+ *
+ * @internal
+ */
+export function advanceFallbackWalk(
+  state: FallbackWalkState,
+  role: 'standing' | 'refill' | undefined,
+  error: unknown,
+): FallbackWalkState {
+  const owed = role === 'standing' && !isContentPolicyRefusal(error) ? 1 : 0;
+  const refusal = (error as { code?: unknown } | null | undefined)?.code === 'content_filter';
+  return {
+    refillsOwed: state.refillsOwed + owed,
+    refusalSeen: state.refusalSeen || refusal,
+  };
+}
+
+/** The catalog the policy chain reads its ladders from. */
+const POLICY_CATALOG = createUncensoredModelCatalog();
+
+/** A catalog model never used as a fallback leg: too weak for a rescue reply. */
+const NEVER_A_LEG_MODEL = 'meta-llama/llama-3.1-8b-instruct';
+
+/**
+ * Build a policy-tier-aware fallback chain, for callers that pass
+ * `policyTier: 'mature' | 'private-adult'`: a refusal or an outage of the
+ * primary walks to an uncensored model before the availability legs.
+ *
+ * Mature and private-adult: the tier's catalog ladder
+ * (the catalog's `getFallbackLadder`; private-adult keeps the
+ * models that permit `erotic`) as OpenRouter legs in the `uncensored`
+ * group, llama-3.1-8b left out, then the {@link buildFallbackChain} suffix.
+ * Every entry is tagged `origin: 'policy-default'`, which lets the walk drop
+ * the leg naming the failed first model, keep two standing uncensored legs,
+ * and pass over Claude legs after a refusal. Safe, standard and an absent
+ * tier get {@link buildFallbackChain} unchanged and untagged.
+ *
+ * Each leg pins `cache: false`. A missing key drops its legs instead of
+ * throwing, so a partial deploy still gets a shorter usable chain.
+ *
+ * @param tier - The call's content tier.
+ * @param excludeProvider - Provider to leave out of the availability suffix
+ *   (typically the failed primary's). The ladder legs ignore it: another
+ *   model on the same provider is a valid rescue, and the walk drops the
+ *   exact failed model.
  */
 export function buildPolicyAwareFallbackChain(
   tier: 'safe' | 'standard' | 'mature' | 'private-adult' | undefined,
   excludeProvider?: string,
 ): FallbackProviderEntry[] {
-  const isMatureTier = tier === 'mature' || tier === 'private-adult';
-  if (!isMatureTier) {
+  if (tier !== 'mature' && tier !== 'private-adult') {
     return buildFallbackChain(excludeProvider);
   }
 
   const chain: FallbackProviderEntry[] = [];
-
-  // Hermes 3 405B leads: uncensored, large, instruction-following
-  // proven on the wilds-ai identity-generation path. Skipped when
-  // OPENROUTER_API_KEY is absent rather than throwing; the suffix
-  // chain may still produce a usable fallback.
   if (process.env.OPENROUTER_API_KEY) {
-    chain.push({
-      provider: 'openrouter',
-      model: 'nousresearch/hermes-3-llama-3.1-405b',
-      cache: false,
-    });
-    // Sonnet via OpenRouter as the second uncensored band. We keep
-    // it on OpenRouter (not direct Anthropic) because the chain's
-    // `excludeProvider` semantics treat each entry as a provider
-    // ID: using `anthropic` here would lock out the suffix's
-    // Anthropic fallback. OpenRouter routes Claude under its own
-    // billing surface, so the slot is independent.
-    chain.push({
-      provider: 'openrouter',
-      model: 'anthropic/claude-sonnet-4',
-      cache: false,
-    });
+    const ladder =
+      tier === 'private-adult'
+        ? POLICY_CATALOG.getFallbackLadder('private-adult', { contentIntent: 'erotic' })
+        : POLICY_CATALOG.getFallbackLadder('mature');
+    for (const entry of ladder) {
+      if (entry.modelId === NEVER_A_LEG_MODEL) continue;
+      chain.push({
+        provider: entry.providerId,
+        model: entry.modelId,
+        cache: false,
+        origin: 'policy-default',
+        group: 'uncensored',
+      });
+    }
   }
 
-  // Append the standard availability chain. Filter out duplicates
-  // since the uncensored prefix may have already added openrouter.
-  const availability = buildFallbackChain(excludeProvider);
-  for (const entry of availability) {
-    const alreadyInChain = chain.some(
-      (existing) =>
-        existing.provider === entry.provider && existing.model === entry.model,
-    );
-    if (!alreadyInChain) chain.push(entry);
+  for (const entry of buildFallbackChain(excludeProvider)) {
+    const listed = chain.some((e) => e.provider === entry.provider && e.model === entry.model);
+    if (!listed) chain.push({ ...entry, origin: 'policy-default' });
   }
   return chain;
 }
@@ -1941,6 +2163,29 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             }))
          : undefined;
 
+      // A catalog model is sent only a request it can hold: otherwise the
+      // call throws in place of the send and the walk moves on. Checked on
+      // the first native send and on the prompt shim's first send.
+      const assertFitsContextWindow = (sent: { messages: ReadonlyArray<unknown>; tools?: unknown }): void => {
+        const fit = checkContextFit({
+          provider: resolved.providerId,
+          model: resolved.modelId,
+          messages: sent.messages,
+          tools: sent.tools,
+          maxTokens: opts.maxTokens,
+          customModelParams: opts.customModelParams,
+        });
+        if (!fit.fits && fit.contextWindow !== undefined) {
+          throw new ContextWindowExceededError({
+            provider: resolved.providerId,
+            model: resolved.modelId,
+            contextWindow: fit.contextWindow,
+            estimatedInputTokens: fit.estimatedInputTokens,
+            outputTokens: fit.outputTokens,
+          });
+        }
+      };
+
       const allToolCalls: ToolCallRecord[] = [];
       const totalUsage = attemptUsage;
       // Provider-reported model id of the final step (spec batch-1 C1);
@@ -2008,6 +2253,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       // provider's tool-unsupported error (see the catch after the loop).
       const toolMode: ToolMode = opts.toolMode ?? 'auto';
       const shimMaxRoundtrips = opts.maxSteps ?? 5;
+      let shimSendChecked = false;
       const runShim = async (): Promise<GenerateTextResult> => {
         const loopResult = await runEmulatedToolLoop({
           tools: Array.from(toolMap.values()),
@@ -2023,6 +2269,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           messages: toShimMessages(messages),
           maxRoundtrips: shimMaxRoundtrips,
           callModel: async (msgs) => {
+            // The shim sends rendered tool text in place of native schemas,
+            // so its first send is checked on its own.
+            if (!shimSendChecked) {
+              shimSendChecked = true;
+              assertFitsContextWindow({ messages: msgs });
+            }
             const r = await provider.generateCompletion(resolved.modelId, msgs as any, {
               temperature: opts.temperature,
               ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
@@ -2177,6 +2429,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             console.warn('[agentos] onBeforeGeneration hook error:', hookErr);
           }
         }
+
+        // A continuation leg's first send carries its completed tool rounds.
+        // Later steps are not checked again.
+        if (step === 0) assertFitsContextWindow({ messages: effectiveMessages, tools: toolSchemas });
 
         const response = await withAgentOSSpan(
           'agentos.api.generate_text.step',
@@ -2691,43 +2947,82 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       { provider: primaryProviderId ?? 'unknown', model: primaryModelId, ok: false },
     ];
     // ── Fallback chain ────────────────────────────────────────────────
-    // Resolve fallback chain: caller-supplied wins, undefined triggers
-    // auto-build from env keys, empty array explicitly opts out.
-    // When `policyTier` is mature/private-adult, the auto-build picks
-    // the policy-aware chain (Hermes 3 + Sonnet uncensored prefix +
-    // standard availability suffix) instead of the availability-only
-    // chain. Caller-supplied chains are respected verbatim regardless
-    // of tier: explicit beats implicit.
-    const effectiveFallbacks = opts.fallbackProviders === undefined
-      ? buildPolicyAwareFallbackChain(opts.policyTier, metricProviderId)
-     : opts.fallbackProviders;
-
+    // Caller-supplied wins, undefined auto-builds from env keys for the
+    // call's resolved tier (the policy-aware chain on mature and
+    // private-adult), an empty array opts out. The top-level walk resolves
+    // the chain once: it drops the policy chain's entry for the failed first
+    // model, applies the call's explicit capability and exclusion
+    // requirements, and marks the uncensored group's standing legs and
+    // refills. A leg receives its resolved slice and never resolves it again.
+    const walkTier = resolvePolicyTier(opts);
+    const chainEntries = opts.fallbackProviders === undefined
+      ? buildPolicyAwareFallbackChain(walkTier, metricProviderId)
+      : opts.fallbackProviders;
+    const logLegSkip = (entry: FallbackProviderEntry, reason: FallbackSkipReason): void =>
+      fallbackLogger.info('provider fallback skipped', {
+        event: 'fallback_leg_skipped',
+        api: 'generateText',
+        reason,
+        primaryProvider: metricProviderId,
+        fallbackProvider: entry.provider,
+        fallbackModel: entry.model,
+      });
+    // Resolved only when the walk runs, so its skip lines describe a walk.
     // A call whose prompt-shim tools already ran cannot be continued, and a
     // restart would run them again; it surfaces the error instead.
-    if (
-      effectiveFallbacks.length &&
-      isRetryableError(error) &&
-      !toolProgress.shimRanTool
-    ) {
+    const walks = isRetryableError(error) && !toolProgress.shimRanTool;
+    const effectiveFallbacks: ResolvedFallbackEntry[] = !walks
+      ? []
+      : opts.__fallbackWalk
+        ? chainEntries
+        : resolveFallbackChain(chainEntries, {
+            primary: { provider: metricProviderId, model: metricModelId },
+            requiredCapabilities: explicitRequiredCapabilities(opts),
+            excludedModelIds: opts.routerParams?.excludedModelIds,
+            onSkip: logLegSkip,
+          });
+    // This attempt's own failure updates the walk: a refusal is recorded,
+    // and a standing leg that failed on availability is owed a refill.
+    let walkState = advanceFallbackWalk(
+      opts.__fallbackWalk?.state ?? INITIAL_FALLBACK_WALK,
+      opts.__fallbackWalk?.role,
+      error,
+    );
+
+    if (walks && effectiveFallbacks.length) {
       let lastError = error;
       let attempt = 0;
       for (const fb of effectiveFallbacks) {
         attempt += 1;
+        // A refill runs only while a standing leg is owed one, and the
+        // policy chain's Claude legs are passed over after a refusal.
+        const gate = gateFallbackEntry(walkState, fb);
+        if (!gate.run) {
+          logLegSkip(fb, gate.reason);
+          continue;
+        }
+        walkState = gate.state;
         // Skip fallback entries whose breaker is already open. Without
         // this check, the loop would still spend a full network round-
         // trip on every dead fallback in the chain before reaching the
         // next healthy one. The recursive `generateText` call below would
         // also short-circuit at the same isOpen() check, but the outer
         // skip avoids the recursion overhead + the extra log line.
-        if (globalLLMProviderHealth.isOpen(fb.provider)) {
+        // The breaker read is the provider the leg is sent to: an
+        // `openrouter:` id under another provider goes to OpenRouter.
+        const legProvider = fallbackEntrySentAs(fb).provider;
+        if (globalLLMProviderHealth.isOpen(legProvider)) {
           fallbackLogger.info('provider fallback skipped (circuit open)', {
             event: 'fallback_skipped_circuit_open',
             api: 'generateText',
             primaryProvider: metricProviderId,
-            fallbackProvider: fb.provider,
+            fallbackProvider: legProvider,
             fallbackModel: fb.model,
             attempt,
           });
+          // An open breaker is an availability failure: a standing leg is
+          // owed a refill.
+          walkState = advanceFallbackWalk(walkState, fb.walkRole, undefined);
           continue;
         }
         try {
@@ -2761,6 +3056,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             ...opts,
             provider: fb.provider,
             model: fb.model,
+            // Legs run as named: no router re-picks the model, and the call's
+            // resolved tier travels with them.
+            router: undefined,
+            policyTier: walkTier,
+            // The walk's state before this leg, and its role.
+            __fallbackWalk: { state: walkState, role: fb.walkRole },
             // When a builder exists, ALWAYS override _responseFormat —
             // including with an explicit `undefined` on builder failure or
             // decline. Merely omitting the key would let the `...opts`
@@ -2790,7 +3091,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             // fallback provider rather than the primary's overrides.
             apiKey: undefined,
             baseUrl: undefined,
-            // Preserve the REMAINING explicit chain (entries AFTER the current
+            // Preserve the REMAINING resolved chain (entries AFTER the current
             // fb; `attempt` is 1-indexed so slice(attempt) drops fb and all
             // already-tried entries). This stops the recursion from rebuilding
             // the default cheap chain (which includes gpt-4o-mini) when a
@@ -2870,6 +3171,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           if (toolsRanBefore(fbError)) break;
           // The leg walked every entry after it and all of them failed.
           if (chainWalkedBefore(fbError)) break;
+          walkState = advanceFallbackWalk(walkState, fb.walkRole, fbError);
         }
       }
       // All fallbacks exhausted: fall through to throw

@@ -1489,6 +1489,38 @@ describe('AnthropicProvider', () => {
       expect('minimum' in requestBody.tools[0].input_schema.properties.inner.properties.z).toBe(false);
     });
 
+    it('omits strict for a schema over the union-typed parameter limit', async () => {
+      // Anthropic allows at most 16 parameters that use anyOf or a type array
+      // across a request's strict schemas and 400s past that; the forced tool
+      // still rides, without the strict flag.
+      const msg = makeAnthropicResponse({
+        content: [{ type: 'tool_use', id: 'toolu_s', name: 'emit', input: {} }],
+        stop_reason: 'tool_use',
+      });
+      fetchMock.mockResolvedValueOnce(mockSseResponse(msg));
+      const properties = Object.fromEntries(
+        Array.from({ length: 17 }, (_, i) => [`f${i}`, { type: ['string', 'null'] }]),
+      );
+
+      await provider.generateCompletion(
+        'claude-opus-4-8',
+        [{ role: 'user', content: 'Hi' }],
+        {
+          responseFormat: {
+            _agentosUseToolForStructuredOutput: true,
+            tool: {
+              name: 'emit',
+              input_schema: { type: 'object', properties, required: Object.keys(properties) },
+            },
+          } as never,
+        },
+      );
+
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(requestBody.tools[0].strict).toBeUndefined();
+      expect(requestBody.tool_choice).toEqual({ type: 'tool', name: 'emit' });
+    });
+
     it('omits strict for a record-bearing input_schema (degrades to the non-strict forced tool)', async () => {
       // z.record(...) lowers to a schema-valued additionalProperties, which
       // strict mode rejects at the API ("'additionalProperties' must be

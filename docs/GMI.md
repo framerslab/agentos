@@ -87,9 +87,39 @@ flowchart TD
 2. **Retrieval.** When `shouldTriggerRAGRetrieval()` decides the turn needs context and a retrieval augmentor is configured, the GMI calls `retrieveContext()` and emits a `RAG_SOURCES_AVAILABLE` chunk with the retrieved sources.
 3. **Memory context.** With cognitive memory attached, `CognitiveMemoryBridge.assembleContext()` retrieves memories relevant to the user's message.
 4. **Prompt.** `IPromptEngine.constructPrompt()` builds the messages for the model call.
-5. **Model call.** `AIModelProviderManager` resolves the provider for the turn's model, and the GMI streams `generateCompletionStream()`.
-6. **Tools.** The GMI runs each requested tool call through `IToolOrchestrator.processToolCall()`. The loop then repeats from step 2 until the model answers without requesting tools or the iteration cap is reached.
+5. **Model call.** `AIModelProviderManager` resolves the provider for the turn's model, and the GMI streams `generateCompletionStream()`. With a completion gateway, the gateway resolves the serving model before step 4 and streams the call ([Model calls through a completion gateway](#model-calls-through-a-completion-gateway)). Each model step ends with a `STEP_FINISHED` chunk.
+6. **Tools.** The GMI runs each requested tool call through `IToolOrchestrator.processToolCall()` and emits a `TOOL_RESULT` chunk for each result it records in the history, a failed call's included. The loop then repeats from step 2 until the model answers without requesting tools or the iteration cap is reached.
 7. **After the turn.** With cognitive memory attached, the bridge encodes the exchange (`syncForTurn()`). When the persona's RAG configuration enables turn-summary ingestion, the GMI ingests the exchange into the retrieval augmentor, summarizing it first if that is configured. Finally `MetapromptExecutor` checks its triggers.
+
+## Model calls through a completion gateway
+
+`GMIBaseConfig.completionGateway` gives a GMI one model layer, a [`CompletionGateway`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/completionGateway.ts) built by `createCompletionGateway(defaults)`. A host that builds a GMI itself sets it, with a [`GatewayProviderManager`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gatewayProviderManager.ts) as the GMI's `llmProviderManager`:
+
+```typescript
+import { createCompletionGateway, GatewayProviderManager } from '@framers/agentos';
+import { GMI } from '@framers/agentos/cognition/substrate';
+
+const gmi = new GMI('support-gmi');
+await gmi.initialize(persona, {
+  ...services, // working memory, prompt engine, tool orchestrator, utility AI
+  completionGateway: createCompletionGateway({
+    fallbackProviders: [{ provider: 'anthropic', model: 'claude-opus-4-8' }],
+  }),
+  llmProviderManager: new GatewayProviderManager().asProviderManager(),
+});
+```
+
+The defaults carry the routing inputs a turn does not: the router and its params, the host policy, the policy tier, the fallback chain and the primary's credentials. The GMI passes the model and provider it would call, the user's text as the router's task hint, the tools and its completion options. `GMIManager` sets no gateway, so the GMIs of the full runtime call their provider directly, one call per model step, with no fallback.
+
+With a gateway, each model step runs this way:
+
+- **Resolved before the prompt.** The gateway picks the hop (the router's choice or the primary, then the fallback chain), skips a hop whose provider circuit is open or whose provider cannot start (a failed initialisation, a fallback leg without credentials), initialises the hop's provider and reads its context window and capabilities. The GMI builds the prompt for that model.
+- **Fallback before output.** An attempt that fails before its first content chunk (text, a tool call or a schema answer) emits none of its chunks. When the failure is retryable, the gateway resolves the next hop and the GMI rebuilds the prompt for that hop's model. A failure that is not retryable, or the end of the chain, ends the turn with `LLM_PROVIDER_ERROR`; a turn with no hop that can start ends with `LLM_PROVIDER_UNAVAILABLE`, and a primary with no credentials or an unknown provider fails the turn with that configuration error.
+- **No fallback after output.** Once text or a tool call has streamed, an error ends the step and the turn with `LLM_PROVIDER_ERROR`.
+- **Forward within a turn.** The next step of the turn, after a tool round, stays on the hop that served the last one. The next user turn starts at the primary again.
+- **Billed failures count.** When the provider billed an attempt that failed before any output and reported it (a refused Claude turn reports its usage), that usage is added to the turn's total and emitted as a `USAGE_UPDATE` whose `metadata` holds `attemptFailed: true` and the failed hop's `hop`, `providerId` and `modelId`. No `STEP_FINISHED` carries it.
+- **Metaprompts and utility calls.** `MetapromptExecutor`, and a utility AI built over the same manager, reach the serving hop's provider through the `GatewayProviderManager`. They have no fallback of their own.
+- **Replay blocks stay in the history.** Each provider sends only its own replay blocks (Anthropic's thinking blocks, Gemini's thought signatures), so the history keeps them as the model produced them, whichever hop serves the next step.
 
 ## What a GMI holds
 
@@ -133,7 +163,8 @@ export class GMI implements IGMI {
 | [`IPromptEngine`](https://github.com/framerslab/agentos/blob/master/src/core/llm/IPromptEngine.ts) | Builds the prompt for each model call. |
 | [`IRetrievalAugmentor`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/IRetrievalAugmentor.ts) | Optional RAG over document corpora; also receives turn summaries when ingestion is enabled. |
 | [`IToolOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/core/tools/IToolOrchestrator.ts) | Lists the tools available to the turn and executes tool calls. |
-| [`AIModelProviderManager`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/AIModelProviderManager.ts) | Resolves the provider for the turn's model. |
+| [`AIModelProviderManager`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/AIModelProviderManager.ts) | Resolves the provider for the turn's model. With a completion gateway it is a [`GatewayProviderManager`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gatewayProviderManager.ts), which answers from the hop serving the turn. |
+| [`CompletionGateway`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/completionGateway.ts) | Optional, set by `GMIBaseConfig.completionGateway`. Resolves the model that serves each step, initialises its provider and streams the call, moving to the next hop when an attempt fails before any output. |
 | [`IUtilityAI`](https://github.com/framerslab/agentos/blob/master/src/cognition/nlp/ai_utilities/IUtilityAI.ts) | Smaller jobs, such as summarizing an exchange before RAG ingestion. |
 | `ICognitiveMemoryManager` | Optional long-term cognitive memory, described below. |
 
@@ -187,7 +218,17 @@ Personality reaches the model separately on each path. `agent()` writes its `per
 
 ## Output stream
 
-A GMI yields `GMIOutputChunk`s ([`IGMI.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts)) of these types: `TEXT_DELTA`, `TOOL_CALL_REQUEST`, `REASONING_STATE_UPDATE`, `FINAL_RESPONSE_MARKER`, `ERROR`, `SYSTEM_MESSAGE`, `USAGE_UPDATE`, `LATENCY_REPORT`, `UI_COMMAND` and `RAG_SOURCES_AVAILABLE`. [`GMIChunkTransformer`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/GMIChunkTransformer.ts) maps them to the [`AgentOSResponse`](https://github.com/framerslab/agentos/blob/master/src/api/types/AgentOSResponse.ts) chunks that `processRequest()` yields: `TEXT_DELTA`, `SYSTEM_PROGRESS`, `TOOL_CALL_REQUEST`, `TOOL_RESULT_EMISSION`, `UI_COMMAND`, `FINAL_RESPONSE`, `ERROR`, `METADATA_UPDATE`, `WORKFLOW_UPDATE`, `AGENCY_UPDATE` and `PROVENANCE_EVENT`.
+A GMI yields `GMIOutputChunk`s ([`IGMI.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts)) of these types: `TEXT_DELTA`, `TOOL_CALL_REQUEST`, `REASONING_STATE_UPDATE`, `FINAL_RESPONSE_MARKER`, `ERROR`, `SYSTEM_MESSAGE`, `USAGE_UPDATE`, `LATENCY_REPORT`, `UI_COMMAND`, `RAG_SOURCES_AVAILABLE`, `STEP_FINISHED` and `TOOL_RESULT`. Three of them describe the model steps:
+
+| Chunk | Content |
+|---|---|
+| `USAGE_UPDATE` | The `ModelUsage` of every provider chunk that carries usage, a chunk without a choice included. Providers report the request's running total, so a step's last `USAGE_UPDATE` is that step's usage. A failed attempt's billed usage arrives with `metadata.attemptFailed: true` (see the gateway section above). |
+| `STEP_FINISHED` | `StepFinishedChunkPayload`, one per model step: `stepIndex` (0-based within the turn), `text` (the step's own text: its deltas joined, or the final message content when the provider sent no deltas), `finishReason`, `providerId`, `modelId` and `hop` (0 for the primary); `usage`, `responseModel`, `serviceTier`, `providerMessageId` and `cacheDiagnostics` when the provider reported them; `structuredOutput` when the turn asked for a schema answer. The chunk's own `finishReason` and `usage` fields repeat the step's. |
+| `TOOL_RESULT` | `ToolResultChunkPayload`, one per tool result recorded in the history, a failed call's included: `toolCallId`, `name`, `result`, `isError`, and `errorDetails` when the call failed with details. |
+
+Within a step, each provider chunk yields its `TEXT_DELTA` and `TOOL_CALL_REQUEST` chunks, then its `USAGE_UPDATE`. The step's `STEP_FINISHED` follows its last chunk, and the `TOOL_RESULT` chunks of its tool round follow the `STEP_FINISHED`. A step's text is emitted once.
+
+[`GMIChunkTransformer`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/GMIChunkTransformer.ts) maps the chunks to the [`AgentOSResponse`](https://github.com/framerslab/agentos/blob/master/src/api/types/AgentOSResponse.ts) chunks that `processRequest()` yields: `TEXT_DELTA`, `SYSTEM_PROGRESS`, `TOOL_CALL_REQUEST`, `TOOL_RESULT_EMISSION`, `UI_COMMAND`, `FINAL_RESPONSE`, `ERROR`, `METADATA_UPDATE`, `WORKFLOW_UPDATE`, `AGENCY_UPDATE` and `PROVENANCE_EVENT`. It does not forward `USAGE_UPDATE`, `STEP_FINISHED` or `TOOL_RESULT`: the turn's usage reaches the runtime stream on `FINAL_RESPONSE.usage`, and step boundaries and tool results serve hosts that read the GMI's own stream.
 
 On the lightweight path, `agent().session(id).stream()` returns a [`StreamTextResult`](https://github.com/framerslab/agentos/blob/master/src/api/streamText.ts): `textStream` for text deltas and `fullStream` for typed stream parts.
 

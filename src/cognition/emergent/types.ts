@@ -57,6 +57,58 @@ export type SandboxAPI = 'fetch' | 'fs.readFile' | 'crypto';
  */
 export type CapabilityName = 'fetch' | 'fs.read' | 'crypto';
 
+/**
+ * A name a request's list may hold: a catalogue name, or the injected name it
+ * stands for (`fs.readFile` for `fs.read`). Lists keep the names as written;
+ * every reader normalises them with `normalizeAllowlist`.
+ */
+export type AllowlistName = SandboxAPI | CapabilityName;
+
+/** The scope a host grants `fetch` under (stage 1: reads only). */
+export interface FetchCeiling {
+  /** Hosts a forged tool may reach, matched exactly and case-insensitively; `'*'` is every host; `[]` grants nothing. */
+  domains: string[] | '*';
+  /** Methods a forged tool may send. Stage 1 allows GET and HEAD only. @default ['GET', 'HEAD'] */
+  methods?: Array<'GET' | 'HEAD'>;
+  /** A response body larger than this is refused while it streams. @default 5_242_880 */
+  maxResponseBytes?: number;
+  /** Redirects the broker follows, each one checked like the first request. @default 5 */
+  maxRedirects?: number;
+  /** One request's time bound, redirects included. @default 30_000 */
+  timeoutMs?: number;
+}
+
+/** The scope a host grants `fs.read` under. */
+export interface FsReadCeiling {
+  /** Absolute directories a forged tool may read under, after symlinks are resolved; `[]` grants nothing. */
+  roots: string[];
+  /** A file larger than this is refused while it streams. @default 1_048_576 */
+  maxBytesPerRead?: number;
+  /** One read's time bound. @default 30_000 */
+  timeoutMs?: number;
+}
+
+/**
+ * What a host lets code-forged tools have. A key that is absent grants
+ * nothing; with this set, a forging agent's `allowlist` is a request the
+ * ceiling must cover, and every capability call goes through the broker.
+ */
+export interface ForgedCapabilities {
+  fetch?: FetchCeiling;
+  'fs.read'?: FsReadCeiling;
+  crypto?: Record<string, never>;
+}
+
+/** Where a ceiling's effect records go. */
+export interface EmergentAuditConfig {
+  /** `'storage'` writes a record per capability call and needs a storage adapter. @default 'storage' */
+  store?: 'storage' | 'none';
+  /** What a record keeps of a call's target: a SHA-256 digest, or the target itself. @default 'digest' */
+  content?: 'digest' | 'full';
+  /** Days effect records are kept; unset keeps them. Prunes the effect table only. */
+  retainDays?: number;
+}
+
 // ============================================================================
 // TOOL IMPLEMENTATIONS
 // ============================================================================
@@ -160,7 +212,7 @@ export interface SandboxedToolSpec {
    * Explicit allowlist of sandbox APIs the code may invoke.
    * Any call to an API not in this list will throw at runtime.
    */
-  allowlist: SandboxAPI[];
+  allowlist: AllowlistName[];
 }
 
 /**
@@ -171,6 +223,20 @@ export type ToolImplementation = ComposableToolSpec | SandboxedToolSpec;
 // ============================================================================
 // SANDBOX EXECUTION
 // ============================================================================
+
+/**
+ * One run of a code-forged tool, as the broker sees it: the run's id, the
+ * tool and the agent it runs for, and the signal that ends it. Under a
+ * ceiling the engine makes one for every forge test and every call; the
+ * broker checks it before every capability call and again just before the
+ * effect, and keys what is in flight by its id.
+ */
+export interface CallHandle {
+  id: string;
+  toolId: string;
+  agentId: string;
+  signal: AbortSignal;
+}
 
 /**
  * Input to the sandbox executor for running a single sandboxed tool invocation.
@@ -189,7 +255,7 @@ export interface SandboxExecutionRequest {
   /**
    * APIs the sandbox is permitted to call. Anything not listed is blocked.
    */
-  allowlist: SandboxAPI[];
+  allowlist: AllowlistName[];
 
   /**
    * Nominal heap budget in megabytes for the sandbox execution.
@@ -205,6 +271,12 @@ export interface SandboxExecutionRequest {
    * @default 5000
    */
   timeoutMs: number;
+
+  /**
+   * The run's handle. Required when the forge has a broker attached (a host
+   * with `EmergentConfig.capabilities`); the engine fills it.
+   */
+  call?: CallHandle;
 }
 
 /**
@@ -451,7 +523,7 @@ export interface ToolStateRecord {
   /**
    * The reason for a state other than `active`. The library's reasons are
    * catalogue words (`source_not_persisted`, `source_unreadable`,
-   * `legacy_inactive`); a host's reason is the text it gave.
+   * `legacy_inactive`, `legacy_owner`); a host's reason is the text it gave.
    */
   reason: string | null;
   /** Who recorded the state. */
@@ -562,7 +634,9 @@ export interface EmergentTool {
    * The agent that created this tool, or `'system'`. The agent identity is the
    * persona: `forge_tool` passes the caller's `personaId`, and an `agent`-tier
    * tool runs only for a caller with that `personaId`. (A GMI instance id is
-   * minted per session and cannot own a tool meant to outlive one.)
+   * minted per session and cannot own a tool meant to outlive one: an
+   * `agent`-tier row from an earlier release that carries one loads suspended
+   * with the reason `legacy_owner`.)
    */
   createdBy: string;
 
@@ -613,6 +687,14 @@ export interface ForgeTestCase {
    * The judge uses this as a reference — partial matches may still score well.
    */
   expectedOutput: unknown;
+
+  /**
+   * Outputs for the steps of a composition that have side effects (or are
+   * compositions themselves). While a tool is forged those steps are not
+   * executed; each takes its output from here, keyed by step name, so later
+   * steps receive real data.
+   */
+  stepOutputs?: Record<string, unknown>;
 }
 
 /**
@@ -833,6 +915,26 @@ export interface EmergentConfig {
    * @default undefined (disabled)
    */
   selfImprovement?: SelfImprovementConfig;
+
+  /**
+   * Which tools with side effects a composition or a workflow may chain as a
+   * step. A tool that declares `hasSideEffects: false` is chained freely; one
+   * that declares `true` only when its name is listed here; one that declares
+   * nothing is never chained. The list is read when a step is checked (at
+   * forge, at load, at promotion and on every run), not at construction.
+   * @default { sideEffectingTools: [] }
+   */
+  compose?: { sideEffectingTools?: string[] };
+
+  /**
+   * The ceiling for code-forged tools (see {@link ForgedCapabilities}).
+   * Absent: the legacy path, where a forged tool takes the APIs it asks for,
+   * unscoped. Validated at engine construction; each failure names its key.
+   */
+  capabilities?: ForgedCapabilities;
+
+  /** Effect records under a ceiling. Ignored without one. */
+  audit?: EmergentAuditConfig;
 }
 
 /**
@@ -856,3 +958,14 @@ export const DEFAULT_EMERGENT_CONFIG: Readonly<EmergentConfig> = {
   judgeModel: 'gpt-4o-mini',
   promotionJudgeModel: 'gpt-4o',
 } as const;
+
+/**
+ * The prefix of a GMI instance id (`GMIManager` mints `gmi-instance-<uuid>`).
+ * Earlier releases recorded the forging instance's id as an `agent`-tier
+ * tool's owner; the persona is the owner now. The prefix is reserved for
+ * telling those rows apart: a tool whose owner begins with it is never
+ * promoted to the `agent` tier, so an `agent`-tier row whose owner carries
+ * it is always one an earlier release wrote, and it loads suspended with the
+ * reason `legacy_owner`.
+ */
+export const GMI_INSTANCE_ID_PREFIX = 'gmi-instance-';

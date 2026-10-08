@@ -150,3 +150,86 @@ describe('SpeechRuntime', () => {
     }
   });
 });
+
+describe('SpeechRuntime providers built from the environment', () => {
+  const ids = ['deepgram-batch', 'deepgram-aura', 'assemblyai', 'azure-speech-stt', 'azure-speech-tts'];
+
+  it('builds the Deepgram, AssemblyAI and Azure providers when their keys are set', () => {
+    const runtime = new SpeechRuntime({
+      env: {
+        DEEPGRAM_API_KEY: 'dg',
+        ASSEMBLYAI_API_KEY: 'aai',
+        AZURE_SPEECH_KEY: 'az',
+        AZURE_SPEECH_REGION: 'eastus',
+      },
+    });
+
+    for (const id of ids) {
+      expect(runtime.getProvider(id)?.id).toBe(id);
+    }
+    expect(runtime.resolver.resolveSTT({ preferredIds: ['assemblyai'] }).id).toBe('assemblyai');
+    expect(runtime.resolver.resolveTTS({ preferredIds: ['azure-speech-tts'] }).id).toBe('azure-speech-tts');
+  });
+
+  it('builds the Azure providers only with both the key and the region', () => {
+    const runtime = new SpeechRuntime({ env: { AZURE_SPEECH_KEY: 'az' } });
+
+    expect(runtime.getProvider('azure-speech-stt')).toBeUndefined();
+    expect(runtime.getProvider('azure-speech-tts')).toBeUndefined();
+  });
+
+  it('keeps OpenAI as the default and resolves a preferred core provider after refresh', async () => {
+    const env = { OPENAI_API_KEY: 'op', DEEPGRAM_API_KEY: 'dg' };
+    const plain = new SpeechRuntime({ env });
+    await plain.resolver.refresh();
+    expect(plain.getSTT()?.id).toBe('openai-whisper');
+
+    const preferring = new SpeechRuntime({ env, preferredSttProviderId: 'deepgram-batch' });
+    await preferring.resolver.refresh();
+    expect(preferring.getSTT()?.id).toBe('deepgram-batch');
+  });
+
+  it('resolves a provider passed to registerSttProvider', () => {
+    const runtime = new SpeechRuntime({ autoRegisterFromEnv: false });
+    const custom = {
+      id: 'custom-stt',
+      getProviderName: () => 'Custom',
+      transcribe: async () => ({ text: 'custom', cost: 0 }),
+    };
+
+    runtime.registerSttProvider(custom);
+
+    expect(runtime.getSTT()).toBe(custom);
+  });
+
+  it('matches a streaming requirement against what the provider instance does', () => {
+    // The catalog lists AssemblyAI as streaming; this provider uploads and polls.
+    const runtime = new SpeechRuntime({ env: { ASSEMBLYAI_API_KEY: 'aai' } });
+
+    expect(runtime.getSTT({ streaming: true })).toBeUndefined();
+    expect(runtime.getSTT({ streaming: false })?.id).toBe('assemblyai');
+  });
+
+  it('reads a streaming feature requirement as the streaming capability', () => {
+    // AssemblyAI's catalog features list 'streaming'; this provider uploads and polls.
+    const runtime = new SpeechRuntime({ env: { ASSEMBLYAI_API_KEY: 'aai' } });
+
+    expect(runtime.getSTT({ features: ['streaming'] })).toBeUndefined();
+    expect(runtime.getSTT({ features: ['diarization'] })?.id).toBe('assemblyai');
+  });
+
+  it('ignores a catalog entry of another kind, and treats an undeclared provider as not streaming', () => {
+    // 'elevenlabs' is a text-to-speech id in the catalog, listed as streaming.
+    const runtime = new SpeechRuntime({ autoRegisterFromEnv: false });
+    const custom = {
+      id: 'elevenlabs',
+      getProviderName: () => 'Custom',
+      transcribe: async () => ({ text: 'custom', cost: 0 }),
+    };
+
+    runtime.registerSttProvider(custom);
+
+    expect(runtime.getSTT({ streaming: false })).toBe(custom);
+    expect(runtime.getSTT({ streaming: true })).toBeUndefined();
+  });
+});

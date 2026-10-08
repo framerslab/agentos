@@ -129,8 +129,12 @@ function mergePropertySchemas(schemas: unknown[]): unknown {
  *     (mirrors the `?? { type: 'object' }` fallback AnthropicProvider's regular
  *     tool-conversion path applies). An object schema already carrying a `type`
  *     passes through unchanged.
+ *
+ * @internal Exported for tests: {@link lowerZodToJsonSchema} gives an enum no
+ *   other fields, so some merge rules can only be reached with a hand-written
+ *   schema. Callers use {@link buildResponseFormat}.
  */
-function ensureAnthropicObjectSchema(jsonSchema: unknown): Record<string, unknown> {
+export function ensureAnthropicObjectSchema(jsonSchema: unknown): Record<string, unknown> {
   if (!jsonSchema || typeof jsonSchema !== 'object') {
     return { type: 'object' };
   }

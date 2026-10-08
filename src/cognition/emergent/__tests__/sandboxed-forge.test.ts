@@ -16,9 +16,11 @@
 import { describe, it, expect, afterAll } from 'vitest';
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, parse } from 'node:path';
+import { join, parse, resolve } from 'node:path';
 import { SandboxedToolForge } from '../SandboxedToolForge.js';
 import type { SandboxExecutionRequest, SandboxAPI } from '../types.js';
+import { CapabilityBroker } from '../broker/CapabilityBroker.js';
+import { resolveCeiling } from '../ceiling.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -642,5 +644,59 @@ describe('SandboxedToolForge', () => {
       expect(result.success).toBe(true);
       expect(result.output).toBe('in-root content');
     });
+  });
+});
+
+describe('the catalogue name and the broker', () => {
+  it("both of the forge's readers take fs.read for fs.readFile", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'forge-alias-')));
+    writeFileSync(join(root, 'a.txt'), 'A');
+    const forge = new SandboxedToolForge({ fsReadRoots: [root] });
+    const code = 'async function execute(input) { return { text: await fs.readFile(input.path) }; }';
+
+    expect(forge.validateCode(code, ['fs.read'])).toEqual({ valid: true, violations: [] });
+    expect(forge.validateCode(code, ['fs.readFile'])).toEqual({ valid: true, violations: [] });
+    expect(forge.validateCode(code, [])).toEqual({ valid: false, violations: ['fs access is not in the allowlist'] });
+    const result = await forge.execute({
+      code,
+      input: { path: join(root, 'a.txt') },
+      allowlist: ['fs.read'],
+      memoryMB: 128,
+      timeoutMs: 2000,
+    });
+    expect(result).toMatchObject({ success: true, output: { text: 'A' } });
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reports the options it runs with', () => {
+    expect(
+      new SandboxedToolForge({ fetchDomainAllowlist: ['API.example.com'], fsReadRoots: ['/srv'] }).effectiveOptions(),
+    ).toEqual({ memoryMB: 128, timeoutMs: 5000, fetchDomainAllowlist: ['api.example.com'], fsReadRoots: [resolve('/srv')] });
+  });
+
+  it("with a broker attached, injects the broker's functions and needs a call handle", async () => {
+    const forge = new SandboxedToolForge();
+    forge.attachBroker(new CapabilityBroker(resolveCeiling({ crypto: {} }, { store: 'none' }, { hasStorage: false })));
+    const request = {
+      code: 'function execute() { return { id: typeof crypto.randomUUID() }; }',
+      input: {},
+      allowlist: ['crypto' as const],
+      memoryMB: 128,
+      timeoutMs: 2000,
+    };
+    expect(await forge.execute(request)).toMatchObject({
+      success: false,
+      error: expect.stringContaining('call_handle_required'),
+    });
+    const call = { id: 'call-1', toolId: 'tool-1', agentId: 'agent-1', signal: new AbortController().signal };
+    expect(await forge.execute({ ...request, call })).toMatchObject({ success: true, output: { id: 'string' } });
+    // The ceiling holds no fetch: a tool that asks for it is handed none.
+    const asking = await forge.execute({
+      ...request,
+      code: 'function execute() { return { kind: typeof fetch }; }',
+      allowlist: ['fetch'],
+      call,
+    });
+    expect(asking).toMatchObject({ success: true, output: { kind: 'undefined' } });
   });
 });

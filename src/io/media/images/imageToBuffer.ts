@@ -21,8 +21,10 @@ import * as fs from 'node:fs/promises';
  *   or a file path is decoded directly. One that looks like a path is read as
  *   a file first, and decoded when no file exists there and it is base64
  *   (standard or URL-safe) whose bytes start with a PNG, JPEG, GIF, WebP, TIFF,
- *   AVIF or HEIC signature: standard base64 uses `/` (RFC 4648, Table 1), so a
- *   JPEG's base64 begins with `/9j/`. A missing path is still an error.
+ *   AVIF, HEIC, BMP, ICO, JPEG 2000, JPEG XL or SVG signature: standard base64
+ *   uses `/` (RFC 4648, Table 1), so a JPEG's base64 begins with `/9j/`. A
+ *   missing path is still an error; when the string is base64 of another
+ *   format, the error says so without repeating the string.
  * - **`file://` URL** — resolved to a local filesystem path and read.
  * - **HTTP/HTTPS URL** — fetched via `globalThis.fetch` and buffered.
  * - **Local file path** — a string that contains `/` or `\`, or ends in a
@@ -94,11 +96,25 @@ export async function imageToBuffer(input: string | Buffer): Promise<Buffer> {
       // Standard base64 uses `/` (RFC 4648, Table 1), so raw base64 looks like a
       // path. When no file exists there and the string decodes to image bytes,
       // it is the image; a missing path that does not stays an error.
-      const decoded = isMissingFileError(error) ? decodeBase64Image(trimmed) : null;
-      if (decoded) {
-        return decoded;
+      const compact = trimmed.replace(/\s+/g, '');
+      if (!isMissingFileError(error) || !BASE64_PATTERN.test(compact)) {
+        throw error;
       }
-      throw error;
+      const bytes = Buffer.from(compact, 'base64');
+      if (hasImageSignature(bytes)) {
+        return bytes;
+      }
+      // Node's error names the whole string as the path, which for a base64
+      // payload can run to megabytes in a message or a log line. It is not
+      // attached as `cause` either: Node prints an error's cause with it.
+      throw Object.assign(
+        new Error(
+          `imageToBuffer: no file exists at ${preview(trimmed)}, and it is not base64 of a ` +
+            'recognised image format (PNG, JPEG, GIF, WebP, TIFF, AVIF, HEIC, BMP, ICO, ' +
+            'JPEG 2000, JPEG XL or SVG). Pass the image as a data URL or a Buffer.',
+        ),
+        { code: (error as NodeJS.ErrnoException).code },
+      );
     }
   }
 
@@ -109,25 +125,19 @@ export async function imageToBuffer(input: string | Buffer): Promise<Buffer> {
 /** The standard and URL-safe base64 alphabets of RFC 4648, with optional padding. */
 const BASE64_PATTERN = /^[A-Za-z0-9+/_-]+={0,2}$/;
 
-/**
- * Decodes `value` when it is base64 whose bytes start with an image signature.
- *
- * @param value - A string `fs.readFile` found no file at.
- * @returns The decoded bytes, or `null` when `value` is not base64 or its bytes
- *   do not start with a PNG, JPEG, GIF, WebP, TIFF, AVIF or HEIC signature.
- */
-function decodeBase64Image(value: string): Buffer | null {
-  const compact = value.replace(/\s+/g, '');
-  if (!BASE64_PATTERN.test(compact)) {
-    return null;
-  }
-  const bytes = Buffer.from(compact, 'base64');
-  return hasImageSignature(bytes) ? bytes : null;
+/** A short, quoted form of `value` for an error message: at most its first 40 characters. */
+function preview(value: string): string {
+  return value.length <= 40
+    ? JSON.stringify(value)
+    : `${JSON.stringify(value.slice(0, 40))}... (${value.length} characters)`;
 }
 
 /**
- * True when `bytes` start with the signature of PNG, JPEG, GIF, WebP, TIFF, or
- * an ISO media file such as AVIF or HEIC (`ftyp` at offset 4).
+ * True when `bytes` start with the signature of PNG, JPEG, GIF, WebP, TIFF, an
+ * ISO media file such as AVIF or HEIC (`ftyp` at offset 4), BMP, ICO, JPEG 2000,
+ * the JPEG XL container, or SVG text. JPEG XL's bare codestream marker (FF 0A)
+ * is left out: two bytes are too few, and a path such as `/work...` decodes to
+ * them.
  */
 function hasImageSignature(bytes: Buffer): boolean {
   const startsWith = (...signature: number[]) => signature.every((byte, i) => bytes[i] === byte);
@@ -138,8 +148,44 @@ function hasImageSignature(bytes: Buffer): boolean {
     (startsWith(0x52, 0x49, 0x46, 0x46) && bytes.subarray(8, 12).toString('latin1') === 'WEBP') ||
     startsWith(0x49, 0x49, 0x2a, 0x00) || // TIFF, little-endian
     startsWith(0x4d, 0x4d, 0x00, 0x2a) || // TIFF, big-endian
-    bytes.subarray(4, 8).toString('latin1') === 'ftyp'
+    bytes.subarray(4, 8).toString('latin1') === 'ftyp' ||
+    // BMP: "BM", then the file size, which a whole file's bytes match.
+    (startsWith(0x42, 0x4d) && bytes.length >= 6 && bytes.readUInt32LE(2) === bytes.length) ||
+    startsWith(0x00, 0x00, 0x01, 0x00) || // ICO
+    startsWith(0x00, 0x00, 0x00, 0x0c, 0x6a, 0x50, 0x20, 0x20, 0x0d, 0x0a, 0x87, 0x0a) || // JPEG 2000 (JP2)
+    startsWith(0xff, 0x4f, 0xff, 0x51) || // JPEG 2000 codestream
+    startsWith(0x00, 0x00, 0x00, 0x0c, 0x4a, 0x58, 0x4c, 0x20, 0x0d, 0x0a, 0x87, 0x0a) || // JPEG XL container
+    isSvgText(bytes)
   );
+}
+
+/**
+ * The XML prolog items that may come before the root element: the XML
+ * declaration and other processing instructions, comments, and a DOCTYPE
+ * (internal subset included), each with the whitespace before it.
+ *
+ * A DOCTYPE's quoted literals and its subset's comments and processing
+ * instructions are read whole, so a `>` in a system identifier, a `]>` in an
+ * entity value or a quote in a processing instruction does not end it.
+ * Every part has one way to match (a subset comment ends at its first `-->`,
+ * a processing instruction at its first `?>`),
+ * which keeps a failed match linear in the input: a lazy `[\s\S]*?` comment
+ * body inside the repeated subset could end at any later `-->` and backtrack
+ * exponentially on input that has many comments and no closing `]`.
+ */
+const XML_PROLOG_ITEM =
+  /^\s*(?:<\?[\s\S]*?\?>|<!--[\s\S]*?-->|<!DOCTYPE(?:[^>["']|"[^"]*"|'[^']*')*(?:\[(?:<!--(?:[^-]|-(?!->))*-->|<\?(?:[^?]|\?(?!>))*\?>|"[^"]*"|'[^']*'|<(?!!--|\?)|[^\]"'<])*\])?\s*>)/i;
+
+/**
+ * True when `bytes` are SVG markup: after the XML prolog (declaration,
+ * comments, DOCTYPE), the root element is `<svg>`.
+ */
+function isSvgText(bytes: Buffer): boolean {
+  let head = bytes.subarray(0, 4096).toString('utf8').replace(/^\uFEFF/, '');
+  for (let item = XML_PROLOG_ITEM.exec(head); item; item = XML_PROLOG_ITEM.exec(head)) {
+    head = head.slice(item[0].length);
+  }
+  return /^\s*<svg[\s/>]/.test(head);
 }
 
 /**

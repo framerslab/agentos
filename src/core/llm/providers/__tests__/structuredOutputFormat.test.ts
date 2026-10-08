@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
-import { buildResponseFormat } from '../structuredOutputFormat.js';
+import { buildResponseFormat, ensureAnthropicObjectSchema } from '../structuredOutputFormat.js';
 
 const schema = z.object({
   verdict: z.enum(['yes', 'no']),
@@ -90,8 +90,21 @@ describe('buildResponseFormat', () => {
       schemaName: 'X',
     }) as any).tool.input_schema;
 
-    // Fields every variant gives the property are kept, so the merge matches the plain enum.
+    // The lowering gives an enum no other fields, so this checks the merged values;
+    // the next test covers the fields the variants share.
     expect(inputSchema.properties.mode).toEqual(alone.properties.mode);
+  });
+
+  it('anthropic: a merged enum keeps the fields every variant shares and drops the rest', () => {
+    const variant = (title: string, value: string) => ({
+      type: 'object',
+      properties: { mode: { type: 'string', description: 'The mode', title, enum: [value] } },
+      required: ['mode'],
+    });
+    const merged = ensureAnthropicObjectSchema({ anyOf: [variant('A', 'x'), variant('B', 'y')] });
+
+    expect(merged.properties).toEqual({ mode: { type: 'string', description: 'The mode', enum: ['x', 'y'] } });
+    expect(merged.required).toEqual(['mode']);
   });
 
   it('anthropic: a property only one variant has keeps its whole schema', () => {

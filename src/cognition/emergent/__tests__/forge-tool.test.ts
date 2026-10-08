@@ -161,10 +161,10 @@ describe('ForgeToolMetaTool', () => {
     await metaTool.execute(input, ctx);
 
     expect(mockEngine.forge).toHaveBeenCalledTimes(1);
-    expect(mockEngine.forge).toHaveBeenCalledWith(input, {
-      agentId: 'persona-main',
-      sessionId: 'sess-xyz',
-    });
+    expect(mockEngine.forge).toHaveBeenCalledWith(
+      input,
+      expect.objectContaining({ agentId: 'persona-main', sessionId: 'sess-xyz' }),
+    );
   });
 
   // =========================================================================
@@ -209,10 +209,10 @@ describe('ForgeToolMetaTool', () => {
     const ctx = makeContext({ personaId: 'custom-agent', correlationId: 'custom-sess' });
     await metaTool.execute(makeInput(), ctx);
 
-    expect(mockEngine.forge).toHaveBeenCalledWith(expect.anything(), {
-      agentId: 'custom-agent',
-      sessionId: 'custom-sess',
-    });
+    expect(mockEngine.forge).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ agentId: 'custom-agent', sessionId: 'custom-sess' }),
+    );
   });
 
   // =========================================================================
@@ -232,10 +232,10 @@ describe('ForgeToolMetaTool', () => {
 
     await metaTool.execute(makeInput(), ctx);
 
-    expect(mockEngine.forge).toHaveBeenCalledWith(expect.anything(), {
-      agentId: 'unknown',
-      sessionId: 'unknown',
-    });
+    expect(mockEngine.forge).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ agentId: 'unknown', sessionId: 'unknown' }),
+    );
   });
 
   it('preserves an empty personaId instead of replacing it with "unknown"', async () => {
@@ -252,10 +252,10 @@ describe('ForgeToolMetaTool', () => {
 
     await metaTool.execute(makeInput(), ctx);
 
-    expect(mockEngine.forge).toHaveBeenCalledWith(expect.anything(), {
-      agentId: '',
-      sessionId: 'unknown',
-    });
+    expect(mockEngine.forge).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ agentId: '', sessionId: 'unknown' }),
+    );
   });
 
   // =========================================================================

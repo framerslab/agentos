@@ -95,14 +95,34 @@ export interface CreateWorkflowDeps {
     /** List of tool names that are permitted in workflow steps. */
     allowedTools: string[];
   };
-  /** Execute a tool by name with the given arguments. */
+  /**
+   * Execute a tool by name with the given arguments. `signal` is aborted when
+   * the step expires: an implementation that waits on an approval checks it
+   * before the tool starts, so a late approval starts nothing.
+   */
   executeTool: (
     name: string,
     args: unknown,
     context?: ToolExecutionContext,
+    signal?: AbortSignal,
+    /**
+     * The instance `checkStep` checked, when it returned one: the step runs
+     * that instance, and the call is refused when the name resolves to
+     * another by the time it runs.
+     */
+    tool?: ITool,
   ) => Promise<unknown>;
   /** Return the list of all currently available tool names. */
   listTools: () => string[];
+  /**
+   * The chainability rule. When given, `create` refuses a step this rule
+   * refuses, and `run` checks every step again before it runs. The emergent
+   * engine supplies it; a host that builds this tool itself owns the checks
+   * its `executeTool` applies.
+   */
+  checkStep?: (
+    name: string,
+  ) => { ok: true; tool?: ITool } | { ok: false; code: string; message: string };
 }
 
 // ============================================================================
@@ -111,6 +131,9 @@ export interface CreateWorkflowDeps {
 
 /** Default per-step execution timeout in milliseconds. */
 const STEP_TIMEOUT_MS = 30_000;
+
+/** A workflow step that ran out of time; its run was revoked. */
+class StepExpiredError extends Error {}
 
 function isToolAllowed(toolName: string, allowedTools: string[]): boolean {
   return allowedTools.includes('*') || allowedTools.includes(toolName);
@@ -313,6 +336,14 @@ export class CreateWorkflowTool implements ITool<CreateWorkflowInput> {
           error: `Tool "${step.tool}" is not permitted by the workflow allowedTools configuration`,
         };
       }
+
+      const chainable = this.deps.checkStep?.(step.tool);
+      if (chainable && !chainable.ok) {
+        return {
+          success: false,
+          error: `Tool "${step.tool}" cannot be a workflow step: ${chainable.code}: ${chainable.message}`,
+        };
+      }
     }
 
     const id = `workflow-${this.nextId++}`;
@@ -364,6 +395,16 @@ export class CreateWorkflowTool implements ITool<CreateWorkflowInput> {
     for (let i = 0; i < workflow.steps.length; i++) {
       const step = workflow.steps[i];
 
+      // A step tool is replaced by name: the rule is checked again at every run.
+      const chainable = this.deps.checkStep?.(step.tool);
+      if (chainable && !chainable.ok) {
+        return {
+          success: false,
+          error: `Workflow refused at step ${i} ("${step.tool}"): ${chainable.code}: ${chainable.message}`,
+          output: { completedSteps: i, stepResults },
+        };
+      }
+
       // Resolve references in step args
       const resolvedArgs = this.resolveReferences(step.args, input, prev, stepResults);
 
@@ -373,11 +414,17 @@ export class CreateWorkflowTool implements ITool<CreateWorkflowInput> {
           resolvedArgs,
           i,
           context,
+          chainable && chainable.ok ? chainable.tool : undefined,
         );
 
         stepResults.push(result);
         prev = result;
       } catch (err: any) {
+        if (err instanceof StepExpiredError) {
+          // The step's run was revoked when it expired; whether its tool had
+          // already started, and so took effect, is not known here.
+          stepResults.push({ status: 'expired', effect: 'unknown' });
+        }
         return {
           success: false,
           error: `Workflow failed at step ${i} ("${step.tool}"): ${err.message ?? String(err)}`,
@@ -487,16 +534,23 @@ export class CreateWorkflowTool implements ITool<CreateWorkflowInput> {
     args: Record<string, unknown>,
     stepIndex: number,
     context: ToolExecutionContext,
+    checkedTool?: ITool,
   ): Promise<unknown> {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const expiry = new AbortController();
 
     try {
       return await Promise.race([
-        this.deps.executeTool(toolName, args, context),
+        checkedTool
+          ? this.deps.executeTool(toolName, args, context, expiry.signal, checkedTool)
+          : this.deps.executeTool(toolName, args, context, expiry.signal),
         new Promise<never>((_, reject) => {
           timeoutId = setTimeout(() => {
+            // Revoke the step's run: an approval that arrives after this
+            // starts nothing.
+            expiry.abort();
             reject(
-              new Error(
+              new StepExpiredError(
                 `Step ${stepIndex} ("${toolName}") timed out after ${STEP_TIMEOUT_MS}ms`,
               ),
             );

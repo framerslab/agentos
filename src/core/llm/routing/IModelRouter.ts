@@ -119,6 +119,13 @@ export interface IModelRouter {
   readonly routerId: string;
 
   /**
+   * The content policy tier this router applies when a request carries none.
+   * Fallback walkers build a routed call's chain for it. Routers without a
+   * default leave it undefined.
+   */
+  readonly policyTier?: 'safe' | 'standard' | 'mature' | 'private-adult';
+
+  /**
    * Initializes the model router with its configuration and necessary dependencies,
    * such as the AIModelProviderManager for accessing information about available models and providers.
    *

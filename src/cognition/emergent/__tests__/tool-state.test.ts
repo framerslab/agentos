@@ -35,6 +35,79 @@ function makeTool(overrides: Partial<EmergentTool> = {}): EmergentTool {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+/** A statement held after it has taken its snapshot, until released. */
+type HeldStatement = { entered: Promise<void>; release: () => void };
+
+/**
+ * The store as PostgreSQL runs the flag statements under READ COMMITTED: a
+ * statement's scalar subquery reads the state row from the statement's own
+ * snapshot, taken when it starts, and its update lands on the newest row
+ * version. The next flag update (a state write's) or the next whole-row write
+ * of a held state is held after its snapshot until released.
+ */
+function readCommittedStore(base: SqliteTestAdapter): SqliteTestAdapter & {
+  holdNextFlag(): HeldStatement;
+  holdNextRowWrite(): HeldStatement;
+} {
+  let flagHold: { entered: () => void; released: Promise<void> } | null = null;
+  let rowHold: { entered: () => void; released: Promise<void> } | null = null;
+  const snapshotOf = (toolId: unknown): number | undefined =>
+    (
+      base.raw
+        .prepare(`SELECT CASE WHEN state = 'active' THEN 1 ELSE 0 END AS v FROM agentos_emergent_tool_state WHERE tool_id = ?`)
+        .get(toolId) as { v: number } | undefined
+    )?.v;
+  const hold = (): { held: { entered: () => void; released: Promise<void> }; statement: HeldStatement } => {
+    let entered!: () => void;
+    let release!: () => void;
+    const enteredPromise = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { held: { entered, released }, statement: { entered: enteredPromise, release } };
+  };
+  return {
+    ...base,
+    async run(sql: string, params: unknown[] = []) {
+      if (flagHold && sql.includes('SET is_active = COALESCE(')) {
+        const held = flagHold;
+        flagHold = null;
+        const [toolId, fallback, id] = params;
+        const value = snapshotOf(toolId) ?? fallback;
+        held.entered();
+        await held.released;
+        return base.raw.prepare('UPDATE agentos_emergent_tools SET is_active = ? WHERE id = ?').run(value, id);
+      }
+      if (rowHold && sql.includes('INSERT INTO agentos_emergent_tools') && sql.includes('COALESCE((SELECT')) {
+        const held = rowHold;
+        rowHold = null;
+        const [toolId, fallback] = params.slice(-2);
+        const value = snapshotOf(toolId) ?? fallback;
+        held.entered();
+        await held.released;
+        const literal = sql.replace(
+          /COALESCE\(\(SELECT CASE WHEN state = 'active' THEN 1 ELSE 0 END\s+FROM agentos_emergent_tool_state WHERE tool_id = \?\), \?\)/,
+          '?',
+        );
+        return base.raw.prepare(literal).run(...params.slice(0, -2), value);
+      }
+      return base.run(sql, params);
+    },
+    holdNextFlag() {
+      const { held, statement } = hold();
+      flagHold = held;
+      return statement;
+    },
+    holdNextRowWrite() {
+      const { held, statement } = hold();
+      rowHold = held;
+      return statement;
+    },
+  };
+}
+
 describe('EmergentToolRegistry state', () => {
   let db: SqliteTestAdapter;
   let registry: EmergentToolRegistry;
@@ -125,17 +198,24 @@ describe('EmergentToolRegistry state', () => {
     expect(readToolRow(db, tool.id)?.is_active).toBe(1);
   });
 
-  it('a whole-row write takes is_active at write time, so a state change during its reads is kept', async () => {
+  it('a whole-row write takes is_active at write time, so a state change another process makes during its reads is kept', async () => {
     const tool = makeTool({ id: 'emergent_test_6' });
     registry.register(tool, 'agent');
     await settle();
     await registry.suspend(tool.id, 'operator_hold');
+    // A state write of this process waits for the row write in the tool's
+    // queue; another process's lands during its reads.
+    const other = new EmergentToolRegistry(
+      { ...DEFAULT_EMERGENT_CONFIG, enabled: true, persistSandboxSource: true },
+      db,
+    );
+    await other.ensureSchema();
 
     // The promotion's row read is held open; the reactivation lands meanwhile.
     const gate = db.gateNext('SELECT promoted_at');
     const promotion = registry.promote(tool.id, 'shared', 'admin');
     await gate.entered;
-    await registry.setState(tool.id, 'active', null, { setBy: 'host' });
+    await other.setState(tool.id, 'active', null, { setBy: 'host' });
     gate.release();
     await promotion;
 
@@ -145,20 +225,38 @@ describe('EmergentToolRegistry state', () => {
 
     // The other direction: a suspension during the reads is kept too.
     const gate2 = db.gateNext('SELECT promoted_at');
-    const rewrite = (async () => {
-      registry.upsert({ ...registry.get(tool.id)!, description: 'Doubles a number, again.' });
-      await settle();
-      await settle();
-    })();
+    registry.upsert({ ...registry.get(tool.id)!, description: 'Doubles a number, again.' });
     await gate2.entered;
-    await registry.suspend(tool.id, 'operator_hold');
+    await other.setState(tool.id, 'suspended', 'operator_hold', { setBy: 'host' });
     gate2.release();
-    await rewrite;
-    await settle();
+    await registry.settled(tool.id);
 
     expect(readToolRow(db, tool.id)?.is_active).toBe(0);
     expect(readToolRow(db, tool.id)?.description).toBe('Doubles a number, again.');
     expect(readStateRow(db, tool.id)).toMatchObject({ state: 'suspended' });
+  });
+
+  it('a promotion runs in the tool write queue: a removal made during it is not undone, and an earlier read is not adopted', async () => {
+    const tool = makeTool({ id: 'emergent_test_15', tier: 'session' });
+    registry.register(tool, 'session');
+    await settle();
+    const readAt = registry.beginRead();
+
+    // The promotion's row read is held open; the tool is removed meanwhile.
+    const gate = db.gateNext('SELECT promoted_at');
+    const promotion = registry.promote(tool.id, 'agent');
+    await gate.entered;
+    // A row read before the promotion is not adopted while it is under way.
+    expect(registry.adopt({ ...tool }, { toolId: tool.id, state: 'active', reason: null, setBy: 'library', at: 1, request: null }, readAt)).toBe(false);
+    registry.remove(tool.id);
+    gate.release();
+    await promotion;
+    await registry.settled(tool.id);
+    registry.endRead();
+
+    expect(registry.get(tool.id)).toBeUndefined();
+    expect(readToolRow(db, tool.id)).toBeUndefined();
+    expect(readStateRow(db, tool.id)).toBeUndefined();
   });
 
   it('leaves a stored request it holds nothing for alone when the state changes', async () => {
@@ -364,6 +462,56 @@ describe('EmergentToolRegistry state', () => {
     const result = await registry.setState('emergent_gone', 'active', null, { setBy: 'library', ifRow: 'absent' });
 
     expect(result).toMatchObject({ state: 'demoted', reason: 'removed' });
+  });
+
+  it("a state write overtaken by another process's writes the flag again from the newer state (PostgreSQL, READ COMMITTED)", async () => {
+    const store = readCommittedStore(db);
+    const tool = makeTool({ id: 'emergent_test_16' });
+    registry.register(tool, 'agent');
+    await settle();
+    await registry.setState(tool.id, 'active', null, { setBy: 'library' });
+    const p2 = new EmergentToolRegistry({ ...DEFAULT_EMERGENT_CONFIG, enabled: true, persistSandboxSource: true }, store);
+    const p3 = new EmergentToolRegistry({ ...DEFAULT_EMERGENT_CONFIG, enabled: true, persistSandboxSource: true }, store);
+    await p2.ensureSchema();
+    await p3.ensureSchema();
+
+    // P2 suspends the tool; its flag statement has read the state row
+    // (suspended) and stalls. P3, a host's reactivation, runs to the end.
+    const held = store.holdNextFlag();
+    const suspending = p2.setState(tool.id, 'suspended', 'step_missing', { setBy: 'library' });
+    await held.entered;
+    await p3.setState(tool.id, 'active', null, { setBy: 'host' });
+    held.release();
+
+    expect(await suspending).toMatchObject({ state: 'active', setBy: 'host' });
+    // The flag agrees with the state row, so no load reads a host's disable.
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active', flag_synced: 1 });
+    expect(readToolRow(db, tool.id)?.is_active).toBe(1);
+  });
+
+  it("a whole-row write overtaken by another process's state write writes the flag again from the newer state (PostgreSQL, READ COMMITTED)", async () => {
+    const store = readCommittedStore(db);
+    const p2 = new EmergentToolRegistry({ ...DEFAULT_EMERGENT_CONFIG, enabled: true, persistSandboxSource: true }, store);
+    await p2.ensureSchema();
+    const tool = makeTool({ id: 'emergent_test_17' });
+    p2.register(tool, 'agent');
+    await settle();
+    await p2.suspend(tool.id, 'operator_hold');
+    const p3 = new EmergentToolRegistry({ ...DEFAULT_EMERGENT_CONFIG, enabled: true, persistSandboxSource: true }, db);
+    await p3.ensureSchema();
+
+    // P2 rewrites the row; its statement has read the state row (suspended)
+    // and stalls. P3, a host's reactivation, runs to the end.
+    const held = store.holdNextRowWrite();
+    p2.upsert({ ...p2.get(tool.id)!, description: 'Doubles a number, again.' });
+    await held.entered;
+    await p3.setState(tool.id, 'active', null, { setBy: 'host' });
+    held.release();
+    await p2.settled(tool.id);
+
+    expect(readToolRow(db, tool.id)?.description).toBe('Doubles a number, again.');
+    expect(readStateRow(db, tool.id)).toMatchObject({ state: 'active', flag_synced: 1 });
+    expect(readToolRow(db, tool.id)?.is_active).toBe(1);
   });
 
   it('two activations in flight hold the later one', async () => {

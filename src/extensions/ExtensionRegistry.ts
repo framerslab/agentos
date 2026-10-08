@@ -21,8 +21,28 @@ interface DescriptorStackEntry<TPayload> {
  */
 export class ExtensionRegistry<TPayload = unknown> {
   private readonly stacks: Map<string, DescriptorStackEntry<TPayload>> = new Map();
+  private readonly registerListeners: Array<
+    (descriptor: ActiveExtensionDescriptor<TPayload>) => void
+  > = [];
 
   constructor(private readonly kind: ExtensionKind) {}
+
+  /**
+   * Calls `listener` after every successful `register`, whoever made it: a
+   * direct registration through `ToolExecutor`, or an extension pack
+   * registering a descriptor. Returns a function that removes the listener.
+   */
+  public onRegister(
+    listener: (descriptor: ActiveExtensionDescriptor<TPayload>) => void,
+  ): () => void {
+    this.registerListeners.push(listener);
+    return () => {
+      const index = this.registerListeners.indexOf(listener);
+      if (index >= 0) {
+        this.registerListeners.splice(index, 1);
+      }
+    };
+  }
 
   /**
    * Registers a descriptor, making it the active entry for its id.
@@ -52,6 +72,15 @@ export class ExtensionRegistry<TPayload = unknown> {
     }
 
     stack.active = nextActive;
+
+    for (const listener of [...this.registerListeners]) {
+      try {
+        listener(activeDescriptor);
+      } catch (error) {
+        // A listener's failure must not fail the registration it observes.
+        console.warn('[ExtensionRegistry] a registration listener threw:', error);
+      }
+    }
   }
 
   /**

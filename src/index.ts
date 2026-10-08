@@ -246,6 +246,8 @@ export {
   buildPolicyAwareFallbackChain,
 } from './api/generateText.js';
 export { CONTEXT_WINDOW_EXCEEDED_CODE } from './core/llm/providers/errors/errorCodes.js';
+export { ContextWindowExceededError } from './core/llm/providers/errors/ContextWindowExceededError.js';
+export { checkContextFit, type ContextFit, type ContextFitRequest } from './api/runtime/contextWindowFit.js';
 export type {
   GenerateTextOptions,
   GenerateTextResult,
@@ -266,6 +268,16 @@ export type {
 export { normalizeHostLLMPolicy } from './api/runtime/hostPolicy.js';
 export { streamText, normalizeStreamFinishReason } from './api/streamText.js';
 export type { StreamTextResult, StreamPart, StreamFinishReason } from './api/streamText.js';
+export { createCompletionGateway, toolFormatFor } from './api/runtime/completionGateway.js';
+export type {
+  CompletionAttempt,
+  CompletionGateway,
+  CompletionHop,
+  CompletionOutcome,
+  CompletionResolution,
+  CompletionRoute,
+} from './api/runtime/completionGateway.js';
+export { GatewayProviderManager } from './api/runtime/gatewayProviderManager.js';
 export { agent } from './api/agent.js';
 export { souledAgent } from './api/souledAgent.js';
 export type { SouledAgentOptions, SouledAgent } from './api/souledAgent.js';
