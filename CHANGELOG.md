@@ -1,3 +1,15 @@
+## [0.12.20](https://github.com/framerslab/agentos/compare/v0.12.19...v0.12.20) (2026-10-08)
+
+### feat
+
+* add MiniMax TTS provider (#39) ([b7f03ad](https://github.com/framerslab/agentos/commit/b7f03adce0e770feb34cad45b73502feb70160c6))
+
+## [0.12.19](https://github.com/framerslab/agentos/compare/v0.12.18...v0.12.19) (2026-10-08)
+
+### feat
+
+* add Requesty as an OpenAI-compatible LLM provider (#17) ([58f90a1](https://github.com/framerslab/agentos/commit/58f90a1ff91c366a660a5fe7ea7b50fd6e5e2e7e))
+
 ## [0.12.18](https://github.com/framerslab/agentos/compare/v0.12.17...v0.12.18) (2026-10-08)
 
 ### feat

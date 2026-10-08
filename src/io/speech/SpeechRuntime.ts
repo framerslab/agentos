@@ -17,6 +17,7 @@ import { AzureSpeechTTSProvider } from './providers/AzureSpeechTTSProvider.js';
 import { DeepgramTextToSpeechProvider } from './providers/DeepgramTextToSpeechProvider.js';
 import { ElevenLabsTextToSpeechProvider } from './providers/ElevenLabsTextToSpeechProvider.js';
 import { OpenAITextToSpeechProvider } from './providers/OpenAITextToSpeechProvider.js';
+import { MiniMaxTextToSpeechProvider } from './providers/MiniMaxTextToSpeechProvider.js';
 import { OpenAIWhisperSpeechToTextProvider } from '../hearing/providers/OpenAIWhisperSpeechToTextProvider.js';
 import type {
   ProviderRequirements,
@@ -133,6 +134,18 @@ export class SpeechRuntime {
         this.registerProviderInResolver(stt, 'stt');
 
         const tts = new AzureSpeechTTSProvider({ key: azureSpeechKey, region: azureSpeechRegion });
+        this.registry.registerTtsProvider(tts);
+        this.registerProviderInResolver(tts, 'tts');
+      }
+
+      const miniMaxApiKey = env['MINIMAX_API_KEY'];
+      if (miniMaxApiKey) {
+        const tts = new MiniMaxTextToSpeechProvider({
+          apiKey: miniMaxApiKey,
+          region: env['MINIMAX_REGION'] === 'china' ? 'china' : 'global',
+          model: env['MINIMAX_TTS_MODEL'] ?? 'speech-2.8-hd',
+          voice: env['MINIMAX_TTS_VOICE'],
+        });
         this.registry.registerTtsProvider(tts);
         this.registerProviderInResolver(tts, 'tts');
       }

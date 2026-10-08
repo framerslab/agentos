@@ -23,6 +23,17 @@ describe('providerCatalog', () => {
     expect(entry!.kind).toBe('stt');
   });
 
+  it('should expose MiniMax HTTP, async, and WebSocket TTS capabilities', () => {
+    const entry = findSpeechProviderCatalogEntry('minimax-tts');
+    expect(entry).toMatchObject({
+      kind: 'tts',
+      streaming: true,
+      defaultModel: 'speech-2.8-hd',
+      envVars: ['MINIMAX_API_KEY'],
+    });
+    expect(entry?.features).toEqual(expect.arrayContaining(['async', 'websocket']));
+  });
+
   it('should mark nvidia-nemo as unavailable (planned but not implemented)', () => {
     const entry = findSpeechProviderCatalogEntry('nvidia-nemo');
     expect(entry).toBeDefined();
