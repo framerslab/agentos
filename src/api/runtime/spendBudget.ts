@@ -1,0 +1,190 @@
+/**
+ * @file spendBudget.ts
+ * @description A spend budget for a run of calls. Before each provider call
+ * the call's largest cost is checked against what the budget has left; after
+ * it, the cost the provider reported (or its token counts at the model's
+ * listed price) is recorded. The spending is held by a CostGuard under the
+ * budget's id, so budgets that share a guard and an id share one total, and a
+ * guard's own daily cap holds across all of them.
+ */
+import { CostCapExceededError, CostGuard } from '../../safety/runtime/CostGuard.js';
+import type { CostCapType } from '../../safety/runtime/CostGuard.js';
+import { openAIModelPricing } from '../../core/llm/providers/implementations/openaiPricing.js';
+
+/** What a budget was about to refuse, for an `onLimitReached` callback. */
+export interface SpendLimitInfo {
+  /** The budget's id. */
+  budgetId: string;
+  /** Which cap: the guard's session, daily or single-call cap, the token budget, or a model with no price row. */
+  capType: CostCapType | 'tokens' | 'unpriced';
+  /** What the call was: `generate_text.step`, `stream_text`, `embed_text` and the like. */
+  what: string;
+  /** Why, in one sentence. */
+  reason: string;
+}
+
+/** A budget's settings. */
+export interface SpendBudgetOptions {
+  /** The most the run may spend, in US dollars. */
+  maxCostUSD: number;
+  /** The most prompt and completion tokens the run may use, counted by this budget. */
+  maxTotalTokens?: number;
+  /**
+   * What a call that would pass the budget does: `'throw'` (the default) refuses it with
+   * {@link CostCapExceededError}; `'warn'` logs once per call and lets it run; a function is told
+   * what was about to be refused and the call is then refused as with `'throw'`.
+   */
+  onLimitReached?: 'throw' | 'warn' | ((info: SpendLimitInfo) => void);
+  /** The guard that holds the spending; a budget given none makes its own, with no daily or single-call cap. */
+  guard?: CostGuard;
+  /** The id the guard keeps the spending under; a budget given none makes one. */
+  budgetId?: string;
+  /**
+   * A call on a model with no price row: `'refuse'` (the default) refuses it with {@link UnpricedModelError},
+   * since its cost could not be counted; `'allow'` lets it run and counts it as nothing.
+   */
+  unpriced?: 'refuse' | 'allow';
+}
+
+/** Refused because the model has no price row, so the call's cost could not be counted. */
+export class UnpricedModelError extends Error {
+  constructor(
+    public readonly providerId: string,
+    public readonly modelId: string,
+  ) {
+    super(`No price is known for ${providerId}:${modelId}, so a call to it cannot be counted against the budget`);
+    this.name = 'UnpricedModelError';
+  }
+}
+
+/** The output tokens a call is assumed to use when it names no cap. */
+export const DEFAULT_OUTPUT_ESTIMATE_TOKENS = 4096;
+
+let budgets = 0;
+
+/** A budget for a run of calls; pass one instance to every call that should share it. */
+export class SpendBudget {
+  /** The id its spending is kept under. */
+  readonly id: string;
+  /** Its settings. */
+  readonly options: Readonly<SpendBudgetOptions>;
+  private readonly guard: CostGuard;
+  private tokens = 0;
+
+  constructor(options: SpendBudgetOptions) {
+    if (!(options.maxCostUSD >= 0)) throw new RangeError('maxCostUSD must be zero or more');
+    this.options = options;
+    this.id = options.budgetId ?? `budget-${Date.now()}-${++budgets}`;
+    this.guard =
+      options.guard ??
+      new CostGuard({
+        maxSessionCostUsd: options.maxCostUSD,
+        maxDailyCostUsd: Number.POSITIVE_INFINITY,
+        maxSingleOperationCostUsd: Number.POSITIVE_INFINITY,
+      });
+    if (options.guard) options.guard.setAgentLimits(this.id, { maxSessionCostUsd: options.maxCostUSD });
+  }
+
+  /** What the run has spent, in US dollars, as the guard holds it. */
+  spentUSD(): number {
+    return this.guard.getSnapshot(this.id).sessionCostUsd;
+  }
+
+  /** The tokens this budget has counted. */
+  tokensUsed(): number {
+    return this.tokens;
+  }
+
+  /**
+   * Refuses (or warns about) a call that could cost up to `estimateUSD` and use up to `estimateTokens`, when it would
+   * pass what is left; `estimateUSD` undefined means the model has no price row.
+   */
+  assertCanSpend(estimateUSD: number | undefined, estimateTokens: number, what: string): void {
+    if (estimateUSD === undefined) {
+      if (this.options.unpriced === 'allow') return;
+      this.refuse({ budgetId: this.id, capType: 'unpriced', what, reason: 'the model has no price row' }, () => {
+        throw new UnpricedModelError('unknown', what);
+      });
+      return;
+    }
+    const max = this.options.maxTotalTokens;
+    if (max !== undefined && this.tokens + estimateTokens > max) {
+      this.refuse({ budgetId: this.id, capType: 'tokens', what, reason: `${this.tokens + estimateTokens} tokens would pass ${max}` }, () => {
+        throw new CostCapExceededError(this.id, 'session', this.spentUSD(), this.options.maxCostUSD);
+      });
+      return;
+    }
+    const verdict = this.guard.canAfford(this.id, estimateUSD);
+    if (verdict.allowed) return;
+    const capType = verdict.capType ?? 'session';
+    this.refuse({ budgetId: this.id, capType, what, reason: verdict.reason ?? 'the budget is spent' }, () => {
+      throw new CostCapExceededError(this.id, capType, this.spentUSD(), this.options.maxCostUSD);
+    });
+  }
+
+  /** Records a finished call: its cost (undefined for a model with no price row, counted as nothing) and its tokens. */
+  record(costUSD: number | undefined, tokens: number, what: string): void {
+    this.tokens += Math.max(0, tokens);
+    if (costUSD !== undefined && costUSD > 0) this.guard.recordCost(this.id, costUSD, undefined, { what });
+  }
+
+  /** Records a cost made outside AgentOS, such as speech-to-text minutes billed by the minute. */
+  recordExternal(costUSD: number, kind: string): void {
+    if (costUSD > 0) this.guard.recordCost(this.id, costUSD, undefined, { what: `external.${kind}` });
+  }
+
+  private refuse(info: SpendLimitInfo, thrower: () => never): void {
+    const on = this.options.onLimitReached ?? 'throw';
+    if (on === 'warn') {
+      console.warn(`[agentos] spend budget ${info.budgetId}: ${info.what} would pass the budget (${info.reason}); running it`);
+      return;
+    }
+    if (typeof on === 'function') on(info);
+    thrower();
+  }
+}
+
+/** A budget from what a caller passed: an instance as it is, settings made into a new instance, or nothing. */
+export function asSpendBudget(input: SpendBudget | SpendBudgetOptions | undefined): SpendBudget | undefined {
+  if (input === undefined) return undefined;
+  return input instanceof SpendBudget ? input : new SpendBudget(input);
+}
+
+/** The characters a request sends: its messages as JSON and its system prompt, which estimate its prompt tokens. */
+export function promptCharsOf(messages: unknown, system?: unknown): number {
+  const systemText = typeof system === 'string' ? system : system === undefined ? '' : JSON.stringify(system);
+  return JSON.stringify(messages ?? []).length + systemText.length;
+}
+
+/** The tokens a prompt of `chars` characters is assumed to hold: four characters a token, rounded up. */
+export function tokensOfChars(chars: number): number {
+  return Math.ceil(chars / 4);
+}
+
+/**
+ * The most a call could cost: its prompt's assumed tokens at the input rate and its output cap at the output rate.
+ * Undefined when the provider's model has no price row (only OpenAI's table is known here).
+ */
+export function estimateCallCostUSD(providerId: string, modelId: string, promptChars: number, maxOutputTokens: number | undefined): number | undefined {
+  const price = providerId === 'openai' ? openAIModelPricing(modelId) : undefined;
+  if (!price) return undefined;
+  const output = maxOutputTokens ?? DEFAULT_OUTPUT_ESTIMATE_TOKENS;
+  return (tokensOfChars(promptChars) / 1000) * price.input + (output / 1000) * price.output;
+}
+
+/**
+ * A finished call's cost: the provider's own `costUSD` when it reported one, else its tokens at the table's rates
+ * (an embedding prices its prompt tokens alone); undefined when neither is known.
+ */
+export function costOfUsageUSD(
+  providerId: string,
+  modelId: string,
+  usage: { promptTokens?: number; completionTokens?: number; costUSD?: number } | undefined,
+  isEmbedding = false,
+): number | undefined {
+  if (typeof usage?.costUSD === 'number') return usage.costUSD;
+  const price = providerId === 'openai' ? openAIModelPricing(modelId) : undefined;
+  if (!price || usage === undefined) return undefined;
+  const prompt = usage.promptTokens ?? 0;
+  return isEmbedding ? (prompt / 1000) * price.input : (prompt / 1000) * price.input + ((usage.completionTokens ?? 0) / 1000) * price.output;
+}
