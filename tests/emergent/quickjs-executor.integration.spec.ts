@@ -350,6 +350,15 @@ describe("the bindings' bounds", () => {
     expect((await run([`${base}/${40 * MIB}`])).output).toEqual([limit]);
   });
 
+  it('copies a large host buffer and a large host string into the guest exactly', async () => {
+    const ran = await executor.run(
+      direct(
+        "function execute() { const text = 'ab'.repeat(40000); const bytes = new TextEncoder().encode(text); return [bytes.length, bytes[0], bytes[79999], new TextDecoder().decode(bytes) === text]; }",
+      ),
+    );
+    expect(ran).toMatchObject({ status: 'ok', output: [80000, 97, 98, true] });
+  });
+
   it('refuses a host call past the ones a call may have in flight', async () => {
     const { base } = await bytesServer();
     const result = await plain.execute({
@@ -430,6 +439,7 @@ describe('Intl, formatted through the host', () => {
       dateOnly: date.toLocaleDateString('ja-JP', { timeZone: 'UTC' }),
       timeOnly: date.toLocaleTimeString('en-US', { timeZone: 'UTC', hour12: false }),
       number: (1234567.891).toLocaleString('en-IN'),
+      big: (12345678901234567890n).toLocaleString('en-US'),
       array: [1234.5, 6789.25].toLocaleString('de-DE'),
       locale: new Intl.NumberFormat('en-US').resolvedOptions().locale,
       supported: Intl.DateTimeFormat.supportedLocalesOf(['en-US', 'tlh']),

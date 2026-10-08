@@ -331,6 +331,14 @@ class GuestRun {
       'return __out === undefined ? undefined : JSON.stringify(__out);',
       '})()',
     ].join('\n');
+    // The source and its input are copied in unchecked, like any host value.
+    if (4 * wrapped.length > CHECKED_COPY_BYTES) {
+      const room = this.allocateGuest(4 * wrapped.length + 64);
+      if (!room) {
+        return { status: 'memory_exceeded', memoryUsedBytes: this.memoryUsed() };
+      }
+      room.dispose();
+    }
     const evaluated = context.evalCode(wrapped, 'forged.js', { type: 'global' });
     if (evaluated.error) {
       return this.failure(evaluated.error);
@@ -426,19 +434,25 @@ class GuestRun {
     const { context } = this.live;
     const bytes = guestBytes(value);
     if (bytes > CHECKED_COPY_BYTES) {
+      if (value instanceof Uint8Array || value instanceof ArrayBuffer) {
+        const data = value instanceof Uint8Array ? value : new Uint8Array(value);
+        const buffer = this.allocateGuest(data.byteLength);
+        if (!buffer) {
+          this.exhausted = true;
+          return context.undefined;
+        }
+        const view = context.getArrayBuffer(buffer);
+        try {
+          view.value.set(data);
+        } finally {
+          view.dispose();
+        }
+        return buffer;
+      }
       const room = this.allocateGuest(bytes);
       if (!room) {
         this.exhausted = true;
         return context.undefined;
-      }
-      if (value instanceof Uint8Array || value instanceof ArrayBuffer) {
-        const view = context.getArrayBuffer(room);
-        try {
-          view.value.set(value instanceof Uint8Array ? value : new Uint8Array(value));
-        } finally {
-          view.dispose();
-        }
-        return room;
       }
       room.dispose();
     }
