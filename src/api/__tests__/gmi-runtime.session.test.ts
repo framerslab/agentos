@@ -17,6 +17,15 @@ import { clearProviderPriority, setProviderPriority } from '../runtime/provider-
 
 let n = 0;
 const key = () => `k-session-${++n}`;
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** A gate a held reply waits on (`reply.hold`), and the function that opens it. */
+function gate(): { opened: Promise<void>; open: () => void } {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { opened, open };
+}
 const base = (apiKey: string, extra: Record<string, unknown> = {}) =>
   ({ runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey, fallbackProviders: [], ...extra }) as unknown as AgentOptions;
 const lookupTool = (execute: (args: Record<string, unknown>) => Promise<unknown>) => ({ name: 'lookup', description: 'Look up.', inputSchema: { type: 'object', properties: { q: { type: 'string' } } }, execute });
@@ -87,6 +96,25 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     const r = await agent(base(k, { tools: [lookupTool(async () => ({ success: true, output: 1 }))] })).session('s').send('find x');
     expect(r.toolCalls).toHaveLength(1);
     expect(r).toMatchObject({ text: '', finishReason: 'stop' });
+  });
+
+  it('stream() resolves provider and model once the model call is routed, and to the routed provider when the turn fails before any step', async () => {
+    const k = key(); const g = gate();
+    script('openai', k, { replies: [reply.hold([], g.opened, reply.text('Late.')), Object.assign(new Error('bad request'), { httpStatus: 400 })] });
+    const session = agent(base(k)).session('s');
+    try {
+      const r = session.stream('go');
+      // The provider holds the request open: routing is done, and no step has finished.
+      expect(await Promise.race([r.provider, sleep(2_000).then(() => 'not yet')])).toBe('openai');
+      expect(await r.model).toBe('stub-model');
+      g.open();
+      expect(await r.text).toBe('Late.');
+    } finally {
+      g.open();
+    }
+    const failed = session.stream('again');
+    expect(await failed.finishReason).toBe('error');
+    expect([await failed.provider, await failed.model]).toEqual(['openai', 'stub-model']);
   });
 
   it('reports the provider message id only when the call opted into cache diagnostics, as agent() does', async () => {

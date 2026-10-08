@@ -33,13 +33,21 @@ export interface ProviderScript {
    * own words.
    */
   embedded: string[];
+  /** How many held requests (see `reply.hold`) ended because the caller aborted them. */
+  aborts: number;
+}
+
+/** A held reply's second half: it is sent once `gate` resolves, unless the request is aborted first. */
+interface Hold {
+  gate: Promise<void>;
+  after: Array<Record<string, unknown>>;
 }
 
 export const scripts = new Map<string, ProviderScript>();
 
 /** Scripts the provider that starts with `apiKey`. */
 export function script(providerId: string, apiKey: string, partial: Partial<ProviderScript> = {}): ProviderScript {
-  const s: ProviderScript = { replies: [], seen: [], embedCalls: 0, embedded: [], ...partial };
+  const s: ProviderScript = { replies: [], seen: [], embedCalls: 0, embedded: [], aborts: 0, ...partial };
   scripts.set(`${providerId}:${apiKey}`, s);
   return s;
 }
@@ -86,6 +94,13 @@ export const reply = {
   ],
   /** One delta, then the connection drops. */
   breakAfterFirstDelta: (text: string) => Object.assign([{ ...base, modelId: 'stub-model', choices: [], responseTextDelta: text }], { breakAfter: 1 }),
+  /**
+   * Streams `before`, then holds the request open until `gate` resolves and
+   * streams `after`; aborted first (`options.abortSignal`), it ends with the
+   * terminal abort chunk the provider contract asks for and counts the abort.
+   */
+  hold: (before: Array<Record<string, unknown>>, gate: Promise<void>, after: Array<Record<string, unknown>> = []) =>
+    Object.assign([...before], { hold: { gate, after } satisfies Hold }),
   /** One delta, then the provider throws `error` (a refusal that reports its usage in `details.usage`, a dropped connection). */
   textThenThrow: (text: string, error: Error) => [{ ...base, modelId: 'stub-model', choices: [], responseTextDelta: text }, error],
 };
@@ -151,6 +166,20 @@ export function stubProviderClass(providerId: string) {
         yield chunk;
         if (breakAfter !== undefined && i + 1 === breakAfter) throw new Error('connection reset');
       }
+      const hold = (next as { hold?: Hold }).hold;
+      if (!hold) return;
+      const signal = options.abortSignal as AbortSignal | undefined;
+      const aborted = await new Promise<boolean>((resolve) => {
+        if (signal?.aborted) return resolve(true);
+        signal?.addEventListener('abort', () => resolve(true), { once: true });
+        void hold.gate.then(() => resolve(false));
+      });
+      if (aborted) {
+        s.aborts += 1;
+        yield { ...base, modelId, choices: [], isFinal: true, error: { message: 'Request aborted', type: 'abort' } };
+        return;
+      }
+      yield* hold.after;
     }
 
     async generateEmbeddings(modelId: string, texts: string[]) {
