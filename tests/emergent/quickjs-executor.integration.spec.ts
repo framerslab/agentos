@@ -163,6 +163,18 @@ describe('the memory bound', () => {
     expect(ran).toMatchObject({ status: 'memory_exceeded', memoryUsedBytes: 16 * MIB });
   });
 
+  it("runs an infinite budget at the build's 2,048 MiB maximum, not at the floor", async () => {
+    const ran = await executor.run(
+      direct(
+        'function execute() { const a = new Uint8Array(40 * 1024 * 1024); a[a.length - 1] = 7; return a[a.length - 1]; }',
+        {},
+        { memoryMB: Number.POSITIVE_INFINITY, timeoutMs: 10_000 },
+      ),
+    );
+    expect(ran).toMatchObject({ status: 'ok', output: 7 });
+    expect(ran.memoryUsedBytes).toBeGreaterThan(40 * MIB);
+  });
+
   it('reads through the forge as the memory limit', async () => {
     const result = await forgeRun(grow, {}, [], { memoryMB: 16, timeoutMs: 10_000 });
     expect(result).toMatchObject({ success: false, error: 'Execution exceeded its memory limit of 16 MB' });
@@ -466,6 +478,15 @@ describe('what the guest hands the host', () => {
     });
   });
 
+  it('refuses a symbol handed to a host function', async () => {
+    const ran = await executor.run(
+      direct(
+        "function execute() { const f = new Intl.NumberFormat('en'); try { f.format(Symbol.for('guest-key')); return 'crossed'; } catch (e) { return e.name + ': ' + e.message; } }",
+      ),
+    );
+    expect(ran).toMatchObject({ status: 'ok', output: 'TypeError: intl_call takes data only: symbol values are not data' });
+  });
+
   it('reads only the JSON text the wrapper makes as the result', async () => {
     const ran = await executor.run(
       direct("function execute() { JSON.stringify = () => ({ big: 'z'.repeat(1000) }); return { a: 1 }; }"),
@@ -534,6 +555,9 @@ describe('Intl, formatted through the host', () => {
       number: (1234567.891).toLocaleString('en-IN'),
       big: (12345678901234567890n).toLocaleString('en-US'),
       array: [1234.5, 6789.25].toLocaleString('de-DE'),
+      upperTurkish: 'iı'.toLocaleUpperCase('tr'),
+      lowerTurkish: 'Iİ'.toLocaleLowerCase('tr'),
+      upperPlain: 'straße'.toLocaleUpperCase(),
       locale: new Intl.NumberFormat('en-US').resolvedOptions().locale,
       supported: Intl.DateTimeFormat.supportedLocalesOf(['en-US', 'tlh']),
     };
