@@ -244,6 +244,10 @@ export function createApprovalGate(o: CreateApprovalGateOptions): ApprovalGateFn
       if (decision.modifications?.toolArgs != null) return refusal(TOOL_ARGS_NOT_APPLIED);
       if (o.hitl.guardrailOverride !== false) {
         const { runPostApprovalGuardrails } = await import('../agency.js');
+        // The import yields, and the guardrails fire their events as soon as
+        // they run: a call that ended meanwhile runs none of them.
+        const beforeGuardrails = stopped();
+        if (beforeGuardrails) return beforeGuardrails;
         const result = await runPostApprovalGuardrails(
           info.name,
           info.args,

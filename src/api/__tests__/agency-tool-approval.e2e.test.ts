@@ -206,6 +206,36 @@ describe('a listed tool waits for the handler', () => {
     expect(toolMsgs.map((m) => JSON.parse(m.content).skipped)).toEqual([true, true]);
   });
 
+  it('a call that ends while the guardrail module loads fires no guardrailResult event and no override warning', async () => {
+    // One prompt-tool turn gates both calls together. The first is approved
+    // and its guardrail check would block it; the second's handler throws
+    // while the first's gate is loading the guardrail module.
+    serve([
+      () => text('<tool_call>{"name":"search","arguments":{"q":"rm -rf /tmp/x"}}</tool_call>\n<tool_call>{"name":"search","arguments":{"q":"y"}}</tool_call>'),
+      () => text('done'),
+    ]);
+    const handler = vi.fn(async (r: ApprovalRequest): Promise<ApprovalDecision> => {
+      if ((r.details.args as Json).q === 'y') throw new Error('approval service down');
+      return { approved: true };
+    });
+    const approvalDecided = vi.fn();
+    const guardrailResult = vi.fn();
+    const guardrailHitlOverride = vi.fn();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const team = base({ approvals: { beforeTool: ['search'] }, handler }, { on: { approvalDecided, guardrailResult, guardrailHitlOverride } });
+      await expect(team.generate('clean up', { toolMode: 'prompt' })).rejects.toThrow('approval service down');
+      // The first call's approval was reported while the call was still running.
+      expect(approvalDecided).toHaveBeenCalledTimes(1);
+      expect(guardrailResult).not.toHaveBeenCalled();
+      expect(guardrailHitlOverride).not.toHaveBeenCalled();
+      expect(warn.mock.calls.some((call) => String(call[0]).includes('Overrode HITL approval'))).toBe(false);
+      expect(search.execute).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("a seat's own hook that throws does not bypass the gate", async () => {
     serve([() => toolCall('search', { q: 'x' }), () => text('done')]);
     const seat = agent({ provider: 'openai', model: 'gpt-4.1', apiKey: KEY, tools: { search }, fallbackProviders: [], onBeforeToolExecution: async () => { throw new Error('hook broke'); } });
