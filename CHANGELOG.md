@@ -1,3 +1,9 @@
+## [0.12.24](https://github.com/framerslab/agentos/compare/v0.12.23...v0.12.24) (2026-10-08)
+
+### fix
+
+* **llm:** map Requesty's model list from the shape its API returns (#164) ([bbcabc3](https://github.com/framerslab/agentos/commit/bbcabc3b85b658a604ca82a12af8f325b8ae3d01))
+
 ## [0.12.23](https://github.com/framerslab/agentos/compare/v0.12.22...v0.12.23) (2026-10-08)
 
 ### fix
