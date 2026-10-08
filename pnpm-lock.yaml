@@ -99,6 +99,9 @@ importers:
       '@framers/agentos-extensions-registry':
         specifier: ^0.18.2
         version: 0.18.5(@aws-sdk/client-polly@3.1045.0)(@google-cloud/speech@6.7.1)(@google-cloud/text-to-speech@5.8.1)(@picovoice/porcupine-node@3.0.6)(@whiskeysockets/baileys@6.7.21(sharp@0.34.5))(express@4.22.3)(mammoth@1.13.0)(onnxruntime-node@1.21.0)(pdf-parse@1.1.4)(react@19.3.0)(request@2.88.2)(tesseract.js@7.0.0)(typescript@5.9.3)(vosk@0.3.39)
+      '@jitl/quickjs-wasmfile-release-sync':
+        specifier: 0.32.0
+        version: 0.32.0
       '@opentelemetry/context-async-hooks':
         specifier: ^2.0.1
         version: 2.11.0(@opentelemetry/api@1.9.1)
@@ -159,6 +162,9 @@ importers:
       prettier:
         specifier: ^3.3.2
         version: 3.9.9
+      quickjs-emscripten-core:
+        specifier: 0.32.0
+        version: 0.32.0
       rimraf:
         specifier: ^6.1.3
         version: 6.1.3
@@ -1517,6 +1523,12 @@ packages:
   '@isaacs/fs-minipass@4.0.1':
     resolution: {integrity: sha512-wgm9Ehl2jpeqP3zw/7mo3kRHFp5MEDhqAdwy1fTGkHAwnkGOVsgpvQhL8B5n1qlb01jV3n/bI0ZfZp5lWA1k4w==}
     engines: {node: '>=18.0.0'}
+
+  '@jitl/quickjs-ffi-types@0.32.0':
+    resolution: {integrity: sha512-v9T+GQpmk43VDJ7d72sf0Nexhk+ArvtUihW27dy7lqAl0zBObFKtSBBIm5RBjwIhE8VwsPPm9PNuvPvNqLWUEg==}
+
+  '@jitl/quickjs-wasmfile-release-sync@0.32.0':
+    resolution: {integrity: sha512-BKNDI/TPBfGlLNGYpLrhcDGXmIk4xHm4MRAisOBnOzpXVn9HZWsfmMAc9WMBrAHjvvds6HOikKeaOBKdPdpVrg==}
 
   '@jridgewell/resolve-uri@3.1.2':
     resolution: {integrity: sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==}
@@ -6106,6 +6118,9 @@ packages:
   quick-format-unescaped@4.0.4:
     resolution: {integrity: sha512-tYC1Q1hgyRuHgloV/YXs2w15unPVh8qfu/qCTfhTYamaw7fyhumKa2yGpdSo87vY32rIclj+4fWYQXUMs9EHvg==}
 
+  quickjs-emscripten-core@0.32.0:
+    resolution: {integrity: sha512-QFnPfjFey8EqknSrSxe1hZrf1/8z7/6s1QzGOmKo6++02r7QRRX7ZoyNaZh7JuVjWsVW87KnQrbZqnHkOAzUyg==}
+
   range-parser@1.2.1:
     resolution: {integrity: sha512-Hrgsx+orqoygnmhFbKaHE6c296J+HTAQXoxEF6gNupROmmGJRoyzfG3ccAveqCBrwr/2yxQ5BVd/GTl5agOwSg==}
     engines: {node: '>= 0.6'}
@@ -9178,6 +9193,12 @@ snapshots:
     dependencies:
       minipass: 7.1.3
     optional: true
+
+  '@jitl/quickjs-ffi-types@0.32.0': {}
+
+  '@jitl/quickjs-wasmfile-release-sync@0.32.0':
+    dependencies:
+      '@jitl/quickjs-ffi-types': 0.32.0
 
   '@jridgewell/resolve-uri@3.1.2': {}
 
@@ -14812,6 +14833,10 @@ snapshots:
     optional: true
 
   quick-format-unescaped@4.0.4: {}
+
+  quickjs-emscripten-core@0.32.0:
+    dependencies:
+      '@jitl/quickjs-ffi-types': 0.32.0
 
   range-parser@1.2.1: {}
 

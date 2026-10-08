@@ -17,6 +17,7 @@
 
 import type { JSONSchemaObject } from '../../core/tools/ITool.js';
 import type { SelfImprovementConfig } from './SelfImprovementConfig.js';
+import type { ForgedCodeExecutor } from './executor/types.js';
 
 // ============================================================================
 // TIER SYSTEM
@@ -860,9 +861,9 @@ export interface EmergentConfig {
   persistSandboxSource: boolean;
 
   /**
-   * Nominal memory budget in megabytes for each sandboxed tool execution.
-   * The current node:vm-backed executor reports heap deltas but does not
-   * preemptively enforce this limit.
+   * Memory budget in megabytes for each sandboxed tool execution. The
+   * in-process executor reports a heap delta and does not enforce it;
+   * QuickJSExecutor stops the guest at it (never below 16 MiB).
    * Passed as `SandboxExecutionRequest.memoryMB`.
    * @default 128
    */
@@ -935,6 +936,14 @@ export interface EmergentConfig {
 
   /** Effect records under a ceiling. Ignored without one. */
   audit?: EmergentAuditConfig;
+
+  /**
+   * What runs forged code in the forge the engine builds. Absent: the
+   * in-process executor (`isolates: false`). A host that passes its own
+   * `sandboxForge` brings that forge's executor; passing one beside a
+   * different `executor` fails construction with `executor_conflict`.
+   */
+  executor?: ForgedCodeExecutor;
 }
 
 /**

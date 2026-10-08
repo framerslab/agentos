@@ -27,6 +27,13 @@ export interface ForgedCodeExecutor {
    * reports a rejection as an execution error.
    */
   run(request: ExecutorRunRequest): Promise<ExecutorRunResult>;
+  /**
+   * Optional. Resolves once the executor can run code and rejects with the
+   * reason when it cannot. The engine awaits it before a forge's test
+   * cases, so a forge on an executor that cannot run is refused with that
+   * reason before any test or review.
+   */
+  ready?(): Promise<void>;
 }
 
 /** One call of a forged tool, as the forge hands it to an executor. */
