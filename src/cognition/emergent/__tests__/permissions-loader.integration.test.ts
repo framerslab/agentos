@@ -565,6 +565,50 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect(readStateRow(db, 'compose-1')).toMatchObject({ state: 'demoted' });
   });
 
+  it("a run's suspension over a composition the host turned off with its own SQL records the host's demotion, and the flag stays down", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, tools: [echoTool()] });
+    seedToolRow(db, {
+      id: 'compose-1',
+      name: 'echo_once',
+      mode: 'compose',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 's1', tool: 'echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    await host.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(readStateRow(db, 'compose-1')).toMatchObject({ state: 'active', flag_synced: 1 });
+
+    // The host turns the tool off with its own SQL. Before a load records
+    // that, a call meets the composition's step missing.
+    db.raw.prepare('UPDATE agentos_emergent_tools SET is_active = 0 WHERE id = ?').run('compose-1');
+    await host.orchestrator.unregisterTool('echo');
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'x' })).isError).toBe(true);
+
+    // The library's suspension is not written over the host's disable: the
+    // disable is recorded as the host's demotion.
+    expect(readStateRow(db, 'compose-1')).toMatchObject({
+      state: 'demoted',
+      state_reason: 'legacy_inactive',
+      set_by: 'host',
+    });
+    expect(readToolRow(db, 'compose-1')?.is_active).toBe(0);
+
+    // The step's return lifts nothing, and the flag stays down.
+    await host.orchestrator.registerTool(echoTool());
+    await host.engine.onHostToolRegistered('echo');
+    expect(await host.orchestrator.getTool('echo_once')).toBeUndefined();
+    expect(readToolRow(db, 'compose-1')?.is_active).toBe(0);
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'compose-1', name: 'echo_once', state: 'demoted', reason: 'legacy_inactive' },
+    ]);
+    expect(await host.orchestrator.getTool('echo_once')).toBeUndefined();
+    expect(readToolRow(db, 'compose-1')?.is_active).toBe(0);
+  });
+
   it('a load whose flag write fails is reported failed, and the next load finishes the flag write', async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db });

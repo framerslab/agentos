@@ -1949,9 +1949,11 @@ export class EmergentCapabilityEngine {
    * the library's (so a later load, or a registration of the missing step
    * tool, re-checks it), held here, and the executable taken out. It gives
    * way to the host's word: when this process holds a host's suspension or a
-   * demotion nothing is written, and a row another process restricted that
-   * way is left as it is and held here (`yieldToHost`), so the library never
-   * turns a host's restriction into one of its own that a re-check lifts.
+   * demotion nothing is written, a row another process restricted that way
+   * is left as it is and held here (`yieldToHost`), and a row the host turned
+   * off with its own SQL (active, its flag lowered, the mark clear) is
+   * recorded as the host's demotion, so the library never turns a host's
+   * restriction into one of its own that a re-check lifts.
    *
    * It takes its turn with the tool's admissions (`serializeAdmission`): a
    * re-check that a registration starts while the suspension is written runs
@@ -1969,12 +1971,14 @@ export class EmergentCapabilityEngine {
     const held = this.registry.getState(toolId);
     let suspended = false;
     if (!held || !isHostRestriction(held)) {
+      let refusedOverActive = false;
       try {
         const inForce = await this.registry.setState(toolId, 'suspended', reason, {
           setBy: 'library',
           yieldToHost: true,
         });
         suspended = inForce.state === 'suspended' && inForce.setBy === 'library';
+        refusedOverActive = inForce.state === 'active';
       } catch (error: unknown) {
         // Held here even though the row did not take it.
         suspended = true;
@@ -1983,9 +1987,46 @@ export class EmergentCapabilityEngine {
           error instanceof Error ? error.message : error,
         );
       }
+      if (refusedOverActive) {
+        // The row reads active and did not take the suspension: when the host
+        // turned the tool row off with its own SQL, that is recorded now as
+        // the host's demotion, as a load records it, so no re-check of the
+        // library's raises the flag again.
+        try {
+          await this.demoteIfHostTurnedOff(toolId);
+        } catch (error: unknown) {
+          console.warn(
+            `[agentos:emergent] could not record the host's disable of "${toolId}":`,
+            error instanceof Error ? error.message : error,
+          );
+        }
+      }
     }
     await this.unregisterIfLive(toolId);
     return suspended;
+  }
+
+  /**
+   * A row that reads active, its mark clear, with its tool row's flag
+   * lowered: the host turned the tool off with its own SQL. Recorded as the
+   * host's demotion (`legacy_inactive`), as a load records it, only while the
+   * state row is still the one read here, so a host that reactivated the
+   * tool meanwhile is not written over. Only `reactivateTool` lifts it.
+   */
+  private async demoteIfHostTurnedOff(toolId: string): Promise<void> {
+    const row = await this.registry.loadRow(toolId);
+    if (!row || row.state !== 'active') {
+      return;
+    }
+    const markClear = !(row.flag_synced === 0 || row.flag_synced === false);
+    const flagLowered = row.is_active === 0 || row.is_active === false;
+    if (!markClear || !flagLowered) {
+      return;
+    }
+    await this.registry.setState(toolId, 'demoted', 'legacy_inactive', {
+      setBy: 'host',
+      ifRow: { at: Number(row.state_at ?? 0), state: 'active', setBy: stateSetterFromColumn(row.set_by) },
+    });
   }
 
   private async unregisterIfLive(toolId: string): Promise<void> {

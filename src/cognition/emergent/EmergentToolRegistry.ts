@@ -563,9 +563,11 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
    *
    * `options.yieldToHost` makes the write give way to the host's word: a row
    * that holds a host's suspension, or a demotion, is not changed, and its
-   * record is returned and held instead. The library's suspensions from a run
-   * or a promotion check use it, so they never replace a restriction a host
-   * set, in this process or in another.
+   * record is returned and held instead; so is an active row whose tool row
+   * the host turned off with its own SQL (`is_active = 0` with the mark
+   * clear), which the caller records as the host's demotion. The library's
+   * suspensions from a run or a promotion check use it, so they never replace
+   * a restriction a host set, in this process or in another.
    *
    * @returns the record now in force for the tool.
    * @throws If the storage adapter rejects.
@@ -714,7 +716,8 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
    * crash or a failed write between the two never leaves the pair apart
    * beyond the next load. With `ifRow`, an existing row is changed only while
    * its state, setter and time are the ones given (`'absent'`: never); with
-   * `yieldToHost`, only while it is active or the library's suspension. A
+   * `yieldToHost`, only while it is active (and the host has not turned the
+   * tool row off) or the library's suspension. A
    * refused write changes nothing, flag included, and the row as it stands
    * afterwards is returned, so it shows as a record other than the one given.
    */
@@ -765,11 +768,18 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
     }
     if (yieldToHost) {
       // A host's suspension and a demotion stay; only an active row or the
-      // library's own suspension is changed.
+      // library's own suspension is changed. An active row whose tool row
+      // the host turned off with its own SQL (the mark clear, so the lowered
+      // flag is not a library write still finishing) is the host's disable,
+      // not yet recorded: it stays too.
       conditions.push(
         `(agentos_emergent_tool_state.state = 'active'
-               OR (agentos_emergent_tool_state.state = 'suspended' AND agentos_emergent_tool_state.set_by = 'library'))`,
+               OR (agentos_emergent_tool_state.state = 'suspended' AND agentos_emergent_tool_state.set_by = 'library'))
+             AND NOT (agentos_emergent_tool_state.state = 'active'
+                      AND agentos_emergent_tool_state.flag_synced = 1
+                      AND EXISTS (SELECT 1 FROM agentos_emergent_tools t WHERE t.id = ? AND t.is_active = 0))`,
       );
+      guardParams.push(toolId);
     }
     const guard =
       conditions.length > 0
