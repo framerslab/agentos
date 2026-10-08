@@ -1,3 +1,52 @@
+## [0.13.0](https://github.com/framerslab/agentos/compare/v0.12.24...v0.13.0) (2026-10-08)
+
+### ⚠ BREAKING CHANGE
+
+* **speech:** URL output (providerSpecificOptions.outputFormat 'url')
+downloads only from hosts listed in audioUrlHosts, or in
+MINIMAX_TTS_AUDIO_URL_HOSTS through SpeechRuntime; without one, synthesize()
+throws instead of fetching. MiniMaxAsyncSpeechResponse.task_id is
+number | string instead of string, and file_id is number | string instead
+of number.
+
+### feat
+
+* **safety:** a persisted spend meter that processRequest reserves against before any provider call (#167) ([b9c2e91](https://github.com/framerslab/agentos/commit/b9c2e91927d58fc40d02a95348ba3a4c2e29b58b))
+
+### fix
+
+* **api:** five defects from a cold read of the gmi() session runner (#165) ([5eec49c](https://github.com/framerslab/agentos/commit/5eec49c09d57ae1eec9fd23ed158fd2447ea909f))
+* **speech:** download MiniMax URL output only from allowed hosts, query async tasks with GET (#166) ([14b86bf](https://github.com/framerslab/agentos/commit/14b86bf6b7e029bbe00e5fe287398fd49aa01258))
+
+## [0.12.24](https://github.com/framerslab/agentos/compare/v0.12.23...v0.12.24) (2026-10-08)
+
+### fix
+
+* **llm:** map Requesty's model list from the shape its API returns (#164) ([bbcabc3](https://github.com/framerslab/agentos/commit/bbcabc3b85b658a604ca82a12af8f325b8ae3d01))
+
+## [0.12.23](https://github.com/framerslab/agentos/compare/v0.12.22...v0.12.23) (2026-10-08)
+
+### fix
+
+* **channels:** accept a Plivo callback once and sign V3 as plivo-python does (#163) ([fe31524](https://github.com/framerslab/agentos/commit/fe31524eb0b7e0cdb56465611e3959ae156ce6f2))
+
+## [0.12.22](https://github.com/framerslab/agentos/compare/v0.12.21...v0.12.22) (2026-10-08)
+
+### feat
+
+* **emergent:** QuickJSExecutor, an isolating executor for forged code (#160) ([598d041](https://github.com/framerslab/agentos/commit/598d041f4a70c6ab43e35b1d960a65bb77ac4748))
+
+## [0.12.21](https://github.com/framerslab/agentos/compare/v0.12.20...v0.12.21) (2026-10-08)
+
+### docs
+
+* third round of audit follow-ups to the guides (#158) ([2aa186b](https://github.com/framerslab/agentos/commit/2aa186b7a29e0cd73321c1354f15b7e3c6a33d74))
+
+### feat
+
+* add LiteLLM as AI gateway provider (#15) ([068e6ce](https://github.com/framerslab/agentos/commit/068e6cee65752eadf63536941eefcd72b883508e))
+* **api:** agent({ runtime: 'gmi' }) routes its sessions through gmi() ([cf3a637](https://github.com/framerslab/agentos/commit/cf3a637fd4fb5b8286f40604e00555bc7ebbf0bf))
+
 ## [0.12.20](https://github.com/framerslab/agentos/compare/v0.12.19...v0.12.20) (2026-10-08)
 
 ### feat

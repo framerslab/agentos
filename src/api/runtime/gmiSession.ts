@@ -6,8 +6,9 @@
  * is replaced with the store's messages, and as the turn runs each finished
  * model step is written to the store through a turn writer; a turn that fails
  * after some steps keeps them, marked partial. One turn runs at a time per
- * session. Each step's usage goes to the usage ledger with the provider and
- * model that served it.
+ * session. Each model call of a turn is metered with the provider and model
+ * that served it: a usage ledger row and a usage event for the process-wide
+ * observer, as `generateText` and `streamText` meter a call.
  */
 import { randomUUID } from 'node:crypto';
 import type { ZodType } from 'zod';
@@ -22,11 +23,12 @@ import {
   type ToolResultChunkPayload,
 } from '../../cognition/substrate/IGMI.js';
 import { addModelUsage, extractTextFromContent, type GenerateTextResult, type MessageContent, type TokenUsage } from '../generateText.js';
-import type { StreamTextResult } from '../streamText.js';
+import { normalizeStreamFinishReason, type StreamTextResult } from '../streamText.js';
 import { ObjectGenerationError } from '../generateObject.js';
+import { fireLlmUsageObserver, type LlmUsageEvent } from '../observers.js';
 import type { SessionHistoryBuffer, SessionTurnWriter } from '../sessionHistory.js';
 import type { SessionTranscriptMessage } from '../sessionTranscript.js';
-import type { AgentOptions } from '../agent.js';
+import type { AgentMemoryProvider, AgentOptions } from '../agent.js';
 import { DEFAULT_MEMORY_TOKEN_BUDGET, MEMORY_TIMEOUT_MS } from './memoryProviderHooks.js';
 import type { AgentOSUsageLedgerOptions } from './usageLedger.js';
 import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
@@ -132,15 +134,69 @@ async function memoryProviderContext(opts: AgentOptions, userText: string): Prom
   }
 }
 
-/** One usage ledger event; a ledger failure is never the caller's error. */
-function recordLedgerUsage(ledger: AgentOSUsageLedgerOptions | undefined, providerId: string | undefined, modelId: string | undefined, usage: unknown): void {
-  if (!usage || typeof usage !== 'object') return;
-  const total: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-  addModelUsage(total, usage);
+/**
+ * `memoryProvider.observe` for one side of a finished turn. It is called on the
+ * provider, as `agent()` calls it, because a provider built from a class reads
+ * `this`; and it is never the turn's error: the turn has been answered and
+ * stored, and a memory store that fails to record it does not undo that.
+ */
+function observeTurn(provider: AgentMemoryProvider, role: 'user' | 'assistant', text: string): void {
+  try {
+    void Promise.resolve(provider.observe?.(role, text)).catch(() => undefined);
+  } catch (observeError) {
+    console.warn('[agentos] memoryProvider.observe failed:', observeError);
+  }
+}
+
+/**
+ * The usage event surface a turn reports under: `generateText` for a turn
+ * folded into a result (`send`, `generate`), `streamText` for a streamed one,
+ * the surfaces the same calls report under through `agent()`.
+ */
+export type GmiTurnSurface = Extract<LlmUsageEvent['surface'], 'generateText' | 'streamText'>;
+
+/** One model call of a turn that was billed or finished. */
+interface MeteredCall {
+  providerId: string | undefined;
+  modelId: string | undefined;
+  /** The provider's usage report for the call, if it gave one. */
+  usage: unknown;
+  /** The gateway hop that served the call; 0 or undefined for the primary. */
+  hop: number | undefined;
+  finishReason: string;
+  /** When the call started, in epoch milliseconds. */
+  startedAt: number;
+}
+
+/**
+ * Meters one model call of a turn where `generateText` and `streamText` meter
+ * theirs: a usage event for the process-wide observer (`setGlobalLlmObserver`),
+ * fired at once, and a usage ledger row. A turn's calls are metered one by
+ * one, each with the provider and model that served it, so a turn that moved
+ * to a fallback hop or ran a tool loop reports every request it was billed for.
+ *
+ * @returns A promise that settles once the ledger row is written, or was not:
+ *   a ledger failure is never the caller's error, so it never rejects.
+ */
+function meterCall(ledger: AgentOSUsageLedgerOptions | undefined, surface: GmiTurnSurface, call: MeteredCall): Promise<void> {
+  const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  addModelUsage(usage, call.usage);
+  fireLlmUsageObserver({
+    provider: call.providerId ?? '',
+    model: call.modelId ?? '',
+    usage: { ...usage },
+    ...(call.hop ? { fallbackDepth: call.hop } : {}),
+    finishReason: call.finishReason,
+    surface,
+    durationMs: Date.now() - call.startedAt,
+  });
   // Imported on use, as agent() imports it: the ledger reads and writes files.
-  void import('./usageLedger.js')
-    .then(({ recordAgentOSUsage }) => recordAgentOSUsage({ providerId, modelId, usage: total, options: ledger }))
-    .catch(() => undefined);
+  return import('./usageLedger.js')
+    .then(({ recordAgentOSUsage }) => recordAgentOSUsage({ providerId: call.providerId, modelId: call.modelId, usage, options: ledger }))
+    .then(
+      () => undefined,
+      () => undefined,
+    );
 }
 
 /** `onAfterGeneration` for one finished step: a returned text replaces the step's text in the result and in the store. */
@@ -167,13 +223,16 @@ async function afterGeneration(opts: AgentOptions, folder: GmiTurnFolder, step: 
 
 /**
  * Runs one GMI turn and yields its chunks, pushing each into `folder`, writing
- * each finished step to the session store and each step's usage to the ledger.
- * The caller folds the chunks (send) or streams them (stream).
+ * each finished step to the session store and metering each model call (a
+ * usage ledger row and a usage observer event). The caller folds the chunks
+ * (send) or streams them (stream).
  *
  * The turn reads the store's epoch and messages the moment it holds the lock,
  * before it waits for its GMI or its memory context, so a clear or reseed during
  * those waits makes the turn's writes no-ops, as an in-flight legacy send's are.
  *
+ * @param surface - The surface the turn's usage events name: `generateText`
+ *   for a folded turn (the default), `streamText` for a streamed one.
  * @returns The messages the turn added to the store (or would have, with no history).
  */
 export async function* runGmiTurn(
@@ -181,25 +240,37 @@ export async function* runGmiTurn(
   input: MessageContent,
   turn: GmiTurnOptions,
   folder: GmiTurnFolder,
+  surface: GmiTurnSurface = 'generateText',
 ): AsyncGenerator<GMIOutputChunk, SessionTranscriptMessage[], undefined> {
   const release = await deps.lock.acquire();
   const recorded: SessionTranscriptMessage[] = [];
   let writer: SessionTurnWriter | undefined;
   let ended = false;
   let releaseGmi: (() => Promise<void>) | undefined;
+  // The turn's usage ledger writes, awaited before the turn ends.
+  const ledgerWrites: Array<Promise<void>> = [];
   const userMessage: SessionTranscriptMessage = { role: 'user', content: input };
-  let pending: { step: StepFinishedChunkPayload; calls: ToolCallRequest[]; results: ToolResultChunkPayload[]; first: boolean } | undefined;
-  // Writes the last finished step once its tool results are in.
+  // False until a step is kept with the turn's user message in front of it.
+  let userMessageKept = false;
+  let pending: { step: StepFinishedChunkPayload; calls: ToolCallRequest[]; results: ToolResultChunkPayload[] } | undefined;
+  // Writes the last finished step once its tool results are in. The turn's user
+  // message goes with the first step the store keeps: when the store refuses a
+  // step (a tool call left unanswered, two calls under one id), the message
+  // waits for the next one, so no later step is stored without the message it
+  // answers.
   const flush = (): void => {
     if (!pending) return;
     const messages = stepToTranscript({
       step: pending.step,
       calls: pending.calls,
       results: pending.results,
-      userMessage: pending.first ? userMessage : undefined,
+      userMessage: userMessageKept ? undefined : userMessage,
       textOverride: folder.stepText(pending.step),
     });
-    if (!writer || writer.appendStep(messages)) recorded.push(...messages);
+    if (!writer || writer.appendStep(messages)) {
+      recorded.push(...messages);
+      userMessageKept = true;
+    }
     pending = undefined;
   };
 
@@ -238,7 +309,9 @@ export async function* runGmiTurn(
     };
 
     let stepCalls: ToolCallRequest[] = [];
-    let firstStep = true;
+    // When the model call in progress started: the turn's start, the end of the
+    // tool round before it, or the failure of the attempt it replaces.
+    let callStartedAt = Date.now();
     for await (const chunk of gmi.processTurnStream(turnInput)) {
       folder.push(chunk);
       switch (chunk.type) {
@@ -249,19 +322,42 @@ export async function* runGmiTurn(
           flush();
           const step = chunk.content as StepFinishedChunkPayload;
           await afterGeneration(deps.opts, folder, step, stepCalls);
-          pending = { step, calls: stepCalls, results: [], first: firstStep };
+          pending = { step, calls: stepCalls, results: [] };
           stepCalls = [];
-          firstStep = false;
-          recordLedgerUsage(deps.ledger, step.providerId, step.modelId, step.usage);
+          ledgerWrites.push(
+            meterCall(deps.ledger, surface, {
+              providerId: step.providerId,
+              modelId: step.modelId,
+              usage: step.usage,
+              hop: step.hop,
+              // A schema answer is the step's reply, whatever stop reason carried it.
+              finishReason: step.structuredOutput !== undefined ? 'stop' : normalizeStreamFinishReason(step.finishReason),
+              startedAt: callStartedAt,
+            }),
+          );
+          callStartedAt = Date.now();
           break;
         }
         case GMIOutputChunkType.TOOL_RESULT:
           pending?.results.push(chunk.content as ToolResultChunkPayload);
+          callStartedAt = Date.now();
           break;
         case GMIOutputChunkType.USAGE_UPDATE: {
           // A failed attempt that was billed (before any output, or a step that failed after it): no step carries it.
-          const meta = chunk.metadata as { attemptFailed?: boolean; providerId?: string; modelId?: string } | undefined;
-          if (meta?.attemptFailed) recordLedgerUsage(deps.ledger, meta.providerId, meta.modelId, chunk.content);
+          const meta = chunk.metadata as { attemptFailed?: boolean; providerId?: string; modelId?: string; hop?: number } | undefined;
+          if (meta?.attemptFailed) {
+            ledgerWrites.push(
+              meterCall(deps.ledger, surface, {
+                providerId: meta.providerId,
+                modelId: meta.modelId,
+                usage: chunk.content,
+                hop: meta.hop,
+                finishReason: 'error',
+                startedAt: callStartedAt,
+              }),
+            );
+            callStartedAt = Date.now();
+          }
           break;
         }
         default:
@@ -275,11 +371,11 @@ export async function* runGmiTurn(
       writer?.abort({ partial: true });
     } else {
       writer?.commit();
-      const observe = deps.opts.memoryProvider?.observe;
-      if (observe) {
-        void observe('user', userText).catch(() => undefined);
+      const memoryProvider = deps.opts.memoryProvider;
+      if (memoryProvider?.observe) {
+        observeTurn(memoryProvider, 'user', userText);
         const reply = folder.text();
-        if (reply) void observe('assistant', reply).catch(() => undefined);
+        if (reply) observeTurn(memoryProvider, 'assistant', reply);
       }
     }
     return recorded;
@@ -290,15 +386,23 @@ export async function* runGmiTurn(
     writer?.abort({ partial: true });
     throw error;
   } finally {
-    // A turn its consumer stopped reading keeps the steps that finished, marked partial.
-    if (!ended) {
-      flush();
-      writer?.abort({ partial: true });
+    try {
+      // A turn its consumer stopped reading keeps the steps that finished, marked partial.
+      if (!ended) {
+        flush();
+        writer?.abort({ partial: true });
+      }
+      const usage = folder.usage();
+      if (usage.totalTokens > 0 || usage.promptTokens > 0 || usage.completionTokens > 0) deps.onUsage(usage);
+      // The ledger holds the turn before the turn ends, as it holds a call before
+      // generateText returns: with the ledger enabled, usage() reads it alone, and
+      // a process that exits once the call returns keeps the turn's rows.
+      await Promise.all(ledgerWrites);
+    } finally {
+      // Whatever the lines above threw, the next turn gets the lock.
+      if (releaseGmi) void releaseGmi().catch(() => undefined);
+      release();
     }
-    const usage = folder.usage();
-    if (usage.totalTokens > 0 || usage.promptTokens > 0 || usage.completionTokens > 0) deps.onUsage(usage);
-    if (releaseGmi) void releaseGmi().catch(() => undefined);
-    release();
   }
 }
 
@@ -363,7 +467,7 @@ export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn:
   const folder = new GmiTurnFolder({ cacheDiagnostics: Boolean(turn.options?.cacheDiagnostics) });
   const stop = new AbortController();
   turn.abortSignal?.addEventListener('abort', () => stop.abort(), { once: true });
-  const run = runGmiTurn(deps, input, { ...turn, abortSignal: stop.signal }, folder);
+  const run = runGmiTurn(deps, input, { ...turn, abortSignal: stop.signal }, folder, 'streamText');
   // runGmiTurn pushes every chunk into `folder` (with the onAfterGeneration replacements); the stream reads that folder.
   return streamFromGmiTurn({ [Symbol.asyncIterator]: () => run }, { folder, stop: () => stop.abort() });
 }

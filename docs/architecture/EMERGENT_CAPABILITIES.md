@@ -1,6 +1,6 @@
 ---
-description: "Runtime tool forging for AI agents: AgentOS lets agents generate, sandbox, judge-approve, and register new Zod-typed tools mid-decision in an in-process node:vm context. Multi-agent spawn_specialist included."
-keywords: [runtime tool forging, ai agent self-improvement, emergent capabilities llm, sandboxed code generation, node:vm sandbox, llm-as-judge, spawn specialist, multi-agent collaboration]
+description: "Runtime tool forging for AI agents: AgentOS lets agents generate, test, judge-approve, and register new tools mid-decision, run in an in-process node:vm context or a QuickJS WebAssembly instance per call. Multi-agent spawn_specialist included."
+keywords: [runtime tool forging, ai agent self-improvement, emergent capabilities llm, sandboxed code generation, node:vm sandbox, quickjs webassembly, llm-as-judge, spawn specialist, multi-agent collaboration]
 ---
 
 # Emergent Capabilities: Runtime Tool Forging
@@ -173,7 +173,7 @@ A request tool has side effects: when `http_request` declares `hasSideEffects: t
 
 ### Sandbox Mode -- Write Novel Code
 
-Sandbox mode runs agent-written JavaScript in an in-process `node:vm` context. Node's documentation says of that module: "The `node:vm` module is not a security mechanism. Do not use it to run untrusted code." The forge-specific [`SandboxedToolForge`](/api/classes/SandboxedToolForge) layers the `function execute(input)` contract and the granted functions on top of [`CodeSandbox`](/api/classes/CodeSandbox), which sets `codeGeneration: { strings: false, wasm: false }`, freezes the console and sets `process`, `globalThis` and `require` to undefined in the context. A scope on a granted function (a domain list, a read root) is a guardrail for code that acts through that function. Wall-clock timeouts are enforced, but a host call the code started keeps running after its timeout; memory is not limited (`node:vm` shares the host heap, and `sandboxMemoryMB` is reported, not enforced).
+Sandbox mode runs agent-written JavaScript on the forge's executor. The default executor is an in-process `node:vm` context, and Node's documentation says of that module: "The `node:vm` module is not a security mechanism. Do not use it to run untrusted code." The forge-specific [`SandboxedToolForge`](/api/classes/SandboxedToolForge) layers the `function execute(input)` contract and the granted functions on top of [`CodeSandbox`](/api/classes/CodeSandbox), which sets `codeGeneration: { strings: false, wasm: false }`, freezes the console and sets `process`, `globalThis` and `require` to undefined in the context. A scope on a granted function (a domain list, a read root) is a guardrail for code that acts through that function. Wall-clock timeouts are enforced, but a host call the code started keeps running after its timeout; memory is not limited (`node:vm` shares the host heap, and `sandboxMemoryMB` is reported, not enforced). `QuickJSExecutor` runs each call in a QuickJS WebAssembly instance of its own and holds it to `sandboxMemoryMB` (see [Executors](#executors)).
 
 **Example: CSV parser**
 
@@ -301,17 +301,59 @@ These are rejected at code validation time (before execution):
 | Resource | Default | Config key |
 |---|---|---|
 | Execution timeout | 5,000 ms | `sandboxTimeoutMs` |
-| Memory budget (the in-process executor observes a heap delta and does not preempt; an executor that can limit memory takes it as its limit) | 128 MB | `sandboxMemoryMB` |
+| Memory budget (the in-process executor observes a heap delta and does not preempt; `QuickJSExecutor` stops the guest at it, never below 16 MiB) | 128 MB | `sandboxMemoryMB` |
 | Session tools | 10 | `maxSessionTools` |
 | Agent tools | 50 | `maxAgentTools` |
 | Sandbox mode | off: a `mode: 'sandbox'` request is rejected and a stored code tool loads suspended (`sandbox_tools_off`) until it is enabled; compose mode needs no switch | `allowSandboxTools` |
 | Side-effecting steps | none: a composition or a workflow chains a tool that declares side effects only when it is listed | `compose.sideEffectingTools` |
 | Settling after a run ends | up to 1 s; what is still in flight is listed `pending` | fixed (`CALL_SETTLE_MS`) |
 | Output, in-process executor | 1 MB of UTF-8 on each of stdout (the result, `console.log`, `console.info`) and stderr (`console.error`, `console.warn`); a call that passes either fails | fixed |
+| Output, `QuickJSExecutor` | 1 MB of UTF-8 for the result after JSON; console output is discarded | fixed |
+| Response bodies, `QuickJSExecutor` | the memory budget, across all of a call's fetches | `sandboxMemoryMB` |
+| Data handed to the host, `QuickJSExecutor` | the memory budget, across all of a call's arguments to host functions, at two bytes a character | `sandboxMemoryMB` |
+| A thrown value's text, `QuickJSExecutor` | 16,384 characters; a longer one is cut in the guest | fixed |
+| Open hashes, `QuickJSExecutor` | 64 per call | fixed |
 
 ### Executors
 
-The forge validates the source, pre-parses it and builds the functions the grant allows; an executor runs the code and calls `execute(input)` or `run(input)`. The library ships one executor, `InProcessExecutor`, the default: a `node:vm` context inside the host's process, through `CodeSandbox`. It declares `isolates: false`.
+The forge validates the source, pre-parses it and builds the functions the grant allows; an executor runs the code and calls `execute(input)` or `run(input)`. The library ships two:
+
+| | `InProcessExecutor` (the default) | `QuickJSExecutor` |
+|---|---|---|
+| Where forged code runs | a `node:vm` context in the host's process, through `CodeSandbox` | QuickJS compiled to WebAssembly: a new instance for each call, on the host's thread |
+| `isolates` | `false`: the context is handed the host's own constructors | `true`: the guest's heap is the call's own WebAssembly memory, and only data crosses |
+| `memoryMB` | observed as a heap delta, not enforced | the guest's memory stops at it (never below 16 MiB, never above 2,048 MiB) |
+| A guest that yields once, then loops | is not stopped | is stopped at its deadline |
+| Installs | nothing | `quickjs-emscripten-core` and `@jitl/quickjs-wasmfile-release-sync`, both 0.32.0 |
+
+```bash
+npm install quickjs-emscripten-core@0.32.0 @jitl/quickjs-wasmfile-release-sync@0.32.0
+```
+
+```typescript
+import { QuickJSExecutor } from '@framers/agentos';
+
+// Imports the two packages and compiles QuickJS once. Rejects with
+// quickjs_unavailable when either package is missing or at another version.
+const executor = await QuickJSExecutor.create();
+
+const emergentConfig = {
+  allowSandboxTools: true,
+  executor, // the forge the engine builds runs forged code here
+};
+```
+
+A host that builds its own forge passes the executor there instead (`new SandboxedToolForge({ executor })`); a `sandboxForge` passed beside a different `executor` fails construction with `executor_conflict`. An executor made with `new QuickJSExecutor()` loads on first use: the engine awaits an executor's optional `ready()` before a forge's test cases, so a forge on an executor that cannot load is refused with the `quickjs_unavailable` message before any test or review, and a call on one fails with the same message. A host that bundles the library keeps it and the two packages external: the executor reads the variant's `.wasm` file from `node_modules`.
+
+On `QuickJSExecutor`:
+
+- **What crosses.** Each granted function reaches the guest as a host function that takes data (JSON values; bytes as latin1 strings) and returns data (JSON values; bytes as an `ArrayBuffer` copy) or a promise of data. A prelude evaluated before the forged code builds over them what the in-process context hands forged code: `fetch` (with a `Response` and `Headers` of its own), `fs.readFile`, `crypto.randomUUID`, `createHash` and `createHmac` (digests computed on the host), `TextEncoder`, `TextDecoder`, `URL`, `URLSearchParams`, `structuredClone`, `atob`, `btoa`, and a `console` that discards what it is given. `Intl` (`DateTimeFormat`, `NumberFormat`, `Collator`, `PluralRules`, `RelativeTimeFormat`, `ListFormat`, `DisplayNames`) and the locale methods of `Date`, `Number`, `BigInt`, `String` and `Array` format through the host's `Intl`. The names the in-process context sets to undefined are undefined, and `eval` and every `Function` constructor refuse source text, as `codeGeneration: { strings: false }` does in-process. `fetch` sends a string body as it is, bytes as bytes, `URLSearchParams` as form text (with the form content type when the request names none) and any other body as its string, as fetch reads a body. Under a ceiling the functions are the broker's, so its scope checks, refusals and effect records apply unchanged.
+- **Bounds.** Beside `memoryMB` and the deadline, each call has: the result after JSON, 1 MB of UTF-8; the response bodies of its fetches together, `memoryMB`; 16 host calls (`fetch`, `fs.readFile`) in flight at once; 64 hashes open at once; the data its arguments to host functions hand the host together, `memoryMB` at two bytes a character (a string's length is read before it is copied, and any other argument crosses as its JSON, made in the guest); a thrown value's text, 16,384 characters; QuickJS's stack, 256 KiB, past which recursion ends as the guest's `stack overflow`. A `timeoutMs` that is not a positive finite number is refused before the guest starts. Without a ceiling the executor aborts the call's requests when the call ends; under one the broker does.
+- **Memory.** Compiled with Emscripten, QuickJS's own memory limit counts only each allocation's overhead, so the bound is the WebAssembly memory's maximum. A budget below 16 MiB runs at 16 MiB, the build's initial memory, of which 5 MiB is the C stack; one above 2,048 MiB runs at 2,048 MiB, the build's maximum. A host value that does not fit what the guest has left ends the call `memory_exceeded`. A finished call's memory is freed when the host's garbage collector collects the instance the call dropped, so calls that run together hold up to the sum of their budgets.
+- **The host's thread.** The guest runs on the thread that called it. A guest that computes without awaiting holds the host's event loop until it is stopped at its deadline, and one built-in operation (a large sort, a JSON operation on a large value) runs to its end before the stop takes effect, so keep `sandboxTimeoutMs` short where forged tools compute for long.
+- **The claim.** `isolates: true` rests on the WebAssembly boundary (the guest reaches its own memory and the functions installed in it) and on the escape tests in `tests/emergent/quickjs-executor.integration.spec.ts`, which run on every change. quickjs-emscripten states that it has not been audited.
+
+Another executor implements `ForgedCodeExecutor`:
 
 ```typescript
 import { SandboxedToolForge, type ForgedCodeExecutor } from '@framers/agentos';
@@ -332,7 +374,7 @@ const sandboxForge = new SandboxedToolForge({ executor });
 
 `run` resolves in every case, with `{ status: 'ok', output }`, `{ status: 'error', error }` (the whole message the forge returns), `{ status: 'timeout' }` or `{ status: 'memory_exceeded' }`, each carrying `memoryUsedBytes`; the forge reports a rejection as an execution error. Under a ceiling, `globals` holds the broker's functions and `signal` aborts when the call's handle ends; the broker refuses capability calls after that, whatever the executor does. The library does not check an executor's `isolates`: it is what the executor's author claims.
 
-A host that builds the engine itself passes such a forge as `sandboxForge` (see [Building the engine yourself](#building-the-engine-yourself)); under a ceiling the engine checks it against the ceiling as it checks any host-built forge. When the runtime builds the engine, forged code runs on the in-process executor.
+A host that builds the engine itself passes such a forge as `sandboxForge` (see [Building the engine yourself](#building-the-engine-yourself)); under a ceiling the engine checks it against the ceiling as it checks any host-built forge. When the runtime builds the engine, forged code runs on `emergentConfig.executor`, or on the in-process executor when it is absent.
 
 ### A ceiling for code-forged tools
 
@@ -370,7 +412,7 @@ The engine validates the whole ceiling when it is built, the settings of a capab
 - `fs.readFile` checks the path against the roots, then its real path against the roots' real paths, and reads it as a stream refused past `maxBytesPerRead`, so no file is held whole before the limit applies.
 - `crypto` is unscoped and synchronous.
 
-On `node:vm` these checks are a guardrail: they hold for forged code that acts through its granted functions. Node's documentation says `node:vm` is not a security mechanism.
+On `node:vm` these checks are a guardrail: they hold for forged code that acts through its granted functions. Node's documentation says `node:vm` is not a security mechanism. On `QuickJSExecutor` forged code reaches the host only through the granted functions (see [Executors](#executors)).
 
 **A host-built forge.** An engine given its own `SandboxedToolForge` under a ceiling reads the forge's `effectiveOptions()`. Options narrower than the ceiling narrow it; options wider fail construction with `forge_wider_than_ceiling` and the option's name. Read roots are compared after their symlinks are resolved, the forge's and the ceiling's alike, since the broker reads by real path: a forge root that is a link inside a ceiling root to a directory outside it is wider (a root that does not exist is compared as written, and reads nothing). `new SandboxedToolForge()` with no options allows every host and the working directory, which is wider than any ceiling that lists hosts or roots, so a host with a ceiling leaves `sandboxForge` out and the engine builds the forge.
 
@@ -382,7 +424,7 @@ On `node:vm` these checks are a guardrail: they hold for forged code that acts t
 
 Under a ceiling every run of a code-forged tool, a forge test or a call, has its own handle, and the handle ends when the run does: it returns, throws, or reaches `sandboxTimeoutMs`. From then on the broker refuses the run's capability calls (`call_ended`) and aborts the ones in flight: a `fetch` through its `AbortSignal`, a read by destroying its stream. The run's result waits up to one second for them to settle; one still unsettled is listed `pending`, and its record completes when it settles. Ending one run never touches another run's calls, of the same tool or another.
 
-The bound holds while the host's event loop is responsive. `node:vm` bounds synchronous time only, so a tool that yields once and then spins in a loop is not stopped by the in-process executor. Without a ceiling there is no broker: a run that times out while a host call is in flight is reported failed while the call keeps running.
+The bound holds while the host's event loop is responsive. `node:vm` bounds synchronous time only, so a tool that yields once and then spins in a loop is not stopped by the in-process executor; `QuickJSExecutor` stops it at the deadline. Without a ceiling there is no broker: a run that times out while a host call is in flight is reported failed while the call keeps running.
 
 ### Effect records
 
@@ -733,17 +775,20 @@ await importEmergentTool('./slugify.emergent-tool.yaml', { seedId: agentSeedId }
 
     // Persistence
     persistSandboxSource: false,   // Store raw code at rest (enables export)
+
+    // What runs forged code (absent: the in-process executor)
+    executor: await QuickJSExecutor.create(),
   },
 }
 ```
 
-Without `capabilities`, a forge request names the APIs it needs in `implementation.allowlist` (`fetch`, `fs.read` or its alias `fs.readFile`, `crypto`) and gets them unscoped: the runtime builds the `SandboxedToolForge` with `sandboxMemoryMB` and `sandboxTimeoutMs` only, on the in-process executor, so `fetchDomainAllowlist` stays empty (a tool granted `fetch` reaches any host) and `fsReadRoots` stays at the process working directory (`.env` files included). With `capabilities`, the ceiling above scopes all three.
+Without `capabilities`, a forge request names the APIs it needs in `implementation.allowlist` (`fetch`, `fs.read` or its alias `fs.readFile`, `crypto`) and gets them unscoped: the runtime builds the `SandboxedToolForge` with `sandboxMemoryMB`, `sandboxTimeoutMs` and `executor` only (the in-process executor when `executor` is absent), so `fetchDomainAllowlist` stays empty (a tool granted `fetch` reaches any host) and `fsReadRoots` stays at the process working directory (`.env` files included). With `capabilities`, the ceiling above scopes all three.
 
 ## Safety Invariants
 
 - Emergent tools **cannot** modify the guardrail pipeline
 - Emergent tools get no memory or credential API. Without a ceiling, a tool granted `fs.read` reads any file under `fsReadRoots`, which defaults to the working directory, so a `.env` kept there is readable; under a ceiling it reads only under the ceiling's `roots`
-- By default, sandbox code runs in an in-process `node:vm` context (`process` / `globalThis` / `require` set to undefined; `codeGeneration: { strings: false, wasm: false }` applies to the context's own intrinsics). The context is handed the host's own constructors (`Object`, `Array`, `Promise` and others) and functions, and through them forged code can reach the host's `Function`. `node:vm` is not a security mechanism (Node's documentation), and runaway memory is not preempted. A host may run forged code on another executor (see [Executors](#executors)); its `isolates` is its author's claim.
+- By default, sandbox code runs in an in-process `node:vm` context (`process` / `globalThis` / `require` set to undefined; `codeGeneration: { strings: false, wasm: false }` applies to the context's own intrinsics). The context is handed the host's own constructors (`Object`, `Array`, `Promise` and others) and functions, and through them forged code can reach the host's `Function`. `node:vm` is not a security mechanism (Node's documentation), and runaway memory is not preempted. `QuickJSExecutor` runs forged code in a WebAssembly instance of its own for each call and declares `isolates: true` (see [Executors](#executors)); another executor's `isolates` is its author's claim.
 - Forge, promotion and removal decisions are written to the `agentos_emergent_audit_log` table when a storage adapter is configured; in memory the registry keeps the newest 1,000 entries. Under a ceiling, capability calls are recorded in `agentos_emergent_effects` (see [Effect records](#effect-records))
 - Shared-tier promotion needs an explicit `promote()` call; the approver is recorded only when the caller passes `approvedBy`; there is no built-in human-in-the-loop gate
 - Raw sandbox source is redacted at rest by default

@@ -1,14 +1,29 @@
-/*
- * Evaluated inside the guest as a classic script, before the forged code; Node
- * never loads this file. It takes the host bindings the executor installed as
- * globals named __host_<name>, removes those globals, and builds the globals
- * forged code is documented to have: the in-process executor's built-ins that
- * QuickJS lacks (TextEncoder, TextDecoder, URL, URLSearchParams,
- * structuredClone, atob, btoa, a console that discards) and the granted
- * capabilities (fetch, fs.readFile, crypto) over data-only bindings. Names the
- * in-process context sets to undefined are set to undefined here too.
+/**
+ * @fileoverview The guest prelude of {@link QuickJSExecutor}: JavaScript the
+ * executor evaluates inside each call's QuickJS context before the forged
+ * code. Node never runs it.
+ *
+ * It takes the host functions the executor installed as globals named
+ * `__host_<name>` (see guest-surface.ts), removes those globals, and builds
+ * what forged code is documented to have: the built-ins the in-process
+ * context hands it that QuickJS lacks (`TextEncoder`, `TextDecoder`, `URL`,
+ * `URLSearchParams`, `structuredClone`, `atob`, `btoa`, `Intl` and the
+ * locale methods, a console that discards) and the granted capabilities
+ * (`fetch`, `fs.readFile`, `crypto`). Names the in-process context sets to
+ * undefined are undefined here too, and string code generation is refused
+ * as the in-process context refuses it.
+ *
+ * The source is a string so that it ships inside the compiled package; it
+ * holds no template interpolation and no backslash.
+ *
+ * @module @framers/agentos/emergent/executor/guest-prelude
  */
-(() => {
+
+/**
+ * The prelude's source. {@link QuickJSExecutor} evaluates it in each call's
+ * context after installing the host bindings and before the forged code.
+ */
+export const GUEST_PRELUDE = String.raw`(() => {
   'use strict';
   const g = globalThis;
   const host = {};
@@ -260,6 +275,111 @@
   const discard = () => undefined;
   const console = Object.freeze({ log: discard, error: discard, warn: discard, info: discard });
 
+  // Intl. QuickJS has none: each service formats through the host's Intl,
+  // data in and data out, built on the host from the locales and options the
+  // guest gave (the host keeps the services it built for the call).
+  const INTL_SERVICES = {
+    DateTimeFormat: ['format', 'formatToParts', 'formatRange', 'formatRangeToParts'],
+    NumberFormat: ['format', 'formatToParts', 'formatRange', 'formatRangeToParts'],
+    Collator: ['compare'],
+    PluralRules: ['select', 'selectRange'],
+    RelativeTimeFormat: ['format', 'formatToParts'],
+    ListFormat: ['format', 'formatToParts'],
+    DisplayNames: ['of'],
+  };
+  // As the real ones, format and compare are getters that return a bound function.
+  const BOUND_METHODS = ['format', 'compare'];
+  const localesArg = (locales) =>
+    locales === undefined || locales === null
+      ? null
+      : typeof locales === 'string'
+        ? locales
+        : Array.from(locales, String);
+  const optionsArg = (options) => {
+    if (options === undefined || options === null) return null;
+    const out = {};
+    for (const key of Object.keys(options)) {
+      const value = options[key];
+      if (value === undefined) continue;
+      out[key] = typeof value === 'number' || typeof value === 'boolean' ? value : String(value);
+    }
+    return out;
+  };
+  const intlValue = (value) => {
+    if (value instanceof Date) return value.getTime();
+    if (typeof value === 'bigint') return String(value);
+    if (value !== null && typeof value === 'object' && typeof value[Symbol.iterator] === 'function') {
+      return Array.from(value, String);
+    }
+    return value;
+  };
+  const Intl = {};
+  for (const service of Object.keys(INTL_SERVICES)) {
+    const Service = class {
+      constructor(locales, options) {
+        this._locales = localesArg(locales);
+        this._options = optionsArg(options);
+        // The host builds the service here, so bad locales or options throw here, as they would there.
+        this._resolved = host.intl_call(service, this._locales, this._options, 'resolvedOptions');
+        this._bound = {};
+      }
+      resolvedOptions() {
+        return JSON.parse(JSON.stringify(this._resolved));
+      }
+      static supportedLocalesOf(locales, options) {
+        return host.intl_supported(service, localesArg(locales), optionsArg(options));
+      }
+    };
+    Object.defineProperty(Service, 'name', { value: service });
+    for (const method of INTL_SERVICES[service]) {
+      const call = function (a, b) {
+        return host.intl_call(service, this._locales, this._options, method, intlValue(a), intlValue(b));
+      };
+      if (BOUND_METHODS.includes(method)) {
+        Object.defineProperty(Service.prototype, method, {
+          configurable: true,
+          get() {
+            const self = this;
+            return self._bound[method] || (self._bound[method] = (a, b) => call.call(self, a, b));
+          },
+        });
+      } else {
+        Object.defineProperty(Service.prototype, method, { configurable: true, writable: true, value: call });
+      }
+    }
+    Intl[service] = Service;
+  }
+  Object.freeze(Intl);
+
+  const define = (target, name, value) =>
+    Object.defineProperty(target, name, { configurable: true, writable: true, enumerable: false, value });
+  for (const method of ['toLocaleString', 'toLocaleDateString', 'toLocaleTimeString']) {
+    define(Date.prototype, method, function (locales, options) {
+      return host.intl_date(method, this.getTime(), localesArg(locales), optionsArg(options));
+    });
+  }
+  define(Number.prototype, 'toLocaleString', function (locales, options) {
+    return host.intl_call('NumberFormat', localesArg(locales), optionsArg(options), 'format', Number(this));
+  });
+  if (typeof BigInt === 'function') {
+    define(BigInt.prototype, 'toLocaleString', function (locales, options) {
+      return host.intl_call('NumberFormat', localesArg(locales), optionsArg(options), 'format', String(this));
+    });
+  }
+  define(String.prototype, 'localeCompare', function (that, locales, options) {
+    return host.intl_compare(String(this), String(that), localesArg(locales), optionsArg(options));
+  });
+  // QuickJS calls each element's toLocaleString with no arguments; the
+  // in-process context passes the locales and options on.
+  define(Array.prototype, 'toLocaleString', function (locales, options) {
+    const parts = [];
+    for (let i = 0; i < this.length; i += 1) {
+      const item = this[i];
+      parts.push(item === undefined || item === null ? '' : String(item.toLocaleString(locales, options)));
+    }
+    return parts.join(',');
+  });
+
   if (host.fetch) {
     class Headers {
       constructor(pairs) {
@@ -355,7 +475,23 @@
         if (init.method !== undefined) options.method = String(init.method);
         const headers = headerPairs(init.headers);
         if (headers !== undefined) options.headers = headers;
-        if (typeof init.body === 'string') options.body = init.body;
+        // A body crosses as data, as fetch reads it: bytes as latin1, form
+        // parameters as their text with the form type, anything else as its
+        // string.
+        const body = init.body;
+        if (typeof body === 'string') {
+          options.body = body;
+        } else if (body instanceof URLSearchParams) {
+          options.body = body.toString();
+          const given = options.headers || [];
+          if (!given.some((pair) => pair[0].toLowerCase() === 'content-type')) {
+            options.headers = given.concat([['content-type', 'application/x-www-form-urlencoded;charset=UTF-8']]);
+          }
+        } else if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
+          options.bodyBytes = bytesToLatin1(toBytes(body));
+        } else if (body !== undefined && body !== null) {
+          options.body = String(body);
+        }
         if (init.redirect !== undefined) options.redirect = String(init.redirect);
       }
       return new Response(await host.fetch(target, options));
@@ -395,6 +531,29 @@
     });
   }
 
+  // String code generation is refused, as the in-process context refuses it
+  // (codeGeneration: { strings: false }): every Function constructor and eval
+  // throw EvalError for source text. The host evaluates the forged code itself.
+  const refusal = () => new EvalError('Code generation from strings disallowed for this context');
+  const refusingConstructor = (name, prototype) => {
+    const ctor = {
+      [name]: function () {
+        throw refusal();
+      },
+    }[name];
+    Object.defineProperty(ctor, 'prototype', { value: prototype });
+    Object.defineProperty(prototype, 'constructor', { value: ctor, writable: false, enumerable: false, configurable: false });
+    return ctor;
+  };
+  const SafeFunction = refusingConstructor('Function', Function.prototype);
+  refusingConstructor('AsyncFunction', Object.getPrototypeOf(async function () {}));
+  refusingConstructor('GeneratorFunction', Object.getPrototypeOf(function* () {}));
+  refusingConstructor('AsyncGeneratorFunction', Object.getPrototypeOf(async function* () {}));
+  const evalRefusing = function (source) {
+    if (typeof source === 'string') throw refusal();
+    return source;
+  };
+
   const absent = [
     'process', 'global', 'require', 'setTimeout', 'setInterval', 'setImmediate', 'clearTimeout',
     'clearInterval', 'clearImmediate', 'queueMicrotask', 'Reflect', 'Proxy', 'WebAssembly',
@@ -402,6 +561,19 @@
   ];
   if (!host.fetch) absent.push('fetch');
   for (const name of absent) g[name] = undefined;
-  Object.assign(g, { TextEncoder, TextDecoder, URL, URLSearchParams, structuredClone, atob, btoa, console });
+  Object.assign(g, {
+    TextEncoder,
+    TextDecoder,
+    URL,
+    URLSearchParams,
+    structuredClone,
+    atob,
+    btoa,
+    console,
+    Intl,
+    Function: SafeFunction,
+    eval: evalRefusing,
+  });
   g.globalThis = undefined;
 })();
+`;

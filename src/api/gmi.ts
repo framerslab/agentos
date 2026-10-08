@@ -329,6 +329,19 @@ export function gmi(opts: GmiOptions): GmiHandle {
         turn.onModelCall?.({ providerId: ctx.providerId, modelId: ctx.modelId });
         let messages: ChatMessage[] = ctx.messages;
         let changed = false;
+        // The GMI names the turn's user message after the turn's user, which on
+        // this path is the session id unless the caller named one, and replays
+        // it under that name on a tool step and for multimodal input. agent()
+        // names no message, and OpenAI refuses a name with a space or a slash
+        // in it (HTTP 400), so the name stays out of the request.
+        if (messages.some((message) => message.role === 'user' && message.name !== undefined)) {
+          messages = messages.map((message) => {
+            if (message.role !== 'user' || message.name === undefined) return message;
+            const { name: _name, ...unnamed } = message;
+            return unnamed;
+          });
+          changed = true;
+        }
         if (turn.memoryContext) {
           let insertAt = 0;
           while (insertAt < messages.length && messages[insertAt].role === 'system') insertAt += 1;

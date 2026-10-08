@@ -32,6 +32,12 @@ const MIME_TYPES: Record<MiniMaxSpeechAudioFormat, string> = {
   pcm: "audio/L16",
 };
 
+/** How long a URL-output download may take by default: 30 seconds. */
+const DEFAULT_AUDIO_DOWNLOAD_TIMEOUT_MS = 30_000;
+
+/** The largest URL-output download accepted by default: 100 MiB. */
+const DEFAULT_MAX_AUDIO_DOWNLOAD_BYTES = 100 * 1024 * 1024;
+
 export interface MiniMaxTextToSpeechProviderConfig {
   apiKey: string;
   region?: MiniMaxSpeechRegion;
@@ -39,6 +45,18 @@ export interface MiniMaxTextToSpeechProviderConfig {
   voice?: string;
   baseUrl?: string;
   webSocketUrl?: string;
+  /**
+   * Hosts that `outputFormat: "url"` audio may be downloaded from: an exact
+   * name such as `"audio.example.com"`, or `"*.example.com"` for that
+   * domain's subdomains. MiniMax does not document the host its audio links
+   * use, so none is allowed by default and URL output fails, naming the host,
+   * until it is listed here. Only `https` links are downloaded.
+   */
+  audioUrlHosts?: string[];
+  /** Time allowed for downloading URL output, in milliseconds. Default: 30,000. */
+  audioDownloadTimeoutMs?: number;
+  /** The largest URL output accepted, in bytes. Default: 100 MiB. */
+  maxAudioDownloadBytes?: number;
   fetchImpl?: typeof fetch;
   webSocketFactory?: (
     url: string,
@@ -67,9 +85,15 @@ interface MiniMaxSpeechResponse {
   base_resp?: MiniMaxBaseResponse;
 }
 
+/**
+ * MiniMax's async task responses. The ids are int64 values sent as JSON
+ * numbers: one that fits a JavaScript number stays a number, and one past
+ * 2^53 is kept as its decimal string, since rounding it would name another
+ * task or file.
+ */
 export interface MiniMaxAsyncSpeechResponse {
-  task_id?: string;
-  file_id?: number;
+  task_id?: number | string;
+  file_id?: number | string;
   status?: string;
   base_resp?: MiniMaxBaseResponse;
 }
@@ -79,6 +103,62 @@ function decodeHexAudio(value: string): Buffer {
     throw new Error("MiniMax speech returned invalid hex audio.");
   }
   return Buffer.from(value, "hex");
+}
+
+/** An int64 id field of a MiniMax response, written as a JSON integer. */
+const INT64_ID_FIELD = /(?<!\\)("(?:task_id|file_id)"\s*:\s*)(-?\d+)(?=\s*[,}])/g;
+
+/**
+ * Parse a MiniMax JSON body. JSON.parse rounds an integer past 2^53, so an
+ * id field holding one is read as its decimal string instead.
+ */
+function parseMiniMaxJson(text: string): unknown {
+  return JSON.parse(
+    text.replace(INT64_ID_FIELD, (match: string, prefix: string, digits: string) =>
+      Number.isSafeInteger(Number(digits)) ? match : `${prefix}"${digits}"`,
+    ),
+  );
+}
+
+/** Whether `host` is listed: an exact name, or `*.domain` for its subdomains. */
+function hostAllowed(host: string, allowed: readonly string[]): boolean {
+  const name = host.toLowerCase();
+  return allowed.some((entry) => {
+    const pattern = entry.trim().toLowerCase();
+    if (pattern.startsWith("*.")) {
+      return pattern.length > 2 && name.endsWith(pattern.slice(1));
+    }
+    return pattern !== "" && name === pattern;
+  });
+}
+
+function audioTooLarge(limit: number): Error {
+  return new Error(
+    `MiniMax audio download is larger than ${limit} bytes (maxAudioDownloadBytes).`,
+  );
+}
+
+/** The response body, read until it ends or passes `limit` bytes. */
+async function readCappedBody(response: Response, limit: number): Promise<Buffer> {
+  if (!response.body) {
+    const whole = Buffer.from(await response.arrayBuffer());
+    if (whole.length > limit) throw audioTooLarge(limit);
+    return whole;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel().catch(() => undefined);
+      throw audioTooLarge(limit);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks, total);
 }
 
 /** Text-to-speech provider for MiniMax HTTP, async, and WebSocket APIs. */
@@ -125,7 +205,7 @@ export class MiniMaxTextToSpeechProvider implements TextToSpeechProvider {
 
     const audioBuffer =
       outputFormat === "url"
-        ? Buffer.from(await (await this.fetchImpl(audio)).arrayBuffer())
+        ? await this.downloadAudio(audio)
         : decodeHexAudio(audio);
     return this.result(audioBuffer, text, options, audioFormat, response);
   }
@@ -146,8 +226,14 @@ export class MiniMaxTextToSpeechProvider implements TextToSpeechProvider {
     );
   }
 
-  async queryAsync(taskId: string): Promise<MiniMaxAsyncSpeechResponse> {
-    return this.request("/v1/query/t2a_async_query_v2", { task_id: taskId });
+  /**
+   * Query an async task's status: `GET /v1/query/t2a_async_query_v2` with
+   * `task_id` as a query parameter.
+   * https://platform.minimax.io/docs/api-reference/speech-t2a-async-query
+   */
+  async queryAsync(taskId: string | number): Promise<MiniMaxAsyncSpeechResponse> {
+    const query = new URLSearchParams({ task_id: String(taskId) });
+    return this.request(`/v1/query/t2a_async_query_v2?${query.toString()}`);
   }
 
   async synthesizeWebSocket(
@@ -279,22 +365,82 @@ export class MiniMaxTextToSpeechProvider implements TextToSpeechProvider {
     };
   }
 
+  /**
+   * Download the audio a `url` response links to. The link must be `https`
+   * on a host in `audioUrlHosts`. The request carries no key, refuses
+   * redirects, has a timeout, and fails on a non-2xx status or a body past
+   * `maxAudioDownloadBytes`.
+   */
+  private async downloadAudio(link: string): Promise<Buffer> {
+    let url: URL;
+    try {
+      url = new URL(link);
+    } catch {
+      throw new Error("MiniMax speech returned an audio URL that is not a URL.");
+    }
+    if (url.protocol !== "https:") {
+      throw new Error(
+        `MiniMax speech returned a ${url.protocol} audio URL; only https is downloaded.`,
+      );
+    }
+    if (!hostAllowed(url.hostname, this.config.audioUrlHosts ?? [])) {
+      throw new Error(
+        `MiniMax speech returned an audio URL on ${url.hostname}, which is not in ` +
+          "audioUrlHosts; list the host there to download URL output.",
+      );
+    }
+
+    const limit = this.config.maxAudioDownloadBytes ?? DEFAULT_MAX_AUDIO_DOWNLOAD_BYTES;
+    const timeoutMs =
+      this.config.audioDownloadTimeoutMs ?? DEFAULT_AUDIO_DOWNLOAD_TIMEOUT_MS;
+    const signal = AbortSignal.timeout(timeoutMs);
+    try {
+      const response = await this.fetchImpl(url.href, { redirect: "error", signal });
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error(`MiniMax audio download failed (${response.status}).`);
+      }
+      const declared = Number(response.headers?.get("content-length"));
+      if (Number.isFinite(declared) && declared > limit) {
+        await response.body?.cancel().catch(() => undefined);
+        throw audioTooLarge(limit);
+      }
+      const audio = await readCappedBody(response, limit);
+      if (audio.length === 0) {
+        throw new Error("MiniMax audio download returned no audio.");
+      }
+      return audio;
+    } catch (error) {
+      if (signal.aborted) {
+        throw new Error(`MiniMax audio download timed out after ${timeoutMs} ms.`);
+      }
+      throw error;
+    }
+  }
+
+  /** A JSON request to MiniMax: a POST when `body` is given, else a GET. */
   private async request<T>(
     path: string,
-    body: Record<string, unknown>,
+    body?: Record<string, unknown>,
   ): Promise<T> {
     const baseUrl = this.config.baseUrl ?? `https://${this.host}`;
-    const response = await this.fetchImpl(`${baseUrl}${path}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.keyPool.next()}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
+    const authorization = `Bearer ${this.keyPool.next()}`;
+    const response = await this.fetchImpl(
+      `${baseUrl}${path}`,
+      body === undefined
+        ? { method: "GET", headers: { Authorization: authorization } }
+        : {
+            method: "POST",
+            headers: {
+              Authorization: authorization,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(body),
+          },
+    );
     let payload: T & { base_resp?: MiniMaxBaseResponse };
     try {
-      payload = (await response.json()) as T & {
+      payload = parseMiniMaxJson(await response.text()) as T & {
         base_resp?: MiniMaxBaseResponse;
       };
     } catch {

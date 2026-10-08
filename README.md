@@ -31,7 +31,7 @@
 AgentOS is an open-source TypeScript framework for AI agents that **remember, adapt, and write their own tools**.
 
 - **Top open-source memory benchmarks:** [85.6% on LongMemEval-S](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) at $0.0090/correct (gpt-4o), and 70.2% on LongMemEval-M, the only open-source library above 65% on M with reproducible methodology.
-- **Runtime tool forging.** An agent writes a TypeScript function with a Zod schema, an LLM judge approves it, and it runs in a hardened `node:vm` sandbox before joining the catalog for the rest of the session.
+- **Runtime tool forging.** An agent writes a JavaScript function with JSON Schemas for its input and output, an LLM judge approves it, and it runs in a `node:vm` context or, with `QuickJSExecutor`, in a QuickJS WebAssembly instance of its own for each call, before joining the catalog for the rest of the session.
 - **Persistent [cognitive memory](https://docs.agentos.sh/features/cognitive-memory)** with 8 neuroscience-backed mechanisms: Ebbinghaus decay, retrieval-induced forgetting, reconsolidation, source-confidence decay.
 - **Optional [HEXACO personality](https://docs.agentos.sh/features/hexaco-personality)**, [6 orchestration strategies](https://docs.agentos.sh/features/agency-collaboration), [guardrails](https://docs.agentos.sh/features/guardrails-architecture), and [voice](https://docs.agentos.sh/features/voice-pipeline) across **11 LLM providers**; 100+ extensions and 88 skills auto-load at startup.
 
@@ -92,7 +92,7 @@ bounded.reseed([{ role: 'user', content: 'compact resume snapshot' }]);
 
 Three things accumulate across a session and compose into behavior: **memory** (what was said, decided, retrieved), the **tool surface** (which grows when an agent forges a tool the judge approves), and an optional **HEXACO personality** vector that biases retrieval, routing, and decisions. Each is configurable and observable.
 
-**Runtime tool forging.** When no tool covers a sub-task, the agent writes a TypeScript function with a Zod schema; a separate LLM judge approves it; it runs in a hardened `node:vm` sandbox (5s wall clock, no `eval`/`require`/`process`), then joins a discoverable index for the rest of the session. First forge costs full tokens; reuse costs tens. Promoted tools export as `SKILL.md` skills. [Emergent capabilities ->](https://docs.agentos.sh/features/emergent-capabilities)
+**Runtime tool forging.** When no tool covers a sub-task, the agent writes a JavaScript function with JSON Schemas for its input and output; a separate LLM judge approves it; it runs in a `node:vm` context (5s wall clock, no `eval`/`require`/`process`) or, with `QuickJSExecutor`, in a QuickJS WebAssembly instance of its own for each call with its memory limited, then joins a discoverable index for the rest of the session. First forge costs full tokens; reuse costs tens. Promoted tools export as `SKILL.md` skills. [Emergent capabilities ->](https://docs.agentos.sh/features/emergent-capabilities)
 
 **HEXACO personality (optional).** Off by default; the runtime behaves identically without it. When supplied, the kernel weights retrieval, specialist routing, and tool selection by trait values, so the same prompt and tools yield measurably different decision sequences. It lives in the kernel, not the prompt, so it persists under context pressure. [HEXACO docs ->](https://docs.agentos.sh/features/hexaco-personality)
 

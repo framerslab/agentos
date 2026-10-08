@@ -315,7 +315,7 @@ await sms.initialize({
 router.registerAdapter(sms);
 ```
 
-**Inbound messages.** Point your Plivo number's Message URL at a route on your host and forward the request to the adapter. Plivo signs inbound webhooks, so pass the method, the exact URL Plivo posted to, and the headers — the adapter verifies `X-Plivo-Signature-V3` and drops anything unsigned or tampered:
+**Inbound messages.** Point your Plivo number's Message URL at a route on your host and forward the request to the adapter. Plivo signs its callbacks, so pass the method, the exact URL Plivo requested, and the headers. The adapter drops a request with no valid signature and accepts each callback once:
 
 ```typescript
 app.post('/plivo/inbound', (req, res) => {
@@ -327,6 +327,15 @@ app.post('/plivo/inbound', (req, res) => {
   res.sendStatus(200);
 });
 ```
+
+**What the signature proves.** Plivo has two signature families, and the adapter accepts both:
+
+- **V3** (`X-Plivo-Signature-V3`, `X-Plivo-Signature-Ma-V3`) signs the URL, its query, the params and a nonce. `From`, `Text` and `MessageUUID` of a V3-verified message are the ones Plivo sent. When a request carries a V3 header, V3 alone decides.
+- **V2** (`X-Plivo-Signature-V2`, `X-Plivo-Signature-Ma-V2`) signs the URL and a nonce, not the body. It does **not** authenticate `From`, `Text` or `MessageUUID`: whoever holds one callback's signature and nonce can send them again with a different sender and text. Plivo's [messaging documentation](https://www.plivo.com/docs/messaging/concepts/signature-validation) describes V2 for message callbacks.
+
+The adapter remembers the nonce of every callback it accepts and drops a request that reuses one. That memory lives in the process, so a restart empties it, and it is bounded: 24 hours and 10,000 nonces by default, set with the `nonceTtlMs` and `maxNonces` constructor options. Plivo's signatures carry no timestamp, so a callback sent again after its nonce is forgotten, or one this process never accepted, is accepted. Treat the sender number as a claim: do not let an inbound SMS authorize an action by its `From` alone.
+
+A GET callback carries its params in the query string. Pass `method: 'GET'` and the full URL Plivo requested, query string included; the adapter reads the message from that query.
 
 ---
 

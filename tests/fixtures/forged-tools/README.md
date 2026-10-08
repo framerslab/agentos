@@ -17,7 +17,7 @@ Stored tools from consumer deployments: none were stored at capture (2026-10-08)
 
 The server answers `/json` (`{"items":[1,2,3],"source":"fixture"}`, `application/json`), `/status/404` (404, `missing`), `/headers` (`x-fixture: yes`, and the request's `x-request` echoed as `x-echo`) and anything else with `ok`.
 
-Two readers use the corpus: `tests/emergent/forged-corpus.integration.spec.ts` runs every fixture on the in-process executor, and the executor evidence run (`evidence/forge-executors/`) runs every fixture on each executor it measures.
+Two readers use the corpus: `tests/emergent/forged-corpus.integration.spec.ts` runs every fixture on the in-process executor, and `tests/emergent/quickjs-executor.integration.spec.ts` runs every fixture on `QuickJSExecutor`. Both hold each fixture to the same expectation.
 
 ## Adding a fixture
 
