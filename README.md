@@ -33,7 +33,7 @@ AgentOS is an open-source TypeScript framework for AI agents that **remember, ad
 - **Top open-source memory benchmarks:** [85.6% on LongMemEval-S](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) at $0.0090/correct (gpt-4o), and 70.2% on LongMemEval-M, the only open-source library above 65% on M with reproducible methodology.
 - **Runtime tool forging.** An agent writes a JavaScript function with JSON Schemas for its input and output, the declared test cases run it, an LLM judge reviews the result, and on approval the tool joins the session's tool list. Forged code runs in an in-process `node:vm` context or, with `QuickJSExecutor`, in a QuickJS WebAssembly instance of its own for each call.
 - **Persistent [cognitive memory](https://docs.agentos.sh/features/cognitive-memory)** with Ebbinghaus decay and 8 neuroscience-backed mechanisms, among them retrieval-induced forgetting, reconsolidation and source-confidence decay.
-- **Optional [HEXACO personality](https://docs.agentos.sh/features/hexaco-personality)**, [6 orchestration strategies](https://docs.agentos.sh/features/agency-collaboration), [guardrails](https://docs.agentos.sh/features/guardrails-architecture), and [voice](https://docs.agentos.sh/features/voice-pipeline) across **13 LLM providers**; 100+ extensions and 88 skills auto-load at startup.
+- **Optional [HEXACO personality](https://docs.agentos.sh/features/hexaco-personality)**, [6 orchestration strategies](https://docs.agentos.sh/features/agency-collaboration), [guardrails](https://docs.agentos.sh/features/guardrails-architecture), and [voice](https://docs.agentos.sh/features/voice-pipeline) across **13 LLM providers**; 100+ extensions and 88 skills ship as separate packages with registries that load them.
 
 ---
 
@@ -212,7 +212,7 @@ Strategies: `sequential`, `parallel`, `debate`, `review-loop`, `hierarchical`, `
 | [`paracosm`](https://www.npmjs.com/package/paracosm) | AI agent swarm simulation on AgentOS. [Live demo](https://paracosm.agentos.sh/sim). |
 | [`wunderland`](https://www.npmjs.com/package/wunderland) | Batteries-included CLI + daemon over the AgentOS registries (preview). Apache-2.0. |
 
-Extensions and skills auto-load at startup. [Extensions architecture ->](https://docs.agentos.sh/architecture/extension-loading)
+Extensions load from the manifest a host passes to `AgentOS.create({ extensionManifest })`; `createCuratedManifest()` from `@framers/agentos-extensions-registry` builds one from the curated extensions that are installed, and a runtime without a manifest loads none. [Extensions architecture ->](https://docs.agentos.sh/architecture/extension-loading)
 
 ---
 
