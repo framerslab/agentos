@@ -16,7 +16,7 @@ With `emergentConfig.selfImprovement.enabled`, four more tools are registered: `
 
 ## Spawning a specialist
 
-In an agency running the hierarchical strategy with emergent planning enabled, the manager gets a `spawn_specialist` tool: [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts) turns the manager's spec into an agent config, [`EmergentAgentJudge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentJudge.ts) reviews it, and the new agent joins the roster as a `delegate_to_<role>` tool for the manager's next turn ([`hierarchical.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/strategies/hierarchical.ts)). At most five specialists per run by default; spawned specialists are reset between `send()` calls.
+In an agency running the hierarchical strategy with `emergent.enabled`, the manager gets a `spawn_specialist` tool: [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts) turns the manager's spec into an agent config, [`EmergentAgentJudge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentJudge.ts) reviews it when `emergent.judge` is `true` (otherwise no review runs), and the new agent joins the roster as a `delegate_to_<role>` tool for the manager's next turn ([`hierarchical.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/strategies/hierarchical.ts)). At most five specialists per run by default (`emergent.planner.maxSpecialists`); spawned specialists are reset between `send()` calls.
 
 ## What is not there
 
