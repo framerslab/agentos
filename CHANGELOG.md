@@ -1,3 +1,9 @@
+## [0.12.22](https://github.com/framerslab/agentos/compare/v0.12.21...v0.12.22) (2026-10-08)
+
+### feat
+
+* **emergent:** QuickJSExecutor, an isolating executor for forged code (#160) ([598d041](https://github.com/framerslab/agentos/commit/598d041f4a70c6ab43e35b1d960a65bb77ac4748))
+
 ## [0.12.21](https://github.com/framerslab/agentos/compare/v0.12.20...v0.12.21) (2026-10-08)
 
 ### docs
