@@ -16,7 +16,9 @@
  * @example
  * ```typescript
  * const output = new LiveKitTranscriptionOutput({ room, trackSid: () => heardTrack?.sid });
- * sttSession.on('transcript', (event) => void output.write(event));
+ * sttSession.on('transcript', (event) => {
+ *   output.write(event).catch((error) => console.warn('transcript not sent', error));
+ * });
  * // when the page says the last line it holds:
  * await output.replayAfter(lastItemId, participantIdentity);
  * ```
@@ -51,7 +53,10 @@ export interface LiveKitTranscriptionRoomLike {
 export interface LiveKitTranscriptionOutputOptions {
   /** A connected room (rtc-node `Room`) whose local participant sends the streams. */
   room: LiveKitTranscriptionRoomLike;
-  /** The SID of the track being transcribed, read at each write; the attribute is left out when it answers nothing. */
+  /**
+   * The SID of the track being transcribed, read at each send, a replay's
+   * included; the attribute is left out when it answers nothing.
+   */
   trackSid?: () => string | undefined;
   /** The topic. @defaultValue 'lk.transcription' */
   topic?: string;
@@ -75,6 +80,11 @@ export class LiveKitTranscriptionOutput {
    * Writes one transcript to every participant. Resolves `true` once it is
    * sent, `false` when the ledger already held it (a repeated final, or an
    * interim after the final), which sends nothing.
+   *
+   * The ledger takes the line before it is sent, so a send that fails leaves
+   * the line there: writing the same transcript again sends nothing, and
+   * {@link LiveKitTranscriptionOutput.replayAfter} sends a final again to a
+   * participant, as it does for one that rejoins.
    *
    * @param extra - `itemId` when the transcript carries none; `failed`, a short
    *   reason, for a line the provider could not transcribe.

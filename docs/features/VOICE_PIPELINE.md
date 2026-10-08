@@ -184,10 +184,12 @@ const output = new LiveKitTranscriptionOutput({
   room, // a connected @livekit/rtc-node Room
   trackSid: () => heardTrack?.sid, // the track the session hears
 });
-session.on('transcript', (event) => void output.write(event));
+session.on('transcript', (event) => {
+  output.write(event).catch((error) => console.warn('transcript not sent', error));
+});
 ```
 
-The output takes the room through a structural type, so AgentOS needs no LiveKit package of its own. Writes go out in the order they were asked for. A transcript from a provider that does not key its results carries no `itemId`: give the line's id as `write(event, { itemId })`.
+The output takes the room through a structural type, so AgentOS needs no LiveKit package of its own. Writes go out in the order they were asked for. A send that fails rejects its write and leaves the line in the output's ledger, so writing the same transcript again sends nothing; `replayAfter` sends a final again to a participant. A transcript from a provider that does not key its results carries no `itemId`: give the line's id as `write(event, { itemId })`.
 
 On the page, `TranscriptLedger` (in `@framers/agentos/io/voice-pipeline/browser`) folds the streams into lines:
 
