@@ -89,6 +89,15 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(r).toMatchObject({ text: '', finishReason: 'stop' });
   });
 
+  it('reports the provider message id only when the call opted into cache diagnostics, as agent() does', async () => {
+    const k = key(); script('openai', k, { replies: [reply.text('One.'), reply.text('Two.'), reply.text('Three.')] });
+    const session = agent(base(k)).session('s');
+    expect(await session.send('one')).not.toHaveProperty('providerMessageId');
+    expect(await session.stream('two').providerMessageId).toBeNull();
+    // send()'s typed overloads take options only with a responseSchema; the per-send overrides are read without one too.
+    expect((await session.send('three', { cacheDiagnostics: true } as never)).providerMessageId).toBe('stub');
+  });
+
   it('a tool-less agent sends no tools payload (the executor\'s built-in date tool is not offered)', async () => {
     const k = key(); const s = script('openai', k, { replies: [reply.text('ok')] });
     await agent(base(k)).session('s').send('hi');
