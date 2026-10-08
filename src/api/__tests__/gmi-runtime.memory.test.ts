@@ -8,12 +8,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
-import { agent } from '../agent';
+import { agent, type AgentOptions } from '../agent';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
+import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager';
 
 let n = 0;
 const key = () => `k-memory-${++n}`;
+/** An agent whose sessions share cognitive memory (no mechanisms) that embeds through OpenAI. */
+const withMemory = (apiKey: string) =>
+  ({ runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey, fallbackProviders: [], cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false } }) as unknown as AgentOptions;
 
 beforeEach(() => globalLLMProviderHealth.reset());
 afterEach(() => {
@@ -72,5 +76,41 @@ describe("agent({ runtime: 'gmi' }) cognitive memory", () => {
     const a = agent({ runtime: 'gmi', provider: 'anthropic', model: 'claude-x', apiKey: k, fallbackProviders: [], cognition: 'full' });
     await expect(a.session('s').send('hi')).rejects.toThrow(/memory\.embedding/);
     expect(s.seen).toHaveLength(0);
+  });
+
+  it('agent.close() while a first turn is still setting up closes the memory that turn builds', async () => {
+    const k = key(); const emb = key();
+    script('openai', k, { replies: [reply.text('Hi.')] });
+    script('openai', emb);
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const built = vi.spyOn(CognitiveMemoryManager.prototype, 'initialize');
+    const shutDown = vi.spyOn(CognitiveMemoryManager.prototype, 'shutdown');
+    const a = agent(withMemory(k));
+    // close() runs before the send's turn has built anything: the turn builds the memory after it.
+    const sent = a.session('s').send('hi').catch(() => undefined);
+    await a.close();
+    await sent;
+    expect(built.mock.contexts).toHaveLength(1);
+    expect(shutDown.mock.contexts).toHaveLength(1);
+    expect(shutDown.mock.contexts[0]).toBe(built.mock.contexts[0]);
+  });
+
+  it('a session closed without waiting, then agent.close(): no memory its turn builds is left open', async () => {
+    const k = key(); const emb = key();
+    script('openai', k, { replies: [reply.text('Hi.')] });
+    script('openai', emb);
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const built = vi.spyOn(CognitiveMemoryManager.prototype, 'initialize');
+    const shutDown = vi.spyOn(CognitiveMemoryManager.prototype, 'shutdown');
+    const a = agent(withMemory(k));
+    const session = a.session('s');
+    const sent = session.send('hi').catch(() => undefined);
+    // The session leaves the agent's list at once; its turn has not set up yet.
+    const sessionClosed = session.close();
+    await a.close();
+    await sent;
+    await sessionClosed;
+    for (const manager of built.mock.contexts) expect(shutDown.mock.contexts).toContain(manager);
+    expect(shutDown.mock.contexts).toHaveLength(built.mock.contexts.length);
   });
 });
