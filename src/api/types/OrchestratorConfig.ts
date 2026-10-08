@@ -13,6 +13,7 @@ import type { AIModelProviderManager } from '../../core/llm/providers/AIModelPro
 import type { ITurnPlanner } from '../../orchestration/turn-planner/TurnPlanner';
 import type { IRollingSummaryMemorySink } from '../../core/conversation/IRollingSummaryMemorySink';
 import type { ILongTermMemoryRetriever } from '../../core/conversation/ILongTermMemoryRetriever';
+import type { ISpendMeter } from '../../safety/runtime/SpendMeter';
 
 // ---------------------------------------------------------------------------
 // Rolling Summary Compaction Profiles
@@ -133,4 +134,6 @@ export interface AgentOSOrchestratorDependencies {
   rollingSummaryMemorySink?: IRollingSummaryMemorySink;
   longTermMemoryRetriever?: ILongTermMemoryRetriever;
   taskOutcomeTelemetryStore?: ITaskOutcomeTelemetryStore;
+  /** The spend meter `processRequest` reserved against; the turn heartbeats and settles the reservation by `input.operationId`. */
+  spendMeter?: ISpendMeter;
 }
