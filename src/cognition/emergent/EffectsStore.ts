@@ -124,9 +124,11 @@ export class EffectsStore {
 
   /**
    * The schema made ready, then, once per store, the rows older than
-   * `retainDays` deleted from this table (never tool rows or state). A failed
-   * preparation is tried again by the next write; a failed prune is logged
-   * and not tried again.
+   * `retainDays` deleted from this table (never tool rows or state), through
+   * the `intent_at` index the schema creates, so the delete the first record
+   * of each engine waits on costs what it deletes, not the table's size. A
+   * failed preparation is tried again by the next write; a failed prune is
+   * logged and not tried again.
    */
   private prepare(): Promise<void> {
     if (!this.ready) {

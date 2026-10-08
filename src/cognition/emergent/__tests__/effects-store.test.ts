@@ -63,6 +63,12 @@ describe('effect records', () => {
     );
     expect(ids).toHaveLength(1);
     expect(ids).not.toContain('old');
+
+    // The prune searches an index on intent_at; it does not scan the table.
+    const plan = db.raw
+      .prepare('EXPLAIN QUERY PLAN DELETE FROM agentos_emergent_effects WHERE intent_at < ?')
+      .all(Date.now()) as Array<{ detail: string }>;
+    expect(plan.map((step) => step.detail).join('\n')).toContain('idx_emergent_effects_intent');
   });
 
   it('has no store without a storage adapter', () => {

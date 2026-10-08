@@ -360,7 +360,9 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_tool_state (
 
     // One row per capability call of a code-forged tool under a ceiling: the
     // intent before the call, the outcome after it (a row with no outcome is
-    // unknown). Pruned by `audit.retainDays`; tool rows and state never are.
+    // unknown). Pruned by `audit.retainDays` through the intent_at index, so
+    // the prune that the first record of each engine waits on costs what it
+    // deletes, not the table's size; tool rows and state never are pruned.
     const effectsTable = `
 CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
   id TEXT PRIMARY KEY,
@@ -381,6 +383,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
 );`;
     const effectsToolIndex = `CREATE INDEX IF NOT EXISTS idx_emergent_effects_tool ON agentos_emergent_effects(tool_id, intent_at);`;
     const effectsCallIndex = `CREATE INDEX IF NOT EXISTS idx_emergent_effects_call ON agentos_emergent_effects(call_id);`;
+    const effectsIntentIndex = `CREATE INDEX IF NOT EXISTS idx_emergent_effects_intent ON agentos_emergent_effects(intent_at);`;
 
     // Tables and indexes only: the flag on the tool row is written by the
     // library's own statements, never by a trigger, so the schema stays
@@ -396,6 +399,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
       effectsTable,
       effectsToolIndex,
       effectsCallIndex,
+      effectsIntentIndex,
     ];
     // Prefer `exec` for multi-statement DDL; fall back to individual `run` calls.
     if (this.db.exec) {
