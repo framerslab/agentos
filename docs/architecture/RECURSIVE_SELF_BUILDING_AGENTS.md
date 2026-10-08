@@ -4,7 +4,7 @@
 
 > **Can an AI agent with only two capabilities—CLI execution and web search/scraping—recursively build anything that humanity can build?**
 
-This is a profound question about the minimal viable toolset for artificial general intelligence (AGI). Let me analyze this hypothesis deeply.
+The question is about the minimal toolset for a general-purpose agent. This page analyzes it and maps each piece to what AgentOS ships.
 
 ---
 
@@ -20,21 +20,7 @@ The ability to:
 - Start/stop services
 - Query system state
 
-```typescript
-// AgentOS Extension: CLI Tool
-interface CLITool extends ITool {
-  execute(args: {
-    command: string;
-    workingDir?: string;
-    timeout?: number;
-    env?: Record<string, string>;
-  }): Promise<{
-    stdout: string;
-    stderr: string;
-    exitCode: number;
-  }>;
-}
-```
+In AgentOS this is the `shell_execute`, `file_read`, `file_write` and `list_directory` tools of the [`@framers/agentos-ext-cli-executor`](https://www.npmjs.com/package/@framers/agentos-ext-cli-executor) extension pack.
 
 ### 2. Web Search + Scraping (Information Gathering)
 
@@ -46,16 +32,7 @@ The ability to:
 - Handle dynamic JavaScript-rendered content
 - Parse structured data (tables, lists, etc.)
 
-```typescript
-// AgentOS Extension: Web Search + Browser
-interface WebTool extends ITool {
-  search(query: string): Promise<SearchResult[]>;
-  navigate(url: string): Promise<void>;
-  scrape(selector?: string): Promise<PageContent>;
-  click(elementRef: string): Promise<void>;
-  type(elementRef: string, text: string): Promise<void>;
-}
-```
+In AgentOS this is the [`@framers/agentos-ext-web-search`](https://www.npmjs.com/package/@framers/agentos-ext-web-search) and [`@framers/agentos-ext-web-browser`](https://www.npmjs.com/package/@framers/agentos-ext-web-browser) extension packs, with the scraper, content-extraction and browser-automation packs beside them in the curated registry.
 
 ---
 
@@ -189,84 +166,46 @@ flowchart TD
 
 ## Implementing This in AgentOS
 
-### Required Extensions
+### The extensions
+
+Both primitives ship as extension packs. A runtime loads them from the manifest it is created with:
 
 ```typescript
-// 1. CLI Extension (exists as CodeSandbox, needs enhancement)
-const cliExtension: ExtensionDefinition = {
-  id: 'agentos-cli-executor',
-  name: 'CLI Executor',
-  kind: 'tool',
-  tool: {
-    id: 'cli',
-    name: 'Command Line Interface',
-    description: 'Execute shell commands and scripts',
-    parameters: {
-      type: 'object',
-      properties: {
-        command: { type: 'string', description: 'Shell command to execute' },
-        workingDir: { type: 'string', description: 'Working directory' },
-        timeout: { type: 'number', description: 'Timeout in ms' },
-      },
-      required: ['command'],
-    },
-    execute: async (args) => { /* ... */ },
-  },
-};
+import { AgentOS } from '@framers/agentos';
+import { createCuratedManifest } from '@framers/agentos-extensions-registry';
 
-// 2. Web Search + Browser Extension (needs implementation)
-const webExtension: ExtensionDefinition = {
-  id: 'agentos-web-browser',
-  name: 'Web Browser',
-  kind: 'tool',
-  tool: {
-    id: 'web',
-    name: 'Web Browser',
-    description: 'Search the web, navigate pages, and extract content',
-    parameters: {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          enum: ['search', 'navigate', 'scrape', 'click', 'type'],
-        },
-        query: { type: 'string', description: 'Search query' },
-        url: { type: 'string', description: 'URL to navigate to' },
-        selector: { type: 'string', description: 'CSS selector' },
-      },
-      required: ['action'],
-    },
-    execute: async (args) => { /* ... */ },
-  },
-};
+// Loads the curated extensions that are installed, among them the CLI executor,
+// web search and web browser packs.
+const extensionManifest = await createCuratedManifest({ tools: 'all', channels: 'none' });
+
+const agentos = await AgentOS.create({ extensionManifest });
 ```
 
-### Autonomous Loop Configuration
+A host that writes its own pack declares each tool as a descriptor whose `payload` is an `ITool` ([Extension & Guardrail Runtime](./ARCHITECTURE.md#extension--guardrail-runtime)).
+
+### Autonomous loop
+
+[`PlanningEngine.runAutonomousLoop()`](https://github.com/framerslab/agentos/blob/master/src/orchestration/planner/PlanningEngine.ts) pursues a goal step by step and yields its progress:
 
 ```typescript
-// Configure a self-building agent
-const autonomousConfig: AutonomousLoopOptions = {
-  maxIterations: 100,
-  goalConfidenceThreshold: 0.95,
-  selfReflectionFrequency: 5,      // Reflect every 5 steps
-  allowSelfModification: true,     // Can modify own tools
-  requireApprovalFor: [
-    'install_package',              // Human approves new dependencies
-    'modify_system_config',         // Human approves system changes
-    'network_request_external',     // Human approves external API calls
-  ],
-  onApprovalRequired: async (req) => {
-    // Human-in-the-loop checkpoint
-    return await hitlManager.requestApproval(req);
-  },
-};
-
-// Run the autonomous builder
-const result = await planningEngine.runAutonomousLoop(
+const loop = planningEngine.runAutonomousLoop(
   'Build a real-time stock trading dashboard with React and WebSocket',
-  autonomousConfig,
+  {
+    maxIterations: 100,
+    goalConfidenceThreshold: 0.95,
+    enableReflection: true,
+    reflectionFrequency: 5,                          // Reflect every 5 steps
+    requireApprovalFor: ['tool_call'],               // Plan action types that need approval
+    onApprovalRequired: async (request) => hitlApprove(request), // Host's human-in-the-loop decision
+  },
 );
+
+for await (const progress of loop) {
+  console.log(progress.iteration, progress.currentStep, progress.goalConfidence);
+}
 ```
+
+`requireApprovalFor` takes plan action types (`tool_call`, `reasoning`, `information_gathering`, `subgoal`, `synthesis`, `validation`, `human_input`, `checkpoint`), not tool names.
 
 ---
 
@@ -311,50 +250,20 @@ If an agent can modify its own code and tools, it could:
 
 ### Mitigation Strategies
 
-```typescript
-// 1. Immutable Core Guardrails
-const IMMUTABLE_GUARDRAILS = [
-  'no_self_modification_of_guardrails',
-  'no_credential_exfiltration',
-  'no_arbitrary_network_access',
-  'require_human_approval_for_installs',
-];
+AgentOS provides these controls for a self-building agent; how strict each is, is the host's choice:
 
-// 2. Sandboxed Execution
-const sandboxConfig: SandboxConfig = {
-  networkAccess: 'restricted',      // Whitelist only
-  fileSystemAccess: 'scoped',       // Limited directories
-  processSpawning: 'monitored',     // Log all processes
-  resourceLimits: {
-    maxMemoryMB: 4096,
-    maxCpuPercent: 50,
-    maxDiskMB: 10240,
-  },
-};
-
-// 3. Human-in-the-Loop Checkpoints
-const hitlPolicy = {
-  requireApprovalFor: [
-    'install_system_package',
-    'modify_agent_config',
-    'external_api_call',
-    'file_write_outside_workspace',
-  ],
-  autoRejectPatterns: [
-    /rm\s+-rf\s+\//,           // No recursive root delete
-    /curl.*\|.*bash/,           // No piped script execution
-    /chmod.*777/,               // No world-writable permissions
-  ],
-};
-```
+- **Guardrails the agent cannot change.** Guardrails are registered by the host on the runtime; no tool an agent forges or calls changes the guardrail pipeline ([Guardrails Usage](../safety/GUARDRAILS_USAGE.md)).
+- **Approval for side effects.** With `hitl.enabled` on the tool orchestrator, a tool that declares `hasSideEffects` waits for a human approval before it runs ([Human-in-the-loop](../safety/HUMAN_IN_THE_LOOP.md)).
+- **A ceiling for forged code.** `emergentConfig.capabilities` scopes what forged code may fetch and read, and `QuickJSExecutor` runs it in a WebAssembly instance of its own with a memory limit ([Emergent Capabilities](./EMERGENT_CAPABILITIES.md)).
+- **Records.** Forge, promotion and removal decisions go to the emergent audit log, and capability calls under a ceiling to the effect records.
 
 ---
 
-## My Assessment
+## Assessment
 
-### Do I Agree With the Hypothesis?
+### Is the hypothesis right?
 
-**Partially yes, with caveats.**
+**Partially, with caveats.**
 
 1. **For digital/software creation**: Yes, CLI + Web Search is theoretically sufficient. An intelligent enough agent with these tools could build any software, documentation, or digital artifact.
 
@@ -362,54 +271,32 @@ const hitlPolicy = {
 
 3. **For "everything of humanity"**: The statement is too broad. Humanity's achievements include physical structures (buildings, bridges), biological advances (medicine, agriculture), and social systems (governments, cultures) that cannot be directly created by software alone.
 
-4. **The "intelligent enough" qualifier**: This is doing a lot of heavy lifting. Current LLMs are not intelligent enough for fully autonomous recursive self-improvement. They:
+4. **The "intelligent enough" qualifier**: Everything rests on it. LLM agents are not reliable enough for fully autonomous recursive self-improvement. They:
    - Hallucinate
    - Lose coherence over long chains
    - Make logical errors
    - Lack true understanding
 
-### What's Actually Achievable Today (2024-2025)
-
-With current LLMs (GPT-4, Claude 3.5, etc.) and these two tools:
+### What LLM agents achieve with these two tools
 
 | Achievability | Examples |
 |---------------|----------|
 | **Highly Achievable** | Write code, fix bugs, create docs, build web apps |
 | **Moderately Achievable** | Complex multi-step projects, research synthesis |
 | **Marginally Achievable** | Self-improving tool creation (needs heavy supervision) |
-| **Not Yet Achievable** | Fully autonomous recursive self-improvement |
+| **Not achievable without supervision** | Fully autonomous recursive self-improvement |
 
 ---
 
-## Recommended Next Steps for AgentOS
+## What AgentOS provides for each piece
 
-### Priority 1: Enhanced CLI Tool
-- [ ] Full shell access with proper sandboxing
-- [ ] Language runtime detection and installation
-- [ ] Package manager integration (npm, pip, cargo, etc.)
-- [ ] Output streaming for long-running processes
-- [ ] Process management (background tasks, kill signals)
-
-### Priority 2: Web Browser Extension
-- [ ] Google Search API integration
-- [ ] Playwright/Puppeteer browser automation
-- [ ] Content extraction and parsing
-- [ ] Screenshot capability for visual feedback
-- [ ] Rate limiting and caching
-
-### Priority 3: Recursive Self-Improvement Infrastructure
-- [ ] Tool registry with hot-reloading
-- [ ] Capability self-assessment
-- [ ] Automated testing framework for self-modifications
-- [ ] Rollback mechanism for failed self-improvements
-- [ ] Confidence scoring for generated code
-
-### Priority 4: Safety & Governance
-- [ ] Immutable guardrail core
-- [ ] Human approval workflows
-- [ ] Resource quotas and limits
-- [ ] Audit logging
-- [ ] Kill switches
+| Piece | AgentOS |
+|---|---|
+| Shell, files, package managers | `@framers/agentos-ext-cli-executor` (`shell_execute`, `file_read`, `file_write`, `list_directory`) |
+| Search and browsing | `@framers/agentos-ext-web-search`, `@framers/agentos-ext-web-browser`, the scraper and browser-automation packs |
+| New tools at runtime | `forge_tool`: composition of existing tools, or agent-written JavaScript tested and judged before registration ([Emergent Capabilities](./EMERGENT_CAPABILITIES.md)) |
+| Self-assessment | The `self_evaluate` tool and the emergent judge's confidence scores |
+| Approval and audit | Tool-level human approval, the emergent audit log and effect records |
 
 ---
 
@@ -425,9 +312,7 @@ However, true "building everything of humanity" requires:
 - Physical actuators
 - More reliable reasoning
 - Better verification mechanisms
-- Robust safety guarantees
-
-**AgentOS is well-positioned** to explore this frontier with its modular architecture, extension system, and human-in-the-loop capabilities.
+- Stronger safety controls than a host can enforce on an agent
 
 
 
