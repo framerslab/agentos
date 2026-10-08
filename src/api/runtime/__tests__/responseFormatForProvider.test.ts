@@ -11,6 +11,7 @@ import { z } from 'zod';
 import {
   buildResponseFormatForProvider,
   describeResponseFormatShape,
+  responseFormatCarriesSchema,
 } from '../responseFormatForProvider.js';
 import { lowerZodToJsonSchema } from '../../../orchestration/compiler/SchemaLowering.js';
 
@@ -120,5 +121,20 @@ describe('describeResponseFormatShape', () => {
     );
     expect(describeResponseFormatShape({ type: 'json_object' })).toBe('json_object');
     expect(describeResponseFormatShape({ weird: true })).toBe('unknown');
+  });
+});
+
+describe('responseFormatCarriesSchema', () => {
+  // A payload that carries no schema leaves the schema to the prompt (session.send, the completion gateway).
+  it('a strict json_schema, the Anthropic schema tool and Gemini responseSchema carry the schema; no payload and JSON mode do not', () => {
+    const carries = (providerId: string, modelId: string, schema: z.ZodTypeAny) =>
+      responseFormatCarriesSchema(buildResponseFormatForProvider(inputs(providerId, modelId, schema)));
+    expect(carries('openai', 'gpt-4o', plainSchema)).toBe(true);
+    expect(carries('anthropic', 'claude-sonnet-4-6', plainSchema)).toBe(true);
+    expect(carries('gemini', 'gemini-2.5-pro', plainSchema)).toBe(true);
+    expect(carries('openai', 'gpt-4o-mini', recordSchema)).toBe(false);
+    expect(carries('openrouter', 'openai/gpt-4o', recordSchema)).toBe(false);
+    expect(carries('anthropic', 'claude-sonnet-5-5', plainSchema)).toBe(false);
+    expect(carries('ollama', 'llama3', plainSchema)).toBe(false);
   });
 });
