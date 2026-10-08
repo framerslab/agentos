@@ -749,10 +749,62 @@ describe('streams', () => {
     expect(d.readError?.message).toContain('Provider disconnected');
   });
 
+  it('a top-level error event during the wait ends the read: the first error stands, the event\'s usage is kept', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: sse([
+        choiceError({ code: 502, message: 'Provider disconnected', metadata: { error_type: 'provider_unavailable' } }),
+        chunk({ error: { code: 503, message: 'later' }, choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error' }], usage: USAGE }),
+        textChunk('never'),
+        'data: [DONE]',
+      ]),
+    });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { message?: string }; usage?: { promptTokens: number } }>;
+    expect(out).toHaveLength(1);
+    expect(out[0]?.error?.message).toBe('[502] Provider disconnected');
+    expect(out[0]?.usage?.promptTokens).toBe(120);
+  });
+
+  it('the wait for a choice-level error\'s usage line ends after the bound when the stream stays open', async () => {
+    const open = new Readable({ read() {} });
+    open.push(Buffer.from(choiceError({ code: 502, message: 'down', metadata: { error_type: 'provider_unavailable' } }) + '\n\n'));
+    const request = vi.fn().mockResolvedValueOnce({ data: open });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const started = Date.now();
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { type?: string } }>;
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1500);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.error?.type).toBe('upstream_error');
+    expect(open.destroyed).toBe(true);
+    // The deliberate close is not logged as a read error.
+    expect(errorSpy).not.toHaveBeenCalled();
+  }, 10_000);
+
+  it('an abort while the stream is idle after a choice-level error is answered within the bound', async () => {
+    const controller = new AbortController();
+    const open = new Readable({ read() {} });
+    open.push(Buffer.from(choiceError({ code: 502, message: 'down', metadata: { error_type: 'provider_unavailable' } }) + '\n\n'));
+    const request = vi.fn().mockResolvedValueOnce({ data: open });
+    setTimeout(() => controller.abort(), 100);
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, { abortSignal: controller.signal }))) as Array<{ error?: { type?: string } }>;
+    expect(out).toHaveLength(1);
+    expect(out[0]?.error?.type).toBe('abort');
+  }, 10_000);
+
   it('an abort during the wait for a choice-level error\'s usage line yields the abort chunk with the usage read so far', async () => {
     const controller = new AbortController();
     const request = vi.fn().mockResolvedValueOnce({
       data: gated([choiceError({ code: 502, message: 'down', metadata: { error_type: 'provider_unavailable' } }), usageChunk, () => controller.abort(), 'data: [DONE]']),
+    });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, { abortSignal: controller.signal }))) as Array<{ error?: { type?: string }; usage?: { promptTokens: number } }>;
+    expect(out).toHaveLength(1);
+    expect(out[0]?.error?.type).toBe('abort');
+    expect(out[0]?.usage?.promptTokens).toBe(120);
+  });
+
+  it('the line that shows an abort during a held error\'s wait is read for its usage', async () => {
+    const controller = new AbortController();
+    const request = vi.fn().mockResolvedValueOnce({
+      data: gated([choiceError({ code: 502, message: 'down', metadata: { error_type: 'provider_unavailable' } }), () => controller.abort(), usageChunk, 'data: [DONE]']),
     });
     const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, { abortSignal: controller.signal }))) as Array<{ error?: { type?: string }; usage?: { promptTokens: number } }>;
     expect(out).toHaveLength(1);

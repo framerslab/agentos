@@ -1,3 +1,11 @@
+## [0.12.8](https://github.com/framerslab/agentos/compare/v0.12.7...v0.12.8) (2026-10-08)
+
+### fix
+
+* **agency:** a seat that sets provider: undefined is judged by the provider its calls use before it inherits the agency key (#120) ([65b1be1](https://github.com/framerslab/agentos/commit/65b1be13af68b86e027846733a6c63385ae766c0))
+* **export:** a credentials object inside an item of a tools list is redacted (#119) ([d95b5cf](https://github.com/framerslab/agentos/commit/d95b5cf8fc104eb949960f346b5734eac4c0b99d))
+* **openrouter:** the wait for a choice-level error's usage line is bounded, ends on the error event, and reads the abort line (#143) ([f4479cd](https://github.com/framerslab/agentos/commit/f4479cd79c7deb78fd475013e523fd60453dc020))
+
 ## [0.12.7](https://github.com/framerslab/agentos/compare/v0.12.6...v0.12.7) (2026-10-08)
 
 ### fix
