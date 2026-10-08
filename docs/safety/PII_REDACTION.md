@@ -20,11 +20,11 @@ keywords:
 
 # PII Redaction (and PHI scrubbing)
 
-`@framers/agentos-ext-pii-redaction` is the guardrail that scans every message flowing through an agent for personally identifiable information, redacts matches before the message reaches downstream tools, the LLM, or storage, and emits an audit record per redaction event. It ships as an optional npm package outside the core runtime so the BERT-based NER model never enters the dependency graph for agents that do not need it.
+`@framers/agentos-ext-pii-redaction` is the guardrail that scans every message flowing through an agent for personally identifiable information and redacts matches before the message reaches downstream tools, the LLM, or storage. It ships as an optional npm package outside the core runtime so the BERT-based NER model never enters the dependency graph for agents that do not need it.
 
 The package covers 18 entity categories including `SSN`, `CREDIT_CARD`, `EMAIL`, `PHONE`, `IBAN`, `PASSPORT`, `DRIVERS_LICENSE`, `GOV_ID`, `DATE_OF_BIRTH`, `API_KEY`, `AWS_KEY`, `CRYPTO_ADDRESS`, `PERSON`, `ORGANIZATION`, `LOCATION`, `MEDICAL_TERM`, and a catch-all `UNKNOWN_PII` bucket for spans the LLM judge or a custom denylist flag without a more specific label.
 
-This page is the source-verified walk-through. Every class, entity type, redaction style, and config field below corresponds to a real surface in [`packages/agentos-ext-pii-redaction/src/`](https://github.com/framerslab/agentos-ext-pii-redaction/tree/master/src). It also covers, with deliberate care, what this guardrail does and does not contribute to a HIPAA-compliant healthcare deployment.
+Every class, entity type, redaction style, and config field below corresponds to a surface in the package's `src/` directory (published as `@framers/agentos-ext-pii-redaction`). It also covers, with deliberate care, what this guardrail does and does not contribute to a HIPAA-compliant healthcare deployment.
 
 ## What it actually is
 
@@ -39,7 +39,7 @@ A four-tier detection pipeline, plus an optional fifth LLM-judge tier, feeding i
 | **Tier 3 — LLM judge (optional)** | A second LLM call (typically `gpt-4o-mini` or `claude-haiku`) that re-examines candidate spans flagged by earlier tiers and catches context-dependent PII — like a name embedded in a free-form complaint that NER missed, or a medical condition referenced by colloquial phrasing. Disabled by default. | One small LLM call per chunk when enabled. Cached via LRU (default 256 entries). |
 | **Redaction engine** | Applies one of four masking strategies to the final entity list and returns the redacted text. | In-process, microsecond-scale. |
 
-The streaming guardrail registers with `config.canSanitize = true` and `config.evaluateStreamingChunks = true`, so it runs in Phase 1 of the two-phase guardrail dispatcher. Sanitize results chain sequentially through other Phase 1 sanitizers, then the redacted text feeds Phase 2 classifiers in parallel.
+The guardrail registers with `config.canSanitize = true`, so it runs in Phase 1 of the two-phase guardrail dispatcher: sanitize results chain sequentially through the other Phase 1 sanitizers, then the redacted text feeds the Phase 2 classifiers in parallel. `config.evaluateStreamingChunks` is `false` unless the pack options set it.
 
 ## The shortest useful example
 
@@ -47,8 +47,7 @@ The streaming guardrail registers with `config.canSanitize = true` and `config.e
 import { AgentOS } from '@framers/agentos';
 import { createPiiRedactionGuardrail } from '@framers/agentos-ext-pii-redaction';
 
-const agentos = new AgentOS();
-await agentos.initialize({
+const agentos = await AgentOS.create({
   extensionManifest: {
     packs: [
       {
@@ -77,7 +76,7 @@ Without `enableNerModel: true`, only regex runs. The model file enters the modul
 
 ## The eighteen entity types
 
-Defined in [`packages/agentos-ext-pii-redaction/src/types.ts:29-68`](https://github.com/framerslab/agentos-ext-pii-redaction/blob/master/src/types.ts):
+Defined in the package's `src/types.ts`:
 
 | Entity | Tier that detects it | Notes |
 |---|---|---|
@@ -104,7 +103,7 @@ Narrow the `entityTypes` array in the pack options to skip irrelevant patterns. 
 
 ## Redaction styles
 
-[`RedactionStyle`](https://github.com/framerslab/agentos-ext-pii-redaction/blob/master/src/types.ts):
+`RedactionStyle`:
 
 | Style | Example output | Use when |
 |---|---|---|
@@ -141,35 +140,17 @@ createPiiRedactionGuardrail({
 });
 ```
 
-The [`SentenceBoundaryBuffer`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/SentenceBoundaryBuffer.ts) collaborator inside the core runtime ([`src/safety/guardrails/SentenceBoundaryBuffer.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/SentenceBoundaryBuffer.ts)) coalesces partial tokens into sentence-shaped fragments before the guardrail runs, so the redactor never sees a `j` followed by `ohn` from two separate SSE chunks.
+The guardrail keeps its own sentence buffer for each stream: text deltas accumulate, and the buffer is scanned when a sentence boundary (`. `, `? `, `! ` or a newline) arrives, so the redactor does not see a `J` followed by `ohn` from two separate SSE chunks. The core runtime's [`SentenceBoundaryBuffer`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/SentenceBoundaryBuffer.ts) is a separate, exported helper that this guardrail does not use.
 
 ## Audit logging
 
-Every redaction event is structured and emitted through the `agentos:pii:audit-logger` service registered in [`SharedServiceRegistry`](https://github.com/framerslab/agentos/blob/master/src/extensions/SharedServiceRegistry.ts). The default implementation writes to stdout in JSON; production deployments swap in a SIEM sink (Splunk, Datadog, custom Kafka producer).
-
-```typescript
-import { PII_SERVICE_IDS } from '@framers/agentos-ext-pii-redaction';
-
-const auditLogger = registry.get(PII_SERVICE_IDS.AUDIT_LOGGER);
-auditLogger.log({
-  timestamp: '2026-05-11T18:42:00Z',
-  agentId: 'support-bot-prod-7',
-  scope: 'output',
-  entitiesDetected: [
-    { entityType: 'MEDICAL_TERM', source: 'ner-model', score: 0.91 },
-    { entityType: 'EMAIL', source: 'regex', score: 1.0 },
-  ],
-  redactionStyle: 'placeholder',
-});
-```
-
-Every entry contains the entity types and detection sources but never the matched text itself. The redacted text and the original input both stay inside the runtime; only the metadata leaves.
+The package reserves a service id for an audit logger, `agentos:pii:audit-logger` (`PII_SERVICE_IDS.AUDIT_LOGGER`), but registers no logger and emits no audit records. A host that needs an audit trail of redactions registers its own logger under that id or records the guardrail's results itself, keeping the entity types and detection sources and leaving out the matched text.
 
 ## HIPAA, PHI, and what this guardrail is and is not
 
 HIPAA compliance is a regulatory regime that applies to a *deploying organization*, not to a piece of software. A library cannot be "HIPAA compliant" on its own. The framework or guardrail you choose is a component; what makes a system HIPAA-conformant is the organizational wrapper around it: a Business Associate Agreement with every vendor that touches PHI, audit log retention policies, encryption at rest and in transit, access controls, breach notification protocols, periodic third-party assessments (HITRUST is common), and a designated privacy officer. None of that ships in an npm package.
 
-What this guardrail does is provide one of the technical building blocks a HIPAA-conformant healthcare deployment commonly needs: **automatic detection and redaction of Protected Health Information categories from agent inputs and outputs**, with an audit trail of every redaction event.
+What this guardrail does is provide one of the technical building blocks a HIPAA-conformant healthcare deployment commonly needs: **automatic detection and redaction of Protected Health Information categories from agent inputs and outputs**, on which a host builds its own audit trail.
 
 The HIPAA Privacy Rule's "Safe Harbor" de-identification standard at [45 CFR §164.514(b)(2)](https://www.ecfr.gov/current/title-45/section-164.514) enumerates 18 identifier categories that must be removed for a dataset to be considered de-identified. This guardrail's recognizers cover the categories that map cleanly to text-extractable identifiers:
 
@@ -203,7 +184,7 @@ If you are building a healthcare deployment on AgentOS:
 1. **Use this guardrail in `guardrailScope: 'both'` mode** so PHI is scrubbed from inbound user messages before it reaches the LLM and from outbound assistant messages before it reaches any downstream tool or log.
 2. **Enable the NER model and the LLM judge** for the strongest recall on `PERSON`, `LOCATION`, and `MEDICAL_TERM` categories.
 3. **Add organization-specific `denylist` patterns** for medical record numbers, internal patient identifiers, vehicle and device serial numbers, and any other Safe Harbor categories not covered out of the box.
-4. **Pipe the audit logger to your SIEM** and retain redaction events for the period your compliance program requires (commonly 6+ years for HIPAA).
+4. **Record redaction events yourself** (the package emits none), send them to your SIEM, and retain them for the period your compliance program requires.
 5. **Use [Human-in-the-Loop](/features/human-in-the-loop)** to gate any agent action that touches PHI through a human approver until your usage patterns are validated.
 6. **Sign Business Associate Agreements** with your LLM provider, your hosting platform, and any third-party tool the agent calls. AgentOS itself does not transmit data anywhere; the BAA chain is about the inference and infrastructure vendors.
 
@@ -211,7 +192,7 @@ This guardrail is a building block. It does not, and cannot, make a deployment H
 
 ## Operational notes
 
-**Latency.** Regex tier: microseconds per chunk. NLP prefilter: ~5-10ms. NER model first-call: ~1-2s for model load, ~30-80ms per inference after that. LLM judge: full provider round-trip (~300-800ms typical for `gpt-4o-mini`). The judge runs in parallel with other Phase 2 guardrails so it does not stack linearly with classification latency.
+**Latency.** Regex tier: microseconds per chunk. NLP prefilter: ~5-10ms. NER model first-call: ~1-2s for model load, ~30-80ms per inference after that. LLM judge: full provider round-trip (~300-800ms typical for `gpt-4o-mini`). The judge runs inside this guardrail, a Phase 1 sanitizer, so its latency adds to the turn before the Phase 2 classifiers run.
 
 **Memory.** The NER model is ~110MB on disk and ~150MB resident. It loads lazily on first scan. Subsequent scans, the streaming guardrail, and the `pii_scan`/`pii_redact` tools all share the same instance through [`SharedServiceRegistry`](https://github.com/framerslab/agentos/blob/master/src/extensions/SharedServiceRegistry.ts).
 
@@ -221,21 +202,21 @@ This guardrail is a building block. It does not, and cannot, make a deployment H
 
 **False negatives.** The regex tier cannot infer context: it will not flag a name as PERSON, and it will not detect a medical condition referenced colloquially ("my arthritis is acting up"). The NER model improves recall on names and locations. The LLM judge is the recall safety net for context-dependent PII.
 
-**Streaming pitfalls.** A name split across two SSE chunks (`"Jo"` then `"hn"`) will be missed by a naive per-chunk regex. The [`SentenceBoundaryBuffer`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/SentenceBoundaryBuffer.ts) upstream of this guardrail handles fragment coalescing, so the redactor always sees sentence-shaped windows.
+**Streaming pitfalls.** A name split across two SSE chunks (`"Jo"` then `"hn"`) would be missed by a per-chunk regex. The guardrail's per-stream sentence buffer scans whole sentences, so the redactor sees sentence-shaped windows.
 
 ## Where things live
 
 | Concern | Source |
 |---|---|
-| Package root | [`packages/agentos-ext-pii-redaction/`](https://github.com/framerslab/agentos-ext-pii-redaction) |
-| Entity type union, redaction styles, pack options | [`src/types.ts`](https://github.com/framerslab/agentos-ext-pii-redaction/blob/master/src/types.ts) |
-| Regex recognizer (500+ patterns) | [`src/recognizers/RegexRecognizer.ts`](https://github.com/framerslab/agentos-ext-pii-redaction/blob/master/src/recognizers/RegexRecognizer.ts) |
-| NER model recognizer | [`src/recognizers/NerModelRecognizer.ts`](https://github.com/framerslab/agentos-ext-pii-redaction/blob/master/src/recognizers/NerModelRecognizer.ts) |
-| NLP prefilter | [`src/recognizers/NlpPrefilterRecognizer.ts`](https://github.com/framerslab/agentos-ext-pii-redaction/blob/master/src/recognizers/NlpPrefilterRecognizer.ts) |
-| LLM judge recognizer (optional Tier 2) | [`src/recognizers/LlmJudgeRecognizer.ts`](https://github.com/framerslab/agentos-ext-pii-redaction/blob/master/src/recognizers/LlmJudgeRecognizer.ts) |
-| Detection pipeline orchestrator | [`src/PiiDetectionPipeline.ts`](https://github.com/framerslab/agentos-ext-pii-redaction/blob/master/src/PiiDetectionPipeline.ts) |
-| Redaction engine | [`src/RedactionEngine.ts`](https://github.com/framerslab/agentos-ext-pii-redaction/blob/master/src/RedactionEngine.ts) |
-| Service IDs for DI lookup | [`PII_SERVICE_IDS`](https://github.com/framerslab/agentos-ext-pii-redaction/blob/master/src/types.ts) in [`src/types.ts`](https://github.com/framerslab/agentos-ext-pii-redaction/blob/master/src/types.ts) |
+| Package root | [`@framers/agentos-ext-pii-redaction`](https://www.npmjs.com/package/@framers/agentos-ext-pii-redaction) |
+| Entity type union, redaction styles, pack options | `src/types.ts` |
+| Regex recognizer (500+ patterns) | `src/recognizers/RegexRecognizer.ts` |
+| NER model recognizer | `src/recognizers/NerModelRecognizer.ts` |
+| NLP prefilter | `src/recognizers/NlpPrefilterRecognizer.ts` |
+| LLM judge recognizer (optional Tier 3) | `src/recognizers/LlmJudgeRecognizer.ts` |
+| Detection pipeline orchestrator | `src/PiiDetectionPipeline.ts` |
+| Redaction engine | `src/RedactionEngine.ts` |
+| Service IDs for DI lookup | `PII_SERVICE_IDS` in `src/types.ts` |
 | Streaming sentence buffer (in core) | [`src/safety/guardrails/SentenceBoundaryBuffer.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/SentenceBoundaryBuffer.ts) |
 
 ## Further reading

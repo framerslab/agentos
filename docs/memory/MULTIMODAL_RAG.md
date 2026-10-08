@@ -9,7 +9,7 @@ AgentOS’ core RAG APIs are **text-first** ([`EmbeddingManager`](https://github
 3. Index that text as a **normal RAG document** so the existing retrieval pipeline (vector, BM25, reranking, GraphRAG, etc.) can operate without any “special” multimodal database.
 4. Optionally add **modality-specific embeddings** (image-to-image / audio-to-audio) as a fast path.
 
-AgentOS supplies [`MultimodalIndexer`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/multimodal/MultimodalIndexer.ts), [`MultimodalAggregator`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/MultimodalAggregator.ts) and [`MultimodalMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/multimodal/MultimodalMemoryBridge.ts). The HTTP routes below come from [`@framers/agentos-ext-http-api`](https://github.com/framerslab/agentos-ext-http-api); the asset table, the derivation steps and the environment variables on this page belong to the reference host backend that implements the router's `ragService`, and AgentOS reads none of those variables.
+AgentOS supplies [`MultimodalIndexer`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/multimodal/MultimodalIndexer.ts), [`MultimodalAggregator`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/MultimodalAggregator.ts) and [`MultimodalMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/multimodal/MultimodalMemoryBridge.ts). The HTTP routes below come from [`@framers/agentos-ext-http-api`](https://www.npmjs.com/package/@framers/agentos-ext-http-api); the asset table, the derivation steps and the environment variables on this page belong to the reference host backend that implements the router's `ragService`, and AgentOS reads none of those variables.
 
 Retrieval runs on derived text: AgentOS has no visual late-interaction retriever and no page-native document retrieval. Document ingestion indexes extracted text into standard RAG collections through [`MultimodalIndexer.indexText(...)`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/multimodal/MultimodalIndexer.ts), so derived document text is retrievable through the normal text pipeline rather than only being stored as memory traces.
 
@@ -88,7 +88,7 @@ This keeps modality embeddings separate from text embeddings, while still reusin
 
 ## HTTP API Surface
 
-The host-agnostic Express router lives in [`@framers/agentos-ext-http-api`](https://github.com/framerslab/agentos-ext-http-api) — specifically [`src/rag/rag.routes.ts`](https://github.com/framerslab/agentos-ext-http-api/blob/master/src/rag/rag.routes.ts):
+The host-agnostic Express router lives in [`@framers/agentos-ext-http-api`](https://www.npmjs.com/package/@framers/agentos-ext-http-api) — specifically `src/rag/rag.routes.ts`:
 
 ```ts
 import express from 'express';
@@ -115,7 +115,7 @@ It mounts multimodal routes under `/multimodal/*`:
 - `GET /multimodal/assets/:assetId/content` (only if payload is stored)
 - `DELETE /multimodal/assets/:assetId`
 
-See the [`@framers/agentos-ext-http-api` package](https://github.com/framerslab/agentos-ext-http-api) for request/response examples and deployment notes — the reference backend mounts the routes wired here ([`createAgentOSRagRouter`](https://github.com/framerslab/agentos-ext-http-api/blob/master/src/rag/rag.routes.ts)).
+See the [`@framers/agentos-ext-http-api` package](https://www.npmjs.com/package/@framers/agentos-ext-http-api) for request/response examples and deployment notes — the reference backend mounts the routes wired here (`createAgentOSRagRouter`).
 
 ## Offline Embeddings (Optional)
 
@@ -188,9 +188,8 @@ This keeps the base retrieval system consistent while still allowing richer moda
 | [`QdrantVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/QdrantVectorStore.ts) | `framerslab/agentos` | [`src/cognition/rag/vector_stores/QdrantVectorStore.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/QdrantVectorStore.ts) |
 | [Vector stores tree](https://github.com/framerslab/agentos/tree/master/src/cognition/rag/vector_stores) | `framerslab/agentos` | [`src/cognition/rag/vector_stores/`](https://github.com/framerslab/agentos/tree/master/src/cognition/rag/vector_stores) |
 | [Multimodal tree (Aggregator + Indexer + types)](https://github.com/framerslab/agentos/tree/master/src/cognition/rag/multimodal) | `framerslab/agentos` | [`src/cognition/rag/multimodal/`](https://github.com/framerslab/agentos/tree/master/src/cognition/rag/multimodal) |
-| [`createAgentOSRagRouter`](https://github.com/framerslab/agentos-ext-http-api/blob/master/src/rag/rag.routes.ts) | `framerslab/agentos-ext-http-api` | `src/rag/rag.routes.ts` |
-| [Multimodal route tests](https://github.com/framerslab/agentos-ext-http-api/blob/master/src/rag/rag.multimodal.routes.test.ts) | `framerslab/agentos-ext-http-api` | `src/rag/rag.multimodal.routes.test.ts` |
-| [HTTP API package root](https://github.com/framerslab/agentos-ext-http-api) | `framerslab/agentos-ext-http-api` | (root) |
+| `createAgentOSRagRouter` | `@framers/agentos-ext-http-api` (npm) | `src/rag/rag.routes.ts` |
+| [HTTP API package](https://www.npmjs.com/package/@framers/agentos-ext-http-api) | `@framers/agentos-ext-http-api` (npm) | (root) |
 
 ---
 
