@@ -136,15 +136,21 @@ function observeTurn(provider: AgentMemoryProvider, role: 'user' | 'assistant', 
   }
 }
 
-/** One usage ledger event; a ledger failure is never the caller's error. */
-function recordLedgerUsage(ledger: AgentOSUsageLedgerOptions | undefined, providerId: string | undefined, modelId: string | undefined, usage: unknown): void {
-  if (!usage || typeof usage !== 'object') return;
+/**
+ * One usage ledger event. The promise settles once the event is written, or
+ * was not: a ledger failure is never the caller's error, so it never rejects.
+ */
+function recordLedgerUsage(ledger: AgentOSUsageLedgerOptions | undefined, providerId: string | undefined, modelId: string | undefined, usage: unknown): Promise<void> {
+  if (!usage || typeof usage !== 'object') return Promise.resolve();
   const total: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   addModelUsage(total, usage);
   // Imported on use, as agent() imports it: the ledger reads and writes files.
-  void import('./usageLedger.js')
+  return import('./usageLedger.js')
     .then(({ recordAgentOSUsage }) => recordAgentOSUsage({ providerId, modelId, usage: total, options: ledger }))
-    .catch(() => undefined);
+    .then(
+      () => undefined,
+      () => undefined,
+    );
 }
 
 /** `onAfterGeneration` for one finished step: a returned text replaces the step's text in the result and in the store. */
@@ -191,6 +197,8 @@ export async function* runGmiTurn(
   let writer: SessionTurnWriter | undefined;
   let ended = false;
   let releaseGmi: (() => Promise<void>) | undefined;
+  // The turn's usage ledger writes, awaited before the turn ends.
+  const ledgerWrites: Array<Promise<void>> = [];
   const userMessage: SessionTranscriptMessage = { role: 'user', content: input };
   // False until a step is kept with the turn's user message in front of it.
   let userMessageKept = false;
@@ -257,7 +265,7 @@ export async function* runGmiTurn(
           await afterGeneration(deps.opts, folder, step, stepCalls);
           pending = { step, calls: stepCalls, results: [] };
           stepCalls = [];
-          recordLedgerUsage(deps.ledger, step.providerId, step.modelId, step.usage);
+          ledgerWrites.push(recordLedgerUsage(deps.ledger, step.providerId, step.modelId, step.usage));
           break;
         }
         case GMIOutputChunkType.TOOL_RESULT:
@@ -266,7 +274,7 @@ export async function* runGmiTurn(
         case GMIOutputChunkType.USAGE_UPDATE: {
           // An attempt that failed before any output and was billed: no step carries it.
           const meta = chunk.metadata as { attemptFailed?: boolean; providerId?: string; modelId?: string } | undefined;
-          if (meta?.attemptFailed) recordLedgerUsage(deps.ledger, meta.providerId, meta.modelId, chunk.content);
+          if (meta?.attemptFailed) ledgerWrites.push(recordLedgerUsage(deps.ledger, meta.providerId, meta.modelId, chunk.content));
           break;
         }
         default:
@@ -295,15 +303,23 @@ export async function* runGmiTurn(
     writer?.abort({ partial: true });
     throw error;
   } finally {
-    // A turn its consumer stopped reading keeps the steps that finished, marked partial.
-    if (!ended) {
-      flush();
-      writer?.abort({ partial: true });
+    try {
+      // A turn its consumer stopped reading keeps the steps that finished, marked partial.
+      if (!ended) {
+        flush();
+        writer?.abort({ partial: true });
+      }
+      const usage = folder.usage();
+      if (usage.totalTokens > 0 || usage.promptTokens > 0 || usage.completionTokens > 0) deps.onUsage(usage);
+      // The ledger holds the turn before the turn ends, as it holds a call before
+      // generateText returns: with the ledger enabled, usage() reads it alone, and
+      // a process that exits once the call returns keeps the turn's rows.
+      await Promise.all(ledgerWrites);
+    } finally {
+      // Whatever the lines above threw, the next turn gets the lock.
+      if (releaseGmi) void releaseGmi().catch(() => undefined);
+      release();
     }
-    const usage = folder.usage();
-    if (usage.totalTokens > 0 || usage.promptTokens > 0 || usage.completionTokens > 0) deps.onUsage(usage);
-    if (releaseGmi) void releaseGmi().catch(() => undefined);
-    release();
   }
 }
 
