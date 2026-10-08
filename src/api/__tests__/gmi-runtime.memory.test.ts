@@ -66,6 +66,7 @@ describe("agent({ runtime: 'gmi' }) cognitive memory", () => {
 
   it('memory with no embedding source: the agent is made, and its first call fails naming memory.embedding before any model call', async () => {
     vi.stubEnv('OPENAI_API_KEY', '');
+    vi.stubEnv('GEMINI_API_KEY', '');
     vi.stubEnv('OLLAMA_BASE_URL', '');
     const k = key(); const s = script('anthropic', k, { replies: [reply.text('Hi.')] });
     const a = agent({ runtime: 'gmi', provider: 'anthropic', model: 'claude-x', apiKey: k, fallbackProviders: [], cognition: 'full' });

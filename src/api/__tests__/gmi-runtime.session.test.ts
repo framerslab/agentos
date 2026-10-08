@@ -405,6 +405,7 @@ describe("agent({ runtime: 'gmi' }) resolves the model and builds memory on firs
 
   it('memory checks that need the environment wait for the first call, which names memory.embedding; the others run at construction', async () => {
     vi.stubEnv('OPENAI_API_KEY', '');
+    vi.stubEnv('GEMINI_API_KEY', '');
     vi.stubEnv('OLLAMA_BASE_URL', '');
     expect(() => agent(base(key(), { memory: { embedding: { provider: 'anthropic' } } }))).toThrow(/Anthropic has no embedding models/);
     expect(() => agent(base(key(), { memory: { embedding: { provider: 'ollama', model: 'mxbai-embed-large', dimension: 0 } } }))).toThrow(/positive integer/);
