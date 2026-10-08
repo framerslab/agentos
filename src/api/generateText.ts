@@ -12,7 +12,7 @@
  * the system prompt so the tool loop executes with awareness of the strategy.
  */
 import { randomUUID } from 'node:crypto';
-import { resolveModelOption, resolveProvider, createProviderManager } from './model.js';
+import { resolveModelOption, resolveProvider, createProviderManager, knownProviderPrefixOf } from './model.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { fireLlmUsageObserver } from './observers.js';
 import {
@@ -1733,8 +1733,10 @@ export function explicitRequiredCapabilities(
  * leg's own call resolves it (a provider's default model when the entry
  * names none, a `provider:model` id split), or the entry as written when it
  * does not resolve.
+ *
+ * @internal Shared with streamText.
  */
-function fallbackEntrySentAs(entry: FallbackProviderEntry): { provider: string; model?: string } {
+export function fallbackEntrySentAs(entry: FallbackProviderEntry): { provider: string; model?: string } {
   try {
     const { providerId, modelId } = resolveModelOption({ provider: entry.provider, model: entry.model }, 'text');
     return { provider: providerId, model: modelId };
@@ -1764,7 +1766,15 @@ export function resolveFallbackChain(
   },
 ): ResolvedFallbackEntry[] {
   const required = ctx.requiredCapabilities ?? [];
-  const excluded = new Set(ctx.excludedModelIds ?? []);
+  // An exclusion names a model as written or as a `provider:model` id; a leg
+  // matches by its model as written and as it is sent.
+  const excluded = new Set<string>();
+  for (const id of ctx.excludedModelIds ?? []) {
+    excluded.add(id);
+    const prefix = knownProviderPrefixOf(id);
+    if (prefix) excluded.add(id.slice(prefix.length + 1));
+  }
+  const isExcluded = (model: string | undefined): boolean => model !== undefined && excluded.has(model);
   const resolved: ResolvedFallbackEntry[] = [];
   let uncensoredLegs = 0;
   for (const entry of chain) {
@@ -1777,7 +1787,7 @@ export function resolveFallbackChain(
       continue;
     }
     const sentAs = fallbackEntrySentAs(entry);
-    if (sentAs.model !== undefined && excluded.has(sentAs.model)) {
+    if (isExcluded(entry.model) || isExcluded(sentAs.model)) {
       ctx.onSkip?.(entry, 'excluded_model');
       continue;
     }
@@ -2998,12 +3008,15 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         // next healthy one. The recursive `generateText` call below would
         // also short-circuit at the same isOpen() check, but the outer
         // skip avoids the recursion overhead + the extra log line.
-        if (globalLLMProviderHealth.isOpen(fb.provider)) {
+        // The breaker read is the provider the leg is sent to: an
+        // `openrouter:` id under another provider goes to OpenRouter.
+        const legProvider = fallbackEntrySentAs(fb).provider;
+        if (globalLLMProviderHealth.isOpen(legProvider)) {
           fallbackLogger.info('provider fallback skipped (circuit open)', {
             event: 'fallback_skipped_circuit_open',
             api: 'generateText',
             primaryProvider: metricProviderId,
-            fallbackProvider: fb.provider,
+            fallbackProvider: legProvider,
             fallbackModel: fb.model,
             attempt,
           });

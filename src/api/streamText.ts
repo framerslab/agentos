@@ -20,6 +20,7 @@ import {
   buildPolicyAwareFallbackChain,
   createPlan,
   explicitRequiredCapabilities,
+  fallbackEntrySentAs,
   fallbackHopOverrides,
   gateFallbackEntry,
   INITIAL_FALLBACK_WALK,
@@ -1384,12 +1385,15 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // streamText below would short-circuit at the same isOpen()
           // check, but the outer skip avoids the extra log noise +
           // recursion overhead.
-          if (globalLLMProviderHealth.isOpen(fb.provider)) {
+          // The breaker read is the provider the leg is sent to: an
+          // `openrouter:` id under another provider goes to OpenRouter.
+          const legProvider = fallbackEntrySentAs(fb).provider;
+          if (globalLLMProviderHealth.isOpen(legProvider)) {
             fallbackLogger.info('streaming provider fallback skipped (circuit open)', {
               event: 'fallback_skipped_circuit_open',
               api: 'streamText',
               primaryProvider: recordedProviderId,
-              fallbackProvider: fb.provider,
+              fallbackProvider: legProvider,
               fallbackModel: fb.model,
               attempt,
             });

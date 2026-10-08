@@ -5,7 +5,8 @@
  * breaker stays closed, the refused call's usage is counted once. A 403
  * without a decline type still opens the breaker. Runs the real walkers,
  * the real provider over a stubbed HTTP client, and the real health
- * registry; only the provider manager is faked.
+ * registry; only the provider manager is faked. The walkers' leg checks
+ * (an excluded model, an open breaker) are exercised the same way.
  */
 import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -429,6 +430,65 @@ describe('OpenRouter declines through streamText', () => {
     expect(r.parts.filter((p) => p.type === 'text').map((p) => p.text)).toEqual(['a']);
     expect(r.parts.filter((p) => p.type === 'error')).toHaveLength(1);
     expect(r.finishReason).toBe('error');
+    expect(hoisted.state.geminiCalls).toBe(0);
+  });
+});
+
+describe('leg checks through the walkers', () => {
+  const MAGNUM = 'anthracite-org/magnum-v4-72b';
+  // A 200 body holding only a 502: retryable, and never retried by the HTTP client.
+  const inBody502 = { data: { id: 'gen-1', error: { code: 502, message: 'down', metadata: { error_type: 'provider_unavailable' } } } };
+  const upstreamEvent = chunk({ error: { code: 502, message: 'down', metadata: { error_type: 'provider_unavailable' } }, choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error' }] });
+  const stopChunk = chunk({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
+  /** The model of every request the stubbed client saw, in order. */
+  const sentModels = () => hoisted.state.openrouterRequest!.mock.calls.map((c) => (c[0] as { data?: { model?: string } }).data?.model);
+  const openOpenAI = () => {
+    globalLLMProviderHealth.recordFailure('openai', Object.assign(new Error('[402] insufficient credits'), { httpStatus: 402 }));
+    expect(globalLLMProviderHealth.isOpen('openai')).toBe(true);
+  };
+
+  it('an excluded model named with its provider prefix is never sent as a leg', async () => {
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce(inBody502);
+    const result = await generateText({
+      provider: 'openrouter',
+      model: MODEL,
+      prompt: 'Hello?',
+      routerParams: { excludedModelIds: [`openrouter:${MAGNUM}`] },
+      fallbackProviders: [{ provider: 'openrouter', model: `openrouter:${MAGNUM}` }, ...CHAIN],
+    });
+    expect(result.text).toBe('from gemini');
+    expect(sentModels()).toEqual([MODEL]);
+  });
+
+  it('the breaker read for a leg is the provider it is sent to: an openrouter: id under openai runs while openai is open', async () => {
+    openOpenAI();
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce(inBody502).mockResolvedValueOnce(okBody('from the openrouter leg'));
+    const result = await generateText({
+      provider: 'openrouter',
+      model: MODEL,
+      prompt: 'Hello?',
+      fallbackProviders: [{ provider: 'openai', model: 'openrouter:openai/gpt-5.6-sol' }, ...CHAIN],
+    });
+    expect(result.text).toBe('from the openrouter leg');
+    expect(sentModels()).toEqual([MODEL, 'openai/gpt-5.6-sol']);
+    expect(hoisted.state.geminiCalls).toBe(0);
+  });
+
+  it('the same leg streams while openai is open', async () => {
+    openOpenAI();
+    hoisted.state.openrouterRequest!
+      .mockResolvedValueOnce({ data: sse([upstreamEvent, 'data: [DONE]']) })
+      .mockResolvedValueOnce({ data: sse([textChunk('from the openrouter leg'), stopChunk, usageChunk, 'data: [DONE]']) });
+    const r = await collect(
+      streamText({
+        provider: 'openrouter',
+        model: MODEL,
+        prompt: 'Hello?',
+        fallbackProviders: [{ provider: 'openai', model: 'openrouter:openai/gpt-5.6-sol' }, ...CHAIN],
+      }),
+    );
+    expect(r.text).toBe('from the openrouter leg');
+    expect(sentModels()).toEqual([MODEL, 'openai/gpt-5.6-sol']);
     expect(hoisted.state.geminiCalls).toBe(0);
   });
 });
