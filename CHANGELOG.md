@@ -1,3 +1,13 @@
+## [0.12.5](https://github.com/framerslab/agentos/compare/v0.12.4...v0.12.5) (2026-10-08)
+
+### fix
+
+* **openrouter:** a choice-level stream error walks on, an error event keeps its usage, and leg checks read the sent model (#136) ([5815f26](https://github.com/framerslab/agentos/commit/5815f261f6b2a428fb909881657d70b41f0688fe))
+
+### feat
+
+* **emergent:** a ceiling for forged code, a broker for its capabilities, and a record of every capability call (#134) ([52f1f83](https://github.com/framerslab/agentos/commit/52f1f83ed05bb7139ab7328c32ef53d5fa2cff5e))
+
 ## [0.12.4](https://github.com/framerslab/agentos/compare/v0.12.3...v0.12.4) (2026-10-07)
 
 ### feat

@@ -68,6 +68,11 @@ describe('imageToBuffer', () => {
   it.each([
     ['a comment', '<!--???--><svg></svg>'],
     ['a declaration and a DOCTYPE', '<?xml version="1.0"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg><!--???--></svg>'],
+    ['a DOCTYPE whose subset holds a processing instruction with a quote', '<!DOCTYPE svg [<?pi a\'?>]><svg><!--???--></svg>'],
+    [
+      'a DOCTYPE whose subset holds a processing instruction with a quote and a bracket',
+      '<!DOCTYPE svg [<?pi "]>?><!ENTITY e "x">]><svg><!--???--></svg>',
+    ],
     [
       'a DOCTYPE whose quoted literals hold its delimiters',
       '<!DOCTYPE svg SYSTEM "http://example.com/a>b.dtd" [<!ENTITY e "x]>y"><!-- it\'s ] a comment -->]><svg><!--???--></svg>',
