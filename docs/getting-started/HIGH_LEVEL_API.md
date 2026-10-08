@@ -219,7 +219,7 @@ Use:
 - `finalTextStream` or `text` for the finalized approved answer
 - `fullStream` when you also need structured events like `final-output`
 
-See [Agency API](./AGENCY_API.md) and [Streaming Semantics](./STREAMING_SEMANTICS.md)
+See [Agency API](../orchestration/AGENCY_API.md) and [Streaming Semantics](../architecture/STREAMING_SEMANTICS.md)
 for the full contract.
 
 ## [`QueryRouter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/query/QueryRouter.ts)

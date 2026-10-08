@@ -447,5 +447,5 @@ with content adaptation per platform.
 
 - [SOCIAL_POSTING.md](./SOCIAL_POSTING.md) — publishing to social media platforms
 - [VOICE_PIPELINE.md](./VOICE_PIPELINE.md) — voice call channels (telephony)
-- [AGENCY_API.md](./AGENCY_API.md) — `agency().connect()` for channel-aware agencies
-- [RFC_EXTENSION_STANDARDS.md](./RFC_EXTENSION_STANDARDS.md) — extension packaging for channel adapters
+- [AGENCY_API.md](../orchestration/AGENCY_API.md) — `agency().connect()` for channel-aware agencies
+- [RFC_EXTENSION_STANDARDS.md](../extensions/RFC_EXTENSION_STANDARDS.md) — extension packaging for channel adapters

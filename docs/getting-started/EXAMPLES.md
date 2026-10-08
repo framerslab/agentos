@@ -1056,5 +1056,5 @@ npx tsx examples/<file>.mjs
 - [COGNITIVE_MEMORY.md](../memory/COGNITIVE_MEMORY.md) — memory system
 - [COGNITIVE_MEMORY.md#mechanism-implementation-reference](../memory/COGNITIVE_MEMORY.md#mechanism-implementation-reference) — 8 neuroscience-backed mechanisms (implementation reference)
 - [IMAGE_GENERATION.md](../features/IMAGE_GENERATION.md) — image provider setup
-- [EVALUATION.md](../features/EVALUATION.md) — testing and benchmarking
-- [AGENCY_API.md](../features/AGENCY_API.md) — full agency reference
+- [EVALUATION.md](../observability/EVALUATION.md) — testing and benchmarking
+- [AGENCY_API.md](../orchestration/AGENCY_API.md) — full agency reference

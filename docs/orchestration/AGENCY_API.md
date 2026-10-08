@@ -548,7 +548,7 @@ available via:
 
 Use `textStream` for low-latency token UX and `finalTextStream` when the client
 must only ever see the approved answer. See
-[Streaming Semantics](./STREAMING_SEMANTICS.md) for the exact contract.
+[Streaming Semantics](../architecture/STREAMING_SEMANTICS.md) for the exact contract.
 
 ---
 
@@ -1302,13 +1302,13 @@ await contentPipeline.close();
 
 ## See Also
 
-- [`docs/HIGH_LEVEL_API.md`](./HIGH_LEVEL_API.md) — `generateText()`, `streamText()`, `generateImage()`, single `agent()`
-- [`docs/HUMAN_IN_THE_LOOP.md`](./HUMAN_IN_THE_LOOP.md) — HITL handler deep-dive
-- [`docs/GUARDRAILS_USAGE.md`](./GUARDRAILS_USAGE.md) — guardrail policies and custom guardrail authoring
-- [`docs/RAG_MEMORY_CONFIGURATION.md`](./RAG_MEMORY_CONFIGURATION.md) — RAG and memory configuration reference
-- [`docs/OBSERVABILITY.md`](./OBSERVABILITY.md) — OTEL integration and trace event reference
+- [`docs/HIGH_LEVEL_API.md`](../getting-started/HIGH_LEVEL_API.md) — `generateText()`, `streamText()`, `generateImage()`, single `agent()`
+- [`docs/HUMAN_IN_THE_LOOP.md`](../safety/HUMAN_IN_THE_LOOP.md) — HITL handler deep-dive
+- [`docs/GUARDRAILS_USAGE.md`](../safety/GUARDRAILS_USAGE.md) — guardrail policies and custom guardrail authoring
+- [`docs/RAG_MEMORY_CONFIGURATION.md`](../memory/RAG_MEMORY_CONFIGURATION.md) — RAG and memory configuration reference
+- [`docs/OBSERVABILITY.md`](../observability/OBSERVABILITY.md) — OTEL integration and trace event reference
 - [`docs/STRUCTURED_OUTPUT.md`](./STRUCTURED_OUTPUT.md) — Zod schema output and extraction patterns
-- [`docs/AGENT_GRAPH.md`](./AGENT_GRAPH.md) — [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) programmatic graph builder (advanced)
+- [`docs/AGENT_GRAPH.md`](../architecture/AGENT_GRAPH.md) — [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) programmatic graph builder (advanced)
 - [`src/api/types.ts`](../../src/api/types.ts) — canonical TypeScript type definitions
 - [`src/api/agency.ts`](../../src/api/agency.ts) — `agency()` implementation
 - [`src/api/hitl.ts`](../../src/api/hitl.ts) — HITL handler factories

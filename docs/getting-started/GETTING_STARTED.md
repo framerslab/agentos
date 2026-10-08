@@ -415,17 +415,17 @@ Usage: { inputTokens: 312, outputTokens: 487, totalTokens: 799, estimatedCost: 0
 
 | Topic                                             | Guide                                        |
 | ------------------------------------------------- | -------------------------------------------- |
-| Graph pipelines, workflows, missions              | [ORCHESTRATION.md](./ORCHESTRATION.md)       |
-| Deploy agents to 37 channels                      | [CHANNELS.md](./CHANNELS.md)                 |
-| Publish to social platforms                       | [SOCIAL_POSTING.md](./SOCIAL_POSTING.md)     |
-| Audit trails and tamper evidence                  | [PROVENANCE.md](./PROVENANCE.md)             |
-| Episodic, semantic, procedural memory             | [COGNITIVE_MEMORY.md](./COGNITIVE_MEMORY.md) |
-| 8 core cognitive mechanisms (+ optional persona drift analysis) | [COGNITIVE_MEMORY.md#mechanism-implementation-reference](./COGNITIVE_MEMORY.md#mechanism-implementation-reference) |
-| HEXACO personality traits and on/off configuration | [COGNITIVE_MEMORY.md](./COGNITIVE_MEMORY.md#1-hexaco-personality---encoding-weights) |
-| Testing and benchmarking agents                   | [EVALUATION.md](./EVALUATION.md)             |
-| Token-efficient capability discovery              | [DISCOVERY.md](./DISCOVERY.md)               |
-| Image generation across 5 providers               | [IMAGE_GENERATION.md](./IMAGE_GENERATION.md) |
+| Graph pipelines, workflows, missions              | [ORCHESTRATION.md](../orchestration/ORCHESTRATION.md)       |
+| Deploy agents to 37 channels                      | [CHANNELS.md](../features/CHANNELS.md)                 |
+| Publish to social platforms                       | [SOCIAL_POSTING.md](../features/SOCIAL_POSTING.md)     |
+| Audit trails and tamper evidence                  | [PROVENANCE.md](../safety/PROVENANCE.md)             |
+| Episodic, semantic, procedural memory             | [COGNITIVE_MEMORY.md](../memory/COGNITIVE_MEMORY.md) |
+| 8 core cognitive mechanisms (+ optional persona drift analysis) | [COGNITIVE_MEMORY.md#mechanism-implementation-reference](../memory/COGNITIVE_MEMORY.md#mechanism-implementation-reference) |
+| HEXACO personality traits and on/off configuration | [COGNITIVE_MEMORY.md](../memory/COGNITIVE_MEMORY.md#1-hexaco-personality---encoding-weights) |
+| Testing and benchmarking agents                   | [EVALUATION.md](../observability/EVALUATION.md)             |
+| Token-efficient capability discovery              | [DISCOVERY.md](../extensions/DISCOVERY.md)               |
+| Image generation across 5 providers               | [IMAGE_GENERATION.md](../features/IMAGE_GENERATION.md) |
 | Practical cookbook examples                       | [EXAMPLES.md](./EXAMPLES.md)                 |
 | Runtime-configured tools and full [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) setup | [HIGH_LEVEL_API.md](./HIGH_LEVEL_API.md)     |
-| Full API hierarchy                                | [AGENCY_API.md](./AGENCY_API.md)             |
-| Architecture overview                             | [ARCHITECTURE.md](./ARCHITECTURE.md)         |
+| Full API hierarchy                                | [AGENCY_API.md](../orchestration/AGENCY_API.md)             |
+| Architecture overview                             | [ARCHITECTURE.md](../architecture/ARCHITECTURE.md)         |

@@ -65,7 +65,7 @@ AgentOS abstracts LLM access behind a unified [`IProvider`](https://github.com/f
 *CLI providers use your existing subscription — $0 per token.
 **Gemini CLI tool calling uses XML prompt-based parsing (less reliable than native API tool calling).
 
-> **Gemini CLI ToS Warning**: Google's Gemini CLI ToS may prohibit third-party subprocess invocation with OAuth auth. Use `gemini` with API key for production. See [CLI Providers](./CLI_PROVIDERS.md) for details.
+> **Gemini CLI ToS Warning**: Google's Gemini CLI ToS may prohibit third-party subprocess invocation with OAuth auth. Use `gemini` with API key for production. See [CLI Providers](../getting-started/CLI_PROVIDERS.md) for details.
 
 *OpenRouter capabilities depend on the underlying model selected.
 
@@ -304,7 +304,7 @@ const myAgent = agent({
 
 For cheap-first routing across multiple models, attach a custom [`IModelRouter`](https://github.com/framerslab/agentos/blob/master/src/core/llm/routing/IModelRouter.ts)
 via `agent({ router })` — the router decides which provider/model to call per
-request. See [Cost Optimization](./COST_OPTIMIZATION.md) for the full guide.
+request. See [Cost Optimization](../safety/COST_OPTIMIZATION.md) for the full guide.
 
 ---
 
@@ -570,10 +570,10 @@ exercised paths.
 
 ## Related Documentation
 
-- [Getting Started](./GETTING_STARTED.md) — Initial setup and configuration
-- [Cost Optimization](./COST_OPTIMIZATION.md) — Budget management and routing
-- [Architecture](./ARCHITECTURE.md) — System architecture overview
-- [Structured Output](./STRUCTURED_OUTPUT.md) — JSON schema enforcement per provider
+- [Getting Started](../getting-started/GETTING_STARTED.md) — Initial setup and configuration
+- [Cost Optimization](../safety/COST_OPTIMIZATION.md) — Budget management and routing
+- [Architecture](../architecture/ARCHITECTURE.md) — System architecture overview
+- [Structured Output](../orchestration/STRUCTURED_OUTPUT.md) — JSON schema enforcement per provider
 
 ## Prompt caching
 

@@ -384,5 +384,5 @@ const agent = await AgentOS.create({
 
 - [PROVENANCE_IMMUTABILITY.md](./PROVENANCE_IMMUTABILITY.md) — original full reference
 - [IMMUTABLE_AGENTS.md](./IMMUTABLE_AGENTS.md) — toolset pinning, secret rotation, soft-forget
-- [CHECKPOINTING.md](./CHECKPOINTING.md) — checkpoint consistency and storage
-- [OBSERVABILITY.md](./OBSERVABILITY.md) — OpenTelemetry tracing alongside provenance
+- [CHECKPOINTING.md](../orchestration/CHECKPOINTING.md) — checkpoint consistency and storage
+- [OBSERVABILITY.md](../observability/OBSERVABILITY.md) — OpenTelemetry tracing alongside provenance

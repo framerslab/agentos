@@ -4,7 +4,7 @@ When `workflow()` is too rigid and `mission()` is too far ahead of where the run
 
 **Honest runtime status.** Compilation is complete. Execution is partial: the base runtime executes `tool`, `router`, `guardrail`, and `human` nodes directly. `gmi`, `extension`, and `subgraph` execution still requires a higher-level runtime bridge today, and the discovery and personality edges activate fully only when those integrations are wired. If your graph uses only the four direct-execution node kinds, you're in production-ready territory; if it relies heavily on `gmi` nodes inside cycles, expect to wire the bridge.
 
-Use [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) when you need cycles, conditional fan-out, memory-driven state machines, or subgraph composition. Use [`workflow()`](./workflow-dsl.md) for linear pipelines. Use [`mission()`](./mission-api.md) when you'd rather declare intent than topology.
+Use [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) when you need cycles, conditional fan-out, memory-driven state machines, or subgraph composition. Use [`workflow()`](../orchestration/WORKFLOW_DSL.md) for linear pipelines. Use [`mission()`](../orchestration/MISSION_API.md) when you'd rather declare intent than topology.
 
 ![AgentGraph topology: six node types (gmi, tool, router, guardrail, human, subgraph) connected by directed edges including conditional fan-out and a memory-driven retry cycle; compiles to the same CompiledExecutionGraph IR as workflow() and mission()](/img/diagrams/agent-graph-topology.svg)
 
@@ -425,9 +425,9 @@ const result2 = await graph.resume(savedCheckpointId);
 
 ## See Also
 
-- [workflow() DSL](./workflow-dsl.md) — simpler API for DAG pipelines
-- [Checkpointing](./checkpointing.md) — ICheckpointStore, resume, time-travel
-- [Unified Orchestration](./unified-orchestration.md) — architecture overview
+- [workflow() DSL](../orchestration/WORKFLOW_DSL.md) — simpler API for DAG pipelines
+- [Checkpointing](../orchestration/CHECKPOINTING.md) — ICheckpointStore, resume, time-travel
+- [Unified Orchestration](../orchestration/UNIFIED_ORCHESTRATION.md) — architecture overview
 
 ---
 

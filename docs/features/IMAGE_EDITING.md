@@ -395,6 +395,6 @@ registerImageProvider({
 ## Related Documentation
 
 - [Image Generation](./IMAGE_GENERATION.md) — Generate images from text prompts
-- [Multimodal RAG](./MULTIMODAL_RAG.md) — Image + audio retrieval-augmented generation
+- [Multimodal RAG](../memory/MULTIMODAL_RAG.md) — Image + audio retrieval-augmented generation
 - [Vision Pipeline](./VISION_PIPELINE.md) — OCR and image understanding
-- [High-Level API](./HIGH_LEVEL_API.md) — Full API reference
+- [High-Level API](../getting-started/HIGH_LEVEL_API.md) — Full API reference

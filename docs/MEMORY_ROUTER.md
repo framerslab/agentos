@@ -221,6 +221,6 @@ Existing CharHash-era deployments using `minimize-cost` continue to work (no bre
 - [Ingest Router](./INGEST_ROUTER.md) - input stage sibling
 - [Read Router](./READ_ROUTER.md) - read stage sibling
 - [Adaptive Memory Router](./ADAPTIVE_MEMORY_ROUTER.md) - self-calibrating extension
-- [Cognitive Memory](./COGNITIVE_MEMORY.md) - the storage substrate canonical-hybrid retrieves from
-- [HyDE Retrieval](./HYDE_RETRIEVAL.md) - alternate retrieval strategy MemoryRouter can dispatch to
+- [Cognitive Memory](./memory/COGNITIVE_MEMORY.md) - the storage substrate canonical-hybrid retrieves from
+- [HyDE Retrieval](./memory/HYDE_RETRIEVAL.md) - alternate retrieval strategy MemoryRouter can dispatch to
 - [agentos-bench](https://github.com/framerslab/agentos-bench) - reproducible run JSONs, full transparency stack

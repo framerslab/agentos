@@ -165,7 +165,7 @@ const soulMarkdown = `---\nname: Tester\n---\nYou are a test agent.`;
 ## HEXACO + AgentOS Persona Machinery
 
 The `hexaco:` block in SOUL.md frontmatter maps directly to AgentOS's existing
-[HEXACO personality model](./HEXACO_PERSONALITY.md). The same six-trait scores
+[HEXACO personality model](./memory/HEXACO_PERSONALITY.md). The same six-trait scores
 flow into:
 
 - `PersonaDriftMechanism`: long-term trait drift across sessions
@@ -231,4 +231,4 @@ the agent IS; AGENTS.md describes what the agent DOES.
 - [SOUL.template.md](../src/cognition/substrate/personas/SOUL.template.md)
 - [aaronjmars/soul.md spec](https://github.com/aaronjmars/soul.md)
 - [OpenClaw workspace files explained](https://capodieci.medium.com/ai-agents-003-openclaw-workspace-files-explained-soul-md-agents-md-heartbeat-md-and-more-5bdfbee4827a)
-- [HEXACO Personality model in AgentOS](./HEXACO_PERSONALITY.md)
+- [HEXACO Personality model in AgentOS](./memory/HEXACO_PERSONALITY.md)

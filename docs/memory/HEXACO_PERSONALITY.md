@@ -379,7 +379,7 @@ Personality is a memory-and-style modulator, not a policy enforcement mechanism.
 | Bower, 1981 | Mood-congruent encoding. Source for the congruence boost in encoding strength. |
 | Yerkes & Dodson, 1908 | Inverted-U arousal curve. Combines with personality to determine encoding quality. |
 
-Full citations are in the [Cognitive Memory page](./cognitive-memory.md#references).
+Full citations are in the [Cognitive Memory page](./COGNITIVE_MEMORY.md#references).
 
 ---
 
@@ -402,7 +402,7 @@ Full citations are in the [Cognitive Memory page](./cognitive-memory.md#referenc
 
 ## See also
 
-- [Cognitive Memory](./cognitive-memory.md) — The full encoding/decay/retrieval architecture HEXACO modulates.
+- [Cognitive Memory](./COGNITIVE_MEMORY.md) — The full encoding/decay/retrieval architecture HEXACO modulates.
 - [Cognitive Memory — Mechanism Implementation Reference](./COGNITIVE_MEMORY.md#mechanism-implementation-reference) — The eight (plus persona drift) optional neuroscience-grounded mechanisms layered on top of the substrate.
-- [Working Memory](./working-memory.md) — Slot-based attention buffer.
-- [Emergent Capabilities](../emergent-capabilities.md) — Self-modification gates including `adapt_personality`.
+- [Working Memory](./WORKING_MEMORY.md) — Slot-based attention buffer.
+- [Emergent Capabilities](../architecture/EMERGENT_CAPABILITIES.md) — Self-modification gates including `adapt_personality`.

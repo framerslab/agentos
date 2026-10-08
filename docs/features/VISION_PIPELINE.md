@@ -284,7 +284,7 @@ const matches = await store.query(textEmbedding, { topK: 5 });
 
 ## Integration with Multimodal RAG
 
-The vision pipeline integrates directly with the [Multimodal RAG](./MULTIMODAL_RAG.md)
+The vision pipeline integrates directly with the [Multimodal RAG](../memory/MULTIMODAL_RAG.md)
 system for indexing and retrieving image content. Configure RAG via the
 `rag` field on `agent({ ... })` — its shape is the [`RagConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts#L97) interface, with `multimodal.images` toggling image indexing.
 
@@ -306,7 +306,7 @@ console.log(result.text);
 ```
 
 For richer indexing pipelines (auto-describe on ingest, multi-modal embedding fusion),
-see the lower-level [Multimodal RAG guide](./MULTIMODAL_RAG.md) — it shows the
+see the lower-level [Multimodal RAG guide](../memory/MULTIMODAL_RAG.md) — it shows the
 [`VisionPipeline`](https://github.com/framerslab/agentos/blob/master/src/io/vision/VisionPipeline.ts) + [`IngestRouter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/ingest/IngestRouter.ts) wiring directly, without going through the
 high-level `agent()` helper.
 
@@ -538,5 +538,5 @@ console.log('Best matches:', results.map(r => r.metadata.path));
 - [Image Generation](./IMAGE_GENERATION.md) — Generate images from text
 - [Image Editing](./IMAGE_EDITING.md) — Edit, upscale, and variate images
 - [Image Segmentation](./IMAGE_SEGMENTATION.md) — Pixel masks via SAM2 / GroundedSAM
-- [Multimodal RAG](./MULTIMODAL_RAG.md) — Image + audio retrieval-augmented generation
-- [High-Level API](./HIGH_LEVEL_API.md) — Full API reference
+- [Multimodal RAG](../memory/MULTIMODAL_RAG.md) — Image + audio retrieval-augmented generation
+- [High-Level API](../getting-started/HIGH_LEVEL_API.md) — Full API reference

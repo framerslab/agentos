@@ -236,7 +236,7 @@ class CostCeilingGuardrail implements IGuardrailService {
 }
 ```
 
-See [Guardrails Usage Guide](./GUARDRAILS_USAGE.md) for complete documentation.
+See [Guardrails Usage Guide](../safety/GUARDRAILS_USAGE.md) for complete documentation.
 
 ## Integration with Agencies
 
@@ -305,10 +305,10 @@ See `IPlanningEngine.ts` for complete type definitions.
 
 ## Related Documentation
 
-- [Architecture Overview](./ARCHITECTURE.md)
-- [Guardrails Usage Guide](./GUARDRAILS_USAGE.md)
-- [Human-in-the-Loop](./HUMAN_IN_THE_LOOP.md)
-- [Agent Communication](./AGENT_COMMUNICATION.md)
+- [Architecture Overview](../architecture/ARCHITECTURE.md)
+- [Guardrails Usage Guide](../safety/GUARDRAILS_USAGE.md)
+- [Human-in-the-Loop](../safety/HUMAN_IN_THE_LOOP.md)
+- [Agent Communication](../architecture/AGENT_COMMUNICATION.md)
 
 
 

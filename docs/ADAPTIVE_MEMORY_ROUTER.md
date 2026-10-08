@@ -150,4 +150,4 @@ const table = buildAdaptiveRoutingTable({
 
 - [Memory Router](./MEMORY_ROUTER.md) — base primitive
 - [Cognitive Pipeline](./COGNITIVE_PIPELINE.md) — composition that uses MemoryRouter as the recall stage
-- [Evaluation Framework](./EVALUATION_FRAMEWORK.md) — for collecting calibration data via your existing eval harness
+- [Evaluation Framework](./observability/EVALUATION_FRAMEWORK.md) — for collecting calibration data via your existing eval harness

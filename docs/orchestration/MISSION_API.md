@@ -2,7 +2,7 @@
 
 > **Live run**: see `mission()` generate a step plan (gmi + tool steps) and return final artifacts with confidence in [the agentos.sh demo gallery](https://agentos.sh/#live-demo). Source: [`examples/mission-api.mjs`](https://github.com/framerslab/agentos/blob/master/examples/mission-api.mjs).
 
-`workflow()` and [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) ask you to think in terms of nodes and edges before you've thought in terms of intent. `mission()` lets you state the intent first and shape the graph later. You declare what the mission is supposed to accomplish — the goal template, the input schema, the return schema, the planner hints — and the compiler emits a working execution graph from those declarations. When the shape stabilises through use, you export it via `.toWorkflow()` and pin it as a deterministic [workflow()](./workflow-dsl.md) or [AgentGraph](./agent-graph.md) for production.
+`workflow()` and [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) ask you to think in terms of nodes and edges before you've thought in terms of intent. `mission()` lets you state the intent first and shape the graph later. You declare what the mission is supposed to accomplish — the goal template, the input schema, the return schema, the planner hints — and the compiler emits a working execution graph from those declarations. When the shape stabilises through use, you export it via `.toWorkflow()` and pin it as a deterministic [workflow()](./WORKFLOW_DSL.md) or [AgentGraph](../architecture/AGENT_GRAPH.md) for production.
 
 Use `mission()` when you want a goal-centric authoring API and the runtime to choose the step plan. Use `workflow()` or [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) when you need the graph shape pinned and reviewable.
 
@@ -265,10 +265,10 @@ const staticIR = deepResearch.toWorkflow();
 
 ## See Also
 
-- [AgentGraph](./agent-graph.md) — for explicit graph control
-- [workflow() DSL](./workflow-dsl.md) — for deterministic DAG pipelines
+- [AgentGraph](../architecture/AGENT_GRAPH.md) — for explicit graph control
+- [workflow() DSL](./WORKFLOW_DSL.md) — for deterministic DAG pipelines
 - [Checkpointing](./checkpointing.md) — ICheckpointStore, resume semantics
-- [Unified Orchestration](./unified-orchestration.md) — architecture overview
+- [Unified Orchestration](./UNIFIED_ORCHESTRATION.md) — architecture overview
 
 ---
 

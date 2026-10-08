@@ -12,7 +12,7 @@ The 26 top-level modules documented below are predominantly state-management sub
 This page is the system map. For the *what* of each subsystem — components, lifecycle ownership, source-tree location — read on. For deep-dives into individual concerns, follow the table of contents.
 
 For specific subsystem deep-dives, see:
-- [Provenance & Immutability](../features/provenance-immutability.md)
+- [Provenance & Immutability](../safety/PROVENANCE_IMMUTABILITY.md)
 
 ![AgentOS layered architecture: seven cooperating layers from caller-facing API (generateText, streamText, agent, agency, mission) through cognitive substrate (GMI coordinator, PersonaOverlayManager, SentimentTracker, MetapromptExecutor), memory and RAG (4-tier memory, 8 cognitive mechanisms, HyDE, GraphRAG, 7 vector backends), tools and capabilities (100+ extension packs, 88 SKILL.md modules, runtime tool forging), guardrails and HITL (PII redaction, ML classifiers, NLI grounding, 5 approval triggers), orchestration (workflow, mission, AgentGraph, checkpointing), down to I/O and providers (voice pipeline, channels, media generation, 11 LLM providers, OpenRouter fanout).](/img/diagrams/system-architecture.svg)
 
@@ -481,7 +481,7 @@ MetapromptExecutor includes pre-built handlers for common situations:
 - **Engagement boost** -- When the conversation stalls
 - **Trait adjustment** -- Periodic self-reflection that adjusts persona parameters within bounds
 
-See [Adaptive Prompt Intelligence](../features/adaptive-prompt-intelligence) for the full guide: the three trigger types, the five preset templates, the state surfaces metaprompts mutate, and concrete cost numbers.
+See [Adaptive Prompt Intelligence](../ADAPTIVE_PROMPT_INTELLIGENCE.md) for the full guide: the three trigger types, the five preset templates, the state surfaces metaprompts mutate, and concrete cost numbers.
 
 ---
 
@@ -844,7 +844,7 @@ const result = await research.generate(
 );
 ```
 
-See [Emergent Capabilities](../features/emergent-capabilities.md) for the full worked example of multi-GMI synthesis via `spawn_specialist`, runtime sequence, and tested rejection paths.
+See [Emergent Capabilities](./EMERGENT_CAPABILITIES.md) for the full worked example of multi-GMI synthesis via `spawn_specialist`, runtime sequence, and tested rejection paths.
 
 ### Checkpoint/Restore
 

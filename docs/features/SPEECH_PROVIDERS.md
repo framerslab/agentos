@@ -275,12 +275,12 @@ export function createExtensionPack(): ExtensionPack {
 }
 ```
 
-See [RFC_EXTENSION_STANDARDS.md](./RFC_EXTENSION_STANDARDS.md) for the full extension pack specification.
+See [RFC_EXTENSION_STANDARDS.md](../extensions/RFC_EXTENSION_STANDARDS.md) for the full extension pack specification.
 
 ---
 
 ## Related Documentation
 
 - [VOICE_PIPELINE.md](./VOICE_PIPELINE.md) — end-to-end voice session orchestration
-- [RFC_EXTENSION_STANDARDS.md](./RFC_EXTENSION_STANDARDS.md) — extension pack authoring guide
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — high-level package architecture
+- [RFC_EXTENSION_STANDARDS.md](../extensions/RFC_EXTENSION_STANDARDS.md) — extension pack authoring guide
+- [ARCHITECTURE.md](../architecture/ARCHITECTURE.md) — high-level package architecture
