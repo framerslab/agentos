@@ -196,7 +196,7 @@ function getCandidates(colonists: Colonist[], dept: Department, topN: number): C
 }
 ```
 
-The commander receives candidate summaries (name, age, specialization, HEXACO profile, relevant experience) and returns:
+The commander receives one line per candidate (name, id, age, specialization and HEXACO profile) for medical, engineering, agriculture and psychology, and returns:
 
 ```typescript
 interface PromotionDecision {
@@ -211,22 +211,20 @@ interface PromotionDecision {
 
 ### Agent sessions
 
-Department agents are NOT recreated each turn. Instead, the orchestrator injects the current HEXACO values into each turn's prompt:
+Department agents are NOT recreated each turn. Instead, `buildDepartmentContext()` (`departments.ts`) puts the living department head's current HEXACO values into each turn's prompt:
 
 ```
-Your current personality profile (this evolves over time):
+YOUR PERSONALITY PROFILE (evolves over time based on leadership and experience):
 Openness: 0.61 | Conscientiousness: 0.72 | Extraversion: 0.45
 Agreeableness: 0.58 | Emotionality: 0.52 | Honesty-Humility: 0.68
-
-This shapes your analysis style. Higher openness means you consider novel solutions.
-Higher conscientiousness means you demand more evidence before recommending action.
+Higher openness: consider novel solutions. Higher conscientiousness: demand evidence. Higher emotionality: weigh human impact.
 ```
 
 This is cheaper than recreating agents and lets the model naturally shift its behavior.
 
-### Subsequent promotions
+### Later turns
 
-The commander can promote new colonists at Turn 9 (governance) or whenever a department head dies. The kernel flags when a promotion is needed.
+Promotions happen once, at Turn 0; when the commander's reply holds no valid promotion for a department, the orchestrator promotes that department's top candidate. Governance joins the turn schedule at Turn 9 (`getDepartmentsForTurn()`), but nobody is promoted to it, so it has no session and files no report. When a department head dies, the department keeps its session and reports without a personality block; nobody is promoted in the head's place.
 
 ## Outcome Classification
 
@@ -275,7 +273,7 @@ function classifyOutcome(
     }
   },
   "outcomeClassifications": [
-    { "turn": 1, "year": 2035, "outcome": "risky_success", "riskyOption": "Valles Marineris", "commanderChoseRisky": true }
+    { "turn": 1, "year": 2035, "outcome": "risky_success" }
   ]
 }
 ```
@@ -286,12 +284,12 @@ function classifyOutcome(
 |---|---|
 | `state.ts` | Add HexacoProfile, PromotionRecord, HexacoSnapshot to Colonist |
 | `colonist-generator.ts` | Add randomHexaco() per colonist, trait inheritance for children |
-| `progression.ts` | Add applyPersonalityDrift() in between-turn progression |
-| `kernel.ts` | Add classifyOutcome(), getCandidates(), applyDrift() |
+| `progression.ts` | Add applyPersonalityDrift() and classifyOutcome() |
+| `kernel.ts` | Add getCandidates(), promoteColonist(), applyDrift() |
 | `contracts.ts` | Add PromotionDecision type |
 | `orchestrator.ts` | Add Turn 0 promotion flow, inject HEXACO into turn prompts, track trajectories |
 | `departments.ts` | Update context builder to include current HEXACO in prompt |
-| `scenarios.ts` | Add riskyOption and riskSuccessProbability to each crisis |
+| `types.ts`, `scenarios.ts` | Add riskyOption and riskSuccessProbability to `Scenario` and to each crisis |
 | Entry points | Same interface, no changes needed |
 
 ## Implementation Order
@@ -300,7 +298,7 @@ function classifyOutcome(
 2. Update `colonist-generator.ts` to randomize HEXACO per colonist
 3. Update `scenarios.ts` with riskyOption fields
 4. Add drift + outcome classification to `progression.ts`
-5. Update `kernel.ts` with getCandidates(), classifyOutcome(), drift in advanceTurn()
+5. Update `kernel.ts` with getCandidates(), promoteColonist() and applyDrift(), which the orchestrator calls after each turn's outcome
 6. Add PromotionDecision to `contracts.ts`
 7. Update `departments.ts` to inject HEXACO into context
 8. Update `orchestrator.ts` with Turn 0 promotion flow and trajectory tracking

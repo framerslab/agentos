@@ -16,11 +16,11 @@ keywords:
 
 # Memory Operations
 
-Three operational subsystems live on top of the AgentOS memory facade: an **auto-ingest pipeline** that extracts and stores facts from each conversation turn, **six agent-facing tools** that let an agent read and write its own memory at runtime, and a **lossless import/export** layer across six formats. They all share the same `Memory` instance and the same vector / FTS index, so a fact added by one path is retrievable through any other.
+Three operational subsystems sit around the AgentOS memory facade: Wunderland's **auto-ingest pipeline**, which extracts facts from conversation turns, **six agent-facing tools** that let an agent read and write its own memory at runtime, and an **import/export** layer (four export formats, six import formats). The tools and the import/export layer work on one `Memory` instance's SQLite brain, so a trace added by one is found by the other.
 
 | Subsystem | Trigger | Direction |
 |---|---|---|
-| **Auto-Ingest** | Every conversation turn, non-blocking | Conversation → vector store |
+| **Auto-Ingest** (Wunderland) | `processConversationTurn()` after a turn | Conversation → vector store or cognitive memory |
 | **Agent Tools** | LLM tool call (`memory_add`, `memory_search`, …) | Agent ↔ memory |
 | **Import/Export** | Explicit `memory.export()` / `memory.import()` | Memory ↔ external format |
 
@@ -28,20 +28,16 @@ Three operational subsystems live on top of the AgentOS memory facade: an **auto
 
 ## Auto-Ingest Pipeline
 
-After every conversation turn, the auto-ingest pipeline uses a cheap LLM (gpt-4o-mini or claude-haiku) to extract structured facts from the exchange and store them in the agent's vector database. The pipeline runs non-blocking so it never slows down the conversation.
-
-### What It Does
-
-The pipeline watches each user–assistant exchange, sends it through LLM-as-judge fact extraction, scores each fact's importance against a personality-derived threshold, and persists qualifying facts into the `auto_memories` vector collection for future retrieval.
+`MemoryAutoIngestPipeline` (Wunderland) takes one user message and one assistant reply, asks an LLM for facts worth keeping, filters them by the agent's HEXACO-derived memory config, and stores the rest. The host supplies the LLM call (`llmCaller`), so the model is the host's choice.
 
 ### How It Works
 
 ```mermaid
 graph LR
     A["User message +\nAssistant response"]:::primary
-    B["LLM Fact Extraction\n(cheap model)"]:::processing
-    C["Personality Scoring\n(HEXACO thresholds)"]:::processing
-    D["Vector Store\n(auto_memories collection)"]:::memory
+    B["LLM Fact Extraction\n(host-supplied llmCaller)"]:::processing
+    C["Category, boost and\nthreshold filter"]:::processing
+    D["CognitiveMemoryManager.encode()\nor auto_memories collection"]:::memory
 
     A --> B --> C --> D
 
@@ -50,11 +46,11 @@ graph LR
     classDef processing fill:#1c1c28,stroke:#8b5cf6,color:#f2f2fa
 ```
 
-1. **Extract** — The LLM receives the latest turn and outputs candidate facts, each tagged with a category and raw importance score (0–1).
-2. **Score** — The personality scoring layer modulates raw importance using the agent's HEXACO traits (see below).
-3. **Filter** — Facts below the importance threshold (default 0.4) are discarded.
-4. **Deduplicate** — Remaining facts are compared against existing memories via cosine similarity (default threshold 0.85). Near-duplicates are dropped.
-5. **Store** — Qualifying facts are embedded and written to the `auto_memories` vector collection with metadata (category, importance, timestamp, source turn).
+1. **Extract**: `llmCaller` returns candidate facts, each with a category, an importance score (0-1) and entities. When the call fails, the turn stores nothing.
+2. **Filter**: a fact whose category the personality config does not enable is skipped. The category's boost is added to the importance, and a fact below the threshold is skipped; the threshold is the lower of the personality-derived value and `storage.autoIngest.importanceThreshold` (default 0.4). At most `maxPerTurn` facts are kept, the lower of the two limits (default 3).
+3. **Store**: with a cognitive memory manager attached, each fact goes through `CognitiveMemoryManager.encode()` as a trace tagged with its category and `auto_ingest`. Without one, the facts are upserted into the `auto_memories` collection of the agent's vector store, with category, importance, entities, conversation id and timestamp as metadata, and embedded only when the host passes `embedFn`.
+
+The pipeline does no deduplication.
 
 ### Fact Categories
 
@@ -68,17 +64,17 @@ graph LR
 
 ### HEXACO Personality Modulation
 
-Each HEXACO trait adjusts which categories get boosted, the importance threshold, and extraction volume:
+`derivePersonalityMemoryConfig()` starts from a threshold of 0.4, three facts per turn and the five categories above, then adjusts them for each trait above 0.6:
 
 | Trait (> 0.6) | Effect |
 |---------------|--------|
-| **Openness** | Lowers importance threshold (catches more marginal facts), +1 max facts per turn, enables emotional context tracking |
-| **Conscientiousness** | Boosts `goal` and action-item importance, tighter deduplication (0.92), more frequent compaction |
-| **Agreeableness** | Boosts `user_preference` importance, increases retrieval topK by 2 |
-| **Emotionality** | Enables sentiment tracking, boosts `episodic` and emotional context categories |
-| **Honesty** | Boosts `correction` category priority, loosens deduplication (0.75) to preserve nuance |
+| **Openness** | Lowers the importance threshold (floor 0.2), allows one more fact per turn (up to 5), enables the `emotional_context` category. Openness below 0.4 raises the threshold (cap 0.7) and allows one fact fewer. |
+| **Conscientiousness** | Enables the `action_item` category with a 0.15 boost, adds 0.1 to `goal` |
+| **Agreeableness** | Adds 0.15 to `user_preference` |
+| **Emotionality** | Enables `emotional_context` with a 0.1 boost, adds 0.1 to `episodic` |
+| **Honesty** | Adds 0.2 to `correction` |
 
-The modulation is automatic — derived from the agent's `personality` block in `agent.config.json`. No manual tuning required.
+The function also sets a deduplication threshold, a compaction interval, a retrieval top-K and a sentiment flag from the traits; nothing reads those four fields. Wunderland derives the config from the agent's `personality` block in `agent.config.json`.
 
 ### Configuration
 
@@ -99,15 +95,12 @@ Add a `storage.autoIngest` section to `agent.config.json`:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `enabled` | `true` | Toggle the pipeline on/off |
-| `importanceThreshold` | `0.4` | Minimum importance score to store a fact (before personality modulation) |
-| `maxPerTurn` | `3` | Maximum facts extracted per conversation turn |
+| `importanceThreshold` | `0.4` | Minimum boosted importance to store a fact; the pipeline uses the lower of this and the personality-derived threshold |
+| `maxPerTurn` | `3` | Maximum facts stored per turn; the pipeline uses the lower of this and the personality-derived limit |
 
 ### Integration Points
 
-The pipeline is wired into two entry points:
-
-- **Chat runtime** — runs after each assistant response via the `afterTurn()` hook in `AgentStorageManager`.
-- **Chat runtime API** (`/api/chat`) — triggered by the same hook when conversations run through the HTTP API.
+`wunderland chat` builds the pipeline from the agent's storage config and traits and calls `processConversationTurn()` after each reply without awaiting it. It builds the pipeline with a placeholder `llmCaller` that returns no facts, so a chat session stores nothing through it. Wunderland's tool-failure learner also passes tool failures through the pipeline.
 
 ### Relationship to Observer / Reflector
 
@@ -121,7 +114,7 @@ The auto-ingest pipeline and the Observer/Reflector system are complementary but
 | **Output** | Individual facts in vector store | Observation notes + long-term memory traces |
 | **Purpose** | Capture details before they scroll out of context | Compress and consolidate accumulated knowledge |
 
-Both systems feed the same retrieval pipeline — auto-ingested facts are surfaced by RAG queries alongside Observer/Reflector traces, scored by the same composite retrieval formula (vector similarity, Ebbinghaus strength, emotional congruence, recency, graph activation, importance).
+With a cognitive memory manager attached, auto-ingested facts become traces and are retrieved with the same composite score as the observer's notes (vector similarity, Ebbinghaus strength, emotional congruence, recency, graph activation, importance). Without one, they stay in the `auto_memories` collection.
 
 ### Key Files
 
@@ -131,14 +124,15 @@ The auto-ingest pipeline ships in [Wunderland](https://github.com/jddunn/wunderl
 |------|---------|
 | [`src/memory/auto-ingest/MemoryAutoIngestPipeline.ts`](https://github.com/jddunn/wunderland/blob/master/src/memory/auto-ingest/MemoryAutoIngestPipeline.ts) | Pipeline orchestrator |
 | [`src/memory/storage/PersonalityMemoryConfig.ts`](https://github.com/jddunn/wunderland/blob/master/src/memory/storage/PersonalityMemoryConfig.ts) | HEXACO-to-config mapping |
-| [`src/memory/storage/AgentStorageManager.ts`](https://github.com/jddunn/wunderland/blob/master/src/memory/storage/AgentStorageManager.ts) | Wires pipeline into afterTurn() |
+| [`src/memory/storage/AgentStorageManager.ts`](https://github.com/jddunn/wunderland/blob/master/src/memory/storage/AgentStorageManager.ts) | Holds the per-agent vector store and the pipeline (`setAutoIngestPipeline()`) |
+| [`src/cli/commands/chat.ts`](https://github.com/jddunn/wunderland/blob/master/src/cli/commands/chat.ts) | Builds the pipeline and calls it after each reply |
 
 ---
 
 ## Agent Memory Tools
 
 
-> Six ITool implementations let agents read, write, search, and consolidate their own memory traces at runtime. Register them as a pack or individually.
+> Six ITool implementations let agents read, write, search, and consolidate their own memory traces at runtime. `Memory.createTools()` returns them; register them one by one, as a pack, or through `AgentOS.create({ memoryTools })`.
 
 
 ### Overview
@@ -148,37 +142,36 @@ The auto-ingest pipeline ships in [Wunderland](https://github.com/jddunn/wunderl
 | [`MemoryAddTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/tools/MemoryAddTool.ts) | `memory_add` | Store a new memory trace | Write |
 | [`MemoryUpdateTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/tools/MemoryUpdateTool.ts) | `memory_update` | Update content or tags of an existing trace | Write |
 | [`MemoryDeleteTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/tools/MemoryDeleteTool.ts) | `memory_delete` | Soft-delete a trace by ID | Write |
-| [`MemoryMergeTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/tools/MemoryMergeTool.ts) | `memory_merge` | Merge multiple traces into one | Write |
+| [`MemoryMergeTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/tools/MemoryMergeTool.ts) | `memory_merge` | Merge two or more traces into the most-retrieved one | Write |
 | [`MemorySearchTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/tools/MemorySearchTool.ts) | `memory_search` | FTS5 full-text search over traces | Read-only |
 | [`MemoryReflectTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/tools/MemoryReflectTool.ts) | `memory_reflect` | Trigger on-demand consolidation | Write |
 
-All tools implement the [`ITool`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ITool.ts) interface and belong to the `memory` category.
+`createTools()` leaves out `memory_reflect` when the `Memory` was created with `selfImprove: false` (there is no consolidation loop) or when called with `{ includeReflect: false }`. All tools implement the [`ITool`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ITool.ts) interface and belong to the `memory` category.
 
 
 ### Registration
 
-### Extension Pack (Recommended)
-
-```ts
-import { createMemoryToolsPack, Memory } from '@framers/agentos';
-
-const memory = await Memory.createSqlite({ path: './brain.sqlite', selfImprove: true });
-
-// Register all 6 tools at once
-for (const tool of memory.createTools()) {
-  await agentos.getToolOrchestrator().registerTool(tool);
-}
-```
-
-### Via AgentOS Initialize
+### Register the tools directly
 
 ```ts
 import { AgentOS, Memory } from '@framers/agentos';
 
 const memory = await Memory.createSqlite({ path: './brain.sqlite', selfImprove: true });
-const agentos = new AgentOS();
+const agentos = await AgentOS.create();
 
-await agentos.initialize({
+for (const tool of memory.createTools()) {
+  await agentos.getToolOrchestrator().registerTool(tool);
+}
+```
+
+### Through the AgentOS configuration
+
+```ts
+import { AgentOS, Memory } from '@framers/agentos';
+
+const memory = await Memory.createSqlite({ path: './brain.sqlite', selfImprove: true });
+
+const agentos = await AgentOS.create({
   memoryTools: {
     memory,
     includeReflect: true,     // Include memory_reflect tool
@@ -188,9 +181,11 @@ await agentos.initialize({
 });
 ```
 
-### Extension-Based Registration
+### As an extension pack
 
 ```ts
+import { createMemoryToolsPack } from '@framers/agentos';
+
 await agentos.getExtensionManager().loadPackFromFactory(
   createMemoryToolsPack(memory),
   'memory-tools',
@@ -209,21 +204,22 @@ Store a new memory trace in the agent's brain database.
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `content` | `string` | Yes | --- | The text content to remember |
-| `type` | `string` | No | `'episodic'` | Tulving memory type: `episodic`, `semantic`, `procedural`, `prospective` |
+| `type` | `string` | No | `'episodic'` | Memory type: `episodic`, `semantic`, `procedural`, `prospective`, `relational` |
 | `scope` | `string` | No | `'user'` | Visibility scope: `thread`, `user`, `persona`, `organization` |
 | `tags` | `string[]` | No | `[]` | Free-form tags for filtering |
 
 **Output:**
 
 ```json
-{ "traceId": "mt_abc123-def4-5678-9abc-def012345678" }
+{ "traceId": "mt_1711234567890_0" }
 ```
 
 **Behaviour:**
-- Creates a trace with strength 1.0 (full encoding strength at creation time).
-- Computes SHA-256 content hash for deduplication --- if an identical trace exists with the same type and scope, the existing trace ID is returned instead.
-- ID format: `mt_<UUID>` (crypto.randomUUID for collision safety).
-- The trace is indexed in FTS5 and optionally added to the memory graph.
+- Creates a trace with strength 1.0 (full encoding strength at creation time) and no embedding.
+- Stores the SHA-256 hash of the content in the trace's metadata. It does not check for an existing trace with the same content: calling it twice stores two traces.
+- ID format: `mt_<epoch ms>_<counter>`, the counter counting up within the process.
+- Records the scope id resolved from the execution context (for example the user id for `user` scope) in the metadata.
+- Indexes the trace in FTS5.
 
 **Example:**
 
@@ -258,11 +254,11 @@ Update the content or tags of an existing memory trace.
 ```
 
 **Behaviour:**
-- Locates the trace by ID in `memory_traces`.
+- Locates the active (not deleted) trace by ID in `memory_traces`.
 - Updates only the specified fields (content, tags, or both).
-- Recomputes the content hash if content changed.
-- Re-syncs the FTS5 index entry.
-- Returns `{ "updated": false }` if the trace was not found.
+- When the content changes, recomputes the content hash and clears the stored embedding.
+- Rebuilds the FTS5 index.
+- Returns `{ "updated": false }` if the trace was not found, was deleted, or neither field was given.
 
 **Example:**
 
@@ -270,7 +266,7 @@ Update the content or tags of an existing memory trace.
 {
   "name": "memory_update",
   "arguments": {
-    "traceId": "mt_abc123-def4-5678-9abc-def012345678",
+    "traceId": "mt_1711234567890_0",
     "content": "User prefers dark mode, TypeScript, and VS Code.",
     "tags": ["preference", "ui", "language", "editor"]
   }
@@ -306,7 +302,7 @@ Soft-delete a memory trace by ID.
 {
   "name": "memory_delete",
   "arguments": {
-    "traceId": "mt_abc123-def4-5678-9abc-def012345678"
+    "traceId": "mt_1711234567890_0"
   }
 }
 ```
@@ -314,30 +310,30 @@ Soft-delete a memory trace by ID.
 
 ### `memory_merge`
 
-Merge multiple memory traces into a single consolidated trace.
+Merge two or more memory traces into one surviving trace.
 
 **Input Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `traceIds` | `string[]` | Yes | IDs of traces to merge (minimum 2) |
-| `content` | `string` | No | Override content for the merged trace (if omitted, content is concatenated) |
+| `mergedContent` | `string` | No | Content for the merged trace (if omitted, the contents are joined with ` \| `) |
 
 **Output:**
 
 ```json
 {
-  "mergedTraceId": "mt_new-merged-id",
-  "sourcesDeleted": 3
+  "survivorId": "mt_aaa",
+  "deletedIds": ["mt_bbb", "mt_ccc"]
 }
 ```
 
 **Behaviour:**
-- Creates a new trace combining the content of all source traces.
-- Tags from all source traces are unioned.
-- Source traces are soft-deleted with a reference to the merged trace.
-- The merged trace inherits the highest strength among the sources.
-- Knowledge graph edges from source traces are re-pointed to the merged trace.
+- Fails when fewer than two of the IDs name active traces.
+- The trace with the highest retrieval count survives and takes the merged content; its embedding is cleared.
+- Tags from all source traces are unioned onto the survivor.
+- Retrieval counts are summed, and the survivor keeps the latest access time and the highest decay stability among the sources.
+- The other traces are soft-deleted, and the FTS5 index is rebuilt.
 
 **Example:**
 
@@ -346,7 +342,7 @@ Merge multiple memory traces into a single consolidated trace.
   "name": "memory_merge",
   "arguments": {
     "traceIds": ["mt_aaa", "mt_bbb", "mt_ccc"],
-    "content": "User's deployment preferences: Docker Compose, blue-green strategy, Friday deploys."
+    "mergedContent": "User's deployment preferences: Docker Compose, blue-green strategy, Friday deploys."
   }
 }
 ```
@@ -386,12 +382,13 @@ Full-text search over memory traces using the FTS5 index with BM25 ranking.
 - Queries the `memory_traces_fts` FTS5 virtual table.
 - Results are ranked by BM25 relevance score.
 - Only active traces are returned (soft-deleted traces are excluded).
-- Optional `type` and `scope` filters are applied via SQL WHERE clauses on the join.
-- Natural language queries are automatically converted to FTS5 syntax.
+- Optional `type` and `scope` filters are applied via SQL WHERE clauses on the join; a `scope` filter also matches the scope id resolved from the execution context.
+- `limit` takes 1 to 100.
+- The query runs as FTS5 syntax first; when SQLite rejects it as a syntax error, the tool converts it to a natural-language FTS5 query and runs it again.
 
 ### FTS5 Query Syntax
 
-The tool accepts natural language queries which are internally converted to FTS5 format. You can also use FTS5 operators directly:
+The tool accepts FTS5 operators directly, and falls back to a converted query for natural-language input that FTS5 rejects:
 
 | Syntax | Meaning | Example |
 |--------|---------|---------|
@@ -434,7 +431,8 @@ Trigger on-demand memory consolidation --- the analogue of slow-wave sleep. Runs
   "merged": 1,
   "derived": 0,
   "compacted": 2,
-  "durationMs": 42
+  "durationMs": 42,
+  "personalityDecayed": 0
 }
 ```
 
@@ -477,7 +475,7 @@ If a consolidation cycle is already in progress (mutex), returns immediately wit
 
 ### rehydrate_memory (opt-in)
 
-Retrieves the original verbatim content of a memory trace whose content has been compressed by temporal gist. Register by passing `{ includeRehydrate: true }` to `MemoryToolsExtension`. Requires an [`IMemoryArchive`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/archive/IMemoryArchive.ts) to be configured.
+Retrieves the original verbatim content of a memory trace whose content has been compressed by temporal gist. Neither `Memory.createTools()` nor `createMemoryToolsPack()` adds it (`MemoryToolsExtensionOptions.includeRehydrate` is declared but not read): build it with `new RehydrateMemoryTool(archive)`, passing an [`IMemoryArchive`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/archive/IMemoryArchive.ts), and register it yourself. The package entry points do not export the class; import it from `@framers/agentos/memory/io/tools/RehydrateMemoryTool`.
 
 **Input:** `{ traceId: string }` — the ID of the gisted/archived trace.
 
@@ -488,24 +486,26 @@ Retrieves the original verbatim content of a memory trace whose content has been
 
 ### Source Files
 
+All under [`src/cognition/memory/io/tools/`](https://github.com/framerslab/agentos/tree/master/src/cognition/memory/io/tools):
+
 | File | Purpose |
 |------|---------|
-| `memory/tools/MemoryAddTool.ts` | `memory_add` implementation |
-| `memory/tools/MemoryUpdateTool.ts` | `memory_update` implementation |
-| `memory/tools/MemoryDeleteTool.ts` | `memory_delete` implementation |
-| `memory/tools/MemoryMergeTool.ts` | `memory_merge` implementation |
-| `memory/tools/MemorySearchTool.ts` | `memory_search` implementation |
-| `memory/tools/MemoryReflectTool.ts` | `memory_reflect` implementation |
-| `memory/tools/RehydrateMemoryTool.ts` | `rehydrate_memory` implementation (opt-in) |
-| `memory/tools/index.ts` | Barrel exports for all tools |
-| `memory/tools/scopeContext.ts` | Scope ID resolution from execution context |
+| `MemoryAddTool.ts` | `memory_add` implementation |
+| `MemoryUpdateTool.ts` | `memory_update` implementation |
+| `MemoryDeleteTool.ts` | `memory_delete` implementation |
+| `MemoryMergeTool.ts` | `memory_merge` implementation |
+| `MemorySearchTool.ts` | `memory_search` implementation |
+| `MemoryReflectTool.ts` | `memory_reflect` implementation |
+| `RehydrateMemoryTool.ts` | `rehydrate_memory` implementation (opt-in) |
+| `index.ts` | Barrel exports for all tools |
+| `scopeContext.ts` | Scope ID resolution from execution context |
 
 ---
 
 ## Import and Export
 
 
-> The Memory I/O subsystem provides lossless round-trip serialisation across four export formats and six import formats. JSON round-trips traces, graph rows, documents, chunks, images, conversations, and messages, and trace deduplication is enabled by default on import.
+> The Memory I/O subsystem exports to four formats and imports from six. The SQLite and JSON exports carry the whole brain: JSON holds traces, graph rows, documents, chunks, images, conversations, and messages. Markdown and Obsidian exports carry the active traces only. Trace deduplication is on by default on import.
 
 
 ### Overview
@@ -546,27 +546,32 @@ await mem.export('./memories-with-embeddings.json', {
 });
 ```
 
-Each trace entry contains fields like:
+Each trace entry is the raw `memory_traces` row, with snake_case columns and JSON-encoded `tags`, `emotions` and `metadata` strings:
 
 ```json
 {
-  "id": "mt_abc123",
+  "brain_id": "brain",
+  "id": "mt_1711234567890_0",
   "type": "semantic",
   "scope": "user",
   "content": "User prefers TypeScript over Python",
+  "embedding": null,
   "strength": 0.87,
-  "tags": ["preference", "language"],
-  "emotions": {},
-  "metadata": { "source": "user_statement" },
-  "createdAt": 1711234567890,
-  "lastAccessed": 1711234600000,
-  "retrievalCount": 3
+  "created_at": 1711234567890,
+  "last_accessed": 1711234600000,
+  "retrieval_count": 3,
+  "tags": "[\"preference\",\"language\"]",
+  "emotions": "{}",
+  "metadata": "{\"source\":\"user_statement\"}",
+  "deleted": 0
 }
 ```
 
+`includeConversations: false` leaves out the conversation and message rows.
+
 ### Markdown (Human-Readable)
 
-Exports each trace as a standalone `.md` file with YAML front-matter. The output directory structure groups traces by type:
+Exports each active trace as a standalone `.md` file with YAML front-matter, in a `{scope}/{type}/` folder:
 
 ```ts
 await mem.export('./memory-export', { format: 'markdown' });
@@ -576,27 +581,29 @@ Produces files like:
 
 ```
 memory-export/
-  episodic/
-    mt_abc123.md
-    mt_def456.md
-  semantic/
-    mt_ghi789.md
-  procedural/
-    mt_jkl012.md
+  user/
+    episodic/
+      mt_1711234567890_0.md
+    semantic/
+      mt_1711234567890_1.md
+  thread/
+    procedural/
+      mt_1711234567890_2.md
 ```
 
 Each file:
 
 ```markdown
-id: mt_abc123
+---
+id: mt_1711234567890_1
 type: semantic
 scope: user
 strength: 0.87
 tags:
   - preference
   - language
-createdAt: 2024-03-24T12:34:56Z
-
+createdAt: 1711234567890
+---
 User prefers TypeScript over Python
 ```
 
@@ -610,29 +617,30 @@ await mem.export('./vault', { format: 'obsidian' });
 
 Produces:
 
-- `[[wikilinks]]` between related traces (graph edges become internal links).
 - `#tags` in the body for every tag on the trace.
-- YAML front-matter with all metadata fields.
-- Folder structure matching Tulving memory types.
+- A **Related:** list of `[[wikilinks]]` to the labels of the knowledge-graph nodes the trace's node links to (empty when the graph has no edges for it).
+- The same YAML front-matter and `{scope}/{type}/` folders as the Markdown export.
 
 Example output:
 
 ```markdown
-id: mt_abc123
+---
+id: mt_1711234567890_1
 type: semantic
 scope: user
 strength: 0.87
 tags:
   - preference
   - language
-
+createdAt: 1711234567890
+---
 User prefers TypeScript over Python
 
 #preference #language
 
-### Related
-- [[mt_def456]] — deployment preferences
-- [[mt_ghi789]] — tooling choices
+**Related:**
+- [[TypeScript]]
+- [[tooling]]
 ```
 
 
@@ -640,7 +648,7 @@ User prefers TypeScript over Python
 
 ### SQLite
 
-Merges another brain database into the current one. Smart deduplication compares content hashes; conflicting traces are resolved by tag union.
+Merges another brain database into the current one. A source trace whose content hash or content already exists in the brain is not inserted: its tags are unioned into the existing trace, which keeps the newer `created_at`. Knowledge nodes are matched by label and type, edges by source, target and type.
 
 ```ts
 const result = await mem.importFrom('./backup.sqlite', { format: 'sqlite' });
@@ -657,7 +665,7 @@ const result = await mem.importFrom('./memories.json', { format: 'json' });
 
 ### Markdown
 
-Walks a directory of Markdown files with YAML front-matter. Each file becomes one memory trace. The `id`, `type`, `scope`, `tags`, and `strength` fields are read from front-matter; the body becomes the trace content.
+Walks a directory of Markdown files with YAML front-matter. Each file with a non-empty body becomes one memory trace. The `id`, `type`, `scope`, `tags`, `strength` and `createdAt` fields are read from front-matter (defaults: a new id, `episodic`, `user`, no tags, 1.0, now); the body becomes the trace content.
 
 ```ts
 const result = await mem.importFrom('./notes/', { format: 'markdown' });
@@ -671,27 +679,28 @@ Extends the Markdown importer with Obsidian-specific parsing:
 const result = await mem.importFrom('./my-vault/', { format: 'obsidian' });
 ```
 
-- `[[wikilinks]]` are parsed and converted to knowledge graph edges between traces.
-- YAML front-matter fields are mapped to trace metadata.
+- Each `[[wikilink]]` (or `[[Target|Alias]]`) becomes a `related_to` knowledge-graph edge from the note's node to a node for the target label, created when missing.
+- YAML front-matter fields are read as in the Markdown importer.
 - `#tags` in the body are extracted and added to the trace's tag array.
-- Folder structure is used to infer memory type when not specified in front-matter.
+- Embedded images (`![[image.png]]`) are not imported.
+- The folder a note sits in does not set its type: a note without `type` in its front-matter is imported as `episodic`.
 
 ### ChatGPT Export
 
-Imports from ChatGPT's `conversations.json` export file. Each user/assistant message pair becomes an episodic memory trace:
+Imports from ChatGPT's `conversations.json` export file. Each conversation becomes a row in the `conversations` table, and each user/assistant message pair becomes an episodic memory trace:
 
 ```ts
 const result = await mem.importFrom('./conversations.json', { format: 'chatgpt' });
 ```
 
-- Conversation titles become trace tags.
-- Each message pair (user question + assistant answer) becomes one episodic trace.
-- Timestamps from the export are preserved as `createdAt`.
+- Each message pair becomes one `episodic` trace in `user` scope whose content is `[user]: ...` followed by `[assistant]: ...`, with no tags; its metadata names the conversation row.
+- System and tool messages are skipped.
+- The user message's timestamp from the export becomes the trace's `created_at`.
 - Long conversations produce many traces, which can then be consolidated via `mem.consolidate()`.
 
 ### CSV
 
-Imports flat CSV files. Requires a `content` column; all other columns are treated as metadata:
+Imports flat CSV files with a header row. A `content` column is required. The optional columns `id`, `type`, `scope`, `strength`, `created_at` (or `createdAt`), `last_accessed`, `retrieval_count`, `deleted`, `tags` (a JSON array, or comma- or pipe-separated) and `metadata` (a JSON object) map onto the trace's fields:
 
 ```ts
 const result = await mem.importFrom('./knowledge-base.csv', { format: 'csv' });
@@ -710,10 +719,9 @@ content,type,tags
 
 All import paths use SHA-256 content hashing to prevent duplicate traces:
 
-1. Before inserting a new trace, the importer computes `SHA-256(content)`.
-2. The hash is compared against existing traces in the `memory_traces.metadata` JSON column (field: `import_hash`).
-3. If a matching hash exists with the same `type` and `scope`, the trace is skipped.
-4. Deduplication is enabled by default (`dedup: true`) and can be disabled per-import.
+1. Before inserting a trace, the importer computes `SHA-256(content)` and stores it in the trace's metadata as `import_hash`.
+2. When a trace in the brain already carries that hash, the row is skipped (counted in `skipped`), whatever its type and scope. The CSV and SQLite importers also match a trace's own `content_hash`, and the SQLite importer an identical `content`.
+3. Deduplication is enabled by default (`dedup: true`) and can be disabled per-import.
 
 ```ts
 // Disable dedup (allows duplicate content)
@@ -767,15 +775,17 @@ interface ImportOptions {
 
 ### Source Files
 
+All under [`src/cognition/memory/io/`](https://github.com/framerslab/agentos/tree/master/src/cognition/memory/io):
+
 | File | Purpose |
 |------|---------|
-| `memory/io/JsonExporter.ts` | JSON export (NDJSON or array) |
-| `memory/io/JsonImporter.ts` | JSON import with dedup |
-| `memory/io/MarkdownExporter.ts` | Markdown directory export with YAML front-matter |
-| `memory/io/MarkdownImporter.ts` | Markdown directory import |
-| `memory/io/ObsidianExporter.ts` | Obsidian vault export (wikilinks + tags) |
-| `memory/io/ObsidianImporter.ts` | Obsidian vault import (wikilinks -> graph edges) |
-| `memory/io/SqliteExporter.ts` | `VACUUM INTO` byte-perfect backup |
-| `memory/io/SqliteImporter.ts` | SQLite merge with smart dedup + tag union |
-| `memory/io/ChatGptImporter.ts` | ChatGPT `conversations.json` parser |
-| `memory/io/CsvImporter.ts` | CSV import with required `content` column |
+| `JsonExporter.ts` | JSON export (one document) |
+| `JsonImporter.ts` | JSON import with dedup |
+| `MarkdownExporter.ts` | Markdown directory export with YAML front-matter |
+| `MarkdownImporter.ts` | Markdown directory import |
+| `ObsidianExporter.ts` | Obsidian vault export (wikilinks + tags) |
+| `ObsidianImporter.ts` | Obsidian vault import (wikilinks -> graph edges) |
+| `SqliteExporter.ts` | `VACUUM INTO` byte-perfect backup |
+| `SqliteImporter.ts` | SQLite merge with smart dedup + tag union |
+| `ChatGptImporter.ts` | ChatGPT `conversations.json` parser |
+| `CsvImporter.ts` | CSV import with required `content` column |
