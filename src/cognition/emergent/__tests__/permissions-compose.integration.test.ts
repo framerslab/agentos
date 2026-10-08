@@ -1118,7 +1118,7 @@ describe('compositions and workflows: one gate, one rule', () => {
     expect((await callTool(host.orchestrator, 'loop_b', { text: 'hi' })).output).toEqual({ text: 'hi' });
   });
 
-  it('a forge registered while another forge closed a cycle with it is taken out again', async () => {
+  it("a forge registered while another forge closed a cycle with it is taken out again, and the host's tool keeps its name", async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db, tools: [echoTool('loop_a'), echoTool('loop_b')] });
 
@@ -1143,6 +1143,51 @@ describe('compositions and workflows: one gate, one rule', () => {
     expect(host.engine.getSessionTools('sess-cycle').map((tool) => tool.name)).toEqual(['loop_b']);
     const loopA = await host.orchestrator.getTool('loop_a');
     expect((loopA as { emergentMode?: string } | undefined)?.emergentMode).toBeUndefined();
+    // The host's loop_a still holds the name, so loop_b, forged over it, runs.
+    expect(loopA?.id).toBe('loop_a-v1');
+    expect((await callTool(host.orchestrator, 'loop_b', { text: 'hi' })).output).toEqual({ text: 'hi' });
+  });
+
+  it("a forge taken out after its executable took a host tool's name hands the name back to the host's tool", async () => {
+    let enterShutdown!: () => void;
+    const shutdownEntered = new Promise<void>((resolve) => {
+      enterShutdown = resolve;
+    });
+    let releaseShutdown!: () => void;
+    const shutdownHeld = new Promise<void>((resolve) => {
+      releaseShutdown = resolve;
+    });
+    // The executor shuts the host's loop_a down when another registration
+    // takes its name, and holds the name until that shutdown returns.
+    const hostLoopA: ITool = {
+      ...echoTool('loop_a'),
+      shutdown: async () => {
+        enterShutdown();
+        await shutdownHeld;
+      },
+    };
+    const host = await makeForgeHost({ tools: [hostLoopA, echoTool('loop_b')] });
+
+    // loop_a over the host's loop_b passes every check, and the host is
+    // registering its executable when loop_b is forged in full over the
+    // host's loop_a, which still holds the name.
+    const forgingA = callTool(host.orchestrator, 'forge_tool', composeOver('loop_a', 'loop_b'), {
+      sessionId: 'sess-restore',
+    });
+    await shutdownEntered;
+    const forgedB = await callTool(host.orchestrator, 'forge_tool', composeOver('loop_b', 'loop_a'), {
+      sessionId: 'sess-restore',
+    });
+    expect(forgedB.isError).toBeFalsy();
+    releaseShutdown();
+    const forgedA = await forgingA;
+
+    expect(forgedA.isError).toBe(true);
+    expect(String(forgedA.errorDetails?.message)).toContain('step_cycle');
+    // The host's loop_a holds its name again, and loop_b, forged over it, runs.
+    expect((await host.orchestrator.getTool('loop_a'))?.id).toBe('loop_a-v1');
+    expect((await callTool(host.orchestrator, 'loop_b', { text: 'hi' })).output).toEqual({ text: 'hi' });
+    expect(host.engine.getSessionTools('sess-restore').map((tool) => tool.name)).toEqual(['loop_b']);
   });
 
   it('a chain nested deeper than the limit is refused, and the composition at the limit, which has no cycle, stays active', async () => {

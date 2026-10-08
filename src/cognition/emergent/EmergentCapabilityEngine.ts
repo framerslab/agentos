@@ -333,6 +333,14 @@ export interface EmergentCapabilityEngineDeps {
 
   /** Optional callback used when a tool is removed from the live runtime. */
   onToolRemoved?: (tool: EmergentTool) => Promise<void>;
+
+  /**
+   * Optional callback used to register again a tool of the host's whose name
+   * a forged composition's executable took, when the forge takes that
+   * executable out again (the composition reached itself once registered).
+   * Without it the name is left empty in that case.
+   */
+  onToolRestored?: (tool: ITool) => Promise<void>;
 }
 
 // ============================================================================
@@ -420,6 +428,7 @@ export class EmergentCapabilityEngine {
   private readonly onToolForged?: (tool: EmergentTool, executable: ITool) => Promise<void>;
   private readonly onToolPromoted?: (tool: EmergentTool) => Promise<void>;
   private readonly onToolRemoved?: (tool: EmergentTool) => Promise<void>;
+  private readonly onToolRestored?: (tool: ITool) => Promise<void>;
 
   /** The host's ceiling for code-forged tools, resolved; absent on the legacy path. */
   private readonly ceiling?: ResolvedCeiling;
@@ -453,6 +462,7 @@ export class EmergentCapabilityEngine {
     this.onToolForged = deps.onToolForged;
     this.onToolPromoted = deps.onToolPromoted;
     this.onToolRemoved = deps.onToolRemoved;
+    this.onToolRestored = deps.onToolRestored;
     if (deps.stepGate) {
       this.composableBuilder.bind({ gate: deps.stepGate });
     }
@@ -763,8 +773,37 @@ export class EmergentCapabilityEngine {
             `(${written.reason ?? 'no reason recorded'})`,
         );
       }
+
+      if (request.implementation.mode === 'compose') {
+        // A composition forged while this one's state was written can close a
+        // cycle with it. Checked again here, with nothing awaited between this
+        // check and the registration of the executable below, so a cycle seen
+        // now is refused before the executor is touched and the name keeps the
+        // tool it has.
+        const cycle = this.compositionCycle(request.name, request.implementation.steps);
+        if (cycle) {
+          const held = this.registry.get(toolId);
+          // A load that adopted the tool from its row meanwhile registered its
+          // executable: that one goes too.
+          const registeredMeanwhile =
+            this.composableBuilder.resolve(request.name)?.id === `emergent-tool:${toolId}`;
+          this.registry.remove(toolId);
+          this.removeIndexedToolEverywhere(toolId);
+          if (held && registeredMeanwhile) {
+            await this.dropExecutable(held);
+          }
+          return {
+            success: false,
+            verdict,
+            error: `step_cycle: "${request.name}" reaches itself through ${cycle.join(' -> ')}`,
+          };
+        }
+      }
       this.indexTool(toolId, context.agentId, context.sessionId);
 
+      // What the name resolves to before this tool's executable takes it: a
+      // forge that takes its own executable out again hands the name back.
+      const displaced = this.composableBuilder.resolve(request.name);
       if (this.onToolForged) {
         // The object the registry holds (a registration stores a stamped copy;
         // an adoption above stores the object itself), so the settlement
@@ -796,10 +835,12 @@ export class EmergentCapabilityEngine {
       }
 
       if (request.implementation.mode === 'compose') {
-        // A composition registered between the check above and this one's own
-        // registration can close a cycle with it, and neither check saw the
-        // other: checked once more now that this one resolves by its name, and
-        // taken out again when it reaches itself.
+        // A composition forged while the host was registering this one's
+        // executable (inside its registerTool) can close a cycle with it, and
+        // neither check saw the other: checked once more now that this one
+        // resolves by its name, and taken out again when it reaches itself.
+        // The tool the name resolved to before is registered again, so a
+        // composition forged over that tool meanwhile keeps working.
         const cycle = this.compositionCycle(request.name, request.implementation.steps);
         if (cycle) {
           const held = this.registry.get(toolId);
@@ -808,6 +849,7 @@ export class EmergentCapabilityEngine {
           }
           this.registry.remove(toolId);
           this.removeIndexedToolEverywhere(toolId);
+          await this.restoreDisplaced(request.name, displaced, toolId);
           return {
             success: false,
             verdict,
@@ -1744,6 +1786,39 @@ export class EmergentCapabilityEngine {
     } catch (error: unknown) {
       console.warn(
         `[agentos:emergent] could not take out the executable of "${tool.name}" (${tool.id}):`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
+  /**
+   * Register again the tool a forge's executable took the name from, after
+   * the forge took its own executable out: only while nothing holds the name.
+   * A host's tool goes back through `onToolRestored`; another forged tool of
+   * the name, when this process still holds it active, through
+   * `onToolForged`. Best-effort.
+   */
+  private async restoreDisplaced(name: string, displaced: ITool | undefined, ownToolId: string): Promise<void> {
+    if (
+      !displaced ||
+      displaced.id === `emergent-tool:${ownToolId}` ||
+      this.composableBuilder.resolve(name) !== undefined
+    ) {
+      return;
+    }
+    try {
+      if (displaced.id.startsWith('emergent-tool:')) {
+        const forgedId = displaced.id.slice('emergent-tool:'.length);
+        const forged = this.registry.get(forgedId);
+        if (forged && forged.name === name && this.registry.isActive(forgedId) && this.onToolForged) {
+          await this.onToolForged(forged, this.createExecutableTool(forged));
+        }
+        return;
+      }
+      await this.onToolRestored?.(displaced);
+    } catch (error: unknown) {
+      console.warn(
+        `[agentos:emergent] could not register "${name}" again after the forge that took the name gave it up:`,
         error instanceof Error ? error.message : error,
       );
     }
