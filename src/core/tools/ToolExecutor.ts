@@ -58,7 +58,9 @@ export interface ToolExecutionRequestDetails {
    * The tool instance the caller already resolved and checked (a composed
    * step). `ToolOrchestrator.processToolCall` runs its checks against it and
    * refuses the call (`STEP_REPLACED`) when the name resolves to another
-   * instance by the time the call is delegated.
+   * instance by the time the call is delegated. A call without it is bound
+   * the same way to the instance resolved when the call began
+   * (`TOOL_REPLACED`).
    */
   tool?: ITool;
   /**

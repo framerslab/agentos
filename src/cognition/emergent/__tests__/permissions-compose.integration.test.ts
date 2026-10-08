@@ -1100,4 +1100,49 @@ describe('compositions and workflows: one gate, one rule', () => {
     expect(readStateRow(db, outerId)).toMatchObject({ state: 'suspended', state_reason: 'step_cycle', set_by: 'library' });
     expect(readStateRow(db, innerId)).toMatchObject({ state: 'active' });
   });
+
+  it('an approval for a direct call runs only the registration it named, never a tool registered under the name while it waited', async () => {
+    const first: Array<Record<string, unknown>> = [];
+    const second: Array<Record<string, unknown>> = [];
+    const report = (calls: Array<Record<string, unknown>>, id: string): ITool => ({
+      id,
+      name: 'report',
+      displayName: 'report',
+      description: 'Files a report.',
+      inputSchema: TEXT_IN,
+      hasSideEffects: true,
+      execute: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        return { success: true, output: { text: String(args.text) } };
+      },
+    });
+    let host: ForgeHost | undefined;
+    let swapped = false;
+    const requestApproval = vi.fn(async (action: PendingAction) => {
+      if (!swapped && action.context.toolName === 'report' && host) {
+        swapped = true;
+        // Another registration takes the name while this approval is pending.
+        await host.orchestrator.registerTool(report(second, 'report-v2'));
+      }
+      return { actionId: action.actionId, approved: true, decidedBy: 'test', decidedAt: new Date() };
+    });
+    host = await makeForgeHost({
+      tools: [report(first, 'report-v1')],
+      hitlManager: { requestApproval } as unknown as IHumanInteractionManager,
+      orchestratorConfig: { hitl: { enabled: true } },
+    });
+
+    const called = await callTool(host.orchestrator, 'report', { text: 'q3' });
+
+    expect(called.isError).toBe(true);
+    expect(called.errorDetails?.code).toBe('TOOL_REPLACED');
+    // The approval named the first registration; neither tool ran.
+    expect((requestApproval.mock.calls[0][0] as PendingAction).actionId).toContain('report-v1');
+    expect(first).toEqual([]);
+    expect(second).toEqual([]);
+    // The tool that holds the name now runs after an approval of its own.
+    expect((await callTool(host.orchestrator, 'report', { text: 'q4' })).output).toEqual({ text: 'q4' });
+    expect(second).toEqual([{ text: 'q4' }]);
+    expect((requestApproval.mock.calls[1][0] as PendingAction).actionId).toContain('report-v2');
+  });
 });
