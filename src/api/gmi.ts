@@ -117,8 +117,8 @@ function withMembers<T extends object>(target: T, members: Partial<Record<keyof 
  * A tool registry that leaves out the tools ToolExecutor registers from its own
  * constructor (the built-in getCurrentDateTime), so a tool-less agent offers the
  * model no tools (spec D4j) and an agent tool of the same name is the only one.
- * The constructor starts that registration without waiting for it; skipping it
- * here needs no wait, and no later registration can be overtaken by it.
+ * The constructor starts that registration without waiting for it, so skipping
+ * it here needs no wait for it before the agent's tools register.
  */
 class AgentToolRegistry extends ExtensionRegistry<ITool> {
   /** False while the executor's constructor registers its built-ins. */
