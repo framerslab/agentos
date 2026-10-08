@@ -1143,7 +1143,11 @@ export class GMI implements IGMI {
           ...pickCompletionOptions(turnOptions),
           ...(stepCacheDiagnostics ? { cacheDiagnostics: { ...stepCacheDiagnostics } } : {}),
           tools: toolsForLLM.length > 0 ? toolsForLLM.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema }})) : undefined,
-          toolChoice: (turnOptions.toolChoice as ModelCompletionOptions['toolChoice']) ?? (personaOptions.toolChoice as ModelCompletionOptions['toolChoice']) ?? (toolsForLLM.length > 0 ? "auto" : undefined),
+          // Only with tools: OpenAI rejects a tool_choice on a request that offers none
+          // (HTTP 400, "'tool_choice' is only allowed when 'tools' are specified").
+          toolChoice: toolsForLLM.length > 0
+            ? ((turnOptions.toolChoice as ModelCompletionOptions['toolChoice']) ?? (personaOptions.toolChoice as ModelCompletionOptions['toolChoice']) ?? "auto")
+            : undefined,
           userId: this.currentUserContext.userId,
           stream: true,
         };
