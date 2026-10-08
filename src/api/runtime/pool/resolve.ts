@@ -18,9 +18,16 @@ export const TEXT_PROVIDER_IDS: ReadonlySet<string> = new Set([
 const CLI_BINARY: Record<string, string> = { 'claude-code-cli': 'claude', 'gemini-cli': 'gemini' };
 const nonEmpty = (v: string | undefined): string | undefined => (v && v.length > 0 ? v : undefined);
 
-/** The agency-level provider, read as a seat's is: `provider`, else a known prefix of `model`. */
+/**
+ * The agency-level provider: the one the agency's own calls go to, which owns
+ * the agency-level key and URL. A known prefix of `model` wins over `provider`
+ * (never under `provider: 'ollama'`), as `resolveModelOption` routes the
+ * agency's synthesizer, judge and manager and as `mergeDefaults` hands the key;
+ * else `provider`.
+ */
 export function agencyProviderOf(agency: AgencyOptions): string | undefined {
-  return agency.provider ?? knownProviderPrefixOf(agency.model);
+  const prefix = agency.provider === 'ollama' ? undefined : knownProviderPrefixOf(agency.model);
+  return prefix ?? agency.provider;
 }
 
 /** The agency-level model with a known provider prefix stripped; never split under `provider: 'ollama'`. */
@@ -48,8 +55,8 @@ export type ResolveOutcome = { ok: true; value: ResolvedCredentials } | { ok: fa
 
 /**
  * Provider, model, key and URL for one seat, entry, hop or chair. Provider:
- * its own, else a known prefix of its model, else the agency level read the
- * same way. Model: its own, else the agency-level
+ * its own, else a known prefix of its model, else the agency-level provider
+ * ({@link agencyProviderOf}). Model: its own, else the agency-level
  * model when it runs on the agency-level provider, else that provider's
  * default text model. Key and URL: the first non-empty of its own, the agency
  * level's (only with `inherits` and on the agency-level provider), a
