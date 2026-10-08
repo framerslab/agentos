@@ -247,6 +247,8 @@ capture.setStream(otherStream); // another microphone, or a mix the page made, o
 capture.stop(); // every node disconnected; no block is handed on after it
 ```
 
+A second `start()` leaves a running capture as it is, a `stop()` while the module loads leaves nothing built, and a module that failed to load is loaded again by the next `start()`.
+
 The worklet module is `capture-worklet.js`, the file beside the entry's own in the package's `dist`. It imports nothing, so the host copies it into its static files at build time and passes its address as `moduleUrl`. A worklet's module is a script to the page's content security policy, so a page whose policy allows scripts from its own origin alone serves the file there.
 
 ```typescript

@@ -28,7 +28,10 @@ export interface AudioWorkletCaptureOptions {
   blockSize?: number;
 }
 
-/** The module each context loaded, so a second capture on one context loads nothing. */
+/**
+ * The module each context loaded, so a second capture on one context loads nothing. A load that fails is dropped, so
+ * the next start on that context loads the module again.
+ */
 const loaded = new WeakMap<BaseAudioContext, Promise<void>>();
 
 /** A page's audio as mono Float32 blocks through an `AudioWorkletNode`. */
@@ -37,6 +40,8 @@ export class AudioWorkletCapture {
   private source: MediaStreamAudioSourceNode | undefined;
   private silent: GainNode | undefined;
   private stream: MediaStream;
+  /** Advanced by each `start()` and `stop()`, so a start whose module loads after a later call builds nothing. */
+  private generation = 0;
   private readonly listeners = new Set<(samples: Float32Array, sampleRate: number) => void>();
 
   constructor(private readonly options: AudioWorkletCaptureOptions) {
@@ -49,15 +54,24 @@ export class AudioWorkletCapture {
     return () => this.listeners.delete(listener);
   }
 
-  /** Loads the module (once per context), builds the path, and starts handing blocks on. */
+  /**
+   * Loads the module (once per context), builds the path, and starts handing blocks on. A started capture is left as
+   * it is, so a second call builds no second path; when calls overlap while the module loads, the last one builds.
+   */
   async start(): Promise<void> {
+    if (this.node) return;
+    const generation = ++this.generation;
     const { context } = this.options;
     let ready = loaded.get(context);
     if (!ready) {
-      ready = context.audioWorklet.addModule(this.options.moduleUrl);
+      ready = context.audioWorklet.addModule(this.options.moduleUrl).catch((error: unknown) => {
+        loaded.delete(context);
+        throw error;
+      });
       loaded.set(context, ready);
     }
     await ready;
+    if (generation !== this.generation) return;
     this.node = new AudioWorkletNode(context, CAPTURE_PROCESSOR_NAME, {
       numberOfInputs: 1,
       numberOfOutputs: 1,
@@ -80,8 +94,9 @@ export class AudioWorkletCapture {
     if (this.node) this.connectSource();
   }
 
-  /** Stops: every node disconnected, and no block handed on after it. */
+  /** Stops: every node disconnected, and no block handed on after it; a start still loading the module builds nothing. */
   stop(): void {
+    this.generation += 1;
     this.listeners.clear();
     if (this.node) this.node.port.onmessage = null;
     this.source?.disconnect();
