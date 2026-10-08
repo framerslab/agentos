@@ -334,6 +334,36 @@ describe("agent({ runtime: 'gmi' }) resolves the model and builds memory on firs
     expect(JSON.stringify(s.seen[3].messages)).toContain('vault');
     await a.close();
   });
+
+  it("a session's memory context names no memory of another session; sessions that share a user id still see each other's", async () => {
+    const k = key(); const emb = key();
+    const s = script('openai', k, { replies: ['Noted.', 'Kept.', 'No idea.', 'Noted.', 'Kept.', 'In the vault.'].map((text) => reply.text(text)) });
+    script('openai', emb);
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = agent(base(k, plainMemory()));
+    /** The memory trace ids a request's prompt names: the active-context list of its memory block. */
+    const traceIdsIn = (request: { messages: unknown }): string[] => JSON.stringify(request.messages).match(/mt_[0-9a-f-]{36}/g) ?? [];
+
+    await a.session('alice-1').send(FACT);
+    await a.session('alice-1').send('Keep that safe for me.');
+    // Alice's second request lists the memories of her first exchange as her active context.
+    expect(traceIdsIn(s.seen[1]).length).toBeGreaterThan(0);
+
+    // Bob has no memories yet: his request names none, Alice's included.
+    await a.session('bob-1').send(QUESTION);
+    expect(traceIdsIn(s.seen[2])).toEqual([]);
+    expect(JSON.stringify(s.seen[2].messages)).not.toContain('vault');
+
+    // One user in two sessions: the second recalls the fact and names a memory of the first.
+    await a.session('carol-1', { userId: 'carol' }).send(FACT);
+    await a.session('carol-1').send('Keep that safe for me.');
+    const carolIds = traceIdsIn(s.seen[4]);
+    expect(carolIds.length).toBeGreaterThan(0);
+    await a.session('carol-2', { userId: 'carol' }).send(QUESTION);
+    expect(JSON.stringify(s.seen[5].messages)).toContain('vault');
+    expect(traceIdsIn(s.seen[5]).some((id) => carolIds.includes(id))).toBe(true);
+    await a.close();
+  });
 });
 
 describe('agent() routes on runtime', () => {

@@ -126,6 +126,28 @@ describe('createAgentCognitiveMemory', () => {
     await mem.close();
   });
 
+  it("a memory context assembled for some scopes carries no associated memory of another scope, whatever the graph links", async () => {
+    const mem = await createAgentCognitiveMemory({ persona, memory: {}, embeddingManager: makeEmbedder() as never });
+    const alices = await mem.manager.encode("Alice's door code is 4471.", neutral, 'neutral', { type: 'semantic', scope: 'user', scopeId: 'alice' });
+    const bobs = await mem.manager.encode('Bob keeps the deploy key in the vault.', neutral, 'neutral', { type: 'semantic', scope: 'user', scopeId: 'bob' });
+    const shared = await mem.manager.encode('The deploy key rotates every month.', neutral, 'neutral', { type: 'semantic', scope: 'persona', scopeId: 'memo' });
+    // The links a caller that reads every scope leaves behind when it recalls these together.
+    const graph = mem.manager.getGraph()!;
+    await graph.addEdge({ sourceId: bobs.id, targetId: alices.id, type: 'CO_ACTIVATED', weight: 1, createdAt: Date.now() });
+    await graph.addEdge({ sourceId: bobs.id, targetId: shared.id, type: 'CO_ACTIVATED', weight: 1, createdAt: Date.now() });
+
+    const forBob = await mem.manager.assembleForPrompt('where is the deploy key', 1600, neutral, {
+      scopes: [{ scope: 'user', scopeId: 'bob' }, { scope: 'persona', scopeId: 'memo' }],
+      // Only Bob's own memory is recalled directly, so the shared one can arrive by association alone.
+      topK: 1,
+    });
+    expect(forBob.contextText).toContain('vault');
+    expect(forBob.contextText).toContain('[associated');
+    expect(forBob.contextText).toContain('rotates every month');
+    expect(forBob.contextText).not.toContain('4471');
+    await mem.close();
+  });
+
   it('close shuts the manager down once and leaves an embedding manager it was given running', async () => {
     const embedder = makeEmbedder();
     const mem = await createAgentCognitiveMemory({ persona, memory: {}, embeddingManager: embedder as never });
