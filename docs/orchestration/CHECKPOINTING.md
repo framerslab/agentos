@@ -1,6 +1,6 @@
 # Checkpointing and Time-Travel
 
-The AgentOS Unified Orchestration Layer has built-in support for checkpoints, resume after failure, and time-travel debugging via the [`ICheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts) interface. [`InMemoryCheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/InMemoryCheckpointStore.ts) is the default implementation; swap in a persistent store by passing your own implementation to `compile({ checkpointStore })`.
+The AgentOS Unified Orchestration Layer saves checkpoints, resumes a run after an interruption or a failure, and forks a run from a past checkpoint through the [`ICheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts) interface. [`InMemoryCheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/InMemoryCheckpointStore.ts) is the default implementation; swap in a persistent store by passing your own implementation to `compile({ checkpointStore })`.
 
 ## ICheckpointStore
 
@@ -30,12 +30,14 @@ interface ICheckpointStore {
 | Custom | Implement [`ICheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts) | Postgres, Redis, object storage, or any durable backend |
 
 ```typescript
-import {
-  InMemoryCheckpointStore,
-} from '@framers/agentos/orchestration/checkpoint';
+import { InMemoryCheckpointStore } from '@framers/agentos/orchestration/checkpoint';
 
-// In-memory (default when no store is specified)
+// In-memory (the default when no store is passed)
 const graph = new AgentGraph(...).compile();
+
+// The same store passed explicitly, so the caller can read it
+const store = new InMemoryCheckpointStore();
+const graphWithStore = new AgentGraph(...).compile({ checkpointStore: store });
 ```
 
 ## What Gets Saved
@@ -58,7 +60,7 @@ interface Checkpoint {
     diagnostics: DiagnosticsView;
   };
 
-  // Optional: memory subsystem snapshot
+  // Optional: memory subsystem snapshot (the runtime does not set it)
   memorySnapshot?: {
     reads: Array<{ traceId: string; content: string; strength: number }>;
     pendingWrites: Array<{ type: string; content: string; scope: string }>;
@@ -77,17 +79,19 @@ interface Checkpoint {
 }
 ```
 
-The `memory` partition is excluded from `state` — it is always rehydrated fresh from the memory store on resume (unless a `memorySnapshot` is present, which restores the exact in-flight state).
+`state` holds the `input`, `scratch`, `artifacts` and `diagnostics` partitions; the `memory` partition is not saved. The runtime never sets `memorySnapshot`, and a resumed run starts with an empty memory view and fresh diagnostics. `pendingEdges` lists the edges a node chose when its checkpoint was taken after it ran, and is empty otherwise.
 
 ## Checkpoint Policies
 
-Control when checkpoints are persisted:
+The graph-wide `checkpointPolicy` and each node's `checkpoint` setting decide when checkpoints are saved:
 
 | Policy | Description |
 |---|---|
-| `every_node` | Persist after every node completes. Maximum durability. Used by `workflow()` by default. |
-| `explicit` | Persist only for nodes with `checkpoint: 'before'`, `'after'`, or `'both'`. |
-| `none` | Never persist. Lowest overhead. Used by [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) by default. |
+| `every_node` | Save after every node completes. The policy of `workflow()` and `mission()`. |
+| `explicit` | Save only around nodes with `checkpoint: 'before'`, `'after'`, or `'both'`. |
+| `none` | The same as `explicit`: the runtime saves around nodes that set `checkpoint`, and no others. The default of [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts). |
+
+Whatever the policy, the runtime also saves a checkpoint when a node fails (after its retries) and when a node interrupts the run for human approval, so a failed or interrupted run can always be resumed.
 
 ```typescript
 // Graph-wide policy
@@ -102,26 +106,31 @@ gmiNode(
 
 ## Resume Semantics
 
-When a run is resumed from a checkpoint, the runtime replays or re-executes nodes depending on their `effectClass`:
+A resumed run restores `input`, `scratch`, `artifacts` and the list of completed nodes from the checkpoint, then schedules the nodes that have not completed:
+
+- A node in `visitedNodes` does not run again, whatever its `effectClass`.
+- A node with a recorded result in `nodeResults` that is not in `visitedNodes` (the node that failed or interrupted the run) is handled by its `effectClass`:
 
 | effectClass | Resume behavior | Rationale |
 |---|---|---|
 | `pure` | Re-execute | Deterministic; safe to run again |
 | `read` | Re-execute | Idempotent; may return fresher data |
-| `write` | Replay recorded output from `nodeResults` | Not idempotent — would duplicate DB writes |
-| `external` | Replay recorded output from `nodeResults` | Not idempotent — would duplicate API calls |
-| `human` | Replay recorded output from `nodeResults` | Cannot ask a human the same question again |
+| `write` | Mark complete with the recorded output | Not idempotent — would duplicate DB writes |
+| `external` | Mark complete with the recorded output | Not idempotent — would duplicate API calls |
+| `human` | Mark complete with the recorded output | Cannot ask a human the same question again |
 
-This means you should always declare `effectClass` accurately on tool nodes:
+- Every other node runs as in a fresh run.
+
+A `write` or `external` node that failed is therefore not retried on resume: its recorded output, from the failed attempt, stands as its result. Declare `effectClass` on tool nodes to match what the node does; `toolNode()` defaults to `'external'` and `gmiNode()` to `'read'`:
 
 ```typescript
-// web_search makes external calls — declare it so resume replays the result
+// web_search makes external calls (the toolNode default)
 toolNode('web_search', {}, { effectClass: 'external' })
 
 // A pure transform — safe to re-run
 toolNode('json_formatter', {}, { effectClass: 'pure' })
 
-// A database insert — mark as write so resume replays it
+// A database insert — mark it as a write
 toolNode('create_record', {}, { effectClass: 'write' })
 ```
 
@@ -137,16 +146,16 @@ const graph = new AgentGraph(...).compile({
 let lastCheckpointId: string | undefined;
 for await (const event of graph.stream(input)) {
   if (event.type === 'checkpoint_saved') {
-    lastCheckpointId = event.checkpointId; // present when a checkpoint was saved
+    lastCheckpointId = event.checkpointId;
   }
 }
 
-// Resume after crash / human approval / timeout.
-// You can pass either the run id or an exact checkpoint id.
+// Resume after a failure, a human approval or a timeout.
+// Pass either the run id (its latest checkpoint) or an exact checkpoint id.
 const result = await graph.resume(lastCheckpointId!);
 ```
 
-The same API applies to `workflow()` and `mission()`:
+The same API applies to compiled `workflow()` and `mission()` graphs. The `resume()` of `AgentGraph` and `mission()` accepts a second `patch` argument and does not apply it; patch state with `fork()` instead:
 
 ```typescript
 const result = await workflow.resume(checkpointId);
@@ -158,10 +167,11 @@ const result = await missionCompiled.resume(checkpointId);
 `fork()` creates a new run branching from any past checkpoint, with optional state overrides. The original run is untouched.
 
 ```typescript
-const store = new InMemoryCheckpointStore();
+// `store` is the store the graph was compiled with
+const graphId = graph.toIR().id;
 
 // List checkpoints for a graph to find the right branch point
-const checkpoints = await store.list('my-graph-id', { runId: 'run-abc' });
+const checkpoints = await store.list(graphId, { runId: 'run-abc' });
 // checkpoints: CheckpointMetadata[], sorted by timestamp descending
 
 // Fork from checkpoint with patched state
@@ -173,10 +183,10 @@ const newRunId = await store.fork(checkpoints[2].id, {
 const result = await graph.resume(newRunId);
 ```
 
-The `fork()` operation:
+The `fork()` operation of `InMemoryCheckpointStore`:
 1. Deep-clones the source checkpoint
 2. Assigns a fresh `runId` and checkpoint `id`
-3. Applies `patchState` overrides
+3. Merges each `patchState` partition (`input`, `scratch`, `artifacts`, `diagnostics`) into the clone's partition
 4. Persists the new checkpoint
 5. Returns the new `runId`
 
@@ -187,18 +197,10 @@ Common uses:
 
 ## Memory Consistency and Checkpointing
 
-The [`MemoryConsistencyMode`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) interacts with checkpointing:
-
-| Mode | Memory snapshot saved? | On resume |
-|---|---|---|
-| `live` | No | Memory is read fresh from the store |
-| `snapshot` | Yes (reads only) | Restores the in-flight reads; writes re-queued |
-| `journaled` | Yes (reads + pending writes) | Journal replayed atomically |
-
-Set the mode per-node or graph-wide:
+A graph declares a [`MemoryConsistencyMode`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) (`live`, `snapshot` or `journaled`) graph-wide or per node:
 
 ```typescript
-// Graph-wide
+// Graph-wide (AgentGraph's default is 'snapshot')
 new AgentGraph(state, { memoryConsistency: 'snapshot' })
 
 // Per-node via MemoryPolicy
@@ -207,11 +209,14 @@ gmiNode({ instructions: '...' }, {
 })
 ```
 
+The mode is recorded in the compiled graph, and `GraphRuntime` does not read it: in every mode the runtime saves no memory snapshot and replays no memory journal on resume.
+
 ## Custom Backend
 
 To use Postgres, Redis, or any other store, implement [`ICheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts):
 
 ```typescript
+import type { Pool } from 'pg';
 import type { ICheckpointStore, Checkpoint, CheckpointMetadata } from '@framers/agentos/orchestration/checkpoint';
 import type { GraphState } from '@framers/agentos/orchestration';
 
@@ -223,6 +228,11 @@ class PostgresCheckpointStore implements ICheckpointStore {
       'INSERT INTO checkpoints (id, run_id, graph_id, node_id, timestamp, payload) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO UPDATE SET payload = $6',
       [checkpoint.id, checkpoint.runId, checkpoint.graphId, checkpoint.nodeId, checkpoint.timestamp, JSON.stringify(checkpoint)]
     );
+  }
+
+  async get(checkpointId: string): Promise<Checkpoint | null> {
+    const { rows } = await this.pool.query('SELECT payload FROM checkpoints WHERE id = $1', [checkpointId]);
+    return rows[0] ? JSON.parse(rows[0].payload) : null;
   }
 
   async load(runId: string, nodeId?: string): Promise<Checkpoint | null> {
@@ -240,8 +250,8 @@ class PostgresCheckpointStore implements ICheckpointStore {
   async list(graphId: string, options?: { limit?: number; runId?: string }): Promise<CheckpointMetadata[]> {
     // Return lightweight metadata, not full payloads
     const { rows } = await this.pool.query(
-      'SELECT id, run_id, graph_id, node_id, timestamp, length(payload) as state_size FROM checkpoints WHERE graph_id = $1 ORDER BY timestamp DESC LIMIT $2',
-      [graphId, options?.limit ?? 100]
+      'SELECT id, run_id, graph_id, node_id, timestamp, length(payload) as state_size FROM checkpoints WHERE graph_id = $1 AND ($2::text IS NULL OR run_id = $2) ORDER BY timestamp DESC LIMIT $3',
+      [graphId, options?.runId ?? null, options?.limit ?? 100]
     );
     return rows.map(r => ({ id: r.id, runId: r.run_id, graphId: r.graph_id, nodeId: r.node_id, timestamp: r.timestamp, stateSize: r.state_size, hasMemorySnapshot: false }));
   }
@@ -251,14 +261,17 @@ class PostgresCheckpointStore implements ICheckpointStore {
   }
 
   async fork(checkpointId: string, patchState?: Partial<GraphState>): Promise<string> {
-    const checkpoint = await this.load(checkpointId);
+    const checkpoint = await this.get(checkpointId);
     if (!checkpoint) throw new Error(`Checkpoint ${checkpointId} not found`);
+    const state = structuredClone(checkpoint.state);
+    if (patchState?.scratch) Object.assign(state.scratch as object, patchState.scratch);
+    if (patchState?.artifacts) Object.assign(state.artifacts as object, patchState.artifacts);
     const newCheckpoint: Checkpoint = {
       ...structuredClone(checkpoint),
       id: crypto.randomUUID(),
       runId: crypto.randomUUID(),
       timestamp: Date.now(),
-      state: patchState ? { ...checkpoint.state, ...patchState } : checkpoint.state,
+      state,
     };
     await this.save(newCheckpoint);
     return newCheckpoint.runId;

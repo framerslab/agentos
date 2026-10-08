@@ -113,6 +113,11 @@ export interface AgentOSInput {
   workflowRequest?: WorkflowInvocationRequest;
   agencyRequest?: AgencyInvocationRequest;
   options?: ProcessingOptions;
+  /**
+   * The product's durable id for this request. With a spend meter configured it is required: the meter reserves
+   * against it, and a retry with the same id replays its reservation instead of charging again.
+   */
+  operationId?: string;
   userContextOverride?: Partial<UserContext>;
   skillPromptContext?: string;
   disabledSessionSkillIds?: string[];

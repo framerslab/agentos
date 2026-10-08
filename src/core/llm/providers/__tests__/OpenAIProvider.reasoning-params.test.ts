@@ -67,6 +67,16 @@ describe('OpenAIProvider — reasoning-model sampling-param guard', () => {
     expect(payload.max_tokens).toBeUndefined();
   });
 
+  it('omits presence_penalty/frequency_penalty for o-series and gpt-5 models, which reject them with HTTP 400', () => {
+    const build = (modelId: string) => (provider as unknown as {
+      buildChatCompletionPayload: (m: string, msgs: ChatMessage[], o: unknown, s: boolean) => Record<string, unknown>;
+    }).buildChatCompletionPayload(modelId, messages, { presencePenalty: 0.1, frequencyPenalty: 0.1 }, false);
+    for (const modelId of ['o3', 'o4-mini', 'gpt-5.5', 'gpt-5-mini']) {
+      expect([modelId, build(modelId).presence_penalty, build(modelId).frequency_penalty]).toEqual([modelId, undefined, undefined]);
+    }
+    expect([build('gpt-4o').presence_penalty, build('gpt-4o').frequency_penalty]).toEqual([0.1, 0.1]);
+  });
+
   it('keeps temperature/top_p for legacy chat models', () => {
     const payload = (provider as unknown as {
       buildChatCompletionPayload: (m: string, msgs: ChatMessage[], o: unknown, s: boolean) => Record<string, unknown>;

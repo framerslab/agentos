@@ -893,8 +893,16 @@ export class MemoryStore {
    * Return the subset of cached trace IDs that remain recallable after a
    * fail-closed durable-state check. Used by non-vector recall paths such as
    * graph association injection so a tombstone cannot bypass vector filters.
+   *
+   * @param traceIds - The candidate trace IDs.
+   * @param scopes - When given and non-empty, only traces filed under one of
+   *   these scopes are recallable, as in {@link query}: a graph association
+   *   never brings in a trace of a scope the caller does not read.
    */
-  async filterRecallableTraceIds(traceIds: string[]): Promise<Set<string>> {
+  async filterRecallableTraceIds(
+    traceIds: string[],
+    scopes?: ReadonlyArray<{ scope: MemoryScope; scopeId: string }>,
+  ): Promise<Set<string>> {
     this.beginOperation();
     const uniqueIds = [...new Set(traceIds)];
     const validated = await this.reconcileDurableTraceStates(
@@ -903,13 +911,17 @@ export class MemoryStore {
       this.brain,
     );
     if (!validated) return new Set();
+    const readable = scopes?.length
+      ? new Set(scopes.map(({ scope, scopeId }) => scopeKey(scope, scopeId)))
+      : null;
     return new Set(
       uniqueIds.filter((traceId) => {
         const trace = this.traceCache.get(traceId);
         return Boolean(
           trace?.isActive &&
           !this.tombstonedTraceIds.has(traceId) &&
-          !isTraceDeletePending(this.coordinationNamespace, traceId),
+          !isTraceDeletePending(this.coordinationNamespace, traceId) &&
+          (!readable || readable.has(scopeKey(trace.scope, trace.scopeId))),
         );
       }),
     );

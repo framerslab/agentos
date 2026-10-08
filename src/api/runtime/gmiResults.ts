@@ -6,9 +6,10 @@
  *
  * The rules are streamText's: the turn's text is the latest step that produced
  * text; usage adds each step's STEP_FINISHED usage once (USAGE_UPDATE carries a
- * request's running total) plus the billed usage of attempts that failed before
- * any output; a run that called tools and produced no text ends as
- * `'tool-calls'`; an ERROR chunk ends it as `'error'` with the GMI's code.
+ * request's running total) plus the billed usage of attempts that failed, before
+ * any output or after it; a run ends with its last step's own finish reason, or
+ * as `'tool-calls'` when the step limit ran out with calls outstanding and no
+ * text; an ERROR chunk ends it as `'error'` with the GMI's code.
  */
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
 import {
@@ -29,7 +30,7 @@ export interface GmiTurnError {
   details?: unknown;
 }
 
-/** An attempt that failed before any output and was billed (reported on a USAGE_UPDATE with `metadata.attemptFailed`). */
+/** An attempt that failed, before any output or after it, and was billed (reported on a USAGE_UPDATE with `metadata.attemptFailed`). */
 export interface GmiFailedAttempt {
   providerId?: string;
   modelId?: string;
@@ -57,11 +58,23 @@ export function toolErrorMessage(result: ToolResultChunkPayload): string {
   return typeof details?.message === 'string' && details.message ? details.message : 'Tool failed.';
 }
 
+/** Options for a {@link GmiTurnFolder}. */
+export interface GmiTurnFolderOptions {
+  /**
+   * Whether the turn opted into cache diagnostics (`cacheDiagnostics` on the
+   * call). The provider message id is reported only then, as generateText and
+   * streamText report it: it is the thread key for the next request's diagnostics.
+   */
+  cacheDiagnostics?: boolean;
+}
+
 /**
  * Accumulates one turn's chunks. `push` every chunk in order; read the result
  * once the turn has ended (or at any point for a partial view).
  */
 export class GmiTurnFolder {
+  constructor(private readonly options: GmiTurnFolderOptions = {}) {}
+
   /** The STEP_FINISHED payloads, in order. */
   readonly steps: StepFinishedChunkPayload[] = [];
   /** Every requested call in order, with its result once the TOOL_RESULT arrived. */
@@ -69,11 +82,20 @@ export class GmiTurnFolder {
   private readonly overrides = new Map<number, string>();
   private readonly failed: GmiFailedAttempt[] = [];
   private failure: GmiTurnError | undefined;
+  /** The provider and model the turn's first model call was routed to, and who waits for them. */
+  private firstRoute: { providerId: string; modelId: string } | undefined;
+  private readonly routeListeners: Array<(route: { providerId: string; modelId: string }) => void> = [];
+  /** How many calls had been requested when the latest step finished: the calls after it belong to the next step. */
+  private callsBeforeLastStep = 0;
+  /** Whether the latest finished step requested tools (the GMI then runs them and goes on, unless the step limit ran out). */
+  private lastStepCalledTools = false;
 
   push(chunk: GMIOutputChunk): void {
     switch (chunk.type) {
       case GMIOutputChunkType.STEP_FINISHED:
         this.steps.push(chunk.content as StepFinishedChunkPayload);
+        this.lastStepCalledTools = this.calls.length > this.callsBeforeLastStep;
+        this.callsBeforeLastStep = this.calls.length;
         break;
       case GMIOutputChunkType.TOOL_CALL_REQUEST:
         for (const call of (chunk.content as ToolCallRequest[]) ?? []) this.calls.push({ call });
@@ -121,6 +143,28 @@ export class GmiTurnFolder {
     };
   }
 
+  /**
+   * Records a model call's route (its provider and model, once the hop is
+   * resolved). The first one is the turn's route, as streamText reports it:
+   * listeners hear it at once, before any chunk of the call arrives.
+   */
+  route(providerId: string, modelId: string): void {
+    if (this.firstRoute) return;
+    this.firstRoute = { providerId, modelId };
+    for (const listener of this.routeListeners.splice(0)) listener(this.firstRoute);
+  }
+
+  /** The turn's first route, once it is known. */
+  routed(): { providerId: string; modelId: string } | undefined {
+    return this.firstRoute;
+  }
+
+  /** Calls `listener` with the turn's first route as soon as it is known (at once when it already is). */
+  onRoute(listener: (route: { providerId: string; modelId: string }) => void): void {
+    if (this.firstRoute) listener(this.firstRoute);
+    else this.routeListeners.push(listener);
+  }
+
   /** Replaces a step's text (`onAfterGeneration`), in the result and in what the session stores. */
   overrideStepText(stepIndex: number, text: string): void {
     this.overrides.set(stepIndex, text);
@@ -149,7 +193,7 @@ export class GmiTurnFolder {
     return total;
   }
 
-  /** The billed attempts that failed before any output, in order. */
+  /** The billed attempts that failed, in order. */
   failedAttempts(): GmiFailedAttempt[] {
     return this.failed.map((a) => ({ ...a, usage: { ...a.usage } }));
   }
@@ -164,6 +208,11 @@ export class GmiTurnFolder {
     });
   }
 
+  /** The last step's provider message id when the turn opted into cache diagnostics (null when the provider sent none); null otherwise. */
+  providerMessageId(): string | null {
+    return this.options.cacheDiagnostics ? this.steps.at(-1)?.providerMessageId ?? null : null;
+  }
+
   /** The latest schema answer a step carried, if any. */
   structuredOutput(): unknown {
     for (let i = this.steps.length - 1; i >= 0; i--) {
@@ -176,12 +225,22 @@ export class GmiTurnFolder {
     return this.failure;
   }
 
-  finishReason(): GenerateTextResult['finishReason'] {
-    if (this.failure) return 'error';
+  /**
+   * How the run ended, by streamText's rules: the last step's own reason when
+   * that step requested no tools; when it did, the step limit ran out, and a run
+   * with calls outstanding and no text ended as 'tool-calls'.
+   *
+   * @param options.ignoreFailure - Report the finished steps even when the turn
+   *   failed: for a stream its consumer abandoned, whose turn ends with the
+   *   abort that the abandonment caused.
+   */
+  finishReason(options: { ignoreFailure?: boolean } = {}): GenerateTextResult['finishReason'] {
+    if (this.failure && !options.ignoreFailure) return 'error';
     const last = this.steps.at(-1);
     // The schema answer is the turn's reply, whatever stop reason carried it.
     if (last?.structuredOutput !== undefined) return 'stop';
-    return this.calls.length > 0 && !this.text() ? 'tool-calls' : normalizeStreamFinishReason(last?.finishReason ?? null);
+    if (this.lastStepCalledTools && this.calls.length > 0 && !this.text()) return 'tool-calls';
+    return normalizeStreamFinishReason(last?.finishReason ?? null);
   }
 
   /** The error the turn ended with, as a GMIError keeping the GMI's code. */
@@ -204,7 +263,7 @@ export class GmiTurnFolder {
       model: last?.modelId ?? '',
       ...(last?.responseModel ? { responseModel: last.responseModel } : {}),
       ...(last?.serviceTier ? { serviceTier: last.serviceTier } : {}),
-      ...(last?.providerMessageId ? { providerMessageId: last.providerMessageId } : {}),
+      ...(this.options.cacheDiagnostics ? { providerMessageId: this.providerMessageId() } : {}),
       ...(last?.cacheDiagnostics !== undefined ? { cacheDiagnostics: last.cacheDiagnostics as GenerateTextResult['cacheDiagnostics'] } : {}),
       text: this.text(),
       usage: this.usage(),
@@ -236,12 +295,21 @@ export interface GmiStreamOptions {
    * folds the chunks itself.
    */
   folder?: GmiTurnFolder;
+  /**
+   * Stops the turn. Called once when the consumer stops reading `textStream` or
+   * `fullStream` before the turn ended (a `break`, or `return()` on the iterator).
+   */
+  stop?: () => void;
 }
 
 /**
  * A `StreamTextResult` over a GMI turn. The turn is drained eagerly, so every
  * promise settles whether the caller iterates, stops iterating early, or never
  * iterates; `textStream` and `fullStream` replay what arrived and wait for more.
+ * A caller that stops iterating either one before the turn ended stops the turn
+ * through `options.stop`; the promises then settle once the turn has ended, with
+ * the text delivered so far and, as streamText reports an abandoned stream, the
+ * finish reason of the latest finished step.
  *
  * `textStream` yields every TEXT_DELTA as it arrives. `fullStream` maps
  * TEXT_DELTA to `text`, TOOL_CALL_REQUEST to `tool-call`, TOOL_RESULT to
@@ -258,6 +326,17 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
   const texts: string[] = [];
   const parts: StreamPart[] = [];
   let done = false;
+  // A consumer that stops reading stops the turn. The abort that follows ends the
+  // turn with an error the consumer did not get; an error that arrived before
+  // the consumer stopped is the turn's own.
+  let abandoned = false;
+  let failedBeforeAbandoned = false;
+  const abandon = (): void => {
+    if (done || abandoned) return;
+    abandoned = true;
+    failedBeforeAbandoned = folder.error() !== undefined;
+    options.stop?.();
+  };
   let waiters: Array<() => void> = [];
   const wake = (): void => {
     const pending = waiters;
@@ -276,6 +355,11 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
     cacheDiagnostics: deferred<Awaited<StreamTextResult['cacheDiagnostics']>>(),
     providerMessageId: deferred<string | null>(),
   };
+  // Provider and model resolve once the turn's model call is routed, as streamText's do.
+  folder.onRoute(({ providerId, modelId }) => {
+    p.provider.resolve(providerId);
+    p.model.resolve(modelId);
+  });
 
   void (async () => {
     // The text the step in progress has delivered; reset at each step boundary.
@@ -318,13 +402,14 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
       p.text.resolve(folder.error() && stepDelivered ? stepDelivered : folder.text());
       p.usage.resolve(folder.usage());
       p.toolCalls.resolve(folder.toolCalls());
-      p.provider.resolve(last?.providerId ?? '');
-      p.model.resolve(last?.modelId ?? '');
-      p.finishReason.resolve(folder.finishReason());
+      // Already resolved when the turn was routed; '' when it failed before routing.
+      p.provider.resolve(folder.routed()?.providerId ?? last?.providerId ?? '');
+      p.model.resolve(folder.routed()?.modelId ?? last?.modelId ?? '');
+      p.finishReason.resolve(folder.finishReason({ ignoreFailure: abandoned && !failedBeforeAbandoned }));
       p.responseModel.resolve(last?.responseModel);
       p.serviceTier.resolve(last?.serviceTier);
       p.cacheDiagnostics.resolve((last?.cacheDiagnostics as Awaited<StreamTextResult['cacheDiagnostics']> | undefined) ?? null);
-      p.providerMessageId.resolve(last?.providerMessageId ?? null);
+      p.providerMessageId.resolve(folder.providerMessageId());
       done = true;
       wake();
     }
@@ -344,6 +429,7 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
           },
           async return(): Promise<IteratorResult<T>> {
             i = Number.MAX_SAFE_INTEGER;
+            abandon();
             return { value: undefined as never, done: true };
           },
         };

@@ -61,6 +61,7 @@ const fixtures = vi.hoisted(() => {
     async getModelInfo() { return undefined; }
     async generateEmbeddings(modelId: string, texts: string[]) {
       if (!pulledOllamaModels.has(modelId)) throw new Error(`model "${modelId}" not found, try pulling it first`);
+      embedCalls.push({ apiKey: undefined, modelId, count: texts.length });
       return {
         object: 'list',
         data: texts.map((text, index) => ({ object: 'embedding', embedding: hashEmbed(text, 768), index })),
@@ -71,13 +72,38 @@ const fixtures = vi.hoisted(() => {
     async checkHealth() { return { isHealthy: true }; }
     async shutdown() {}
   }
-  return { hashEmbed, embedCalls, OpenAIProvider, pulledOllamaModels, OllamaProvider };
+  /** Stands in for GeminiProvider: embeds 3072 wide, as gemini-embedding-2 does, and records each call like the OpenAI stub. */
+  class GeminiProvider {
+    readonly providerId = 'gemini';
+    isInitialized = false;
+    private apiKey?: string;
+    async initialize(config: { apiKey?: string }) {
+      this.apiKey = config.apiKey;
+      this.isInitialized = true;
+    }
+    async listAvailableModels() { return []; }
+    async getModelInfo() { return undefined; }
+    async generateEmbeddings(modelId: string, texts: string[]) {
+      embedCalls.push({ apiKey: this.apiKey, modelId, count: texts.length });
+      return {
+        object: 'list',
+        data: texts.map((text, index) => ({ object: 'embedding', embedding: hashEmbed(text, 3072), index })),
+        model: modelId,
+        usage: { prompt_tokens: 0, total_tokens: 0 },
+      };
+    }
+    async checkHealth() { return { isHealthy: true }; }
+    async shutdown() {}
+  }
+  return { hashEmbed, embedCalls, OpenAIProvider, pulledOllamaModels, OllamaProvider, GeminiProvider };
 });
 
 vi.mock('../../../core/llm/providers/implementations/OpenAIProvider', () => ({ OpenAIProvider: fixtures.OpenAIProvider }));
 vi.mock('../../../core/llm/providers/implementations/OllamaProvider', () => ({ OllamaProvider: fixtures.OllamaProvider }));
+vi.mock('../../../core/llm/providers/implementations/GeminiProvider', () => ({ GeminiProvider: fixtures.GeminiProvider }));
 
 import { assertEmbeddingAvailable, createAgentCognitiveMemory } from '../agentCognitiveMemory.js';
+import { clearDefaultProvider, setDefaultProvider } from '../global-default.js';
 
 const DIM = 64;
 function makeEmbedder() {
@@ -104,6 +130,7 @@ const FACT = 'The deploy key lives in the vault under ops/deploy.';
 afterEach(() => {
   vi.unstubAllEnvs();
   fixtures.pulledOllamaModels.clear();
+  clearDefaultProvider();
 });
 
 describe('createAgentCognitiveMemory', () => {
@@ -123,6 +150,28 @@ describe('createAgentCognitiveMemory', () => {
     expect(config.consolidation?.enabled).toBe(false);
     expect(config.graph?.backend).toBe('knowledge-graph');
     expect(config.moodProvider()).toEqual(neutral);
+    await mem.close();
+  });
+
+  it("a memory context assembled for some scopes carries no associated memory of another scope, whatever the graph links", async () => {
+    const mem = await createAgentCognitiveMemory({ persona, memory: {}, embeddingManager: makeEmbedder() as never });
+    const alices = await mem.manager.encode("Alice's door code is 4471.", neutral, 'neutral', { type: 'semantic', scope: 'user', scopeId: 'alice' });
+    const bobs = await mem.manager.encode('Bob keeps the deploy key in the vault.', neutral, 'neutral', { type: 'semantic', scope: 'user', scopeId: 'bob' });
+    const shared = await mem.manager.encode('The deploy key rotates every month.', neutral, 'neutral', { type: 'semantic', scope: 'persona', scopeId: 'memo' });
+    // The links a caller that reads every scope leaves behind when it recalls these together.
+    const graph = mem.manager.getGraph()!;
+    await graph.addEdge({ sourceId: bobs.id, targetId: alices.id, type: 'CO_ACTIVATED', weight: 1, createdAt: Date.now() });
+    await graph.addEdge({ sourceId: bobs.id, targetId: shared.id, type: 'CO_ACTIVATED', weight: 1, createdAt: Date.now() });
+
+    const forBob = await mem.manager.assembleForPrompt('where is the deploy key', 1600, neutral, {
+      scopes: [{ scope: 'user', scopeId: 'bob' }, { scope: 'persona', scopeId: 'memo' }],
+      // Only Bob's own memory is recalled directly, so the shared one can arrive by association alone.
+      topK: 1,
+    });
+    expect(forBob.contextText).toContain('vault');
+    expect(forBob.contextText).toContain('[associated');
+    expect(forBob.contextText).toContain('rotates every month');
+    expect(forBob.contextText).not.toContain('4471');
     await mem.close();
   });
 
@@ -163,12 +212,49 @@ describe('createAgentCognitiveMemory', () => {
     await mem.close();
   });
 
+  it('with memory.embedding unset, the global default provider comes first when it has embedding models', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'k-agent-memory-global-default');
+    setDefaultProvider({ provider: 'ollama', baseUrl: 'http://ollama.test:11434' });
+    fixtures.pulledOllamaModels.add('nomic-embed-text');
+    fixtures.embedCalls.length = 0;
+    const mem = await createAgentCognitiveMemory({ persona, memory: {} });
+    await mem.manager.encode(FACT, neutral, 'neutral', { type: 'episodic' });
+    expect(fixtures.embedCalls.length).toBeGreaterThan(0);
+    expect(fixtures.embedCalls.every((call) => call.modelId === 'nomic-embed-text')).toBe(true);
+    await mem.close();
+  });
+
+  it('a global default provider without embedding models is passed over for the first provider with a key that has them, Gemini included', async () => {
+    vi.stubEnv('OPENAI_API_KEY', '');
+    vi.stubEnv('OLLAMA_BASE_URL', '');
+    vi.stubEnv('GEMINI_API_KEY', 'k-agent-memory-gemini-detected');
+    setDefaultProvider({ provider: 'anthropic', apiKey: 'k-anthropic' });
+    fixtures.embedCalls.length = 0;
+    const mem = await createAgentCognitiveMemory({ persona, memory: {} });
+    await mem.manager.encode(FACT, neutral, 'neutral', { type: 'episodic' });
+    expect(fixtures.embedCalls.length).toBeGreaterThan(0);
+    expect(fixtures.embedCalls.every((call) => call.modelId === 'gemini-embedding-2' && call.apiKey === 'k-agent-memory-gemini-detected')).toBe(true);
+    await mem.close();
+  });
+
   it('an embedding model the provider cannot serve fails the build, naming memory.embedding: the Ollama default when it was never pulled', async () => {
     vi.stubEnv('OPENAI_API_KEY', '');
     vi.stubEnv('OLLAMA_BASE_URL', 'http://ollama.test:11434');
     await expect(createAgentCognitiveMemory({ persona, memory: {} })).rejects.toThrow(
       /memory\.embedding[\s\S]*model "nomic-embed-text" not found, try pulling it first/,
     );
+  });
+
+  it("memory.embedding: { provider: 'gemini' } with no model embeds through gemini-embedding-2, embedText's Gemini default", async () => {
+    vi.stubEnv('GEMINI_API_KEY', 'k-agent-memory-gemini');
+    fixtures.embedCalls.length = 0;
+    const mem = await createAgentCognitiveMemory({ persona, memory: { embedding: { provider: 'gemini' } } });
+    await mem.manager.encode(FACT, neutral, 'neutral', { type: 'episodic' });
+    const hits = await mem.manager.retrieve('where is the deploy key', neutral, { topK: 3 });
+    expect(hits.retrieved.map((trace) => trace.content).join('\n')).toContain('vault');
+    expect(fixtures.embedCalls.length).toBeGreaterThan(0);
+    expect(fixtures.embedCalls.every((call) => call.modelId === 'gemini-embedding-2' && call.apiKey === 'k-agent-memory-gemini')).toBe(true);
+    await mem.close();
   });
 
   it('an embedding model that returns another size than memory expects fails the build, naming the size it returns', async () => {
@@ -198,7 +284,8 @@ describe('assertEmbeddingAvailable', () => {
     const env = {};
     expect(() => assertEmbeddingAvailable({ embedding: { provider: 'groq' } }, env)).toThrow(/Groq has no embedding models/);
     expect(() => assertEmbeddingAvailable({ embedding: { provider: 'openai', model: 'anthropic:claude-x' } }, env)).toThrow(/Anthropic/);
-    expect(() => assertEmbeddingAvailable({ embedding: { provider: 'gemini' } }, env)).toThrow(/memory\.embedding: .*no default embedding model/);
+    // Gemini without a model takes embedText's default, gemini-embedding-2.
+    expect(() => assertEmbeddingAvailable({ embedding: { provider: 'gemini' } }, env)).not.toThrow();
     expect(() => assertEmbeddingAvailable({ embedding: { provider: 'ollama', model: 'mxbai-embed-large' } }, env)).toThrow(/memory\.embedding\.dimension/);
     expect(() => assertEmbeddingAvailable({ embedding: { provider: 'ollama', model: 'mxbai-embed-large', dimension: 0 } }, env)).toThrow(/positive integer/);
     expect(() => assertEmbeddingAvailable({ embedding: { provider: 'ollama', model: 'mxbai-embed-large', dimension: 1024 } }, env)).not.toThrow();

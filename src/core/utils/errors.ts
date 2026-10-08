@@ -64,6 +64,10 @@ export enum GMIErrorCode {
 
   /** A guardrail the deployment requires is not active, so the request was not run. */
   GUARDRAIL_REQUIRED_MISSING = 'SYS_GUARDRAIL_REQUIRED_MISSING',
+  /** The account's allowance for the period has no room for the request (the spend meter). */
+  ALLOWANCE_EXHAUSTED = 'BILLING_ALLOWANCE_EXHAUSTED',
+  /** The spend meter's store could not answer, so the request was not run. */
+  SPEND_METER_UNAVAILABLE = 'SYS_SPEND_METER_UNAVAILABLE',
 
   PERSONA_NOT_FOUND = 'GMI_PERSONA_NOT_FOUND',
   PERSONA_LOAD_ERROR = 'GMI_PERSONA_LOAD_ERROR',
@@ -124,6 +128,8 @@ const statusCodeMap: Partial<Record<GMIErrorCode, number>> = {
   [GMIErrorCode.ACCESS_DENIED]: 403,
   [GMIErrorCode.SUBSCRIPTION_ERROR]: 402,
   [GMIErrorCode.GUARDRAIL_REQUIRED_MISSING]: 503,
+  [GMIErrorCode.ALLOWANCE_EXHAUSTED]: 402,
+  [GMIErrorCode.SPEND_METER_UNAVAILABLE]: 503,
   [GMIErrorCode.LLM_PROVIDER_UNAVAILABLE]: 503,
 };
 
@@ -138,6 +144,8 @@ const userFriendlyMessageMap: Partial<Record<GMIErrorCode, string>> = {
   [GMIErrorCode.PERSONA_NOT_FOUND]: 'That persona is not available.',
   [GMIErrorCode.SUBSCRIPTION_ERROR]: 'Please upgrade your plan to access this feature.',
   [GMIErrorCode.RATE_LIMIT_EXCEEDED]: 'You are sending requests too quickly. Please slow down.',
+  [GMIErrorCode.ALLOWANCE_EXHAUSTED]: 'This account has used its allowance for the period.',
+  [GMIErrorCode.SPEND_METER_UNAVAILABLE]: 'The request could not be counted just now, so it was not run. Please try again shortly.',
 };
 
 export type GMIErrorDetails = Record<string, any> | undefined;

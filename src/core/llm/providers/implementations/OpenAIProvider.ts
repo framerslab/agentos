@@ -549,6 +549,24 @@ export function isOpenAIReasoningModel(modelId: string): boolean {
 }
 
 /**
+ * Whether OpenAI rejects `presence_penalty` and `frequency_penalty` for
+ * `modelId`: the o-series and the GPT-5 family do, with HTTP 400 ("Unsupported
+ * parameter: 'presence_penalty' is not supported with this model."), recorded
+ * for GPT-5, GPT-5 mini, o3 and o4-mini in
+ * https://github.com/danny-avila/LibreChat/discussions/11689 and for a GPT-5.1
+ * mini model in https://docs.nectain.com/docs/nectainium/admin_guide/2/2.14/2.14.3/.
+ * GPT-6 is left out: OpenAI's GPT-6 guide
+ * (https://developers.openai.com/api/docs/guides/latest-model) lists
+ * temperature, top_p, top_logprobs and logprobs as unsupported and names no
+ * penalty, and no rejection is on record.
+ *
+ * @param modelId Provider-side model identifier (e.g. `'o3'`, `'gpt-5.5'`).
+ */
+function openAiRejectsPenalties(modelId: string): boolean {
+  return /^(o\d|gpt-5)/i.test(modelId);
+}
+
+/**
  * Whether OpenAI rejects `reasoning_effort` sent alongside function tools on
  * the `/v1/chat/completions` endpoint for `modelId`. The GPT-5 family does:
  * "Function tools with reasoning_effort are not supported for gpt-5.5 in
@@ -1820,8 +1838,10 @@ export class OpenAIProvider implements IProvider {
         payload.max_tokens = effMaxTokens;
       }
     }
-    if (options.presencePenalty !== undefined) payload.presence_penalty = options.presencePenalty;
-    if (options.frequencyPenalty !== undefined) payload.frequency_penalty = options.frequencyPenalty;
+    if (!openAiRejectsPenalties(modelId)) {
+      if (options.presencePenalty !== undefined) payload.presence_penalty = options.presencePenalty;
+      if (options.frequencyPenalty !== undefined) payload.frequency_penalty = options.frequencyPenalty;
+    }
     if (options.stopSequences !== undefined) payload.stop = options.stopSequences;
     if (options.userId !== undefined) payload.user = options.userId;
     if (options.tools !== undefined) payload.tools = options.tools;

@@ -41,7 +41,7 @@ Each call to `route()` runs three stages in sequence:
 
 If no embedding provider is configured, the router degrades cleanly to keyword search instead of failing. The platform-knowledge entries that ship with `@framers/agentos` (68 in the published package: FAQ, API reference and troubleshooting) are merged into your corpus automatically, with no extra configuration.
 
-## What Is Live Today
+## What It Does
 
 - Tier classification uses an LLM prompt with corpus topics, recent conversation history, and optional tool names.
 - The router embeds local markdown docs into an in-memory vector store when an embedding provider is available.
@@ -56,16 +56,17 @@ If no embedding provider is configured, the router degrades cleanly to keyword s
 - Default path: `route()` classifies the query, then dispatches retrieval through the legacy [`QueryDispatcher`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/query/QueryDispatcher.ts).
 - Opt-in path: if a host calls `setUnifiedRetriever(...)`, `route()` switches to plan-aware retrieval through [`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts).
 
-This matters because [`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts) is implemented and usable today, but it is not the default QueryRouter/runtime retrieval path yet.
+[`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts) runs only after a host calls `setUnifiedRetriever()`; it is not the default retrieval path.
 
-## Current Limitations
+## Built-in Retrieval Branches
 
-The QueryRouter scaffold is ahead of the wired runtime in a few places:
+The graph, rerank and research branches have built-in implementations that use only the local corpus:
 
-- `graphExpand()` is now a built-in corpus-neighborhood heuristic, not yet a true GraphRAG engine.
-- `rerank()` is now a built-in lexical heuristic reranker, not yet a cross-encoder service.
-- `deepResearch()` is now a built-in local-corpus heuristic synthesis pass, not yet a web-backed research runtime.
-- The router is useful today for query classification, vector retrieval, keyword fallback, heuristic graph expansion, heuristic reranking, heuristic local research synthesis, and grounded answer generation, but it is not yet a full GraphRAG or web-research runtime.
+- `graphExpand()` adds chunks from the same document and with overlapping headings; it is not a GraphRAG engine.
+- `rerank()` is a lexical reranker, not a cross-encoder.
+- `deepResearch()` synthesizes from the local corpus; it searches no web sources.
+
+Hosts replace any of the three with their own implementation through the hooks below.
 
 ## Host-Injected Runtime Hooks
 
@@ -76,7 +77,7 @@ by passing host-provided callbacks in the constructor:
 - `rerank(query, chunks, topN)` for provider-backed reranking
 - `deepResearch(query, sources)` for real multi-source research
 
-When these hooks are supplied, `router.getCorpusStats()` will report the
+When these hooks are supplied, `router.getCorpusStats()` reports the
 corresponding runtime mode as `active` instead of the built-in `heuristic`
 mode.
 
@@ -235,4 +236,4 @@ The router records typed events for:
 - `generate:*`
 - `route:complete`
 
-These events are intended for observability, audit trails, and future workbench/runtime inspection surfaces.
+Hosts use them for observability and audit trails.

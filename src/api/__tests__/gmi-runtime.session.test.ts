@@ -17,6 +17,15 @@ import { clearProviderPriority, setProviderPriority } from '../runtime/provider-
 
 let n = 0;
 const key = () => `k-session-${++n}`;
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** A gate a held reply waits on (`reply.hold`), and the function that opens it. */
+function gate(): { opened: Promise<void>; open: () => void } {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { opened, open };
+}
 const base = (apiKey: string, extra: Record<string, unknown> = {}) =>
   ({ runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey, fallbackProviders: [], ...extra }) as unknown as AgentOptions;
 const lookupTool = (execute: (args: Record<string, unknown>) => Promise<unknown>) => ({ name: 'lookup', description: 'Look up.', inputSchema: { type: 'object', properties: { q: { type: 'string' } } }, execute });
@@ -82,10 +91,90 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     ]);
   });
 
+  it('a run that ends by itself with no text after a tool round reports the last step\'s reason, not tool-calls', async () => {
+    const k = key(); script('openai', k, { replies: [reply.tools([{ id: 'c1', name: 'lookup', args: { q: 'x' } }]), reply.text('')] });
+    const r = await agent(base(k, { tools: [lookupTool(async () => ({ success: true, output: 1 }))] })).session('s').send('find x');
+    expect(r.toolCalls).toHaveLength(1);
+    expect(r).toMatchObject({ text: '', finishReason: 'stop' });
+  });
+
+  it('stream() resolves provider and model once the model call is routed, and to the routed provider when the turn fails before any step', async () => {
+    const k = key(); const g = gate();
+    script('openai', k, { replies: [reply.hold([], g.opened, reply.text('Late.')), Object.assign(new Error('bad request'), { httpStatus: 400 })] });
+    const session = agent(base(k)).session('s');
+    try {
+      const r = session.stream('go');
+      // The provider holds the request open: routing is done, and no step has finished.
+      expect(await Promise.race([r.provider, sleep(2_000).then(() => 'not yet')])).toBe('openai');
+      expect(await r.model).toBe('stub-model');
+      g.open();
+      expect(await r.text).toBe('Late.');
+    } finally {
+      g.open();
+    }
+    const failed = session.stream('again');
+    expect(await failed.finishReason).toBe('error');
+    expect([await failed.provider, await failed.model]).toEqual(['openai', 'stub-model']);
+  });
+
+  it('abandoning stream() stops the turn: the model request is aborted, and the promises settle with what was delivered', async () => {
+    const k = key(); const g = gate();
+    const delta = { id: 'stub', object: 'chat.completion.chunk', created: 0, modelId: 'stub-model', choices: [], responseTextDelta: 'First' };
+    const s = script('openai', k, { replies: [reply.hold([delta], g.opened, reply.text(' and the rest.'))] });
+    const session = agent(base(k)).session('s');
+    try {
+      const r = session.stream('go');
+      for await (const _text of r.textStream) break;
+      // Nobody opens the gate: the turn ends only because the abandoned stream aborted its request.
+      expect(await Promise.race([r.text, sleep(2_000).then(() => 'still running')])).toBe('First');
+      expect(s.aborts).toBe(1);
+      // As streamText reports an abandoned stream: the reason of the latest finished step, not the abort.
+      expect(await r.finishReason).toBe('stop');
+    } finally {
+      g.open();
+    }
+  });
+
+  it("sends the provider's end-user field only for a user id the caller passed, never the session id or a call id", async () => {
+    const k = key(); const s = script('openai', k, { replies: ['One.', 'Two.', 'Three.'].map((text) => reply.text(text)) });
+    const a = agent(base(k));
+    await a.session('s1').send('hi');
+    await a.generate('hi');
+    await a.session('s2', { userId: 'user-hash-1' }).send('hi');
+    expect(s.seen.map((call) => call.options.userId)).toEqual([undefined, undefined, 'user-hash-1']);
+  });
+
+  it('reports the provider message id only when the call opted into cache diagnostics, as agent() does', async () => {
+    const k = key(); script('openai', k, { replies: [reply.text('One.'), reply.text('Two.'), reply.text('Three.')] });
+    const session = agent(base(k)).session('s');
+    expect(await session.send('one')).not.toHaveProperty('providerMessageId');
+    expect(await session.stream('two').providerMessageId).toBeNull();
+    // send()'s typed overloads take options only with a responseSchema; the per-send overrides are read without one too.
+    expect((await session.send('three', { cacheDiagnostics: true } as never)).providerMessageId).toBe('stub');
+  });
+
   it('a tool-less agent sends no tools payload (the executor\'s built-in date tool is not offered)', async () => {
     const k = key(); const s = script('openai', k, { replies: [reply.text('ok')] });
     await agent(base(k)).session('s').send('hi');
     expect(s.seen[0].options.tools).toBeUndefined();
+  });
+
+  it('a send that asks for a tool choice on an agent with no tools sends none: OpenAI rejects tool_choice without tools', async () => {
+    const k = key(); const s = script('openai', k, { replies: [reply.text('ok')] });
+    // send()'s typed overloads take options only with a responseSchema; the per-send overrides are read without one too.
+    await agent(base(k)).session('s').send('hi', { toolChoice: 'auto' } as never);
+    expect(s.seen[0].options.tools).toBeUndefined();
+    expect(s.seen[0].options.toolChoice).toBeUndefined();
+  });
+
+  it('sends no temperature and no output budget unless the agent or the call sets one, as agent() does', async () => {
+    const k = key(); const s = script('openai', k, { replies: [reply.text('ok'), reply.text('ok')] });
+    const a = agent(base(k));
+    await a.session('s').send('hi');
+    expect(s.seen[0].options).not.toHaveProperty('temperature');
+    expect(s.seen[0].options).not.toHaveProperty('maxTokens');
+    await a.generate('hi', { temperature: 0.3, maxTokens: 64 });
+    expect(s.seen[1].options).toMatchObject({ temperature: 0.3, maxTokens: 64 });
   });
 
   it("an agent tool named getCurrentDateTime is the one that runs, not the executor's built-in", async () => {
@@ -163,13 +252,53 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(s.seen[1].messages.map((m) => m.content)).toContain('First.');
   });
 
-  it('close() lets a running send finish but keeps it out of the history; the id starts empty', async () => {
-    const k = key(); script('openai', k, { replies: [reply.text('Late.')] });
+  it('close() stops a running send: it rejects with the abort error, and the id starts empty', async () => {
+    const k = key(); const s = script('openai', k, { replies: [reply.text('Late.')] });
     const a = agent(base(k));
     const pending = a.session('s').send('one');
     await a.session('s').close();
-    expect((await pending).text).toBe('Late.');
+    await expect(pending).rejects.toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringMatching(/abort/i) });
+    expect(s.aborts).toBe(1);
     expect(a.session('s').messages()).toEqual([]);
+  });
+
+  it('close() during a provider request held open aborts it and returns at once; the send rejects with the abort error', async () => {
+    const k = key(); const g = gate();
+    const s = script('openai', k, { replies: [reply.hold([], g.opened, reply.text('Late.'))] });
+    const session = agent(base(k)).session('s');
+    try {
+      const outcome = session.send('one').then(() => 'resolved', (error: unknown) => error);
+      await vi.waitFor(() => expect(s.seen).toHaveLength(1));
+      expect(await Promise.race([session.close().then(() => 'closed'), sleep(2_000).then(() => 'still waiting')])).toBe('closed');
+      expect(s.aborts).toBe(1);
+      expect(await outcome).toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringMatching(/abort/i) });
+    } finally {
+      g.open();
+    }
+  });
+
+  it('a session that streams many turns leaves no listener behind on the signal close() aborts', async () => {
+    const warnings: Error[] = [];
+    const onWarning = (warning: Error): void => {
+      warnings.push(warning);
+    };
+    process.on('warning', onWarning);
+    try {
+      const k = key(); script('openai', k, { replies: Array.from({ length: 12 }, () => reply.text('ok')) });
+      const session = agent(base(k)).session('s');
+      for (let i = 0; i < 12; i++) expect(await session.stream(`turn ${i}`).text).toBe('ok');
+      // Node reports a listener leak on an AbortSignal past ten listeners, on a later tick.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(warnings.filter((warning) => warning.name === 'MaxListenersExceededWarning').map((warning) => warning.message)).toEqual([]);
+    } finally {
+      process.off('warning', onWarning);
+    }
+  });
+
+  it("an onAfterGeneration override to '' makes stream().text ''", async () => {
+    const k = key(); script('openai', k, { replies: [reply.text('raw text')] });
+    const session = agent(base(k, { onAfterGeneration: async (res: { text: string }) => ({ ...res, text: '' }) })).session('s');
+    expect(await session.stream('hi').text).toBe('');
   });
 
   it('a clear while the turn waits for its memory context keeps that turn out of the history', async () => {
@@ -188,6 +317,13 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     session.clear();
     releaseContext();
     expect((await pending).text).toBe('Late reply.');
+    expect(session.messages()).toEqual([]);
+  });
+
+  it('a primary with no credentials: send rejects with CONFIGURATION_ERROR, naming the missing key', async () => {
+    vi.stubEnv('OPENAI_API_KEY', '');
+    const session = agent({ runtime: 'gmi', provider: 'openai', model: 'stub-model', fallbackProviders: [] }).session('s');
+    await expect(session.send('go')).rejects.toMatchObject({ code: GMIErrorCode.CONFIGURATION_ERROR, message: expect.stringContaining('No API key for openai') });
     expect(session.messages()).toEqual([]);
   });
 
@@ -287,6 +423,7 @@ describe("agent({ runtime: 'gmi' }) resolves the model and builds memory on firs
 
   it('memory checks that need the environment wait for the first call, which names memory.embedding; the others run at construction', async () => {
     vi.stubEnv('OPENAI_API_KEY', '');
+    vi.stubEnv('GEMINI_API_KEY', '');
     vi.stubEnv('OLLAMA_BASE_URL', '');
     expect(() => agent(base(key(), { memory: { embedding: { provider: 'anthropic' } } }))).toThrow(/Anthropic has no embedding models/);
     expect(() => agent(base(key(), { memory: { embedding: { provider: 'ollama', model: 'mxbai-embed-large', dimension: 0 } } }))).toThrow(/positive integer/);
@@ -332,6 +469,36 @@ describe("agent({ runtime: 'gmi' }) resolves the model and builds memory on firs
     await a.session('carol-1').close();
     await a.session('carol-2', { userId: 'carol' }).send(QUESTION);
     expect(JSON.stringify(s.seen[3].messages)).toContain('vault');
+    await a.close();
+  });
+
+  it("a session's memory context names no memory of another session; sessions that share a user id still see each other's", async () => {
+    const k = key(); const emb = key();
+    const s = script('openai', k, { replies: ['Noted.', 'Kept.', 'No idea.', 'Noted.', 'Kept.', 'In the vault.'].map((text) => reply.text(text)) });
+    script('openai', emb);
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = agent(base(k, plainMemory()));
+    /** The memory trace ids a request's prompt names: the active-context list of its memory block. */
+    const traceIdsIn = (request: { messages: unknown }): string[] => JSON.stringify(request.messages).match(/mt_[0-9a-f-]{36}/g) ?? [];
+
+    await a.session('alice-1').send(FACT);
+    await a.session('alice-1').send('Keep that safe for me.');
+    // Alice's second request lists the memories of her first exchange as her active context.
+    expect(traceIdsIn(s.seen[1]).length).toBeGreaterThan(0);
+
+    // Bob has no memories yet: his request names none, Alice's included.
+    await a.session('bob-1').send(QUESTION);
+    expect(traceIdsIn(s.seen[2])).toEqual([]);
+    expect(JSON.stringify(s.seen[2].messages)).not.toContain('vault');
+
+    // One user in two sessions: the second recalls the fact and names a memory of the first.
+    await a.session('carol-1', { userId: 'carol' }).send(FACT);
+    await a.session('carol-1').send('Keep that safe for me.');
+    const carolIds = traceIdsIn(s.seen[4]);
+    expect(carolIds.length).toBeGreaterThan(0);
+    await a.session('carol-2', { userId: 'carol' }).send(QUESTION);
+    expect(JSON.stringify(s.seen[5].messages)).toContain('vault');
+    expect(traceIdsIn(s.seen[5]).some((id) => carolIds.includes(id))).toBe(true);
     await a.close();
   });
 });

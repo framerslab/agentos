@@ -1,6 +1,6 @@
 # Qdrant Backend
 
-The Qdrant backend stores embeddings in [Qdrant](https://qdrant.tech/), a purpose-built vector database with built-in BM25 sparse vectors for hybrid search. Non-vector data (knowledge graph, document metadata) lives in a sidecar SQLite file alongside Qdrant. Qdrant is the default OSS production recommendation for AgentOS.
+[`QdrantVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/QdrantVectorStore.ts) stores embeddings in [Qdrant](https://qdrant.tech/), a purpose-built vector database with built-in BM25 sparse vectors for hybrid search. It is a vector store for the RAG layer: it holds vectors and their payload metadata, and nothing else. Qdrant is the default open-source production recommendation for AgentOS vector search.
 
 ## Prerequisites
 
@@ -32,16 +32,17 @@ Port 6333 is the HTTP API; 6334 is gRPC (optional).
 3. Configure:
 
 ```typescript
-import { QdrantVectorStore } from '@framers/agentos/cognition/rag/implementations/vector_stores/QdrantVectorStore';
+import { QdrantVectorStore } from '@framers/agentos/cognition/rag';
 
-const store = new QdrantVectorStore({
+// The constructor takes no options; initialize() takes the configuration.
+const store = new QdrantVectorStore();
+
+await store.initialize({
   id: 'my-qdrant',
   type: 'qdrant',
   url: 'https://abc123-xyz.aws.cloud.qdrant.io:6333',
-  apiKey: 'your-qdrant-cloud-api-key',
+  apiKey: process.env.QDRANT_API_KEY,
 });
-
-await store.initialize({ id: 'my-qdrant', type: 'qdrant', url: '...', apiKey: '...' } as any);
 ```
 
 ## Configuration options
@@ -93,15 +94,9 @@ await store.createCollection('agent-bob', 1536, { similarityMetric: 'cosine' });
 
 Collections are fully isolated. Deleting one agent's collection does not affect others.
 
-## Knowledge graph sidecar SQLite
+## Knowledge graph and the Memory facade
 
-Qdrant is a vector database — it stores embeddings and payload metadata. Non-vector data that the memory system needs (knowledge graph nodes/edges, consolidation logs, retrieval feedback, conversation history) lives in a **sidecar SQLite file**.
-
-The sidecar is the same [`Brain`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts) used by the default SQLite backend, minus the embedding column (which lives in Qdrant). This means:
-
-- Knowledge graph queries (entity lookup, relation traversal) stay fast (local SQLite).
-- Vector queries go through Qdrant's optimized HNSW index.
-- Migration between SQLite-only and Qdrant backends is straightforward.
+Qdrant stores vectors and payloads only. The `Memory` facade has no Qdrant backend: `store: 'qdrant'` is a reserved value in its config type, and `Memory.createSqlite()` rejects it. Knowledge-graph data stays in the store that holds it (the SQLite or Postgres `Brain`, or Neo4j); pairing it with Qdrant vectors is wiring the host does.
 
 ## Scaling beyond 10M vectors
 
@@ -162,7 +157,7 @@ curl -X PATCH 'http://localhost:6333/collections/my_collection' \
 The default timeout is 15 seconds. Increase `timeoutMs` for slow networks or large datasets:
 
 ```typescript
-const store = new QdrantVectorStore({
+await store.initialize({
   // ...
   timeoutMs: 30_000,
 });
@@ -174,7 +169,7 @@ The `url` field is missing or empty. Ensure the configuration includes a valid Q
 
 ### Collection not found (404)
 
-`createCollection()` must be called before upserting data. AgentOS does not auto-create collections — this is by design to prevent accidental data isolation issues.
+`createCollection()` must be called before upserting data: `upsert()` does not create a missing collection.
 
 ### Dimension mismatch
 

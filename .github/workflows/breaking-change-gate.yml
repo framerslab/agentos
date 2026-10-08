@@ -1,0 +1,52 @@
+name: Breaking change gate
+
+# A breaking change moves AgentOS to a new minor version (release.config.js),
+# and every consumer pinned to the current minor has to move to it by hand.
+# This check fails a pull request that carries a breaking-change marker unless
+# a maintainer has added the label `breaking-approved`.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse an unapproved breaking change
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          # The markers release.config.js reads: a type with `!` before the
+          # colon, or a note keyword (BREAKING CHANGE, BREAKING CHANGES,
+          # BREAKING) at the start of a line, followed by a colon or a space.
+          subject='^[a-z]+(\([^)]*\))?!:'
+          note='^[[:space:]*>-]*(BREAKING CHANGES?|BREAKING)[[:space:]]*:'
+          found=""
+          if printf '%s\n' "$TITLE" | grep -Eq "$subject"; then found="the title"; fi
+          if printf '%s\n' "$BODY" | grep -Eq "$note"; then found="${found:+$found, }the description"; fi
+          if gh api --paginate "repos/$REPO/pulls/$PR/commits?per_page=100" --jq '.[].commit.message' | grep -Eq "$subject|$note"; then
+            found="${found:+$found, }a commit message"
+          fi
+          if [ -z "$found" ]; then
+            echo "No breaking-change marker."
+            exit 0
+          fi
+          case ",$LABELS," in
+            *,breaking-approved,*)
+              echo "Breaking-change marker in $found; approved with the breaking-approved label."
+              exit 0
+              ;;
+          esac
+          echo "::error::Breaking-change marker in $found. A breaking change releases a new minor version of AgentOS, and every consumer pinned to the current minor must move to it by hand. Make the change backward compatible and drop the marker, or ask a maintainer to add the breaking-approved label."
+          exit 1

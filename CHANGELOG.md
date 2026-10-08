@@ -1,3 +1,29 @@
+## [0.13.1](https://github.com/framerslab/agentos/compare/v0.13.0...v0.13.1) (2026-10-08)
+
+### fix
+
+* **emergent:** bound what QuickJSExecutor copies out of the guest (#168) ([5dd510e](https://github.com/framerslab/agentos/commit/5dd510ef0b40226c45e59ab6d640251474d5d72a))
+
+## [0.13.0](https://github.com/framerslab/agentos/compare/v0.12.24...v0.13.0) (2026-10-08)
+
+### ⚠ BREAKING CHANGE
+
+* **speech:** URL output (providerSpecificOptions.outputFormat 'url')
+downloads only from hosts listed in audioUrlHosts, or in
+MINIMAX_TTS_AUDIO_URL_HOSTS through SpeechRuntime; without one, synthesize()
+throws instead of fetching. MiniMaxAsyncSpeechResponse.task_id is
+number | string instead of string, and file_id is number | string instead
+of number.
+
+### feat
+
+* **safety:** a persisted spend meter that processRequest reserves against before any provider call (#167) ([b9c2e91](https://github.com/framerslab/agentos/commit/b9c2e91927d58fc40d02a95348ba3a4c2e29b58b))
+
+### fix
+
+* **api:** five defects from a cold read of the gmi() session runner (#165) ([5eec49c](https://github.com/framerslab/agentos/commit/5eec49c09d57ae1eec9fd23ed158fd2447ea909f))
+* **speech:** download MiniMax URL output only from allowed hosts, query async tasks with GET (#166) ([14b86bf](https://github.com/framerslab/agentos/commit/14b86bf6b7e029bbe00e5fe287398fd49aa01258))
+
 ## [0.12.24](https://github.com/framerslab/agentos/compare/v0.12.23...v0.12.24) (2026-10-08)
 
 ### fix

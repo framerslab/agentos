@@ -18,7 +18,6 @@ import type { GenerateTextOptions, GenerateTextResult, Message, MessageContent }
 import type { StreamTextResult } from './streamText.js';
 import { GMI } from '../cognition/substrate/GMI.js';
 import type { GMIBaseConfig, IGMI } from '../cognition/substrate/IGMI.js';
-import type { ICognitiveMemoryManager } from '../cognition/memory/CognitiveMemoryManager.js';
 import type { IPersonaDefinition } from '../cognition/substrate/personas/IPersonaDefinition.js';
 import { InMemoryWorkingMemory } from '../cognition/substrate/memory/InMemoryWorkingMemory.js';
 import { StatisticalUtilityAI } from '../cognition/nlp/ai_utilities/StatisticalUtilityAI.js';
@@ -115,20 +114,11 @@ function withMembers<T extends object>(target: T, members: Partial<Record<keyof 
 }
 
 /**
- * The agent's memory manager as one GMI sees it. `GMI.shutdown()` shuts down
- * the cognitive memory it was given; the agent's sessions share one manager, so
- * a session's shutdown must leave it to the others, and `agent.close()` closes it.
- */
-function sharedMemoryView(manager: ICognitiveMemoryManager): ICognitiveMemoryManager {
-  return withMembers(manager, { shutdown: async () => undefined });
-}
-
-/**
  * A tool registry that leaves out the tools ToolExecutor registers from its own
  * constructor (the built-in getCurrentDateTime), so a tool-less agent offers the
  * model no tools (spec D4j) and an agent tool of the same name is the only one.
- * The constructor starts that registration without waiting for it; skipping it
- * here needs no wait, and no later registration can be overtaken by it.
+ * The constructor starts that registration without waiting for it, so skipping
+ * it here needs no wait for it before the agent's tools register.
  */
 class AgentToolRegistry extends ExtensionRegistry<ITool> {
   /** False while the executor's constructor registers its built-ins. */
@@ -323,7 +313,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
       llmProviderManager: new GatewayProviderManager().asProviderManager(),
       utilityAI: s.utilityAI,
       toolOrchestrator: hookTools(s.tools, opts.onBeforeToolExecution, step),
-      ...(mem ? { cognitiveMemory: sharedMemoryView(mem.manager) } : {}),
+      // The agent's memory as this GMI's session sees it: the shared store with a
+      // working memory of its own, so one session's active context never lists
+      // another's memories. `GMI.shutdown()` shuts down the memory it was given;
+      // on the view that does nothing, and `agent.close()` closes the manager.
+      ...(mem ? { cognitiveMemory: mem.manager.forSession() } : {}),
       completionGateway: gateway,
       maxToolLoopIterations: steps,
       defaultLlmProviderId: persona.defaultProviderId,
@@ -332,8 +326,22 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // messages (where the legacy path puts it), then onBeforeGeneration.
       beforeModelCall: async (ctx) => {
         step.index = ctx.stepIndex;
+        turn.onModelCall?.({ providerId: ctx.providerId, modelId: ctx.modelId });
         let messages: ChatMessage[] = ctx.messages;
         let changed = false;
+        // The GMI names the turn's user message after the turn's user, which on
+        // this path is the session id unless the caller named one, and replays
+        // it under that name on a tool step and for multimodal input. agent()
+        // names no message, and OpenAI refuses a name with a space or a slash
+        // in it (HTTP 400), so the name stays out of the request.
+        if (messages.some((message) => message.role === 'user' && message.name !== undefined)) {
+          messages = messages.map((message) => {
+            if (message.role !== 'user' || message.name === undefined) return message;
+            const { name: _name, ...unnamed } = message;
+            return unnamed;
+          });
+          changed = true;
+        }
         if (turn.memoryContext) {
           let insertAt = 0;
           while (insertAt < messages.length && messages[insertAt].role === 'system') insertAt += 1;
@@ -442,6 +450,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
       const tally = sessionTallies.get(sessionId)!;
       const lock = new TurnLock();
       let closing: Promise<void> | undefined;
+      // Every turn of the session runs under this signal; close() aborts it.
+      const stopTurns = new AbortController();
 
       const buildSessionGmi = async (gmiId: string): Promise<BuiltGmi> => {
         const { persona } = await shared.get();
@@ -477,6 +487,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
         sessionId,
         opts,
         userId,
+        // Only a user id the caller passed reaches the provider's end-user field.
+        providerUserId: sessionOptions?.userId,
         history,
         lock,
         ledger: mergeLedger(ledger, { sessionId, source }),
@@ -505,9 +517,10 @@ export function gmi(opts: GmiOptions): GmiHandle {
             responseSchema: sendOpts?.responseSchema,
             schemaName: sendOpts?.schemaName,
             blockLabel: sendOpts?.blockLabel,
+            abortSignal: stopTurns.signal,
           });
         },
-        stream: (input: MessageContent) => streamGmiTurn(deps('agent.session.stream'), input, {}),
+        stream: (input: MessageContent) => streamGmiTurn(deps('agent.session.stream'), input, { abortSignal: stopTurns.signal }),
         messages: (): SessionTranscriptMessage[] => history?.messages() ?? [],
         reseed: (snapshot: SessionTranscriptMessage[]) => {
           if (!history) throw new Error('reseed requires session history (history: false is set on this agent)');
@@ -523,12 +536,14 @@ export function gmi(opts: GmiOptions): GmiHandle {
           history?.reseed([]);
           syncGmiHistory();
         },
-        // A turn still running ends first and is returned to its caller, but the
-        // reseed keeps it out of the history; then the session's GMI is shut down.
+        // A turn still running is stopped: its model call is aborted, its caller
+        // gets the abort error, and the steps it finished stay in this session's
+        // history, marked partial. Once it has ended, the session's GMI is shut
+        // down. The next agent.session(id) builds a new session, which starts empty.
         close: () =>
           (closing ??= (async () => {
             if (sessions.get(sessionId) === entry) sessions.delete(sessionId);
-            history?.reseed([]);
+            stopTurns.abort();
             const release = await lock.acquire();
             try {
               const built = await own.peek()?.catch(() => undefined);
@@ -550,10 +565,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
     },
 
     /**
-     * Closes every session (each after its running turn), then the cognitive
-     * memory; a session opened from now on builds a new one. The tools stay as
-     * the caller passed them: the orchestrator is not shut down, because
-     * shutting it down would shut down the caller's tools.
+     * Closes every session (each stops its running turn first, see
+     * `session.close()`), then the cognitive memory; a session opened from now
+     * on builds a new one. The tools stay as the caller passed them: the
+     * orchestrator is not shut down, because shutting it down would shut down
+     * the caller's tools.
      */
     async close(): Promise<void> {
       const pending = memory.peek();

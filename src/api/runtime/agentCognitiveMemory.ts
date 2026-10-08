@@ -5,12 +5,15 @@
  * in-memory knowledge graph, an embedding manager for `memory.embedding`, a
  * working memory of its own and the persona's HEXACO traits.
  *
- * One manager serves every session of an agent. Each GMI's memory bridge passes
- * the session's mood on every encode, retrieve and assemble call and scopes
- * recall to the session's user and conversation, so the manager's own mood
- * callback is neutral. The memory graph runs on the `'knowledge-graph'` backend
- * over the same in-memory knowledge graph, because the `'graphology'` backend
- * needs graphology, an optional peer dependency. Consolidation runs only when
+ * One manager serves every session of an agent, and each session's GMI is given
+ * `manager.forSession()`: the shared store with a working memory of its own, so
+ * a session's active context lists only its own memories. Each GMI's memory
+ * bridge passes the session's mood on every encode, retrieve and assemble call
+ * and scopes recall (graph associations included) to the session's user and
+ * conversation, so the manager's own mood callback is neutral. The memory graph
+ * runs on the `'knowledge-graph'` backend over the same in-memory knowledge
+ * graph, because the `'graphology'` backend needs graphology, an optional peer
+ * dependency. Consolidation runs only when
  * `memory.consolidation.enabled` is true. The build embeds one test text through
  * the embedding model it sets up, so a model that cannot answer, or answers with
  * another size than memory expects, fails the build instead of leaving memory empty.
@@ -30,6 +33,8 @@ import type { AIModelProviderManager } from '../../core/llm/providers/AIModelPro
 import type { IProvider, ProviderEmbeddingResponse } from '../../core/llm/providers/IProvider.js';
 import type { MemoryConfig } from '../types.js';
 import { createProviderManager, resolveModelOption, resolveProvider, type ParsedModel, type ResolvedProvider } from '../model.js';
+import { GEMINI_DEFAULT_EMBEDDING_MODEL, PROVIDER_DEFAULTS } from './provider-defaults.js';
+import { getDefaultProvider } from './global-default.js';
 
 /**
  * Output sizes of the embedding models agentos knows, as each returns them when
@@ -101,24 +106,58 @@ function checkedDimension(memory: MemoryConfig): number | undefined {
   return declared;
 }
 
+/** The default embedding model agentos has for `providerId`: the shared provider defaults', or Gemini's (embedText's). */
+function defaultEmbeddingModelOf(providerId: string): string | undefined {
+  return providerId === 'gemini' ? GEMINI_DEFAULT_EMBEDDING_MODEL : PROVIDER_DEFAULTS[providerId]?.embedding;
+}
+
+/** The providers memory picks by itself, OpenAI first (spec D7), each with the variable that configures it. */
+const EMBEDDING_DETECTION_ORDER: ReadonlyArray<{ provider: string; envKey: string }> = [
+  { provider: 'openai', envKey: 'OPENAI_API_KEY' },
+  { provider: 'gemini', envKey: 'GEMINI_API_KEY' },
+  { provider: 'ollama', envKey: 'OLLAMA_BASE_URL' },
+];
+
 /**
- * Resolves the embedding model from `memory.embedding`, or, when it is unset,
- * from the environment: OpenAI's default embedding model when OPENAI_API_KEY is
- * set, else Ollama's when OLLAMA_BASE_URL is set. Only checks whether those two
- * are set; the provider's credentials are resolved when the memory is built.
+ * The embedding provider, and the model when one is named, memory uses when
+ * `memory.embedding` names no provider: the global default provider
+ * (`setDefaultProvider`) when agentos has an embedding model for it, with the
+ * default's own model when that is an embedding model; else the first of
+ * OpenAI, Gemini and Ollama whose key (Ollama: base URL) is set.
+ */
+function defaultEmbeddingChoice(env: Env): { provider: string; model?: string } | undefined {
+  const globalDefault = getDefaultProvider();
+  if (globalDefault?.provider && defaultEmbeddingModelOf(globalDefault.provider)) {
+    const model = globalDefault.model && /embed/i.test(globalDefault.model) ? globalDefault.model : undefined;
+    return { provider: globalDefault.provider, ...(model ? { model } : {}) };
+  }
+  const detected = EMBEDDING_DETECTION_ORDER.find(({ envKey }) => env[envKey]);
+  return detected ? { provider: detected.provider } : undefined;
+}
+
+/**
+ * Resolves the embedding model from `memory.embedding`, or, when it names no
+ * provider, from the global default provider and the environment (see
+ * {@link defaultEmbeddingChoice}). Only checks which provider is configured;
+ * its credentials are resolved when the memory is built.
  */
 function resolveEmbeddingTarget(memory: MemoryConfig, env: Env): EmbeddingTarget {
-  const requested = memory.embedding?.provider || (env.OPENAI_API_KEY ? 'openai' : env.OLLAMA_BASE_URL ? 'ollama' : undefined);
-  if (!requested) {
+  const choice: { provider: string; model?: string } | undefined = memory.embedding?.provider
+    ? { provider: memory.embedding.provider }
+    : defaultEmbeddingChoice(env);
+  if (!choice) {
     throw new Error(
-      'gmi(): cognitive memory needs an embedding model. Set memory.embedding: { provider, model } or set OPENAI_API_KEY or OLLAMA_BASE_URL.',
+      'gmi(): cognitive memory needs an embedding model. Set memory.embedding: { provider, model }, a default provider that has embedding models (setDefaultProvider), or OPENAI_API_KEY, GEMINI_API_KEY or OLLAMA_BASE_URL.',
     );
   }
+  const requested = choice.provider;
   refuseProviderWithoutEmbeddings(requested);
 
+  // Gemini has no embedding model in the shared provider defaults; embedText's default applies.
+  const modelName = memory.embedding?.model ?? choice.model ?? (requested === 'gemini' ? GEMINI_DEFAULT_EMBEDDING_MODEL : undefined);
   let model: ParsedModel;
   try {
-    model = resolveModelOption({ provider: requested, model: memory.embedding?.model }, 'embedding');
+    model = resolveModelOption({ provider: requested, model: modelName }, 'embedding');
   } catch (error) {
     throw errorWithCause(`gmi(): memory.embedding: ${messageOf(error)}`, error);
   }
@@ -138,11 +177,11 @@ function resolveEmbeddingTarget(memory: MemoryConfig, env: Env): EmbeddingTarget
 /**
  * Checks, when the agent is built, that cognitive memory has an embedding model
  * it can use, so a missing or unusable one fails before the first send. Reads
- * the environment only to pick the provider when `memory.embedding` is unset;
- * credentials are read when the memory is built.
+ * the global default provider and the environment only to pick the provider when
+ * `memory.embedding` names none; credentials are read when the memory is built.
  *
  * @param memory - The agent's memory config.
- * @param env - The environment to read OPENAI_API_KEY and OLLAMA_BASE_URL from (defaults to `process.env`).
+ * @param env - The environment to read OPENAI_API_KEY, GEMINI_API_KEY and OLLAMA_BASE_URL from (defaults to `process.env`).
  * @throws {Error} Naming `memory.embedding` when no provider is set or detected, when the
  *   provider has no embeddings (Anthropic, Groq, xAI, the Claude Code and Gemini CLIs), when the
  *   model does not resolve, or when the model's output size is unknown and

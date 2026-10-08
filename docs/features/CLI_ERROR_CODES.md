@@ -186,7 +186,7 @@ new CLISubprocessError(
 import { CLISubprocessError, CLI_ERROR } from '@framers/agentos/sandbox/subprocess';
 
 try {
-  const result = await bridge.execute(prompt);
+  const result = await bridge.execute({ prompt });
 } catch (error) {
   if (error instanceof CLISubprocessError) {
     console.error(`[${error.code}] ${error.binaryName}: ${error.message}`);
@@ -194,7 +194,7 @@ try {
 
     if (error.recoverable) {
       // Retry or fall back to another provider
-      return await fallbackProvider.execute(prompt);
+      return await fallbackBridge.execute({ prompt });
     }
 
     // Non-recoverable -- surface to user

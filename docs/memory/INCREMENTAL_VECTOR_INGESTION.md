@@ -155,7 +155,7 @@ The first run embeds the whole corpus. Every run after only embeds the deltas. A
 | `upsert(name, documents)` | Insert-or-replace the changed and new chunks by id. |
 | `query(name, queryEmbedding, { topK, filter })` | Retrieval at read time (see below). |
 
-`fetchByIds` is the load-bearing optional method. A store that does not implement it (some remote or sparse-only indexes) cannot do the skip, and the recipe degrades to "embed everything every run." [`PostgresVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/PostgresVectorStore.ts) and the in-memory store both implement it.
+The skip depends on `fetchByIds`, an optional method. A store that does not implement it cannot do the skip, and the recipe embeds everything every run. Among the bundled stores only [`PostgresVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/PostgresVectorStore.ts) implements it; the in-memory, SQL, HNSW, Qdrant, Neo4j and Pinecone stores do not.
 
 ---
 
@@ -180,7 +180,7 @@ The recipe is backend-agnostic: it only calls interface methods. Choose the stor
 
 - [Postgres + pgvector](./POSTGRES_BACKEND.md): HNSW index, tsvector FTS, `fetchByIds`. The default for a server-side corpus.
 - [Pinecone](./PINECONE_BACKEND.md): managed, for large or multi-region indexes.
-- In-memory: tests and small static corpora, no persistence.
+- In-memory: tests and small static corpora, no persistence; it has no `fetchByIds`, so every run re-embeds.
 
 ---
 
@@ -196,7 +196,7 @@ When you want recall that decays, consolidates, and surfaces involuntarily, agen
 |------|---------|
 | `core/vector-store/IVectorStore.ts` | The interface: `createCollection`, `upsert`, `fetchByIds`, `query`, `delete`. |
 | `cognition/rag/vector_stores/PostgresVectorStore.ts` | pgvector backend with HNSW index, tsvector FTS, and `fetchByIds`. |
-| `cognition/rag/vector_stores/InMemoryVectorStore.ts` | In-process backend for tests and small corpora. |
+| `cognition/rag/vector_stores/InMemoryVectorStore.ts` | In-process backend for tests and small corpora (no `fetchByIds`). |
 
 ---
 

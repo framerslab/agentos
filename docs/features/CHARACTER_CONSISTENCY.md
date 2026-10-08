@@ -18,11 +18,11 @@ Character consistency lets you anchor generated images to a reference face or ch
 
 | Provider | Mechanism | Models |
 |----------|-----------|--------|
-| **Replicate** | Pulid (strict), Flux image input (balanced/loose) | `zsxkib/pulid`, `black-forest-labs/flux-dev` |
-| **Fal** | IP-Adapter | `fal-ai/flux/dev` |
+| **Replicate** | Pulid (strict, when no model is set), Flux image input with `image_strength` (balanced/loose); Flux 2 and Kontext models take the reference as their input image | `zsxkib/pulid` (pinned version), `black-forest-labs/flux-dev` |
+| **Fal** | IP-Adapter (`ip_adapter_scale` 0.9 / 0.6 / 0.3); Flux 2 models use their `/edit` endpoint and Kontext models their `image_url` | `fal-ai/flux/dev` |
 | **SD-Local** | ControlNet + IP-Adapter extension | Any SD 1.5 / SDXL checkpoint |
-| OpenAI | Not supported (graceful ignore) | — |
-| Stability | Not supported (graceful ignore) | — |
+| OpenAI | Not supported: the reference is ignored, with a `console.debug` note | — |
+| Stability | Not supported: the reference is ignored, with a `console.debug` note | — |
 
 ## Basic Usage
 
@@ -38,7 +38,7 @@ const result = await generateImage({
 });
 ```
 
-When `consistencyMode` is `'strict'` and no model is explicitly set, Replicate auto-selects `zsxkib/pulid` for maximum face consistency.
+When `consistencyMode` is `'strict'` and no model is explicitly set, Replicate selects a pinned version of `zsxkib/pulid`. Without `consistencyMode`, the mode is `'balanced'`.
 
 ## Fields Reference
 
@@ -48,12 +48,13 @@ URL or base64 data URI of the reference character image. Each provider maps this
 
 - **Replicate (Pulid):** `main_face_image` input
 - **Replicate (standard Flux):** `image` input with `image_strength`
-- **Fal:** `ip_adapter_image` body field
+- **Replicate (Flux 2 / Kontext):** `input_images` / `input_image`
+- **Fal:** `ip_adapter_image` body field (`image_urls` on Flux 2 `/edit`, `image_url` on Kontext)
 - **SD-Local:** ControlNet `input_image` with IP-Adapter preprocessor
 
 ### `faceEmbedding`
 
-Optional 512-dimensional vector from InsightFace or equivalent. Used by the [`AvatarPipeline`](https://github.com/framerslab/agentos/blob/master/src/io/media/avatar/AvatarPipeline.ts) for drift detection — after generating each image, the pipeline extracts the face embedding from the output and compares it to this anchor via cosine similarity. Images that drift below the threshold (default 0.6) are regenerated.
+Optional 512-dimensional vector from InsightFace or equivalent. `generateImage()` passes it to the provider request, and no built-in provider reads it. Drift detection is done by [`AvatarPipeline`](https://github.com/framerslab/agentos/blob/master/src/io/media/avatar/AvatarPipeline.ts): it computes the anchor embedding from the neutral portrait at its `face_embedding` stage, compares each expression-sheet image with it by cosine similarity, and regenerates an image below `driftGuard.faceSimilarity` (default 0.6) up to `driftGuard.maxRegenerationAttempts` times (default 3).
 
 ### `consistencyMode`
 
@@ -86,14 +87,15 @@ await generateImage({
 
 The [`AvatarPipeline`](https://github.com/framerslab/agentos/blob/master/src/io/media/avatar/AvatarPipeline.ts) uses consistency modes per stage:
 
-| Stage | Mode | Rationale |
-|-------|------|-----------|
-| `neutral_portrait` | none | This IS the anchor — no reference exists yet |
-| `face_embedding` | none | Extraction, not generation |
-| `expression_sheet` | `'strict'` | Facial identity must match across all emotions |
-| `animated_emotes` | `'strict'` | Same character in motion |
-| `full_body` | `'balanced'` | Body proportions can vary; face should be recognizable |
-| `additional_angles` | `'balanced'` | 3/4 and profile views naturally differ from frontal |
+| Stage | Mode | What it does |
+|-------|------|--------------|
+| `neutral_portrait` | none | Generates the anchor portrait |
+| `face_embedding` | none | Extracts the anchor embedding from the portrait |
+| `expression_sheet` | `'strict'` | One image per emotion with the portrait as reference, drift-checked and regenerated |
+| `animated_emotes` | none | One image per emotion from the prompt alone, with no reference image and no drift check |
+| `full_body` | `'balanced'` | One image with the portrait as reference, not drift-checked |
+
+Without `stages`, the pipeline runs these five. `additional_angles` is a declared stage name that the pipeline does not run.
 
 ```typescript
 import { AvatarPipeline } from '@framers/agentos/io/media/avatar';

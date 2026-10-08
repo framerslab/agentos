@@ -1,12 +1,15 @@
 #!/usr/bin/env node
-// Example: agent({ verifyCitations }) — one-flag grounded generation.
+// Example: agent({ verifyCitations }) — citation verification on generate().
 //
 // Configure the agent with an embedder + a retriever, and every call to
 // agent.generate() returns its response with a `grounding` field
 // containing per-claim verdicts. No separate verifier.verify(text, sources)
-// step required.
+// step required. The sources are fetched after the model answers and are
+// used only to score the answer; they are not added to the prompt.
 //
-// Run: node examples/citation-verification-agent.mjs
+// Usage:
+//   export OPENAI_API_KEY="sk-..."   # the model call is real; the embedder and retriever are mocks
+//   node examples/citation-verification-agent.mjs
 
 import { agent, formatVerifiedResponse } from '../dist/index.js';
 
@@ -34,7 +37,7 @@ async function mockRetrieve(query) {
 
 // --- Build an agent with citation verification wired in ---
 const docsAgent = agent({
-  model: 'mock:demo',
+  provider: process.env.AGENTOS_PROVIDER || 'openai',
   verifyCitations: {
     embedFn: mockEmbed,
     retrieve: mockRetrieve,

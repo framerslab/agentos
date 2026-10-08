@@ -102,6 +102,25 @@ function cacheDiagnosticsSeed(value: unknown): { previousMessageId: string | nul
   return { previousMessageId: typeof id === 'string' && id.length > 0 ? id : null };
 }
 
+/** `value` when it is a usage report as a provider gives one: an object with a numeric token count. */
+function asUsageReport(value: unknown): ModelUsage | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const { promptTokens, completionTokens, totalTokens } = value as Record<string, unknown>;
+  return [promptTokens, completionTokens, totalTokens].some((count) => typeof count === 'number' && Number.isFinite(count))
+    ? (value as ModelUsage)
+    : undefined;
+}
+
+/** A message's content as a string two equal contents share: the text itself, or the JSON of its parts. */
+function contentKey(content: unknown): string {
+  if (typeof content === 'string') return content;
+  try {
+    return JSON.stringify(content) ?? '';
+  } catch {
+    return '';
+  }
+}
+
 /** Adds one provider usage report to the turn's total. */
 function addUsage(total: CostAggregator, usage: ModelUsage): void {
   total.promptTokens += usage.promptTokens || 0;
@@ -151,6 +170,17 @@ export class GMI implements IGMI {
    */
   private turnSequence = 0;
   private stateOwnerTurn = 0;
+
+  /**
+   * What the GMI needs to forget a turn once the history no longer holds it
+   * (see {@link GMI.forgetTurnsOutside}): the turn each trace entry was recorded
+   * in (entries recorded outside a turn have none), and each user turn's input
+   * as a comparison key, by turn id, oldest first.
+   */
+  private readonly traceEntryTurn = new WeakMap<ReasoningTraceEntry, string>();
+  private readonly turnInputs = new Map<string, string>();
+  /** Settles once the latest replaceHistory() or clearHistory() has also cleaned the sentiment history. */
+  private historyForgetting: Promise<void> = Promise.resolve();
 
   /**
    * The gateway hop that served the turn's last model step; the next step of
@@ -493,6 +523,55 @@ export class GMI implements IGMI {
       details: details ? JSON.parse(JSON.stringify(details)) : {},
     };
     this.reasoningTrace.entries.push(entry);
+    if (this.reasoningTrace.turnId) this.traceEntryTurn.set(entry, this.reasoningTrace.turnId);
+  }
+
+  /**
+   * Drops what the GMI recorded about the turns `history` no longer holds, so
+   * that a replaced or cleared fact reaches no later model call through the
+   * records kept beside the history: the reflection metaprompt sends recent
+   * trace entries to the model as evidence.
+   *
+   * A recorded turn is kept when `history` has a user message with that turn's
+   * input, each message keeping one turn, the newest first. For every other
+   * turn, the details of its trace entries are emptied (the first characters of
+   * its input, its tool calls and results; the entries stay, with their type and
+   * message), and the sentiment tracker drops the input excerpts of its events
+   * and sentiment trends. The tracker's part runs asynchronously and has
+   * finished before the next turn starts.
+   *
+   * @param history - The conversation history after the replacement.
+   */
+  private forgetTurnsOutside(history: readonly ChatMessage[]): void {
+    const unclaimed = new Map<string, number>();
+    for (const message of history) {
+      if (message.role !== 'user') continue;
+      const key = contentKey(message.content);
+      unclaimed.set(key, (unclaimed.get(key) ?? 0) + 1);
+    }
+    const kept = new Set<string>();
+    for (const [turnId, key] of [...this.turnInputs].reverse()) {
+      const left = unclaimed.get(key) ?? 0;
+      if (left === 0) {
+        this.turnInputs.delete(turnId);
+        continue;
+      }
+      unclaimed.set(key, left - 1);
+      kept.add(turnId);
+    }
+    for (const entry of this.reasoningTrace.entries) {
+      const turnId = this.traceEntryTurn.get(entry);
+      if (turnId === undefined || kept.has(turnId)) continue;
+      entry.details = {};
+      this.traceEntryTurn.delete(entry);
+    }
+    this.historyForgetting = this.historyForgetting
+      .then(() => this.sentimentTracker?.forgetTurnsExcept(kept))
+      .catch((error: unknown) => {
+        this.addTraceEntry(ReasoningEntryType.WARNING, 'Could not drop the sentiment history of turns removed from the conversation history.', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
   }
 
   private stringifyTurnContent(content: GMITurnInput['content']): string | null {
@@ -629,16 +708,22 @@ export class GMI implements IGMI {
    * Makes `messages` the whole conversation history. An empty array is
    * authoritative: it empties the history (unlike
    * `metadata.conversationHistoryForPrompt`, which a turn ignores when empty).
-   * The sentiment tracker and the metaprompts read the same history.
+   * The sentiment tracker and the metaprompts read the same history. What the
+   * GMI recorded about turns the new history no longer holds is dropped too:
+   * the details of their reasoning-trace entries and the input excerpts of
+   * their sentiment records (a turn stays while a user message with its input
+   * is in the history).
    */
   public replaceHistory(messages: ConversationMessage[]): void {
     this.conversationHistoryManager.clear();
     if (messages.length > 0) this.conversationHistoryManager.hydrate(messages);
+    this.forgetTurnsOutside(this.conversationHistoryManager.history);
   }
 
-  /** Empties the conversation history. */
+  /** Empties the conversation history, and drops what the GMI recorded about its turns, as {@link GMI.replaceHistory} does. */
   public clearHistory(): void {
     this.conversationHistoryManager.clear();
+    this.forgetTurnsOutside([]);
   }
 
   public hydrateTurnContext(context: {
@@ -865,6 +950,9 @@ export class GMI implements IGMI {
       let lastErrorForOutput: GMIOutput['error'] = undefined;
 
     try {
+      // A history replaced or cleared just before this turn has finished dropping
+      // the sentiment records of the turns it removed.
+      await this.historyForgetting;
       if (turnInput.userContextOverride) {
         const mergedPreferences =
           turnInput.userContextOverride.preferences &&
@@ -903,6 +991,18 @@ export class GMI implements IGMI {
       const currentUserMessage = historyAtTurnStart.find(
         (message) => message.role === 'user' && !messagesBeforeInput.has(message),
       );
+      // The turn's input, so a later replaceHistory() or clearHistory() can tell
+      // whether the history still holds this turn. Bounded like the trace:
+      // every turn on the trace has at least one entry there.
+      if (currentUserMessage) {
+        this.turnInputs.delete(turnId);
+        this.turnInputs.set(turnId, contentKey(currentUserMessage.content));
+        while (this.turnInputs.size > this.traceLimits.maxEntries) {
+          const oldest = this.turnInputs.keys().next().value;
+          if (oldest === undefined) break;
+          this.turnInputs.delete(oldest);
+        }
+      }
       const currentTurnText = currentUserMessage?.content
         ? (typeof currentUserMessage.content === 'string'
             ? currentUserMessage.content
@@ -1139,35 +1239,51 @@ export class GMI implements IGMI {
           }
         }
 
-        // Every completion option the persona and the turn set (D4b); temperature and
-        // the output budget keep their defaults; tools, user and streaming are the GMI's.
+        // Every completion option the persona and the turn set (D4b), the turn's
+        // over the persona's; one neither sets is not sent, so the provider's
+        // default applies. Tools, user and streaming are the GMI's.
         const turnOptions = (turnInput.metadata?.options ?? {}) as Record<string, unknown>;
         const personaOptions = (this.activePersona.defaultModelCompletionOptions ?? {}) as Record<string, unknown>;
+        // The provider's end-user field: the host's choice when the turn names one
+        // (null sends none), else the turn's user.
+        const providerUserId = turnInput.metadata && 'providerUserId' in turnInput.metadata
+          ? turnInput.metadata.providerUserId
+          : this.currentUserContext.userId;
         const llmOptions: ModelCompletionOptions = {
           ...pickCompletionOptions(personaOptions),
           ...pickCompletionOptions(turnOptions),
           ...(stepCacheDiagnostics ? { cacheDiagnostics: { ...stepCacheDiagnostics } } : {}),
-          temperature: (turnOptions.temperature as number | undefined) ?? (personaOptions.temperature as number | undefined) ?? 0.7,
-          maxTokens: (turnOptions.maxTokens as number | undefined) ?? (personaOptions.maxTokens as number | undefined) ?? 2048,
+          // The turn's own abort signal: aborting it ends the model call in progress
+          // with the provider's abort chunk, and every later call of the turn at once.
+          ...(turnOptions.abortSignal ? { abortSignal: turnOptions.abortSignal as AbortSignal } : {}),
           tools: toolsForLLM.length > 0 ? toolsForLLM.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema }})) : undefined,
-          toolChoice: (turnOptions.toolChoice as ModelCompletionOptions['toolChoice']) ?? (personaOptions.toolChoice as ModelCompletionOptions['toolChoice']) ?? (toolsForLLM.length > 0 ? "auto" : undefined),
-          userId: this.currentUserContext.userId,
+          // Only with tools: OpenAI rejects a tool_choice on a request that offers none
+          // (HTTP 400, "'tool_choice' is only allowed when 'tools' are specified").
+          toolChoice: toolsForLLM.length > 0
+            ? ((turnOptions.toolChoice as ModelCompletionOptions['toolChoice']) ?? (personaOptions.toolChoice as ModelCompletionOptions['toolChoice']) ?? "auto")
+            : undefined,
+          ...(providerUserId ? { userId: providerUserId } : {}),
           stream: true,
         };
         // A schema travels to the gateway, which lowers it per hop (D9); it is not a provider option.
         const responseSchema = turnOptions.responseSchema as ZodType | undefined;
         const schemaName = turnOptions.schemaName as string | undefined;
 
-        // The gateway's route: the model asked for, the user's text as the router's
-        // task hint, the tools, and the call options each fallback hop derives its
-        // overrides from. Every hop that could not start is traced.
+        // The gateway's route: the model asked for, the last user message (its text
+        // is the router's task hint: the text parts of a multimodal message, and on
+        // a continuation the message being answered, never the continuation's own
+        // internal text), the tools, and the call options each fallback hop derives
+        // its overrides from. Every hop that could not start is traced.
         let lastHopError: Error | undefined;
-        const userText = this.stringifyTurnContent(turnInput.content) ?? '';
+        let lastUserMessage: ChatMessage | undefined;
+        for (let i = historyAtTurnStart.length - 1; i >= 0 && !lastUserMessage; i--) {
+          if (historyAtTurnStart[i].role === 'user') lastUserMessage = historyAtTurnStart[i];
+        }
         const route: CompletionRoute | undefined = gateway
           ? {
               modelId: modelIdToUse,
               providerId: providerIdForModel,
-              messages: userText ? [{ role: 'user', content: userText }] : [],
+              messages: lastUserMessage ? [lastUserMessage] : [],
               tools: llmOptions.tools,
               callOptions: { maxTokens: llmOptions.maxTokens, effort: llmOptions.effort, cache: llmOptions.cache },
               onFallback: ({ from, to, hop, error }) => this.addTraceEntry(ReasoningEntryType.WARNING, `Model fallback from '${from}' to '${to}' (hop ${hop}): ${error.message}`),
@@ -1183,7 +1299,19 @@ export class GMI implements IGMI {
         // prompt is built, so the prompt is budgeted for the serving model (D1).
         let resolution: CompletionResolution | null = null;
         if (gateway && route) {
-          resolution = this.turnResolution ?? (await gateway.resolve(route));
+          try {
+            resolution = this.turnResolution ?? (await gateway.resolve(route));
+          } catch (resolveError) {
+            // resolve() throws only when the primary cannot be set up (no
+            // credentials, a provider or model that does not resolve): a
+            // configuration error, not a failure of the turn's processing.
+            if (resolveError instanceof GMIError) throw resolveError;
+            throw new GMIError(
+              resolveError instanceof Error ? resolveError.message : String(resolveError),
+              GMIErrorCode.CONFIGURATION_ERROR,
+              { turnId, providerId: providerIdForModel, modelId: modelIdToUse },
+            );
+          }
           if (!resolution) {
             throw new GMIError(
               `No model provider could serve the turn${lastHopError ? `: ${lastHopError.message}` : '.'}`,
@@ -1287,73 +1415,97 @@ export class GMI implements IGMI {
           this.addTraceEntry(ReasoningEntryType.LLM_CALL_START, `Streaming from ${modelTargetInfo.modelId}${resolution ? ` (hop ${resolution.hop})` : ''}. Tools: ${toolsForLLM.length}.`);
 
           let textDeltaEmitted = false;
-          for await (const chunk of attempt) {
-            if (chunk.error) {
-              throw new GMIError(`LLM stream error: ${chunk.error.message}`, GMIErrorCode.LLM_PROVIDER_ERROR, chunk.error.details);
-            }
+          // The usage on the error chunk that ended the step, when it carried one.
+          let errorChunkUsage: ModelUsage | undefined;
+          try {
+            for await (const chunk of attempt) {
+              if (chunk.error) {
+                errorChunkUsage = asUsageReport(chunk.usage);
+                throw new GMIError(`LLM stream error: ${chunk.error.message}`, GMIErrorCode.LLM_PROVIDER_ERROR, chunk.error.details);
+              }
 
-            if (chunk.responseTextDelta) {
-              currentIterationTextResponse += chunk.responseTextDelta;
-              aggregatedResponseText += chunk.responseTextDelta; // Aggregate for final output
-              yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TEXT_DELTA, chunk.responseTextDelta, { usage: chunk.usage });
-              textDeltaEmitted = true;
-            }
+              if (chunk.responseTextDelta) {
+                currentIterationTextResponse += chunk.responseTextDelta;
+                aggregatedResponseText += chunk.responseTextDelta; // Aggregate for final output
+                yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TEXT_DELTA, chunk.responseTextDelta, { usage: chunk.usage });
+                textDeltaEmitted = true;
+              }
 
-            // Handle fully formed tool_calls if present in the chunk's message
-            const choice = chunk.choices?.[0];
-            // Capture extended-thinking blocks from the final chunk so they ride
-            // the assistant turn into history (replayed verbatim next tool turn).
-            if (choice?.message?.thinkingBlocks?.length) {
-              currentIterationThinkingBlocks = choice.message.thinkingBlocks;
-            }
-            // The gateway lifts a streamed schema tool call into `structuredOutput` (D9).
-            const structured = (chunk as { structuredOutput?: unknown }).structuredOutput;
-            if (structured !== undefined) stepStructuredOutput = structured;
+              // Handle fully formed tool_calls if present in the chunk's message
+              const choice = chunk.choices?.[0];
+              // Capture extended-thinking blocks from the final chunk so they ride
+              // the assistant turn into history (replayed verbatim next tool turn).
+              if (choice?.message?.thinkingBlocks?.length) {
+                currentIterationThinkingBlocks = choice.message.thinkingBlocks;
+              }
+              // The gateway lifts a streamed schema tool call into `structuredOutput` (D9).
+              const structured = (chunk as { structuredOutput?: unknown }).structuredOutput;
+              if (structured !== undefined) stepStructuredOutput = structured;
 
-            if (choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
-              currentIterationToolCallRequests = choice.message.tool_calls.map((tc: any) => ({ // tc is from IProvider.ChatMessage.tool_calls
-                  id: tc.id || `toolcall-${uuidv4()}`, // Ensure ID
-                  name: tc.function.name,
-                  arguments: typeof tc.function.arguments === 'string'
-                      ? JSON.parse(tc.function.arguments)
-                      : tc.function.arguments,
-                  ...(tc.thoughtSignature ? { thoughtSignature: tc.thoughtSignature } : {}),
-              }));
-              aggregatedToolCalls.push(...currentIterationToolCallRequests); // Aggregate for final output
-              yield this.createOutputChunk(
-                turnInput.interactionId,
-                GMIOutputChunkType.TOOL_CALL_REQUEST,
-                [...currentIterationToolCallRequests],
-                {
-                  metadata: {
-                    executionMode: 'internal',
-                    requiresExternalToolResult: false,
+              if (choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
+                currentIterationToolCallRequests = choice.message.tool_calls.map((tc: any) => ({ // tc is from IProvider.ChatMessage.tool_calls
+                    id: tc.id || `toolcall-${uuidv4()}`, // Ensure ID
+                    name: tc.function.name,
+                    arguments: typeof tc.function.arguments === 'string'
+                        ? JSON.parse(tc.function.arguments)
+                        : tc.function.arguments,
+                    ...(tc.thoughtSignature ? { thoughtSignature: tc.thoughtSignature } : {}),
+                }));
+                aggregatedToolCalls.push(...currentIterationToolCallRequests); // Aggregate for final output
+                yield this.createOutputChunk(
+                  turnInput.interactionId,
+                  GMIOutputChunkType.TOOL_CALL_REQUEST,
+                  [...currentIterationToolCallRequests],
+                  {
+                    metadata: {
+                      executionMode: 'internal',
+                      requiresExternalToolResult: false,
+                    },
                   },
-                },
-              );
-              this.addTraceEntry(ReasoningEntryType.TOOL_CALL_REQUESTED, `LLM requested tool(s).`, { requests: currentIterationToolCallRequests });
-            }
+                );
+                this.addTraceEntry(ReasoningEntryType.TOOL_CALL_REQUESTED, `LLM requested tool(s).`, { requests: currentIterationToolCallRequests });
+              }
 
-            // A provider that sends no deltas: its final content is the step's text, emitted once (D4d).
-            if (chunk.isFinal && !textDeltaEmitted && typeof choice?.message?.content === 'string' && choice.message.content.length > 0) {
-              currentIterationTextResponse = choice.message.content;
-              aggregatedResponseText += choice.message.content;
-              yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TEXT_DELTA, choice.message.content, { usage: chunk.usage });
-              textDeltaEmitted = true;
-            }
+              // A provider that sends no deltas: its final content is the step's text, emitted once (D4d).
+              if (chunk.isFinal && !textDeltaEmitted && typeof choice?.message?.content === 'string' && choice.message.content.length > 0) {
+                currentIterationTextResponse = choice.message.content;
+                aggregatedResponseText += choice.message.content;
+                yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TEXT_DELTA, choice.message.content, { usage: chunk.usage });
+                textDeltaEmitted = true;
+              }
 
-            if (chunk.isFinal && choice?.finishReason) {
-              stepFinishReason = choice.finishReason;
-              this.addTraceEntry(ReasoningEntryType.LLM_CALL_COMPLETE, `LLM stream part finished. Reason: ${choice.finishReason}`, { usage: chunk.usage });
+              if (chunk.isFinal && choice?.finishReason) {
+                stepFinishReason = choice.finishReason;
+                this.addTraceEntry(ReasoningEntryType.LLM_CALL_COMPLETE, `LLM stream part finished. Reason: ${choice.finishReason}`, { usage: chunk.usage });
+              }
+              if (chunk.isFinal) stepFinalChunk = chunk;
+              // Usage on every chunk that carries it, choice or not (D4c). Providers report
+              // the request's running total, so the turn total takes the step's last value once.
+              if (chunk.usage) {
+                stepUsage = chunk.usage;
+                yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.USAGE_UPDATE, chunk.usage);
+              }
+            } // End LLM stream
+          } catch (stepError) {
+            // A step that fails once its attempt has started was still billed.
+            // Providers report the request's running total, so the bill is the
+            // latest report: the error chunk's own usage, else the usage the
+            // error carries (a refused turn reports it), else the last usage the
+            // step reported. It counts toward the turn once and is reported on a
+            // USAGE_UPDATE of its own, marked as a failed attempt's, because no
+            // STEP_FINISHED will carry it.
+            const billed =
+              errorChunkUsage ??
+              asUsageReport((stepError as { details?: { usage?: unknown } } | null | undefined)?.details?.usage) ??
+              stepUsage;
+            if (billed) {
+              addUsage(aggregatedUsage, billed);
+              yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.USAGE_UPDATE, billed, {
+                metadata: { attemptFailed: true, hop: resolution?.hop ?? 0, providerId: modelTargetInfo.providerId, modelId: modelTargetInfo.modelId },
+              });
             }
-            if (chunk.isFinal) stepFinalChunk = chunk;
-            // Usage on every chunk that carries it, choice or not (D4c). Providers report
-            // the request's running total, so the turn total takes the step's last value once.
-            if (chunk.usage) {
-              stepUsage = chunk.usage;
-              yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.USAGE_UPDATE, chunk.usage);
-            }
-          } // End LLM stream
+            throw stepError;
+          }
 
           if (gateway && route && resolution && attemptOutcome) {
             const outcome = await attemptOutcome;

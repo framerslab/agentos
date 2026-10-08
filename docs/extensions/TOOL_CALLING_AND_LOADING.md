@@ -83,7 +83,7 @@ If a descriptor declares a non-optional secret and it can’t be resolved, it’
 
 Skills are prompt modules loaded from `SKILL.md` files. Hosts can inject skills into a system prompt via `SkillRegistry.buildSnapshot()`.
 
-For “lazy” skills, [`SkillRegistry`](https://github.com/framerslab/agentos/blob/master/src/cognition/skills/SkillRegistry.ts) from `@framers/agentos/cognition/skills` (the engine) exposes tools that let the model fetch `SKILL.md` content on demand (via tool calls) instead of pre-injecting everything. Curated skill content ships in `@framers/agentos-skills`.
+For “lazy” skills, the `@framers/agentos-ext-skills` extension pack gives the model tools (`skills_list`, `skills_read` and the rest) that fetch `SKILL.md` content on demand instead of pre-injecting everything; [`SkillRegistry`](https://github.com/framerslab/agentos/blob/master/src/cognition/skills/SkillRegistry.ts) from `@framers/agentos/cognition/skills` loads the skills and builds the snapshot. Curated skill content ships in `@framers/agentos-skills`.
 
 ## What “Lazy Loading” Means Here
 
@@ -95,7 +95,7 @@ AgentOS supports a few different “lazy” patterns:
 
 ### Schema-On-Demand Tool Schemas (Optional)
 
-Tool calling still requires schemas **up front for each round**. However, AgentOS now supports a **schema-on-demand pattern** via optional meta tools that can load extension packs at runtime.
+Tool calling requires schemas **up front for each round**. The **schema-on-demand pattern** works around that with optional meta tools that load extension packs at runtime.
 
 When enabled, AgentOS registers these meta tools:
 

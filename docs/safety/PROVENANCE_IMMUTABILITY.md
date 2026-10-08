@@ -48,10 +48,7 @@ Use this for "immutable after setup" agents where identity/history should not be
 
 If you enable `sealed` storage policy and persist conversations, your persistence layer must avoid `UPDATE`/`DELETE` and upsert-style mutations on protected tables.
 
-In this monorepo:
-
-- `ConversationManagerConfig.appendOnlyPersistence=true` makes the built-in [`ConversationManager`](https://github.com/framerslab/agentos/blob/master/src/core/conversation/ConversationManager.ts) insert-only for `conversations` + `conversation_messages` and disables deletion.
-- `backend/src/integrations/agentos/agentos.integration.ts` automatically enables `appendOnlyPersistence` when a sealed provenance profile is active.
+`ConversationManagerConfig.appendOnlyPersistence=true` makes the built-in [`ConversationManager`](https://github.com/framerslab/agentos/blob/master/src/core/conversation/ConversationManager.ts) insert-only for `conversations` + `conversation_messages` and disables deletion. AgentOS does not turn it on for you: a host that runs a sealed profile sets it.
 
 ## Toolset Pinning (Recommended)
 
@@ -110,24 +107,9 @@ The provenance system is typically wired via an extension pack:
 import { profiles } from '@framers/agentos/provenance';
 import { createProvenancePack } from '@framers/agentos/extensions/packs/provenance-pack';
 
-const config = profiles.revisionedVerified(); // or sealedAutonomous()
+const config = profiles.revisionedVerified(); // or mutableDev(), sealedAutonomous(), sealedAuditable(rekorEndpoint)
 
 const pack = createProvenancePack(config, storageAdapter, 'agent-001', 'agentos_');
 
 // Add `pack` to your extension manifest, then initialize AgentOS.
 ```
-
-## Enabling Provenance In This Monorepo (Backend)
-
-The embedded AgentOS router in `backend/` supports env-driven provenance:
-
-- `AGENTOS_ENABLE_PERSISTENCE=true`
-- `AGENTOS_PROVENANCE_ENABLED=true`
-- `AGENTOS_PROVENANCE_PROFILE=revisioned-verified` (or `sealed-autonomous`, `sealed-auditable`)
-
-Optional:
-
-- `AGENTOS_PROVENANCE_PRIVATE_KEY_BASE64` + `AGENTOS_PROVENANCE_PUBLIC_KEY_BASE64` for stable signing keys
-- `AGENTOS_PROVENANCE_ANCHOR_TYPE` + `AGENTOS_PROVENANCE_ANCHOR_ENDPOINT` for external anchoring
-
-The backend also exposes provenance status + verification endpoints under `/api/agentos/provenance/*` when enabled.

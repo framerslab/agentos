@@ -1,6 +1,6 @@
 # Immutable Agents (Sealed Mode)
 
-This doc describes the recommended end-to-end design for **immutable after setup** agents in AgentOS.
+This doc describes the recommended end-to-end design for **immutable after setup** agents built on AgentOS. AgentOS supplies the storage policies, the signed event ledger, revisions, tombstones and anchor providers ([Provenance & Immutability](./PROVENANCE_IMMUTABILITY.md)); the sealing flow on this page (the seal marker, the toolset manifest and hash, the blocked configuration endpoints, the credential vault and redaction-based forgetting) is built by the host. AgentOS has no seal API, toolset hasher or memory-redaction event.
 
 The key idea is: **separate immutable identity/state from rotatable operational secrets**, then use **append-only storage + cryptographic provenance** to make tampering detectable.
 
@@ -31,7 +31,7 @@ Avoid the trap of "immutable from birth" (no iteration). Instead, use a two-phas
 2. **Sealed phase** (immutable)
    - You **seal** once, then block configuration mutations permanently (except explicit secret rotation flows).
 
-In practice, sealing means:
+In this design, sealing means:
 
 - `storagePolicy = "sealed"`
 - a `sealedAt` marker is set (so you can default storagePolicy to `sealed` while still allowing setup edits until seal)
@@ -180,15 +180,11 @@ If you *must* support break-glass:
 - treat the agent as "modified" (verification should reflect this)
 - consider requiring a new agent identity/spec for any behavioral change
 
-## How This Repo Implements It (Reference Integration)
+## Building It on AgentOS
 
-The reference integration follows the pattern above:
-
-- agents are editable during setup (`sealed_at` is null)
-- sealing sets `sealed_at` and persists a toolset manifest + hash
-- sealed agents block config mutation endpoints
-- secrets rotate via a separate credential vault
-- "forget" is implemented as memory redaction events (soft-forget)
+- The storage policy, the ledger and anchoring: `profiles.sealedAutonomous()` or `profiles.sealedAuditable(rekorEndpoint)` with `createProvenancePack()` ([Provenance & Immutability](./PROVENANCE_IMMUTABILITY.md)).
+- Append-only conversations: `ConversationManagerConfig.appendOnlyPersistence: true`.
+- The seal marker, the toolset manifest and its hash, the blocked configuration endpoints, the credential vault and the redaction events: host code.
 
 See:
 

@@ -9,11 +9,9 @@ AgentOS’ core RAG APIs are **text-first** ([`EmbeddingManager`](https://github
 3. Index that text as a **normal RAG document** so the existing retrieval pipeline (vector, BM25, reranking, GraphRAG, etc.) can operate without any “special” multimodal database.
 4. Optionally add **modality-specific embeddings** (image-to-image / audio-to-audio) as a fast path.
 
-This guide documents the reference implementation used by the AgentOS HTTP API router ([`@framers/agentos-ext-http-api`](https://github.com/framerslab/agentos-ext-http-api)) and the `voice-chat-assistant` backend.
+AgentOS supplies [`MultimodalIndexer`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/multimodal/MultimodalIndexer.ts), [`MultimodalAggregator`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/MultimodalAggregator.ts) and [`MultimodalMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/multimodal/MultimodalMemoryBridge.ts). The HTTP routes below come from [`@framers/agentos-ext-http-api`](https://www.npmjs.com/package/@framers/agentos-ext-http-api); the asset table, the derivation steps and the environment variables on this page belong to the reference host backend that implements the router's `ragService`, and AgentOS reads none of those variables.
 
-This is a strong **production baseline**, not a claim that AgentOS already ships the full current frontier of multimodal retrieval research. Today the canonical retrieval surface is still derived text. Direct visual late-interaction retrievers and page-native document retrieval remain follow-up work.
-
-Current implementation detail: PDF/document ingestion now indexes extracted text into standard RAG collections through [`MultimodalIndexer.indexText(...)`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/multimodal/MultimodalIndexer.ts), so derived document text is retrievable through the normal text pipeline rather than only being stored as memory traces.
+Retrieval runs on derived text: AgentOS has no visual late-interaction retriever and no page-native document retrieval. Document ingestion indexes extracted text into standard RAG collections through [`MultimodalIndexer.indexText(...)`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/multimodal/MultimodalIndexer.ts), so derived document text is retrievable through the normal text pipeline rather than only being stored as memory traces.
 
 ![Multimodal RAG fan-out: four input modalities (text, image, audio, document) flow through derivation (caption + OCR, transcript, parser) into the canonical text-first RAG pipeline; an optional native sidecar provides image-to-image and audio-to-audio vector collections; retrievalMode toggles auto, text, native, or hybrid fusion](/img/diagrams/multimodal-rag-fanout.svg)
 
@@ -37,9 +35,9 @@ flowchart LR
   E -->|upsert vectors| V[(vector collection: *_img / *_aud)]
 ```
 
-Key idea: the **derived text** is the canonical retrieval surface. Modality embeddings (when enabled) are an acceleration path, not a requirement. Documents are first-class assets in the same model, but stay text-first for now.
+Key idea: the **derived text** is the canonical retrieval surface. Modality embeddings (when enabled) are an acceleration path, not a requirement. Documents are assets in the same model and are retrieved through their text.
 
-That text-first design has one important boundary today: [`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts) still treats its multimodal source as non-text-only. Document/PDF text retrieval therefore works through the standard text RAG collections rather than through the multimodal source branch in [`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts).
+[`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts) runs its multimodal source only for the plan's non-text modalities, so document and PDF text is retrieved through the standard text RAG collections, not through that source.
 
 ### Query
 
@@ -67,7 +65,7 @@ Text queries over `/multimodal/query` can search any combination of `image`, `au
 
 ## Data Model (Reference Backend)
 
-The backend stores multimodal asset metadata in a dedicated SQL table (name depends on the configured RAG table prefix):
+The reference backend stores multimodal asset metadata in a dedicated SQL table (name depends on the configured RAG table prefix):
 
 - `media_assets.asset_id` (string) is the stable identifier.
 - `media_assets.modality` is `image`, `audio`, or `document`.
@@ -90,7 +88,7 @@ This keeps modality embeddings separate from text embeddings, while still reusin
 
 ## HTTP API Surface
 
-The host-agnostic Express router lives in [`@framers/agentos-ext-http-api`](https://github.com/framerslab/agentos-ext-http-api) — specifically [`src/rag/rag.routes.ts`](https://github.com/framerslab/agentos-ext-http-api/blob/master/src/rag/rag.routes.ts):
+The host-agnostic Express router lives in [`@framers/agentos-ext-http-api`](https://www.npmjs.com/package/@framers/agentos-ext-http-api) — specifically `src/rag/rag.routes.ts`:
 
 ```ts
 import express from 'express';
@@ -117,7 +115,7 @@ It mounts multimodal routes under `/multimodal/*`:
 - `GET /multimodal/assets/:assetId/content` (only if payload is stored)
 - `DELETE /multimodal/assets/:assetId`
 
-See the [`@framers/agentos-ext-http-api` package](https://github.com/framerslab/agentos-ext-http-api) for request/response examples and deployment notes — the routes wired here ([`createAgentOSRagRouter`](https://github.com/framerslab/agentos-ext-http-api/blob/master/src/rag/rag.routes.ts)) are the same ones the `voice-chat-assistant` backend mounts.
+See the [`@framers/agentos-ext-http-api` package](https://www.npmjs.com/package/@framers/agentos-ext-http-api) for request/response examples and deployment notes — the reference backend mounts the routes wired here (`createAgentOSRagRouter`).
 
 ## Offline Embeddings (Optional)
 
@@ -143,14 +141,14 @@ Additional compatibility notes:
 
 - Multipart query fields such as `modalities` and `collectionIds` may be sent as comma-separated strings (`image,audio`, `docs,media_images`) by higher-level clients.
 - Document assets can be searched through `/multimodal/query` with `modalities:["document"]` or mixed alongside image/audio assets.
-- Document parsing in the reference backend currently supports PDF, DOCX, TXT, Markdown, CSV, JSON, and XML.
-- PDFs that contain no embedded text still need a page-image OCR/vision pipeline; the current backend surfaces that as an explicit extraction error instead of silently indexing nothing.
-- Ollama can be used for image captioning when the selected model supports vision input and the caller sends image bytes as an inline `data:` URL. Remote image URLs are not converted automatically for Ollama in the current provider adapter.
+- Document parsing in the reference backend supports PDF, DOCX, TXT, Markdown, CSV, JSON, and XML.
+- PDFs that contain no embedded text need a page-image OCR/vision pipeline; the reference backend surfaces that as an explicit extraction error instead of silently indexing nothing.
+- Ollama can be used for image captioning when the selected model supports vision input and the caller sends image bytes as an inline `data:` URL; the Ollama provider sends only inline `data:` images and drops remote image URLs.
 - Audio embedding retrieval is WAV-only in the Node reference backend. Non-WAV audio is retrieved via the transcript-first path.
 
 ## Configuration (Reference Backend)
 
-These env vars control the multimodal behavior in the `voice-chat-assistant` backend:
+These env vars control the multimodal behavior of the reference backend; AgentOS does not read them:
 
 - `AGENTOS_RAG_MEDIA_STORE_PAYLOAD=true|false` (default `false`)
 - `AGENTOS_RAG_MEDIA_IMAGE_COLLECTION_ID` (default `media_images`)
@@ -190,9 +188,8 @@ This keeps the base retrieval system consistent while still allowing richer moda
 | [`QdrantVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/QdrantVectorStore.ts) | `framerslab/agentos` | [`src/cognition/rag/vector_stores/QdrantVectorStore.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/QdrantVectorStore.ts) |
 | [Vector stores tree](https://github.com/framerslab/agentos/tree/master/src/cognition/rag/vector_stores) | `framerslab/agentos` | [`src/cognition/rag/vector_stores/`](https://github.com/framerslab/agentos/tree/master/src/cognition/rag/vector_stores) |
 | [Multimodal tree (Aggregator + Indexer + types)](https://github.com/framerslab/agentos/tree/master/src/cognition/rag/multimodal) | `framerslab/agentos` | [`src/cognition/rag/multimodal/`](https://github.com/framerslab/agentos/tree/master/src/cognition/rag/multimodal) |
-| [`createAgentOSRagRouter`](https://github.com/framerslab/agentos-ext-http-api/blob/master/src/rag/rag.routes.ts) | `framerslab/agentos-ext-http-api` | `src/rag/rag.routes.ts` |
-| [Multimodal route tests](https://github.com/framerslab/agentos-ext-http-api/blob/master/src/rag/rag.multimodal.routes.test.ts) | `framerslab/agentos-ext-http-api` | `src/rag/rag.multimodal.routes.test.ts` |
-| [HTTP API package root](https://github.com/framerslab/agentos-ext-http-api) | `framerslab/agentos-ext-http-api` | (root) |
+| `createAgentOSRagRouter` | `@framers/agentos-ext-http-api` (npm) | `src/rag/rag.routes.ts` |
+| [HTTP API package](https://www.npmjs.com/package/@framers/agentos-ext-http-api) | `@framers/agentos-ext-http-api` (npm) | (root) |
 
 ---
 

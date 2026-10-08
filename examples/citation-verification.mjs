@@ -5,7 +5,8 @@
  * using cosine similarity with the CitationVerifier.
  *
  * Run: node examples/citation-verification.mjs
- * Requires: OPENAI_API_KEY (for embeddings)
+ * Needs no API key: the embedding function below is a mock. Pass a real
+ * one (for example a wrapper around embedText()) for meaningful scores.
  */
 
 import { CitationVerifier, formatVerifiedResponse } from '@framers/agentos';

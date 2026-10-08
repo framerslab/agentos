@@ -22,6 +22,14 @@
  * itself less free memory than their size, and then only that call's own
  * instance is affected.
  *
+ * What the host copies out of the guest is bounded as well. A binding's
+ * argument that is a string has its length read before it is copied, and any
+ * other argument crosses as its JSON, made in the guest by a `JSON.stringify`
+ * taken before any guest code ran; what one call hands the host counts
+ * against its memory budget, two bytes a UTF-16 code unit. A thrown value is
+ * reported by its message, cut in the guest at {@link THROWN_TEXT_CHARS}
+ * characters, and a result is read only as the JSON text the wrapper makes.
+ *
  * The guest runs on the host's thread: a guest that runs synchronously holds
  * the event loop until the interrupt handler stops it at the call's deadline.
  *
@@ -66,6 +74,33 @@ const STACK_BYTES = 256 * 1024;
 const RESULT_LIMIT_BYTES = 1_048_576;
 /** Host values larger than this are copied in only after QuickJS's allocator has found room for them. */
 const CHECKED_COPY_BYTES = 4 * 1024;
+/** How much of a thrown value's text a failed call reports; a longer text is cut in the guest before it is copied out. */
+const THROWN_TEXT_CHARS = 16_384;
+/** The longest delay Node's timers keep (2^31 - 1 ms); a longer one fires at once. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/**
+ * Made in each guest from its intrinsics before any guest code runs, so
+ * nothing the forged code changes later reaches them: an allocation through
+ * QuickJS's checked allocator, `JSON.stringify`, and a reader of what a
+ * thrown value says, cut at a limit inside the guest.
+ */
+const GUEST_HELPERS = [
+  '((AB, S, Str, slice) => [',
+  '  (n) => new AB(n),',
+  '  (v) => S(v),',
+  '  (e, limit) => {',
+  '    let text;',
+  '    try {',
+  "      const m = e !== null && typeof e === 'object' ? e.message : undefined;",
+  "      text = typeof m === 'string' ? m : Str(e);",
+  '    } catch (x) {',
+  "      return '(the thrown value could not be read)';",
+  '    }',
+  "    return text.length > limit ? slice(text, 0, limit) + ' (cut at ' + limit + ' characters)' : text;",
+  '  },',
+  '])(ArrayBuffer, JSON.stringify, String, Function.prototype.call.bind(String.prototype.slice))',
+].join('\n');
 
 /**
  * The QuickJS packages are missing, at another version, or failed to load.
@@ -212,6 +247,15 @@ export class QuickJSExecutor implements ForgedCodeExecutor {
   }
 
   async run(request: ExecutorRunRequest): Promise<ExecutorRunResult> {
+    // The interrupt handler compares the clock with the deadline, which a
+    // timeout that is not a positive finite number never brings.
+    if (!(typeof request.timeoutMs === 'number' && Number.isFinite(request.timeoutMs) && request.timeoutMs > 0)) {
+      return {
+        status: 'error',
+        error: `Execution error: timeoutMs must be a positive finite number of milliseconds, got ${String(request.timeoutMs)}`,
+        memoryUsedBytes: 0,
+      };
+    }
     let engine: QuickJSEngine;
     try {
       engine = await (this.engine ??= loadEngine());
@@ -255,13 +299,20 @@ export class QuickJSExecutor implements ForgedCodeExecutor {
 
 /**
  * One call's guest: its context, the host work it started and its open
- * promises. Dispose drops every reference to the instance,
- * so host work still settling after the call holds none of the call's memory.
+ * promises. Dispose drops every reference to the instance, its memory
+ * included, so host work still settling after the call holds none of the
+ * call's memory.
  */
 class GuestRun {
   private context: QuickJSContext | undefined;
   private runtime: QuickJSRuntime | undefined;
+  private memory: WebAssembly.Memory | undefined;
   private allocate: QuickJSHandle | undefined;
+  private stringify: QuickJSHandle | undefined;
+  private describe: QuickJSHandle | undefined;
+  /** What the call has handed the host so far, in bytes, and how much it may. */
+  private handed = 0;
+  private handLimit = 0;
   private exhausted = false;
   private interrupted = false;
   private nextDeferred = 1;
@@ -270,11 +321,12 @@ class GuestRun {
 
   constructor(
     runtime: QuickJSRuntime,
-    private readonly memory: WebAssembly.Memory,
+    memory: WebAssembly.Memory,
     private readonly deadline: number,
     private readonly signal: AbortSignal | undefined,
   ) {
     this.runtime = runtime;
+    this.memory = memory;
     runtime.setInterruptHandler(() => {
       if (performance.now() > this.deadline || this.signal?.aborted === true) {
         this.interrupted = true;
@@ -294,15 +346,16 @@ class GuestRun {
   async execute(request: ExecutorRunRequest, memoryBytes: number, ended: AbortSignal): Promise<ExecutorRunResult> {
     const { context, runtime } = this.live;
 
-    // The intrinsic ArrayBuffer, taken before any guest code runs: it
-    // allocates through QuickJS's checked allocator.
-    const allocator = context.evalCode('((AB) => (n) => new AB(n))(ArrayBuffer)', 'guest-allocator.js', {
-      type: 'global',
-    });
-    if (allocator.error) {
-      return this.failure(allocator.error, 'the guest allocator failed: ');
+    const helpers = context.evalCode(GUEST_HELPERS, 'guest-helpers.js', { type: 'global' });
+    if (helpers.error) {
+      return this.failure(helpers.error, 'the guest helpers failed: ');
     }
-    this.allocate = context.unwrapResult(allocator);
+    const made = context.unwrapResult(helpers);
+    this.allocate = context.getProp(made, 0);
+    this.stringify = context.getProp(made, 1);
+    this.describe = context.getProp(made, 2);
+    made.dispose();
+    this.handLimit = memoryBytes;
 
     const bindings = guestBindings(request.globals, {
       bodyBytes: memoryBytes,
@@ -389,18 +442,23 @@ class GuestRun {
       }
     }
     this.deferreds.clear();
-    if (this.allocate?.alive) {
-      this.allocate.dispose();
+    for (const helper of [this.allocate, this.stringify, this.describe]) {
+      if (helper?.alive) {
+        helper.dispose();
+      }
     }
     this.allocate = undefined;
+    this.stringify = undefined;
+    this.describe = undefined;
     const context = this.context;
     this.context = undefined;
     this.runtime = undefined;
+    this.memory = undefined;
     context?.dispose();
   }
 
   private memoryUsed(): number {
-    return this.memory.buffer.byteLength;
+    return this.memory?.buffer.byteLength ?? 0;
   }
 
   /** An ArrayBuffer of `bytes` made by QuickJS's checked allocator, or undefined when the guest's memory cannot hold it. */
@@ -459,9 +517,15 @@ class GuestRun {
       }
       let values: unknown[];
       try {
-        values = args.map((arg) => live.context.dump(arg) as unknown);
+        values = args.map((arg) => this.take(arg));
       } catch (error) {
-        return { error: live.context.newError({ name: 'TypeError', message: `${name} takes data only: ${message(error)}` }) };
+        return {
+          error: live.context.newError(
+            error instanceof RangeError
+              ? { name: 'RangeError', message: `${name}: ${message(error)}` }
+              : { name: 'TypeError', message: `${name} takes data only: ${message(error)}` },
+          ),
+        };
       }
       let result: unknown;
       try {
@@ -482,6 +546,72 @@ class GuestRun {
     });
     context.setProp(context.global, `__host_${name}`, fn);
     fn.dispose();
+  }
+
+  /**
+   * A binding's argument as host data, read with a bound. A string's length
+   * is read before it is copied: a primitive string's length is its own,
+   * whatever the guest has done to `String.prototype`. Any other value
+   * crosses as its JSON, made in the guest by the `JSON.stringify` taken
+   * before any guest code ran. A symbol, a function or a bigint is not data.
+   */
+  private take(handle: QuickJSHandle): unknown {
+    const { context } = this.live;
+    const type = context.typeof(handle);
+    if (type === 'undefined') {
+      return undefined;
+    }
+    if (type === 'number') {
+      return context.getNumber(handle);
+    }
+    if (type === 'boolean') {
+      return context.dump(handle) as boolean;
+    }
+    if (type === 'string') {
+      return this.readString(handle);
+    }
+    if (type === 'object' && this.stringify) {
+      const made = context.callFunction(this.stringify, context.undefined, handle);
+      if (made.error) {
+        made.error.dispose();
+        throw new TypeError('the value could not be turned into JSON');
+      }
+      const json = context.unwrapResult(made);
+      try {
+        return context.typeof(json) === 'string' ? (JSON.parse(this.readString(json)) as unknown) : undefined;
+      } finally {
+        json.dispose();
+      }
+    }
+    throw new TypeError(`${type} values are not data`);
+  }
+
+  /**
+   * A guest string, copied out once its length is known. A binding's
+   * argument counts against what the call may hand the host (two bytes a
+   * UTF-16 code unit, the call's memory budget in all), and a long string is
+   * copied only once QuickJS's allocator has found room in the guest for the
+   * UTF-8 copy the binding layer makes on the way out.
+   */
+  private readString(handle: QuickJSHandle, counted = true): string {
+    const { context } = this.live;
+    const lengthHandle = context.getProp(handle, 'length');
+    const length = context.getNumber(lengthHandle);
+    lengthHandle.dispose();
+    const bytes = counted ? 2 * length : 0;
+    if (bytes > this.handLimit - this.handed) {
+      throw new RangeError(`the data this call handed the host passed its limit of ${Math.round(this.handLimit / MIB)} MB`);
+    }
+    if (3 * length > CHECKED_COPY_BYTES) {
+      const room = this.allocateGuest(3 * length + 64);
+      if (!room) {
+        this.exhausted = true;
+        throw new RangeError('out of memory');
+      }
+      room.dispose();
+    }
+    this.handed += bytes;
+    return context.getString(handle);
   }
 
   /**
@@ -598,7 +728,7 @@ class GuestRun {
     const waits: Promise<unknown>[] = [...this.pending];
     waits.push(
       new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, Math.max(0, this.deadline - performance.now()) + 1);
+        timer = setTimeout(resolve, Math.min(MAX_TIMER_MS, Math.max(0, this.deadline - performance.now()) + 1));
       }),
     );
     const signal = this.signal;
@@ -631,8 +761,14 @@ class GuestRun {
    */
   private readResult(handle: QuickJSHandle): ExecutorRunResult {
     const { context } = this.live;
-    if (context.typeof(handle) !== 'string') {
-      return this.success(context.dump(handle) as unknown);
+    const type = context.typeof(handle);
+    if (type === 'undefined') {
+      return this.success(undefined);
+    }
+    if (type !== 'string') {
+      // The wrapper returns JSON text or undefined; anything else means the
+      // forged code replaced JSON.stringify, and the value is not read.
+      return { status: 'error', error: 'Execution error: the result was not JSON text', memoryUsedBytes: this.memoryUsed() };
     }
     const lengthHandle = context.getProp(handle, 'length');
     const length = context.getNumber(lengthHandle);
@@ -676,28 +812,57 @@ class GuestRun {
 
   /** How a call that threw ended: out of memory or past its deadline before anything the error says. */
   private failure(errorHandle: QuickJSHandle, prefix = ''): ExecutorRunResult {
+    let text = '';
+    if (!this.exhausted && !this.interrupted) {
+      try {
+        text = this.thrownText(errorHandle);
+      } catch (readError) {
+        text = `(the error could not be read: ${message(readError)})`;
+      }
+    }
+    if (errorHandle.alive) {
+      errorHandle.dispose();
+    }
+    // Reading the text runs guest code (a message getter, a toString), which
+    // can itself pass the deadline or the memory.
     const memoryUsedBytes = this.memoryUsed();
     if (this.exhausted || this.interrupted) {
-      if (errorHandle.alive) {
-        errorHandle.dispose();
-      }
       return this.exhausted ? { status: 'memory_exceeded', memoryUsedBytes } : { status: 'timeout', memoryUsedBytes };
     }
-    let error: unknown;
-    try {
-      error = this.live.context.dump(errorHandle) as unknown;
-    } catch (dumpError) {
-      error = { message: `(the error could not be read: ${message(dumpError)})` };
-    } finally {
-      if (errorHandle.alive) {
-        errorHandle.dispose();
-      }
-    }
-    const shape = error !== null && typeof error === 'object' ? (error as { message?: unknown }) : undefined;
-    if (shape?.message === 'out of memory') {
+    if (text === 'out of memory') {
       return { status: 'memory_exceeded', memoryUsedBytes };
     }
-    const text = typeof shape?.message === 'string' ? shape.message : String(error);
     return { status: 'error', error: `Execution error: ${prefix}${text}`, memoryUsedBytes };
+  }
+
+  /**
+   * What a thrown value says: its message when it has a string one, the value
+   * as text otherwise, cut in the guest at {@link THROWN_TEXT_CHARS}
+   * characters so no long text is copied out.
+   */
+  private thrownText(errorHandle: QuickJSHandle): string {
+    const { context } = this.live;
+    if (!this.describe) {
+      // The helpers failed to build: only the executor's own code has run.
+      const error = context.dump(errorHandle) as unknown;
+      const shape = error !== null && typeof error === 'object' ? (error as { message?: unknown }) : undefined;
+      return typeof shape?.message === 'string' ? shape.message : String(error);
+    }
+    const limit = context.newNumber(THROWN_TEXT_CHARS);
+    try {
+      const made = context.callFunction(this.describe, context.undefined, errorHandle, limit);
+      if (made.error) {
+        made.error.dispose();
+        return '(the thrown value could not be read)';
+      }
+      const text = context.unwrapResult(made);
+      try {
+        return context.typeof(text) === 'string' ? this.readString(text, false) : '(the thrown value could not be read)';
+      } finally {
+        text.dispose();
+      }
+    } finally {
+      limit.dispose();
+    }
   }
 }

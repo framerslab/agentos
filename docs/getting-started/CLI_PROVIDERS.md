@@ -1,6 +1,6 @@
 # CLI-Based LLM Providers
 
-AgentOS supports using locally-installed CLI tools as LLM providers. This allows users to leverage their existing subscriptions (Anthropic Max, Google AI Pro/Ultra, OpenAI ChatGPT Plus/Pro) without separate API keys.
+AgentOS can use locally installed CLI tools as LLM providers, so a user's existing subscription (Anthropic Max, a Google account) serves the calls without an API key. A ChatGPT subscription is reached through an OAuth flow rather than a CLI ([below](#openai-codex-cli--oauth-flow)).
 
 ## Architecture
 
@@ -28,7 +28,7 @@ The generalized subprocess bridge lives at `src/safety/sandbox/subprocess/`:
 
 - **[`CLISubprocessBridge`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLISubprocessBridge.ts)** — abstract base class (template method pattern). Owns process lifecycle: spawn, stdin pipe, NDJSON line splitting, timeout, abort signal. Subclasses implement `buildArgs()`, `classifyError()`, `parseStreamEvent()`.
 - **[`CLISubprocessError`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/errors.ts)** — generic error with open string codes, `guidance` (user-facing fix instructions), and `recoverable` flag. Works for any binary, not just LLM CLIs.
-- **[`CLIRegistry`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLIRegistry.ts)** — PATH scanner that discovers installed CLIs. Ships with 10 well-known defaults (claude, gemini, git, gh, docker, node, python3, ffmpeg, gcloud, aws). Feeds into health checks and capability discovery.
+- **[`CLIRegistry`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLIRegistry.ts)** — PATH scanner that discovers installed CLIs. It loads 54 bundled descriptors from the JSON files in `registry/` (LLM CLIs such as `claude`, `gemini` and `ollama`, dev tools, runtimes, package managers, cloud CLIs, databases, media and networking tools), and `register()` adds more.
 
 ## Available CLI Providers
 
@@ -63,13 +63,11 @@ Key points from Anthropic's [legal and compliance page](https://code.claude.com/
 
 **What AgentOS does**: Spawns `gemini -p --output-format json` as a subprocess. System prompts are injected via a temporary file + the `GEMINI_SYSTEM_MD` environment variable (Gemini CLI's official mechanism). Never extracts or stores OAuth tokens.
 
-### OpenAI Codex CLI — OAuth Token Extraction Supported
+### OpenAI Codex CLI — OAuth flow
 
 OpenAI's approach is the most permissive. The Codex CLI is Apache 2.0 licensed, and an OpenAI maintainer [confirmed](https://github.com/openai/codex/discussions/8338) that the terms are "quite permissive" toward third-party tools doing similar things.
 
-AgentOS includes a complete [`OpenAIOAuthFlow`](https://github.com/framerslab/agentos/blob/master/src/core/llm/auth/OpenAIOAuthFlow.ts) implementation that uses the same public OAuth client ID (`app_EMoamEEZ73f0CkXaXp7hrann`) and PKCE flow as the Codex CLI. This allows users to authenticate with their ChatGPT Plus/Pro subscription and obtain an API key without a separate Console account.
-
-**Current status**: The OAuth flow is architecturally complete but disabled in the CLI pending full integration testing. The flow mirrors Codex CLI's `obtain_api_key()` step exactly — browser-based PKCE on `localhost:1455`, id_token exchange for API key.
+AgentOS exports an [`OpenAIOAuthFlow`](https://github.com/framerslab/agentos/blob/master/src/core/llm/auth/OpenAIOAuthFlow.ts) from `@framers/agentos/auth` that uses the Codex CLI's public OAuth client ID (`app_EMoamEEZ73f0CkXaXp7hrann`) and its browser PKCE flow on `localhost:1455`, then exchanges the `id_token` for an API key as the Codex CLI's `obtain_api_key()` does. `OpenAIProvider` takes the flow as `oauthFlow` and calls it for a token on each request ([OAuth Auth](../features/OAUTH_AUTH.md)). There is no `codex` CLI provider.
 
 ## Provider Details
 
@@ -78,7 +76,7 @@ AgentOS includes a complete [`OpenAIOAuthFlow`](https://github.com/framerslab/ag
 - **Binary**: `claude` (install: `npm install -g @anthropic-ai/claude-code`)
 - **Auth**: User logs into Claude Code separately by running `claude` in terminal
 - **System prompt**: `--system-prompt` flag (direct)
-- **Tool calling**: `--json-schema` for structured output enforcement
+- **Tool calling**: tool schemas written into the system prompt; when tools are present, `--json-schema` constrains the reply to text or tool calls (a reply that does not parse as that shape is retried once without the schema and returned as text)
 - **Streaming**: `--output-format stream-json` with `--verbose --include-partial-messages`
 - **Key flags**: `--bare` (skip plugins/hooks), `--max-turns 1` (single completion)
 - **Models**: claude-opus-5-5, claude-fable-5-1, claude-fable-5, claude-sonnet-5-5, claude-sonnet-5, claude-sonnet-4-6 (default), claude-haiku-4-5-20251001
@@ -105,22 +103,27 @@ To add support for a new CLI binary:
 2. Create `{Name}CLIProviderError extends CLISubprocessError` — define CLI-specific error codes
 3. Create `{Name}CLIProvider implements IProvider` — message formatting, tool calling strategy, response mapping
 4. Register in `CLIRegistry.WELL_KNOWN_CLIS` if it should be auto-discovered
-5. Register in [`AIModelProviderManager`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/AIModelProviderManager.ts), `SmallModelResolver`, `LLM_PROVIDERS`, `PROVIDER_CATALOG`, and the provider registry
+5. Register the provider id in [`AIModelProviderManager`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/AIModelProviderManager.ts), and add its default models and its PATH probe to `PROVIDER_DEFAULTS` and `AUTO_DETECT_ORDER` in [`provider-defaults.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/provider-defaults.ts)
 
-The [`CLISubprocessBridge`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLISubprocessBridge.ts) base class handles ~60% of the work (spawn, pipe, NDJSON parse, timeout, health checks). Subclasses only implement what's CLI-specific.
+The [`CLISubprocessBridge`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLISubprocessBridge.ts) base class handles the spawn, the stdin pipe, NDJSON parsing, timeouts and health checks; subclasses implement what is specific to their CLI.
 
 ## Auto-Detection Order
 
 When no provider is explicitly configured, AgentOS probes in this order:
 
 ```
-1. openrouter     → OPENROUTER_API_KEY
-2. openai         → OPENAI_API_KEY
-3. anthropic      → ANTHROPIC_API_KEY
-4. gemini         → GEMINI_API_KEY
-5. claude-code-cli → `which claude` (PATH detection)
-6. gemini-cli     → `which gemini` (PATH detection)
-7. ollama         → OLLAMA_BASE_URL
+1. openrouter      → OPENROUTER_API_KEY
+2. openai          → OPENAI_API_KEY
+3. anthropic       → ANTHROPIC_API_KEY
+4. gemini          → GEMINI_API_KEY
+5. groq            → GROQ_API_KEY
+6. together        → TOGETHER_API_KEY
+7. mistral         → MISTRAL_API_KEY
+8. xai             → XAI_API_KEY
+9. requesty        → REQUESTY_API_KEY
+10. claude-code-cli → `which claude` (PATH detection)
+11. gemini-cli     → `which gemini` (PATH detection)
+12. ollama         → OLLAMA_BASE_URL
 ```
 
 API-key providers take priority (explicitly configured). CLI providers come next (subscription-grade models). Ollama is last (local/free).
