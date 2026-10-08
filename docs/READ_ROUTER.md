@@ -179,7 +179,7 @@ Each reader gets the retrieved context from Stage 2 plus the question. `selectRe
 
 ### Why route at all
 
-Two readers behave very differently on the same retrieved evidence. Per-category Phase B at full N=500 on the same retrieval stack (canonical-hybrid + sem-embed):
+Two readers behave very differently on the same retrieved evidence. Per-category Phase B at full N=500 on the same retrieval stack (hybrid retrieval and Cohere rerank behind the `minimize-cost` policy router):
 
 | Category | gpt-4o reader | gpt-5-mini reader | Best pick |
 |---|---:|---:|---|
@@ -189,9 +189,10 @@ Two readers behave very differently on the same retrieved evidence. Per-category
 | single-session-assistant (n=56) | 98.2% | **100.0%** | gpt-5-mini (cheaper, ties or wins) |
 | knowledge-update (n=78) | 85.7% | **87.2%** | gpt-5-mini (cheaper, ties or wins) |
 | multi-session (n=133) | 76.2% | **79.7%** | gpt-5-mini (+3.5 pp) |
-| **Aggregate** | **83.2%** | **83.2%** | **tied** |
+| **Run score** | **83.2%** (416/500) | **83.2%** (416/500) | **tied** |
+| **Category rows weighted by n** | 84.2% | 83.2% | gpt-4o (+1.0 pp) |
 
-At a fixed reader, aggregate accuracy is the same. The two readers tie at 83.2% on aggregate, but their per-category profiles are mirror images. Picking the better reader per category reaches 87.0% (435/500), +3.8 pp over either reader alone; the run with the gpt-5-mini classifier's real predictions scored 85.6%. The largest per-category gap is single-session-preference (63.3% gpt-4o → 86.7% gpt-5-mini at the same retrieval), and about half of the cases (53% in the measured run) route to the cheaper gpt-5-mini reader.
+Both runs scored 416 of 500. The gpt-4o run recorded six cases without a category, all scored wrong; its category rates cover the other 494 cases (temporal-reasoning 131, multi-session 130, knowledge-update 77), so its rows weight to 84.2%. The per-category profiles are mirror images. Picking the better reader per category reaches 87.0% (435/500): +2.8 pp over gpt-4o's weighted 84.2% and +3.8 pp over gpt-5-mini. A run that routed on the gpt-5-mini classifier's real predictions, with canonical-hybrid retrieval for every case, scored 85.6% (428/500). The largest per-category gap is single-session-preference (63.3% gpt-4o → 86.7% gpt-5-mini at the same retrieval), and about half of the cases (53% in the measured run) route to the cheaper gpt-5-mini reader.
 
 ### Calibration table
 

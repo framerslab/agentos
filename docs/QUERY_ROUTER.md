@@ -152,12 +152,13 @@ The platform knowledge layer sits beneath your project documentation:
 
 ```
 User project docs     (your ./docs, ./guides, etc.)
-  + Platform knowledge  (bundled tools, skills, FAQ, API, troubleshooting)
+  + Platform knowledge  (FAQ, API, troubleshooting; tools and skills only when
+                         the corpus was built beside their registries)
   + GitHub repos        (optional — indexed asynchronously after init)
   = Complete corpus
 ```
 
-This means an agent can answer questions like "What vector stores does AgentOS support?" or "How do I set up a Bluesky channel?" without any project-specific documentation — the answer comes from the bundled platform knowledge.
+An agent can answer questions such as "How do I add voice?" or "What messaging channels are supported?" without any project documentation: the published corpus holds FAQ entries for both.
 
 ### Agentic Credential Discovery
 

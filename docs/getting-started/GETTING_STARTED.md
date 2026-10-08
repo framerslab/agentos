@@ -46,7 +46,7 @@ AgentOS resolves credentials in three layers, highest priority first:
 
 1. **Inline `apiKey` / `provider` / `baseUrl`** on the call.
 2. **Module-level default** set via `setDefaultProvider()` (see below).
-3. **Environment variable auto-detect chain**: `OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `which claude` → `which gemini` → `OLLAMA_BASE_URL` → `STABILITY_API_KEY` → `REPLICATE_API_TOKEN` → `STABLE_DIFFUSION_LOCAL_BASE_URL` → `BFL_API_KEY` → `FAL_API_KEY`.
+3. **Environment variable auto-detect chain**: `OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `REQUESTY_API_KEY` → `which claude` → `which gemini` → `OLLAMA_BASE_URL` → `STABILITY_API_KEY` → `REPLICATE_API_TOKEN` → `STABLE_DIFFUSION_LOCAL_BASE_URL` → `BFL_API_KEY` → `FAL_API_KEY` → `MINIMAX_API_KEY`.
 
 You only need one of these — pick whichever fits your deployment.
 
@@ -81,7 +81,7 @@ setDefaultProvider(undefined);
 
 The default's `model` is the text model. `embedText`, `editImage` and `generateImage` use it as well unless it is recognizably a chat model (GPT, Claude, Gemini, Llama and similar families) headed for the provider's own endpoint, in which case they use the provider's default model for the task. `generateImage` without `provider` or `model` tries the default's provider first when that provider makes images, then the image providers whose keys are in the environment. With a custom endpoint (`baseUrl`) or on Ollama, `embedText` uses it too, except on Gemini: there a default model that does not name an embedding model is replaced by `gemini-embedding-2`, so pass `model` to `embedText` to use another one. The default's `apiKey` and `baseUrl` apply to every call that resolves to the same provider, image calls included.
 
-[`setDefaultProvider`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/global-default.ts) is the recommended path for apps that hold their keys somewhere other than environment variables (secrets manager, runtime config service, etc.). It also works inside the [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) class — pass `defaultProvider` in your [`AgentOSConfig`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) and the runtime will install it during `initialize()`.
+[`setDefaultProvider`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/global-default.ts) is the recommended path for apps that hold their keys somewhere other than environment variables (secrets manager, runtime config service, etc.). It applies to the high-level functions only. The full [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) runtime does not read it: its providers come from `modelProviderManagerConfig.providers` in [`AgentOSConfig`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts), where the entry with `isDefault: true` is the default, and `createAgentOSConfig()` builds that list from `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `REQUESTY_API_KEY` and `OLLAMA_BASE_URL`.
 
 ### Reordering the auto-detect chain
 
@@ -148,7 +148,7 @@ const { text: local } = await generateText({
 });
 ```
 
-All high-level functions support `apiKey`: `generateText`, [`streamText`](https://github.com/framerslab/agentos/blob/master/src/api/streamText.ts), `generateObject`, [`streamObject`](https://github.com/framerslab/agentos/blob/master/src/api/streamObject.ts), `generateImage`, `generateVideo`, `generateMusic`, `generateSFX`, `embedText`, `performOCR`, [`agent`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts), and [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts).
+All high-level functions support `apiKey`: `generateText`, [`streamText`](https://github.com/framerslab/agentos/blob/master/src/api/streamText.ts), `generateObject`, [`streamObject`](https://github.com/framerslab/agentos/blob/master/src/api/streamObject.ts), `generateImage`, `generateVideo`, `generateMusic`, `generateSFX`, `embedText`, [`agent`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts), and [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts). `performOCR` accepts `apiKey` but does not pass it on: its cloud tier reads the provider's environment variable.
 
 ---
 
@@ -184,7 +184,7 @@ flowchart LR
 
 - **Agent** — the runtime loop. Receives input, calls the LLM, executes tool calls, retrieves memory, returns a response. `agent()` and `agency()` are the two factories that build one.
 - **LLM** — the language model. AgentOS routes through 11 provider adapters; the agent does not care which one you pick.
-- **Memory** — what survives across turns and sessions. Working memory (short-term scratchpad) plus cognitive memory (episodic, semantic, procedural traces with Ebbinghaus decay, retrieval-induced forgetting, and reconsolidation).
+- **Memory** — what survives across turns and sessions. On the full runtime, a GMI keeps working memory for its session and, when cognitive memory is attached, episodic, semantic and procedural traces with Ebbinghaus decay. `agent()` keeps each session's message history and reaches long-term memory through `memoryProvider` hooks.
 - **Tools** — functions the agent can invoke when the LLM decides it needs one. Pre-registered tools work the same way runtime-generated tools do once approved by the LLM judge.
 
 The three levels below build on this picture:
@@ -192,10 +192,10 @@ The three levels below build on this picture:
 | Level | API | What it adds |
 |---|---|---|
 | 1 | `generateText()` / `streamText()` | one LLM call, no agent loop, no memory, no tools |
-| 2 | `agent()` | the loop, sessions, working memory, tool calling |
+| 2 | `agent()` | the tool-calling loop (up to 5 steps by default), sessions with their own message history, memory hooks |
 | 3 | `agency()` | multiple agents under a coordination strategy; optional runtime tool generation and specialist spawning |
 
-Personality vectors, multimodal RAG, streaming guardrails, channel adapters, and the voice pipeline layer on top of any level.
+Guardrails, retrieval, human approval, voice and channels come with `agency()` and the full runtime; [API paths](../API_PATHS.md) lists what each surface does with each option.
 
 ---
 
@@ -205,8 +205,8 @@ Every entry point (`generateText`, [`streamText`](https://github.com/framerslab/
 
 | Field | Required? | Default | Notes |
 |---|---|---|---|
-| `provider` | yes | none | One of `openai`, `anthropic`, `gemini`, `ollama`, `groq`, `together`, `fireworks`, `perplexity`, `mistral`, `cohere`, `deepseek`, `xai`, `bedrock`, `qwen`, `moonshot`, `openrouter`, plus the CLI bridges. |
-| `model` | no | provider-specific (`gpt-4o`, `claude-sonnet-4-6`, `gemini-2.5-pro`, `llama3.3` for Ollama, etc.) | Pin explicitly for stability across package upgrades. Use a current model id; retired snapshots return 404. |
+| `provider` | no | auto-detected from the environment ([Environment Setup](#environment-setup)) | One of `openai`, `anthropic`, `gemini`, `openrouter`, `requesty`, `groq`, `together`, `mistral`, `xai`, `ollama`, and the CLI bridges `claude-code-cli` and `gemini-cli`. Another OpenAI-compatible service runs through `openai` with `baseUrl`. |
+| `model` | no | provider-specific (`gpt-4o`, `claude-sonnet-4-6`, `gemini-2.5-flash`, `llama3.2` for Ollama, etc.) | Pin explicitly for stability across package upgrades. Use a current model id; retired snapshots return 404. |
 | `apiKey` | no | env auto-detect (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.; full chain in [Environment Setup](#environment-setup)) | Pass explicitly for multi-tenant apps and to avoid coupling code to env var names. |
 
 The examples below use the same explicit shape across all three levels. If you would rather rely on the auto-detect chain plus the provider's default model, omit `model` and `apiKey` — the calls still work as long as the env var is set.
@@ -251,7 +251,7 @@ for await (const chunk of stream.textStream) {
 
 ## Level 2 — Stateful Agent Session
 
-`agent()` adds the loop, sessions, working memory, and tool calling on top of a Level 1 call:
+`agent()` adds the tool-calling loop and sessions that keep their own message history on top of a Level 1 call:
 
 ```typescript
 import { agent } from '@framers/agentos';
@@ -304,7 +304,7 @@ Per-agent overrides: any sub-agent in the `agents` map can declare its own `prov
 
 ## Personality (Optional)
 
-HEXACO personality traits modulate encoding strength, retrieval bias, memory decay, and cognitive mechanisms. They're **completely optional** — omit them for purely objective behavior.
+HEXACO personality traits are optional. On `agent()`, `personality` adds a `## Personality & Communication Style` section to the system prompt, with one directive for each trait above 0.65 or below 0.35; traits between those values add nothing. A cognitive memory manager weights encoding and its mechanisms by the `traits` it is configured with; on the full runtime, `gmiManagerConfig.cognitiveMemoryFactory` receives the persona and decides which traits to pass.
 
 ```typescript
 // ── Personality-driven agent (warm, curious, detail-oriented) ─────────────
@@ -323,7 +323,7 @@ const empathicAgent = agent({
 const objectiveAgent = agent({
   provider: 'openai',
   instructions: 'You are a factual analyst. Be precise and neutral.',
-  // personality: omitted — all encoding weights default to uniform (0.5)
+  // personality: omitted — no personality section in the system prompt
 });
 
 // ── Selective traits (only set what matters) ──────────────────────────────
@@ -333,24 +333,18 @@ const analyticalAgent = agent({
   personality: {
     conscientiousness: 0.95,  // meticulous, thorough
     openness: 0.7,            // open to new ideas
-    // other traits: default to 0.5 (neutral)
+    // unset traits count as 0.5 and add no directive
   },
 });
 ```
 
-When personality is omitted:
-- Memory encoding uses **uniform weights** (no trait-driven bias)
-- Cognitive mechanisms use **default parameters** (no HEXACO modulation)
-- System prompt includes **no behavior traits** section
-- The agent behaves as a purely objective, trait-neutral assistant
-
-You can also disable personality per-turn by passing `personality: undefined` to individual method calls while the base agent retains its configured traits.
+When personality is omitted, the system prompt has no personality section. The section is built once, when the agent is created; a call cannot change it.
 
 ---
 
 ## First End-to-End Example
 
-This complete example uses tools, streaming, and a basic session:
+This complete example makes a one-shot call, holds a two-turn session and reads its usage:
 
 ```typescript
 import { agent, generateText } from '@framers/agentos';
@@ -362,10 +356,10 @@ const { text: summary } = await generateText({
 });
 console.log('Summary:', summary);
 
-// ── Step 2: Stateful session with tool-enabled agent ───────────────────────
+// ── Step 2: Session that keeps its message history ─────────────────────────
 const coder = agent({
   provider: 'anthropic',
-  model: 'claude-sonnet-4-5-20250929',
+  model: 'claude-sonnet-4-6',
   instructions: 'You are an expert TypeScript developer.',
   maxSteps: 4,
 });
@@ -406,7 +400,15 @@ Cancellable version:
     fn: T, delay: number, signal?: AbortSignal
   ): T { ... }
 
-Usage: { inputTokens: 312, outputTokens: 487, totalTokens: 799, estimatedCost: 0.00024 }
+Usage: {
+  sessionId: 'quickstart',
+  personaId: undefined,
+  promptTokens: 312,
+  completionTokens: 487,
+  totalTokens: 799,
+  costUSD: 0.00024,
+  calls: 2
+}
 ```
 
 ---
@@ -416,7 +418,7 @@ Usage: { inputTokens: 312, outputTokens: 487, totalTokens: 799, estimatedCost: 0
 | Topic                                             | Guide                                        |
 | ------------------------------------------------- | -------------------------------------------- |
 | Graph pipelines, workflows, missions              | [ORCHESTRATION.md](../orchestration/ORCHESTRATION.md)       |
-| Deploy agents to 37 channels                      | [CHANNELS.md](../features/CHANNELS.md)                 |
+| Connect agents to messaging and social channels   | [CHANNELS.md](../features/CHANNELS.md)                 |
 | Publish to social platforms                       | [SOCIAL_POSTING.md](../features/SOCIAL_POSTING.md)     |
 | Audit trails and tamper evidence                  | [PROVENANCE.md](../safety/PROVENANCE.md)             |
 | Episodic, semantic, procedural memory             | [COGNITIVE_MEMORY.md](../memory/COGNITIVE_MEMORY.md) |
@@ -424,7 +426,7 @@ Usage: { inputTokens: 312, outputTokens: 487, totalTokens: 799, estimatedCost: 0
 | HEXACO personality traits and on/off configuration | [COGNITIVE_MEMORY.md](../memory/COGNITIVE_MEMORY.md#1-hexaco-personality---encoding-weights) |
 | Testing and benchmarking agents                   | [EVALUATION.md](../observability/EVALUATION.md)             |
 | Token-efficient capability discovery              | [DISCOVERY.md](../extensions/DISCOVERY.md)               |
-| Image generation across 5 providers               | [IMAGE_GENERATION.md](../features/IMAGE_GENERATION.md) |
+| Image generation across 8 providers               | [IMAGE_GENERATION.md](../features/IMAGE_GENERATION.md) |
 | Practical cookbook examples                       | [EXAMPLES.md](./EXAMPLES.md)                 |
 | Runtime-configured tools and full [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) setup | [HIGH_LEVEL_API.md](./HIGH_LEVEL_API.md)     |
 | Full API hierarchy                                | [AGENCY_API.md](../orchestration/AGENCY_API.md)             |
