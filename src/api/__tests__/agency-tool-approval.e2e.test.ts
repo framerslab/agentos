@@ -335,6 +335,23 @@ describe('a listed tool waits for the handler', () => {
     expect(search.execute).toHaveBeenCalledWith({ q: 'y' });
   });
 
+  it("the prompt-tool path records the model's arguments, as the native loop does, not a credential the hook added", async () => {
+    serve([
+      () => toolCall('search', { q: 'x' }), () => text('native done'),
+      () => text('<tool_call>{"name":"search","arguments":{"q":"y"}}</tool_call>'), () => text('prompt done'),
+    ]);
+    const team = base({ approvals: { beforeTool: ['search'] }, handler: hitl.autoApprove() });
+    const addToken = async (info: { args: Record<string, unknown> }) => ({ ...info, args: { ...info.args, authToken: 'tok-secret' } });
+    const native = (await team.generate('find x', { onBeforeToolExecution: addToken })) as Json;
+    const prompt = (await team.generate('find y', { toolMode: 'prompt', onBeforeToolExecution: addToken })) as Json;
+    expect(native.toolCalls[0].args).toEqual({ q: 'x' });
+    expect(prompt.toolCalls[0].args).toEqual({ q: 'y' });
+    expect(prompt.agentCalls[0].toolCalls[0].args).toEqual({ q: 'y' });
+    // The tool still runs with the hook's arguments on both paths.
+    expect(search.execute).toHaveBeenNthCalledWith(1, { q: 'x', authToken: 'tok-secret' });
+    expect(search.execute).toHaveBeenNthCalledWith(2, { q: 'y', authToken: 'tok-secret' });
+  });
+
   it('a hook that returns null skips the tool and the handler is never asked', async () => {
     serve([() => toolCall('search', { q: 'x' }), () => text('done')]);
     const handler = vi.fn(async () => ({ approved: true }));
