@@ -57,6 +57,7 @@ export class AudioWorkletCapture {
   /**
    * Loads the module (once per context), builds the path, and starts handing blocks on. A started capture is left as
    * it is, so a second call builds no second path; when calls overlap while the module loads, the last one builds.
+   * A start that fails leaves nothing connected, and the next call tries again.
    */
   async start(): Promise<void> {
     if (this.node) return;
@@ -72,19 +73,24 @@ export class AudioWorkletCapture {
     }
     await ready;
     if (generation !== this.generation) return;
-    this.node = new AudioWorkletNode(context, CAPTURE_PROCESSOR_NAME, {
+    // The path is built whole before it is kept: a stream with no audio track throws here, with nothing connected.
+    const source = context.createMediaStreamSource(this.stream);
+    const node = new AudioWorkletNode(context, CAPTURE_PROCESSOR_NAME, {
       numberOfInputs: 1,
       numberOfOutputs: 1,
       processorOptions: { blockSize: this.options.blockSize ?? 2048 },
     });
-    this.node.port.onmessage = (event: MessageEvent<Float32Array>) => {
+    node.port.onmessage = (event: MessageEvent<Float32Array>) => {
       for (const listener of this.listeners) listener(event.data, context.sampleRate);
     };
-    this.silent = context.createGain();
-    this.silent.gain.value = 0;
-    this.node.connect(this.silent);
-    this.silent.connect(context.destination);
-    this.connectSource();
+    const silent = context.createGain();
+    silent.gain.value = 0;
+    node.connect(silent);
+    silent.connect(context.destination);
+    source.connect(node);
+    this.source = source;
+    this.node = node;
+    this.silent = silent;
   }
 
   /** Hears another stream with the same node: a new microphone, or the tab's sound added. */

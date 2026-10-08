@@ -161,15 +161,22 @@ describe('AudioWorkletCapture', () => {
     expect(context.createGain).toHaveBeenCalledTimes(1);
   });
 
-  it('loads a module that failed to load again at the next start', async () => {
+  it('starts again after a start that failed, on a module that did not load or a stream it could not hear', async () => {
     vi.stubGlobal('AudioWorkletNode', FakeNode);
     const context = fakeContext();
     context.audioWorklet.addModule.mockRejectedValueOnce(new Error('the module did not load'));
+    context.createMediaStreamSource.mockImplementationOnce(() => {
+      throw new Error('the stream has no audio track');
+    });
     const capture = new AudioWorkletCapture({ context: context as unknown as AudioContext, stream: {} as MediaStream, moduleUrl: '/w.js' });
     await expect(capture.start()).rejects.toThrow('the module did not load');
     expect(FakeNode.made).toHaveLength(0);
+    await expect(capture.start()).rejects.toThrow('the stream has no audio track');
+    expect(FakeNode.made).toHaveLength(0);
+    expect(context.createGain).not.toHaveBeenCalled();
     await capture.start();
     expect(context.audioWorklet.addModule).toHaveBeenCalledTimes(2);
+    expect(context.createMediaStreamSource).toHaveBeenCalledTimes(2);
     expect(FakeNode.made).toHaveLength(1);
   });
 });
