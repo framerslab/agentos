@@ -446,6 +446,64 @@ describe('the call deadline and effect records', () => {
     ]);
   });
 
+  it('a call whose tool is removed while its request is in flight returns its output and its effects, through removeTool and cleanupSession', async () => {
+    let hold: { arrived: () => void; released: Promise<void> } | undefined;
+    const { port } = await serve((req, res) => {
+      if (req.url === '/slow' && hold) {
+        const { arrived, released } = hold;
+        arrived();
+        void released.then(() => res.end('slow'));
+        return;
+      }
+      res.end('ok');
+    });
+    const base = `http://127.0.0.1:${port}`;
+    const host = await makeForgeHost({
+      db: createSqliteAdapter(),
+      config: { capabilities: { fetch: { domains: ['127.0.0.1'] } } },
+    });
+    const removals: Array<[string, (toolId: string, sessionId: string) => unknown]> = [
+      ['removeTool', (toolId) => host.engine.removeTool(toolId)],
+      ['cleanupSession', (_toolId, sessionId) => host.engine.cleanupSession(sessionId)],
+    ];
+    for (const [how, remove] of removals) {
+      const sessionId = `sess-${how}`;
+      const forged = await callTool(
+        host.orchestrator,
+        'forge_tool',
+        forgeArgs('get_it', FETCH_CODE, ['fetch'], URL_IN, { url: `${base}/ok` }),
+        { sessionId },
+      );
+      expect(forged.isError).toBeFalsy();
+      const toolId = forged.output.toolId as string;
+
+      let arrived!: () => void;
+      let release!: () => void;
+      const requestArrived = new Promise<void>((resolve) => {
+        arrived = resolve;
+      });
+      hold = {
+        arrived,
+        released: new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      };
+      const call = callTool(host.orchestrator, 'get_it', { url: `${base}/slow` });
+      await requestArrived;
+      // The host removes the tool while its request is in flight.
+      await remove(toolId, sessionId);
+      release();
+
+      const result = await call;
+      expect(result.isError).toBeFalsy();
+      expect(result.output).toEqual({ status: 200, body: 'slow' });
+      expect(result.effects).toEqual([
+        expect.objectContaining({ kind: 'capability', capability: 'fetch', outcome: 'ok', record: 'written' }),
+      ]);
+      expect(host.engine.getSessionTools(sessionId)).toEqual([]);
+    }
+  });
+
   it("8. without a ceiling no effect record is written; with one, a failed record write refuses the call; a composed result carries its steps' effects", async () => {
     const { port, seen } = await serve(routes);
     const base = `http://127.0.0.1:${port}`;

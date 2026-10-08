@@ -2048,6 +2048,8 @@ export class EmergentCapabilityEngine {
    * `agent`-tier tool, a call from any agent but its own, before anything
    * runs or a use is recorded; it then performs runtime output validation,
    * usage tracking, and promotion checks after each successful execution.
+   * A call whose tool was removed, or replaced under its id, while it ran
+   * returns its result, effects included, and records no use.
    */
   createExecutableTool(tool: EmergentTool): EmergentExecutableTool {
     const baseTool =
@@ -2183,13 +2185,20 @@ export class EmergentCapabilityEngine {
           }
         }
 
-        this.registry.recordUse(tool.id, args, result.output, success, executionTimeMs);
+        // A use is recorded, and promotion checked, only while the registry
+        // still holds the tool this call checked: a tool removed while it ran
+        // (removeTool, cleanupSession) records nothing, and one replaced
+        // under its id is not credited with a run of the code it replaced.
+        // The call's result, effects included, is returned either way.
+        if (this.registry.get(tool.id) === current) {
+          this.registry.recordUse(tool.id, args, result.output, success, executionTimeMs);
 
-        // Only check promotion when execution succeeded AND output passed
-        // validation. Promoting after validation failure would reward tools
-        // that produce structurally invalid output.
-        if (success && validationPassed) {
-          await this.checkPromotion(tool.id);
+          // Only check promotion when execution succeeded AND output passed
+          // validation. Promoting after validation failure would reward tools
+          // that produce structurally invalid output.
+          if (success && validationPassed) {
+            await this.checkPromotion(tool.id);
+          }
         }
 
         return success
