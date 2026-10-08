@@ -66,9 +66,10 @@ export class InProcessExecutor implements ForgedCodeExecutor {
       return { status: 'error', error: `Execution error: ${baseError}`, memoryUsedBytes };
     }
 
-    // The result rides at the end of stdout, after any console output, so a
-    // stdout CodeSandbox cut at its output limit holds a cut result or none.
-    if (codeResult.truncated?.stdout) {
+    // The result rides at the end of stdout, after console.log and console.info,
+    // so a stdout CodeSandbox cut at its output limit holds a cut result or
+    // none; console.error and console.warn go to stderr, under the same limit.
+    if (codeResult.truncated?.stdout || codeResult.truncated?.stderr) {
       return {
         status: 'error',
         error: "Execution error: the result and console output passed the in-process executor's output limit of 1 MB",
