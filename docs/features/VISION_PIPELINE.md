@@ -348,7 +348,8 @@ interface VisionPipelineConfig {
   /**
    * Cloud vision provider, a name generateText() knows. Detected: the first of
    * 'openai', 'anthropic', 'google' and 'openrouter' whose key is in the
-   * environment. Unset and undetected: no cloud tier.
+   * environment. Unset and undetected: no cloud tier. With 'google', give
+   * the image as a Buffer or a data URL: Gemini does not fetch image URLs.
    */
   cloudProvider?: string;
   /** Cloud model. Default: the provider's default vision model. */

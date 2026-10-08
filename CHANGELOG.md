@@ -1,3 +1,31 @@
+## [0.12.18](https://github.com/framerslab/agentos/compare/v0.12.17...v0.12.18) (2026-10-08)
+
+### feat
+
+* **channels:** add Plivo SMS channel adapter (#20) ([d5ff215](https://github.com/framerslab/agentos/commit/d5ff21515137edb43d3485031862c292110c8aa1))
+
+## [0.12.17](https://github.com/framerslab/agentos/compare/v0.12.16...v0.12.17) (2026-10-08)
+
+### feat
+
+* add MiniMax image generation provider (#56) ([9d21348](https://github.com/framerslab/agentos/commit/9d21348742fbb5ce48c92ffb8ab5e40377fdfccc))
+
+## [0.12.16](https://github.com/framerslab/agentos/compare/v0.12.15...v0.12.16) (2026-10-08)
+
+### fix
+
+* **llm:** Gemini sends image parts; transferStyle sends a key only to a provider the call names (#156) ([e8b4d5f](https://github.com/framerslab/agentos/commit/e8b4d5f6636878aa825fe688620750f192f7264d))
+
+## [0.12.15](https://github.com/framerslab/agentos/compare/v0.12.14...v0.12.15) (2026-10-08)
+
+### fix
+
+* **emergent:** five defects from a second cold read of the stored-tool and composition code (#155) ([3229b10](https://github.com/framerslab/agentos/commit/3229b10638a0eb157adfb39e38137487e723ba48))
+
+### ci
+
+* a workflow that resolves the lockfile for a branch (#157) ([4457a40](https://github.com/framerslab/agentos/commit/4457a402f651bf7d26303e5702f457b3d0fd3059))
+
 ## [0.12.14](https://github.com/framerslab/agentos/compare/v0.12.13...v0.12.14) (2026-10-08)
 
 ### docs

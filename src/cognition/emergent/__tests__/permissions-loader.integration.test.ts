@@ -23,6 +23,37 @@ const SUM_IN = {
 };
 const SUM_OUT = { type: 'object', properties: { sum: { type: 'number' } }, required: ['sum'] };
 
+/**
+ * A composition over the host's echo, loaded; a run that meets its step
+ * missing suspends it (the row reads the library's step_missing), then the
+ * host suspends it and that write fails: the row still reads the library's
+ * suspension, and the host's is held in this process only. The step's tool
+ * is unregistered when this returns.
+ */
+async function hostSuspensionFailedOverLibraryRow() {
+  const db = createSqliteAdapter();
+  const host = await makeForgeHost({ db, tools: [echoTool()] });
+  seedToolRow(db, {
+    id: 'c-echo',
+    name: 'echo_once',
+    mode: 'compose',
+    source: JSON.stringify({
+      mode: 'compose',
+      steps: [{ name: 'e', tool: 'echo', inputMapping: { text: '$input.text' } }],
+    }),
+    inputSchema: TEXT_IN,
+    outputSchema: TEXT_OUT,
+  });
+  expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).active).toBe(1);
+  await host.orchestrator.unregisterTool('echo');
+  expect((await callTool(host.orchestrator, 'echo_once', { text: 'x' })).isError).toBe(true);
+  expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'suspended', state_reason: 'step_missing', set_by: 'library' });
+  db.failNext('INSERT INTO agentos_emergent_tool_state');
+  await expect(host.engine.suspendTool('c-echo', 'policy_hold')).rejects.toThrow('simulated storage failure');
+  expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'suspended', state_reason: 'step_missing', set_by: 'library' });
+  return { db, host };
+}
+
 describe('stored tools: the loader, legacy rows and suspension', () => {
   it('loads the three stored forms, keeps a row a host turned off, and never rewrites a row', async () => {
     const db = createSqliteAdapter();
@@ -381,6 +412,44 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect((await callTool(host.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
   });
 
+  it("a host's suspension whose write failed stays over a row that reads the library's step suspension: a load with the step still missing keeps it, and the step's return lifts nothing", async () => {
+    const { db, host } = await hostSuspensionFailedOverLibraryRow();
+
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'c-echo', name: 'echo_once', state: 'suspended', reason: 'policy_hold' },
+    ]);
+    // The step's tool comes back: a host's suspension is not re-checked.
+    await host.orchestrator.registerTool(echoTool());
+    await host.engine.onHostToolRegistered('echo');
+    expect(await host.orchestrator.getTool('echo_once')).toBeUndefined();
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'x' })).isError).toBe(true);
+    // Nothing was written over the row.
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'suspended', state_reason: 'step_missing', set_by: 'library' });
+
+    // The host clears it.
+    expect(await host.engine.reactivateTool('c-echo')).toMatchObject({ state: 'active' });
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'back' })).output).toEqual({ text: 'back' });
+  });
+
+  it("a host's suspension whose write failed stays over a row that reads the library's step suspension: a load with the step back keeps it", async () => {
+    const { db, host } = await hostSuspensionFailedOverLibraryRow();
+
+    // The step's tool is back before the load; its registration re-checks
+    // nothing, and the load writes nothing over the row.
+    await host.orchestrator.registerTool(echoTool());
+    await host.engine.onHostToolRegistered('echo');
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'c-echo', name: 'echo_once', state: 'suspended', reason: 'policy_hold' },
+    ]);
+    expect(await host.orchestrator.getTool('echo_once')).toBeUndefined();
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'x' })).isError).toBe(true);
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'suspended', state_reason: 'step_missing', set_by: 'library' });
+
+    // The host clears it.
+    expect(await host.engine.reactivateTool('c-echo')).toMatchObject({ state: 'active' });
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'back' })).output).toEqual({ text: 'back' });
+  });
+
   it('demoting a tool leaves a later tool of the same name callable', async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db });
@@ -494,6 +563,50 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     ]);
     expect(await host.orchestrator.getTool('echo_once')).toBeUndefined();
     expect(readStateRow(db, 'compose-1')).toMatchObject({ state: 'demoted' });
+  });
+
+  it("a run's suspension over a composition the host turned off with its own SQL records the host's demotion, and the flag stays down", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, tools: [echoTool()] });
+    seedToolRow(db, {
+      id: 'compose-1',
+      name: 'echo_once',
+      mode: 'compose',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 's1', tool: 'echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    await host.engine.loadPersistedTools({ tiers: ['shared'] });
+    expect(readStateRow(db, 'compose-1')).toMatchObject({ state: 'active', flag_synced: 1 });
+
+    // The host turns the tool off with its own SQL. Before a load records
+    // that, a call meets the composition's step missing.
+    db.raw.prepare('UPDATE agentos_emergent_tools SET is_active = 0 WHERE id = ?').run('compose-1');
+    await host.orchestrator.unregisterTool('echo');
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'x' })).isError).toBe(true);
+
+    // The library's suspension is not written over the host's disable: the
+    // disable is recorded as the host's demotion.
+    expect(readStateRow(db, 'compose-1')).toMatchObject({
+      state: 'demoted',
+      state_reason: 'legacy_inactive',
+      set_by: 'host',
+    });
+    expect(readToolRow(db, 'compose-1')?.is_active).toBe(0);
+
+    // The step's return lifts nothing, and the flag stays down.
+    await host.orchestrator.registerTool(echoTool());
+    await host.engine.onHostToolRegistered('echo');
+    expect(await host.orchestrator.getTool('echo_once')).toBeUndefined();
+    expect(readToolRow(db, 'compose-1')?.is_active).toBe(0);
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'compose-1', name: 'echo_once', state: 'demoted', reason: 'legacy_inactive' },
+    ]);
+    expect(await host.orchestrator.getTool('echo_once')).toBeUndefined();
+    expect(readToolRow(db, 'compose-1')?.is_active).toBe(0);
   });
 
   it('a load whose flag write fails is reported failed, and the next load finishes the flag write', async () => {
@@ -1543,5 +1656,47 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     await host.orchestrator.registerTool(echoTool('late_echo'));
     await host.engine.onHostToolRegistered('late_echo');
     expect(await host.orchestrator.getTool('echo_later')).toBeUndefined();
+  });
+
+  it("a session's cleanup lets go of its held suspensions before it returns, so a step tool registered right after brings nothing back", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'ss-2',
+      name: 'echo_later',
+      mode: 'compose',
+      tier: 'session',
+      createdBySession: 'sess-r2',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 's', tool: 'late_echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    expect((await host.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess-r2' })).outcomes).toEqual([
+      { toolId: 'ss-2', name: 'echo_later', state: 'suspended', reason: 'step_missing' },
+    ]);
+
+    // A read of the session's rows that the cleanup may make is held, so the
+    // registration below lands while such a read would still be under way.
+    const sessionRows = db.gateNext("FROM agentos_emergent_tools WHERE tier = 'session'");
+    host.orchestrator.cleanupEmergentSession('sess-r2');
+    // The step's tool registers right after the cleanup returns.
+    await host.orchestrator.registerTool(echoTool('late_echo'));
+    await host.engine.onHostToolRegistered('late_echo');
+    sessionRows.release();
+
+    // Nothing of the ended session comes back: not registered, not callable,
+    // not indexed under it, no state held, and its rows go.
+    expect(await host.orchestrator.getTool('echo_later')).toBeUndefined();
+    expect((await callTool(host.orchestrator, 'echo_later', { text: 'x' })).isError).toBe(true);
+    expect(host.engine.getSessionTools('sess-r2')).toEqual([]);
+    const registry = (host.engine as unknown as { registry: EmergentToolRegistry }).registry;
+    expect(registry.getState('ss-2')).toBeUndefined();
+    await vi.waitFor(() => {
+      expect(readToolRow(db, 'ss-2')).toBeUndefined();
+      expect(readStateRow(db, 'ss-2')).toBeUndefined();
+    });
   });
 });
