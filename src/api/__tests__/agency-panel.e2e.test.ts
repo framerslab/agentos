@@ -514,7 +514,8 @@ describe('10-12. vendors, shortfalls, truncation and pre-built seats', () => {
   it('a truncated seat with text is ok and truncated; text under minChars is empty; a pre-built seat is prebuilt and counts', async () => {
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiText('cut off mid', 'length'), openaiText('prebuilt view')]], [ANTHROPIC, [anthropicText('ok'), anthropicText('Merged')]], [GEMINI, geminiText('C')]]);
     const pre = agent({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, fallbackProviders: [] });
-    const r = await agency({ strategy: 'panel', modelPool: POOL(), agents: { ...SEATS(), pre }, chair: { from: ['opus'] }, panel: { minChars: 3 }, quorum: { minAgents: 4 } } as never).generate('review');
+    // Healthy: the astra seat and the pre-built one ('ok' and 'C' are under minChars), so the quorum of 2 is met only if the pre-built seat counts.
+    const r = await agency({ strategy: 'panel', modelPool: POOL(), agents: { ...SEATS(), pre }, chair: { from: ['opus'] }, panel: { minChars: 3 }, quorum: { minAgents: 2 } } as never).generate('review');
     expect(r.seats.find((s) => s.entry === 'astra')).toMatchObject({ status: 'ok', truncated: true, finishReason: 'length' });
     expect(r.seats.find((s) => s.entry === 'opus')).toMatchObject({ status: 'empty' });
     expect(r.seating.seats.pre).toEqual({ prebuilt: true });
