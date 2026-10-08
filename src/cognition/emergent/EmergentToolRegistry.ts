@@ -845,8 +845,16 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
     // stored meanwhile, or a removal, is what holds, not the record written
     // here. Read for every write, conditional or not, so a host's reactivation
     // overtaken by another process's suspension yields to it in memory too.
-    const after = await readRow();
+    let after = await readRow();
     if (!matches(after)) {
+      if (after?.state && after.tool_exists) {
+        // Overtaken after this write's upsert: this write's flag statement
+        // may have landed after the newer write's own, with this write's
+        // state (see flagAfterOvertaking), so the flag is written again from
+        // the newer state.
+        await this.flagAfterOvertaking(toolId, after.state, writeId);
+        after = await readRow();
+      }
       return after?.state && after.tool_exists ? rowRecord(after) : removed();
     }
     return record;
@@ -861,6 +869,38 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
         WHERE id = ?`,
       [toolId, state === 'active' ? 1 : 0, toolId],
     );
+  }
+
+  /** The id of the state row's last write, or null when the row has none (or there is no row). */
+  private async readStateWriteId(toolId: string): Promise<string | null> {
+    const row = (await this.db!.get(`SELECT write_id FROM agentos_emergent_tool_state WHERE tool_id = ?`, [
+      toolId,
+    ])) as { write_id?: string | null } | undefined;
+    return row?.write_id ?? null;
+  }
+
+  /**
+   * After a statement that set the legacy flag from the state row read inside
+   * it: when another state write landed since `seen` (the state row's write
+   * id when the statement was sent), the flag is written again from the state
+   * row, until a flag write is not overtaken (three rounds at most). On
+   * PostgreSQL under READ COMMITTED a statement reads the state row from its
+   * own snapshot and applies its update to the newest row version, so a flag
+   * statement that started before another write's upsert can land after that
+   * write's own flag statement, with the older state; a new statement reads
+   * the newer one. On SQLite every statement reads the newest row, and a
+   * round here only writes the flag the state row already gives.
+   */
+  private async flagAfterOvertaking(toolId: string, fallback: ToolState, seen: string | null): Promise<void> {
+    let last = seen;
+    for (let round = 0; round < 3; round += 1) {
+      const now = await this.readStateWriteId(toolId);
+      if (now === last) {
+        return;
+      }
+      last = now;
+      await this.writeLegacyFlag(toolId, fallback);
+    }
   }
 
   /**
@@ -1699,7 +1739,12 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
     // reactivates the tool. A process that holds no state writes 1 for a new
     // row and leaves an existing row's flag as it stands at write time, not
     // as it read it earlier: a whole-row write is never a reactivation, and
-    // never a disable either.
+    // never a disable either. A state write another process lands while the
+    // statement runs can leave it with the older state (PostgreSQL, READ
+    // COMMITTED): the state row's write id is read before it, and when it has
+    // moved the flag is written again from the state row, as that state
+    // write's own flag write does.
+    const stateWriteBefore = this.states.has(tool.id) ? await this.readStateWriteId(tool.id) : null;
     const heldNow = this.states.get(tool.id);
     const flagExpr = heldNow
       ? `COALESCE((SELECT CASE WHEN state = 'active' THEN 1 ELSE 0 END
@@ -1750,6 +1795,9 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
         ...flagParams,
       ],
     );
+    if (heldNow) {
+      await this.flagAfterOvertaking(tool.id, heldNow.state, stateWriteBefore);
+    }
   }
 
   /**
