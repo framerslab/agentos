@@ -28,6 +28,7 @@ import type {
   ToolStateRecord,
   ToolTier,
   CallHandle,
+  ComposableToolSpec,
   SandboxExecutionResult,
   SandboxedToolSpec,
 } from './types.js';
@@ -518,24 +519,11 @@ export class EmergentCapabilityEngine {
       // ---- COMPOSE MODE ----
       source = JSON.stringify(request.implementation);
 
-      // Every step must be chainable before any test case runs.
-      for (const step of request.implementation.steps) {
-        const verdict = this.composableBuilder.check(step.tool);
-        if (!verdict.ok) {
-          return {
-            success: false,
-            error: `${verdict.code}: step "${step.name}" (tool "${step.tool}"): ${verdict.message}`,
-          };
-        }
-      }
-
-      // A composition must not reach itself, through any nesting.
-      const cycle = this.compositionCycle(request.name, request.implementation.steps);
-      if (cycle) {
-        return {
-          success: false,
-          error: `step_cycle: "${request.name}" reaches itself through ${cycle.join(' -> ')}`,
-        };
+      // Every step must be chainable before any test case runs, and the
+      // composition must not reach itself, through any nesting.
+      const refused = this.composeRefusal(request.name, request.implementation);
+      if (refused) {
+        return { success: false, error: refused };
       }
 
       // The test steps run as the forging caller, so they meet the checks the
@@ -674,6 +662,17 @@ export class EmergentCapabilityEngine {
 
     // Step 5: Register if approved.
     if (verdict.approved) {
+      if (request.implementation.mode === 'compose') {
+        // The tests and the judge took time, and what the steps name may have
+        // changed meanwhile (another forge registered a composition that
+        // closes a cycle with this one, say): checked again before anything
+        // is registered.
+        const refused = this.composeRefusal(request.name, request.implementation);
+        if (refused) {
+          return { success: false, verdict, error: refused };
+        }
+      }
+
       const now = new Date().toISOString();
 
       const usageStats: ToolUsageStats = {
@@ -773,6 +772,27 @@ export class EmergentCapabilityEngine {
         if (settled && settled.reason === 'removed') {
           // Removed while the host was registering it: nothing is registered.
           return { success: false, error: 'the tool was removed while it was being forged' };
+        }
+      }
+
+      if (request.implementation.mode === 'compose') {
+        // A composition registered between the check above and this one's own
+        // registration can close a cycle with it, and neither check saw the
+        // other: checked once more now that this one resolves by its name, and
+        // taken out again when it reaches itself.
+        const cycle = this.compositionCycle(request.name, request.implementation.steps);
+        if (cycle) {
+          const held = this.registry.get(toolId);
+          if (held) {
+            await this.dropExecutable(held);
+          }
+          this.registry.remove(toolId);
+          this.removeIndexedToolEverywhere(toolId);
+          return {
+            success: false,
+            verdict,
+            error: `step_cycle: "${request.name}" reaches itself through ${cycle.join(' -> ')}`,
+          };
         }
       }
 
@@ -1701,6 +1721,22 @@ export class EmergentCapabilityEngine {
         error instanceof Error ? error.message : error,
       );
     }
+  }
+
+  /**
+   * The forge's refusal of a composition under what is registered now: a step
+   * that may not be chained, or a chain that reaches the composition itself,
+   * with the step or the path named; `null` when it may be forged.
+   */
+  private composeRefusal(name: string, implementation: ComposableToolSpec): string | null {
+    for (const step of implementation.steps) {
+      const verdict = this.composableBuilder.check(step.tool);
+      if (!verdict.ok) {
+        return `${verdict.code}: step "${step.name}" (tool "${step.tool}"): ${verdict.message}`;
+      }
+    }
+    const cycle = this.compositionCycle(name, implementation.steps);
+    return cycle ? `step_cycle: "${name}" reaches itself through ${cycle.join(' -> ')}` : null;
   }
 
   /**

@@ -956,4 +956,57 @@ describe('compositions and workflows: one gate, one rule', () => {
     });
     expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'active' });
   });
+
+  it('a forge whose judge was out while another forge closed a cycle with it is refused before it is registered', async () => {
+    const host = await makeForgeHost({ tools: [echoTool('loop_a'), echoTool('loop_b')] });
+    let releaseJudge!: () => void;
+    const judgeHeld = new Promise<void>((resolve) => {
+      releaseJudge = resolve;
+    });
+    host.judge.mockImplementationOnce(async () => {
+      await judgeHeld;
+      return APPROVED_VERDICT;
+    });
+
+    // loop_a over the host's loop_b is with the judge when loop_b is forged
+    // over the host's loop_a; each check saw only the host's tools.
+    const forgingA = callTool(host.orchestrator, 'forge_tool', composeOver('loop_a', 'loop_b'));
+    await vi.waitFor(() => expect(host.judge).toHaveBeenCalledTimes(1));
+    const forgedB = await callTool(host.orchestrator, 'forge_tool', composeOver('loop_b', 'loop_a'));
+    expect(forgedB.isError).toBeFalsy();
+    releaseJudge();
+    const forgedA = await forgingA;
+
+    expect(forgedA.isError).toBe(true);
+    expect(String(forgedA.errorDetails?.message)).toContain('step_cycle');
+    // loop_b chains the host's loop_a, which was never replaced.
+    expect((await callTool(host.orchestrator, 'loop_b', { text: 'hi' })).output).toEqual({ text: 'hi' });
+  });
+
+  it('a forge registered while another forge closed a cycle with it is taken out again', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, tools: [echoTool('loop_a'), echoTool('loop_b')] });
+
+    // loop_a has passed its checks and is registered in the registry; its
+    // state write is held while loop_b is forged and registered in full.
+    const gate = db.gateNext('INSERT INTO agentos_emergent_tool_state');
+    const forgingA = callTool(host.orchestrator, 'forge_tool', composeOver('loop_a', 'loop_b'), {
+      sessionId: 'sess-cycle',
+    });
+    await gate.entered;
+    const forgedB = await callTool(host.orchestrator, 'forge_tool', composeOver('loop_b', 'loop_a'), {
+      sessionId: 'sess-cycle',
+    });
+    expect(forgedB.isError).toBeFalsy();
+    gate.release();
+    const forgedA = await forgingA;
+
+    expect(forgedA.isError).toBe(true);
+    expect(String(forgedA.errorDetails?.message)).toContain('step_cycle');
+    // Only loop_b is held, and no composition holds the name loop_a: the
+    // cycle is not registered.
+    expect(host.engine.getSessionTools('sess-cycle').map((tool) => tool.name)).toEqual(['loop_b']);
+    const loopA = await host.orchestrator.getTool('loop_a');
+    expect((loopA as { emergentMode?: string } | undefined)?.emergentMode).toBeUndefined();
+  });
 });
