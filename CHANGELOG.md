@@ -1,3 +1,9 @@
+## [0.13.1](https://github.com/framerslab/agentos/compare/v0.13.0...v0.13.1) (2026-10-08)
+
+### fix
+
+* **emergent:** bound what QuickJSExecutor copies out of the guest (#168) ([5dd510e](https://github.com/framerslab/agentos/commit/5dd510ef0b40226c45e59ab6d640251474d5d72a))
+
 ## [0.13.0](https://github.com/framerslab/agentos/compare/v0.12.24...v0.13.0) (2026-10-08)
 
 ### ⚠ BREAKING CHANGE
