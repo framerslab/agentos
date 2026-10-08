@@ -61,6 +61,10 @@ export function createSqliteAdapter(): SqliteTestAdapter {
     },
     async all(sql: string, params: unknown[] = []) {
       guard(sql);
+      // Only a gated read waits, so every other read resolves as it always has.
+      if (gate && sql.includes(gate.fragment)) {
+        await waitAtGate(sql);
+      }
       return raw.prepare(sql).all(...params);
     },
     async exec(sql: string) {

@@ -110,21 +110,6 @@ const CLOUD_VISION_PROMPT =
 // ---------------------------------------------------------------------------
 
 /**
- * Unified vision pipeline with progressive enhancement.
- *
- * Processes images through up to three tiers of increasing capability:
- * 1. Local OCR (PaddleOCR / Tesseract.js) — fast, free, offline
- * 2. Local Vision Models (TrOCR / Florence-2 / CLIP) — offline but slower
- * 3. Cloud Vision LLMs (GPT-4o, Claude, Gemini) — best quality, API cost
- *
- * All heavy dependencies are loaded lazily on first use. The pipeline
- * never imports ML libraries at module load time, so it's safe to
- * instantiate even when optional peer deps are missing — errors only
- * surface when a tier that needs them actually runs.
- *
- * @see {@link createVisionPipeline} for automatic provider detection.
- */
-/**
  * The media type of an image from its first bytes: PNG, JPEG, GIF or WebP,
  * and `image/png` for anything else.
  */
@@ -140,6 +125,21 @@ export function imageMediaType(image: Buffer): string {
   return 'image/png';
 }
 
+/**
+ * Unified vision pipeline with progressive enhancement.
+ *
+ * Processes images through up to three tiers of increasing capability:
+ * 1. Local OCR (PaddleOCR / Tesseract.js) — fast, free, offline
+ * 2. Local Vision Models (TrOCR / Florence-2 / CLIP) — offline but slower
+ * 3. Cloud Vision LLMs (GPT-4o, Claude, Gemini) — best quality, API cost
+ *
+ * All heavy dependencies are loaded lazily on first use. The pipeline
+ * never imports ML libraries at module load time, so it's safe to
+ * instantiate even when optional peer deps are missing — errors only
+ * surface when a tier that needs them actually runs.
+ *
+ * @see {@link createVisionPipeline} for automatic provider detection.
+ */
 export class VisionPipeline {
   // -------------------------------------------------------------------------
   // Configuration

@@ -128,7 +128,17 @@ export interface StableDiffusionLocalImageProviderOptions {
   denoisingStrength?: number;
 }
 
+/** MiniMax text-to-image request options. */
+export interface MiniMaxImageProviderOptions {
+  /** Enable automatic prompt optimization. */
+  promptOptimizer?: boolean;
+  /** Pixel dimensions; supply both width and height. */
+  width?: number;
+  height?: number;
+}
+
 export interface ImageProviderOptionBag {
+  minimax?: MiniMaxImageProviderOptions;
   openai?: OpenAIImageProviderOptions;
   openrouter?: OpenRouterImageProviderOptions;
   stability?: StabilityImageProviderOptions;
@@ -328,7 +338,7 @@ export interface IImageProvider {
   variateImage?(request: ImageVariateRequest): Promise<ImageGenerationResult>;
 }
 
-const BUILT_IN_IMAGE_PROVIDER_IDS = new Set(['openai', 'openrouter', 'stability', 'replicate', 'stable-diffusion-local']);
+const BUILT_IN_IMAGE_PROVIDER_IDS = new Set(['minimax', 'openai', 'openrouter', 'stability', 'replicate', 'stable-diffusion-local']);
 
 export function getImageProviderOptions<T extends object>(
   providerId: string,

@@ -42,3 +42,7 @@ export { TeamsChannelAdapter } from './adapters/TeamsChannelAdapter.js';
 export type { TeamsAuthParams } from './adapters/TeamsChannelAdapter.js';
 export { GoogleChatChannelAdapter } from './adapters/GoogleChatChannelAdapter.js';
 export type { GoogleChatAuthParams } from './adapters/GoogleChatChannelAdapter.js';
+
+// SMS
+export { PlivoSmsChannelAdapter } from './adapters/PlivoSmsChannelAdapter.js';
+export type { PlivoSmsAuthParams } from './adapters/PlivoSmsChannelAdapter.js';
