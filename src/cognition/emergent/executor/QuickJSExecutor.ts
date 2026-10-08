@@ -425,30 +425,16 @@ class GuestRun {
   /**
    * Host data into a new guest value, when the guest's memory can hold it.
    * A value of more than {@link CHECKED_COPY_BYTES} is checked first by
-   * QuickJS's allocator: binary data is written into the buffer it made, and
-   * anything else is built in the room that buffer frees. A value that does
-   * not fit marks the call out of memory; the guest gets undefined and is
-   * stopped at its next interrupt check.
+   * QuickJS's allocator: a buffer of the value's size is made and freed, and
+   * the value is built in the room that leaves. (The binding layer offers no
+   * write into a guest buffer: `getArrayBuffer` hands back a copy.) A value
+   * that does not fit marks the call out of memory; the guest gets undefined
+   * and is stopped at its next interrupt check.
    */
   private deliver(value: unknown): QuickJSHandle {
     const { context } = this.live;
     const bytes = guestBytes(value);
     if (bytes > CHECKED_COPY_BYTES) {
-      if (value instanceof Uint8Array || value instanceof ArrayBuffer) {
-        const data = value instanceof Uint8Array ? value : new Uint8Array(value);
-        const buffer = this.allocateGuest(data.byteLength);
-        if (!buffer) {
-          this.exhausted = true;
-          return context.undefined;
-        }
-        const view = context.getArrayBuffer(buffer);
-        try {
-          view.value.set(data);
-        } finally {
-          view.dispose();
-        }
-        return buffer;
-      }
       const room = this.allocateGuest(bytes);
       if (!room) {
         this.exhausted = true;
