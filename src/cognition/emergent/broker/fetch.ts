@@ -214,7 +214,7 @@ export async function sendFetch(
       ? new InFlightCut(signal.aborted ? 'aborted' : 'timed_out', host)
       : new CapabilityRefusal(signal.aborted ? 'aborted' : 'timed_out', host);
   // A typed array is not a BodyInit under TypeScript 5.7 and later; its own copy is.
-  const body =
+  const sentBody =
     prepared.body === undefined
       ? undefined
       : typeof prepared.body === 'string'
@@ -230,7 +230,7 @@ export async function sendFetch(
         headers,
         redirect: 'manual',
         signal: bounded,
-        ...(body !== undefined ? { body } : {}),
+        ...(sentBody !== undefined ? { body: sentBody } : {}),
       });
     } catch (error: unknown) {
       if (bounded.aborted) {

@@ -233,12 +233,12 @@ export function guestBindings(
   const fetchFn = globals.fetch;
   if (typeof fetchFn === 'function') {
     const budget = { left: limits.bodyBytes, limit: limits.bodyBytes };
-    bindings.fetch = async (input, init, body, bodyKind) => {
+    bindings.fetch = async (input, init, bodyText, bodyKind) => {
       let options = init === null || init === undefined ? undefined : (init as Record<string, unknown>);
       // The body crosses out of the guest as its own string, bytes as latin1;
       // fetch is handed the text or the bytes.
-      if (typeof body === 'string') {
-        options = { ...options, body: bodyKind === 'bytes' ? Buffer.from(body, 'latin1') : body };
+      if (typeof bodyText === 'string') {
+        options = { ...options, body: bodyKind === 'bytes' ? Buffer.from(bodyText, 'latin1') : bodyText };
       }
       const response = (await (fetchFn as (i: unknown, o?: unknown) => Promise<Response>)(
         input,
