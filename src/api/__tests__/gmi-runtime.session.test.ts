@@ -1,26 +1,24 @@
 /**
- * gmi() end to end: sessions served by a GMI built in-process from agent
- * options, over the real provider manager, completion gateway, prompt engine,
- * tool orchestrator, cognitive memory and session store. Only the provider
- * classes are stubbed (helpers/stubProviders.ts), at their module boundary.
+ * agent({ runtime: 'gmi' }) end to end: sessions served by a GMI built
+ * in-process from agent options, over the real provider manager, completion
+ * gateway, prompt engine, tool orchestrator, cognitive memory and session
+ * store. Only the provider classes are stubbed (helpers/stubProviders.ts), at
+ * their module boundary.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
 import { z } from 'zod';
-import { gmi, type GmiOptions } from '../gmi';
-import { agent as legacyAgent } from '../agent';
+import { agent, type AgentOptions } from '../agent';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { GMIErrorCode } from '../../core/utils/errors';
 import { clearProviderPriority, setProviderPriority } from '../runtime/provider-priority';
 
-const agent = (opts: GmiOptions) => gmi(opts);
-
 let n = 0;
 const key = () => `k-session-${++n}`;
 const base = (apiKey: string, extra: Record<string, unknown> = {}) =>
-  ({ runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey, fallbackProviders: [], ...extra }) as unknown as GmiOptions;
+  ({ runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey, fallbackProviders: [], ...extra }) as unknown as AgentOptions;
 const lookupTool = (execute: (args: Record<string, unknown>) => Promise<unknown>) => ({ name: 'lookup', description: 'Look up.', inputSchema: { type: 'object', properties: { q: { type: 'string' } } }, execute });
 /** Cognitive memory with no mechanisms, so recall depends on the scopes alone. */
 const plainMemory = (embedding: Record<string, unknown> = { provider: 'openai' }) => ({ cognition: { memory: { embedding }, mechanisms: false } });
@@ -34,7 +32,7 @@ afterEach(() => {
   clearProviderPriority();
 });
 
-describe('gmi() sessions', () => {
+describe("agent({ runtime: 'gmi' }) sessions", () => {
   it('send returns the reply with stop, usage from the trailing chunk and the provider', async () => {
     const k = key(); script('openai', k, { replies: [reply.text('Hello there.')] });
     const a = agent({ ...base(k), name: 'Greeter', instructions: 'Be brief.' });
@@ -269,14 +267,14 @@ describe('gmi() sessions', () => {
   });
 });
 
-describe('gmi() resolves the model and builds memory on first use', () => {
+describe("agent({ runtime: 'gmi' }) resolves the model and builds memory on first use", () => {
   it('construction reads no environment: the first call fails as agent() fails, and a key set before a call is used', async () => {
     // Only OPENAI_API_KEY is probed, so a CLI on the runner's PATH cannot answer.
     setProviderPriority(['openai']);
     vi.stubEnv('OPENAI_API_KEY', '');
     const early = agent({ runtime: 'gmi', fallbackProviders: [] });
     const later = agent({ runtime: 'gmi', fallbackProviders: [] });
-    const legacyError = await legacyAgent({ fallbackProviders: [] }).generate('hi').then(() => undefined, (error: unknown) => error);
+    const legacyError = await agent({ fallbackProviders: [] }).generate('hi').then(() => undefined, (error: unknown) => error);
     expect(legacyError).toBeInstanceOf(Error);
     await expect(early.generate('hi')).rejects.toThrow((legacyError as Error).message);
 
@@ -343,12 +341,12 @@ describe('agent() routes on runtime', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const warnings = (): string[] => warn.mock.calls.map(([message]) => String(message));
 
-    legacyAgent({ ...base(key()), discovery: { enabled: true }, cognitiveMechanisms: {} });
+    agent({ ...base(key()), discovery: { enabled: true }, cognitiveMechanisms: {} });
     expect(warnings()).toContain('[AgentOS] gmi() accepted config it does not enforce yet: discovery.');
     expect(warnings().some((message) => message.includes('lightweight helper'))).toBe(false);
 
     warn.mockClear();
-    legacyAgent({ ...base(key()), runtime: 'legacy', discovery: { enabled: true } });
+    agent({ ...base(key()), runtime: 'legacy', discovery: { enabled: true } });
     expect(warnings().some((message) => message.includes('lightweight helper'))).toBe(true);
     expect(warnings().some((message) => message.includes('gmi()'))).toBe(false);
   });
