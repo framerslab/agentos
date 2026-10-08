@@ -337,3 +337,19 @@ describe('gmi() resolves the model and builds memory on first use', () => {
     await a.close();
   });
 });
+
+describe('agent() routes on runtime', () => {
+  it("runtime: 'gmi' builds the agent on the GMI path, whose diagnostics name gmi(); runtime: 'legacy' keeps the helper's", () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const warnings = (): string[] => warn.mock.calls.map(([message]) => String(message));
+
+    legacyAgent({ ...base(key()), discovery: { enabled: true }, cognitiveMechanisms: {} });
+    expect(warnings()).toContain('[AgentOS] gmi() accepted config it does not enforce yet: discovery.');
+    expect(warnings().some((message) => message.includes('lightweight helper'))).toBe(false);
+
+    warn.mockClear();
+    legacyAgent({ ...base(key()), runtime: 'legacy', discovery: { enabled: true } });
+    expect(warnings().some((message) => message.includes('lightweight helper'))).toBe(true);
+    expect(warnings().some((message) => message.includes('gmi()'))).toBe(false);
+  });
+});
