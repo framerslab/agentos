@@ -1,5 +1,5 @@
 ---
-description: "AgentCommunicationBus — structured messaging between AgentOS GMIs in a multi-agent agency. Point-to-point, broadcast, request/response, pub/sub, handoff, threading. Three layers: Message Router → Subscription Manager → Delivery Manager with retry, ACK, and audit."
+description: "AgentCommunicationBus — structured messaging between agents a host registers on it. Point-to-point, broadcast, request/response, pub/sub, handoff, threading, with a manual retry of failed deliveries, acknowledgements and a per-agent history."
 keywords: [agent communication bus, multi-agent messaging, pub/sub agents, agent handoff, multi-agent collaboration, agent runtime messaging, agentos agency]
 ---
 
@@ -7,7 +7,7 @@ keywords: [agent communication bus, multi-agent messaging, pub/sub agents, agent
 
 > **Live run**: side-by-side code + captured bus traffic (delegation + handoff between two GMIs) on the [agentos.sh demo gallery](https://agentos.sh/#live-demo). Source: [`examples/agent-communication-bus.mjs`](https://github.com/framerslab/agentos/blob/master/examples/agent-communication-bus.mjs).
 
-The [`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgentCommunicationBus.ts) is the inter-agent messaging primitive for AgentOS agencies. Agents in the same agency share a memory layer, a runtime, and a tool catalog, but cross-agent task transfer, query/response, and topic-based publishing require explicit routing. The bus provides routing rules, subscription filters, retry-on-failure semantics, and a replayable message history. It supports six message patterns over three internal layers, exposed via one API.
+The [`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgentCommunicationBus.ts) is an in-process messaging class for agents a host registers on it by agency and role. `agency()` and the runtime do not create or use one; a host builds it and wires its agents to it. The bus provides role routing, subscription filters, a manual retry of failed deliveries and a per-agent message history. It supports six message patterns through one class.
 
 | Pattern | Use it for |
 | --- | --- |
@@ -51,7 +51,9 @@ const targetAgentId = this.routingConfig.enableLoadBalancing
 | **At-most-once** | Yes | No persisted queue; handler exceptions logged but no retry |
 | **At-least-once** | No | Handlers execute once per delivery attempt |
 | **Exactly-once** | No | No transaction support |
-| **Message persistence** | Limited | Circular buffer (100 msgs per agent) |
+| **Message persistence** | Limited | In-memory history of the last 100 messages per agent (`maxHistoryPerAgent`) |
+
+Nothing retries on its own. `retryDelivery(messageId)` re-sends a failed delivery from the target's history, up to `routingConfig.maxRetries` (3) times. `acknowledgeMessage(messageId, agentId)` marks a delivered message `acknowledged`. The bus does not read `defaultTtlMs`, `retryDelayMs` or `enableRoleRouting` from its routing config, nor `expiresAt` or `requiresAck` on a message: messages do not expire.
 
 ### Priority System
 
@@ -85,7 +87,10 @@ Four-tier priority: `low` < `normal` < `high` < `urgent`
 | `decision` | Announce a decision | Coordination |
 | `critique` | Provide feedback on work | Quality assurance |
 | `handoff` | Transfer responsibility | Task transitions |
+| `acknowledgment` | Acknowledge receipt of a message | Handoff confirmation |
+| `error` | Report an error | Failed request (resolves a pending request with status `error`) |
 | `broadcast` | General announcement | Team-wide updates |
+| `heartbeat` | Keep-alive signal | Liveness |
 
 ## Usage
 
@@ -201,6 +206,8 @@ if (response.status === 'success') {
 }
 ```
 
+The target answers by sending an `answer` (or `error`) message whose `inReplyTo` is the request's `messageId`, as the subscriber above does; that message resolves the pending request. A request to an agent with no matching subscription resolves at once with status `error`.
+
 ### Task Handoff
 
 ```typescript
@@ -222,6 +229,8 @@ if (result.accepted) {
   console.log(`Handoff rejected: ${result.rejectionReason}`);
 }
 ```
+
+`handoff()` sends the context as a `task_delegation` request with a 60-second timeout. The handoff is accepted when the target replies with an `answer` message (`inReplyTo` the request's `messageId`); the bus then sends the sender an `acknowledgment`. An `error` reply, no subscriber or the timeout returns `accepted: false`.
 
 ### Topic-Based Pub/Sub
 
@@ -249,6 +258,8 @@ await bus.publishToTopic(topic.topicId, {
 });
 ```
 
+`publishToTopic()` calls each topic subscriber's handler directly. It checks neither `publisherRoles` nor `subscriberRoles`, and topic messages enter neither the message history nor the statistics.
+
 ## Message History & Statistics
 
 ```typescript
@@ -267,9 +278,11 @@ console.log(`Messages delivered: ${stats.totalMessagesDelivered}`);
 console.log(`Avg delivery time: ${stats.avgDeliveryTimeMs}ms`);
 ```
 
+`queueDepth` stays 0: the bus delivers each message as it is sent and keeps no queue.
+
 ## Integration with Agency Memory
 
-The Communication Bus integrates with AgencyMemoryManager for automatic context sharing:
+The bus does not write to memory itself. A host that wants important messages in an agency's shared memory forwards them to `AgencyMemoryManager`:
 
 ```typescript
 import { AgencyMemoryManager, AgentCommunicationBus } from '@framers/agentos';
@@ -304,9 +317,11 @@ interface AgentMessage {
   content: string | Record<string, unknown>;
   priority: MessagePriority;
   sentAt: Date;
+  expiresAt?: Date;
   inReplyTo?: string;
   threadId?: string;
   metadata?: Record<string, unknown>;
+  requiresAck?: boolean;
 }
 ```
 
