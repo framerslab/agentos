@@ -5,6 +5,7 @@ import {
   TranscriptLedger,
   transcriptEventFromLiveKit,
 } from '../transcriptLedger.js';
+import type { TranscriptEvent } from '../types.js';
 
 const line = (itemId: string, text: string, isFinal: boolean) => ({ itemId, text, isFinal });
 
@@ -96,6 +97,13 @@ describe('TranscriptLedger', () => {
     ledger.apply({ itemId: 'i1', text: 'One.', isFinal: true, startMs: 0, endMs: 900, language: 'en' });
     const copy = TranscriptLedger.fromJSON({ ...ledger.toJSON(), items: [...ledger.toJSON().items, { itemId: 7 }, null] });
     expect(copy.items()).toEqual(ledger.items());
+  });
+
+  it("takes a TranscriptEvent as it is and keeps a line's fields of it", () => {
+    const event: TranscriptEvent = { text: 'One.', confidence: 0.9, words: [], isFinal: true, itemId: 'i1', startMs: 0, endMs: 900, language: 'en' };
+    const ledger = new TranscriptLedger();
+    expect(ledger.apply(event)).toBe(true);
+    expect(ledger.get('i1')).toEqual({ itemId: 'i1', text: 'One.', isFinal: true, startMs: 0, endMs: 900, language: 'en' });
   });
 });
 

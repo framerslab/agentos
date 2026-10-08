@@ -9,11 +9,10 @@
  * attributes its own transcription output sets: `transcriptEventFromLiveKit()`
  * reads one, and `LiveKitTranscriptionOutput`
  * (`@framers/agentos/io/hearing/livekit`) writes them. The module imports
- * nothing at run time, so a browser bundle takes it from
- * `@framers/agentos/io/voice-pipeline/browser`.
+ * nothing, its types included, so a browser bundle takes it from
+ * `@framers/agentos/io/voice-pipeline/browser` and a type check of it needs no
+ * Node types.
  */
-
-import type { TranscriptEvent } from './types.js';
 
 /** LiveKit's topic for transcription text streams. */
 export const LIVEKIT_TRANSCRIPTION_TOPIC = 'lk.transcription';
@@ -49,9 +48,27 @@ export interface LedgerItem {
   readonly failed?: string;
 }
 
-/** What a ledger takes: a transcript's text, finality and id, with the optional timing, language and failure. */
-export type LedgerEvent = Pick<TranscriptEvent, 'text' | 'isFinal'> &
-  Partial<Pick<TranscriptEvent, 'itemId' | 'startMs' | 'endMs' | 'language'>> & { failed?: string };
+/**
+ * What a ledger takes: a transcript's text, finality and id, with the optional
+ * timing, language and failure. A `TranscriptEvent` fits it as it is; the shape
+ * is declared here so the browser entry's typings import nothing.
+ */
+export interface LedgerEvent {
+  /** The line's id: the provider's item id. An event without one changes nothing. */
+  itemId?: string;
+  /** The line's text: an interim's text so far, or the final text. */
+  text: string;
+  /** `true` on the line's final, `false` on an interim. */
+  isFinal: boolean;
+  /** Start of the line on the session's audio clock, when the provider gives it. */
+  startMs?: number;
+  /** End of the line on the session's audio clock, when the provider gives it. */
+  endMs?: number;
+  /** The line's language, when the provider gives it. */
+  language?: string;
+  /** Why the provider could not transcribe the line; its text is then empty. */
+  failed?: string;
+}
 
 /** Options of {@link TranscriptLedger}. */
 export interface TranscriptLedgerOptions {
