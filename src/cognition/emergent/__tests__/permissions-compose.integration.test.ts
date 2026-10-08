@@ -1092,6 +1092,47 @@ describe('compositions and workflows: one gate, one rule', () => {
     expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'active' });
   });
 
+  it("a promotion check's suspension that waited behind an admission is checked again, and the composition comes back with its step", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, tools: [echoTool()] });
+    seedToolRow(db, {
+      id: 'c-echo',
+      name: 'echo_once',
+      mode: 'compose',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 'e', tool: 'echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).active).toBe(1);
+
+    // An admission of the composition is under way: a load whose re-read of
+    // the state row is held.
+    const reread = db.gateNext('FROM agentos_emergent_tool_state s\n        WHERE s.tool_id = ?');
+    const loading = host.engine.loadPersistedTools({ tiers: ['shared'] });
+    await reread.entered;
+
+    // The host replaces the step's tool: unregistered, then registered again.
+    // A promotion check in the gap finds the step missing, and its suspension
+    // waits for the admission; the new tool registers while it waits, when
+    // the composition is not suspended yet, so that registration re-checks
+    // nothing.
+    await host.orchestrator.unregisterTool('echo');
+    const checking = host.engine.checkPromotion('c-echo');
+    await host.orchestrator.registerTool(echoTool());
+    await host.engine.onHostToolRegistered('echo');
+    reread.release();
+    expect((await loading).outcomes).toEqual([{ toolId: 'c-echo', name: 'echo_once', state: 'active', reason: null }]);
+    expect(await checking).toMatchObject({ success: false });
+
+    // The composition ends active, with its step present.
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'active' });
+    expect(await host.orchestrator.getTool('echo_once')).toBeDefined();
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'back' })).output).toEqual({ text: 'back' });
+  });
+
   it('a forge whose judge was out while another forge closed a cycle with it is refused before it is registered', async () => {
     const host = await makeForgeHost({ tools: [echoTool('loop_a'), echoTool('loop_b')] });
     let releaseJudge!: () => void;

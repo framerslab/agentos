@@ -913,7 +913,22 @@ export class EmergentCapabilityEngine {
     // A tool that no longer fits what is in force is suspended, not promoted.
     const refusal = this.refusalFor(tool.implementation, tool.name);
     if (refusal) {
-      await this.suspendAsLibrary(toolId, refusal);
+      const suspended = await this.suspendAsLibrary(toolId, refusal);
+      // The suspension took its turn behind the tool's admissions, and a
+      // fitting tool registered while it waited re-checked nothing (the tool
+      // was not suspended yet): checked again now against the tools
+      // registered now, as a run's suspension is.
+      const implementation = this.registry.get(toolId)?.implementation ?? tool.implementation;
+      if (suspended && this.refusalFor(implementation, tool.name) === null) {
+        try {
+          await this.recheck(toolId, false);
+        } catch (recheckError: unknown) {
+          console.warn(
+            `[agentos:emergent] could not re-check "${tool.name}" (${toolId}) after the promotion check suspended it:`,
+            recheckError instanceof Error ? recheckError.message : recheckError,
+          );
+        }
+      }
       return { success: false, error: `${refusal}: the tool no longer fits and was suspended.` };
     }
 
