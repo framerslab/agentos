@@ -277,6 +277,24 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     }
   });
 
+  it('a session that streams many turns leaves no listener behind on the signal close() aborts', async () => {
+    const warnings: Error[] = [];
+    const onWarning = (warning: Error): void => {
+      warnings.push(warning);
+    };
+    process.on('warning', onWarning);
+    try {
+      const k = key(); script('openai', k, { replies: Array.from({ length: 12 }, () => reply.text('ok')) });
+      const session = agent(base(k)).session('s');
+      for (let i = 0; i < 12; i++) expect(await session.stream(`turn ${i}`).text).toBe('ok');
+      // Node reports a listener leak on an AbortSignal past ten listeners, on a later tick.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(warnings.filter((warning) => warning.name === 'MaxListenersExceededWarning').map((warning) => warning.message)).toEqual([]);
+    } finally {
+      process.off('warning', onWarning);
+    }
+  });
+
   it("an onAfterGeneration override to '' makes stream().text ''", async () => {
     const k = key(); script('openai', k, { replies: [reply.text('raw text')] });
     const session = agent(base(k, { onAfterGeneration: async (res: { text: string }) => ({ ...res, text: '' }) })).session('s');
