@@ -369,6 +369,12 @@ export const GUEST_PRELUDE = String.raw`(() => {
   define(String.prototype, 'localeCompare', function (that, locales, options) {
     return host.intl_compare(String(this), String(that), localesArg(locales), optionsArg(options));
   });
+  // QuickJS converts case without the locale; the in-process context's ICU uses it.
+  for (const method of ['toLocaleLowerCase', 'toLocaleUpperCase']) {
+    define(String.prototype, method, function (locales) {
+      return host.string_case(method, String(this), localesArg(locales));
+    });
+  }
   // QuickJS calls each element's toLocaleString with no arguments; the
   // in-process context passes the locales and options on.
   define(Array.prototype, 'toLocaleString', function (locales, options) {

@@ -427,7 +427,7 @@ export function renderSoulMarkdown(persona: IPersonaDefinition): string {
       persona.reasoningTraceConfig && typeof persona.reasoningTraceConfig === 'object' && !Array.isArray(persona.reasoningTraceConfig)
         ? { ...persona.reasoningTraceConfig }
         : (persona.reasoningTraceConfig as SoulFrontmatter['reasoningTrace']),
-    hardLimits: (persona as IPersonaDefinition & { hardLimits?: string[] }).hardLimits,
+    hardLimits: persona.hardLimits,
     avatar: persona.avatarConfig
       ? {
           type: persona.avatarConfig.type,
