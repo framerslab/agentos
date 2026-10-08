@@ -350,38 +350,35 @@ describe('GeminiProvider', () => {
       ]);
     });
 
-    it('fetches an https image and sends it inline, since Gemini does not fetch URLs', async () => {
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        headers: new Headers({ 'content-type': 'image/jpeg' }),
-        arrayBuffer: () => Promise.resolve(Uint8Array.from([0xff, 0xd8, 0xff]).buffer),
-      } as unknown as Response);
+    it('decodes a percent-encoded data URL to its bytes', async () => {
       fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse()));
 
       await provider.generateCompletion('gemini-2.5-flash', [
-        { role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.com/cat.jpg' } }] },
+        { role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/svg+xml,%3Csvg%3E' } }] },
       ], {});
 
-      expect(fetchMock.mock.calls[0][0]).toBe('https://example.com/cat.jpg');
-      const requestBody = JSON.parse(fetchMock.mock.calls[1][1].body);
-      expect(requestBody.contents[0].parts).toEqual([{ inlineData: { mimeType: 'image/jpeg', data: '/9j/' } }]);
+      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(requestBody.contents[0].parts).toEqual([{ inlineData: { mimeType: 'image/svg+xml', data: 'PHN2Zz4=' } }]);
     });
 
-    it('refuses an image URL that does not serve an image, before calling Gemini', async () => {
-      fetchMock.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        headers: new Headers({ 'content-type': 'text/html; charset=utf-8' }),
-        arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
-      } as unknown as Response);
-
+    it('refuses an https image URL, which neither Gemini nor this provider fetches', async () => {
       await expect(
         provider.generateCompletion('gemini-2.5-flash', [
-          { role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.com/page' } }] },
+          { role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.com/cat.jpg' } }] },
         ], {}),
-      ).rejects.toThrow('is not an image');
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      ).rejects.toThrow('does not fetch image URLs');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("refuses inline images past Gemini's 20 MB per request", async () => {
+      // 28 MiB of base64 decodes to 21 MiB.
+      const big = `data:image/png;base64,${'A'.repeat(28 * 1024 * 1024)}`;
+      await expect(
+        provider.generateCompletion('gemini-2.5-flash', [
+          { role: 'user', content: [{ type: 'image_url', image_url: { url: big } }] },
+        ], {}),
+      ).rejects.toThrow('20 MB of inline data');
+      expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('maps generation config fields correctly', async () => {
