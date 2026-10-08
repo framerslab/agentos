@@ -106,16 +106,16 @@ describe("MiniMaxTextToSpeechProvider", () => {
       )
       .mockResolvedValueOnce(
         response({
-          task_id: "task-1",
-          file_id: 42,
+          task_id: 95157322514444,
+          file_id: 95157322514496,
           base_resp: { status_code: 0 },
         }),
       )
       .mockResolvedValueOnce(
         response({
-          task_id: "task-1",
+          task_id: 95157322514444,
           status: "success",
-          file_id: 42,
+          file_id: 95157322514496,
           base_resp: { status_code: 0 },
         }),
       );
@@ -125,18 +125,56 @@ describe("MiniMaxTextToSpeechProvider", () => {
     });
 
     await expect(provider.createAsync("long text")).resolves.toMatchObject({
-      task_id: "task-1",
+      task_id: 95157322514444,
     });
-    await expect(provider.queryAsync("task-1")).resolves.toMatchObject({
+    await expect(
+      provider.queryAsync("95157322514444"),
+    ).resolves.toMatchObject({
       status: "success",
     });
     expect(fetchImpl.mock.calls.map((call) => call[0])).toEqual([
       "https://api.minimax.io/v1/t2a_async_v2",
-      "https://api.minimax.io/v1/query/t2a_async_query_v2",
+      "https://api.minimax.io/v1/query/t2a_async_query_v2?task_id=95157322514444",
     ]);
-    expect(JSON.parse(fetchImpl.mock.calls[1]![1]?.body as string)).toEqual({
-      task_id: "task-1",
+    // MiniMax documents the query as a GET with task_id in the query string:
+    // https://platform.minimax.io/docs/api-reference/speech-t2a-async-query
+    const queryInit = fetchImpl.mock.calls[1]![1];
+    expect(queryInit?.method).toBe("GET");
+    expect(queryInit?.body).toBeUndefined();
+    expect(
+      (queryInit?.headers as Record<string, string>).Authorization,
+    ).toBe("Bearer test-key");
+  });
+
+  it("does not download URL output from a host that was not allowed", async () => {
+    const fetchImpl = vi
+      .fn(
+        (
+          _input: string | URL | Request,
+          _init?: RequestInit,
+        ): Promise<Response> => Promise.resolve(new Response("not audio")),
+      )
+      .mockResolvedValueOnce(
+        response({
+          data: {
+            audio: "https://internal.example.net/latest/meta-data",
+            status: 2,
+          },
+          base_resp: { status_code: 0 },
+        }),
+      );
+    const provider = new MiniMaxTextToSpeechProvider({
+      apiKey: "test-key",
+      fetchImpl,
     });
+
+    await expect(
+      provider.synthesize("hello", {
+        providerSpecificOptions: { outputFormat: "url" },
+      }),
+    ).rejects.toThrow("internal.example.net");
+    // Only the synthesis request went out; the returned URL was never fetched.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("runs the WebSocket start, continue, and finish protocol", async () => {
