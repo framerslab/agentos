@@ -6,7 +6,8 @@
  * - Outbound SMS send (request shape + returned message id).
  * - Inbound webhook: valid signature emits a message; invalid/missing drops it.
  * - Inbound replay: a callback is accepted once, V3 decides when it is present,
- *   and a GET callback is read from its signed query string.
+ *   a GET callback is read from its signed query string, and a nonce is
+ *   forgotten after its time to live or past the cap.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -370,9 +371,23 @@ describe('PlivoSmsChannelAdapter — inbound replay', () => {
     'x-plivo-signature-v2-nonce': SIG_V2_NONCE,
   };
 
+  /** V2 headers for the fixture URL under `nonce`, signed with the fixture token. */
+  function v2HeadersFor(nonce: string): Record<string, string> {
+    return {
+      'x-plivo-signature-ma-v2': computePlivoV2Signature({
+        url: FIXTURE.url,
+        nonce,
+        authToken: FIXTURE.authToken,
+      }),
+      'x-plivo-signature-v2-nonce': nonce,
+    };
+  }
+
   /** A connected adapter and the message events it emits. */
-  async function listen(): Promise<{ adapter: PlivoSmsChannelAdapter; events: ChannelEvent[] }> {
-    const adapter = new PlivoSmsChannelAdapter({ fetchImpl: makeFetch({}) });
+  async function listen(
+    opts: { nonceTtlMs?: number; maxNonces?: number } = {},
+  ): Promise<{ adapter: PlivoSmsChannelAdapter; events: ChannelEvent[] }> {
+    const adapter = new PlivoSmsChannelAdapter({ fetchImpl: makeFetch({}), ...opts });
     await connect(adapter);
     const events: ChannelEvent[] = [];
     adapter.on((e) => void events.push(e), ['message']);
@@ -404,20 +419,12 @@ describe('PlivoSmsChannelAdapter — inbound replay', () => {
 
   it('accepts the next callback, signed under a new nonce', async () => {
     const { adapter, events } = await listen();
-    const nextNonce = 'v2nonce456';
 
     adapter.handleIncomingWebhook(inboundBody, { method: 'POST', url: FIXTURE.url, headers: v2Headers });
     adapter.handleIncomingWebhook(inboundBody, {
       method: 'POST',
       url: FIXTURE.url,
-      headers: {
-        'x-plivo-signature-ma-v2': computePlivoV2Signature({
-          url: FIXTURE.url,
-          nonce: nextNonce,
-          authToken: FIXTURE.authToken,
-        }),
-        'x-plivo-signature-v2-nonce': nextNonce,
-      },
+      headers: v2HeadersFor('v2nonce456'),
     });
 
     expect(events).toHaveLength(2);
@@ -467,5 +474,49 @@ describe('PlivoSmsChannelAdapter — inbound replay', () => {
     expect(msg.conversationId).toBe('+14150000001');
     expect(msg.text).toBe('test');
     expect(msg.messageId).toBe('11111111-2222-3333-4444-555555555555');
+  });
+
+  it('forgets a nonce after its time to live', async () => {
+    const { adapter, events } = await listen({ nonceTtlMs: 60_000 });
+    const request = { method: 'POST', url: FIXTURE.url, headers: v2Headers };
+    const now = vi.spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(1_000_000);
+      adapter.handleIncomingWebhook(inboundBody, request);
+
+      now.mockReturnValue(1_000_000 + 59_999);
+      adapter.handleIncomingWebhook(inboundBody, request);
+      expect(events).toHaveLength(1);
+
+      // Plivo's signatures carry no timestamp, so past the window the same
+      // callback is accepted again: the memory narrows replay, it does not end it.
+      now.mockReturnValue(1_000_000 + 60_000);
+      adapter.handleIncomingWebhook(inboundBody, request);
+      expect(events).toHaveLength(2);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('remembers at most maxNonces nonces, forgetting the oldest first', async () => {
+    const { adapter, events } = await listen({ maxNonces: 2 });
+    const deliver = (nonce: string): void =>
+      adapter.handleIncomingWebhook(inboundBody, {
+        method: 'POST',
+        url: FIXTURE.url,
+        headers: v2HeadersFor(nonce),
+      });
+
+    deliver('nonce-a');
+    deliver('nonce-b');
+    deliver('nonce-c');
+    expect(events).toHaveLength(3);
+
+    deliver('nonce-b');
+    deliver('nonce-c');
+    expect(events).toHaveLength(3);
+
+    deliver('nonce-a');
+    expect(events).toHaveLength(4);
   });
 });
