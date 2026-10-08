@@ -31,7 +31,7 @@ The world-model literature ([Xing 2025](https://arxiv.org/abs/2507.05169), [ACM 
 
 Pixels are what humans watch. State is what agents reason inside.
 
-**Paracosm is in the second class — and is among the first open-source production-grade implementations of it.** It is a prompt/document/URL-grounded, JSON-contract-backed state space + deterministic seeded kernel + LLM-driven events and specialist analyses + HEXACO-personality leaders directing a swarm of ~100 personality-typed cells + universal Zod-validated run artifact spanning turn-loop civilization simulations, batch-trajectory digital twins, and batch-point forecasts.
+**Paracosm is in the second class.** It is a prompt/document/URL-grounded, JSON-contract-backed state space + deterministic seeded kernel + LLM-driven events and specialist analyses + HEXACO-personality leaders directing a swarm of ~100 personality-typed cells + universal Zod-validated run artifact spanning turn-loop civilization simulations, batch-trajectory digital twins, and batch-point forecasts.
 
 It is **not** a visual / native world model (Sora, Genie 3, World Labs Marble), **not** a JEPA-style predictive-representation model, **not** a multi-agent task orchestration framework (LangGraph, AutoGen, CrewAI, OpenAI Agents SDK), **not** a bottom-up emergent-crowd simulator (OASIS, MiroFish), and **not** a generative-agents library (Stanford Generative Agents, Google DeepMind Concordia). It is a structured world model: typed contract first, LLM second, deterministic kernel underneath.
 
@@ -105,7 +105,7 @@ artifact.trajectory?.timepoints?.forEach((tp) => {
 });
 ```
 
-The schema exposes 13 content primitives ([`RunMetadata`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`WorldSnapshot`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`SwarmAgent`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`SwarmSnapshot`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`Score`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`HighlightMetric`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`Timepoint`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`TrajectoryPoint`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`Trajectory`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`Citation`](https://github.com/framerslab/paracosm/blob/master/src/runtime/contracts.ts), [`SpecialistDetail`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`SpecialistNote`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`RiskFlag`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`Decision`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts)) plus operational types ([`Cost`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`ProviderError`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/errors/ProviderError.ts)). Every primitive carries an optional `scenarioExtensions?: Record<string, unknown>` escape hatch for domain-specific fields that must not pollute the universal shape.
+The schema exposes these content primitives ([`RunMetadata`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`WorldSnapshot`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`SwarmAgent`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`SwarmSnapshot`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`Score`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`HighlightMetric`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`Timepoint`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`TrajectoryPoint`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`Trajectory`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`Citation`](https://github.com/framerslab/paracosm/blob/master/src/runtime/contracts.ts), [`SpecialistDetail`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`SpecialistNote`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`RiskFlag`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`Decision`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts)) plus operational types ([`Cost`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts), [`ProviderError`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts)). Every primitive carries an optional `scenarioExtensions?: Record<string, unknown>` escape hatch for domain-specific fields that must not pollute the universal shape.
 
 Non-TypeScript consumers generate equivalent types from JSON Schema: `npm run export:json-schema` emits `schema/run-artifact.schema.json` and `schema/stream-event.schema.json`. Python projects use `datamodel-codegen`; any ecosystem with a JSON-Schema code generator adopts cleanly.
 
@@ -171,10 +171,10 @@ if (swarm) {
 }
 ```
 
-Or hit the lightweight HTTP endpoint when you only need the roster, not the full artifact:
+Or hit the lightweight HTTP endpoint of a paracosm server when you only need the roster, not the full artifact. The `/api/v1/runs` routes answer 403 on a server in hosted-demo mode unless `PARACOSM_ENABLE_RUN_HISTORY_ROUTES` turns them on:
 
 ```bash
-curl https://paracosm.agentos.sh/api/v1/runs/$RUN_ID/swarm
+curl "$PARACOSM_URL/api/v1/runs/$RUN_ID/swarm"
 ```
 
 The dashboard's living-swarm grid streams the same shape every turn via the SSE `systems_snapshot` event, so visualization, analytics, and replay all share one swarm contract.
@@ -208,7 +208,7 @@ Paracosm uses the [HEXACO model](/features/cognitive-memory) (Ashton & Lee, 2007
 - **Emotionality.** High: weigh human cost heavily. Low: accept casualties for strategic gain.
 - **Honesty-Humility.** High: report failures transparently. Low: leverage information asymmetries.
 
-Trait thresholds are 0.7 (high) and 0.3 (low); cues only fire when a trait is meaningfully expressed. Visible in action at [departments.ts:90](https://github.com/framerslab/paracosm/blob/master/src/runtime/departments.ts#L90) and [commander-setup.ts:30](https://github.com/framerslab/paracosm/blob/master/src/runtime/commander-setup.ts#L30).
+Trait thresholds are 0.7 (high) and 0.3 (low); cues only fire when a trait is meaningfully expressed. Visible in action in [`departments.ts`](https://github.com/framerslab/paracosm/blob/master/src/runtime/orchestrator/departments.ts) and [`commander-setup.ts`](https://github.com/framerslab/paracosm/blob/master/src/runtime/orchestrator/commander-setup.ts).
 
 ## Emergent tool forging + reuse
 
@@ -244,17 +244,17 @@ Any domain works. Mars colonies, submarine habitats, space stations, medieval ki
 
 The hosted demo uses three layered guards so public access stays affordable:
 
-1. **Demo caps** when `PARACOSM_HOSTED_DEMO=true`: 6 turns (configurable), 30 colonists, 3 active departments, cheapest model tier. Settings UI locks the capped inputs and unlocks the moment a user pastes their own API key.
-2. **Per-IP rate limit**: one simulation per IP per day for demo-mode requests, JSON-persisted across restarts.
-3. **Abort gates**: when all SSE clients disconnect for longer than 1.5 seconds, an AbortController fires and the runtime checks it before every LLM call in the turn. At most one in-flight call completes after a tab closes.
+1. **Demo caps** when `PARACOSM_HOSTED_DEMO=true`: 6 turns (`PARACOSM_DEMO_MAX_TURNS`, 1 to 20), 30 colonists, 3 active departments, cheapest model tier. Settings UI locks the capped inputs and unlocks the moment a user pastes their own API key.
+2. **Per-IP rate limit**: one simulation per IP per day by default (`RATE_LIMIT`), JSON-persisted across restarts.
+3. **Abort gates**: when all SSE clients stay disconnected for the grace period (30 seconds by default, `disconnectGraceMs`), an AbortController fires and the runtime checks it before every LLM call in the turn. At most one in-flight call completes after the abort.
 
 Users who want more runs paste their own OpenAI or Anthropic key. The dashboard's cost modal breaks down per-stage spend (director, commander, dept-by-name, judge, reactions) so the reuse economy's impact on total cost is visible.
 
 ## API surface
 
 ```typescript
-import type { ScenarioPackage, Agent, HexacoProfile } from 'paracosm';
-import type { ActorConfig } from 'paracosm';
+import type { ScenarioPackage, HexacoProfile, ActorConfig } from 'paracosm';
+import type { Agent } from 'paracosm/core';
 import {
   WorldModel,
   run,
@@ -303,7 +303,7 @@ The dashboard server exposes a small HTTP API for driving sims from any client:
 
 `/events` replays a buffered event history on reconnect (persisted to disk so restarts do not evaporate completed runs), closes with a `replay_done` marker so clients can distinguish historical from live events.
 
-The SSE stream emits a 17-variant [`StreamEvent`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/types.ts) discriminated union (defined in `paracosm/schema`), every event carrying a universal `e.data.summary` one-liner so consumers can render cleanly without narrowing on per-event fields:
+The SSE stream emits a 17-variant [`StreamEvent`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/stream.ts) discriminated union (defined in `paracosm/schema`), every event carrying a universal `e.data.summary` one-liner so consumers can render cleanly without narrowing on per-event fields:
 
 ```
 turn_start, event_start, specialist_start, specialist_done, forge_attempt,
