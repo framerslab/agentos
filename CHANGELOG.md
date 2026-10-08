@@ -1,3 +1,9 @@
+## [0.12.23](https://github.com/framerslab/agentos/compare/v0.12.22...v0.12.23) (2026-10-08)
+
+### fix
+
+* **channels:** accept a Plivo callback once and sign V3 as plivo-python does (#163) ([fe31524](https://github.com/framerslab/agentos/commit/fe31524eb0b7e0cdb56465611e3959ae156ce6f2))
+
 ## [0.12.22](https://github.com/framerslab/agentos/compare/v0.12.21...v0.12.22) (2026-10-08)
 
 ### feat
