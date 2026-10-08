@@ -18,6 +18,8 @@
 //   4. the turn's usage total, from the GMIOutput the turn returns
 //   5. the reasoning trace's WARNING entries for the failed hop and the fallback
 //
+// It exits with status 1 when the turn fails.
+//
 // Usage (the example imports the built package from ../dist):
 //   pnpm run build
 //   export OPENAI_API_KEY="sk-..."
@@ -180,6 +182,12 @@ async function main() {
   }
 
   await gmi.shutdown();
+  // A failed turn still returns its GMIOutput, with `error` set: for example
+  // when the fallback hop's key is missing or its call fails too.
+  if (output.error) {
+    console.error(`\nThe turn failed: ${output.error.code}: ${output.error.message}`);
+    process.exit(1);
+  }
   process.exit(0);
 }
 

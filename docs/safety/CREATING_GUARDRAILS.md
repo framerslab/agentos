@@ -264,6 +264,7 @@ The result of an external tool call, emitted when the host returns it (`handleTo
   toolName: 'web_search',
   toolResult: { ... },
   isSuccess: true,
+  errorMessage: undefined,         // the host's error message when isSuccess is false
   isFinal: false,
 }
 ```
@@ -282,12 +283,12 @@ The result of an external tool call, emitted when the host returns it (`handleTo
 
 ### The isFinal flag
 
-Every chunk has an `isFinal: boolean` field.
+Every chunk has an `isFinal: boolean` field. The flag describes its own chunk; `isFinal: false` does not mean another chunk follows.
 
-- **`isFinal: false`** -- more chunks will follow in this stream. Every `TEXT_DELTA` of a GMI turn carries `false`.
+- **`isFinal: false`** -- every `TEXT_DELTA` of a GMI turn carries it, and so does every `TOOL_CALL_REQUEST`. When the request is actionable (`executionMode: 'external'` and `requiresExternalToolResult: true`), `processRequest()` returns right after it: the turn waits for the host's tool results, and the rest of it comes from `handleToolResult()`, `handleToolResults()` or `resumeExternalToolRequest()`.
 - **`isFinal: true`** -- `FINAL_RESPONSE` and `ERROR` chunks carry it, and so does an `AGENCY_UPDATE` once every seat of the agency has completed or failed. A GMI turn that fails on a `processRequest()` stream yields its `ERROR` and then the turn's `FINAL_RESPONSE`, which carries the error, so an `ERROR` is not always the stream's last chunk.
 
-If your guardrail buffers streaming text, use `isFinal: true` as the signal to **flush your buffer** and perform a final evaluation.
+`evaluateOutput` receives every chunk with `isFinal: true`, whatever `evaluateStreamingChunks` is set to. If your guardrail buffers streaming text, use `isFinal: true` as the signal to **flush your buffer** and perform a final evaluation. A turn that stops for an external tool ends its `processRequest()` stream with that `TOOL_CALL_REQUEST`, which has no `isFinal: true`, and output guardrails do not run on the streams that `handleToolResult()`, `handleToolResults()` and `resumeExternalToolRequest()` return. Text your guardrail buffered before the tool request gets no final evaluation from the runtime.
 
 ---
 
