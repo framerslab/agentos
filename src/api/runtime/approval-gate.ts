@@ -185,6 +185,10 @@ export function createApprovalGate(o: CreateApprovalGateOptions): ApprovalGateFn
       }
       const parent = asVerdict(verdict, 'not approved by the parent agency');
       if (parent !== APPROVAL_GRANTED) return parent;
+      // The parent's approval can arrive after this call ended (a concurrent
+      // approval failed, or the owner settled): it runs nothing and asks no one.
+      const afterParent = stopped();
+      if (afterParent) return afterParent;
     }
     if (!covers(info.name)) return APPROVAL_GRANTED;
     const request: ApprovalRequest = {

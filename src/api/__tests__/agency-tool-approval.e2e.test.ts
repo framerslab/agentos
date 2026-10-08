@@ -376,6 +376,30 @@ describe('nested agencies', () => {
     expect(((await parent.usage()) as Json).totalTokens).toBe(28);
   });
 
+  it("a parent's approval that arrives after the nested call's own approval failed runs nothing", async () => {
+    // One prompt-tool turn gates both calls together. The nested agency's
+    // handler fails on search; the parent holds its approval of ping until then.
+    serve([() => text('<tool_call>{"name":"search","arguments":{"q":"x"}}</tool_call>\n<tool_call>{"name":"ping","arguments":{}}</tool_call>'), () => text('inner done')]);
+    const ping = { description: 'Ping.', parameters: { type: 'object' as const, properties: {} }, execute: vi.fn(async () => ({ ok: true })) };
+    let releasePing = (): void => undefined;
+    const pingApproved = new Promise<ApprovalDecision>((resolve) => { releasePing = () => resolve({ approved: true }); });
+    const parentHandler = vi.fn(async (r: ApprovalRequest): Promise<ApprovalDecision> => (r.action === 'ping' ? pingApproved : { approved: true }));
+    const childError = new Error('child approval down');
+    const inner = agency({
+      provider: 'openai', model: 'gpt-4.1', apiKey: KEY, tools: { search, ping },
+      agents: { inner: { instructions: 'Use the tools.' } },
+      strategy: 'sequential',
+      hitl: { approvals: { beforeTool: ['search'] }, handler: async () => { throw childError; } },
+      on: { error: () => releasePing() },
+    } as never);
+    const parent = agency({ agents: { c: inner }, hitl: { approvals: { beforeTool: ['*'] }, handler: parentHandler } });
+    await expect(parent.generate('x', { toolMode: 'prompt' })).rejects.toBe(childError);
+    expect(parentHandler).toHaveBeenCalledTimes(2);
+    expect(search.execute).not.toHaveBeenCalled();
+    // The nested agency does not list ping, so the parent's late approval was all it needed to run.
+    expect(ping.execute).not.toHaveBeenCalled();
+  });
+
   it('a string or a throwing __approvalGate passed per call skips the tool, asks no handler and does not reject', async () => {
     serve([() => toolCall('search', { q: 'x' }), () => text('a'), () => toolCall('search', { q: 'y' }), () => text('b')]);
     const handler = vi.fn(async () => ({ approved: true }));
