@@ -326,6 +326,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // messages (where the legacy path puts it), then onBeforeGeneration.
       beforeModelCall: async (ctx) => {
         step.index = ctx.stepIndex;
+        turn.onModelCall?.({ providerId: ctx.providerId, modelId: ctx.modelId });
         let messages: ChatMessage[] = ctx.messages;
         let changed = false;
         if (turn.memoryContext) {

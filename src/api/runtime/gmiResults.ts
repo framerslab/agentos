@@ -82,6 +82,9 @@ export class GmiTurnFolder {
   private readonly overrides = new Map<number, string>();
   private readonly failed: GmiFailedAttempt[] = [];
   private failure: GmiTurnError | undefined;
+  /** The provider and model the turn's first model call was routed to, and who waits for them. */
+  private firstRoute: { providerId: string; modelId: string } | undefined;
+  private readonly routeListeners: Array<(route: { providerId: string; modelId: string }) => void> = [];
   /** How many calls had been requested when the latest step finished: the calls after it belong to the next step. */
   private callsBeforeLastStep = 0;
   /** Whether the latest finished step requested tools (the GMI then runs them and goes on, unless the step limit ran out). */
@@ -138,6 +141,28 @@ export class GmiTurnFolder {
       message: error instanceof Error ? error.message : String(error),
       details: error instanceof GMIError ? error.details : undefined,
     };
+  }
+
+  /**
+   * Records a model call's route (its provider and model, once the hop is
+   * resolved). The first one is the turn's route, as streamText reports it:
+   * listeners hear it at once, before any chunk of the call arrives.
+   */
+  route(providerId: string, modelId: string): void {
+    if (this.firstRoute) return;
+    this.firstRoute = { providerId, modelId };
+    for (const listener of this.routeListeners.splice(0)) listener(this.firstRoute);
+  }
+
+  /** The turn's first route, once it is known. */
+  routed(): { providerId: string; modelId: string } | undefined {
+    return this.firstRoute;
+  }
+
+  /** Calls `listener` with the turn's first route as soon as it is known (at once when it already is). */
+  onRoute(listener: (route: { providerId: string; modelId: string }) => void): void {
+    if (this.firstRoute) listener(this.firstRoute);
+    else this.routeListeners.push(listener);
   }
 
   /** Replaces a step's text (`onAfterGeneration`), in the result and in what the session stores. */
@@ -306,6 +331,11 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
     cacheDiagnostics: deferred<Awaited<StreamTextResult['cacheDiagnostics']>>(),
     providerMessageId: deferred<string | null>(),
   };
+  // Provider and model resolve once the turn's model call is routed, as streamText's do.
+  folder.onRoute(({ providerId, modelId }) => {
+    p.provider.resolve(providerId);
+    p.model.resolve(modelId);
+  });
 
   void (async () => {
     // The text the step in progress has delivered; reset at each step boundary.
@@ -348,8 +378,9 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
       p.text.resolve(folder.error() && stepDelivered ? stepDelivered : folder.text());
       p.usage.resolve(folder.usage());
       p.toolCalls.resolve(folder.toolCalls());
-      p.provider.resolve(last?.providerId ?? '');
-      p.model.resolve(last?.modelId ?? '');
+      // Already resolved when the turn was routed; '' when it failed before routing.
+      p.provider.resolve(folder.routed()?.providerId ?? last?.providerId ?? '');
+      p.model.resolve(folder.routed()?.modelId ?? last?.modelId ?? '');
       p.finishReason.resolve(folder.finishReason());
       p.responseModel.resolve(last?.responseModel);
       p.serviceTier.resolve(last?.serviceTier);

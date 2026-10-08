@@ -64,6 +64,8 @@ export interface GmiTurnContext {
   prompt: string | undefined;
   /** The `memoryProvider.getContext` block for this turn, inserted as a system message on every model call. */
   memoryContext: string | undefined;
+  /** Called before every model call of the turn with the provider and model its hop was routed to. */
+  onModelCall?: (route: { providerId: string; modelId: string }) => void;
 }
 
 /** The GMI that serves one turn. */
@@ -204,7 +206,11 @@ export async function* runGmiTurn(
     const gmi = served.gmi;
     gmi.replaceHistory?.(transcriptToConversation(priorMessages));
     const memoryContext = deps.useMemoryProviderContext ? await memoryProviderContext(deps.opts, userText) : undefined;
-    served.prepare?.({ prompt: typeof input === 'string' ? input : undefined, memoryContext });
+    served.prepare?.({
+      prompt: typeof input === 'string' ? input : undefined,
+      memoryContext,
+      onModelCall: ({ providerId, modelId }) => folder.route(providerId, modelId),
+    });
     writer = deps.history?.beginTurn(turn.blockLabel, epochAtStart);
 
     const turnInput: GMITurnInput = {
