@@ -474,6 +474,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
         sessionId,
         opts,
         userId,
+        // Only a user id the caller passed reaches the provider's end-user field.
+        providerUserId: sessionOptions?.userId,
         history,
         lock,
         ledger: mergeLedger(ledger, { sessionId, source }),

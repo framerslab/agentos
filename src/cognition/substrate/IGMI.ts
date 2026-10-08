@@ -254,6 +254,12 @@ export interface GMITurnInput {
     userFeedback?: any; // Added for GMI.ts usage
     explicitPersonaSwitchId?: string; // Added for GMI.ts usage
     /**
+     * The end-user id this turn's model calls send to the provider (OpenAI's
+     * `user` / `safety_identifier`). Unset, the GMI sends the turn's `userId`;
+     * `null` sends none. Pass an opaque or hashed id: the provider receives it.
+     */
+    providerUserId?: string | null;
+    /**
      * Optional conversation history snapshot to use for prompt construction.
      * When provided, the GMI should prefer this over any internal ephemeral history so
      * persona switches share conversation memory.

@@ -1238,6 +1238,11 @@ export class GMI implements IGMI {
         // default applies. Tools, user and streaming are the GMI's.
         const turnOptions = (turnInput.metadata?.options ?? {}) as Record<string, unknown>;
         const personaOptions = (this.activePersona.defaultModelCompletionOptions ?? {}) as Record<string, unknown>;
+        // The provider's end-user field: the host's choice when the turn names one
+        // (null sends none), else the turn's user.
+        const providerUserId = turnInput.metadata && 'providerUserId' in turnInput.metadata
+          ? turnInput.metadata.providerUserId
+          : this.currentUserContext.userId;
         const llmOptions: ModelCompletionOptions = {
           ...pickCompletionOptions(personaOptions),
           ...pickCompletionOptions(turnOptions),
@@ -1251,7 +1256,7 @@ export class GMI implements IGMI {
           toolChoice: toolsForLLM.length > 0
             ? ((turnOptions.toolChoice as ModelCompletionOptions['toolChoice']) ?? (personaOptions.toolChoice as ModelCompletionOptions['toolChoice']) ?? "auto")
             : undefined,
-          userId: this.currentUserContext.userId,
+          ...(providerUserId ? { userId: providerUserId } : {}),
           stream: true,
         };
         // A schema travels to the gateway, which lowers it per hop (D9); it is not a provider option.

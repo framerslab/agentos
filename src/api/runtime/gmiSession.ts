@@ -85,8 +85,14 @@ export interface GmiSessionDeps {
   opts: AgentOptions;
   /** The GMI that serves the next turn: the session's own, or one made for the turn when the session keeps no history. */
   gmiFor(): Promise<GmiForTurn>;
-  /** The user the GMI runs the turn as: it scopes cognitive memory, and the GMI passes it to the provider as its user field. */
+  /** The user the GMI runs the turn as: it scopes cognitive memory. */
   userId: string;
+  /**
+   * The end-user id the turn's model calls send to the provider (OpenAI's `user`
+   * / `safety_identifier`): a user id the caller passed, never a session or call
+   * id. Unset, they send none, as agent() sends none.
+   */
+  providerUserId?: string;
   /** False when cognitive memory supplies the memory context: `memoryProvider.getContext` is then skipped. */
   useMemoryProviderContext: boolean;
   /** The session store, or null when the turn keeps no history. */
@@ -222,6 +228,7 @@ export async function* runGmiTurn(
       type: typeof input === 'string' ? GMIInteractionType.TEXT : GMIInteractionType.MULTIMODAL_CONTENT,
       content: input as GMITurnInput['content'],
       metadata: {
+        providerUserId: deps.providerUserId ?? null,
         options: {
           ...(turn.options ?? {}),
           ...(turn.responseSchema ? { responseSchema: turn.responseSchema, schemaName: turn.schemaName ?? 'response' } : {}),

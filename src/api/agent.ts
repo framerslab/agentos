@@ -456,8 +456,9 @@ export interface AgentSessionOptions {
    * cognitive memory: sessions opened with the same user id recall each other's
    * facts, and a session opened without one has a scope of its own, its session
    * id. The GMI also sends it with each model request as the end user's id
-   * (OpenAI's `user` or `safety_identifier`). Asking for an open session with
-   * another user id throws. The legacy runtime ignores it.
+   * (OpenAI's `user` or `safety_identifier`), so pass an opaque or hashed id,
+   * not an email address; a session opened without one sends none. Asking for an
+   * open session with another user id throws. The legacy runtime ignores it.
    */
   userId?: string;
 }
