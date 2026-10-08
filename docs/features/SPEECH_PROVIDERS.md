@@ -151,6 +151,47 @@ resolver.on('provider_fallback', ({ from, to, error }) => {
 
 ---
 
+## A speech-to-text chain from entries
+
+`createSttChain(entries, options)` in [`env-constructor.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/env-constructor.ts) builds the voice pipeline's [`StreamingSTTChain`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/StreamingSTTChain.ts) from a list the host chooses, such as a setting per audience, where `createVoiceProvidersFromEnv()` builds it from the environment's keys in a fixed order:
+
+```typescript
+import { createSttChain, sttEntryPricePerMinute } from '@framers/agentos/io/voice-pipeline';
+
+const apiKey = process.env.OPENAI_API_KEY!;
+const stt = createSttChain(['openai:gpt-4o-transcribe', 'openai:gpt-4o-mini-transcribe'], { openai: { apiKey } });
+const session = await stt.startSession({ language: 'en' });
+
+sttEntryPricePerMinute('openai:gpt-4o-transcribe'); // 0.006 US dollars a minute
+sttEntryPricePerMinute('deepgram:nova-3'); // undefined: no price row
+```
+
+**The entry.** An entry is `<vendor>:<model>`: a vendor of `STT_CHAIN_VENDORS` (`openai`, `deepgram`, `elevenlabs`), a colon, and the model's name in letters, digits, `.`, `_` and `-`. `parseSttEntry(entry)` returns `{ vendor, model }` and throws a `RangeError` for any other shape, a vendor outside the list included. Its module imports nothing, so the browser entry, `@framers/agentos/io/voice-pipeline/browser`, exports it as well, and a page can hold a list of entries to the rule the server builds them by.
+
+**The order is the priority.** The entries take the priorities 10, 20, 30 and so on, in the order given: a session starts on the first provider whose session opens, and the next entry is its fallback. `createSttChain` throws a `RangeError` for an empty list, an entry named twice, an entry `parseSttEntry` refuses, or an entry whose vendor has no options. Mid-utterance failover is off unless the third argument, the chain's `StreamingSTTChainOptions`, turns it on, so a session is the provider's own, with its `flush()` and its events.
+
+**The vendors and their options.** Each vendor's options are its provider's configuration without `model` and `priority`, its API key among them: the entry names the model, and its place in the list sets the priority. Every entry of one vendor shares that vendor's options.
+
+| Vendor | Provider | Options |
+|---|---|---|
+| `openai` | [`OpenAIRealtimeTranscriptionSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/OpenAIRealtimeTranscriptionSTT.ts) | `options.openai` |
+| `deepgram` | [`DeepgramStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/DeepgramStreamingSTT.ts) | `options.deepgram` |
+| `elevenlabs` | [`ElevenLabsStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/ElevenLabsStreamingSTT.ts) | `options.elevenlabs` |
+
+**Prices.** `sttEntryPricePerMinute(entry)` gives the US dollars a minute of an entry's audio from the providers' price rows, and `undefined` for an entry with no row; Deepgram and ElevenLabs entries have none. OpenAI's rows are `OPENAI_TRANSCRIPTION_PRICING` in [`openaiPricing.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/openaiPricing.ts), from [OpenAI's pricing page](https://developers.openai.com/api/docs/pricing) as read on 8 October 2026:
+
+| Model | US dollars a minute |
+|---|---|
+| `gpt-4o-mini-transcribe` | 0.003 |
+| `gpt-4o-transcribe` | 0.006 |
+| `gpt-transcribe` | 0.0045 |
+| `gpt-live-transcribe` | 0.017 |
+| `gpt-realtime-whisper` | 0.017 |
+
+A dated snapshot without a row of its own (the model's name followed by `-YYYY-MM-DD`) takes its base model's price.
+
+---
+
 ## Resolution Requirements
 
 Both `resolveSTT()` and `resolveTTS()` accept an optional [`ProviderRequirements`](https://github.com/framerslab/agentos/blob/master/src/io/speech/types.ts) object:

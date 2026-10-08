@@ -310,6 +310,11 @@
       "default": "./dist/io/voice-pipeline/index.js",
       "types": "./dist/io/voice-pipeline/index.d.ts"
     },
+    "./io/voice-pipeline/browser": {
+      "import": "./dist/io/voice-pipeline/browser.js",
+      "default": "./dist/io/voice-pipeline/browser.js",
+      "types": "./dist/io/voice-pipeline/browser.d.ts"
+    },
     "./io/voice-pipeline/providers": {
       "import": "./dist/io/voice-pipeline/providers/index.js",
       "default": "./dist/io/voice-pipeline/providers/index.js",
