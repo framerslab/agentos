@@ -240,7 +240,7 @@ describe('ComposableToolBuilder with a gate', () => {
       ...ctx,
       sessionData: { emergentDepth: MAX_COMPOSITION_DEPTH },
     });
-    expect(deep).toMatchObject({ success: false, details: { code: 'step_cycle' } });
+    expect(deep).toMatchObject({ success: false, details: { code: 'nesting_too_deep' } });
     const nearly = await builder.runPipeline(readOnly, { text: 'hi' }, {
       ...ctx,
       sessionData: { emergentDepth: MAX_COMPOSITION_DEPTH - 1 },

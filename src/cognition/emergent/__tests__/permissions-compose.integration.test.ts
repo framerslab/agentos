@@ -1009,4 +1009,95 @@ describe('compositions and workflows: one gate, one rule', () => {
     const loopA = await host.orchestrator.getTool('loop_a');
     expect((loopA as { emergentMode?: string } | undefined)?.emergentMode).toBeUndefined();
   });
+
+  it('a chain nested deeper than the limit is refused, and the composition at the limit, which has no cycle, stays active', async () => {
+    const db = createSqliteAdapter();
+    const names = Array.from({ length: 9 }, (_, i) => `c${i + 1}`);
+    const host = await makeForgeHost({ db, tools: [echoTool()], config: { compose: { sideEffectingTools: names } } });
+    // c1 chains c2, c2 chains c3, ..., c9 chains the host's echo; stored innermost first.
+    names.forEach((name, i) => {
+      const step = i + 1 < names.length ? names[i + 1] : 'echo';
+      seedToolRow(db, {
+        id: `id-${name}`,
+        name,
+        mode: 'compose',
+        source: JSON.stringify({ mode: 'compose', steps: [{ name: 's', tool: step, inputMapping: { text: '$input.text' } }] }),
+        inputSchema: TEXT_IN,
+        outputSchema: TEXT_OUT,
+      });
+      db.raw
+        .prepare('UPDATE agentos_emergent_tools SET created_at = ? WHERE id = ?')
+        .run(1_700_000_000_000 + (names.length - i), `id-${name}`);
+    });
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).active).toBe(9);
+
+    const deep = await callTool(host.orchestrator, 'c1', { text: 'deep' });
+    expect(deep.isError).toBe(true);
+    expect(String(deep.errorDetails?.message)).toContain('nesting_too_deep');
+    // c9, where the limit was met, reaches nothing of its own: it stays active and runs.
+    expect(readStateRow(db, 'id-c9')).toMatchObject({ state: 'active' });
+    expect((await callTool(host.orchestrator, 'c9', { text: 'near' })).output).toEqual({ text: 'near' });
+    expect((await callTool(host.orchestrator, 'c2', { text: 'within' })).output).toEqual({ text: 'within' });
+  });
+
+  it('a composition that reaches itself at run time is refused at the repeat, before its steps run again, and suspended', async () => {
+    const db = createSqliteAdapter();
+    const counted: Array<Record<string, unknown>> = [];
+    const countTool: ITool = {
+      id: 'count-it-v1',
+      name: 'count_it',
+      displayName: 'count_it',
+      description: 'Counts its calls and returns the text it is given.',
+      inputSchema: TEXT_IN,
+      hasSideEffects: false,
+      execute: async (args: Record<string, unknown>) => {
+        counted.push(args);
+        return { success: true, output: { text: String(args.text) } };
+      },
+    };
+    const host = await makeForgeHost({
+      db,
+      tools: [countTool, echoTool('alias_step')],
+      config: { compose: { sideEffectingTools: ['alias_step'] } },
+    });
+    const outer = await callTool(host.orchestrator, 'forge_tool', {
+      name: 'outer_loop',
+      description: 'Counts, then runs the alias step.',
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+      implementation: {
+        mode: 'compose',
+        steps: [
+          { name: 'count', tool: 'count_it', inputMapping: { text: '$input.text' } },
+          { name: 'alias', tool: 'alias_step', inputMapping: { text: '$prev.text' } },
+        ],
+      },
+      testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'hi' } }],
+    });
+    expect(outer.isError).toBeFalsy();
+    const inner = await callTool(
+      host.orchestrator,
+      'forge_tool',
+      composeOver('inner_loop', 'outer_loop', {
+        testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'hi' }, stepOutputs: { s: { text: 'hi' } } }],
+      }),
+    );
+    expect(inner.isError).toBeFalsy();
+    // The host registers inner_loop's executable under the alias step's name
+    // too: outer_loop now reaches itself through a name no forge-time check
+    // follows.
+    const innerExecutable = await host.orchestrator.getTool('inner_loop');
+    await host.orchestrator.registerTool({ ...innerExecutable!, id: 'alias-of-inner-loop', name: 'alias_step' });
+
+    counted.length = 0;
+    const called = await callTool(host.orchestrator, 'outer_loop', { text: 'x' });
+
+    expect(called.isError).toBe(true);
+    // Its first step ran once: the repeat was refused before running anything.
+    expect(counted).toEqual([{ text: 'x' }]);
+    const outerId = String((outer.output as { toolId: string }).toolId);
+    const innerId = String((inner.output as { toolId: string }).toolId);
+    expect(readStateRow(db, outerId)).toMatchObject({ state: 'suspended', state_reason: 'step_cycle', set_by: 'library' });
+    expect(readStateRow(db, innerId)).toMatchObject({ state: 'active' });
+  });
 });

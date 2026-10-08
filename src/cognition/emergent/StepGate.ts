@@ -38,7 +38,7 @@ export interface StepGate {
  * no tool under its name (`step_missing`), a tool with side effects the host
  * has not listed (`step_not_chainable`), a tool that does not declare
  * `hasSideEffects` (`side_effects_undeclared`), or a chain that reaches itself
- * or nests too deep (`step_cycle`).
+ * (`step_cycle`).
  */
 export type ChainRefusalCode =
   | 'compose_needs_gate'
@@ -61,7 +61,11 @@ export const COMPOSE_NEEDS_GATE_MESSAGE =
   'this engine composes tools through a bare callback, which cannot say what a step tool is; ' +
   'pass a StepGate (createStepGate({ resolve, ... })) to ComposableToolBuilder or as deps.stepGate';
 
-/** Compositions nest no deeper than this at run time; a deeper chain is refused with `step_cycle`. */
+/**
+ * Compositions nest no deeper than this at run time. A deeper chain is
+ * refused with `nesting_too_deep`: the call fails and no composition is
+ * suspended for it, since a long chain is not a cycle.
+ */
 export const MAX_COMPOSITION_DEPTH = 8;
 
 /**

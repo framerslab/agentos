@@ -232,7 +232,9 @@ export class ComposableToolBuilder {
    *
    * Compositions nest no deeper than {@link MAX_COMPOSITION_DEPTH}: the depth
    * travels in `context.sessionData.emergentDepth`, and a run at the limit is
-   * refused with `step_cycle`.
+   * refused with `nesting_too_deep`, a code no composition is suspended for (a
+   * chain that long is not a cycle; the engine refuses a composition that
+   * reaches itself at its own call).
    *
    * A refusal or a failure ends the run; `details` then names the step, the
    * steps that completed before it, and the effects so far.
@@ -258,9 +260,9 @@ export class ComposableToolBuilder {
       return {
         success: false,
         error:
-          `step_cycle: compositions nest more than ${MAX_COMPOSITION_DEPTH} deep; ` +
-          'a composition that reaches itself, or a chain that long, does not run',
-        details: { code: 'step_cycle', depth },
+          `nesting_too_deep: compositions nest more than ${MAX_COMPOSITION_DEPTH} deep; ` +
+          'a chain that long does not run',
+        details: { code: 'nesting_too_deep', depth },
       };
     }
     const stepContext: ToolExecutionContext = {

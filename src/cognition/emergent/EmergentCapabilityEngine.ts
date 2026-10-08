@@ -399,6 +399,17 @@ function isHostRestriction(record: ToolStateRecord): boolean {
   return record.state === 'demoted' || (record.state === 'suspended' && record.setBy === 'host');
 }
 
+/**
+ * The ids of the emergent compositions running further up a call, outermost
+ * first. Each composition's executable adds its own before its steps run;
+ * the list travels in `sessionData.emergentChain`, through every step's
+ * call, as the depth does.
+ */
+function compositionChain(context: ToolExecutionContext): string[] {
+  const chain = context.sessionData?.emergentChain;
+  return Array.isArray(chain) ? chain.filter((id): id is string => typeof id === 'string') : [];
+}
+
 export class EmergentCapabilityEngine {
   /** Injected dependencies. */
   private readonly config: EmergentConfig;
@@ -2084,8 +2095,28 @@ export class EmergentCapabilityEngine {
             error: `Emergent tool "${tool.name}" belongs to agent ${owner}; it is not callable as ${caller}.`,
           };
         }
+        // A composition already running further up this call reaches itself:
+        // the call is refused before any step runs, and this composition is
+        // suspended for the cycle. A long chain without a cycle is refused at
+        // the depth limit (nesting_too_deep) and suspends nothing.
+        let runContext = context;
+        if (tool.implementation.mode === 'compose') {
+          const chain = compositionChain(context);
+          if (chain.includes(tool.id)) {
+            await this.suspendAsLibrary(tool.id, 'step_cycle');
+            return {
+              success: false,
+              error: `step_cycle: "${tool.name}" reaches itself at run time; it was suspended`,
+              details: { code: 'step_cycle' },
+            };
+          }
+          runContext = {
+            ...context,
+            sessionData: { ...(context.sessionData ?? {}), emergentChain: [...chain, tool.id] },
+          };
+        }
         const startTime = performance.now();
-        const result = await baseTool.execute(args, context);
+        const result = await baseTool.execute(args, runContext);
         const executionTimeMs = Math.round(performance.now() - startTime);
 
         // A step that can no longer be chained (its tool was removed or
