@@ -75,7 +75,7 @@ export interface StepTranscriptInput {
   calls: ToolCallRequest[];
   /** The step's tool results, in order. */
   results: ToolResultChunkPayload[];
-  /** The turn's user message, given on the turn's first step. */
+  /** The turn's user message, given with the turn's steps until the session store keeps one. */
   userMessage?: SessionTranscriptMessage;
   /** `onAfterGeneration`'s replacement for the step text. */
   textOverride?: string;
@@ -90,12 +90,13 @@ function toolContent(result: ToolResultChunkPayload): string {
 }
 
 /**
- * The store messages one finished step adds: the turn's user message on the
- * first step, the assistant message (left out when the step produced neither
- * text nor tool calls), then one tool message per result. A step that answered
- * a response schema is stored as the JSON string of its answer.
+ * The store messages one finished step adds: the turn's user message when it
+ * is given (the first step the store keeps carries it), the assistant message
+ * (left out when the step produced neither text nor tool calls), then one tool
+ * message per result. A step that answered a response schema is stored as the
+ * JSON string of its answer.
  *
- * @param input - The step, its calls and results, and the turn's user message on the first step.
+ * @param input - The step, its calls and results, and the turn's user message while no step of the turn is stored.
  * @returns The messages to append through the turn writer.
  */
 export function stepToTranscript(input: StepTranscriptInput): SessionTranscriptMessage[] {
