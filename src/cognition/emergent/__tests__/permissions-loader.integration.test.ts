@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { EmergentTool } from '../types.js';
 import type { EmergentToolRegistry } from '../EmergentToolRegistry.js';
 import { createSqliteAdapter, readStateRow, readToolRow } from './helpers/sqlite-adapter.js';
@@ -1509,5 +1509,39 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
       doubled: 4,
     });
     expect(readToolRow(db, toolId)).toMatchObject({ tier: 'agent' });
+  });
+
+  it("a session's cleanup deletes the rows of its tools a load admitted suspended, and lets their held states go", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'ss-1',
+      name: 'echo_later',
+      mode: 'compose',
+      tier: 'session',
+      createdBySession: 'sess-m3',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 's', tool: 'late_echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    expect((await host.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess-m3' })).outcomes).toEqual([
+      { toolId: 'ss-1', name: 'echo_later', state: 'suspended', reason: 'step_missing' },
+    ]);
+
+    host.orchestrator.cleanupEmergentSession('sess-m3');
+
+    await vi.waitFor(() => {
+      expect(readToolRow(db, 'ss-1')).toBeUndefined();
+      expect(readStateRow(db, 'ss-1')).toBeUndefined();
+    });
+    const registry = (host.engine as unknown as { registry: EmergentToolRegistry }).registry;
+    expect(registry.getState('ss-1')).toBeUndefined();
+    // The step's tool arriving later brings nothing of the ended session back.
+    await host.orchestrator.registerTool(echoTool('late_echo'));
+    await host.engine.onHostToolRegistered('late_echo');
+    expect(await host.orchestrator.getTool('echo_later')).toBeUndefined();
   });
 });

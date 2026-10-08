@@ -1579,11 +1579,14 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
    *
    * Iterates the session map and deletes every tool whose `source` names the
    * given session; the rows go after the tool's queued writes. Logs a cleanup
-   * audit event for each removed tool.
+   * audit event for each removed tool. The session's rows that a load in this
+   * process admitted without activating (suspended or demoted: their state is
+   * held here, the tool is not) go too, with the state held for them; that
+   * part reads the rows first, so it completes after this returns.
    *
    * @param sessionId - The session identifier to match against tool `source`
    *   strings.
-   * @returns The number of tools removed.
+   * @returns The number of live tools removed.
    */
   cleanupSession(sessionId: string): number {
     let removedCount = 0;
@@ -1601,7 +1604,45 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
       }
     }
 
+    if (this.db && [...this.states.keys()].some((id) => !this.sessionTools.has(id) && !this.persistedTools.has(id))) {
+      void this.cleanupHeldSessionRows(sessionId);
+    }
+
     return removedCount;
+  }
+
+  /**
+   * The rows of the session whose tool this process holds a state for but
+   * not the tool itself (a load admitted them suspended or demoted): deleted
+   * after their queued writes, with the held state, so they neither stay in
+   * storage after the session nor bring the tool back when a step tool it
+   * names registers. Rows this process never loaded are left to the process
+   * that holds them. Best-effort, as the live tools' row deletes are.
+   */
+  private async cleanupHeldSessionRows(sessionId: string): Promise<void> {
+    const db = this.db;
+    if (!db) {
+      return;
+    }
+    try {
+      await this.ensureSchemaReady();
+      const rows = (await db.all(
+        `SELECT id FROM agentos_emergent_tools WHERE tier = 'session' AND created_by_session = ?`,
+        [sessionId],
+      )) as Array<{ id: string }>;
+      for (const { id } of rows) {
+        if (!this.states.has(id) || this.sessionTools.has(id) || this.persistedTools.has(id)) {
+          continue;
+        }
+        this.states.delete(id);
+        this.restrictionWrites.delete(id);
+        this.bump(id);
+        this.queueRowDeletes(id);
+        this.logAudit(id, 'cleanup', { sessionId });
+      }
+    } catch {
+      // Best-effort cleanup only.
+    }
   }
 
   // --------------------------------------------------------------------------
