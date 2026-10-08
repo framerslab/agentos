@@ -13,7 +13,7 @@ It also runs escape probes against the QuickJS executor directly, past the forge
 | File | What it is |
 |---|---|
 | `run.ts` | The questions, the probes and the report |
-| `quickjs-executor.ts` | A prototype `ForgedCodeExecutor` on QuickJS: a runtime and context per call, a memory limit, a stack limit, an interrupt at the deadline |
+| `quickjs-executor.ts` | A prototype `ForgedCodeExecutor` on QuickJS: a runtime and context per call, a memory limit, a stack limit, an interrupt at the deadline; one shared module, a shared module on a capped memory, or an instance per call on a memory capped at the call's limit |
 | `guest-surface.ts`, `guest-prelude.cjs` | How the granted functions reach the guest: host functions that take and return data only, and guest JavaScript that builds `fetch`, `fs.readFile`, `crypto` and the in-process context's built-ins over them |
 | `in-process-child.ts` | One in-process case in a process of its own, for the cases that stall or exhaust the process running them |
 | `package.json` | The run's one dependency, `quickjs-emscripten` 0.32.0, installed only by the job |

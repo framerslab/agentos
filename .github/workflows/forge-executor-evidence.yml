@@ -45,7 +45,7 @@ jobs:
         run: npm install --no-package-lock --no-audit --no-fund --ignore-scripts
 
       - name: Run the evidence questions
-        run: pnpm exec tsx evidence/forge-executors/run.ts --out evidence/forge-executors/out
+        run: node --expose-gc --import tsx evidence/forge-executors/run.ts --out evidence/forge-executors/out
 
       - name: Write the report to the job summary
         if: always()

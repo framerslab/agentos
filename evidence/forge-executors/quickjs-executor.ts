@@ -2,13 +2,17 @@
  * A prototype ForgedCodeExecutor on QuickJS compiled to WebAssembly
  * (quickjs-emscripten 0.32.0, its default release-sync variant), written for
  * the evidence run. Each call gets its own runtime and context with a memory
- * limit, a stack limit and an interrupt at the deadline; the granted functions
+ * limit, a stack limit and an interrupt at the deadline, on one shared module or
+ * (`instance: 'per-call'`) on an instance of its own with a capped memory; the granted functions
  * reach the guest only as the data-only bindings of guestSurface(). The library
  * ships none of this; the evidence run decides whether an executor like it is
  * built.
  */
+import { readFileSync } from 'node:fs';
 import {
   newQuickJSWASMModule,
+  newVariant,
+  RELEASE_SYNC,
   type QuickJSContext,
   type QuickJSDeferredPromise,
   type QuickJSHandle,
@@ -23,6 +27,8 @@ import type {
 import { guestSurface, type Binding } from './guest-surface.js';
 
 const STACK_BYTES = 1024 * 1024;
+const PAGE_BYTES = 65536;
+const MB = 1024 * 1024;
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -32,23 +38,103 @@ function errorShape(error: unknown): { name: string; message: string } {
   return error instanceof Error ? { name: error.name, message: error.message } : { name: 'Error', message: String(error) };
 }
 
+function wasmMemoryOf(module: QuickJSWASMModule): WebAssembly.Memory | undefined {
+  try {
+    return module.getWasmMemory();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * How the executor holds QuickJS. The build imports its memory and grows it up
+ * to that memory's maximum (`IMPORTED_MEMORY=1`, `ALLOW_MEMORY_GROWTH=1`), so a
+ * supplied memory with a maximum bounds what a guest can make the host allocate;
+ * QuickJS's own limit does not, under Emscripten (it counts only each
+ * allocation's overhead).
+ */
+export interface QuickJSExecutorOptions {
+  /**
+   * 'shared': one WebAssembly module serves every call (the default).
+   * 'per-call': each call instantiates the module, compiled once, with a fresh
+   * WebAssembly.Memory whose maximum is the call's memoryMB, dropped when the
+   * call ends.
+   */
+  instance?: 'shared' | 'per-call';
+  /** 'shared' only: the maximum of the shared module's memory, in MB; unset keeps the build's own. */
+  sharedMemoryCapMB?: number;
+  /** QuickJS's own stack limit for each runtime, in bytes (default 1 MiB). */
+  maxStackBytes?: number;
+  /** A name for reports. */
+  label?: string;
+}
+
 export class QuickJSExecutor implements ForgedCodeExecutor {
-  readonly name = 'quickjs-wasm';
+  readonly name: string;
   readonly isolates = true;
   /** Teardowns that failed, each followed by a fresh module. */
   moduleReloads = 0;
+  /** The WebAssembly memory's size in bytes after the last call (0 when the variant does not expose it). */
+  lastWasmBytes = 0;
+  /** Whether the last call ran in the memory this executor supplied. */
+  lastMemoryWasSupplied = false;
   private module: QuickJSWASMModule | undefined;
+  private compiled: Promise<WebAssembly.Module> | undefined;
+  private initialPages: number | undefined;
+  private suppliedMemory: WebAssembly.Memory | undefined;
+
+  constructor(private readonly options: QuickJSExecutorOptions = {}) {
+    this.name = options.label ?? `quickjs-wasm (${options.instance ?? 'shared'})`;
+  }
+
+  private get perCall(): boolean {
+    return this.options.instance === 'per-call';
+  }
 
   /** Loads and compiles the WebAssembly module; the evidence run times the first load as start-up. */
   async load(): Promise<void> {
-    this.module ??= await newQuickJSWASMModule();
+    if (this.initialPages === undefined) {
+      // The build's initial memory, read from a default module: a supplied memory may not start smaller.
+      const probe = await newQuickJSWASMModule();
+      const bytes = wasmMemoryOf(probe)?.buffer.byteLength ?? 0;
+      this.initialPages = bytes > 0 ? bytes / PAGE_BYTES : 256;
+      if (!this.perCall && this.options.sharedMemoryCapMB === undefined) {
+        this.module = probe;
+      }
+    }
+    if (this.perCall) {
+      this.compiled ??= WebAssembly.compile(
+        readFileSync(new URL(import.meta.resolve('@jitl/quickjs-wasmfile-release-sync/wasm'))),
+      );
+      await this.compiled;
+      return;
+    }
+    if (!this.module) {
+      this.module =
+        this.options.sharedMemoryCapMB === undefined
+          ? await newQuickJSWASMModule()
+          : await this.moduleWithMemory(this.options.sharedMemoryCapMB);
+    }
+  }
+
+  /** A module instance on a fresh memory whose maximum is `capMB`. */
+  private async moduleWithMemory(capMB: number): Promise<QuickJSWASMModule> {
+    const initial = this.initialPages ?? 256;
+    const maximum = Math.max(initial, Math.ceil((capMB * MB) / PAGE_BYTES));
+    const memory = new WebAssembly.Memory({ initial, maximum });
+    this.suppliedMemory = memory;
+    const compiled = this.perCall ? await this.compiled : undefined;
+    return newQuickJSWASMModule(
+      newVariant(RELEASE_SYNC, compiled ? { wasmModule: compiled, wasmMemory: memory } : { wasmMemory: memory }),
+    );
   }
 
   async run(request: ExecutorRunRequest): Promise<ExecutorRunResult> {
     await this.load();
-    const runtime = (this.module as QuickJSWASMModule).newRuntime();
+    const module = this.perCall ? await this.moduleWithMemory(request.memoryMB) : (this.module as QuickJSWASMModule);
+    const runtime = module.newRuntime();
     runtime.setMemoryLimit(Math.max(1024 * 1024, Math.floor(request.memoryMB * 1024 * 1024)));
-    runtime.setMaxStackSize(STACK_BYTES);
+    runtime.setMaxStackSize(this.options.maxStackBytes ?? STACK_BYTES);
     const deadline = Date.now() + request.timeoutMs;
     let interrupted = false;
     runtime.setInterruptHandler(() => {
@@ -66,13 +152,19 @@ export class QuickJSExecutor implements ForgedCodeExecutor {
     } catch (error) {
       result = { status: 'error', error: `Execution error: the executor failed: ${message(error)}`, memoryUsedBytes: 0 };
     }
+    const memory = wasmMemoryOf(module);
+    this.lastWasmBytes = memory?.buffer.byteLength ?? 0;
+    this.lastMemoryWasSupplied = memory !== undefined && memory === this.suppliedMemory;
     try {
       guest.dispose();
       context.dispose();
       runtime.dispose();
     } catch {
-      // A teardown that fails can leave the module unusable: load a fresh one for the next call.
-      this.module = undefined;
+      // A teardown that fails can leave the module unusable: the next call gets a fresh one
+      // (per call, every call does).
+      if (!this.perCall) {
+        this.module = undefined;
+      }
       this.moduleReloads += 1;
     }
     return result;
