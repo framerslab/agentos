@@ -86,7 +86,7 @@ const MAX_TIMER_MS = 2_147_483_647;
  * thrown value says, cut at a limit inside the guest.
  */
 const GUEST_HELPERS = [
-  '((AB, S, Str, slice) => [',
+  '((AB, S, P, Str, slice) => [',
   '  (n) => new AB(n),',
   '  (v) => S(v),',
   '  (e, limit) => {',
@@ -95,12 +95,23 @@ const GUEST_HELPERS = [
   "      const m = e !== null && typeof e === 'object' ? e.message : undefined;",
   "      text = typeof m === 'string' ? m : Str(e);",
   '    } catch (x) {',
-  "      return '(the thrown value could not be read)';",
+  "      text = '(the thrown value could not be read)';",
   '    }',
-  "    return text.length > limit ? slice(text, 0, limit) + ' (cut at ' + limit + ' characters)' : text;",
+  "    return S(text.length > limit ? slice(text, 0, limit) + ' (cut at ' + limit + ' characters)' : text);",
   '  },',
-  '])(ArrayBuffer, JSON.stringify, String, Function.prototype.call.bind(String.prototype.slice))',
+  '  (t) => P(t),',
+  '])(ArrayBuffer, JSON.stringify, JSON.parse, String, Function.prototype.call.bind(String.prototype.slice))',
 ].join('\n');
+
+/**
+ * A string the binding layer cannot copy whole: it copies a string as a C
+ * string, so a U+0000 ends it, and it encodes a lone surrogate wrongly. Such
+ * a string crosses as JSON, which escapes both.
+ */
+function needsJson(value: string): boolean {
+  // A string, not a regular expression: eslint's no-control-regex refuses U+0000 in one.
+  return value.includes('\u0000') || /[\uD800-\uDFFF]/.test(value);
+}
 
 /**
  * The QuickJS packages are missing, at another version, or failed to load.
@@ -208,7 +219,8 @@ function guestBytes(value: unknown): number {
     return 32;
   }
   if (typeof value === 'string') {
-    return 4 * value.length + 64;
+    // A string that crosses as JSON takes its escaped text and the parsed copy.
+    return (needsJson(value) ? 9 : 4) * value.length + 64;
   }
   if (value instanceof Uint8Array || value instanceof ArrayBuffer) {
     return value.byteLength + 64;
@@ -319,6 +331,7 @@ class GuestRun {
   private allocate: QuickJSHandle | undefined;
   private stringify: QuickJSHandle | undefined;
   private describe: QuickJSHandle | undefined;
+  private parse: QuickJSHandle | undefined;
   /** What the call has handed the host so far, in bytes, and how much it may. */
   private handed = 0;
   private handLimit = 0;
@@ -363,6 +376,7 @@ class GuestRun {
     this.allocate = context.getProp(made, 0);
     this.stringify = context.getProp(made, 1);
     this.describe = context.getProp(made, 2);
+    this.parse = context.getProp(made, 3);
     made.dispose();
     this.handLimit = memoryBytes;
 
@@ -451,7 +465,7 @@ class GuestRun {
       }
     }
     this.deferreds.clear();
-    for (const helper of [this.allocate, this.stringify, this.describe]) {
+    for (const helper of [this.allocate, this.stringify, this.describe, this.parse]) {
       if (helper?.alive) {
         helper.dispose();
       }
@@ -459,6 +473,7 @@ class GuestRun {
     this.allocate = undefined;
     this.stringify = undefined;
     this.describe = undefined;
+    this.parse = undefined;
     const context = this.context;
     this.context = undefined;
     this.runtime = undefined;
@@ -591,10 +606,9 @@ class GuestRun {
     if (type === 'boolean') {
       return context.dump(handle) as boolean;
     }
-    if (type === 'string') {
-      return this.readString(handle);
-    }
-    if (type === 'object' && this.stringify) {
+    // A string crosses as its JSON too: the binding layer copies a string as
+    // a C string, which a U+0000 would end.
+    if ((type === 'string' || type === 'object') && this.stringify) {
       const made = context.callFunction(this.stringify, context.undefined, handle);
       if (made.error) {
         made.error.dispose();
@@ -705,7 +719,23 @@ class GuestRun {
     if (value === null) return context.null;
     if (typeof value === 'boolean') return value ? context.true : context.false;
     if (typeof value === 'number') return context.newNumber(value);
-    if (typeof value === 'string') return context.newString(value);
+    if (typeof value === 'string') {
+      if (!needsJson(value) || !this.parse) {
+        return context.newString(value);
+      }
+      // JSON escapes what the binding layer's C-string copy would lose.
+      const json = context.newString(JSON.stringify(value));
+      try {
+        const made = context.callFunction(this.parse, context.undefined, json);
+        if (made.error) {
+          made.error.dispose();
+          throw new TypeError('a string could not be copied into the guest');
+        }
+        return context.unwrapResult(made);
+      } finally {
+        json.dispose();
+      }
+    }
     if (value instanceof Uint8Array) {
       return context.newArrayBuffer(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
     }
@@ -880,7 +910,9 @@ class GuestRun {
       }
       const text = context.unwrapResult(made);
       try {
-        return context.typeof(text) === 'string' ? this.readString(text, false) : '(the thrown value could not be read)';
+        return context.typeof(text) === 'string'
+          ? (JSON.parse(this.readString(text, false)) as string)
+          : '(the thrown value could not be read)';
       } finally {
         text.dispose();
       }
