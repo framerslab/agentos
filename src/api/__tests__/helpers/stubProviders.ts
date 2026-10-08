@@ -33,7 +33,7 @@ export interface ProviderScript {
    * own words.
    */
   embedded: string[];
-  /** How many held requests (see `reply.hold`) ended because the caller aborted them. */
+  /** How many requests ended because the caller aborted them: held ones (see `reply.hold`) and ones aborted before they started. */
   aborts: number;
 }
 
@@ -158,6 +158,13 @@ export function stubProviderClass(providerId: string) {
       s.seen.push({ modelId, messages: JSON.parse(JSON.stringify(messages)), options });
       const next = s.replies.shift();
       if (!next) throw new Error(`${providerId}: unexpected model call`);
+      const signal = options.abortSignal as AbortSignal | undefined;
+      // The provider contract: a request aborted before it starts ends with the terminal abort chunk.
+      if (signal?.aborted) {
+        s.aborts += 1;
+        yield { ...base, modelId, choices: [], isFinal: true, error: { message: 'Request aborted', type: 'abort' } };
+        return;
+      }
       if (next instanceof Error) throw next;
       const breakAfter = (next as { breakAfter?: number }).breakAfter;
       for (let i = 0; i < next.length; i++) {
@@ -168,7 +175,6 @@ export function stubProviderClass(providerId: string) {
       }
       const hold = (next as { hold?: Hold }).hold;
       if (!hold) return;
-      const signal = options.abortSignal as AbortSignal | undefined;
       const aborted = await new Promise<boolean>((resolve) => {
         if (signal?.aborted) return resolve(true);
         signal?.addEventListener('abort', () => resolve(true), { once: true });

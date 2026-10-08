@@ -243,13 +243,35 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(s.seen[1].messages.map((m) => m.content)).toContain('First.');
   });
 
-  it('close() lets a running send finish but keeps it out of the history; the id starts empty', async () => {
-    const k = key(); script('openai', k, { replies: [reply.text('Late.')] });
+  it('close() stops a running send: it rejects with the abort error, and the id starts empty', async () => {
+    const k = key(); const s = script('openai', k, { replies: [reply.text('Late.')] });
     const a = agent(base(k));
     const pending = a.session('s').send('one');
     await a.session('s').close();
-    expect((await pending).text).toBe('Late.');
+    await expect(pending).rejects.toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringMatching(/abort/i) });
+    expect(s.aborts).toBe(1);
     expect(a.session('s').messages()).toEqual([]);
+  });
+
+  it('close() during a provider request held open aborts it and returns at once; the send rejects with the abort error', async () => {
+    const k = key(); const g = gate();
+    const s = script('openai', k, { replies: [reply.hold([], g.opened, reply.text('Late.'))] });
+    const session = agent(base(k)).session('s');
+    try {
+      const outcome = session.send('one').then(() => 'resolved', (error: unknown) => error);
+      await vi.waitFor(() => expect(s.seen).toHaveLength(1));
+      expect(await Promise.race([session.close().then(() => 'closed'), sleep(2_000).then(() => 'still waiting')])).toBe('closed');
+      expect(s.aborts).toBe(1);
+      expect(await outcome).toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringMatching(/abort/i) });
+    } finally {
+      g.open();
+    }
+  });
+
+  it("an onAfterGeneration override to '' makes stream().text ''", async () => {
+    const k = key(); script('openai', k, { replies: [reply.text('raw text')] });
+    const session = agent(base(k, { onAfterGeneration: async (res: { text: string }) => ({ ...res, text: '' }) })).session('s');
+    expect(await session.stream('hi').text).toBe('');
   });
 
   it('a clear while the turn waits for its memory context keeps that turn out of the history', async () => {
