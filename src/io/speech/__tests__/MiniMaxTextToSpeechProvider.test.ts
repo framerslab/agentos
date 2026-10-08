@@ -3,12 +3,15 @@ import WebSocket from "ws";
 import { describe, expect, it, vi } from "vitest";
 import { MiniMaxTextToSpeechProvider } from "../providers/MiniMaxTextToSpeechProvider.js";
 
+/** A 200 response whose body is `body` as JSON, or `body` itself when it is text. */
 function response(body: unknown): Response {
+  const text = typeof body === "string" ? body : JSON.stringify(body);
   return {
     ok: true,
     status: 200,
     statusText: "OK",
-    json: vi.fn(async () => body),
+    json: vi.fn(async () => JSON.parse(text)),
+    text: vi.fn(async () => text),
   } as unknown as Response;
 }
 
@@ -150,6 +153,42 @@ describe("MiniMaxTextToSpeechProvider", () => {
     expect(
       (queryInit?.headers as Record<string, string>).Authorization,
     ).toBe("Bearer test-key");
+  });
+
+  it("keeps a task id past 2^53 as its digits and queries with them", async () => {
+    // JSON.parse would round 9223372036854775807 to 9223372036854775808.
+    const fetchImpl = vi
+      .fn(
+        (
+          _input: string | URL | Request,
+          _init?: RequestInit,
+        ): Promise<Response> =>
+          Promise.resolve(undefined as unknown as Response),
+      )
+      .mockResolvedValueOnce(
+        response(
+          '{"task_id": 9223372036854775807, "file_id": 9223372036854775806, "base_resp": {"status_code": 0}}',
+        ),
+      )
+      .mockResolvedValueOnce(
+        response(
+          '{"task_id": 9223372036854775807, "status": "processing", "base_resp": {"status_code": 0}}',
+        ),
+      );
+    const provider = new MiniMaxTextToSpeechProvider({
+      apiKey: "test-key",
+      fetchImpl,
+    });
+
+    const created = await provider.createAsync("long text");
+    expect(created).toMatchObject({
+      task_id: "9223372036854775807",
+      file_id: "9223372036854775806",
+    });
+    await provider.queryAsync(created.task_id!);
+    expect(fetchImpl.mock.calls[1]![0]).toBe(
+      "https://api.minimax.io/v1/query/t2a_async_query_v2?task_id=9223372036854775807",
+    );
   });
 
   it("does not download URL output from a host that was not allowed", async () => {

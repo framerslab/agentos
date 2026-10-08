@@ -85,10 +85,15 @@ interface MiniMaxSpeechResponse {
   base_resp?: MiniMaxBaseResponse;
 }
 
+/**
+ * MiniMax's async task responses. The ids are int64 values sent as JSON
+ * numbers: one that fits a JavaScript number stays a number, and one past
+ * 2^53 is kept as its decimal string, since rounding it would name another
+ * task or file.
+ */
 export interface MiniMaxAsyncSpeechResponse {
-  /** The task's id; MiniMax returns it as a JSON number (an int64). */
   task_id?: number | string;
-  file_id?: number;
+  file_id?: number | string;
   status?: string;
   base_resp?: MiniMaxBaseResponse;
 }
@@ -98,6 +103,21 @@ function decodeHexAudio(value: string): Buffer {
     throw new Error("MiniMax speech returned invalid hex audio.");
   }
   return Buffer.from(value, "hex");
+}
+
+/** An int64 id field of a MiniMax response, written as a JSON integer. */
+const INT64_ID_FIELD = /(?<!\\)("(?:task_id|file_id)"\s*:\s*)(-?\d+)(?=\s*[,}])/g;
+
+/**
+ * Parse a MiniMax JSON body. JSON.parse rounds an integer past 2^53, so an
+ * id field holding one is read as its decimal string instead.
+ */
+function parseMiniMaxJson(text: string): unknown {
+  return JSON.parse(
+    text.replace(INT64_ID_FIELD, (match: string, prefix: string, digits: string) =>
+      Number.isSafeInteger(Number(digits)) ? match : `${prefix}"${digits}"`,
+    ),
+  );
 }
 
 /** Whether `host` is listed: an exact name, or `*.domain` for its subdomains. */
@@ -420,7 +440,7 @@ export class MiniMaxTextToSpeechProvider implements TextToSpeechProvider {
     );
     let payload: T & { base_resp?: MiniMaxBaseResponse };
     try {
-      payload = (await response.json()) as T & {
+      payload = parseMiniMaxJson(await response.text()) as T & {
         base_resp?: MiniMaxBaseResponse;
       };
     } catch {
