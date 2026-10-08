@@ -1133,16 +1133,15 @@ export class GMI implements IGMI {
           }
         }
 
-        // Every completion option the persona and the turn set (D4b); temperature and
-        // the output budget keep their defaults; tools, user and streaming are the GMI's.
+        // Every completion option the persona and the turn set (D4b), the turn's
+        // over the persona's; one neither sets is not sent, so the provider's
+        // default applies. Tools, user and streaming are the GMI's.
         const turnOptions = (turnInput.metadata?.options ?? {}) as Record<string, unknown>;
         const personaOptions = (this.activePersona.defaultModelCompletionOptions ?? {}) as Record<string, unknown>;
         const llmOptions: ModelCompletionOptions = {
           ...pickCompletionOptions(personaOptions),
           ...pickCompletionOptions(turnOptions),
           ...(stepCacheDiagnostics ? { cacheDiagnostics: { ...stepCacheDiagnostics } } : {}),
-          temperature: (turnOptions.temperature as number | undefined) ?? (personaOptions.temperature as number | undefined) ?? 0.7,
-          maxTokens: (turnOptions.maxTokens as number | undefined) ?? (personaOptions.maxTokens as number | undefined) ?? 2048,
           tools: toolsForLLM.length > 0 ? toolsForLLM.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema }})) : undefined,
           toolChoice: (turnOptions.toolChoice as ModelCompletionOptions['toolChoice']) ?? (personaOptions.toolChoice as ModelCompletionOptions['toolChoice']) ?? (toolsForLLM.length > 0 ? "auto" : undefined),
           userId: this.currentUserContext.userId,
