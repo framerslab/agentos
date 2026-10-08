@@ -176,9 +176,10 @@ export interface GuardrailInputPayload {
  * or block agent output.
  *
  * @remarks
- * The timing of evaluation depends on {@link GuardrailConfig.evaluateStreamingChunks}:
- * - `true`: Called for every TEXT_DELTA chunk (real-time filtering)
- * - `false` (default): Called only for FINAL_RESPONSE chunks
+ * Every guardrail is called for each chunk that carries `isFinal: true`
+ * (the FINAL_RESPONSE, an ERROR). With
+ * {@link GuardrailConfig.evaluateStreamingChunks} set, it is also called for
+ * each TEXT_DELTA chunk (real-time filtering). Other chunks are not evaluated.
  */
 export interface GuardrailOutputPayload {
   /** Conversational context for policy decisions */
@@ -221,8 +222,10 @@ export interface GuardrailConfig {
   /**
    * Enable real-time evaluation of streaming chunks.
    *
-   * When `true`, evaluates every TEXT_DELTA chunk during streaming.
-   * When `false` (default), only evaluates FINAL_RESPONSE chunks.
+   * When `true`, also evaluates each TEXT_DELTA chunk during streaming.
+   * When `false` (default), evaluates only the chunks that carry
+   * `isFinal: true` (the FINAL_RESPONSE, an ERROR), which every guardrail
+   * evaluates either way.
    *
    * **Performance Impact:**
    * - Streaming: Adds 1-500ms latency per TEXT_DELTA chunk
@@ -307,6 +310,11 @@ export interface GuardrailConfig {
    *   is included as overlap context for safety evaluation.
    *
    * Only applies when {@link evaluateStreamingChunks} is `true`.
+   *
+   * The output dispatcher does not read this field: it passes each TEXT_DELTA
+   * to the guardrail on its own, whatever the value. A guardrail that needs
+   * sentence-level text buffers the deltas itself, for example with
+   * `SentenceBoundaryBuffer`.
    *
    * @default 'per-chunk'
    */
@@ -410,9 +418,10 @@ export interface IGuardrailService {
   /**
    * Evaluate agent output before streaming to client.
    *
-   * Called for response chunks based on {@link GuardrailConfig.evaluateStreamingChunks}:
-   * - `true`: Called for every TEXT_DELTA chunk (real-time filtering)
-   * - `false` (default): Called only for FINAL_RESPONSE chunks
+   * Called for each chunk that carries `isFinal: true` (the FINAL_RESPONSE,
+   * an ERROR) and, when {@link GuardrailConfig.evaluateStreamingChunks} is
+   * set, for each TEXT_DELTA chunk (real-time filtering). Other chunks, such
+   * as TOOL_CALL_REQUEST, are not passed to it.
    *
    * @param payload - Response chunk and context to evaluate
    * @returns Evaluation result, or `null` to allow without action
