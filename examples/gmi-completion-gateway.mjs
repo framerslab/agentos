@@ -186,12 +186,19 @@ async function main() {
   // when the fallback hop's key is missing or its call fails too.
   if (output.error) {
     console.error(`\nThe turn failed: ${output.error.code}: ${output.error.message}`);
-    process.exit(1);
+    process.exitCode = 1;
   }
-  process.exit(0);
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+// Exit with process.exitCode once stdout and stderr have flushed, whatever
+// handles are still open.
+function exitAfterFlush() {
+  process.stdout.write('', () => process.stderr.write('', () => process.exit()));
+}
+
+main()
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  })
+  .finally(exitAfterFlush);

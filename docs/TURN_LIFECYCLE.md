@@ -1,6 +1,6 @@
 # The turn lifecycle
 
-One request to the full runtime becomes one GMI turn. Five stages own it, in this order; every line names the code that runs it. When the model requests a tool the host executes, `processRequest()` yields that chunk and returns; the host continues the same turn through `resumeExternalToolRequest()`.
+One request to the full runtime becomes one GMI turn. Five stages own it, in this order; every line names the code that runs it. When the model requests a tool the host executes, `processRequest()` yields that chunk and returns; the host continues the same turn through `handleToolResult()`, `handleToolResults()` or, with the pending request stored on the conversation (`getPendingExternalToolRequest()`), `resumeExternalToolRequest()`. The streams those calls return do not pass through the output guardrails.
 
 | Stage | Owner | What happens |
 |---|---|---|
