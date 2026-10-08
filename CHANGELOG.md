@@ -1,3 +1,15 @@
+## [0.12.18](https://github.com/framerslab/agentos/compare/v0.12.17...v0.12.18) (2026-10-08)
+
+### feat
+
+* **channels:** add Plivo SMS channel adapter (#20) ([d5ff215](https://github.com/framerslab/agentos/commit/d5ff21515137edb43d3485031862c292110c8aa1))
+
+## [0.12.17](https://github.com/framerslab/agentos/compare/v0.12.16...v0.12.17) (2026-10-08)
+
+### feat
+
+* add MiniMax image generation provider (#56) ([9d21348](https://github.com/framerslab/agentos/commit/9d21348742fbb5ce48c92ffb8ab5e40377fdfccc))
+
 ## [0.12.16](https://github.com/framerslab/agentos/compare/v0.12.15...v0.12.16) (2026-10-08)
 
 ### fix
