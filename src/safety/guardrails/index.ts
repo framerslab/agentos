@@ -63,11 +63,38 @@ export {
   evaluateInputGuardrails,
   type GuardrailInputOutcome,
   type GuardrailOutputOptions,
+  type GuardrailOutputVerdict,
   wrapOutputGuardrails,
 } from './guardrailDispatcher';
 
+// Guards a deployment requires: the boot and request checks and the fail-closed posture
+export {
+  assertRequiredGuardrails,
+  checkRequiredGuardrails,
+  withRequiredPosture,
+  type ActiveGuardrail,
+  type GuardrailStage,
+  type RequiredGuardrailReport,
+  type RequiredGuardrailSpec,
+} from './requiredGuardrails';
+
 // Two-phase parallel guardrail dispatcher
 export { ParallelGuardrailDispatcher } from './ParallelGuardrailDispatcher';
+
+// A guard over a reviewed phrase list, with a judge behind it and a fixed reply per rule
+export {
+  PhraseListGuardrail,
+  StaticPhraseListSource,
+  createLlmPhraseJudge,
+  createPhraseListPack,
+  normalizePhraseText,
+  type PhraseEntry,
+  type PhraseJudge,
+  type PhraseJudgeVerdict,
+  type PhraseListGuardrailOptions,
+  type PhraseListSnapshot,
+  type PhraseListSource,
+} from './builtin/PhraseListGuardrail';
 
 // Cross-agent guardrail interface and types
 export {
