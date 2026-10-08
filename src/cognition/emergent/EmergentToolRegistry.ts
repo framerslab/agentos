@@ -1063,6 +1063,17 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
     return this.readStoredState(toolId);
   }
 
+  /**
+   * Hold a stored state for a tool this process holds no object for: a load
+   * that finds a restriction already stored on a row it does not activate
+   * takes it in here, so {@link listStates} carries it (a registration of a
+   * composition's missing step tool re-checks the composition from it).
+   * Nothing is written.
+   */
+  holdState(record: ToolStateRecord): void {
+    this.states.set(record.toolId, record);
+  }
+
   /** Every state held in memory: the tools this process forged, loaded or suspended. */
   listStates(): ToolStateRecord[] {
     return [...this.states.values()];

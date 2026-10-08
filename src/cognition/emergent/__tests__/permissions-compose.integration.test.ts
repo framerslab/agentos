@@ -805,4 +805,37 @@ describe('compositions and workflows: one gate, one rule', () => {
       { toolId: 'c-echo', name: 'echo_once', state: 'suspended', reason: 'policy' },
     ]);
   });
+
+  it('a composition whose row already holds the step suspension is re-checked when its step tool registers, on a later start too', async () => {
+    const db = createSqliteAdapter();
+    // First start: the step's tool is not there yet, so the load suspends the
+    // composition and stores the library's step suspension.
+    const first = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'c-echo',
+      name: 'echo_once',
+      mode: 'compose',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 'e', tool: 'echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    expect((await first.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'c-echo', name: 'echo_once', state: 'suspended', reason: 'step_missing' },
+    ]);
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'suspended', state_reason: 'step_missing', set_by: 'library' });
+
+    // A later start reads that suspension from the row, then the step's tool
+    // arrives: the composition is checked again and comes back.
+    const later = await makeForgeHost({ db });
+    expect((await later.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'c-echo', name: 'echo_once', state: 'suspended', reason: 'step_missing' },
+    ]);
+    await later.orchestrator.registerTool(echoTool());
+    await later.engine.onHostToolRegistered('echo');
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'active' });
+    expect((await callTool(later.orchestrator, 'echo_once', { text: 'back' })).output).toEqual({ text: 'back' });
+  });
 });

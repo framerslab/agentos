@@ -1826,6 +1826,11 @@ export class EmergentCapabilityEngine {
     const live = this.registry.get(toolId);
     if (live) {
       this.registry.adopt(live, record);
+    } else if (record.state !== 'active') {
+      // Held without a tool: a stored step suspension must reach
+      // onHostToolRegistered, which walks the held states, on every start
+      // and in every process that reads it, not only where it was written.
+      this.registry.holdState(record);
     }
   }
 
