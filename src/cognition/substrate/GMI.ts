@@ -110,6 +110,16 @@ function asUsageReport(value: unknown): ModelUsage | undefined {
     : undefined;
 }
 
+/** A message's content as a string two equal contents share: the text itself, or the JSON of its parts. */
+function contentKey(content: unknown): string {
+  if (typeof content === 'string') return content;
+  try {
+    return JSON.stringify(content) ?? '';
+  } catch {
+    return '';
+  }
+}
+
 /** Adds one provider usage report to the turn's total. */
 function addUsage(total: CostAggregator, usage: ModelUsage): void {
   total.promptTokens += usage.promptTokens || 0;
@@ -159,6 +169,17 @@ export class GMI implements IGMI {
    */
   private turnSequence = 0;
   private stateOwnerTurn = 0;
+
+  /**
+   * What the GMI needs to forget a turn once the history no longer holds it
+   * (see {@link GMI.forgetTurnsOutside}): the turn each trace entry was recorded
+   * in (entries recorded outside a turn have none), and each user turn's input
+   * as a comparison key, by turn id, oldest first.
+   */
+  private readonly traceEntryTurn = new WeakMap<ReasoningTraceEntry, string>();
+  private readonly turnInputs = new Map<string, string>();
+  /** Settles once the latest replaceHistory() or clearHistory() has also cleaned the sentiment history. */
+  private historyForgetting: Promise<void> = Promise.resolve();
 
   /**
    * The gateway hop that served the turn's last model step; the next step of
@@ -501,6 +522,55 @@ export class GMI implements IGMI {
       details: details ? JSON.parse(JSON.stringify(details)) : {},
     };
     this.reasoningTrace.entries.push(entry);
+    if (this.reasoningTrace.turnId) this.traceEntryTurn.set(entry, this.reasoningTrace.turnId);
+  }
+
+  /**
+   * Drops what the GMI recorded about the turns `history` no longer holds, so
+   * that a replaced or cleared fact reaches no later model call through the
+   * records kept beside the history: the reflection metaprompt sends recent
+   * trace entries to the model as evidence.
+   *
+   * A recorded turn is kept when `history` has a user message with that turn's
+   * input, each message keeping one turn, the newest first. For every other
+   * turn, the details of its trace entries are emptied (the first characters of
+   * its input, its tool calls and results; the entries stay, with their type and
+   * message), and the sentiment tracker drops the input excerpts of its events
+   * and sentiment trends. The tracker's part runs asynchronously and has
+   * finished before the next turn starts.
+   *
+   * @param history - The conversation history after the replacement.
+   */
+  private forgetTurnsOutside(history: readonly ChatMessage[]): void {
+    const unclaimed = new Map<string, number>();
+    for (const message of history) {
+      if (message.role !== 'user') continue;
+      const key = contentKey(message.content);
+      unclaimed.set(key, (unclaimed.get(key) ?? 0) + 1);
+    }
+    const kept = new Set<string>();
+    for (const [turnId, key] of [...this.turnInputs].reverse()) {
+      const left = unclaimed.get(key) ?? 0;
+      if (left === 0) {
+        this.turnInputs.delete(turnId);
+        continue;
+      }
+      unclaimed.set(key, left - 1);
+      kept.add(turnId);
+    }
+    for (const entry of this.reasoningTrace.entries) {
+      const turnId = this.traceEntryTurn.get(entry);
+      if (turnId === undefined || kept.has(turnId)) continue;
+      entry.details = {};
+      this.traceEntryTurn.delete(entry);
+    }
+    this.historyForgetting = this.historyForgetting
+      .then(() => this.sentimentTracker?.forgetTurnsExcept(kept))
+      .catch((error: unknown) => {
+        this.addTraceEntry(ReasoningEntryType.WARNING, 'Could not drop the sentiment history of turns removed from the conversation history.', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
   }
 
   private stringifyTurnContent(content: GMITurnInput['content']): string | null {
@@ -637,16 +707,22 @@ export class GMI implements IGMI {
    * Makes `messages` the whole conversation history. An empty array is
    * authoritative: it empties the history (unlike
    * `metadata.conversationHistoryForPrompt`, which a turn ignores when empty).
-   * The sentiment tracker and the metaprompts read the same history.
+   * The sentiment tracker and the metaprompts read the same history. What the
+   * GMI recorded about turns the new history no longer holds is dropped too:
+   * the details of their reasoning-trace entries and the input excerpts of
+   * their sentiment records (a turn stays while a user message with its input
+   * is in the history).
    */
   public replaceHistory(messages: ConversationMessage[]): void {
     this.conversationHistoryManager.clear();
     if (messages.length > 0) this.conversationHistoryManager.hydrate(messages);
+    this.forgetTurnsOutside(this.conversationHistoryManager.history);
   }
 
-  /** Empties the conversation history. */
+  /** Empties the conversation history, and drops what the GMI recorded about its turns, as {@link GMI.replaceHistory} does. */
   public clearHistory(): void {
     this.conversationHistoryManager.clear();
+    this.forgetTurnsOutside([]);
   }
 
   public hydrateTurnContext(context: {
@@ -873,6 +949,9 @@ export class GMI implements IGMI {
       let lastErrorForOutput: GMIOutput['error'] = undefined;
 
     try {
+      // A history replaced or cleared just before this turn has finished dropping
+      // the sentiment records of the turns it removed.
+      await this.historyForgetting;
       if (turnInput.userContextOverride) {
         const mergedPreferences =
           turnInput.userContextOverride.preferences &&
@@ -911,6 +990,18 @@ export class GMI implements IGMI {
       const currentUserMessage = historyAtTurnStart.find(
         (message) => message.role === 'user' && !messagesBeforeInput.has(message),
       );
+      // The turn's input, so a later replaceHistory() or clearHistory() can tell
+      // whether the history still holds this turn. Bounded like the trace:
+      // every turn on the trace has at least one entry there.
+      if (currentUserMessage) {
+        this.turnInputs.delete(turnId);
+        this.turnInputs.set(turnId, contentKey(currentUserMessage.content));
+        while (this.turnInputs.size > this.traceLimits.maxEntries) {
+          const oldest = this.turnInputs.keys().next().value;
+          if (oldest === undefined) break;
+          this.turnInputs.delete(oldest);
+        }
+      }
       const currentTurnText = currentUserMessage?.content
         ? (typeof currentUserMessage.content === 'string'
             ? currentUserMessage.content

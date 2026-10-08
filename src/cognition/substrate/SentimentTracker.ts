@@ -103,6 +103,26 @@ export class SentimentTracker {
   }
 
   /**
+   * Drops the input excerpts kept for turns the conversation history no longer
+   * holds: the `evidencePreview` of their events and the `context` of their
+   * sentiment trends. Scores, counters and the events themselves stay.
+   *
+   * @param keptTurnIds - The turns whose input is still in the history.
+   */
+  public async forgetTurnsExcept(keptTurnIds: ReadonlySet<string>): Promise<void> {
+    this._eventHistory = this._eventHistory.map((event) => {
+      if (keptTurnIds.has(event.turnId) || event.metadata.evidencePreview === undefined) return event;
+      const { evidencePreview: _dropped, ...metadata } = event.metadata;
+      return { ...event, metadata };
+    });
+
+    const history = await this.workingMemory.get<SentimentHistoryState>('gmi_sentiment_history');
+    if (!history?.trends?.some((trend) => trend.context && !keptTurnIds.has(trend.turnId))) return;
+    history.trends = history.trends.map((trend) => (keptTurnIds.has(trend.turnId) ? trend : { ...trend, context: '' }));
+    await this.workingMemory.set('gmi_sentiment_history', history);
+  }
+
+  /**
    * Analyzes the sentiment of user input and updates persistent sentiment history.
    *
    * This method:

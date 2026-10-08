@@ -139,6 +139,8 @@ The GMI keeps the session's messages in its [`ConversationHistoryManager`](https
 
 Both replacing calls take [`ConversationMessage`](https://github.com/framerslab/agentos/blob/master/src/core/conversation/ConversationMessage.ts)s: they leave out messages with the `error` or `thought` role and turn a `summary` message into a system message. Neither trims what it sets; the next turn trims the history to its window when it records its input.
 
+`replaceHistory()` and `clearHistory()` also drop what the GMI recorded about the turns the new history no longer holds, so a replaced or cleared fact reaches no later model call through those records (the reflection metaprompt sends recent trace entries to the model). A recorded turn stays while the history has a user message with that turn's input. For every other turn, its reasoning-trace entries keep their type and message and lose their details (the first characters of the input, the tool calls and results), its sentiment trend in `gmi_sentiment_history` loses its `context`, and its events lose their `evidencePreview`; the sentiment part has finished before the next turn starts. Cognitive memory is separate: what a turn encoded there stays until the memory itself forgets it. `hydrateConversationHistory()` drops nothing.
+
 A turn whose `metadata.conversationHistoryForPrompt` is a non-empty array builds its prompts from that history instead of the GMI's own: the conversation before the turn, ending before the current user message. The full runtime passes its stored conversation this way. An empty array is ignored.
 
 ## What a GMI holds

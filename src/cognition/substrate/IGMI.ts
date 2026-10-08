@@ -643,9 +643,13 @@ export interface IGMI {
     conversationHistory: ConversationMessage[],
   ): void;
 
-  /** Makes `messages` the whole conversation history. An empty array is authoritative. */
+  /**
+   * Makes `messages` the whole conversation history. An empty array is authoritative.
+   * `GMI` also drops what it recorded about the turns the new history no longer holds
+   * (the details of their trace entries, the input excerpts of their sentiment records).
+   */
   replaceHistory?(messages: ConversationMessage[]): void;
-  /** Empties the conversation history. */
+  /** Empties the conversation history; `GMI` drops what it recorded about its turns, as for `replaceHistory`. */
   clearHistory?(): void;
 
   hydrateTurnContext?(
