@@ -1,0 +1,138 @@
+/**
+ * @module hearing/LiveKitTranscriptionOutput
+ * Writes a speech-to-text session's transcripts into a LiveKit room the way
+ * LiveKit's own transcription output does, so a page's standard handler of the
+ * `lk.transcription` topic shows them: each interim and each final as a text
+ * stream holding the line's whole text, with `lk.segment_id` (the transcript's
+ * `itemId`), `lk.transcription_final` and `lk.transcribed_track_id`. Writes go
+ * out in the order they were asked for. The finals are kept in a
+ * {@link TranscriptLedger}, so a participant that reconnects can be sent again
+ * the finals after the last line it holds.
+ *
+ * The room is described by a structural type, so this module and its typings
+ * carry no dependency on `@livekit/rtc-node`; a connected rtc-node `Room` is
+ * passed as it is.
+ *
+ * @example
+ * ```typescript
+ * const output = new LiveKitTranscriptionOutput({ room, trackSid: () => heardTrack?.sid });
+ * sttSession.on('transcript', (event) => void output.write(event));
+ * // when the page says the last line it holds:
+ * await output.replayAfter(lastItemId, participantIdentity);
+ * ```
+ */
+
+import {
+  LIVEKIT_TRANSCRIPTION_ATTRIBUTES,
+  LIVEKIT_TRANSCRIPTION_TOPIC,
+  TRANSCRIPTION_FAILED_ATTRIBUTE,
+  TranscriptLedger,
+  type LedgerItem,
+} from '../voice-pipeline/transcriptLedger.js';
+import type { TranscriptEvent } from '../voice-pipeline/types.js';
+
+/**
+ * The part of a connected room (rtc-node `Room`) the output uses: its local
+ * participant, which sends the text streams. A real rtc-node `Room` satisfies
+ * it as it is.
+ */
+export interface LiveKitTranscriptionRoomLike {
+  /** The room's local participant; rtc-node leaves it unset until the room is connected. */
+  readonly localParticipant?: {
+    /** rtc-node's `LocalParticipant.sendText`, with the options the output sets. */
+    sendText(
+      text: string,
+      options?: { topic?: string; attributes?: Record<string, string>; destinationIdentities?: string[] }
+    ): Promise<unknown>;
+  };
+}
+
+/** Options of {@link LiveKitTranscriptionOutput}. */
+export interface LiveKitTranscriptionOutputOptions {
+  /** A connected room (rtc-node `Room`) whose local participant sends the streams. */
+  room: LiveKitTranscriptionRoomLike;
+  /** The SID of the track being transcribed, read at each write; the attribute is left out when it answers nothing. */
+  trackSid?: () => string | undefined;
+  /** The topic. @defaultValue 'lk.transcription' */
+  topic?: string;
+  /** The ledger the finals are kept in; a new one when omitted. */
+  ledger?: TranscriptLedger;
+}
+
+/** Transcripts written into a LiveKit room as transcription text streams. */
+export class LiveKitTranscriptionOutput {
+  /** The lines written so far, the finals among them. */
+  readonly ledger: TranscriptLedger;
+  private readonly topic: string;
+  private chain: Promise<unknown> = Promise.resolve();
+
+  constructor(private readonly options: LiveKitTranscriptionOutputOptions) {
+    this.ledger = options.ledger ?? new TranscriptLedger();
+    this.topic = options.topic ?? LIVEKIT_TRANSCRIPTION_TOPIC;
+  }
+
+  /**
+   * Writes one transcript to every participant. Resolves `true` once it is
+   * sent, `false` when the ledger already held it (a repeated final, or an
+   * interim after the final), which sends nothing.
+   *
+   * @param extra - `itemId` when the transcript carries none; `failed`, a short
+   *   reason, for a line the provider could not transcribe.
+   * @throws {RangeError} When neither the transcript nor `extra` gives a line id.
+   * @throws {Error} When the room has no local participant, or the send fails.
+   */
+  write(event: TranscriptEvent, extra: { itemId?: string; failed?: string } = {}): Promise<boolean> {
+    const itemId = extra.itemId ?? event.itemId;
+    if (!itemId) {
+      return Promise.reject(new RangeError('LiveKitTranscriptionOutput: the transcript has no itemId; pass one in the second argument'));
+    }
+    const changed = this.ledger.apply({
+      itemId,
+      text: event.text,
+      isFinal: event.isFinal,
+      ...(event.startMs !== undefined ? { startMs: event.startMs } : {}),
+      ...(event.endMs !== undefined ? { endMs: event.endMs } : {}),
+      ...(event.language !== undefined ? { language: event.language } : {}),
+      ...(extra.failed !== undefined ? { failed: extra.failed } : {}),
+    });
+    if (!changed) return Promise.resolve(false);
+    const line = this.ledger.get(itemId)!;
+    return this.enqueue(() => this.send(line, undefined)).then(() => true);
+  }
+
+  /**
+   * Sends again, to one participant, the final lines after the line with the
+   * id, in order; every final line when the id is `undefined` or unknown.
+   * Resolves how many were sent.
+   */
+  replayAfter(itemId: string | undefined, participantIdentity: string): Promise<number> {
+    const finals = this.ledger.finalsAfter(itemId);
+    return this.enqueue(async () => {
+      for (const line of finals) await this.send(line, [participantIdentity]);
+      return finals.length;
+    });
+  }
+
+  private enqueue<T>(work: () => Promise<T>): Promise<T> {
+    const next = this.chain.then(work, work);
+    this.chain = next.catch(() => undefined);
+    return next;
+  }
+
+  private async send(line: LedgerItem, destinationIdentities: string[] | undefined): Promise<void> {
+    const local = this.options.room.localParticipant;
+    if (!local) throw new Error('LiveKitTranscriptionOutput: the room has no local participant; connect it first');
+    const attributes: Record<string, string> = {
+      [LIVEKIT_TRANSCRIPTION_ATTRIBUTES.segmentId]: line.itemId,
+      [LIVEKIT_TRANSCRIPTION_ATTRIBUTES.final]: line.isFinal ? 'true' : 'false',
+    };
+    const sid = this.options.trackSid?.();
+    if (sid) attributes[LIVEKIT_TRANSCRIPTION_ATTRIBUTES.trackId] = sid;
+    if (line.failed) attributes[TRANSCRIPTION_FAILED_ATTRIBUTE] = line.failed;
+    await local.sendText(line.text, {
+      topic: this.topic,
+      attributes,
+      ...(destinationIdentities ? { destinationIdentities } : {}),
+    });
+  }
+}
