@@ -58,11 +58,23 @@ export function toolErrorMessage(result: ToolResultChunkPayload): string {
   return typeof details?.message === 'string' && details.message ? details.message : 'Tool failed.';
 }
 
+/** Options for a {@link GmiTurnFolder}. */
+export interface GmiTurnFolderOptions {
+  /**
+   * Whether the turn opted into cache diagnostics (`cacheDiagnostics` on the
+   * call). The provider message id is reported only then, as generateText and
+   * streamText report it: it is the thread key for the next request's diagnostics.
+   */
+  cacheDiagnostics?: boolean;
+}
+
 /**
  * Accumulates one turn's chunks. `push` every chunk in order; read the result
  * once the turn has ended (or at any point for a partial view).
  */
 export class GmiTurnFolder {
+  constructor(private readonly options: GmiTurnFolderOptions = {}) {}
+
   /** The STEP_FINISHED payloads, in order. */
   readonly steps: StepFinishedChunkPayload[] = [];
   /** Every requested call in order, with its result once the TOOL_RESULT arrived. */
@@ -171,6 +183,11 @@ export class GmiTurnFolder {
     });
   }
 
+  /** The last step's provider message id when the turn opted into cache diagnostics (null when the provider sent none); null otherwise. */
+  providerMessageId(): string | null {
+    return this.options.cacheDiagnostics ? this.steps.at(-1)?.providerMessageId ?? null : null;
+  }
+
   /** The latest schema answer a step carried, if any. */
   structuredOutput(): unknown {
     for (let i = this.steps.length - 1; i >= 0; i--) {
@@ -217,7 +234,7 @@ export class GmiTurnFolder {
       model: last?.modelId ?? '',
       ...(last?.responseModel ? { responseModel: last.responseModel } : {}),
       ...(last?.serviceTier ? { serviceTier: last.serviceTier } : {}),
-      ...(last?.providerMessageId ? { providerMessageId: last.providerMessageId } : {}),
+      ...(this.options.cacheDiagnostics ? { providerMessageId: this.providerMessageId() } : {}),
       ...(last?.cacheDiagnostics !== undefined ? { cacheDiagnostics: last.cacheDiagnostics as GenerateTextResult['cacheDiagnostics'] } : {}),
       text: this.text(),
       usage: this.usage(),
@@ -337,7 +354,7 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
       p.responseModel.resolve(last?.responseModel);
       p.serviceTier.resolve(last?.serviceTier);
       p.cacheDiagnostics.resolve((last?.cacheDiagnostics as Awaited<StreamTextResult['cacheDiagnostics']> | undefined) ?? null);
-      p.providerMessageId.resolve(last?.providerMessageId ?? null);
+      p.providerMessageId.resolve(folder.providerMessageId());
       done = true;
       wake();
     }

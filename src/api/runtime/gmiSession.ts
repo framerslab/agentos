@@ -319,7 +319,7 @@ export async function sendGmiTurn(
   input: MessageContent,
   turn: GmiTurnOptions,
 ): Promise<GenerateTextResult & { object?: unknown }> {
-  const folder = new GmiTurnFolder();
+  const folder = new GmiTurnFolder({ cacheDiagnostics: Boolean(turn.options?.cacheDiagnostics) });
   const run = runGmiTurn(deps, input, turn, folder);
   let recorded: SessionTranscriptMessage[] = [];
   for (;;) {
@@ -342,7 +342,7 @@ export async function sendGmiTurn(
  * `text` and sends again finds the turn in the history.
  */
 export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn: GmiTurnOptions): StreamTextResult {
-  const folder = new GmiTurnFolder();
+  const folder = new GmiTurnFolder({ cacheDiagnostics: Boolean(turn.options?.cacheDiagnostics) });
   const run = runGmiTurn(deps, input, turn, folder);
   // runGmiTurn pushes every chunk into `folder` (with the onAfterGeneration replacements); the stream reads that folder.
   return streamFromGmiTurn({ [Symbol.asyncIterator]: () => run }, { folder });

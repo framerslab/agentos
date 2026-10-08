@@ -39,13 +39,17 @@ describe('GmiTurnFolder', () => {
   });
 
   it('preamble, tool step, answer: text is the answer, tool calls carry results, usage sums the steps', () => {
-    const f = new GmiTurnFolder();
+    const f = new GmiTurnFolder({ cacheDiagnostics: true });
     preambleToolAnswer.forEach((x) => f.push(x));
     expect(f.toGenerateTextResult()).toMatchObject({
       text: 'Found it.', finishReason: 'stop', responseModel: 'gpt-4o-2024', providerMessageId: 'msg_2',
       usage: { promptTokens: 30, completionTokens: 5, totalTokens: 35 },
       toolCalls: [{ name: 'lookup', args: { q: 'a' }, result: { ok: true } }],
     });
+    // Without the opt-in the id is not reported.
+    const plain = new GmiTurnFolder();
+    preambleToolAnswer.forEach((x) => plain.push(x));
+    expect(plain.toGenerateTextResult()).not.toHaveProperty('providerMessageId');
   });
 
   it('counts each step once: running USAGE_UPDATE totals are not added', () => {
