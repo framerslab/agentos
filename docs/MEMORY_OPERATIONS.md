@@ -648,7 +648,7 @@ User prefers TypeScript over Python
 
 ### SQLite
 
-Merges another brain database into the current one. A source trace whose content hash or content already exists in the brain is not inserted: its tags are unioned into the existing trace, which keeps the newer `created_at`. Knowledge nodes are matched by label and type, edges by source, target and type.
+Merges another brain database into the current one. A source trace is not inserted when a trace in the brain has the same `content` or carries the content's SHA-256 as its `import_hash`: its tags are unioned into that trace, which keeps the newer `created_at`, and the row counts as skipped. Knowledge nodes are matched by label and type, edges by source, target and type.
 
 ```ts
 const result = await mem.importFrom('./backup.sqlite', { format: 'sqlite' });
@@ -720,7 +720,7 @@ content,type,tags
 All import paths use SHA-256 content hashing to prevent duplicate traces:
 
 1. Before inserting a trace, the importer computes `SHA-256(content)` and stores it in the trace's metadata as `import_hash`.
-2. When a trace in the brain already carries that hash, the row is skipped (counted in `skipped`), whatever its type and scope. The CSV and SQLite importers also match a trace's own `content_hash`, and the SQLite importer an identical `content`.
+2. When a trace in the brain already carries that hash, the row is skipped (counted in `skipped`), whatever its type and scope. The CSV importer also matches a trace whose metadata `content_hash` equals the hash. The SQLite importer also matches a trace with identical `content`, does not read `content_hash`, and merges the skipped row's tags into the trace it matched.
 3. Deduplication is enabled by default (`dedup: true`) and can be disabled per-import.
 
 ```ts

@@ -124,8 +124,13 @@ last agent of the final tier).
 
 ## Guarantees
 
-- `final-output` is emitted into `fullStream` after post-processing completes,
-  followed by an agency-level `agent-end`.
+- `final-output` is emitted into `fullStream` after post-processing completes.
+- `sequential` and `graph` end their raw stream with an `agent-end` part for
+  `__agency__` (`sequential` with the last agent's text as `output`, `graph`
+  with an empty `output`), so that part comes before `final-output`.
+- After `final-output`, `fullStream` adds an `agent-end` for the agency (its
+  `name`, or `__agency__`) with the final text as `output`, unless an earlier
+  part already carried that agent and that output.
 - `text`, `usage`, `agentCalls` and `parsed` resolve once the run is
   finalized.
 - `textStream` carries the text before output guardrails and before

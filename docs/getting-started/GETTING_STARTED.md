@@ -46,7 +46,7 @@ AgentOS resolves credentials in three layers, highest priority first:
 
 1. **Inline `apiKey` / `provider` / `baseUrl`** on the call.
 2. **Module-level default** set via `setDefaultProvider()` (see below).
-3. **Environment variable auto-detect chain**: `OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `which claude` → `which gemini` → `OLLAMA_BASE_URL` → `STABILITY_API_KEY` → `REPLICATE_API_TOKEN` → `STABLE_DIFFUSION_LOCAL_BASE_URL` → `BFL_API_KEY` → `FAL_API_KEY` → `MINIMAX_API_KEY`.
+3. **Environment variable auto-detect chain**: `OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `REQUESTY_API_KEY` → `which claude` → `which gemini` → `OLLAMA_BASE_URL` → `STABILITY_API_KEY` → `REPLICATE_API_TOKEN` → `STABLE_DIFFUSION_LOCAL_BASE_URL` → `BFL_API_KEY` → `FAL_API_KEY` → `MINIMAX_API_KEY`.
 
 You only need one of these — pick whichever fits your deployment.
 
@@ -81,7 +81,7 @@ setDefaultProvider(undefined);
 
 The default's `model` is the text model. `embedText`, `editImage` and `generateImage` use it as well unless it is recognizably a chat model (GPT, Claude, Gemini, Llama and similar families) headed for the provider's own endpoint, in which case they use the provider's default model for the task. `generateImage` without `provider` or `model` tries the default's provider first when that provider makes images, then the image providers whose keys are in the environment. With a custom endpoint (`baseUrl`) or on Ollama, `embedText` uses it too, except on Gemini: there a default model that does not name an embedding model is replaced by `gemini-embedding-2`, so pass `model` to `embedText` to use another one. The default's `apiKey` and `baseUrl` apply to every call that resolves to the same provider, image calls included.
 
-[`setDefaultProvider`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/global-default.ts) is the recommended path for apps that hold their keys somewhere other than environment variables (secrets manager, runtime config service, etc.). It applies to the high-level functions only. The full [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) runtime does not read it: its providers come from `modelProviderManagerConfig.providers` in [`AgentOSConfig`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts), where the entry with `isDefault: true` is the default, and `createAgentOSConfig()` builds that list from `OPENAI_API_KEY`, `OPENROUTER_API_KEY` and `OLLAMA_BASE_URL`.
+[`setDefaultProvider`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/global-default.ts) is the recommended path for apps that hold their keys somewhere other than environment variables (secrets manager, runtime config service, etc.). It applies to the high-level functions only. The full [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) runtime does not read it: its providers come from `modelProviderManagerConfig.providers` in [`AgentOSConfig`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts), where the entry with `isDefault: true` is the default, and `createAgentOSConfig()` builds that list from `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `REQUESTY_API_KEY` and `OLLAMA_BASE_URL`.
 
 ### Reordering the auto-detect chain
 
@@ -205,7 +205,7 @@ Every entry point (`generateText`, [`streamText`](https://github.com/framerslab/
 
 | Field | Required? | Default | Notes |
 |---|---|---|---|
-| `provider` | no | auto-detected from the environment ([Environment Setup](#environment-setup)) | One of `openai`, `anthropic`, `gemini`, `openrouter`, `groq`, `together`, `mistral`, `xai`, `ollama`, and the CLI bridges `claude-code-cli` and `gemini-cli`. Another OpenAI-compatible service runs through `openai` with `baseUrl`. |
+| `provider` | no | auto-detected from the environment ([Environment Setup](#environment-setup)) | One of `openai`, `anthropic`, `gemini`, `openrouter`, `requesty`, `groq`, `together`, `mistral`, `xai`, `ollama`, and the CLI bridges `claude-code-cli` and `gemini-cli`. Another OpenAI-compatible service runs through `openai` with `baseUrl`. |
 | `model` | no | provider-specific (`gpt-4o`, `claude-sonnet-4-6`, `gemini-2.5-flash`, `llama3.2` for Ollama, etc.) | Pin explicitly for stability across package upgrades. Use a current model id; retired snapshots return 404. |
 | `apiKey` | no | env auto-detect (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.; full chain in [Environment Setup](#environment-setup)) | Pass explicitly for multi-tenant apps and to avoid coupling code to env var names. |
 

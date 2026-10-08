@@ -68,6 +68,7 @@ for the requested task automatically:
 | `together`               | Cloud | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | —                 | —                        | `TOGETHER_API_KEY`                |
 | `mistral`                | Cloud | `mistral-large-latest`     | —                                | —                        | `MISTRAL_API_KEY`                 |
 | `xai`                    | Cloud | `grok-2`                   | —                                | —                        | `XAI_API_KEY`                     |
+| `requesty`               | Cloud | `openai/gpt-4o`            | —                                | —                        | `REQUESTY_API_KEY`                |
 | `bfl`                    | Cloud | —                          | `flux-pro-1.1`                   | —                        | `BFL_API_KEY`                     |
 | `fal`                    | Cloud | —                          | `fal-ai/flux/dev`                | —                        | `FAL_API_KEY`                     |
 | `minimax`                | Cloud | —                          | `image-01`                       | —                        | `MINIMAX_API_KEY`                 |
@@ -75,7 +76,7 @@ for the requested task automatically:
 | `stable-diffusion-local` | Local | —                          | `v1-5-pruned-emaonly`            | —                        | `STABLE_DIFFUSION_LOCAL_BASE_URL` |
 
 When neither `provider` nor `model` is given, AgentOS checks configured runtimes in order
-(`OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `which claude` → `which gemini` → `OLLAMA_BASE_URL`). Or call `setDefaultProvider({ provider, apiKey })` once at boot to skip env vars entirely; every subsequent function inherits that default while still letting inline `apiKey` win when supplied.
+(`OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `REQUESTY_API_KEY` → `which claude` → `which gemini` → `OLLAMA_BASE_URL`). Or call `setDefaultProvider({ provider, apiKey })` once at boot to skip env vars entirely; every subsequent function inherits that default while still letting inline `apiKey` win when supplied.
 
 ### Inline API Keys
 

@@ -262,13 +262,13 @@ function classifyOutcome(
   "colonistTrajectories": {
     "col-yuki-tanaka": {
       "name": "Dr. Yuki Tanaka",
-      "promotedTurn": 1,
+      "promotedTurn": 0,
       "promotedAs": "Chief Medical Officer",
       "promotedBy": "Aria Chen",
       "hexacoTrajectory": [
-        { "turn": 0, "year": 2035, "openness": 0.52, "conscientiousness": 0.78, "extraversion": 0.45, "agreeableness": 0.61, "emotionality": 0.55, "honestyHumility": 0.68 },
-        { "turn": 6, "year": 2049, "openness": 0.61, "conscientiousness": 0.72, "extraversion": 0.52, "agreeableness": 0.59, "emotionality": 0.51, "honestyHumility": 0.67 },
-        { "turn": 12, "year": 2085, "openness": 0.71, "conscientiousness": 0.65, "extraversion": 0.58, "agreeableness": 0.57, "emotionality": 0.48, "honestyHumility": 0.66 }
+        { "turn": 0, "year": 2035, "hexaco": { "openness": 0.52, "conscientiousness": 0.78, "extraversion": 0.45, "agreeableness": 0.61, "emotionality": 0.55, "honestyHumility": 0.68 } },
+        { "turn": 6, "year": 2049, "hexaco": { "openness": 0.61, "conscientiousness": 0.72, "extraversion": 0.52, "agreeableness": 0.59, "emotionality": 0.51, "honestyHumility": 0.67 } },
+        { "turn": 12, "year": 2085, "hexaco": { "openness": 0.71, "conscientiousness": 0.65, "extraversion": 0.58, "agreeableness": 0.57, "emotionality": 0.48, "honestyHumility": 0.66 } }
       ]
     }
   },
@@ -277,6 +277,8 @@ function classifyOutcome(
   ]
 }
 ```
+
+`promotedTurn` is `0` for every head: the orchestrator promotes them before the first scenario turn. `hexacoTrajectory` holds the Turn 0 profile, then one entry for each turn the head is alive, taken after that turn's drift; the example shows three of them. `colonistTrajectories` lists only promoted colonists with more than one entry.
 
 ## File Changes from v2
 
