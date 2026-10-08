@@ -16,9 +16,16 @@ import { adaptTools } from './runtime/toolAdapter.js';
 import { runEmulatedToolLoop, toShimMessages, type ToolMode } from './runtime/tool-emulation/index.js';
 import { APPROVAL_GRANTED, askApprovalGate } from './runtime/approval-gate.js';
 import {
+  advanceFallbackWalk,
   buildPolicyAwareFallbackChain,
   createPlan,
+  explicitRequiredCapabilities,
+  fallbackEntrySentAs,
   fallbackHopOverrides,
+  gateFallbackEntry,
+  INITIAL_FALLBACK_WALK,
+  resolveFallbackChain,
+  resolvePolicyTier,
   addModelUsage,
   hasBillableUsage,
   isRetryableError,
@@ -28,6 +35,8 @@ import {
   toolsRanBefore,
   usageOfError,
   resolveChainOfThought,
+  type FallbackProviderEntry,
+  type FallbackSkipReason,
   type GenerateTextOptions,
   type GenerationHookContext,
   type GenerationHookResult,
@@ -35,7 +44,10 @@ import {
   type TokenUsage,
   type ToolCallHookInfo,
   type ToolCallRecord,
+  type ResolvedFallbackEntry,
 } from './generateText.js';
+import { ContextWindowExceededError } from '../core/llm/providers/errors/ContextWindowExceededError.js';
+import { checkContextFit } from './runtime/contextWindowFit.js';
 import type { CacheDiagnostics } from '../core/llm/providers/IProvider.js';
 import { toProviderReplayMessage } from './sessionTranscript.js';
 import type { ModelRouteParams } from '../core/llm/routing/IModelRouter.js';
@@ -569,6 +581,29 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             }))
          : undefined;
 
+      // A catalog model is sent only a request it can hold: otherwise the
+      // call throws in place of the send and the walk moves on. Checked on
+      // the first native send and on the prompt shim's first send.
+      const assertFitsContextWindow = (sent: { messages: ReadonlyArray<unknown>; tools?: unknown }): void => {
+        const fit = checkContextFit({
+          provider: resolved.providerId,
+          model: resolved.modelId,
+          messages: sent.messages,
+          tools: sent.tools,
+          maxTokens: opts.maxTokens,
+          customModelParams: opts.customModelParams,
+        });
+        if (!fit.fits && fit.contextWindow !== undefined) {
+          throw new ContextWindowExceededError({
+            provider: resolved.providerId,
+            model: resolved.modelId,
+            contextWindow: fit.contextWindow,
+            estimatedInputTokens: fit.estimatedInputTokens,
+            outputTokens: fit.outputTokens,
+          });
+        }
+      };
+
       const maxSteps = opts.maxSteps ?? 1;
       rootSpan?.setAttribute('agentos.api.max_steps', maxSteps);
       const planningEnabled = !!opts.planning;
@@ -616,6 +651,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       const toolUnsupportedErr = (e: unknown): boolean =>
         e instanceof Error &&
         /support tool use|does not support (tools|function)|no endpoints found that support/i.test(e.message);
+      let shimSendChecked = false;
       async function* runShimStream(): AsyncGenerator<StreamPart> {
         const loopResult = await runEmulatedToolLoop({
           tools: Array.from(toolMap.values()),
@@ -631,6 +667,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           messages: toShimMessages(messages),
           maxRoundtrips: opts.maxSteps ?? 5,
           callModel: async (msgs) => {
+            // The shim sends rendered tool text in place of native schemas,
+            // so its first send is checked on its own.
+            if (!shimSendChecked) {
+              shimSendChecked = true;
+              assertFitsContextWindow({ messages: msgs });
+            }
             // provider is guaranteed non-undefined by the `if (!provider) throw`
             // guard above; the closure just loses TS's flow-narrowing.
             const r = await provider!.generateCompletion(resolved.modelId, msgs as any, {
@@ -744,6 +786,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             console.warn('[agentos] onBeforeGeneration hook error:', hookErr);
           }
         }
+
+        // A leg's first send is checked against its model's window; later
+        // steps are not checked again.
+        if (step === 0) assertFitsContextWindow({ messages: effectiveMessages, tools: toolSchemas });
 
         const stepSpan = startAgentOSSpan('agentos.api.stream_text.step', {
           attributes: {
@@ -1274,17 +1320,49 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // the uncensored prefix) — streaming previously used the plain
       // availability chain, so a mature streamed turn that lost its
       // primary fell onto refuse-happy legs first.
-      const effectiveFallbacks = opts.fallbackProviders === undefined
-        ? buildPolicyAwareFallbackChain(opts.policyTier, recordedProviderId)
-       : opts.fallbackProviders;
-
+      const walkTier = resolvePolicyTier(opts);
+      const chainEntries = opts.fallbackProviders === undefined
+        ? buildPolicyAwareFallbackChain(walkTier, recordedProviderId)
+        : opts.fallbackProviders;
+      const logLegSkip = (entry: FallbackProviderEntry, reason: FallbackSkipReason): void =>
+        fallbackLogger.info('streaming provider fallback skipped', {
+          event: 'fallback_leg_skipped',
+          api: 'streamText',
+          reason,
+          primaryProvider: recordedProviderId,
+          fallbackProvider: entry.provider,
+          fallbackModel: entry.model,
+        });
       // A stream that already handed text or tool activity to the consumer
       // is not restarted on another provider (a refusal after text
       // included): the consumer would receive the partial answer followed by
       // a fresh one, and tools could run twice.
       // firstPartAt is stamped when the first part reaches the consumer.
       const deliveredOutput = firstPartAt !== undefined || shimRanTool;
-      if (effectiveFallbacks.length && isRetryableError(error) && !deliveredOutput) {
+      const walks = isRetryableError(error) && !deliveredOutput;
+      // The top-level walk resolves the chain once (the failed first model's
+      // policy leg dropped, explicit requirements applied, standing legs and
+      // refills marked); a leg receives its resolved slice. Resolved only
+      // when the walk runs, so its skip lines describe a walk.
+      const effectiveFallbacks: ResolvedFallbackEntry[] = !walks
+        ? []
+        : opts.__fallbackWalk
+          ? chainEntries
+          : resolveFallbackChain(chainEntries, {
+              primary: { provider: recordedProviderId, model: recordedModelId },
+              requiredCapabilities: explicitRequiredCapabilities(opts),
+              excludedModelIds: opts.routerParams?.excludedModelIds,
+              onSkip: logLegSkip,
+            });
+      // This attempt's own failure updates the walk: a refusal is recorded,
+      // and a standing leg that failed on availability is owed a refill.
+      let walkState = advanceFallbackWalk(
+        opts.__fallbackWalk?.state ?? INITIAL_FALLBACK_WALK,
+        opts.__fallbackWalk?.role,
+        error,
+      );
+
+      if (walks && effectiveFallbacks.length) {
         let lastFallbackError: Error = error;
         // How the walk ended: a leg served the stream; a leg failed after it
         // delivered output (its error part already reached the consumer); or
@@ -1295,19 +1373,33 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
 
         for (const fb of effectiveFallbacks) {
           attempt += 1;
+          // A refill runs only while a standing leg is owed one, and the
+          // policy chain's Claude legs are passed over after a refusal.
+          const gate = gateFallbackEntry(walkState, fb);
+          if (!gate.run) {
+            logLegSkip(fb, gate.reason);
+            continue;
+          }
+          walkState = gate.state;
           // Skip fallback entries with an open breaker: the recursive
           // streamText below would short-circuit at the same isOpen()
           // check, but the outer skip avoids the extra log noise +
           // recursion overhead.
-          if (globalLLMProviderHealth.isOpen(fb.provider)) {
+          // The breaker read is the provider the leg is sent to: an
+          // `openrouter:` id under another provider goes to OpenRouter.
+          const legProvider = fallbackEntrySentAs(fb).provider;
+          if (globalLLMProviderHealth.isOpen(legProvider)) {
             fallbackLogger.info('streaming provider fallback skipped (circuit open)', {
               event: 'fallback_skipped_circuit_open',
               api: 'streamText',
               primaryProvider: recordedProviderId,
-              fallbackProvider: fb.provider,
+              fallbackProvider: legProvider,
               fallbackModel: fb.model,
               attempt,
             });
+            // An open breaker is an availability failure: a standing leg is
+            // owed a refill.
+            walkState = advanceFallbackWalk(walkState, fb.walkRole, undefined);
             continue;
           }
           // Whether this leg handed the consumer a part, and the error it
@@ -1330,6 +1422,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ...opts,
               provider: fb.provider,
               model: fb.model,
+              // Legs run as named: no router re-picks the model, and the
+              // call's resolved tier travels with them.
+              router: undefined,
+              policyTier: walkTier,
+              // The walk's state before this leg, and its role.
+              __fallbackWalk: { state: walkState, role: fb.walkRole },
               // Per-hop effort, cache and output budget over the ORIGINAL
               // call, shared with generateText's walker (see
               // fallbackHopOverrides). Canonical chain legs pin `cache: false`
@@ -1397,6 +1495,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ) {
                 break;
               }
+              walkState = advanceFallbackWalk(walkState, fb.walkRole, legError);
               continue;
             }
 
@@ -1455,6 +1554,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               break;
             }
             if (toolsRanBefore(lastFallbackError) || chainWalkedBefore(lastFallbackError)) break;
+            walkState = advanceFallbackWalk(walkState, fb.walkRole, lastFallbackError);
           }
         }
 

@@ -869,7 +869,7 @@ describe('generateText', () => {
 
   // Policy-aware fallback: when policyTier is mature/private-adult AND
   // the primary refuses on a content_policy_violation, the auto-built
-  // chain should include the uncensored Hermes 3 prefix and the
+  // chain should include the uncensored catalog ladder and the
   // request should re-route there instead of hard-failing. Without
   // this branch, NSFW callers either had to roll their own fallback
   // or eat the 400. See `buildPolicyAwareFallbackChain` +
@@ -1037,11 +1037,12 @@ describe('generateText', () => {
   });
 
   describe('policy-aware fallback', () => {
-    it('routes content_policy_violation to OpenRouter Hermes 3 when policyTier=mature', async () => {
+    it('routes content_policy_violation to the mature ladder lead when policyTier=mature', async () => {
       // Primary throws an OpenAI-shaped content-policy refusal, then the
       // fallback succeeds. The fallback chain is auto-built from the
-      // policyTier — Hermes 3 leads, then Sonnet, then the standard
-      // availability suffix.
+      // policyTier: Llama 3.3 70B leads the mature ladder, then magnum and
+      // Hermes 3 70B, then the availability suffix.
+      vi.mocked(resolveModelOption).mockClear();
       const policyError = new Error("Sorry, I can't help with that.");
       (policyError as { httpStatus?: number }).httpStatus = 400;
       (policyError as { code?: string }).code = 'content_policy_violation';
@@ -1049,7 +1050,7 @@ describe('generateText', () => {
       hoisted.generateCompletion
         .mockRejectedValueOnce(policyError)
         .mockResolvedValueOnce({
-          modelId: 'nousresearch/hermes-3-llama-3.1-405b',
+          modelId: 'meta-llama/llama-3.3-70b-instruct',
           usage: { promptTokens: 10, completionTokens: 8, totalTokens: 18 },
           choices: [
             {
@@ -1068,6 +1069,19 @@ describe('generateText', () => {
           policyTier: 'mature',
         });
         expect(result.text).toBe('uncensored reply');
+        // This file's model mocks return a fixed model, so the leg's requested
+        // provider and model are read from the options it was called with:
+        // the one call made at fallback depth 1. (The walk resolves each
+        // chain entry through the same function before any leg runs.)
+        const legOptions = vi
+          .mocked(resolveModelOption)
+          .mock.calls.map((c) => c[0] as { provider?: string; model?: string; __fallbackDepth?: number })
+          .find((o) => o.__fallbackDepth === 1);
+        expect(legOptions).toBeDefined();
+        expect([legOptions?.provider, legOptions?.model]).toEqual([
+          'openrouter',
+          'meta-llama/llama-3.3-70b-instruct',
+        ]);
       } finally {
         if (originalKey === undefined) {
           delete process.env.OPENROUTER_API_KEY;
@@ -1077,7 +1091,7 @@ describe('generateText', () => {
       }
     });
 
-    it('does NOT include Hermes 3 prefix when policyTier=safe (back-compat)', async () => {
+    it('does NOT include the uncensored ladder when policyTier=safe (back-compat)', async () => {
       const policyError = new Error("Sorry, I can't help with that.");
       (policyError as { httpStatus?: number }).httpStatus = 400;
       (policyError as { code?: string }).code = 'content_policy_violation';
@@ -1088,7 +1102,7 @@ describe('generateText', () => {
       process.env.OPENROUTER_API_KEY = 'test-or-key';
       try {
         // safe tier with content_policy_violation: the policy chain
-        // builder returns the standard availability chain (no Hermes 3
+        // builder returns the standard availability chain (no uncensored
         // prefix). Without ANTHROPIC_API_KEY set, the chain is just
         // OpenRouter (default model) which we don't mock — so this
         // should bubble the original refusal instead of routing.
@@ -1217,10 +1231,57 @@ describe('canonical fallback chains stand their cache markers down', () => {
     withAllKeys(() => {
       const chain = buildPolicyAwareFallbackChain('mature');
       expect(chain.length).toBeGreaterThanOrEqual(5);
-      expect(chain[0]?.model).toBe('nousresearch/hermes-3-llama-3.1-405b');
+      expect(chain[0]?.model).toBe('meta-llama/llama-3.3-70b-instruct');
       for (const entry of chain) {
         expect(entry.cache, `${entry.provider}:${entry.model ?? ''}`).toBe(false);
       }
+    });
+  });
+  it('emits the mature ladder as tagged uncensored legs, the 8B never, then the tagged suffix', () => {
+    withAllKeys(() => {
+      const chain = buildPolicyAwareFallbackChain('mature');
+      expect(chain.slice(0, 3)).toEqual([
+        { provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct', cache: false, origin: 'policy-default', group: 'uncensored' },
+        { provider: 'openrouter', model: 'anthracite-org/magnum-v4-72b', cache: false, origin: 'policy-default', group: 'uncensored' },
+        { provider: 'openrouter', model: 'nousresearch/hermes-3-llama-3.1-70b', cache: false, origin: 'policy-default', group: 'uncensored' },
+      ]);
+      expect(chain.map((e) => e.model)).not.toContain('meta-llama/llama-3.1-8b-instruct');
+      const suffix = chain.slice(3);
+      expect(suffix.map((e) => `${e.provider}:${e.model}`)).toEqual(
+        buildFallbackChain().map((e) => `${e.provider}:${e.model}`),
+      );
+      for (const entry of suffix) {
+        expect(entry.origin).toBe('policy-default');
+        expect(entry.group).toBeUndefined();
+      }
+    });
+  });
+
+  it('emits the erotic private-adult ladder', () => {
+    withAllKeys(() => {
+      const chain = buildPolicyAwareFallbackChain('private-adult');
+      expect(chain.filter((e) => e.group === 'uncensored').map((e) => e.model)).toEqual([
+        'anthracite-org/magnum-v4-72b',
+        'nousresearch/hermes-3-llama-3.1-70b',
+      ]);
+    });
+  });
+
+  it('leaves safe and standard chains untagged and equal to the availability chain', () => {
+    withAllKeys(() => {
+      for (const tier of ['safe', 'standard', undefined] as const) {
+        const chain = buildPolicyAwareFallbackChain(tier);
+        expect(chain).toEqual(buildFallbackChain());
+        expect(chain.some((e) => e.origin !== undefined || e.group !== undefined)).toBe(false);
+      }
+    });
+  });
+
+  it('adds no ladder legs without an OpenRouter key', () => {
+    withAllKeys(() => {
+      delete process.env.OPENROUTER_API_KEY;
+      // withAllKeys restores every key afterwards.
+      expect(buildPolicyAwareFallbackChain('mature').some((e) => e.group === 'uncensored')).toBe(false);
     });
   });
 });

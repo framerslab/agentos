@@ -29,6 +29,28 @@ import type {
   SandboxedToolSpec,
 } from '../types.js';
 import type { ToolExecutionResult, ToolExecutionContext } from '../../../core/tools/ITool.js';
+import type { StepGate } from '../StepGate.js';
+
+/** A gate over one mock: every step resolves to a tool with no side effects and runs through `executeTool`. */
+function gateOver(executeTool: ReturnType<typeof vi.fn>): StepGate {
+  const call = executeTool as unknown as (
+    name: string,
+    args: unknown,
+    context: ToolExecutionContext,
+  ) => Promise<ToolExecutionResult>;
+  return {
+    resolve: (name) => ({
+      id: name,
+      name,
+      displayName: name,
+      description: name,
+      inputSchema: {},
+      hasSideEffects: false,
+      execute: (args: Record<string, unknown>, context: ToolExecutionContext) => call(name, args, context),
+    }),
+    run: (tool, args, context) => call(tool.name, args, context),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -170,7 +192,7 @@ describe('EmergentCapabilityEngine', () => {
     generateText = vi.fn();
     executeTool = vi.fn();
 
-    composableBuilder = new ComposableToolBuilder(executeTool as any);
+    composableBuilder = new ComposableToolBuilder(gateOver(executeTool));
     sandboxForge = new SandboxedToolForge({ timeoutMs: 3000 });
     judge = new EmergentJudge({
       judgeModel: 'gpt-4o-mini',
@@ -451,6 +473,22 @@ describe('EmergentCapabilityEngine', () => {
     // Tool should now be at agent tier.
     const tool = registry.get(toolId);
     expect(tool!.tier).toBe('agent');
+  });
+
+  it('checkPromotion leaves a tool whose owner has the reserved instance-id prefix at the session tier', async () => {
+    generateText.mockResolvedValueOnce(approvedVerdictJson());
+    const forgeResult = await engine.forge(makeSandboxRequest(), { agentId: 'gmi-instance-0b7e3c1a', sessionId });
+    expect(forgeResult.success).toBe(true);
+    const toolId = forgeResult.toolId!;
+    for (let i = 0; i < 5; i++) {
+      registry.recordUse(toolId, { a: i, b: i }, { sum: i * 2 }, true, 10);
+    }
+    const judgeCalls = generateText.mock.calls.length;
+
+    expect(await engine.checkPromotion(toolId)).toBeNull();
+    // The panel is not asked, and the tool stays at the session tier.
+    expect(generateText.mock.calls.length).toBe(judgeCalls);
+    expect(registry.get(toolId)!.tier).toBe('session');
   });
 
   // =========================================================================

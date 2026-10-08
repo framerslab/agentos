@@ -333,6 +333,21 @@ function namedErrorCode(code: unknown): string | undefined {
   return typeof code === 'string' && /^[a-z][a-z0-9_]*$/i.test(code) ? code : undefined;
 }
 
+/**
+ * The error a stream chunk reports: the event's own `error`, else the error
+ * on a choice that `finish_reason: 'error'` ended, as the non-stream path
+ * reads a body. A choice ended by `'error'` with no error object is not a
+ * documented shape and is mapped as a finish.
+ */
+function streamChunkError(apiChunk: OpenRouterChatCompletionAPIResponse): OpenRouterErrorEnvelope | undefined {
+  if (apiChunk.error && typeof apiChunk.error === 'object') return apiChunk.error;
+  const choice = Array.isArray(apiChunk.choices) ? apiChunk.choices[0] : undefined;
+  if (choice && choice.finish_reason === 'error' && choice.error && typeof choice.error === 'object') {
+    return choice.error;
+  }
+  return undefined;
+}
+
 /** How OpenRouter declined a request, read from its error envelope. */
 export interface OpenRouterDecline {
   /**
@@ -910,6 +925,12 @@ export class OpenRouterProvider implements IProvider {
     let yieldedText = '';
     let held: { decline: OpenRouterDecline; refusal: string | null; usage?: ModelUsage } | null = null;
     let readError: unknown;
+    // An error on a choice (not the documented event, which ends the
+    // stream) is held while the usage-only line that may follow is read,
+    // so the failed attempt's tokens are not lost. Initialised through the
+    // assertion: tsc otherwise narrows the variable to its initial null at
+    // the loop's first read and does not carry the later assignment back.
+    let pendingError = null as ModelCompletionResponse | null;
     const isDecline = (e: unknown): boolean =>
       e instanceof OpenRouterProviderError && (e.code === 'content_filter' || e.code === 'content_policy_violation');
 
@@ -920,7 +941,7 @@ export class OpenRouterProvider implements IProvider {
             // The line that shows the abort is usually the usage line a held
             // decline was waiting for: read what it reports before leaving.
             if (held) held.usage = this.usageOfSseLine(rawChunk) ?? held.usage;
-            yield abortChunk('Stream aborted by caller', held?.usage);
+            yield abortChunk('Stream aborted by caller', held?.usage ?? (pendingError as ModelCompletionResponse | null)?.usage);
             return;
           }
           if (!rawChunk.startsWith('data: ')) continue;
@@ -942,32 +963,42 @@ export class OpenRouterProvider implements IProvider {
             continue;
           }
 
+          const heldError: ModelCompletionResponse | null = pendingError;
+          if (heldError) {
+            // After a choice-level error only the usage-only line is wanted;
+            // the chunk is yielded when the stream ends.
+            if (apiChunk.usage) pendingError = { ...heldError, usage: mapOpenRouterUsage(apiChunk.usage) };
+            continue;
+          }
+
           // OpenRouter reports upstream failures MID-STREAM as an SSE data
-          // event carrying an `error` object. A content decline throws typed
-          // (the walkers move on before any output; after output the stream
-          // ends with an error part). Any other error still surfaces as an
-          // upstream_error chunk and ends the stream.
-          if (apiChunk.error && typeof apiChunk.error === 'object') {
+          // event carrying an `error` object, on the event or on the choice
+          // it ends. A content decline throws typed (the walkers move on
+          // before any output; after output the stream ends with an error
+          // part). Any other error still surfaces as an upstream_error chunk
+          // and ends the stream.
+          const streamError = streamChunkError(apiChunk);
+          if (streamError) {
             // The stream is an HTTP 200, so the in-body 403 row applies here too.
-            const decline = classifyOpenRouterDecline(apiChunk.error, { inBody: true });
+            const decline = classifyOpenRouterDecline(streamError, { inBody: true });
             if (decline) {
               throw this.declineError(modelId, decline, {
-                httpStatus: typeof apiChunk.error.code === 'number' ? apiChunk.error.code : undefined,
-                error: apiChunk.error,
+                httpStatus: typeof streamError.code === 'number' ? streamError.code : undefined,
+                error: streamError,
                 partialText: yieldedText,
                 // The event's own usage when it reports one, else what the
                 // held finish or the usage chunk reported.
                 usage: mapOpenRouterUsage(apiChunk.usage) ?? held?.usage,
               });
             }
-            const errMessage = apiChunk.error.message || 'OpenRouter mid-stream error';
-            const errCode = apiChunk.error.code;
+            const errMessage = streamError.message || 'OpenRouter mid-stream error';
+            const errCode = streamError.code;
             // The typed code: metadata.error_type, else the envelope's own
             // `type`, in the order the HTTP error path reads them.
-            const envelopeType = (apiChunk.error as { type?: unknown }).type;
+            const envelopeType = (streamError as { type?: unknown }).type;
             const errType =
-              typeof apiChunk.error.metadata?.error_type === 'string'
-                ? apiChunk.error.metadata.error_type
+              typeof streamError.metadata?.error_type === 'string'
+                ? streamError.metadata.error_type
                 : typeof envelopeType === 'string'
                   ? envelopeType
                   : undefined;
@@ -987,27 +1018,40 @@ export class OpenRouterProvider implements IProvider {
               isContextWindowRejection(errType, typeof errCode === 'number' ? errCode : undefined, errMessage)
                 ? CONTEXT_WINDOW_EXCEEDED_CODE
                 : namedErrorCode(errCode);
+            // The documented event ends the stream. An error on the choice is
+            // not documented to, so the usage-only line that may follow it is
+            // still read.
+            const fromChoice = !(apiChunk.error && typeof apiChunk.error === 'object');
             if (held) {
               // The answer already ended on a content_filter finish. A later
               // upstream failure is the end of the read: it neither replaces
               // the held decline nor loses the usage read so far.
               if (apiChunk.usage) held.usage = mapOpenRouterUsage(apiChunk.usage);
               readError = new Error(decorated);
+              if (fromChoice) continue;
               break;
             }
-            yield {
+            // What the failed attempt billed, when the chunk reports it.
+            const errUsage = mapOpenRouterUsage(apiChunk.usage);
+            const errorChunk: ModelCompletionResponse = {
               id: apiChunk.id ?? `openrouter-error-${Date.now()}`,
               object: 'chat.completion.chunk',
               created: apiChunk.created ?? Math.floor(Date.now() / 1000),
               modelId: apiChunk.model || modelId,
               choices: [],
               isFinal: true,
+              ...(errUsage ? { usage: errUsage } : {}),
               error: {
                 message: decorated,
                 type: 'upstream_error',
                 ...(chunkCode !== undefined ? { code: chunkCode } : {}),
               },
             };
+            if (fromChoice) {
+              pendingError = errorChunk;
+              continue;
+            }
+            yield errorChunk;
             break;
           }
 
@@ -1049,7 +1093,19 @@ export class OpenRouterProvider implements IProvider {
         // A read error after a content_filter finish does not lose the
         // decline: it is thrown below with the usage held so far.
         if (held) readError = error;
-        else throw error;
+        // A read error during the wait for a held error's usage line does
+        // not replace the failure already read.
+        else if (!pendingError) throw error;
+      }
+      const heldErrorChunk: ModelCompletionResponse | null = pendingError;
+      if (heldErrorChunk) {
+        // An abort during the wait wins, as it does over a held decline.
+        if (abortSignal?.aborted) {
+          yield abortChunk('Stream aborted by caller', heldErrorChunk.usage);
+          return;
+        }
+        yield heldErrorChunk;
+        return;
       }
       if (held) {
         // An abort during the wait wins over the decline. The loop only
@@ -1343,8 +1399,10 @@ export class OpenRouterProvider implements IProvider {
         modelId: apiChunk.model || requestedModelId,
         ...(apiChunk.provider ? { servingProvider: apiChunk.provider } : {}),
         choices: finalChoices,
-        responseTextDelta: isFinal ? undefined : responseTextDelta,
-        toolCallsDeltas: isFinal ? undefined : toolCallsDeltas,
+        // The finish chunk can carry the last text or tool-argument fragment,
+        // and deltas are append-only (StreamingReconstructor), so it keeps them.
+        responseTextDelta,
+        toolCallsDeltas,
         isFinal,
         usage: finalUsage,
       };

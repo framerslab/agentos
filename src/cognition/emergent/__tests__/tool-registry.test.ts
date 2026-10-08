@@ -416,6 +416,18 @@ describe('EmergentToolRegistry', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Additional: the reserved instance-id prefix never reaches the agent tier
+  // -------------------------------------------------------------------------
+  it('promote() refuses the agent tier for an owner with the reserved instance-id prefix', async () => {
+    const registry = makeRegistry();
+    const tool = makeTool({ createdBy: 'gmi-instance-0b7e3c1a' });
+    registry.register(tool, 'session');
+
+    await expect(registry.promote(tool.id, 'agent')).rejects.toThrow(/reserved prefix "gmi-instance-"/);
+    expect(registry.get(tool.id)?.tier).toBe('session');
+  });
+
+  // -------------------------------------------------------------------------
   // Additional: register() throws on duplicate ID
   // -------------------------------------------------------------------------
   it('register() throws when a tool with the same ID already exists', () => {
@@ -497,5 +509,43 @@ describe('EmergentToolRegistry', () => {
     const filtered = registry.getByTier('agent', { agentId: 'agent-A' });
     expect(filtered).toHaveLength(1);
     expect(filtered[0].createdBy).toBe('agent-A');
+  });
+});
+
+describe('EmergentToolRegistry generations', () => {
+  const record = (toolId: string) => ({ toolId, state: 'active' as const, reason: null, setBy: 'library' as const, at: 1, request: null });
+
+  it('a removal moves the generation even without storage, so a stale adoption is refused', () => {
+    const registry = makeRegistry();
+    const tool = makeTool({ id: 'gen-1', tier: 'shared' });
+    const before = registry.generation('gen-1');
+    registry.register(tool, 'shared');
+    expect(registry.generation('gen-1')).not.toBe(before);
+    const read = registry.generation('gen-1');
+    registry.remove('gen-1');
+    expect(registry.generation('gen-1')).not.toBe(read);
+    expect(registry.adopt(tool, record('gen-1'), read)).toBe(false);
+    expect(registry.get('gen-1')).toBeUndefined();
+  });
+
+  it('a registration under a removed id leaves a stale adoption refused and the new tool in place', () => {
+    const registry = makeRegistry();
+    const first = makeTool({ id: 'gen-2', name: 'first_tool', tier: 'shared' });
+    registry.register(first, 'shared');
+    const read = registry.generation('gen-2');
+    registry.remove('gen-2');
+    registry.register(makeTool({ id: 'gen-2', name: 'second_tool', tier: 'shared' }), 'shared');
+    expect(registry.adopt(first, record('gen-2'), read)).toBe(false);
+    expect(registry.get('gen-2')?.name).toBe('second_tool');
+  });
+
+  it('an adoption at the current generation lands, and moves the generation on', () => {
+    const registry = makeRegistry();
+    const tool = makeTool({ id: 'gen-3', tier: 'shared' });
+    const read = registry.generation('gen-3');
+    expect(registry.adopt(tool, record('gen-3'), read)).toBe(true);
+    expect(registry.get('gen-3')).toBe(tool);
+    expect(registry.generation('gen-3')).not.toBe(read);
+    expect(registry.adopt(tool, record('gen-3'), read)).toBe(false);
   });
 });
