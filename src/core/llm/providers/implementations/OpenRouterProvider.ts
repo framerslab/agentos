@@ -939,7 +939,7 @@ export class OpenRouterProvider implements IProvider {
             // The line that shows the abort is usually the usage line a held
             // decline was waiting for: read what it reports before leaving.
             if (held) held.usage = this.usageOfSseLine(rawChunk) ?? held.usage;
-            yield abortChunk('Stream aborted by caller', held?.usage ?? pendingError?.usage);
+            yield abortChunk('Stream aborted by caller', held?.usage ?? (pendingError as ModelCompletionResponse | null)?.usage);
             return;
           }
           if (!rawChunk.startsWith('data: ')) continue;
@@ -961,10 +961,13 @@ export class OpenRouterProvider implements IProvider {
             continue;
           }
 
-          if (pendingError) {
+          // Read through a typed local: the assignment that sets this comes
+          // later in the loop body, and tsc narrows the variable itself here.
+          const heldError: ModelCompletionResponse | null = pendingError;
+          if (heldError) {
             // After a choice-level error only the usage-only line is wanted;
             // the chunk is yielded when the stream ends.
-            if (apiChunk.usage) pendingError = { ...pendingError, usage: mapOpenRouterUsage(apiChunk.usage) };
+            if (apiChunk.usage) pendingError = { ...heldError, usage: mapOpenRouterUsage(apiChunk.usage) };
             continue;
           }
 
@@ -1094,13 +1097,14 @@ export class OpenRouterProvider implements IProvider {
         // not replace the failure already read.
         else if (!pendingError) throw error;
       }
-      if (pendingError) {
+      const heldErrorChunk: ModelCompletionResponse | null = pendingError;
+      if (heldErrorChunk) {
         // An abort during the wait wins, as it does over a held decline.
         if (abortSignal?.aborted) {
-          yield abortChunk('Stream aborted by caller', pendingError.usage);
+          yield abortChunk('Stream aborted by caller', heldErrorChunk.usage);
           return;
         }
-        yield pendingError;
+        yield heldErrorChunk;
         return;
       }
       if (held) {
