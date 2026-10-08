@@ -154,21 +154,26 @@ export function parseModelString(model: string): ParsedModel {
  * @param providerId - Provider identifier (e.g. `"openai"`, `"anthropic"`, `"ollama"`).
  * @param modelId - Model identifier within the provider.
  * @param overrides - Optional explicit API key and/or base URL that take precedence
- *   over environment variable lookups.
+ *   over environment variable lookups. `strict` (set for an agency seat) admits
+ *   only a `setDefaultProvider()` default that names this provider, for the key
+ *   and for the URL, and turns off the Anthropic → OpenRouter fallback, so a
+ *   provider with no key of its own fails.
  * @returns A `ResolvedProvider` ready for `createProviderManager()`.
  * @throws {Error} When no credentials can be resolved for the given provider.
  */
 export function resolveProvider(
   providerId: string,
   modelId: string,
-  overrides?: { apiKey?: string; baseUrl?: string }
+  overrides?: { apiKey?: string; baseUrl?: string; strict?: boolean }
 ): ResolvedProvider {
   // Global-default credentials apply when their `provider` matches the
   // provider being resolved (or when no provider was pinned in the
   // default — in which case the default's apiKey is treated as
-  // applicable to whichever provider the auto-detect chain picked).
+  // applicable to whichever provider the auto-detect chain picked),
+  // unless the caller is strict (an agency seat): then only a default
+  // that names this provider applies, and Anthropic is never rerouted.
   const def = getDefaultProvider();
-  const defAppliesToThisProvider = def && (!def.provider || def.provider === providerId);
+  const defAppliesToThisProvider = def && (def.provider === providerId || (!def.provider && !overrides?.strict));
   const defApiKey = defAppliesToThisProvider ? def?.apiKey : undefined;
   const defBaseUrl = defAppliesToThisProvider ? def?.baseUrl : undefined;
 
@@ -194,7 +199,8 @@ export function resolveProvider(
 
   // Anthropic fallback: when ANTHROPIC_API_KEY is missing, fall back to OpenRouter
   // if available. This is a convenience — OpenRouter proxies Anthropic models.
-  if (providerId === 'anthropic' && !apiKey) {
+  // A strict caller fails below instead: its key must be Anthropic's own.
+  if (providerId === 'anthropic' && !apiKey && !overrides?.strict) {
     const orKey = process.env['OPENROUTER_API_KEY'];
     if (orKey) {
       // Anthropic's native API takes dated model IDs (e.g. "claude-haiku-4-5-20251001").
