@@ -61,6 +61,7 @@ import {
   type SessionHistoryConfig,
 } from './sessionHistory.js';
 import type { SessionTranscriptMessage } from './sessionTranscript.js';
+import type { CognitionConfig, CognitionProfile } from './runtime/gmiCognition.js';
 
 /**
  * Provider hook interface consumed by `agent()` for memory integration.
@@ -297,6 +298,17 @@ export interface AgentOptions extends BaseAgentConfig {
    * @see https://github.com/aaronjmars/soul.md for the cross-framework convention.
    */
   soul?: string | { content: string } | { path: string };
+  /**
+   * Which engine serves this agent. `'legacy'` (the default) calls the model through
+   * generateText and streamText; `'gmi'` serves every session with a Generalized Mind
+   * Instance (docs/GMI.md, "GMIs from agent()").
+   */
+  runtime?: 'legacy' | 'gmi';
+  /**
+   * GMI profile when `runtime` is `'gmi'`: `'light'` (the default), `'full'`, or each
+   * switch set in a {@link CognitionConfig}.
+   */
+  cognition?: CognitionProfile | CognitionConfig;
 }
 
 /**
@@ -418,6 +430,13 @@ export interface AgentSession {
   usage(): Promise<AgentOSUsageAggregate>;
   /** Clears all messages from this session's history. */
   clear(): void;
+  /**
+   * Ends this session and releases its history. A send still running is returned
+   * to its caller but added to no history, and the next `agent.session(id)` with
+   * this id starts empty. The id's usage totals stay readable through
+   * `agent.usage(id)`. With `runtime: 'gmi'`, the session's GMI is shut down too.
+   */
+  close(): Promise<void>;
 }
 
 /**
@@ -1177,6 +1196,14 @@ export function agent(opts: AgentOptions): Agent {
 
         clear() {
           historyBuffer?.reseed([]);
+        },
+
+        async close(): Promise<void> {
+          // The reseed bumps the epoch, so a send still in flight drops its
+          // append; the next session(id) builds a new buffer. The usage tally
+          // stays, as agent.close() keeps it, so agent.usage(id) still counts.
+          historyBuffer?.reseed([]);
+          if (sessionBuffers.get(sessionId) === historyBuffer) sessionBuffers.delete(sessionId);
         },
       };
       // The send() implementation returns a union (GenerateTextResult |

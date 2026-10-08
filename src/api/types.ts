@@ -88,6 +88,13 @@ export interface MemoryConfig {
     /** Cron-style or ISO-duration interval between consolidation passes (e.g. `"PT1H"`). */
     interval?: string;
   };
+  /**
+   * Embedding model for cognitive memory on the GMI path (`agent({ runtime: 'gmi' })`).
+   * Default: OpenAI's default embedding model when OPENAI_API_KEY is set, else Ollama's when
+   * OLLAMA_BASE_URL is set. Anthropic has no embedding models. `dimension` is required for a
+   * model whose dimension agentos does not know.
+   */
+  embedding?: { provider: string; model?: string; dimension?: number };
 }
 
 /**
