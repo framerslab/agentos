@@ -1446,4 +1446,36 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
       doubled: 4,
     });
   });
+
+  it("a forge whose tool a load of its session adopted while the state was being written reports success, and the tool runs", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+
+    // The forge's state row has landed and its flag write is held open; a
+    // load of the session reads the row and adopts the tool meanwhile.
+    const gate = db.gateNext('SET is_active = COALESCE(');
+    const forging = callTool(
+      host.orchestrator,
+      'forge_tool',
+      {
+        name: 'double_it',
+        description: 'Doubles a number.',
+        inputSchema: NUMBER_IN,
+        outputSchema: DOUBLED_OUT,
+        implementation: { mode: 'sandbox', code: RAW_DOUBLE, allowlist: [] },
+        testCases: [{ input: { n: 2 }, expectedOutput: { doubled: 4 } }],
+      },
+      { sessionId: 'sess-m1' },
+    );
+    await gate.entered;
+    const loaded = await host.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess-m1' });
+    expect(loaded.outcomes).toEqual([{ toolId: expect.any(String), name: 'double_it', state: 'active', reason: null }]);
+    gate.release();
+    const forged = await forging;
+
+    expect(forged.isError).toBeFalsy();
+    expect(String(forged.output.toolId)).toBe(loaded.outcomes[0].toolId);
+    expect((await callTool(host.orchestrator, 'double_it', { n: 3 })).output).toEqual({ doubled: 6 });
+    expect(host.engine.getSessionTools('sess-m1').map((tool) => tool.name)).toEqual(['double_it']);
+  });
 });

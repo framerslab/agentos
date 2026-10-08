@@ -711,7 +711,6 @@ export class EmergentCapabilityEngine {
       };
 
       this.registry.register(tool, 'session');
-      const registered = this.registry.generation(toolId);
       let written: ToolStateRecord | undefined;
       try {
         written = await this.registry.setState(toolId, 'active', null, {
@@ -726,8 +725,11 @@ export class EmergentCapabilityEngine {
           error instanceof Error ? error.message : error,
         );
       }
-      if (this.registry.generation(toolId) !== registered) {
-        // Removed while it was being forged: nothing is registered.
+      if (!this.registry.get(toolId)) {
+        // Removed while it was being forged: nothing is registered. (Another
+        // change while the state was written, such as a load of the session
+        // that adopted the tool from its row, leaves it registered: the forge
+        // goes on with the object the registry holds.)
         return { success: false, error: 'the tool was removed while it was being forged' };
       }
       if (written && written.state === 'demoted' && written.reason === 'removed') {
