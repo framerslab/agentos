@@ -420,6 +420,99 @@ describe("the bindings' bounds", () => {
   });
 });
 
+describe('what the guest hands the host', () => {
+  it("refuses a binding's argument once the call has handed the host its memory budget", async () => {
+    const seen: number[] = [];
+    const ran = await executor.run(
+      direct(
+        `async function execute() {
+          const path = 'x'.repeat(4000000);
+          let accepted = 0;
+          for (;;) {
+            try {
+              await fs.readFile(path);
+              accepted += 1;
+            } catch (e) {
+              return { accepted, name: e.name, message: e.message };
+            }
+          }
+        }`,
+        {},
+        {
+          globals: {
+            fs: {
+              readFile: async (filePath: unknown) => {
+                seen.push(String(filePath).length);
+                return 'read';
+              },
+            },
+          },
+        },
+      ),
+    );
+    // 64 MB counted at two bytes a character: eight copies of four million characters fit, the ninth does not.
+    expect(ran).toMatchObject({
+      status: 'ok',
+      output: { accepted: 8, name: 'RangeError', message: 'fs_readFile: the data this call handed the host passed its limit of 64 MB' },
+    });
+    expect(seen).toEqual(Array.from({ length: 8 }, () => 4_000_000));
+  });
+
+  it('reports a thrown message cut in the guest at 16,384 characters', async () => {
+    const ran = await executor.run(direct("function execute() { throw new Error('y'.repeat(100000)); }"));
+    expect(ran).toMatchObject({
+      status: 'error',
+      error: `Execution error: ${'y'.repeat(16384)} (cut at 16384 characters)`,
+    });
+  });
+
+  it('reads only the JSON text the wrapper makes as the result', async () => {
+    const ran = await executor.run(
+      direct("function execute() { JSON.stringify = () => ({ big: 'z'.repeat(1000) }); return { a: 1 }; }"),
+    );
+    expect(ran).toMatchObject({ status: 'error', error: 'Execution error: the result was not JSON text' });
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -1])('refuses a timeout of %s', async (timeoutMs) => {
+    const ran = await executor.run(direct('function execute() { return 1; }', {}, { timeoutMs }));
+    expect(ran).toMatchObject({
+      status: 'error',
+      error: `Execution error: timeoutMs must be a positive finite number of milliseconds, got ${String(timeoutMs)}`,
+    });
+  });
+
+  it('sends a byte body, form parameters and any other body as fetch reads them, on the path without a ceiling', async () => {
+    const seen: Array<{ body: unknown; headers: unknown }> = [];
+    const globals = {
+      fetch: async (_input: unknown, init?: { body?: unknown; headers?: unknown }) => {
+        const body = init?.body;
+        seen.push({ body: body instanceof Uint8Array ? Array.from(body) : body, headers: init?.headers });
+        return new Response('ok');
+      },
+    };
+    const ran = await executor.run(
+      direct(
+        `async function execute() {
+          await fetch('http://example.test/a', { method: 'POST', body: new Uint8Array([0, 1, 255]) });
+          await fetch('http://example.test/b', { method: 'POST', body: new URLSearchParams({ a: '1 2' }) });
+          await fetch('http://example.test/c', { method: 'POST', body: 'text' });
+          await fetch('http://example.test/d', { method: 'POST', body: { toString() { return 'object'; } } });
+          return 'sent';
+        }`,
+        {},
+        { globals },
+      ),
+    );
+    expect(ran).toMatchObject({ status: 'ok', output: 'sent' });
+    expect(seen).toEqual([
+      { body: [0, 1, 255], headers: undefined },
+      { body: 'a=1+2', headers: [['content-type', 'application/x-www-form-urlencoded;charset=UTF-8']] },
+      { body: 'text', headers: undefined },
+      { body: 'object', headers: undefined },
+    ]);
+  });
+});
+
 describe('Intl, formatted through the host', () => {
   const INTL_TOOL = `function execute() {
     const date = new Date(Date.UTC(2026, 9, 7, 15, 30));
