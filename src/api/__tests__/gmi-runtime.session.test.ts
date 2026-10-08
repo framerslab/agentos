@@ -88,6 +88,13 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(s.seen[0].options.tools).toBeUndefined();
   });
 
+  it('a send that asks for a tool choice on an agent with no tools sends none: OpenAI rejects tool_choice without tools', async () => {
+    const k = key(); const s = script('openai', k, { replies: [reply.text('ok')] });
+    await agent(base(k)).session('s').send('hi', { toolChoice: 'auto' });
+    expect(s.seen[0].options.tools).toBeUndefined();
+    expect(s.seen[0].options.toolChoice).toBeUndefined();
+  });
+
   it('sends no temperature and no output budget unless the agent or the call sets one, as agent() does', async () => {
     const k = key(); const s = script('openai', k, { replies: [reply.text('ok'), reply.text('ok')] });
     const a = agent(base(k));

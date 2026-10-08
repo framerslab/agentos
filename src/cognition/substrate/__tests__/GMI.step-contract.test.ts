@@ -8,6 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import { GMIOutputChunkType, type GMIOutputChunk } from '../IGMI';
 import { GMIErrorCode } from '../../../core/utils/errors';
+import type { IToolOrchestrator } from '../../../core/tools/IToolOrchestrator';
 import { createScriptedGmi, errorReply, runTurn, scriptedProvider, textReply, textTurn, toolCallReply } from './helpers/scriptedGmi';
 
 const of = (chunks: GMIOutputChunk[], type: GMIOutputChunkType) => chunks.filter((c) => c.type === type);
@@ -76,6 +77,26 @@ describe('GMI step contract (runtime path)', () => {
     await runTurn(gmi, textTurn('t1', 'Hi.'));
     await runTurn(gmi, textTurn('t2', 'Again.', { options: { temperature: 0.9, maxTokens: 300 } }));
     expect(options.map((o) => [o.temperature, o.maxTokens])).toEqual([[0.2, 900], [0.9, 300]]);
+  });
+
+  it('sends toolChoice only with tools: a turn with no tools to offer carries none, whatever the persona or the turn asks', async () => {
+    const without = scriptedProvider([textReply('ok'), textReply('ok')]);
+    const noTools = { orchestratorId: 'no-tools', listAvailableTools: async () => [], processToolCall: async () => { throw new Error('no tool call expected'); } } as unknown as IToolOrchestrator;
+    const { gmi: bare } = await createScriptedGmi({
+      provider: without.provider,
+      persona: { defaultModelCompletionOptions: { toolChoice: 'auto' } as never },
+      config: { toolOrchestrator: noTools },
+    });
+    await runTurn(bare, textTurn('t1', 'Hi.'));
+    await runTurn(bare, textTurn('t2', 'Again.', { options: { toolChoice: 'required' } }));
+    expect(without.options.map((o) => [o.tools, o.toolChoice])).toEqual([[undefined, undefined], [undefined, undefined]]);
+
+    // With tools, the persona's choice is sent and the turn's replaces it.
+    const withTools = scriptedProvider([textReply('ok'), textReply('ok')]);
+    const { gmi } = await createScriptedGmi({ provider: withTools.provider, persona: { defaultModelCompletionOptions: { toolChoice: 'required' } as never } });
+    await runTurn(gmi, textTurn('t1', 'Hi.'));
+    await runTurn(gmi, textTurn('t2', 'Again.', { options: { toolChoice: 'none' } }));
+    expect(withTools.options.map((o) => [Array.isArray(o.tools), o.toolChoice])).toEqual([[true, 'required'], [true, 'none']]);
   });
 
   it('an in-band provider error keeps LLM_PROVIDER_ERROR through the outer catch', async () => {
