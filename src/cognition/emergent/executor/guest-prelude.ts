@@ -19,6 +19,10 @@
  * @module @framers/agentos/emergent/executor/guest-prelude
  */
 
+/**
+ * The prelude's source. {@link QuickJSExecutor} evaluates it in each call's
+ * context after installing the host bindings and before the forged code.
+ */
 export const GUEST_PRELUDE = String.raw`(() => {
   'use strict';
   const g = globalThis;
@@ -471,7 +475,23 @@ export const GUEST_PRELUDE = String.raw`(() => {
         if (init.method !== undefined) options.method = String(init.method);
         const headers = headerPairs(init.headers);
         if (headers !== undefined) options.headers = headers;
-        if (typeof init.body === 'string') options.body = init.body;
+        // A body crosses as data, as fetch reads it: bytes as latin1, form
+        // parameters as their text with the form type, anything else as its
+        // string.
+        const body = init.body;
+        if (typeof body === 'string') {
+          options.body = body;
+        } else if (body instanceof URLSearchParams) {
+          options.body = body.toString();
+          const given = options.headers || [];
+          if (!given.some((pair) => pair[0].toLowerCase() === 'content-type')) {
+            options.headers = given.concat([['content-type', 'application/x-www-form-urlencoded;charset=UTF-8']]);
+          }
+        } else if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
+          options.bodyBytes = bytesToLatin1(toBytes(body));
+        } else if (body !== undefined && body !== null) {
+          options.body = String(body);
+        }
         if (init.redirect !== undefined) options.redirect = String(init.redirect);
       }
       return new Response(await host.fetch(target, options));

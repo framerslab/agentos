@@ -224,10 +224,15 @@ export function guestBindings(
   if (typeof fetchFn === 'function') {
     const budget = { left: limits.bodyBytes, limit: limits.bodyBytes };
     bindings.fetch = async (input, init) => {
-      const options = init === null || init === undefined ? {} : (init as Record<string, unknown>);
+      let options = init === null || init === undefined ? undefined : (init as Record<string, unknown>);
+      // A byte body crosses out of the guest as latin1; fetch is handed the bytes.
+      if (options && typeof options.bodyBytes === 'string') {
+        const { bodyBytes, ...rest } = options;
+        options = { ...rest, body: Buffer.from(bodyBytes as string, 'latin1') };
+      }
       const response = (await (fetchFn as (i: unknown, o?: unknown) => Promise<Response>)(
         input,
-        limits.signal ? { ...options, signal: limits.signal } : init === null ? undefined : init,
+        limits.signal ? { ...options, signal: limits.signal } : options,
       )) as Response;
       const body = await readBody(response, budget);
       const headers: string[][] = [];
