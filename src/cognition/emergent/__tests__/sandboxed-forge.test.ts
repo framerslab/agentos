@@ -700,3 +700,30 @@ describe('the catalogue name and the broker', () => {
     expect(asking).toMatchObject({ success: true, output: { kind: 'undefined' } });
   });
 });
+
+describe('the in-process output limit', () => {
+  const forge = new SandboxedToolForge();
+
+  it('fails a call whose result passes the limit instead of returning a cut string', async () => {
+    const result = await forge.execute(makeRequest("function execute() { return 'x'.repeat(1100000); }"));
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('output limit');
+  });
+
+  it('fails a call whose console output pushes its result past the limit', async () => {
+    const result = await forge.execute(
+      makeRequest("function execute() { console.log('y'.repeat(1100000)); return { ok: true }; }"),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('output limit');
+  });
+
+  it('returns a result just under the limit whole', async () => {
+    const result = await forge.execute(makeRequest("function execute() { return 'z'.repeat(1000000); }"));
+
+    expect(result.success).toBe(true);
+    expect(result.output).toBe('z'.repeat(1000000));
+  });
+});

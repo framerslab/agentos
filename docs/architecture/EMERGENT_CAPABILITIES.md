@@ -307,6 +307,7 @@ These are rejected at code validation time (before execution):
 | Sandbox mode | off: a `mode: 'sandbox'` request is rejected and a stored code tool loads suspended (`sandbox_tools_off`) until it is enabled; compose mode needs no switch | `allowSandboxTools` |
 | Side-effecting steps | none: a composition or a workflow chains a tool that declares side effects only when it is listed | `compose.sideEffectingTools` |
 | Settling after a run ends | up to 1 s; what is still in flight is listed `pending` | fixed (`CALL_SETTLE_MS`) |
+| Output, in-process executor | 1 MB, console output included; a call whose result and output pass it fails | fixed |
 
 ### Executors
 
