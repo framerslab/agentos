@@ -352,6 +352,7 @@ export type {
   AgencyQuorumConfig,
 } from './api/types.js';
 export { AgencyConfigError, AgencyQuorumError, AgencyPanelError, AgencySeatingError } from './api/types.js';
+export { vendorOf } from './api/runtime/pool/vendor.js';
 export { generateImage } from './api/generateImage.js';
 export type { GenerateImageOptions, GenerateImageResult } from './api/generateImage.js';
 export { editImage } from './api/editImage.js';
