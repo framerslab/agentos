@@ -904,4 +904,56 @@ describe('compositions and workflows: one gate, one rule', () => {
       { toolId: 'c-echo', name: 'echo_once', state: 'active', reason: null },
     ]);
   });
+
+  it("a re-check a registration starts while a run's suspension is being written reads that suspension, and lifts it", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db, tools: [echoTool()] });
+    seedToolRow(db, {
+      id: 'c-echo',
+      name: 'echo_once',
+      mode: 'compose',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 'e', tool: 'echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).active).toBe(1);
+
+    // The host replaces the step's tool: unregistered, then registered again.
+    // A call in the gap meets the missing step, and its suspension's write is
+    // held while the new tool's registration starts a re-check.
+    await host.orchestrator.unregisterTool('echo');
+    const gate = db.gateNext('INSERT INTO agentos_emergent_tool_state');
+    const calling = callTool(host.orchestrator, 'echo_once', { text: 'x' });
+    await gate.entered;
+    await host.orchestrator.registerTool(echoTool());
+    // The re-check runs as far as it can while the suspension's write is held.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    gate.release();
+    expect((await calling).isError).toBe(true);
+
+    // The composition comes back with its step present.
+    await vi.waitFor(async () => {
+      expect(await host.orchestrator.getTool('echo_once')).toBeDefined();
+    });
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'active' });
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'back' })).output).toEqual({ text: 'back' });
+
+    // The same through a promotion check, which suspends a composition that
+    // no longer fits: the registration's re-check waits for that suspension.
+    await host.orchestrator.unregisterTool('echo');
+    const gate2 = db.gateNext('INSERT INTO agentos_emergent_tool_state');
+    const checking = host.engine.checkPromotion('c-echo');
+    await gate2.entered;
+    await host.orchestrator.registerTool(echoTool());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    gate2.release();
+    expect(await checking).toMatchObject({ success: false });
+    await vi.waitFor(async () => {
+      expect(await host.orchestrator.getTool('echo_once')).toBeDefined();
+    });
+    expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'active' });
+  });
 });

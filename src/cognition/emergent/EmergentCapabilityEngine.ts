@@ -1784,9 +1784,19 @@ export class EmergentCapabilityEngine {
    * way is left as it is and held here (`yieldToHost`), so the library never
    * turns a host's restriction into one of its own that a re-check lifts.
    *
+   * It takes its turn with the tool's admissions (`serializeAdmission`): a
+   * re-check that a registration starts while the suspension is written runs
+   * after it, reads the row it leaves and lifts it when the step fits again,
+   * instead of reading the row from before it and holding the suspension
+   * whose write was still under way.
+   *
    * @returns whether the library's suspension is what holds now.
    */
-  private async suspendAsLibrary(toolId: string, reason: string): Promise<boolean> {
+  private suspendAsLibrary(toolId: string, reason: string): Promise<boolean> {
+    return this.serializeAdmission(toolId, () => this.suspendAsLibraryNow(toolId, reason));
+  }
+
+  private async suspendAsLibraryNow(toolId: string, reason: string): Promise<boolean> {
     const held = this.registry.getState(toolId);
     let suspended = false;
     if (!held || !isHostRestriction(held)) {
@@ -2049,16 +2059,19 @@ export class EmergentCapabilityEngine {
         const suspendFor = !result.success && refused ? RUN_REFUSAL_REASONS[refused] : undefined;
         if (suspendFor) {
           const suspended = await this.suspendAsLibrary(tool.id, suspendFor);
-          if (suspended && refused === 'step_replaced') {
+          const implementation = this.registry.get(tool.id)?.implementation ?? tool.implementation;
+          if (suspended && (refused === 'step_replaced' || this.refusalFor(implementation, tool.name) === null)) {
             // The step's tool changed hands between its check and its run (the
-            // gate's refusal; nothing ran). The registration that swapped it ran
-            // before this suspension existed, so it did not re-check this
-            // composition: check it now against the tool that holds the name.
+            // gate's refusal; nothing ran), or a fitting tool was registered
+            // before this suspension was held (it may have waited for an
+            // admission of this tool). The registration ran before the
+            // suspension existed, so it did not re-check this composition:
+            // check it now against the tools registered now.
             try {
               await this.recheck(tool.id, false);
             } catch (recheckError: unknown) {
               console.warn(
-                `[agentos:emergent] could not re-check "${tool.name}" (${tool.id}) after its step was replaced:`,
+                `[agentos:emergent] could not re-check "${tool.name}" (${tool.id}) after its step was refused:`,
                 recheckError instanceof Error ? recheckError.message : recheckError,
               );
             }
