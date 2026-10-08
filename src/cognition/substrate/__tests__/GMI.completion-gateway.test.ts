@@ -73,6 +73,15 @@ describe('GMI turn through the real completion gateway', () => {
     expect(taskHints).toEqual(['Look up the release date.']);
   });
 
+  it('a primary with no credentials ends the turn with CONFIGURATION_ERROR and the configuration error\'s message', async () => {
+    vi.stubEnv('OPENAI_API_KEY', '');
+    const { gmi } = await createScriptedGmi({ gateway: createCompletionGateway({ fallbackProviders: [] }) });
+    const { chunks } = await runTurn(gmi, textTurn('t1', 'Hi.'));
+    const error = of(chunks, GMIOutputChunkType.ERROR)[0];
+    expect(error?.errorDetails?.code).toBe(GMIErrorCode.CONFIGURATION_ERROR);
+    expect(String(error?.content)).toContain('No API key for openai');
+  });
+
   it('a step that fails after output is still counted: the usage its provider error carries is reported and added to the turn', async () => {
     const k = key();
     const billed = { promptTokens: 12, completionTokens: 4, totalTokens: 16 };

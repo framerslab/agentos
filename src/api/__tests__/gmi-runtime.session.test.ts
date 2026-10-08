@@ -209,6 +209,13 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(session.messages()).toEqual([]);
   });
 
+  it('a primary with no credentials: send rejects with CONFIGURATION_ERROR, naming the missing key', async () => {
+    vi.stubEnv('OPENAI_API_KEY', '');
+    const session = agent({ runtime: 'gmi', provider: 'openai', model: 'stub-model', fallbackProviders: [] }).session('s');
+    await expect(session.send('go')).rejects.toMatchObject({ code: GMIErrorCode.CONFIGURATION_ERROR, message: expect.stringContaining('No API key for openai') });
+    expect(session.messages()).toEqual([]);
+  });
+
   it('a provider error before any output: send rejects with the GMI code and the store keeps nothing', async () => {
     const k = key(); script('openai', k, { replies: [Object.assign(new Error('bad request'), { httpStatus: 400 })] });
     const session = agent(base(k)).session('s');
