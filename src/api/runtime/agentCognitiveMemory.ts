@@ -33,6 +33,7 @@ import type { AIModelProviderManager } from '../../core/llm/providers/AIModelPro
 import type { IProvider, ProviderEmbeddingResponse } from '../../core/llm/providers/IProvider.js';
 import type { MemoryConfig } from '../types.js';
 import { createProviderManager, resolveModelOption, resolveProvider, type ParsedModel, type ResolvedProvider } from '../model.js';
+import { GEMINI_DEFAULT_EMBEDDING_MODEL } from './provider-defaults.js';
 
 /**
  * Output sizes of the embedding models agentos knows, as each returns them when
@@ -119,9 +120,11 @@ function resolveEmbeddingTarget(memory: MemoryConfig, env: Env): EmbeddingTarget
   }
   refuseProviderWithoutEmbeddings(requested);
 
+  // Gemini has no embedding model in the shared provider defaults; embedText's default applies.
+  const modelName = memory.embedding?.model ?? (requested === 'gemini' ? GEMINI_DEFAULT_EMBEDDING_MODEL : undefined);
   let model: ParsedModel;
   try {
-    model = resolveModelOption({ provider: requested, model: memory.embedding?.model }, 'embedding');
+    model = resolveModelOption({ provider: requested, model: modelName }, 'embedding');
   } catch (error) {
     throw errorWithCause(`gmi(): memory.embedding: ${messageOf(error)}`, error);
   }

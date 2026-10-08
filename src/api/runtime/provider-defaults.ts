@@ -117,6 +117,16 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
   },
 };
 
+/**
+ * Embedding model used when Gemini is the effective provider and no embedding
+ * model is named (`embedText`, and the cognitive memory `agent({ runtime: 'gmi' })`
+ * builds). It is kept out of {@link PROVIDER_DEFAULTS}: those defaults also decide
+ * embedding auto-detection, where Gemini comes before Ollama, so a registry entry
+ * would silently move a caller who has a Gemini key and embeds through Ollama
+ * onto a different vector space.
+ */
+export const GEMINI_DEFAULT_EMBEDDING_MODEL = 'gemini-embedding-2';
+
 /** Runtime probes checked for auto-detection, in priority order. */
 type AutoDetectProbe =
   | { provider: string; envKey: string }

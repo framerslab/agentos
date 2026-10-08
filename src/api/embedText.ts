@@ -15,6 +15,7 @@ import { resolveModelOption, resolveProvider } from './model.js';
 import { GeminiProvider } from '../core/llm/providers/implementations/GeminiProvider.js';
 import { GeminiProviderError } from '../core/llm/providers/errors/GeminiProviderError.js';
 import { getDefaultProvider } from './runtime/global-default.js';
+import { GEMINI_DEFAULT_EMBEDDING_MODEL } from './runtime/provider-defaults.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { recordAgentOSUsage, type AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
@@ -309,15 +310,6 @@ async function callOllamaEmbed(
 // ---------------------------------------------------------------------------
 // Main function
 // ---------------------------------------------------------------------------
-
-/**
- * Embedding model used when Gemini is the effective provider and no embedding
- * model is named. It is applied here and kept out of the shared provider
- * defaults: those defaults also decide embedding auto-detection, where Gemini
- * comes before Ollama, so a registry entry would silently move a caller who
- * has a Gemini key and embeds through Ollama onto a different vector space.
- */
-const GEMINI_DEFAULT_EMBEDDING_MODEL = 'gemini-embedding-2';
 
 /**
  * Whether a `gemini` embedding call should use Gemini's native
