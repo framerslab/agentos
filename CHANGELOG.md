@@ -1,3 +1,14 @@
+## [0.12.21](https://github.com/framerslab/agentos/compare/v0.12.20...v0.12.21) (2026-10-08)
+
+### docs
+
+* third round of audit follow-ups to the guides (#158) ([2aa186b](https://github.com/framerslab/agentos/commit/2aa186b7a29e0cd73321c1354f15b7e3c6a33d74))
+
+### feat
+
+* add LiteLLM as AI gateway provider (#15) ([068e6ce](https://github.com/framerslab/agentos/commit/068e6cee65752eadf63536941eefcd72b883508e))
+* **api:** agent({ runtime: 'gmi' }) routes its sessions through gmi() ([cf3a637](https://github.com/framerslab/agentos/commit/cf3a637fd4fb5b8286f40604e00555bc7ebbf0bf))
+
 ## [0.12.20](https://github.com/framerslab/agentos/compare/v0.12.19...v0.12.20) (2026-10-08)
 
 ### feat
