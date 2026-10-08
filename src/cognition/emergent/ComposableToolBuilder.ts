@@ -216,8 +216,10 @@ export class ComposableToolBuilder {
       description,
       inputSchema,
       hasSideEffects: true,
+      // The call's expiry reaches every step's run, so a step whose approval
+      // arrives after the call expired starts nothing.
       execute: (args: Record<string, unknown>, context: ToolExecutionContext): Promise<ToolExecutionResult> =>
-        this.runPipeline(spec, args, context),
+        this.runPipeline(spec, args, context, context.signal ? { signal: context.signal } : {}),
     };
   }
 

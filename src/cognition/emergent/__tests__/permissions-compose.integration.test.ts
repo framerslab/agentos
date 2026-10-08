@@ -576,6 +576,80 @@ describe('compositions and workflows: one gate, one rule', () => {
     expect(sent).toEqual([]);
   });
 
+  it("an approval that arrives after a workflow step expired starts nothing inside a composed step either", async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    let releaseApproval!: () => void;
+    const approvalHeld = new Promise<void>((resolve) => {
+      releaseApproval = resolve;
+    });
+    const requestApproval = vi.fn(async (action: PendingAction) => {
+      if (action.context.toolName === 'send_message') {
+        await approvalHeld;
+      }
+      return { actionId: action.actionId, approved: true, decidedBy: 'test', decidedAt: new Date() };
+    });
+    const host = await makeForgeHost({
+      selfImprovement: true,
+      tools: [sendMessageTool(sent)],
+      hitlManager: { requestApproval } as unknown as IHumanInteractionManager,
+      orchestratorConfig: { hitl: { enabled: true } },
+      config: { compose: { sideEffectingTools: ['send_message', 'notify_customer'] } },
+    });
+    // A composition whose one step sends: the workflow step is the composed call.
+    const forged = await callTool(
+      host.orchestrator,
+      'forge_tool',
+      composeOver('notify_customer', 'send_message', {
+        testCases: [{ input: { text: 'hi' }, expectedOutput: { text: 'sent: hi' }, stepOutputs: { s: { text: 'sent: hi' } } }],
+      }),
+      { personaCapabilities: ['messaging'] },
+    );
+    expect(forged.isError).toBeFalsy();
+    requestApproval.mockClear();
+    const workflowTool = await host.orchestrator.getTool('create_workflow');
+    const caller: ToolExecutionContext = {
+      gmiId: 'gmi-test',
+      personaId: 'persona-test',
+      personaCapabilities: ['messaging'],
+      userContext: { userId: 'user-test' } as ToolExecutionContext['userContext'],
+      correlationId: 'wf-composed',
+    };
+    const created = await workflowTool!.execute(
+      {
+        action: 'create',
+        name: 'notify',
+        description: 'Notifies a customer.',
+        steps: [{ tool: 'notify_customer', args: { text: '$input' } }],
+      },
+      caller,
+    );
+    expect(created.success).toBe(true);
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const running = workflowTool!.execute(
+        { action: 'run', workflowId: (created.output as { workflowId: string }).workflowId, input: 'hello' },
+        caller,
+      );
+      // Past the step's limit while the composed step's own approval is pending.
+      await vi.advanceTimersByTimeAsync(31_000);
+      const run = await running;
+
+      expect(run.success).toBe(false);
+      expect(run.error).toContain('timed out');
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // The approval arrives late: the composed call expired, so its step starts nothing.
+    releaseApproval();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(requestApproval).toHaveBeenCalledTimes(1);
+    expect((requestApproval.mock.calls[0][0] as PendingAction).context).toMatchObject({ toolName: 'send_message' });
+    expect(sent).toEqual([]);
+  });
+
   it('a nested composition is not run while forging, and a composition that reaches itself is refused', async () => {
     const host = await makeForgeHost({
       tools: [echoTool()],

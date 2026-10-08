@@ -257,6 +257,7 @@ export class ToolExecutor {
       userContext,
       correlationId,
       sessionData,
+      signal,
     } = requestDetails;
     
     if (!toolCallRequest || !toolCallRequest.name || typeof toolCallRequest.name !== 'string') {
@@ -328,6 +329,8 @@ export class ToolExecutor {
       correlationId: correlationId || `tool-exec-${uuidv4()}`,
       ...(sessionData ? { sessionData } : {}),
       ...(personaCapabilities ? { personaCapabilities } : {}),
+      // A composed tool passes the expiry on to its own steps.
+      ...(signal ? { signal } : {}),
     };
 
     try {

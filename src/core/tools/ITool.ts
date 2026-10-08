@@ -130,6 +130,13 @@ export interface ToolExecutionContext {
    * workflow) passes them on, so each step is checked as the caller.
    */
   personaCapabilities?: string[];
+  /**
+   * The call's expiry signal, when the call carries one (a workflow step's
+   * timer: `ToolExecutionRequestDetails.signal`). A tool that runs other
+   * tools on the caller's behalf (a composed tool) passes it on, so a step
+   * whose call expired starts nothing, however late its approval arrives.
+   */
+  signal?: AbortSignal;
 }
 
 /**
