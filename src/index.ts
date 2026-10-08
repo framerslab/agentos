@@ -252,6 +252,7 @@ export type {
   GenerateTextOptions,
   GenerateTextResult,
   FallbackProviderEntry,
+  FallbackSignal,
   HostLLMPolicy,
   GenerationHookContext,
   GenerationHookResult,
