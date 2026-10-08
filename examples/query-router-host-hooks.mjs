@@ -70,7 +70,7 @@ async function main() {
 
   console.log('\n=== sources ===\n');
   for (const source of result.sources) {
-    console.log(`- ${source.title} (${source.uri})`);
+    console.log(`- ${source.heading} (${source.path})`);
   }
 
   await router.close();

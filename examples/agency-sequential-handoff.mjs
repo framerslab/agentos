@@ -2,14 +2,14 @@
 // Example: agency() with a sequential hand-off.
 //
 // Three agents in one agency. The orchestration strategy (sequential here)
-// decides the order and gives each agent the previous agent's output as its
-// input. Nothing else is shared: agency() builds no shared memory store and
-// runs no retrieval of its own, so what flows between agents is the text each
-// one returns.
+// decides the order. The first agent receives the prompt; each later agent
+// receives the original task followed by the previous agent's output. Nothing
+// else is shared: agency() builds no shared memory store and runs no retrieval
+// of its own, so what flows between agents is the text each one returns.
 //
 // What this example shows:
-//   1. strategy: 'sequential' runs the roster in order; each agent's output
-//      is the next agent's input
+//   1. strategy: 'sequential' runs the roster in order; each agent's output,
+//      with the original task above it, is the next agent's input
 //   2. Same .generate() surface as a single agent — drop-in swap
 //   3. result.agentCalls lists who ran, in what order, with what input
 //   4. The companion file examples/single-agent-briefing.mjs runs a single

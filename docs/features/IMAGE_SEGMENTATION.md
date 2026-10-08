@@ -81,8 +81,8 @@ Exactly one prompt mode must be set. Setting zero or more than one throws
 
 The hosted Replicate provider supports **text** (GroundedSAM) and **automatic**
 (SAM2 "segment everything"). **Point** and **box** prompts are part of the API
-surface for a coordinate-capable provider (such as a future local SAM2 provider);
-the Replicate provider returns [`SegmentationModeNotSupportedError`](https://github.com/framerslab/agentos/blob/master/src/io/segmentation/errors.ts) for them.
+surface for a coordinate-capable provider registered with
+`registerSegmentationProvider()`; the Replicate provider throws [`SegmentationModeNotSupportedError`](https://github.com/framerslab/agentos/blob/master/src/io/segmentation/errors.ts) for them.
 
 ```typescript
 // Text (open vocabulary) — GroundedSAM
@@ -174,11 +174,11 @@ inverts so everything except the object is edited.
 import { segment, cropRegion, createVisionPipeline } from '@framers/agentos';
 
 const { masks } = await segment({ image, automatic: true });
-const vision = await createVisionPipeline({ strategy: 'local-only', tier1: { enableCLIP: true } });
+const vision = await createVisionPipeline({ strategy: 'local-only', embedding: true });
 
 for (const m of masks) {
   const cutout = await cropRegion(image, m);     // transparent PNG of just that object
-  const { embedding } = await vision.embed(cutout);
+  const embedding = await vision.embed(cutout);  // number[]
   // upsert `embedding` into a vector store for "find similar region" search
 }
 ```
@@ -197,8 +197,8 @@ for (const m of masks) {
 
 ## Scope
 
-Shipped: hosted Replicate provider — **text** (GroundedSAM) and **automatic**
-(SAM2) — plus the `maskToEditMask` and `cropRegion` bridges.
+Included: the hosted Replicate provider, with **text** (GroundedSAM) and **automatic**
+(SAM2) prompts, plus the `maskToEditMask` and `cropRegion` bridges.
 
 Not in this surface: coordinate (point/box) prompting, which needs a
 coordinate-capable provider; a local/offline SAM provider; in-browser WebGPU

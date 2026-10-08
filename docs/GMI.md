@@ -15,7 +15,7 @@ The full runtime creates a GMI for each session, and a host can build one itself
 | Persona | A persona definition, named on every request by `selectedPersonaId` | `instructions` and `personality`, written into the system prompt |
 | Sentiment tracking and metaprompts | Yes | No |
 | Long-term memory | A cognitive memory manager, when `gmiManagerConfig.cognitiveMemoryFactory` supplies one | A `memoryProvider` you pass in |
-| Guardrails, RAG, HITL, channels, emergent tools | Run by the runtime | `agent()` accepts them without applying them and logs a warning ([capability contract](https://github.com/framerslab/agentos/blob/master/src/api/runtime/capabilityContract.ts)); `agency()` applies guardrails, RAG context, HITL approvals and, on `hierarchical`, emergent specialists at the agency level, and wires no channels ([Agencies](./AGENCIES.md)) |
+| Guardrails, RAG, HITL, channels, emergent tools | Run by the runtime | `agent()` accepts them without applying them and logs a warning ([capability contract](https://github.com/framerslab/agentos/blob/master/src/api/runtime/capabilityContract.ts)); `agency()` applies HITL approvals and, on `hierarchical`, emergent specialists at the agency level, reports its guardrail ids as not enforced, adds no RAG context and wires no channels ([Agencies](./AGENCIES.md)) |
 | Output | A stream of `AgentOSResponse` chunks | A `StreamTextResult` (`textStream`, `fullStream`) |
 
 ## What a GMI adds over a plain agent

@@ -9,7 +9,7 @@
 1. [Customer Service Agency](#1-customer-service-agency)
 2. [Research Team](#2-research-team)
 3. [Content Pipeline](#3-content-pipeline)
-4. [Voice Call Center](#4-voice-call-center)
+4. [Call Center over a WebSocket](#4-call-center-over-a-websocket)
 5. [Code Review Bot](#5-code-review-bot)
 6. [Knowledge Base Q&A](#6-knowledge-base-qa)
 7. [Multi-Channel Support Bot](#7-multi-channel-support-bot)
@@ -20,18 +20,18 @@
 12. [Query Router Host Hooks](#12-query-router-host-hooks)
 13. [Per-Agent Identity via SOUL.md](#13-per-agent-identity-via-soulmd)
 14. [Single Agent — Minimal](#14-single-agent--minimal)
-15. [Agency with Shared Memory + RAG](#15-agency-with-shared-memory--rag)
+15. [Agency with a Sequential Hand-off](#15-agency-with-a-sequential-hand-off)
 16. [Multi-Agent Team with Dependency Graph](#16-multi-agent-team-with-dependency-graph)
-17. [Emergent Self-Improvement Agent](#17-emergent-self-improvement-agent)
+17. [Self-Improvement Tools on the Runtime](#17-self-improvement-tools-on-the-runtime)
 
 ---
 
 ## 1. Customer Service Agency
 
-Sequential pipeline with human-in-the-loop escalation.
+Sequential pipeline with a human approval before the reply goes out.
 
 ```typescript
-import { agency } from '@framers/agentos';
+import { agency, hitl } from '@framers/agentos';
 
 const supportTeam = agency({
   provider: 'openai',
@@ -53,20 +53,18 @@ const supportTeam = agency({
         You are a support resolver. Based on the classification, provide:
         - A clear, empathetic response to the customer
         - Step-by-step resolution if applicable
-        - If classified as "escalate", ask the human team to take over
+        - If classified as "escalate", say that a human will take over
       `,
-      hitl: {
-        conditions: [{ type: 'agent_flag', flag: 'needs_escalation' }],
-        prompt: 'A customer issue requires human review. Approve the response or redirect.',
-      },
     },
   },
+  // Approval is configured on the agency. `beforeReturn` asks the handler
+  // before generate() returns; hitl.cli() prompts on the terminal. A rejection
+  // makes generate() throw.
+  hitl: {
+    approvals: { beforeReturn: true },
+    handler: hitl.cli(),
+  },
 });
-
-// Guardrails are runtime instances, not string IDs. Pull packs from
-// `@framers/agentos-extensions` (PII redaction, ML toxicity classifiers,
-// topicality, grounding guard, etc.) and pass them via `guardrails: [...]`.
-// See https://docs.agentos.sh/features/guardrails for the full catalog.
 
 const result = await supportTeam.generate(
   'My account was charged twice for the same subscription and I am very upset.'
@@ -75,11 +73,13 @@ const result = await supportTeam.generate(
 console.log(result.text);
 ```
 
+`agency()` accepts a `guardrails` list of ids and reports each one through `on.guardrailResult` with `enforced: false`: it evaluates none of them. Guardrail packs run on the full runtime ([Guardrails](/features/guardrails)).
+
 ---
 
 ## 2. Research Team
 
-Parallel information gathering with RAG and synthesis.
+Parallel information gathering and synthesis.
 
 ```typescript
 import { agency } from '@framers/agentos';
@@ -107,6 +107,12 @@ const newsTool = {
 const researchTeam = agency({
   provider: 'anthropic',
   strategy: 'parallel',
+  // The parallel strategy builds its synthesizer from the agency-level
+  // provider, model and instructions.
+  instructions: `Synthesize the three researchers' output into:
+    1. 3-paragraph executive summary
+    2. Key facts (bullets, with sources)
+    3. Open questions and limitations`,
   agents: {
     webResearcher: {
       instructions: 'Search the web. Return 5 facts with sources.',
@@ -121,12 +127,6 @@ const researchTeam = agency({
       tools: [newsTool],
     },
   },
-  synthesizer: {
-    instructions: `Synthesize the three researchers' output into:
-      1. 3-paragraph executive summary
-      2. Key facts (bullets, with sources)
-      3. Open questions and limitations`,
-  },
 });
 
 const report = await researchTeam.generate(
@@ -135,16 +135,16 @@ const report = await researchTeam.generate(
 console.log(report.text);
 ```
 
-> **Tools must be [`ITool`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ITool.ts) instances, not bare names.** Agencies don't auto-resolve string identifiers like `'web_search'` to registered tools; pass the actual object the agent should call. See [Agent Memory Tools](/features/memory-operations#agent-memory-tools) for the contract.
+> **Tools are objects, not bare names.** An agency does not resolve a string such as `'web_search'` to a registered tool: an array of strings is dropped. Pass objects with a `name`, a `description`, an `inputSchema` and an `execute` function, or a map of name to definition.
 
 ---
 
 ## 3. Content Pipeline
 
-Review loop with social posting on approval. The high-level path is `agency({ strategy: 'sequential' })` — each agent's output feeds the next, with [`hitl`](https://github.com/framerslab/agentos/blob/master/src/api/hitl.ts) gating the human-approval step. Use this when every step is an LLM/GMI call. Reach for the lower-level `workflow()` DSL only when you need explicit graph control, branches, or non-LLM tool steps wired into the same graph (see [workflow() DSL](/features/workflow-dsl) for that path). For the full [`hitl`](https://github.com/framerslab/agentos/blob/master/src/api/hitl.ts) surface (5 triggers, 6 handler factories, judge + fallback), see the [Human-in-the-Loop guide](/features/human-in-the-loop).
+Draft, review and a social teaser, with a human approval before the result is returned. The high-level path is `agency({ strategy: 'sequential' })`: each agent receives the original task and the previous agent's output, and [`hitl`](https://github.com/framerslab/agentos/blob/master/src/api/hitl.ts) on the agency gates the final answer. Use this when every step is a model call. Reach for the lower-level `workflow()` DSL only when you need explicit graph control, branches, or non-LLM tool steps wired into the same graph (see [workflow() DSL](/features/workflow-dsl) for that path). For the full [`hitl`](https://github.com/framerslab/agentos/blob/master/src/api/hitl.ts) surface (5 triggers, 6 handler factories, judge + fallback), see the [Human-in-the-Loop guide](/features/human-in-the-loop).
 
 ```typescript
-import { agency } from '@framers/agentos';
+import { agency, hitl } from '@framers/agentos';
 
 // A host-side helper for the final "publish" step — replace with your real
 // social-posting implementation (Twitter / LinkedIn API calls).
@@ -160,7 +160,7 @@ const contentPipeline = agency({
   agents: {
     researcher: {
       instructions:
-        'Research {{topic}} for {{audience}}. Output 5 short bullet facts.',
+        'Research the topic for the stated audience. Output 5 short bullet facts.',
     },
     writer: {
       instructions:
@@ -169,17 +169,16 @@ const contentPipeline = agency({
     reviewer: {
       instructions:
         'Approve the draft as-is, or list specific edits. Reply "APPROVED" if good.',
-      // Optional HITL gate: when the reviewer flags `needs_human_review`, pause
-      // for a real reviewer. Omit `hitl` to run fully autonomous.
-      hitl: {
-        conditions: [{ type: 'agent_flag', flag: 'needs_human_review' }],
-        prompt: 'A human reviewer should approve this draft.',
-      },
     },
     socialDraft: {
       instructions:
         'Write a 280-char Twitter/LinkedIn teaser of the approved post.',
     },
+  },
+  // Optional approval before generate() returns. Omit `hitl` to run without one.
+  hitl: {
+    approvals: { beforeReturn: true },
+    handler: hitl.cli(),
   },
 });
 
@@ -189,7 +188,7 @@ const result = await contentPipeline.generate(
 
 console.log('Final teaser:', result.text);
 // Each agent's output is in `result.agentCalls[i].output`.
-console.log('Pipeline steps:', result.agentCalls?.map((c) => c.agentName));
+console.log('Pipeline steps:', result.agentCalls?.map((c) => c.agent));
 
 // Publish the final teaser. This step is host-driven — agencies are the
 // orchestration layer for LLM-driven steps, not for network side effects.
@@ -201,9 +200,9 @@ console.log('Posted:', posted);
 
 ---
 
-## 4. Voice Call Center
+## 4. Call Center over a WebSocket
 
-Hierarchical agency with voice transport. The `voice.enabled: true` flag attaches a `listen()` method to the returned agency that starts a local WebSocket server; STT, TTS, and telephony bridge to that transport.
+A hierarchical agency behind a local WebSocket. With `voice.enabled: true`, `agency()` attaches a `listen()` method that starts a WebSocket server on `127.0.0.1`. Each client sends JSON text frames (`{ "text": "..." }`) and receives the agency's reply as `{ "text": "..." }`. `agency()` reads no other `voice` field: it runs no speech-to-text, text-to-speech or telephony. For audio, put the [Voice Pipeline](/features/voice-pipeline) or a [telephony provider](/features/telephony-providers) in front of the socket. `listen()` needs the `ws` package (`npm install ws`).
 
 ```typescript
 import { agency } from '@framers/agentos';
@@ -212,54 +211,31 @@ const callCenter = agency({
   provider: 'openai',
   model: 'gpt-4o',
   strategy: 'hierarchical',
-  voice: {
-    enabled: true,
-    transport: 'telephony',
-    stt: 'deepgram',
-    tts: 'elevenlabs',
-    ttsVoice: 'professional-en-us',
-    telephony: {
-      provider: 'twilio',
-      inboundNumber: process.env.TWILIO_PHONE_NUMBER,
-    },
-  },
+  // On the hierarchical strategy the agency-level instructions go to the
+  // manager, which gets one delegate_to_<name> tool per roster agent.
+  instructions: `
+    You are a friendly receptionist. Greet the caller, find out the reason for
+    the call, and delegate: "billing" for payment issues, "technical" for
+    product problems, "sales" for new customer inquiries. Relay the answer.
+  `,
+  voice: { enabled: true },
   agents: {
-    receptionist: {
-      instructions: `
-        You are a friendly receptionist. Greet callers, collect their name
-        and reason for calling, then route to the appropriate specialist.
-        Route to "billing" for payment issues, "technical" for product problems,
-        or "sales" for new customer inquiries.
-      `,
-      role: 'orchestrator',
-    },
     billing: {
       instructions: 'You are a billing specialist. Resolve payment issues calmly and efficiently.',
-      role: 'worker',
     },
     technical: {
       instructions: 'You are a technical support specialist. Diagnose and resolve product issues.',
-      role: 'worker',
-      tools: ['knowledge_base_search', 'ticket_create'],
     },
     sales: {
       instructions: 'You are a sales consultant. Help prospects find the right plan.',
-      role: 'worker',
-      tools: ['product_catalog', 'crm_create_lead'],
     },
   },
 });
 
-// listen() is attached when voice.enabled is set. It starts a local WebSocket
-// server that accepts JSON text frames and routes them through the agency's
-// generate(). STT, TTS, and Twilio bridge the WebSocket to live audio via the
-// channels system and the telephony adapter — see
-// docs.agentos.sh/features/telephony-providers.
-const { port, url, close } = await callCenter.listen({ port: 8080 });
+const { url, close } = await callCenter.listen({ port: 8080 });
 
-console.log(`Call center ready. WebSocket transport listening at ${url}`);
+console.log(`Call center ready at ${url}`);
 
-// Optional: graceful shutdown
 process.on('SIGINT', async () => {
   await close();
   process.exit(0);
@@ -270,7 +246,7 @@ process.on('SIGINT', async () => {
 
 ## 5. Code Review Bot
 
-Debate strategy: two agents argue across N rounds, then the agency-level model synthesises a final verdict.
+Debate strategy: the roster agents argue for `maxRounds` rounds, then a synthesizer built from the agency-level provider, model and instructions gives the verdict.
 
 ```typescript
 import { agency } from '@framers/agentos';
@@ -278,10 +254,17 @@ import { readFileSync } from 'fs';
 
 const codeReviewer = agency({
   provider: 'anthropic',
-  // Pin the model explicitly so production traffic doesn't drift across snapshots.
   model: 'claude-sonnet-4-6',
   strategy: 'debate',
   maxRounds: 2,
+  // Appended to the synthesizer's prompt after the last round.
+  instructions: `
+    You are a senior engineer making the final call on a code review.
+    Weigh the critic's and the advocate's arguments and output one of:
+    - APPROVE: code is production-ready
+    - REQUEST_CHANGES: fixes are needed (list them)
+    - REJECT: the approach is fundamentally flawed
+  `,
   agents: {
     critic: {
       instructions: `
@@ -296,16 +279,6 @@ const codeReviewer = agency({
         good patterns, clear naming, testability, solid architecture choices.
         Push back on overly pedantic criticism.
       `,
-    },
-    synthesizer: {
-      instructions: `
-        You are a senior engineer making the final call on a code review.
-        Weigh the critic and advocate's arguments and output one of:
-        - APPROVE: code is production-ready
-        - REQUEST_CHANGES: fixes are needed (list them)
-        - REJECT: the approach is fundamentally flawed
-      `,
-      role: 'orchestrator',
     },
   },
 });
@@ -323,18 +296,20 @@ console.log(review.text);
 // APPROVE / REQUEST_CHANGES / REJECT + detailed feedback
 ```
 
+Two agents over two rounds cost four debate calls plus the synthesis call.
+
 ---
 
 ## 6. Knowledge Base Q&A
 
-RAG-powered Q&A with cognitive memory across sessions. The standalone `Memory` facade owns ingestion, vector storage, and recall; `agent()` wires it in via the `standaloneMemory` config bridge so the same store powers the agent's long-term retrieval AND its session memory.
+Retrieval-augmented Q&A over a document store. The standalone `Memory` facade owns ingestion, storage and recall; the host calls `memory.recall()` and puts the hits into the prompt it sends.
 
 ```typescript
 import { agent, Memory } from '@framers/agentos';
 
-// 1. Build (or open) the persistent brain. SQLite is the default; swap
-//    `createSqlite` for `createPostgres` in production. Requires the peer
-//    `better-sqlite3` for native Node runs (`npm install better-sqlite3`).
+// 1. Build (or open) the persistent brain. `createSqlite` uses
+//    `better-sqlite3` when that package is installed and falls back to sql.js;
+//    `createPostgres(connectionString, { brainId })` opens Postgres.
 const memory = await Memory.createSqlite({
   path: './brain.sqlite',
   graph: true,
@@ -342,14 +317,13 @@ const memory = await Memory.createSqlite({
 });
 
 // 2. Ingest a corpus once. Supports folders, single files, and URLs.
-//    Re-running ingest is idempotent — already-indexed chunks are skipped.
+//    A document whose content hash is already stored is skipped on a re-run.
 await memory.ingest('./docs/product');
 await memory.ingest('./docs/api-reference');
 
 // 3. Construct the answering agent. The KB pattern here is explicit
-//    retrieval-then-inject: pull top-K hits via `memory.recall()` and
-//    feed them into `session.send()` as grounding context. This is
-//    the most predictable RAG path — your prompt deterministically
+//    retrieval-then-inject: pull the top hits via `memory.recall()` and
+//    feed them into `session.send()` as grounding context. The prompt
 //    contains the retrieved chunks, so the model can cite them.
 const kb = agent({
   provider: 'openai',
@@ -365,7 +339,7 @@ const session = kb.session('user-alice');
 async function ask(question: string) {
   // `recall()` returns `{ trace, score }` pairs. `trace.content` is the
   // raw chunk text; `trace.id` is stable across runs.
-  const hits = await memory.recall(question, { topK: 5 });
+  const hits = await memory.recall(question, { limit: 5 });
   const context = hits
     .map(({ trace }, i) => `[${i + 1}] ${trace.id}\n${trace.content}`)
     .join('\n\n');
@@ -378,21 +352,22 @@ console.log((await ask('What about for the voice pipeline specifically?')).text)
 await memory.close();
 ```
 
-> **Why not just `standaloneMemory: { memory, longTermRetriever: true }`?** The `agent()` helper accepts that bridge for forward compatibility, but automatic per-turn RAG injection requires the full runtime (`new AgentOS()` or `agency()`). When you want deterministic, debuggable retrieval — show me the chunks the model saw — keep `memory.recall()` explicit in your turn loop. See [Memory Operations](/features/memory-operations) for ingest/export options and [Multimodal RAG](/features/multimodal-rag) for image/audio sources.
+> **Retrieval per turn without host code.** `standaloneMemory: { memory, longTermRetriever: true }` is an option of the full runtime (`AgentOS.create()`), which then retrieves from the same store on each `processRequest()` turn. `agent()` and `agency()` have no such option: with them, keep `memory.recall()` in your turn loop, which also shows you the chunks the model saw. See [Memory Operations](/features/memory-operations) for ingest and export options and [Multimodal RAG](/features/multimodal-rag) for image and audio sources.
 
 ---
 
 ## 7. Multi-Channel Support Bot
 
-Agency connected to Discord + Slack + Telegram simultaneously.
+One agency answering on Discord, Slack and Telegram. `agency()` builds no channel adapters, so the host creates them and subscribes to their `message` events. Each adapter loads its platform SDK when it initializes (`discord.js`, `@slack/bolt`, `telegraf`), so install the ones you use.
 
 ```typescript
 import { agency } from '@framers/agentos';
 import {
-  ChannelRouter,
   DiscordChannelAdapter,
   SlackChannelAdapter,
   TelegramChannelAdapter,
+  type ChannelMessage,
+  type IChannelAdapter,
 } from '@framers/agentos/channels';
 
 // 1. Create the agency
@@ -401,19 +376,15 @@ const supportBot = agency({
   strategy: 'sequential',
   agents: {
     greeter: {
-      instructions: 'Greet the user and understand their issue in 1–2 sentences.',
+      instructions: 'Restate the user\'s issue in one or two sentences.',
     },
     resolver: {
-      instructions: 'Provide a clear, helpful resolution. Use the knowledge base if needed.',
-      tools: ['knowledge_base_search', 'ticket_create'],
+      instructions: 'Provide a clear, helpful resolution of the issue you receive.',
     },
   },
-  guardrails: ['content-safety'],
 });
 
 // 2. Connect to channels
-const router = new ChannelRouter();
-
 const discord = new DiscordChannelAdapter();
 const slack = new SlackChannelAdapter();
 const telegram = new TelegramChannelAdapter();
@@ -426,7 +397,10 @@ await discord.initialize({
 await slack.initialize({
   platform: 'slack',
   credential: process.env.SLACK_BOT_TOKEN!,
-  params: { botToken: process.env.SLACK_BOT_TOKEN! },
+  params: {
+    botToken: process.env.SLACK_BOT_TOKEN!,
+    signingSecret: process.env.SLACK_SIGNING_SECRET!,
+  },
 });
 await telegram.initialize({
   platform: 'telegram',
@@ -434,140 +408,99 @@ await telegram.initialize({
   params: { botToken: process.env.TELEGRAM_BOT_TOKEN! },
 });
 
-router.registerAdapter(discord);
-router.registerAdapter(slack);
-router.registerAdapter(telegram);
+// 3. Answer messages from any platform
+function serve(adapter: IChannelAdapter) {
+  adapter.on(async (event) => {
+    const message = event.data as ChannelMessage;
+    if (message.sender.isBot) return;
 
-// 3. Handle messages from any platform
-router.onMessage(async (message, binding, session) => {
-  const platform = binding.platform;
-  const sessionId = `${platform}:${session.remoteUser ?? message.sender ?? 'anon'}`;
+    // One agency session per conversation keeps that conversation's history.
+    const session = supportBot.session(`${event.platform}:${event.conversationId}`);
+    const response = await session.send(message.text);
 
-  const response = await supportBot.generate(message.text ?? '', {
-    sessionId,
-    context: { platform, userId: session.remoteUser },
-  });
+    await adapter.sendMessage(event.conversationId, {
+      blocks: [{ type: 'text', text: response.text }],
+    });
+  }, ['message']);
+}
 
-  await router.sendMessage(
-    binding.cipherId,
-    platform,
-    message.conversationId,
-    { blocks: [{ type: 'text', text: response.text }] },
-  );
-});
+[discord, slack, telegram].forEach(serve);
 
 console.log('Support bot listening on Discord, Slack, and Telegram...');
 ```
+
+[`ChannelRouter`](https://github.com/framerslab/agentos/blob/master/src/io/channels/ChannelRouter.ts) adds bindings between conversations and agents, group policies and per-conversation sessions on top of the adapters; its `onMessage` handlers run only for conversations that have a binding ([Channels](/features/channels)).
 
 ---
 
 ## 8. Automated Blog Publisher
 
-Full pipeline: research → write → image → social posting.
+Research, write, illustrate, then hand the result to your publishing code.
 
 ```typescript
-import { workflow } from '@framers/agentos/orchestration';
-import { generateImage } from '@framers/agentos';
-import { SocialPostManager, ContentAdaptationEngine } from '@framers/agentos/social-posting';
-import { z } from 'zod';
+import { agency, generateImage } from '@framers/agentos';
 
-const blogPublisher = workflow('automated-blog-publisher')
-  .input(
-    z.object({
-      topic: z.string(),
-      audience: z.string(),
-      platforms: z.array(z.string()).default(['twitter', 'linkedin', 'bluesky']),
-    })
-  )
-  .returns(
-    z.object({
-      postUrl: z.string(),
-      socialUrls: z.record(z.string()),
-    })
-  )
-
-  // Research
-  .step('research', {
-    tool: 'web_search',
-    effectClass: 'external',
-  })
-
-  // Write the post
-  .step('write', {
-    gmi: {
+const writers = agency({
+  provider: 'openai',
+  model: 'gpt-4o-mini',
+  strategy: 'sequential',
+  agents: {
+    researcher: {
+      instructions: 'List five facts about the topic that matter to the stated audience, one per line.',
+    },
+    writer: {
       instructions: `
-        Write a 600-word blog post about {{topic}} for {{audience}}.
-        Include: compelling headline, 3 sections with headers, key takeaways.
-        Format as Markdown.
+        Write a 600-word Markdown blog post from the facts you receive:
+        a headline, three sections with headers, and key takeaways.
       `,
     },
-  })
-
-  // Generate a header image
-  .step('generate-image', {
-    gmi: {
-      instructions: 'Describe a header image for this blog post in one sentence.',
+    social: {
+      instructions: `
+        Write social posts for the blog post you receive and return JSON:
+        { "twitter": "<280 characters>", "linkedin": "<three bullet highlights>" }
+      `,
     },
-  })
+  },
+});
 
-  // Parallel: publish to CMS + generate social variants
-  .parallel(
-    { reducers: {} },
-    (wf) =>
-      wf.step('publish-cms', {
-        tool: 'cms_publish',
-        effectClass: 'external',
-      }),
-    (wf) =>
-      wf.step('social-variants', {
-        gmi: {
-          instructions: `
-          Create platform-specific social media posts for this blog post.
-          Twitter: 280 chars max, hook + link
-          LinkedIn: professional tone, 3 bullet highlights
-          Bluesky: casual tone, 300 chars max
-          Return as JSON: { twitter, linkedin, bluesky }
-        `,
-        },
-      })
-  )
+// Host code: replace with your CMS and scheduler calls.
+async function publishToCms(markdown: string, headerImage: string | undefined) {
+  return 'https://example.com/blog/new-post';
+}
+async function scheduleSocial(postsJson: string, postUrl: string) {
+  return { scheduled: true };
+}
 
-  // Schedule social posts
-  .step('schedule-social', {
-    tool: 'bulk_scheduler',
-    effectClass: 'external',
-  })
+async function publishPost(topic: string, audience: string) {
+  const run = await writers.generate(`Topic: ${topic}\nAudience: ${audience}`);
 
-  .compile();
+  // result.agentCalls holds every agent's output, in order.
+  const post = run.agentCalls?.find((call) => call.agent === 'writer')?.output ?? '';
+  const socialPosts = run.text;
 
-// Run the pipeline
-async function publishPost(topic: string) {
-  // First, generate the header image outside the workflow
   const image = await generateImage({
     provider: 'stability',
     model: 'stable-image-core',
     prompt: `A professional blog header image representing: ${topic}. Clean, modern style.`,
-    width: 1200,
-    height: 628,
+    aspectRatio: '16:9',
     providerOptions: {
       stability: { stylePreset: 'digital-art' },
     },
   });
+  const header = image.images[0]?.url ?? image.images[0]?.dataUrl;
 
-  const result = await blogPublisher.invoke({
-    topic,
-    audience: 'software developers',
-    platforms: ['twitter', 'linkedin', 'bluesky'],
-    // Pass image URL into the workflow context
-    headerImageUrl: image.images[0].url,
-  });
-
-  console.log('Published:', result.postUrl);
-  console.log('Social posts scheduled:', result.socialUrls);
+  const postUrl = await publishToCms(post, header);
+  console.log('Published:', postUrl);
+  console.log('Social posts:', await scheduleSocial(socialPosts, postUrl));
 }
 
-await publishPost('How vector databases enable semantic search in AI applications');
+await publishPost(
+  'How vector databases enable semantic search in AI applications',
+  'software developers',
+);
 ```
+
+`generateImage()` takes `size` (`'1024x1024'`) or `aspectRatio` (`'16:9'`); it has no `width` or `height` option. To run the steps as a typed graph with tool nodes, use the [`workflow()` DSL](/features/workflow-dsl): a compiled workflow executes `tool` and `gmi` steps only when `compile({ deps })` receives the executors for them.
 
 ---
 
@@ -644,7 +577,7 @@ const streamingTeam = agency({
     handler: async () => ({
       approved: true,
       modifications: {
-        output: 'Approved for delivery:\\n- Risk 1\\n- Risk 2\\n- Risk 3\\n- Risk 4',
+        output: 'Approved for delivery:\n- Risk 1\n- Risk 2\n- Risk 3\n- Risk 4',
       },
     }),
   },
@@ -657,7 +590,7 @@ const stream: AgencyStreamResult = streamingTeam.stream(
 for await (const chunk of stream.textStream) {
   process.stdout.write(chunk); // raw live output
 }
-process.stdout.write('\\n');
+process.stdout.write('\n');
 
 for await (const event of stream.fullStream) {
   if (event.type === 'final-output') {
@@ -743,7 +676,7 @@ Runnable source: [`examples/query-router-host-hooks.mjs`](https://github.com/fra
 
 ## 13. Per-Agent Identity via SOUL.md
 
-Load identity, voice, hard limits, and HEXACO scores from a markdown workspace. The runtime injects `SOUL.md` body as the first system message and parses YAML frontmatter into [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts) fields. Compatible with the [aaronjmars/soul.md](https://github.com/aaronjmars/soul.md) and OpenClaw conventions.
+Load an agent's identity from a markdown workspace. `agent({ soul })` puts the `SOUL.md` body at the head of the system prompt, followed by `STYLE.md` and the `memory/index.md` catalog. The loader also parses the YAML frontmatter (HEXACO scores, voice, mood, hard limits) into an [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts), which the full runtime takes as a persona; `agent()` does not read those fields. Compatible with the [aaronjmars/soul.md](https://github.com/aaronjmars/soul.md) and OpenClaw conventions.
 
 Workspace layout (per agent):
 
@@ -751,10 +684,10 @@ Workspace layout (per agent):
 ~/.agentos/agents/aria/
 ├── SOUL.md       # identity, values, tone, hard limits (REQUIRED)
 ├── STYLE.md      # voice, syntax, vocabulary patterns (optional)
-├── IDENTITY.md   # display card: name, role, agent-ID (optional)
-├── AGENTS.md     # procedural rules (optional)
+├── IDENTITY.md   # display card: name, role, agent-ID (optional; loaded, not used by the runtime)
+├── AGENTS.md     # procedural rules (optional; loaded, not used by the runtime)
 ├── memory/       # long-term memory wiki: index.md + entities/ + concepts/ + log/ (auto-managed)
-└── examples/     # good-outputs.md + bad-outputs.md (optional)
+└── examples/     # good-outputs.md + bad-outputs.md (optional; not read)
 ```
 
 Sample `SOUL.md`:
@@ -800,7 +733,7 @@ const aria = agent({
   soul: '~/.agentos/agents/aria',
 });
 
-// Direct file path — loads SOUL.md only
+// Direct file path — reads that file as SOUL.md and the companion files beside it
 const compact = agent({
   provider: 'openai',
   soul: './personas/aria.soul.md',
@@ -815,7 +748,7 @@ const ephemeral = agent({
 const reply = await aria.generate('I need help with my invoice.');
 ```
 
-The HEXACO frontmatter flows into the same `PersonaDriftMechanism` and [`PersonaOverlayManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/persona_overlays/PersonaOverlayManager.ts) as inline `personality:` config — both paths produce identical runtime behavior. See [SOUL_FILES.md](../SOUL_FILES.md) for the full 6-file workspace spec.
+`agent({ soul })` does not read the `hexaco` scores; pass `personality` to give the agent its trait directives. On the full runtime the scores become the persona's `personalityTraits`. See [SOUL_FILES.md](../SOUL_FILES.md) for the full 6-file workspace spec.
 
 For an agent whose long-term memory **is** its `memory/` wiki, use `souledAgent()` instead of `agent()`. It injects `memory/index.md` into the prelude, adds the `read_memory_page` tool, and folds new conversation into entity/concept pages:
 
@@ -841,11 +774,11 @@ See [High-Level API](./HIGH_LEVEL_API.md) for the full `souledAgent()` reference
 The simplest entry point: one agent, one tool, one call.
 
 ```typescript
-import { agent, type ITool } from '@framers/agentos';
+import { agent } from '@framers/agentos';
 
 // Stand-in for a real web-search tool (Tavily, Serper, Firecrawl, etc.).
 // Replace with your real implementation.
-const webSearchTool: ITool = {
+const webSearchTool = {
   name: 'web_search',
   description: 'Search the web for recent information.',
   inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
@@ -868,12 +801,12 @@ console.log(result.text);
 ## 15. Agency with a Sequential Hand-off
 
 Three agents in one agency. `strategy: 'sequential'` runs the roster in
-order and gives each agent the previous agent's output as its input. Nothing
-else is shared: `agency()` builds no shared memory store and runs no
-retrieval of its own (its `memory` and `rag` options are accepted and
-deferred on the lightweight path; `injectRagContext()` returns the prompt
-unchanged because no store is initialised), so what flows between agents is
-the text each one returns.
+order; each agent after the first receives the original task followed by the
+previous agent's output. Nothing else is shared: `agency()` builds no shared
+memory store and runs no retrieval of its own (it accepts `memory` and `rag`
+and applies neither; `injectRagContext()` returns the prompt unchanged because
+no store is initialised), so what flows between agents is the text each one
+returns.
 
 ```typescript
 import { agency } from '@framers/agentos';
@@ -889,9 +822,9 @@ const team = agency({
   },
 });
 
-// Same .generate() surface as a single agent. The agency routes each
-// agent's output into the next agent's prompt; result.agentCalls lists
-// who ran, in what order, with what input.
+// Same .generate() surface as a single agent. The agency puts each
+// agent's output into the next agent's prompt, under the original task;
+// result.agentCalls lists who ran, in what order, with what input.
 const result = await team.generate(
   'Compare QUIC and TCP for low-latency game networking.',
 );
@@ -921,17 +854,17 @@ automatically. Agents with no dependencies run first; downstream agents receive
 their predecessors' outputs as context.
 
 ```typescript
-import { agency, type ITool } from '@framers/agentos';
+import { agency } from '@framers/agentos';
 
 // Stand-ins for the host-supplied tools each agent uses. Replace with real
 // implementations (Tavily, arxiv-api, etc.).
-const webSearchTool: ITool = {
+const webSearchTool = {
   name: 'web_search',
   description: 'Search the web.',
   inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
   execute: async ({ query }) => ({ success: true, output: `(stub) ${query}` }),
 };
-const arxivTool: ITool = {
+const arxivTool = {
   name: 'arxiv_search',
   description: 'Search arXiv for papers.',
   inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
@@ -966,83 +899,76 @@ console.log(result.text);
 
 ---
 
-## 17. Emergent Self-Improvement Agent
+## 17. Self-Improvement Tools on the Runtime
 
-Enable the emergent subsystem so the agent can forge new tools, adapt its own
-personality, and manage its skill set at runtime. Guard the mutation surface
-with `maxDeltaPerSession` and skill allowlists.
+With `emergent: true` the full runtime gives every GMI the `forge_tool` meta-tool, and `emergentConfig.selfImprovement.enabled` adds `adapt_personality`, `manage_skills`, `create_workflow` and `self_evaluate`. The model decides when to call them; the limits below bound what a call can change.
 
-> **Use `agency()` or `new AgentOS()` — not `agent()`.** Emergent tooling requires the full runtime that initializes [`ToolOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts) with emergent support. The lightweight `agent()` helper accepts `emergent: true` for config compatibility but emits a `[AgentOS] agent() accepted config that requires the full AgentOS runtime` warning and does not activate `forge_tool` on its own.
+> **These tools run on the full runtime.** `agent()` accepts `emergent` and logs that it does not apply it. On `agency()`, `emergent: { enabled: true }` with `strategy: 'hierarchical'` gives the manager `spawn_specialist`, which adds agents to the roster ([`examples/emergent-hierarchical-spawning.mjs`](https://github.com/framerslab/agentos/blob/master/examples/emergent-hierarchical-spawning.mjs)); it does not register the tools on this page.
 
 ```typescript
-import { agency } from '@framers/agentos';
+import { AgentOS, AgentOSResponseChunkType, BUILT_IN_PERSONAS } from '@framers/agentos';
 
-// `emergent.enabled` requires `strategy: 'hierarchical'` or `adaptive: true`.
-// When enabled, the runtime's ToolOrchestrator auto-wires the emergent
-// meta-tools (`forge_tool`, `adapt_personality`) with the live
-// EmergentCapabilityEngine reference — you do NOT pass them in `tools: [...]`
-// (those classes require a constructor arg, not a bare reference).
-const adaptiveAgent = agency({
-  provider: 'openai',
-  model: 'gpt-4o',
-  strategy: 'hierarchical',
-  agents: {
-    manager: {
-      instructions: 'Coordinate the work. Decide which specialist to spawn when needed.',
-    },
-    primary: {
-      instructions: 'You are a helpful assistant that learns and adapts.',
-    },
-  },
-  emergent: {
-    enabled: true,
+const agentos = await AgentOS.create({
+  personas: BUILT_IN_PERSONAS,
+  emergent: true,
+  emergentConfig: {
     selfImprovement: {
       enabled: true,
-      personality: { maxDeltaPerSession: 0.15 },
-      skills: { allowlist: ['*'] },
+      personality: { maxDeltaPerSession: 0.15, persistWithDecay: true, decayRate: 0.05 },
+      skills: { allowlist: ['*'], requireApprovalForNewCategories: true },
+      workflows: { maxSteps: 10, allowedTools: ['*'] },
+      selfEval: {
+        autoAdjust: true,
+        adjustableParams: ['temperature', 'verbosity', 'personality'],
+        maxEvaluationsPerSession: 10,
+      },
     },
   },
 });
 
-// The agency can now:
-// - Forge new tools at runtime via the auto-injected `forge_tool`
-// - Adapt its personality via the auto-injected `adapt_personality`
-// - Enable/disable skills dynamically through the skills subsystem
-// - Evaluate its own performance and adjust
-const result = await adaptiveAgent.generate('Help me write a creative story.');
-console.log(result.text);
+for await (const chunk of agentos.processRequest({
+  userId: 'user-42',
+  sessionId: 'story-1',
+  selectedPersonaId: 'v_researcher',
+  textInput: 'Help me write a creative story, and adapt your tone to mine as we go.',
+})) {
+  if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA) process.stdout.write(chunk.textDelta);
+}
 ```
+
+Compose-mode `forge_tool` requests work as soon as `emergent` is on; code-forged tools stay off until `emergentConfig.allowSandboxTools` is set ([Emergent Capabilities](/features/emergent-capabilities)).
 
 ---
 
 ## Runnable Example Files
 
-The `examples/` directory contains standalone `.mjs` files you can run directly:
+The `examples/` directory of the repository contains standalone `.mjs` files. They import the built package from `../dist`, so build once and run them with Node:
 
 ```bash
-npx tsx examples/<file>.mjs
+pnpm install && pnpm run build
+node examples/<file>.mjs
 ```
 
 | File | Description | Key APIs |
 |------|-------------|----------|
 | [`high-level-api.mjs`](../../examples/high-level-api.mjs) | One-shot text, streaming, image generation, agent sessions | `generateText`, [`streamText`](https://github.com/framerslab/agentos/blob/master/src/api/streamText.ts), `generateImage`, [`agent`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) |
-| [`single-agent-briefing.mjs`](../../examples/single-agent-briefing.mjs) | Single-agent baseline before agency. One brain, no team, no shared state. | [`agent`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts), `.generate()` |
-| [`agency-sequential-handoff.mjs`](../../examples/agency-sequential-handoff.mjs) | Three agents in a sequential hand-off: each agent's output is the next agent's input | [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts), `strategy: 'sequential'`, `result.agentCalls` |
+| [`single-agent-briefing.mjs`](../../examples/single-agent-briefing.mjs) | Single-agent baseline before agency. One agent, no team, no shared state. | [`agent`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts), `.generate()` |
+| [`agency-sequential-handoff.mjs`](../../examples/agency-sequential-handoff.mjs) | Three agents in a sequential hand-off: each agent's output, under the original task, is the next agent's input | [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts), `strategy: 'sequential'`, `result.agentCalls` |
 | [`emergent-hierarchical-spawning.mjs`](../../examples/emergent-hierarchical-spawning.mjs) | Hierarchical agency that mints a specialist at runtime when the static roster falls short | [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts), `emergent`, `spawn_specialist`, [`EmergentAgentJudge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentJudge.ts) |
-| [`agency-graph.mjs`](../../examples/agency-graph.mjs) | Multi-agent agency with graph strategy | [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts), graph edges, parallel execution |
-| [`agency-streaming.mjs`](../../examples/agency-streaming.mjs) | Streaming agency output with real-time chunks | [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts), `onChunk` callbacks |
+| [`agency-graph.mjs`](../../examples/agency-graph.mjs) | Multi-agent agency with the graph strategy: four agents in three dependency tiers, run with `generate()` and with `stream()` | [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts), `dependsOn`, `result.agentCalls` |
+| [`agency-streaming.mjs`](../../examples/agency-streaming.mjs) | The raw text stream, the `final-output` part and the approved final text of one `agency().stream()` run | [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts), `textStream`, `fullStream`, `finalTextStream`, `hitl.approvals.beforeReturn` |
 | [`agency-roundtable.mjs`](../../examples/agency-roundtable.mjs) | Multi-provider panel: six seats on four providers with per-seat reasoning effort, a chair that synthesizes, and a two-seat floor the script checks before the run | [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts), `strategy: 'parallel'`, per-agent `provider` and `effort` |
-| [`agent-graph.mjs`](../../examples/agent-graph.mjs) | AgentGraph runtime with typed nodes and edges | [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts), node definitions, edge routing |
-| [`agent-communication-bus.mjs`](../../examples/agent-communication-bus.mjs) | Inter-agent messaging via communication bus | [`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgentCommunicationBus.ts), pub/sub topics |
-| [`workflow-dsl.mjs`](../../examples/workflow-dsl.mjs) | Declarative workflow definitions | [`workflow`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/WorkflowBuilder.ts), sequential/parallel/conditional steps |
-| [`mission-api.mjs`](../../examples/mission-api.mjs) | Self-expanding mission orchestration with planner | [`mission`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/MissionBuilder.ts), goal decomposition, fact-checking |
-| [`multi-agent-workflow.mjs`](../../examples/multi-agent-workflow.mjs) | Coordinated multi-agent pipeline with handoffs | Multi-agent, handoff protocol |
-| [`query-router.mjs`](../../examples/query-router.mjs) | Intent-based routing to specialized agents | [`QueryRouter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/query/QueryRouter.ts), route definitions |
-| [`query-router-host-hooks.mjs`](../../examples/query-router-host-hooks.mjs) | Query router with host lifecycle hooks | `QueryRouter`, `onRoute`, `onFallback` hooks |
+| [`agent-graph.mjs`](../../examples/agent-graph.mjs) | An `AgentGraph` with a model node, a human node and a tool node, run on a stubbed node executor, interrupted at the human node and resumed from its checkpoint | [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts), `GraphRuntime.stream()` and `resume()`, `InMemoryCheckpointStore` |
+| [`agent-communication-bus.mjs`](../../examples/agent-communication-bus.mjs) | Inter-agent messaging: a role-routed message, a request and its reply, a handoff and the message history | [`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgentCommunicationBus.ts), `sendToRole`, `requestResponse`, `handoff` |
+| [`workflow-dsl.mjs`](../../examples/workflow-dsl.mjs) | A workflow with a step, a branch, a parallel fan-out and a final step, run on a stubbed node executor | [`workflow`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/WorkflowBuilder.ts), sequential/parallel/conditional steps |
+| [`mission-api.mjs`](../../examples/mission-api.mjs) | A mission compiled from a goal into the research plan template, with an anchored fact-check node, run on a stubbed node executor | [`mission`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/MissionBuilder.ts), `anchor()`, `explain()` |
+| [`multi-agent-workflow.mjs`](../../examples/multi-agent-workflow.mjs) | Checks a four-task dependency list for cycles and prints the rounds in which its tasks become ready, in plain JavaScript, then makes one direct OpenAI API call | None: it calls no AgentOS API |
+| [`query-router.mjs`](../../examples/query-router.mjs) | Question answering over a markdown corpus: classify, retrieve, generate, with the classification and retrieval hooks | [`QueryRouter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/query/QueryRouter.ts), `onClassification`, `onRetrieval` |
+| [`query-router-host-hooks.mjs`](../../examples/query-router-host-hooks.mjs) | Query router with host-provided graph expansion, reranking and deep research | `QueryRouter`, `graphExpand`, `rerank`, `deepResearch` |
 | [`generate-image.mjs`](../../examples/generate-image.mjs) | Image generation across providers | `generateImage`, provider selection |
-| [`agentos-config-tools.mjs`](../../examples/agentos-config-tools.mjs) | Full AgentOS runtime with tool registration | [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts), `processRequest`, custom tools |
+| [`agentos-config-tools.mjs`](../../examples/agentos-config-tools.mjs) | The full runtime initialized with a tool from its config; the script fetches the tool from the orchestrator and runs it | [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts), `createTestAgentOSConfig({ tools })`, `getToolOrchestrator().getTool()` |
 | [`gmi-completion-gateway.mjs`](../../examples/gmi-completion-gateway.mjs) | A GMI built with a completion gateway: the primary fails before any output, a fallback hop serves the turn, and the script prints each `USAGE_UPDATE`, `STEP_FINISHED` and `TOOL_RESULT` chunk and the turn's usage total | [`createCompletionGateway`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/completionGateway.ts), [`GatewayProviderManager`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gatewayProviderManager.ts), [`GMI`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMI.ts) `processTurnStream()` |
-| [`schema-on-demand-local-module.mjs`](../../examples/schema-on-demand-local-module.mjs) | Dynamic extension loading from local modules | [`createCuratedManifest`](https://github.com/framerslab/agentos/blob/master/src/core/types/vendor.d.ts), lazy imports |
+| [`schema-on-demand-local-module.mjs`](../../examples/schema-on-demand-local-module.mjs) | Loads an extension pack from a local module at run time through the `extensions_enable` meta-tool | [`createSchemaOnDemandPack`](https://github.com/framerslab/agentos/blob/master/src/extensions/packs/schema-on-demand-pack.ts), [`ExtensionManager`](https://github.com/framerslab/agentos/blob/master/src/extensions/ExtensionManager.ts) |
 
 ---
 

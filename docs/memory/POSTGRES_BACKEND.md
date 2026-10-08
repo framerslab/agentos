@@ -1,6 +1,6 @@
 # Postgres + pgvector Backend
 
-The Postgres backend stores embeddings, metadata, and full-text content in a single relational database using the [pgvector](https://github.com/pgvector/pgvector) extension. This gives you ACID transactions, hybrid search (dense vectors + BM25 in one query), and JSONB metadata filtering — all without a separate vector service.
+The Postgres backend stores embeddings, metadata, and full-text content in a single relational database using the [pgvector](https://github.com/pgvector/pgvector) extension. This gives you ACID transactions, hybrid search (dense vectors and full-text ranking in one query), and JSONB metadata filtering, all without a separate vector service.
 
 ## Prerequisites
 
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS "<prefix>my_collection" (
 ## Configuration
 
 ```typescript
-import { PostgresVectorStore } from '@framers/agentos/cognition/rag/implementations/vector_stores/PostgresVectorStore';
+import { PostgresVectorStore } from '@framers/agentos/cognition/rag';
 
 const store = new PostgresVectorStore({
   id: 'my-pg-store',
@@ -84,7 +84,7 @@ await store.initialize();
 
 ## Hybrid search
 
-The Postgres backend is the only backend that supports true **single-query hybrid search**: pgvector HNSW for dense vectors and PostgreSQL tsvector for BM25 lexical matching, fused with Reciprocal Rank Fusion (RRF) in a single SQL statement.
+The Postgres backend runs **hybrid search in one SQL statement**: pgvector HNSW for dense vectors and PostgreSQL full-text ranking (`ts_rank` over the `tsv` column; not BM25), fused with Reciprocal Rank Fusion (RRF). `alpha` and `fusion` are accepted and not read: the two ranks always count equally.
 
 ```typescript
 const results = await store.hybridSearch(
@@ -101,8 +101,8 @@ const results = await store.hybridSearch(
 How it works internally:
 
 1. **Dense CTE**: Finds top candidates by pgvector HNSW distance (`<=>` for cosine).
-2. **Lexical CTE**: Finds top candidates by `ts_rank()` against the `tsvector` column.
-3. **Fusion CTE**: Merges both result sets with `1/(k + rank_dense) + 1/(k + rank_lexical)`.
+2. **Lexical CTE**: Finds top candidates by `ts_rank()` against the `tsvector` column (`plainto_tsquery('english', ...)`).
+3. **Fusion CTE**: Merges both result sets with `1/(k + rank_dense) + 1/(k + rank_lexical)`; a document missing from one list takes rank 10,000 there. Each list holds up to `topK × 3` candidates, and a metadata filter applies to each before ranking.
 4. **Final join**: Fetches full documents for the top fused results.
 
 This avoids two separate queries and application-level fusion.
@@ -172,9 +172,9 @@ You changed `defaultDimension` after creating a collection. pgvector enforces di
 
 Increase `poolSize` in the config, or reduce concurrent usage. The default of 10 is usually sufficient for single-agent deployments. Multi-agent setups may need 20-50.
 
-## Postgres for the cognitive Brain (0.3.0+)
+## Postgres for the cognitive Brain
 
-Beyond the [`PostgresVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/PostgresVectorStore.ts), agentos 0.3.0+ runs the entire cognitive [`Brain`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts) on Postgres via three named factories. The [`Brain`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts) class is dialect-agnostic; the factory chooses the backend.
+Beyond the [`PostgresVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/PostgresVectorStore.ts), AgentOS runs the entire cognitive [`Brain`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts) on Postgres via three named factories. The [`Brain`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts) class is dialect-agnostic; the factory chooses the backend.
 
 ```ts
 import { Brain } from '@framers/agentos/memory';
@@ -217,7 +217,7 @@ const brain = await Brain.openWithAdapter(adapter, { brainId: 'companion-alice' 
 
 **Pool contention:** the pool is shared across all brains opened against the same adapter. Five brains opened against a `max: 10` pool compete for the same 10 connections; one slow query can starve the others. Size the pool for the total concurrent query load across all brains, not per-brain. For high-fan-out deployments (e.g., one process serving 50 active brains), consider a dedicated pool per brain via `Brain.openPostgres(connStr, { brainId, poolSize: N })` instead of sharing.
 
-The 0.3.1 hardening pass uses `pg_advisory_xact_lock` to serialize concurrent first-opens against the same `brainId`. The lock is per-brain (different brainIds boot in parallel; same brainId from two workers serializes), so pool sizing should account for one extra connection-second per brain at process startup.
+Schema migrations take a `pg_advisory_xact_lock` keyed on the `brainId`, which serializes concurrent first-opens of the same brain. The lock is per-brain (different brainIds boot in parallel; same brainId from two workers serializes), so pool sizing should account for one extra connection-second per brain at process startup.
 
 ### Schema migration
 

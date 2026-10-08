@@ -44,9 +44,9 @@ Parallel to [`HydeRetriever`](https://github.com/framerslab/agentos/blob/master/
 
 ## Performance characteristics
 
-- **Stage 1 cost**: one embedding (reusable via a shared `CachedEmbedder`) plus one vector search per query. Bounded by `topK=K`.
+- **Stage 1 cost**: one query embedding plus one vector search per query, bounded by `topK=K`.
 - **Stage 2 cost**: one `MemoryStore.query` per query with `topK = K × M × 3` (over-fetch multiplier). Typical: 45 at the defaults.
-- **Optional rerank cost**: one Cohere `rerank-v3.5` call over the merged K×M pool (~15 documents at defaults). Approximately $0.0001 per query.
+- **Optional rerank cost**: one reranker call over the merged K×M pool (15 documents at the defaults).
 - **Fallback cost**: Stage-1 empty → plain `MemoryStore.query` (no extra cost). Stage-2 empty → raw Stage-2 pool (no extra cost).
 
 ## Related modules

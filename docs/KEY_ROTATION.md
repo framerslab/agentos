@@ -36,8 +36,8 @@ Every other provider in the list below rotates its keys but never marks one exha
 
 ## Supported Providers
 
-- **LLM:** OpenAI, Anthropic, Gemini, OpenRouter
-- **Speech TTS:** ElevenLabs, OpenAI TTS, Deepgram
+- **LLM:** OpenAI, Anthropic, Gemini, OpenRouter, Requesty
+- **Speech TTS:** ElevenLabs, OpenAI TTS, Deepgram, MiniMax
 - **Speech STT:** OpenAI Whisper, Deepgram, AssemblyAI
 - **Voice Pipeline:** OpenAI batch TTS and Realtime, ElevenLabs batch and streaming TTS and streaming STT, Cartesia batch and streaming TTS, Hume batch and streaming TTS, Deepgram Aura batch and streaming TTS and Deepgram streaming STT
 - **Image:** OpenAI, Stability, Flux, Fal, Replicate, OpenRouter

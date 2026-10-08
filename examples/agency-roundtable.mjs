@@ -3,8 +3,13 @@
 // per-seat reasoning effort and graceful degradation when providers are absent.
 //
 // Seats span four providers so no single vendor's failure mode dominates the
-// panel. A seat whose provider has no API key (or whose call fails) is skipped
-// with a visible warning — the table proceeds on a quorum of two seats.
+// panel. A seat whose provider has no API key is left out with a warning, and
+// the table needs two seats to run. A seated agent whose call fails is logged
+// and left out of the chair's synthesis.
+//
+// Every seat names its own model. A seat that sets `provider` without `model`
+// inherits the agency-level model, the chair's here, and a Gemini or xAI seat
+// asked for a Claude model fails.
 //
 // Usage (any subset of keys works; two or more providers recommended):
 //   export OPENAI_API_KEY="sk-..."      # aggressive PM + devil's advocate (gpt-5.6 @ xhigh)
@@ -23,7 +28,7 @@ const BRIEF =
 const available = {
   openai: !!process.env.OPENAI_API_KEY,
   anthropic: !!process.env.ANTHROPIC_API_KEY,
-  gemini: !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY),
+  gemini: !!process.env.GEMINI_API_KEY,
   xai: !!process.env.XAI_API_KEY,
 };
 
@@ -40,6 +45,7 @@ const SEAT_FORMAT =
 const SEATS = {
   risk_averse_pm: {
     provider: 'anthropic',
+    model: 'claude-opus-4-8',
     effort: 'max',
     instructions:
       `Capital-preservation portfolio manager. You care about drawdown, tail risk, and position sizing before upside. Default to the smallest exposure that keeps optionality. ${SEAT_FORMAT}`,
@@ -53,18 +59,21 @@ const SEATS = {
   },
   macro_analyst: {
     provider: 'gemini',
+    model: 'gemini-3.1-pro-preview',
     effort: 'high',
     instructions:
       `Macro and regime analyst. Frame the aggregates against liquidity conditions, correlation regime, and crowding. You do not pick trades; you set the weather. ${SEAT_FORMAT}`,
   },
   flow_analyst: {
     provider: 'xai',
-    effort: 'high',
+    model: 'grok-2',
+    effort: 'high', // not sent to grok-2: only models that take an effort level receive one
     instructions:
       `Market-microstructure and flow analyst. Volumes, slippage, participation, who is on the other side. Flag when measured slippage makes the trade uneconomic. ${SEAT_FORMAT}`,
   },
   risk_officer: {
     provider: 'anthropic',
+    model: 'claude-opus-4-8',
     effort: 'max',
     instructions:
       `Chief risk officer with veto power. Check every seat's stance against exposure limits and the fail-closed doctrine: missing or stale inputs mean NO new risk. State explicitly whether you veto. ${SEAT_FORMAT}`,
@@ -82,7 +91,7 @@ async function main() {
   const seated = Object.fromEntries(
     Object.entries(SEATS).filter(([name, cfg]) => {
       if (available[cfg.provider]) return true;
-      console.warn(`⚠️  seat "${name}" ABSENT — no ${cfg.provider} key configured (graceful degradation)`);
+      console.warn(`⚠️  seat "${name}" ABSENT — no ${cfg.provider} key configured`);
       return false;
     }),
   );
@@ -107,8 +116,7 @@ async function main() {
     agents: seated,
     controls: { maxTotalTokens: 120_000, onLimitReached: 'warn' },
     on: {
-      agentStart: (e) => console.log(`— ${e.agent} deliberating…`),
-      agentEnd: (e) => console.log(`— ${e.agent} done (${e.durationMs}ms)`),
+      limitReached: (e) => console.warn(`⚠️  ${e.metric} ${e.value} over the limit ${e.limit}`),
     },
   });
 
@@ -117,6 +125,11 @@ async function main() {
       Object.keys(SEATS).filter((n) => !seated[n]).join(',') || 'none'
     }.`,
   );
+
+  // One record per seat that answered; a seat whose call failed is not in it.
+  for (const call of result.agentCalls ?? []) {
+    console.log(`— ${call.agent} answered (${call.durationMs}ms, ${call.usage?.totalTokens ?? 0} tokens)`);
+  }
 
   console.log('\n================ TABLE VERDICT ================\n');
   console.log(result.text);
