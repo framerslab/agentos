@@ -1,11 +1,14 @@
 /**
  * @file GMI.completion-gateway.test.ts
  * A GMI turn through the real completion gateway (`createCompletionGateway`):
- * its `resolve()` and `stream()`, the provider manager it creates and the real
- * prompt engine. Only the provider classes are stubbed, at their module
- * boundary (src/api/__tests__/helpers/stubProviders.ts); each case scripts its
- * providers under keys of its own, because provider managers are cached by
- * provider, key and base URL.
+ * its `resolve()` (a primary that cannot be set up, fallback legs that cannot
+ * start, open circuits, the router's task hint) and its `stream()` (the
+ * delivery boundary, the usage of failed attempts), the provider manager it
+ * creates and the real prompt engine. Only the provider classes are stubbed, at
+ * their module boundary (src/api/__tests__/helpers/stubProviders.ts); each case
+ * scripts its providers under keys of its own, because provider managers are
+ * cached by provider, key and base URL. GMI.gateway.test.ts covers the hop loop
+ * over a scripted gateway.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('../../../api/__tests__/helpers/stubProviders')).stubProviderClass('openai') }));
@@ -80,6 +83,68 @@ describe('GMI turn through the real completion gateway', () => {
     const error = of(chunks, GMIOutputChunkType.ERROR)[0];
     expect(error?.errorDetails?.code).toBe(GMIErrorCode.CONFIGURATION_ERROR);
     expect(String(error?.content)).toContain('No API key for openai');
+  });
+
+  it('a fallback leg that cannot start is skipped: the failed primary moves on to the leg after it', async () => {
+    const k = key(); const broken = key(); const healthy = key();
+    const overloaded = Object.assign(new Error('overloaded'), { httpStatus: 529 });
+    const primary = script('openai', k, { replies: [overloaded] });
+    script('anthropic', broken, { initThrows: Object.assign(new Error('invalid x-api-key'), { httpStatus: 401 }) });
+    const last = script('openai', healthy, { replies: [reply.text('From the last leg.')] });
+    // Fallback legs take their credentials from the environment.
+    vi.stubEnv('ANTHROPIC_API_KEY', broken);
+    vi.stubEnv('OPENAI_API_KEY', healthy);
+    const gateway = createCompletionGateway({
+      apiKey: k,
+      fallbackProviders: [{ provider: 'anthropic', model: 'claude-x' }, { provider: 'openai', model: 'stub-model' }],
+    });
+    const { gmi } = await createScriptedGmi({ gateway, persona: { defaultModelId: 'stub-model' } });
+    const { chunks } = await runTurn(gmi, textTurn('t1', 'Hi.'));
+    expect(of(chunks, GMIOutputChunkType.ERROR)).toEqual([]);
+    expect(of(chunks, GMIOutputChunkType.STEP_FINISHED)[0].content).toMatchObject({ text: 'From the last leg.', providerId: 'openai', hop: 2 });
+    expect([primary.seen.length, last.seen.length]).toEqual([1, 1]);
+    const skipped = gmi.getReasoningTrace().entries.find((entry) => entry.message.includes("Provider 'anthropic' (hop 1) could not start"));
+    expect(skipped).toBeDefined();
+  });
+
+  it('a primary whose circuit is open is skipped before any prompt is built or sent to it', async () => {
+    const k = key(); const fb = key();
+    const primary = script('anthropic', k, { replies: [reply.text('Should not run.')] });
+    script('openai', fb, { replies: [reply.text('From the fallback.')] });
+    vi.stubEnv('OPENAI_API_KEY', fb);
+    // A rejected key opens the provider's circuit at once.
+    globalLLMProviderHealth.recordFailure('anthropic', Object.assign(new Error('invalid x-api-key'), { httpStatus: 401 }));
+    const { gmi, promptEngine } = await createScriptedGmi({
+      gateway: createCompletionGateway({ apiKey: k, fallbackProviders: [{ provider: 'openai', model: 'stub-model' }] }),
+      persona: { defaultProviderId: 'anthropic', defaultModelId: 'claude-x' },
+    });
+    const construct = vi.spyOn(promptEngine, 'constructPrompt');
+    const { chunks } = await runTurn(gmi, textTurn('t1', 'Hi.'));
+    expect(of(chunks, GMIOutputChunkType.STEP_FINISHED)[0].content).toMatchObject({ text: 'From the fallback.', providerId: 'openai', hop: 1 });
+    expect(construct.mock.calls.map((call) => call[1].providerId)).toEqual(['openai']);
+    expect(primary.seen).toHaveLength(0);
+  });
+
+  it('an attempt that fails before any content shows the GMI none of its chunks, only the bill it reported', async () => {
+    const k = key(); const fb = key();
+    const early = { promptTokens: 30, completionTokens: 0, totalTokens: 30 };
+    // A usage chunk, then the provider fails: the chunk is buffered and dropped with the attempt.
+    script('openai', k, { replies: [[{ id: 'stub', object: 'chat.completion.chunk', created: 0, modelId: 'stub-model', choices: [], usage: early }, Object.assign(new Error('overloaded'), { httpStatus: 529 })]] });
+    script('anthropic', fb, { replies: [reply.text('From the fallback.')] });
+    vi.stubEnv('ANTHROPIC_API_KEY', fb);
+    const { gmi } = await createScriptedGmi({
+      gateway: createCompletionGateway({ apiKey: k, fallbackProviders: [{ provider: 'anthropic', model: 'claude-x' }] }),
+      persona: { defaultModelId: 'stub-model' },
+    });
+    const { chunks, output } = await runTurn(gmi, textTurn('t1', 'Hi.'));
+    const usage = of(chunks, GMIOutputChunkType.USAGE_UPDATE);
+    // The primary's usage chunk never reached the GMI as its own USAGE_UPDATE; it arrives once, as the failed attempt's bill.
+    expect(usage.map((c) => [c.content, c.metadata?.attemptFailed === true])).toEqual([
+      [early, true],
+      [{ promptTokens: 12, completionTokens: 3, totalTokens: 15 }, false],
+    ]);
+    expect(of(chunks, GMIOutputChunkType.TEXT_DELTA).map((c) => c.content)).toEqual(['From the fallback.']);
+    expect(output.usage).toMatchObject({ promptTokens: 42, completionTokens: 3, totalTokens: 45 });
   });
 
   it('a step that fails after output is still counted: the usage its provider error carries is reported and added to the turn', async () => {
