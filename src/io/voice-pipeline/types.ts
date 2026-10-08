@@ -400,6 +400,37 @@ export interface TranscriptEvent {
     /** Confidence score in [0, 1]. */
     confidence: number;
   };
+
+  /**
+   * Identifier of the provider's input item this hypothesis belongs to, when
+   * the provider keys its results (OpenAI Realtime's `item_id`). Every interim
+   * and the final of one utterance carry the same `itemId`, so a consumer that
+   * shows interim text replaces it by key, and the results of two utterances
+   * whose events interleave never mix. Providers without item keys leave it
+   * undefined.
+   */
+  itemId?: string;
+
+  /**
+   * Start of the utterance's audio, in milliseconds counted from the first
+   * frame pushed into the session, when the provider reports speech
+   * boundaries.
+   */
+  startMs?: number;
+
+  /**
+   * End of the utterance's audio, in milliseconds counted from the first
+   * frame pushed into the session, when the provider reports speech
+   * boundaries.
+   */
+  endMs?: number;
+
+  /**
+   * Language of `text`: the code the provider detected, or the language the
+   * session was configured with (for example `'en'`). Undefined when neither
+   * is known.
+   */
+  language?: string;
 }
 
 /**
