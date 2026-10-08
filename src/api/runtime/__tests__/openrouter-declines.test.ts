@@ -433,6 +433,17 @@ describe('OpenRouter declines through streamText', () => {
     expect(hoisted.state.geminiCalls).toBe(0);
   });
 
+  it('a choice-level upstream error on a stream that stays open: the next leg streams within the bound', async () => {
+    const open = new Readable({ read() {} });
+    open.push(Buffer.from(choiceError({ code: 502, message: 'down', metadata: { error_type: 'provider_unavailable' } }) + '\n\n'));
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce({ data: open });
+    const started = Date.now();
+    const r = await stream();
+    expect(r.text).toBe('from gemini');
+    expect(Date.now() - started).toBeLessThan(8_000);
+    expect(open.destroyed).toBe(true);
+  }, 10_000);
+
   it('a choice-level upstream error followed by the usage line: the next leg streams and the failed attempt is counted once', async () => {
     hoisted.state.openrouterRequest!.mockResolvedValueOnce({
       data: sse([choiceError({ code: 502, message: 'Provider disconnected', metadata: { error_type: 'provider_unavailable' } }), usageChunk, 'data: [DONE]']),
