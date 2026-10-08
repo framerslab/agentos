@@ -37,6 +37,40 @@ describe('resolveCeiling', () => {
     }
   });
 
+  it('names the key of an audit value, a list of the wrong shape, and a bound out of range', () => {
+    const cases: Array<[unknown, unknown, string]> = [
+      [{ crypto: {} }, { store: 'storge' }, 'invalid_audit: audit.store'],
+      [{ crypto: {} }, { content: 'hash' }, 'invalid_audit: audit.content'],
+      [{ fetch: {} }, undefined, 'invalid_domain: capabilities.fetch.domains'],
+      [{ fetch: { domains: 'api.example.com' } }, undefined, 'invalid_domain: capabilities.fetch.domains'],
+      [{ fetch: { domains: ['api.example.com', 7] } }, undefined, 'invalid_domain: capabilities.fetch.domains'],
+      [{ 'fs.read': {} }, undefined, 'root_not_absolute: capabilities.fs.read.roots'],
+      [{ 'fs.read': { roots: '/srv' } }, undefined, 'root_not_absolute: capabilities.fs.read.roots'],
+      [{ 'fs.read': { roots: ['/srv', null] } }, undefined, 'root_not_absolute: capabilities.fs.read.roots'],
+      [{ fetch: { domains: '*', methods: 'GET' } }, undefined, 'method_not_allowed: capabilities.fetch.methods'],
+      // Node keeps a timer delay of at most 2^31 - 1 ms: above it a timeout
+      // fires at once, and from 2^32 AbortSignal.timeout throws.
+      [{ fetch: { domains: '*', timeoutMs: 3_000_000_000 } }, undefined, 'invalid_bound: capabilities.fetch.timeoutMs'],
+      [{ 'fs.read': { roots: ['/srv'], timeoutMs: 2 ** 32 } }, undefined, 'invalid_bound: capabilities.fs.read.timeoutMs'],
+      [{ fetch: { domains: '*', maxResponseBytes: 2 ** 53 } }, undefined, 'invalid_bound: capabilities.fetch.maxResponseBytes'],
+      [{ 'fs.read': { roots: ['/srv'], maxBytesPerRead: 1e21 } }, undefined, 'invalid_bound: capabilities.fs.read.maxBytesPerRead'],
+      // A capability an empty list removes is validated all the same.
+      [{ fetch: { domains: [], timeoutMs: 0 } }, undefined, 'invalid_bound: capabilities.fetch.timeoutMs'],
+    ];
+    for (const [capabilities, audit, message] of cases) {
+      expect(() => resolveCeiling(capabilities as never, audit as never, storage)).toThrow(message);
+    }
+
+    // The largest bounds are accepted.
+    const widest = resolveCeiling(
+      { fetch: { domains: '*', timeoutMs: 2_147_483_647, maxResponseBytes: Number.MAX_SAFE_INTEGER } },
+      { store: 'none', content: 'full' },
+      storage,
+    );
+    expect(widest.fetch).toMatchObject({ timeoutMs: 2_147_483_647, maxResponseBytes: Number.MAX_SAFE_INTEGER });
+    expect(widest.audit).toEqual({ store: 'none', content: 'full' });
+  });
+
   it('a ceiling that records needs storage, and one that does not, does not', () => {
     expect(() => resolveCeiling({ crypto: {} }, undefined, { hasStorage: false })).toThrow(
       'audit_needs_storage: audit.store',

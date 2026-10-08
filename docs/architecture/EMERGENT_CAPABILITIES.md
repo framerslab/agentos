@@ -334,7 +334,7 @@ emergentConfig: {
 | `'fs.read'.maxBytesPerRead` | 1 MB | A file larger than this is refused while it streams |
 | `'fs.read'.timeoutMs` | 30 s | One read |
 
-The engine validates the ceiling when it is built, and the error names the key: `unknown_capability`, `root_not_absolute`, `method_not_allowed`, `invalid_domain`, `invalid_bound`, or `audit_needs_storage` (a ceiling records every capability call, so it needs a storage adapter unless `audit.store` is `'none'`).
+The engine validates the whole ceiling when it is built, the settings of a capability that an empty list removes included, and each error names its key: `unknown_capability`; `invalid_domain` (`domains` is `'*'` or a list of host names); `root_not_absolute` (`roots` is a list of absolute paths); `method_not_allowed` (`methods` is a list of `'GET'` and `'HEAD'`); `invalid_bound` (each bound is an integer, a time bound at most 2,147,483,647 ms, the longest delay Node's timers keep, and a byte bound or `maxRedirects` at most `Number.MAX_SAFE_INTEGER`); `invalid_audit` (`audit.store` is `'storage'` or `'none'`, `audit.content` is `'digest'` or `'full'`); or `audit_needs_storage` (a ceiling records every capability call, so it needs a storage adapter unless `audit.store` is `'none'`). A configuration read from JSON gets no type check, and these checks stand in for it.
 
 **The request.** A forging agent names capabilities in `implementation.allowlist`; under a ceiling the list is a request. A name the ceiling does not grant refuses the forge before any test case runs, with `capability_not_granted` and the names the host grants. A tool gets the functions it asked for that the ceiling allows, with the ceiling's scopes, and cannot widen a scope.
 

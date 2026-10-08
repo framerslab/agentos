@@ -74,7 +74,7 @@ export interface FetchCeiling {
   maxResponseBytes?: number;
   /** Redirects the broker follows, each one checked like the first request. @default 5 */
   maxRedirects?: number;
-  /** One request's time bound, redirects included. @default 30_000 */
+  /** One request's time bound, redirects included; at most 2_147_483_647 (Node's longest timer delay). @default 30_000 */
   timeoutMs?: number;
 }
 
@@ -84,7 +84,7 @@ export interface FsReadCeiling {
   roots: string[];
   /** A file larger than this is refused while it streams. @default 1_048_576 */
   maxBytesPerRead?: number;
-  /** One read's time bound. @default 30_000 */
+  /** One read's time bound; at most 2_147_483_647 (Node's longest timer delay). @default 30_000 */
   timeoutMs?: number;
 }
 
