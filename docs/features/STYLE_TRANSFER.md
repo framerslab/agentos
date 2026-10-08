@@ -1,16 +1,18 @@
 # Style Transfer — Image-Guided Aesthetic Translation
 
-> Apply the visual style of one image to another using `transferStyle()`, backed by Flux Redux and cross-provider img2img.
+> `transferStyle()` turns a prompt and an image into a new image on Flux Redux or an img2img provider. Which of the two images it sends depends on the provider.
 
 ---
 
 ## Overview
 
-`transferStyle()` takes a source image and a style reference image, then produces an output that combines the content of the source with the visual aesthetic of the reference. This is useful for:
+`transferStyle()` takes a source image (`image`), a style reference image (`styleReference`) and a prompt. It picks a provider and sends one of the two images:
 
-- Converting photographs to specific art styles (oil painting, anime, pixel art)
-- Applying a brand's visual identity to generated content
-- Creating consistent visual themes across a set of images
+- **Flux Redux on Replicate** (the first choice when `REPLICATE_API_TOKEN` is set): the style reference and the prompt. The source image is not sent, so the output is a variation of the reference steered by the prompt.
+- **An img2img provider** (Fal, Stability, OpenAI, or Replicate with another model): the source image, the prompt and `strength`. The style reference is not sent, so the style comes from the prompt alone.
+- **A provider without image editing**: the prompt with "Apply the visual style and aesthetic of the reference." appended, and no image.
+
+Describe the target style in the prompt in every case: on the img2img path the prompt is the only carrier of the style.
 
 ## `transferStyle()` API
 
@@ -24,8 +26,8 @@ const result = await transferStyle({
   strength: 0.7,
 });
 
-console.log(result.images[0].url);
-console.log(result.provider);  // 'replicate'
+console.log(result.images[0].url ?? result.images[0].dataUrl);
+console.log(result.provider);  // 'replicate' when REPLICATE_API_TOKEN is set
 console.log(result.model);     // 'black-forest-labs/flux-redux-dev'
 ```
 
@@ -33,66 +35,50 @@ console.log(result.model);     // 'black-forest-labs/flux-redux-dev'
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `image` | `string \| Buffer` | **required** | Source image (file path, URL, data URI, or Buffer) |
-| `styleReference` | `string \| Buffer` | **required** | Reference image whose style to apply |
-| `prompt` | `string` | **required** | Text guiding the transfer direction |
-| `strength` | `number` | `0.7` | How much reference style to apply (0 = unchanged, 1 = full transfer) |
+| `image` | `string \| Buffer` | **required** | Source image (file path, URL, data URI, or Buffer). Sent on the img2img path only. |
+| `styleReference` | `string \| Buffer` | **required** | Style reference image. Sent on the Flux Redux path only. |
+| `prompt` | `string` | **required** | Text guiding the output; the description of the style on the img2img path |
+| `strength` | `number` | `0.7` | img2img strength: how far the output may move from the source image (0 keeps it, 1 replaces it). Not sent on the Flux Redux path, and the OpenAI provider does not send it. |
 | `provider` | `string` | auto-detect | Override provider selection |
 | `model` | `string` | provider default | Override model selection |
 | `size` | `string` | — | Output dimensions (e.g. `'1024x1024'`) |
 | `negativePrompt` | `string` | — | Content to avoid |
 | `seed` | `number` | — | Reproducibility seed |
-| `policyTier` | `string` | — | Content policy tier for provider routing |
+| `policyTier` | `string` | — | Accepted and not read: it does not change the provider routing below |
+| `providerOptions` | `object` | — | Provider-specific options passed through |
 | `apiKey` | `string` | the provider's env var | Key for the provider named by `provider` or a prefixed `model` (`openai:gpt-image-1`); refused without one |
 | `baseUrl` | `string` | provider default | Base URL for the provider |
 
 ## Provider Routing
 
-When no provider is specified, `transferStyle()` auto-detects the best available provider from environment variables:
+When no provider is named, `transferStyle()` takes the first provider whose key is set:
 
-| Priority | Provider | Model | How It Works |
-|----------|----------|-------|-------------|
-| 1 | Replicate | Flux Redux Dev | Purpose-built for image-guided generation. Style reference as primary input. |
-| 2 | Fal | Flux Dev | img2img with style description in prompt |
-| 3 | Stability | stable-image-core | img2img with strength parameter |
-| 4 | OpenAI | gpt-image-1 | editImage with descriptive prompt |
-
-Replicate with Flux Redux produces the best results for style transfer because the model was trained specifically for image-conditioned generation.
-
-## Strength Guide
-
-| Range | Effect | Use Case |
-|-------|--------|----------|
-| 0.1–0.3 | Subtle color grading, minor texture shifts | Brand color overlays |
-| 0.4–0.6 | Moderate style influence, composition preserved | "In the style of" variations |
-| 0.7–0.8 | Strong style transfer, content recognizable | Art style conversion |
-| 0.9–1.0 | Near-complete adoption of reference aesthetic | Full aesthetic transformation |
+| Priority | Env var | Provider | Model | What is sent |
+|----------|---------|----------|-------|--------------|
+| 1 | `REPLICATE_API_TOKEN` | Replicate | `black-forest-labs/flux-redux-dev` | Style reference + prompt |
+| 2 | `FAL_API_KEY` | Fal | `fal-ai/flux/dev` | Source image + prompt + `strength` |
+| 3 | `STABILITY_API_KEY` | Stability | `stable-image-core` | Source image + prompt + `strength` |
+| 4 | `OPENAI_API_KEY` | OpenAI | `gpt-image-1` | Source image + prompt (edit endpoint) |
 
 ## Examples
 
 ```typescript
-// Photograph → anime style
+// Photograph → anime style (on an img2img provider, the prompt carries the style)
 const anime = await transferStyle({
+  provider: 'stability',
   image: './portrait-photo.jpg',
   styleReference: './ghibli-frame.png',
   prompt: 'Studio Ghibli anime style, cel shading, vibrant colors',
   strength: 0.75,
 });
 
-// Photograph → pixel art
-const pixel = await transferStyle({
+// A variation of a reference look (Flux Redux sends the reference, not the photo)
+const variation = await transferStyle({
+  provider: 'replicate',
+  model: 'black-forest-labs/flux-redux-dev',
   image: './landscape.jpg',
   styleReference: './pixel-art-reference.png',
-  prompt: '16-bit pixel art, limited palette, retro game aesthetic',
-  strength: 0.8,
-});
-
-// Apply brand visual identity
-const branded = await transferStyle({
-  image: './product-photo.jpg',
-  styleReference: './brand-style-guide.png',
-  prompt: 'Clean, modern, brand-consistent visual treatment',
-  strength: 0.5,
+  prompt: '16-bit pixel art of a mountain landscape, limited palette',
 });
 ```
 

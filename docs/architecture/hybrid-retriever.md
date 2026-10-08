@@ -2,63 +2,73 @@
 
 ## What this is
 
-[`HybridRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hybrid/HybridRetriever.ts) fuses dense and sparse retrieval signals over memory traces. Dense side uses `MemoryStore.query` (preserving the 6-signal cognitive scoring). Sparse side uses a per-instance [`BM25Index`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/search/BM25Index.ts). Reciprocal Rank Fusion merges the two ranked lists. Optional neural rerank (Cohere `rerank-v3.5`) runs over the merged pool before truncation.
+[`HybridRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hybrid/HybridRetriever.ts) fuses dense and sparse retrieval over memory traces. The dense side is `MemoryStore.query`, which keeps the store's cognitive scoring. The sparse side is a [`BM25Index`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/search/BM25Index.ts) the retriever owns. Reciprocal Rank Fusion merges the two ranked lists, and an optional reranker rescores the merged pool before truncation.
 
-The effect: exact-term matches (names, dates, specific numbers) that pure semantic embedding misses are re-surfaced by BM25, then re-ranked by the cross-encoder for final quality.
+Exact-term matches (names, dates, specific numbers) that an embedding ranks low are surfaced by BM25, then reranked with the semantic candidates.
 
-## Mental model
+```ts
+import { HybridRetriever } from '@framers/agentos/memory';
 
-Parallel to [`SessionRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/session/SessionRetriever.ts) (Step 2), [`HydeRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/HydeRetriever.ts), and [`ProspectiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/prospective/ProspectiveMemoryManager.ts). All four are query-time retrieval strategies under `memory/retrieval/`. All are opt-in; callers wire them up when their use case benefits.
+const hybrid = new HybridRetriever({ memoryStore, rerankerService });
+
+// The caller indexes each trace's text in the BM25 index as it stores the trace:
+hybrid.bm25.addDocument(trace.id, trace.content);
+
+const result = await hybrid.retrieve(
+  'What did the user say about their mortgage?',
+  { valence: 0, arousal: 0, dominance: 0 },  // current mood
+  { scope: 'user', scopeId: 'u1' },
+  { recallTopK: 10 },
+);
+```
+
+The BM25 index starts empty and is not filled from the store: traces the caller does not add are found by the dense side only.
 
 ## Relation to [`HybridSearcher`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/search/HybridSearcher.ts) in `rag/search/`
 
-[`HybridSearcher`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/search/HybridSearcher.ts) is a generic document-RAG hybrid retriever: it takes a vector store + a BM25 index + an embedding manager and returns document hits. It knows nothing about memory traces, cognitive scoring, or decay.
+[`HybridSearcher`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/search/HybridSearcher.ts) is a document-RAG hybrid retriever: it takes a vector store, a BM25 index and an embedding manager and returns document hits. It knows nothing about memory traces, cognitive scoring or decay.
 
-[`HybridRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hybrid/HybridRetriever.ts) is a memory-domain retriever: it delegates dense search to `MemoryStore.query` (inheriting cognitive scoring), owns a per-instance [`BM25Index`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/search/BM25Index.ts) for sparse, and returns [`ScoredMemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts) in a [`CognitiveRetrievalResult`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts) shape. It is NOT built on top of [`HybridSearcher`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/search/HybridSearcher.ts). They are siblings at different abstraction levels.
+`HybridRetriever` is the memory-domain sibling: it delegates dense search to `MemoryStore.query`, owns its BM25 index, and returns [`ScoredMemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts) results in a [`CognitiveRetrievalResult`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts). It is not built on `HybridSearcher`.
 
-## Two stages
+[`SessionRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/session/SessionRetriever.ts), [`HydeRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/HydeRetriever.ts) and [`ProspectiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/prospective/ProspectiveMemoryManager.ts) are the other opt-in query-time strategies; `CognitiveMemoryManager` uses none of them on its own.
 
-1. **Dense** (`MemoryStore.query` with over-fetched topK): returns cognitive-scored traces.
-2. **Sparse** (`this.bm25.search`): returns BM25-scored trace ids.
-3. **RRF merge** via [`reciprocalRankFusion`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hybrid/reciprocalRankFusion.ts) helper. Rank-based, so metric-space mismatch between cognitive composite and BM25 scores is irrelevant.
-4. **Hydrate**: sparse-only docs skipped in MVP (documented limitation; drop rate expected to be low at the default over-fetch=3).
-5. **Rerank** (optional, mandatory-wired from the bench per Step 2 post-mortem): Cohere rerank over merged pool, 0.7 cognitive + 0.3 neural blend matching baseline semantics.
-6. **Truncate** to `recallTopK`.
+## Steps of `retrieve()`
+
+1. **HyDE (optional).** With `hydeRetriever`, a hypothetical answer replaces the query for the dense and sparse searches; the reranker keeps the original query. A generation failure falls back to the original query.
+2. **Dense.** `MemoryStore.query` with `topK = recallTopK × overFetchMultiplier` (30 at the defaults of 10 and 3), scoped to the call's scope.
+3. **Sparse.** `bm25.search` with the same `topK`. When it returns nothing, the retriever returns the dense results alone and adds `hybrid-retriever:sparse-empty` to `diagnostics.escalations`.
+4. **Merge.** [`reciprocalRankFusion`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hybrid/reciprocalRankFusion.ts) with weights 0.7 dense and 0.3 sparse and `k` = 60 (`defaultDenseWeight`, `defaultSparseWeight`, `defaultRrfK`, and per call `denseWeight`, `sparseWeight`, `rrfK`). Fusion uses ranks, so the two score scales need not match.
+5. **Hydrate.** Each merged id is resolved to its dense-side trace. A trace that only BM25 found is dropped.
+6. **Fact graph (optional).** With `factStore`, the facts that match `(subject, predicate)` pairs in the query are added at the top of the pool as synthetic traces with `retrievalScore` 1.0: the latest fact per pair, or every fact for the subject when the query is temporal. `factGraphQueryClassifier` replaces the keyword classifier that extracts the pairs.
+7. **Rerank (optional).** With `rerankerService`, each trace's score becomes `0.7 × retrievalScore + 0.3 × rerank score`, and the pool is re-sorted. With `splitAmbiguousThreshold` in (0, 1], each trace in that lowest-scoring fraction is split in two at the sentence boundary nearest its middle, the halves are reranked, and the trace's content becomes its better half when that half scores higher than the whole trace did. A reranker error keeps the merged order.
+8. **Truncate** to `recallTopK` (default 10).
+
+`diagnostics.stageIds` lists the trace ids at each step (`dense`, `sparse`, `merged`, `reranked`, `final`).
 
 ## When to use
 
-- Deployments with a mix of semantic queries and exact-term queries (names, dates, specific values).
-- LoCoMo adversarial / LongMemEval knowledge-update where specific-value extraction is the dominant failure mode.
-- Any scenario where the dense embedding struggles with out-of-vocabulary or rare tokens.
+- A mix of semantic queries and exact-term queries (names, dates, specific values).
+- Corpora where the embedding ranks rare or out-of-vocabulary tokens poorly.
 
-## When NOT to use
+## When not to use
 
-- Very short corpora (< 50 traces) where BM25's IDF estimates are unreliable.
-- Scenarios without an embedder (BM25 alone: use [`BM25Index`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/search/BM25Index.ts) or the generic `HybridSearcher`).
-- Configurations where every trace has near-identical content (BM25 can't discriminate; rerank would do all the work).
+- Very small corpora, where BM25's document-frequency statistics carry little signal.
+- No embedder at all: use [`BM25Index`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/search/BM25Index.ts) or `HybridSearcher` directly.
 
-## Performance characteristics
+## Cost
 
-- **Dense cost**: one vector search at `topK = recallTopK * overFetchMultiplier` (default 30 at K=10).
-- **Sparse cost**: O(query tokens * matched docs), in-memory BM25, typically sub-millisecond at 100s of docs.
-- **RRF**: O(dense + sparse) pure CPU merge.
-- **Rerank**: one Cohere `rerank-v3.5` call over the merged pool (typically 15-20 docs). ~$0.0001 per query.
-- **Total added latency vs dense-only**: < 50ms typical.
-
-## Mutex with [`SessionRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/session/SessionRetriever.ts)
-
-In Step 3 MVP, [`HybridRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hybrid/HybridRetriever.ts) and [`SessionRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/session/SessionRetriever.ts) are mutually exclusive at the bench boundary. Passing both flags throws a documented error inside `runFullCognitiveCase`. A combined path (Hybrid-over-selected-sessions) is a hypothetical Step 7 concept; not implemented.
+- One dense search and one in-memory BM25 search per query, plus one HyDE generation call when `hydeRetriever` is set.
+- One reranker call over the merged pool when `rerankerService` is set, and a second over the split halves when `splitAmbiguousThreshold` is set.
 
 ## References
 
-- Cormack, Clarke, Büttcher (2009): *Reciprocal rank fusion outperforms Condorcet and individual rank learning methods*.
-- Anthropic Sep 2024: Contextual Retrieval. Contextual BM25 + embeddings cut retrieval failure by 49%, 67% with reranking.
-- Robertson & Zaragoza (2009): *The Probabilistic Relevance Framework: BM25 and Beyond*.
+- Cormack, Clarke and Büttcher (2009): *Reciprocal rank fusion outperforms Condorcet and individual rank learning methods*.
+- Robertson and Zaragoza (2009): *The Probabilistic Relevance Framework: BM25 and Beyond*.
 
 ## Related modules
 
-- [`src/cognition/memory/retrieval/hybrid/HybridRetriever.ts`](../../src/cognition/memory/retrieval/hybrid/HybridRetriever.ts)
-- [`src/cognition/memory/retrieval/hybrid/reciprocalRankFusion.ts`](../../src/cognition/memory/retrieval/hybrid/reciprocalRankFusion.ts)
-- [`src/cognition/rag/search/BM25Index.ts`](../../src/cognition/rag/search/BM25Index.ts) — reused verbatim
-- [`src/cognition/memory/retrieval/store/MemoryStore.ts`](../../src/cognition/memory/retrieval/store/MemoryStore.ts) — dense source
-- [`src/cognition/rag/reranking/RerankerService.ts`](../../src/cognition/rag/reranking/RerankerService.ts) — optional reranker
+- [`src/cognition/memory/retrieval/hybrid/HybridRetriever.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hybrid/HybridRetriever.ts)
+- [`src/cognition/memory/retrieval/hybrid/reciprocalRankFusion.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hybrid/reciprocalRankFusion.ts)
+- [`src/cognition/rag/search/BM25Index.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/search/BM25Index.ts)
+- [`src/cognition/memory/retrieval/store/MemoryStore.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/MemoryStore.ts): the dense source
+- [`src/cognition/rag/reranking/RerankerService.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts): the optional reranker
