@@ -439,7 +439,10 @@ export interface AgentSession {
    * Ends this session and releases its history. A send still running is returned
    * to its caller but added to no history, and the next `agent.session(id)` with
    * this id starts empty. The id's usage totals stay readable through
-   * `agent.usage(id)`. With `runtime: 'gmi'`, the session's GMI is shut down too.
+   * `agent.usage(id)`. With `runtime: 'gmi'`, a send or stream still running is
+   * stopped instead: its model call is aborted, its caller gets the abort error,
+   * and the steps it had finished stay in this session's `messages()`, marked
+   * partial; then the session's GMI is shut down.
    */
   close(): Promise<void>;
 }

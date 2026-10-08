@@ -437,6 +437,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
       const tally = sessionTallies.get(sessionId)!;
       const lock = new TurnLock();
       let closing: Promise<void> | undefined;
+      // Every turn of the session runs under this signal; close() aborts it.
+      const stopTurns = new AbortController();
 
       const buildSessionGmi = async (gmiId: string): Promise<BuiltGmi> => {
         const { persona } = await shared.get();
@@ -500,9 +502,10 @@ export function gmi(opts: GmiOptions): GmiHandle {
             responseSchema: sendOpts?.responseSchema,
             schemaName: sendOpts?.schemaName,
             blockLabel: sendOpts?.blockLabel,
+            abortSignal: stopTurns.signal,
           });
         },
-        stream: (input: MessageContent) => streamGmiTurn(deps('agent.session.stream'), input, {}),
+        stream: (input: MessageContent) => streamGmiTurn(deps('agent.session.stream'), input, { abortSignal: stopTurns.signal }),
         messages: (): SessionTranscriptMessage[] => history?.messages() ?? [],
         reseed: (snapshot: SessionTranscriptMessage[]) => {
           if (!history) throw new Error('reseed requires session history (history: false is set on this agent)');
@@ -518,12 +521,14 @@ export function gmi(opts: GmiOptions): GmiHandle {
           history?.reseed([]);
           syncGmiHistory();
         },
-        // A turn still running ends first and is returned to its caller, but the
-        // reseed keeps it out of the history; then the session's GMI is shut down.
+        // A turn still running is stopped: its model call is aborted, its caller
+        // gets the abort error, and the steps it finished stay in this session's
+        // history, marked partial. Once it has ended, the session's GMI is shut
+        // down. The next agent.session(id) builds a new session, which starts empty.
         close: () =>
           (closing ??= (async () => {
             if (sessions.get(sessionId) === entry) sessions.delete(sessionId);
-            history?.reseed([]);
+            stopTurns.abort();
             const release = await lock.acquire();
             try {
               const built = await own.peek()?.catch(() => undefined);
@@ -545,10 +550,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
     },
 
     /**
-     * Closes every session (each after its running turn), then the cognitive
-     * memory; a session opened from now on builds a new one. The tools stay as
-     * the caller passed them: the orchestrator is not shut down, because
-     * shutting it down would shut down the caller's tools.
+     * Closes every session (each stops its running turn first, see
+     * `session.close()`), then the cognitive memory; a session opened from now
+     * on builds a new one. The tools stay as the caller passed them: the
+     * orchestrator is not shut down, because shutting it down would shut down
+     * the caller's tools.
      */
     async close(): Promise<void> {
       const pending = memory.peek();
