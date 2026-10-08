@@ -214,4 +214,11 @@ export {
   type VoiceProviderBundle,
   type SttProviderEnvConfig,
   type SttProviderBundle,
+  createSttChain,
+  sttEntryPricePerMinute,
+  parseSttEntry,
+  STT_CHAIN_VENDORS,
+  type SttChainEntryOptions,
+  type SttChainVendor,
+  type SttEntry,
 } from './env-constructor.js';

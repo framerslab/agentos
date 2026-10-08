@@ -89,6 +89,7 @@ describe.skipIf(!inCI && !existsSync(entry))('the browser entry of the voice pip
         'io/voice-pipeline/transcriptLedger.js',
         'io/voice-pipeline/inputLevel.js',
         'io/voice-pipeline/phraseHeard.js',
+        'io/voice-pipeline/sttEntries.js',
         'cognition/library/tokens.js',
       ])
     );
