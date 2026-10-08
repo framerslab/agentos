@@ -31,6 +31,8 @@ BREAKING CHANGE: <what users must change>
 
 That footer becomes the breaking-change note in the changelog and the GitHub release.
 
+A breaking change needs a maintainer's approval before it merges. The `Breaking change gate` check ([`breaking-change-gate.yml`](https://github.com/framerslab/agentos/blob/master/.github/workflows/breaking-change-gate.yml)) fails a pull request whose title, description or commit messages carry a breaking-change marker, until a maintainer adds the label `breaking-approved`. Prefer a change that keeps existing callers working: a new option with the old behaviour as its default, a widened type, a deprecation before a removal.
+
 ## Documentation sites
 
 - The API reference at [framerslab.github.io/agentos](https://framerslab.github.io/agentos/) is built by [`docs.yml`](https://github.com/framerslab/agentos/blob/master/.github/workflows/docs.yml) and published from this repository's `agentos-live-docs` branch. It rebuilds when a push to `master` changes `src/`, `docs/`, `README.md`, `package.json`, `CHANGELOG.md`, `typedoc.json` or the workflow itself, and on a manual run.
