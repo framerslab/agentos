@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { EmergentTool } from '../types.js';
+import type { EmergentToolRegistry } from '../EmergentToolRegistry.js';
 import { createSqliteAdapter, readStateRow, readToolRow } from './helpers/sqlite-adapter.js';
 import { callTool, echoTool, makeForgeHost } from './helpers/forge-host.js';
 import {
@@ -1403,5 +1404,46 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     expect(readStateRow(db, 'raw-1')).toMatchObject({ state: 'active', flag_synced: 1 });
     expect(readToolRow(db, 'raw-1')?.is_active).toBe(1);
     expect((await callTool(hostA.orchestrator, 'double_it', { n: 2 })).output).toEqual({ doubled: 4 });
+  });
+
+  it("a promotion while a load has the tool's session row in hand is kept: the load reads the row again, and the owner check holds", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    const forged = await callTool(
+      host.orchestrator,
+      'forge_tool',
+      {
+        name: 'double_it',
+        description: 'Doubles a number.',
+        inputSchema: NUMBER_IN,
+        outputSchema: DOUBLED_OUT,
+        implementation: { mode: 'sandbox', code: RAW_DOUBLE, allowlist: [] },
+        testCases: [{ input: { n: 2 }, expectedOutput: { doubled: 4 } }],
+      },
+      { sessionId: 'sess-p', personaId: 'agent-p' },
+    );
+    expect(forged.isError).toBeFalsy();
+    const toolId = String(forged.output.toolId);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const registry = (host.engine as unknown as { registry: EmergentToolRegistry }).registry;
+
+    // The session load has read the row (session tier, active with its
+    // request) and is held at its second read; the tool is promoted meanwhile.
+    const gate = db.gateNext('FROM agentos_emergent_tool_state s\n        WHERE s.tool_id = ?');
+    const loading = host.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess-p' });
+    await gate.entered;
+    await registry.promote(toolId, 'agent');
+    gate.release();
+    const summary = await loading;
+
+    expect(summary.outcomes).toEqual([{ toolId, name: 'double_it', state: 'active', reason: null }]);
+    expect(registry.get(toolId)?.tier).toBe('agent');
+    expect(readToolRow(db, toolId)).toMatchObject({ tier: 'agent' });
+    const asOther = await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'agent-q' });
+    expect(asOther.isError).toBe(true);
+    expect(JSON.stringify(asOther)).toMatch(/belongs to agent agent-p/);
+    expect((await callTool(host.orchestrator, 'double_it', { n: 2 }, { personaId: 'agent-p' })).output).toEqual({
+      doubled: 4,
+    });
   });
 });

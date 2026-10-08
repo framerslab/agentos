@@ -218,19 +218,22 @@ export class EmergentToolRegistry {
    * deletes land, or when a new row is written for the id.
    */
   /**
-   * Change points. `epoch` advances on every registration, adoption, row
-   * write and removal of any tool in this process, and once more when a
-   * removal's row deletes land; `changedAt` holds, per tool, the epoch of its
-   * last change. A read of stored rows notes the epoch it started at
-   * ({@link beginRead}), and an admission adopts what it read only while the
-   * tool has not changed since and no removal of it is still deleting its
-   * rows ({@link adopt}), so a row read before a removal, or during one, is
-   * never put back, with or without storage.
+   * Change points. `epoch` advances on every registration, adoption,
+   * promotion, row write and removal of any tool in this process, and once
+   * more when a removal's row deletes or a rewrite of the tool row from
+   * memory (a promotion, an `upsert`) land; `changedAt` holds, per tool, the
+   * epoch of its last change. A read of stored rows notes the epoch it
+   * started at ({@link beginRead}), and an admission adopts what it read only
+   * while the tool has not changed since and no removal or rewrite of its
+   * rows is still pending ({@link adopt}), so a row read before a removal or
+   * a promotion, or during one, is never put back, with or without storage.
    */
   private epoch = 0;
   private readonly changedAt = new Map<string, number>();
   /** Removals whose row deletes have not landed yet, counted per tool. */
   private readonly removing = new Map<string, number>();
+  /** Rewrites of the tool row from memory that have not landed yet, counted per tool. */
+  private readonly rewriting = new Map<string, number>();
   /** Reads in flight; change points are forgotten only when none is. */
   private openReads = 0;
 
@@ -888,13 +891,14 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
       return;
     }
     // No read in flight can hold a stale row: forget the change points of
-    // tools this process neither holds nor is removing.
+    // tools this process neither holds nor is removing or rewriting.
     for (const toolId of [...this.changedAt.keys()]) {
       if (
         !this.sessionTools.has(toolId) &&
         !this.persistedTools.has(toolId) &&
         !this.states.has(toolId) &&
-        !this.removing.has(toolId)
+        !this.removing.has(toolId) &&
+        !this.rewriting.has(toolId)
       ) {
         this.changedAt.delete(toolId);
       }
@@ -961,19 +965,48 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
   }
 
   /**
+   * A rewrite of the tool row from the object held in memory (a promotion,
+   * an `upsert`), in the tool's write queue: after the tool's earlier state
+   * writes, and before the deletes of a removal that comes after it, so a
+   * removal is never undone by a row write that lands late. The write is
+   * skipped when the registry no longer holds that object by the time it
+   * runs (the tool was removed, or replaced under its id). Until it lands an
+   * admission does not adopt the tool, and when it lands the tool counts as
+   * changed, so a row read before it is read again.
+   */
+  private queueToolRowWrite(tool: EmergentTool, approvedBy?: string): Promise<void> {
+    this.rewriting.set(tool.id, (this.rewriting.get(tool.id) ?? 0) + 1);
+    return this.queueStateWrite(tool.id, async () => {
+      try {
+        if (this.get(tool.id) === tool) {
+          await this.persistToolToDb(tool, approvedBy);
+        }
+      } finally {
+        const left = (this.rewriting.get(tool.id) ?? 1) - 1;
+        if (left > 0) {
+          this.rewriting.set(tool.id, left);
+        } else {
+          this.rewriting.delete(tool.id);
+        }
+        this.bump(tool.id);
+      }
+    });
+  }
+
+  /**
    * Take a tool read from storage into memory without rewriting its row.
    * `upsert` re-serialises the source; a loaded tool must keep the row it has.
    *
    * @param ifUnchangedSince - The point the caller's read started at
    *   ({@link beginRead}), or a {@link generation} reading. The adoption is
-   *   refused when the tool changed in this process after it, or a removal of
-   *   the tool is still deleting its rows: the row the caller holds may then
-   *   be one that is gone.
+   *   refused when the tool changed in this process after it, or a removal or
+   *   a rewrite of the tool's rows is still pending: the row the caller holds
+   *   may then be one that is gone or about to change.
    */
   adopt(tool: EmergentTool, record: ToolStateRecord, ifUnchangedSince?: number): boolean {
     if (
       ifUnchangedSince !== undefined &&
-      (this.generation(tool.id) > ifUnchangedSince || this.removing.has(tool.id))
+      (this.generation(tool.id) > ifUnchangedSince || this.removing.has(tool.id) || this.rewriting.has(tool.id))
     ) {
       return false;
     }
@@ -1116,10 +1149,11 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
   /**
    * Replace the in-memory copy of a tool and mirror it to storage.
    *
-   * The row is rewritten from the object given. To bring stored tools back
-   * after a restart, call the engine's `loadPersistedTools`, which reads each
-   * row, checks it and never rewrites it. A tool whose state this process does
-   * not hold keeps the `is_active` its row has.
+   * The row is rewritten from the object given, in the tool's write queue.
+   * To bring stored tools back after a restart, call the engine's
+   * `loadPersistedTools`, which reads each row, checks it and never rewrites
+   * it. A tool whose state this process does not hold keeps the `is_active`
+   * its row has.
    */
   upsert(tool: EmergentTool): void {
     this.sessionTools.delete(tool.id);
@@ -1136,7 +1170,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
     }
 
     if (this.db && this.schemaReady) {
-      this.persistToolToDb(normalized).catch(() => {
+      this.queueToolRowWrite(normalized).catch(() => {
         // Best-effort persistence mirror only.
       });
     }
@@ -1321,7 +1355,10 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
    * Moves the tool from its current tier to `targetTier`. If the tool was at
    * session tier, it is removed from the session map and added to the persisted
    * map. If a storage adapter is available and the target tier is agent or
-   * shared, the tool is persisted to the database.
+   * shared, the tool is persisted to the database. The promotion is a change
+   * point, and its row write runs in the tool's write queue: an admission that
+   * read the row before it reads the row again, and a removal that comes
+   * after it deletes the promoted row.
    *
    * @param toolId - The ID of the tool to promote.
    * @param targetTier - The target tier to promote to. Must be strictly higher
@@ -1371,10 +1408,11 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
     } else {
       tool.tier = targetTier;
     }
+    this.bump(toolId);
 
     // Persist to DB if adapter is available and target is a persisted tier.
     if (this.db && this.schemaReady) {
-      await this.persistToolToDb(tool, approvedBy);
+      await this.queueToolRowWrite(tool, approvedBy);
     }
 
     this.logAudit(toolId, 'promote', {

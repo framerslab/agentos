@@ -125,17 +125,24 @@ describe('EmergentToolRegistry state', () => {
     expect(readToolRow(db, tool.id)?.is_active).toBe(1);
   });
 
-  it('a whole-row write takes is_active at write time, so a state change during its reads is kept', async () => {
+  it('a whole-row write takes is_active at write time, so a state change another process makes during its reads is kept', async () => {
     const tool = makeTool({ id: 'emergent_test_6' });
     registry.register(tool, 'agent');
     await settle();
     await registry.suspend(tool.id, 'operator_hold');
+    // A state write of this process waits for the row write in the tool's
+    // queue; another process's lands during its reads.
+    const other = new EmergentToolRegistry(
+      { ...DEFAULT_EMERGENT_CONFIG, enabled: true, persistSandboxSource: true },
+      db,
+    );
+    await other.ensureSchema();
 
     // The promotion's row read is held open; the reactivation lands meanwhile.
     const gate = db.gateNext('SELECT promoted_at');
     const promotion = registry.promote(tool.id, 'shared', 'admin');
     await gate.entered;
-    await registry.setState(tool.id, 'active', null, { setBy: 'host' });
+    await other.setState(tool.id, 'active', null, { setBy: 'host' });
     gate.release();
     await promotion;
 
@@ -145,20 +152,38 @@ describe('EmergentToolRegistry state', () => {
 
     // The other direction: a suspension during the reads is kept too.
     const gate2 = db.gateNext('SELECT promoted_at');
-    const rewrite = (async () => {
-      registry.upsert({ ...registry.get(tool.id)!, description: 'Doubles a number, again.' });
-      await settle();
-      await settle();
-    })();
+    registry.upsert({ ...registry.get(tool.id)!, description: 'Doubles a number, again.' });
     await gate2.entered;
-    await registry.suspend(tool.id, 'operator_hold');
+    await other.setState(tool.id, 'suspended', 'operator_hold', { setBy: 'host' });
     gate2.release();
-    await rewrite;
-    await settle();
+    await registry.settled(tool.id);
 
     expect(readToolRow(db, tool.id)?.is_active).toBe(0);
     expect(readToolRow(db, tool.id)?.description).toBe('Doubles a number, again.');
     expect(readStateRow(db, tool.id)).toMatchObject({ state: 'suspended' });
+  });
+
+  it('a promotion runs in the tool write queue: a removal made during it is not undone, and an earlier read is not adopted', async () => {
+    const tool = makeTool({ id: 'emergent_test_15', tier: 'session' });
+    registry.register(tool, 'session');
+    await settle();
+    const readAt = registry.beginRead();
+
+    // The promotion's row read is held open; the tool is removed meanwhile.
+    const gate = db.gateNext('SELECT promoted_at');
+    const promotion = registry.promote(tool.id, 'agent');
+    await gate.entered;
+    // A row read before the promotion is not adopted while it is under way.
+    expect(registry.adopt({ ...tool }, { toolId: tool.id, state: 'active', reason: null, setBy: 'library', at: 1, request: null }, readAt)).toBe(false);
+    registry.remove(tool.id);
+    gate.release();
+    await promotion;
+    await registry.settled(tool.id);
+    registry.endRead();
+
+    expect(registry.get(tool.id)).toBeUndefined();
+    expect(readToolRow(db, tool.id)).toBeUndefined();
+    expect(readStateRow(db, tool.id)).toBeUndefined();
   });
 
   it('leaves a stored request it holds nothing for alone when the state changes', async () => {
