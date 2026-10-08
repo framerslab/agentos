@@ -176,9 +176,12 @@ export interface GuardrailInputPayload {
  * or block agent output.
  *
  * @remarks
- * The timing of evaluation depends on {@link GuardrailConfig.evaluateStreamingChunks}:
- * - `true`: Called for every TEXT_DELTA chunk (real-time filtering)
- * - `false` (default): Called only for FINAL_RESPONSE chunks
+ * Every guardrail is called for each chunk of the turn's output stream that
+ * carries `isFinal: true` (the FINAL_RESPONSE, an ERROR the turn yields). With
+ * {@link GuardrailConfig.evaluateStreamingChunks} set, it is also called for
+ * each TEXT_DELTA chunk (real-time filtering). Other chunks are not evaluated,
+ * and neither is the ERROR that `processRequest()` yields from its own
+ * `catch` or for an input guardrail's BLOCK.
  */
 export interface GuardrailOutputPayload {
   /** Conversational context for policy decisions */
@@ -221,8 +224,10 @@ export interface GuardrailConfig {
   /**
    * Enable real-time evaluation of streaming chunks.
    *
-   * When `true`, evaluates every TEXT_DELTA chunk during streaming.
-   * When `false` (default), only evaluates FINAL_RESPONSE chunks.
+   * When `true`, also evaluates each TEXT_DELTA chunk during streaming.
+   * When `false` (default), evaluates only the output stream's chunks that
+   * carry `isFinal: true` (the FINAL_RESPONSE, an ERROR the turn yields),
+   * which every guardrail evaluates either way.
    *
    * **Performance Impact:**
    * - Streaming: Adds 1-500ms latency per TEXT_DELTA chunk
@@ -246,6 +251,10 @@ export interface GuardrailConfig {
    * Rate-limits streaming evaluations to control cost and performance.
    * Only applies when {@link evaluateStreamingChunks} is `true`.
    * After reaching the limit, remaining chunks pass through unevaluated.
+   *
+   * The output dispatcher counts evaluations per stream by the guardrail
+   * object's `id` property. Streaming sanitizers (`canSanitize: true`) that
+   * have no `id` share one count; give each of them an `id`.
    *
    * @default undefined (no limit)
    */
@@ -299,14 +308,16 @@ export interface GuardrailConfig {
   failClosed?: boolean;
 
   /**
-   * Streaming evaluation mode.
+   * Streaming evaluation mode, a declaration for the guardrail's own use.
    *
-   * - `'per-chunk'` — evaluate every TEXT_DELTA individually (default behavior).
-   * - `'sentence-buffered'` — accumulate chunks and evaluate at sentence
-   *   boundaries using the internal sentence boundary buffer. The previous sentence
-   *   is included as overlap context for safety evaluation.
+   * The output dispatcher does not read this field: when
+   * {@link evaluateStreamingChunks} is `true` it passes each TEXT_DELTA to the
+   * guardrail on its own, whatever the value.
    *
-   * Only applies when {@link evaluateStreamingChunks} is `true`.
+   * - `'per-chunk'` — the guardrail evaluates each TEXT_DELTA as it arrives.
+   * - `'sentence-buffered'` — the guardrail buffers the deltas itself and
+   *   evaluates whole sentences, for example with `SentenceBoundaryBuffer`,
+   *   which also returns the previous sentence as overlap context.
    *
    * @default 'per-chunk'
    */
@@ -410,9 +421,12 @@ export interface IGuardrailService {
   /**
    * Evaluate agent output before streaming to client.
    *
-   * Called for response chunks based on {@link GuardrailConfig.evaluateStreamingChunks}:
-   * - `true`: Called for every TEXT_DELTA chunk (real-time filtering)
-   * - `false` (default): Called only for FINAL_RESPONSE chunks
+   * Called for each chunk of the turn's output stream that carries
+   * `isFinal: true` (the FINAL_RESPONSE, an ERROR the turn yields) and, when
+   * {@link GuardrailConfig.evaluateStreamingChunks} is set, for each
+   * TEXT_DELTA chunk (real-time filtering). Other chunks, such as
+   * TOOL_CALL_REQUEST, are not passed to it, nor is the ERROR that
+   * `processRequest()` yields from its own `catch`.
    *
    * @param payload - Response chunk and context to evaluate
    * @returns Evaluation result, or `null` to allow without action

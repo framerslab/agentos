@@ -43,7 +43,7 @@ The `summarized` strategy implements Anthropic's "contextual retrieval" pattern 
 | `raw-chunks` (default) | every kind → raw-chunks | high-volume / cost-sensitive workloads; retrieval does the work |
 | `summarized` | long-* and code → summarized; short stays raw | documents/conversations with global context that aids recall |
 | `observational` | long-conversation → observational; long-article → summarized | conversational workloads with multi-session synthesis questions |
-| `hybrid` | long-* → hybrid; short stays raw | cost-tolerant workloads with heterogeneous retrieval needs |
+| `hybrid` | long-* → hybrid; code → summarized; the rest raw-chunks | cost-tolerant workloads with heterogeneous retrieval needs |
 
 ## Quickstart
 
@@ -82,8 +82,8 @@ const router = new IngestRouter({
 
 const { decision, outcome } = await router.decideAndDispatch(content);
 console.log(decision.classifier.kind);          // 'long-conversation'
-console.log(decision.routing.chosenStrategy);   // 'observational'
-console.log(decision.routing.estimatedCostUsd); // 0.020
+console.log(decision.routing.chosenStrategy);   // 'summarized' (the preset's pick for long-conversation)
+console.log(decision.routing.estimatedCostUsd); // 0.005
 console.log(outcome.writtenTraces);             // 47
 ```
 
@@ -118,12 +118,12 @@ const router = new IngestRouter({
   preset: 'observational',
   budget: {
     perIngestUsd: 0.005,
-    mode: 'cheapest-fallback',  // silently fall back to summarized or raw-chunks
+    mode: 'cheapest-fallback',  // pick the cheapest strategy that fits the budget
   },
 });
 ```
 
-Three modes (same as MemoryRouter): `hard` / `soft` / `cheapest-fallback`. The default is `cheapest-fallback` for production safety.
+Three modes (same as MemoryRouter): `hard` throws `IngestRouterBudgetExceededError`, `soft` keeps the pick and sets `budgetExceeded`, and `cheapest-fallback` (the default) picks the cheapest strategy whose cost fits. With the default costs the cheapest is `skip` (cost 0), so in `cheapest-fallback` mode content whose routed strategy is over budget is not stored; use `soft` or `hard`, or give `skip` a cost above the budget in `strategyCosts`, to keep it.
 
 ## Few-shot classifier prompt
 
@@ -161,4 +161,4 @@ The shipping cost-points are illustrative averages on a typical OpenAI stack. Fo
 - [Memory Router](./MEMORY_ROUTER.md) — recall stage sibling
 - [Read Router](./READ_ROUTER.md) — read stage sibling
 - [Memory Operations](./MEMORY_OPERATIONS.md#auto-ingest-pipeline) — the underlying auto-ingest primitives this router orchestrates
-- [Memory Document Ingestion](./MEMORY_DOCUMENT_INGESTION.md) — document-mode ingest pipeline
+- [Memory Document Ingestion](./memory/MEMORY_DOCUMENT_INGESTION.md) — document-mode ingest pipeline

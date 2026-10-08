@@ -160,12 +160,15 @@ describe('SelfEvaluateTool', () => {
     );
 
     expect(storeMemory).toHaveBeenCalledOnce();
+    // The execution context rides along so the host stores the trace for the
+    // calling agent and session.
     expect(storeMemory).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'self-evaluation',
         scope: 'session',
         tags: ['evaluation', 'quality'],
       }),
+      ctx,
     );
   });
 

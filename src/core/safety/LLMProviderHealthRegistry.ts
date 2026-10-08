@@ -80,6 +80,8 @@
  * ```
  */
 
+import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../llm/providers/errors/errorCodes.js';
+
 /** Snapshot of breaker state for a single provider. */
 export interface LLMProviderHealthStats {
   /** Provider id this snapshot describes. */
@@ -241,6 +243,42 @@ function isNonHealthClientError(status: number | null): boolean {
   return status !== 401 && status !== 402 && status !== 403 && status !== 408 && status !== 429;
 }
 
+/** `code` / `type` values a provider puts on a content-policy decline. */
+const CONTENT_POLICY_MARKS: ReadonlySet<string> = new Set([
+  'content_filter',
+  'content_policy_violation',
+  'safety_violations',
+]);
+
+/**
+ * A request larger than the model's context window is a verdict on the
+ * request: the provider answered, or was never asked. Counting it would trip
+ * a healthy provider's breaker on long conversations.
+ */
+function isRequestTooLarge(error: unknown): boolean {
+  return (
+    !!error &&
+    typeof error === 'object' &&
+    (error as { code?: unknown }).code === CONTEXT_WINDOW_EXCEEDED_CODE
+  );
+}
+
+/**
+ * A content-policy decline (an Anthropic refusal, a Gemini safety block, an
+ * OpenAI content-policy rejection) is a verdict on the request: the provider
+ * is up and answered. These errors often carry no HTTP status, which
+ * classifies as the transient class, so without this check five refused
+ * prompts in a row would open the breaker and divert every later call away
+ * from a healthy provider.
+ */
+function isContentPolicyDecline(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const { code, type } = error as { code?: unknown; type?: unknown };
+  return [code, type].some(
+    (mark) => typeof mark === 'string' && CONTENT_POLICY_MARKS.has(mark.toLowerCase()),
+  );
+}
+
 /**
  * Per-process registry of provider health. Construct once per agentos
  * runtime; the module-level `globalLLMProviderHealth` singleton is
@@ -282,8 +320,15 @@ export class LLMProviderHealthRegistry {
    * Safe to call regardless of whether the breaker is already open:
    * a repeat failure on an open breaker just refreshes the
    * cooldown for the new error class.
+   *
+   * A content-policy decline and a context-window rejection are ignored
+   * entirely (see {@link isContentPolicyDecline} and
+   * {@link isRequestTooLarge}): they neither trip the breaker nor count
+   * toward a streak.
    */
   recordFailure(providerId: string, error: unknown): void {
+    if (isContentPolicyDecline(error)) return;
+    if (isRequestTooLarge(error)) return;
     const status = classifyErrorStatus(error);
     // Billing/quota exhaustion is provider health regardless of the
     // transport status it wears: OpenAI reports it as 429, Anthropic as

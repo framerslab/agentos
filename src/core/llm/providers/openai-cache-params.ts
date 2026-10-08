@@ -41,7 +41,7 @@
  * only with 24h extended prompt caching", hence their ONLY_24H membership.
  */
 
-import { createHash } from 'node:crypto';
+import { sha256Hex } from '../../utils/sha256';
 
 /** Retention values a caller may request. */
 export type OpenAiCacheRetention = 'in_memory' | '24h' | '30m';
@@ -136,7 +136,7 @@ export function resolvePromptCacheKey(
   if (option === false || option === undefined) return undefined;
   if (option === 'auto') {
     if (!sessionId || !sessionId.trim()) return undefined;
-    return 'agentos:' + createHash('sha256').update(sessionId).digest('hex').slice(0, 16);
+    return 'agentos:' + sha256Hex(sessionId).slice(0, 16);
   }
   const trimmed = option.trim();
   return trimmed.length ? trimmed : undefined;

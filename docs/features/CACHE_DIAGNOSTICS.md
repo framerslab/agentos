@@ -53,6 +53,15 @@ Per-step verdicts surface on the `onAfterGeneration` hook
 (`GenerationHookResult.cacheDiagnostics`); the final result carries the last
 step's verdict (`GenerateTextResult.cacheDiagnostics`).
 
+## GMI turns
+
+A [GMI](../GMI.md) turn threads the same way. Set `cacheDiagnostics` in the
+turn's `metadata.options`: `true` opts in with nothing to compare, and
+`{ previousMessageId }` compares the first step against an earlier response.
+Each later step of the turn compares against the previous step's response,
+and each step's verdict and message id arrive on its `STEP_FINISHED` chunk
+(`cacheDiagnostics`, `providerMessageId`).
+
 ## Single calls: thread the id yourself
 
 At the provider layer, pass `cacheDiagnostics` in `ModelCompletionOptions`

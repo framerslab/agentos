@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   validateTranscriptPairing,
+  toProviderReplayMessage,
   transcriptTokenText,
   type SessionTranscriptMessage,
 } from '../../sessionTranscript.js';
@@ -77,5 +78,32 @@ describe('transcriptTokenText', () => {
     expect(a).toContain('"suite":"boot"');
     expect(a).toContain('{"passed":true}');
     expect(a).toContain('Both tracks look green.');
+  });
+});
+
+describe('toProviderReplayMessage', () => {
+  it('keeps a plain message as role and content only', () => {
+    expect(toProviderReplayMessage({ role: 'user', content: 'hi' })).toEqual({ role: 'user', content: 'hi' });
+  });
+
+  it('prefers recorded thinkingBlocks over the documented thinking shape', () => {
+    const blocks = [{ type: 'thinking', thinking: 'recorded', signature: 's1' }];
+    expect(
+      toProviderReplayMessage({
+        role: 'assistant',
+        content: null,
+        thinkingBlocks: blocks,
+        thinking: { text: 'other', signature: 's2' },
+      } as never),
+    ).toMatchObject({ thinkingBlocks: blocks });
+  });
+
+  it('maps redacted thinking to a redacted_thinking block and drops unsigned thinking', () => {
+    expect(
+      toProviderReplayMessage({ role: 'assistant', content: 'a', thinking: { text: '', redacted: 'opaque' } } as never),
+    ).toEqual({ role: 'assistant', content: 'a', thinkingBlocks: [{ type: 'redacted_thinking', data: 'opaque' }] });
+    expect(
+      toProviderReplayMessage({ role: 'assistant', content: 'a', thinking: { text: 'unsigned' } } as never),
+    ).toEqual({ role: 'assistant', content: 'a' });
   });
 });

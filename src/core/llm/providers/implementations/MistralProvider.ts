@@ -21,7 +21,39 @@ import {
   ProviderEmbeddingOptions,
   ProviderEmbeddingResponse,
 } from '../IProvider';
+import { sha256Hex } from '../../../utils/sha256';
 import { OpenAIProvider } from './OpenAIProvider';
+
+/** Mistral accepts only tool call ids made of nine letters and digits. */
+const MISTRAL_TOOL_CALL_ID = /^[A-Za-z0-9]{9}$/;
+
+/**
+ * A tool call id in the form Mistral accepts. Mistral rejects any other id
+ * with HTTP 400, and a conversation can carry ids another provider issued
+ * (`call_...`, `toolu_...`, `call_gemini_...`) through session history or a
+ * fallback that continues after completed tool rounds. Those map to a stable
+ * nine-character digest, so a call and its result keep matching ids.
+ *
+ * @param id Tool call id as recorded.
+ * @returns The id itself when Mistral accepts it, else its digest.
+ */
+export function toMistralToolCallId(id: string): string {
+  if (MISTRAL_TOOL_CALL_ID.test(id)) return id;
+  return sha256Hex(id).slice(0, 9);
+}
+
+/** The messages with every tool call id in Mistral's form. */
+function withMistralToolCallIds(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map((m) => {
+    if (m.role === 'tool' && m.tool_call_id) {
+      return { ...m, tool_call_id: toMistralToolCallId(m.tool_call_id) };
+    }
+    if (m.role === 'assistant' && m.tool_calls?.length) {
+      return { ...m, tool_calls: m.tool_calls.map((tc) => ({ ...tc, id: toMistralToolCallId(tc.id) })) };
+    }
+    return m;
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -167,7 +199,7 @@ export class MistralProvider implements IProvider {
     messages: ChatMessage[],
     options: ModelCompletionOptions,
   ): Promise<ModelCompletionResponse> {
-    return this.delegate.generateCompletion(modelId, messages, options);
+    return this.delegate.generateCompletion(modelId, withMistralToolCallIds(messages), options);
   }
 
   /** @inheritdoc */
@@ -176,7 +208,7 @@ export class MistralProvider implements IProvider {
     messages: ChatMessage[],
     options: ModelCompletionOptions,
   ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
-    yield* this.delegate.generateCompletionStream(modelId, messages, options);
+    yield* this.delegate.generateCompletionStream(modelId, withMistralToolCallIds(messages), options);
   }
 
   /**

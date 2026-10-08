@@ -62,6 +62,22 @@ import {
 // Constants
 // ============================================================================
 
+/**
+ * Cuts captured output at `maxBytes` of UTF-8, the unit `maxOutputBytes`
+ * names (a string's `length` counts UTF-16 code units, so a multibyte text
+ * could pass the limit unseen). A cut text ends with a marker; a cut that
+ * lands inside a multibyte character leaves a replacement character before it.
+ */
+function cutOutput(text: string, maxBytes: number): { text: string; cut: boolean } {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) {
+    return { text, cut: false };
+  }
+  return {
+    text: Buffer.from(text, 'utf8').subarray(0, maxBytes).toString('utf8') + '\n[OUTPUT TRUNCATED]',
+    cut: true,
+  };
+}
+
 const DEFAULT_CONFIG: SandboxConfig = {
   timeoutMs: 30000, // 30 seconds
   maxMemoryBytes: 128 * 1024 * 1024, // Nominal budget; JS node:vm reports heap delta only.
@@ -74,7 +90,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
 
 /**
  * Keys that callers MUST NOT be able to override via SandboxConfig.extraGlobals.
- * The hardened context explicitly nulls these to prevent host-state leaks; if
+ * The minimal context explicitly nulls these to prevent host-state leaks; if
  * we let extraGlobals re-bind them the entire isolation guarantee evaporates.
  * Filtered silently at merge time so a forge-style consumer that includes one
  * of these by accident still gets a working sandbox without a noisy error.
@@ -152,7 +168,9 @@ const DANGEROUS_PATTERNS: Record<SandboxLanguage, RegExp[]> = {
 /**
  * Code Execution Sandbox implementation.
  *
- * Provides isolated code execution with security controls.
+ * Runs code with a time limit and a minimal set of globals: JavaScript in a
+ * node:vm context inside this process, Python in a child process. `node:vm`
+ * is not a security mechanism (Node's documentation).
  */
 export class CodeSandbox implements ICodeSandbox {
   private logger?: ILogger;
@@ -281,14 +299,17 @@ export class CodeSandbox implements ICodeSandbox {
   }
 
   /**
-   * Executes JavaScript code in a hardened VM sandbox using node:vm.
+   * Executes JavaScript code in a node:vm context inside this process.
    *
-   * Security guarantees:
-   * - Isolated context prevents access to host globals (process, require, etc.)
-   * - `codeGeneration.strings = false` blocks eval() and new Function() inside the sandbox
+   * What the context does:
+   * - removes host globals from the context (process, require, global, globalThis)
+   * - `codeGeneration.strings = false` blocks eval() and new Function() inside the context
    * - `codeGeneration.wasm = false` blocks WebAssembly compilation
-   * - Frozen console object prevents prototype chain manipulation
-   * - Explicit undefined assignments for dangerous globals (process, global, globalThis)
+   * - freezes the console object
+   *
+   * What it does not do: `node:vm` is not a security mechanism (Node's
+   * documentation), memory is not limited, and a host call started before the
+   * timeout keeps running after it.
    */
   private async executeJavaScript(
     executionId: string,
@@ -358,9 +379,9 @@ export class CodeSandbox implements ICodeSandbox {
       Atomics: undefined,
     };
 
-    // Merge caller-supplied extras AFTER the hardened defaults so an explicit
+    // Merge caller-supplied extras AFTER the minimal defaults so an explicit
     // override (e.g., SandboxedToolForge injecting an allowlisted fetch wrapper)
-    // can replace the hardened-undefined values where it makes sense. Keys in
+    // can replace the removed values where it makes sense. Keys in
     // DANGEROUS_GLOBAL_KEYS are dropped silently to keep the hardening intact.
     if (config.extraGlobals) {
       for (const [key, value] of Object.entries(config.extraGlobals)) {
@@ -400,14 +421,17 @@ export class CodeSandbox implements ICodeSandbox {
         stdout += typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result);
       }
 
-      // Truncate oversized output
+      // Truncate oversized output, measured in bytes.
+      const maxOutputBytes = config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!;
       const truncated: ExecutionResult['truncated'] = {};
-      if (stdout.length > (config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!)) {
-        stdout = stdout.slice(0, config.maxOutputBytes) + '\n[OUTPUT TRUNCATED]';
+      const outCut = cutOutput(stdout, maxOutputBytes);
+      stdout = outCut.text;
+      if (outCut.cut) {
         truncated.stdout = true;
       }
-      if (stderr.length > (config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!)) {
-        stderr = stderr.slice(0, config.maxOutputBytes) + '\n[OUTPUT TRUNCATED]';
+      const errCut = cutOutput(stderr, maxOutputBytes);
+      stderr = errCut.text;
+      if (errCut.cut) {
         truncated.stderr = true;
       }
 
@@ -487,14 +511,17 @@ export class CodeSandbox implements ICodeSandbox {
       let stdout = proc.stdout || '';
       let stderr = proc.stderr || '';
 
-      // Truncate oversized output
+      // Truncate oversized output, measured in bytes.
+      const maxOutputBytes = config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!;
       const truncated: ExecutionResult['truncated'] = {};
-      if (stdout.length > (config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!)) {
-        stdout = stdout.slice(0, config.maxOutputBytes) + '\n[OUTPUT TRUNCATED]';
+      const outCut = cutOutput(stdout, maxOutputBytes);
+      stdout = outCut.text;
+      if (outCut.cut) {
         truncated.stdout = true;
       }
-      if (stderr.length > (config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!)) {
-        stderr = stderr.slice(0, config.maxOutputBytes) + '\n[OUTPUT TRUNCATED]';
+      const errCut = cutOutput(stderr, maxOutputBytes);
+      stderr = errCut.text;
+      if (errCut.cut) {
         truncated.stderr = true;
       }
 
@@ -571,14 +598,17 @@ export class CodeSandbox implements ICodeSandbox {
       let stdout = proc.stdout || '';
       let stderr = proc.stderr || '';
 
-      // Truncate oversized output
+      // Truncate oversized output, measured in bytes.
+      const maxOutputBytes = config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!;
       const truncated: ExecutionResult['truncated'] = {};
-      if (stdout.length > (config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!)) {
-        stdout = stdout.slice(0, config.maxOutputBytes) + '\n[OUTPUT TRUNCATED]';
+      const outCut = cutOutput(stdout, maxOutputBytes);
+      stdout = outCut.text;
+      if (outCut.cut) {
         truncated.stdout = true;
       }
-      if (stderr.length > (config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!)) {
-        stderr = stderr.slice(0, config.maxOutputBytes) + '\n[OUTPUT TRUNCATED]';
+      const errCut = cutOutput(stderr, maxOutputBytes);
+      stderr = errCut.text;
+      if (errCut.cut) {
         truncated.stderr = true;
       }
 

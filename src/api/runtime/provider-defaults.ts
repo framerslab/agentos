@@ -61,15 +61,22 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
   },
   gemini: {
     text: 'gemini-2.5-flash',
-    cheap: 'gemini-2.0-flash',
+    // gemini-2.0-flash returns HTTP 404 "no longer available" (probed
+    // 2026-09-29). gemini-2.5-flash-lite is the cheapest Gemini model served.
+    cheap: 'gemini-2.5-flash-lite',
   },
   'claude-code-cli': {
     text: 'claude-sonnet-4-6',
     cheap: 'claude-haiku-4-5-20251001',
   },
   'gemini-cli': {
-    text: 'gemini-2.5-flash',
-    cheap: 'gemini-2.0-flash-lite',
+    // The CLI answers gemini-2.5-flash with gemini-3.5-flash (probed
+    // 2026-09-30), so the default names the model that runs.
+    text: 'gemini-3.5-flash',
+    // gemini-2.0-flash-lite fails in the CLI with ModelNotFoundError (probed
+    // 2026-09-29), while gemini-2.5-flash-lite is served as requested
+    // (re-probed 2026-09-30).
+    cheap: 'gemini-2.5-flash-lite',
   },
   stability: {
     image: 'stable-diffusion-xl-1024-v1-0',
@@ -91,8 +98,11 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
     cheap: 'gemma2-9b-it',
   },
   together: {
-    text: 'meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo',
-    cheap: 'meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo',
+    // The Llama 3.1 Turbo ids left Together serverless in 2026-02/03. The
+    // cheap slot stays on a non-reasoning model: the cheaper served picks
+    // reason by default and can spend a small maxTokens budget on the trace.
+    text: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+    cheap: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
   },
   mistral: {
     text: 'mistral-large-latest',

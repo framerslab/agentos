@@ -131,7 +131,12 @@ const publicationManifest = [
   }),
 
   agentosDoc('ARCHITECTURE.md', 'architecture/system-architecture.md', 'System Architecture', 'Concepts', 1),
-  agentosDoc('GMI.md', 'architecture/gmi.md', 'Generalized Mind Instances (GMIs)', 'Concepts', 1.5),
+  agentosDoc('GMI.md', 'architecture/gmi.md', 'Generalized Mind Instances (GMIs)', 'Concepts', 0.5),
+  agentosDoc('API_PATHS.md', 'architecture/api-paths.md', 'Two API Paths: Lightweight Agents and the Runtime', 'Concepts', 0.7),
+  agentosDoc('TURN_LIFECYCLE.md', 'architecture/turn-lifecycle.md', 'The Turn Lifecycle', 'Concepts', 1.2),
+  agentosDoc('MEMORY_MODEL.md', 'architecture/memory-model.md', 'Memory Model', 'Concepts', 1.4),
+  agentosDoc('SELF_EXTENSION.md', 'architecture/self-extension.md', 'Self-Extension: Forging and Self-Improvement', 'Concepts', 1.6),
+  agentosDoc('AGENCIES.md', 'architecture/agencies.md', 'Agencies and Orchestration Strategies', 'Concepts', 1.8),
   agentosDoc('PLATFORM_SUPPORT.md', 'architecture/platform-support.md', 'Platform Support', 'Concepts', 2),
   siteDoc('architecture/skills-vs-tools-vs-extensions.md', 'architecture/skills-vs-tools-vs-extensions.md', 'Skills vs Tools vs Extensions', 'Architecture', 8.5),
   agentosDoc('OBSERVABILITY.md', 'architecture/observability.md', 'Observability (OpenTelemetry)', 'Architecture', 9),
@@ -157,6 +162,7 @@ const publicationManifest = [
 
   // Cognitive deep-dive
   agentosDoc('COGNITIVE_MEMORY.md', 'features/cognitive-memory.md', 'Cognitive Memory', 'Memory', 3),
+  agentosDoc('PERSONAS.md', 'features/personas.md', 'Defining and Loading Personas', 'Personas', 1),
   agentosDoc('HEXACO_PERSONALITY.md', 'features/hexaco-personality.md', 'HEXACO Personality', 'Personas', 4),
   agentosDoc('SOUL_FILES.md', 'features/soul-files.md', 'Soul Files & the Markdown Memory Wiki', 'Personas', 5),
   agentosDoc('ADAPTIVE_PROMPT_INTELLIGENCE.md', 'features/adaptive-prompt-intelligence.md', 'Adaptive Prompt Intelligence', 'Personas', 5.5),
@@ -244,7 +250,6 @@ const publicationManifest = [
     section: 'Orchestration',
   }),
   agentosDoc('AGENT_COMMUNICATION.md', 'features/agent-communication.md', 'Agent Communication', 'Orchestration', 4),
-  agentosDoc('RECURSIVE_SELF_BUILDING_AGENTS.md', 'features/recursive-self-building.md', 'Recursive Self-Building Agents', 'Tools & Capabilities', 5),
   agentosDoc('MEMORY_CONSOLIDATION.md', 'features/memory-consolidation.md', 'Self-Improving Memory', 'Memory', 6, {
     sidebar: false,
   }),

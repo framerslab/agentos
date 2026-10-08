@@ -74,6 +74,11 @@ export * from './cognition/marketplace/store';
 export * from './cognition/marketplace/workspace';
 export * from './cognition/substrate/personas/definitions';
 export * from './cognition/substrate/personas/IPersonaDefinition';
+export type { IPersonaLoader, PersonaLoaderConfig } from './cognition/substrate/personas/IPersonaLoader';
+export { PersonaLoader } from './cognition/substrate/personas/PersonaLoader';
+export type { FileSystemPersonaLoaderConfig } from './cognition/substrate/personas/PersonaLoader';
+export { InMemoryPersonaLoader, assertInlinePersonaDefinitions, INLINE_PERSONA_LOADER_CONFIG } from './cognition/substrate/personas/InMemoryPersonaLoader';
+export { normalizePersonaDefinition } from './cognition/substrate/personas/personaNormalization';
 export * from './cognition/substrate/persona_overlays/PersonaOverlayTypes';
 export { PersonaOverlayManager } from './cognition/substrate/persona_overlays/PersonaOverlayManager';
 // Guardrails
@@ -240,6 +245,9 @@ export {
   buildFallbackChain,
   buildPolicyAwareFallbackChain,
 } from './api/generateText.js';
+export { CONTEXT_WINDOW_EXCEEDED_CODE } from './core/llm/providers/errors/errorCodes.js';
+export { ContextWindowExceededError } from './core/llm/providers/errors/ContextWindowExceededError.js';
+export { checkContextFit, type ContextFit, type ContextFitRequest } from './api/runtime/contextWindowFit.js';
 export type {
   GenerateTextOptions,
   GenerateTextResult,
@@ -260,6 +268,16 @@ export type {
 export { normalizeHostLLMPolicy } from './api/runtime/hostPolicy.js';
 export { streamText, normalizeStreamFinishReason } from './api/streamText.js';
 export type { StreamTextResult, StreamPart, StreamFinishReason } from './api/streamText.js';
+export { createCompletionGateway, toolFormatFor } from './api/runtime/completionGateway.js';
+export type {
+  CompletionAttempt,
+  CompletionGateway,
+  CompletionHop,
+  CompletionOutcome,
+  CompletionResolution,
+  CompletionRoute,
+} from './api/runtime/completionGateway.js';
+export { GatewayProviderManager } from './api/runtime/gatewayProviderManager.js';
 export { agent } from './api/agent.js';
 export { souledAgent } from './api/souledAgent.js';
 export type { SouledAgentOptions, SouledAgent } from './api/souledAgent.js';
@@ -289,7 +307,12 @@ export {
   importAgentFromYAML,
   validateAgentExport,
 } from './api/agentExport.js';
-export type { AgentExportConfig } from './api/agentExport.js';
+export type {
+  AgentExportConfig,
+  ExportAgentConfigOptions,
+  ImportAgentOptions,
+  PrebuiltSeatMarker,
+} from './api/agentExport.js';
 export { hitl } from './api/hitl.js';
 export type { HitlHandler } from './api/hitl.js';
 export * from './api/runtime/processRequestWithExternalTools.js';
@@ -378,7 +401,12 @@ export {
   clearDefaultProvider,
   type GlobalDefaultProvider,
 } from './api/runtime/global-default.js';
-export { parseModelString, resolveProvider, resolveModelOption } from './api/model.js';
+export {
+  parseModelString,
+  resolveProvider,
+  resolveModelOption,
+  ProviderInitializationError,
+} from './api/model.js';
 export { PROVIDER_DEFAULTS, autoDetectProvider } from './api/runtime/provider-defaults.js';
 export type { ProviderDefaults } from './api/runtime/provider-defaults.js';
 export {

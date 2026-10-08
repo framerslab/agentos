@@ -55,4 +55,24 @@ describe('providerCatalog', () => {
     expect(entry).toBeDefined();
     expect(entry!.kind).toBe('stt');
   });
+
+  it('should default OpenAI transcription to gpt-transcribe', () => {
+    // OpenAI removes whisper-1 on 2027-02-26 and names gpt-live-transcribe or
+    // gpt-transcribe as the replacement; gpt-transcribe serves recorded files.
+    expect(findSpeechProviderCatalogEntry('openai-whisper')!.defaultModel).toBe('gpt-transcribe');
+  });
+
+  it('should default Deepgram batch transcription to nova-3', () => {
+    // Deepgram lists nova-3 as its general-purpose model; DeepgramBatchSTTProvider
+    // sends it when no model is configured.
+    expect(findSpeechProviderCatalogEntry('deepgram-batch')!.defaultModel).toBe('nova-3');
+  });
+
+  it('should keep the OpenAI TTS default on a model /v1/audio/speech accepts', () => {
+    // The speech endpoint's reference lists these models. OpenAI's named
+    // replacement for them, gpt-realtime-2.1-mini, runs only on the Realtime
+    // API, so a default pointing at it would fail every default synthesis.
+    const speechEndpointModels = ['tts-1', 'tts-1-hd', 'gpt-4o-mini-tts', 'gpt-4o-mini-tts-2025-12-15'];
+    expect(speechEndpointModels).toContain(findSpeechProviderCatalogEntry('openai-tts')!.defaultModel);
+  });
 });

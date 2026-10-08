@@ -119,6 +119,45 @@ describe('streamText usage observer — fallback + error terminals', () => {
     expect(streamEvents[0]!.usage.completionTokens).toBe(2000);
   });
 
+  it('applies an entry effort and maxTokens headroom to its own hop only, over the ORIGINAL call', async () => {
+    // Primary fails, the first rescue leg (effort + headroom) fails, the
+    // second (no overrides) serves from inside the first leg's recursion.
+    hoisted.generateCompletionStream
+      .mockImplementationOnce(async function* () {
+        throw new Error('[429] rate limited');
+      })
+      .mockImplementationOnce(async function* () {
+        throw new Error('[429] rate limited');
+      })
+      .mockImplementationOnce(async function* () {
+        yield finalChunk('served by the plain leg', 'plain-leg');
+      });
+
+    const result = streamText({
+      provider: 'openai',
+      model: 'gpt-5.5',
+      prompt: 'Hello',
+      maxTokens: 800,
+      fallbackProviders: [
+        { provider: 'gemini', model: 'thinking-leg', effort: 'low', maxTokensHeadroom: 1024 },
+        { provider: 'anthropic', model: 'plain-leg' },
+      ],
+    });
+    expect(await drain(result.textStream)).toBe('served by the plain leg');
+
+    const optionsOf = (call: number) =>
+      (hoisted.generateCompletionStream.mock.calls[call]?.[2] ?? {}) as { effort?: string; maxTokens?: number };
+    // The primary ran on the caller's budget with no effort...
+    expect(optionsOf(0).maxTokens).toBe(800);
+    expect(optionsOf(0).effort).toBeUndefined();
+    // ...the thinking leg on its own effort, with room for its thinking...
+    expect(optionsOf(1).effort).toBe('low');
+    expect(optionsOf(1).maxTokens).toBe(1824);
+    // ...and neither reached the next leg.
+    expect(optionsOf(2).effort).toBeUndefined();
+    expect(optionsOf(2).maxTokens).toBe(800);
+  });
+
   it("fires one 'error' event when an error terminal has accrued billable usage", async () => {
     hoisted.generateCompletionStream.mockImplementationOnce(async function* () {
       // Step usage lands (final chunk), then the stream reports a failure —

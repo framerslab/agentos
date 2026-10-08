@@ -10,7 +10,9 @@
  *  - Offer proactive suggestions that improve quality (e.g., recommend cost strategy if omitted).
  *  - Remain side-effect free and pure: callers can run in CI, authoring tools, or runtime gates.
  */
+import { REASONING_TRACE_MAX_ENTRIES_CEILING, REASONING_TRACE_MAX_MESSAGE_LENGTH_CEILING, REASONING_TRACE_MIN_ENTRIES, toJsonSafe } from '../reasoningTraceLimits';
 import { IPersonaDefinition } from './IPersonaDefinition';
+import { GMIEventType } from '../GMIEvent.js';
 
 /** Classification of validation issue severity. */
 export type PersonaValidationIssueSeverity = 'error' | 'warning' | 'suggestion';
@@ -99,6 +101,10 @@ export interface LoadedPersonaRecord {
 const SEMVER_REGEX = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-.]+)?$/;
 // Lightweight BCP-47 heuristic (not exhaustive): lang subtags 2-3 letters, optional hyphen groups.
 const BCP47_REGEX = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/;
+/** Metaprompt trigger types the MetapromptExecutor fires. A metaprompt with any other type never runs. */
+const SUPPORTED_METAPROMPT_TRIGGER_TYPES: ReadonlySet<string> = new Set(['turn_interval', 'event_based', 'manual']);
+/** Event names the GMI raises, and so the only ones an `event_based` metaprompt can wait for. */
+const GMI_EVENT_NAMES: ReadonlySet<string> = new Set<string>(Object.values(GMIEventType));
 
 /**
  * Validate a single persona definition and return structured issues.
@@ -117,6 +123,37 @@ export async function validatePersona(persona: IPersonaDefinition, opts: Persona
     const v: any = (persona as any)[field];
     if (v === undefined || v === null || (typeof v === 'string' && v.trim() === '') || (Array.isArray(v) && v.length === 0)) {
       add('error', 'missing_required_field', `Required field '${field}' is missing or empty.`, String(field));
+    }
+  }
+  if (persona.activationKeywords !== undefined) {
+    if (!Array.isArray(persona.activationKeywords)) {
+      add('error', 'invalid_field_type', `Field 'activationKeywords' must be an array of strings when present.`, 'activationKeywords');
+    } else if (persona.activationKeywords.some((keyword) => typeof keyword !== 'string')) {
+      add('error', 'invalid_field_type', `Field 'activationKeywords' has an entry that is not a string.`, 'activationKeywords');
+    }
+  }
+  const traceConfig = persona.reasoningTraceConfig;
+  if (traceConfig !== undefined) {
+    if (typeof traceConfig !== 'object' || traceConfig === null || Array.isArray(traceConfig)) {
+      add('error', 'invalid_field_type', `Field 'reasoningTraceConfig' must be an object when present.`, 'reasoningTraceConfig');
+    } else {
+      for (const name of Object.keys(traceConfig)) {
+        if (name !== 'maxEntries' && name !== 'maxMessageLength') {
+          add('warning', 'invalid_reasoning_trace_config', `Field 'reasoningTraceConfig.${name}' is not a known setting (maxEntries, maxMessageLength); it is ignored.`, `reasoningTraceConfig.${name}`);
+        }
+      }
+      for (const key of ['maxEntries', 'maxMessageLength'] as const) {
+        const value = (traceConfig as Record<string, unknown>)[key];
+        const shown = String(toJsonSafe(value));
+        const ceiling = key === 'maxEntries' ? REASONING_TRACE_MAX_ENTRIES_CEILING : REASONING_TRACE_MAX_MESSAGE_LENGTH_CEILING;
+        if (value !== undefined && !(typeof value === 'number' && Number.isInteger(value) && value > 0)) {
+          add('warning', 'invalid_reasoning_trace_config', `Field 'reasoningTraceConfig.${key}' is ${shown}; it must be a positive integer, so the runtime default applies.`, `reasoningTraceConfig.${key}`);
+        } else if (key === 'maxEntries' && typeof value === 'number' && value < REASONING_TRACE_MIN_ENTRIES) {
+          add('warning', 'invalid_reasoning_trace_config', `Field 'reasoningTraceConfig.maxEntries' is ${shown}, below the floor of ${REASONING_TRACE_MIN_ENTRIES} entries that the metaprompts read; the GMI raises it to ${REASONING_TRACE_MIN_ENTRIES}.`, 'reasoningTraceConfig.maxEntries');
+        } else if (typeof value === 'number' && value > ceiling) {
+          add('warning', 'invalid_reasoning_trace_config', `Field 'reasoningTraceConfig.${key}' is ${shown}, above the ceiling of ${ceiling}; it is clamped.`, `reasoningTraceConfig.${key}`);
+        }
+      }
     }
   }
 
@@ -217,6 +254,32 @@ export async function validatePersona(persona: IPersonaDefinition, opts: Persona
     }
   }
 
+  // Metaprompt triggers. Persona JSON is cast rather than type-checked, so a
+  // trigger the executor can never fire would otherwise load without notice.
+  if (Array.isArray(persona.metaPrompts)) {
+    persona.metaPrompts.forEach((metaPrompt, idx) => {
+      const trigger = metaPrompt?.trigger as
+        | { type?: unknown; intervalTurns?: unknown; eventName?: unknown }
+        | undefined;
+      if (!trigger) return;
+      const field = `metaPrompts[${idx}].trigger`;
+      const label = `Metaprompt '${metaPrompt.id}'`;
+
+      if (typeof trigger.type !== 'string' || !SUPPORTED_METAPROMPT_TRIGGER_TYPES.has(trigger.type)) {
+        add('warning', 'unsupported_metaprompt_trigger', `${label} has trigger type '${String(trigger.type)}', which never fires. Supported types: turn_interval, event_based, manual.`, field);
+      } else if (trigger.type === 'turn_interval') {
+        const interval = trigger.intervalTurns;
+        if (typeof interval !== 'number' || !Number.isFinite(interval) || interval < 1) {
+          add('warning', 'invalid_metaprompt_interval', `${label} has intervalTurns ${String(interval)}; it must be a number of at least 1, or the metaprompt never fires.`, field);
+        }
+      } else if (trigger.type === 'event_based') {
+        if (typeof trigger.eventName !== 'string' || !GMI_EVENT_NAMES.has(trigger.eventName)) {
+          add('warning', 'unknown_metaprompt_event', `${label} waits for event '${String(trigger.eventName)}', which the GMI never raises. Known events: ${Array.from(GMI_EVENT_NAMES).join(', ')}.`, field);
+        }
+      }
+    });
+  }
+
   const summary = summarizeIssues(issues);
   return { personaId: persona.id, issues, summary };
 }
@@ -229,7 +292,7 @@ export async function validatePersonas(personas: IPersonaDefinition[], opts: Per
   }
   const keywordMap = new Map<string, string[]>();
   for (const p of personas) {
-    (p.activationKeywords || []).forEach(kw => {
+    (Array.isArray(p.activationKeywords) ? p.activationKeywords.filter((kw): kw is string => typeof kw === 'string') : []).forEach(kw => {
       const existing = keywordMap.get(kw) || [];
       existing.push(p.id);
       keywordMap.set(kw, existing);

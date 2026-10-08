@@ -37,8 +37,9 @@ export const SPEECH_PROVIDER_CATALOG: readonly SpeechProviderCatalogEntry[] = [
     label: 'OpenAI Whisper',
     envVars: ['OPENAI_API_KEY'],
     local: false,
-    description: 'Hosted Whisper speech-to-text for file and utterance transcription.',
-    defaultModel: 'whisper-1',
+    description:
+      'Hosted OpenAI speech-to-text for file and utterance transcription (gpt-transcribe; whisper-1 for timestamped formats).',
+    defaultModel: 'gpt-transcribe',
     streaming: false,
     features: ['cloud', 'timestamps', 'transcription'],
   },
@@ -60,6 +61,7 @@ export const SPEECH_PROVIDER_CATALOG: readonly SpeechProviderCatalogEntry[] = [
     local: false,
     streaming: false,
     description: 'Batch speech-to-text via Deepgram REST API.',
+    defaultModel: 'nova-3',
     features: ['cloud', 'diarization', 'timestamps'],
   },
   {
@@ -129,6 +131,9 @@ export const SPEECH_PROVIDER_CATALOG: readonly SpeechProviderCatalogEntry[] = [
     local: false,
     streaming: true,
     description: 'Hosted speech synthesis via OpenAI speech models.',
+    // /v1/audio/speech accepts tts-1, tts-1-hd and gpt-4o-mini-tts, which OpenAI
+    // removes on 2027-01-06. Their named replacement, gpt-realtime-2.1-mini,
+    // runs only on the Realtime API, so the default stays on tts-1.
     defaultModel: 'tts-1',
     defaultVoice: 'nova',
     features: ['cloud', 'tts'],

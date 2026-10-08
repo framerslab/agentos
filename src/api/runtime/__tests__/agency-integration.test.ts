@@ -974,15 +974,15 @@ describe('Agency Full Integration', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // beforeTool forwarding to sub-agent permissions
+  // beforeTool construction
   // ---------------------------------------------------------------------------
 
-  describe('beforeTool forwarding', () => {
+  describe('beforeTool construction', () => {
     it('agency-level beforeTool config does not throw during construction', () => {
       /**
-       * When `hitl.approvals.beforeTool` is set, the agency forwards those
-       * tool names into each sub-agent's `permissions.requireApproval`. The
-       * construction itself must not throw.
+       * `hitl.approvals.beforeTool` is enforced per call by the approval gate
+       * the agency builds (agency-tool-approval.e2e.test.ts covers the tool
+       * loops). The construction itself must not throw.
        */
       expect(() =>
         agency({
@@ -1119,7 +1119,7 @@ describe('Agency Full Integration', () => {
       expect(team.connect).toBeUndefined();
     });
 
-    it('connect() resolves without throwing for multiple channels', async () => {
+    it('connect() rejects and names every configured channel', async () => {
       const team = agency({
         agents: { worker: mockAgentConfig('worker') },
         strategy: 'sequential',
@@ -1129,11 +1129,11 @@ describe('Agency Full Integration', () => {
         },
       });
 
-      await expect(team.connect!()).resolves.toBeUndefined();
+      await expect(team.connect!()).rejects.toThrow(/"discord", "telegram"/);
     });
 
-    it('connect() logs each configured channel without throwing', async () => {
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    it('connect() does not log as if a channel had connected', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
       const team = agency({
         agents: { worker: mockAgentConfig('worker') },
@@ -1141,13 +1141,28 @@ describe('Agency Full Integration', () => {
         channels: { slack: { webhookUrl: 'https://hooks.slack.com/...' } },
       });
 
-      await team.connect!();
+      await expect(team.connect!()).rejects.toThrow(/slack/);
+      expect(logSpy).not.toHaveBeenCalledWith(expect.stringContaining('connected'));
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('slack'),
+      logSpy.mockRestore();
+    });
+  });
+
+  describe('cognitiveMechanisms', () => {
+    it('warns that the lightweight agency() does not run the mechanisms', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      agency({
+        agents: { worker: mockAgentConfig('worker') },
+        strategy: 'sequential',
+        cognitiveMechanisms: {},
+      });
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('agency() accepted a cognitiveMechanisms config'),
       );
 
-      consoleSpy.mockRestore();
+      warn.mockRestore();
     });
   });
 

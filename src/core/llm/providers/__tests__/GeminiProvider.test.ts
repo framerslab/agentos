@@ -8,7 +8,7 @@
  * - Tool definition conversion (OpenAI functions -> `functionDeclarations`)
  * - Tool call response mapping (`functionCall` -> `tool_calls`)
  * - Finish reason mapping (`STOP`/`MAX_TOKENS`/`SAFETY`/`RECITATION`)
- * - Auth via query parameter (`?key=`) not header
+ * - Auth via the `x-goog-api-key` header, never the URL
  * - Usage metadata extraction (`usageMetadata` -> `ModelUsage`)
  * - Streaming SSE parsing
  */
@@ -22,7 +22,7 @@ const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
 import { GeminiProvider } from '../implementations/GeminiProvider';
-import type { ChatMessage } from '../IProvider';
+import type { ChatMessage, ModelCompletionOptions } from '../IProvider';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -125,11 +125,11 @@ describe('GeminiProvider', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Auth: query parameter (not header)
+  // Auth: x-goog-api-key header, never the URL
   // -------------------------------------------------------------------------
 
   describe('authentication', () => {
-    it('passes API key as query parameter, not as Authorization header', async () => {
+    it('sends the API key in the x-goog-api-key header, never in the URL', async () => {
       fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse()));
 
       await provider.generateCompletion('gemini-2.5-flash', [
@@ -139,13 +139,91 @@ describe('GeminiProvider', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const [url, options] = fetchMock.mock.calls[0];
 
-      // API key should be in the URL as a query parameter
-      expect(url).toContain('?key=test-gemini-key');
-
-      // Should NOT have an Authorization header
+      expect(String(url)).not.toContain('key=');
+      expect(String(url)).not.toContain('test-gemini-key');
+      expect(options.headers['x-goog-api-key']).toBe('test-gemini-key');
       expect(options.headers['Authorization']).toBeUndefined();
-      // Should NOT have an x-api-key header
       expect(options.headers['x-api-key']).toBeUndefined();
+    });
+
+    it.each([
+      [
+        'generateCompletion',
+        () => mockJsonResponse(makeGeminiResponse()),
+        (p: GeminiProvider) => p.generateCompletion('gemini-2.5-flash', [{ role: 'user', content: 'Hi' }], {}),
+      ],
+      [
+        'generateCompletionStream',
+        () =>
+          ({
+            ok: true,
+            status: 200,
+            headers: new Headers(),
+            body: createSseStream([JSON.stringify(makeGeminiResponse())]),
+          }) as unknown as Response,
+        async (p: GeminiProvider) => {
+          for await (const _chunk of p.generateCompletionStream('gemini-2.5-flash', [{ role: 'user', content: 'Hi' }], {})) {
+            // drain
+          }
+        },
+      ],
+      [
+        'generateEmbeddings',
+        () => mockJsonResponse({ embeddings: [{ values: [0.1, 0.2] }] }),
+        (p: GeminiProvider) => p.generateEmbeddings('gemini-embedding-2', ['hi']),
+      ],
+      [
+        'checkHealth',
+        () => mockJsonResponse(makeGeminiResponse()),
+        (p: GeminiProvider) => p.checkHealth(),
+      ],
+    ])('%s authenticates with the header only', async (_name, reply, call) => {
+      fetchMock.mockResolvedValueOnce(reply());
+
+      await call(provider);
+
+      expect(fetchMock).toHaveBeenCalled();
+      for (const [url, options] of fetchMock.mock.calls) {
+        expect(String(url)).not.toContain('key=');
+        expect((options as { headers: Record<string, string> }).headers['x-goog-api-key']).toBe('test-gemini-key');
+      }
+    });
+
+    it('rotates pooled keys through the header', async () => {
+      const pooled = new GeminiProvider();
+      await pooled.initialize({ apiKey: 'key-a,key-b' });
+      fetchMock
+        .mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse()))
+        .mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse()))
+        .mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse()));
+
+      for (let i = 0; i < 3; i++) {
+        await pooled.generateCompletion('gemini-2.5-flash', [{ role: 'user', content: 'Hi' }], {});
+      }
+
+      // The primary key has weight 2 in the pool.
+      expect(
+        fetchMock.mock.calls.map(([, options]) => (options as { headers: Record<string, string> }).headers['x-goog-api-key']),
+      ).toEqual(['key-a', 'key-a', 'key-b']);
+    });
+
+    it('retries a 429 with the next pooled key', async () => {
+      const pooled = new GeminiProvider();
+      await pooled.initialize({ apiKey: 'key-a,key-b', maxRetries: 2 });
+      fetchMock
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ error: { code: 429, message: 'Quota exceeded.', status: 'RESOURCE_EXHAUSTED' } }), {
+            status: 429,
+            headers: { 'content-type': 'application/json', 'retry-after': '0' },
+          }),
+        )
+        .mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse()));
+
+      await pooled.generateCompletion('gemini-2.5-flash', [{ role: 'user', content: 'Hi' }], {});
+
+      expect(
+        fetchMock.mock.calls.map(([, options]) => (options as { headers: Record<string, string> }).headers['x-goog-api-key']),
+      ).toEqual(['key-a', 'key-b']);
     });
 
     it('uses model-scoped endpoint URL', async () => {
@@ -271,6 +349,131 @@ describe('GeminiProvider', () => {
         topP: 0.9,
         stopSequences: ['END'],
       });
+    });
+  });
+
+  describe('thinking level and output ceiling', () => {
+    /** Request body of one completion call against `modelId`. */
+    const requestBody = async (modelId: string, options: ModelCompletionOptions) => {
+      fetchMock.mockReset();
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse()));
+      await provider.generateCompletion(modelId, [{ role: 'user', content: 'Hi' }], options);
+      return JSON.parse(fetchMock.mock.calls[0][1].body);
+    };
+
+    it('maps effort onto the thinking levels the model is known to take', async () => {
+      for (const [effort, level] of [['low', 'low'], ['medium', 'medium'], ['high', 'high'], ['max', 'high']]) {
+        expect(
+          (await requestBody('gemini-3.1-pro-preview', { maxTokens: 800, effort })).generationConfig,
+          effort,
+        ).toEqual({ maxOutputTokens: 800, thinkingConfig: { thinkingLevel: level } });
+      }
+      // No effort: the API default stands.
+      expect((await requestBody('gemini-3.1-pro-preview', { maxTokens: 800 })).generationConfig)
+        .toEqual({ maxOutputTokens: 800 });
+    });
+
+    it('never sends a level to a model that is not known to take it', async () => {
+      // The alias can move to another model, the 2.5 family answers a level
+      // with 400 INVALID_ARGUMENT, 2.0 does not think, and the 3.x image
+      // models take a different set of levels.
+      for (const modelId of ['gemini-pro-latest', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-3.1-flash-image']) {
+        expect((await requestBody(modelId, { maxTokens: 800, effort: 'low' })).generationConfig, modelId)
+          .toEqual({ maxOutputTokens: 800 });
+      }
+    });
+
+    it('forwards a caller thinkingConfig as is, over the effort mapping', async () => {
+      const body = await requestBody('gemini-2.5-flash', {
+        maxTokens: 800,
+        effort: 'max',
+        customModelParams: { thinkingConfig: { thinkingBudget: 512 } },
+      });
+      expect(body.generationConfig).toEqual({ maxOutputTokens: 800, thinkingConfig: { thinkingBudget: 512 } });
+      // Only inside generationConfig: the API rejects thinkingConfig at the
+      // payload root, where the other custom params are passed through.
+      expect(body).not.toHaveProperty('thinkingConfig');
+    });
+
+    it('clamps maxTokens to the output ceiling of a catalog model', async () => {
+      // A rescue hop's headroom can lift a large budget past the ceiling,
+      // and the API rejects the whole request above it.
+      expect((await requestBody('gemini-3.1-pro-preview', { maxTokens: 66560 })).generationConfig)
+        .toEqual({ maxOutputTokens: 65536 });
+      // A model outside the catalog has no known ceiling.
+      expect((await requestBody('gemini-experimental-x', { maxTokens: 66560 })).generationConfig)
+        .toEqual({ maxOutputTokens: 66560 });
+    });
+  });
+
+  describe('retired pinned model', () => {
+    const notFound = () =>
+      mockJsonResponse({ error: { code: 404, status: 'NOT_FOUND', message: 'models/x is not found' } }, 404);
+
+    it('retries a retired pin on its alias and reports the alias as the served model', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fetchMock.mockReset();
+      fetchMock
+        .mockResolvedValueOnce(notFound())
+        .mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse()));
+
+      const result = await provider.generateCompletion('gemini-3.1-pro-preview', [
+        { role: 'user', content: 'Hi' },
+      ], { maxTokens: 800, effort: 'low' });
+
+      expect(fetchMock.mock.calls[0][0]).toContain('/models/gemini-3.1-pro-preview:generateContent');
+      expect(fetchMock.mock.calls[1][0]).toContain('/models/gemini-pro-latest:generateContent');
+      // The alias is not in the thinking-level table, so it gets no level.
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).generationConfig).toEqual({ maxOutputTokens: 800 });
+      expect(result.modelId).toBe('gemini-pro-latest');
+      warn.mockRestore();
+    });
+
+    it('serves a stream from the alias when the pin is retired', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fetchMock.mockReset();
+      fetchMock
+        .mockResolvedValueOnce(notFound())
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          body: createSseStream([
+            JSON.stringify({
+              candidates: [{ content: { role: 'model', parts: [{ text: 'Hello' }] }, finishReason: 'STOP' }],
+              usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 2, totalTokenCount: 7 },
+            }),
+          ]),
+        } as unknown as Response);
+
+      const chunks: any[] = [];
+      for await (const chunk of provider.generateCompletionStream('gemini-3.1-pro-preview', [
+        { role: 'user', content: 'Hi' },
+      ], {})) {
+        chunks.push(chunk);
+      }
+
+      expect(fetchMock.mock.calls[1][0]).toContain('/models/gemini-pro-latest:streamGenerateContent');
+      const finalChunk = chunks[chunks.length - 1];
+      expect(finalChunk.isFinal).toBe(true);
+      expect(finalChunk.modelId).toBe('gemini-pro-latest');
+      warn.mockRestore();
+    });
+
+    it('lets a 404 through for a model without an alias, and for the alias itself', async () => {
+      fetchMock.mockReset();
+      fetchMock.mockResolvedValueOnce(notFound());
+      await expect(
+        provider.generateCompletion('gemini-2.5-flash', [{ role: 'user', content: 'Hi' }], {}),
+      ).rejects.toMatchObject({ httpStatus: 404 });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      fetchMock.mockReset();
+      fetchMock.mockResolvedValueOnce(notFound());
+      await expect(
+        provider.generateCompletion('gemini-pro-latest', [{ role: 'user', content: 'Hi' }], {}),
+      ).rejects.toMatchObject({ httpStatus: 404 });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -484,6 +687,45 @@ describe('GeminiProvider', () => {
       expect(result.usage).not.toHaveProperty('cacheReadInputTokens');
     });
 
+    it('counts thinking tokens as completion tokens and prices them as output', async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse({
+        usageMetadata: {
+          promptTokenCount: 100000,
+          candidatesTokenCount: 20000,
+          thoughtsTokenCount: 80000,
+          totalTokenCount: 200000,
+        },
+      })));
+
+      const result = await provider.generateCompletion('gemini-3.1-pro-preview', [
+        { role: 'user', content: 'Hi' },
+      ], {});
+
+      expect(result.usage!.promptTokens).toBe(100000);
+      expect(result.usage!.completionTokens).toBe(100000);
+      expect(result.usage!.totalTokens).toBe(200000);
+      // Up to 200k prompt tokens: $2.00/1M input + $12.00/1M output, thinking billed as output.
+      expect(result.usage!.costUSD).toBeCloseTo(1.4, 4);
+    });
+
+    it('prices a long prompt at the long-context tier', async () => {
+      fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse({
+        usageMetadata: {
+          promptTokenCount: 250000,
+          candidatesTokenCount: 4000,
+          thoughtsTokenCount: 6000,
+          totalTokenCount: 260000,
+        },
+      })));
+
+      const result = await provider.generateCompletion('gemini-3.1-pro-preview', [
+        { role: 'user', content: 'Hi' },
+      ], {});
+
+      // Above 200k prompt tokens the whole request bills $4.00/1M in, $18.00/1M out.
+      expect(result.usage!.costUSD).toBeCloseTo(0.25 * 4 + 0.01 * 18, 4);
+    });
+
     it('includes cost estimation for known models', async () => {
       fetchMock.mockResolvedValueOnce(mockJsonResponse(makeGeminiResponse({
         usageMetadata: {
@@ -497,8 +739,8 @@ describe('GeminiProvider', () => {
         { role: 'user', content: 'Hi' },
       ], {});
 
-      // gemini-2.5-flash: $0.15/1M input + $0.60/1M output
-      expect(result.usage!.costUSD).toBeCloseTo(0.75, 2);
+      // gemini-2.5-flash: $0.30/1M input + $2.50/1M output
+      expect(result.usage!.costUSD).toBeCloseTo(2.8, 2);
     });
   });
 
@@ -575,10 +817,10 @@ describe('GeminiProvider', () => {
         // just consume
       }
 
-      const [url] = fetchMock.mock.calls[0];
-      expect(url).toContain('streamGenerateContent');
-      expect(url).toContain('alt=sse');
-      expect(url).toContain('key=test-gemini-key');
+      const [url, options] = fetchMock.mock.calls[0];
+      expect(String(url)).toMatch(/:streamGenerateContent\?alt=sse$/);
+      expect(String(url)).not.toContain('key=');
+      expect(options.headers['x-goog-api-key']).toBe('test-gemini-key');
     });
 
     it('emits abort chunk when abortSignal is pre-aborted', async () => {
@@ -608,6 +850,8 @@ describe('GeminiProvider', () => {
       expect(models.length).toBeGreaterThanOrEqual(4);
 
       const ids = models.map(m => m.modelId);
+      expect(ids).toContain('gemini-3.1-pro-preview');
+      expect(ids).toContain('gemini-pro-latest');
       expect(ids).toContain('gemini-2.5-flash');
       expect(ids).toContain('gemini-2.5-pro');
       expect(ids).toContain('gemini-2.0-flash');

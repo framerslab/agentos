@@ -5,14 +5,20 @@
  * Implements {@link IBatchTTS} for one-shot narration synthesis.
  *
  * Contract notes (verified 2026-07-08): Bearer auth with the pinned
- * `Cartesia-Version: 2026-03-01` header (the only valid value today); models
- * sonic-3.5 (default) / sonic-3 / sonic-latest; prosody rides
+ * `Cartesia-Version: 2026-03-01` header (the only valid value today); prosody rides
  * `generation_config` (the vendor's top-level `speed` is deprecated — the
  * AgentOS `speed` knob maps into generation_config, clamped to Cartesia's
  * documented 0.6–1.5 range). `opus` output has no Cartesia container and
  * falls back to mp3, with the produced format reported on the result.
  * Cartesia has no natural-language instruction surface, so
  * `expressiveness.instructions` is ignored and never reported.
+ *
+ * Models (read 2026-10-07): the default is the dated snapshot
+ * `sonic-3.6-2026-08-27`, which Cartesia never changes once released. The
+ * `sonic-3.6` alias follows the latest stable 3.6 snapshot, and `sonic-3.5`
+ * and `sonic-3` stay accepted. Cartesia retires dated snapshots on a published
+ * schedule (`sonic-3-2025-10-27` sunsets on 2026-10-20), so the default needs
+ * a newer snapshot before this one sunsets.
  */
 
 import type { IBatchTTS, BatchTTSConfig, BatchTTSResult } from '../types.js';
@@ -28,6 +34,9 @@ import { VoicePipelineError } from '../VoicePipelineError.js';
 
 /** The only Cartesia-Version value the API accepts today. Pinned, not a knob. */
 export const CARTESIA_VERSION = '2026-03-01';
+
+/** Default Sonic model: the dated 3.6 snapshot, whose output never changes. */
+export const CARTESIA_DEFAULT_MODEL = 'sonic-3.6-2026-08-27';
 
 /** Approximate bytes per second for 128kbps MP3 audio (duration estimate). */
 const BYTES_PER_SEC_MP3 = 16_000;
@@ -54,7 +63,7 @@ export interface CartesiaBatchTTSConfig {
   apiKey: string;
   /** Default voice id. Cartesia voices are ids; there is no vendor default. */
   voiceId: string;
-  /** Model identifier. @default 'sonic-3.5' */
+  /** Model identifier. @default 'sonic-3.6-2026-08-27' */
   model?: string;
   /** Sample rate (Hz) used when `format: 'pcm'` is requested. @default 16000 */
   pcmSampleRate?: number;
@@ -101,7 +110,7 @@ export class CartesiaBatchTTS implements IBatchTTS, HealthyProvider {
   constructor(config: CartesiaBatchTTSConfig) {
     this.keyPool = new ApiKeyPool(config.apiKey);
     this.voiceId = config.voiceId;
-    this.model = config.model ?? 'sonic-3.5';
+    this.model = config.model ?? CARTESIA_DEFAULT_MODEL;
     this.pcmSampleRate = config.pcmSampleRate ?? 16000;
     this.baseUrl = config.baseUrl ?? 'https://api.cartesia.ai';
     this.priority = config.priority ?? 85;

@@ -144,8 +144,8 @@ The [`FileTokenStore`](https://github.com/framerslab/agentos/blob/master/src/cor
 | Provider | OAuth Status | CLI Provider Alternative |
 |----------|-------------|------------------------|
 | OpenAI | **Supported** — Codex CLI PKCE flow with public client ID `app_EMoamEEZ73f0CkXaXp7hrann`. OpenAI maintainers have [confirmed](https://github.com/openai/codex/discussions/8338) permissive terms for third-party usage. | N/A (OAuth works directly) |
-| Anthropic | Not available — no consumer OAuth API | **`claude-code-cli`** — use Claude Code CLI with Max subscription. Anthropic [explicitly supports](https://code.claude.com/docs/en/headless) programmatic `claude -p` calls. See [CLI Providers](./CLI_PROVIDERS.md). |
-| Google Gemini | Not available — API keys only | **`gemini-cli`** — use Gemini CLI with Google account. **WARNING**: Google's ToS may prohibit third-party CLI invocation with OAuth auth. Use at your own risk. See [CLI Providers](./CLI_PROVIDERS.md). |
+| Anthropic | Not available — no consumer OAuth API | **`claude-code-cli`** — use Claude Code CLI with Max subscription. Anthropic [explicitly supports](https://code.claude.com/docs/en/headless) programmatic `claude -p` calls. See [CLI Providers](../getting-started/CLI_PROVIDERS.md). |
+| Google Gemini | Not available — API keys only | **`gemini-cli`** — use Gemini CLI with Google account. **WARNING**: Google's ToS may prohibit third-party CLI invocation with OAuth auth. Use at your own risk. See [CLI Providers](../getting-started/CLI_PROVIDERS.md). |
 
 ### Authentication Strategy by Use Case
 

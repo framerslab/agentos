@@ -34,6 +34,26 @@ export function isEffortLevel(v: unknown): v is EffortLevel {
 }
 
 /**
+ * The `output_config.effort` to send to a Claude model, or undefined to omit
+ * it. Each model accepts its own ladder (Anthropic's model docs): Opus 4.5
+ * takes low, medium and high; Opus 4.6 and Sonnet 4.6 add max but not xhigh,
+ * which arrived with Opus 4.7; Opus 4.7 and later, Sonnet 5 and later, Fable
+ * and Mythos take all five. A level the model does not take is sent as
+ * `high` instead of returning 400. Matches bare and provider-prefixed ids,
+ * like {@link modelSupportsEffort}.
+ *
+ * @param modelId Anthropic-side model id.
+ * @param effort Caller-supplied effort value.
+ * @returns The level to send, or undefined for an unsupported model or value.
+ */
+export function resolveAnthropicEffort(modelId: string, effort: unknown): EffortLevel | undefined {
+  if (!isEffortLevel(effort) || !modelSupportsEffort(modelId)) return undefined;
+  if (/claude-opus-4-5/i.test(modelId) && (effort === 'xhigh' || effort === 'max')) return 'high';
+  if (/claude-(opus|sonnet)-4-6/i.test(modelId) && effort === 'xhigh') return 'high';
+  return effort;
+}
+
+/**
  * OpenAI reasoning models (o-series, GPT-5 and GPT-6 families) take
  * `reasoning_effort` (none|low|medium|high|xhigh) — the OpenAI analogue of
  * Anthropic's `output_config.effort`. This maps the agentos effort scale onto
@@ -67,9 +87,16 @@ export function mapEffortToOpenAiReasoningEffort(effort: unknown): string | unde
  * `gpt-6-astra` with `reasoning:{effort:'xhigh'}` → HTTP 200 (status:
  * completed) — GPT-6 joins the allow-list. Widen further only after
  * probing the new id.
+ *
+ * Live-probed 2026-09-30: `POST /v1/responses` with function tools and
+ * `reasoning: {effort: 'xhigh'}` returned HTTP 200 with a `function_call`
+ * output on `gpt-6-sol`, `gpt-6-luna` and `gpt-6-astra`. OpenAI's 2026-09-29
+ * changelog lists reasoning effort `low` through `max` for `gpt-6.1-sol` on
+ * `/v1/responses` and says it rejects `none` and `minimal`, which the agentos
+ * effort scale never produces.
  */
 export function modelAcceptsXhighResponsesEffort(modelId: string): boolean {
-  return /^(gpt-5\.[56]|gpt-6-astra)/i.test(modelId);
+  return /^(gpt-5\.[56]|gpt-6-(astra|sol|luna)|gpt-6\.1-sol)/i.test(modelId);
 }
 
 /**
@@ -94,9 +121,16 @@ export function modelAcceptsXhighResponsesEffort(modelId: string): boolean {
  * that the 2026-08-06 sweep never probed. All three join the list. Note the
  * asymmetry this preserves: the same ids reject `'max'` on chat.completions
  * (see {@link CHAT_MAX_EFFORT_MODELS}), so `max` stays a Responses-only tier.
+ *
+ * 2026-09-30 probe (POST /v1/responses with function tools,
+ * `reasoning: {effort: 'max'}`): HTTP 200 with a `function_call` output on
+ * `gpt-6-sol`, `gpt-6-luna` and `gpt-6-astra`, so Sol and Luna join Astra.
+ * `gpt-6.1-sol` joins on OpenAI's 2026-09-29 changelog, which lists `max`
+ * among its `/v1/responses` efforts.
  */
 const RESPONSES_MAX_EFFORT_MODELS: ReadonlySet<string> = new Set([
-  'gpt-5.6', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra',
+  'gpt-5.6', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
+  'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-6.1-sol',
 ]);
 
 /**

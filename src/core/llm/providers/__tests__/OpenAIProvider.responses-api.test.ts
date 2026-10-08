@@ -6,7 +6,9 @@ vi.stubGlobal('fetch', vi.fn());
 import {
   OpenAIProvider,
   shouldRouteToOpenAiResponsesApi,
+  isOpenAIResponsesOnlyModel,
   isResponsesMappableContent,
+  isResponsesMappableMessage,
   flattenResponsesTextContent,
 } from '../implementations/OpenAIProvider';
 import type { ChatMessage, ModelCompletionOptions } from '../IProvider';
@@ -85,18 +87,41 @@ describe('shouldRouteToOpenAiResponsesApi', () => {
     expect(shouldRouteToOpenAiResponsesApi('gpt-5.5', cacheMarkedSystem, { tools: toolsOpt, effort: 'max' })).toBe(true);
   });
 
-  it('still does NOT route genuinely multimodal content (the mapper cannot carry it)', () => {
-    expect(shouldRouteToOpenAiResponsesApi('gpt-6-astra', multimodal, { tools: toolsOpt, effort: 'xhigh' })).toBe(false);
+  it('routes user images, which Responses carries as input_image', () => {
+    expect(shouldRouteToOpenAiResponsesApi('gpt-6-astra', multimodal, { tools: toolsOpt, effort: 'xhigh' })).toBe(true);
+    expect(shouldRouteToOpenAiResponsesApi('gpt-5.5', multimodal, { tools: toolsOpt, effort: 'xhigh' })).toBe(true);
   });
 
-  it('still does NOT route cache-marked blocks when responseFormat is present', () => {
+  it('routes a call with a responseFormat, which Responses carries as text.format', () => {
+    const responseFormat = { type: 'json_object' } as ModelCompletionOptions['responseFormat'];
     expect(
-      shouldRouteToOpenAiResponsesApi('gpt-6-astra', cacheMarkedSystem, {
-        tools: toolsOpt,
-        effort: 'xhigh',
-        responseFormat: { type: 'json_object' } as ModelCompletionOptions['responseFormat'],
-      }),
-    ).toBe(false);
+      shouldRouteToOpenAiResponsesApi('gpt-6-astra', cacheMarkedSystem, { tools: toolsOpt, effort: 'xhigh', responseFormat }),
+    ).toBe(true);
+    expect(shouldRouteToOpenAiResponsesApi('gpt-5.5', userMsgs, { tools: toolsOpt, effort: 'xhigh', responseFormat })).toBe(true);
+  });
+
+  it('routes every GPT-6 tool call, with or without an effort, and no GPT-6 call without tools', () => {
+    for (const model of ['gpt-6-sol', 'gpt-6-luna', 'gpt-6-astra', 'gpt-6.1-sol']) {
+      expect(shouldRouteToOpenAiResponsesApi(model, userMsgs, { tools: toolsOpt })).toBe(true);
+      expect(shouldRouteToOpenAiResponsesApi(model, userMsgs, { tools: toolsOpt, effort: 'low' })).toBe(true);
+      expect(shouldRouteToOpenAiResponsesApi(model, userMsgs, { effort: 'high' })).toBe(false);
+      expect(shouldRouteToOpenAiResponsesApi(model, userMsgs, { tools: [] })).toBe(false);
+    }
+  });
+
+  it('routes every Responses-only model, with or without tools', () => {
+    for (const model of ['gpt-5.3-codex', 'gpt-5.5-pro', 'gpt-5-pro', 'o3-pro', 'o3-pro-2025-06-10', 'gpt-5.6-cyber', 'o4-mini-deep-research', 'codex-mini-latest']) {
+      expect(isOpenAIResponsesOnlyModel(model)).toBe(true);
+      expect(shouldRouteToOpenAiResponsesApi(model, userMsgs, {})).toBe(true);
+      expect(shouldRouteToOpenAiResponsesApi(model, userMsgs, { tools: toolsOpt })).toBe(true);
+    }
+  });
+
+  it('leaves non-OpenAI ids that look Responses-only on chat (Groq, xAI, Together, Mistral delegate here)', () => {
+    for (const model of ['grok-4-pro', 'acme/model-pro', 'codestral-latest', 'llama-3.3-70b-versatile']) {
+      expect(isOpenAIResponsesOnlyModel(model)).toBe(false);
+      expect(shouldRouteToOpenAiResponsesApi(model, userMsgs, {})).toBe(false);
+    }
   });
 
   it('does NOT route without tools, without effort, or on non-gpt-5 reasoning/chat models', () => {
@@ -106,21 +131,28 @@ describe('shouldRouteToOpenAiResponsesApi', () => {
     expect(shouldRouteToOpenAiResponsesApi('gpt-4o', userMsgs, { tools: toolsOpt, effort: 'high' })).toBe(false); // legacy
   });
 
-  it('does NOT route when responseFormat is present (Codex-High-2)', () => {
-    expect(
-      shouldRouteToOpenAiResponsesApi('gpt-5.5', userMsgs, {
-        tools: toolsOpt,
-        effort: 'xhigh',
-        responseFormat: { type: 'json_object' } as ModelCompletionOptions['responseFormat'],
-      }),
-    ).toBe(false);
+  it('keeps a GPT-5 tool call off Responses when a part has no Responses form (audio, tool_result)', () => {
+    const audio: ChatMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'hi' }, { type: 'input_audio', input_audio: { data: 'AAAA', format: 'wav' } }] },
+    ];
+    const toolResultBlock: ChatMessage[] = [
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'r' }] },
+    ];
+    for (const messages of [audio, toolResultBlock]) {
+      expect(isResponsesMappableMessage(messages[0])).toBe(false);
+      expect(shouldRouteToOpenAiResponsesApi('gpt-5.5', messages, { tools: toolsOpt, effort: 'xhigh' })).toBe(false);
+    }
   });
 
-  it('does NOT route when any message carries multimodal (non-string) content (Codex-Medium-1)', () => {
-    const multimodal: ChatMessage[] = [
-      { role: 'user', content: [{ type: 'text', text: 'hi' }, { type: 'image_url', image_url: { url: 'x' } }] as unknown as ChatMessage['content'] },
+  it('maps images only on user and tool turns', () => {
+    const imageContent: ChatMessage['content'] = [
+      { type: 'text', text: 'see' },
+      { type: 'image_url', image_url: { url: 'https://example.com/a.png' } },
     ];
-    expect(shouldRouteToOpenAiResponsesApi('gpt-5.5', multimodal, { tools: toolsOpt, effort: 'xhigh' })).toBe(false);
+    expect(isResponsesMappableMessage({ role: 'user', content: imageContent })).toBe(true);
+    expect(isResponsesMappableMessage({ role: 'tool', tool_call_id: 'c1', content: imageContent })).toBe(true);
+    expect(isResponsesMappableMessage({ role: 'system', content: imageContent })).toBe(false);
+    expect(isResponsesMappableMessage({ role: 'assistant', content: imageContent })).toBe(false);
   });
 });
 
@@ -130,10 +162,10 @@ describe('OpenAIProvider.buildResponsesPayload', () => {
     vi.clearAllMocks();
     provider = new OpenAIProvider();
   });
-  const build = (model: string, msgs: ChatMessage[], options: unknown): Record<string, unknown> =>
+  const build = (model: string, msgs: ChatMessage[], options: unknown, stream?: boolean): Record<string, unknown> =>
     (provider as unknown as {
-      buildResponsesPayload: (m: string, msgs: ChatMessage[], o: unknown) => Record<string, unknown>;
-    }).buildResponsesPayload(model, msgs, options);
+      buildResponsesPayload: (m: string, msgs: ChatMessage[], o: unknown, stream?: boolean) => Record<string, unknown>;
+    }).buildResponsesPayload(model, msgs, options, stream);
 
   it('maps a multi-turn tool conversation into ordered input items', () => {
     const convo: ChatMessage[] = [
@@ -213,6 +245,19 @@ describe('OpenAIProvider.buildResponsesPayload', () => {
 
   it('caps xhigh -> high for a non-allow-listed gpt-5 model', () => {
     expect(build('gpt-5.4', userMsgs, { tools: toolsOpt, effort: 'max' }).reasoning).toEqual({ effort: 'high' });
+  });
+
+  it('sends reasoning, tools and stream only when the call has them', () => {
+    const bare = build('gpt-5.3-codex', userMsgs, {});
+    expect(bare).not.toHaveProperty('reasoning');
+    expect(bare).not.toHaveProperty('tools');
+    expect(bare).not.toHaveProperty('stream');
+    expect(build('gpt-5.3-codex', userMsgs, {}, true).stream).toBe(true);
+    const argumentless = [{ type: 'function', function: { name: 'now', description: 'Current time.' } }];
+    // Responses requires `parameters` on a function tool.
+    expect(build('gpt-6-sol', userMsgs, { tools: argumentless }).tools).toEqual([
+      { type: 'function', name: 'now', description: 'Current time.', parameters: { type: 'object', properties: {} }, strict: false },
+    ]);
   });
 });
 

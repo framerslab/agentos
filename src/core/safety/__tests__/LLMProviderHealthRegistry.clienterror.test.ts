@@ -44,6 +44,24 @@ describe('LLMProviderHealthRegistry — client-error 4xx must not trip the break
   });
 });
 
+describe('LLMProviderHealthRegistry: content-policy declines are not provider failures', () => {
+  /** The shape of a refusal error: a content_filter code and no HTTP status. */
+  const decline = () => ({ code: 'content_filter', message: 'Claude declined the request.' });
+
+  it('stays closed after repeated declines, which carry no HTTP status', () => {
+    const reg = new LLMProviderHealthRegistry();
+    for (let i = 0; i < 10; i++) reg.recordFailure('anthropic', decline());
+    expect(reg.isOpen('anthropic')).toBe(false);
+  });
+
+  it('does not let declines inflate the streak a transient 5xx then trips on', () => {
+    const reg = new LLMProviderHealthRegistry();
+    for (let i = 0; i < 4; i++) reg.recordFailure('anthropic', decline());
+    reg.recordFailure('anthropic', err(503)); // one real transient failure, below threshold (5)
+    expect(reg.isOpen('anthropic')).toBe(false);
+  });
+});
+
 describe('LLMProviderHealthRegistry — quota exhaustion rides the billing class', () => {
   /** OpenAI reports a dead account as HTTP 429 + insufficient_quota. */
   const quotaErr = () => ({

@@ -115,8 +115,9 @@ export const hitl = {
    * Returns a handler that pauses execution and prompts the user interactively
    * via `stdin`/`stdout`.
    *
-   * Displays the approval request summary (description, agent, action, type)
-   * and waits for the user to type `y` (approve) or `n` (reject).
+   * Prints the request's description, agent, action, type and details (for a
+   * tool call, the arguments it will run with), then waits for the user to
+   * type `y` (approve) or `n` (reject).
    *
    * **Important**: This handler reads from `process.stdin`, so it must only be
    * used in interactive terminal environments (not in CI/CD pipelines or
@@ -132,6 +133,7 @@ export const hitl = {
   cli(): HitlHandler {
     return async (request: ApprovalRequest): Promise<ApprovalDecision> => {
       const readline = await import('node:readline');
+      const { inspect } = await import('node:util');
       const rl = readline.createInterface({
         input: process.stdin,
         output: process.stdout,
@@ -141,6 +143,12 @@ export const hitl = {
         console.log(`\n[APPROVAL NEEDED] ${request.description}`);
         console.log(`Agent: ${request.agent} | Action: ${request.action}`);
         console.log(`Type: ${request.type}`);
+        // What is being approved: for a tool call, the arguments it will run
+        // with, in full. They are printed here and kept out of the
+        // description, which hitl.slack posts to a channel.
+        console.log(
+          `Details: ${inspect(request.details, { depth: null, maxArrayLength: null, maxStringLength: null, breakLength: 100 })}`,
+        );
         rl.question('Approve? (y/n): ', (answer) => {
           rl.close();
           resolve({ approved: answer.toLowerCase().startsWith('y') });

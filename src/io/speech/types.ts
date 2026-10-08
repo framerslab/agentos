@@ -220,6 +220,7 @@ export interface SpeechResolverConfig {
 export interface ProviderRequirements {
   streaming?: boolean;
   local?: boolean;
+  /** Features every match must list. `'streaming'` is read as the `streaming` capability, which a provider instance can override. */
   features?: string[];
   preferredIds?: string[];
 }

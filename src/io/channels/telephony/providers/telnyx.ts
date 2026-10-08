@@ -29,12 +29,17 @@
  *
  * 1. Telnyx generates a signed payload: `{timestamp}|{rawBody}`.
  * 2. The signature is computed with the account's Ed25519 private key.
- * 3. The public key is provided as a base64-encoded DER SPKI blob.
- * 4. Headers: `X-Telnyx-Timestamp` (the timestamp) and
- *    `X-Telnyx-Signature-Ed25519` (base64-encoded Ed25519 signature).
+ * 3. The Telnyx portal shows the public key as base64 of its 32 raw bytes,
+ *    the form telnyx-node passes to tweetnacl. A base64 DER SPKI blob is
+ *    accepted too.
+ * 4. Headers: `Telnyx-Timestamp` (the timestamp) and
+ *    `Telnyx-Signature-Ed25519` (base64-encoded Ed25519 signature), as
+ *    telnyx-node and telnyx-python read them. The `X-` prefixed names are
+ *    read as well.
  * 5. Verification: decode the signature from base64, construct the payload
  *    string `{timestamp}|{body}`, and verify using `crypto.verify()` with
- *    the SPKI public key.
+ *    the key as DER SPKI. As in telnyx-node, a timestamp more than 300
+ *    seconds old is rejected.
  *
  * When no public key is configured, verification is skipped (returns
  * `valid: true`) to support development environments.
@@ -87,12 +92,19 @@ export interface TelnyxVoiceProviderConfig {
   /** Telnyx connection/application ID for call routing. */
   connectionId: string;
   /**
-   * Base64-encoded DER-encoded SPKI Ed25519 public key for webhook verification.
+   * Ed25519 public key for webhook verification, base64-encoded: the 32-byte
+   * key as the Telnyx portal shows it, or a DER SPKI blob.
    *
    * When omitted, webhook verification is skipped (always returns `valid: true`).
    * This is acceptable for development but should always be set in production.
    */
   publicKey?: string;
+  /**
+   * How old a webhook's `Telnyx-Timestamp` may be, in seconds, before it is
+   * rejected as a replay. Defaults to 300, telnyx-node's default; 0 turns
+   * the check off.
+   */
+  webhookToleranceSec?: number;
   /**
    * Optional fetch implementation override -- inject a mock in tests.
    * Defaults to the global `fetch`.
@@ -130,6 +142,24 @@ interface TelnyxWebhookPayload {
 // ============================================================================
 // TelnyxVoiceProvider
 // ============================================================================
+
+/** DER header of an Ed25519 SubjectPublicKeyInfo; the 32 raw key bytes follow it. */
+const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+
+/** Default webhook replay window in seconds, telnyx-node's `DEFAULT_TOLERANCE`. */
+const DEFAULT_WEBHOOK_TOLERANCE_SEC = 300;
+
+/**
+ * The configured public key as DER SPKI. A 32-byte key (the portal's form)
+ * gets the Ed25519 SPKI header; anything else is taken as DER SPKI already.
+ *
+ * @param publicKey - The base64 public key from the config.
+ * @returns The key bytes for `crypto.verify()` with `format: 'der'`.
+ */
+function telnyxPublicKeyDer(publicKey: string): Buffer {
+  const bytes = Buffer.from(publicKey, 'base64');
+  return bytes.length === 32 ? Buffer.concat([ED25519_SPKI_PREFIX, bytes]) : bytes;
+}
 
 /**
  * Telnyx voice call provider.
@@ -182,12 +212,14 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
    *
    * 1. If no public key is configured, skip verification (return `valid: true`).
    *    This supports development environments without cryptographic setup.
-   * 2. Extract `X-Telnyx-Timestamp` and `X-Telnyx-Signature-Ed25519` headers.
+   * 2. Extract the `Telnyx-Timestamp` and `Telnyx-Signature-Ed25519` headers
+   *    (or their `X-` prefixed forms).
    * 3. Decode the signature from base64 into a raw byte Buffer.
    * 4. Construct the signed payload: `"{timestamp}|{rawBody}"`.
-   * 5. Decode the SPKI public key from base64.
+   * 5. Decode the public key from base64 into DER SPKI ({@link telnyxPublicKeyDer}).
    * 6. Call `crypto.verify(null, payload, { key, format: 'der', type: 'spki' }, signature)`.
-   * 7. Return the verification result.
+   * 7. Reject a timestamp older than `webhookToleranceSec` (default 300).
+   * 8. Return the verification result.
    *
    * @param ctx - Raw webhook request context.
    * @returns Verification result. Returns `{ valid: true }` when no public key
@@ -200,8 +232,8 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
       return { valid: true };
     }
 
-    const timestamp = ctx.headers['x-telnyx-timestamp'];
-    const sigHeader = ctx.headers['x-telnyx-signature-ed25519'];
+    const timestamp = ctx.headers['telnyx-timestamp'] ?? ctx.headers['x-telnyx-timestamp'];
+    const sigHeader = ctx.headers['telnyx-signature-ed25519'] ?? ctx.headers['x-telnyx-signature-ed25519'];
 
     if (!timestamp || Array.isArray(timestamp) || !sigHeader || Array.isArray(sigHeader)) {
       return { valid: false, error: 'Missing Telnyx signature headers' };
@@ -211,22 +243,34 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
     // Telnyx signs the concatenation of timestamp, pipe separator, and raw body.
     const payload = Buffer.from(`${timestamp}|${ctx.body.toString()}`);
 
+    let valid: boolean;
     try {
-      const valid = verify(
+      valid = verify(
         null, // Ed25519 does not use a separate hash algorithm parameter.
         payload,
         {
-          key: Buffer.from(this.config.publicKey, 'base64'),
+          key: telnyxPublicKeyDer(this.config.publicKey),
           format: 'der',
           type: 'spki',
         },
         signature,
       );
-      return { valid };
     } catch {
       // crypto.verify throws on malformed keys or invalid DER encoding.
       return { valid: false, error: 'Verification failed' };
     }
+    if (!valid) {
+      return { valid: false, error: 'Signature mismatch' };
+    }
+
+    // A signed timestamp older than the window is a replay. A non-numeric
+    // timestamp fails the comparison and is rejected too.
+    const toleranceSec = this.config.webhookToleranceSec ?? DEFAULT_WEBHOOK_TOLERANCE_SEC;
+    const ageSec = Math.floor(Date.now() / 1000) - Number(timestamp);
+    if (toleranceSec > 0 && !(ageSec <= toleranceSec)) {
+      return { valid: false, error: 'Timestamp outside the tolerance window' };
+    }
+    return { valid: true };
   }
 
   /**

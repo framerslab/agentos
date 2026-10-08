@@ -86,7 +86,10 @@ interface ParsedEvaluation {
 export interface MemoryTrace {
   /** Trace type identifier. */
   type: string;
-  /** Scope of the trace (e.g. 'session'). */
+  /**
+   * Scope of the trace (e.g. 'session'). The AgentOS host stores 'session'
+   * traces under the memory `thread` scope of the calling conversation.
+   */
   scope: string;
   /** Serialized trace content. */
   content: string;
@@ -149,8 +152,12 @@ export interface SelfEvaluateDeps {
   };
   /** Optional AdaptPersonalityTool for delegating personality adjustments. */
   adaptPersonality?: AdaptPersonalityTool;
-  /** Optional callback to persist evaluation traces to long-term memory. */
-  storeMemory?: (trace: MemoryTrace) => Promise<void>;
+  /**
+   * Optional callback to persist evaluation traces to long-term memory.
+   * Receives the tool's execution context so the host can store the trace in
+   * the calling agent's memory, scoped to the calling session.
+   */
+  storeMemory?: (trace: MemoryTrace, context?: ToolExecutionContext) => Promise<void>;
   /** Optional override for tests or custom judge routing. */
   generateTextImpl?: typeof generateText;
   /** Optional host-level getter for session runtime parameters. */
@@ -343,19 +350,23 @@ export class SelfEvaluateTool implements ITool<SelfEvaluateInput> {
       sessionState.evaluations.push(record);
       sessionState.evalCount++;
 
-      // Store as memory trace if callback is provided
+      // Store as memory trace if callback is provided. The trace carries the
+      // user's query, so the context goes along to keep it in this session.
       if (this.deps.storeMemory) {
         try {
-          await this.deps.storeMemory({
-            type: 'self-evaluation',
-            scope: 'session',
-            content: JSON.stringify({
-              query,
-              scores,
-              autoAdjustments: autoAdjustResults?.appliedAdjustments ?? [],
-            }),
-            tags: ['evaluation', 'quality'],
-          });
+          await this.deps.storeMemory(
+            {
+              type: 'self-evaluation',
+              scope: 'session',
+              content: JSON.stringify({
+                query,
+                scores,
+                autoAdjustments: autoAdjustResults?.appliedAdjustments ?? [],
+              }),
+              tags: ['evaluation', 'quality'],
+            },
+            context,
+          );
         } catch {
           // Best-effort memory storage; don't fail the evaluation
         }

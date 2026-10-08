@@ -96,6 +96,19 @@ export interface StreamObjectOptions<T extends ZodType> {
   maxTokens?: number;
 
   /**
+   * Reasoning depth forwarded to
+   * {@link import('./generateText.js').GenerateTextOptions.effort}.
+   */
+  effort?: string;
+
+  /**
+   * Extended-thinking switch forwarded to
+   * {@link import('./generateText.js').GenerateTextOptions.thinking}; see
+   * {@link import('./generateObject.js').GenerateObjectOptions.thinking}.
+   */
+  thinking?: { budgetTokens: number } | false;
+
+  /**
    * Number of retries on validation failure.
    * Unlike {@link generateObject}, streaming retries are not currently supported
    * (the stream is consumed once). This field is accepted for API symmetry but
@@ -363,8 +376,10 @@ export function streamObject<T extends ZodType>(
     resolveUsage = res;
   });
 
-  // Convert the Zod schema to JSON Schema for the system prompt
-  const jsonSchema = lowerZodToJsonSchema(opts.schema);
+  // Convert the Zod schema to JSON Schema for the system prompt. Streaming
+  // has no provider-side structured-output payload: this text is the only
+  // schema the model ever sees, so it carries the Zod size checks too.
+  const jsonSchema = lowerZodToJsonSchema(opts.schema, { sizeConstraints: true });
 
   const systemPrompt = buildSchemaSystemPrompt(
     opts.system,
@@ -391,6 +406,8 @@ export function streamObject<T extends ZodType>(
       prompt: opts.prompt,
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,
+      effort: opts.effort,
+      thinking: opts.thinking,
       apiKey: opts.apiKey,
       baseUrl: opts.baseUrl,
     });

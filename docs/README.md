@@ -23,7 +23,7 @@
 - [**Getting Started Guide**](./getting-started/GETTING_STARTED.md) — Install, env setup, and 3 levels (1 line → 3 lines → 5 lines)
 - [**README**](../README.md) — Installation and quick start
 - [**High-Level API**](./getting-started/HIGH_LEVEL_API.md) — `generateText()`, `streamText()`, `generateImage()`, `generateVideo()`, `analyzeVideo()`, `generateMusic()`, `generateSFX()`, `performOCR()`, `agent()`, and `agency()`
-- [**Examples Cookbook**](./getting-started/EXAMPLES.md) — 12 complete runnable examples, including QueryRouter host hooks and finalized agency streaming
+- [**Examples Cookbook**](./getting-started/EXAMPLES.md) — 17 worked examples and the runnable files under `examples/`, including QueryRouter host hooks and finalized agency streaming
 - [**CHANGELOG**](../CHANGELOG.md) — Version history and release notes
 
 ### Architecture & Core Concepts
@@ -75,7 +75,7 @@
 #### Extensions & Customization
 
 - [**RFC Extension Standards**](./extensions/RFC_EXTENSION_STANDARDS.md) — Extension development guidelines
-- [**Recursive Self-Building Agents**](./architecture/RECURSIVE_SELF_BUILDING_AGENTS.md) — Advanced agent patterns
+- [**Self-Extension: Forging and Self-Improvement**](./SELF_EXTENSION.md) — Forged tools, self-improvement tools and specialist spawning
 - [**Skills (SKILL.md)**](./extensions/SKILLS.md) — Prompt modules loaded from directories/registries
 
 #### Channels & Social

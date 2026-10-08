@@ -182,20 +182,25 @@ interface AggregateMetrics {
 
 ## Integration with GMI
 
-Evaluate GMI responses:
+Evaluate GMI responses through the runtime. Each test case runs on a session of its own, so one case's history does not reach the next:
 
 ```typescript
-import { GMIManager } from '@framers/agentos';
+import { AgentOS, AgentOSResponseChunkType, BUILT_IN_PERSONAS } from '@framers/agentos';
 
-const gmiManager = new GMIManager();
-const gmi = await gmiManager.createGMI(myPersona);
+const agentos = await AgentOS.create({ personas: BUILT_IN_PERSONAS });
+let caseNumber = 0;
 
 // Create wrapper function for evaluation
 async function gmiAgent(input: string): Promise<string> {
   let response = '';
-  for await (const chunk of gmi.processTurnStream({ message: input })) {
-    if (chunk.content) {
-      response += chunk.content;
+  for await (const chunk of agentos.processRequest({
+    userId: 'eval-user',
+    sessionId: `eval-case-${++caseNumber}`,
+    selectedPersonaId: 'v_researcher',
+    textInput: input,
+  })) {
+    if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA) {
+      response += chunk.textDelta;
     }
   }
   return response;
@@ -319,6 +324,6 @@ evaluator.registerScorer('llm_judge', judge.createScorer());
 
 ### Implementation references
 
-- [`packages/agentos/src/evaluation/Evaluator.ts`](https://github.com/framerslab/agentos/blob/master/src/evaluation/Evaluator.ts) — the evaluation harness
-- [`packages/agentos/src/evaluation/LLMJudge.ts`](https://github.com/framerslab/agentos/blob/master/src/evaluation/LLMJudge.ts) — judge implementation with position-bias mitigation
-- [`packages/agentos/src/evaluation/SqlTaskOutcomeTelemetryStore.ts`](https://github.com/framerslab/agentos/blob/master/src/evaluation/SqlTaskOutcomeTelemetryStore.ts) — persistent outcome KPIs across runs
+- [`src/safety/evaluation/Evaluator.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/Evaluator.ts) — the evaluation harness
+- [`src/safety/evaluation/LLMJudge.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/LLMJudge.ts) — judge implementation with position-bias mitigation
+- [`src/orchestration/turn-planner/SqlTaskOutcomeTelemetryStore.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/turn-planner/SqlTaskOutcomeTelemetryStore.ts) — persistent outcome KPIs across runs

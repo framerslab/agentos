@@ -58,4 +58,20 @@ describe('DeepgramPreRecordedBatchSTT', () => {
 
     await expect(provider.transcribe(AUDIO)).rejects.toThrow(/deepgram_http_429/);
   });
+
+  it('sends mip_opt_out only when configured', async () => {
+    const urls: string[] = [];
+    const fetchImpl = async (url: string) => {
+      urls.push(url);
+      return jsonResponse({ results: { channels: [{ alternatives: [{ transcript: 'hi' }] }] } });
+    };
+
+    await new DeepgramPreRecordedBatchSTT({ apiKey: 'dg-key', fetchImpl }).transcribe(AUDIO);
+    await new DeepgramPreRecordedBatchSTT({ apiKey: 'dg-key', mipOptOut: true, fetchImpl }).transcribe(
+      AUDIO
+    );
+
+    expect(urls[0]).not.toContain('mip_opt_out');
+    expect(urls[1]).toContain('mip_opt_out=true');
+  });
 });

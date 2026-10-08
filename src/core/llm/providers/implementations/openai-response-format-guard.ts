@@ -62,3 +62,35 @@ export function toOpenAiResponseFormat(
   // text | json_object — bare type, stripping any non-OpenAI markers.
   return { type };
 }
+
+/**
+ * Return the `/v1/responses` form of a `responseFormat` (the value of
+ * `text.format`), or `undefined` when {@link toOpenAiResponseFormat} drops it.
+ *
+ * The same validation applies: the input must be OpenAI-shaped, foreign
+ * markers (`_gemini`) are stripped, and Anthropic tool-markers are dropped.
+ * The Responses API takes the json_schema fields flat on the format object
+ * rather than nested under `json_schema`:
+ *
+ * - `json_schema` → `{ type: 'json_schema', name, schema, strict?, description? }`.
+ * - `text` / `json_object` → the bare `{ type }`.
+ *
+ * @param responseFormat The caller's `responseFormat`, possibly built for
+ *   another provider on a fallback hop.
+ * @returns The `text.format` object, or `undefined` to omit it.
+ */
+export function toOpenAiResponsesTextFormat(
+  responseFormat: unknown,
+): Record<string, unknown> | undefined {
+  const chatFormat = toOpenAiResponseFormat(responseFormat);
+  if (!chatFormat) return undefined;
+  if (chatFormat.type !== 'json_schema') return { type: chatFormat.type };
+  const js = chatFormat.json_schema as Record<string, unknown>;
+  return {
+    type: 'json_schema',
+    name: js.name,
+    schema: js.schema,
+    ...(typeof js.strict === 'boolean' ? { strict: js.strict } : {}),
+    ...(typeof js.description === 'string' ? { description: js.description } : {}),
+  };
+}

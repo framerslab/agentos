@@ -53,6 +53,18 @@ describe('segment()', () => {
       .rejects.toBeInstanceOf(InvalidSegmentationPromptError);
   });
 
+  it('passes the decoded bytes of a raw base64 image that contains "/" to the provider', async () => {
+    const { provider, calls } = makeFake(['automatic']);
+    registerSegmentationProvider('fake', provider);
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01]);
+
+    // '/9j/4AAQSkZJRgAB': standard base64 starts a JPEG with '/'.
+    await segment({ image: jpeg.toString('base64'), provider: 'fake', automatic: true });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].image).toEqual(jpeg);
+  });
+
   it('returns the provider result (empty masks is not an error)', async () => {
     const { provider } = makeFake(['automatic']);
     registerSegmentationProvider('fake', provider);

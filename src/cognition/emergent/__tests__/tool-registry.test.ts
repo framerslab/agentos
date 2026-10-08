@@ -86,7 +86,7 @@ class MockStorageAdapter implements IStorageAdapter {
   >();
 
   async run(sql: string, params: unknown[] = []): Promise<unknown> {
-    if (sql.includes('INSERT OR REPLACE INTO agentos_emergent_tools')) {
+    if (sql.includes('INTO agentos_emergent_tools')) {
       const id = String(params[0]);
       this.rows.set(id, {
         promoted_at:
@@ -317,7 +317,7 @@ describe('EmergentToolRegistry', () => {
     expect(demoted.isActive).toBe(false);
   });
 
-  it('preserves promoted_at when a promoted tool is persisted again after usage', async () => {
+  it("preserves promoted_at when a promoted tool's row is rewritten", async () => {
     const adapter = new MockStorageAdapter();
     const registry = new EmergentToolRegistry(
       { ...DEFAULT_EMERGENT_CONFIG, enabled: true },
@@ -329,13 +329,18 @@ describe('EmergentToolRegistry', () => {
     registry.register(tool, 'session');
     await registry.promote(tool.id, 'agent', 'admin');
     const firstPromotedAt = adapter.rows.get(tool.id)?.promoted_at;
+    expect(firstPromotedAt).not.toBeNull();
+    // A stored stamp a fresh Date.now() cannot equal, so a writer that stamps
+    // again is caught even within the same millisecond.
+    adapter.rows.get(tool.id)!.promoted_at = 1_000;
 
-    registry.recordUse(tool.id, {}, {}, true, 10);
+    // A whole-row rewrite with no approver named: the stored promotion stays.
+    // (recordUse no longer rewrites the row, so it cannot drive this case.)
+    registry.upsert({ ...registry.get(tool.id)! });
     await new Promise((resolve) => setTimeout(resolve, 0));
     const secondPromotedAt = adapter.rows.get(tool.id)?.promoted_at;
 
-    expect(firstPromotedAt).not.toBeNull();
-    expect(secondPromotedAt).toBe(firstPromotedAt);
+    expect(secondPromotedAt).toBe(1_000);
   });
 
   it('redacts sandbox source at rest by default', async () => {
@@ -408,6 +413,18 @@ describe('EmergentToolRegistry', () => {
     await expect(registry.promote(tool.id, 'session')).rejects.toThrow(
       /target tier must be strictly higher/,
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Additional: the reserved instance-id prefix never reaches the agent tier
+  // -------------------------------------------------------------------------
+  it('promote() refuses the agent tier for an owner with the reserved instance-id prefix', async () => {
+    const registry = makeRegistry();
+    const tool = makeTool({ createdBy: 'gmi-instance-0b7e3c1a' });
+    registry.register(tool, 'session');
+
+    await expect(registry.promote(tool.id, 'agent')).rejects.toThrow(/reserved prefix "gmi-instance-"/);
+    expect(registry.get(tool.id)?.tier).toBe('session');
   });
 
   // -------------------------------------------------------------------------
@@ -492,5 +509,43 @@ describe('EmergentToolRegistry', () => {
     const filtered = registry.getByTier('agent', { agentId: 'agent-A' });
     expect(filtered).toHaveLength(1);
     expect(filtered[0].createdBy).toBe('agent-A');
+  });
+});
+
+describe('EmergentToolRegistry generations', () => {
+  const record = (toolId: string) => ({ toolId, state: 'active' as const, reason: null, setBy: 'library' as const, at: 1, request: null });
+
+  it('a removal moves the generation even without storage, so a stale adoption is refused', () => {
+    const registry = makeRegistry();
+    const tool = makeTool({ id: 'gen-1', tier: 'shared' });
+    const before = registry.generation('gen-1');
+    registry.register(tool, 'shared');
+    expect(registry.generation('gen-1')).not.toBe(before);
+    const read = registry.generation('gen-1');
+    registry.remove('gen-1');
+    expect(registry.generation('gen-1')).not.toBe(read);
+    expect(registry.adopt(tool, record('gen-1'), read)).toBe(false);
+    expect(registry.get('gen-1')).toBeUndefined();
+  });
+
+  it('a registration under a removed id leaves a stale adoption refused and the new tool in place', () => {
+    const registry = makeRegistry();
+    const first = makeTool({ id: 'gen-2', name: 'first_tool', tier: 'shared' });
+    registry.register(first, 'shared');
+    const read = registry.generation('gen-2');
+    registry.remove('gen-2');
+    registry.register(makeTool({ id: 'gen-2', name: 'second_tool', tier: 'shared' }), 'shared');
+    expect(registry.adopt(first, record('gen-2'), read)).toBe(false);
+    expect(registry.get('gen-2')?.name).toBe('second_tool');
+  });
+
+  it('an adoption at the current generation lands, and moves the generation on', () => {
+    const registry = makeRegistry();
+    const tool = makeTool({ id: 'gen-3', tier: 'shared' });
+    const read = registry.generation('gen-3');
+    expect(registry.adopt(tool, record('gen-3'), read)).toBe(true);
+    expect(registry.get('gen-3')).toBe(tool);
+    expect(registry.generation('gen-3')).not.toBe(read);
+    expect(registry.adopt(tool, record('gen-3'), read)).toBe(false);
   });
 });

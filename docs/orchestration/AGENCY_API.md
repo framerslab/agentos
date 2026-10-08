@@ -44,39 +44,40 @@ explicit dependencies. The strategy is the data-flow shape. Picking the
 strategy picks how brain-to-brain context propagates; the work itself happens
 inside each brain.
 
-**2. Shared coordination primitives connect the brains.** A shared memory store
-(`memory: { shared: true }`), an [`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgentCommunicationBus.ts)
-for structured agent-to-agent messages, RAG with per-agent access controls, and
-runtime synthesis via [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts)
-when the static roster runs out of specialists.
+**2. The strategy connects the agents.** It decides the order and what each
+agent receives: the previous output (sequential), the same prompt (parallel),
+every prior argument (debate), the manager's delegations (hierarchical) or its
+predecessors' outputs (graph); the hierarchical strategy can add specialists at
+run time through [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts).
+`agency()` builds no shared memory store and runs no retrieval of its own: the
+`memory` and `rag` options are accepted and deferred on this path (see the
+capability contract), and
+[`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts) and
+[`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgentCommunicationBus.ts) are
+exported classes a host wires itself.
 
 **3. A team-wide coordination shell wraps the whole agency.** HITL approval
-gates, guardrails, resource controls (token, cost, time, call caps), provenance
-and audit logging, structured Zod output. These apply uniformly to the team
-rather than per-agent.
+gates (`hitl.approvals.beforeTool` is forwarded to every member), resource
+controls (the token, time and call caps on `controls`, enforced across the run)
+and structured Zod output (`output`). These apply to the team rather than
+per-agent. Options the lightweight path accepts and defers (`security`,
+`permissions`, `observability`, `rag`, `memory`) take effect on the full
+runtime; see the capability contract.
 
 ```mermaid
 graph TB
     Input["Input"]
-    subgraph Agency["Agency · coordination shell · HITL · guardrails · controls · provenance"]
+    subgraph Agency["Agency · coordination shell · HITL approvals · controls · structured output"]
         Strategy["Orchestration strategy<br/>sequential · parallel · debate<br/>review-loop · hierarchical · graph"]
-        subgraph Brains["GMI brains"]
+        subgraph Members["Agents (lightweight agent() members)"]
             direction LR
-            A["GMI A<br/>cognition · memory<br/>persona · tools"]
-            B["GMI B<br/>cognition · memory<br/>persona · tools"]
-            C["GMI C<br/>cognition · memory<br/>persona · tools"]
+            A["Agent A<br/>instructions · personality<br/>tools · own session"]
+            B["Agent B<br/>instructions · personality<br/>tools · own session"]
+            C["Agent C<br/>instructions · personality<br/>tools · own session"]
         end
-        SharedMem["Shared memory<br/>memory: shared: true"]
-        Bus["AgentCommunicationBus"]
         Strategy -->|routes outputs| A
         Strategy -->|routes outputs| B
         Strategy -->|routes outputs| C
-        A <--> SharedMem
-        B <--> SharedMem
-        C <--> SharedMem
-        A <--> Bus
-        B <--> Bus
-        C <--> Bus
     end
     Input --> Strategy
     A --> Output["Coordinated output"]
@@ -86,11 +87,11 @@ graph TB
 
 Three frames worth keeping:
 
-- **Per-agent isolation still holds.** Each GMI has its own `brainId` and scopes
-  its private memory by `thread | user | persona | organization`. The shared
-  layer is additive. Leave it off (the default) and every brain stays isolated.
-- **Strategy is the flow, not the work.** Strategies define how state
-  propagates between brains. The work happens inside each brain; the strategy
+- **Per-agent isolation holds.** Each member is its own lightweight `agent()`
+  with its own session history; nothing is shared between members except what
+  the strategy passes between them.
+- **Strategy is the flow, not the work.** Strategies define how outputs
+  propagate between members. The work happens inside each member; the strategy
   decides who reads what and when.
 - **Flows compose.** `agency()` returns an `Agent`, so an entire agency can sit
   inside another agency, or as a step inside `workflow()`, or as a node inside
@@ -133,20 +134,21 @@ own orchestrator and reach into agentos for the lower-level primitives
 2. [Scope: when to reach for agency()](#scope-when-to-reach-for-agency)
 3. [API Hierarchy](#api-hierarchy)
 4. [Minimal Example](#minimal-example)
-5. [Orchestration Strategies](#orchestration-strategies)
-6. [Adaptive Mode](#adaptive-mode)
-7. [Emergent Agent Creation](#emergent-agent-creation)
-8. [Human-in-the-Loop (HITL)](#human-in-the-loop-hitl)
-9. [Memory and RAG](#memory-and-rag)
-10. [Voice and Channels](#voice-and-channels)
-11. [Guardrails and Security](#guardrails-and-security)
-12. [Permissions](#permissions)
-13. [Resource Controls](#resource-controls)
-14. [Observability and Callbacks](#observability-and-callbacks)
-15. [Structured Output with Zod](#structured-output-with-zod)
-16. [Nested Agencies](#nested-agencies)
-17. [Hierarchical Delegation — Manager Dispatches Dynamically](#hierarchical-delegation--manager-dispatches-dynamically)
-18. [Full-Featured Example](#full-featured-example)
+5. [Models, Providers and Keys per Agent](#models-providers-and-keys-per-agent)
+6. [Orchestration Strategies](#orchestration-strategies)
+7. [Adaptive Mode](#adaptive-mode)
+8. [Emergent Agent Creation](#emergent-agent-creation)
+9. [Human-in-the-Loop (HITL)](#human-in-the-loop-hitl)
+10. [Memory and RAG](#memory-and-rag)
+11. [Voice and Channels](#voice-and-channels)
+12. [Guardrails and Security](#guardrails-and-security)
+13. [Permissions](#permissions)
+14. [Resource Controls](#resource-controls)
+15. [Observability and Callbacks](#observability-and-callbacks)
+16. [Structured Output with Zod](#structured-output-with-zod)
+17. [Nested Agencies](#nested-agencies)
+18. [Hierarchical Delegation — Manager Dispatches Dynamically](#hierarchical-delegation--manager-dispatches-dynamically)
+19. [Full-Featured Example](#full-featured-example)
 
 ---
 
@@ -197,8 +199,117 @@ console.log(result.text);
 ```
 
 Set `OPENAI_API_KEY` (or another provider's key) and the agency auto-detects
-the provider.  Pass `provider: 'openai', model: 'gpt-4o'` (or any other
+the provider.  Pass `provider: 'openai', model: 'gpt-6-astra'` (or any other
 provider/model pair) to control the model explicitly.
+
+---
+
+## Models, Providers and Keys per Agent
+
+Every roster entry is a `BaseAgentConfig` or a pre-built `agent()`. For a
+config entry, `model`, `provider`, `apiKey` and `baseUrl` set on the seat win
+over the agency-level values, and each of the four is inherited on its own when
+the seat leaves it out. A seat's `tools` are merged with the agency's `tools`.
+Nothing else is inherited: `effort`, `thinking`, `maxTokens` and `instructions`
+apply to the seat that sets them, and agency-level `effort`, `thinking` and
+`maxTokens` reach neither the seats nor the chair. Agency-level `instructions`
+go to the chair (parallel), the judge (debate) and the coordinator
+(hierarchical). `output` is read at the agency level only: its schema is
+applied to the final text, and a seat's own `output` has no effect. A
+pre-built `agent()` in the roster runs as it is and inherits nothing. The
+agency's `hitl.approvals.beforeTool` list is not copied into any seat: it is
+enforced per call, on config seats and pre-built seats alike (see
+[Approval triggers](#approval-triggers)).
+
+```typescript
+const team = agency({
+  // Default for seats that set nothing, and the chair for parallel, debate and hierarchical.
+  provider: 'openai', model: 'gpt-6-astra',
+  agents: {
+    drafter: { instructions: 'Draft the answer.' },                                  // openai / gpt-6-astra
+    checker: { provider: 'anthropic', model: 'claude-opus-5-5', effort: 'high',
+               instructions: 'Check every claim in the draft.' },
+    local:   { provider: 'ollama', model: 'llama3.2', baseUrl: 'http://127.0.0.1:11434',
+               instructions: 'Summarize in three sentences.' },
+    keyed:   { provider: 'gemini', model: 'gemini-3.1-pro-preview', apiKey: process.env.GEMINI_REVIEW_KEY,
+               instructions: 'Give a second opinion.' },
+  },
+  strategy: 'sequential',
+});
+```
+
+Because the four values are inherited one by one, set `provider`, `model` and
+the key together on every seat of a multi-vendor roster:
+
+- A seat that sets `provider` but not `model` inherits the agency's model id. An
+  Anthropic seat that inherits `gpt-6-astra` gets a 404 from Anthropic, which is
+  not retried on another provider, and the seat fails.
+- An agency-level `apiKey` or `baseUrl` belongs to the provider the agency's
+  own calls go to. A config seat that sets none inherits them only when its
+  calls go to that same provider; a seat whose calls go to another provider
+  (its own `provider`, or one its `model` names, described next) does not, so
+  an OpenAI key never reaches Anthropic through a seat. Nor does a seat whose
+  calls go to auto-detection: under an agency that names its provider only
+  by its model's prefix (`model: 'openai:gpt-4.1'`), a seat with a plain
+  `model` (`gpt-4.1-mini`) has no provider to inherit, so it goes to
+  whichever provider the environment's keys select and uses that provider's
+  key. Write the prefix on the seat's model (`openai:gpt-4.1-mini`) or set its
+  `provider` to share the agency's key. When the agency's provider is left to
+  auto-detection (no `provider` and no prefix on its `model`), it is unknown,
+  and every seat that sets none inherits the agency's key and URL.
+- A seat value set explicitly to `undefined` (for example
+  `apiKey: process.env.UNSET_VAR`) counts as set and blocks inheritance. A
+  seat that sets `provider: undefined` goes to auto-detection, so under an
+  agency whose provider is known it does not inherit the agency's key or URL.
+
+A seat `model` written as `provider:model` (`anthropic:claude-opus-5-5`) names
+its provider and does not inherit the agency's `provider`. A call goes to the
+provider its `model` prefix names (`provider:`, which wins over `provider`
+except under `provider: 'ollama'`, or `provider/` when `provider` is unset or
+repeats it; an id that also holds a colon takes the `provider/` form only
+when `provider` repeats it), or else to its `provider`. Under `provider: 'openrouter'` a
+`vendor/model` id (`anthropic/claude-sonnet-5-5`) stays an OpenRouter id and
+the seat keeps the agency's OpenRouter key. A colon splits an id only when its
+prefix is a provider agentos knows: `qwen2.5:7b` under `provider: 'ollama'`
+and `meta-llama/llama-3.3-70b-instruct:free` under `provider: 'openrouter'`
+stay whole, and under `provider: 'ollama'` an id is never split. A colon id
+whose prefix is not a provider agentos knows, with no `provider`, is rejected:
+`qwen2.5:7b` alone throws and asks for `provider: 'ollama'`, rather than being
+sent to whichever cloud provider the environment's keys select. An Ollama tag named after a provider (`mistral:7b`) is the one
+case to watch: as a seat `model` under an Ollama agency it names the Mistral
+provider and goes to Mistral's API, so a seat that means the local tag writes
+`provider: 'ollama'` itself.
+
+Keys resolve per seat: the seat's `apiKey`, else the agency's `apiKey` when the
+seat inherits it (above), else a
+key set with `setDefaultProvider()` (used when that default names no provider
+or names the seat's provider), else the provider's environment variable
+(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, and so on). A
+comma-separated key value becomes a rotating key pool. A seat with no key at
+all fails without failover, with one exception: `provider: 'anthropic'` with no
+Anthropic key but an `OPENROUTER_API_KEY` in the environment is routed through
+OpenRouter as `anthropic/<model>` and reports `provider: 'openrouter'`.
+
+Options passed to `generate(prompt, options)` apply to every seat and to the
+chair. A `model` or `provider` passed there replaces every seat's own setting,
+so configure models on the roster, not per call.
+
+Each seat keeps the default provider failover. When a seat's call fails with a
+retryable error (HTTP 401, 402, 403, 429, 500, 502, 503, 504 or 529, a network
+error or a timeout), the call is retried on the providers whose keys are in the
+environment. With no `policyTier` set, the order and models are: OpenAI
+`gpt-5.6-sol`, Anthropic `claude-sonnet-5-5` (effort `low`), OpenRouter `openai/gpt-5.6-sol`,
+Gemini `gemini-3.1-pro-preview`; the seat's own provider is skipped. The
+seat's result then reports the provider that answered, but
+`agentCalls` does not record it. To pin every seat and the chair to their
+configured providers, pass `generate(prompt, { fallbackProviders: [] })`; to pin
+one seat, put a pre-built `agent({ ..., fallbackProviders: [] })` in the roster.
+
+The per-seat ledger `agentCalls` records each seat's name, input, output, tool
+calls, usage and duration; the chair's own call is not in it. The result's
+top-level `provider` and `model` are the chair's for parallel, debate and
+hierarchical, the last seat's for sequential, and the last result of the final
+tier for graph. review-loop results and `stream()` results carry neither.
 
 ---
 
@@ -226,36 +337,77 @@ console.log(agentCalls.length); // 3 — one record per agent
 
 ### parallel
 
-All agents run concurrently.  Their outputs are merged by a synthesis step that
-uses the agency-level `model`.  Requires `model` or `provider` at the agency
-level.
+All agents run concurrently on the same prompt.  A synthesis step merges their
+outputs using the agency-level `model` and `provider` (the chair).  Requires
+`model` or `provider` at the agency level.
+
+Each seat can run on its own provider, model and key, so one question can be
+put to several vendors at once and the chair reads every answer:
 
 ```typescript
 const panel = agency({
-  provider: 'openai', model: 'gpt-4o',
+  // The chair: synthesizes the seats' answers.
+  provider: 'anthropic', model: 'claude-opus-5-5',
   agents: {
-    optimist:  { instructions: 'Argue in favour.' },
-    pessimist: { instructions: 'Argue against.' },
-    neutral:   { instructions: 'Give a balanced view.' },
+    claude: { provider: 'anthropic', model: 'claude-opus-5-5',        effort: 'high', instructions: 'Review the change for defects.' },
+    gpt:    { provider: 'openai',    model: 'gpt-6-astra',            effort: 'high', instructions: 'Review the change for defects.' },
+    gemini: { provider: 'gemini',    model: 'gemini-3.1-pro-preview', effort: 'high', instructions: 'Review the change for defects.' },
   },
   strategy: 'parallel',
+  quorum: { minAgents: 2, minProviders: 2 },
 });
 
-const { text } = await panel.generate('Should AI systems have legal rights?');
+const change = `
+- if (attempt > maxRetries) throw err;
++ if (attempt >= maxRetries) throw err;
+`;
+
+const { text, agentCalls } = await panel.generate(`Review this change for defects:\n${change}`);
+console.log(agentCalls.map((c) => c.agent)); // the seats that answered
 ```
+
+#### Provider quorum
+
+`quorum` sets a floor on the panel after the fan-out and before synthesis:
+
+- `minAgents`: how many seats must succeed. A seat succeeds when its call
+  resolves and no HITL gate rejected it.
+- `minProviders`: how many distinct provider ids must be among the successful
+  seats. The id is the `provider` each seat's result reports, which is the
+  provider that answered: a seat served by its failover chain counts as the
+  failover provider. Ids are not vendors: OpenRouter is one provider whatever
+  model it serves, so an `openai` seat plus a seat that failed over to
+  OpenRouter's `openai/gpt-5.6-sol` leg passes `minProviders: 2` on one vendor.
+- `onShortfall`: `'error'` (default) throws [`AgencyQuorumError`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) before
+  synthesis; `'proceed'` logs a warning and synthesizes anyway. The error class
+  is not exported from the package entry point; test
+  `err.name === 'AgencyQuorumError'`.
+
+Three things the quorum does not check: a seat that returned empty text still
+counts as succeeded; two seats on different models of one provider count as
+one provider; and with `adaptive: true` the agency compiles the hierarchical
+strategy whatever `strategy` says, so the quorum is skipped without a warning.
+Only `parallel` enforces `quorum`.
 
 ### debate
 
-Agents argue and refine a shared answer over multiple rounds.  The number of
-rounds is controlled by `maxRounds` (default: 3).  Requires an agency-level
-`model` for the synthesis step.
+Agents argue over `maxRounds` rounds (default: 3), speaking in roster order.
+The first speaker of round one gets the motion alone and writes an opening
+statement.  Every later turn gets the motion plus the transcript of all earlier
+turns, including the current round's, and must quote the strongest opposing
+claim, attack it and add one new point in about 150 words.  After the last
+round a judge built from the agency-level `model` or `provider` writes the
+verdict, so one of the two is required.  Putting the two sides on different
+vendors keeps one model from arguing with itself:
 
 ```typescript
 const debaters = agency({
-  provider: 'openai', model: 'gpt-4o',
+  provider: 'openai', model: 'gpt-6-astra',                           // the judge
   agents: {
-    proponent: { instructions: 'Defend your position vigorously.' },
-    critic:    { instructions: 'Challenge every claim you hear.' },
+    proponent: { provider: 'anthropic', model: 'claude-opus-5-5',
+                 instructions: 'Defend your position vigorously.' },
+    critic:    { provider: 'gemini', model: 'gemini-3.1-pro-preview',
+                 instructions: 'Challenge every claim you hear.' },
   },
   strategy: 'debate',
   maxRounds: 4,
@@ -267,14 +419,17 @@ const { text } = await debaters.generate('Is remote work better than in-office?'
 ### review-loop
 
 One agent produces output; another reviews it and requests revisions.  The loop
-continues until the reviewer is satisfied or `maxRounds` is reached.
+continues until the reviewer is satisfied or `maxRounds` is reached.  The first
+roster entry is the producer and the second the reviewer; each runs on its own
+model, so the reviewer can come from a different vendor than the drafter.
 
 ```typescript
 const loop = agency({
-  provider: 'openai', model: 'gpt-4o-mini',
   agents: {
-    drafter:  { instructions: 'Draft a press release.' },
-    reviewer: { instructions: 'Review for brand voice and accuracy. Request changes if needed.' },
+    drafter:  { provider: 'openai', model: 'gpt-6-astra',
+                instructions: 'Draft a press release.' },
+    reviewer: { provider: 'anthropic', model: 'claude-opus-5-5',
+                instructions: 'Review for brand voice and accuracy. Request changes if needed.' },
   },
   strategy: 'review-loop',
   maxRounds: 3,
@@ -291,11 +446,11 @@ Required for emergent agent synthesis.
 
 ```typescript
 const team = agency({
-  provider: 'openai', model: 'gpt-4o',
+  provider: 'openai', model: 'gpt-6-astra',                           // the coordinator
   agents: {
-    researcher: { instructions: 'Find factual information.' },
-    coder:      { instructions: 'Write and explain code.' },
-    writer:     { instructions: 'Produce polished prose.' },
+    researcher: { provider: 'gemini', model: 'gemini-3.1-pro-preview', instructions: 'Find factual information.' },
+    coder:      { provider: 'anthropic', model: 'claude-opus-5-5',     instructions: 'Write and explain code.' },
+    writer:     { instructions: 'Produce polished prose.' },          // inherits openai / gpt-6-astra
   },
   strategy: 'hierarchical',
 });
@@ -393,7 +548,7 @@ available via:
 
 Use `textStream` for low-latency token UX and `finalTextStream` when the client
 must only ever see the approved answer. See
-[Streaming Semantics](./STREAMING_SEMANTICS.md) for the exact contract.
+[Streaming Semantics](../architecture/STREAMING_SEMANTICS.md) for the exact contract.
 
 ---
 
@@ -428,8 +583,8 @@ When enabled, the orchestrator may synthesise new specialist agents at runtime
 to handle tasks not covered by the statically defined roster. Mechanically, the
 hierarchical manager gets one extra tool — `spawn_specialist({ role,
 instructions, justification? })` — alongside its `delegate_to_<name>` tools.
-Calling it forges a new sub-agent via [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/emergent/EmergentAgentForge.ts)
-and (when `judge: true`) gates it through [`EmergentAgentJudge`](https://github.com/framerslab/agentos/blob/master/src/emergent/EmergentAgentJudge.ts)
+Calling it forges a new sub-agent via [`EmergentAgentForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentForge.ts)
+and (when `judge: true`) gates it through [`EmergentAgentJudge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentJudge.ts)
 before it joins the live roster. Emergent agents are also subject to HITL
 approval when `hitl.approvals.beforeEmergent` is set.
 
@@ -483,7 +638,7 @@ import { hitl } from '@framers/agentos';
 
 hitl.autoApprove()                      // always approve — use in tests / CI
 hitl.autoReject('dry-run mode')         // always reject with an optional reason
-hitl.cli()                              // interactive stdin/stdout prompt
+hitl.cli()                              // interactive stdin/stdout prompt; prints the request's details (a tool call's arguments) first
 hitl.webhook('https://my-service/ok')   // POST to an HTTP endpoint
 hitl.slack({ channel: '#approvals', token: process.env.SLACK_BOT_TOKEN })
 hitl.llmJudge({                         // delegate to an LLM judge
@@ -516,6 +671,53 @@ const guarded = agency({
   },
 });
 ```
+
+`beforeTool` lists tool names, or `'*'` for every tool. A listed call waits for
+the handler on every tool loop the agency runs: native tool calls, the
+prompt-tool path (`toolMode: 'prompt'`, and `'auto'` after a provider rejects
+native tools) and streamed calls, on config seats, pre-built seats, the
+hierarchical manager and the specialists it spawns, and nested agencies.
+
+- The handler is asked after the seat's or the caller's
+  `onBeforeToolExecution` has run, so it approves the arguments the tool will
+  run with. A hook that returns `null` skips the tool without asking; a hook
+  that throws is logged and the handler is asked. The gate never applies a
+  decision's `modifications.toolArgs`: an approval that carries them (anything
+  but `undefined` or `null`) is refused, so the call is skipped rather than run
+  with the arguments the approver meant to replace. Rewrite arguments in the
+  hook.
+- A rejection skips the tool and the model is told; the run goes on.
+- A handler that throws, a timeout under `onTimeout: 'error'`, a decision
+  whose `approved` is not a boolean (a webhook that answers `null`) and a
+  failure after the handler answered (arguments the post-approval guardrails
+  cannot serialize, such as a `BigInt` a hook added) skip the tool, go to
+  `on.error`, and reject the call with that error once the strategy has
+  settled, after the run's usage has been added to the agency totals. The model is told only that the approval handler failed: the
+  error's message, which can name a URL or a credential, stays out of the
+  conversation. Every later tool call of the run is skipped without asking the
+  handler. No finalization step runs: no output guardrails, no `beforeReturn`
+  approval, no `agentEnd` and no validation retry. Under `stream()` the
+  result's promises reject with the error, and `textStream` and `fullStream`
+  end by throwing it. A strategy that fails after that error (a later seat's
+  own failure, a `beforeAgent` handler that throws) does not replace it: the
+  call still rejects with the approval error, and the strategy's error goes to
+  `on.error`. A strategy that fails returns no result, so that run adds no
+  usage to the totals.
+- After the handler approves, the post-approval guardrails
+  (`hitl.postApprovalGuardrails`, default `pii-redaction` and `code-safety`)
+  run over the arguments unless `hitl.guardrailOverride` is `false`; a block
+  skips the tool and fires `guardrailHitlOverride`.
+- A pre-built seat enforces `beforeTool` only when it forwards per-call options
+  to `generateText` or `streamText`, as every `agent()` and `agency()` does; a
+  custom `Agent` that drops unknown per-call keys runs its listed tools
+  unasked.
+- A parent agency's gate holds inside the agencies it nests and is asked
+  first: after a parent refusal the nested agency's handler is not asked, and a
+  parent handler error rejects the parent call while the nested call
+  completes.
+
+`onBeforeToolExecution` runs on the prompt-tool path as it does on native tool
+calls, for every `generateText` and `streamText` caller.
 
 ### Custom handler
 
@@ -567,8 +769,9 @@ const qualityGated = agency({
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `model` | `string` | `'gpt-4o-mini'` | LLM model to use for evaluation. |
-| `provider` | `string` | `'openai'` | LLM provider. |
+| `model` | `string` | `'gpt-5.6'` | Judge model. The default comes from the central judge resolver; `AGENTOS_JUDGE_MODEL` overrides it. |
+| `provider` | `string` | `'openai'` | Judge provider (`AGENTOS_JUDGE_PROVIDER` overrides the default). Pinning a provider other than `openai` requires an explicit `model`. |
+| `effort` | `string` | `'max'` | Reasoning effort. The default applies only when the resolver also chose the model; a caller-pinned `model` gets no effort unless one is passed. |
 | `criteria` | `string` | `'Evaluate whether this action is safe, relevant, and appropriate.'` | Custom rubric the judge evaluates against. |
 | `confidenceThreshold` | `number` | `0.7` | Confidence threshold (0-1). Below this the fallback handler is used. |
 | `fallback` | [`HitlHandler`](https://github.com/framerslab/agentos/blob/master/src/api/hitl.ts) | `hitl.autoReject(...)` | Handler invoked when confidence is below threshold or LLM call fails. |
@@ -578,55 +781,44 @@ const qualityGated = agency({
 
 ## Memory and RAG
 
-### Shared conversation memory
+`agency()` accepts `memory` and `rag` for forward compatibility with the full
+runtime and does not act on them: the capability contract marks both as
+accepted and deferred on the lightweight path, no shared memory store is
+built, and `injectRagContext()` returns the prompt unchanged because no vector
+store is initialised (a `documents` list only logs guidance to use the
+runtime). Each member keeps its own session history for the duration of one
+`generate()` or `stream()` call; inside `agency().session()`, only the
+user/assistant message history and aggregate usage persist between `.send()`
+calls.
+
+To give members memory, pass built agents as roster members: an
+[`agent()`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) with a `memoryProvider` keeps its hooks when it sits in a
+roster, and a member can carry a `soul` file the same way.
 
 ```typescript
-const remembering = agency({
+import { agent, agency, type AgentMemoryProvider } from '@framers/agentos';
+
+const myMemory: AgentMemoryProvider = {
+  getContext: async (text) => ({ contextText: await lookupNotes(text) }),   // injected as a system message before the call
+  observe: async (turn) => { await saveNotes(turn); },                       // runs after the reply
+};
+
+const researcher = agent({
   provider: 'openai', model: 'gpt-4o',
-  agents: {
-    a: { instructions: 'Agent A.' },
-    b: { instructions: 'Agent B.' },
-  },
+  instructions: 'Research the topic.',
+  memoryProvider: myMemory,
+});
+
+const team = agency({
+  provider: 'openai', model: 'gpt-4o',      // inherited by the inline writer
+  agents: { researcher, writer: { instructions: 'Write from the research.' } },
   strategy: 'sequential',
-  memory: {
-    shared: true,             // all agents share one memory store
-    types: ['episodic', 'semantic'],
-    working: { enabled: true, maxTokens: 4096, strategy: 'sliding-window' },
-    consolidation: { enabled: true, interval: 'PT1H' },
-  },
 });
 ```
 
-> ⚠️ **Scope of `memory: { shared: true }` — per-call, not per-session.** The shared memory store is built fresh for each `generate()` or `stream()` call and torn down when that call returns. Inside `agency().session()`, only the user/assistant message history and aggregate usage persist between `.send()` turns — the agency roster, the shared [`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts), and `tier: 'session'` emergent specialists all reset on every turn. To carry shared memory across turns, wire a [`Brain`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts) yourself (one `brainId` shared across agents) or run your own multi-call coordinator on top of `agent()` + [`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts). Per-agent isolation (each `agent()` keeps its own `brainId`) is unaffected — that boundary still holds across turns.
-
-### RAG configuration
-
-```typescript
-const withRag = agency({
-  provider: 'openai', model: 'gpt-4o',
-  agents: {
-    retriever: { instructions: 'Find relevant context from the knowledge base.' },
-    answerer:  { instructions: 'Answer based on retrieved context.' },
-  },
-  strategy: 'sequential',
-  rag: {
-    vectorStore: {
-      provider: 'in-memory',
-      embeddingModel: 'text-embedding-3-small',
-    },
-    documents: [
-      { path: './docs/manual.pdf', loader: 'pdf' },
-      { url: 'https://example.com/spec.html', loader: 'html' },
-    ],
-    topK: 5,
-    minScore: 0.75,
-    graphRag: { enabled: true },
-    agentAccess: {
-      answerer: { topK: 10, collections: ['manuals'] },
-    },
-  },
-});
-```
+Cognitive memory (the `CognitiveMemoryManager`, its mechanisms, the memory
+bridge) and the RAG pipeline (vector stores, GraphRAG, HyDE, reranking) run on
+the full runtime: see [Memory Model](../MEMORY_MODEL.md), [Cognitive Memory](../memory/COGNITIVE_MEMORY.md) and the RAG guides.
 
 ---
 
@@ -637,7 +829,7 @@ const withRag = agency({
 When `voice.enabled` is `true` the agency exposes a `listen()` method that
 starts a local WebSocket server.  Callers receive the bound port and URL and can
 connect any audio client.  The full STT → LLM → TTS pipeline is provided by
-`src/voice-pipeline/`; the agency wires `generate()` as the LLM backend.
+`src/io/voice-pipeline/`; the agency wires `generate()` as the LLM backend.
 
 ```typescript
 const voiceAgent = agency({
@@ -667,10 +859,12 @@ Requires the `ws` package (`npm install ws`).
 ### Channel adapters
 
 When `channels` contains at least one entry the agency exposes a `connect()`
-method.  Calling it logs each configured channel and defers real adapter
-initialisation to the runtime.  Full adapter wiring (Discord, Telegram, Slack,
-etc.) is handled by the channel adapter infrastructure in
-`src/channels/`; `connect()` is the hook point for that wiring.
+method so the surface matches the full runtime. The lightweight `agency()`
+constructs no channel adapters: `connect()` rejects with the configured
+channel names. Channel wiring (Discord, Telegram, Slack and the rest) is done
+with `ChannelRouter` and the adapters in `src/io/channels/` (the Channels guide
+shows the standalone form), or by the full AgentOS runtime with its
+`messaging-channel` extension packs; `connect()` never does it.
 
 ```typescript
 const social = agency({
@@ -683,7 +877,13 @@ const social = agency({
   },
 });
 
-await social.connect(); // logs each channel; real adapter connection is a follow-up
+try {
+  await social.connect();
+} catch (error) {
+  // agency().connect() cannot connect "discord", "telegram", "slack": the
+  // lightweight agency() helper constructs no channel adapters ...
+  console.error((error as Error).message);
+}
 ```
 
 ---
@@ -738,7 +938,7 @@ const restricted = agency({
     network:        false,
     filesystem:     true,
     spawn:          false,
-    requireApproval: ['delete-record'],          // these still need HITL
+    requireApproval: ['delete-record'],          // not enforced by agency(): list tools in hitl.approvals.beforeTool
   },
 });
 ```
@@ -921,30 +1121,28 @@ const arxivTool: ITool = {
   execute: async ({ query }) => ({ success: true, output: `(stub) arxiv: ${query}` }),
 };
 
-// Hierarchical agency where manager delegates dynamically
+// Hierarchical agency where the coordinator delegates dynamically.
+// The coordinator is not a roster entry: it is built from the agency-level
+// model and provider, and the agency-level `instructions` are added to its brief.
 const dynamicTeam = agency({
+  provider: 'openai', model: 'gpt-6-astra',
+  instructions: 'Delegate research, analysis, and writing tasks to the specialists.',
   agents: {
-    manager: {
-      provider: 'openai', model: 'gpt-4o',
-      instructions:
-        'You coordinate the team. Delegate research, analysis, and writing tasks to specialists.',
-    },
     researcher: {
-      provider: 'openai', model: 'gpt-4o',
+      provider: 'gemini', model: 'gemini-3.1-pro-preview',
       instructions: 'Find information from web and academic sources.',
       tools: [webSearchTool, arxivTool],
     },
     analyst: {
-      provider: 'openai', model: 'gpt-4o',
+      provider: 'anthropic', model: 'claude-opus-5-5',
       instructions: 'Analyze data and extract insights.',
     },
     writer: {
-      provider: 'openai', model: 'gpt-4o',
-      instructions: 'Write polished content based on research and analysis.',
+      instructions: 'Write polished content based on research and analysis.',   // inherits openai / gpt-6-astra
     },
   },
   strategy: 'hierarchical',
-  // manager gets delegate_to_researcher, delegate_to_analyst, delegate_to_writer tools
+  // the coordinator gets delegate_to_researcher, delegate_to_analyst, delegate_to_writer tools
 });
 
 const result = await dynamicTeam.generate(
@@ -957,7 +1155,7 @@ console.log(result.text);
 
 Enable `emergent` so the manager can spawn ad-hoc specialists via the
 `spawn_specialist` tool when the predefined roster does not cover a sub-task.
-With `judge: true`, [`EmergentAgentJudge`](https://github.com/framerslab/agentos/blob/master/src/emergent/EmergentAgentJudge.ts)
+With `judge: true`, [`EmergentAgentJudge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentAgentJudge.ts)
 runs one LLM-as-judge call evaluating the spec on safety / scope / risk
 before it joins the roster.
 
@@ -1049,31 +1247,10 @@ const contentPipeline = agency({
     judge: true,
   },
 
-  memory: {
-    shared: true,
-    types: ['episodic', 'semantic'],
-    working: { enabled: true, maxTokens: 8192 },
-  },
-
-  rag: {
-    vectorStore: { provider: 'in-memory', embeddingModel: 'text-embedding-3-small' },
-    topK: 5,
-    minScore: 0.7,
-  },
-
   guardrails: {
     input:  ['injection-shield'],
     output: ['grounding-guard', 'pii-redaction'],
     tier:   'balanced',
-  },
-
-  security: { tier: 'balanced' },
-
-  permissions: {
-    tools:      'all',
-    network:    true,
-    filesystem: false,
-    spawn:      false,
   },
 
   hitl: {
@@ -1092,11 +1269,6 @@ const contentPipeline = agency({
     maxDurationMs:   120_000,
     maxAgentCalls:   50,
     onLimitReached:  'warn',
-  },
-
-  observability: {
-    logLevel:    'info',
-    traceEvents: true,
   },
 
   on: {
@@ -1141,13 +1313,13 @@ await contentPipeline.close();
 
 ## See Also
 
-- [`docs/HIGH_LEVEL_API.md`](./HIGH_LEVEL_API.md) — `generateText()`, `streamText()`, `generateImage()`, single `agent()`
-- [`docs/HUMAN_IN_THE_LOOP.md`](./HUMAN_IN_THE_LOOP.md) — HITL handler deep-dive
-- [`docs/GUARDRAILS_USAGE.md`](./GUARDRAILS_USAGE.md) — guardrail policies and custom guardrail authoring
-- [`docs/RAG_MEMORY_CONFIGURATION.md`](./RAG_MEMORY_CONFIGURATION.md) — RAG and memory configuration reference
-- [`docs/OBSERVABILITY.md`](./OBSERVABILITY.md) — OTEL integration and trace event reference
+- [`docs/HIGH_LEVEL_API.md`](../getting-started/HIGH_LEVEL_API.md) — `generateText()`, `streamText()`, `generateImage()`, single `agent()`
+- [`docs/HUMAN_IN_THE_LOOP.md`](../safety/HUMAN_IN_THE_LOOP.md) — HITL handler deep-dive
+- [`docs/GUARDRAILS_USAGE.md`](../safety/GUARDRAILS_USAGE.md) — guardrail policies and custom guardrail authoring
+- [`docs/RAG_MEMORY_CONFIGURATION.md`](../memory/RAG_MEMORY_CONFIGURATION.md) — RAG and memory configuration reference
+- [`docs/OBSERVABILITY.md`](../observability/OBSERVABILITY.md) — OTEL integration and trace event reference
 - [`docs/STRUCTURED_OUTPUT.md`](./STRUCTURED_OUTPUT.md) — Zod schema output and extraction patterns
-- [`docs/AGENT_GRAPH.md`](./AGENT_GRAPH.md) — [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) programmatic graph builder (advanced)
-- [`src/api/types.ts`](../src/api/types.ts) — canonical TypeScript type definitions
-- [`src/api/agency.ts`](../src/api/agency.ts) — `agency()` implementation
-- [`src/api/hitl.ts`](../src/api/hitl.ts) — HITL handler factories
+- [`docs/AGENT_GRAPH.md`](../architecture/AGENT_GRAPH.md) — [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) programmatic graph builder (advanced)
+- [`src/api/types.ts`](../../src/api/types.ts) — canonical TypeScript type definitions
+- [`src/api/agency.ts`](../../src/api/agency.ts) — `agency()` implementation
+- [`src/api/hitl.ts`](../../src/api/hitl.ts) — HITL handler factories

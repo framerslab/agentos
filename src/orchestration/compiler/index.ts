@@ -8,6 +8,7 @@
  */
 
 export { lowerZodToJsonSchema } from './SchemaLowering.js';
+export type { LowerZodOptions } from './SchemaLowering.js';
 export { GraphValidator } from './Validator.js';
 export type { ValidationResult } from './Validator.js';
 export { GraphCompiler } from './GraphCompiler.js';

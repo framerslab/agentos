@@ -60,7 +60,11 @@ export interface ForgeToolInput extends Record<string, any> {
    * One or more test cases for the judge to evaluate.
    * Each has an `input` object and optional `expectedOutput`.
    */
-  testCases: Array<{ input: Record<string, unknown>; expectedOutput?: unknown }>;
+  testCases: Array<{
+    input: Record<string, unknown>;
+    expectedOutput?: unknown;
+    stepOutputs?: Record<string, unknown>;
+  }>;
 }
 
 // ============================================================================
@@ -181,7 +185,11 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
               },
               allowlist: {
                 type: 'array',
-                items: { type: 'string', enum: ['fetch', 'fs.readFile', 'crypto'] },
+                description:
+                  'The capabilities the code uses: fetch, fs.read (in code, the function fs.readFile; ' +
+                  'the name fs.readFile is accepted too) and crypto. The host decides what it grants: ' +
+                  'a name it does not grant refuses the forge, and the refusal names what it grants.',
+                items: { type: 'string', enum: ['fetch', 'fs.read', 'fs.readFile', 'crypto'] },
               },
             },
             required: ['mode', 'code', 'allowlist'],
@@ -196,6 +204,12 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
           properties: {
             input: { type: 'object' },
             expectedOutput: {},
+            stepOutputs: {
+              type: 'object',
+              description:
+                'For a composition: the output of each step whose tool has side effects, keyed by step name. ' +
+                'Those steps are not executed while the tool is forged.',
+            },
           },
           required: ['input'],
         },
@@ -248,12 +262,14 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
     }
 
     const result = await this.engine.forge(args as unknown as ForgeToolRequest, {
-      // Use nullish coalescing (??), not logical OR (||), so that an empty
-      // string '' correctly falls through to 'unknown'. The old || operator
-      // treated any falsy value the same, which is correct for empty strings
-      // but ?? is more intentional about the distinction.
-      agentId: context.gmiId ?? 'unknown',
+      // The agent identity of a forged tool is the persona that forged it: a
+      // GMI instance id is minted per session, so a tool owned by one would
+      // be callable in no later session. Nullish coalescing (??), not ||, so
+      // an empty string is kept as given.
+      agentId: context.personaId ?? 'unknown',
       sessionId: context.correlationId ?? 'unknown',
+      // A composition's test steps run as this caller.
+      caller: context,
     });
 
     return {

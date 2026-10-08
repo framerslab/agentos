@@ -1,4 +1,9 @@
-export type CapabilitySurface = 'agent' | 'generation' | 'runtime';
+/**
+ * Where a config field is read: `agent` (the lightweight `agent()` helper on its
+ * legacy runtime), `generation` (generateText and streamText), `runtime` (the full
+ * AgentOS runtime) and `gmi` (`agent({ runtime: 'gmi' })` and `gmi()`).
+ */
+export type CapabilitySurface = 'agent' | 'generation' | 'runtime' | 'gmi';
 
 export type CapabilitySupport =
   | 'enforced'
@@ -27,21 +32,21 @@ export const CAPABILITY_KEYS = [
 export type CapabilityKey = (typeof CAPABILITY_KEYS)[number];
 
 export const BASE_AGENT_CONFIG_CAPABILITY_CONTRACT = {
-  tools: { agent: 'enforced', generation: 'enforced', runtime: 'enforced' },
-  memory: { agent: 'partially_enforced', generation: 'runtime_only', runtime: 'enforced' },
-  rag: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced' },
-  discovery: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced' },
-  guardrails: { agent: 'accepted_but_deferred', generation: 'partially_enforced', runtime: 'enforced' },
-  security: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced' },
-  permissions: { agent: 'accepted_but_deferred', generation: 'partially_enforced', runtime: 'enforced' },
-  hitl: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced' },
-  emergent: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced' },
-  voice: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced' },
-  channels: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced' },
-  output: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced' },
-  provenance: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced' },
-  observability: { agent: 'partially_enforced', generation: 'partially_enforced', runtime: 'enforced' },
-  controls: { agent: 'partially_enforced', generation: 'runtime_only', runtime: 'enforced' },
+  tools: { agent: 'enforced', generation: 'enforced', runtime: 'enforced', gmi: 'enforced' },
+  memory: { agent: 'partially_enforced', generation: 'runtime_only', runtime: 'enforced', gmi: 'enforced' },
+  rag: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
+  discovery: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
+  guardrails: { agent: 'accepted_but_deferred', generation: 'partially_enforced', runtime: 'enforced', gmi: 'accepted_but_deferred' },
+  security: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
+  permissions: { agent: 'accepted_but_deferred', generation: 'partially_enforced', runtime: 'enforced', gmi: 'accepted_but_deferred' },
+  hitl: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
+  emergent: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
+  voice: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'runtime_only' },
+  channels: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'runtime_only' },
+  output: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
+  provenance: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
+  observability: { agent: 'partially_enforced', generation: 'partially_enforced', runtime: 'enforced', gmi: 'partially_enforced' },
+  controls: { agent: 'partially_enforced', generation: 'runtime_only', runtime: 'enforced', gmi: 'partially_enforced' },
 } as const satisfies Record<CapabilityKey, Record<CapabilitySurface, CapabilitySupport>>;
 
 export function getCapabilitySupport(

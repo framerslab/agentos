@@ -1627,13 +1627,29 @@ Provide a comprehensive answer based on the information above.`,
         ON ${this.tablePrefix}communities(level);
     `);
 
-    // Migration: add content_hash to existing tables if needed.
+    // Migration: add content_hash to tables created before the column existed.
+    //
+    // The column is read first and added only when that read fails. On
+    // Postgres an ALTER TABLE takes an ACCESS EXCLUSIVE lock even when the
+    // column exists; the lock waits behind every open reader of the table (a
+    // pg_dump reads it for its whole run) and later queries queue behind it.
+    let hasContentHash = false;
     try {
-      await this.persistenceAdapter.exec(
-        `ALTER TABLE ${this.tablePrefix}ingested_documents ADD COLUMN content_hash TEXT;`,
+      await this.persistenceAdapter.get(
+        `SELECT content_hash FROM ${this.tablePrefix}ingested_documents LIMIT 0`,
       );
+      hasContentHash = true;
     } catch {
-      // ignore duplicate column / unsupported
+      // The column is missing: add it below.
+    }
+    if (!hasContentHash) {
+      try {
+        await this.persistenceAdapter.exec(
+          `ALTER TABLE ${this.tablePrefix}ingested_documents ADD COLUMN content_hash TEXT;`,
+        );
+      } catch {
+        // ignore duplicate column / unsupported
+      }
     }
   }
 

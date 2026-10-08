@@ -11,6 +11,8 @@ role: Customer support agent for Meridian SaaS
 
 # HEXACO personality scores (0.0–1.0). See https://hexaco.org for the trait reference.
 # Maps to PersonaDriftMechanism + PersonaOverlayManager at runtime.
+# The loaded persona stores Honesty-Humility as personalityTraits.honesty.
+# Either spelling works here: honestyHumility or honesty (honesty wins if both are set).
 hexaco:
   honestyHumility: 0.85   # sincerity, fairness, low entitlement
   emotionality: 0.55      # empathy, sentimentality

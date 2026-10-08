@@ -30,7 +30,9 @@ const mockIndex = {
 };
 
 vi.mock('hnswlib-node', () => ({
-  HierarchicalNSW: vi.fn().mockImplementation(() => ({ ...mockIndex })),
+  HierarchicalNSW: vi.fn().mockImplementation(function () {
+    return { ...mockIndex };
+  }),
 }));
 
 import { HnswlibVectorStore } from '../vector_stores/HnswlibVectorStore';

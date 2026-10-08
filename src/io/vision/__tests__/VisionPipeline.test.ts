@@ -21,7 +21,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
-import { VisionPipeline } from '../VisionPipeline.js';
+import { VisionPipeline, imageMediaType } from '../VisionPipeline.js';
+import { createVisionPipeline } from '../index.js';
 import type { VisionPipelineConfig, ContentCategory } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -776,5 +777,67 @@ describe('VisionPipeline', () => {
       expect(result.regions!.length).toBe(2);
       expect(result.regions![0].text).toBe('Hello World');
     });
+  });
+});
+
+// ===========================================================================
+// The cloud vision request
+// ===========================================================================
+
+describe('VisionPipeline cloud vision request', () => {
+  /** The first bytes of a JPEG file. */
+  const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+
+  it('sends the image as an image part, typed by its bytes, with the configured key and base URL', async () => {
+    const pipeline = createFullPipeline({ cloudApiKey: 'sk-vision', cloudBaseUrl: 'https://proxy.example/v1' });
+    await pipeline.process(JPEG, { tiers: ['cloud-vision'] });
+
+    expect(mockGenerateText).toHaveBeenCalledTimes(1);
+    const [request] = mockGenerateText.mock.calls[0];
+    expect(request).toMatchObject({ provider: 'openai', apiKey: 'sk-vision', baseUrl: 'https://proxy.example/v1' });
+    // An array of parts: a string here reaches the model as text, and the model never sees the image.
+    const { content } = request.messages[0];
+    expect(Array.isArray(content)).toBe(true);
+    expect(content[0]).toMatchObject({ type: 'text' });
+    expect(content[1]).toEqual({
+      type: 'image_url',
+      image_url: { url: `data:image/jpeg;base64,${JPEG.toString('base64')}` },
+    });
+  });
+
+  it('passes an image URL through as the image part', async () => {
+    const pipeline = createFullPipeline();
+    await pipeline.process('https://example.com/scan.png', { tiers: ['cloud-vision'] });
+
+    const [request] = mockGenerateText.mock.calls[0];
+    expect(request.messages[0].content[1]).toEqual({ type: 'image_url', image_url: { url: 'https://example.com/scan.png' } });
+  });
+
+  it('createVisionPipeline carries the cloud key and base URL into the pipeline', async () => {
+    const pipeline = await createVisionPipeline({
+      strategy: 'cloud-only',
+      ocr: 'none',
+      handwriting: false,
+      documentAI: false,
+      embedding: false,
+      cloudProvider: 'anthropic',
+      cloudApiKey: 'sk-from-config',
+      cloudBaseUrl: 'https://gateway.example',
+    });
+    await pipeline.process(JPEG);
+
+    const [request] = mockGenerateText.mock.calls[0];
+    expect(request).toMatchObject({ provider: 'anthropic', apiKey: 'sk-from-config', baseUrl: 'https://gateway.example' });
+  });
+});
+
+describe('imageMediaType', () => {
+  it('reads PNG, JPEG, GIF and WebP from their first bytes, and calls anything else PNG', () => {
+    expect(imageMediaType(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]))).toBe('image/png');
+    expect(imageMediaType(Buffer.from([0xff, 0xd8, 0xff, 0xdb]))).toBe('image/jpeg');
+    expect(imageMediaType(Buffer.from('GIF89a......', 'latin1'))).toBe('image/gif');
+    expect(imageMediaType(Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBPVP8 ')]))).toBe('image/webp');
+    expect(imageMediaType(Buffer.from('fake-png-data'))).toBe('image/png');
+    expect(imageMediaType(Buffer.alloc(0))).toBe('image/png');
   });
 });
