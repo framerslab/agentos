@@ -13,11 +13,13 @@ const step = (stepIndex: number, text: string, finishReason: string, usage?: Rec
 const u = (p: number, q: number) => ({ promptTokens: p, completionTokens: q, totalTokens: p + q });
 const gmiError = (message: string, code: string) => c(GMIOutputChunkType.ERROR, message, { errorDetails: { name: 'GMIError', message, code, details: { hop: 0 } } });
 
+/** Yields `chunks`, throwing before chunk `throwAt` (after the last one when `throwAt` is the length). */
 async function* from(chunks: GMIOutputChunk[], throwAt?: number) {
   for (let i = 0; i < chunks.length; i++) {
     if (i === throwAt) throw new Error('stream broke');
     yield chunks[i];
   }
+  if (throwAt !== undefined && throwAt >= chunks.length) throw new Error('stream broke');
 }
 
 const preambleToolAnswer = [
