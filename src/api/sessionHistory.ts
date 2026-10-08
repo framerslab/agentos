@@ -129,9 +129,12 @@ export class SessionHistoryBuffer {
    * later steps are still being written.
    *
    * @param label - Telemetry and eviction-boundary label for the turn's block.
+   * @param expectEpoch - The epoch the turn started under, when it read the
+   *   history before calling this (default: the current epoch). A reseed or
+   *   clear between that read and this call makes the turn's commit a no-op.
    */
-  beginTurn(label?: string): SessionTurnWriter {
-    const epochAtStart = this.historyEpoch;
+  beginTurn(label?: string, expectEpoch?: number): SessionTurnWriter {
+    const epochAtStart = expectEpoch ?? this.historyEpoch;
     const steps: SessionTranscriptMessage[] = [];
     let open = true;
     const land = (partial: boolean): boolean => {

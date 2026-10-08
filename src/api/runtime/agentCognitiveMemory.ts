@@ -92,6 +92,15 @@ function knownDimension(modelId: string): number | undefined {
   return KNOWN_EMBEDDING_DIMENSIONS.get(base);
 }
 
+/** `memory.embedding.dimension`, refused when it is set and is not a positive integer. */
+function checkedDimension(memory: MemoryConfig): number | undefined {
+  const declared = memory.embedding?.dimension;
+  if (declared !== undefined && !(Number.isInteger(declared) && declared > 0)) {
+    throw new Error(`gmi(): memory.embedding.dimension must be a positive integer; got ${String(declared)}.`);
+  }
+  return declared;
+}
+
 /**
  * Resolves the embedding model from `memory.embedding`, or, when it is unset,
  * from the environment: OpenAI's default embedding model when OPENAI_API_KEY is
@@ -116,10 +125,7 @@ function resolveEmbeddingTarget(memory: MemoryConfig, env: Env): EmbeddingTarget
   // A `provider:model` id names its own provider, which may be one that cannot embed.
   refuseProviderWithoutEmbeddings(model.providerId);
 
-  const declared = memory.embedding?.dimension;
-  if (declared !== undefined && !(Number.isInteger(declared) && declared > 0)) {
-    throw new Error(`gmi(): memory.embedding.dimension must be a positive integer; got ${String(declared)}.`);
-  }
+  const declared = checkedDimension(memory);
   const dimension = declared ?? knownDimension(model.modelId);
   if (dimension === undefined) {
     throw new Error(
@@ -144,6 +150,25 @@ function resolveEmbeddingTarget(memory: MemoryConfig, env: Env): EmbeddingTarget
  */
 export function assertEmbeddingAvailable(memory: MemoryConfig, env: Env = process.env): void {
   resolveEmbeddingTarget(memory, env);
+}
+
+/**
+ * The checks on `memory.embedding` that read no environment, for `gmi()` to run
+ * when the agent is built: with a provider set, that it has embeddings, that the
+ * model resolves on it, that a declared dimension is a positive integer, and that
+ * the model's output size is known or declared. With no provider set, the
+ * provider is picked from the environment when the memory is first built, and
+ * only a declared dimension is checked here.
+ *
+ * @param memory - The agent's memory config.
+ * @throws {Error} Naming `memory.embedding`, as {@link assertEmbeddingAvailable} does.
+ */
+export function assertEmbeddingConfig(memory: MemoryConfig): void {
+  if (memory.embedding?.provider) {
+    resolveEmbeddingTarget(memory, {});
+    return;
+  }
+  checkedDimension(memory);
 }
 
 export interface AgentCognitiveMemoryOptions {
