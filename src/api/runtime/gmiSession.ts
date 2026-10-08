@@ -56,6 +56,8 @@ export interface GmiTurnOptions {
   schemaName?: string;
   /** Label of the turn's block in the session store. */
   blockLabel?: string;
+  /** Stops the turn: the model call in progress is aborted, and the turn ends with the abort error. */
+  abortSignal?: AbortSignal;
 }
 
 /** What the GMI's hooks need to know about the turn about to run. */
@@ -223,6 +225,7 @@ export async function* runGmiTurn(
         options: {
           ...(turn.options ?? {}),
           ...(turn.responseSchema ? { responseSchema: turn.responseSchema, schemaName: turn.schemaName ?? 'response' } : {}),
+          ...(turn.abortSignal ? { abortSignal: turn.abortSignal } : {}),
         },
       },
     };
@@ -345,11 +348,15 @@ export async function sendGmiTurn(
 /**
  * `stream()`: the turn's chunks as a `StreamTextResult`. The promises settle
  * after the turn is written to the session store, so a caller that awaits
- * `text` and sends again finds the turn in the history.
+ * `text` and sends again finds the turn in the history. A consumer that stops
+ * reading `textStream` or `fullStream` stops the turn, as streamText's
+ * consumer stops its generator: the model call in progress is aborted.
  */
 export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn: GmiTurnOptions): StreamTextResult {
   const folder = new GmiTurnFolder({ cacheDiagnostics: Boolean(turn.options?.cacheDiagnostics) });
-  const run = runGmiTurn(deps, input, turn, folder);
+  const stop = new AbortController();
+  turn.abortSignal?.addEventListener('abort', () => stop.abort(), { once: true });
+  const run = runGmiTurn(deps, input, { ...turn, abortSignal: stop.signal }, folder);
   // runGmiTurn pushes every chunk into `folder` (with the onAfterGeneration replacements); the stream reads that folder.
-  return streamFromGmiTurn({ [Symbol.asyncIterator]: () => run }, { folder });
+  return streamFromGmiTurn({ [Symbol.asyncIterator]: () => run }, { folder, stop: () => stop.abort() });
 }

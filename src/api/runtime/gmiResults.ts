@@ -229,9 +229,13 @@ export class GmiTurnFolder {
    * How the run ended, by streamText's rules: the last step's own reason when
    * that step requested no tools; when it did, the step limit ran out, and a run
    * with calls outstanding and no text ended as 'tool-calls'.
+   *
+   * @param options.ignoreFailure - Report the finished steps even when the turn
+   *   failed: for a stream its consumer abandoned, whose turn ends with the
+   *   abort that the abandonment caused.
    */
-  finishReason(): GenerateTextResult['finishReason'] {
-    if (this.failure) return 'error';
+  finishReason(options: { ignoreFailure?: boolean } = {}): GenerateTextResult['finishReason'] {
+    if (this.failure && !options.ignoreFailure) return 'error';
     const last = this.steps.at(-1);
     // The schema answer is the turn's reply, whatever stop reason carried it.
     if (last?.structuredOutput !== undefined) return 'stop';
@@ -291,12 +295,21 @@ export interface GmiStreamOptions {
    * folds the chunks itself.
    */
   folder?: GmiTurnFolder;
+  /**
+   * Stops the turn. Called once when the consumer stops reading `textStream` or
+   * `fullStream` before the turn ended (a `break`, or `return()` on the iterator).
+   */
+  stop?: () => void;
 }
 
 /**
  * A `StreamTextResult` over a GMI turn. The turn is drained eagerly, so every
  * promise settles whether the caller iterates, stops iterating early, or never
  * iterates; `textStream` and `fullStream` replay what arrived and wait for more.
+ * A caller that stops iterating either one before the turn ended stops the turn
+ * through `options.stop`; the promises then settle once the turn has ended, with
+ * the text delivered so far and, as streamText reports an abandoned stream, the
+ * finish reason of the latest finished step.
  *
  * `textStream` yields every TEXT_DELTA as it arrives. `fullStream` maps
  * TEXT_DELTA to `text`, TOOL_CALL_REQUEST to `tool-call`, TOOL_RESULT to
@@ -313,6 +326,17 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
   const texts: string[] = [];
   const parts: StreamPart[] = [];
   let done = false;
+  // A consumer that stops reading stops the turn. The abort that follows ends the
+  // turn with an error the consumer did not get; an error that arrived before
+  // the consumer stopped is the turn's own.
+  let abandoned = false;
+  let failedBeforeAbandoned = false;
+  const abandon = (): void => {
+    if (done || abandoned) return;
+    abandoned = true;
+    failedBeforeAbandoned = folder.error() !== undefined;
+    options.stop?.();
+  };
   let waiters: Array<() => void> = [];
   const wake = (): void => {
     const pending = waiters;
@@ -381,7 +405,7 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
       // Already resolved when the turn was routed; '' when it failed before routing.
       p.provider.resolve(folder.routed()?.providerId ?? last?.providerId ?? '');
       p.model.resolve(folder.routed()?.modelId ?? last?.modelId ?? '');
-      p.finishReason.resolve(folder.finishReason());
+      p.finishReason.resolve(folder.finishReason({ ignoreFailure: abandoned && !failedBeforeAbandoned }));
       p.responseModel.resolve(last?.responseModel);
       p.serviceTier.resolve(last?.serviceTier);
       p.cacheDiagnostics.resolve((last?.cacheDiagnostics as Awaited<StreamTextResult['cacheDiagnostics']> | undefined) ?? null);
@@ -405,6 +429,7 @@ export function streamFromGmiTurn(turn: AsyncIterable<GMIOutputChunk>, options: 
           },
           async return(): Promise<IteratorResult<T>> {
             i = Number.MAX_SAFE_INTEGER;
+            abandon();
             return { value: undefined as never, done: true };
           },
         };

@@ -1242,6 +1242,9 @@ export class GMI implements IGMI {
           ...pickCompletionOptions(personaOptions),
           ...pickCompletionOptions(turnOptions),
           ...(stepCacheDiagnostics ? { cacheDiagnostics: { ...stepCacheDiagnostics } } : {}),
+          // The turn's own abort signal: aborting it ends the model call in progress
+          // with the provider's abort chunk, and every later call of the turn at once.
+          ...(turnOptions.abortSignal ? { abortSignal: turnOptions.abortSignal as AbortSignal } : {}),
           tools: toolsForLLM.length > 0 ? toolsForLLM.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema }})) : undefined,
           // Only with tools: OpenAI rejects a tool_choice on a request that offers none
           // (HTTP 400, "'tool_choice' is only allowed when 'tools' are specified").
