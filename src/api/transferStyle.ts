@@ -33,7 +33,7 @@ import type {
   GeneratedImage,
   ImageGenerationResult,
 } from '../io/media/images/IImageProvider.js';
-import { resolveModelOption, resolveMediaProvider } from './model.js';
+import { knownProviderPrefixOf, resolveModelOption, resolveMediaProvider } from './model.js';
 import { recordAgentOSUsage, type AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 
@@ -82,6 +82,14 @@ export interface TransferStyleOptions {
   policyTier?: 'safe' | 'standard' | 'mature' | 'private-adult';
   /** Provider-specific options passthrough. */
   providerOptions?: Record<string, unknown>;
+  /**
+   * API key for the provider, instead of its environment variable. The call
+   * must name the provider, with `provider` or a provider-prefixed `model`
+   * (`openai:gpt-image-1`); a key with neither is refused.
+   */
+  apiKey?: string;
+  /** Base URL for the provider, instead of its default or its environment variable. */
+  baseUrl?: string;
   /** Usage ledger configuration. */
   usageLedger?: AgentOSUsageLedgerOptions;
 }
@@ -140,7 +148,17 @@ export async function transferStyle(opts: TransferStyleOptions): Promise<Transfe
       let providerId: string;
       let modelId: string;
 
-      if (opts.provider) {
+      // The provider the call names: `provider`, or the prefix of `model`
+      // (`openai:gpt-image-1`). A key belongs to one vendor, so a call with a
+      // key must name its provider: otherwise the key would go to whichever
+      // provider the environment selects.
+      const namedProvider = opts.provider ?? knownProviderPrefixOf(opts.model);
+      if (opts.apiKey && !namedProvider) {
+        throw new Error(
+          'transferStyle: an apiKey needs `provider`, or a model with a provider prefix such as "openai:gpt-image-1"; it is not sent to a provider chosen from the environment.',
+        );
+      }
+      if (namedProvider) {
         ({ providerId, modelId } = resolveModelOption(opts, 'image'));
       } else {
         // Auto-detect best available style transfer provider
@@ -156,7 +174,10 @@ export async function transferStyle(opts: TransferStyleOptions): Promise<Transfe
         modelId = opts.model ?? match.modelId;
       }
 
-      const resolved = resolveMediaProvider(providerId, modelId);
+      const resolved = resolveMediaProvider(providerId, modelId, {
+        apiKey: opts.apiKey,
+        baseUrl: opts.baseUrl,
+      });
       span?.setAttribute('llm.provider', resolved.providerId);
       span?.setAttribute('llm.model', resolved.modelId);
 

@@ -30,7 +30,7 @@
 
 import { uuidv4 } from '../utils/uuid.js';
 import { IToolOrchestrator, ToolDefinitionForLLM } from './IToolOrchestrator';
-import { ITool, JSONSchemaObject, ToolExecutionResult, ToolExecutionContext } from './ITool';
+import { ITool, JSONSchemaObject, ToolExecutionResult } from './ITool';
 import {
   IToolPermissionManager,
   PermissionCheckContext,
@@ -50,11 +50,11 @@ import { DEFAULT_EMERGENT_CONFIG } from '../../cognition/emergent/types.js';
 import { DEFAULT_SELF_IMPROVEMENT_CONFIG } from '../../cognition/emergent/SelfImprovementConfig.js';
 import { EmergentCapabilityEngine } from '../../cognition/emergent/EmergentCapabilityEngine.js';
 import { ComposableToolBuilder } from '../../cognition/emergent/ComposableToolBuilder.js';
-import { SandboxedToolForge } from '../../cognition/emergent/SandboxedToolForge.js';
 import { EmergentJudge } from '../../cognition/emergent/EmergentJudge.js';
 import { EmergentToolRegistry } from '../../cognition/emergent/EmergentToolRegistry.js';
 import type { IStorageAdapter as EmergentStorageAdapter } from '../../cognition/emergent/EmergentToolRegistry.js';
 import { ForgeToolMetaTool } from '../../cognition/emergent/ForgeToolMetaTool.js';
+import type { StepGate } from '../../cognition/emergent/StepGate.js';
 import type { SelfImprovementToolDeps } from '../../cognition/emergent/EmergentCapabilityEngine.js';
 
 /**
@@ -105,6 +105,10 @@ export class ToolOrchestrator implements IToolOrchestrator {
    * @private
    */
   private emergentEngine?: EmergentCapabilityEngine;
+  /** Removes this orchestrator's registration listener; set while forging is enabled. */
+  private stopWatchingRegistrations?: () => void;
+  /** Which forged tool owns the executable registered under each name (the newest wins). */
+  private readonly emergentExecutables = new Map<string, string>();
   private emergentDiscoveryIndexer?: (tools: EmergentTool[]) => Promise<void>;
 
   /**
@@ -276,27 +280,11 @@ export class ToolOrchestrator implements IToolOrchestrator {
         enabled: true,
       };
 
-      // ComposableToolBuilder — wired to this orchestrator's own tool execution
-      // so that composed tools can invoke any registered tool.
-      const composableBuilder = new ComposableToolBuilder(
-        async (
-          toolName: string,
-          args: unknown,
-          context: ToolExecutionContext
-        ): Promise<ToolExecutionResult> => {
-          const tool = await this.getTool(toolName);
-          if (!tool) {
-            return { success: false, error: `Tool "${toolName}" not found in orchestrator.` };
-          }
-          return tool.execute(args as Record<string, unknown>, context);
-        }
-      );
-
-      // SandboxedToolForge — uses config-driven resource limits.
-      const sandboxForge = new SandboxedToolForge({
-        memoryMB: emergentConfig.sandboxMemoryMB,
-        timeoutMs: emergentConfig.sandboxTimeoutMs,
-      });
+      // ComposableToolBuilder — every step of a composed tool is a tool call
+      // through this orchestrator's processToolCall, as the composed call's
+      // caller (see buildStepGate).
+      const stepGate = this.buildStepGate();
+      const composableBuilder = new ComposableToolBuilder(stepGate);
 
       // EmergentJudge — wired to the provided generateText callback, or a
       // no-op stub that rejects all tools when no LLM is configured.
@@ -319,20 +307,58 @@ export class ToolOrchestrator implements IToolOrchestrator {
       this.emergentEngine = new EmergentCapabilityEngine({
         config: emergentConfig,
         composableBuilder,
-        sandboxForge,
         judge,
         registry,
-        onToolForged: async (_tool, executable) => {
+        stepGate,
+        onToolForged: async (tool, executable) => {
           await this.registerInitialTool(executable);
+          // The executor holds one executable per name; the newest forged tool
+          // of a name owns it.
+          this.emergentExecutables.set(executable.name, tool.id);
         },
         onToolPromoted: async (tool) => {
           await this.emergentDiscoveryIndexer?.([tool]);
+        },
+        // Suspending or removing a forged tool takes its executable out of the
+        // executor; before this hook was wired the tool stayed callable.
+        onToolRemoved: async (tool) => {
+          // Only this tool's own executable: a later tool of the same name
+          // replaced it in the executor, and that one stays.
+          if (this.emergentExecutables.get(tool.name) === tool.id) {
+            this.emergentExecutables.delete(tool.name);
+            await this.toolExecutor.unregisterTool(tool.name);
+          }
+        },
+        // A forge that took a host tool's name and then took its own
+        // executable out again (its composition reached itself) hands the
+        // name back to the host's tool.
+        onToolRestored: async (tool) => {
+          await this.registerInitialTool(tool);
         },
       });
 
       // Create and register the forge_tool meta-tool.
       const forgeMetaTool = new ForgeToolMetaTool(this.emergentEngine);
       await this.registerInitialTool(forgeMetaTool);
+
+      // A composition suspended for a missing or refused step is re-checked
+      // when a tool with that name is registered, by any path.
+      this.stopWatchingRegistrations?.();
+      const executorEvents = this.toolExecutor as Partial<Pick<ToolExecutor, 'onToolRegistered'>>;
+      if (typeof executorEvents.onToolRegistered === 'function') {
+        this.stopWatchingRegistrations = executorEvents.onToolRegistered((toolName) => {
+          const engine = this.emergentEngine;
+          if (!engine) {
+            return;
+          }
+          void engine.onHostToolRegistered(toolName).catch((error: unknown) => {
+            console.warn(
+              `ToolOrchestrator (ID: ${this.orchestratorId}): re-checking compositions after '${toolName}' was registered failed:`,
+              error
+            );
+          });
+        });
+      }
 
       console.log(
         `ToolOrchestrator (ID: ${this.orchestratorId}): Emergent capability engine initialized. ` +
@@ -625,13 +651,68 @@ export class ToolOrchestrator implements IToolOrchestrator {
   }
 
   /**
+   * The gate composed tools and workflows run their steps through: each step
+   * is a tool call through processToolCall, as the composed call's caller,
+   * with the instance the pipeline checked, so it meets the disabled list,
+   * the permission check, the approval and argument validation that a direct
+   * call meets. The orchestrator's refusals reach the step's result as
+   * `details.code` (permission_denied, step_disabled, approval_rejected,
+   * approval_unavailable, approval_failed, step_replaced, step_aborted), with
+   * the orchestrator's own code kept as `orchestratorCode`.
+   */
+  private buildStepGate(): StepGate {
+    return {
+      resolve: (name) => this.toolExecutor.getTool(name),
+      run: async (step, args, context, signal) => {
+        const result = await this.processToolCall({
+          toolCallRequest: { id: `step-${uuidv4()}`, name: step.name, arguments: args },
+          gmiId: context.gmiId,
+          personaId: context.personaId,
+          personaCapabilities: context.personaCapabilities ?? [],
+          userContext: context.userContext,
+          correlationId: context.correlationId,
+          sessionData: context.sessionData,
+          tool: step,
+          ...(signal ? { signal } : {}),
+        });
+        const effects = result.effects ? { effects: result.effects } : {};
+        if (!result.isError) {
+          return { success: true, output: result.output, ...effects };
+        }
+        const errorDetails = (result.errorDetails ?? {}) as {
+          message?: string;
+          code?: string;
+          reason?: string;
+          details?: Record<string, unknown>;
+        };
+        const code = stepCodeFor(errorDetails.code, errorDetails.reason);
+        // A code inside the step tool's own details is a nested composition's
+        // refusal of one of its steps: it moves to innerCode, so only that
+        // composition is suspended, not this one.
+        const { code: innerCode, ...stepDetails } = (errorDetails.details ?? {}) as Record<string, unknown>;
+        return {
+          success: false,
+          error: errorDetails.message ?? `Step tool "${step.name}" failed.`,
+          details: {
+            ...stepDetails,
+            ...(innerCode !== undefined ? { innerCode } : {}),
+            ...(code ? { code } : {}),
+            ...(errorDetails.code ? { orchestratorCode: errorDetails.code } : {}),
+          },
+          ...effects,
+        };
+      },
+    };
+  }
+
+  /**
    * @inheritdoc
    */
   public async processToolCall(
     requestDetails: ToolExecutionRequestDetails
   ): Promise<ToolCallResult> {
     this.ensureInitialized();
-    const { toolCallRequest, gmiId, personaId, personaCapabilities, userContext } = requestDetails;
+    const { toolCallRequest, gmiId, personaId, personaCapabilities, userContext, signal } = requestDetails;
 
     // Check if toolCallRequest and toolCallRequest.name are valid
     if (!toolCallRequest || !toolCallRequest.name || typeof toolCallRequest.name !== 'string') {
@@ -675,7 +756,11 @@ export class ToolOrchestrator implements IToolOrchestrator {
       };
     }
 
-    const tool = await this.getTool(toolName);
+    // A composed step arrives with the instance its pipeline checked; every
+    // check below is about that instance, and the call is refused before
+    // delegation when the name no longer resolves to it.
+    const resolvedForStep = requestDetails.tool;
+    const tool = resolvedForStep ?? (await this.getTool(toolName));
     if (!tool) {
       const errorMsg = `Tool '${toolName}' not found in orchestrator's tool registry.`;
       console.error(`${logPrefix} ${errorMsg}`);
@@ -762,7 +847,10 @@ export class ToolOrchestrator implements IToolOrchestrator {
     const requiresSideEffectsApproval =
       Boolean(hitlConfig?.enabled) &&
       (hitlConfig?.requireApprovalForSideEffects ?? true) &&
-      tool.hasSideEffects === true;
+      tool.hasSideEffects === true &&
+      // A composed tool's side-effecting steps are each asked when they run,
+      // through the step gate; asking at the composed call too would ask twice.
+      (tool as { emergentMode?: string }).emergentMode !== 'compose';
 
     if (requiresSideEffectsApproval) {
       if (!this.hitlManager) {
@@ -784,7 +872,10 @@ export class ToolOrchestrator implements IToolOrchestrator {
           };
         }
       } else {
-        const actionId = `tool:${gmiId}:${personaId}:${toolName}:${llmProvidedCallId || uuidv4()}`;
+        // The tool's id is in the action id: an approval is for this
+        // registration, and the call runs only that registration (checked
+        // before delegation below).
+        const actionId = `tool:${gmiId}:${personaId}:${toolName}:${tool.id}:${llmProvidedCallId || uuidv4()}`;
         const severity = (hitlConfig?.defaultSideEffectsSeverity ?? 'high') as ActionSeverity;
 
         const argsPreview = (() => {
@@ -866,6 +957,37 @@ export class ToolOrchestrator implements IToolOrchestrator {
       );
     }
 
+    if (signal?.aborted) {
+      const errorMsg = `step_aborted: the call to '${toolName}' expired before it was delegated; nothing ran.`;
+      console.warn(`${logPrefix} ${errorMsg}`);
+      return {
+        toolCallId: llmProvidedCallId,
+        toolName,
+        output: null,
+        isError: true,
+        errorDetails: { message: errorMsg, code: 'STEP_ABORTED' },
+      };
+    }
+    // Every call runs the instance its checks and approval were for: a
+    // composed step the one its pipeline checked, a direct call the one
+    // resolved when the call began. A registration that replaces the name
+    // meanwhile (while an approval is pending, say) is refused. No await
+    // between this check and the executor's own lookup of the name, which
+    // happens synchronously when executeTool is entered.
+    if (this.toolExecutor.getTool(toolName) !== tool) {
+      const errorMsg = resolvedForStep
+        ? `step_replaced: the tool registered as '${toolName}' changed after it was checked; nothing ran.`
+        : `tool_replaced: the tool registered as '${toolName}' is not the one this call's checks and approval were for (it was replaced or unregistered meanwhile); nothing ran.`;
+      console.warn(`${logPrefix} ${errorMsg}`);
+      return {
+        toolCallId: llmProvidedCallId,
+        toolName,
+        output: null,
+        isError: true,
+        errorDetails: { message: errorMsg, code: resolvedForStep ? 'STEP_REPLACED' : 'TOOL_REPLACED' },
+      };
+    }
+
     let coreExecutorResult: ToolExecutionResult;
     try {
       coreExecutorResult = await this.toolExecutor.executeTool(requestDetails);
@@ -914,6 +1036,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
             details: coreExecutorResult.details,
           }
         : undefined,
+      ...(coreExecutorResult.effects ? { effects: coreExecutorResult.effects } : {}),
     };
   }
 
@@ -948,7 +1071,17 @@ export class ToolOrchestrator implements IToolOrchestrator {
   public cleanupEmergentSession(sessionId: string): void {
     if (this.emergentEngine) {
       const removedTools = this.emergentEngine.cleanupSession(sessionId);
-      void Promise.allSettled(removedTools.map((tool) => this.unregisterTool(tool.name)));
+      void Promise.allSettled(
+        removedTools.map((tool) => {
+          if (this.emergentExecutables.get(tool.name) !== tool.id) {
+            return Promise.resolve(false);
+          }
+          this.emergentExecutables.delete(tool.name);
+          // Through the executor, as onToolRemoved does: this cleanup is the
+          // library's own and does not depend on allowDynamicRegistration.
+          return this.toolExecutor.unregisterTool(tool.name);
+        }),
+      );
       console.log(
         `ToolOrchestrator (ID: ${this.orchestratorId}): Cleaned up emergent session "${sessionId}".`
       );
@@ -1142,6 +1275,8 @@ export class ToolOrchestrator implements IToolOrchestrator {
    * @inheritdoc
    */
   public async shutdown(): Promise<void> {
+    this.stopWatchingRegistrations?.();
+    this.stopWatchingRegistrations = undefined;
     if (!this.isInitialized) {
       console.log(
         `ToolOrchestrator (ID: ${this.orchestratorId}): Shutdown called, but orchestrator was not initialized or already shut down.`
@@ -1156,5 +1291,34 @@ export class ToolOrchestrator implements IToolOrchestrator {
     console.log(
       `ToolOrchestrator (ID: ${this.orchestratorId}) shut down complete. All tools processed for shutdown and registry cleared.`
     );
+  }
+}
+
+/**
+ * The step code for an orchestrator refusal: what a composed step's result
+ * says in `details.code`, so the engine can tell a refused step from a
+ * failed one. `undefined` for a failure that is the tool's own.
+ */
+function stepCodeFor(code: string | undefined, reason: string | undefined): string | undefined {
+  if (code === 'STEP_REPLACED') {
+    return 'step_replaced';
+  }
+  if (code === 'STEP_ABORTED') {
+    return 'step_aborted';
+  }
+  if (code !== GMIErrorCode.PERMISSION_DENIED) {
+    return undefined;
+  }
+  switch (reason) {
+    case 'Tool is globally disabled.':
+      return 'step_disabled';
+    case 'HITL rejected':
+      return 'approval_rejected';
+    case 'HITL manager missing':
+      return 'approval_unavailable';
+    case 'HITL error':
+      return 'approval_failed';
+    default:
+      return 'permission_denied';
   }
 }

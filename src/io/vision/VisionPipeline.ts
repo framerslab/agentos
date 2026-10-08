@@ -110,6 +110,22 @@ const CLOUD_VISION_PROMPT =
 // ---------------------------------------------------------------------------
 
 /**
+ * The media type of an image from its first bytes: PNG, JPEG, GIF or WebP,
+ * and `image/png` for anything else.
+ */
+export function imageMediaType(image: Buffer): string {
+  if (image.length >= 8 && image.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return 'image/png';
+  }
+  if (image.length >= 3 && image[0] === 0xff && image[1] === 0xd8 && image[2] === 0xff) return 'image/jpeg';
+  if (image.length >= 6 && /^GIF8[79]a$/.test(image.toString('latin1', 0, 6))) return 'image/gif';
+  if (image.length >= 12 && image.toString('latin1', 0, 4) === 'RIFF' && image.toString('latin1', 8, 12) === 'WEBP') {
+    return 'image/webp';
+  }
+  return 'image/png';
+}
+
+/**
  * Unified vision pipeline with progressive enhancement.
  *
  * Processes images through up to three tiers of increasing capability:
@@ -901,30 +917,27 @@ export class VisionPipeline {
     // Import the high-level API to avoid coupling to any specific provider
     const { generateText } = await import('../../api/generateText.js');
 
-    // Build the base64 data URL for the image
-    const base64 = Buffer.isBuffer(image)
-      ? image.toString('base64')
-      : image;
-
+    // A buffer goes as a data URL with the media type its bytes show: a
+    // provider that checks the declared type against the data (Anthropic
+    // does) rejects a JPEG sent as image/png.
     const imageUrl = Buffer.isBuffer(image)
-      ? `data:image/png;base64,${base64}`
+      ? `data:${imageMediaType(image)};base64,${image.toString('base64')}`
       : image;
 
-    // Use the multimodal message format supported by the IProvider interface.
-    // The `content` array with image_url parts is the standard format
-    // across OpenAI, Anthropic, and Gemini providers.
+    // The content is an array of parts, which providers send as a text part
+    // and an image part. A string, such as the parts serialized as JSON,
+    // reaches the model as text, and the model never sees the image.
     const result = await generateText({
       provider: this._config.cloudProvider,
       model: this._config.cloudModel,
+      apiKey: this._config.cloudApiKey,
+      baseUrl: this._config.cloudBaseUrl,
       messages: [{
         role: 'user',
-        // The generateText API passes content through to the provider as-is
-        // when it's an array (multimodal message). All major providers support
-        // the OpenAI-style content parts array.
-        content: JSON.stringify([
+        content: [
           { type: 'text', text: CLOUD_VISION_PROMPT },
           { type: 'image_url', image_url: { url: imageUrl } },
-        ]),
+        ],
       }],
     });
 

@@ -2,8 +2,9 @@
  * @file embedText.ts
  * Provider-agnostic text embedding generation for the AgentOS high-level API.
  *
- * Dispatches embedding requests to OpenAI-compatible, Ollama, or OpenRouter
- * endpoints using the same provider resolution pipeline as {@link generateText}.
+ * Dispatches embedding requests to OpenAI-compatible, Ollama, OpenRouter, or
+ * Gemini endpoints using the same provider resolution pipeline as
+ * {@link generateText}.
  * Supports single and batch text inputs, optional dimensionality reduction,
  * and returns raw float vectors.
  *
@@ -11,9 +12,13 @@
  * @see {@link resolveModelOption} for model resolution with `TaskType = 'embedding'`.
  */
 import { resolveModelOption, resolveProvider } from './model.js';
+import { GeminiProvider } from '../core/llm/providers/implementations/GeminiProvider.js';
+import { GeminiProviderError } from '../core/llm/providers/errors/GeminiProviderError.js';
+import { getDefaultProvider } from './runtime/global-default.js';
 import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { recordAgentOSUsage, type AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
+import { redactUrlSecrets } from '../core/llm/providers/url-secrets.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -42,7 +47,7 @@ export interface EmbedTextOptions {
    * Provider name. When supplied without `model`, the default embedding model
    * for the provider is resolved automatically from the built-in defaults.
    *
-   * @example `"openai"`, `"ollama"`, `"openrouter"`
+   * @example `"openai"`, `"ollama"`, `"openrouter"`, `"gemini"`
    */
   provider?: string;
 
@@ -123,6 +128,11 @@ export interface EmbedTextResult {
     promptTokens: number;
     /** Sum of prompt and any other tokens (usually equal to `promptTokens`). */
     totalTokens: number;
+    /**
+     * Cost in USD when the provider prices the call itself (Gemini embedding
+     * models with a catalog price). Absent when the provider reports none.
+     */
+    costUSD?: number;
   };
 }
 
@@ -151,8 +161,11 @@ interface OpenAIEmbeddingResponse {
   data: OpenAIEmbeddingData[];
   /** Model identifier echoed back by the API. */
   model: string;
-  /** Token usage summary. */
-  usage: {
+  /**
+   * Token usage summary. OpenAI always sends it; an OpenAI-compatible server
+   * may omit it.
+   */
+  usage?: {
     prompt_tokens: number;
     total_tokens: number;
   };
@@ -185,7 +198,8 @@ interface OllamaEmbedResponse {
  * @param input - Array of strings to embed.
  * @param dimensions - Optional dimensionality reduction hint.
  * @returns Parsed {@link OpenAIEmbeddingResponse}.
- * @throws {Error} On non-2xx HTTP status or network failure.
+ * @throws {Error} On non-2xx HTTP status or network failure, with base URL
+ *   credentials and the API key masked out of the message.
  */
 async function callOpenAIEmbedding(
   baseUrl: string,
@@ -203,21 +217,53 @@ async function callOpenAIEmbedding(
 
   const url = `${baseUrl.replace(/\/+$/, '')}/embeddings`;
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    throw embeddingFetchError(error, 'Embedding', baseUrl, [apiKey]);
+  }
 
   if (!response.ok) {
     const text = await response.text().catch(() => '(no body)');
-    throw new Error(`Embedding request failed (${response.status}): ${text}`);
+    // A server can echo the key or the URL it was called with.
+    throw new Error(`Embedding request failed (${response.status}): ${redactUrlSecrets(text, baseUrl, [apiKey])}`);
   }
 
   return response.json() as Promise<OpenAIEmbeddingResponse>;
+}
+
+/**
+ * The error raised when fetch rejects an embedding request. fetch quotes the
+ * request URL when it rejects it (a base URL with `user:password@`, or one it
+ * cannot parse) and quotes a header value it rejects, which carries the API
+ * key, so the message is masked. The cause is dropped, since a parse
+ * failure's cause holds the raw URL; a network error code such as
+ * ECONNREFUSED is kept in the message.
+ *
+ * @param error What fetch rejected with.
+ * @param label Names the request in the message.
+ * @param baseUrl The base URL the request was built from.
+ * @param secrets Other secrets the request carried, such as the API key.
+ * @returns An error safe to pass to callers, logs and spans.
+ */
+function embeddingFetchError(
+  error: unknown,
+  label: string,
+  baseUrl: string,
+  secrets: ReadonlyArray<string> = [],
+): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = (error as { cause?: { code?: unknown } } | null | undefined)?.cause?.code;
+  const suffix = typeof code === 'string' && /^[A-Z][A-Z0-9_]*$/.test(code) ? ` (${code})` : '';
+  return new Error(`${label} request failed: ${redactUrlSecrets(message, baseUrl, secrets)}${suffix}`);
 }
 
 /**
@@ -231,7 +277,8 @@ async function callOpenAIEmbedding(
  * @param modelId - The Ollama model name (e.g. `nomic-embed-text`).
  * @param input - Array of strings to embed.
  * @returns Parsed {@link OllamaEmbedResponse}.
- * @throws {Error} On non-2xx HTTP status or network failure.
+ * @throws {Error} On non-2xx HTTP status or network failure, with base URL
+ *   credentials masked out of the message.
  */
 async function callOllamaEmbed(
   baseUrl: string,
@@ -240,15 +287,20 @@ async function callOllamaEmbed(
 ): Promise<OllamaEmbedResponse> {
   const url = `${baseUrl.replace(/\/+$/, '')}/api/embed`;
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: modelId, input }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: modelId, input }),
+    });
+  } catch (error) {
+    throw embeddingFetchError(error, 'Ollama embed', baseUrl);
+  }
 
   if (!response.ok) {
     const text = await response.text().catch(() => '(no body)');
-    throw new Error(`Ollama embed request failed (${response.status}): ${text}`);
+    throw new Error(`Ollama embed request failed (${response.status}): ${redactUrlSecrets(text, baseUrl)}`);
   }
 
   return response.json() as Promise<OllamaEmbedResponse>;
@@ -259,13 +311,71 @@ async function callOllamaEmbed(
 // ---------------------------------------------------------------------------
 
 /**
+ * Embedding model used when Gemini is the effective provider and no embedding
+ * model is named. It is applied here and kept out of the shared provider
+ * defaults: those defaults also decide embedding auto-detection, where Gemini
+ * comes before Ollama, so a registry entry would silently move a caller who
+ * has a Gemini key and embeds through Ollama onto a different vector space.
+ */
+const GEMINI_DEFAULT_EMBEDDING_MODEL = 'gemini-embedding-2';
+
+/**
+ * Whether a `gemini` embedding call should use Gemini's native
+ * batchEmbedContents protocol: with no base URL (GeminiProvider's default
+ * endpoint) or with Google's own native endpoint. Any other base URL, such as
+ * an OpenAI-compatible gateway or Google's OpenAI-compatible surface (a path
+ * ending in `/openai`), keeps the OpenAI-style `/embeddings` route with bearer
+ * auth that those endpoints serve.
+ *
+ * @param baseUrl Resolved base URL, if any.
+ * @returns True when the native Gemini protocol applies.
+ */
+function usesNativeGeminiEmbeddings(baseUrl: string | undefined): boolean {
+  if (baseUrl === undefined) return true;
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return false;
+  }
+  return url.hostname === 'generativelanguage.googleapis.com' && !/\/openai\/*$/.test(url.pathname);
+}
+
+/**
+ * Applies {@link GEMINI_DEFAULT_EMBEDDING_MODEL} when the effective provider is
+ * Gemini and no embedding model is named: `provider: 'gemini'` inline without a
+ * model, or a global default provider of `gemini` (set with
+ * `setDefaultProvider`). A global default's model is kept only when it is an
+ * embedding model. It is normally the chat model `generateText` uses, and
+ * Gemini's embedding endpoint rejects a chat model. The global default applies
+ * only when neither provider nor model is inline, as in `resolveModelOption`.
+ *
+ * @param opts Caller options.
+ * @returns Options with the Gemini embedding model filled in where needed.
+ */
+function withGeminiEmbeddingDefault(opts: EmbedTextOptions): EmbedTextOptions {
+  if (opts.model) return opts;
+  if (opts.provider) {
+    return opts.provider === 'gemini' ? { ...opts, model: GEMINI_DEFAULT_EMBEDDING_MODEL } : opts;
+  }
+  const globalDefault = getDefaultProvider();
+  if (globalDefault?.provider !== 'gemini') return opts;
+  const globalModel = globalDefault.model;
+  return {
+    ...opts,
+    provider: 'gemini',
+    model: globalModel && /embedding/i.test(globalModel) ? globalModel : GEMINI_DEFAULT_EMBEDDING_MODEL,
+  };
+}
+
+/**
  * Generates embedding vectors for one or more text inputs using a
  * provider-agnostic `provider:model` string.
  *
  * Resolves credentials via the standard AgentOS provider pipeline, then
- * dispatches to the appropriate embedding endpoint (OpenAI, Ollama, or
- * OpenRouter). Returns raw float arrays suitable for vector similarity
- * search, clustering, or any downstream ML pipeline.
+ * dispatches to the appropriate embedding endpoint (OpenAI, Ollama,
+ * OpenRouter or Gemini). Returns raw float arrays suitable for vector
+ * similarity search, clustering, or any downstream ML pipeline.
  *
  * @param opts - Embedding options including model, input text(s), and
  *   optional provider/key overrides.
@@ -307,7 +417,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
   let metricStatus: 'ok' | 'error' = 'ok';
   let metricProviderId: string | undefined;
   let metricModelId: string | undefined;
-  let metricUsage: { promptTokens: number; totalTokens: number } | undefined;
+  let metricUsage: { promptTokens: number; totalTokens: number; costUSD?: number } | undefined;
 
   try {
     return await withAgentOSSpan(
@@ -315,7 +425,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
       async (span) => {
         // Resolve provider/model using the 'embedding' task type so the
         // correct default model is selected (e.g. text-embedding-3-small).
-        const { providerId, modelId } = resolveModelOption(opts, 'embedding');
+        const { providerId, modelId } = resolveModelOption(withGeminiEmbeddingDefault(opts), 'embedding');
         const resolved = resolveProvider(providerId, modelId, {
           apiKey: opts.apiKey,
           baseUrl: opts.baseUrl,
@@ -333,7 +443,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
 
         let embeddings: number[][];
         let reportedModel: string;
-        let usage: { promptTokens: number; totalTokens: number };
+        let usage: { promptTokens: number; totalTokens: number; costUSD?: number };
 
         if (resolved.providerId === 'ollama') {
           // Ollama uses its own /api/embed endpoint format
@@ -344,6 +454,47 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
           reportedModel = result.model;
           // Ollama doesn't report token usage for embeddings
           usage = { promptTokens: 0, totalTokens: 0 };
+        } else if (resolved.providerId === 'gemini' && usesNativeGeminiEmbeddings(resolved.baseUrl)) {
+          // Gemini's native API serves embeddings through batchEmbedContents,
+          // which GeminiProvider implements (including the API's limit of 100
+          // texts per call). A gateway or Google's OpenAI-compatible base URL
+          // takes the OpenAI-compatible branch below instead.
+          if (!resolved.apiKey) {
+            throw new Error('No API key available for embedding provider "gemini".');
+          }
+          const gemini = new GeminiProvider();
+          await gemini.initialize({
+            apiKey: resolved.apiKey,
+            ...(resolved.baseUrl ? { baseURL: resolved.baseUrl } : {}),
+          });
+          const result = await gemini
+            .generateEmbeddings(
+              resolved.modelId,
+              inputArray,
+              opts.dimensions ? { dimensions: opts.dimensions } : undefined,
+            )
+            .catch((error: unknown) => {
+              // A batch that fails after earlier ones succeeded still leaves
+              // those billed; record their usage before the error propagates.
+              const partial = error instanceof GeminiProviderError ? error.partialUsage : undefined;
+              if (partial) {
+                metricUsage = {
+                  promptTokens: partial.prompt_tokens,
+                  totalTokens: partial.total_tokens,
+                  ...(partial.costUSD !== undefined ? { costUSD: partial.costUSD } : {}),
+                };
+              }
+              throw error;
+            });
+          embeddings = [...result.data].sort((a, b) => a.index - b.index).map((d) => d.embedding);
+          reportedModel = result.model;
+          // gemini-embedding-2 reports prompt tokens, which GeminiProvider
+          // prices; gemini-embedding-001 reports none, so its calls count zero.
+          usage = {
+            promptTokens: result.usage.prompt_tokens,
+            totalTokens: result.usage.total_tokens,
+            ...(result.usage.costUSD !== undefined ? { costUSD: result.usage.costUSD } : {}),
+          };
         } else {
           // OpenAI, OpenRouter, and any OpenAI-compatible provider
           const baseUrl = resolved.baseUrl ?? (
@@ -369,9 +520,11 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
           const sorted = [...result.data].sort((a, b) => a.index - b.index);
           embeddings = sorted.map((d) => d.embedding);
           reportedModel = result.model;
+          // Unreported usage counts as zero rather than failing a call
+          // that already returned vectors.
           usage = {
-            promptTokens: result.usage.prompt_tokens,
-            totalTokens: result.usage.total_tokens,
+            promptTokens: result.usage?.prompt_tokens ?? 0,
+            totalTokens: result.usage?.total_tokens ?? 0,
           };
         }
 
@@ -380,6 +533,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
         attachUsageAttributes(span, {
           promptTokens: usage.promptTokens,
           totalTokens: usage.totalTokens,
+          ...(usage.costUSD !== undefined ? { costUSD: usage.costUSD } : {}),
         });
         // GenAI semconv for the embeddings operation (queue item:
         // modality-aware operation names — embeddings input carries no
@@ -418,6 +572,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
           promptTokens: metricUsage.promptTokens,
           completionTokens: 0,
           totalTokens: metricUsage.totalTokens,
+          ...(metricUsage.costUSD !== undefined ? { costUSD: metricUsage.costUSD } : {}),
         } : undefined,
         options: {
           ...opts.usageLedger,
@@ -434,6 +589,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
         promptTokens: metricUsage.promptTokens,
         completionTokens: 0,
         totalTokens: metricUsage.totalTokens,
+        ...(metricUsage.costUSD !== undefined ? { costUSD: metricUsage.costUSD } : {}),
       } : undefined),
     });
   }

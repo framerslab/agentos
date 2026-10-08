@@ -141,7 +141,7 @@ createPiiRedactionGuardrail({
 });
 ```
 
-The [`SentenceBoundaryBuffer`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/SentenceBoundaryBuffer.ts) collaborator inside the core runtime ([`packages/agentos/src/safety/guardrails/SentenceBoundaryBuffer.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/SentenceBoundaryBuffer.ts)) coalesces partial tokens into sentence-shaped fragments before the guardrail runs, so the redactor never sees a `j` followed by `ohn` from two separate SSE chunks.
+The [`SentenceBoundaryBuffer`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/SentenceBoundaryBuffer.ts) collaborator inside the core runtime ([`src/safety/guardrails/SentenceBoundaryBuffer.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/SentenceBoundaryBuffer.ts)) coalesces partial tokens into sentence-shaped fragments before the guardrail runs, so the redactor never sees a `j` followed by `ohn` from two separate SSE chunks.
 
 ## Audit logging
 
@@ -236,7 +236,7 @@ This guardrail is a building block. It does not, and cannot, make a deployment H
 | Detection pipeline orchestrator | [`src/PiiDetectionPipeline.ts`](https://github.com/framerslab/agentos-ext-pii-redaction/blob/master/src/PiiDetectionPipeline.ts) |
 | Redaction engine | [`src/RedactionEngine.ts`](https://github.com/framerslab/agentos-ext-pii-redaction/blob/master/src/RedactionEngine.ts) |
 | Service IDs for DI lookup | [`PII_SERVICE_IDS`](https://github.com/framerslab/agentos-ext-pii-redaction/blob/master/src/types.ts) in [`src/types.ts`](https://github.com/framerslab/agentos-ext-pii-redaction/blob/master/src/types.ts) |
-| Streaming sentence buffer (in core) | [`packages/agentos/src/safety/guardrails/SentenceBoundaryBuffer.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/SentenceBoundaryBuffer.ts) |
+| Streaming sentence buffer (in core) | [`src/safety/guardrails/SentenceBoundaryBuffer.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/SentenceBoundaryBuffer.ts) |
 
 ## Further reading
 

@@ -1,8 +1,8 @@
 # workflow() DSL
 
-The right way to ship a multi-step agent is rarely the most flexible way. A graph that can loop and replan is great when you don't know what shape the work takes; it's overkill — and harder to operate — when you do know. `workflow()` exists for the second case. You declare the steps in the order they run, the compiler builds the execution graph, and a static cycle check rejects anything that would loop. The output is the same [`CompiledExecutionGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/compiler/CompiledExecutionGraph.ts) the cyclic builders produce, so you can swap a `workflow()` for an [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) later without re-architecting the runtime around it.
+The right way to ship a multi-step agent is rarely the most flexible way. A graph that can loop and replan is great when you don't know what shape the work takes; it's overkill — and harder to operate — when you do know. `workflow()` exists for the second case. You declare the steps in the order they run, the compiler builds the execution graph, and a static cycle check rejects anything that would loop. The output is the same [`CompiledExecutionGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) the cyclic builders produce, so you can swap a `workflow()` for an [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) later without re-architecting the runtime around it.
 
-Use `workflow()` when the steps are known and ordered. Use [`AgentGraph`](./AGENT_GRAPH.md) when you need cycles, conditional branches, or fan-out/fan-in patterns the linear `then()` chain can't express. Use [`mission()`](./MISSION_API.md) when you want to declare intent first and let the planner decide the steps.
+Use `workflow()` when the steps are known and ordered. Use [`AgentGraph`](../architecture/AGENT_GRAPH.md) when you need cycles, conditional branches, or fan-out/fan-in patterns the linear `then()` chain can't express. Use [`mission()`](./MISSION_API.md) when you want to declare intent first and let the planner decide the steps.
 
 ## Quick Start
 
@@ -158,7 +158,7 @@ wf.step('fetch', { tool: 'web_fetch' })
 Workflow validation failed: cycle detected involving nodes: fetch → process → fetch
 ```
 
-If you need agent loops, use [AgentGraph](./agent-graph.md) instead.
+If you need agent loops, use [AgentGraph](../architecture/AGENT_GRAPH.md) instead.
 
 GMI steps inside `workflow()` always run in `single_turn` mode — the `executionMode` field in `gmi` config is accepted in the type but ignored at runtime. This is a deliberate design choice: workflow steps must be cost-bounded and deterministic.
 
@@ -275,10 +275,10 @@ const result2 = await onboarding.resume(savedCheckpointId);
 
 ## See Also
 
-- [AgentGraph](./agent-graph.md) — for cyclic graphs and full graph control
-- [mission() API](./mission-api.md) — for goal-driven orchestration
+- [AgentGraph](../architecture/AGENT_GRAPH.md) — for cyclic graphs and full graph control
+- [mission() API](./MISSION_API.md) — for goal-driven orchestration
 - [Checkpointing](./checkpointing.md) — ICheckpointStore, resume semantics
-- [Unified Orchestration](./unified-orchestration.md) — architecture overview
+- [Unified Orchestration](./UNIFIED_ORCHESTRATION.md) — architecture overview
 
 ---
 
@@ -296,5 +296,5 @@ const result2 = await onboarding.resume(savedCheckpointId);
 
 ### Implementation references
 
-- [`packages/agentos/src/orchestration/builders/WorkflowBuilder.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/WorkflowBuilder.ts) — `workflow()` factory + chain builder
-- [`packages/agentos/src/orchestration/compiler/CompiledExecutionGraph.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/compiler/CompiledExecutionGraph.ts) — shared IR
+- [`src/orchestration/builders/WorkflowBuilder.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/WorkflowBuilder.ts) — `workflow()` factory + chain builder
+- [`src/orchestration/ir/types.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) — shared IR

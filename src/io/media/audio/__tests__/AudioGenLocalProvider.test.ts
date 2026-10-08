@@ -49,7 +49,7 @@ describe('AudioGenLocalProvider', () => {
     // Mock the dynamic import of @huggingface/transformers
     vi.spyOn(
       provider as unknown as { _ensurePipeline: () => Promise<unknown> },
-      '_ensurePipeline' as never,
+      '_ensurePipeline',
     ).mockResolvedValue(mockPipeline);
 
     const result = await provider.generateSFX({

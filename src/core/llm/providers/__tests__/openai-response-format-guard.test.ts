@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { toOpenAiResponseFormat } from '../implementations/openai-response-format-guard';
+import {
+  toOpenAiResponseFormat,
+  toOpenAiResponsesTextFormat,
+} from '../implementations/openai-response-format-guard';
 
 /**
  * Regression guard for the multi-provider fallback bug (2026-06-01):
@@ -66,5 +69,35 @@ describe('toOpenAiResponseFormat', () => {
 
   it('returns undefined for undefined input', () => {
     expect(toOpenAiResponseFormat(undefined)).toBeUndefined();
+  });
+});
+
+/**
+ * The /v1/responses form of the same guard: `text.format` takes the
+ * json_schema fields flat on the format object, and anything the chat guard
+ * drops is dropped here too.
+ */
+describe('toOpenAiResponsesTextFormat', () => {
+  it('flattens json_schema, keeps bare json_object and text, and drops what the chat guard drops', () => {
+    const schema = { type: 'object', properties: { verdict: { type: 'string' } } };
+    expect(
+      toOpenAiResponsesTextFormat({
+        type: 'json_schema',
+        json_schema: { name: 'Verdict', strict: true, description: 'The verdict.', schema },
+      }),
+    ).toEqual({ type: 'json_schema', name: 'Verdict', schema, strict: true, description: 'The verdict.' });
+    expect(toOpenAiResponsesTextFormat({ type: 'json_schema', json_schema: { name: 'V', schema } })).toEqual({
+      type: 'json_schema',
+      name: 'V',
+      schema,
+    });
+    expect(toOpenAiResponsesTextFormat({ type: 'json_object', _gemini: { responseSchema: schema } })).toEqual({
+      type: 'json_object',
+    });
+    expect(toOpenAiResponsesTextFormat({ type: 'text' })).toEqual({ type: 'text' });
+    expect(
+      toOpenAiResponsesTextFormat({ _agentosUseToolForStructuredOutput: true, tool: { name: 'V', input_schema: schema } }),
+    ).toBeUndefined();
+    expect(toOpenAiResponsesTextFormat({ type: 'json_schema', json_schema: { name: 'V' } })).toBeUndefined();
   });
 });

@@ -1,5 +1,6 @@
 /**
- * @fileoverview Tests for OpenRouter provider streaming usage propagation.
+ * @fileoverview Tests for OpenRouter provider streaming usage propagation and
+ * the role of the final streamed message.
  *
  * OpenRouter follows OpenAI's streaming convention: usage is omitted unless
  * stream_options.include_usage is set, in which case a trailing usage-only
@@ -18,6 +19,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Readable } from 'node:stream';
 import { OpenRouterProvider } from '../implementations/OpenRouterProvider.js';
+import { reconstructStream } from '../../streaming/StreamingReconstructor.js';
 
 interface MockClient {
   request: ReturnType<typeof vi.fn>;
@@ -199,5 +201,88 @@ describe('OpenRouterProvider streaming usage', () => {
     const usageChunk = chunks.find((c) => c.usage && c.isFinal);
     expect(usageChunk).toBeDefined();
     expect(usageChunk!.usage!.totalTokens).toBe(18);
+  });
+});
+
+describe('OpenRouterProvider streaming final message', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("keeps the role the final chunk's delta names", async () => {
+    // `||` binds tighter than `?:`: the role expression read as
+    // `(delta.role || hasToolCalls) ? 'assistant' : ...` and replaced any
+    // streamed role with 'assistant'.
+    const { provider, client } = await mountProvider();
+    const sseLines = [
+      `data: ${JSON.stringify({
+        id: 'gen-2',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: 'openai/gpt-4o',
+        choices: [{ index: 0, delta: { role: 'tool', content: 'done' }, finish_reason: 'stop' }],
+      })}\n\n`,
+      'data: [DONE]\n\n',
+    ];
+    client.request.mockResolvedValueOnce({ data: makeReadableSse(sseLines) });
+
+    const finals: Array<{ choices: Array<{ message: { role: string } }> }> = [];
+    for await (const chunk of provider.generateCompletionStream(
+      'openai/gpt-4o',
+      [{ role: 'user', content: 'hi' }],
+      {},
+    )) {
+      const c = chunk as { isFinal?: boolean; choices?: Array<{ message: { role: string } }> };
+      if (c.isFinal && c.choices?.length) finals.push(c as { choices: Array<{ message: { role: string } }> });
+    }
+
+    expect(finals).toHaveLength(1);
+    expect(finals[0].choices[0].message.role).toBe('tool');
+  });
+
+  it('keeps the text and tool-argument fragments the finish chunk carries', async () => {
+    const { provider, client } = await mountProvider();
+    const chunk = (delta: Record<string, unknown>, finish: string | null) =>
+      `data: ${JSON.stringify({
+        id: 'gen-3',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: 'openai/gpt-4o',
+        choices: [{ index: 0, delta, finish_reason: finish }],
+      })}\n\n`;
+    const call = (args: string, first = false) => ({
+      tool_calls: [
+        {
+          index: 0,
+          ...(first ? { id: 'call_1', type: 'function' } : {}),
+          function: { ...(first ? { name: 'lookup' } : {}), arguments: args },
+        },
+      ],
+    });
+    client.request.mockResolvedValueOnce({
+      data: makeReadableSse([
+        chunk({ role: 'assistant', content: 'Hello ' }, null),
+        chunk({ content: 'world' }, 'stop'),
+        'data: [DONE]\n\n',
+      ]),
+    });
+    client.request.mockResolvedValueOnce({
+      data: makeReadableSse([
+        chunk({ role: 'assistant', ...call('{"q":', true) }, null),
+        chunk(call('"x"}'), 'tool_calls'),
+        'data: [DONE]\n\n',
+      ]),
+    });
+
+    const text = await reconstructStream(
+      provider.generateCompletionStream('openai/gpt-4o', [{ role: 'user', content: 'hi' }], {}),
+    );
+    const tools = await reconstructStream(
+      provider.generateCompletionStream('openai/gpt-4o', [{ role: 'user', content: 'hi' }], {}),
+    );
+
+    expect(text.fullText).toBe('Hello world');
+    expect(tools.toolCalls).toHaveLength(1);
+    expect(tools.toolCalls[0].arguments).toEqual({ q: 'x' });
   });
 });

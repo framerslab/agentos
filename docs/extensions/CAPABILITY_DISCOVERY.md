@@ -488,7 +488,7 @@ const capabilityContext = engine.renderForPrompt(discoveryResult);
 
 ## Source Files
 
-All source lives in `packages/agentos/src/discovery/`:
+All source lives in `src/cognition/discovery/`:
 
 | File | Export |
 |------|--------|

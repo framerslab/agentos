@@ -39,7 +39,7 @@ Each call to `route()` runs three stages in sequence:
 2. **Retrieve** the right amount of context for that tier — vector search for T1, HyDE for T2, multi-source decomposition for T3, nothing at all for T0.
 3. **Generate** a grounded answer from the retrieved context, attaching `SourceCitation[]` entries that point back at the chunks the answer was drawn from.
 
-If no embedding provider is configured, the router degrades cleanly to keyword search instead of failing. 260 platform-knowledge entries (tools, skills, FAQ, API, troubleshooting) ship with `@framers/agentos` and are merged into your corpus automatically — no extra configuration.
+If no embedding provider is configured, the router degrades cleanly to keyword search instead of failing. The platform-knowledge entries that ship with `@framers/agentos` (68 in the published package: FAQ, API reference and troubleshooting) are merged into your corpus automatically, with no extra configuration.
 
 ## What Is Live Today
 
@@ -82,7 +82,7 @@ mode.
 
 ## Example
 
-Runnable source: [`packages/agentos/examples/query-router.mjs`](https://github.com/framerslab/agentos/blob/master/examples/query-router.mjs)
+Runnable source: [`examples/query-router.mjs`](https://github.com/framerslab/agentos/blob/master/examples/query-router.mjs)
 
 ```ts
 import { QueryRouter } from '@framers/agentos';
@@ -109,7 +109,7 @@ await router.close();
 
 ### Host-Injected Runtime Example
 
-Runnable source: [`packages/agentos/examples/query-router-host-hooks.mjs`](https://github.com/framerslab/agentos/blob/master/examples/query-router-host-hooks.mjs)
+Runnable source: [`examples/query-router-host-hooks.mjs`](https://github.com/framerslab/agentos/blob/master/examples/query-router-host-hooks.mjs)
 
 ```ts
 const router = new QueryRouter({
@@ -130,17 +130,19 @@ console.log(router.getCorpusStats()); // graph/deepResearch/rerank runtime modes
 
 ## Bundled Platform Knowledge
 
-The QueryRouter ships with **260 pre-built knowledge entries** that cover the entire AgentOS platform surface. These entries are auto-loaded at startup and merged into the corpus alongside your project docs — no configuration required.
+The QueryRouter loads a bundled platform-knowledge corpus at startup and merges it into the corpus alongside your project docs, with no configuration required.
 
 ### What's Included
 
-| Category | Count | Examples |
+| Category | Count in the published package | Examples |
 |----------|-------|---------|
-| **Tools** | 110 | All channel adapters, productivity tools, orchestration tools |
-| **Skills** | 82 | Every curated skill from the skills registry |
 | **FAQ** | 38 | "How do I add voice?", "What models are supported?", "Does AgentOS support streaming?" |
 | **API** | 15 | generateText(), streamText(), agent(), agency(), embedText(), generateImage() |
 | **Troubleshooting** | 15 | Missing API keys, model not found, embedding init failures |
+| **Tools** | 0 | One entry per capability-catalog entry of the extensions registry |
+| **Skills** | 0 | One entry per curated skill |
+
+`npm run build:knowledge` adds the tool and skill entries only when `agentos-extensions-registry` and `agentos-skills` sit beside the package; the published package is built without them, so it carries the 68 FAQ, API and troubleshooting entries.
 
 ### How It Works
 
@@ -165,9 +167,9 @@ A key application of platform knowledge is **agentic credential setup**. The cor
 - **General credential setup** (`faq:setup-credentials-general`): The universal pattern for helping users configure any extension — discover what's needed via `discover_capabilities`, find files via `shell_execute`, parse them via `file_read`, and persist credentials.
 - **Extension credentials reference** (`faq:extension-credentials`): Complete listing of what environment variables each extension requires (GITHUB_TOKEN, DISCORD_BOT_TOKEN, ELEVENLABS_API_KEY, etc.).
 - **File discovery** (`faq:find-credential-files`): How to locate downloaded credential files on the user's system (checking ~/Downloads, ~/Desktop, ~/.aws, ~/.ssh).
-- **Connect reference** (`faq:connect-flow`): Reference for the OAuth-based connect flow with all supported services and the `--credentials` flag.
+- **Connect reference** (`faq:wunderland-connect`): Reference for the `wunderland connect <service>` OAuth flow, its supported services and the `--credentials` flag.
 
-When a user asks "help me set up Gmail" or "I downloaded a credentials file", the NL intent classifier routes to the connect flow, and the agent uses these knowledge entries combined with agentic tools (`shell_execute`, `file_read`) to guide the user through credential setup without any hard-coded logic in the CLI itself.
+When a user asks "help me set up Gmail" or "I downloaded a credentials file", retrieval surfaces these entries, and an agent with tools such as `shell_execute` and `file_read` can follow them to guide the user through credential setup.
 
 ### Configuration
 
@@ -193,20 +195,20 @@ This regenerates `knowledge/platform-corpus.json` from the current tool manifest
 ## Config Notes
 
 - `knowledgeCorpus` is required.
-- `init()` throws if `knowledgeCorpus` resolves to zero readable `.md` / `.mdx` sections.
+- `init()` throws when the corpus is empty: no readable `.md` / `.mdx` sections under `knowledgeCorpus` and no platform knowledge (`includePlatformKnowledge: false`, or the bundled file missing).
 - `availableTools` is optional and is only used to help the classifier reason about what the runtime can do.
 - `apiKey` / `baseUrl` configure classifier and generator LLM calls. When omitted, QueryRouter prefers `OPENAI_API_KEY` and falls back to `OPENROUTER_API_KEY` with the OpenRouter compatibility base URL.
 - `embeddingApiKey` / `embeddingBaseUrl` override only the embedding path when vector retrieval should use a different provider or credential. When omitted, embeddings fall back through `apiKey`, then `OPENAI_API_KEY`, then `OPENROUTER_API_KEY`.
 - `githubRepos` optionally enables non-blocking GitHub corpus indexing after `init()`. Newly indexed repo chunks are merged back into the live corpus, keyword fallback, classifier topics, and the vector index when embeddings are active.
-- `deepResearchEnabled` controls whether the tier-3 research branch is attempted; the default core implementation is a local-corpus heuristic, and hosts can still inject a real web-backed implementation.
+- `deepResearchEnabled` controls whether the tier-3 research branch is attempted (by default, on when `SERPER_API_KEY` is set); the default core implementation is a local-corpus heuristic, and hosts can inject a web-backed implementation.
 - `onClassification` and `onRetrieval` are hooks for consumers that want lightweight runtime integration without reading the full event stream.
 - `cacheResults` controls an in-memory cache of completed `route()` results. QueryRouter clears that cache when indexed corpus chunks change and when retrieval-planning dependencies such as [`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts) or the capability-discovery engine are swapped.
 - `verifyCitations` enables post-generation [`CitationVerifier`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/citation/CitationVerifier.ts) runs against the retrieved chunks for a route. When verification runs successfully, the result is attached to `QueryResult.grounding`; if embeddings are unavailable or no chunks were retrieved, verification is skipped gracefully.
 - `router.getCorpusStats()` returns a [`QueryRouterCorpusStats`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/query/types.ts) snapshot with configured path count, loaded chunk/topic/source counts, live bundled platform-knowledge category counts, whether retrieval is running in `vector+keyword-fallback` or `keyword-only` mode, the embedding health field `embeddingStatus`, and the runtime-truth fields `graphRuntimeMode`, `rerankRuntimeMode`, and `deepResearchRuntimeMode`.
 - `embeddingStatus: 'active'` means the vector index initialized successfully, `'disabled-no-key'` means init stayed keyword-only because no embedding credential was available, and `'failed-init'` means embedding bootstrap was attempted but failed and the router fell back to keyword-only mode.
-- `graphRuntimeMode: 'heuristic'` means the built-in same-document / heading-overlap expansion is active; `'active'` is reserved for a future wired graph expansion service or a host-injected hook.
-- `rerankRuntimeMode: 'heuristic'` means the built-in lexical reranker is active; `'active'` is reserved for a future wired reranker service.
-- `deepResearchRuntimeMode: 'heuristic'` means the built-in local-corpus synthesis pass is active; `'active'` is reserved for a host-injected or future provider-backed research runtime.
+- `graphRuntimeMode: 'heuristic'` means the built-in same-document / heading-overlap expansion is active; `'active'` means a host-injected `graphExpand` hook; `'disabled'` means `graphEnabled` is off.
+- `rerankRuntimeMode: 'heuristic'` means the built-in lexical reranker is active; `'active'` means a host-injected `rerank` hook.
+- `deepResearchRuntimeMode: 'heuristic'` means the built-in local-corpus synthesis pass is active; `'active'` means a host-injected `deepResearch` hook; `'disabled'` means `deepResearchEnabled` is off.
 
 ## Result Metadata
 

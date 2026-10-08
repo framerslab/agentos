@@ -206,12 +206,26 @@ export class SqlStorageAdapter implements IStorageAdapter {
     // without an explicit ALTER. Swallow the duplicate-column error
     // because neither SQLite nor Postgres has portable IF NOT EXISTS
     // on ADD COLUMN (Postgres does; SQLite does not until 3.35).
-    for (const col of ['cacheReadTokens', 'cacheCreationTokens']) {
-      try {
-        await this.adapter.exec(`ALTER TABLE messages ADD COLUMN ${col} INTEGER;`);
-      } catch {
-        // Column already exists — expected on every startup after the
-        // first post-migration run. No-op.
+    //
+    // Both columns are read first and the ALTERs run only when that read
+    // fails. On Postgres an ALTER TABLE takes an ACCESS EXCLUSIVE lock even
+    // when the column exists; the lock waits behind every open reader of
+    // the table (a pg_dump reads it for its whole run) and later queries
+    // queue behind it.
+    let hasCacheTokenColumns = false;
+    try {
+      await this.adapter.get('SELECT cacheReadTokens, cacheCreationTokens FROM messages LIMIT 0');
+      hasCacheTokenColumns = true;
+    } catch {
+      // At least one column is missing: add them below.
+    }
+    if (!hasCacheTokenColumns) {
+      for (const col of ['cacheReadTokens', 'cacheCreationTokens']) {
+        try {
+          await this.adapter.exec(`ALTER TABLE messages ADD COLUMN ${col} INTEGER;`);
+        } catch {
+          // The column already exists (the other one was the missing one).
+        }
       }
     }
 

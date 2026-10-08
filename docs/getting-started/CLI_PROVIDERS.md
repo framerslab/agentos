@@ -24,7 +24,7 @@ execa → local CLI binary                   ← user's authenticated CLI (claud
 
 ### Core Subprocess Module
 
-The generalized subprocess bridge lives at `packages/agentos/src/sandbox/subprocess/`:
+The generalized subprocess bridge lives at `src/safety/sandbox/subprocess/`:
 
 - **[`CLISubprocessBridge`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLISubprocessBridge.ts)** — abstract base class (template method pattern). Owns process lifecycle: spawn, stdin pipe, NDJSON line splitting, timeout, abort signal. Subclasses implement `buildArgs()`, `classifyError()`, `parseStreamEvent()`.
 - **[`CLISubprocessError`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/errors.ts)** — generic error with open string codes, `guidance` (user-facing fix instructions), and `recoverable` flag. Works for any binary, not just LLM CLIs.
@@ -34,8 +34,8 @@ The generalized subprocess bridge lives at `packages/agentos/src/sandbox/subproc
 
 | Provider ID | Binary | Auth | Default Model | Status |
 |---|---|---|---|---|
-| `claude-code-cli` | `claude` | Anthropic Max subscription | `claude-sonnet-4-5-20250929` | **Confirmed — officially supported by Anthropic** |
-| `gemini-cli` | `gemini` | Google account login | `gemini-2.5-flash` | **Use at your own risk — see ToS warning below** |
+| `claude-code-cli` | `claude` | Anthropic Max subscription | `claude-sonnet-4-6` | **Confirmed — officially supported by Anthropic** |
+| `gemini-cli` | `gemini` | Google account login | `gemini-3.5-flash` | **Use at your own risk — see ToS warning below** |
 
 ## Terms of Service Compliance
 
@@ -81,7 +81,7 @@ AgentOS includes a complete [`OpenAIOAuthFlow`](https://github.com/framerslab/ag
 - **Tool calling**: `--json-schema` for structured output enforcement
 - **Streaming**: `--output-format stream-json` with `--verbose --include-partial-messages`
 - **Key flags**: `--bare` (skip plugins/hooks), `--max-turns 1` (single completion)
-- **Models**: claude-opus-4, claude-sonnet-4, claude-haiku-4.5
+- **Models**: claude-opus-5-5, claude-fable-5-1, claude-fable-5, claude-sonnet-5-5, claude-sonnet-5, claude-sonnet-4-6 (default), claude-haiku-4-5-20251001
 - **Cost**: $0 per token (subscription)
 - **Auto-detection**: Checks if `claude` is on PATH (after API-key providers, before Ollama)
 
@@ -93,7 +93,7 @@ AgentOS includes a complete [`OpenAIOAuthFlow`](https://github.com/framerslab/ag
 - **Tool calling**: XML prompt-based with `<tool_call>` markers (no `--json-schema` support)
 - **Streaming**: `--output-format stream-json`
 - **Key flags**: `-p` (headless), `-m` (model selection)
-- **Models**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash, gemini-2.0-flash-lite
+- **Models**: gemini-3.5-flash (default), gemini-3.1-pro-preview, gemini-3.5-flash-lite, gemini-2.5-flash-lite. The CLI answers gemini-2.5-flash with gemini-3.5-flash and returns 404 for gemini-2.5-pro.
 - **Cost**: $0 per token (Google account — free tier: 60 req/min, 1000 req/day; higher with AI Pro/Ultra)
 - **Auto-detection**: Checks if `gemini` is on PATH (after `claude-code-cli`, before Ollama)
 

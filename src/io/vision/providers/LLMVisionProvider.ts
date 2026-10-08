@@ -58,7 +58,7 @@ export interface LLMVisionProviderConfig {
   /**
    * Model identifier. When omitted, the provider's default vision model
    * is used.
-   * @example 'gpt-4o', 'claude-sonnet-4-20250514', 'gemini-2.0-flash'
+   * @example 'gpt-4o', 'claude-sonnet-4-6', 'gemini-2.5-flash'
    */
   model?: string;
 
@@ -134,7 +134,7 @@ export class LLMVisionProvider implements IVisionProvider {
    * ```typescript
    * const provider = new LLMVisionProvider({
    *   provider: 'anthropic',
-   *   model: 'claude-sonnet-4-20250514',
+   *   model: 'claude-sonnet-4-6',
    * });
    * ```
    */

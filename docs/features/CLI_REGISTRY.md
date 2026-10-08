@@ -14,7 +14,7 @@ This powers:
 
 ## Registry Categories
 
-The 54 bundled descriptors live in `src/sandbox/subprocess/registry/` as plain JSON files:
+The 54 bundled descriptors live in `src/safety/sandbox/subprocess/registry/` as plain JSON files:
 
 | File | Category | Count | Examples |
 |------|----------|-------|----------|
@@ -109,7 +109,7 @@ interface CLIScanResult extends CLIDescriptor {
 
 ### Option 1: Edit JSON (permanent)
 
-Add a new entry to an existing category file, or create a new `*.json` file in `src/sandbox/subprocess/registry/`:
+Add a new entry to an existing category file, or create a new `*.json` file in `src/safety/sandbox/subprocess/registry/`:
 
 ```json
 [
@@ -320,7 +320,7 @@ registry.register({
 
 Runtime registrations via `registry.register()` or `registry.registerAll()` are **per-process only**. They do not survive process restarts.
 
-**Fix:** For permanent additions, add a JSON file to `src/sandbox/subprocess/registry/` or add entries to an existing category file. The [`CLIRegistry`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLIRegistry.ts) constructor automatically loads all `*.json` files from this directory.
+**Fix:** For permanent additions, add a JSON file to `src/safety/sandbox/subprocess/registry/` or add entries to an existing category file. The [`CLIRegistry`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLIRegistry.ts) constructor automatically loads all `*.json` files from this directory.
 
 ### scan() is slow
 
@@ -335,7 +335,7 @@ The `scan()` method runs `which` + `--version` for every registered descriptor. 
 
 ## Complete CLI Reference
 
-All 54 bundled CLI descriptors, organized by category. Data sourced from `src/sandbox/subprocess/registry/*.json`.
+All 54 bundled CLI descriptors, organized by category. Data sourced from `src/safety/sandbox/subprocess/registry/*.json`.
 
 ### LLM (5)
 

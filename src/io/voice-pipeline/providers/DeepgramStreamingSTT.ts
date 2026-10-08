@@ -78,10 +78,19 @@ export interface DeepgramStreamingSTTConfig {
   baseUrl?: string;
 
   /**
-   * Deepgram model to use.
-   * @default 'nova-2'
+   * Deepgram model to use. `nova-3` is Deepgram's general-purpose model.
+   * @default 'nova-3'
    */
   model?: string;
+
+  /**
+   * Opt every session out of Deepgram's Model Improvement Program by sending
+   * `mip_opt_out=true`. Off by default because Deepgram notes that opting out
+   * has pricing impacts. A single session can opt out with
+   * `providerOptions.mip_opt_out: true`.
+   * @default false
+   */
+  mipOptOut?: boolean;
 
   /**
    * Chain priority. Lower values are tried first.
@@ -146,6 +155,19 @@ interface DGResult {
   };
 }
 
+/** Deepgram's general-purpose speech-to-text model. */
+const DEFAULT_MODEL = 'nova-3';
+
+/** Nova-3 models take `keyterm` in place of the `keywords` parameter. */
+function isNova3Model(model: string): boolean {
+  return model === 'nova-3' || model.startsWith('nova-3-');
+}
+
+/** Drops a trailing `:intensifier` from a `keywords` entry, since `keyterm` takes plain terms. */
+function stripKeywordIntensifier(keyword: string): string {
+  return keyword.replace(/:-?\d+(?:\.\d+)?$/, '');
+}
+
 // ---------------------------------------------------------------------------
 // Session Implementation
 // ---------------------------------------------------------------------------
@@ -188,7 +210,7 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
    */
   async connect(): Promise<void> {
     const baseUrl = this.config.baseUrl ?? 'wss://api.deepgram.com/v1/listen';
-    const model = this.config.model ?? 'nova-2';
+    const model = this.config.model ?? DEFAULT_MODEL;
     const language = this.sessionConfig.language ?? 'en-US';
     const interim = this.sessionConfig.interimResults !== false;
     const punctuate = this.sessionConfig.punctuate !== false;
@@ -213,9 +235,16 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
     if (opts.smart_format) params.set('smart_format', 'true');
     if (opts.diarize) params.set('diarize', 'true');
     if (opts.utterance_end_ms) params.set('utterance_end_ms', String(opts.utterance_end_ms));
+    if (this.config.mipOptOut === true || opts.mip_opt_out === true) {
+      params.set('mip_opt_out', 'true');
+    }
     if (Array.isArray(opts.keywords)) {
+      // Nova-3 does not support `keywords`; it boosts terms through `keyterm`,
+      // which takes plain terms, so the `:intensifier` suffix is dropped there.
+      const useKeyterm = isNova3Model(model);
       for (const kw of opts.keywords) {
-        params.append('keywords', String(kw));
+        if (useKeyterm) params.append('keyterm', stripKeywordIntensifier(String(kw)));
+        else params.append('keywords', String(kw));
       }
     }
 
@@ -415,7 +444,7 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
  * ```typescript
  * const stt = new DeepgramStreamingSTT({
  *   apiKey: process.env.DEEPGRAM_API_KEY!,
- *   model: 'nova-2',
+ *   model: 'nova-3',
  * });
  * const session = await stt.startSession({ language: 'en-US' });
  * session.on('transcript', (event) => console.log(event.text));

@@ -79,6 +79,8 @@ const { text: tenantReply } = await generateText({
 setDefaultProvider(undefined);
 ```
 
+The default's `model` is the text model. `embedText`, `editImage` and `generateImage` use it as well unless it is recognizably a chat model (GPT, Claude, Gemini, Llama and similar families) headed for the provider's own endpoint, in which case they use the provider's default model for the task. `generateImage` without `provider` or `model` tries the default's provider first when that provider makes images, then the image providers whose keys are in the environment. With a custom endpoint (`baseUrl`) or on Ollama, `embedText` uses it too, except on Gemini: there a default model that does not name an embedding model is replaced by `gemini-embedding-2`, so pass `model` to `embedText` to use another one. The default's `apiKey` and `baseUrl` apply to every call that resolves to the same provider, image calls included.
+
 [`setDefaultProvider`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/global-default.ts) is the recommended path for apps that hold their keys somewhere other than environment variables (secrets manager, runtime config service, etc.). It also works inside the [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) class — pass `defaultProvider` in your [`AgentOSConfig`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) and the runtime will install it during `initialize()`.
 
 ### Reordering the auto-detect chain
@@ -413,17 +415,17 @@ Usage: { inputTokens: 312, outputTokens: 487, totalTokens: 799, estimatedCost: 0
 
 | Topic                                             | Guide                                        |
 | ------------------------------------------------- | -------------------------------------------- |
-| Graph pipelines, workflows, missions              | [ORCHESTRATION.md](./ORCHESTRATION.md)       |
-| Deploy agents to 37 channels                      | [CHANNELS.md](./CHANNELS.md)                 |
-| Publish to social platforms                       | [SOCIAL_POSTING.md](./SOCIAL_POSTING.md)     |
-| Audit trails and tamper evidence                  | [PROVENANCE.md](./PROVENANCE.md)             |
-| Episodic, semantic, procedural memory             | [COGNITIVE_MEMORY.md](./COGNITIVE_MEMORY.md) |
-| 8 core cognitive mechanisms (+ optional persona drift analysis) | [COGNITIVE_MEMORY.md#mechanism-implementation-reference](./COGNITIVE_MEMORY.md#mechanism-implementation-reference) |
-| HEXACO personality traits and on/off configuration | [COGNITIVE_MEMORY.md](./COGNITIVE_MEMORY.md#1-hexaco-personality---encoding-weights) |
-| Testing and benchmarking agents                   | [EVALUATION.md](./EVALUATION.md)             |
-| Token-efficient capability discovery              | [DISCOVERY.md](./DISCOVERY.md)               |
-| Image generation across 5 providers               | [IMAGE_GENERATION.md](./IMAGE_GENERATION.md) |
+| Graph pipelines, workflows, missions              | [ORCHESTRATION.md](../orchestration/ORCHESTRATION.md)       |
+| Deploy agents to 37 channels                      | [CHANNELS.md](../features/CHANNELS.md)                 |
+| Publish to social platforms                       | [SOCIAL_POSTING.md](../features/SOCIAL_POSTING.md)     |
+| Audit trails and tamper evidence                  | [PROVENANCE.md](../safety/PROVENANCE.md)             |
+| Episodic, semantic, procedural memory             | [COGNITIVE_MEMORY.md](../memory/COGNITIVE_MEMORY.md) |
+| 8 core cognitive mechanisms (+ optional persona drift analysis) | [COGNITIVE_MEMORY.md#mechanism-implementation-reference](../memory/COGNITIVE_MEMORY.md#mechanism-implementation-reference) |
+| HEXACO personality traits and on/off configuration | [COGNITIVE_MEMORY.md](../memory/COGNITIVE_MEMORY.md#1-hexaco-personality---encoding-weights) |
+| Testing and benchmarking agents                   | [EVALUATION.md](../observability/EVALUATION.md)             |
+| Token-efficient capability discovery              | [DISCOVERY.md](../extensions/DISCOVERY.md)               |
+| Image generation across 5 providers               | [IMAGE_GENERATION.md](../features/IMAGE_GENERATION.md) |
 | Practical cookbook examples                       | [EXAMPLES.md](./EXAMPLES.md)                 |
 | Runtime-configured tools and full [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) setup | [HIGH_LEVEL_API.md](./HIGH_LEVEL_API.md)     |
-| Full API hierarchy                                | [AGENCY_API.md](./AGENCY_API.md)             |
-| Architecture overview                             | [ARCHITECTURE.md](./ARCHITECTURE.md)         |
+| Full API hierarchy                                | [AGENCY_API.md](../orchestration/AGENCY_API.md)             |
+| Architecture overview                             | [ARCHITECTURE.md](../architecture/ARCHITECTURE.md)         |

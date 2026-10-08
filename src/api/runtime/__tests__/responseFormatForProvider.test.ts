@@ -56,6 +56,12 @@ describe('buildResponseFormatForProvider', () => {
     ).toBeUndefined();
   });
 
+  it('anthropic + Sonnet 5.5 -> undefined (prompt-only; the API rejects a forced tool_choice)', () => {
+    expect(
+      buildResponseFormatForProvider(inputs('anthropic', 'claude-sonnet-5-5', plainSchema)),
+    ).toBeUndefined();
+  });
+
   it('anthropic + empty modelId (default-model fallback entry) -> tool marker', () => {
     const rf = buildResponseFormatForProvider(inputs('anthropic', '', plainSchema));
     expect((rf as any)._agentosUseToolForStructuredOutput).toBe(true);

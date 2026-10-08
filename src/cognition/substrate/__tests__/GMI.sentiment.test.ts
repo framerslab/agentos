@@ -618,11 +618,12 @@ describe('GMI Metaprompt Trigger System', () => {
     const gmi = new GMI('test-turn-interval');
     await gmi.initialize(persona, createConfig(neutralUtility));
 
-    // With intervalTurns=1, the metaprompt triggers when counter reaches 1
-    // Turn 1: counter=0, check 0>=1=false, increment to 1
-    // Turn 2: counter=1, check 1>=1=true, trigger
+    // Each user turn increments the counter; the metaprompt fires when the
+    // counter reaches intervalTurns, then the counter resets. Tool
+    // continuations and system turns do not count. With intervalTurns=1 it
+    // fires on every user turn.
 
-    // Process first turn (increments counter to 1)
+    // Process first turn (counter reaches 1, fires)
     const input1: GMITurnInput = {
       interactionId: 'turn-1',
       userId: 'user-1',
@@ -631,7 +632,7 @@ describe('GMI Metaprompt Trigger System', () => {
     };
     for await (const _chunk of gmi.processTurnStream(input1)) { /* consume */ }
 
-    // Process second turn (counter reaches interval, should trigger)
+    // Process second turn (fires again)
     const input2: GMITurnInput = {
       interactionId: 'turn-2',
       userId: 'user-1',
@@ -643,7 +644,7 @@ describe('GMI Metaprompt Trigger System', () => {
     // Should NOT have called analyzeSentiment (no sentimentTracking config)
     expect(neutralUtility.analyzeSentiment).not.toHaveBeenCalled();
 
-    // But should have triggered the turn-interval metaprompt on second turn
+    // But should have triggered the turn-interval metaprompt
     const trace = (gmi as any).reasoningTrace;
     const reflectionEntry = trace.entries.find(
       (e: any) => e.type === 'SELF_REFLECTION_TRIGGERED'

@@ -217,10 +217,10 @@ Existing CharHash-era deployments using `minimize-cost` continue to work (no bre
 
 - [Cognitive Pipeline](./COGNITIVE_PIPELINE.md) - the three-stage classifier dispatch this fits inside
 - [Query Router](./QUERY_ROUTER.md) - Stage 1, the memory-or-not gate
-- [Reader Router](./READ_ROUTER.md) - Stage 3, the reader-tier dispatch
+- [Reader Router](./READ_ROUTER.md#reader-router--reader-model-selection) - Stage 3, the reader-tier dispatch (`selectReader()`)
 - [Ingest Router](./INGEST_ROUTER.md) - input stage sibling
 - [Read Router](./READ_ROUTER.md) - read stage sibling
 - [Adaptive Memory Router](./ADAPTIVE_MEMORY_ROUTER.md) - self-calibrating extension
-- [Cognitive Memory](./COGNITIVE_MEMORY.md) - the storage substrate canonical-hybrid retrieves from
-- [HyDE Retrieval](./HYDE_RETRIEVAL.md) - alternate retrieval strategy MemoryRouter can dispatch to
+- [Cognitive Memory](./memory/COGNITIVE_MEMORY.md) - the storage substrate canonical-hybrid retrieves from
+- [HyDE Retrieval](./memory/HYDE_RETRIEVAL.md) - hypothesis-based retrieval that a backend executor can run; MemoryRouter itself routes only to the three backend ids
 - [agentos-bench](https://github.com/framerslab/agentos-bench) - reproducible run JSONs, full transparency stack

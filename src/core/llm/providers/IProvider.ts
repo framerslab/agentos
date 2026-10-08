@@ -86,6 +86,13 @@ export interface ChatMessage {
       name: string;
       arguments: string;
     };
+    /**
+     * Gemini thought signature for this call. Gemini 3 rejects a replayed
+     * function call without one (HTTP 400), so GeminiProvider captures it from
+     * the response and sends it back on the next turn. Other providers ignore
+     * it.
+     */
+    thoughtSignature?: string;
   }>;
   /**
    * Anthropic extended-thinking blocks emitted on this assistant turn.
@@ -96,6 +103,14 @@ export interface ChatMessage {
    * unchanged).
    */
   thinkingBlocks?: ThinkingBlock[];
+  /**
+   * The model's reasoning summary for this assistant turn, as plain text,
+   * when the provider returns one (Gemini returns thought summaries only with
+   * `customModelParams.thinkingConfig.includeThoughts`). Output only: no
+   * provider sends it back. It is separate from `thinkingBlocks`, which carry
+   * Anthropic's signed blocks for replay.
+   */
+  reasoningText?: string;
 }
 
 // ... (rest of IProvider.ts remains the same as provided by user initially)
@@ -133,15 +148,17 @@ export interface ModelCompletionOptions {
    */
   requestTimeout?: number;
   /**
-   * Anthropic extended-thinking switch. When set on a reasoning-default
-   * Claude model (Opus 4.7/4.8), the provider sends
-   * `thinking: { type: 'adaptive' }` — the only form this family accepts;
-   * the budget number is not sent and max_tokens passes through unchanged.
-   * Providers/models that don't support it ignore the field. Single-shot
-   * calls only — preserving thinking blocks across an agent tool loop is
-   * a separate concern.
+   * Anthropic extended-thinking switch. `{ budgetTokens }` turns thinking on:
+   * on a thinking-capable Claude model the provider sends
+   * `thinking: { type: 'adaptive' }` (the budget number is not sent and
+   * max_tokens passes through unchanged). `false` turns it off with the shape
+   * the model takes (`between_tools` on Sonnet 5.5, `disabled` on Opus 5 and
+   * Sonnet 5, capping effort at `high` where the model requires it); Opus
+   * 5.5, Fable and Mythos always think. Omitted keeps the model's default,
+   * which is thinking on for Opus 5 and later, Sonnet 5 and later, Fable and
+   * Mythos, and off for older models. Other providers ignore the field.
    */
-  thinking?: { budgetTokens: number };
+  thinking?: { budgetTokens: number } | false;
   /**
    * Reasoning-effort control. On effort-capable Claude models (Opus 4.5+,
    * Sonnet 4.6, Fable/Mythos 5) the provider sends `output_config.effort`
@@ -394,6 +411,11 @@ export interface ModelCompletionResponse {
   };
   /** Incremental append‑only text delta for streaming; NOT cumulative. Undefined on non‑streaming final response. */
   responseTextDelta?: string;
+  /**
+   * Incremental append-only reasoning-summary text for streaming (see
+   * `ChatMessage.reasoningText`). Never part of `responseTextDelta`.
+   */
+  reasoningTextDelta?: string;
   /** Array of incremental tool/function call argument deltas building up tool invocation payloads. */
   toolCallsDeltas?: Array<{
     /** Choice index if multiple parallel choices produce tool calls. */
@@ -409,6 +431,8 @@ export interface ModelCompletionResponse {
       /** Partial argument JSON fragment (streamed). Concatenate & then parse when final. */
       arguments_delta?: string;
     };
+    /** Gemini thought signature for this call; see ChatMessage tool_calls. */
+    thoughtSignature?: string;
   }>;
   /** Indicates terminal chunk in a stream. MUST be true on last emission (success or error). */
   isFinal?: boolean;
@@ -470,6 +494,11 @@ export interface ModelInfo {
   outputTokenLimit?: number;
   pricePer1MTokensInput?: number;
   pricePer1MTokensOutput?: number;
+  /**
+   * USD per 1M prompt-cache read tokens. Absent means the provider's standard
+   * ratio applies (Anthropic: 0.1 x {@link pricePer1MTokensInput}).
+   */
+  pricePer1MTokensCacheRead?: number;
   pricePer1MTokensTotal?: number;
   supportsStreaming?: boolean;
   defaultTemperature?: number;

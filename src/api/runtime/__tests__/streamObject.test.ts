@@ -231,3 +231,65 @@ describe('streamObject', () => {
     expect(text).toContain('"Dan"');
   });
 });
+
+describe('streamObject — the schema text carries the Zod size checks (2026-10-03)', () => {
+  beforeEach(() => {
+    hoisted.generateCompletionStream.mockReset();
+  });
+
+  it('puts the size limits in the system prompt (streaming has no provider payload to carry them)', async () => {
+    hoisted.generateCompletionStream.mockImplementationOnce(async function* () {
+      yield textChunk('{"name": "A", "hobbies": ["x"]}', {
+        isFinal: true,
+        usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+      });
+    });
+    const bounded = z.object({
+      name: z.string().max(40),
+      hobbies: z.array(z.string()).min(1).max(3),
+    });
+
+    const result = streamObject({ schema: bounded, prompt: 'Create a profile' });
+    for await (const _partial of result.partialObjectStream) {
+      // drain the stream so the provider call is made and the object resolves
+    }
+    await expect(result.object).resolves.toEqual({ name: 'A', hobbies: ['x'] });
+
+    const messages = hoisted.generateCompletionStream.mock.calls[0][1];
+    const systemMsg = messages.find((m: Record<string, unknown>) => m.role === 'system');
+    const text =
+      typeof systemMsg?.content === 'string' ? systemMsg.content : JSON.stringify(systemMsg?.content);
+    expect(text).toContain('"maxLength": 40');
+    expect(text).toContain('"minItems": 1');
+    expect(text).toContain('"maxItems": 3');
+  });
+});
+
+describe('streamObject — reasoning options reach the provider', () => {
+  beforeEach(() => {
+    hoisted.generateCompletionStream.mockReset();
+  });
+
+  it('forwards effort and thinking through streamText', async () => {
+    hoisted.generateCompletionStream.mockImplementationOnce(async function* () {
+      yield textChunk('{"name": "A", "age": 3, "hobbies": []}', {
+        isFinal: true,
+        usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 },
+      });
+    });
+    const schema = z.object({ name: z.string(), age: z.number(), hobbies: z.array(z.string()) });
+
+    const result = streamObject({ schema, prompt: 'Create a profile', effort: 'low', thinking: false });
+    for await (const _partial of result.partialObjectStream) {
+      // drain the stream so the provider call is made
+    }
+    await expect(result.object).resolves.toEqual({ name: 'A', age: 3, hobbies: [] });
+
+    const providerOptions = hoisted.generateCompletionStream.mock.calls[0][2] as {
+      effort?: string;
+      thinking?: unknown;
+    };
+    expect(providerOptions.effort).toBe('low');
+    expect(providerOptions.thinking).toBe(false);
+  });
+});

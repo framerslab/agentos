@@ -23,10 +23,9 @@ const mockGraph = {
 
 vi.mock('graphology', () => {
   return {
-    default: vi.fn().mockImplementation(() => {
+    default: vi.fn().mockImplementation(function () {
       // Reset order/size on each new Graph instance
-      const g = { ...mockGraph, order: 0, size: 0 };
-      return g;
+      return { ...mockGraph, order: 0, size: 0 };
     }),
   };
 });
@@ -743,6 +742,39 @@ describe('GraphRAGEngine', () => {
       expect(schemaCall).toContain('graphrag_relationships');
       expect(schemaCall).toContain('graphrag_communities');
       expect(schemaCall).toContain('graphrag_ingested_documents');
+    });
+
+    // On Postgres an ALTER TABLE takes an ACCESS EXCLUSIVE lock even when the
+    // column exists; the lock waits behind every open reader of the table and
+    // later queries queue behind it. A table that already has content_hash
+    // must see no ALTER.
+    it('should not alter a table that already has content_hash', async () => {
+      const persistence = createMockPersistenceAdapter();
+
+      engine = new GraphRAGEngine({ persistenceAdapter: persistence });
+      await engine.initialize({ engineId: 'schema-test' });
+
+      const statements = (persistence.exec as any).mock.calls.map((call: unknown[]) => String(call[0]));
+      expect(statements.length).toBeGreaterThan(0);
+      expect(statements.filter((sql: string) => /ALTER\s+TABLE/i.test(sql))).toEqual([]);
+    });
+
+    it('should add content_hash to a table created before the column existed', async () => {
+      const persistence = createMockPersistenceAdapter();
+      persistence.get.mockImplementation(async (sql: string) => {
+        if (sql.includes('SELECT content_hash')) throw new Error('no such column: content_hash');
+        return null;
+      });
+
+      engine = new GraphRAGEngine({ persistenceAdapter: persistence });
+      await engine.initialize({ engineId: 'schema-test' });
+
+      const statements = (persistence.exec as any).mock.calls.map((call: unknown[]) => String(call[0]));
+      expect(
+        statements.some((sql: string) =>
+          /ALTER TABLE \S*ingested_documents ADD COLUMN content_hash TEXT/.test(sql),
+        ),
+      ).toBe(true);
     });
 
     it('should load data from persistence on initialization', async () => {

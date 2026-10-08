@@ -39,6 +39,7 @@ import {
   UICommand, // Assuming UICommand is used internally if GMI constructs them
   // AudioOutputConfig, ImageOutputConfig are part of GMIOutput
 } from './IGMI';
+import type { StepFinishedChunkPayload, ToolResultChunkPayload } from './IGMI';
 import {
   IPersonaDefinition,
   PersonaRagConfigIngestionTrigger, // Ensure this type definition exists and is correctly imported
@@ -47,7 +48,9 @@ import { IWorkingMemory } from './memory/IWorkingMemory';
 import { IPromptEngine, PromptExecutionContext, PromptComponents, PromptEngineResult, ModelTargetInfo } from '../../core/llm/IPromptEngine';
 import { IRetrievalAugmentor, RagRetrievalOptions, RagDocumentInput, RagIngestionOptions, RagMemoryCategory } from '../rag/IRetrievalAugmentor';
 
-import { ChatMessage, ModelCompletionOptions, ThinkingBlock } from '../../core/llm/providers/IProvider';
+import { ChatMessage, ModelCompletionOptions, ModelCompletionResponse, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
+import type { ZodType } from 'zod';
+import type { CompletionAttempt, CompletionOutcome, CompletionResolution, CompletionRoute } from '../../api/runtime/completionGateway.js';
 
 import { AIModelProviderManager } from '../../core/llm/providers/AIModelProviderManager';
 import { IUtilityAI, SummarizationOptions } from '../nlp/ai_utilities/IUtilityAI';
@@ -63,10 +66,48 @@ import { ConversationHistoryManager } from './ConversationHistoryManager';
 import { CognitiveMemoryBridge } from './CognitiveMemoryBridge';
 import { SentimentTracker } from './SentimentTracker';
 import { MetapromptExecutor } from './MetapromptExecutor';
+import { feedbackTraceMessage, type NormalizedUserFeedback } from './userFeedback';
+import { resolveReasoningTraceLimits, type ReasoningTraceLimits } from './reasoningTraceLimits';
 
 const DEFAULT_MAX_CONVERSATION_HISTORY_TURNS = 20;
 const DEFAULT_SELF_REFLECTION_INTERVAL_TURNS = 5;
-const MAX_REASONING_TRACE_ENTRIES = 500; // Limit trace size in memory
+
+/** The completion options a persona's defaults and a turn's `metadata.options` may set (design D4b). */
+const FORWARDED_COMPLETION_OPTION_KEYS = [
+  'temperature', 'maxTokens', 'topP', 'frequencyPenalty', 'presencePenalty', 'thinking', 'effort', 'cache',
+  'promptCacheKey', 'promptCacheRetention', 'serviceTier', 'requestTimeout', 'customModelParams',
+  'stopSequences', 'responseFormat', 'toolChoice',
+] as const;
+
+/** The forwarded completion options `source` sets; unset keys are left out so a later layer can fill them. */
+function pickCompletionOptions(source: Record<string, unknown> | undefined): Partial<ModelCompletionOptions> {
+  const picked: Record<string, unknown> = {};
+  if (!source) return picked;
+  for (const key of FORWARDED_COMPLETION_OPTION_KEYS) {
+    if (source[key] !== undefined) picked[key] = source[key];
+  }
+  return picked as Partial<ModelCompletionOptions>;
+}
+
+/**
+ * The `cacheDiagnostics` a turn's first model step sends, or undefined when the
+ * turn did not opt in. Takes generateText's forms beside the provider's: `true`
+ * opts in with nothing to compare, an object compares against its
+ * `previousMessageId` (nothing when it names none), and `false` stays off.
+ */
+function cacheDiagnosticsSeed(value: unknown): { previousMessageId: string | null } | undefined {
+  if (!value) return undefined;
+  const id = typeof value === 'object' ? (value as { previousMessageId?: unknown }).previousMessageId : undefined;
+  return { previousMessageId: typeof id === 'string' && id.length > 0 ? id : null };
+}
+
+/** Adds one provider usage report to the turn's total. */
+function addUsage(total: CostAggregator, usage: ModelUsage): void {
+  total.promptTokens += usage.promptTokens || 0;
+  total.completionTokens += usage.completionTokens || 0;
+  total.totalTokens = total.promptTokens + total.completionTokens;
+  if (usage.costUSD) total.totalCostUSD = (total.totalCostUSD || 0) + usage.costUSD;
+}
 
 /**
  * @class GMI
@@ -97,7 +138,25 @@ export class GMI implements IGMI {
   private currentUserContext!: UserContext;
   private currentTaskContext!: TaskContext;
   private reasoningTrace: ReasoningTrace;
+  /** Entry cap and message cap of the trace; resolved from the persona and the config at initialize(). */
+  private traceLimits: ReasoningTraceLimits = resolveReasoningTraceLimits();
   private conversationHistoryManager!: ConversationHistoryManager;
+
+  /**
+   * Turn ownership. Each processTurnStream call takes the next number and
+   * owns the lifecycle state until a newer turn starts; a turn that no longer
+   * owns it (a failed turn whose generator is drained after the next turn
+   * began) leaves the state and the trace's turn id to the newer turn.
+   */
+  private turnSequence = 0;
+  private stateOwnerTurn = 0;
+
+  /**
+   * The gateway hop that served the turn's last model step; the next step of
+   * the turn starts there (a turn moves forward through the chain, never back).
+   * Cleared when a user turn starts, so the next turn tries the primary again.
+   */
+  private turnResolution: CompletionResolution | undefined;
 
   // (Self-reflection state is owned by MetapromptExecutor)
 
@@ -138,6 +197,10 @@ export class GMI implements IGMI {
       this.conversationHistoryManager.clear();
     }
 
+    this.traceLimits = resolveReasoningTraceLimits(persona, config);
+    if (this.traceLimits.ignored.length > 0) {
+      this.addTraceEntry(ReasoningEntryType.WARNING, 'Reasoning-trace limit setting ignored or clamped.', { ignored: this.traceLimits.ignored });
+    }
     this.validateInitializationInputs(persona, config);
 
     this.activePersona = persona;
@@ -356,17 +419,76 @@ export class GMI implements IGMI {
   }
 
   /**
+   * Records user feedback on this instance. Adds a reasoning-trace entry
+   * (WARNING for negative feedback, DEBUG otherwise) and, when cognitive memory
+   * is configured, encodes the feedback as an episodic memory of the user. A
+   * correction is also encoded as a semantic memory so later turns can recall
+   * it. Memory failures are traced by the bridge and never thrown.
+   *
+   * @param feedback - Normalized feedback plus the id of the user who sent it.
+   */
+  public async recordUserFeedback(feedback: NormalizedUserFeedback & { userId: string }): Promise<void> {
+    const { userId, polarity, score, text, correctedContent, targetMessageId, tags } = feedback;
+    this.addTraceEntry(
+      polarity === 'negative' ? ReasoningEntryType.WARNING : ReasoningEntryType.DEBUG,
+      feedbackTraceMessage(polarity),
+      { userId, polarity, score, text, correctedContent, targetMessageId, tags },
+    );
+
+    // An empty user id falls back to the bridge's default scope (the current user).
+    const scopeId = typeof userId === 'string' && userId.trim() ? userId.trim() : undefined;
+    const scoreLabel = score !== undefined ? `, score ${score}` : '';
+    await this.memoryBridge?.encode(`User feedback (${polarity}${scoreLabel})${text ? `: ${text}` : ''}`, {
+      type: 'episodic',
+      sourceType: 'user_statement',
+      role: 'user',
+      scopeId,
+      tags: ['user_feedback', `feedback_${polarity}`, ...(tags ?? [])],
+    });
+
+    if (correctedContent) {
+      const target = targetMessageId ? ` for message ${targetMessageId}` : '';
+      await this.memoryBridge?.encode(`User correction${target}: ${correctedContent}`, {
+        type: 'semantic',
+        sourceType: 'user_statement',
+        role: 'user',
+        scopeId,
+        tags: ['user_feedback', 'user_correction'],
+      });
+    }
+  }
+
+  /**
+   * Sets one personality trait on this instance only. The persona definition
+   * is shared by every GMI of that persona (it is the GMIManager registry
+   * object), so the change is made on a copy that replaces this instance's
+   * active persona; other sessions and GMIs created later keep the original.
+   *
+   * @param trait - Trait key, e.g. `openness` or `honesty`.
+   * @param value - New trait value.
+   * @throws {GMIError} When the GMI has not been initialized.
+   */
+  public setPersonalityTrait(trait: string, value: number): void {
+    const persona = this.getPersona();
+    this.activePersona = {
+      ...persona,
+      personalityTraits: { ...(persona.personalityTraits ?? {}), [trait]: value },
+    };
+    this.addTraceEntry(ReasoningEntryType.STATE_CHANGE, `Personality trait '${trait}' set to ${value}.`, { trait, value });
+  }
+
+  /**
    * Adds an entry to the GMI's reasoning trace.
    * @private
    */
   private addTraceEntry(type: ReasoningEntryType, message: string, details?: Record<string, any>, timestamp?: Date): void {
-    if (this.reasoningTrace.entries.length >= MAX_REASONING_TRACE_ENTRIES) {
+    while (this.reasoningTrace.entries.length >= this.traceLimits.maxEntries) {
       this.reasoningTrace.entries.shift();
     }
     const entry: ReasoningTraceEntry = {
       timestamp: timestamp || new Date(),
       type,
-      message: message.substring(0, 1000), // Cap message length
+      message: message.substring(0, this.traceLimits.maxMessageLength),
       details: details ? JSON.parse(JSON.stringify(details)) : {},
     };
     this.reasoningTrace.entries.push(entry);
@@ -406,6 +528,40 @@ export class GMI implements IGMI {
     return organizationId || undefined;
   }
 
+  /**
+   * Error results for the calls of a tool round that produced none: the call
+   * that was running when the round failed and the calls not yet started.
+   * Recording them leaves a history in which every tool call the assistant
+   * message declared has an answer, which the next request needs (providers
+   * reject an unanswered tool call, and a later turn replays this history).
+   *
+   * @param requests - Every call the round's assistant message declared, in order.
+   * @param finishedCount - How many of them already produced a result.
+   * @param inFlight - The call that was running when the round failed, if any.
+   * @param error - Why the round stopped.
+   * @returns One error result per unanswered call.
+   */
+  private resultsForUnfinishedToolCalls(
+    requests: ToolCallRequest[],
+    finishedCount: number,
+    inFlight: ToolCallRequest | undefined,
+    error: unknown,
+  ): ToolCallResult[] {
+    const reason = error instanceof Error ? error.message : String(error);
+    return requests.slice(finishedCount).map((request) => ({
+      toolCallId: request.id,
+      toolName: request.name,
+      output: undefined,
+      isError: true,
+      errorDetails: {
+        message:
+          request === inFlight
+            ? `Tool '${request.name}' failed: ${reason}`
+            : `Tool '${request.name}' was not run because the tool round stopped: ${reason}`,
+      },
+    }));
+  }
+
   private buildToolSessionData(turnInput: GMITurnInput): Record<string, any> | undefined {
     const sessionId = typeof turnInput.sessionId === 'string' ? turnInput.sessionId.trim() : '';
     const conversationId = this.getConversationIdForTurn(turnInput);
@@ -426,17 +582,17 @@ export class GMI implements IGMI {
   }
 
   /**
-   * Ensures the GMI is initialized and in a READY state.
+   * Ensures the GMI is initialized and idle: READY, or ERRORED after a failed
+   * turn. ERRORED only records that the last turn failed; the instance still
+   * works, so it does not block the next turn or the memory callbacks.
    * @private
    */
   private ensureReady(additionallyAllowedStates: GMIPrimeState[] = []): void {
     if (!this.isInitialized) {
         throw new GMIError(`GMI (ID: ${this.gmiId}) is not initialized.`, GMIErrorCode.NOT_INITIALIZED);
     }
-    if (
-      this.state !== GMIPrimeState.READY &&
-      !additionallyAllowedStates.includes(this.state)
-    ) {
+    const isIdle = this.state === GMIPrimeState.READY || this.state === GMIPrimeState.ERRORED;
+    if (!isIdle && !additionallyAllowedStates.includes(this.state)) {
 
       throw new GMIError(
         `GMI (ID: ${this.gmiId}) is not in READY state. Current state: ${this.state}.`,
@@ -466,6 +622,22 @@ export class GMI implements IGMI {
 
   public hydrateConversationHistory(conversationHistory: ConversationMessage[]): void {
     this.conversationHistoryManager.hydrate(conversationHistory);
+  }
+
+  /**
+   * Makes `messages` the whole conversation history. An empty array is
+   * authoritative: it empties the history (unlike
+   * `metadata.conversationHistoryForPrompt`, which a turn ignores when empty).
+   * The sentiment tracker and the metaprompts read the same history.
+   */
+  public replaceHistory(messages: ConversationMessage[]): void {
+    this.conversationHistoryManager.clear();
+    if (messages.length > 0) this.conversationHistoryManager.hydrate(messages);
+  }
+
+  /** Empties the conversation history. */
+  public clearHistory(): void {
+    this.conversationHistoryManager.clear();
   }
 
   public hydrateTurnContext(context: {
@@ -509,6 +681,69 @@ export class GMI implements IGMI {
   }
 
   /**
+   * Assembles the conversation history and user input for one model call of
+   * a turn.
+   *
+   * The history is the conversation before this turn, then this turn's own
+   * messages. The conversation before the turn is the host's durable history
+   * (`metadata.conversationHistoryForPrompt`) when the host passed a non-empty
+   * one, which ends before the current user message; otherwise it is this
+   * GMI's history as the turn found it, without the user message the turn
+   * recorded. The turn's own messages are that user message and the assistant
+   * replies and tool results of earlier calls in the turn, so a tool round's
+   * calls and results reach the next call on either history.
+   *
+   * On a turn's first call, plain text input travels as `userInput`, which the
+   * chat template places last and attaches retrieved context to; the durable
+   * path has always sent it that way. Structured (multimodal) input stays a
+   * history message, so its parts reach the provider intact and only once.
+   *
+   * @param turn - Where the turn's messages come from.
+   * @param turn.durableHistory - The host's history before this turn, or
+   *   `null` to use this GMI's own history.
+   * @param turn.historyAtTurnStart - This GMI's history once the turn input
+   *   was recorded.
+   * @param turn.currentUserMessage - The user message the turn input added,
+   *   when the turn is user-initiated.
+   * @param turn.turnMessages - Assistant replies and tool results the turn has
+   *   added so far.
+   * @returns The `conversationHistory` and `userInput` prompt components,
+   *   and how many history messages belong to this turn (token budgeting
+   *   leaves those whole).
+   */
+  private buildPromptConversation(turn: {
+    durableHistory: ConversationMessage[] | null;
+    historyAtTurnStart: readonly ChatMessage[];
+    currentUserMessage: ChatMessage | undefined;
+    turnMessages: readonly ChatMessage[];
+  }): { conversationHistory: ConversationMessage[]; userInput: string | null; currentTurnMessageCount: number } {
+    const { durableHistory, historyAtTurnStart, currentUserMessage, turnMessages } = turn;
+    const toConversationMessage = (message: ChatMessage): ConversationMessage =>
+      this.conversationHistoryManager.convertToConversationMessage(message);
+
+    const historyBeforeTurn =
+      durableHistory ??
+      historyAtTurnStart
+        .filter((message) => message !== currentUserMessage)
+        .map(toConversationMessage);
+    const userContent = currentUserMessage?.content;
+    const userText =
+      turnMessages.length === 0 && typeof userContent === 'string' && userContent !== ''
+        ? userContent
+        : null;
+    const turnHistory: ChatMessage[] = [
+      ...(currentUserMessage && userText === null ? [currentUserMessage] : []),
+      ...turnMessages,
+    ];
+
+    return {
+      conversationHistory: [...historyBeforeTurn, ...turnHistory.map(toConversationMessage)],
+      userInput: userText,
+      currentTurnMessageCount: turnHistory.length,
+    };
+  }
+
+  /**
    * Determines if RAG retrieval should be triggered based on the current query and persona configuration.
    * @private
    * @param {string} query - The current user query.
@@ -538,19 +773,19 @@ export class GMI implements IGMI {
   }
 
   /**
-   * Determines the prompt format type based on model provider.
-   * @param modelDetails - Model metadata from the provider manager.
-   * @param providerId - The provider identifier.
-   * @returns The prompt format type string.
+   * Returns the PromptEngine template GMI builds its prompts with.
+   *
+   * GMI hands the constructed prompt to `IProvider.generateCompletionStream`,
+   * whose input is an OpenAI-style `ChatMessage[]` for every provider; each
+   * provider converts that array to its own wire format (Anthropic messages
+   * with a separate system field, Gemini contents with a systemInstruction).
+   * A provider-specific template would hand the provider another shape; the
+   * `anthropic_messages` template, for one, returns an object with the
+   * system prompt split out, which AnthropicProvider cannot iterate.
+   *
+   * @returns Always `'openai_chat'`.
    */
-  private determinePromptFormat(
-    modelDetails: { providerId?: string } | null | undefined,
-    providerId?: string,
-  ): string {
-    const pid = (modelDetails?.providerId || providerId || '').toLowerCase();
-    if (pid.includes('anthropic')) return 'anthropic_messages';
-    if (pid.includes('google') || pid.includes('gemini')) return 'google_gemini';
-    if (pid.includes('cohere')) return 'cohere_chat';
+  private determinePromptFormat(): 'openai_chat' {
     return 'openai_chat';
   }
 
@@ -570,6 +805,26 @@ export class GMI implements IGMI {
     return 'openai_functions';
   }
 
+  /**
+   * The model target of a turn without a completion gateway: the runtime
+   * path's lookup through the provider manager, with the 8192-token window
+   * and no capabilities when the manager knows nothing about the model.
+   */
+  private async legacyModelTargetInfo(modelId: string, providerId: string | undefined): Promise<ModelTargetInfo> {
+    const modelDetails = await this.llmProviderManager.getModelInfo(modelId, providerId);
+    return {
+      modelId,
+      providerId: modelDetails?.providerId || providerId || this.llmProviderManager.getProviderForModel(modelId)?.providerId || 'unknown',
+      maxContextTokens: modelDetails?.contextWindowSize || 8192,
+      capabilities: modelDetails?.capabilities || [],
+      promptFormatType: this.determinePromptFormat(),
+      toolSupport: {
+        supported: modelDetails?.capabilities.includes('tool_use') || false,
+        format: this.determineToolFormat(modelDetails, providerId),
+      },
+    };
+  }
+
   /** @inheritdoc */
 
   public async *processTurnStream(turnInput: GMITurnInput): AsyncGenerator<GMIOutputChunk, GMIOutput, undefined> {
@@ -578,7 +833,17 @@ export class GMI implements IGMI {
         ? [GMIPrimeState.PROCESSING, GMIPrimeState.AWAITING_TOOL_RESULT]
         : [];
     this.ensureReady(continuationAllowedStates);
+    if (this.state === GMIPrimeState.ERRORED) {
+      this.addTraceEntry(ReasoningEntryType.WARNING, 'Previous turn failed; starting a new turn.');
+    }
     this.state = GMIPrimeState.PROCESSING;
+    const turnNumber = ++this.turnSequence;
+    // A user turn starts at the primary hop; a tool continuation stays on the
+    // hop that served the step it continues.
+    if (turnInput.metadata?.isToolContinuation !== true) this.turnResolution = undefined;
+    this.stateOwnerTurn = turnNumber;
+    // False once a newer turn has started; lifecycle writes below check it.
+    const ownsState = (): boolean => this.stateOwnerTurn === turnNumber;
     const turnId = turnInput.interactionId || `turn-${uuidv4()}`;
     // Store turnId on reasoningTrace for current turn
     if (this.reasoningTrace) {
@@ -627,7 +892,26 @@ export class GMI implements IGMI {
       const maxHistoryMessages = this.activePersona.conversationContextConfig?.maxMessages ||
                                this.activePersona.memoryConfig?.conversationContext?.maxMessages ||
                                DEFAULT_MAX_CONVERSATION_HISTORY_TURNS;
+      const messagesBeforeInput = new Set<ChatMessage>(this.conversationHistoryManager.history);
       this.conversationHistoryManager.update(turnInput, maxHistoryMessages);
+      // The turn's prompt sources: this GMI's history once the input is
+      // recorded, the user message the input added (user-initiated turns
+      // only), the host's durable history when it passed one, and the
+      // assistant replies and tool results the loop below adds.
+      const historyAtTurnStart = [...this.conversationHistoryManager.history];
+      const currentUserMessage = historyAtTurnStart.find(
+        (message) => message.role === 'user' && !messagesBeforeInput.has(message),
+      );
+      const currentTurnText = currentUserMessage?.content
+        ? (typeof currentUserMessage.content === 'string'
+            ? currentUserMessage.content
+            : JSON.stringify(currentUserMessage.content))
+        : '';
+      const durableHistoryForPrompt =
+        Array.isArray(turnInput.metadata?.conversationHistoryForPrompt) && turnInput.metadata?.conversationHistoryForPrompt.length > 0
+          ? (turnInput.metadata?.conversationHistoryForPrompt as ConversationMessage[])
+          : null;
+      const turnMessages: ChatMessage[] = [];
 
       // Analyze sentiment of user input only when sentiment tracking is enabled
       if (this.activePersona.sentimentTracking?.enabled) {
@@ -669,6 +953,15 @@ export class GMI implements IGMI {
       // -------------------------------------------------------------------
       let safetyBreak = 0;
       const maxToolLoopIterations = this.config.maxToolLoopIterations ?? 5;
+      // Prompt-cache diagnostics run through the turn's steps as they run through
+      // generateText's: the first step compares against the message the turn (or
+      // the persona) names, each later step against the previous step's response.
+      const requestedCacheDiagnostics = (turnInput.metadata?.options as Record<string, unknown> | undefined)?.cacheDiagnostics;
+      let stepCacheDiagnostics = cacheDiagnosticsSeed(
+        requestedCacheDiagnostics !== undefined
+          ? requestedCacheDiagnostics
+          : (this.activePersona.defaultModelCompletionOptions as Record<string, unknown> | undefined)?.cacheDiagnostics,
+      );
       let lastRagSources: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[] | undefined;
       main_processing_loop: while (safetyBreak < maxToolLoopIterations) {
         safetyBreak++;
@@ -679,16 +972,11 @@ export class GMI implements IGMI {
             : "";
         let assembledMemoryContext: AssembledMemoryContext | null = null;
 
-        const lastMessage = this.conversationHistoryManager.history.length > 0 ? this.conversationHistoryManager.history[this.conversationHistoryManager.history.length - 1] : null;
-        const isUserInitiatedTurn = lastMessage?.role === 'user';
-        const currentTurnText =
-          isUserInitiatedTurn && lastMessage?.content
-            ? (typeof lastMessage.content === 'string'
-                ? lastMessage.content
-                : JSON.stringify(lastMessage.content))
-            : '';
+        // Retrieval and memory assembly run for a user turn's first model
+        // call only; later calls continue from tool results.
+        const isUserInitiatedTurn = currentUserMessage !== undefined && turnMessages.length === 0;
 
-        if (this.retrievalAugmentor && this.activePersona.memoryConfig?.ragConfig?.enabled && isUserInitiatedTurn && lastMessage?.content) {
+        if (this.retrievalAugmentor && this.activePersona.memoryConfig?.ragConfig?.enabled && isUserInitiatedTurn && currentTurnText) {
           const currentQueryForRag = currentTurnText;
           if (this.shouldTriggerRAGRetrieval(currentQueryForRag)) {
             this.addTraceEntry(ReasoningEntryType.RAG_QUERY_START, "RAG retrieval triggered.", { queryPreview: currentQueryForRag.substring(0, 100) });
@@ -725,7 +1013,12 @@ export class GMI implements IGMI {
         }
 
         if (isUserInitiatedTurn && currentTurnText) {
-          assembledMemoryContext = await this.memoryBridge?.assembleContext(currentTurnText) ?? null;
+          // Recall is limited to this turn's user, session and conversation scopes.
+          assembledMemoryContext = await this.memoryBridge?.assembleContext(currentTurnText, {
+            sessionId: turnInput.sessionId,
+            conversationId: this.getConversationIdForTurn(turnInput),
+            organizationId: this.getOrganizationIdForTurn(turnInput),
+          }) ?? null;
         }
 
         const promptExecContext = this.buildPromptExecutionContext();
@@ -777,15 +1070,18 @@ export class GMI implements IGMI {
           });
         }
 
-        const durableHistoryForPrompt =
-          Array.isArray(turnInput.metadata?.conversationHistoryForPrompt) && turnInput.metadata?.conversationHistoryForPrompt.length > 0
-            ? (turnInput.metadata?.conversationHistoryForPrompt as ConversationMessage[])
-            : null;
+        const promptConversation = this.buildPromptConversation({
+          durableHistory: durableHistoryForPrompt,
+          historyAtTurnStart,
+          currentUserMessage,
+          turnMessages,
+        });
 
         const promptComponents: PromptComponents = {
           systemPrompts,
-          conversationHistory: durableHistoryForPrompt ?? this.conversationHistoryManager.buildForPrompt(),
-          userInput: isUserInitiatedTurn ? currentTurnText : null,
+          conversationHistory: promptConversation.conversationHistory,
+          currentTurnMessageCount: promptConversation.currentTurnMessageCount,
+          userInput: promptConversation.userInput,
           retrievedContext: [
             assembledMemoryContext?.contextText,
             augmentedContextFromRAG,
@@ -795,37 +1091,13 @@ export class GMI implements IGMI {
           // tools: this.activePersona.embeddedTools, // If ITool[] and PromptComponents.tools takes ITool[]
         };
 
+        const gateway = this.config.completionGateway;
         const preferredModelIdFromInput = turnInput.metadata?.options?.preferredModelId as string | undefined;
         const modelIdToUse = preferredModelIdFromInput || this.activePersona.defaultModelId || this.config.defaultLlmModelId;
         const providerIdForModel = this.activePersona.defaultProviderId || this.config.defaultLlmProviderId;
 
         if (!modelIdToUse) {
             throw new GMIError("Could not determine modelId for LLM call.", GMIErrorCode.CONFIGURATION_ERROR, { turnId });
-        }
-
-        const modelDetails = await this.llmProviderManager.getModelInfo(modelIdToUse, providerIdForModel);
-        const modelTargetInfo: ModelTargetInfo = {
-            modelId: modelIdToUse,
-            providerId: modelDetails?.providerId || providerIdForModel || this.llmProviderManager.getProviderForModel(modelIdToUse)?.providerId || 'unknown',
-            maxContextTokens: modelDetails?.contextWindowSize || 8192, // Default fallback
-            capabilities: modelDetails?.capabilities || [],
-            promptFormatType: this.determinePromptFormat(modelDetails, providerIdForModel),
-            toolSupport: {
-              supported: modelDetails?.capabilities.includes('tool_use') || false,
-              format: this.determineToolFormat(modelDetails, providerIdForModel),
-            },
-        };
-
-        const promptEngineResult: PromptEngineResult = await this.promptEngine.constructPrompt(
-          promptComponents, modelTargetInfo, promptExecContext
-        );
-
-        promptEngineResult.issues?.forEach(issue => this.addTraceEntry(ReasoningEntryType.WARNING, `Prompt Engine Issue: ${issue.message}`, issue as any));
-        this.addTraceEntry(ReasoningEntryType.PROMPT_CONSTRUCTION_COMPLETE, `Prompt constructed for model ${modelTargetInfo.modelId}.`);
-
-        const provider = this.llmProviderManager.getProvider(modelTargetInfo.providerId);
-        if (!provider) {
-            throw new GMIError(`LLM Provider '${modelTargetInfo.providerId}' not found or not initialized.`, GMIErrorCode.LLM_PROVIDER_UNAVAILABLE);
         }
 
         const plannedToolFailureMode =
@@ -860,134 +1132,366 @@ export class GMI implements IGMI {
             toolsForLLM = discoveredTools;
           }
         }
-        
+
+        // Every completion option the persona and the turn set (D4b); temperature and
+        // the output budget keep their defaults; tools, user and streaming are the GMI's.
+        const turnOptions = (turnInput.metadata?.options ?? {}) as Record<string, unknown>;
+        const personaOptions = (this.activePersona.defaultModelCompletionOptions ?? {}) as Record<string, unknown>;
         const llmOptions: ModelCompletionOptions = {
-          temperature: (turnInput.metadata?.options?.temperature as number) ?? this.activePersona.defaultModelCompletionOptions?.temperature ?? 0.7,
-          maxTokens: (turnInput.metadata?.options?.maxTokens as number) ?? this.activePersona.defaultModelCompletionOptions?.maxTokens ?? 2048,
+          ...pickCompletionOptions(personaOptions),
+          ...pickCompletionOptions(turnOptions),
+          ...(stepCacheDiagnostics ? { cacheDiagnostics: { ...stepCacheDiagnostics } } : {}),
+          temperature: (turnOptions.temperature as number | undefined) ?? (personaOptions.temperature as number | undefined) ?? 0.7,
+          maxTokens: (turnOptions.maxTokens as number | undefined) ?? (personaOptions.maxTokens as number | undefined) ?? 2048,
           tools: toolsForLLM.length > 0 ? toolsForLLM.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema }})) : undefined,
-          toolChoice: turnInput.metadata?.options?.toolChoice || (toolsForLLM.length > 0 ? "auto" : undefined),
+          toolChoice: (turnOptions.toolChoice as ModelCompletionOptions['toolChoice']) ?? (personaOptions.toolChoice as ModelCompletionOptions['toolChoice']) ?? (toolsForLLM.length > 0 ? "auto" : undefined),
           userId: this.currentUserContext.userId,
-          stream: true, // For generateCompletionStream
-          responseFormat: turnInput.metadata?.options?.responseFormat,
+          stream: true,
         };
+        // A schema travels to the gateway, which lowers it per hop (D9); it is not a provider option.
+        const responseSchema = turnOptions.responseSchema as ZodType | undefined;
+        const schemaName = turnOptions.schemaName as string | undefined;
 
-        this.addTraceEntry(ReasoningEntryType.LLM_CALL_START, `Streaming from ${modelTargetInfo.modelId}. Tools: ${toolsForLLM.length}.`);
-
-        let currentIterationTextResponse = "";
-        let currentIterationToolCallRequests: ToolCallRequest[] = [];
-        // Extended-thinking blocks emitted this iteration (Opus 4.7/4.8 with
-        // thinking enabled). Captured from the final chunk + stored on the
-        // assistant turn so the next tool turn replays them verbatim, which
-        // Anthropic requires. Empty for every non-thinking turn, so the stored
-        // turn is unchanged on the normal path.
-        let currentIterationThinkingBlocks: ThinkingBlock[] = [];
-
-        let textDeltaEmitted = false;
-        for await (const chunk of provider.generateCompletionStream(modelTargetInfo.modelId, promptEngineResult.prompt as ChatMessage[], llmOptions)) {
-          if (chunk.error) {
-
-            throw new GMIError(`LLM stream error: ${chunk.error.message}`, GMIErrorCode.LLM_PROVIDER_ERROR, chunk.error.details);
-          }
-
-          if (chunk.responseTextDelta) {
-            currentIterationTextResponse += chunk.responseTextDelta;
-            aggregatedResponseText += chunk.responseTextDelta; // Aggregate for final output
-            yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TEXT_DELTA, chunk.responseTextDelta, { usage: chunk.usage });
-            textDeltaEmitted = true;
-          }
-
-          // Handle fully formed tool_calls if present in the chunk's message
-          const choice = chunk.choices?.[0];
-          // Capture extended-thinking blocks from the final chunk so they ride
-          // the assistant turn into history (replayed verbatim next tool turn).
-          if (choice?.message?.thinkingBlocks?.length) {
-            currentIterationThinkingBlocks = choice.message.thinkingBlocks;
-          }
-          if (choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
-            currentIterationToolCallRequests = choice.message.tool_calls.map((tc: any) => ({ // tc is from IProvider.ChatMessage.tool_calls
-                id: tc.id || `toolcall-${uuidv4()}`, // Ensure ID
-                name: tc.function.name,
-                arguments: typeof tc.function.arguments === 'string'
-                    ? JSON.parse(tc.function.arguments)
-                    : tc.function.arguments,
-            }));
-            aggregatedToolCalls.push(...currentIterationToolCallRequests); // Aggregate for final output
-            yield this.createOutputChunk(
-              turnInput.interactionId,
-              GMIOutputChunkType.TOOL_CALL_REQUEST,
-              [...currentIterationToolCallRequests],
-              {
-                metadata: {
-                  executionMode: 'internal',
-                  requiresExternalToolResult: false,
-                },
+        // The gateway's route: the model asked for, the user's text as the router's
+        // task hint, the tools, and the call options each fallback hop derives its
+        // overrides from. Every hop that could not start is traced.
+        let lastHopError: Error | undefined;
+        const userText = this.stringifyTurnContent(turnInput.content) ?? '';
+        const route: CompletionRoute | undefined = gateway
+          ? {
+              modelId: modelIdToUse,
+              providerId: providerIdForModel,
+              messages: userText ? [{ role: 'user', content: userText }] : [],
+              tools: llmOptions.tools,
+              callOptions: { maxTokens: llmOptions.maxTokens, effort: llmOptions.effort, cache: llmOptions.cache },
+              onFallback: ({ from, to, hop, error }) => this.addTraceEntry(ReasoningEntryType.WARNING, `Model fallback from '${from}' to '${to}' (hop ${hop}): ${error.message}`),
+              onHopFailure: ({ providerId, hop, error }) => {
+                lastHopError = error;
+                this.addTraceEntry(ReasoningEntryType.WARNING, `Provider '${providerId}' (hop ${hop}) could not start: ${error.message}`);
               },
-            );
-            this.addTraceEntry(ReasoningEntryType.TOOL_CALL_REQUESTED, `LLM requested tool(s).`, { requests: currentIterationToolCallRequests });
-          }
-          
-          if (chunk.isFinal && choice?.finishReason) {
-            this.addTraceEntry(ReasoningEntryType.LLM_CALL_COMPLETE, `LLM stream part finished. Reason: ${choice.finishReason}`, { usage: chunk.usage });
-            if (chunk.usage) {
-              yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.USAGE_UPDATE, chunk.usage);
-              // Aggregate usage
-              aggregatedUsage.promptTokens += chunk.usage.promptTokens || 0;
-              aggregatedUsage.completionTokens += chunk.usage.completionTokens || 0;
-              aggregatedUsage.totalTokens = aggregatedUsage.promptTokens + aggregatedUsage.completionTokens;
-              if (chunk.usage.costUSD) aggregatedUsage.totalCostUSD = (aggregatedUsage.totalCostUSD || 0) + chunk.usage.costUSD;
             }
-          }
-        } // End LLM stream
+          : undefined;
 
-        // Ensure at least one TEXT_DELTA is emitted for this turn if text was produced
-        if (!textDeltaEmitted && aggregatedResponseText) {
-          yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TEXT_DELTA, aggregatedResponseText);
+        // The hop that serves this step: the one that served the turn's last
+        // step, else the route's first hop that can start. Resolved before the
+        // prompt is built, so the prompt is budgeted for the serving model (D1).
+        let resolution: CompletionResolution | null = null;
+        if (gateway && route) {
+          resolution = this.turnResolution ?? (await gateway.resolve(route));
+          if (!resolution) {
+            throw new GMIError(
+              `No model provider could serve the turn${lastHopError ? `: ${lastHopError.message}` : '.'}`,
+              GMIErrorCode.LLM_PROVIDER_UNAVAILABLE,
+              { turnId },
+            );
+          }
         }
 
-        this.conversationHistoryManager.push({
+        // What the serving attempt produced; read after the hop loop.
+        let currentIterationTextResponse = "";
+        let currentIterationToolCallRequests: ToolCallRequest[] = [];
+        // Extended-thinking blocks emitted this step (Anthropic with thinking
+        // enabled). Captured from the final chunk and stored on the assistant
+        // turn so the next tool turn replays them verbatim, which Anthropic
+        // requires. Empty for every non-thinking step.
+        let currentIterationThinkingBlocks: ThinkingBlock[] = [];
+        let stepUsage: ModelUsage | undefined;
+        let stepFinishReason: string | null = null;
+        let stepFinalChunk: ModelCompletionResponse | undefined;
+        let stepStructuredOutput: unknown;
+        let modelTargetInfo!: ModelTargetInfo;
+
+        // One attempt per hop. A failure before any output moves to the next
+        // hop and rebuilds the prompt for that hop's model (D3); after output
+        // there is no fallback for the step. Without a gateway the loop runs once.
+        hopLoop: for (;;) {
+          if (resolution) {
+            (this.llmProviderManager as unknown as { setResolution?: (r: CompletionResolution) => void }).setResolution?.(resolution);
+          }
+          modelTargetInfo = resolution
+            ? {
+                modelId: resolution.modelId,
+                providerId: resolution.providerId,
+                maxContextTokens: resolution.maxContextTokens,
+                capabilities: resolution.capabilities,
+                promptFormatType: this.determinePromptFormat(),
+                toolSupport: { supported: resolution.capabilities.includes('tool_use'), format: resolution.toolFormat },
+              }
+            : await this.legacyModelTargetInfo(modelIdToUse, providerIdForModel);
+
+          const promptEngineResult: PromptEngineResult = await this.promptEngine.constructPrompt(
+            promptComponents, modelTargetInfo, promptExecContext
+          );
+
+          promptEngineResult.issues?.forEach(issue => this.addTraceEntry(ReasoningEntryType.WARNING, `Prompt Engine Issue: ${issue.message}`, issue as any));
+          // A failed template leaves the prompt empty, and every provider takes
+          // a non-empty ChatMessage[]; fail the turn rather than send nothing.
+          const promptMessages = promptEngineResult.prompt;
+          if (!Array.isArray(promptMessages) || promptMessages.length === 0) {
+            throw new GMIError(
+              `Prompt construction produced no chat messages for model '${modelTargetInfo.modelId}' (template '${promptEngineResult.metadata?.templateUsed ?? 'unknown'}').`,
+              GMIErrorCode.GMI_PROCESSING_ERROR,
+              {
+                turnId,
+                templateUsed: promptEngineResult.metadata?.templateUsed,
+                issues: promptEngineResult.issues?.filter((issue) => issue.type === 'error'),
+              },
+            );
+          }
+          this.addTraceEntry(ReasoningEntryType.PROMPT_CONSTRUCTION_COMPLETE, `Prompt constructed for model ${modelTargetInfo.modelId}.`);
+
+          // The host's hook sees each attempt's prompt, a fallback hop's rebuilt one
+          // included, and may replace it for that attempt; the history is untouched.
+          let sendMessages: ChatMessage[] = promptMessages;
+          if (this.config.beforeModelCall) {
+            try {
+              const replaced = await this.config.beforeModelCall({
+                turnId,
+                stepIndex: safetyBreak - 1,
+                hop: resolution?.hop ?? 0,
+                providerId: modelTargetInfo.providerId,
+                modelId: modelTargetInfo.modelId,
+                messages: [...promptMessages],
+              });
+              if (Array.isArray(replaced)) {
+                if (replaced.length > 0) {
+                  sendMessages = replaced;
+                } else {
+                  this.addTraceEntry(ReasoningEntryType.WARNING, 'beforeModelCall returned no messages; the built prompt is sent.');
+                }
+              }
+            } catch (hookError) {
+              this.addTraceEntry(ReasoningEntryType.WARNING, `beforeModelCall hook failed: ${hookError instanceof Error ? hookError.message : String(hookError)}`);
+            }
+          }
+
+          let attempt: AsyncIterable<ModelCompletionResponse>;
+          let attemptOutcome: Promise<CompletionOutcome> | undefined;
+          if (gateway && resolution) {
+            const gatewayAttempt: CompletionAttempt = gateway.stream(resolution, sendMessages, llmOptions, responseSchema, schemaName);
+            attempt = gatewayAttempt;
+            attemptOutcome = gatewayAttempt.outcome;
+          } else {
+            const provider = this.llmProviderManager.getProvider(modelTargetInfo.providerId);
+            if (!provider) {
+                throw new GMIError(`LLM Provider '${modelTargetInfo.providerId}' not found or not initialized.`, GMIErrorCode.LLM_PROVIDER_UNAVAILABLE);
+            }
+            attempt = provider.generateCompletionStream(modelTargetInfo.modelId, sendMessages, llmOptions);
+          }
+          this.addTraceEntry(ReasoningEntryType.LLM_CALL_START, `Streaming from ${modelTargetInfo.modelId}${resolution ? ` (hop ${resolution.hop})` : ''}. Tools: ${toolsForLLM.length}.`);
+
+          let textDeltaEmitted = false;
+          for await (const chunk of attempt) {
+            if (chunk.error) {
+              throw new GMIError(`LLM stream error: ${chunk.error.message}`, GMIErrorCode.LLM_PROVIDER_ERROR, chunk.error.details);
+            }
+
+            if (chunk.responseTextDelta) {
+              currentIterationTextResponse += chunk.responseTextDelta;
+              aggregatedResponseText += chunk.responseTextDelta; // Aggregate for final output
+              yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TEXT_DELTA, chunk.responseTextDelta, { usage: chunk.usage });
+              textDeltaEmitted = true;
+            }
+
+            // Handle fully formed tool_calls if present in the chunk's message
+            const choice = chunk.choices?.[0];
+            // Capture extended-thinking blocks from the final chunk so they ride
+            // the assistant turn into history (replayed verbatim next tool turn).
+            if (choice?.message?.thinkingBlocks?.length) {
+              currentIterationThinkingBlocks = choice.message.thinkingBlocks;
+            }
+            // The gateway lifts a streamed schema tool call into `structuredOutput` (D9).
+            const structured = (chunk as { structuredOutput?: unknown }).structuredOutput;
+            if (structured !== undefined) stepStructuredOutput = structured;
+
+            if (choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
+              currentIterationToolCallRequests = choice.message.tool_calls.map((tc: any) => ({ // tc is from IProvider.ChatMessage.tool_calls
+                  id: tc.id || `toolcall-${uuidv4()}`, // Ensure ID
+                  name: tc.function.name,
+                  arguments: typeof tc.function.arguments === 'string'
+                      ? JSON.parse(tc.function.arguments)
+                      : tc.function.arguments,
+                  ...(tc.thoughtSignature ? { thoughtSignature: tc.thoughtSignature } : {}),
+              }));
+              aggregatedToolCalls.push(...currentIterationToolCallRequests); // Aggregate for final output
+              yield this.createOutputChunk(
+                turnInput.interactionId,
+                GMIOutputChunkType.TOOL_CALL_REQUEST,
+                [...currentIterationToolCallRequests],
+                {
+                  metadata: {
+                    executionMode: 'internal',
+                    requiresExternalToolResult: false,
+                  },
+                },
+              );
+              this.addTraceEntry(ReasoningEntryType.TOOL_CALL_REQUESTED, `LLM requested tool(s).`, { requests: currentIterationToolCallRequests });
+            }
+
+            // A provider that sends no deltas: its final content is the step's text, emitted once (D4d).
+            if (chunk.isFinal && !textDeltaEmitted && typeof choice?.message?.content === 'string' && choice.message.content.length > 0) {
+              currentIterationTextResponse = choice.message.content;
+              aggregatedResponseText += choice.message.content;
+              yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TEXT_DELTA, choice.message.content, { usage: chunk.usage });
+              textDeltaEmitted = true;
+            }
+
+            if (chunk.isFinal && choice?.finishReason) {
+              stepFinishReason = choice.finishReason;
+              this.addTraceEntry(ReasoningEntryType.LLM_CALL_COMPLETE, `LLM stream part finished. Reason: ${choice.finishReason}`, { usage: chunk.usage });
+            }
+            if (chunk.isFinal) stepFinalChunk = chunk;
+            // Usage on every chunk that carries it, choice or not (D4c). Providers report
+            // the request's running total, so the turn total takes the step's last value once.
+            if (chunk.usage) {
+              stepUsage = chunk.usage;
+              yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.USAGE_UPDATE, chunk.usage);
+            }
+          } // End LLM stream
+
+          if (gateway && route && resolution && attemptOutcome) {
+            const outcome = await attemptOutcome;
+            if (outcome.kind === 'hopFailed') {
+              const failedHop = resolution;
+              lastHopError = outcome.error;
+              this.addTraceEntry(ReasoningEntryType.WARNING, `Provider '${failedHop.providerId}' (hop ${failedHop.hop}) failed before any output: ${outcome.error.message}`);
+              // A failed attempt can still be billed (a refused turn reports its
+              // usage). It counts toward the turn once, whether or not the turn
+              // goes on, and is reported on its own USAGE_UPDATE: no STEP_FINISHED
+              // carries it.
+              if (outcome.usage) {
+                addUsage(aggregatedUsage, outcome.usage);
+                yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.USAGE_UPDATE, outcome.usage, {
+                  metadata: { attemptFailed: true, hop: failedHop.hop, providerId: failedHop.providerId, modelId: failedHop.modelId },
+                });
+              }
+              if (!outcome.retryable) {
+                throw new GMIError(`LLM provider error: ${outcome.error.message}`, GMIErrorCode.LLM_PROVIDER_ERROR, { turnId, providerId: failedHop.providerId, hop: failedHop.hop });
+              }
+              const next = await gateway.resolve(route, failedHop);
+              if (!next) {
+                throw new GMIError(`LLM provider error after ${failedHop.hop + 1} hop(s): ${lastHopError.message}`, GMIErrorCode.LLM_PROVIDER_ERROR, { turnId, providerId: failedHop.providerId, hop: failedHop.hop });
+              }
+              // Nothing of the failed attempt carries over to the next hop.
+              currentIterationTextResponse = "";
+              currentIterationToolCallRequests = [];
+              currentIterationThinkingBlocks = [];
+              stepUsage = undefined;
+              stepFinishReason = null;
+              stepFinalChunk = undefined;
+              stepStructuredOutput = undefined;
+              resolution = next;
+              continue hopLoop;
+            }
+          }
+          break hopLoop;
+        }
+        if (resolution) this.turnResolution = resolution;
+
+        // The step's usage, counted once (D4c).
+        if (stepUsage) addUsage(aggregatedUsage, stepUsage);
+
+        // The next step's diagnostics compare against this step's response.
+        if (stepCacheDiagnostics) {
+          const responseId = stepFinalChunk?.id;
+          stepCacheDiagnostics = { previousMessageId: typeof responseId === 'string' && responseId.length > 0 ? responseId : null };
+        }
+
+        // The step boundary (D4d): the step's own text, finish reason, hop and usage.
+        const stepPayload: StepFinishedChunkPayload = {
+          stepIndex: safetyBreak - 1,
+          text: currentIterationTextResponse,
+          finishReason: stepFinishReason,
+          providerId: modelTargetInfo.providerId,
+          modelId: modelTargetInfo.modelId,
+          hop: resolution?.hop ?? 0,
+          ...(stepUsage ? { usage: stepUsage } : {}),
+          ...(stepFinalChunk?.modelId ? { responseModel: stepFinalChunk.modelId } : {}),
+          ...(stepFinalChunk?.serviceTier ? { serviceTier: stepFinalChunk.serviceTier } : {}),
+          ...(stepFinalChunk?.id ? { providerMessageId: stepFinalChunk.id } : {}),
+          ...(stepFinalChunk?.cacheDiagnostics !== undefined ? { cacheDiagnostics: stepFinalChunk.cacheDiagnostics } : {}),
+          ...(stepStructuredOutput !== undefined ? { structuredOutput: stepStructuredOutput } : {}),
+          ...(currentIterationThinkingBlocks.length > 0 ? { thinkingBlocks: [...currentIterationThinkingBlocks] } : {}),
+        };
+        yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.STEP_FINISHED, stepPayload, {
+          ...(stepFinishReason ? { finishReason: stepFinishReason } : {}),
+          ...(stepUsage ? { usage: stepUsage } : {}),
+        });
+
+        const assistantMessage: ChatMessage = {
           role: 'assistant',
           content: currentIterationTextResponse || null,
           tool_calls: currentIterationToolCallRequests.length > 0
             ? currentIterationToolCallRequests.map(tc => ({
                 id: tc.id,
                 type: 'function' as const,
-                function: { name: tc.name, arguments: JSON.stringify(tc.arguments) }
+                function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
+                ...(tc.thoughtSignature ? { thoughtSignature: tc.thoughtSignature } : {}),
               }))
             : undefined,
           ...(currentIterationThinkingBlocks.length > 0 && { thinkingBlocks: currentIterationThinkingBlocks }),
-        });
+        };
+        this.conversationHistoryManager.push(assistantMessage);
+        turnMessages.push(assistantMessage);
 
         if (currentIterationToolCallRequests.length > 0) {
-          this.state = GMIPrimeState.AWAITING_TOOL_RESULT;
+          if (ownsState()) this.state = GMIPrimeState.AWAITING_TOOL_RESULT;
           const toolExecutionResults: ToolCallResult[] = [];
-          for (const toolCallReq of currentIterationToolCallRequests) {
-            const requestDetails: ToolExecutionRequestDetails = {
-              toolCallRequest: toolCallReq,
-              gmiId: this.gmiId, personaId: this.activePersona.id,
-              personaCapabilities: this.activePersona.allowedCapabilities || [],
-              userContext: this.currentUserContext, correlationId: turnId,
-              sessionData: this.buildToolSessionData(turnInput),
-            };
-            this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_START, `Orchestrating tool: ${toolCallReq.name}`, { reqId: toolCallReq.id });
-            const result = await this.toolOrchestrator.processToolCall(requestDetails);
-            toolExecutionResults.push(result);
-            this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_RESULT, `Tool '${toolCallReq.name}' result. Success: ${!result.isError}`, { result });
-            if (result.isError && plannedToolFailureMode === 'fail_closed') {
-              throw new GMIError(
-                `Tool '${toolCallReq.name}' failed and execution policy is fail_closed.`,
-                GMIErrorCode.TOOL_ERROR,
-                {
-                  toolCallId: toolCallReq.id,
-                  toolName: toolCallReq.name,
-                  errorDetails: result.errorDetails,
-                },
-              );
+          // The call awaiting its result; cleared once processToolCall returns.
+          let callInFlight: ToolCallRequest | undefined;
+          let toolRoundFailure: { error: unknown } | undefined;
+          try {
+            for (const toolCallReq of currentIterationToolCallRequests) {
+              const requestDetails: ToolExecutionRequestDetails = {
+                toolCallRequest: toolCallReq,
+                gmiId: this.gmiId, personaId: this.activePersona.id,
+                personaCapabilities: this.activePersona.allowedCapabilities || [],
+                userContext: this.currentUserContext, correlationId: turnId,
+                sessionData: this.buildToolSessionData(turnInput),
+              };
+              this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_START, `Orchestrating tool: ${toolCallReq.name}`, { reqId: toolCallReq.id });
+              callInFlight = toolCallReq;
+              const result = await this.toolOrchestrator.processToolCall(requestDetails);
+              callInFlight = undefined;
+              toolExecutionResults.push(result);
+              this.addTraceEntry(ReasoningEntryType.TOOL_EXECUTION_RESULT, `Tool '${toolCallReq.name}' result. Success: ${!result.isError}`, { result });
+              if (result.isError && plannedToolFailureMode === 'fail_closed') {
+                throw new GMIError(
+                  `Tool '${toolCallReq.name}' failed and execution policy is fail_closed.`,
+                  GMIErrorCode.TOOL_ERROR,
+                  {
+                    toolCallId: toolCallReq.id,
+                    toolName: toolCallReq.name,
+                    errorDetails: result.errorDetails,
+                  },
+                );
+              }
             }
+          } catch (error) {
+            toolRoundFailure = { error };
+            toolExecutionResults.push(...this.resultsForUnfinishedToolCalls(
+              currentIterationToolCallRequests,
+              toolExecutionResults.length,
+              callInFlight,
+              error,
+            ));
           }
-          toolExecutionResults.forEach(tcResult => this.conversationHistoryManager.updateWithToolResult(tcResult));
-          currentIterationTextResponse = ""; // Reset for next iteration if any
-          currentIterationToolCallRequests = []; // Reset
-          this.state = GMIPrimeState.PROCESSING;
+          // Recorded on success and failure alike, so the history this turn
+          // leaves answers every call its assistant message declared. Each
+          // recorded result is also published as a TOOL_RESULT chunk (D4e).
+          for (const tcResult of toolExecutionResults) {
+            turnMessages.push(this.conversationHistoryManager.updateWithToolResult(tcResult));
+            const toolResultPayload: ToolResultChunkPayload = {
+              toolCallId: tcResult.toolCallId,
+              name: tcResult.toolName,
+              result: tcResult.output,
+              isError: tcResult.isError === true,
+              ...(tcResult.errorDetails !== undefined ? { errorDetails: tcResult.errorDetails } : {}),
+            };
+            yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TOOL_RESULT, toolResultPayload);
+          }
+          if (toolRoundFailure) throw toolRoundFailure.error;
+          if (ownsState()) this.state = GMIPrimeState.PROCESSING;
           continue main_processing_loop;
         }
         break main_processing_loop; // Break if no tool calls
@@ -1000,8 +1504,14 @@ export class GMI implements IGMI {
         aggregatedResponseText
       );
 
-      // Check and trigger all metaprompts (turn_interval, event_based, manual)
-      await this.metapromptExecutor.checkAndTriggerMetaprompts(turnId);
+      // Check and trigger all metaprompts (turn_interval, event_based, manual).
+      // Only user messages count toward turn_interval triggers: tool
+      // continuations, system messages and tool responses do not.
+      const isUserTurn =
+        turnInput.metadata?.isToolContinuation !== true &&
+        (turnInput.type === GMIInteractionType.TEXT ||
+          turnInput.type === GMIInteractionType.MULTIMODAL_CONTENT);
+      await this.metapromptExecutor.checkAndTriggerMetaprompts(turnId, { countTurn: isUserTurn });
 
       // Prepare the final GMIOutput for the generator's return value
       const finalTurnOutput: GMIOutput = {
@@ -1016,9 +1526,15 @@ export class GMI implements IGMI {
       return finalTurnOutput; // Return the aggregated output
 
     } catch (error: any) {
-
-      const gmiError = createGMIErrorFromError(error, GMIErrorCode.GMI_PROCESSING_ERROR, { turnId }, `Error in GMI turn '${turnId}'.`);
-      this.state = GMIPrimeState.ERRORED;
+      // A GMIError keeps its code (an in-band provider error stays
+      // LLM_PROVIDER_ERROR); anything else is a processing error (D4f).
+      const gmiError = createGMIErrorFromError(
+        error,
+        error instanceof GMIError ? error.code : GMIErrorCode.GMI_PROCESSING_ERROR,
+        { turnId },
+        `Error in GMI turn '${turnId}'.`,
+      );
+      if (ownsState()) this.state = GMIPrimeState.ERRORED;
       lastErrorForOutput = { code: gmiError.code, message: gmiError.message, details: gmiError.details };
       this.addTraceEntry(ReasoningEntryType.ERROR, `GMI processing error: ${gmiError.message}`, gmiError.toPlainObject());
       console.error(`GMI (ID: ${this.gmiId}) error in turn '${turnId}':`, gmiError);
@@ -1032,13 +1548,21 @@ export class GMI implements IGMI {
         usage: aggregatedUsage, // Could be partial
       };
     } finally {
-      if (this.state !== GMIPrimeState.ERRORED && this.state !== GMIPrimeState.AWAITING_TOOL_RESULT) {
+      // A newer turn may already own the lifecycle state (this generator was
+      // drained after a failure, once the next turn had started); leave the
+      // state and the trace's turn id to that turn.
+      if (
+        ownsState() &&
+        this.state !== GMIPrimeState.ERRORED &&
+        this.state !== GMIPrimeState.AWAITING_TOOL_RESULT
+      ) {
         this.state = GMIPrimeState.READY;
       }
       // This final chunk is part of the stream, not the return value of the generator
       yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.FINAL_RESPONSE_MARKER, 'Turn processing sequence complete.', { isFinal: true });
       this.addTraceEntry(ReasoningEntryType.INTERACTION_END, `Turn '${turnId}' finished. GMI State: ${this.state}.`);
-      if (this.reasoningTrace) this.reasoningTrace.turnId = undefined;
+      // Checked after the yield: a newer turn can start while this one waits there.
+      if (ownsState() && this.reasoningTrace) this.reasoningTrace.turnId = undefined;
     }
   }
 
@@ -1284,10 +1808,13 @@ export class GMI implements IGMI {
     }
 
     if (!providerId && modelId.includes('/')) {
-      const parts = modelId.split('/');
-      if (parts.length >= 2) { // Can be "openai/gpt-3.5-turbo" or "ollama/modelname/variant"
-        providerId = parts[0];
-        // modelId = parts.slice(1).join('/'); // Keep full model name if provider prefix was there
+      // A namespaced id names its provider only when that provider is
+      // registered here. Otherwise it is a router's model id (OpenRouter
+      // lists `openai/gpt-4o-mini`), and the registry lookup below finds the
+      // provider that serves it.
+      const prefix = modelId.split('/')[0];
+      if (prefix && this.llmProviderManager.getProvider(prefix)) {
+        providerId = prefix;
       }
     }
 
@@ -1300,9 +1827,15 @@ export class GMI implements IGMI {
         throw new GMIError(`Cannot determine providerId for model '${modelId}'. No explicit providerId, unable to infer from modelId, and no default provider found for it.`, GMIErrorCode.CONFIGURATION_ERROR, {modelId});
       }
     }
-     // Ensure modelId doesn't contain the provider prefix if providerId is now set
-     if (modelId.startsWith(providerId + '/')) {
-        modelId = modelId.substring(providerId.length + 1);
+    // Drop the provider prefix from the model id. OpenRouter's own ids are
+    // namespaced slugs, and some name OpenRouter itself (`openrouter/auto`),
+    // so there the prefix goes only when it wraps another vendor's slug
+    // (`openrouter/openai/gpt-4o` sends `openai/gpt-4o`).
+    if (modelId.startsWith(providerId + '/')) {
+      const unprefixed = modelId.substring(providerId.length + 1);
+      if (providerId !== 'openrouter' || unprefixed.includes('/')) {
+        modelId = unprefixed;
+      }
     }
 
     return { modelId, providerId };
@@ -1407,6 +1940,11 @@ export class GMI implements IGMI {
     this.state = GMIPrimeState.SHUTTING_DOWN;
     this.addTraceEntry(ReasoningEntryType.LIFECYCLE, "GMI shutting down.");
     try {
+      // Give metaprompt work still in flight a bounded window to store its
+      // updates before the memories it writes to are closed, then stop the
+      // queue: work not yet started is skipped, and late results are dropped.
+      await this.metapromptExecutor?.drain();
+      this.metapromptExecutor?.close();
       await this.cognitiveMemory?.shutdown?.();
       await this.workingMemory?.close?.();
       // Shared dependencies (tool orchestrator, retrieval augmentor, utility AI, etc.) are owned by

@@ -16,13 +16,13 @@ keywords:
 
 # Cognitive Pipeline
 
-The Cognitive Pipeline routes each incoming message through a chain of small classifier calls and dispatches to the cheapest retrieval + reader strategy that handles its category. It does not block, refuse, or validate output. Content-level safety is a separate primitive — see [Guardrails Architecture](./GUARDRAILS_ARCHITECTURE.md).
+The Cognitive Pipeline routes each incoming message through a chain of small classifier calls and dispatches to the cheapest retrieval + reader strategy that handles its category. It does not block, refuse, or validate output. Content-level safety is a separate primitive — see [Guardrails Architecture](/features/guardrails-architecture).
 
-The pipeline replaces single-path retrieval (embed → vector search → top-K → reader, same path every query) with three sequential routers — ingest, recall, read — each picking a strategy from a registered routing table. The result is per-message-adaptive cost: trivial queries skip retrieval entirely, complex queries get the architecture and reader best suited to their category.
+The pipeline replaces single-path retrieval (embed → vector search → top-K → reader, same path every query) with three sequential routers — ingest, recall, read — each picking a strategy from a registered routing table. The result is per-message-adaptive cost: with the QueryClassifier gate in front, trivial queries skip retrieval entirely, and complex queries get the architecture and reader best suited to their category.
 
 ## What it actually does
 
-Every message goes through a chain of decisions. Each decision is a small `gpt-5-mini`-style classifier call that picks the best strategy for that specific message. The first decision is whether memory should be touched at all — single-path retrieval treats this as implicit ("always retrieve"), which means paying full embedding+rerank+reader cost on greetings, small-talk turns, and general-knowledge questions answerable from context.
+Every message goes through a chain of decisions. Each decision is a small `gpt-5-mini`-style classifier call that picks the best strategy for that specific message, except the reader-tier lookup, which reuses a category the recall stage already produced. The first decision can be whether memory should be touched at all — single-path retrieval treats this as implicit ("always retrieve"), which means paying full embedding+rerank+reader cost on greetings, small-talk turns, and general-knowledge questions answerable from context.
 
 For incoming content:
 
@@ -30,15 +30,15 @@ For incoming content:
 
 For incoming queries:
 
-2. **Stage 1: Memory-or-not gate ([QueryClassifier](./QUERY_ROUTER.md))**: assigns each query a retrieval tier (T0 / T1 / T2 / T3). T0 is "no retrieval, answer from context alone" — greetings, small talk, general-knowledge questions that don't need memory at all. T1+ activates the rest of the pipeline. This stage saves the embedding+rerank+reader cost on every memory-irrelevant query.
+2. **Stage 1: Memory-or-not gate ([QueryClassifier](./QUERY_ROUTER.md))**: assigns each query a retrieval tier (T0 / T1 / T2 / T3). T0 is "no retrieval, answer from context alone" — greetings, small talk, general-knowledge questions that don't need memory at all. `CognitivePipeline` does not run this gate: the host calls the classifier and skips `recallAndRead()` on T0, which saves the embedding+rerank+reader cost on every memory-irrelevant query.
 
-3. **Stage 2: Architecture dispatch ([MemoryRouter](./MEMORY_ROUTER.md))**: for T1+ queries only, classify the query category (one of six: single-session-user, single-session-assistant, single-session-preference, knowledge-update, multi-session, temporal-reasoning) and pick the best memory backend (canonical-hybrid, observational-memory-v10, or observational-memory-v11). Canonical-hybrid handles single-session-user and multi-session synthesis questions at low latency in sem-embed deployments. See [MEMORY_ROUTER.md](./MEMORY_ROUTER.md) for the full routing table.
+3. **Stage 2: Architecture dispatch ([MemoryRouter](./MEMORY_ROUTER.md))**: classify the query category (one of six: single-session-user, single-session-assistant, single-session-preference, knowledge-update, multi-session, temporal-reasoning) and pick the best memory backend (canonical-hybrid, observational-memory-v10, or observational-memory-v11). Canonical-hybrid handles single-session-user and multi-session synthesis questions at low latency in sem-embed deployments. See [MEMORY_ROUTER.md](./MEMORY_ROUTER.md) for the full routing table.
 
-4. **Stage 3: Reader-tier dispatch ([ReaderRouter](./READ_ROUTER.md))**: reuses Stage 2's category classification (zero extra LLM calls) to dispatch the answer call to the best reader for that category. gpt-4o for temporal-reasoning + single-session-user (long-context arithmetic and exact recall). gpt-5-mini for single-session-assistant + single-session-preference + knowledge-update + multi-session (structured extraction at ~12× lower per-token cost). The single-session-preference lift alone is +23.4 pp on a reader-tier swap (63.3% gpt-4o → 86.7% gpt-5-mini at the same retrieval).
+4. **Stage 3: Reader-tier dispatch ([`selectReader()`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/memory/reader-router.ts), exported from `@framers/agentos/memory-router`)**: a pure lookup that takes Stage 2's category (zero extra LLM calls) and a reader preset and names the reader model for the answer call. `CognitivePipeline` does not call it; the host reads the category from the recall decision. With the `min-cost-best-cat-2026-04-28` preset: gpt-4o for temporal-reasoning + single-session-user (long-context arithmetic and exact recall). gpt-5-mini for single-session-assistant + single-session-preference + knowledge-update + multi-session (structured extraction at ~12× lower per-token cost). The single-session-preference lift alone is +23.4 pp on a reader-tier swap (63.3% gpt-4o → 86.7% gpt-5-mini at the same retrieval).
 
 5. **Read intent dispatch ([ReadRouter](./READ_ROUTER.md))**: a separate primitive that picks read strategy (precise-fact lookups use single-call; multi-source synthesis uses two-call extract-then-answer; time-interval questions use scratchpad-then-answer). Composable with ReaderRouter or used independently.
 
-Each stage is a router. Each router is an LLM-as-judge that classifies its input, picks a strategy from its routing table, and dispatches to a registered executor. The pipeline costs **one classifier call per query** because Stages 2 and 3 reuse Stage 1's classification output. Cognitive Pipeline composes the routers into one orchestrator.
+Each stage is a router. Each router is an LLM-as-judge that classifies its input, picks a strategy from its routing table, and dispatches to a registered executor. `CognitivePipeline` composes three of them, ingest, recall and read; `recallAndRead()` makes **two classifier calls per query** (the MemoryRouter's and the ReadRouter's), and the QueryClassifier gate adds one when the host runs it.
 
 ## Architecture
 
@@ -68,7 +68,7 @@ flowchart TB
     classDef external fill:#f3e8ff,stroke:#8b5cf6,color:#5b21b6
 ```
 
-The cognitive pipeline is the three orchestrator stages on the left. Output guardrails on the right are a separate primitive ([Guardrails Architecture](./GUARDRAILS_ARCHITECTURE.md)) that runs after the pipeline finishes.
+The cognitive pipeline is the three orchestrator stages on the left. Output guardrails on the right are a separate primitive ([Guardrails Architecture](/features/guardrails-architecture)) that runs after the pipeline finishes.
 
 ## How a single message flows through
 
@@ -102,7 +102,7 @@ Total LLM calls: 1 classifier (recall) + 1 classifier (read) + 1 backend retriev
 
 ## Stage primitives
 
-Each stage is its own shippable primitive with full README + 26-38 contract tests:
+Each stage is its own shippable primitive with its own README and tests:
 
 | Stage | Primitive | Subpath | Doc |
 |---|---|---|---|
@@ -294,4 +294,4 @@ The shipping presets come from LongMemEval-S Phase B N=500 measurements. For wor
 - [Read Router](./READ_ROUTER.md) — read stage primitive
 - [Adaptive Memory Router](./ADAPTIVE_MEMORY_ROUTER.md) — self-calibrating router for non-LongMemEval workloads
 - [Query Router](./QUERY_ROUTER.md) — sibling primitive for general Q&A (vector / graph / keyword fallback). MemoryRouter is for memory recall; QueryRouter is for ask-a-question retrieval.
-- [Guardrails Architecture](./GUARDRAILS_ARCHITECTURE.md) — output-stage safety/policy (separate concern from this module)
+- [Guardrails Architecture](/features/guardrails-architecture) — output-stage safety/policy (separate concern from this module)

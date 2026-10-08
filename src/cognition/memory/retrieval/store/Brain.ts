@@ -946,6 +946,7 @@ export class Brain {
     await MigrationRunner.runPending(adapter, features, brainId, MIGRATIONS);
     await brain._initSchema();
     await brain._seedMeta();
+    await brain._repairFullTextIndex();
 
     return brain;
   }
@@ -1097,6 +1098,83 @@ export class Brain {
       // IDENTITY` (valid, and consistent with the 64-bit surrogate keys SQLite produces).
       .replace(/\bINTEGER\b/g, 'BIGINT')
       .replace(/\bBLOB\b/g, 'BYTEA');
+  }
+
+  /**
+   * Repair the full-text index when it disagrees with the content table,
+   * checked on every open.
+   *
+   * `memory_traces_fts` is external-content with no triggers, so it only
+   * covers rows a writer synced. Brains written through the cognitive
+   * pipeline before `MemoryStore.store()` synced carry an EMPTY index, a
+   * failed sync leaves one row out, and an `INSERT OR REPLACE` revival
+   * leaves the old rowid's entry behind. Each makes the index's set of
+   * document ids differ from the content table's rowids. Both sets hold
+   * unique ids, so they are equal exactly when both counts equal the size of
+   * their join (|T ∩ D| = |T| = |D|); anything else triggers a rebuild from
+   * the content table. That is exact — defects cannot cancel — and costs one
+   * primary-key probe into the index's document table per content row, with
+   * no temporary index.
+   *
+   * The check cannot see indexed content rewritten under an unchanged
+   * rowid set. The writers that rewrite content in place (MemoryUpdateTool,
+   * the Memory facade, ConsolidationLoop) rebuild the index themselves, and
+   * the one writer that hard deletes traces (`importFromSqlite`) does too. SQLite
+   * only — a SQLite brain is its own file, while a rebuild on a shared
+   * Postgres table would re-index every brain's rows. Best-effort: nothing
+   * here may block opening the brain.
+   */
+  private async _repairFullTextIndex(): Promise<void> {
+    if (this._features.dialect.name === 'postgres') {
+      return;
+    }
+    try {
+      const sets = await this._adapter.get<{
+        trace_rows: number;
+        indexed_docs: number;
+        matched: number;
+      }>(
+        `SELECT (SELECT count(*) FROM memory_traces) AS trace_rows,
+                (SELECT count(*) FROM memory_traces_fts_docsize) AS indexed_docs,
+                (SELECT count(*) FROM memory_traces t
+                   JOIN memory_traces_fts_docsize d ON d.id = t.rowid) AS matched`,
+      );
+      if (
+        !sets ||
+        (Number(sets.trace_rows) === Number(sets.matched) &&
+          Number(sets.indexed_docs) === Number(sets.matched))
+      ) {
+        return;
+      }
+      await this._adapter.exec(this._features.fts.rebuildCommand('memory_traces_fts'));
+    } catch (error) {
+      this._warnFullTextIndexError('repair', error);
+    }
+  }
+
+  /**
+   * Rebuild the full-text index from the content table (SQLite only,
+   * best-effort). Used after bulk writes that bypass per-row syncing.
+   */
+  private async _rebuildFullTextIndex(): Promise<void> {
+    if (this._features.dialect.name === 'postgres') {
+      return;
+    }
+    try {
+      await this._adapter.exec(this._features.fts.rebuildCommand('memory_traces_fts'));
+    } catch (error) {
+      this._warnFullTextIndexError('rebuild', error);
+    }
+  }
+
+  /** Log a full-text index failure, staying silent when FTS5 is absent. */
+  private _warnFullTextIndexError(action: 'repair' | 'rebuild', error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    // SQL.js builds without FTS5 never create the index; nothing to maintain.
+    if (message.includes('no such module: fts5') || message.includes('no such table: memory_traces_fts')) {
+      return;
+    }
+    console.warn(`[Brain] full-text index ${action} failed for brain ${this.#brainId}: ${message}`);
   }
 
   /**
@@ -1341,6 +1419,13 @@ export class Brain {
       }
     } finally {
       await source.close();
+      // The bulk copy writes memory_traces without syncing the full-text
+      // index, and a 'replace' import hard-deletes rows first, so SQLite can
+      // hand the imported traces reused rowids that still carry the old
+      // postings. Rebuild so the index matches whatever the import left —
+      // including a partial import that failed midway. Best-effort: it never
+      // throws, so an import error still propagates unchanged.
+      await this._rebuildFullTextIndex();
     }
 
     return { tablesImported };

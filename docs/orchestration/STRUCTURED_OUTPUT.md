@@ -431,9 +431,9 @@ const result2 = await manager.generate({
 
 ## Related Documentation
 
-- [Architecture](./ARCHITECTURE.md) - Full system overview
+- [Architecture](../architecture/ARCHITECTURE.md) - Full system overview
 - [Planning Engine](./PLANNING_ENGINE.md) - Multi-step execution
-- [Human-in-the-Loop](./HUMAN_IN_THE_LOOP.md) - Human oversight
+- [Human-in-the-Loop](../safety/HUMAN_IN_THE_LOOP.md) - Human oversight
 
 
 

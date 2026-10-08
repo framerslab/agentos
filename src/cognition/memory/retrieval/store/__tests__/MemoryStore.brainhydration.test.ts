@@ -134,6 +134,63 @@ describe('MemoryStore — durable recall hydration from Brain', () => {
     }
   });
 
+  it('concurrent first queries on a cold instance all wait for hydration; none reads the empty index', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brainhydration-'));
+    const dbPath = path.join(tmpDir, 'brain.sqlite');
+    const brain = await Brain.openSqlite(dbPath);
+    try {
+      const store1 = mkStore(await mkVectorStore());
+      store1.setBrain(brain);
+      await store1.store(mkTrace('t1', 'my sister is named Vera'));
+
+      // A fresh instance receives several queries in the same tick — the shape
+      // of a host whose first turn on a rebuilt facade fans out reads. Before
+      // hydration was single-flighted, the first caller latched the guard and
+      // every concurrent caller searched the still-empty index, so recall
+      // silently returned nothing for them.
+      const store2 = mkStore(await mkVectorStore());
+      store2.setBrain(brain);
+      const [a, b, c] = await Promise.all([
+        store2.query("what is my sister's name", neutralMood, {}),
+        store2.query("what is my sister's name", neutralMood, {}),
+        store2.query("what is my sister's name", neutralMood, {
+          scopes: [{ scope: 'user' as MemoryScope, scopeId: 'u1' }],
+        }),
+      ]);
+      expect(a.scored.map((s) => s.id)).toContain('t1');
+      expect(b.scored.map((s) => s.id)).toContain('t1');
+      expect(c.scored.map((s) => s.id)).toContain('t1');
+    } finally {
+      await brain.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('a query racing getByScope on a cold instance still sees the hydrated index', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brainhydration-'));
+    const dbPath = path.join(tmpDir, 'brain.sqlite');
+    const brain = await Brain.openSqlite(dbPath);
+    try {
+      const store1 = mkStore(await mkVectorStore());
+      store1.setBrain(brain);
+      await store1.store(mkTrace('t1', 'my sister is named Vera'));
+
+      // getByScope (the consolidation pipeline's read) and query share the
+      // hydration gate; whichever starts first must not starve the other.
+      const store2 = mkStore(await mkVectorStore());
+      store2.setBrain(brain);
+      const [byScope, queried] = await Promise.all([
+        store2.getByScope('user' as MemoryScope, 'u1'),
+        store2.query("what is my sister's name", neutralMood, {}),
+      ]);
+      expect(byScope.map((s) => s.id)).toContain('t1');
+      expect(queried.scored.map((s) => s.id)).toContain('t1');
+    } finally {
+      await brain.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('softDelete removes a cached trace from vector recall and scope listings', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'brainhydration-'));
     const dbPath = path.join(tmpDir, 'brain.sqlite');

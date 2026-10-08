@@ -3,14 +3,15 @@
  * @fileoverview Backpressure batching wrapper for provider streaming chunks (`ModelCompletionResponse`).
  * Combines small, high-frequency deltas into larger aggregated chunks to reduce downstream
  * dispatch overhead (websocket emissions, DOM updates, etc.) while preserving core invariants:
- *   - Text remains append-only (merged into a single `responseTextDelta` per batch).
+ *   - Text remains append-only (merged into a single `responseTextDelta` per batch), and so does
+ *     reasoning-summary text (`reasoningTextDelta`), kept apart from it.
  *   - Tool/function argument deltas merged per (choiceIndex, toolCallId) into single consolidated delta.
  *   - Exactly one terminal chunk with `isFinal: true` (forwarded from original final chunk).
  *   - Usage & error surfaced only when FINAL chunk encountered (or if intermediate provider error semantics change).
  *
  * Flush Triggers (any):
  *   1. Latency: maxLatencyMs elapsed since first unflushed chunk arrival.
- *   2. Size: accumulated text delta length >= maxTextDeltaChars.
+ *   2. Size: accumulated text and reasoning delta length >= maxTextDeltaChars.
  *   3. Chunk Count: buffer size >= maxChunksPerBatch.
  *   4. Explicit final provider chunk.
  *   5. Manual tool argument size threshold (maxToolArgumentChars) exceeded.
@@ -30,7 +31,7 @@ import { ModelCompletionResponse } from '../providers/IProvider';
 export interface StreamingBatcherOptions {
   /** Max wall-clock latency before forcing a flush (milliseconds). */
   maxLatencyMs?: number; // default 100ms
-  /** Max accumulated text delta characters before flush. */
+  /** Max accumulated text delta characters (answer and reasoning text together) before flush. */
   maxTextDeltaChars?: number; // default 800 chars
   /** Max accumulated tool argument characters (combined per tool call) before flush. */
   maxToolArgumentChars?: number; // default 4000 chars
@@ -52,11 +53,14 @@ interface AccumulatedToolBuffer {
   raw: string;
   name?: string;
   id?: string;
+  /** Gemini thought signature carried on the call's deltas, if any. */
+  thoughtSignature?: string;
 }
 
 interface AccumulatorState {
   chunks: ModelCompletionResponse[];
   textBuffer: string;
+  reasoningBuffer: string;
   toolBuffers: Record<string, AccumulatedToolBuffer>; // key => `${index}|${id??'_'}`
   firstChunkAt: number; // ms timestamp of first buffered chunk
 }
@@ -65,6 +69,7 @@ interface AccumulatorState {
 function accumulate(state: AccumulatorState, chunk: ModelCompletionResponse) {
   state.chunks.push(chunk);
   if (chunk.responseTextDelta) state.textBuffer += chunk.responseTextDelta;
+  if (chunk.reasoningTextDelta) state.reasoningBuffer += chunk.reasoningTextDelta;
   if (chunk.toolCallsDeltas) {
     for (const d of chunk.toolCallsDeltas) {
       const key = `${d.index}|${d.id || '_'}`;
@@ -72,6 +77,7 @@ function accumulate(state: AccumulatorState, chunk: ModelCompletionResponse) {
       if (d.function?.arguments_delta) buf.raw += d.function.arguments_delta;
       if (d.function?.name) buf.name = d.function.name;
       if (d.id) buf.id = d.id;
+      if (d.thoughtSignature) buf.thoughtSignature = d.thoughtSignature;
       state.toolBuffers[key] = buf;
     }
   }
@@ -94,6 +100,7 @@ function buildBatch(state: AccumulatorState, batchSequence: number, isFinalOverr
         name: data.name,
         arguments_delta: data.raw, // merged arguments
       },
+      ...(data.thoughtSignature ? { thoughtSignature: data.thoughtSignature } : {}),
     };
   });
 
@@ -104,6 +111,7 @@ function buildBatch(state: AccumulatorState, batchSequence: number, isFinalOverr
     modelId: first.modelId,
     choices: first.choices, // assume stable choice metadata
     responseTextDelta: state.textBuffer.length > 0 ? state.textBuffer : undefined,
+    reasoningTextDelta: state.reasoningBuffer.length > 0 ? state.reasoningBuffer : undefined,
     toolCallsDeltas: mergedToolCalls.length > 0 ? mergedToolCalls : undefined,
     // Only propagate usage/error when final provider chunk present.
     usage: finalProviderChunk?.usage,
@@ -119,6 +127,7 @@ function buildBatch(state: AccumulatorState, batchSequence: number, isFinalOverr
   // Reset state for next batch
   state.chunks = [];
   state.textBuffer = '';
+  state.reasoningBuffer = '';
   state.toolBuffers = {};
   state.firstChunkAt = 0;
   return batched;
@@ -129,7 +138,7 @@ function shouldFlush(state: AccumulatorState, opts: Required<StreamingBatcherOpt
   if (state.chunks.length === 0) return false;
   const now = Date.now();
   if (state.firstChunkAt && (now - state.firstChunkAt) >= opts.maxLatencyMs) return true;
-  if (state.textBuffer.length >= opts.maxTextDeltaChars) return true;
+  if (state.textBuffer.length + state.reasoningBuffer.length >= opts.maxTextDeltaChars) return true;
   if (state.chunks.length >= opts.maxChunksPerBatch) return true;
   // Tool argument size check
   const toolArgSize = Object.values(state.toolBuffers).reduce((sum, t) => sum + t.raw.length, 0);
@@ -149,7 +158,7 @@ export async function* batchStream(
 ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
   const opts: Required<StreamingBatcherOptions> = { ...DEFAULT_BATCHER_OPTIONS, ...options };
   let batchSequence = 0;
-  const state: AccumulatorState = { chunks: [], textBuffer: '', toolBuffers: {}, firstChunkAt: 0 };
+  const state: AccumulatorState = { chunks: [], textBuffer: '', reasoningBuffer: '', toolBuffers: {}, firstChunkAt: 0 };
 
   const flush = (isFinal = false): ModelCompletionResponse | undefined => {
     const chunk = buildBatch(state, batchSequence++, isFinal);
@@ -194,11 +203,12 @@ export async function* batchStream(
       }
       // Flush buffered chunks first, then emit final chunk.
       let preFinal = flush(false);
-      if (!preFinal && state.textBuffer) {
+      if (!preFinal && (state.textBuffer || state.reasoningBuffer)) {
         preFinal = {
           ...state.chunks[0],
           id: `${state.chunks[0]?.id || 'chunk'}-batch-${batchSequence++}`,
           responseTextDelta: state.textBuffer || undefined,
+          reasoningTextDelta: state.reasoningBuffer || undefined,
           isFinal: false,
         } as ModelCompletionResponse;
       }

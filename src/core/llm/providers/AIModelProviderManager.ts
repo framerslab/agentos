@@ -60,6 +60,8 @@ export class AIModelProviderManager {
   private defaultProviderId?: string;
   private readonly modelToProviderMap: Map<string, string> = new Map();
   private allModelsCache: ModelInfo[] | null = null;
+  /** Errors thrown by providers that failed to initialize, keyed by configured provider id. */
+  private readonly providerInitErrors: Map<string, unknown> = new Map();
   public isInitialized: boolean = false;
 
   constructor() {}
@@ -101,6 +103,7 @@ export class AIModelProviderManager {
       console.warn("AIModelProviderManager: Manager is already initialized. Re-initializing will reset providers.");
       this.providers.clear();
       this.modelToProviderMap.clear();
+      this.providerInitErrors.clear();
       this.allModelsCache = null;
       this.defaultProviderId = undefined;
     }
@@ -171,6 +174,7 @@ export class AIModelProviderManager {
         await this.cacheModelsFromProvider(providerInstance);
 
       } catch (error: unknown) {
+        this.providerInitErrors.set(providerEntry.providerId, error);
         const gmiError = createGMIErrorFromError( // Using the imported function
           error, // Pass the original error
           GMIErrorCode.LLM_PROVIDER_ERROR,
@@ -222,6 +226,19 @@ export class AIModelProviderManager {
     }
   }
 
+  /**
+   * Returns the error a provider threw during {@link initialize}, so a caller
+   * that finds the provider missing can report why (for example the HTTP 401
+   * of a rejected API key) instead of a bare "not available".
+   *
+   * @param providerId - The provider id as configured.
+   * @returns The thrown error, or undefined when the provider initialized or
+   *   was never configured.
+   */
+  public getProviderInitError(providerId: string): unknown {
+    return this.providerInitErrors.get(providerId);
+  }
+
   public getProvider(providerId: string): IProvider | undefined {
     this.ensureInitialized(); // Corrected: using ensureInitialized
     const provider = this.providers.get(providerId);
@@ -257,6 +274,14 @@ export class AIModelProviderManager {
     return this.getDefaultProvider();
   }
 
+  /**
+   * Lists every model the initialized providers serve: one row per
+   * (providerId, modelId), in provider registration order. Two providers can
+   * serve the same model id (gemini and gemini-cli, anthropic and
+   * claude-code-cli), and routing names the provider, so each keeps its row.
+   * A bare-id `find` still lands on the first-registered provider, matching
+   * {@link getProviderForModel}.
+   */
   public async listAllAvailableModels(): Promise<ModelInfo[]> {
     this.ensureInitialized(); // Corrected: using ensureInitialized
     if (this.allModelsCache) {
@@ -286,13 +311,18 @@ export class AIModelProviderManager {
       }
     });
 
-    const uniqueModelsMap = new Map<string, ModelInfo>();
+    // Unique per (provider, model): keying on the model id alone dropped the
+    // second provider's row, so a ModelRouter rule or default naming that
+    // provider matched nothing.
+    const seen = new Set<string>();
+    const uniqueModels: ModelInfo[] = [];
     for (const model of allModels) {
-      if (!uniqueModelsMap.has(model.modelId)) {
-        uniqueModelsMap.set(model.modelId, model);
-      }
+      const key = `${model.providerId}\u0000${model.modelId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      uniqueModels.push(model);
     }
-    this.allModelsCache = Array.from(uniqueModelsMap.values());
+    this.allModelsCache = uniqueModels;
     return [...this.allModelsCache];
   }
 

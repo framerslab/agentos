@@ -33,20 +33,25 @@ const mockClient = {
   release: vi.fn(),
 };
 
+/** Default pool.query behaviour: record the call, answer from the queue or the canned result. */
+async function recordPoolQuery(sql: string, params?: unknown[]) {
+  queryCalls.push({ sql, params });
+  if (queryResultQueue.length > 0) return queryResultQueue.shift()!;
+  return nextQueryResult;
+}
+
 /** Mock Pool class. */
 const mockPool = {
-  query: vi.fn(async (sql: string, params?: unknown[]) => {
-    queryCalls.push({ sql, params });
-    if (queryResultQueue.length > 0) return queryResultQueue.shift()!;
-    return nextQueryResult;
-  }),
+  query: vi.fn(recordPoolQuery),
   connect: vi.fn(async () => mockClient),
   end: vi.fn(async () => {}),
 };
 
 vi.mock('pg', () => ({
   default: {
-    Pool: vi.fn(() => mockPool),
+    Pool: vi.fn(function () {
+      return mockPool;
+    }),
   },
 }));
 
@@ -78,11 +83,26 @@ function lastQuery() {
   return queryCalls[queryCalls.length - 1];
 }
 
+/**
+ * Make collection tables look like ones created before the `tsv` column:
+ * the read of `tsv` fails the way Postgres fails it.
+ */
+function tsvColumnIsMissing() {
+  mockPool.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+    if (/^\s*SELECT tsv FROM /.test(sql)) {
+      queryCalls.push({ sql, params });
+      throw new Error('column "tsv" does not exist');
+    }
+    return recordPoolQuery(sql, params);
+  });
+}
+
 function resetMocks() {
   queryCalls.length = 0;
   queryResultQueue.length = 0;
   nextQueryResult = { rows: [], rowCount: 0 };
   mockPool.query.mockClear();
+  mockPool.query.mockImplementation(recordPoolQuery);
   mockClient.query.mockClear();
   mockClient.release.mockClear();
 }
@@ -145,11 +165,12 @@ describe('PostgresVectorStore', () => {
       store = new PostgresVectorStore(makeConfig());
       await store.initialize();
       resetMocks();
+      tsvColumnIsMissing();
 
       await store.createCollection('my_docs', 4, { similarityMetric: 'cosine' });
 
       // Should have: CREATE TABLE, CREATE INDEX (hnsw), CREATE INDEX (gin metadata),
-      // ALTER TABLE (tsvector), CREATE INDEX (fts), INSERT into _collections.
+      // a read of tsv, ALTER TABLE (tsvector), CREATE INDEX (fts), INSERT into _collections.
       const createTable = queryCalls.find(c => c.sql.includes('CREATE TABLE') && c.sql.includes('my_docs'));
       expect(createTable).toBeDefined();
       expect(createTable!.sql).toContain('vector(4)');
@@ -164,14 +185,33 @@ describe('PostgresVectorStore', () => {
       const ginIdx = queryCalls.find(c => c.sql.includes('gin') && c.sql.includes('metadata_json'));
       expect(ginIdx).toBeDefined();
 
-      // Tsvector column.
+      // Tsvector column and its full-text index.
       const tsvCol = queryCalls.find(c => c.sql.includes('tsvector'));
       expect(tsvCol).toBeDefined();
+      const ftsIdx = queryCalls.find(c => c.sql.includes('my_docs_fts'));
+      expect(ftsIdx).toBeDefined();
 
       // _collections registration.
       const reg = queryCalls.find(c => c.sql.includes('INSERT INTO') && c.sql.includes('_collections'));
       expect(reg).toBeDefined();
       expect(reg!.params).toEqual(['my_docs', 4, 'cosine']);
+    });
+
+    // ALTER TABLE takes an ACCESS EXCLUSIVE lock even when the column exists.
+    // That lock waits behind every open reader of the table (a pg_dump reads
+    // it for its whole run) and later queries queue behind it, so a
+    // collection that already has the column must see no ALTER.
+    it('leaves a collection that already has the tsv column without an ALTER TABLE', async () => {
+      store = new PostgresVectorStore(makeConfig());
+      await store.initialize();
+      resetMocks();
+
+      await store.createCollection('my_docs', 4, { similarityMetric: 'cosine' });
+
+      expect(queryCalls.some(c => c.sql.includes('SELECT tsv FROM'))).toBe(true);
+      expect(queryCalls.filter(c => /ALTER\s+TABLE/i.test(c.sql))).toEqual([]);
+      const reg = queryCalls.find(c => c.sql.includes('INSERT INTO') && c.sql.includes('_collections'));
+      expect(reg).toBeDefined();
     });
 
     it('uses vector_l2_ops for euclidean metric', async () => {

@@ -25,6 +25,15 @@ describe('isOpenAIReasoningModel', () => {
     expect(isOpenAIReasoningModel('gpt-4-turbo')).toBe(false);
     expect(isOpenAIReasoningModel('gpt-3.5-turbo')).toBe(false);
   });
+
+  it('matches the gpt-6 family (live-probed 2026-09-10: rejects temperature + max_tokens)', () => {
+    expect(isOpenAIReasoningModel('gpt-6-astra')).toBe(true);
+    expect(isOpenAIReasoningModel('gpt-6-astra-2026-09-03')).toBe(true);
+    expect(isOpenAIReasoningModel('GPT-6-ASTRA')).toBe(true);
+    // Not generalized to gpt-\d: an unshipped family stays on the
+    // conservative legacy max_tokens path until it is probed.
+    expect(isOpenAIReasoningModel('gpt-7-whatever')).toBe(false);
+  });
 });
 
 describe('OpenAIProvider — reasoning-model sampling-param guard', () => {
@@ -44,6 +53,18 @@ describe('OpenAIProvider — reasoning-model sampling-param guard', () => {
     }).buildChatCompletionPayload('o3', messages, { temperature: 0.7, topP: 0.9 }, false);
     expect(payload.temperature).toBeUndefined();
     expect(payload.top_p).toBeUndefined();
+  });
+
+  it('omits temperature/top_p for gpt-6 and uses max_completion_tokens', () => {
+    const payload = (provider as unknown as {
+      buildChatCompletionPayload: (m: string, msgs: ChatMessage[], o: unknown, s: boolean) => Record<string, unknown>;
+    }).buildChatCompletionPayload(
+      'gpt-6-astra', messages, { temperature: 0.7, topP: 0.9, maxTokens: 4096 }, false,
+    );
+    expect(payload.temperature).toBeUndefined();
+    expect(payload.top_p).toBeUndefined();
+    expect(payload.max_completion_tokens).toBe(4096);
+    expect(payload.max_tokens).toBeUndefined();
   });
 
   it('keeps temperature/top_p for legacy chat models', () => {
@@ -91,6 +112,14 @@ describe('openAiRejectsReasoningEffortWithTools', () => {
     expect(openAiRejectsReasoningEffortWithTools('o3')).toBe(false);
     expect(openAiRejectsReasoningEffortWithTools('gpt-4o')).toBe(false);
   });
+
+  it('is true for the gpt-6 family (live-probed 2026-09-10)', () => {
+    // "Function tools with reasoning_effort are not supported for gpt-6-astra
+    // in /v1/chat/completions." The documented 'none' escape hatch is itself
+    // rejected on this family, so dropping/rerouting is the only option.
+    expect(openAiRejectsReasoningEffortWithTools('gpt-6-astra')).toBe(true);
+    expect(openAiRejectsReasoningEffortWithTools('gpt-7-whatever')).toBe(false);
+  });
 });
 
 describe('OpenAIProvider — reasoning_effort + function tools (gpt-5 chat/completions 400 guard)', () => {
@@ -124,5 +153,16 @@ describe('OpenAIProvider — reasoning_effort + function tools (gpt-5 chat/compl
 
   it('ignores an empty tools array (no incompatibility to guard against)', () => {
     expect(build('gpt-5.5', { effort: 'max', tools: [] }).reasoning_effort).toBe('xhigh');
+  });
+
+  it('DROPS reasoning_effort when a gpt-6 request carries function tools', () => {
+    const payload = build('gpt-6-astra', { effort: 'max', tools: TOOLS });
+    expect(payload.reasoning_effort).toBeUndefined();
+    expect(payload.tools).toEqual(TOOLS);
+  });
+
+  it('KEEPS reasoning_effort (max -> xhigh chat ceiling) for gpt-6 with NO tools', () => {
+    expect(build('gpt-6-astra', { effort: 'max' }).reasoning_effort).toBe('xhigh');
+    expect(build('gpt-6-astra', { effort: 'high' }).reasoning_effort).toBe('high');
   });
 });

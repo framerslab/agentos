@@ -16,6 +16,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import YAML from 'yaml';
 
 import type { AgentExportConfig } from '../agentExport.js';
+import type { BaseAgentConfig } from '../../types.js';
 import {
   exportAgentConfig,
   exportAgentConfigJSON,
@@ -281,8 +282,9 @@ describe('Agent Export/Import', () => {
     expect(config.type).toBe('agency');
     expect(config.agents).toBeDefined();
     expect(Object.keys(config.agents!)).toEqual(['researcher', 'writer']);
-    expect(config.agents!.researcher.instructions).toBe('Research things.');
-    expect(config.agents!.writer.model).toBe('openai:gpt-4o');
+    // A roster entry is a config or a pre-built seat's marker; these two are configs.
+    expect((config.agents!.researcher as BaseAgentConfig).instructions).toBe('Research things.');
+    expect((config.agents!.writer as BaseAgentConfig).model).toBe('openai:gpt-4o');
     expect(config.strategy).toBe('sequential');
     expect(config.maxRounds).toBe(3);
   });

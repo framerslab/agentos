@@ -1,4 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  AnthropicProvider,
+  estimateAnthropicCostUSD,
+  type AnthropicUsageForCost,
+} from '../implementations/AnthropicProvider';
+import { resetCacheLeakDetector } from '../implementations/cacheLeakDetector';
+import type { ModelCompletionOptions } from '../IProvider';
 
 /**
  * Test the system block extraction logic that AnthropicProvider.buildRequestPayload
@@ -120,100 +127,132 @@ describe('AnthropicProvider system prompt cache control', () => {
 });
 
 /**
- * Verify the cache-tier cost estimation math. Anthropic bills at three
- * different rates for input tokens:
- *   non-cached input       × 1.00 × base input rate
- *   cache_read_input_tokens × 0.10 × base input rate
- *   cache_creation_input_tokens × 1.25 × base input rate (5-min TTL)
- *
- * The previous AnthropicProvider.estimateCost signature only took
- * (inputTokens, outputTokens, modelId), which silently under-reported
- * cost when caching was active. We replicate the current math here so a
- * regression to the old formula trips the test.
+ * Anthropic cost math, through the exported estimateAnthropicCostUSD that both
+ * response paths use. Input is billed in four parts:
+ *   input_tokens                 x the input price
+ *   cache_read_input_tokens      x the row's cache-read price (0.1x input by default)
+ *   5-minute cache writes        x 1.25 x the input price
+ *   1-hour cache writes          x 2 x the input price
  */
-function estimateCacheAwareCost(
-  inputTokens: number,
-  outputTokens: number,
-  inputPricePerM: number,
-  outputPricePerM: number,
-  cacheReadTokens?: number,
-  cacheCreationTokens?: number,
-): number {
-  const nonCachedInput = (inputTokens / 1_000_000) * inputPricePerM;
-  const cachedRead = ((cacheReadTokens ?? 0) / 1_000_000) * inputPricePerM * 0.10;
-  const cachedCreate = ((cacheCreationTokens ?? 0) / 1_000_000) * inputPricePerM * 1.25;
-  const output = (outputTokens / 1_000_000) * outputPricePerM;
-  return nonCachedInput + cachedRead + cachedCreate + output;
-}
-
 describe('AnthropicProvider cache-aware cost estimation', () => {
-  // Claude Sonnet 4.6 prices — same as production
-  const SONNET_INPUT = 3.00;
-  const SONNET_OUTPUT = 15.00;
+  /** Cost of a Claude Sonnet 4.6 call ($3 input / $15 output per 1M tokens). */
+  const sonnet46 = (usage: AnthropicUsageForCost): number => {
+    const cost = estimateAnthropicCostUSD('claude-sonnet-4-6', usage);
+    if (cost === undefined) throw new Error('claude-sonnet-4-6 has no catalog price');
+    return cost;
+  };
+  const calls = (input: number, output: number, read = 0, created = 0): AnthropicUsageForCost => ({
+    input_tokens: input,
+    output_tokens: output,
+    cache_read_input_tokens: read,
+    cache_creation_input_tokens: created,
+  });
 
   it('matches the base-rate formula when caching is inactive', () => {
-    const cost = estimateCacheAwareCost(1000, 500, SONNET_INPUT, SONNET_OUTPUT);
-    // 1000 × $3/M + 500 × $15/M = $0.003 + $0.0075 = $0.0105
-    expect(cost).toBeCloseTo(0.0105, 6);
+    // 1000 x $3/M + 500 x $15/M = $0.003 + $0.0075 = $0.0105
+    expect(sonnet46(calls(1000, 500))).toBeCloseTo(0.0105, 6);
   });
 
-  it('bills cache_read tokens at 0.1× the input rate', () => {
-    // 1000 non-cached input + 5000 cache-read + 500 output
-    const cost = estimateCacheAwareCost(1000, 500, SONNET_INPUT, SONNET_OUTPUT, 5000);
-    // Non-cached:  1000 × $3/M     = $0.003
-    // Cache read:  5000 × $3/M × 0.1 = $0.0015
-    // Output:      500 × $15/M    = $0.0075
-    // Total:                        $0.012
-    expect(cost).toBeCloseTo(0.012, 6);
+  it('bills cache_read tokens at 0.1x the input rate', () => {
+    // Non-cached 1000 x $3/M = $0.003, cache read 5000 x $3/M x 0.1 = $0.0015,
+    // output 500 x $15/M = $0.0075: $0.012 in all.
+    expect(sonnet46(calls(1000, 500, 5000))).toBeCloseTo(0.012, 6);
   });
 
-  it('bills cache_creation tokens at 1.25× the input rate', () => {
-    // 1000 non-cached + 5000 cache-created + 500 output (no read)
-    const cost = estimateCacheAwareCost(1000, 500, SONNET_INPUT, SONNET_OUTPUT, 0, 5000);
-    // Non-cached:  1000 × $3/M       = $0.003
-    // Cache create: 5000 × $3/M × 1.25 = $0.01875
-    // Output:       500 × $15/M     = $0.0075
-    // Total:                          $0.02925
-    expect(cost).toBeCloseTo(0.02925, 6);
+  it('bills cache_creation tokens at 1.25x the input rate', () => {
+    // Non-cached $0.003, cache write 5000 x $3/M x 1.25 = $0.01875, output
+    // $0.0075: $0.02925 in all.
+    expect(sonnet46(calls(1000, 500, 0, 5000))).toBeCloseTo(0.02925, 6);
   });
 
   it('surfaces the savings when most input is a cache read vs fully non-cached', () => {
-    // First call pays full price for 10000 input tokens (no cache yet)
-    const firstCall = estimateCacheAwareCost(10000, 500, SONNET_INPUT, SONNET_OUTPUT);
-    // Second call hits the cache: only 100 non-cached + 9900 cache reads
-    const secondCall = estimateCacheAwareCost(100, 500, SONNET_INPUT, SONNET_OUTPUT, 9900);
-    // Second call should cost significantly less than first.
+    const firstCall = sonnet46(calls(10000, 500));
+    const secondCall = sonnet46(calls(100, 500, 9900));
     expect(secondCall).toBeLessThan(firstCall * 0.5);
-    // Specifically: firstCall = 10000 × $3/M + 500 × $15/M = $0.0375
+    // 10000 x $3/M + 500 x $15/M = $0.0375
     expect(firstCall).toBeCloseTo(0.0375, 6);
-    // secondCall = 100 × $3/M + 9900 × $3/M × 0.1 + 500 × $15/M
-    //            = $0.0003 + $0.00297 + $0.0075 = $0.01077
+    // 100 x $3/M + 9900 x $3/M x 0.1 + 500 x $15/M = $0.0003 + $0.00297 + $0.0075
     expect(secondCall).toBeCloseTo(0.01077, 6);
   });
 
   it('a cache-heavy run saves roughly 80% on input cost vs no cache', () => {
-    // 1 initial cache-create (expensive) + 9 cache reads (cheap), same token shape each call
     const PROMPT_PREFIX = 5000;
     const DYNAMIC = 500;
     const OUTPUT = 200;
-
-    // Cold run: 10 calls, all non-cached
     let coldTotal = 0;
-    for (let i = 0; i < 10; i++) {
-      coldTotal += estimateCacheAwareCost(PROMPT_PREFIX + DYNAMIC, OUTPUT, SONNET_INPUT, SONNET_OUTPUT);
-    }
+    for (let i = 0; i < 10; i++) coldTotal += sonnet46(calls(PROMPT_PREFIX + DYNAMIC, OUTPUT));
+    let cachedTotal = sonnet46(calls(DYNAMIC, OUTPUT, 0, PROMPT_PREFIX));
+    for (let i = 0; i < 9; i++) cachedTotal += sonnet46(calls(DYNAMIC, OUTPUT, PROMPT_PREFIX));
+    // With a 5500:200 input:output ratio the total saving clears 50%.
+    expect((coldTotal - cachedTotal) / coldTotal).toBeGreaterThan(0.5);
+  });
 
-    // Cached run: first call creates, next 9 read
-    let cachedTotal = estimateCacheAwareCost(DYNAMIC, OUTPUT, SONNET_INPUT, SONNET_OUTPUT, 0, PROMPT_PREFIX);
-    for (let i = 0; i < 9; i++) {
-      cachedTotal += estimateCacheAwareCost(DYNAMIC, OUTPUT, SONNET_INPUT, SONNET_OUTPUT, PROMPT_PREFIX);
-    }
+  it('prices a 1-hour cache write at 2x and a 5-minute write at 1.25x', () => {
+    // 6000 x $3/M x 1.25 + 4000 x $3/M x 2 = $0.0225 + $0.024
+    expect(
+      sonnet46({
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 10000,
+        cache_creation: { ephemeral_5m_input_tokens: 6000, ephemeral_1h_input_tokens: 4000 },
+      }),
+    ).toBeCloseTo(0.0465, 6);
+    // The split alone, without the total, prices the same.
+    expect(
+      sonnet46({
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation: { ephemeral_5m_input_tokens: 6000, ephemeral_1h_input_tokens: 4000 },
+      }),
+    ).toBeCloseTo(0.0465, 6);
+  });
 
-    const savings = (coldTotal - cachedTotal) / coldTotal;
-    // Caching should save 60-90% of INPUT cost on cache-heavy workloads.
-    // Output cost is identical so the total savings depend on input:output ratio.
-    // With 5500:200 input:output ratio here, total savings should be 50%+.
-    expect(savings).toBeGreaterThan(0.5);
+  it('prices writes without a TTL split as 5-minute writes and caps the 1-hour share at the total', () => {
+    expect(sonnet46(calls(0, 0, 0, 10000))).toBeCloseTo(0.0375, 6);
+    expect(
+      sonnet46({
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 10000,
+        cache_creation: { ephemeral_1h_input_tokens: 20000 },
+      }),
+    ).toBeCloseTo(0.06, 6);
+  });
+
+  it('prices Claude Opus 5.5 cache reads at 0.05x the input price', () => {
+    // 1000 x $4/M + 100000 x $0.20/M + 500 x $20/M = $0.004 + $0.02 + $0.01.
+    // At the flat 0.1x rate the reads alone would cost $0.04.
+    expect(
+      estimateAnthropicCostUSD('claude-opus-5-5', {
+        input_tokens: 1000,
+        output_tokens: 500,
+        cache_read_input_tokens: 100000,
+      }),
+    ).toBeCloseTo(0.034, 6);
+  });
+
+  it('prices Claude Fable 5.1 cache reads at 0.025x, bare and dated', () => {
+    const reads = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 1_000_000 };
+    expect(estimateAnthropicCostUSD('claude-fable-5-1', reads)).toBeCloseTo(0.25, 6);
+    expect(estimateAnthropicCostUSD('claude-fable-5-1-20261001', reads)).toBeCloseTo(0.25, 6);
+  });
+
+  it('keeps Claude Fable 5 cache reads at 0.1x: the Fable 5.1 rate does not leak through prefix resolution', () => {
+    const reads = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 1_000_000 };
+    expect(estimateAnthropicCostUSD('claude-fable-5', reads)).toBeCloseTo(1, 6);
+    expect(estimateAnthropicCostUSD('claude-fable-5-20260601', reads)).toBeCloseTo(1, 6);
+  });
+
+  it('prices Sonnet 5.5 and Opus 4.5 cache reads at the standard 0.1x', () => {
+    const reads = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 1_000_000 };
+    expect(estimateAnthropicCostUSD('claude-sonnet-5-5', reads)).toBeCloseTo(0.2, 6);
+    expect(estimateAnthropicCostUSD('claude-opus-4-5', reads)).toBeCloseTo(0.5, 6);
+  });
+
+  it('returns undefined for an unknown or empty model id', () => {
+    const usage = { input_tokens: 1000, output_tokens: 1000 };
+    expect(estimateAnthropicCostUSD('claude-nova-9', usage)).toBeUndefined();
+    expect(estimateAnthropicCostUSD('', usage)).toBeUndefined();
   });
 });
 
@@ -229,7 +268,6 @@ describe('AnthropicProvider cache-aware cost estimation', () => {
  * down entirely. Exercises the REAL private buildRequestPayload (the single
  * chokepoint feeding both the streaming and non-streaming /v1/messages paths).
  */
-import { AnthropicProvider } from '../implementations/AnthropicProvider';
 
 describe('AnthropicProvider automatic prompt caching', () => {
   const ENV_KEY = 'AGENTOS_ANTHROPIC_AUTO_CACHE';
@@ -1164,5 +1202,87 @@ describe('AnthropicProvider cache:false sanitizes customModelParams-injected reg
     // The caller's own customModelParams objects are never mutated.
     expect(injectedSystem[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
     expect(injectedMessages[0].content[0].cache_control).toEqual({ type: 'ephemeral' });
+  });
+});
+
+/**
+ * The cacheable-prefix floor decides when the leak detector reports a callsite
+ * that never caches. Driven through generateCompletion with only fetch
+ * stubbed: eight calls from one callsite at 700 uncached input tokens and no
+ * cache activity. That sits above Sonnet 5.5's 512-token floor and below
+ * Sonnet 5's 1024.
+ */
+describe('AnthropicProvider cache-leak floors via generateCompletion', () => {
+  const fetchMock = vi.fn();
+  /** First argument of every console.warn call in the current test. */
+  const warned: string[] = [];
+
+  /** A completed SSE reply whose usage reports 700 uncached input tokens. */
+  function uncachedReply(model: string): Response {
+    const events = [
+      {
+        type: 'message_start',
+        message: {
+          id: 'msg_floor', type: 'message', role: 'assistant', content: [], model,
+          stop_reason: null, stop_sequence: null, usage: { input_tokens: 700, output_tokens: 1 },
+        },
+      },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 1 } },
+      { type: 'message_stop' },
+    ];
+    return new Response(events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(''), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+  }
+
+  /** Makes eight calls from one callsite and returns the `unmarked` warnings. */
+  async function unmarkedWarnings(model: string, options: ModelCompletionOptions = {}): Promise<string[]> {
+    const provider = new AnthropicProvider();
+    await provider.initialize({ apiKey: 'test-anthropic-key' });
+    fetchMock.mockImplementation(async () => uncachedReply(model));
+    for (let i = 0; i < 8; i++) {
+      await provider.generateCompletion(
+        model,
+        [
+          { role: 'system', content: `Floor probe system prompt for ${model}.` },
+          { role: 'user', content: `turn ${i}` },
+        ],
+        options,
+      );
+    }
+    return warned.filter((message) => /cache-leak\] unmarked/.test(message));
+  }
+
+  beforeEach(() => {
+    resetCacheLeakDetector();
+    warned.length = 0;
+    fetchMock.mockReset();
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warned.push(String(args[0]));
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('reports a Sonnet 5.5 callsite that pays 700 uncached tokens a call (512-token floor)', async () => {
+    const warnings = await unmarkedWarnings('claude-sonnet-5-5');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/model=claude-sonnet-5-5/);
+  });
+
+  it('stays quiet for the same prompts on Sonnet 5 (1024-token floor)', async () => {
+    expect(await unmarkedWarnings('claude-sonnet-5')).toHaveLength(0);
+  });
+
+  it('stays quiet when the caller turned caching off (cache: false)', async () => {
+    expect(await unmarkedWarnings('claude-sonnet-5-5', { cache: false })).toHaveLength(0);
   });
 });

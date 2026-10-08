@@ -23,7 +23,8 @@ import type {
   ImageModality,
   ImageOutputFormat,
 } from '../io/media/images/IImageProvider.js';
-import { resolveModelOption, resolveMediaProvider } from './model.js';
+import { resolveModelOption, resolveMediaProvider, type ModelOption } from './model.js';
+import { getDefaultProvider } from './runtime/global-default.js';
 import {
   resolveProviderChain,
   resolveProviderOrder,
@@ -50,6 +51,7 @@ const IMAGE_PROVIDER_ENV_MAP: Array<{ envKey: string; providerId: string }> = [
   { envKey: 'STABILITY_API_KEY', providerId: 'stability' },
   { envKey: 'OPENROUTER_API_KEY', providerId: 'openrouter' },
   { envKey: 'STABLE_DIFFUSION_LOCAL_BASE_URL', providerId: 'stable-diffusion-local' },
+  { envKey: 'MINIMAX_API_KEY', providerId: 'minimax' },
 ];
 
 /** Shared emitter for image fallback events (singleton per process). */
@@ -89,6 +91,40 @@ function detectAvailableImageProviders(): string[] {
   return available;
 }
 
+/** The global default's provider and the image model it resolves to. */
+interface DefaultImageModel {
+  providerId: string;
+  modelId: string;
+}
+
+/**
+ * The image model the global default (setDefaultProvider) resolves to, when
+ * its provider makes images: the default's model when it can serve images
+ * (see resolveModelOption), else the provider's default image model.
+ * Undefined when there is no global default, its provider has no image
+ * provider, no image model resolves for it (OpenRouter with a chat model),
+ * or it has no credential in the default, the call or the environment.
+ *
+ * @param inline - The call's own key and base URL. Pass them only for the
+ *   primary: a custom endpoint keeps the default's model whatever its name,
+ *   and a fallback runs on its own endpoint with its own key.
+ */
+function globalDefaultImageModel(inline: { apiKey?: string; baseUrl?: string }): DefaultImageModel | undefined {
+  const providerId = getDefaultProvider()?.provider;
+  if (!providerId || !hasImageProviderFactory(providerId)) return undefined;
+  try {
+    const resolved = resolveModelOption({ ...(inline.baseUrl ? { baseUrl: inline.baseUrl } : {}) } as ModelOption, 'image');
+    if (resolved.providerId !== providerId || !resolved.modelId) return undefined;
+    // Throws when a built-in provider has no key in the default, the call or
+    // the environment, or stable-diffusion-local has no base URL.
+    const media = resolveMediaProvider(providerId, resolved.modelId, inline);
+    const hasCredential = Boolean(media.apiKey) || providerId === 'stable-diffusion-local';
+    return hasCredential ? { providerId, modelId: resolved.modelId } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Creates an {@link IImageProvider} for the resolved primary provider,
  * optionally wrapped in a {@link FallbackImageProxy} when an ordered
@@ -96,11 +132,14 @@ function detectAvailableImageProviders(): string[] {
  *
  * @param resolved - The primary resolved provider credentials.
  * @param providerChain - Optional ordered provider IDs with the primary first.
+ * @param preferred - The model to use when its provider runs as a fallback
+ *   (the global default's image model on that provider's own endpoint).
  * @returns An initialised image provider (possibly a fallback proxy).
  */
 async function createImageProviderWithFallback(
   resolved: { providerId: string; modelId: string; apiKey?: string; baseUrl?: string },
   providerChain?: string[],
+  preferred?: DefaultImageModel,
 ): Promise<IImageProvider> {
   const primary = createImageProvider(resolved.providerId);
   await primary.initialize({
@@ -122,8 +161,10 @@ async function createImageProviderWithFallback(
   const chain: IImageProvider[] = [primary];
   for (const fbId of fallbackIds) {
     try {
-      const { modelId: fallbackModelId } = resolveModelOption({ provider: fbId }, 'image');
-      const fbResolved = resolveMediaProvider(fbId, fallbackModelId);
+      const fbResolved = resolveMediaProvider(
+        fbId,
+        preferred?.providerId === fbId ? preferred.modelId : resolveModelOption({ provider: fbId }, 'image').modelId,
+      );
       const fb = createImageProvider(fbId);
       await fb.initialize({
         apiKey: fbResolved.apiKey,
@@ -278,18 +319,28 @@ export async function generateImage(opts: GenerateImageOptions): Promise<Generat
       let providerChain: string[] | undefined;
       let providerId: string;
       let modelId: string;
+      let defaultImage: DefaultImageModel | undefined;
 
       if (!opts.provider && !opts.model) {
+        // A global default (setDefaultProvider) with an image model for its
+        // provider leads the chain: its key need not be in the environment.
+        defaultImage = globalDefaultImageModel({ apiKey: opts.apiKey, baseUrl: opts.baseUrl });
+        const detected = detectAvailableImageProviders();
         providerChain = resolveProviderChain(
-          detectAvailableImageProviders(),
+          defaultImage
+            ? [defaultImage.providerId, ...detected.filter((id) => id !== defaultImage!.providerId)]
+            : detected,
           opts.providerPreferences,
         );
         if (providerChain.length === 0) {
           throw new Error(
-            'No image provider configured. Set OPENAI_API_KEY, STABILITY_API_KEY, REPLICATE_API_TOKEN, BFL_API_KEY, FAL_API_KEY, OPENROUTER_API_KEY, or STABLE_DIFFUSION_LOCAL_BASE_URL.',
+            'No image provider configured. Call setDefaultProvider() with an image-capable provider, or set OPENAI_API_KEY, STABILITY_API_KEY, REPLICATE_API_TOKEN, BFL_API_KEY, FAL_API_KEY, OPENROUTER_API_KEY, or STABLE_DIFFUSION_LOCAL_BASE_URL.',
           );
         }
-        ({ providerId, modelId } = resolveModelOption({ provider: providerChain[0] }, 'image'));
+        ({ providerId, modelId } =
+          defaultImage && providerChain[0] === defaultImage.providerId
+            ? defaultImage
+            : resolveModelOption({ provider: providerChain[0] }, 'image'));
       } else {
         ({ providerId, modelId } = resolveModelOption(opts, 'image'));
         let fallbackIds = detectFallbackImageProviders(providerId);
@@ -364,7 +415,13 @@ export async function generateImage(opts: GenerateImageOptions): Promise<Generat
       span?.setAttribute('llm.provider', resolved.providerId);
       span?.setAttribute('llm.model', resolved.modelId);
 
-      const provider = await createImageProviderWithFallback(resolved, providerChain);
+      // A fallback on the default's provider runs its image model on that
+      // provider's own endpoint, without the call's inline key or base URL.
+      const provider = await createImageProviderWithFallback(
+        resolved,
+        providerChain,
+        defaultImage ? globalDefaultImageModel({}) : undefined,
+      );
 
       const result = await provider.generateImage({
         modelId:

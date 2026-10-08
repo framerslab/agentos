@@ -61,7 +61,7 @@ for the requested task automatically:
 | `gemini`                 | Cloud | `gemini-2.5-flash`         | —                                | —                        | `GEMINI_API_KEY`                  |
 | `openrouter`             | Cloud | `openai/gpt-4o`            | —                                | —                        | `OPENROUTER_API_KEY`              |
 | `claude-code-cli`        | Local | `claude-sonnet-4-5-20250929` | —                                | —                        | `which claude`                    |
-| `gemini-cli`             | Local | `gemini-2.5-flash`         | —                                | —                        | `which gemini`                    |
+| `gemini-cli`             | Local | `gemini-3.5-flash`         | —                                | —                        | `which gemini`                    |
 | `stability`              | Cloud | —                          | `stable-diffusion-xl-1024-v1-0`  | —                        | `STABILITY_API_KEY`               |
 | `replicate`              | Cloud | —                          | `black-forest-labs/flux-1.1-pro` | —                        | `REPLICATE_API_TOKEN`             |
 | `ollama`                 | Local | `llama3.2`                 | `stable-diffusion`               | `nomic-embed-text`       | `OLLAMA_BASE_URL`                 |
@@ -219,7 +219,7 @@ Use:
 - `finalTextStream` or `text` for the finalized approved answer
 - `fullStream` when you also need structured events like `final-output`
 
-See [Agency API](./AGENCY_API.md) and [Streaming Semantics](./STREAMING_SEMANTICS.md)
+See [Agency API](../orchestration/AGENCY_API.md) and [Streaming Semantics](../architecture/STREAMING_SEMANTICS.md)
 for the full contract.
 
 ## [`QueryRouter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/query/QueryRouter.ts)
@@ -559,9 +559,9 @@ One `Memory` facade backs both the live memory and the wiki, so the markdown sta
 
 Runnable examples in the package source:
 
-- [`packages/agentos/examples/high-level-api.mjs`](https://github.com/framerslab/agentos/blob/master/examples/high-level-api.mjs)
-- [`packages/agentos/examples/generate-image.mjs`](https://github.com/framerslab/agentos/blob/master/examples/generate-image.mjs)
-- [`packages/agentos/examples/agentos-config-tools.mjs`](https://github.com/framerslab/agentos/blob/master/examples/agentos-config-tools.mjs)
+- [`examples/high-level-api.mjs`](https://github.com/framerslab/agentos/blob/master/examples/high-level-api.mjs)
+- [`examples/generate-image.mjs`](https://github.com/framerslab/agentos/blob/master/examples/generate-image.mjs)
+- [`examples/agentos-config-tools.mjs`](https://github.com/framerslab/agentos/blob/master/examples/agentos-config-tools.mjs)
 
 ## Full runtime: [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts)
 

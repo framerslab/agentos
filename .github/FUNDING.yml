@@ -1,6 +1,2 @@
-# Funding sources shown as a "Sponsor" button on the repository.
-# Set `github:` to the org or user handle once GitHub Sponsors is enabled, then
-# the button links to the GitHub Sponsors page. Until then the custom link is used.
-# github: [framerslab]
-custom:
-  - https://frame.dev
+github: [framerslab]
+custom: ["https://frame.dev"]

@@ -191,16 +191,24 @@ export class PostgresVectorStore implements IVectorStore {
     );
 
     // Create tsvector column + GIN index for full-text search.
-    // Use a try-catch because the column may already exist.
-    try {
-      await this.pool.query(
-        `ALTER TABLE ${table} ADD COLUMN tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', COALESCE(text_content, ''))) STORED`,
-      );
-      await this.pool.query(
-        `CREATE INDEX IF NOT EXISTS ${name}_fts ON ${table} USING gin (tsv)`,
-      );
-    } catch {
-      // Column already exists — fine.
+    //
+    // The column is read first and added only when that read fails. ALTER
+    // TABLE takes an ACCESS EXCLUSIVE lock even when the column exists. That
+    // lock waits behind every open reader of the table (a pg_dump reads the
+    // table for its whole run), and every later query on the table queues
+    // behind the waiting ALTER. A read takes ACCESS SHARE, which a dump does
+    // not block.
+    if (!(await this._hasTsvColumn(table))) {
+      try {
+        await this.pool.query(
+          `ALTER TABLE ${table} ADD COLUMN tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', COALESCE(text_content, ''))) STORED`,
+        );
+        await this.pool.query(
+          `CREATE INDEX IF NOT EXISTS ${name}_fts ON ${table} USING gin (tsv)`,
+        );
+      } catch {
+        // Another caller added the column between the read and the ALTER.
+      }
     }
 
     // Register in collections metadata.
@@ -575,6 +583,16 @@ export class PostgresVectorStore implements IVectorStore {
   // =========================================================================
   // Internals
   // =========================================================================
+
+  /** Whether a collection table already has its `tsv` full-text column. */
+  private async _hasTsvColumn(table: string): Promise<boolean> {
+    try {
+      await this.pool.query(`SELECT tsv FROM ${table} LIMIT 0`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   /** Ensure the store is initialized before any operation. */
   private async _ensureInit(): Promise<void> {

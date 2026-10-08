@@ -1,0 +1,639 @@
+[
+  {
+    "id": "w-radiation-dose",
+    "note": "A dose model of the kind the example's medical department forges.",
+    "code": "function execute(input) {\n  const { dailyDoseMsv, days, shieldingFactor } = input;\n  let cumulative = 0;\n  const monthly = [];\n  for (let day = 1; day <= days; day++) {\n    cumulative += dailyDoseMsv * (1 - shieldingFactor);\n    if (day % 30 === 0) {\n      monthly.push(Number(cumulative.toFixed(2)));\n    }\n  }\n  const riskPercent = Math.min(100, (cumulative / 1000) * 5);\n  return { cumulativeMsv: Number(cumulative.toFixed(2)), monthly, riskPercent: Number(riskPercent.toFixed(3)) };\n}",
+    "input": {
+      "dailyDoseMsv": 0.5,
+      "days": 90,
+      "shieldingFactor": 0.25
+    },
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "cumulativeMsv": 33.75,
+        "monthly": [
+          11.25,
+          22.5,
+          33.75
+        ],
+        "riskPercent": 0.169
+      }
+    }
+  },
+  {
+    "id": "w-crop-yield",
+    "code": "function execute(input) {\n  const plots = input.plots.map((plot) => ({ ...plot, yieldKg: plot.areaM2 * plot.kgPerM2 * (plot.healthy ? 1 : 0.5) }));\n  const totalKg = plots.reduce((sum, plot) => sum + plot.yieldKg, 0);\n  const best = plots.filter((plot) => plot.healthy).sort((a, b) => b.yieldKg - a.yieldKg)[0];\n  return { totalKg, bestPlot: best ? best.id : null, caloriesPerDay: Math.round((totalKg * 800) / input.days) };\n}",
+    "input": {
+      "plots": [
+        {
+          "id": "A",
+          "areaM2": 40,
+          "kgPerM2": 2.5,
+          "healthy": true
+        },
+        {
+          "id": "B",
+          "areaM2": 30,
+          "kgPerM2": 3,
+          "healthy": false
+        },
+        {
+          "id": "C",
+          "areaM2": 20,
+          "kgPerM2": 4,
+          "healthy": true
+        }
+      ],
+      "days": 100
+    },
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "totalKg": 225,
+        "bestPlot": "A",
+        "caloriesPerDay": 1800
+      }
+    }
+  },
+  {
+    "id": "w-morale-index",
+    "code": "function execute(input) {\n  const weights = { sleep: 0.3, social: 0.25, workload: 0.25, privacy: 0.2 };\n  const scored = input.crew.map((member) => {\n    let score = 0;\n    for (const [factor, weight] of Object.entries(weights)) {\n      score += (member[factor] ?? 0) * weight;\n    }\n    return { name: member.name, score: Math.round(score * 10) / 10 };\n  });\n  scored.sort((a, b) => a.score - b.score);\n  const average = scored.reduce((sum, member) => sum + member.score, 0) / scored.length;\n  return { lowest: scored[0], average: Math.round(average * 10) / 10 };\n}",
+    "input": {
+      "crew": [
+        {
+          "name": "Ana",
+          "sleep": 6,
+          "social": 7,
+          "workload": 4,
+          "privacy": 5
+        },
+        {
+          "name": "Bo",
+          "sleep": 8,
+          "social": 5,
+          "workload": 6,
+          "privacy": 7
+        },
+        {
+          "name": "Cy",
+          "sleep": 4,
+          "social": 6,
+          "workload": 3,
+          "privacy": 6
+        }
+      ]
+    },
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "lowest": {
+          "name": "Cy",
+          "score": 4.7
+        },
+        "average": 5.6
+      }
+    }
+  },
+  {
+    "id": "w-habitat-classes",
+    "code": "class Habitat {\n  constructor(name, volumeM3) {\n    this.name = name;\n    this.volumeM3 = volumeM3;\n  }\n  get crewCapacity() {\n    return Math.floor(this.volumeM3 / 25);\n  }\n  static largest(list) {\n    return list.reduce((a, b) => (b.volumeM3 > a.volumeM3 ? b : a));\n  }\n}\nclass Greenhouse extends Habitat {\n  get crewCapacity() {\n    return 0;\n  }\n}\nfunction execute(input) {\n  const habitats = input.habitats.map((h) => (h.kind === 'greenhouse' ? new Greenhouse(h.name, h.volumeM3) : new Habitat(h.name, h.volumeM3)));\n  return { capacity: habitats.reduce((sum, h) => sum + h.crewCapacity, 0), largest: Habitat.largest(habitats).name };\n}",
+    "input": {
+      "habitats": [
+        {
+          "name": "Dome",
+          "kind": "habitat",
+          "volumeM3": 500
+        },
+        {
+          "name": "Lab",
+          "kind": "habitat",
+          "volumeM3": 260
+        },
+        {
+          "name": "Grow",
+          "kind": "greenhouse",
+          "volumeM3": 900
+        }
+      ]
+    },
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "capacity": 30,
+        "largest": "Grow"
+      }
+    }
+  },
+  {
+    "id": "w-date-diff",
+    "code": "function execute(input) {\n  const start = new Date(input.start);\n  const end = new Date(input.end);\n  const days = Math.round((end.getTime() - start.getTime()) / 86400000);\n  return { days, startDay: start.getUTCDay(), iso: end.toISOString() };\n}",
+    "input": {
+      "start": "2026-01-15T00:00:00Z",
+      "end": "2026-03-01T12:00:00Z"
+    },
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "days": 46,
+        "startDay": 4,
+        "iso": "2026-03-01T12:00:00.000Z"
+      }
+    }
+  },
+  {
+    "id": "w-regex-extract",
+    "code": "function execute(input) {\n  const pattern = /(?<user>[a-z0-9._-]+)@(?<domain>[a-z0-9.-]+\\.[a-z]{2,})/gi;\n  const found = [];\n  for (const match of input.text.matchAll(pattern)) {\n    found.push({ user: match.groups.user, domain: match.groups.domain.toLowerCase() });\n  }\n  return { count: found.length, found };\n}",
+    "input": {
+      "text": "Contact ops@Colony.example or medic.lead@base-two.example.org today."
+    },
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "count": 2,
+        "found": [
+          {
+            "user": "ops",
+            "domain": "colony.example"
+          },
+          {
+            "user": "medic.lead",
+            "domain": "base-two.example.org"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "w-json-groupby",
+    "code": "function execute(input) {\n  const rows = JSON.parse(input.json);\n  const groups = new Map();\n  for (const row of rows) {\n    const names = groups.get(row.dept) ?? [];\n    names.push(row.name);\n    groups.set(row.dept, names);\n  }\n  return Object.fromEntries([...groups].map(([dept, names]) => [dept, names.sort()]));\n}",
+    "input": {
+      "json": "[{\"dept\":\"medical\",\"name\":\"Cy\"},{\"dept\":\"eng\",\"name\":\"Bo\"},{\"dept\":\"medical\",\"name\":\"Ana\"},{\"dept\":\"eng\",\"name\":\"Al\"}]"
+    },
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "medical": [
+          "Ana",
+          "Cy"
+        ],
+        "eng": [
+          "Al",
+          "Bo"
+        ]
+      }
+    }
+  },
+  {
+    "id": "w-generators",
+    "code": "function* fibonacci(limit) {\n  let a = 0;\n  let b = 1;\n  while (a <= limit) {\n    yield a;\n    [a, b] = [b, a + b];\n  }\n}\nfunction execute(input) {\n  const values = [...fibonacci(input.limit)];\n  return { values, evens: values.filter((v) => v % 2 === 0).length };\n}",
+    "input": {
+      "limit": 100
+    },
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "values": [
+          0,
+          1,
+          1,
+          2,
+          3,
+          5,
+          8,
+          13,
+          21,
+          34,
+          55,
+          89
+        ],
+        "evens": 4
+      }
+    }
+  },
+  {
+    "id": "w-async-no-host",
+    "code": "const doubleLater = async (value) => {\n  await null;\n  return value * 2;\n};\nasync function execute(input) {\n  const doubled = await Promise.all(input.values.map(doubleLater));\n  const settled = await Promise.allSettled([Promise.reject(new Error('nope')), doubleLater(5)]);\n  return { doubled, statuses: settled.map((s) => s.status), reason: settled[0].reason.message };\n}",
+    "input": {
+      "values": [
+        1,
+        2,
+        3
+      ]
+    },
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "doubled": [
+          2,
+          4,
+          6
+        ],
+        "statuses": [
+          "rejected",
+          "fulfilled"
+        ],
+        "reason": "nope"
+      }
+    }
+  },
+  {
+    "id": "w-custom-error",
+    "code": "class QuotaError extends Error {\n  constructor(limit) {\n    super('ration quota exceeded: limit ' + limit);\n    this.name = 'QuotaError';\n  }\n}\nfunction execute(input) {\n  if (input.requested > input.limit) {\n    throw new QuotaError(input.limit);\n  }\n  return { granted: input.requested };\n}",
+    "input": {
+      "requested": 12,
+      "limit": 10
+    },
+    "allowlist": [],
+    "expect": {
+      "success": false,
+      "errorIncludes": "ration quota exceeded: limit 10"
+    }
+  },
+  {
+    "id": "w-console-noise",
+    "code": "function execute() {\n  for (let i = 0; i < 100; i++) {\n    console.log('step', i, { i });\n  }\n  console.error('done');\n  return { steps: 100 };\n}",
+    "input": {},
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "steps": 100
+      }
+    }
+  },
+  {
+    "id": "w-es2021",
+    "code": "async function execute(input) {\n  const budget = 1_000_000;\n  const settings = { mode: undefined };\n  settings.mode ??= 'safe';\n  const first = await Promise.any([Promise.reject(new Error('a')), Promise.resolve('b')]);\n  return { budget, mode: settings.mode, first, label: input.label.replaceAll('-', ' ') };\n}",
+    "input": {
+      "label": "north-dome-3"
+    },
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "budget": 1000000,
+        "mode": "safe",
+        "first": "b",
+        "label": "north dome 3"
+      }
+    }
+  },
+  {
+    "id": "w-es2022",
+    "code": "class Counter {\n  #count = 0;\n  static created = 0;\n  constructor() {\n    Counter.created += 1;\n  }\n  increment() {\n    this.#count += 1;\n    return this;\n  }\n  get value() {\n    return this.#count;\n  }\n  static #secret() {\n    return 'hidden';\n  }\n  static reveal() {\n    return Counter.#secret();\n  }\n}\nfunction execute(input) {\n  const counter = new Counter().increment().increment();\n  return { value: counter.value, created: Counter.created, last: input.list.at(-1), own: Object.hasOwn(input, 'list'), reveal: Counter.reveal() };\n}",
+    "input": {
+      "list": [
+        1,
+        2,
+        3
+      ]
+    },
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "value": 2,
+        "created": 1,
+        "last": 3,
+        "own": true,
+        "reveal": "hidden"
+      }
+    }
+  },
+  {
+    "id": "w-es2023",
+    "code": "function execute(input) {\n  return {\n    sorted: input.values.toSorted((a, b) => a - b),\n    original: input.values,\n    lastEven: input.values.findLast((v) => v % 2 === 0),\n    lastEvenIndex: input.values.findLastIndex((v) => v % 2 === 0),\n    replaced: input.values.with(0, 99),\n  };\n}",
+    "input": {
+      "values": [
+        5,
+        2,
+        8,
+        1
+      ]
+    },
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "sorted": [
+          1,
+          2,
+          5,
+          8
+        ],
+        "original": [
+          5,
+          2,
+          8,
+          1
+        ],
+        "lastEven": 8,
+        "lastEvenIndex": 2,
+        "replaced": [
+          99,
+          2,
+          8,
+          1
+        ]
+      }
+    }
+  },
+  {
+    "id": "w-intl",
+    "note": "Formatting for people, as report-writing tools do; needs Intl.",
+    "code": "function execute() {\n  const date = new Date(Date.UTC(2026, 9, 7));\n  return {\n    formatted: new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', year: 'numeric', month: 'short', day: 'numeric' }).format(date),\n    number: (1234567.891).toLocaleString('en-US'),\n  };\n}",
+    "input": {},
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "formatted": "Oct 7, 2026",
+        "number": "1,234,567.891"
+      }
+    }
+  },
+  {
+    "id": "w-url",
+    "code": "function execute(input) {\n  const url = new URL(input.href);\n  url.searchParams.append('page', '2');\n  return { host: url.hostname, path: url.pathname, q: url.searchParams.get('q'), href: url.href };\n}",
+    "input": {
+      "href": "https://example.com/search/items?q=mars+base&sort=asc"
+    },
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "host": "example.com",
+        "path": "/search/items",
+        "q": "mars base",
+        "href": "https://example.com/search/items?q=mars+base&sort=asc&page=2"
+      }
+    }
+  },
+  {
+    "id": "w-urlsearchparams",
+    "code": "function execute(input) {\n  const params = new URLSearchParams();\n  for (const [key, value] of Object.entries(input.filters)) {\n    params.append(key, String(value));\n  }\n  params.sort();\n  return params.toString();\n}",
+    "input": {
+      "filters": {
+        "zone": "north",
+        "limit": 10,
+        "name": "a b&c"
+      }
+    },
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": "limit=10&name=a+b%26c&zone=north"
+    }
+  },
+  {
+    "id": "w-text-encoding",
+    "code": "function execute(input) {\n  const bytes = new TextEncoder().encode(input.text);\n  const back = new TextDecoder().decode(bytes);\n  return { length: bytes.length, first: bytes[0], roundTrip: back === input.text };\n}",
+    "input": {
+      "text": "héllo ✓"
+    },
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "length": 10,
+        "first": 104,
+        "roundTrip": true
+      }
+    }
+  },
+  {
+    "id": "w-base64",
+    "code": "function execute(input) {\n  const encoded = btoa(input.text);\n  return { encoded, decoded: atob(encoded) };\n}",
+    "input": {
+      "text": "agentos:forge"
+    },
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "encoded": "YWdlbnRvczpmb3JnZQ==",
+        "decoded": "agentos:forge"
+      }
+    }
+  },
+  {
+    "id": "w-structured-clone",
+    "code": "function execute() {\n  const original = { when: new Date(Date.UTC(2026, 0, 2)), tags: new Map([['a', 1]]), list: [1, { deep: true }] };\n  const copy = structuredClone(original);\n  copy.list[1].deep = false;\n  copy.tags.set('b', 2);\n  return {\n    sameTime: copy.when.getTime() === original.when.getTime(),\n    isDate: copy.when instanceof Date,\n    originalDeep: original.list[1].deep,\n    originalTags: original.tags.size,\n    copyTags: copy.tags.size,\n  };\n}",
+    "input": {},
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": {
+        "sameTime": true,
+        "isDate": true,
+        "originalDeep": true,
+        "originalTags": 1,
+        "copyTags": 2
+      }
+    }
+  },
+  {
+    "id": "w-blocked-globals",
+    "note": "The names the in-process context sets to undefined.",
+    "code": "function execute() {\n  return [typeof setTimeout, typeof queueMicrotask, typeof Reflect, typeof Proxy, typeof globalThis].join(',');\n}",
+    "input": {},
+    "allowlist": [],
+    "expect": {
+      "success": true,
+      "output": "undefined,undefined,undefined,undefined,undefined"
+    }
+  },
+  {
+    "id": "w-fetch-json",
+    "code": "async function execute(input) {\n  const response = await fetch(input.base + '/json');\n  const data = await response.json();\n  return { count: data.items.length, source: data.source, type: response.headers.get('content-type') };\n}",
+    "input": {
+      "base": "{{server}}"
+    },
+    "allowlist": [
+      "fetch"
+    ],
+    "expect": {
+      "success": true,
+      "output": {
+        "count": 3,
+        "source": "fixture",
+        "type": "application/json"
+      }
+    }
+  },
+  {
+    "id": "w-fetch-status",
+    "code": "async function execute(input) {\n  const response = await fetch(input.base + '/status/404');\n  return { ok: response.ok, status: response.status, text: await response.text() };\n}",
+    "input": {
+      "base": "{{server}}"
+    },
+    "allowlist": [
+      "fetch"
+    ],
+    "expect": {
+      "success": true,
+      "output": {
+        "ok": false,
+        "status": 404,
+        "text": "missing"
+      }
+    }
+  },
+  {
+    "id": "w-fetch-headers",
+    "code": "async function execute(input) {\n  const response = await fetch(input.base + '/headers', { headers: { 'x-request': 'forge' } });\n  const names = [];\n  response.headers.forEach((value, name) => {\n    if (name.startsWith('x-')) {\n      names.push(name + '=' + value);\n    }\n  });\n  return { names: names.sort(), echoed: response.headers.get('x-echo') };\n}",
+    "input": {
+      "base": "{{server}}"
+    },
+    "allowlist": [
+      "fetch"
+    ],
+    "expect": {
+      "success": true,
+      "output": {
+        "names": [
+          "x-echo=forge",
+          "x-fixture=yes"
+        ],
+        "echoed": "forge"
+      }
+    }
+  },
+  {
+    "id": "w-fetch-parallel",
+    "code": "async function execute(input) {\n  const paths = ['/ok', '/json', '/status/404'];\n  const responses = await Promise.all(paths.map((p) => fetch(input.base + p)));\n  return responses.map((r) => r.status);\n}",
+    "input": {
+      "base": "{{server}}"
+    },
+    "allowlist": [
+      "fetch"
+    ],
+    "expect": {
+      "success": true,
+      "output": [
+        200,
+        200,
+        404
+      ]
+    }
+  },
+  {
+    "id": "w-fs-json",
+    "code": "async function execute(input) {\n  const data = JSON.parse(await fs.readFile(input.root + '/data.json'));\n  return { n: data.n, tags: data.tags.join(',') };\n}",
+    "input": {
+      "root": "{{root}}"
+    },
+    "allowlist": [
+      "fs.read"
+    ],
+    "expect": {
+      "success": true,
+      "output": {
+        "n": 7,
+        "tags": "x,y"
+      }
+    }
+  },
+  {
+    "id": "w-fs-lines",
+    "code": "async function execute(input) {\n  const text = await fs.readFile(input.root + '/notes.txt');\n  const lines = text.split('\\n').filter(Boolean);\n  return { count: lines.length, last: lines[lines.length - 1] };\n}",
+    "input": {
+      "root": "{{root}}"
+    },
+    "allowlist": [
+      "fs.read"
+    ],
+    "expect": {
+      "success": true,
+      "output": {
+        "count": 3,
+        "last": "gamma"
+      }
+    }
+  },
+  {
+    "id": "w-crypto-sha256",
+    "code": "function execute(input) {\n  return crypto.createHash('sha256').update(input.text).digest('hex');\n}",
+    "input": {
+      "text": "abc"
+    },
+    "allowlist": [
+      "crypto"
+    ],
+    "expect": {
+      "success": true,
+      "output": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    }
+  },
+  {
+    "id": "w-crypto-hmac",
+    "code": "function execute(input) {\n  return crypto.createHmac('sha256', input.key).update(input.message).digest('hex');\n}",
+    "input": {
+      "key": "key",
+      "message": "The quick brown fox jumps over the lazy dog"
+    },
+    "allowlist": [
+      "crypto"
+    ],
+    "expect": {
+      "success": true,
+      "output": "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+    }
+  },
+  {
+    "id": "w-crypto-digest-bytes",
+    "note": "digest() without an encoding returns bytes that know toString('hex').",
+    "code": "function execute(input) {\n  const digest = crypto.createHash('md5').update(input.text).digest();\n  return { hex: digest.toString('hex'), length: digest.length };\n}",
+    "input": {
+      "text": "hello"
+    },
+    "allowlist": [
+      "crypto"
+    ],
+    "expect": {
+      "success": true,
+      "output": {
+        "hex": "5d41402abc4b2a76b9719d911017c592",
+        "length": 16
+      }
+    }
+  },
+  {
+    "id": "w-crypto-base64",
+    "code": "function execute(input) {\n  return crypto.createHash('sha1').update(input.text).digest('base64');\n}",
+    "input": {
+      "text": "abc"
+    },
+    "allowlist": [
+      "crypto"
+    ],
+    "expect": {
+      "success": true,
+      "output": "qZk+NkcGgWq6PiVxeFDCbJzQ2J0="
+    }
+  },
+  {
+    "id": "w-crypto-uuid",
+    "code": "function execute() {\n  return { id: crypto.randomUUID() };\n}",
+    "input": {},
+    "allowlist": [
+      "crypto"
+    ],
+    "expect": {
+      "success": true,
+      "outputMatches": {
+        "id": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      }
+    }
+  }
+]

@@ -33,6 +33,7 @@ import type { PersonaStateOverlay, PersonaEvolutionContext } from './persona_ove
 import { resolveSecretForProvider } from '../../core/config/extensionSecrets';
 import type { PersonaEvolutionRule } from '../../orchestration/workflows/WorkflowTypes';
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
+import { feedbackTraceMessage, normalizeUserFeedback } from './userFeedback';
 
 /**
  * Custom error class for GMIManager-specific operational errors.
@@ -52,7 +53,7 @@ export interface GMIManagerConfig {
   personaLoaderConfig: PersonaLoaderConfig;
   defaultGMIInactivityCleanupMinutes?: number;
   defaultWorkingMemoryType?: 'in_memory' | string;
-  defaultGMIBaseConfigDefaults?: Partial<Pick<GMIBaseConfig, 'defaultLlmProviderId' | 'defaultLlmModelId' | 'customSettings'>>;
+  defaultGMIBaseConfigDefaults?: Partial<Pick<GMIBaseConfig, 'defaultLlmProviderId' | 'defaultLlmModelId' | 'customSettings' | 'defaultReasoningTraceMaxEntries' | 'defaultReasoningTraceMaxMessageLength'>>;
   /** Strict validation enforcement configuration (optional, defaults to permissive). */
   personaValidationStrict?: PersonaValidationStrictConfig;
   /** Optional per-GMI cognitive memory factory used by devtools and advanced runtimes. */
@@ -495,6 +496,8 @@ export class GMIManager {
       cognitiveMemory,
       defaultLlmProviderId: persona.defaultProviderId || this.config.defaultGMIBaseConfigDefaults?.defaultLlmProviderId,
       defaultLlmModelId: persona.defaultModelId || this.config.defaultGMIBaseConfigDefaults?.defaultLlmModelId,
+      defaultReasoningTraceMaxEntries: this.config.defaultGMIBaseConfigDefaults?.defaultReasoningTraceMaxEntries,
+      defaultReasoningTraceMaxMessageLength: this.config.defaultGMIBaseConfigDefaults?.defaultReasoningTraceMaxMessageLength,
       customSettings: persona.customFields,
     };
   }
@@ -716,31 +719,43 @@ export class GMIManager {
     console.log(`GMIManager (ID: ${this.managerId}): Shutdown complete.`);
   }
 
+  /**
+   * Routes user feedback to the GMI that serves the session. The payload is
+   * normalized first (see {@link normalizeUserFeedback}): a `rating` label
+   * decides the polarity, otherwise a numeric rating is read on the 1 to 5
+   * scale. The GMI then records a trace entry and, when cognitive memory is
+   * configured, stores the feedback and any correction as memories of the user.
+   *
+   * @param userId - The user who sent the feedback.
+   * @param sessionId - The session the feedback refers to.
+   * @param personaId - The persona involved; used for logging only.
+   * @param feedbackData - Raw feedback, normally a `UserFeedbackPayload`.
+   */
   public async processUserFeedback(userId: string, sessionId: string, personaId: string, feedbackData: any): Promise<void> {
     this.ensureInitialized();
     console.log(`GMIManager (ID: ${this.managerId}): Received feedback for User: ${userId}, Session: ${sessionId}, Persona: ${personaId}`, feedbackData);
 
     const gmiInstanceId = this.gmiSessionMap.get(sessionId);
-    const gmi = gmiInstanceId ? this.activeGMIs.get(gmiInstanceId) as GMI | undefined : undefined;
+    const gmi = gmiInstanceId ? this.activeGMIs.get(gmiInstanceId) : undefined;
 
-    if (gmi && feedbackData) {
-      const rating = feedbackData.rating ?? feedbackData.score;
-      const isPositive = typeof rating === 'number' ? rating >= 4 : feedbackData.type === 'positive';
-      const feedbackText = feedbackData.comment ?? feedbackData.text ?? '';
-
-      if (isPositive) {
-        this.addTraceEntryToRelevantGMI(sessionId, ReasoningEntryType.DEBUG, 'Positive feedback recorded.', { userId, rating, feedbackText });
-      } else {
-        this.addTraceEntryToRelevantGMI(sessionId, ReasoningEntryType.WARNING, 'Negative feedback recorded — flagged for review.', { userId, rating, feedbackText });
-      }
-
-      if ((gmi as any).memoryBridge?.observe) {
-        const summary = `User feedback (${isPositive ? 'positive' : 'negative'}${rating != null ? `, rating: ${rating}` : ''}): ${feedbackText}`.trim();
-        await (gmi as any).memoryBridge.observe('system', summary);
-      }
-    } else {
+    if (!gmi || !feedbackData || typeof feedbackData !== 'object') {
       this.addTraceEntryToRelevantGMI(sessionId, ReasoningEntryType.DEBUG, 'User feedback received by manager.', { userId, feedbackData });
+      return;
     }
+
+    const normalized = normalizeUserFeedback(feedbackData);
+    if (typeof gmi.recordUserFeedback === 'function') {
+      await gmi.recordUserFeedback({ ...normalized, userId });
+      return;
+    }
+
+    // IGMI implementations without the hook still get the classified trace entry.
+    this.addTraceEntryToRelevantGMI(
+      sessionId,
+      normalized.polarity === 'negative' ? ReasoningEntryType.WARNING : ReasoningEntryType.DEBUG,
+      feedbackTraceMessage(normalized.polarity),
+      { userId, ...normalized },
+    );
   }
 
   private addTraceEntryToRelevantGMI(sessionId: string, type: ReasoningEntryType, message: string, details?: Record<string, any>): void {

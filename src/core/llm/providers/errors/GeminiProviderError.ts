@@ -38,6 +38,14 @@ export class GeminiProviderError extends ProviderError {
   public readonly geminiErrorStatus?: string;
 
   /**
+   * Usage already billed when a request made of several API calls fails
+   * partway: the calls that succeeded before this error. Set by
+   * `GeminiProvider.generateEmbeddings` when a later batch fails, so a caller
+   * can still record that spend; absent otherwise.
+   */
+  public partialUsage?: { prompt_tokens: number; total_tokens: number; costUSD?: number };
+
+  /**
    * Creates an instance of GeminiProviderError.
    *
    * @param {string} message - Human-readable description of the error.

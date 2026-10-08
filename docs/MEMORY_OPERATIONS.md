@@ -125,11 +125,13 @@ Both systems feed the same retrieval pipeline — auto-ingested facts are surfac
 
 ### Key Files
 
-| File | Purpose |
+The auto-ingest pipeline ships in [Wunderland](https://github.com/jddunn/wunderland), not in the `@framers/agentos` package.
+
+| File (in `jddunn/wunderland`) | Purpose |
 |------|---------|
-| `src/memory/auto-ingest/MemoryAutoIngestPipeline.ts` | Pipeline orchestrator |
-| `src/memory/auto-ingest/PersonalityMemoryConfig.ts` | HEXACO-to-config mapping |
-| `src/memory/auto-ingest/AgentStorageManager.ts` | Wires pipeline into afterTurn() |
+| [`src/memory/auto-ingest/MemoryAutoIngestPipeline.ts`](https://github.com/jddunn/wunderland/blob/master/src/memory/auto-ingest/MemoryAutoIngestPipeline.ts) | Pipeline orchestrator |
+| [`src/memory/storage/PersonalityMemoryConfig.ts`](https://github.com/jddunn/wunderland/blob/master/src/memory/storage/PersonalityMemoryConfig.ts) | HEXACO-to-config mapping |
+| [`src/memory/storage/AgentStorageManager.ts`](https://github.com/jddunn/wunderland/blob/master/src/memory/storage/AgentStorageManager.ts) | Wires pipeline into afterTurn() |
 
 ---
 

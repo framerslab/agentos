@@ -284,7 +284,7 @@ const matches = await store.query(textEmbedding, { topK: 5 });
 
 ## Integration with Multimodal RAG
 
-The vision pipeline integrates directly with the [Multimodal RAG](./MULTIMODAL_RAG.md)
+The vision pipeline integrates directly with the [Multimodal RAG](../memory/MULTIMODAL_RAG.md)
 system for indexing and retrieving image content. Configure RAG via the
 `rag` field on `agent({ ... })` — its shape is the [`RagConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts#L97) interface, with `multimodal.images` toggling image indexing.
 
@@ -306,7 +306,7 @@ console.log(result.text);
 ```
 
 For richer indexing pipelines (auto-describe on ingest, multi-modal embedding fusion),
-see the lower-level [Multimodal RAG guide](./MULTIMODAL_RAG.md) — it shows the
+see the lower-level [Multimodal RAG guide](../memory/MULTIMODAL_RAG.md) — it shows the
 [`VisionPipeline`](https://github.com/framerslab/agentos/blob/master/src/io/vision/VisionPipeline.ts) + [`IngestRouter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/ingest/IngestRouter.ts) wiring directly, without going through the
 high-level `agent()` helper.
 
@@ -330,36 +330,45 @@ high-level `agent()` helper.
 
 ## createVisionPipeline() Options
 
+`createVisionPipeline(config?)` takes a partial [`VisionPipelineConfig`](https://github.com/framerslab/agentos/blob/master/src/io/vision/types.ts). A field left out is filled in by detection: the optional packages installed, and the API keys in the environment.
+
 ```typescript
-interface VisionPipelineOptions {
-  /** Processing strategy. Default: 'progressive'. */
+interface VisionPipelineConfig {
+  /** How the tiers combine. Default: 'progressive' (escalates when OCR confidence is low). */
   strategy: 'progressive' | 'local-only' | 'cloud-only' | 'parallel';
 
-  /** Tier 0 configuration (local OCR). */
-  tier0?: {
-    provider?: 'paddle-ocr' | 'tesseract';
-    confidenceThreshold?: number;   // Default: 0.85
-    languages?: string[];           // Default: ['en']
-  };
+  /** OCR engine. Detected: 'paddle' when ppu-paddle-ocr is installed, else 'tesseract' when tesseract.js is, else 'none'. */
+  ocr?: 'paddle' | 'tesseract' | 'none';
 
-  /** Tier 1 configuration (enhanced local). */
-  tier1?: {
-    enableTrOCR?: boolean;          // Default: true
-    enableFlorence2?: boolean;      // Default: true
-    enableCLIP?: boolean;           // Default: true
-    modelCacheDir?: string;         // Default: ~/.cache/huggingface
-  };
+  /** TrOCR handwriting, Florence-2 document layout and CLIP embeddings. Detected: on when @huggingface/transformers is installed. */
+  handwriting?: boolean;
+  documentAI?: boolean;
+  embedding?: boolean;
 
-  /** Tier 2 configuration (cloud vision). */
-  tier2?: {
-    provider?: 'google-cloud-vision' | 'openai' | 'anthropic';
-    maxCostPerRequest?: number;     // Budget cap in USD
-  };
+  /**
+   * Cloud vision provider, a name generateText() knows. Detected: the first of
+   * 'openai', 'anthropic', 'google' and 'openrouter' whose key is in the
+   * environment. Unset and undetected: no cloud tier. With 'google', give
+   * the image as a Buffer or a data URL: Gemini does not fetch image URLs.
+   */
+  cloudProvider?: string;
+  /** Cloud model. Default: the provider's default vision model. */
+  cloudModel?: string;
+  /** Key for the cloud provider. Default: its environment variable (OPENAI_API_KEY and so on). */
+  cloudApiKey?: string;
+  /** Base URL for the cloud provider, such as a proxy. */
+  cloudBaseUrl?: string;
 
-  /** Global options. */
-  maxImageSize?: number;            // Max dimension in pixels (auto-resize). Default: 4096
-  timeout?: number;                 // Per-tier timeout in ms. Default: 30000
-  enableRegionDetection?: boolean;  // Bounding boxes for text regions. Default: true
+  /** OCR confidence below which 'progressive' escalates to the next tier. Default: 0.7. */
+  confidenceThreshold?: number;
+
+  /** Applied with sharp before any tier runs. */
+  preprocessing?: {
+    grayscale?: boolean;
+    resize?: { maxWidth?: number; maxHeight?: number };  // scales down only
+    sharpen?: boolean;
+    normalize?: boolean;
+  };
 }
 ```
 
@@ -538,5 +547,5 @@ console.log('Best matches:', results.map(r => r.metadata.path));
 - [Image Generation](./IMAGE_GENERATION.md) — Generate images from text
 - [Image Editing](./IMAGE_EDITING.md) — Edit, upscale, and variate images
 - [Image Segmentation](./IMAGE_SEGMENTATION.md) — Pixel masks via SAM2 / GroundedSAM
-- [Multimodal RAG](./MULTIMODAL_RAG.md) — Image + audio retrieval-augmented generation
-- [High-Level API](./HIGH_LEVEL_API.md) — Full API reference
+- [Multimodal RAG](../memory/MULTIMODAL_RAG.md) — Image + audio retrieval-augmented generation
+- [High-Level API](../getting-started/HIGH_LEVEL_API.md) — Full API reference

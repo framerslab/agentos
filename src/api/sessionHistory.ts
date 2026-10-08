@@ -33,12 +33,40 @@ interface Block {
 }
 
 /**
+ * One in-flight turn on the GMI path (`agent({ runtime: 'gmi' })`). The turn's
+ * model steps accumulate and land as ONE block, so eviction keeps or drops the
+ * whole turn and never separates a tool call from its result.
+ */
+export interface SessionTurnWriter {
+  /**
+   * Adds one model step's messages: the user message first on the turn's first
+   * step, then the assistant message and its tool results. Returns false, and
+   * adds nothing, when the step leaves a tool call unanswered or the writer is
+   * closed.
+   */
+  appendStep(messages: SessionTranscriptMessage[]): boolean;
+  /**
+   * Stores the turn as one block and runs eviction. Returns false when no step
+   * was appended, the writer is already closed, or the history was reseeded
+   * (or cleared) after the turn began.
+   */
+  commit(): boolean;
+  /**
+   * Ends a failed turn. With `partial: true` the steps that completed are
+   * stored, the block's last message marked `partial`; otherwise nothing is
+   * stored. Returns whether a block was stored.
+   */
+  abort(options?: { partial?: boolean }): boolean;
+}
+
+/**
  * Session conversation state: whole-send blocks, chunk-amortized eviction,
  * epoch-guarded mutation (spec §1c/§1d). Pure state machine — no I/O, no
  * provider coupling — so eviction semantics are testable byte-for-byte.
  *
  * Eviction shape: one contiguous OLDEST chunk per event, whole blocks only
- * (a block is one send's complete delta, so tool_use never separates from
+ * (a block is one send's complete delta, or one GMI turn written through
+ * {@link SessionHistoryBuffer.beginTurn}, so tool_use never separates from
  * its tool_result), amortizing the cache re-pay to one write per event.
  * Byte-stability is an invariant of THIS stored serialization; the final
  * wire request may still diverge under dynamic memory-context injection
@@ -91,6 +119,55 @@ export class SessionHistoryBuffer {
     });
     this.evictIfNeeded();
     return true;
+  }
+
+  /**
+   * Starts a turn whose steps land as one block (GMI path). The turn is tied
+   * to the current epoch: a reseed or clear while it runs discards it at
+   * commit, as {@link appendSendDelta} discards a stale send. Eviction runs
+   * at commit only, so a turn's earlier steps can never be evicted while its
+   * later steps are still being written.
+   *
+   * @param label - Telemetry and eviction-boundary label for the turn's block.
+   * @param expectEpoch - The epoch the turn started under, when it read the
+   *   history before calling this (default: the current epoch). A reseed or
+   *   clear between that read and this call makes the turn's commit a no-op.
+   */
+  beginTurn(label?: string, expectEpoch?: number): SessionTurnWriter {
+    const epochAtStart = expectEpoch ?? this.historyEpoch;
+    const steps: SessionTranscriptMessage[] = [];
+    let open = true;
+    const land = (partial: boolean): boolean => {
+      if (!open) return false;
+      open = false;
+      if (steps.length === 0) return false;
+      if (epochAtStart !== this.historyEpoch) {
+        this.events.push({ type: 'stale-append-discarded', label });
+        return false;
+      }
+      const messages = steps.slice();
+      if (partial) {
+        const last = messages[messages.length - 1];
+        if (last.role !== 'user') messages[messages.length - 1] = { ...last, partial: true as const };
+      }
+      this.blocks.push({ label, messages, tokens: estimateTokens(transcriptTokenText(messages)) });
+      this.evictIfNeeded();
+      return true;
+    };
+    return {
+      appendStep: (messages) => {
+        if (!open || messages.length === 0) return false;
+        if (!validateTranscriptPairing(messages).ok) return false;
+        steps.push(...messages);
+        return true;
+      },
+      commit: () => land(false),
+      abort: (options) => {
+        if (options?.partial) return land(true);
+        open = false;
+        return false;
+      },
+    };
   }
 
   /** Atomic replace + epoch bump. Throws on pairing-invalid snapshots. */

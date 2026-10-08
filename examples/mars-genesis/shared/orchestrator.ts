@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import type { ITool } from '@framers/agentos';
 import {
   EmergentCapabilityEngine, EmergentJudge, EmergentToolRegistry,
-  ComposableToolBuilder, SandboxedToolForge, ForgeToolMetaTool, generateText,
+  ComposableToolBuilder, ForgeToolMetaTool, generateText, createStepGate,
 } from '@framers/agentos';
 import type { Department, TurnOutcome } from './state.js';
 import { SeededRng } from './rng.js';
@@ -62,20 +62,20 @@ function createEmergentEngine(toolMap: Map<string, ITool>) {
   };
   const registry = new EmergentToolRegistry();
   const judge = new EmergentJudge({ judgeModel: 'gpt-5.4', promotionModel: 'gpt-5.4', generateText: llmCb });
-  const executor = async (name: string, args: unknown, ctx: any) => {
-    const t = toolMap.get(name);
-    return t ? t.execute(args as any, ctx) : { success: false, error: `Tool "${name}" not found` };
-  };
   const engine = new EmergentCapabilityEngine({
     config: {
       enabled: true, maxSessionTools: 20, maxAgentTools: 50,
       sandboxTimeoutMs: 10000, sandboxMemoryMB: 128,
       promotionThreshold: { uses: 5, confidence: 0.8 },
       allowSandboxTools: true, persistSandboxSource: true,
+      // The departments forge pure computations: a ceiling that grants
+      // nothing, and no storage adapter, so no effect records.
+      capabilities: {}, audit: { store: 'none' },
       judgeModel: 'gpt-5.4', promotionJudgeModel: 'gpt-5.4',
     },
-    composableBuilder: new ComposableToolBuilder(executor as any),
-    sandboxForge: new SandboxedToolForge(),
+    // Each step resolves its tool from the map; web_search declares no side
+    // effects, so compositions of it are chained freely.
+    composableBuilder: new ComposableToolBuilder(createStepGate({ resolve: (name) => toolMap.get(name) })),
     judge, registry,
   });
   return { engine, forgeTool: new ForgeToolMetaTool(engine) };

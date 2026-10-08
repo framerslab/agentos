@@ -346,9 +346,22 @@ export interface VisionPipelineConfig {
 
   /**
    * Cloud model override. When unset, the provider's default vision model is used.
-   * @example 'gpt-4o', 'claude-sonnet-4-20250514', 'gemini-2.0-flash'
+   * @example 'gpt-4o', 'claude-sonnet-4-6', 'gemini-2.5-flash'
    */
   cloudModel?: string;
+
+  /**
+   * API key for the cloud vision provider. When unset, the provider's key is
+   * read from its environment variable (`OPENAI_API_KEY` and so on), as
+   * {@link generateText} does.
+   */
+  cloudApiKey?: string;
+
+  /**
+   * Base URL for the cloud vision provider, such as a proxy or a local
+   * OpenAI-compatible server. When unset, the provider's default is used.
+   */
+  cloudBaseUrl?: string;
 
   /**
    * Minimum confidence to accept an OCR result without escalating to cloud.

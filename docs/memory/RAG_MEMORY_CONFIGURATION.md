@@ -818,8 +818,8 @@ Respond with ONLY a JSON object:
 The classifier uses the cheapest available model:
 
 - OpenAI: `gpt-4o-mini`
-- Gemini: `gemini-2.0-flash-lite`
-- Ollama: `qwen2.5:3b`
+- Gemini: `gemini-2.5-flash-lite`
+- Ollama: `llama3.2`
 
 Classification typically adds 200-400ms to the turn. The result is cached per query.
 

@@ -12,6 +12,7 @@
  */
 import { agent as createAgent } from '../agent.js';
 import { mergeAdaptableTools } from '../toolAdapter.js';
+import { knownProviderPrefixOf, routedProviderOf } from '../../model.js';
 import type {
   AgencyOptions,
   AgencyQuorumConfig,
@@ -225,14 +226,34 @@ export function mergeDefaults(
   agentConfig: BaseAgentConfig,
   agencyConfig: AgencyOptions
 ): BaseAgentConfig {
+  // A seat whose own model names a provider (`anthropic:claude-opus-5-5`) does
+  // not inherit the agency's provider, so the prefix never meets an inherited
+  // `ollama`, under which a colon is never split.
+  const seatPrefix = agentConfig.provider === 'ollama' ? undefined : knownProviderPrefixOf(agentConfig.model);
+  const model = agentConfig.model ?? agencyConfig.model;
+  const provider = agentConfig.provider ?? (seatPrefix !== undefined ? undefined : agencyConfig.provider);
+  // The agency's key and URL belong to the provider the agency's own calls go
+  // to. A seat inherits them only when its calls go to that same provider: a
+  // seat whose calls go to another provider (named by a model prefix in either
+  // form, or by its own `provider`), or to auto-detection, which may pick any
+  // vendor, does not, since sending them there would leak the key to another
+  // vendor. When the agency's provider comes from auto-detection, it is
+  // unknown and the seat inherits them. The check reads the provider and
+  // model the merged config below carries: a seat value set explicitly to
+  // undefined (`provider: undefined`) counts as set, since the spread of
+  // agentConfig writes it over the agency's.
+  const used: BaseAgentConfig = { model, provider, ...agentConfig };
+  const seatRouted = routedProviderOf({ provider: used.provider, model: used.model });
+  const agencyRouted = routedProviderOf(agencyConfig);
+  const otherVendor = agencyRouted !== undefined && seatRouted !== agencyRouted;
   return {
     // Agency-level model/provider/apiKey/baseUrl serve as defaults.
     // They are placed BEFORE the spread of agentConfig so that agent-level
     // values override them when present.
-    model: agentConfig.model ?? agencyConfig.model,
-    provider: agentConfig.provider ?? agencyConfig.provider,
-    apiKey: agentConfig.apiKey ?? agencyConfig.apiKey,
-    baseUrl: agentConfig.baseUrl ?? agencyConfig.baseUrl,
+    model,
+    provider,
+    apiKey: agentConfig.apiKey ?? (otherVendor ? undefined : agencyConfig.apiKey),
+    baseUrl: agentConfig.baseUrl ?? (otherVendor ? undefined : agencyConfig.baseUrl),
     ...agentConfig,
     // Tools are merged separately because we want additive merging
     // (agency tools + agent tools) rather than wholesale replacement.

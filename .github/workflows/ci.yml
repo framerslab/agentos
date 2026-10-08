@@ -34,7 +34,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install PNPM
         uses: pnpm/action-setup@v6
@@ -47,8 +47,25 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      - name: Package exports point at built files
+        run: pnpm run verify:exports
+
       - name: Lint
         run: pnpm run lint
+
+      - name: Documentation states only what the code enforces
+        run: |
+          set -euo pipefail
+          # Words the published pages may not use for the in-process node:vm executor.
+          if grep -rn -i -E 'hardened|domain-restricted|host-realm escape is blocked|isolated context|security guarantees|safe[- ]by[- ]construction' \
+              docs/architecture/EMERGENT_CAPABILITIES.md docs/architecture/ARCHITECTURE.md \
+              src/cognition/emergent/SandboxedToolForge.ts src/cognition/emergent/ComposableToolBuilder.ts \
+              src/cognition/emergent/EmergentCapabilityEngine.ts src/cognition/emergent/types.ts \
+              src/safety/sandbox/executor/CodeSandbox.ts src/safety/sandbox/executor/ICodeSandbox.ts \
+              src/cognition/emergent/executor/types.ts src/cognition/emergent/executor/InProcessExecutor.ts; then
+            echo "::error::the documentation claims an isolation the executor does not provide (see docs/architecture/EMERGENT_CAPABILITIES.md, Sandbox Mode)"
+            exit 1
+          fi
 
       - name: Type check
         run: pnpm run typecheck
@@ -76,7 +93,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install PNPM
         uses: pnpm/action-setup@v6
@@ -102,3 +119,33 @@ jobs:
           src/cognition/emergent/__tests__/decay-for-agent.test.ts
           src/cognition/emergent/__tests__/adapt-personality.test.ts
           src/cognition/rag/__tests__/neo4j-graphrag-export.test.ts
+
+  # Exercises the release configuration without tagging or publishing: the
+  # commit analyser and the release-notes generator read the commits since
+  # the last release tag, fed the way the Release workflow feeds them.
+  release-dry-run:
+    name: Release dry run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install PNPM
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Analyse the commits since the last release tag
+        run: node scripts/release-dry-run.mjs

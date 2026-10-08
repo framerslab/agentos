@@ -212,11 +212,11 @@ export interface GenerateObjectOptions<T extends ZodType> {
    *
    * Particularly relevant here because OpenAI's strict structured-
    * output mode (`response_format: json_schema`) is the most
-   * aggressively-moderated path on the platform; a NSFW story
-   * extraction tagged with `policyTier: 'mature'` will pre-empt the
-   * 422 by routing to Hermes 3 (which honors the looser
-   * `json_object` mode that {@link generateObject} falls back to for
-   * non-OpenAI providers).
+   * aggressively-moderated path on the platform; a mature story
+   * extraction tagged with `policyTier: 'mature'` that the primary
+   * refuses walks on to the tier's uncensored OpenRouter models, which
+   * take the looser `json_object` mode that {@link generateObject}
+   * uses for non-OpenAI providers.
    */
   policyTier?: 'safe' | 'standard' | 'mature' | 'private-adult';
   /**
@@ -236,6 +236,18 @@ export interface GenerateObjectOptions<T extends ZodType> {
    * models that don't support it.
    */
   effort?: string;
+
+  /**
+   * Extended-thinking switch, forwarded to
+   * {@link import('./generateText.js').GenerateTextOptions.thinking}.
+   * `false` turns thinking off with the model's own off shape (Sonnet 5.5
+   * takes `between_tools`, at effort `high` or below); Opus 5.5, Fable and
+   * Mythos always think. Omitted keeps the model's default, which is thinking
+   * on for Opus 5 and later, Sonnet 5 and later, Fable and Mythos. Thinking
+   * tokens count toward `maxTokens`, so a structured call on a thinking model
+   * needs room for both.
+   */
+  thinking?: { budgetTokens: number } | false;
 
   /**
    * Per-call prompt-cache control, forwarded to
@@ -639,13 +651,22 @@ export async function generateObject<T extends ZodType>(
     ? `${opts.schemaName ?? 'response'}Envelope`
     : opts.schemaName;
 
-  // Convert the Zod schema to JSON Schema for the system prompt.
-  // Uses the hand-rolled SchemaLowering converter to avoid extra dependencies.
+  // Convert the Zod schema to JSON Schema. Two lowerings of the same schema:
+  // `jsonSchema` is the provider payload (tool input_schema, strict
+  // json_schema, responseSchema) and keeps the keyword set every provider's
+  // structured-output mode accepts; `promptJsonSchema` is the TEXT the model
+  // reads in the system prompt and carries the Zod size checks as well
+  // (`maxLength`, `maxItems`, `maximum`, ...). On the prompt-only path (the
+  // Anthropic models that reject a forced tool_choice) that text is the only
+  // place the model can learn a limit: without it a reply over any `.max()`
+  // failed validation on every attempt, and the caller saw only "Failed to
+  // generate valid structured output" (wilds codegen, 2026-10-03).
   const jsonSchema = lowerZodToJsonSchema(effectiveSchema);
+  const promptJsonSchema = lowerZodToJsonSchema(effectiveSchema, { sizeConstraints: true });
 
   const systemPrompt = buildSchemaSystemPrompt(
     opts.system,
-    jsonSchema,
+    promptJsonSchema,
     effectiveSchemaName,
     opts.schemaDescription,
     opts.schemaCacheTtl,
@@ -753,6 +774,10 @@ export async function generateObject<T extends ZodType>(
       // reasoning_effort, effort-capable Claude -> output_config.effort) run at
       // the requested depth instead of their default.
       effort: opts.effort,
+      // Forward the thinking switch so a structured call on a model that
+      // thinks by default (Sonnet 5.5) can turn it off and keep its whole
+      // output budget for the JSON.
+      thinking: opts.thinking,
       // Forward per-call cache control: `false` = zero cache_control on the
       // wire (one-shot extractions, schema block included); `{ ttl: '1h' }`
       // = 1h TTL on the provider's auto markers (moving message-tail).

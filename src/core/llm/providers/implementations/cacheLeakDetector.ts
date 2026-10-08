@@ -20,9 +20,11 @@
  *                  activity at all. Breakpoints are missing, dropped in
  *                  conversion, or stood down; the caller re-pays full
  *                  input price on every call. Only fires when the
- *                  average uncached size clears the largest per-model
- *                  cacheable minimum (4096 tokens), so legitimately
- *                  sub-minimum prompts never flag.
+ *                  average uncached size clears the model's own
+ *                  cacheable minimum (512 to 4096 tokens, see
+ *                  model-cache-capabilities.ts), so legitimately
+ *                  sub-minimum prompts never flag, and never for a
+ *                  request that turned caching off (`cacheOptOut`).
  *
  * A callsite is identified as `model | hash(first 256 chars of the
  * system prompt)` — stable across calls from the same prompt-assembly
@@ -46,6 +48,12 @@ export interface CacheUsageSample {
   cacheReadTokens: number;
   /** `usage.cache_creation_input_tokens` (1.25-2x price). */
   cacheCreationTokens: number;
+  /**
+   * True when the caller turned caching off for this request (the provider
+   * option `cache: false`), such as a one-shot fallback leg. Its uncached
+   * input is deliberate, so the sample is not recorded.
+   */
+  cacheOptOut?: boolean;
 }
 
 interface Bucket {
@@ -66,10 +74,10 @@ export const __cacheLeakThresholds = {
   /**
    * FALLBACK average uncached tokens/call before "nothing cached" is
    * suspicious, used when the model id resolves no capabilities. The live
-   * threshold is the MODEL's own cacheable-prefix floor (4096/2048/1024 —
-   * see model-cache-capabilities.ts), so e.g. a Sonnet 4.6 callsite paying
-   * 3K uncached tokens/call with zero cache activity flags even though it
-   * sits under the Opus floor.
+   * threshold is the MODEL's own cacheable-prefix floor (512, 1024, 2048 or
+   * 4096; see model-cache-capabilities.ts), so e.g. a Sonnet 4.6 callsite
+   * paying 3K uncached tokens/call with zero cache activity flags even
+   * though it sits under the Opus 4.5 floor.
    */
   uncachedAvgFloor: 4_096,
   /** Bucket-map size cap; the map clears past it. */
@@ -103,6 +111,8 @@ export function recordCacheUsage(
 ): void {
   const env = process.env.AGENTOS_CACHE_LEAK_DETECTOR;
   if (env === '0' || env === 'false') return;
+  // A deliberate opt-out carries no markers, so it would read as `unmarked`.
+  if (sample.cacheOptOut) return;
 
   try {
     const T = __cacheLeakThresholds;

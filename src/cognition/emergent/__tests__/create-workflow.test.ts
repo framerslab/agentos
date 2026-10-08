@@ -125,6 +125,7 @@ describe('CreateWorkflowTool', () => {
         correlationId: 'call-2',
         sessionData: { sessionId: 'shared-session' },
       }),
+      expect.any(AbortSignal),
     );
     // The second call should have received the output of web_search as $prev
     expect(deps.executeTool).toHaveBeenCalledWith('summarize', {
@@ -132,7 +133,7 @@ describe('CreateWorkflowTool', () => {
     }, expect.objectContaining({
       correlationId: 'call-2',
       sessionData: { sessionId: 'shared-session' },
-    }));
+    }), expect.any(AbortSignal));
   });
 
   it('should isolate workflows by session', async () => {
@@ -301,5 +302,7 @@ describe('CreateWorkflowTool', () => {
     expect(runResult.success).toBe(false);
     expect(runResult.error).toContain('timed out');
     expect(runResult.output.completedSteps).toBe(1);
+    // The expired step is reported, and whether it took effect is not known.
+    expect(runResult.output.stepResults[1]).toEqual({ status: 'expired', effect: 'unknown' });
   });
 });

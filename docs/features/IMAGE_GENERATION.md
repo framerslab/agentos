@@ -415,6 +415,6 @@ console.log(usage.estimatedCost);   // e.g., 0.04
 
 ## Related Guides
 
-- [HIGH_LEVEL_API.md](./HIGH_LEVEL_API.md) — full `generateImage()` API reference
-- [EXAMPLES.md](./EXAMPLES.md) — automated blog publisher example with image generation
-- [GETTING_STARTED.md](./GETTING_STARTED.md) — installation and environment setup
+- [HIGH_LEVEL_API.md](../getting-started/HIGH_LEVEL_API.md) — full `generateImage()` API reference
+- [EXAMPLES.md](../getting-started/EXAMPLES.md) — automated blog publisher example with image generation
+- [GETTING_STARTED.md](../getting-started/GETTING_STARTED.md) — installation and environment setup

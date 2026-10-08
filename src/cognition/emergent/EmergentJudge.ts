@@ -85,6 +85,8 @@ export interface ToolCandidate {
     output: unknown;
     success: boolean;
     error?: string;
+    /** The test run's effects: a composition's steps that were not executed while forging, or a code tool's capability calls under a ceiling. */
+    effects?: unknown[];
   }>;
 }
 
@@ -436,7 +438,9 @@ export class EmergentJudge {
     const testResultsFormatted = candidate.testResults
       .map(
         (r, i) =>
-          `Test ${i + 1}: input=${JSON.stringify(r.input)} output=${JSON.stringify(r.output)} success=${r.success}${r.error ? ` error=${r.error}` : ''}`,
+          `Test ${i + 1}: input=${JSON.stringify(r.input)} output=${JSON.stringify(r.output)} success=${r.success}` +
+          `${r.error ? ` error=${r.error}` : ''}` +
+          `${r.effects && r.effects.length > 0 ? ` effects=${JSON.stringify(r.effects)}` : ''}`,
       )
       .join('\n');
 

@@ -20,9 +20,24 @@ import {
   LanguageDetectionOptions, LanguageDetectionResult,
   TextNormalizationOptions, NGramOptions, ReadabilityOptions, ReadabilityResult,
 } from './IUtilityAI';
-import * as natural from 'natural';
+import * as naturalModule from 'natural';
 import { GMIError, GMIErrorCode } from '../../../core/utils/errors.js';
 import { detectLanguageTrigram } from './trigram-language-profiles';
+
+/**
+ * The `natural` library's runtime members.
+ *
+ * `natural` is CommonJS and builds its exports at run time
+ * (`module.exports = buildExportMap([...])`), so Node's ESM loader cannot name
+ * them: under plain Node, where this package's built ESM runs (a consumer that
+ * keeps `@framers/agentos` external to its bundle), a namespace import holds
+ * only `default`, and `new naturalModule.WordTokenizer()` throws
+ * "is not a constructor". Bundlers and Vitest hand the members over on the
+ * namespace itself. Read them from `default` when that is where they are; the
+ * namespace import stays the source of the types.
+ */
+const natural: typeof naturalModule =
+  (naturalModule as unknown as { default?: typeof naturalModule }).default ?? naturalModule;
 
 const NATURAL_STEMMER_LANGUAGE_KEYS: Record<string, string> = {
   De: 'de',
@@ -91,17 +106,17 @@ export class StatisticalUtilityAI implements IUtilityAI {
   private config!: StatisticalUtilityAIConfig; // Make it fully required internally
   private isInitialized: boolean = false;
 
-  private tokenizers: { word: natural.WordTokenizer, sentence: natural.SentenceTokenizer };
-  private stemmers: Record<string, natural.Stemmer>; // algorithm_name -> stemmer_instance
+  private tokenizers: { word: naturalModule.WordTokenizer, sentence: naturalModule.SentenceTokenizer };
+  private stemmers: Record<string, naturalModule.Stemmer>; // algorithm_name -> stemmer_instance
   private stopWords: Map<string, Set<string>>; // language -> Set<string>
 
   // For Naive Bayes classifier instances: modelId -> classifier
-  private classifiers: Map<string, natural.BayesClassifier>;
+  private classifiers: Map<string, naturalModule.BayesClassifier>;
   // For sentiment analysis
-  private sentimentAnalyzers: Map<string, natural.SentimentAnalyzer>; // language -> analyzer
+  private sentimentAnalyzers: Map<string, naturalModule.SentimentAnalyzer>; // language -> analyzer
 
-  private createStemmerRegistry(): Record<string, natural.Stemmer> {
-    const registry: Record<string, natural.Stemmer> = {
+  private createStemmerRegistry(): Record<string, naturalModule.Stemmer> {
+    const registry: Record<string, naturalModule.Stemmer> = {
       porter: natural.PorterStemmer,
       lancaster: natural.LancasterStemmer,
     };
@@ -109,24 +124,24 @@ export class StatisticalUtilityAI implements IUtilityAI {
     const naturalWithVariants = natural as unknown as Record<string, unknown>;
     for (const [suffix, langCode] of Object.entries(NATURAL_STEMMER_LANGUAGE_KEYS)) {
       const porterVariant = naturalWithVariants[`PorterStemmer${suffix}`];
-      if (porterVariant && typeof (porterVariant as natural.Stemmer).stem === 'function') {
-        registry[`porter_${langCode}`] = porterVariant as natural.Stemmer;
+      if (porterVariant && typeof (porterVariant as naturalModule.Stemmer).stem === 'function') {
+        registry[`porter_${langCode}`] = porterVariant as naturalModule.Stemmer;
       }
     }
 
     const carryFrench = naturalWithVariants.CarryStemmerFr;
-    if (carryFrench && typeof (carryFrench as natural.Stemmer).stem === 'function') {
-      registry.carry_fr = carryFrench as natural.Stemmer;
+    if (carryFrench && typeof (carryFrench as naturalModule.Stemmer).stem === 'function') {
+      registry.carry_fr = carryFrench as naturalModule.Stemmer;
     }
 
     const stemmerId = naturalWithVariants.StemmerId;
-    if (stemmerId && typeof (stemmerId as natural.Stemmer).stem === 'function') {
-      registry.default_id = stemmerId as natural.Stemmer;
+    if (stemmerId && typeof (stemmerId as naturalModule.Stemmer).stem === 'function') {
+      registry.default_id = stemmerId as naturalModule.Stemmer;
     }
 
     const stemmerJa = naturalWithVariants.StemmerJa;
-    if (stemmerJa && typeof (stemmerJa as natural.Stemmer).stem === 'function') {
-      registry.default_ja = stemmerJa as natural.Stemmer;
+    if (stemmerJa && typeof (stemmerJa as naturalModule.Stemmer).stem === 'function') {
+      registry.default_ja = stemmerJa as naturalModule.Stemmer;
     }
 
     return registry;
@@ -205,7 +220,7 @@ export class StatisticalUtilityAI implements IUtilityAI {
     return this.stopWords.get(langCode) || this.stopWords.get('en') || DEFAULT_ENGLISH_STOP_WORDS;
   }
 
-  private getStemmer(algorithm?: string, language?: string): natural.Stemmer {
+  private getStemmer(algorithm?: string, language?: string): naturalModule.Stemmer {
     const algo = (algorithm || 'porter').toLowerCase();
     const langCode = language?.toLowerCase().split('-')[0];
     if (langCode && langCode !== 'en' && this.stemmers[`${algo}_${langCode}`]) {
@@ -217,7 +232,7 @@ export class StatisticalUtilityAI implements IUtilityAI {
     return this.stemmers[algo] || natural.PorterStemmer; // Fallback to Porter
   }
 
-  private getSentimentAnalyzer(language: string): natural.SentimentAnalyzer {
+  private getSentimentAnalyzer(language: string): naturalModule.SentimentAnalyzer {
     const langCode = language.toLowerCase().split('-')[0];
     if (!this.sentimentAnalyzers.has(langCode)) {
       try {
@@ -245,7 +260,7 @@ export class StatisticalUtilityAI implements IUtilityAI {
           getSentiment: (_tokens: string[]) => 0,
           vocabulary: {},
         } as any;
-        this.sentimentAnalyzers.set(langCode, neutralAnalyzer as unknown as natural.SentimentAnalyzer);
+        this.sentimentAnalyzers.set(langCode, neutralAnalyzer as unknown as naturalModule.SentimentAnalyzer);
       }
     }
     return this.sentimentAnalyzers.get(langCode)!;
@@ -751,7 +766,7 @@ export class StatisticalUtilityAI implements IUtilityAI {
     const loadPath = storagePath || (this.config.classifierConfig?.naiveBayes?.modelStoragePath ? path.join(this.config.classifierConfig.naiveBayes.modelStoragePath, `${modelId}.nbc.json`) : `${modelId}.nbc.json`);
 
     return new Promise((resolve) => {
-      (natural.BayesClassifier as any).load(loadPath, this.getStemmer('porter'), (err: any, classifier: natural.BayesClassifier) => {
+      (natural.BayesClassifier as any).load(loadPath, this.getStemmer('porter'), (err: any, classifier: naturalModule.BayesClassifier) => {
         if (err || !classifier) {
           console.error(`StatisticalUtilityAI (ID: ${this.utilityId}): Error loading Naive Bayes model '${modelId}' from '${loadPath}':`, err);
           resolve({ success: false, message: `Failed to load model: ${err?.message || 'Classifier could not be loaded.'}` });

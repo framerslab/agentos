@@ -24,11 +24,22 @@ import type { AgentOSMemoryControl } from '../../core/conversation/LongTermMemor
  * @interface UserFeedbackPayload
  */
 export interface UserFeedbackPayload {
+  /** Polarity label. When set, it decides the polarity even if `score` disagrees. */
   rating?: 'positive' | 'negative' | 'neutral';
+  /**
+   * Numeric rating on a 1 to 5 scale, read when `rating` is absent: 4 and
+   * above is positive, 2 and below is negative, anything in between is neutral.
+   */
   score?: number;
+  /** Free-text comment. Stored in the user's cognitive memory when configured. */
   text?: string;
   tags?: string[];
+  /**
+   * The answer the user says the assistant should have given. Stored as a
+   * semantic memory of the user so later turns can recall it.
+   */
   correctedContent?: string;
+  /** Identifier of the message the feedback refers to. */
   targetMessageId?: string;
   customData?: Record<string, any>;
 }

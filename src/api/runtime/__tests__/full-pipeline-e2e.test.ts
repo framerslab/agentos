@@ -17,6 +17,7 @@
  * 7. {@link agency} sequential strategy — multi-agent pipeline
  * 8. {@link generateImage} — image generation via DALL-E
  * 9. Agent config export / import round-trip validation
+ * 10. /v1/responses: a streamed GPT-6 tool loop and a Responses-only model
  *
  * Run with:
  * ```sh
@@ -268,4 +269,41 @@ describe.skipIf(!hasE2E)('Full AgentOS Pipeline E2E', () => {
 
     await original.close();
   });
+
+  // -------------------------------------------------------------------------
+  // 10. /v1/responses: a streamed GPT-6 tool loop and a Responses-only model
+  // -------------------------------------------------------------------------
+
+  it('streamText runs a gpt-6-sol tool loop', async () => {
+    const result = streamText({
+      model: 'openai:gpt-6-sol',
+      prompt: 'Call the add tool with a=17 and b=25, then state the sum.',
+      tools: {
+        add: {
+          description: 'Add two numbers',
+          parameters: z.object({ a: z.number(), b: z.number() }),
+          execute: async ({ a, b }: { a: number; b: number }) => ({ result: a + b }),
+        },
+      },
+      maxSteps: 3,
+      fallbackProviders: [],
+    });
+
+    for await (const _token of result.textStream) {
+      // drain
+    }
+
+    expect((await result.toolCalls).map((c) => c.name)).toContain('add');
+    expect(await result.text).toContain('42');
+  }, 60_000);
+
+  it('generateText answers from gpt-5.3-codex', async () => {
+    const result = await generateText({
+      model: 'openai:gpt-5.3-codex',
+      prompt: 'Say "hello" and nothing else.',
+      fallbackProviders: [],
+    });
+
+    expect(result.text.toLowerCase()).toContain('hello');
+  }, 60_000);
 });

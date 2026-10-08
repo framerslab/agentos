@@ -249,3 +249,32 @@ describe('generateText — planning integration', () => {
     expect(result.text).toBe('Analysis complete.');
   });
 });
+
+describe('generateText planning and the transcript delta', () => {
+  beforeEach(() => {
+    hoisted.generateCompletion.mockReset();
+  });
+
+  it('keeps the plan and the caller history out of the transcript delta', async () => {
+    hoisted.generateCompletion
+      .mockResolvedValueOnce(makePlanResponse([{ description: 'Answer', tool: null, reasoning: 'direct' }]))
+      .mockResolvedValueOnce(makeTextResponse('Done.'));
+
+    const result = await generateText({
+      provider: 'openai',
+      model: 'gpt-4.1-mini',
+      messages: [
+        { role: 'user', content: 'Earlier question.' },
+        { role: 'assistant', content: 'Earlier answer.' },
+      ],
+      prompt: 'Do it.',
+      planning: true,
+    });
+
+    expect(result.text).toBe('Done.');
+    expect(result.transcriptDelta).toEqual([
+      { role: 'user', content: 'Do it.' },
+      { role: 'assistant', content: 'Done.' },
+    ]);
+  });
+});
