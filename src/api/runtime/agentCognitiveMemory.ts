@@ -11,7 +11,9 @@
  * callback is neutral. The memory graph runs on the `'knowledge-graph'` backend
  * over the same in-memory knowledge graph, because the `'graphology'` backend
  * needs graphology, an optional peer dependency. Consolidation runs only when
- * `memory.consolidation.enabled` is true.
+ * `memory.consolidation.enabled` is true. The build embeds one test text through
+ * the embedding model it sets up, so a model that cannot answer, or answers with
+ * another size than memory expects, fails the build instead of leaving memory empty.
  */
 import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager.js';
 import type { CognitiveMemoryConfig, HexacoTraits, PADState } from '../../cognition/memory/core/config.js';
@@ -25,6 +27,7 @@ import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPer
 import type { InMemoryVectorStoreConfig } from '../../core/config/VectorStoreConfiguration.js';
 import type { IEmbeddingManager } from '../../core/embeddings/IEmbeddingManager.js';
 import type { AIModelProviderManager } from '../../core/llm/providers/AIModelProviderManager.js';
+import type { IProvider, ProviderEmbeddingResponse } from '../../core/llm/providers/IProvider.js';
 import type { MemoryConfig } from '../types.js';
 import { createProviderManager, resolveModelOption, resolveProvider, type ParsedModel, type ResolvedProvider } from '../model.js';
 
@@ -165,6 +168,53 @@ export interface AgentCognitiveMemory {
   close(): Promise<void>;
 }
 
+/** The text the build embeds once to check the embedding model. */
+const PROBE_TEXT = 'cognitive memory embedding check';
+
+/**
+ * Embeds {@link PROBE_TEXT} once through the provider and model the embedding
+ * manager will call, and fails when the model cannot answer (an Ollama model
+ * that was never pulled, a model the provider does not serve) or answers with
+ * another size than memory expects. Without this check the build succeeds and
+ * memory stays empty: the embedding manager drops each failed or wrong-size
+ * vector, the memory store refuses the trace, and the GMI's memory bridge only
+ * records a trace warning.
+ *
+ * @param provider - The provider the embedding manager will call.
+ * @param model - The resolved provider and model.
+ * @param expected - The vector size memory expects.
+ * @param declared - `memory.embedding.dimension`, when set.
+ */
+async function probeEmbeddingModel(
+  provider: IProvider,
+  model: ParsedModel,
+  expected: number,
+  declared: number | undefined,
+): Promise<void> {
+  const label = `cognitive memory's embedding model '${model.modelId}' on ${model.providerId}`;
+  let response: ProviderEmbeddingResponse;
+  try {
+    response = await provider.generateEmbeddings(model.modelId, [PROBE_TEXT]);
+  } catch (error) {
+    throw errorWithCause(`gmi(): ${label} failed a test call (memory.embedding): ${messageOf(error)}`, error);
+  }
+  if (response?.error) {
+    throw errorWithCause(`gmi(): ${label} failed a test call (memory.embedding): ${response.error.message}`, response.error);
+  }
+  const vector = response?.data?.[0]?.embedding;
+  const size = Array.isArray(vector) ? vector.length : 0;
+  if (size === 0) {
+    throw new Error(`gmi(): ${label} returned no vector for a test call (memory.embedding).`);
+  }
+  if (size !== expected) {
+    const expectation =
+      declared !== undefined
+        ? `memory.embedding.dimension (${declared}) declares ${declared}`
+        : `agentos expects ${expected} for this model`;
+    throw new Error(`gmi(): ${label} returns ${size} values, while ${expectation}; set memory.embedding.dimension to ${size}.`);
+  }
+}
+
 async function buildEmbeddingManager(memory: MemoryConfig): Promise<{ manager: IEmbeddingManager; dimension: number }> {
   const target = resolveEmbeddingTarget(memory, process.env);
   let resolved: ResolvedProvider;
@@ -179,6 +229,11 @@ async function buildEmbeddingManager(memory: MemoryConfig): Promise<{ manager: I
       error,
     );
   }
+  const provider = providerManager.getProvider(resolved.providerId);
+  if (!provider) {
+    throw new Error(`gmi(): cognitive memory's embedding provider '${resolved.providerId}' is not available (memory.embedding).`);
+  }
+  await probeEmbeddingModel(provider, resolved, target.dimension, memory.embedding?.dimension);
   const manager = new EmbeddingManager();
   await manager.initialize(
     {
@@ -197,7 +252,9 @@ async function buildEmbeddingManager(memory: MemoryConfig): Promise<{ manager: I
  * @param opts - The persona, the memory config, the mechanisms and an optional embedding manager.
  * @returns The manager and a `close()` that releases it.
  * @throws {Error} When the embedding model is missing or unusable (see {@link assertEmbeddingAvailable}),
- *   when its provider has no credentials or fails to start, or when the manager fails to initialise.
+ *   when its provider has no credentials or fails to start, when a test embedding through it
+ *   fails or returns another size than memory expects (skipped for an embedding manager the
+ *   caller passes), or when the manager fails to initialise.
  */
 export async function createAgentCognitiveMemory(opts: AgentCognitiveMemoryOptions): Promise<AgentCognitiveMemory> {
   const owned = opts.embeddingManager === undefined;
