@@ -207,7 +207,13 @@ function errorFromChunk(e: InBandError): Error {
   });
 }
 
+/**
+ * The chunk that ends an attempt whose provider threw after content. It carries
+ * the usage the error reports (`details.usage`, as a refused Claude turn reports
+ * it), so the GMI counts what the failed step was billed.
+ */
 function terminalErrorChunk(resolution: CompletionResolution, error: Error): ModelCompletionResponse {
+  const usage = asUsageReport(usageOfError(error));
   return {
     id: `gateway-error-${resolution.providerId}-${resolution.hop}`,
     object: 'chat.completion.chunk',
@@ -215,6 +221,7 @@ function terminalErrorChunk(resolution: CompletionResolution, error: Error): Mod
     modelId: resolution.modelId,
     choices: [],
     isFinal: true,
+    ...(usage ? { usage } : {}),
     error: { message: error.message, type: (error as { type?: string }).type ?? 'provider_error', details: { terminal: true, providerId: resolution.providerId, hop: resolution.hop } },
   };
 }

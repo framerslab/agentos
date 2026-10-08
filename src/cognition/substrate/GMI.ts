@@ -101,6 +101,15 @@ function cacheDiagnosticsSeed(value: unknown): { previousMessageId: string | nul
   return { previousMessageId: typeof id === 'string' && id.length > 0 ? id : null };
 }
 
+/** `value` when it is a usage report as a provider gives one: an object with a numeric token count. */
+function asUsageReport(value: unknown): ModelUsage | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const { promptTokens, completionTokens, totalTokens } = value as Record<string, unknown>;
+  return [promptTokens, completionTokens, totalTokens].some((count) => typeof count === 'number' && Number.isFinite(count))
+    ? (value as ModelUsage)
+    : undefined;
+}
+
 /** Adds one provider usage report to the turn's total. */
 function addUsage(total: CostAggregator, usage: ModelUsage): void {
   total.promptTokens += usage.promptTokens || 0;
@@ -1289,73 +1298,97 @@ export class GMI implements IGMI {
           this.addTraceEntry(ReasoningEntryType.LLM_CALL_START, `Streaming from ${modelTargetInfo.modelId}${resolution ? ` (hop ${resolution.hop})` : ''}. Tools: ${toolsForLLM.length}.`);
 
           let textDeltaEmitted = false;
-          for await (const chunk of attempt) {
-            if (chunk.error) {
-              throw new GMIError(`LLM stream error: ${chunk.error.message}`, GMIErrorCode.LLM_PROVIDER_ERROR, chunk.error.details);
-            }
+          // The usage on the error chunk that ended the step, when it carried one.
+          let errorChunkUsage: ModelUsage | undefined;
+          try {
+            for await (const chunk of attempt) {
+              if (chunk.error) {
+                errorChunkUsage = asUsageReport(chunk.usage);
+                throw new GMIError(`LLM stream error: ${chunk.error.message}`, GMIErrorCode.LLM_PROVIDER_ERROR, chunk.error.details);
+              }
 
-            if (chunk.responseTextDelta) {
-              currentIterationTextResponse += chunk.responseTextDelta;
-              aggregatedResponseText += chunk.responseTextDelta; // Aggregate for final output
-              yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TEXT_DELTA, chunk.responseTextDelta, { usage: chunk.usage });
-              textDeltaEmitted = true;
-            }
+              if (chunk.responseTextDelta) {
+                currentIterationTextResponse += chunk.responseTextDelta;
+                aggregatedResponseText += chunk.responseTextDelta; // Aggregate for final output
+                yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TEXT_DELTA, chunk.responseTextDelta, { usage: chunk.usage });
+                textDeltaEmitted = true;
+              }
 
-            // Handle fully formed tool_calls if present in the chunk's message
-            const choice = chunk.choices?.[0];
-            // Capture extended-thinking blocks from the final chunk so they ride
-            // the assistant turn into history (replayed verbatim next tool turn).
-            if (choice?.message?.thinkingBlocks?.length) {
-              currentIterationThinkingBlocks = choice.message.thinkingBlocks;
-            }
-            // The gateway lifts a streamed schema tool call into `structuredOutput` (D9).
-            const structured = (chunk as { structuredOutput?: unknown }).structuredOutput;
-            if (structured !== undefined) stepStructuredOutput = structured;
+              // Handle fully formed tool_calls if present in the chunk's message
+              const choice = chunk.choices?.[0];
+              // Capture extended-thinking blocks from the final chunk so they ride
+              // the assistant turn into history (replayed verbatim next tool turn).
+              if (choice?.message?.thinkingBlocks?.length) {
+                currentIterationThinkingBlocks = choice.message.thinkingBlocks;
+              }
+              // The gateway lifts a streamed schema tool call into `structuredOutput` (D9).
+              const structured = (chunk as { structuredOutput?: unknown }).structuredOutput;
+              if (structured !== undefined) stepStructuredOutput = structured;
 
-            if (choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
-              currentIterationToolCallRequests = choice.message.tool_calls.map((tc: any) => ({ // tc is from IProvider.ChatMessage.tool_calls
-                  id: tc.id || `toolcall-${uuidv4()}`, // Ensure ID
-                  name: tc.function.name,
-                  arguments: typeof tc.function.arguments === 'string'
-                      ? JSON.parse(tc.function.arguments)
-                      : tc.function.arguments,
-                  ...(tc.thoughtSignature ? { thoughtSignature: tc.thoughtSignature } : {}),
-              }));
-              aggregatedToolCalls.push(...currentIterationToolCallRequests); // Aggregate for final output
-              yield this.createOutputChunk(
-                turnInput.interactionId,
-                GMIOutputChunkType.TOOL_CALL_REQUEST,
-                [...currentIterationToolCallRequests],
-                {
-                  metadata: {
-                    executionMode: 'internal',
-                    requiresExternalToolResult: false,
+              if (choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
+                currentIterationToolCallRequests = choice.message.tool_calls.map((tc: any) => ({ // tc is from IProvider.ChatMessage.tool_calls
+                    id: tc.id || `toolcall-${uuidv4()}`, // Ensure ID
+                    name: tc.function.name,
+                    arguments: typeof tc.function.arguments === 'string'
+                        ? JSON.parse(tc.function.arguments)
+                        : tc.function.arguments,
+                    ...(tc.thoughtSignature ? { thoughtSignature: tc.thoughtSignature } : {}),
+                }));
+                aggregatedToolCalls.push(...currentIterationToolCallRequests); // Aggregate for final output
+                yield this.createOutputChunk(
+                  turnInput.interactionId,
+                  GMIOutputChunkType.TOOL_CALL_REQUEST,
+                  [...currentIterationToolCallRequests],
+                  {
+                    metadata: {
+                      executionMode: 'internal',
+                      requiresExternalToolResult: false,
+                    },
                   },
-                },
-              );
-              this.addTraceEntry(ReasoningEntryType.TOOL_CALL_REQUESTED, `LLM requested tool(s).`, { requests: currentIterationToolCallRequests });
-            }
+                );
+                this.addTraceEntry(ReasoningEntryType.TOOL_CALL_REQUESTED, `LLM requested tool(s).`, { requests: currentIterationToolCallRequests });
+              }
 
-            // A provider that sends no deltas: its final content is the step's text, emitted once (D4d).
-            if (chunk.isFinal && !textDeltaEmitted && typeof choice?.message?.content === 'string' && choice.message.content.length > 0) {
-              currentIterationTextResponse = choice.message.content;
-              aggregatedResponseText += choice.message.content;
-              yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TEXT_DELTA, choice.message.content, { usage: chunk.usage });
-              textDeltaEmitted = true;
-            }
+              // A provider that sends no deltas: its final content is the step's text, emitted once (D4d).
+              if (chunk.isFinal && !textDeltaEmitted && typeof choice?.message?.content === 'string' && choice.message.content.length > 0) {
+                currentIterationTextResponse = choice.message.content;
+                aggregatedResponseText += choice.message.content;
+                yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TEXT_DELTA, choice.message.content, { usage: chunk.usage });
+                textDeltaEmitted = true;
+              }
 
-            if (chunk.isFinal && choice?.finishReason) {
-              stepFinishReason = choice.finishReason;
-              this.addTraceEntry(ReasoningEntryType.LLM_CALL_COMPLETE, `LLM stream part finished. Reason: ${choice.finishReason}`, { usage: chunk.usage });
+              if (chunk.isFinal && choice?.finishReason) {
+                stepFinishReason = choice.finishReason;
+                this.addTraceEntry(ReasoningEntryType.LLM_CALL_COMPLETE, `LLM stream part finished. Reason: ${choice.finishReason}`, { usage: chunk.usage });
+              }
+              if (chunk.isFinal) stepFinalChunk = chunk;
+              // Usage on every chunk that carries it, choice or not (D4c). Providers report
+              // the request's running total, so the turn total takes the step's last value once.
+              if (chunk.usage) {
+                stepUsage = chunk.usage;
+                yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.USAGE_UPDATE, chunk.usage);
+              }
+            } // End LLM stream
+          } catch (stepError) {
+            // A step that fails once its attempt has started was still billed.
+            // Providers report the request's running total, so the bill is the
+            // latest report: the error chunk's own usage, else the usage the
+            // error carries (a refused turn reports it), else the last usage the
+            // step reported. It counts toward the turn once and is reported on a
+            // USAGE_UPDATE of its own, marked as a failed attempt's, because no
+            // STEP_FINISHED will carry it.
+            const billed =
+              errorChunkUsage ??
+              asUsageReport((stepError as { details?: { usage?: unknown } } | null | undefined)?.details?.usage) ??
+              stepUsage;
+            if (billed) {
+              addUsage(aggregatedUsage, billed);
+              yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.USAGE_UPDATE, billed, {
+                metadata: { attemptFailed: true, hop: resolution?.hop ?? 0, providerId: modelTargetInfo.providerId, modelId: modelTargetInfo.modelId },
+              });
             }
-            if (chunk.isFinal) stepFinalChunk = chunk;
-            // Usage on every chunk that carries it, choice or not (D4c). Providers report
-            // the request's running total, so the turn total takes the step's last value once.
-            if (chunk.usage) {
-              stepUsage = chunk.usage;
-              yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.USAGE_UPDATE, chunk.usage);
-            }
-          } // End LLM stream
+            throw stepError;
+          }
 
           if (gateway && route && resolution && attemptOutcome) {
             const outcome = await attemptOutcome;

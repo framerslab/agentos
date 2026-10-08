@@ -315,7 +315,8 @@ export enum GMIOutputChunkType {
   RAG_SOURCES_AVAILABLE = 'rag_sources_available',
   /**
    * One per model step that completes: the step's text, finish reason, provider, model, hop and usage.
-   * A step that fails emits none; the turn's ERROR chunk follows. Content: StepFinishedChunkPayload.
+   * A step that fails emits none: a USAGE_UPDATE with `metadata.attemptFailed: true` reports what it was
+   * billed, when the provider reported that, and the turn's ERROR chunk follows. Content: StepFinishedChunkPayload.
    */
   STEP_FINISHED = 'step_finished',
   /**

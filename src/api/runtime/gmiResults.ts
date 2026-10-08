@@ -6,8 +6,8 @@
  *
  * The rules are streamText's: the turn's text is the latest step that produced
  * text; usage adds each step's STEP_FINISHED usage once (USAGE_UPDATE carries a
- * request's running total) plus the billed usage of attempts that failed before
- * any output; a run that called tools and produced no text ends as
+ * request's running total) plus the billed usage of attempts that failed, before
+ * any output or after it; a run that called tools and produced no text ends as
  * `'tool-calls'`; an ERROR chunk ends it as `'error'` with the GMI's code.
  */
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
@@ -29,7 +29,7 @@ export interface GmiTurnError {
   details?: unknown;
 }
 
-/** An attempt that failed before any output and was billed (reported on a USAGE_UPDATE with `metadata.attemptFailed`). */
+/** An attempt that failed, before any output or after it, and was billed (reported on a USAGE_UPDATE with `metadata.attemptFailed`). */
 export interface GmiFailedAttempt {
   providerId?: string;
   modelId?: string;
@@ -149,7 +149,7 @@ export class GmiTurnFolder {
     return total;
   }
 
-  /** The billed attempts that failed before any output, in order. */
+  /** The billed attempts that failed, in order. */
   failedAttempts(): GmiFailedAttempt[] {
     return this.failed.map((a) => ({ ...a, usage: { ...a.usage } }));
   }

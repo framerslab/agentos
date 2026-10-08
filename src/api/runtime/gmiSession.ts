@@ -243,7 +243,7 @@ export async function* runGmiTurn(
           pending?.results.push(chunk.content as ToolResultChunkPayload);
           break;
         case GMIOutputChunkType.USAGE_UPDATE: {
-          // An attempt that failed before any output and was billed: no step carries it.
+          // A failed attempt that was billed (before any output, or a step that failed after it): no step carries it.
           const meta = chunk.metadata as { attemptFailed?: boolean; providerId?: string; modelId?: string } | undefined;
           if (meta?.attemptFailed) recordLedgerUsage(deps.ledger, meta.providerId, meta.modelId, chunk.content);
           break;
