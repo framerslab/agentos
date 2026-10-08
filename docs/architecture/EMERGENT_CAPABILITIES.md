@@ -306,6 +306,7 @@ These are rejected at code validation time (before execution):
 | Agent tools | 50 | `maxAgentTools` |
 | Sandbox mode | off: a `mode: 'sandbox'` request is rejected and a stored code tool loads suspended (`sandbox_tools_off`) until it is enabled; compose mode needs no switch | `allowSandboxTools` |
 | Side-effecting steps | none: a composition or a workflow chains a tool that declares side effects only when it is listed | `compose.sideEffectingTools` |
+| Settling after a run ends | up to 1 s; what is still in flight is listed `pending` | fixed (`CALL_SETTLE_MS`) |
 
 ### A ceiling for code-forged tools
 
@@ -350,6 +351,29 @@ On `node:vm` these checks are a guardrail: they hold for forged code that acts t
 **Stored tools.** The ceiling is checked again whenever a stored tool loads: a tool whose request the ceiling no longer covers loads suspended with `capability_not_granted`, and loads active again once a ceiling covers it. Under a ceiling, a tool whose stored request this release cannot read (a later release wrote it) loads suspended with `request_unreadable`, since a request derived from its source could narrow it silently.
 
 **Without a ceiling** (the legacy path), forged tools take the three APIs as before, and the engine logs one line when it is built: what runs unscoped, and the ceiling that comes closest.
+
+### The call deadline
+
+Under a ceiling every run of a code-forged tool, a forge test or a call, has its own handle, and the handle ends when the run does: it returns, throws, or reaches `sandboxTimeoutMs`. From then on the broker refuses the run's capability calls (`call_ended`) and aborts the ones in flight: a `fetch` through its `AbortSignal`, a read by destroying its stream. The run's result waits up to one second for them to settle; one still unsettled is listed `pending`, and its record completes when it settles. Ending one run never touches another run's calls, of the same tool or another.
+
+The bound holds while the host's event loop is responsive. `node:vm` bounds synchronous time only, so a tool that yields once and then spins in a loop is not stopped by the in-process executor. Without a ceiling there is no broker: a run that times out while a host call is in flight is reported failed while the call keeps running.
+
+### Effect records
+
+Under a ceiling, a tool call's result carries `effects`, one entry per capability call, attached by AgentOS whatever the tool's code returns:
+
+```typescript
+const result = await orchestrator.processToolCall(request);
+result.effects;
+// [{ kind: 'capability', capability: 'fetch', decision: 'allowed', decidedBy: 'ceiling',
+//    outcome: 'ok', bytes: 512, target: '9f2c…', record: 'written', toolId, callId }]
+```
+
+`outcome` is `ok`, `error`, `aborted`, `timed_out`, `refused` or `pending`. A call refused before it ran says why in `decidedBy` (`capability_not_granted`, `host_not_allowed`, `call_ended`, `audit_unavailable`); one ended while it ran says why in `code` (`host_not_allowed` at a redirect, `response_too_large`, `file_too_large`). `crypto` has one entry per run, with `uses`, the number of calls. A composition's result lists its steps' entries: a step's own effects when it reports them, and `{ kind: 'step', step, tool, ran: true }` for a step with side effects that reports none.
+
+With `audit.store: 'storage'`, the default under a ceiling, every capability call is also written to `agentos_emergent_effects`: an intent row before the call (tool id, call id, agent id, capability, target, decision, what decided it, a timestamp) and a terminal update after it (outcome, code, bytes, a timestamp). `target` is a SHA-256 digest unless `audit.content` is `'full'`. A failed intent write refuses the call (`audit_unavailable`), so a storage outage stops forged tools that have a ceiling. A failed terminal write leaves the row without an outcome, which reads as unknown, and the result's entry says `record: 'intent_only'`; after a crash, intent rows without an outcome are unknown, and nothing undoes an operation that ran. A refused call is one row. `audit.retainDays` deletes rows older than that many days from this table, once per engine before its first record; tool rows and state rows are never pruned. A host without a storage adapter sets `audit.store: 'none'`: its results still carry `effects`, and no record is kept.
+
+Without a ceiling no effect record is written and results carry no `effects`.
 
 ## LLM-as-Judge Verification
 
@@ -667,6 +691,13 @@ await importEmergentTool('./slugify.emergent-tool.yaml', { seedId: agentSeedId }
       crypto: {},
     },
 
+    // Effect records under a ceiling
+    audit: {
+      store: 'storage',   // 'none' without a storage adapter: no records kept
+      content: 'digest',  // 'full' keeps URLs and paths as written
+      retainDays: 90,     // unset: kept until deleted
+    },
+
     // Compose mode
     compose: {
       sideEffectingTools: [],      // Tools with side effects a composition or workflow may chain
@@ -685,7 +716,7 @@ Without `capabilities`, a forge request names the APIs it needs in `implementati
 - Emergent tools **cannot** modify the guardrail pipeline
 - Emergent tools get no memory or credential API. Without a ceiling, a tool granted `fs.read` reads any file under `fsReadRoots`, which defaults to the working directory, so a `.env` kept there is readable; under a ceiling it reads only under the ceiling's `roots`
 - Sandbox code runs in an in-process `node:vm` context (own realm, `process` / `globalThis` / `require` set to undefined, `codeGeneration: { strings: false, wasm: false }` blocks runtime `eval`/`Function` reflection). `node:vm` is not a security mechanism (Node's documentation), and runaway memory is not preempted.
-- Forge, promotion and removal decisions are written to the `agentos_emergent_audit_log` table when a storage adapter is configured, and kept in memory otherwise
+- Forge, promotion and removal decisions are written to the `agentos_emergent_audit_log` table when a storage adapter is configured; in memory the registry keeps the newest 1,000 entries. Under a ceiling, capability calls are recorded in `agentos_emergent_effects` (see [Effect records](#effect-records))
 - Shared-tier promotion needs an explicit `promote()` call; the approver is recorded only when the caller passes `approvedBy`; there is no built-in human-in-the-loop gate
 - Raw sandbox source is redacted at rest by default
 - If no LLM is configured, all forge requests are rejected (fail-closed)
