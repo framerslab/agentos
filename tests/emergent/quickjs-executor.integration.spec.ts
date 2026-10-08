@@ -89,14 +89,24 @@ afterEach(async () => {
 
 /**
  * A server on 127.0.0.1: `/bytes/<n>` answers n bytes; `/hold` never answers,
- * and `closed` lists the held requests whose connection closed.
+ * and `closed` lists the held requests whose connection closed; `/when-held`
+ * answers once a `/hold` request has arrived.
  */
 async function bytesServer(): Promise<{ base: string; closed: string[] }> {
   const closed: string[] = [];
+  let holdArrived!: () => void;
+  const held = new Promise<void>((resolve) => {
+    holdArrived = resolve;
+  });
   const server = http.createServer((req, res) => {
     const url = req.url ?? '';
     if (url.startsWith('/hold')) {
       req.socket.on('close', () => closed.push(url));
+      holdArrived();
+      return;
+    }
+    if (url.startsWith('/when-held')) {
+      void held.then(() => res.end('held'));
       return;
     }
     res.end(Buffer.alloc(Number(url.split('/')[2] ?? 0), 120));
@@ -364,14 +374,16 @@ describe("the bindings' bounds", () => {
 
   it('aborts a request still running when the call ends, on the path without a ceiling', async () => {
     const { base, closed } = await bytesServer();
+    // The call ends only once the server holds the first request: a request
+    // started and abandoned in one turn is aborted before it is ever sent.
     const result = await plain.execute({
-      code: "function execute(input) { fetch(input.url); return 'started'; }",
-      input: { url: `${base}/hold` },
+      code: "async function execute(input) { fetch(input.hold).catch(() => undefined); return (await fetch(input.whenHeld)).text(); }",
+      input: { hold: `${base}/hold`, whenHeld: `${base}/when-held` },
       allowlist: ['fetch'],
       memoryMB: 64,
       timeoutMs: 5000,
     });
-    expect(result).toMatchObject({ success: true, output: 'started' });
+    expect(result).toMatchObject({ success: true, output: 'held' });
     await expect.poll(() => closed, { timeout: 2000 }).toEqual(['/hold']);
   });
 
