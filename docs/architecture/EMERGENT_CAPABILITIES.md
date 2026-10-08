@@ -301,12 +301,37 @@ These are rejected at code validation time (before execution):
 | Resource | Default | Config key |
 |---|---|---|
 | Execution timeout | 5,000 ms | `sandboxTimeoutMs` |
-| Memory observed (heap delta heuristic, NOT preempted) | 128 MB nominal | `sandboxMemoryMB` |
+| Memory budget (the in-process executor observes a heap delta and does not preempt; an executor that can limit memory takes it as its limit) | 128 MB | `sandboxMemoryMB` |
 | Session tools | 10 | `maxSessionTools` |
 | Agent tools | 50 | `maxAgentTools` |
 | Sandbox mode | off: a `mode: 'sandbox'` request is rejected and a stored code tool loads suspended (`sandbox_tools_off`) until it is enabled; compose mode needs no switch | `allowSandboxTools` |
 | Side-effecting steps | none: a composition or a workflow chains a tool that declares side effects only when it is listed | `compose.sideEffectingTools` |
 | Settling after a run ends | up to 1 s; what is still in flight is listed `pending` | fixed (`CALL_SETTLE_MS`) |
+
+### Executors
+
+The forge validates the source, pre-parses it and builds the functions the grant allows; an executor runs the code and calls `execute(input)` or `run(input)`. The library ships one executor, `InProcessExecutor`, the default: a `node:vm` context inside the host's process, through `CodeSandbox`. It declares `isolates: false`.
+
+```typescript
+import { SandboxedToolForge, type ForgedCodeExecutor } from '@framers/agentos';
+
+const executor: ForgedCodeExecutor = {
+  name: 'my-executor',
+  isolates: true, // the author's claim: forged code reaches the host only through `globals`
+  async run({ code, input, globals, timeoutMs, memoryMB, signal }) {
+    // Run `code` in a realm of its own with `globals` installed (`fetch`, `fs`, `crypto`
+    // when granted), call execute(input) or run(input), stop it at `timeoutMs` or when
+    // `signal` aborts, and return the value it resolved to after a JSON round trip.
+    return { status: 'ok', output: null, memoryUsedBytes: 0 };
+  },
+};
+
+const sandboxForge = new SandboxedToolForge({ executor });
+```
+
+`run` resolves in every case, with `{ status: 'ok', output }`, `{ status: 'error', error }` (the whole message the forge returns), `{ status: 'timeout' }` or `{ status: 'memory_exceeded' }`, each carrying `memoryUsedBytes`; the forge reports a rejection as an execution error. Under a ceiling, `globals` holds the broker's functions and `signal` aborts when the call's handle ends; the broker refuses capability calls after that, whatever the executor does. The library does not check an executor's `isolates`: it is what the executor's author claims.
+
+A host that builds the engine itself passes such a forge as `sandboxForge` (see [Building the engine yourself](#building-the-engine-yourself)); under a ceiling the engine checks it against the ceiling as it checks any host-built forge. When the runtime builds the engine, forged code runs on the in-process executor.
 
 ### A ceiling for code-forged tools
 
@@ -709,13 +734,13 @@ await importEmergentTool('./slugify.emergent-tool.yaml', { seedId: agentSeedId }
 }
 ```
 
-Without `capabilities`, a forge request names the APIs it needs in `implementation.allowlist` (`fetch`, `fs.read` or its alias `fs.readFile`, `crypto`) and gets them unscoped: the runtime builds the `SandboxedToolForge` with `sandboxMemoryMB` and `sandboxTimeoutMs` only, so `fetchDomainAllowlist` stays empty (a tool granted `fetch` reaches any host) and `fsReadRoots` stays at the process working directory (`.env` files included). With `capabilities`, the ceiling above scopes all three.
+Without `capabilities`, a forge request names the APIs it needs in `implementation.allowlist` (`fetch`, `fs.read` or its alias `fs.readFile`, `crypto`) and gets them unscoped: the runtime builds the `SandboxedToolForge` with `sandboxMemoryMB` and `sandboxTimeoutMs` only, on the in-process executor, so `fetchDomainAllowlist` stays empty (a tool granted `fetch` reaches any host) and `fsReadRoots` stays at the process working directory (`.env` files included). With `capabilities`, the ceiling above scopes all three.
 
 ## Safety Invariants
 
 - Emergent tools **cannot** modify the guardrail pipeline
 - Emergent tools get no memory or credential API. Without a ceiling, a tool granted `fs.read` reads any file under `fsReadRoots`, which defaults to the working directory, so a `.env` kept there is readable; under a ceiling it reads only under the ceiling's `roots`
-- Sandbox code runs in an in-process `node:vm` context (own realm, `process` / `globalThis` / `require` set to undefined, `codeGeneration: { strings: false, wasm: false }` blocks runtime `eval`/`Function` reflection). `node:vm` is not a security mechanism (Node's documentation), and runaway memory is not preempted.
+- By default, sandbox code runs in an in-process `node:vm` context (`process` / `globalThis` / `require` set to undefined; `codeGeneration: { strings: false, wasm: false }` applies to the context's own intrinsics). The context is handed the host's own constructors (`Object`, `Array`, `Promise` and others) and functions, and through them forged code can reach the host's `Function`. `node:vm` is not a security mechanism (Node's documentation), and runaway memory is not preempted. A host may run forged code on another executor (see [Executors](#executors)); its `isolates` is its author's claim.
 - Forge, promotion and removal decisions are written to the `agentos_emergent_audit_log` table when a storage adapter is configured; in memory the registry keeps the newest 1,000 entries. Under a ceiling, capability calls are recorded in `agentos_emergent_effects` (see [Effect records](#effect-records))
 - Shared-tier promotion needs an explicit `promote()` call; the approver is recorded only when the caller passes `approvedBy`; there is no built-in human-in-the-loop gate
 - Raw sandbox source is redacted at rest by default
