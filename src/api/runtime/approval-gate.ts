@@ -7,7 +7,8 @@
  * throws: a rejection, a handler error, a timeout, a guardrail block and a
  * received gate that threw all skip the tool. A handler error or an
  * `onTimeout: 'error'` timeout is stored in the owner's slot, which `agency()`
- * checks when its strategy settles.
+ * checks when its strategy settles; the model is told only that the approval
+ * handler failed, and the error itself goes to the slot and `on.error`.
  */
 import type { AgencyOptions, ApprovalDecision, ApprovalRequest } from '../types.js';
 import { AgencyConfigError } from '../types.js';
@@ -65,6 +66,14 @@ export function composeReceivedGate(value: unknown): ApprovalGateFn | undefined 
 }
 
 const refusal = (reason: string): ApprovalRefusal => ({ skipped: true, reason });
+
+/**
+ * What the model is told when the handler fails or an `'error'` timeout
+ * fires. Fixed, because an error's message can name a URL or a credential
+ * (fetch's for a webhook URL that carries one does), and the refusal reason
+ * is sent to the model provider as the tool result.
+ */
+const HANDLER_FAILED = 'the approval handler failed';
 
 /** Why an approval that names other arguments is refused: the gate approves or refuses, and never applies them. */
 const TOOL_ARGS_NOT_APPLIED = 'the arguments the approval names (modifications.toolArgs) are not applied; rewrite them in onBeforeToolExecution';
@@ -197,7 +206,7 @@ export function createApprovalGate(o: CreateApprovalGateOptions): ApprovalGateFn
         if (o.slot.error === undefined) o.slot.error = err === undefined ? new AgencyConfigError('HITL approval failed') : err;
         safeCall(o.on?.error, { agent: o.agentName, error: err instanceof Error ? err : new Error(String(err)), timestamp: Date.now() });
       }
-      return refusal(err instanceof Error ? err.message : 'approval failed');
+      return refusal(HANDLER_FAILED);
     }
     // A decision that arrives after the call ended (a concurrent approval
     // failed, or the owner settled) fires nothing and runs nothing.

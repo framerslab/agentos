@@ -122,6 +122,19 @@ describe('a listed tool waits for the handler', () => {
     expect(((await team.usage()) as Json).totalTokens).toBe(14);
   });
 
+  it("a handler error's message never reaches the model: the tool result carries a fixed reason, the error goes to on.error and the rejection", async () => {
+    serve([() => toolCall('search', { q: 'x' }), () => text('done')]);
+    // The message fetch gives hitl.webhook for a URL that carries credentials names them.
+    const leak = new TypeError('Request cannot be constructed from a URL that includes credentials: https://approver:s3cret@hooks.example.com/decide');
+    const error = vi.fn();
+    const team = base({ approvals: { beforeTool: ['search'] }, handler: async () => { throw leak; } }, { on: { error } });
+    await expect(team.generate('find x')).rejects.toBe(leak);
+    expect(error).toHaveBeenCalledWith(expect.objectContaining({ error: leak }));
+    const toolMsg = chatBodies()[1].messages.find((m: Json) => m.role === 'tool');
+    expect(JSON.parse(toolMsg.content)).toEqual({ skipped: true, reason: 'the approval handler failed' });
+    expect(JSON.stringify(chatBodies())).not.toContain('s3cret');
+  });
+
   it("a timeout under onTimeout 'error' rejects generate() and stream() with the timeout error; usage is in the totals", async () => {
     serve([() => toolCall('search', { q: 'x' }), () => text('done'), () => toolCallStream('search', { q: 'y' }), () => textStream('done again')]);
     const team = base({ approvals: { beforeTool: ['search'] }, handler: waitForever, timeoutMs: 10, onTimeout: 'error' });

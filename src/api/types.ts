@@ -216,7 +216,7 @@ export interface HitlConfig {
      * the tool and the run goes on; a handler error, or a timeout under
      * `onTimeout: 'error'`, skips that tool and every later one unasked, and
      * rejects the call once the strategy settles, after the run's usage is
-     * counted.
+     * counted; the model is told only that the approval handler failed.
      */
     beforeTool?: string[];
     /** Agent names whose invocations require approval before execution. */
