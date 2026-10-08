@@ -8,6 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import { GMIOutputChunkType, type GMIOutputChunk } from '../IGMI';
 import { GMIErrorCode } from '../../../core/utils/errors';
+import type { IProvider } from '../../../core/llm/providers/IProvider';
 import type { IToolOrchestrator } from '../../../core/tools/IToolOrchestrator';
 import { createScriptedGmi, errorReply, runTurn, scriptedProvider, textReply, textTurn, toolCallReply } from './helpers/scriptedGmi';
 
@@ -104,6 +105,37 @@ describe('GMI step contract (runtime path)', () => {
     const { gmi } = await createScriptedGmi({ provider });
     const { chunks } = await runTurn(gmi, textTurn('t1', 'Hi.'));
     expect(of(chunks, GMIOutputChunkType.ERROR)[0]?.errorDetails?.code).toBe(GMIErrorCode.LLM_PROVIDER_ERROR);
+  });
+
+  it('a step that fails after output is still counted: the usage on its error chunk, or the usage a thrown provider error carries', async () => {
+    const billed = { promptTokens: 9, completionTokens: 2, totalTokens: 11 };
+    const marked = { attemptFailed: true, hop: 0, providerId: 'scripted', modelId: 'scripted-model' };
+    const bills = (chunks: GMIOutputChunk[]) =>
+      of(chunks, GMIOutputChunkType.USAGE_UPDATE).filter((c) => c.metadata?.attemptFailed === true).map((c) => [c.content, c.metadata]);
+
+    // An abort after some text: the provider ends the stream with an error chunk that carries the usage.
+    const { provider: aborted } = scriptedProvider([[
+      { ...scriptedChunk, choices: [], responseTextDelta: 'Partial' },
+      { ...scriptedChunk, choices: [], isFinal: true, error: { message: 'aborted', type: 'abort' }, usage: billed },
+    ] as never]);
+    const inBand = await runTurn((await createScriptedGmi({ provider: aborted })).gmi, textTurn('t1', 'Hi.'));
+    expect(of(inBand.chunks, GMIOutputChunkType.ERROR)[0]?.errorDetails?.code).toBe(GMIErrorCode.LLM_PROVIDER_ERROR);
+    expect(bills(inBand.chunks)).toEqual([[billed, marked]]);
+    expect(inBand.output.usage).toMatchObject(billed);
+
+    // A refusal after some text: the provider throws, and the error carries the usage.
+    const refusing = {
+      providerId: 'scripted',
+      isInitialized: true,
+      generateCompletionStream: async function* () {
+        yield { ...scriptedChunk, choices: [], responseTextDelta: 'Sure, here' };
+        throw Object.assign(new Error('refused'), { details: { usage: billed } });
+      },
+    } as unknown as IProvider;
+    const thrown = await runTurn((await createScriptedGmi({ provider: refusing })).gmi, textTurn('t1', 'Hi.'));
+    expect(of(thrown.chunks, GMIOutputChunkType.ERROR)).toHaveLength(1);
+    expect(bills(thrown.chunks)).toEqual([[billed, marked]]);
+    expect(thrown.output.usage).toMatchObject(billed);
   });
 
   it('runs the tool calls of the last allowed step, as streamText does, and reports that step as tool_calls', async () => {

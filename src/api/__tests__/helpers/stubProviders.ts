@@ -18,8 +18,11 @@ export interface ProviderScript {
   initThrows?: Error;
   /** Context window the provider reports for every model. Default 128,000. */
   window?: number;
-  /** One entry per model call: the chunks to stream, or an Error to throw before any chunk. */
-  replies: Array<Array<Record<string, unknown>> | Error>;
+  /**
+   * One entry per model call: the chunks to stream, or an Error to throw before
+   * any chunk. An Error among the chunks is thrown at that point of the stream.
+   */
+  replies: Array<Array<Record<string, unknown> | Error> | Error>;
   /** Every model call: the model, a copy of the messages, and the options. */
   seen: Array<{ modelId: string; messages: ChatMessage[]; options: Record<string, unknown> }>;
   /** How many embedding requests reached the provider. */
@@ -83,6 +86,8 @@ export const reply = {
   ],
   /** One delta, then the connection drops. */
   breakAfterFirstDelta: (text: string) => Object.assign([{ ...base, modelId: 'stub-model', choices: [], responseTextDelta: text }], { breakAfter: 1 }),
+  /** One delta, then the provider throws `error` (a refusal that reports its usage in `details.usage`, a dropped connection). */
+  textThenThrow: (text: string, error: Error) => [{ ...base, modelId: 'stub-model', choices: [], responseTextDelta: text }, error],
 };
 
 /** A deterministic embedding: word hashes in 1536 buckets (text-embedding-3-small's size), normalised. */
@@ -141,7 +146,9 @@ export function stubProviderClass(providerId: string) {
       if (next instanceof Error) throw next;
       const breakAfter = (next as { breakAfter?: number }).breakAfter;
       for (let i = 0; i < next.length; i++) {
-        yield next[i];
+        const chunk = next[i];
+        if (chunk instanceof Error) throw chunk;
+        yield chunk;
         if (breakAfter !== undefined && i + 1 === breakAfter) throw new Error('connection reset');
       }
     }
