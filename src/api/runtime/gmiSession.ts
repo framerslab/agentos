@@ -465,9 +465,21 @@ export async function sendGmiTurn(
  */
 export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn: GmiTurnOptions): StreamTextResult {
   const folder = new GmiTurnFolder({ cacheDiagnostics: Boolean(turn.options?.cacheDiagnostics) });
+  // The turn stops when the caller's signal aborts (a session's close()) or when
+  // the consumer stops reading. The listener on the caller's signal, which
+  // outlives the turn, goes once the turn has ended.
   const stop = new AbortController();
-  turn.abortSignal?.addEventListener('abort', () => stop.abort(), { once: true });
+  const forwardAbort = (): void => stop.abort();
+  if (turn.abortSignal?.aborted) stop.abort();
+  else turn.abortSignal?.addEventListener('abort', forwardAbort, { once: true });
   const run = runGmiTurn(deps, input, { ...turn, abortSignal: stop.signal }, folder, 'streamText');
+  const chunks = (async function* () {
+    try {
+      return yield* run;
+    } finally {
+      turn.abortSignal?.removeEventListener('abort', forwardAbort);
+    }
+  })();
   // runGmiTurn pushes every chunk into `folder` (with the onAfterGeneration replacements); the stream reads that folder.
-  return streamFromGmiTurn({ [Symbol.asyncIterator]: () => run }, { folder, stop: () => stop.abort() });
+  return streamFromGmiTurn(chunks, { folder, stop: () => stop.abort() });
 }
