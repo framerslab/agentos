@@ -1285,7 +1285,19 @@ export class GMI implements IGMI {
         // prompt is built, so the prompt is budgeted for the serving model (D1).
         let resolution: CompletionResolution | null = null;
         if (gateway && route) {
-          resolution = this.turnResolution ?? (await gateway.resolve(route));
+          try {
+            resolution = this.turnResolution ?? (await gateway.resolve(route));
+          } catch (resolveError) {
+            // resolve() throws only when the primary cannot be set up (no
+            // credentials, a provider or model that does not resolve): a
+            // configuration error, not a failure of the turn's processing.
+            if (resolveError instanceof GMIError) throw resolveError;
+            throw new GMIError(
+              resolveError instanceof Error ? resolveError.message : String(resolveError),
+              GMIErrorCode.CONFIGURATION_ERROR,
+              { turnId, providerId: providerIdForModel, modelId: modelIdToUse },
+            );
+          }
           if (!resolution) {
             throw new GMIError(
               `No model provider could serve the turn${lastHopError ? `: ${lastHopError.message}` : '.'}`,
