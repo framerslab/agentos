@@ -333,6 +333,21 @@ function namedErrorCode(code: unknown): string | undefined {
   return typeof code === 'string' && /^[a-z][a-z0-9_]*$/i.test(code) ? code : undefined;
 }
 
+/**
+ * The error a stream chunk reports: the event's own `error`, else the error
+ * on a choice that `finish_reason: 'error'` ended, as the non-stream path
+ * reads a body. A choice ended by `'error'` with no error object is not a
+ * documented shape and is mapped as a finish.
+ */
+function streamChunkError(apiChunk: OpenRouterChatCompletionAPIResponse): OpenRouterErrorEnvelope | undefined {
+  if (apiChunk.error && typeof apiChunk.error === 'object') return apiChunk.error;
+  const choice = Array.isArray(apiChunk.choices) ? apiChunk.choices[0] : undefined;
+  if (choice && choice.finish_reason === 'error' && choice.error && typeof choice.error === 'object') {
+    return choice.error;
+  }
+  return undefined;
+}
+
 /** How OpenRouter declined a request, read from its error envelope. */
 export interface OpenRouterDecline {
   /**
@@ -943,31 +958,33 @@ export class OpenRouterProvider implements IProvider {
           }
 
           // OpenRouter reports upstream failures MID-STREAM as an SSE data
-          // event carrying an `error` object. A content decline throws typed
-          // (the walkers move on before any output; after output the stream
-          // ends with an error part). Any other error still surfaces as an
-          // upstream_error chunk and ends the stream.
-          if (apiChunk.error && typeof apiChunk.error === 'object') {
+          // event carrying an `error` object, on the event or on the choice
+          // it ends. A content decline throws typed (the walkers move on
+          // before any output; after output the stream ends with an error
+          // part). Any other error still surfaces as an upstream_error chunk
+          // and ends the stream.
+          const streamError = streamChunkError(apiChunk);
+          if (streamError) {
             // The stream is an HTTP 200, so the in-body 403 row applies here too.
-            const decline = classifyOpenRouterDecline(apiChunk.error, { inBody: true });
+            const decline = classifyOpenRouterDecline(streamError, { inBody: true });
             if (decline) {
               throw this.declineError(modelId, decline, {
-                httpStatus: typeof apiChunk.error.code === 'number' ? apiChunk.error.code : undefined,
-                error: apiChunk.error,
+                httpStatus: typeof streamError.code === 'number' ? streamError.code : undefined,
+                error: streamError,
                 partialText: yieldedText,
                 // The event's own usage when it reports one, else what the
                 // held finish or the usage chunk reported.
                 usage: mapOpenRouterUsage(apiChunk.usage) ?? held?.usage,
               });
             }
-            const errMessage = apiChunk.error.message || 'OpenRouter mid-stream error';
-            const errCode = apiChunk.error.code;
+            const errMessage = streamError.message || 'OpenRouter mid-stream error';
+            const errCode = streamError.code;
             // The typed code: metadata.error_type, else the envelope's own
             // `type`, in the order the HTTP error path reads them.
-            const envelopeType = (apiChunk.error as { type?: unknown }).type;
+            const envelopeType = (streamError as { type?: unknown }).type;
             const errType =
-              typeof apiChunk.error.metadata?.error_type === 'string'
-                ? apiChunk.error.metadata.error_type
+              typeof streamError.metadata?.error_type === 'string'
+                ? streamError.metadata.error_type
                 : typeof envelopeType === 'string'
                   ? envelopeType
                   : undefined;
@@ -995,6 +1012,9 @@ export class OpenRouterProvider implements IProvider {
               readError = new Error(decorated);
               break;
             }
+            // What the failed attempt billed, when the event reports it: the
+            // stream ends here, so no usage chunk follows.
+            const errUsage = mapOpenRouterUsage(apiChunk.usage);
             yield {
               id: apiChunk.id ?? `openrouter-error-${Date.now()}`,
               object: 'chat.completion.chunk',
@@ -1002,6 +1022,7 @@ export class OpenRouterProvider implements IProvider {
               modelId: apiChunk.model || modelId,
               choices: [],
               isFinal: true,
+              ...(errUsage ? { usage: errUsage } : {}),
               error: {
                 message: decorated,
                 type: 'upstream_error',

@@ -382,4 +382,53 @@ describe('OpenRouter declines through streamText', () => {
     expect(r.text).toBe('from gemini');
     expect(globalLLMProviderHealth.getStats('openrouter')?.failureCount ?? 0).toBe(0);
   });
+
+  it('an upstream error event that carries usage before text: the next leg streams and the failed attempt is counted once', async () => {
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce({
+      data: sse([chunk({ error: { code: 502, message: 'Provider disconnected', metadata: { error_type: 'provider_unavailable' } }, choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error' }], usage: USAGE }), 'data: [DONE]']),
+    });
+    const r = await stream();
+    expect(r.text).toBe('from gemini');
+    expect(r.parts.filter((p) => p.type === 'error')).toHaveLength(0);
+    expect(r.usage.promptTokens).toBe(120 + 5);
+    expect(r.usage.completionTokens).toBe(7 + 2);
+    expect(globalLLMProviderHealth.getStats('openrouter')?.failureCount).toBe(1);
+  });
+
+  // The error on the choice a `finish_reason: 'error'` ended, with no error on the event.
+  const choiceError = (error: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+    chunk({ choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error', error }], ...extra });
+
+  it('a choice-level upstream error before text: the next leg streams; the registry counts one transient failure', async () => {
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce({
+      data: sse([choiceError({ code: 502, message: 'Provider disconnected', metadata: { error_type: 'provider_unavailable' } }, { usage: USAGE }), 'data: [DONE]']),
+    });
+    const r = await stream();
+    expect(r.text).toBe('from gemini');
+    expect(r.parts.filter((p) => p.type === 'error')).toHaveLength(0);
+    expect(r.finishReason).toBe('stop');
+    expect(r.usage.promptTokens).toBe(120 + 5);
+    expect(globalLLMProviderHealth.getStats('openrouter')?.failureCount).toBe(1);
+  });
+
+  it('a choice-level refusal before text: the next leg streams and the breaker stays closed', async () => {
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce({
+      data: sse([choiceError({ code: 403, message: 'refused', metadata: { error_type: 'refusal' } }), 'data: [DONE]']),
+    });
+    const r = await stream();
+    expect(r.text).toBe('from gemini');
+    expect(globalLLMProviderHealth.isOpen('openrouter')).toBe(false);
+    expect(globalLLMProviderHealth.getStats('openrouter')?.failureCount ?? 0).toBe(0);
+  });
+
+  it('a choice-level upstream error after text: one error part, finish reason error, no second leg', async () => {
+    hoisted.state.openrouterRequest!.mockResolvedValueOnce({
+      data: sse([textChunk('a'), choiceError({ code: 502, message: 'Provider disconnected', metadata: { error_type: 'provider_unavailable' } }), 'data: [DONE]']),
+    });
+    const r = await stream();
+    expect(r.parts.filter((p) => p.type === 'text').map((p) => p.text)).toEqual(['a']);
+    expect(r.parts.filter((p) => p.type === 'error')).toHaveLength(1);
+    expect(r.finishReason).toBe('error');
+    expect(hoisted.state.geminiCalls).toBe(0);
+  });
 });
