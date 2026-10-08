@@ -460,7 +460,7 @@ The weights are `DEFAULT_SCORING_WEIGHTS` ([`RetrievalPriorityScorer.ts`](https:
 
 ## The Eight Cognitive Mechanisms
 
-On top of the encoding/decay/retrieval substrate, `CognitiveMemoryManager` runs eight neuroscience-grounded mechanisms, all enabled by default and individually configurable via `cognitiveMechanisms` on [`CognitiveMemoryConfig`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/config.ts) ([`defaults.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/defaults.ts)). Six of them are scaled by a HEXACO trait: reconsolidation by Emotionality, RIF by Conscientiousness, involuntary recall by Openness, source confidence decay by Honesty-Humility, emotion regulation by Agreeableness and FOK by Extraversion.
+On top of the encoding/decay/retrieval substrate, `CognitiveMemoryManager` runs eight neuroscience-grounded mechanisms when it is initialized with a `cognitiveMechanisms` config: `{}` turns all eight on with their defaults, and per-mechanism fields on [`CognitiveMemoryConfig`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/config.ts) override them ([`defaults.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/defaults.ts)); without the config no mechanism runs. Six of them are scaled by a HEXACO trait: reconsolidation by Emotionality, RIF by Conscientiousness, involuntary recall by Openness, source confidence decay by Honesty-Humility, emotion regulation by Agreeableness and FOK by Extraversion.
 
 ### Retrieval and prompt-assembly time
 
