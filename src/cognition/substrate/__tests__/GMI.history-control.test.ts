@@ -92,4 +92,18 @@ describe('GMI history control', () => {
     gmi.replaceHistory([createConversationMessage(MessageRole.USER, 'Another subject.')]);
     expect(JSON.stringify(gmi.getReasoningTrace())).not.toContain('Hello there.');
   });
+
+  it('the window trim leaves no tool result without the assistant message that called the tool', async () => {
+    const { provider, received } = scriptedProvider([textReply('Sure.')]);
+    const { gmi } = await createScriptedGmi({ provider, persona: { conversationContextConfig: { maxMessages: 3 } } as never });
+    gmi.replaceHistory([
+      createConversationMessage(MessageRole.USER, 'Look it up.'),
+      createConversationMessage(MessageRole.ASSISTANT, null, { tool_calls: [{ id: 'call_a', name: 'lookup', arguments: { q: 'a' } }] }),
+      createConversationMessage(MessageRole.TOOL, '{"ok":true}', { tool_call_id: 'call_a', name: 'lookup' }),
+      createConversationMessage(MessageRole.ASSISTANT, 'Done.'),
+    ]);
+    // The turn records its input and keeps the newest three messages: the cut falls between the tool call and its result.
+    await runTurn(gmi, textTurn('t1', 'Next.'));
+    expect(received[0].filter((m) => m.role !== 'system').map((m) => [m.role, m.content])).toEqual([['assistant', 'Done.'], ['user', 'Next.']]);
+  });
 });
