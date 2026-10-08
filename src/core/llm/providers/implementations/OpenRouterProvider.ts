@@ -927,8 +927,10 @@ export class OpenRouterProvider implements IProvider {
     let readError: unknown;
     // An error on a choice (not the documented event, which ends the
     // stream) is held while the usage-only line that may follow is read,
-    // so the failed attempt's tokens are not lost.
-    let pendingError: ModelCompletionResponse | null = null;
+    // so the failed attempt's tokens are not lost. Initialised through the
+    // assertion: tsc otherwise narrows the variable to its initial null at
+    // the loop's first read and does not carry the later assignment back.
+    let pendingError = null as ModelCompletionResponse | null;
     const isDecline = (e: unknown): boolean =>
       e instanceof OpenRouterProviderError && (e.code === 'content_filter' || e.code === 'content_policy_violation');
 
@@ -961,8 +963,6 @@ export class OpenRouterProvider implements IProvider {
             continue;
           }
 
-          // Read through a typed local: the assignment that sets this comes
-          // later in the loop body, and tsc narrows the variable itself here.
           const heldError: ModelCompletionResponse | null = pendingError;
           if (heldError) {
             // After a choice-level error only the usage-only line is wanted;
