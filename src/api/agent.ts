@@ -326,11 +326,15 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
    * the provider's native structured-output API (OpenAI json_schema,
    * Anthropic forced tool-use, Gemini responseSchema), and returns a
    * Zod-validated typed object on `result.object` alongside the JSON
-   * string in `result.text`.
+   * string in `result.text`. A call whose provider payload carries no
+   * schema (a provider with none, an Anthropic model that rejects a
+   * forced tool choice, JSON-object mode) gets the schema in its system
+   * prompt, in the words `generateObject` uses; each fallback provider is
+   * checked for its own payload.
    *
-   * Tools (caller-provided in baseOpts.tools) are still passed through;
-   * the structured-output mode adds its own forced tool on Anthropic
-   * but the existing tool definitions remain in the payload.
+   * The agent's tools are left out of a schema request, and with them the
+   * chain-of-thought instruction; `runtime: 'legacy'` (the default) warns
+   * that it leaves them out.
    */
   responseSchema?: S;
   /**
