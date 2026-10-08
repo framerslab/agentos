@@ -1,3 +1,17 @@
+## [0.12.14](https://github.com/framerslab/agentos/compare/v0.12.13...v0.12.14) (2026-10-08)
+
+### docs
+
+* second round of audit follow-ups to the guides (#150) ([3b74c6c](https://github.com/framerslab/agentos/commit/3b74c6ce76ba3e9c74e5850db06ce15689c1d570))
+
+### feat
+
+* **api:** gmi(), an agent whose sessions are GMIs ([daa9273](https://github.com/framerslab/agentos/commit/daa9273dd5b459377828c640a46d02b2bb401cce))
+
+### fix
+
+* **vision:** the cloud tier sends the image as an image part; vision and style transfer take a key (#154) ([1a4db02](https://github.com/framerslab/agentos/commit/1a4db02f049561489e67a61ba1474f1ee5abb978))
+
 ## [0.12.13](https://github.com/framerslab/agentos/compare/v0.12.12...v0.12.13) (2026-10-08)
 
 ### fix
