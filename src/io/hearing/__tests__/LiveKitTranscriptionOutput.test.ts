@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { TranscriptLedger, transcriptEventFromLiveKit } from '../../voice-pipeline/transcriptLedger.js';
 import { LiveKitTranscriptionOutput } from '../LiveKitTranscriptionOutput.js';
 import { FakeRoom } from './livekit-fakes.js';
 
@@ -39,6 +40,26 @@ describe('LiveKitTranscriptionOutput', () => {
       { topic: 'lk.transcription', attributes: { 'lk.segment_id': 'i2', 'lk.transcription_final': 'true' }, destinationIdentities: ['user-1'] },
     ]);
     expect(await output.replayAfter('gone', 'user-1')).toBe(2);
+  });
+
+  it('replays a line taken back as its empty final, so a page that missed the retraction drops the line', async () => {
+    const room = new FakeRoom();
+    const output = new LiveKitTranscriptionOutput({ room });
+    const page = new TranscriptLedger();
+    const deliver = (from: number) => {
+      for (const [text, options] of room.localParticipant.sendText.mock.calls.slice(from)) {
+        const event = transcriptEventFromLiveKit(text, (options as { attributes?: Record<string, string> } | undefined)?.attributes);
+        if (event) page.apply(event);
+      }
+    };
+    await output.write(final('i1', 'One.'));
+    await output.write(interim('i2', 'Tw'));
+    deliver(0);
+    await output.write(final('i2', ''));
+    const away = room.localParticipant.sendText.mock.calls.length;
+    expect(await output.replayAfter(page.resumeAfterId(), 'user-1')).toBe(1);
+    deliver(away);
+    expect(page.items().map((item) => item.itemId)).toEqual(['i1']);
   });
 
   it('marks a failed line with its reason and keeps writes in the order they were asked for', async () => {

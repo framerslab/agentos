@@ -7,7 +7,7 @@
  * `itemId`), `lk.transcription_final` and `lk.transcribed_track_id`. Writes go
  * out in the order they were asked for. The finals are kept in a
  * {@link TranscriptLedger}, so a participant that reconnects can be sent again
- * the finals after the last line it holds.
+ * the finals after the last line it holds, a line taken back among them.
  *
  * The room is described by a structural type, so this module and its typings
  * carry no dependency on `@livekit/rtc-node`; a connected rtc-node `Room` is
@@ -102,11 +102,12 @@ export class LiveKitTranscriptionOutput {
 
   /**
    * Sends again, to one participant, the final lines after the line with the
-   * id, in order; every final line when the id is `undefined` or unknown.
-   * Resolves how many were sent.
+   * id, in order, a line taken back among them as its empty final, so a page
+   * that missed the retraction drops the line; every one of them when the id
+   * is `undefined` or unknown. Resolves how many were sent.
    */
   replayAfter(itemId: string | undefined, participantIdentity: string): Promise<number> {
-    const finals = this.ledger.finalsAfter(itemId);
+    const finals = this.ledger.finalsAfter(itemId, { takenBack: true });
     return this.enqueue(async () => {
       for (const line of finals) await this.send(line, [participantIdentity]);
       return finals.length;

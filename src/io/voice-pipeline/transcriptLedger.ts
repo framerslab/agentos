@@ -74,8 +74,8 @@ export interface LedgerEvent {
 export interface TranscriptLedgerOptions {
   /**
    * The most lines held, a line taken back among them (it stays, hidden, so a
-   * later event for its id changes nothing); beyond it the oldest final lines
-   * are dropped, never the line just applied.
+   * later event for its id changes nothing and a replay carries it); beyond it
+   * the oldest final lines are dropped, never the line just applied.
    * @defaultValue 20000
    */
   maxItems?: number;
@@ -161,9 +161,14 @@ export class TranscriptLedger {
     return last;
   }
 
-  /** The final lines shown after the line with the id, in order; every one of them when the id is `undefined` or unknown. */
-  finalsAfter(itemId: string | undefined): LedgerItem[] {
-    const lines = this.items();
+  /**
+   * The final lines shown after the line with the id, in order; every one of
+   * them when the id is `undefined` or unknown. With `takenBack`, a line taken
+   * back comes too, as its empty final in its place: what a participant that
+   * rejoins is sent again, so a page that missed the retraction drops the line.
+   */
+  finalsAfter(itemId: string | undefined, options: { takenBack?: boolean } = {}): LedgerItem[] {
+    const lines = options.takenBack ? [...this.lines.values()] : this.items();
     const index = itemId === undefined ? -1 : lines.findIndex((line) => line.itemId === itemId);
     return lines.slice(index + 1).filter((line) => line.isFinal);
   }
