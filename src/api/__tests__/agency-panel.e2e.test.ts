@@ -2,7 +2,8 @@
  * @file agency-panel.e2e.test.ts
  * Model pool, seating, strict credentials, redaction and the panel strategy,
  * driven through agency(), agent(), generateText, streamText and the real
- * Anthropic, OpenAI, Gemini and xAI provider classes with only fetch stubbed.
+ * Anthropic, OpenAI, Gemini and xAI provider classes with only fetch stubbed
+ * (axios, which OpenRouter and Ollama send through, is forwarded to it).
  * OpenRouter and Ollama seats are in agency-panel-axios.e2e.test.ts.
  */
 // @ts-nocheck -- the types this file imports land in Task 15 and the typed results in Task 23, which removes this line.
@@ -11,6 +12,35 @@ import { z } from 'zod';
 
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
+
+// OpenRouter and Ollama send through axios, which does not use fetch. Forwarded to the stubbed fetch, a request to
+// either is captured, and refused unless a test routes it; with the real axios, an Anthropic call rerouted to
+// OpenRouter reaches the network and every "nothing reaches OpenRouter" check in this file passes regardless.
+vi.mock('axios', () => {
+  const respond = async (url: string, init: Record<string, unknown>) => {
+    const res = (await (globalThis.fetch as (u: string, i: unknown) => Promise<Response>)(url, init)) as Response;
+    const data = await res.json().catch(() => undefined);
+    const out = { status: res.status, statusText: res.statusText, data, headers: Object.fromEntries(res.headers.entries()), config: { url } };
+    if (res.status >= 400) { const err = Object.assign(new Error(`Request failed with status code ${res.status}`), { isAxiosError: true, response: out, config: { url } }); throw err; }
+    return out;
+  };
+  const call = (base: string, baseHeaders: Record<string, string>, cfg: Record<string, any>) =>
+    respond(`${base}${cfg.url ?? ''}`, { method: String(cfg.method ?? 'GET').toUpperCase(), headers: { ...baseHeaders, ...(cfg.headers ?? {}) }, body: cfg.data !== undefined ? JSON.stringify(cfg.data) : undefined });
+  const create = (c: Record<string, any> = {}) => ({
+    defaults: { baseURL: c.baseURL, headers: c.headers },
+    request: (cfg: Record<string, any>) => call(c.baseURL ?? '', c.headers ?? {}, cfg),
+    get: (url: string, cfg: Record<string, any> = {}) => call(c.baseURL ?? '', c.headers ?? {}, { ...cfg, url, method: 'GET' }),
+    post: (url: string, data: unknown, cfg: Record<string, any> = {}) => call(c.baseURL ?? '', c.headers ?? {}, { ...cfg, url, data, method: 'POST' }),
+  });
+  const axios = Object.assign((cfg: Record<string, any>) => call('', {}, cfg), {
+    create,
+    get: (url: string, cfg: Record<string, any> = {}) => call('', {}, { ...cfg, url, method: 'GET' }),
+    post: (url: string, data: unknown, cfg: Record<string, any> = {}) => call('', {}, { ...cfg, url, data, method: 'POST' }),
+    isAxiosError: (e: unknown) => Boolean((e as { isAxiosError?: boolean })?.isAxiosError),
+  });
+  class AxiosError extends Error {}
+  return { default: axios, isAxiosError: axios.isAxiosError, AxiosError };
+});
 
 // The CLI binary probe is deterministic in this file: a binary is on PATH only while a test lists it (hoisted, since vi.mock runs first).
 const { binariesOnPath } = vi.hoisted(() => ({ binariesOnPath: new Set<string>() }));
@@ -514,7 +544,8 @@ describe('10-12. vendors, shortfalls, truncation and pre-built seats', () => {
   it('a truncated seat with text is ok and truncated; text under minChars is empty; a pre-built seat is prebuilt and counts', async () => {
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiText('cut off mid', 'length'), openaiText('prebuilt view')]], [ANTHROPIC, [anthropicText('ok'), anthropicText('Merged')]], [GEMINI, geminiText('C')]]);
     const pre = agent({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai, fallbackProviders: [] });
-    const r = await agency({ strategy: 'panel', modelPool: POOL(), agents: { ...SEATS(), pre }, chair: { from: ['opus'] }, panel: { minChars: 3 }, quorum: { minAgents: 4 } } as never).generate('review');
+    // Healthy: the astra seat and the pre-built one ('ok' and 'C' are under minChars), so the quorum of 2 is met only if the pre-built seat counts.
+    const r = await agency({ strategy: 'panel', modelPool: POOL(), agents: { ...SEATS(), pre }, chair: { from: ['opus'] }, panel: { minChars: 3 }, quorum: { minAgents: 2 } } as never).generate('review');
     expect(r.seats.find((s) => s.entry === 'astra')).toMatchObject({ status: 'ok', truncated: true, finishReason: 'length' });
     expect(r.seats.find((s) => s.entry === 'opus')).toMatchObject({ status: 'empty' });
     expect(r.seating.seats.pre).toEqual({ prebuilt: true });
