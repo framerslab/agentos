@@ -118,12 +118,12 @@ const router = new IngestRouter({
   preset: 'observational',
   budget: {
     perIngestUsd: 0.005,
-    mode: 'cheapest-fallback',  // pick the cheapest strategy that fits the budget
+    mode: 'cheapest-fallback',  // over budget: the cheapest strategy that fits
   },
 });
 ```
 
-Three modes (same as MemoryRouter): `hard` throws `IngestRouterBudgetExceededError`, `soft` keeps the pick and sets `budgetExceeded`, and `cheapest-fallback` (the default) picks the cheapest strategy whose cost fits. With the default costs the cheapest is `skip` (cost 0), so in `cheapest-fallback` mode content whose routed strategy is over budget is not stored; use `soft` or `hard`, or give `skip` a cost above the budget in `strategyCosts`, to keep it.
+The mode decides what happens when the routed strategy costs more than `perIngestUsd`. `hard` throws `IngestRouterBudgetExceededError` and returns no decision. `soft` keeps the routed strategy and sets `budgetExceeded: true`. `cheapest-fallback` (the default) picks the cheapest strategy whose cost fits. In `soft` and `cheapest-fallback` mode, when no strategy fits, the router picks the cheapest strategy overall and sets `budgetExceeded: true`. With the default costs `skip` costs 0, so it always fits, and `cheapest-fallback` turns every over-budget ingest into `skip`: the content is not stored. To store it, use `soft`, or pass a `strategyCosts` map (it replaces the defaults, so give every strategy a cost) in which the cheapest strategy that fits the budget stores content.
 
 ## Few-shot classifier prompt
 
