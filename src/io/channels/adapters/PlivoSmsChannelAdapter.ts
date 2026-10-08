@@ -244,12 +244,12 @@ export class PlivoSmsChannelAdapter extends BaseChannelAdapter<PlivoSmsAuthParam
    *   and nonce can send them again over a different body. Plivo's messaging
    *   documentation describes V2 for message callbacks.
    *
-   * The nonce memory narrows that replay; it does not end it. Nonces are kept
-   * in this process for `nonceTtlMs` (24 hours by default), `maxNonces` of
-   * them at most, and Plivo's signatures carry no timestamp, so a callback
-   * sent again after its nonce is forgotten, or to another process, is
-   * accepted. Do not let an inbound message authorize an action by its sender
-   * number alone.
+   * The nonce memory narrows that replay; it does not end it. It holds the
+   * callbacks this process accepted, for `nonceTtlMs` (24 hours by default)
+   * and `maxNonces` of them at most, and a restart empties it. Plivo's
+   * signatures carry no timestamp, so a callback sent again after its nonce is
+   * forgotten, or one this process never accepted, is accepted. Do not let an
+   * inbound message authorize an action by its sender number alone.
    *
    * @param body - Parsed form body of Plivo's inbound-message POST. For a GET
    *   callback the params are read from the query string of `meta.url`, whose
@@ -601,11 +601,11 @@ function atLeastOneOr(value: number | undefined, fallback: number): number {
 /**
  * The nonces of accepted callbacks, so a callback delivered again is refused.
  *
- * Held in memory and bounded twice: a nonce is forgotten `ttlMs` after it was
- * added, and once `maxEntries` are held the oldest is forgotten first. A
- * forgotten nonce is accepted again, so this narrows replay to callbacks older
- * than the window; Plivo's signatures carry no timestamp that would let an old
- * callback be refused by its age.
+ * Held in memory, so a restart empties it, and bounded twice: a nonce is
+ * forgotten `ttlMs` after it was added, and once `maxEntries` are held the
+ * oldest is forgotten first. A forgotten nonce is accepted again, so this
+ * narrows replay to callbacks older than the window; Plivo's signatures carry
+ * no timestamp that would let an old callback be refused by its age.
  */
 class SeenNonces {
   /** Nonce → when it expires (ms since the epoch). Insertion order is age order. */
