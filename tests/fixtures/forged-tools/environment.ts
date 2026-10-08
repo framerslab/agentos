@@ -1,8 +1,8 @@
 /**
  * The forged-tool corpus and what its capability fixtures call: an HTTP server
  * on every interface (so 127.0.0.1 and localhost are two hosts on one server)
- * and a directory of files. Shared by the corpus integration test and the
- * executor evidence run; it imports nothing from the library.
+ * and a directory of files. Shared by the corpus tests of both executors; it
+ * imports nothing from the library.
  */
 import { readFileSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
