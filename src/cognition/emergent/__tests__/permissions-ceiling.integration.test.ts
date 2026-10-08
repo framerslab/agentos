@@ -14,7 +14,7 @@ import { EmergentCapabilityEngine } from '../EmergentCapabilityEngine.js';
 import { EmergentJudge } from '../EmergentJudge.js';
 import { EmergentToolRegistry } from '../EmergentToolRegistry.js';
 import { SandboxedToolForge } from '../SandboxedToolForge.js';
-import { DEFAULT_EMERGENT_CONFIG, type EmergentConfig } from '../types.js';
+import { DEFAULT_EMERGENT_CONFIG, type AllowlistName, type EmergentConfig, type EmergentTool } from '../types.js';
 import { APPROVED_VERDICT, callTool, makeForgeHost } from './helpers/forge-host.js';
 import { createSqliteAdapter, readStateRow } from './helpers/sqlite-adapter.js';
 import { seedStateRow, seedToolRow } from './helpers/seed-rows.js';
@@ -306,6 +306,61 @@ describe('the ceiling at load', () => {
       state: 'suspended',
       reason: 'request_unreadable',
     });
+  });
+
+  it('a host implementation that lists fs.read meets the ceiling at load and keeps fs.read when rebuilt, as one that lists fs.readFile does', async () => {
+    const root = tempRoot();
+    fs.writeFileSync(path.join(root, 'note.txt'), 'hello');
+    const hostReader = (allowlist: AllowlistName[]): EmergentTool => ({
+      id: 'host-reader',
+      name: 'read_it',
+      description: 'Reads a file.',
+      inputSchema: PATH_IN,
+      outputSchema: ANY_OUT,
+      implementation: { mode: 'sandbox', code: READ_CODE, allowlist },
+      tier: 'shared',
+      createdBy: 'host',
+      createdAt: new Date(1_700_000_000_000).toISOString(),
+      judgeVerdicts: [],
+      usageStats: {
+        totalUses: 0,
+        successCount: 0,
+        failureCount: 0,
+        avgExecutionTimeMs: 0,
+        lastUsedAt: null,
+        confidenceScore: 0.9,
+      },
+      source: 'hydrated by the host from its own store',
+    });
+
+    for (const allowlist of [['fs.read'], ['fs.readFile']] as AllowlistName[][]) {
+      // A host without storage, under a ceiling that does not grant fs.read:
+      // the tool is checked against the ceiling with the list it names.
+      const bare = await makeForgeHost({ config: { capabilities: { crypto: {} }, audit: { store: 'none' } } });
+      expect(await bare.engine.syncPersistedTool(hostReader(allowlist))).toEqual({
+        toolId: 'host-reader',
+        name: 'read_it',
+        state: 'suspended',
+        reason: 'capability_not_granted',
+      });
+      expect(await bare.orchestrator.getTool('read_it')).toBeUndefined();
+
+      // With source persistence off the row holds a redacted record, and the
+      // tool is rebuilt from the host's implementation: under a ceiling that
+      // grants fs.read, its call reads a file under the roots.
+      const redacting = await makeForgeHost({
+        db: createSqliteAdapter(),
+        config: { persistSandboxSource: false, capabilities: { 'fs.read': { roots: [root] } } },
+      });
+      expect(await redacting.engine.syncPersistedTool(hostReader(allowlist))).toEqual({
+        toolId: 'host-reader',
+        name: 'read_it',
+        state: 'active',
+        reason: null,
+      });
+      const read = await callTool(redacting.orchestrator, 'read_it', { path: path.join(root, 'note.txt') });
+      expect(read.output).toEqual({ text: 'hello' });
+    }
   });
 });
 

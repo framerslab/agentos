@@ -1512,14 +1512,14 @@ export class EmergentCapabilityEngine {
       // text was read only to derive a request where none was stored, and a
       // stored request narrower than a stored list is the grant. Never wider
       // than a stored list: a request widened by hand grants nothing the list
-      // did not.
-      const listed = implementation;
-      const granted = toSandboxApis(request.capabilities);
-      implementation = {
-        ...implementation,
-        allowlist:
-          source.format === 'code-with-list' ? granted.filter((api) => listed.allowlist.includes(api)) : granted,
-      };
+      // did not. The two are compared in catalogue names, since a list a host
+      // built, or one held in memory, may name `fs.read` or `fs.readFile`.
+      const listed = normalizeAllowlist(implementation.allowlist).capabilities;
+      const names =
+        source.format === 'code-with-list'
+          ? request.capabilities.filter((name) => listed.includes(name))
+          : request.capabilities;
+      implementation = { ...implementation, allowlist: toSandboxApis(names) };
     }
     // 3a. An agent-tier row from an earlier release is owned by the forging
     //     GMI instance's id, which no persona can match, so no caller could
