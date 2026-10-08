@@ -351,6 +351,19 @@ export interface VisionPipelineConfig {
   cloudModel?: string;
 
   /**
+   * API key for the cloud vision provider. When unset, the provider's key is
+   * read from its environment variable (`OPENAI_API_KEY` and so on), as
+   * {@link generateText} does.
+   */
+  cloudApiKey?: string;
+
+  /**
+   * Base URL for the cloud vision provider, such as a proxy or a local
+   * OpenAI-compatible server. When unset, the provider's default is used.
+   */
+  cloudBaseUrl?: string;
+
+  /**
    * Minimum confidence to accept an OCR result without escalating to cloud.
    * Only applies to `'progressive'` strategy — if OCR confidence is below
    * this threshold, the pipeline escalates to the next tier.
