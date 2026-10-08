@@ -1240,6 +1240,12 @@ export class EmergentCapabilityEngine {
       }
       const tool = this.registry.get(toolId);
       if (!tool) {
+        // Neither a row nor a tool: a state held for it here (a stored
+        // suspension another process has since removed) is let go, so no
+        // later registration re-checks it.
+        if (this.registry.getState(toolId)) {
+          this.registry.forget(toolId);
+        }
         return undefined;
       }
       const held = this.registry.getState(toolId);
@@ -1506,8 +1512,10 @@ export class EmergentCapabilityEngine {
           return this.readmit(candidate, options);
         }
       } else {
-        // The row already says so; this process holds it too when the tool is live here.
-        this.holdStored(toolId, stored);
+        // The row already says so; this process holds it too. A row that
+        // holds no request it can read is held with the one derived from its
+        // source, so a registration of a step tool it names finds it.
+        this.holdStored(toolId, stored.request ? stored : { ...stored, request });
       }
       await this.unregisterIfLive(toolId);
       return { toolId, name, state: 'suspended', reason };

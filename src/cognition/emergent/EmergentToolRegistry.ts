@@ -847,7 +847,8 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
   /**
    * Drop a tool from memory without touching its rows: for a load whose
    * registration with the host failed, so the row is there for the next load
-   * and nothing here claims a tool the executor does not run.
+   * and nothing here claims a tool the executor does not run; and for a state
+   * held for a tool that has neither a row nor an object here any more.
    */
   forget(toolId: string): void {
     this.sessionTools.delete(toolId);

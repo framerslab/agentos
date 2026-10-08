@@ -21,7 +21,7 @@ import {
   sendMessageTool,
   type ForgeHost,
 } from './helpers/forge-host.js';
-import { DOUBLED_OUT, NUMBER_IN, RAW_DOUBLE, TEXT_IN, TEXT_OUT, seedToolRow } from './helpers/seed-rows.js';
+import { DOUBLED_OUT, NUMBER_IN, RAW_DOUBLE, TEXT_IN, TEXT_OUT, seedStateRow, seedToolRow } from './helpers/seed-rows.js';
 
 /** A composition that sends a message, then echoes what the send returned. */
 const NOTIFY_AND_ECHO = {
@@ -837,5 +837,36 @@ describe('compositions and workflows: one gate, one rule', () => {
     await later.engine.onHostToolRegistered('echo');
     expect(readStateRow(db, 'c-echo')).toMatchObject({ state: 'active' });
     expect((await callTool(later.orchestrator, 'echo_once', { text: 'back' })).output).toEqual({ text: 'back' });
+  });
+
+  it('a stored step suspension whose row holds no request is re-checked from its source, and one whose rows are gone is let go', async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    const source = JSON.stringify({
+      mode: 'compose',
+      steps: [{ name: 'e', tool: 'echo', inputMapping: { text: '$input.text' } }],
+    });
+    seedToolRow(db, { id: 'c-plain', name: 'echo_once', mode: 'compose', source, inputSchema: TEXT_IN, outputSchema: TEXT_OUT });
+    seedStateRow(db, { toolId: 'c-plain', state: 'suspended', reason: 'step_missing', setBy: 'library', requestJson: null });
+    seedToolRow(db, { id: 'c-gone', name: 'echo_again', mode: 'compose', source, inputSchema: TEXT_IN, outputSchema: TEXT_OUT });
+    seedStateRow(db, { toolId: 'c-gone', state: 'suspended', reason: 'step_missing', setBy: 'library', requestJson: null });
+    db.raw.prepare('UPDATE agentos_emergent_tools SET created_at = ? WHERE id = ?').run(1_700_000_000_001, 'c-gone');
+
+    expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([
+      { toolId: 'c-plain', name: 'echo_once', state: 'suspended', reason: 'step_missing' },
+      { toolId: 'c-gone', name: 'echo_again', state: 'suspended', reason: 'step_missing' },
+    ]);
+    // Another process removes one of the two.
+    db.raw.prepare('DELETE FROM agentos_emergent_tools WHERE id = ?').run('c-gone');
+    db.raw.prepare('DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?').run('c-gone');
+
+    await host.orchestrator.registerTool(echoTool());
+    await host.engine.onHostToolRegistered('echo');
+
+    expect(readStateRow(db, 'c-plain')).toMatchObject({ state: 'active' });
+    expect((await callTool(host.orchestrator, 'echo_once', { text: 'back' })).output).toEqual({ text: 'back' });
+    const registry = (host.engine as unknown as { registry: EmergentToolRegistry }).registry;
+    expect(registry.getState('c-gone')).toBeUndefined();
+    expect(await host.orchestrator.getTool('echo_again')).toBeUndefined();
   });
 });
