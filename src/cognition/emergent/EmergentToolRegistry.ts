@@ -241,6 +241,13 @@ export class EmergentToolRegistry {
    * is in force here). See {@link restrictionUnread}.
    */
   private readonly restrictionWrites = new Map<string, { pending: number; settledAt: number }>();
+  /**
+   * The session of each stored session-tier tool this process admitted, or
+   * restricted without loading it (the row's `created_by_session`), recorded
+   * before any state is held for it. {@link cleanupSession} lets go of the
+   * states held for such tools without the tools before it returns.
+   */
+  private readonly storedSessions = new Map<string, string>();
   /** Reads in flight; change points are forgotten only when none is. */
   private openReads = 0;
 
@@ -556,9 +563,11 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
    *
    * `options.yieldToHost` makes the write give way to the host's word: a row
    * that holds a host's suspension, or a demotion, is not changed, and its
-   * record is returned and held instead. The library's suspensions from a run
-   * or a promotion check use it, so they never replace a restriction a host
-   * set, in this process or in another.
+   * record is returned and held instead; so is an active row whose tool row
+   * the host turned off with its own SQL (`is_active = 0` with the mark
+   * clear), which the caller records as the host's demotion. The library's
+   * suspensions from a run or a promotion check use it, so they never replace
+   * a restriction a host set, in this process or in another.
    *
    * @returns the record now in force for the tool.
    * @throws If the storage adapter rejects.
@@ -707,7 +716,8 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
    * crash or a failed write between the two never leaves the pair apart
    * beyond the next load. With `ifRow`, an existing row is changed only while
    * its state, setter and time are the ones given (`'absent'`: never); with
-   * `yieldToHost`, only while it is active or the library's suspension. A
+   * `yieldToHost`, only while it is active (and the host has not turned the
+   * tool row off) or the library's suspension. A
    * refused write changes nothing, flag included, and the row as it stands
    * afterwards is returned, so it shows as a record other than the one given.
    */
@@ -758,11 +768,18 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
     }
     if (yieldToHost) {
       // A host's suspension and a demotion stay; only an active row or the
-      // library's own suspension is changed.
+      // library's own suspension is changed. An active row whose tool row
+      // the host turned off with its own SQL (the mark clear, so the lowered
+      // flag is not a library write still finishing) is the host's disable,
+      // not yet recorded: it stays too.
       conditions.push(
         `(agentos_emergent_tool_state.state = 'active'
-               OR (agentos_emergent_tool_state.state = 'suspended' AND agentos_emergent_tool_state.set_by = 'library'))`,
+               OR (agentos_emergent_tool_state.state = 'suspended' AND agentos_emergent_tool_state.set_by = 'library'))
+             AND NOT (agentos_emergent_tool_state.state = 'active'
+                      AND agentos_emergent_tool_state.flag_synced = 1
+                      AND EXISTS (SELECT 1 FROM agentos_emergent_tools t WHERE t.id = ? AND t.is_active = 0))`,
       );
+      guardParams.push(toolId);
     }
     const guard =
       conditions.length > 0
@@ -959,6 +976,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
     this.persistedTools.delete(toolId);
     this.states.delete(toolId);
     this.restrictionWrites.delete(toolId);
+    this.storedSessions.delete(toolId);
     this.bump(toolId);
   }
 
@@ -1047,16 +1065,32 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
    * deleted. Until the deletes land the removal counts as pending, and when
    * they land the tool counts as changed: a read that started before either
    * point may hold the row as it was. Best-effort.
+   *
+   * With `onlySessionOf`, the tool row goes only while it is still a session
+   * row of that session (another process may have promoted it since), and
+   * the state row only once the tool row is gone.
    */
-  private queueRowDeletes(toolId: string): void {
+  private queueRowDeletes(toolId: string, onlySessionOf?: string): void {
     const db = this.db;
     if (!db) {
       return;
     }
     this.removing.set(toolId, (this.removing.get(toolId) ?? 0) + 1);
     this.queueStateWrite(toolId, async () => {
-      await db.run(`DELETE FROM agentos_emergent_tools WHERE id = ?`, [toolId]);
-      await db.run(`DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?`, [toolId]);
+      if (onlySessionOf === undefined) {
+        await db.run(`DELETE FROM agentos_emergent_tools WHERE id = ?`, [toolId]);
+        await db.run(`DELETE FROM agentos_emergent_tool_state WHERE tool_id = ?`, [toolId]);
+        return;
+      }
+      await db.run(
+        `DELETE FROM agentos_emergent_tools WHERE id = ? AND tier = 'session' AND created_by_session = ?`,
+        [toolId, onlySessionOf],
+      );
+      await db.run(
+        `DELETE FROM agentos_emergent_tool_state
+          WHERE tool_id = ? AND NOT EXISTS (SELECT 1 FROM agentos_emergent_tools WHERE id = ?)`,
+        [toolId, toolId],
+      );
     })
       .catch(() => {
         // Best-effort cleanup only.
@@ -1216,6 +1250,17 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
     this.states.set(record.toolId, record);
   }
 
+  /**
+   * Record the session a stored session-tier tool belongs to (its row's
+   * `created_by_session`), before a state is held for it here: a load's
+   * admission, or a host's restriction of a tool this process never loaded.
+   * {@link cleanupSession} then lets go of a state held for it without the
+   * tool, and deletes its rows.
+   */
+  noteStoredSession(toolId: string, sessionId: string): void {
+    this.storedSessions.set(toolId, sessionId);
+  }
+
   /** Every state held in memory: the tools this process forged, loaded or suspended. */
   listStates(): ToolStateRecord[] {
     return [...this.states.values()];
@@ -1296,6 +1341,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
       this.sessionTools.delete(toolId) || this.persistedTools.delete(toolId);
     this.states.delete(toolId);
     this.restrictionWrites.delete(toolId);
+    this.storedSessions.delete(toolId);
     // The rows go whether or not this process held the tool, so a host can
     // remove a stored tool it never loaded; the generation moves, so an
     // admission that read the tool before this does not put it back.
@@ -1583,10 +1629,14 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
    *
    * Iterates the session map and deletes every tool whose `source` names the
    * given session; the rows go after the tool's queued writes. Logs a cleanup
-   * audit event for each removed tool. The session's rows that a load in this
-   * process admitted without activating (suspended or demoted: their state is
-   * held here, the tool is not) go too, with the state held for them; that
-   * part reads the rows first, so it completes after this returns.
+   * audit event for each removed tool. The session's stored tools whose state
+   * this process holds without the tool (a load admitted them suspended or
+   * demoted, or the host restricted one it never loaded) go too: the state
+   * before this returns, so no registration from then on re-checks one and a
+   * re-check already under way does not adopt it, and the rows after their
+   * queued writes, while they are still the session's. Rows of the session
+   * this process never admitted or restricted are left to the process that
+   * holds them.
    *
    * @param sessionId - The session identifier to match against tool `source`
    *   strings.
@@ -1601,6 +1651,7 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
         this.sessionTools.delete(id);
         this.states.delete(id);
         this.restrictionWrites.delete(id);
+        this.storedSessions.delete(id);
         this.bump(id);
         this.queueRowDeletes(id);
         this.logAudit(id, 'cleanup', { sessionId });
@@ -1608,45 +1659,25 @@ CREATE TABLE IF NOT EXISTS agentos_emergent_effects (
       }
     }
 
-    if (this.db && [...this.states.keys()].some((id) => !this.sessionTools.has(id) && !this.persistedTools.has(id))) {
-      void this.cleanupHeldSessionRows(sessionId);
+    for (const [id, session] of [...this.storedSessions]) {
+      if (session !== sessionId) {
+        continue;
+      }
+      this.storedSessions.delete(id);
+      // A tool live here is not one of these (one promoted out of the
+      // session belongs to its agent now), and with no state held there is
+      // nothing to let go.
+      if (this.sessionTools.has(id) || this.persistedTools.has(id) || !this.states.has(id)) {
+        continue;
+      }
+      this.states.delete(id);
+      this.restrictionWrites.delete(id);
+      this.bump(id);
+      this.queueRowDeletes(id, sessionId);
+      this.logAudit(id, 'cleanup', { sessionId });
     }
 
     return removedCount;
-  }
-
-  /**
-   * The rows of the session whose tool this process holds a state for but
-   * not the tool itself (a load admitted them suspended or demoted): deleted
-   * after their queued writes, with the held state, so they neither stay in
-   * storage after the session nor bring the tool back when a step tool it
-   * names registers. Rows this process never loaded are left to the process
-   * that holds them. Best-effort, as the live tools' row deletes are.
-   */
-  private async cleanupHeldSessionRows(sessionId: string): Promise<void> {
-    const db = this.db;
-    if (!db) {
-      return;
-    }
-    try {
-      await this.ensureSchemaReady();
-      const rows = (await db.all(
-        `SELECT id FROM agentos_emergent_tools WHERE tier = 'session' AND created_by_session = ?`,
-        [sessionId],
-      )) as Array<{ id: string }>;
-      for (const { id } of rows) {
-        if (!this.states.has(id) || this.sessionTools.has(id) || this.persistedTools.has(id)) {
-          continue;
-        }
-        this.states.delete(id);
-        this.restrictionWrites.delete(id);
-        this.bump(id);
-        this.queueRowDeletes(id);
-        this.logAudit(id, 'cleanup', { sessionId });
-      }
-    } catch {
-      // Best-effort cleanup only.
-    }
   }
 
   // --------------------------------------------------------------------------

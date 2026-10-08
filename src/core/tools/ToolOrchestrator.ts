@@ -329,6 +329,12 @@ export class ToolOrchestrator implements IToolOrchestrator {
             await this.toolExecutor.unregisterTool(tool.name);
           }
         },
+        // A forge that took a host tool's name and then took its own
+        // executable out again (its composition reached itself) hands the
+        // name back to the host's tool.
+        onToolRestored: async (tool) => {
+          await this.registerInitialTool(tool);
+        },
       });
 
       // Create and register the forge_tool meta-tool.
