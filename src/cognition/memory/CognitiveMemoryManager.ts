@@ -265,6 +265,9 @@ export interface ICognitiveMemoryManager {
 // Implementation
 // ---------------------------------------------------------------------------
 
+/** The options of {@link ICognitiveMemoryManager.encode}. */
+type EncodeOptions = NonNullable<Parameters<ICognitiveMemoryManager['encode']>[3]>;
+
 /**
  * Generate a globally unique trace ID.
  * Previous implementation used a monotonic counter (`mt_{timestamp}_{counter}`)
@@ -387,22 +390,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     }
 
     // Cognitive working memory (wraps the existing IWorkingMemory)
-    this.workingMemory = new CognitiveWorkingMemory(config.workingMemory, {
-      baseCapacity: config.workingMemoryCapacity ?? 7,
-      traits: config.traits,
-      activationDecayRate: 0.1,
-      minActivation: 0.15,
-      onEvict: async (_slotId, traceId) => {
-        const trace = this.store.getTrace(traceId);
-        // Never resurrect a soft-deleted trace: its isActive=false is a
-        // tombstone, not a working-memory focus state. Re-activating it let
-        // the spaced-repetition sweep re-embed and re-upsert the deleted
-        // document into shared vector recall.
-        if (trace && !trace.isActive && !this.store.isDeleted(traceId)) {
-          trace.isActive = true;
-        }
-      },
-    });
+    this.workingMemory = this.createWorkingMemory(config);
 
     // Feature detector
     this.featureDetector = createFeatureDetector(
@@ -566,6 +554,57 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     this.initialized = true;
   }
 
+  /** A slot-based working memory over the configured backing store, with this manager's capacity and eviction rule. */
+  private createWorkingMemory(config: CognitiveMemoryConfig): CognitiveWorkingMemory {
+    return new CognitiveWorkingMemory(config.workingMemory, {
+      baseCapacity: config.workingMemoryCapacity ?? 7,
+      traits: config.traits,
+      activationDecayRate: 0.1,
+      minActivation: 0.15,
+      onEvict: async (_slotId, traceId) => {
+        const trace = this.store.getTrace(traceId);
+        // Never resurrect a soft-deleted trace: its isActive=false is a
+        // tombstone, not a working-memory focus state. Re-activating it let
+        // the spaced-repetition sweep re-embed and re-upsert the deleted
+        // document into shared vector recall.
+        if (trace && !trace.isActive && !this.store.isDeleted(traceId)) {
+          trace.isActive = true;
+        }
+      },
+    });
+  }
+
+  /**
+   * This manager as one session sees it: the same store, graph and mechanisms,
+   * with a working memory of its own. `encode`, `retrieve` and
+   * `assembleForPrompt` on the view focus traces in that working memory, and the
+   * view's active context lists only the traces the session encoded or recalled.
+   * Sessions that call the manager directly share its one working memory, whose
+   * slot list (trace ids and activations) is part of every assembled context.
+   *
+   * `shutdown()` on the view does nothing: whoever owns the manager shuts it down.
+   *
+   * @returns A view to hand to one session (one GMI).
+   */
+  forSession(): ICognitiveMemoryManager {
+    this.ensureInitialized();
+    const workingMemory = this.createWorkingMemory(this.config);
+    const own: Pick<ICognitiveMemoryManager, 'encode' | 'retrieve' | 'assembleForPrompt' | 'getWorkingMemory' | 'shutdown'> = {
+      encode: (input, mood, gmiMood, options) => this.encodeInto(workingMemory, input, mood, gmiMood, options),
+      retrieve: (query, mood, options) => this.retrieveWith(workingMemory, query, mood, options),
+      assembleForPrompt: (query, tokenBudget, mood, options) => this.assembleWith(workingMemory, own.retrieve, query, tokenBudget, mood, options),
+      getWorkingMemory: () => workingMemory,
+      shutdown: async () => undefined,
+    };
+    return new Proxy<ICognitiveMemoryManager>(this, {
+      get: (manager, property) => {
+        if (Object.prototype.hasOwnProperty.call(own, property)) return own[property as keyof typeof own];
+        const value: unknown = Reflect.get(manager, property, manager);
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(manager) : value;
+      },
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // Stage E typed-network accessors
   // ---------------------------------------------------------------------------
@@ -593,24 +632,18 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     input: string,
     mood: PADState,
     gmiMood: string,
-    options: {
-      type?: MemoryType;
-      scope?: MemoryScope;
-      scopeId?: string;
-      sourceType?: MemoryTrace['provenance']['sourceType'];
-      contentSentiment?: number;
-      tags?: string[];
-      entities?: string[];
-      /**
-       * When the input is a perspective-encoded subjective trace from
-       * {@link PerspectiveObserver}, pass the source-event identifiers here so
-       * the resulting MemoryTrace carries the `MechanismMetadata` fields that
-       * `applyReconsolidation` uses to halve drift on perspective traces and
-       * that downstream audit queries use to back-reference the objective
-       * source event.
-       */
-      perspectiveSource?: { eventId: string; eventHash: string };
-    } = {}
+    options: EncodeOptions = {}
+  ): Promise<MemoryTrace> {
+    return this.encodeInto(this.workingMemory, input, mood, gmiMood, options);
+  }
+
+  /** {@link encode}, with the new trace focused in `workingMemory`. */
+  private async encodeInto(
+    workingMemory: CognitiveWorkingMemory,
+    input: string,
+    mood: PADState,
+    gmiMood: string,
+    options: EncodeOptions = {}
   ): Promise<MemoryTrace> {
     this.ensureInitialized();
 
@@ -697,7 +730,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     await this.store.store(trace);
 
     // Add to working memory
-    await this.workingMemory.focus(trace.id, encoding.initialStrength);
+    await workingMemory.focus(trace.id, encoding.initialStrength);
 
     // --- Batch 2: Register in memory graph ---
     if (this.graph) {
@@ -746,6 +779,16 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
   // =========================================================================
 
   async retrieve(
+    query: string,
+    mood: PADState,
+    options: CognitiveRetrievalOptions = {}
+  ): Promise<CognitiveRetrievalResult> {
+    return this.retrieveWith(this.workingMemory, query, mood, options);
+  }
+
+  /** {@link retrieve}, with the recalled traces focused, and the per-turn decay applied, in `workingMemory`. */
+  private async retrieveWith(
+    workingMemory: CognitiveWorkingMemory,
     query: string,
     mood: PADState,
     options: CognitiveRetrievalOptions = {}
@@ -896,7 +939,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     });
 
     if (resolvedPolicy && confidence.suppressResults) {
-      await this.workingMemory.decayActivations();
+      await workingMemory.decayActivations();
       const totalTime = Date.now() - startTime;
       return {
         retrieved: [],
@@ -954,11 +997,11 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     // Record access for retrieved memories (spaced repetition)
     for (const trace of scored.slice(0, 5)) {
       await this.store.recordAccess(trace.id);
-      await this.workingMemory.focus(trace.id, trace.retrievalScore);
+      await workingMemory.focus(trace.id, trace.retrievalScore);
     }
 
     // Decay working memory activations each turn
-    await this.workingMemory.decayActivations();
+    await workingMemory.decayActivations();
 
     const totalTime = Date.now() - startTime;
 
@@ -988,6 +1031,28 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     mood: PADState,
     options: CognitiveRetrievalOptions = {}
   ): Promise<AssembledMemoryContext> {
+    return this.assembleWith(
+      this.workingMemory,
+      (q, m, o) => this.retrieve(q, m, o),
+      query,
+      tokenBudget,
+      mood,
+      options,
+    );
+  }
+
+  /**
+   * {@link assembleForPrompt}, with `workingMemory` as the active context and
+   * `retrieve` as the recall that focuses traces in it.
+   */
+  private async assembleWith(
+    workingMemory: CognitiveWorkingMemory,
+    retrieve: ICognitiveMemoryManager['retrieve'],
+    query: string,
+    tokenBudget: number,
+    mood: PADState,
+    options: CognitiveRetrievalOptions = {}
+  ): Promise<AssembledMemoryContext> {
     this.ensureInitialized();
 
     // The three pre-assembly stages that hit a backend — retrieval (vector
@@ -999,7 +1064,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     // retrieval. The auxiliary stages never reject: each degrades to its
     // empty value so a rejected retrieval is the only fatal path (unchanged)
     // and no auxiliary promise is left to reject unhandled behind it.
-    const retrievePromise = this.retrieve(query, mood, options);
+    const retrievePromise = retrieve(query, mood, options);
 
     const persistentPromise: Promise<string | undefined> = this.config.persistentMemory
       ? Promise.resolve()
@@ -1049,7 +1114,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
 
     // Get working memory state (sync; after retrieval so it reflects the
     // focus/decay updates retrieval just applied — same order as before).
-    const wmText = this.workingMemory.formatForPrompt();
+    const wmText = workingMemory.formatForPrompt();
 
     // --- Batch 2: Graph associations ---
     const graphContext: string[] = [];
@@ -1057,8 +1122,12 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       const seedIds = result.retrieved.slice(0, 3).map((t) => t.id);
       try {
         const activated = await this.graph.spreadingActivation(seedIds, { maxResults: 5 });
+        // An association may lead to a trace of another scope (traces of several
+        // scopes recalled together are linked); only the scopes this assembly
+        // reads may reach its context.
         const recallableIds = await this.store.filterRecallableTraceIds(
           activated.map((node) => node.memoryId),
+          options.scopes,
         );
         for (const node of activated) {
           const trace = this.store.getTrace(node.memoryId);

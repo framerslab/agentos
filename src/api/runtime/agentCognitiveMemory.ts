@@ -5,12 +5,15 @@
  * in-memory knowledge graph, an embedding manager for `memory.embedding`, a
  * working memory of its own and the persona's HEXACO traits.
  *
- * One manager serves every session of an agent. Each GMI's memory bridge passes
- * the session's mood on every encode, retrieve and assemble call and scopes
- * recall to the session's user and conversation, so the manager's own mood
- * callback is neutral. The memory graph runs on the `'knowledge-graph'` backend
- * over the same in-memory knowledge graph, because the `'graphology'` backend
- * needs graphology, an optional peer dependency. Consolidation runs only when
+ * One manager serves every session of an agent, and each session's GMI is given
+ * `manager.forSession()`: the shared store with a working memory of its own, so
+ * a session's active context lists only its own memories. Each GMI's memory
+ * bridge passes the session's mood on every encode, retrieve and assemble call
+ * and scopes recall (graph associations included) to the session's user and
+ * conversation, so the manager's own mood callback is neutral. The memory graph
+ * runs on the `'knowledge-graph'` backend over the same in-memory knowledge
+ * graph, because the `'graphology'` backend needs graphology, an optional peer
+ * dependency. Consolidation runs only when
  * `memory.consolidation.enabled` is true. The build embeds one test text through
  * the embedding model it sets up, so a model that cannot answer, or answers with
  * another size than memory expects, fails the build instead of leaving memory empty.

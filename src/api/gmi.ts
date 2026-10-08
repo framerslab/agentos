@@ -18,7 +18,6 @@ import type { GenerateTextOptions, GenerateTextResult, Message, MessageContent }
 import type { StreamTextResult } from './streamText.js';
 import { GMI } from '../cognition/substrate/GMI.js';
 import type { GMIBaseConfig, IGMI } from '../cognition/substrate/IGMI.js';
-import type { ICognitiveMemoryManager } from '../cognition/memory/CognitiveMemoryManager.js';
 import type { IPersonaDefinition } from '../cognition/substrate/personas/IPersonaDefinition.js';
 import { InMemoryWorkingMemory } from '../cognition/substrate/memory/InMemoryWorkingMemory.js';
 import { StatisticalUtilityAI } from '../cognition/nlp/ai_utilities/StatisticalUtilityAI.js';
@@ -112,15 +111,6 @@ function withMembers<T extends object>(target: T, members: Partial<Record<keyof 
       return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(t) : value;
     },
   });
-}
-
-/**
- * The agent's memory manager as one GMI sees it. `GMI.shutdown()` shuts down
- * the cognitive memory it was given; the agent's sessions share one manager, so
- * a session's shutdown must leave it to the others, and `agent.close()` closes it.
- */
-function sharedMemoryView(manager: ICognitiveMemoryManager): ICognitiveMemoryManager {
-  return withMembers(manager, { shutdown: async () => undefined });
 }
 
 /**
@@ -323,7 +313,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
       llmProviderManager: new GatewayProviderManager().asProviderManager(),
       utilityAI: s.utilityAI,
       toolOrchestrator: hookTools(s.tools, opts.onBeforeToolExecution, step),
-      ...(mem ? { cognitiveMemory: sharedMemoryView(mem.manager) } : {}),
+      // The agent's memory as this GMI's session sees it: the shared store with a
+      // working memory of its own, so one session's active context never lists
+      // another's memories. `GMI.shutdown()` shuts down the memory it was given;
+      // on the view that does nothing, and `agent.close()` closes the manager.
+      ...(mem ? { cognitiveMemory: mem.manager.forSession() } : {}),
       completionGateway: gateway,
       maxToolLoopIterations: steps,
       defaultLlmProviderId: persona.defaultProviderId,
