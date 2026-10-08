@@ -5,6 +5,8 @@
  * - X-Plivo-Signature-V3 computation against the Plivo SDK golden fixture.
  * - Outbound SMS send (request shape + returned message id).
  * - Inbound webhook: valid signature emits a message; invalid/missing drops it.
+ * - Inbound replay: a callback is accepted once, V3 decides when it is present,
+ *   and a GET callback is read from its signed query string.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -52,6 +54,87 @@ describe('computePlivoV3Signature', () => {
       To: '+14150000002',
     };
     expect(computePlivoV3Signature({ ...FIXTURE, params: shuffled })).toBe(SIG_EXPECTED);
+  });
+});
+
+// The fixture's params as a GET callback carries them: in the query string.
+const FIXTURE_QUERY =
+  'From=%2B14150000001&To=%2B14150000002&Text=test&Type=sms' +
+  '&MessageUUID=11111111-2222-3333-4444-555555555555';
+// The V3 signature of that GET, from plivo-python 4.63.0 signature_v3.py.
+const SIG_GET_EXPECTED = 'unI2gEPE+ObHkK9pF710geGP/s/WEEuAc5Yd/SpCF+4=';
+
+// Values computed by plivo-python 4.63.0 signature_v3.py (construct_get_url,
+// construct_post_url, get_signature_v3) with the fixture's token and nonce.
+const REFERENCE_SHAPES: Array<{
+  name: string;
+  method: string;
+  url: string;
+  params: Record<string, unknown>;
+  expected: string;
+}> = [
+  {
+    name: 'a POST with no params signs the URL alone',
+    method: 'POST',
+    url: FIXTURE.url,
+    params: {},
+    expected: 'm4dffObv3yS2q5scDiabUiKekeqKVG1O1Bh6SkZ6j8o=',
+  },
+  {
+    name: 'a POST with no params signs the URL and its sorted query',
+    method: 'POST',
+    url: `${FIXTURE.url}?b=2&a=1`,
+    params: {},
+    expected: 'kVeQmP8rBmB3J4N4cyC2UUu943NZFWiPQ4vbVy7Dvlk=',
+  },
+  {
+    name: 'a POST with params and a query signs the query, a dot, then the params',
+    method: 'POST',
+    url: `${FIXTURE.url}?b=2&a=1`,
+    params: { ...FIXTURE.params },
+    expected: 'aA4I2N9YqDuQVY1mmJbboq6jVtfZ+sdn9KGFqAIvwUQ=',
+  },
+  {
+    name: 'a repeated query key has its values sorted',
+    method: 'POST',
+    url: `${FIXTURE.url}?x=b&x=a`,
+    params: { ...FIXTURE.params },
+    expected: 'lyqHJE6WcB2gKEdRA/yTZS3r+q9yDL4N0U94gEGu2Lc=',
+  },
+  {
+    name: 'a GET signs its sorted query and the nonce',
+    method: 'GET',
+    url: `${FIXTURE.url}?${FIXTURE_QUERY}`,
+    params: {},
+    expected: SIG_GET_EXPECTED,
+  },
+  {
+    name: 'a GET signs params passed beside the URL as its query',
+    method: 'GET',
+    url: FIXTURE.url,
+    params: { ...FIXTURE.params },
+    expected: SIG_GET_EXPECTED,
+  },
+  {
+    name: 'a GET merges params passed beside the URL into its query',
+    method: 'GET',
+    url: `${FIXTURE.url}?tenant=42`,
+    params: { ...FIXTURE.params },
+    expected: 'Q+KpSbp4m9gn1Bb/FNXDQhGNF7yXwYhVbbZuFpDMjJo=',
+  },
+];
+
+describe('computePlivoV3Signature against plivo-python for other request shapes', () => {
+  it.each(REFERENCE_SHAPES)('$name', ({ method, url, params, expected }) => {
+    expect(
+      computePlivoV3Signature({
+        method,
+        url,
+        nonce: FIXTURE.nonce,
+        authToken: FIXTURE.authToken,
+        params,
+      }),
+    ).toBe(expected);
   });
 });
 
@@ -263,5 +346,126 @@ describe('PlivoSmsChannelAdapter — inbound', () => {
     adapter.handleIncomingWebhook(inboundBody);
 
     expect(events).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inbound replay
+// ---------------------------------------------------------------------------
+
+describe('PlivoSmsChannelAdapter — inbound replay', () => {
+  const inboundBody = { ...FIXTURE.params };
+  const forgedBody = {
+    ...FIXTURE.params,
+    From: '+19995550000',
+    Text: 'send the reset code',
+    MessageUUID: '99999999-2222-3333-4444-555555555555',
+  };
+  const v3Headers = {
+    'x-plivo-signature-v3': SIG_EXPECTED,
+    'x-plivo-signature-v3-nonce': FIXTURE.nonce,
+  };
+  const v2Headers = {
+    'x-plivo-signature-ma-v2': SIG_V2_EXPECTED,
+    'x-plivo-signature-v2-nonce': SIG_V2_NONCE,
+  };
+
+  /** A connected adapter and the message events it emits. */
+  async function listen(): Promise<{ adapter: PlivoSmsChannelAdapter; events: ChannelEvent[] }> {
+    const adapter = new PlivoSmsChannelAdapter({ fetchImpl: makeFetch({}) });
+    await connect(adapter);
+    const events: ChannelEvent[] = [];
+    adapter.on((e) => void events.push(e), ['message']);
+    return { adapter, events };
+  }
+
+  it('delivers a V2-signed callback once: its headers sent again with a forged sender are dropped', async () => {
+    const { adapter, events } = await listen();
+    const request = { method: 'POST', url: FIXTURE.url, headers: v2Headers };
+
+    adapter.handleIncomingWebhook(inboundBody, request);
+    // V2 signs the URL and the nonce, not the body, so the same headers still
+    // verify over any From and Text. Only the reused nonce gives this away.
+    adapter.handleIncomingWebhook(forgedBody, request);
+
+    expect(events).toHaveLength(1);
+    expect((events[0].data as { conversationId: string }).conversationId).toBe('+14150000001');
+  });
+
+  it('delivers a V3-signed callback once', async () => {
+    const { adapter, events } = await listen();
+    const request = { method: 'POST', url: FIXTURE.url, headers: v3Headers };
+
+    adapter.handleIncomingWebhook(inboundBody, request);
+    adapter.handleIncomingWebhook(inboundBody, request);
+
+    expect(events).toHaveLength(1);
+  });
+
+  it('accepts the next callback, signed under a new nonce', async () => {
+    const { adapter, events } = await listen();
+    const nextNonce = 'v2nonce456';
+
+    adapter.handleIncomingWebhook(inboundBody, { method: 'POST', url: FIXTURE.url, headers: v2Headers });
+    adapter.handleIncomingWebhook(inboundBody, {
+      method: 'POST',
+      url: FIXTURE.url,
+      headers: {
+        'x-plivo-signature-ma-v2': computePlivoV2Signature({
+          url: FIXTURE.url,
+          nonce: nextNonce,
+          authToken: FIXTURE.authToken,
+        }),
+        'x-plivo-signature-v2-nonce': nextNonce,
+      },
+    });
+
+    expect(events).toHaveLength(2);
+  });
+
+  it('lets V3 decide when its headers are present: a valid V2 signature does not rescue a body V3 rejects', async () => {
+    const { adapter, events } = await listen();
+
+    adapter.handleIncomingWebhook(forgedBody, {
+      method: 'POST',
+      url: FIXTURE.url,
+      headers: { ...v3Headers, ...v2Headers },
+    });
+
+    expect(events).toHaveLength(0);
+  });
+
+  it('remembers the V2 nonce of a callback it verified by V3', async () => {
+    const { adapter, events } = await listen();
+
+    adapter.handleIncomingWebhook(inboundBody, {
+      method: 'POST',
+      url: FIXTURE.url,
+      headers: { ...v3Headers, ...v2Headers },
+    });
+    // The V3 headers stripped: what is left verifies under V2 over any body.
+    adapter.handleIncomingWebhook(forgedBody, { method: 'POST', url: FIXTURE.url, headers: v2Headers });
+
+    expect(events).toHaveLength(1);
+    expect((events[0].data as { conversationId: string }).conversationId).toBe('+14150000001');
+  });
+
+  it('accepts a GET callback and reads it from the signed query string, not the body', async () => {
+    const { adapter, events } = await listen();
+
+    adapter.handleIncomingWebhook(forgedBody, {
+      method: 'GET',
+      url: `${FIXTURE.url}?${FIXTURE_QUERY}`,
+      headers: {
+        'x-plivo-signature-v3': SIG_GET_EXPECTED,
+        'x-plivo-signature-v3-nonce': FIXTURE.nonce,
+      },
+    });
+
+    expect(events).toHaveLength(1);
+    const msg = events[0].data as { conversationId: string; text: string; messageId: string };
+    expect(msg.conversationId).toBe('+14150000001');
+    expect(msg.text).toBe('test');
+    expect(msg.messageId).toBe('11111111-2222-3333-4444-555555555555');
   });
 });
