@@ -29,6 +29,11 @@ function gate(): { opened: Promise<void>; open: () => void } {
 const base = (apiKey: string, extra: Record<string, unknown> = {}) =>
   ({ runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey, fallbackProviders: [], ...extra }) as unknown as AgentOptions;
 const lookupTool = (execute: (args: Record<string, unknown>) => Promise<unknown>) => ({ name: 'lookup', description: 'Look up.', inputSchema: { type: 'object', properties: { q: { type: 'string' } } }, execute });
+/** The system prompt a model call sent: the text of its system messages. */
+const systemText = (call: { messages: Array<{ role: string; content: unknown }> }): string =>
+  call.messages.filter((m) => m.role === 'system').map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
+/** The line generateObject's schema instructions carry, which a structured send repeats when nothing else carries the schema. */
+const SCHEMA_LINE = 'The JSON MUST conform to this JSON Schema:';
 /** Cognitive memory with no mechanisms, so recall depends on the scopes alone. */
 const plainMemory = (embedding: Record<string, unknown> = { provider: 'openai' }) => ({ cognition: { memory: { embedding }, mechanisms: false } });
 const FACT = 'The deploy key lives in the vault under ops/deploy.';
@@ -207,12 +212,30 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(session.messages().at(-1)).toEqual({ role: 'assistant', content: '{"city":"Lyon"}' });
   });
 
-  it('a structured send on Claude Sonnet 5.5 (no forced tool): the JSON text answer is parsed', async () => {
+  it('a structured send on Claude Sonnet 5.5 (no forced tool): the schema rides the system prompt, and the JSON text answer is parsed', async () => {
     const k = key(); const s = script('anthropic', k, { replies: [reply.text('{"city":"Lyon"}')] });
     const r = await agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-5-5' }).session('s')
       .send('where?', { responseSchema: z.object({ city: z.string() }) });
     expect(r.object).toEqual({ city: 'Lyon' });
     expect(s.seen[0].options.responseFormat).toBeUndefined();
+    // No payload carries the schema to this model, so the request's system prompt does.
+    expect(systemText(s.seen[0])).toContain(SCHEMA_LINE);
+    expect(systemText(s.seen[0])).toContain('"city"');
+  });
+
+  it('a structured send in OpenAI JSON mode (a schema strict mode cannot take) carries the schema in its system prompt; a strict one does not repeat it', async () => {
+    const k = key(); const s = script('openai', k, { replies: [reply.text('{"city":"Lyon","scores":{"a":1}}'), reply.text('{"city":"Lyon"}')] });
+    const session = agent(base(k)).session('s');
+    const loose = await session.send('where?', { responseSchema: z.object({ city: z.string(), scores: z.record(z.string(), z.number()) }) });
+    expect(loose.object).toEqual({ city: 'Lyon', scores: { a: 1 } });
+    // JSON mode takes no schema: the model sees it only in the prompt.
+    expect(s.seen[0].options.responseFormat).toEqual({ type: 'json_object' });
+    expect(systemText(s.seen[0])).toContain(SCHEMA_LINE);
+    expect(systemText(s.seen[0])).toContain('"scores"');
+    const strict = await session.send('where?', { responseSchema: z.object({ city: z.string() }) });
+    expect(strict.object).toEqual({ city: 'Lyon' });
+    expect((s.seen[1].options.responseFormat as { type?: string }).type).toBe('json_schema');
+    expect(systemText(s.seen[1])).not.toContain(SCHEMA_LINE);
   });
 
   it('generate keeps no history; close releases sessions', async () => {

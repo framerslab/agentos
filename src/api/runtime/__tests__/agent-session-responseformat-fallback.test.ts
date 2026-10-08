@@ -34,6 +34,18 @@ import { agent } from '../../agent.js';
 import { resolveModelOption, resolveProvider } from '../../model.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
 
+/** The system prompt a provider call sent: the text of its system messages. */
+function systemOf(call: unknown[] | undefined): string {
+  const messages = (call?.[1] ?? []) as Array<{ role: string; content: unknown }>;
+  return messages
+    .filter((m) => m.role === 'system')
+    .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
+    .join('\n');
+}
+
+/** The line generateObject's schema instructions carry, which session.send repeats when nothing else carries the schema. */
+const SCHEMA_LINE = 'The JSON MUST conform to this JSON Schema:';
+
 function okResponse(modelId: string, text: string) {
   return {
     modelId,
@@ -146,6 +158,9 @@ describe('AgentSession.send responseSchema fallback rebuild (2026-07-07)', () =>
     // Fable rejects a forced tool_choice at the API level; the primary must
     // run schema-in-prompt only, exactly like generateObject's primary path.
     expect(primaryOptions.responseFormat).toBeUndefined();
+    const system = systemOf(hoisted.generateCompletion.mock.calls[0] as unknown[]);
+    expect(system).toContain(SCHEMA_LINE);
+    expect(system).toContain('"title"');
   });
 
   it('record schema on an openai primary degrades to json_object (strict gate)', async () => {
@@ -173,5 +188,38 @@ describe('AgentSession.send responseSchema fallback rebuild (2026-07-07)', () =>
       responseFormat?: Record<string, unknown>;
     };
     expect(primaryOptions.responseFormat).toEqual({ type: 'json_object' });
+    // JSON mode carries no schema, so the system prompt does.
+    const system = systemOf(hoisted.generateCompletion.mock.calls[0] as unknown[]);
+    expect(system).toContain(SCHEMA_LINE);
+    expect(system).toContain('"palette"');
+  });
+
+  it('each leg decides for its own payload: a strict primary sends no schema text, a Claude Sonnet 5.5 leg (no forced tool) gets it in its system prompt', async () => {
+    hoisted.generateCompletion.mockImplementation(async (modelId: string) => {
+      if (modelId === 'claude-sonnet-5-5') return okResponse(modelId, '{"title":"x"}');
+      throw new Error('503 overloaded');
+    });
+
+    const a = agent({
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      memory: false,
+      fallbackProviders: [{ provider: 'anthropic', model: 'claude-sonnet-5-5' }],
+    });
+    const result = await a.session().send('hi', {
+      responseSchema: z.object({ title: z.string() }),
+      schemaName: 'titled',
+    });
+
+    expect((result as { object?: unknown }).object).toEqual({ title: 'x' });
+    const calls = hoisted.generateCompletion.mock.calls as unknown[][];
+    const primary = calls.find((c) => c[0] === 'gpt-4o-mini');
+    const leg = calls.find((c) => c[0] === 'claude-sonnet-5-5');
+    expect((primary?.[2] as { responseFormat?: { type?: string } } | undefined)?.responseFormat?.type).toBe('json_schema');
+    expect(systemOf(primary)).not.toContain(SCHEMA_LINE);
+    expect(leg).toBeDefined();
+    expect((leg?.[2] as { responseFormat?: unknown } | undefined)?.responseFormat).toBeUndefined();
+    expect(systemOf(leg)).toContain(SCHEMA_LINE);
+    expect(systemOf(leg)).toContain('"title"');
   });
 });
