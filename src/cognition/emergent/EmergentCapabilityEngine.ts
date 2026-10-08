@@ -304,8 +304,10 @@ export interface EmergentCapabilityEngineDeps {
   composableBuilder: ComposableToolBuilder;
 
   /**
-   * The executor for code-forged tools. Optional: without it the engine
-   * builds one from `config.sandboxMemoryMB` and `config.sandboxTimeoutMs`.
+   * The forge for code-forged tools. Optional: without it the engine
+   * builds one from `config.sandboxMemoryMB`, `config.sandboxTimeoutMs` and
+   * `config.executor`; with it, `config.executor` must be absent or this
+   * forge's own executor (`executor_conflict` otherwise).
    * Under a ceiling (`config.capabilities`) a forge given here must be no
    * wider than the ceiling (construction fails with
    * `forge_wider_than_ceiling` naming the option), narrows it where it is
@@ -472,9 +474,18 @@ export class EmergentCapabilityEngine {
       sideEffectingTools: this.config.compose?.sideEffectingTools ?? [],
     });
 
+    if (deps.sandboxForge && this.config.executor && deps.sandboxForge.executor !== this.config.executor) {
+      throw new Error(
+        `executor_conflict: emergentConfig.executor (${this.config.executor.name}) is not the executor of the sandboxForge passed beside it (${deps.sandboxForge.executor.name}); pass one or the other`,
+      );
+    }
     const forge =
       deps.sandboxForge ??
-      new SandboxedToolForge({ memoryMB: this.config.sandboxMemoryMB, timeoutMs: this.config.sandboxTimeoutMs });
+      new SandboxedToolForge({
+        memoryMB: this.config.sandboxMemoryMB,
+        timeoutMs: this.config.sandboxTimeoutMs,
+        ...(this.config.executor ? { executor: this.config.executor } : {}),
+      });
     if (this.config.capabilities) {
       // Throws a CeilingError naming the key of the first failure.
       const resolved = resolveCeiling(this.config.capabilities, this.config.audit, {
@@ -656,6 +667,18 @@ export class EmergentCapabilityEngine {
           success: false,
           error: `Code validation failed: ${validation.violations.join('; ')}`,
         };
+      }
+
+      // Step 2d: an executor that has to load first is asked before any test
+      // case runs, so a forge on an executor that cannot run is refused with
+      // its reason and reaches neither a test nor the judge.
+      const executor = this.sandboxForge.executor;
+      if (executor.ready) {
+        try {
+          await executor.ready();
+        } catch (error: unknown) {
+          return { success: false, error: error instanceof Error ? error.message : String(error) };
+        }
       }
 
       // Step 3: Execute test cases in the sandbox, each as a run of its own.
