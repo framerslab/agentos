@@ -34,7 +34,8 @@ describe("agent({ runtime: 'gmi' }) cognitive memory", () => {
     await session.send('Where does the deploy key live?');
     // The cleared history cannot carry it: the fact reaches the prompt through recall.
     expect(JSON.stringify(s.seen[1].messages)).toContain('vault');
-    expect(e.embedCalls).toBeGreaterThan(0);
+    // The memory build's test text reaches this provider too; the fact's own words show memory embeds here.
+    expect(e.embedded.some((text) => text.includes('vault'))).toBe(true);
   });
 
   it('cognitive memory and memoryProvider together: the bridge supplies context, getContext is skipped, observe still runs', async () => {
@@ -59,7 +60,8 @@ describe("agent({ runtime: 'gmi' }) cognitive memory", () => {
     vi.stubEnv('OPENAI_API_KEY', emb);
     const r = await agent({ runtime: 'gmi', provider: 'anthropic', model: 'claude-x', apiKey: k, fallbackProviders: [], cognition: 'full', memory: { embedding: { provider: 'openai' } } as never }).session('s').send('remember tea');
     expect(r).toMatchObject({ text: 'Hi.', provider: 'anthropic' });
-    expect(e.embedCalls).toBeGreaterThan(0);
+    // Not only the memory build's test text: the turn's own words were embedded through OpenAI.
+    expect(e.embedded.some((text) => /\btea\b/.test(text))).toBe(true);
   });
 
   it('memory with no embedding source: the agent is made, and its first call fails naming memory.embedding before any model call', async () => {
