@@ -728,4 +728,35 @@ describe('streams', () => {
     const out2 = (await drain(makeProvider(bare).generateCompletionStream(MODEL, messages, {}))) as Array<{ usage?: unknown }>;
     expect(out2[0]).not.toHaveProperty('usage');
   });
+
+  it('a choice-level error waits for the usage-only line that may follow and carries it', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: sse([choiceError({ code: 502, message: 'Provider disconnected', metadata: { error_type: 'provider_unavailable' } }), textChunk('never'), usageChunk, 'data: [DONE]']),
+    });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, {}))) as Array<{ error?: { type?: string }; usage?: { promptTokens: number } }>;
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ isFinal: true, error: { type: 'upstream_error' }, usage: { promptTokens: 120, completionTokens: 7 } });
+  });
+
+  it('a choice-level error after a content_filter finish keeps the held decline and still reads the usage line', async () => {
+    const request = vi.fn().mockResolvedValueOnce({
+      data: sse([filterChunk, choiceError({ code: 502, message: 'Provider disconnected', metadata: { error_type: 'provider_unavailable' } }), usageChunk, 'data: [DONE]']),
+    });
+    const err = await thrown(drain(makeProvider(request).generateCompletionStream(MODEL, messages, {})));
+    expect(err.code).toBe('content_filter');
+    const d = err.details as { usage?: { promptTokens: number }; readError?: { message: string } };
+    expect(d.usage?.promptTokens).toBe(120);
+    expect(d.readError?.message).toContain('Provider disconnected');
+  });
+
+  it('an abort during the wait for a choice-level error\'s usage line yields the abort chunk with the usage read so far', async () => {
+    const controller = new AbortController();
+    const request = vi.fn().mockResolvedValueOnce({
+      data: gated([choiceError({ code: 502, message: 'down', metadata: { error_type: 'provider_unavailable' } }), usageChunk, () => controller.abort(), 'data: [DONE]']),
+    });
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, { abortSignal: controller.signal }))) as Array<{ error?: { type?: string }; usage?: { promptTokens: number } }>;
+    expect(out).toHaveLength(1);
+    expect(out[0]?.error?.type).toBe('abort');
+    expect(out[0]?.usage?.promptTokens).toBe(120);
+  });
 });

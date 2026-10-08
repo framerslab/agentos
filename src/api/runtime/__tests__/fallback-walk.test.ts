@@ -134,11 +134,14 @@ describe('resolveFallbackChain', () => {
         { provider: 'openrouter', model: `openrouter:${MAGNUM}` },
         { provider: 'openrouter', model: MAGNUM },
         { provider: 'openrouter', model: `openrouter:${HERMES}` },
+        // Sent as `gpt-5.6-sol` (the prefix repeats the provider): only the
+        // written form matches this exclusion.
+        { provider: 'openai', model: 'openai/gpt-5.6-sol' },
         { provider: 'openrouter', model: LLAMA },
       ],
       {
         primary: { provider: 'anthropic', model: 'claude-sonnet-5-5' },
-        excludedModelIds: [`openrouter:${MAGNUM}`, HERMES],
+        excludedModelIds: [`openrouter:${MAGNUM}`, HERMES, 'openai/gpt-5.6-sol'],
         onSkip: (entry, reason) => skipped.push(`${entry.model}:${reason}`),
       },
     );
@@ -147,6 +150,7 @@ describe('resolveFallbackChain', () => {
       `openrouter:${MAGNUM}:excluded_model`,
       `${MAGNUM}:excluded_model`,
       `openrouter:${HERMES}:excluded_model`,
+      'openai/gpt-5.6-sol:excluded_model',
     ]);
   });
 
