@@ -78,6 +78,18 @@ describe("agent({ runtime: 'gmi' }) fallback", () => {
     expect(await r.text).toBe('Part');
   });
 
+  it('a step that fails after output still counts what the provider billed: stream usage and session.usage() report it', async () => {
+    const k = key();
+    const billed = { promptTokens: 12, completionTokens: 4, totalTokens: 16 };
+    script('openai', k, { replies: [reply.textThenThrow('Sure, here', Object.assign(new Error('refused'), { details: { usage: billed } }))] });
+    const session = agent({ runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [] }).session('s');
+    const r = session.stream('go');
+    expect(await r.text).toBe('Sure, here');
+    expect(await r.finishReason).toBe('error');
+    expect(await r.usage).toMatchObject(billed);
+    expect((await session.usage()).totalTokens).toBe(16);
+  });
+
   it('after a fallback inside a turn, the next step stays on the fallback; the next user turn starts at the primary', async () => {
     const k = key(); const fb = key();
     const an = script('anthropic', k, { replies: [overloaded(), reply.text('Back on primary.')] });

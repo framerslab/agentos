@@ -71,7 +71,10 @@ export class ExtensionRegistry<TPayload = unknown> {
       await nextActive.onActivate?.(context ?? {});
     }
 
-    stack.active = nextActive;
+    // Read the stack again: a registration under the same id that completed
+    // while the hooks above were awaited may have pushed a newer descriptor,
+    // which must stay active.
+    stack.active = this.computeActive(stack);
 
     for (const listener of [...this.registerListeners]) {
       try {

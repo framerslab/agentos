@@ -58,6 +58,8 @@ export interface GmiTurnOptions {
   schemaName?: string;
   /** Label of the turn's block in the session store. */
   blockLabel?: string;
+  /** Stops the turn: the model call in progress is aborted, and the turn ends with the abort error. */
+  abortSignal?: AbortSignal;
 }
 
 /** What the GMI's hooks need to know about the turn about to run. */
@@ -66,6 +68,8 @@ export interface GmiTurnContext {
   prompt: string | undefined;
   /** The `memoryProvider.getContext` block for this turn, inserted as a system message on every model call. */
   memoryContext: string | undefined;
+  /** Called before every model call of the turn with the provider and model its hop was routed to. */
+  onModelCall?: (route: { providerId: string; modelId: string }) => void;
 }
 
 /** The GMI that serves one turn. */
@@ -83,8 +87,14 @@ export interface GmiSessionDeps {
   opts: AgentOptions;
   /** The GMI that serves the next turn: the session's own, or one made for the turn when the session keeps no history. */
   gmiFor(): Promise<GmiForTurn>;
-  /** The user the GMI runs the turn as: it scopes cognitive memory, and the GMI passes it to the provider as its user field. */
+  /** The user the GMI runs the turn as: it scopes cognitive memory. */
   userId: string;
+  /**
+   * The end-user id the turn's model calls send to the provider (OpenAI's `user`
+   * / `safety_identifier`): a user id the caller passed, never a session or call
+   * id. Unset, they send none, as agent() sends none.
+   */
+  providerUserId?: string;
   /** False when cognitive memory supplies the memory context: `memoryProvider.getContext` is then skipped. */
   useMemoryProviderContext: boolean;
   /** The session store, or null when the turn keeps no history. */
@@ -275,7 +285,11 @@ export async function* runGmiTurn(
     const gmi = served.gmi;
     gmi.replaceHistory?.(transcriptToConversation(priorMessages));
     const memoryContext = deps.useMemoryProviderContext ? await memoryProviderContext(deps.opts, userText) : undefined;
-    served.prepare?.({ prompt: typeof input === 'string' ? input : undefined, memoryContext });
+    served.prepare?.({
+      prompt: typeof input === 'string' ? input : undefined,
+      memoryContext,
+      onModelCall: ({ providerId, modelId }) => folder.route(providerId, modelId),
+    });
     writer = deps.history?.beginTurn(turn.blockLabel, epochAtStart);
 
     const turnInput: GMITurnInput = {
@@ -285,9 +299,11 @@ export async function* runGmiTurn(
       type: typeof input === 'string' ? GMIInteractionType.TEXT : GMIInteractionType.MULTIMODAL_CONTENT,
       content: input as GMITurnInput['content'],
       metadata: {
+        providerUserId: deps.providerUserId ?? null,
         options: {
           ...(turn.options ?? {}),
           ...(turn.responseSchema ? { responseSchema: turn.responseSchema, schemaName: turn.schemaName ?? 'response' } : {}),
+          ...(turn.abortSignal ? { abortSignal: turn.abortSignal } : {}),
         },
       },
     };
@@ -327,7 +343,7 @@ export async function* runGmiTurn(
           callStartedAt = Date.now();
           break;
         case GMIOutputChunkType.USAGE_UPDATE: {
-          // An attempt that failed before any output and was billed: no step carries it.
+          // A failed attempt that was billed (before any output, or a step that failed after it): no step carries it.
           const meta = chunk.metadata as { attemptFailed?: boolean; providerId?: string; modelId?: string; hop?: number } | undefined;
           if (meta?.attemptFailed) {
             ledgerWrites.push(
@@ -423,7 +439,7 @@ export async function sendGmiTurn(
   input: MessageContent,
   turn: GmiTurnOptions,
 ): Promise<GenerateTextResult & { object?: unknown }> {
-  const folder = new GmiTurnFolder();
+  const folder = new GmiTurnFolder({ cacheDiagnostics: Boolean(turn.options?.cacheDiagnostics) });
   const run = runGmiTurn(deps, input, turn, folder);
   let recorded: SessionTranscriptMessage[] = [];
   for (;;) {
@@ -443,11 +459,27 @@ export async function sendGmiTurn(
 /**
  * `stream()`: the turn's chunks as a `StreamTextResult`. The promises settle
  * after the turn is written to the session store, so a caller that awaits
- * `text` and sends again finds the turn in the history.
+ * `text` and sends again finds the turn in the history. A consumer that stops
+ * reading `textStream` or `fullStream` stops the turn, as streamText's
+ * consumer stops its generator: the model call in progress is aborted.
  */
 export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn: GmiTurnOptions): StreamTextResult {
-  const folder = new GmiTurnFolder();
-  const run = runGmiTurn(deps, input, turn, folder, 'streamText');
+  const folder = new GmiTurnFolder({ cacheDiagnostics: Boolean(turn.options?.cacheDiagnostics) });
+  // The turn stops when the caller's signal aborts (a session's close()) or when
+  // the consumer stops reading. The listener on the caller's signal, which
+  // outlives the turn, goes once the turn has ended.
+  const stop = new AbortController();
+  const forwardAbort = (): void => stop.abort();
+  if (turn.abortSignal?.aborted) stop.abort();
+  else turn.abortSignal?.addEventListener('abort', forwardAbort, { once: true });
+  const run = runGmiTurn(deps, input, { ...turn, abortSignal: stop.signal }, folder, 'streamText');
+  const chunks = (async function* () {
+    try {
+      return yield* run;
+    } finally {
+      turn.abortSignal?.removeEventListener('abort', forwardAbort);
+    }
+  })();
   // runGmiTurn pushes every chunk into `folder` (with the onAfterGeneration replacements); the stream reads that folder.
-  return streamFromGmiTurn({ [Symbol.asyncIterator]: () => run }, { folder });
+  return streamFromGmiTurn(chunks, { folder, stop: () => stop.abort() });
 }

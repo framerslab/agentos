@@ -47,6 +47,25 @@ describe('ExtensionRegistry', () => {
   });
 
   describe('register', () => {
+    it('keeps the newer descriptor active when it registers while an older one of the same id still awaits its activation', async () => {
+      let finishActivation!: () => void;
+      const activation = new Promise<void>((resolve) => {
+        finishActivation = resolve;
+      });
+      const older = createTestDescriptor('race-tool', undefined, { onActivate: () => activation });
+      older.payload.name = 'older';
+      const newer = createTestDescriptor('race-tool');
+      newer.payload.name = 'newer';
+
+      const olderRegistered = registry.register(older);
+      await registry.register(newer);
+      expect(registry.getActive('race-tool')?.payload.name).toBe('newer');
+      // The older registration finishes last; it must not take the id back.
+      finishActivation();
+      await olderRegistered;
+      expect(registry.getActive('race-tool')?.payload.name).toBe('newer');
+    });
+
     it('should register a descriptor', async () => {
       const descriptor = createTestDescriptor('test-tool');
       await registry.register(descriptor);

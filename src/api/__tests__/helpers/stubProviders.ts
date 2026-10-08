@@ -18,8 +18,11 @@ export interface ProviderScript {
   initThrows?: Error;
   /** Context window the provider reports for every model. Default 128,000. */
   window?: number;
-  /** One entry per model call: the chunks to stream, or an Error to throw before any chunk. */
-  replies: Array<Array<Record<string, unknown>> | Error>;
+  /**
+   * One entry per model call: the chunks to stream, or an Error to throw before
+   * any chunk. An Error among the chunks is thrown at that point of the stream.
+   */
+  replies: Array<Array<Record<string, unknown> | Error> | Error>;
   /** Every model call: the model, a copy of the messages, and the options. */
   seen: Array<{ modelId: string; messages: ChatMessage[]; options: Record<string, unknown> }>;
   /** How many embedding requests reached the provider. */
@@ -30,13 +33,21 @@ export interface ProviderScript {
    * own words.
    */
   embedded: string[];
+  /** How many requests ended because the caller aborted them: held ones (see `reply.hold`) and ones aborted before they started. */
+  aborts: number;
+}
+
+/** A held reply's second half: it is sent once `gate` resolves, unless the request is aborted first. */
+interface Hold {
+  gate: Promise<void>;
+  after: Array<Record<string, unknown>>;
 }
 
 export const scripts = new Map<string, ProviderScript>();
 
 /** Scripts the provider that starts with `apiKey`. */
 export function script(providerId: string, apiKey: string, partial: Partial<ProviderScript> = {}): ProviderScript {
-  const s: ProviderScript = { replies: [], seen: [], embedCalls: 0, embedded: [], ...partial };
+  const s: ProviderScript = { replies: [], seen: [], embedCalls: 0, embedded: [], aborts: 0, ...partial };
   scripts.set(`${providerId}:${apiKey}`, s);
   return s;
 }
@@ -83,6 +94,15 @@ export const reply = {
   ],
   /** One delta, then the connection drops. */
   breakAfterFirstDelta: (text: string) => Object.assign([{ ...base, modelId: 'stub-model', choices: [], responseTextDelta: text }], { breakAfter: 1 }),
+  /**
+   * Streams `before`, then holds the request open until `gate` resolves and
+   * streams `after`; aborted first (`options.abortSignal`), it ends with the
+   * terminal abort chunk the provider contract asks for and counts the abort.
+   */
+  hold: (before: Array<Record<string, unknown>>, gate: Promise<void>, after: Array<Record<string, unknown>> = []) =>
+    Object.assign([...before], { hold: { gate, after } satisfies Hold }),
+  /** One delta, then the provider throws `error` (a refusal that reports its usage in `details.usage`, a dropped connection). */
+  textThenThrow: (text: string, error: Error) => [{ ...base, modelId: 'stub-model', choices: [], responseTextDelta: text }, error],
 };
 
 /** A deterministic embedding: word hashes in 1536 buckets (text-embedding-3-small's size), normalised. */
@@ -138,12 +158,34 @@ export function stubProviderClass(providerId: string) {
       s.seen.push({ modelId, messages: JSON.parse(JSON.stringify(messages)), options });
       const next = s.replies.shift();
       if (!next) throw new Error(`${providerId}: unexpected model call`);
+      const signal = options.abortSignal as AbortSignal | undefined;
+      // The provider contract: a request aborted before it starts ends with the terminal abort chunk.
+      if (signal?.aborted) {
+        s.aborts += 1;
+        yield { ...base, modelId, choices: [], isFinal: true, error: { message: 'Request aborted', type: 'abort' } };
+        return;
+      }
       if (next instanceof Error) throw next;
       const breakAfter = (next as { breakAfter?: number }).breakAfter;
       for (let i = 0; i < next.length; i++) {
-        yield next[i];
+        const chunk = next[i];
+        if (chunk instanceof Error) throw chunk;
+        yield chunk;
         if (breakAfter !== undefined && i + 1 === breakAfter) throw new Error('connection reset');
       }
+      const hold = (next as { hold?: Hold }).hold;
+      if (!hold) return;
+      const aborted = await new Promise<boolean>((resolve) => {
+        if (signal?.aborted) return resolve(true);
+        signal?.addEventListener('abort', () => resolve(true), { once: true });
+        void hold.gate.then(() => resolve(false));
+      });
+      if (aborted) {
+        s.aborts += 1;
+        yield { ...base, modelId, choices: [], isFinal: true, error: { message: 'Request aborted', type: 'abort' } };
+        return;
+      }
+      yield* hold.after;
     }
 
     async generateEmbeddings(modelId: string, texts: string[]) {

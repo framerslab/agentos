@@ -254,6 +254,12 @@ export interface GMITurnInput {
     userFeedback?: any; // Added for GMI.ts usage
     explicitPersonaSwitchId?: string; // Added for GMI.ts usage
     /**
+     * The end-user id this turn's model calls send to the provider (OpenAI's
+     * `user` / `safety_identifier`). Unset, the GMI sends the turn's `userId`;
+     * `null` sends none. Pass an opaque or hashed id: the provider receives it.
+     */
+    providerUserId?: string | null;
+    /**
      * Optional conversation history snapshot to use for prompt construction.
      * When provided, the GMI should prefer this over any internal ephemeral history so
      * persona switches share conversation memory.
@@ -315,7 +321,8 @@ export enum GMIOutputChunkType {
   RAG_SOURCES_AVAILABLE = 'rag_sources_available',
   /**
    * One per model step that completes: the step's text, finish reason, provider, model, hop and usage.
-   * A step that fails emits none; the turn's ERROR chunk follows. Content: StepFinishedChunkPayload.
+   * A step that fails emits none: a USAGE_UPDATE with `metadata.attemptFailed: true` reports what it was
+   * billed, when the provider reported that, and the turn's ERROR chunk follows. Content: StepFinishedChunkPayload.
    */
   STEP_FINISHED = 'step_finished',
   /**
@@ -642,9 +649,13 @@ export interface IGMI {
     conversationHistory: ConversationMessage[],
   ): void;
 
-  /** Makes `messages` the whole conversation history. An empty array is authoritative. */
+  /**
+   * Makes `messages` the whole conversation history. An empty array is authoritative.
+   * `GMI` also drops what it recorded about the turns the new history no longer holds
+   * (the details of their trace entries, the input excerpts of their sentiment records).
+   */
   replaceHistory?(messages: ConversationMessage[]): void;
-  /** Empties the conversation history. */
+  /** Empties the conversation history; `GMI` drops what it recorded about its turns, as for `replaceHistory`. */
   clearHistory?(): void;
 
   hydrateTurnContext?(
