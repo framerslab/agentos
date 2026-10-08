@@ -233,6 +233,7 @@ export type BuiltInScorer =
   | 'semantic_similarity'
   | 'bleu'
   | 'rouge'
+  | 'word_error_rate'
   | 'llm_judge';
 
 // ============================================================================
