@@ -316,6 +316,50 @@ describe('a listed tool waits for the handler', () => {
     expect(search.execute).not.toHaveBeenCalled();
   });
 
+  it("team.stream() with toolMode 'prompt' asks the handler before the tool runs", async () => {
+    serve([
+      () => text('<tool_call>{"name":"search","arguments":{"q":"x"}}</tool_call>'), () => text('refused, done'),
+      () => text('<tool_call>{"name":"search","arguments":{"q":"y"}}</tool_call>'), () => text('approved, done'),
+    ]);
+    const handler = vi.fn(async (r: ApprovalRequest): Promise<ApprovalDecision> => ({ approved: (r.details.args as Json).q === 'y' }));
+    const team = base({ approvals: { beforeTool: ['search'] }, handler });
+    let out = '';
+    for await (const t of team.stream('find x', { toolMode: 'prompt' }).textStream) out += t;
+    expect(out).toBe('refused, done');
+    expect(search.execute).not.toHaveBeenCalled();
+    out = '';
+    for await (const t of team.stream('find y', { toolMode: 'prompt' }).textStream) out += t;
+    expect(out).toBe('approved, done');
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(search.execute).toHaveBeenCalledWith({ q: 'y' });
+    expect(handler.mock.invocationCallOrder[1]).toBeLessThan(search.execute.mock.invocationCallOrder[0]);
+  });
+
+  it("seats of strategy 'parallel': a listed tool asks the handler, and a refusal skips it", async () => {
+    // The seats run concurrently, so each request is answered by what it
+    // holds: a seat asks for search until its tool result is in, and the
+    // chair's synthesis request carries the seats' outputs.
+    fetchMock.mockImplementation(async (url: unknown, init?: { body?: unknown }) => {
+      if (/\/v1\/models/.test(String(url))) return listing();
+      const messages = (JSON.parse(String(init?.body)) as Json).messages as Json[];
+      if (JSON.stringify(messages).includes('Synthesize these into a single coherent response')) return text('synthesis');
+      return messages.some((m) => m.role === 'tool') ? text('seat done') : toolCall('search', { q: 'x' });
+    });
+    const handler = vi.fn(hitl.autoReject('no'));
+    const team = agency({
+      provider: 'openai', model: 'gpt-4.1', apiKey: KEY, tools: { search },
+      agents: { a: { instructions: 'Search for it.' }, b: { instructions: 'Search for it too.' } },
+      strategy: 'parallel',
+      hitl: { approvals: { beforeTool: ['search'] }, handler },
+    } as never);
+    const result = (await team.generate('find x')) as Json;
+    expect(result.text).toBe('synthesis');
+    expect(handler.mock.calls.map(([r]) => r.action)).toEqual(['search', 'search']);
+    expect(search.execute).not.toHaveBeenCalled();
+    const toolResults = chatBodies().flatMap((b) => (b.messages as Json[]).filter((m) => m.role === 'tool'));
+    expect(toolResults.map((m) => JSON.parse(m.content).skipped)).toEqual([true, true]);
+  });
+
   it("a pre-built seat's tool, and its own hook still runs with and without beforeTool", async () => {
     const hook = vi.fn(async (info: { args: Record<string, unknown> }) => info as never);
     const mk = () => agent({ provider: 'openai', model: 'gpt-4.1', apiKey: KEY, tools: { search }, fallbackProviders: [], onBeforeToolExecution: hook as never });
