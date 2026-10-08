@@ -117,13 +117,19 @@ export function buildResponseFormatForProvider(
 /**
  * Whether a payload from {@link buildResponseFormatForProvider} carries the
  * schema to the model. A strict `json_schema`, Anthropic's forced schema tool
- * and Gemini's `responseSchema` do; no payload, and the loose `json_object`
- * mode, do not, so the schema has to ride the prompt.
+ * and Gemini's `responseSchema` (typed `json_object`, with the schema under
+ * `_gemini`) do; no payload, the loose `json_object` mode and any other shape
+ * do not, so the schema has to ride the prompt.
  */
 export function responseFormatCarriesSchema(
   responseFormat: Record<string, unknown> | undefined,
 ): boolean {
-  return responseFormat !== undefined && responseFormat.type !== 'json_object';
+  if (!responseFormat) return false;
+  return (
+    responseFormat.type === 'json_schema' ||
+    responseFormat._agentosUseToolForStructuredOutput === true ||
+    responseFormat._gemini !== undefined
+  );
 }
 
 /**
