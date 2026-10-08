@@ -84,11 +84,14 @@ describe('TranscriptLedger', () => {
     expect(ledger.items().map((item) => item.itemId)).toEqual(['i1', 'i3']);
   });
 
-  it('keeps the line it just took when every other line is still being heard, dropping the oldest of those', () => {
+  it('holds every line still being heard over its size, with the final it just took, so a later retraction finds its line', () => {
     const ledger = new TranscriptLedger({ maxItems: 2 });
     ledger.apply(line('i1', 'Open', false));
     ledger.apply(line('i2', 'Also open', false));
     expect(ledger.apply(line('i3', 'Three.', true))).toBe(true);
+    expect(ledger.items().map((item) => item.itemId)).toEqual(['i1', 'i2', 'i3']);
+    expect(ledger.apply(line('i1', '', true))).toBe(true);
+    expect(ledger.apply(line('i2', 'Two.', true))).toBe(true);
     expect(ledger.items().map((item) => item.itemId)).toEqual(['i2', 'i3']);
   });
 

@@ -75,7 +75,9 @@ export interface TranscriptLedgerOptions {
   /**
    * The most lines held, a line taken back among them (it stays, hidden, so a
    * later event for its id changes nothing and a replay carries it); beyond it
-   * the oldest final lines are dropped, never the line just applied.
+   * the oldest final lines are dropped, never the line just applied nor a line
+   * still being heard, so while more lines than that are open the ledger holds
+   * them all.
    * @defaultValue 20000
    */
   maxItems?: number;
@@ -202,24 +204,22 @@ export class TranscriptLedger {
 
   /**
    * Drops the oldest final lines while the ledger is over its size, never the
-   * line just applied; the oldest other line when no other line is final.
+   * line just applied nor a line still being heard: a later final or
+   * retraction of an open line must find it, so open lines are held over the
+   * size until they close.
    */
   private trim(keep: string): void {
     while (this.lines.size > this.maxItems) {
-      let oldest: string | undefined;
       let drop: string | undefined;
       for (const line of this.lines.values()) {
-        if (line.itemId === keep) continue;
-        if (oldest === undefined) oldest = line.itemId;
-        if (line.isFinal) {
+        if (line.isFinal && line.itemId !== keep) {
           drop = line.itemId;
           break;
         }
       }
-      // Over a size of at least 1 the ledger holds two lines or more, so one other than `keep` is there.
-      const id = (drop ?? oldest)!;
-      this.lines.delete(id);
-      this.retracted.delete(id);
+      if (drop === undefined) return;
+      this.lines.delete(drop);
+      this.retracted.delete(drop);
     }
   }
 }
