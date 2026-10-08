@@ -61,7 +61,8 @@ jobs:
               docs/architecture/EMERGENT_CAPABILITIES.md docs/architecture/ARCHITECTURE.md \
               src/cognition/emergent/SandboxedToolForge.ts src/cognition/emergent/ComposableToolBuilder.ts \
               src/cognition/emergent/EmergentCapabilityEngine.ts src/cognition/emergent/types.ts \
-              src/safety/sandbox/executor/CodeSandbox.ts src/safety/sandbox/executor/ICodeSandbox.ts; then
+              src/safety/sandbox/executor/CodeSandbox.ts src/safety/sandbox/executor/ICodeSandbox.ts \
+              src/cognition/emergent/executor/types.ts src/cognition/emergent/executor/InProcessExecutor.ts; then
             echo "::error::the documentation claims an isolation the executor does not provide (see docs/architecture/EMERGENT_CAPABILITIES.md, Sandbox Mode)"
             exit 1
           fi

@@ -1,3 +1,30 @@
+## [0.12.12](https://github.com/framerslab/agentos/compare/v0.12.11...v0.12.12) (2026-10-08)
+
+### fix
+
+* **sandbox:** the output limit is measured in bytes, and a forged call that passes it on either stream fails (#151) ([b83f058](https://github.com/framerslab/agentos/commit/b83f058ece33de2ef188649d556e36b64c5f1e92))
+
+## [0.12.11](https://github.com/framerslab/agentos/compare/v0.12.10...v0.12.11) (2026-10-08)
+
+### fix
+
+* **emergent:** a forged tool's result past the in-process output limit fails the call instead of coming back cut (#149) ([45570bb](https://github.com/framerslab/agentos/commit/45570bb0c2afc99a789b4117179c2f72b5a27227))
+
+## [0.12.10](https://github.com/framerslab/agentos/compare/v0.12.9...v0.12.10) (2026-10-08)
+
+### feat
+
+* **emergent:** forged code runs through an executor interface, and a CI run measures QuickJS (#148) ([3c5832a](https://github.com/framerslab/agentos/commit/3c5832ac978a511a03397201ec1a3c3379deceba))
+
+### docs
+
+* audit follow-ups to the GMI step contract and gateway docs (#147) ([000547a](https://github.com/framerslab/agentos/commit/000547a77f2fe57fd8c3f61fbb7008d490e41106))
+* **gmi:** correct the step contract and document completion options, history and the gateway (#145) ([ff883a4](https://github.com/framerslab/agentos/commit/ff883a43926dd46f1052d365d13cad969e5421da))
+
+### ci
+
+* check that package exports point at built files (#146) ([fee43be](https://github.com/framerslab/agentos/commit/fee43be4142aefe488667bbbd54d05f00a60074e))
+
 ## [0.12.9](https://github.com/framerslab/agentos/compare/v0.12.8...v0.12.9) (2026-10-08)
 
 ### fix

@@ -1,0 +1,63 @@
+name: Forge executor evidence
+
+on:
+  pull_request:
+    branches: [master, main]
+    paths:
+      - 'src/cognition/emergent/**'
+      - 'src/safety/sandbox/**'
+      - 'evidence/forge-executors/**'
+      - 'tests/fixtures/forged-tools/**'
+      - '.github/workflows/forge-executor-evidence.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    name: Forge executor evidence (QuickJS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install PNPM
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Install the evidence run's own dependency
+        working-directory: evidence/forge-executors
+        run: npm install --no-package-lock --no-audit --no-fund --ignore-scripts
+
+      - name: Run the evidence questions
+        run: node --expose-gc --import tsx evidence/forge-executors/run.ts --out evidence/forge-executors/out
+
+      - name: Write the report to the job summary
+        if: always()
+        run: |
+          if [ -f evidence/forge-executors/out/report.md ]; then
+            cat evidence/forge-executors/out/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-executor-evidence
+          path: evidence/forge-executors/out/
+          if-no-files-found: warn

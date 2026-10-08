@@ -62,6 +62,22 @@ import {
 // Constants
 // ============================================================================
 
+/**
+ * Cuts captured output at `maxBytes` of UTF-8, the unit `maxOutputBytes`
+ * names (a string's `length` counts UTF-16 code units, so a multibyte text
+ * could pass the limit unseen). A cut text ends with a marker; a cut that
+ * lands inside a multibyte character leaves a replacement character before it.
+ */
+function cutOutput(text: string, maxBytes: number): { text: string; cut: boolean } {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) {
+    return { text, cut: false };
+  }
+  return {
+    text: Buffer.from(text, 'utf8').subarray(0, maxBytes).toString('utf8') + '\n[OUTPUT TRUNCATED]',
+    cut: true,
+  };
+}
+
 const DEFAULT_CONFIG: SandboxConfig = {
   timeoutMs: 30000, // 30 seconds
   maxMemoryBytes: 128 * 1024 * 1024, // Nominal budget; JS node:vm reports heap delta only.
@@ -405,14 +421,17 @@ export class CodeSandbox implements ICodeSandbox {
         stdout += typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result);
       }
 
-      // Truncate oversized output
+      // Truncate oversized output, measured in bytes.
+      const maxOutputBytes = config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!;
       const truncated: ExecutionResult['truncated'] = {};
-      if (stdout.length > (config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!)) {
-        stdout = stdout.slice(0, config.maxOutputBytes) + '\n[OUTPUT TRUNCATED]';
+      const outCut = cutOutput(stdout, maxOutputBytes);
+      stdout = outCut.text;
+      if (outCut.cut) {
         truncated.stdout = true;
       }
-      if (stderr.length > (config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!)) {
-        stderr = stderr.slice(0, config.maxOutputBytes) + '\n[OUTPUT TRUNCATED]';
+      const errCut = cutOutput(stderr, maxOutputBytes);
+      stderr = errCut.text;
+      if (errCut.cut) {
         truncated.stderr = true;
       }
 
@@ -492,14 +511,17 @@ export class CodeSandbox implements ICodeSandbox {
       let stdout = proc.stdout || '';
       let stderr = proc.stderr || '';
 
-      // Truncate oversized output
+      // Truncate oversized output, measured in bytes.
+      const maxOutputBytes = config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!;
       const truncated: ExecutionResult['truncated'] = {};
-      if (stdout.length > (config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!)) {
-        stdout = stdout.slice(0, config.maxOutputBytes) + '\n[OUTPUT TRUNCATED]';
+      const outCut = cutOutput(stdout, maxOutputBytes);
+      stdout = outCut.text;
+      if (outCut.cut) {
         truncated.stdout = true;
       }
-      if (stderr.length > (config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!)) {
-        stderr = stderr.slice(0, config.maxOutputBytes) + '\n[OUTPUT TRUNCATED]';
+      const errCut = cutOutput(stderr, maxOutputBytes);
+      stderr = errCut.text;
+      if (errCut.cut) {
         truncated.stderr = true;
       }
 
@@ -576,14 +598,17 @@ export class CodeSandbox implements ICodeSandbox {
       let stdout = proc.stdout || '';
       let stderr = proc.stderr || '';
 
-      // Truncate oversized output
+      // Truncate oversized output, measured in bytes.
+      const maxOutputBytes = config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!;
       const truncated: ExecutionResult['truncated'] = {};
-      if (stdout.length > (config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!)) {
-        stdout = stdout.slice(0, config.maxOutputBytes) + '\n[OUTPUT TRUNCATED]';
+      const outCut = cutOutput(stdout, maxOutputBytes);
+      stdout = outCut.text;
+      if (outCut.cut) {
         truncated.stdout = true;
       }
-      if (stderr.length > (config.maxOutputBytes || DEFAULT_CONFIG.maxOutputBytes!)) {
-        stderr = stderr.slice(0, config.maxOutputBytes) + '\n[OUTPUT TRUNCATED]';
+      const errCut = cutOutput(stderr, maxOutputBytes);
+      stderr = errCut.text;
+      if (errCut.cut) {
         truncated.stderr = true;
       }
 
