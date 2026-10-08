@@ -1,3 +1,9 @@
+## [0.12.17](https://github.com/framerslab/agentos/compare/v0.12.16...v0.12.17) (2026-10-08)
+
+### feat
+
+* add MiniMax image generation provider (#56) ([9d21348](https://github.com/framerslab/agentos/commit/9d21348742fbb5ce48c92ffb8ab5e40377fdfccc))
+
 ## [0.12.16](https://github.com/framerslab/agentos/compare/v0.12.15...v0.12.16) (2026-10-08)
 
 ### fix
