@@ -284,11 +284,25 @@ export type { SouledAgentOptions, SouledAgent } from './api/souledAgent.js';
 export type {
   Agent,
   AgentSession,
+  AgentSessionOptions,
   AgentOptions,
   AgentMemoryProvider,
   SessionSendOptions,
   SessionSendStructuredResult,
 } from './api/agent.js';
+export { gmi, createGmi } from './api/gmi.js';
+export type { GmiOptions, GmiHandle } from './api/gmi.js';
+export { resolveCognition } from './api/runtime/gmiCognition.js';
+export type {
+  CognitionProfile,
+  CognitionConfig,
+  CognitionInputs,
+  MetapromptPreset,
+  ResolvedCognition,
+} from './api/runtime/gmiCognition.js';
+export { personaFromAgentOptions } from './api/runtime/gmiPersona.js';
+export { createAgentCognitiveMemory } from './api/runtime/agentCognitiveMemory.js';
+export type { AgentCognitiveMemory, AgentCognitiveMemoryOptions } from './api/runtime/agentCognitiveMemory.js';
 export type { MemoryProviderHookOptions } from './api/runtime/memoryProviderHooks.js';
 export type {
   IModelRouter,

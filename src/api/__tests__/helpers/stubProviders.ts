@@ -24,13 +24,19 @@ export interface ProviderScript {
   seen: Array<{ modelId: string; messages: ChatMessage[]; options: Record<string, unknown> }>;
   /** How many embedding requests reached the provider. */
   embedCalls: number;
+  /**
+   * Every text the provider embedded, in order. The memory build's test text is
+   * one of them, so a case that checks memory itself embedded here looks for its
+   * own words.
+   */
+  embedded: string[];
 }
 
 export const scripts = new Map<string, ProviderScript>();
 
 /** Scripts the provider that starts with `apiKey`. */
 export function script(providerId: string, apiKey: string, partial: Partial<ProviderScript> = {}): ProviderScript {
-  const s: ProviderScript = { replies: [], seen: [], embedCalls: 0, ...partial };
+  const s: ProviderScript = { replies: [], seen: [], embedCalls: 0, embedded: [], ...partial };
   scripts.set(`${providerId}:${apiKey}`, s);
   return s;
 }
@@ -143,6 +149,7 @@ export function stubProviderClass(providerId: string) {
     async generateEmbeddings(modelId: string, texts: string[]) {
       if (providerId === 'anthropic') throw Object.assign(new Error('embeddings not supported'), { code: 'EMBEDDINGS_NOT_SUPPORTED' });
       this.script!.embedCalls += 1;
+      this.script!.embedded.push(...texts);
       return {
         object: 'list',
         data: texts.map((t, index) => ({ object: 'embedding', embedding: hashEmbed(t), index })),

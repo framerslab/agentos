@@ -7,6 +7,9 @@
  * prompt builder.  Guardrail identifiers are accepted and stored in config but
  * are not actively enforced in this lightweight layer — use the full AgentOS
  * runtime (`AgentOSOrchestrator`) or `agency()` for guardrail enforcement.
+ *
+ * With `runtime: 'gmi'` the agent is built by {@link gmi} instead: every session
+ * is served by a Generalized Mind Instance (docs/GMI.md, "GMIs from agent()").
  */
 import type { ZodType, z } from 'zod';
 import {
@@ -62,6 +65,8 @@ import {
 } from './sessionHistory.js';
 import type { SessionTranscriptMessage } from './sessionTranscript.js';
 import type { CognitionConfig, CognitionProfile } from './runtime/gmiCognition.js';
+// gmi.ts imports this module back (through gmiPersona.ts); each side calls the other only inside functions.
+import { gmi } from './gmi.js';
 
 /**
  * Provider hook interface consumed by `agent()` for memory integration.
@@ -744,29 +749,6 @@ export function loadSoulFromOption(
 }
 
 /**
- * Creates a lightweight stateful agent backed by in-memory session storage.
- *
- * The agent wraps {@link generateText} and {@link streamText} with a persistent
- * system prompt built from `instructions`, `name`, and `personality` fields.
- * Multiple independent sessions can be opened via `Agent.session()`.
- *
- * @param opts - Agent configuration including model, instructions, and optional tools.
- *   All `BaseAgentConfig` fields are accepted; advanced fields (rag, discovery,
- *   permissions, emergent, voice, guardrails, etc.) are stored but not actively
- *   wired in the lightweight layer — they are consumed by `agency()` and the full runtime.
- * @returns An {@link Agent} instance with `generate`, `stream`, `session`, and `close` methods.
- *
- * @example
- * ```ts
- * const myAgent = agent({ provider: 'openai', model: 'gpt-4o', instructions: 'You are a helpful assistant.' });
- * const session = myAgent.session('user-123');
- * const reply = await session.send('Hello!');
- * console.log(reply.text);
- * ```
- *
- * @category Core
- */
-/**
  * Copies only the defined per-send generation overrides off SessionSendOptions
  * (spec §1f) so undefined keys never clobber agent-level baseOpts via spread.
  */
@@ -783,7 +765,38 @@ function pickSendGenerationOverrides(
   return out;
 }
 
+/**
+ * Creates a lightweight stateful agent backed by in-memory session storage.
+ *
+ * The agent wraps {@link generateText} and {@link streamText} with a persistent
+ * system prompt built from `instructions`, `name`, and `personality` fields.
+ * Multiple independent sessions can be opened via `Agent.session()`.
+ *
+ * With `runtime: 'gmi'`, `agent(opts)` returns `gmi(opts)`: the same `Agent`
+ * surface, with every session served by a Generalized Mind Instance built from
+ * these options, and the construction checks and diagnostics of that path.
+ *
+ * @param opts - Agent configuration including model, instructions, and optional tools.
+ *   All `BaseAgentConfig` fields are accepted; advanced fields (rag, discovery,
+ *   permissions, emergent, voice, guardrails, etc.) are stored but not actively
+ *   wired in the lightweight layer — they are consumed by `agency()` and the full runtime.
+ * @returns An {@link Agent} instance with `generate`, `stream`, `session`, and `close` methods.
+ * @throws {Error} With `runtime: 'gmi'`, at construction, naming an option the GMI path
+ *   cannot honour (see {@link gmi}).
+ *
+ * @example
+ * ```ts
+ * const myAgent = agent({ provider: 'openai', model: 'gpt-4o', instructions: 'You are a helpful assistant.' });
+ * const session = myAgent.session('user-123');
+ * const reply = await session.send('Hello!');
+ * console.log(reply.text);
+ * ```
+ *
+ * @category Core
+ */
 export function agent(opts: AgentOptions): Agent {
+  // Before anything of the legacy path runs: its diagnostics and warnings describe that path.
+  if (opts.runtime === 'gmi') return gmi(opts);
   const sessionBuffers = new Map<string, SessionHistoryBuffer | null>();
   // In-memory usage tally per session and per agent. Populated synchronously
   // after every generate/send/stream call so `agent.usage()` and
