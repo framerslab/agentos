@@ -3,8 +3,8 @@
  * CognitiveMemoryManager over the in-memory vector store and knowledge graph.
  * Most cases embed through an injected embedding manager (a word hash, no
  * provider); the provider cases build the embedding manager the way gmi()
- * does, from memory.embedding and the environment, over a stubbed OpenAI
- * provider module.
+ * does, from memory.embedding and the environment, over stubbed OpenAI and
+ * Ollama provider modules.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -44,10 +44,38 @@ const fixtures = vi.hoisted(() => {
     async checkHealth() { return { isHealthy: true }; }
     async shutdown() {}
   }
-  return { hashEmbed, embedCalls, OpenAIProvider };
+  /** The models the Ollama stub has pulled; cleared after each case. */
+  const pulledOllamaModels = new Set<string>();
+  /**
+   * Stands in for OllamaProvider: initialises whenever a base URL is given, as
+   * the real one does when the server answers, embeds 768 wide with a pulled
+   * model and refuses any other with Ollama's own error.
+   */
+  class OllamaProvider {
+    readonly providerId = 'ollama';
+    isInitialized = false;
+    async initialize() {
+      this.isInitialized = true;
+    }
+    async listAvailableModels() { return []; }
+    async getModelInfo() { return undefined; }
+    async generateEmbeddings(modelId: string, texts: string[]) {
+      if (!pulledOllamaModels.has(modelId)) throw new Error(`model "${modelId}" not found, try pulling it first`);
+      return {
+        object: 'list',
+        data: texts.map((text, index) => ({ object: 'embedding', embedding: hashEmbed(text, 768), index })),
+        model: modelId,
+        usage: { prompt_tokens: 0, total_tokens: 0 },
+      };
+    }
+    async checkHealth() { return { isHealthy: true }; }
+    async shutdown() {}
+  }
+  return { hashEmbed, embedCalls, OpenAIProvider, pulledOllamaModels, OllamaProvider };
 });
 
 vi.mock('../../../core/llm/providers/implementations/OpenAIProvider', () => ({ OpenAIProvider: fixtures.OpenAIProvider }));
+vi.mock('../../../core/llm/providers/implementations/OllamaProvider', () => ({ OllamaProvider: fixtures.OllamaProvider }));
 
 import { assertEmbeddingAvailable, createAgentCognitiveMemory } from '../agentCognitiveMemory.js';
 
@@ -75,6 +103,7 @@ const FACT = 'The deploy key lives in the vault under ops/deploy.';
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  fixtures.pulledOllamaModels.clear();
 });
 
 describe('createAgentCognitiveMemory', () => {
@@ -121,6 +150,37 @@ describe('createAgentCognitiveMemory', () => {
   it('a named embedding provider with no credentials fails the build, naming memory.embedding and the missing key', async () => {
     vi.stubEnv('OPENAI_API_KEY', '');
     await expect(createAgentCognitiveMemory({ persona, memory: { embedding: { provider: 'openai' } } })).rejects.toThrow(/memory\.embedding[\s\S]*OPENAI_API_KEY/);
+  });
+
+  it("with only OLLAMA_BASE_URL set, embeds through Ollama's default model, nomic-embed-text at 768", async () => {
+    vi.stubEnv('OPENAI_API_KEY', '');
+    vi.stubEnv('OLLAMA_BASE_URL', 'http://ollama.test:11434');
+    fixtures.pulledOllamaModels.add('nomic-embed-text');
+    const mem = await createAgentCognitiveMemory({ persona, memory: {} });
+    await mem.manager.encode(FACT, neutral, 'neutral', { type: 'episodic' });
+    const hits = await mem.manager.retrieve('where is the deploy key', neutral, { topK: 3 });
+    expect(hits.retrieved.map((trace) => trace.content).join('\n')).toContain('vault');
+    await mem.close();
+  });
+
+  it('an embedding model the provider cannot serve fails the build, naming memory.embedding: the Ollama default when it was never pulled', async () => {
+    vi.stubEnv('OPENAI_API_KEY', '');
+    vi.stubEnv('OLLAMA_BASE_URL', 'http://ollama.test:11434');
+    await expect(createAgentCognitiveMemory({ persona, memory: {} })).rejects.toThrow(
+      /memory\.embedding[\s\S]*model "nomic-embed-text" not found, try pulling it first/,
+    );
+  });
+
+  it('an embedding model that returns another size than memory expects fails the build, naming the size it returns', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'k-agent-memory-dimension');
+    // The size memory.embedding.dimension declares.
+    await expect(
+      createAgentCognitiveMemory({ persona, memory: { embedding: { provider: 'openai', model: 'text-embedding-3-small', dimension: 256 } } }),
+    ).rejects.toThrow(/returns 1536 values[\s\S]*memory\.embedding\.dimension \(256\)/);
+    // The size agentos knows for the model (the stub answers 1536 for every model).
+    await expect(
+      createAgentCognitiveMemory({ persona, memory: { embedding: { provider: 'openai', model: 'text-embedding-3-large' } } }),
+    ).rejects.toThrow(/returns 1536 values[\s\S]*expects 3072[\s\S]*memory\.embedding\.dimension to 1536/);
   });
 });
 
