@@ -286,14 +286,16 @@ These are rejected at code validation time (before execution):
 | `eval`, `Function` | Arbitrary code execution escape |
 | `require`, `import()` | Module system escape |
 | `process`, `child_process` | System access |
-| `fs.write*`, `fs.appendFile`, `fs.truncate`, `fs.unlink`, `fs.rm`, `fs.rmdir` | Filesystem mutation (only `fs.readFile` is ever exposed, and only when the request's allowlist names it) |
+| Every `fs.write*` name but `fs.writeFile`, every `fs.unlink*` name but `fs.unlink`; `fs.appendFile`, `fs.truncate`, `fs.rm`, `fs.rmdir` | Filesystem mutation. A ceiling's `fs.write` and `fs.delete` supply `fs.writeFile` and `fs.unlink`, and the validator accepts each only when the request names its capability |
 
 ### Allowed APIs (opt-in via `allowlist`)
 
 | API | What it grants |
 |---|---|
-| `fetch` | Without a ceiling: outbound HTTP/HTTPS; the injected function sends the caller's method, headers and body to the host and follows redirects; `fetchDomainAllowlist` checks the first URL's host when a host sets it, and the standard wiring does not set it. Under a ceiling: GET and HEAD to the ceiling's hosts, every redirect checked, the body capped (see [A ceiling for code-forged tools](#a-ceiling-for-code-forged-tools)). A grant that holds `fetch` and `fs.read` together can send out what it reads. |
+| `fetch` | Without a ceiling: outbound HTTP/HTTPS; the injected function sends the caller's method, headers and body to the host and follows redirects; `fetchDomainAllowlist` checks the first URL's host when a host sets it, and the standard wiring does not set it. Under a ceiling: GET and HEAD to the ceiling's hosts, every redirect checked, the body capped; POST, PUT, PATCH and DELETE when the ceiling lists them, on `QuickJSExecutor` only (see [Effects](#effects-writes-deletes-and-state-changing-requests)). A grant that holds `fetch` and `fs.read` together can send out what it reads. |
 | `fs.read` (the function `fs.readFile` in code; a list may name either) | Read-only file access under the roots, after symlinks are resolved: `fsReadRoots` without a ceiling (the working directory by default), the ceiling's `roots` with one |
+| `fs.write` (the function `fs.writeFile(path, data)`) | Under a ceiling on `QuickJSExecutor` only: one file written under the ceiling's write roots, within its bounds (see [Effects](#effects-writes-deletes-and-state-changing-requests)) |
+| `fs.delete` (the function `fs.unlink(path)`) | Under a ceiling on `QuickJSExecutor` only: one regular file removed under the ceiling's delete roots |
 | `crypto` | `randomUUID`, `createHash` and `createHmac` from Node's `crypto` |
 
 ### Resource Limits
@@ -391,18 +393,46 @@ emergentConfig: {
 },
 ```
 
+The effect capabilities (`fs.write`, `fs.delete`, and `fetch` methods beyond GET and HEAD) are granted the same way, on an isolating executor, with every bound written out:
+
+```typescript
+emergentConfig: {
+  allowSandboxTools: true,
+  executor: await QuickJSExecutor.create(),
+  capabilities: {
+    fetch: { domains: ['api.example.com'], methods: ['GET', 'POST'], maxRequestBytes: 65_536, approval: 'none' },
+    'fs.write': {
+      roots: ['/srv/agent-data/out'],
+      mode: 'create-only',           // or 'create-or-replace'
+      maxBytesPerFile: 1_048_576,
+      maxBytesPerCall: 4_194_304,
+      maxFilesPerCall: 20,
+      timeoutMs: 10_000,
+      approval: 'none',
+    },
+    'fs.delete': { roots: ['/srv/agent-data/out'], maxFilesPerCall: 5, timeoutMs: 10_000, approval: 'none' },
+  },
+  protectedPaths: ['/srv/app', '/srv/agent-data/state.sqlite'],
+  effectPolicy: (effect) => (effect.target.endsWith('.lock') ? { deny: 'lock files stay' } : undefined),
+},
+```
+
 | Key | Default | What it does |
 |---|---|---|
 | `fetch.domains` | (required) | Hosts, matched exactly and case-insensitively; no wildcards, and an internationalised name is listed in its punycode form. `'*'` is every host |
-| `fetch.methods` | `['GET', 'HEAD']` | The methods a tool may send; this release accepts no others |
+| `fetch.methods` | `['GET', 'HEAD']` | The methods a tool may send: GET and HEAD, and POST, PUT, PATCH and DELETE, which change state and need an isolating executor, `maxRequestBytes` and `approval` |
+| `fetch.maxRequestBytes` | (required beside a state-changing method) | A request body larger than this is refused before anything is sent; refused on a `fetch` without a state-changing method |
+| `fetch.approval` | (required beside a state-changing method) | `'none'`; `'at-forge'` and `'per-call'` fail construction with `approval_not_available` in this release |
 | `fetch.maxResponseBytes` | 5 MB | A body larger than this is refused while it streams |
 | `fetch.maxRedirects` | 5 | Redirects followed, each hop's host checked like the first |
 | `fetch.timeoutMs` | 30 s | One request, redirects and body included |
 | `'fs.read'.roots` | (required) | Absolute directories, compared after symlinks are resolved |
 | `'fs.read'.maxBytesPerRead` | 1 MB | A file larger than this is refused while it streams |
 | `'fs.read'.timeoutMs` | 30 s | One read |
+| `'fs.write'.roots`, `mode`, `maxBytesPerFile`, `maxBytesPerCall`, `maxFilesPerCall`, `timeoutMs`, `approval` | (all required) | Absolute directories; `'create-only'` refuses an existing file, `'create-or-replace'` replaces one whole; one file's bytes, one call's bytes and files; one write's time bound, from admission; `'none'` |
+| `'fs.delete'.roots`, `maxFilesPerCall`, `timeoutMs`, `approval` | (all required) | Absolute directories; the regular files one call may remove; one removal's time bound, from admission; `'none'` |
 
-The engine validates the whole ceiling when it is built, the settings of a capability that an empty list removes included, and each error names its key: `unknown_capability`; `invalid_domain` (`domains` is `'*'` or a list of host names); `root_not_absolute` (`roots` is a list of absolute paths); `method_not_allowed` (`methods` is a list of `'GET'` and `'HEAD'`); `invalid_bound` (each bound is an integer, a time bound at most 2,147,483,647 ms, the longest delay Node's timers keep, and a byte bound or `maxRedirects` at most `Number.MAX_SAFE_INTEGER`); `invalid_audit` (`audit.store` is `'storage'` or `'none'`, `audit.content` is `'digest'` or `'full'`); or `audit_needs_storage` (a ceiling records every capability call, so it needs a storage adapter unless `audit.store` is `'none'`). A configuration read from JSON gets no type check, and these checks stand in for it.
+The engine validates the whole ceiling when it is built, the settings of a capability that an empty list removes included, and each error names its key: `unknown_capability`; `invalid_domain` (`domains` is `'*'` or a list of host names); `root_not_absolute` (`roots` is a list of absolute paths); `method_not_allowed` (`methods` is a list of `'GET'`, `'HEAD'`, `'POST'`, `'PUT'`, `'PATCH'` and `'DELETE'`); `invalid_mode` (`'fs.write'.mode`); `invalid_approval` and `approval_not_available` (an effect capability's `approval`); `executor_does_not_isolate` (an effect capability on an executor that does not declare `isolates: true`); `protected_path` (a write or delete root that holds or lies inside a protected path); `invalid_bound` (each bound is an integer, a time bound at most 2,147,483,647 ms, the longest delay Node's timers keep, and a byte bound or `maxRedirects` at most `Number.MAX_SAFE_INTEGER`); `invalid_audit` (`audit.store` is `'storage'` or `'none'`, `audit.content` is `'digest'` or `'full'`); or `audit_needs_storage` (a ceiling records every capability call, so it needs a storage adapter unless `audit.store` is `'none'`). A configuration read from JSON gets no type check, and these checks stand in for it.
 
 **The request.** A forging agent names capabilities in `implementation.allowlist`; under a ceiling the list is a request. A name the ceiling does not grant refuses the forge before any test case runs, with `capability_not_granted` and the names the host grants. A tool gets the functions it asked for that the ceiling allows, with the ceiling's scopes, and cannot widen a scope.
 
@@ -419,6 +449,28 @@ On `node:vm` these checks are a guardrail: they hold for forged code that acts t
 **Stored tools.** The ceiling is checked again whenever a stored tool loads: a tool whose request the ceiling no longer covers loads suspended with `capability_not_granted`, and loads active again once a ceiling covers it. Under a ceiling, a tool whose stored request this release cannot read (a later release wrote it) loads suspended with `request_unreadable`, since a request derived from its source could narrow it silently.
 
 **Without a ceiling** (the legacy path), forged tools take the three APIs as before, and the engine logs one line when it is built: what runs unscoped, and the ceiling that comes closest.
+
+### Effects: writes, deletes and state-changing requests
+
+`fs.write`, `fs.delete`, and `fetch` with POST, PUT, PATCH or DELETE change the world outside the process, so they are granted only under a ceiling and only on an executor that declares `isolates: true` (`executor_does_not_isolate` otherwise; there is no fallback to `node:vm`). Without a ceiling a request naming `fs.write` or `fs.delete` is refused before any test runs (`effects_need_ceiling`), and a stored tool that names them loads suspended with the same reason.
+
+**What forged code calls.** `fs.writeFile(path, data)` writes a string as UTF-8, or bytes (an `ArrayBuffer` or a typed array) as they are, and resolves to nothing; `fs.unlink(path)` removes one regular file. `fetch(url, { method, headers, body })` sends a listed state-changing method with a string or byte body; a body on GET or HEAD is dropped. On `QuickJSExecutor` the data and the body cross out of the guest as their own string arguments, so the host reads their length before it copies them.
+
+**The order of checks.** Every effect is checked in this order: the call is live; the capability is in the tool's grant; the target fits the scope; the bounds are left; `effectPolicy`; then the intent record. The scope of a write is the path, resolved as a read's is, against the roots; the real path of its parent against the roots' real paths (the parent has to exist: no directory is made); and the last component, which may exist only as a regular file, and under `create-only` not at all. A delete takes the same path checks, and its target must be a regular file. The bounds are the file's size against `maxBytesPerFile`, and the call's totals against `maxBytesPerCall` and `maxFilesPerCall` (`call_quota_exceeded`); an effect's share of the totals is reserved when it is checked, so writes started together cannot pass a bound between them, and a share is returned when `effectPolicy` refuses. The target a record keeps, and `effectPolicy` sees, is the path as written: the parent's real path and the last component.
+
+**A write.** Under `create-only` the target is opened with an exclusive create and no signal, so the broker knows whether it made the file; under `create-or-replace` the data goes to a temporary file beside the target, `.<name>.<call id>.tmp`, opened the same way and then renamed over the target, so a reader never sees a half-written file and a link put at the target meanwhile is replaced rather than followed. The data is written in chunks, the call's end and the write's `timeoutMs` (counted from admission) checked between them. A cut write removes the file it made and is recorded `timed_out` or `aborted`; a file it could not remove is recorded with the code `file_left`. A removal or a rename, once started, runs to its end.
+
+**A state-changing request** goes to a listed host with its body checked against `maxRequestBytes` (`request_too_large`) before anything is sent. A redirect answer is returned to the tool, not followed. The record's target is the method and the URL (`POST https://api.example.com/items`). A request cut after `fetch()` was called may have been acted on by the server, and Node's `fetch` does not say how far it got: its record keeps no outcome, which reads as unknown, with the code `cut_in_flight`, and the call's effect list shows `unknown`.
+
+**Protected roots.** A write or delete root fails construction with `protected_path` when its real path holds or lies inside the library's own package directory, the `node_modules` directory the library was loaded from, the directory of the process's entry script, or a path in `protectedPaths`, or when it passes through a `node_modules` directory; a root that does not exist yet is checked when it first resolves. The check is partial: the library cannot find a host's own code and data in general, so a host lists its source, build output, data directories and a file database in `protectedPaths`.
+
+**`effectPolicy`.** A host function called for every write, delete and state-changing request, forge tests included (`effect.dryRun` tells them apart), after the bounds and before the record. Returning `{ deny: reason }` refuses the effect (`policy_denied`); returning nothing lets it go on; it cannot allow what the scope refused. A throw, or no answer within one second, refuses.
+
+**Forge tests change nothing.** A forge's test cases run as dry runs: every check is made as in a real call, and every check that asks whether a path exists reads the run's own view first. A write lands in a temporary directory made for the run and removed after it, a delete marks its target gone for the run, a read sees what the run wrote or deleted, and a state-changing request is not sent: it takes the first unused answer in the test case's `responses` with its method and URL, and otherwise a `204` with the header `x-agentos-forge-test: not-sent`. These effects are listed with `dryRun: true` and recorded with the code `dry_run`. The judge sees each attempted effect's full target whatever `audit.content` says, and is told that dry-run effects show what the code attempted, not what a real call reaches.
+
+**Approval.** This release builds `approval: 'none'` only. A ceiling that names `'at-forge'` or `'per-call'` fails construction with `approval_not_available`, so no grant is built that skips an approval its host asked for.
+
+**What the broker cannot stop.** Node has no `openat`, so a process that swaps a parent directory for a link between the check and the open is outside these checks; and the exclusive create rests on the file system honouring `O_EXCL`, which Node's documentation says a network file system might not do.
 
 ### The call deadline
 
@@ -437,7 +489,7 @@ result.effects;
 //    outcome: 'ok', bytes: 512, target: '9f2c…', record: 'written', toolId, callId }]
 ```
 
-`outcome` is `ok`, `error`, `aborted`, `timed_out`, `refused` or `pending`. A call refused before it ran says why in `decidedBy` (`capability_not_granted`, `host_not_allowed`, `call_ended`, `audit_unavailable`); one ended while it ran says why in `code` (`host_not_allowed` at a redirect, `response_too_large`, `file_too_large`). `crypto` has one entry per run, with `uses`, the number of calls. A composition's result lists its steps' entries: a step's own effects when it reports them, and `{ kind: 'step', step, tool, ran: true }` for a step with side effects that reports none.
+`outcome` is `ok`, `error`, `aborted`, `timed_out`, `refused`, `pending`, or `unknown` (a state-changing request cut after it was sent, code `cut_in_flight`). A write, delete or state-changing request in a forge test carries `dryRun: true` and the code `dry_run`. A call refused before it ran says why in `decidedBy` (`capability_not_granted`, `host_not_allowed`, `call_ended`, `audit_unavailable`); one ended while it ran says why in `code` (`host_not_allowed` at a redirect, `response_too_large`, `file_too_large`). `crypto` has one entry per run, with `uses`, the number of calls. A composition's result lists its steps' entries: a step's own effects when it reports them, and `{ kind: 'step', step, tool, ran: true }` for a step with side effects that reports none.
 
 With `audit.store: 'storage'`, the default under a ceiling, every capability call is also written to `agentos_emergent_effects`: an intent row before the call (tool id, call id, agent id, capability, target, decision, what decided it, a timestamp) and a terminal update after it (outcome, code, bytes, a timestamp). The target is what the broker checked and acted on: the URL of the first request it sent, as parsed (`http://API.example.com/x` is recorded as `http://api.example.com/x`), or the path it read, resolved; the tool's argument is read once, so the URL recorded is the URL sent. A call refused before its checks passed records the value the tool passed. `target` is a SHA-256 digest unless `audit.content` is `'full'`. A failed intent write refuses the call (`audit_unavailable`), so a storage outage stops forged tools that have a ceiling. A failed terminal write leaves the row without an outcome, which reads as unknown, and the result's entry says `record: 'intent_only'`; after a crash, intent rows without an outcome are unknown, and nothing undoes an operation that ran. A refused call is one row. `audit.retainDays` deletes rows older than that many days from this table, once per engine before its first record, through an index on `intent_at`, so the delete's cost follows the rows it deletes rather than the size of the table; tool rows and state rows are never pruned. A host without a storage adapter sets `audit.store: 'none'`: its results still carry `effects`, and no record is kept.
 
@@ -761,6 +813,11 @@ await importEmergentTool('./slugify.emergent-tool.yaml', { seedId: agentSeedId }
       crypto: {},
     },
 
+    // Paths no fs.write or fs.delete root may hold or lie inside (beside the library,
+    // node_modules and the entry script's directory), and the host's last word on each effect
+    protectedPaths: ['/srv/app'],
+    effectPolicy: (effect) => undefined,  // { deny: reason } refuses
+
     // Effect records under a ceiling
     audit: {
       store: 'storage',   // 'none' without a storage adapter: no records kept
@@ -791,6 +848,7 @@ Without `capabilities`, a forge request names the APIs it needs in `implementati
 - By default, sandbox code runs in an in-process `node:vm` context (`process` / `globalThis` / `require` set to undefined; `codeGeneration: { strings: false, wasm: false }` applies to the context's own intrinsics). The context is handed the host's own constructors (`Object`, `Array`, `Promise` and others) and functions, and through them forged code can reach the host's `Function`. `node:vm` is not a security mechanism (Node's documentation), and runaway memory is not preempted. `QuickJSExecutor` runs forged code in a WebAssembly instance of its own for each call and declares `isolates: true` (see [Executors](#executors)); another executor's `isolates` is its author's claim.
 - Forge, promotion and removal decisions are written to the `agentos_emergent_audit_log` table when a storage adapter is configured; in memory the registry keeps the newest 1,000 entries. Under a ceiling, capability calls are recorded in `agentos_emergent_effects` (see [Effect records](#effect-records))
 - Shared-tier promotion needs an explicit `promote()` call; the approver is recorded only when the caller passes `approvedBy`; there is no built-in human-in-the-loop gate
+- Writes, deletes and state-changing requests are granted only under a ceiling, only on an executor that declares `isolates: true`, within roots and bounds the host writes out, and never while a forge's tests run (see [Effects](#effects-writes-deletes-and-state-changing-requests))
 - Raw sandbox source is redacted at rest by default
 - If no LLM is configured, all forge requests are rejected (fail-closed)
 

@@ -19,7 +19,7 @@ import type {
   ToolExecutionContext,
   JSONSchemaObject,
 } from '../../core/tools/ITool.js';
-import type { ForgeToolRequest, ForgeResult } from './types.js';
+import type { ForgeToolRequest, ForgeResult, ForgeTestResponse } from './types.js';
 import type { EmergentCapabilityEngine } from './EmergentCapabilityEngine.js';
 
 // ============================================================================
@@ -64,6 +64,7 @@ export interface ForgeToolInput extends Record<string, any> {
     input: Record<string, unknown>;
     expectedOutput?: unknown;
     stepOutputs?: Record<string, unknown>;
+    responses?: ForgeTestResponse[];
   }>;
 }
 
@@ -186,10 +187,14 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
               allowlist: {
                 type: 'array',
                 description:
-                  'The capabilities the code uses: fetch, fs.read (in code, the function fs.readFile; ' +
-                  'the name fs.readFile is accepted too) and crypto. The host decides what it grants: ' +
-                  'a name it does not grant refuses the forge, and the refusal names what it grants.',
-                items: { type: 'string', enum: ['fetch', 'fs.read', 'fs.readFile', 'crypto'] },
+                  'The capabilities the code uses: fetch, fs.read (in code, the function fs.readFile), ' +
+                  'fs.write (fs.writeFile(path, data)), fs.delete (fs.unlink(path)) and crypto; the function names ' +
+                  'are accepted too. The host decides what it grants: a name it does not grant refuses the forge, ' +
+                  'and the refusal names what it grants.',
+                items: {
+                  type: 'string',
+                  enum: ['fetch', 'fs.read', 'fs.readFile', 'fs.write', 'fs.writeFile', 'fs.delete', 'fs.unlink', 'crypto'],
+                },
               },
             },
             required: ['mode', 'code', 'allowlist'],
@@ -209,6 +214,26 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
               description:
                 'For a composition: the output of each step whose tool has side effects, keyed by step name. ' +
                 'Those steps are not executed while the tool is forged.',
+            },
+            responses: {
+              type: 'array',
+              description:
+                'For a code tool that sends POST, PUT, PATCH or DELETE requests: the answer each such request ' +
+                'gets while the tool is forged, since none is sent then. A request takes the first unused answer ' +
+                'with its method and URL; one with no answer gets a 204. Writes and deletes made while forging ' +
+                'land in a temporary directory and are read back from it.',
+              maxItems: 16,
+              items: {
+                type: 'object',
+                properties: {
+                  method: { type: 'string', enum: ['POST', 'PUT', 'PATCH', 'DELETE', 'GET', 'HEAD'] },
+                  url: { type: 'string' },
+                  status: { type: 'integer', minimum: 200, maximum: 599 },
+                  headers: { type: 'object', additionalProperties: { type: 'string' } },
+                  body: { type: 'string' },
+                },
+                required: ['method', 'url', 'status'],
+              },
             },
           },
           required: ['input'],

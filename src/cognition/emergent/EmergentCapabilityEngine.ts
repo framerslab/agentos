@@ -31,6 +31,7 @@ import type {
   ComposableToolSpec,
   SandboxExecutionResult,
   SandboxedToolSpec,
+  ForgeTestResponse,
 } from './types.js';
 import { GMI_INSTANCE_ID_PREFIX } from './types.js';
 import {
@@ -45,10 +46,20 @@ import {
   toolFromRow,
   type PersistedSource,
 } from './persisted-source.js';
-import { normalizeAllowlist, toSandboxApis } from './capabilities.js';
+import { EFFECT_CAPABILITIES, normalizeAllowlist, toSandboxApis } from './capabilities.js';
 import { randomUUID } from 'node:crypto';
-import { checkRequest, narrowToForge, resolveCeiling, type ResolvedCeiling } from './ceiling.js';
+import {
+  CeilingError,
+  checkProtectedRoots,
+  checkRequest,
+  grantsEffects,
+  narrowToForge,
+  resolveCeiling,
+  type ResolvedCeiling,
+} from './ceiling.js';
 import { CapabilityBroker } from './broker/CapabilityBroker.js';
+import { protectedRealPaths } from './broker/protected.js';
+import { MAX_TEST_RESPONSES } from './broker/dry-run.js';
 import type { ToolCandidate } from './EmergentJudge.js';
 import type { ITool, ToolEffectRecord, ToolExecutionContext, ToolExecutionResult } from '../../core/tools/ITool.js';
 import type { PersonalityMutationStore } from './PersonalityMutationStore.js';
@@ -492,6 +503,16 @@ export class EmergentCapabilityEngine {
         hasStorage: this.registry.hasStorage(),
       });
       this.ceiling = deps.sandboxForge ? narrowToForge(resolved, deps.sandboxForge.effectiveOptions()) : resolved;
+      // Effects run only where the guest's heap is its own: no fallback.
+      if (grantsEffects(this.ceiling) && !forge.executor.isolates) {
+        throw new CeilingError(
+          'executor_does_not_isolate',
+          'capabilities',
+          `fs.write, fs.delete and state-changing methods need an executor that declares isolates: true; ${forge.executor.name} does not (pass emergentConfig.executor: await QuickJSExecutor.create())`,
+        );
+      }
+      const protectedReal = protectedRealPaths(this.config.protectedPaths ?? []);
+      checkProtectedRoots(this.ceiling, protectedReal);
       const store =
         this.ceiling.audit.store === 'storage'
           ? this.registry.effectsStore({
@@ -499,7 +520,10 @@ export class EmergentCapabilityEngine {
               ...(this.ceiling.audit.retainDays !== undefined ? { retainDays: this.ceiling.audit.retainDays } : {}),
             })
           : undefined;
-      this.broker = new CapabilityBroker(this.ceiling, store);
+      this.broker = new CapabilityBroker(this.ceiling, store, {
+        ...(this.config.effectPolicy ? { policy: this.config.effectPolicy } : {}),
+        protectedReal,
+      });
       forge.attachBroker(this.broker);
     } else if (this.config.allowSandboxTools) {
       // A direct host never calls the loader, so the line comes from here.
@@ -641,6 +665,20 @@ export class EmergentCapabilityEngine {
         };
       }
 
+      // Step 2a': without a ceiling nothing writes, deletes or sends a
+      // state-changing request: the legacy path forges as before.
+      if (!this.ceiling) {
+        const effects = list.capabilities.filter((name) => EFFECT_CAPABILITIES.includes(name));
+        if (effects.length > 0) {
+          return {
+            success: false,
+            error:
+              `effects_need_ceiling: ${effects.join(', ')} need a ceiling that grants them (emergentConfig.capabilities); ` +
+              'without one this host grants fetch, fs.read and crypto to code-forged tools',
+          };
+        }
+      }
+
       // Step 2b: under a ceiling the list is a request, and a name the ceiling
       // does not grant refuses the forge before any test case runs.
       if (this.ceiling) {
@@ -681,12 +719,21 @@ export class EmergentCapabilityEngine {
         }
       }
 
-      // Step 3: Execute test cases in the sandbox, each as a run of its own.
+      // Step 2e: the answers a test case gives its state-changing requests.
+      const answersRefused = this.refuseTestResponses(request.testCases);
+      if (answersRefused) {
+        return { success: false, error: answersRefused };
+      }
+
+      // Step 3: Execute test cases in the sandbox, each as a run of its own,
+      // and each a dry run: nothing it writes, deletes or sends is real.
       for (const tc of request.testCases) {
-        const sandboxResult = await this.runSandboxed(request.implementation, tc.input, {
-          toolId,
-          agentId: context.agentId,
-        });
+        const sandboxResult = await this.runSandboxed(
+          request.implementation,
+          tc.input,
+          { toolId, agentId: context.agentId },
+          { responses: tc.responses ?? [] },
+        );
 
         testResults.push({
           input: tc.input,
@@ -1931,6 +1978,9 @@ export class EmergentCapabilityEngine {
         if (list.unknown.length > 0 || !checkRequest(list.capabilities, this.ceiling).ok) {
           return 'capability_not_granted';
         }
+      } else if (normalizeAllowlist(implementation.allowlist).capabilities.some((name) => EFFECT_CAPABILITIES.includes(name))) {
+        // Writes and deletes need a ceiling; a stored tool that asks for them waits for one.
+        return 'effects_need_ceiling';
       }
       return null;
     }
@@ -2498,6 +2548,52 @@ export class EmergentCapabilityEngine {
   }
 
   /**
+   * The answers a forge's test cases give their state-changing requests,
+   * checked before any test runs: at most {@link MAX_TEST_RESPONSES} a case,
+   * each with a method, an absolute URL, a status from 200 to 599 and a body
+   * within the ceiling's `maxResponseBytes`. Returns why they are refused, or
+   * undefined.
+   */
+  private refuseTestResponses(testCases: readonly { responses?: readonly ForgeTestResponse[] }[]): string | undefined {
+    const methods = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'];
+    const limit = this.ceiling?.fetch?.maxResponseBytes ?? 5 * 1024 * 1024;
+    for (const [index, tc] of testCases.entries()) {
+      const responses = tc.responses ?? [];
+      if (!Array.isArray(responses) || responses.length > MAX_TEST_RESPONSES) {
+        return `invalid_test_responses: test case ${index} gives more than ${MAX_TEST_RESPONSES} answers, or not a list`;
+      }
+      for (const answer of responses) {
+        let url = '';
+        try {
+          url = new URL(String(answer?.url)).href;
+        } catch {
+          url = '';
+        }
+        // The answers come from a forging agent's JSON: their types are not trusted.
+        const status: unknown = answer?.status;
+        const body: unknown = answer?.body;
+        const headers: unknown = answer?.headers;
+        if (
+          !methods.includes(String(answer?.method)) ||
+          url === '' ||
+          typeof status !== 'number' ||
+          !Number.isInteger(status) ||
+          status < 200 ||
+          status > 599 ||
+          (body !== undefined && typeof body !== 'string') ||
+          (headers !== undefined && (typeof headers !== 'object' || headers === null))
+        ) {
+          return `invalid_test_responses: test case ${index} has an answer without a method, an absolute URL and a status from 200 to 599`;
+        }
+        if (typeof body === 'string' && Buffer.byteLength(body, 'utf8') > limit) {
+          return `invalid_test_responses: test case ${index} has an answer body over ${limit} bytes`;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * One run of forged code, as a forge test or a call. Under a ceiling the
    * run has its own call handle, which ends when the run does, however it
    * ends (it returns, throws or times out): the broker refuses capability
@@ -2509,6 +2605,7 @@ export class EmergentCapabilityEngine {
     implementation: SandboxedToolSpec,
     input: unknown,
     who: { toolId: string; agentId: string },
+    dryRun?: { responses: readonly ForgeTestResponse[] },
   ): Promise<SandboxExecutionResult & { effects?: ToolEffectRecord[] }> {
     const request = {
       code: implementation.code,
@@ -2526,6 +2623,7 @@ export class EmergentCapabilityEngine {
       toolId: who.toolId,
       agentId: who.agentId,
       signal: controller.signal,
+      ...(dryRun ? { dryRun } : {}),
     };
     let result: SandboxExecutionResult;
     try {

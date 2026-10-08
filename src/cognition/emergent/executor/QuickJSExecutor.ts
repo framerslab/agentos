@@ -53,14 +53,14 @@ import type { ExecutorRunRequest, ExecutorRunResult, ForgedCodeExecutor } from '
 /** The version of both QuickJS packages this release runs on. */
 export const QUICKJS_VERSION = '0.32.0';
 
-/** Host calls (`fetch`, `fs.readFile`) one call may have in flight at once. */
+/** Host calls (`fetch` and the file functions) one call may have in flight at once. */
 export const MAX_PENDING_HOST_CALLS = 16;
 
 const CORE_PACKAGE = 'quickjs-emscripten-core';
 const VARIANT_PACKAGE = '@jitl/quickjs-wasmfile-release-sync';
 
 /** The bindings that start host work and answer with a promise. */
-const ASYNC_BINDINGS: ReadonlySet<string> = new Set(['fetch', 'fs_readFile']);
+const ASYNC_BINDINGS: ReadonlySet<string> = new Set(['fetch', 'fs_readFile', 'fs_writeFile', 'fs_unlink']);
 
 const PAGE_BYTES = 65_536;
 const MIB = 1_048_576;

@@ -245,16 +245,24 @@ describe('SandboxedToolForge', () => {
   });
 
   // -------------------------------------------------------------------------
-  // 12. fs.write* is always banned
+  // 12. fs.writeFile needs fs.write; every other fs.write* name is banned
   // -------------------------------------------------------------------------
-  it('bans fs.writeFile even when fs.readFile is in the allowlist', () => {
-    const result = forge.validateCode(
-      'function execute(input) { fs.writeFile("/tmp/x", "data"); }',
-      ['fs.readFile'],
-    );
+  it('refuses fs.writeFile unless the list names fs.write, and every other fs.write* or fs.unlink* name whatever it names', () => {
+    const writer = 'function execute(input) { fs.writeFile("/tmp/x", "data"); }';
+    expect(forge.validateCode(writer, ['fs.readFile']).violations).toContain('fs.writeFile is not in the allowlist');
+    expect(forge.validateCode(writer, ['fs.write'])).toEqual({ valid: true, violations: [] });
+    expect(forge.validateCode(writer, ['fs.writeFile'])).toEqual({ valid: true, violations: [] });
 
-    expect(result.valid).toBe(false);
-    expect(result.violations).toContain('fs.write* is forbidden');
+    for (const banned of ['fs.writeFileSync("/tmp/x", "d")', 'fs.write(1, "d")', 'fs.writeSync(1, "d")', 'fs.writev(1, [])']) {
+      const result = forge.validateCode(`function execute() { ${banned}; }`, ['fs.read', 'fs.write', 'fs.delete']);
+      expect(result.violations).toContain('fs.write* other than fs.writeFile is forbidden');
+    }
+    expect(forge.validateCode('function execute() { fs.unlinkSync("/tmp/x"); }', ['fs.read', 'fs.delete']).violations).toContain(
+      'fs.unlink* other than fs.unlink is forbidden',
+    );
+    expect(forge.validateCode('function execute() { fs.unlink("/tmp/x"); }', ['fs.read']).violations).toContain(
+      'fs.unlink is not in the allowlist',
+    );
   });
 
   // -------------------------------------------------------------------------

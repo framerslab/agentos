@@ -464,6 +464,16 @@ APPROVAL RULES (hard):
 Respond ONLY with JSON:
 {"safety":{"passed":true/false,"concerns":[]},"correctness":{"passed":true/false,"failedTests":[]},"determinism":{"likely":true/false,"reasoning":""},"bounded":{"likely":true/false,"reasoning":""},"confidence":0.0-1.0,"approved":true/false,"reasoning":""}`;
 
+    const dryRuns = candidate.testResults.some((r) =>
+      (r.effects ?? []).some((e) => e !== null && typeof e === 'object' && (e as { dryRun?: unknown }).dryRun === true),
+    );
+    const dryRunNote = dryRuns
+      ? '\nEffects marked "dryRun": true were checked as a real call checks them and not carried out: writes went ' +
+        'to a temporary directory, deletes were not made, and state-changing requests were not sent; their answers ' +
+        "came from the test case's responses, which the tool's author wrote. They show what the code attempted, " +
+        'not what a real call will reach.'
+      : '';
+
     const user = `Tool name: ${candidate.name}
 Description: ${candidate.description}
 Input schema: ${JSON.stringify(candidate.inputSchema)}
@@ -473,7 +483,7 @@ Source code:
 ${candidate.source}
 Requested sandbox APIs: ${JSON.stringify(candidate.allowlist ?? [])}
 Test cases and results:
-${testResultsFormatted}`;
+${testResultsFormatted}${dryRunNote}`;
 
     return { system, user };
   }

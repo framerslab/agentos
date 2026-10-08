@@ -71,6 +71,13 @@ describe('inferRequestFromCode', () => {
     ],
     ['a space before the dot', 'async function execute(i) { return await fs .readFile(i.path); }'],
     ['an fs member other than readFile', 'async function execute(i) { return await fs.stat(i.path); }'],
+    ['fs.write alone', 'async function execute(i) { await fs.writeFile(i.path, i.text); return {}; }'],
+    ['fs.delete alone', 'async function execute(i) { await fs.unlink(i.path); return {}; }'],
+    [
+      'a read, a write and a delete',
+      'async function execute(i) { const t = await fs.readFile(i.a); await fs.writeFile(i.b, t); await fs.unlink(i.a); return {}; }',
+    ],
+    ['a space before writeFile', 'async function execute(i) { await fs . writeFile(i.path, i.text); return {}; }'],
     [
       'a name only in a comment',
       'function execute(i) {\n  // crypto.randomUUID() would also do\n  return { id: i.n + 1 };\n}',
