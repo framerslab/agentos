@@ -53,6 +53,3 @@ docs/*-plan-phase*.md
 
 # Example run output — large LLM artifacts, not part of the published surface
 examples/*/output/*.json
-
-# The forge executor evidence run's report (its node_modules/ is covered by the rule above)
-evidence/forge-executors/out/

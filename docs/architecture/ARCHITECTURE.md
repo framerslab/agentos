@@ -1152,8 +1152,8 @@ When `emergent: true` is set in [`AgentOSConfig`](https://github.com/framerslab/
 
 1. The agent generates JavaScript code for a new tool (name, description, input schema, implementation)
 2. [`SandboxedToolForge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/SandboxedToolForge.ts) performs static validation, rejecting dangerous patterns (`eval`, `Function`, `process`, `require`, `import`, `child_process`, `fs.write*`)
-3. Validated code executes in an in-process node:vm context (not a security boundary, per Node's documentation) via [`CodeSandbox`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/executor/CodeSandbox.ts) with configurable bounds:
-   - Memory: observed as a heap delta only, not preemptively capped
+3. Validated code executes on the forge's executor: by default an in-process node:vm context (not a security boundary, per Node's documentation) via [`CodeSandbox`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/executor/CodeSandbox.ts), or a QuickJS WebAssembly instance per call with [`QuickJSExecutor`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/executor/QuickJSExecutor.ts), with configurable bounds:
+   - Memory: observed as a heap delta in-process; `QuickJSExecutor` stops the guest at it
    - Timeout: 5,000 ms default
    - API allowlist: `fetch` (any method and host; `fetchDomainAllowlist` checks the first URL's host when a host sets it), `fs.readFile` (under `fsReadRoots`, the working directory by default; 1 MB, checked after the read), `crypto` (hash, HMAC, UUID)
 4. [`EmergentJudge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentJudge.ts) evaluates the tool against safety criteria before permanent registration

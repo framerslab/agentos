@@ -1,3 +1,21 @@
+## [0.12.24](https://github.com/framerslab/agentos/compare/v0.12.23...v0.12.24) (2026-10-08)
+
+### fix
+
+* **llm:** map Requesty's model list from the shape its API returns (#164) ([bbcabc3](https://github.com/framerslab/agentos/commit/bbcabc3b85b658a604ca82a12af8f325b8ae3d01))
+
+## [0.12.23](https://github.com/framerslab/agentos/compare/v0.12.22...v0.12.23) (2026-10-08)
+
+### fix
+
+* **channels:** accept a Plivo callback once and sign V3 as plivo-python does (#163) ([fe31524](https://github.com/framerslab/agentos/commit/fe31524eb0b7e0cdb56465611e3959ae156ce6f2))
+
+## [0.12.22](https://github.com/framerslab/agentos/compare/v0.12.21...v0.12.22) (2026-10-08)
+
+### feat
+
+* **emergent:** QuickJSExecutor, an isolating executor for forged code (#160) ([598d041](https://github.com/framerslab/agentos/commit/598d041f4a70c6ab43e35b1d960a65bb77ac4748))
+
 ## [0.12.21](https://github.com/framerslab/agentos/compare/v0.12.20...v0.12.21) (2026-10-08)
 
 ### docs
