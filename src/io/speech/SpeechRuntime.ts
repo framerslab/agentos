@@ -145,6 +145,11 @@ export class SpeechRuntime {
           region: env['MINIMAX_REGION'] === 'china' ? 'china' : 'global',
           model: env['MINIMAX_TTS_MODEL'] ?? 'speech-2.8-hd',
           voice: env['MINIMAX_TTS_VOICE'],
+          // The hosts URL output may be downloaded from, comma-separated.
+          audioUrlHosts: env['MINIMAX_TTS_AUDIO_URL_HOSTS']
+            ?.split(',')
+            .map((host) => host.trim())
+            .filter(Boolean),
         });
         this.registry.registerTtsProvider(tts);
         this.registerProviderInResolver(tts, 'tts');

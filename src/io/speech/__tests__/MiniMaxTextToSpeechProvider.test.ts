@@ -59,7 +59,7 @@ describe("MiniMaxTextToSpeechProvider", () => {
     });
   });
 
-  it("uses the China endpoint and downloads URL output", async () => {
+  it("uses the China endpoint and downloads URL output from an allowed host", async () => {
     const fetchImpl = vi
       .fn(
         (
@@ -74,12 +74,11 @@ describe("MiniMaxTextToSpeechProvider", () => {
           base_resp: { status_code: 0 },
         }),
       )
-      .mockResolvedValueOnce({
-        arrayBuffer: vi.fn(async () => Buffer.from("audio")),
-      } as unknown as Response);
+      .mockResolvedValueOnce(new Response("audio"));
     const provider = new MiniMaxTextToSpeechProvider({
       apiKey: "test-key",
       region: "china",
+      audioUrlHosts: ["cdn.example.com"],
       fetchImpl,
     });
 
@@ -93,6 +92,13 @@ describe("MiniMaxTextToSpeechProvider", () => {
     );
     expect(result.audioBuffer.toString()).toBe("audio");
     expect(result.mimeType).toBe("audio/wav");
+
+    // The download carries no key, refuses redirects and has a deadline.
+    const [downloadUrl, downloadInit] = fetchImpl.mock.calls[1]!;
+    expect(downloadUrl).toBe("https://cdn.example.com/audio.wav");
+    expect(downloadInit?.headers).toBeUndefined();
+    expect(downloadInit?.redirect).toBe("error");
+    expect(downloadInit?.signal).toBeInstanceOf(AbortSignal);
   });
 
   it("creates and queries asynchronous speech tasks", async () => {
@@ -175,6 +181,121 @@ describe("MiniMaxTextToSpeechProvider", () => {
     ).rejects.toThrow("internal.example.net");
     // Only the synthesis request went out; the returned URL was never fetched.
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * A provider built with `config` whose synthesis response links to `link`;
+   * `download` answers the request for that link.
+   */
+  function urlOutputProvider(
+    link: string,
+    config: {
+      audioUrlHosts?: string[];
+      maxAudioDownloadBytes?: number;
+      audioDownloadTimeoutMs?: number;
+    },
+    download: (init?: RequestInit) => Promise<Response> = async () =>
+      new Response("audio"),
+  ) {
+    const fetchImpl = vi
+      .fn(
+        (_input: string | URL | Request, init?: RequestInit): Promise<Response> =>
+          download(init),
+      )
+      .mockResolvedValueOnce(
+        response({
+          data: { audio: link, status: 2 },
+          base_resp: { status_code: 0 },
+        }),
+      );
+    const provider = new MiniMaxTextToSpeechProvider({
+      apiKey: "test-key",
+      fetchImpl,
+      ...config,
+    });
+    const synthesize = () =>
+      provider.synthesize("hello", {
+        providerSpecificOptions: { outputFormat: "url" },
+      });
+    return { fetchImpl, synthesize };
+  }
+
+  it.each([
+    ["an http link", "http://cdn.example.com/a.mp3", "only https"],
+    [
+      "a host that only starts with an allowed one",
+      "https://cdn.example.com.attacker.example/a.mp3",
+      "not in audioUrlHosts",
+    ],
+    ["text that is not a URL", "audio.mp3", "not a URL"],
+  ])("refuses %s without fetching it", async (_name, link, message) => {
+    const { fetchImpl, synthesize } = urlOutputProvider(link, {
+      audioUrlHosts: ["cdn.example.com"],
+    });
+
+    await expect(synthesize()).rejects.toThrow(message);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows the subdomains of a *. entry, not the domain itself", async () => {
+    const config = { audioUrlHosts: ["*.example.com"] };
+
+    const sub = urlOutputProvider("https://eu.audio.example.com/a.mp3", config);
+    await expect(sub.synthesize()).resolves.toMatchObject({
+      audioBuffer: Buffer.from("audio"),
+    });
+
+    const bare = urlOutputProvider("https://example.com/a.mp3", config);
+    await expect(bare.synthesize()).rejects.toThrow("not in audioUrlHosts");
+  });
+
+  it("fails on a download that is not a success", async () => {
+    const { synthesize } = urlOutputProvider(
+      "https://cdn.example.com/a.mp3",
+      { audioUrlHosts: ["cdn.example.com"] },
+      async () => new Response("denied", { status: 403 }),
+    );
+
+    await expect(synthesize()).rejects.toThrow("download failed (403)");
+  });
+
+  it("stops at maxAudioDownloadBytes, read or declared", async () => {
+    const config = { audioUrlHosts: ["cdn.example.com"], maxAudioDownloadBytes: 4 };
+
+    const read = urlOutputProvider("https://cdn.example.com/a.mp3", config, async () =>
+      new Response("12345"),
+    );
+    await expect(read.synthesize()).rejects.toThrow("larger than 4 bytes");
+
+    const declared = urlOutputProvider("https://cdn.example.com/a.mp3", config, async () =>
+      new Response("12", { headers: { "content-length": "999" } }),
+    );
+    await expect(declared.synthesize()).rejects.toThrow("larger than 4 bytes");
+
+    const fits = urlOutputProvider("https://cdn.example.com/a.mp3", config, async () =>
+      new Response("1234"),
+    );
+    await expect(fits.synthesize()).resolves.toMatchObject({
+      audioBuffer: Buffer.from("1234"),
+    });
+  });
+
+  it("gives up on a download that outlasts audioDownloadTimeoutMs", async () => {
+    const { synthesize } = urlOutputProvider(
+      "https://cdn.example.com/a.mp3",
+      { audioUrlHosts: ["cdn.example.com"], audioDownloadTimeoutMs: 5 },
+      (init) =>
+        new Promise<Response>((resolve, reject) => {
+          // A reply that would come long after the deadline.
+          const late = setTimeout(() => resolve(new Response("late")), 10_000);
+          init?.signal?.addEventListener("abort", () => {
+            clearTimeout(late);
+            reject(init?.signal?.reason);
+          });
+        }),
+    );
+
+    await expect(synthesize()).rejects.toThrow("timed out after 5 ms");
   });
 
   it("runs the WebSocket start, continue, and finish protocol", async () => {
