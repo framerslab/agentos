@@ -5,6 +5,7 @@
  * @module @framers/agentos/emergent/ceiling
  */
 
+import { realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { CAPABILITY_NAMES } from './capabilities.js';
 import type { CapabilityName, EmergentAuditConfig, ForgedCapabilities } from './types.js';
@@ -257,11 +258,28 @@ function within(candidate: string, root: string): boolean {
 }
 
 /**
+ * A path with its symlinks resolved, as the broker resolves read roots (the
+ * native realpath, as `fs/promises` uses), or the path as given when it does
+ * not resolve: a path that does not exist reads nothing.
+ */
+function realOrGiven(candidate: string): string {
+  try {
+    return realpathSync.native(candidate);
+  } catch {
+    return candidate;
+  }
+}
+
+/**
  * A host-built forge under a ceiling: its options may be narrower than the
  * ceiling, and then they narrow it; they may never be wider. Only the
  * capabilities the ceiling grants are compared, since the broker injects no
  * other. An intersection is taken in the ceiling's terms and never widens:
- * disjoint lists are wider, not empty.
+ * disjoint lists are wider, not empty. Read roots are compared after their
+ * symlinks are resolved, the forge's and the ceiling's alike, since the
+ * broker reads by real path: a forge root that is a link inside a ceiling
+ * root to a directory outside it is wider. The narrowed roots are the
+ * forge's, as it names them.
  *
  * @throws CeilingError (`forge_wider_than_ceiling`) naming the forge option.
  */
@@ -287,9 +305,15 @@ export function narrowToForge(
     }
   }
   if (ceiling['fs.read']) {
-    const ceilingRoots = ceiling['fs.read'].roots;
+    const ceilingRoots = ceiling['fs.read'].roots.map(realOrGiven);
     const forgeRoots = forge.fsReadRoots.map((root) => path.resolve(root));
-    const wider = forgeRoots.filter((root) => !ceilingRoots.some((ceilingRoot) => within(root, ceilingRoot)));
+    const wider: string[] = [];
+    for (const root of forgeRoots) {
+      const real = realOrGiven(root);
+      if (!ceilingRoots.some((ceilingRoot) => within(real, ceilingRoot))) {
+        wider.push(real === root ? root : `${root} (resolves to ${real})`);
+      }
+    }
     if (wider.length > 0) {
       throw new CeilingError('forge_wider_than_ceiling', 'sandboxForge.fsReadRoots', `outside the ceiling: ${wider.join(', ')}`);
     }

@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { checkRequest, narrowToForge, resolveCeiling } from '../ceiling.js';
 
 const storage = { hasStorage: true };
@@ -127,6 +130,33 @@ describe('narrowToForge', () => {
     const narrowed = narrowToForge(ceiling, { fetchDomainAllowlist: ['a.example'], fsReadRoots: [] });
     expect(narrowed['fs.read']).toBeUndefined();
     expect(checkRequest(['fs.read'], narrowed)).toEqual({ ok: false, refused: ['fs.read'], allowed: ['fetch'] });
+  });
+
+  it('compares read roots after symlinks are resolved: a forge root that links out of a ceiling root is wider', () => {
+    const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ceiling-roots-')));
+    const data = path.join(base, 'data');
+    const release = path.join(base, 'releases', 'v42');
+    fs.mkdirSync(path.join(data, 'v1'), { recursive: true });
+    fs.mkdirSync(release, { recursive: true });
+    // A link inside the ceiling root to a directory outside it, a link that
+    // stays inside it, and the ceiling root reached through a link.
+    fs.symlinkSync(release, path.join(data, 'current'));
+    fs.symlinkSync(path.join(data, 'v1'), path.join(data, 'latest'));
+    fs.symlinkSync(data, path.join(base, 'data-link'));
+    const ceiling = resolveCeiling({ 'fs.read': { roots: [data] } }, undefined, storage);
+
+    expect(() =>
+      narrowToForge(ceiling, { fetchDomainAllowlist: [], fsReadRoots: [path.join(data, 'current')] }),
+    ).toThrow('forge_wider_than_ceiling: sandboxForge.fsReadRoots');
+
+    // A link that resolves inside the ceiling narrows it, kept as the forge names it.
+    const inside = narrowToForge(ceiling, { fetchDomainAllowlist: [], fsReadRoots: [path.join(data, 'latest')] });
+    expect(inside['fs.read']?.roots).toEqual([path.join(data, 'latest')]);
+
+    // The ceiling's roots are resolved too.
+    const throughLink = resolveCeiling({ 'fs.read': { roots: [path.join(base, 'data-link')] } }, undefined, storage);
+    const under = narrowToForge(throughLink, { fetchDomainAllowlist: [], fsReadRoots: [path.join(data, 'v1')] });
+    expect(under['fs.read']?.roots).toEqual([path.join(data, 'v1')]);
   });
 
   it('the forge options of a capability the ceiling does not grant are not compared', () => {
