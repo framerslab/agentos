@@ -271,6 +271,8 @@ interface AdmissionCandidate {
   tier: ToolTier;
   /** The owner the row or the host-built object carries (`created_by_agent`). */
   createdBy: string;
+  /** The session the row (`created_by_session`) or the host-built object's source names. */
+  session?: string;
   /** False when the row's last state write did not finish its flag write; undefined for a host-built object. */
   flagSynced?: boolean;
   buildTool: (implementation: ToolImplementation) => EmergentTool;
@@ -1087,6 +1089,7 @@ export class EmergentCapabilityEngine {
           legacyActive: (tool as EmergentTool & { isActive?: boolean }).isActive ?? true,
           tier: tool.tier,
           createdBy: tool.createdBy,
+          session: sessionFromSource(tool.source) ?? undefined,
           buildTool: () => tool,
         },
         { readAt },
@@ -1243,6 +1246,9 @@ export class EmergentCapabilityEngine {
       if (!row) {
         return false;
       }
+      if (row.tier === 'session') {
+        this.registry.noteStoredSession(toolId, row.created_by_session);
+      }
       await this.registry.setState(toolId, 'suspended', reason, { setBy: 'host' });
       return true;
     }
@@ -1265,6 +1271,9 @@ export class EmergentCapabilityEngine {
       const row = await this.registry.loadRow(toolId);
       if (!row) {
         return false;
+      }
+      if (row.tier === 'session') {
+        this.registry.noteStoredSession(toolId, row.created_by_session);
       }
       await this.registry.setState(toolId, 'demoted', reason, { setBy: 'host' });
       return true;
@@ -1347,6 +1356,7 @@ export class EmergentCapabilityEngine {
           legacyActive: true,
           tier: tool.tier,
           createdBy: tool.createdBy,
+          session: sessionFromSource(tool.source) ?? undefined,
           buildTool: () => tool,
         },
         { force, readAt },
@@ -1425,6 +1435,7 @@ export class EmergentCapabilityEngine {
         flagSynced: row.flag_synced == null ? undefined : !(row.flag_synced === 0 || row.flag_synced === false),
         tier: row.tier,
         createdBy: row.created_by_agent,
+        session: row.created_by_session,
         buildTool: (implementation) => toolFromRow(row, implementation),
       },
       options,
@@ -1475,6 +1486,11 @@ export class EmergentCapabilityEngine {
     // The point after which a change makes what this admission holds stale:
     // where its row was read, or, for a caller that did not say, now.
     const readAt = options.readAt ?? this.registry.generation(toolId);
+    // A stored session tool's session, recorded before any state is held for
+    // it here: the session's cleanup lets go of that state before it returns.
+    if (candidate.tier === 'session' && candidate.session) {
+      this.registry.noteStoredSession(toolId, candidate.session);
+    }
     let legacyActive = candidate.legacyActive;
     // A row whose last state write did not finish its flag write: finish it
     // first, so the flag reads what the state row says before anything is

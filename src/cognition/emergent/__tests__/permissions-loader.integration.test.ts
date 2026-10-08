@@ -1544,4 +1544,46 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
     await host.engine.onHostToolRegistered('late_echo');
     expect(await host.orchestrator.getTool('echo_later')).toBeUndefined();
   });
+
+  it("a session's cleanup lets go of its held suspensions before it returns, so a step tool registered right after brings nothing back", async () => {
+    const db = createSqliteAdapter();
+    const host = await makeForgeHost({ db });
+    seedToolRow(db, {
+      id: 'ss-2',
+      name: 'echo_later',
+      mode: 'compose',
+      tier: 'session',
+      createdBySession: 'sess-r2',
+      source: JSON.stringify({
+        mode: 'compose',
+        steps: [{ name: 's', tool: 'late_echo', inputMapping: { text: '$input.text' } }],
+      }),
+      inputSchema: TEXT_IN,
+      outputSchema: TEXT_OUT,
+    });
+    expect((await host.engine.loadPersistedTools({ tiers: ['session'], sessionId: 'sess-r2' })).outcomes).toEqual([
+      { toolId: 'ss-2', name: 'echo_later', state: 'suspended', reason: 'step_missing' },
+    ]);
+
+    // A read of the session's rows that the cleanup may make is held, so the
+    // registration below lands while such a read would still be under way.
+    const sessionRows = db.gateNext("FROM agentos_emergent_tools WHERE tier = 'session'");
+    host.orchestrator.cleanupEmergentSession('sess-r2');
+    // The step's tool registers right after the cleanup returns.
+    await host.orchestrator.registerTool(echoTool('late_echo'));
+    await host.engine.onHostToolRegistered('late_echo');
+    sessionRows.release();
+
+    // Nothing of the ended session comes back: not registered, not callable,
+    // not indexed under it, no state held, and its rows go.
+    expect(await host.orchestrator.getTool('echo_later')).toBeUndefined();
+    expect((await callTool(host.orchestrator, 'echo_later', { text: 'x' })).isError).toBe(true);
+    expect(host.engine.getSessionTools('sess-r2')).toEqual([]);
+    const registry = (host.engine as unknown as { registry: EmergentToolRegistry }).registry;
+    expect(registry.getState('ss-2')).toBeUndefined();
+    await vi.waitFor(() => {
+      expect(readToolRow(db, 'ss-2')).toBeUndefined();
+      expect(readStateRow(db, 'ss-2')).toBeUndefined();
+    });
+  });
 });
