@@ -381,6 +381,13 @@ describe('7. keys on the first call', () => {
     expect(fetchMock.mock.calls.every(([u]) => !/nameless\.example/.test(String(u)))).toBe(true);
     expect(JSON.stringify(fetchMock.mock.calls.map(([, i]) => (i as RequestInit).headers))).not.toContain('sk-nameless-default-0013');
   });
+  it('an agency-level provider that disagrees with the prefix of the agency model yields to it, as the agency calls do: the chair calls Anthropic with the agency key, and no OpenAI request carries it', async () => {
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('B')], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]], [GEMINI, geminiText('C')]]);
+    const result = await agency({ strategy: 'panel', provider: 'openai', model: 'anthropic:claude-opus-5-5', apiKey: K.agency, modelPool: POOL(), agents: SEATS() } as never).generate('review');
+    expect(result.text).toBe('Merged');
+    expect(calls(ANTHROPIC, 'POST').some((c) => header(c, 'x-api-key') === K.agency && c.body?.model === 'claude-opus-5-5')).toBe(true);
+    expect(JSON.stringify(calls(/api\.openai\.com/).map((c) => c.init.headers))).not.toContain(K.agency);
+  });
   it('a fixed seat on another provider with no key is unseated under panel; a provider-only fixed seat runs on that provider default model', async () => {
     vi.stubEnv('XAI_API_KEY', K.xai);
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('B')], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]], [GEMINI, geminiText('C')], [XAI_LIST, openaiListing], [XAI_CHAT, openaiText('Grok view', 'stop', 'grok-2')]]);

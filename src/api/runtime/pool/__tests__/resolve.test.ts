@@ -42,6 +42,14 @@ describe('resolveSeatCredentials', () => {
     // An agency-level Ollama tag is never split either: a seat that names nothing runs on it whole.
     expect(resolveSeatCredentials({ inherits: true }, agency({ provider: 'ollama', model: 'mistral:7b', baseUrl: 'http://127.0.0.1:11434' }))).toMatchObject({ ok: true, value: { provider: 'ollama', model: 'mistral:7b', baseUrl: 'http://127.0.0.1:11434' } });
   });
+  it('an agency-level provider that disagrees with a known prefix of the agency model yields to the prefix, and the agency key follows the prefix', () => {
+    vi.stubEnv('OPENAI_API_KEY', 'env-openai');
+    // resolveModelOption sends the agency's own calls to the prefix's provider, whatever `provider` says.
+    const a = agency({ provider: 'openai', model: 'anthropic:claude-opus-5-5', apiKey: 'agency-key' });
+    expect(agencyProviderOf(a)).toBe('anthropic');
+    expect(resolveSeatCredentials({ inherits: true }, a)).toMatchObject({ ok: true, value: { provider: 'anthropic', model: 'claude-opus-5-5', apiKey: 'agency-key' } });
+    expect(resolveSeatCredentials({ provider: 'openai', model: 'gpt-4.1', inherits: true }, a)).toMatchObject({ ok: true, value: { provider: 'openai', apiKey: 'env-openai' } });
+  });
 });
 
 describe('availabilityOf', () => {
