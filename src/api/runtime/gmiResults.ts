@@ -7,8 +7,9 @@
  * The rules are streamText's: the turn's text is the latest step that produced
  * text; usage adds each step's STEP_FINISHED usage once (USAGE_UPDATE carries a
  * request's running total) plus the billed usage of attempts that failed, before
- * any output or after it; a run that called tools and produced no text ends as
- * `'tool-calls'`; an ERROR chunk ends it as `'error'` with the GMI's code.
+ * any output or after it; a run ends with its last step's own finish reason, or
+ * as `'tool-calls'` when the step limit ran out with calls outstanding and no
+ * text; an ERROR chunk ends it as `'error'` with the GMI's code.
  */
 import { GMIError, GMIErrorCode } from '../../core/utils/errors.js';
 import {
@@ -69,11 +70,17 @@ export class GmiTurnFolder {
   private readonly overrides = new Map<number, string>();
   private readonly failed: GmiFailedAttempt[] = [];
   private failure: GmiTurnError | undefined;
+  /** How many calls had been requested when the latest step finished: the calls after it belong to the next step. */
+  private callsBeforeLastStep = 0;
+  /** Whether the latest finished step requested tools (the GMI then runs them and goes on, unless the step limit ran out). */
+  private lastStepCalledTools = false;
 
   push(chunk: GMIOutputChunk): void {
     switch (chunk.type) {
       case GMIOutputChunkType.STEP_FINISHED:
         this.steps.push(chunk.content as StepFinishedChunkPayload);
+        this.lastStepCalledTools = this.calls.length > this.callsBeforeLastStep;
+        this.callsBeforeLastStep = this.calls.length;
         break;
       case GMIOutputChunkType.TOOL_CALL_REQUEST:
         for (const call of (chunk.content as ToolCallRequest[]) ?? []) this.calls.push({ call });
@@ -176,12 +183,18 @@ export class GmiTurnFolder {
     return this.failure;
   }
 
+  /**
+   * How the run ended, by streamText's rules: the last step's own reason when
+   * that step requested no tools; when it did, the step limit ran out, and a run
+   * with calls outstanding and no text ended as 'tool-calls'.
+   */
   finishReason(): GenerateTextResult['finishReason'] {
     if (this.failure) return 'error';
     const last = this.steps.at(-1);
     // The schema answer is the turn's reply, whatever stop reason carried it.
     if (last?.structuredOutput !== undefined) return 'stop';
-    return this.calls.length > 0 && !this.text() ? 'tool-calls' : normalizeStreamFinishReason(last?.finishReason ?? null);
+    if (this.lastStepCalledTools && this.calls.length > 0 && !this.text()) return 'tool-calls';
+    return normalizeStreamFinishReason(last?.finishReason ?? null);
   }
 
   /** The error the turn ended with, as a GMIError keeping the GMI's code. */
