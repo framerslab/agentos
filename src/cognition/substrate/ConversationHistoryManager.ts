@@ -63,9 +63,7 @@ export class ConversationHistoryManager {
 
   /**
    * Appends a new turn's messages to the conversation history and trims
-   * to the configured maximum length. The trim removes the oldest messages,
-   * and with them any tool results the cut would leave without the assistant
-   * message that called their tools.
+   * to the configured maximum length.
    *
    * Handles TEXT, MULTIMODAL_CONTENT, TOOL_RESPONSE, and SYSTEM_MESSAGE
    * interaction types. For TOOL_RESPONSE, multiple results are each appended
@@ -118,11 +116,7 @@ export class ConversationHistoryManager {
 
     const effectiveMax = maxMessages ?? this.maxHistoryLength;
     if (this.conversationHistory.length > effectiveMax) {
-      let removeCount = this.conversationHistory.length - effectiveMax;
-      // A cut inside a tool round would keep tool results whose assistant
-      // message (the one that called the tools) is gone, and providers reject a
-      // tool result that answers no call. The round's remaining results go too.
-      while (this.conversationHistory[removeCount]?.role === 'tool') removeCount += 1;
+      const removeCount = this.conversationHistory.length - effectiveMax;
       this.conversationHistory.splice(0, removeCount);
     }
   }
