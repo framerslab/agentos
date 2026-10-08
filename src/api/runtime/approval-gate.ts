@@ -5,10 +5,12 @@
  * tool loops of `generateText` and `streamText` and the prompt-tool shim call
  * it after `onBeforeToolExecution`, on the arguments that hook left. It never
  * throws: a rejection, a handler error, a timeout, a guardrail block and a
- * received gate that threw all skip the tool. A handler error or an
- * `onTimeout: 'error'` timeout is stored in the owner's slot, which `agency()`
- * checks when its strategy settles; the model is told only that the approval
- * handler failed, and the error itself goes to the slot and `on.error`.
+ * received gate that threw all skip the tool. A handler error (a throw, an
+ * answer whose `approved` is not a boolean, or a failure after the handler
+ * answered) or an `onTimeout: 'error'` timeout is stored in the owner's slot,
+ * which `agency()` checks when its strategy settles; the model is told only
+ * that the approval handler failed, and the error itself goes to the slot and
+ * `on.error`.
  */
 import type { AgencyOptions, ApprovalDecision, ApprovalRequest } from '../types.js';
 import { AgencyConfigError } from '../types.js';
@@ -85,6 +87,11 @@ function asVerdict(verdict: unknown, fallback: string): typeof APPROVAL_GRANTED 
     ? (verdict as ApprovalRefusal).reason
     : fallback;
   return refusal(reason);
+}
+
+/** Whether a handler's answer is a decision: an object whose `approved` is a boolean. */
+function isDecision(answer: unknown): answer is ApprovalDecision {
+  return answer !== null && typeof answer === 'object' && typeof (answer as { approved?: unknown }).approved === 'boolean';
 }
 
 function safeCall<T>(fn: ((e: T) => void) | undefined, event: T): void {
@@ -201,44 +208,62 @@ export function createApprovalGate(o: CreateApprovalGateOptions): ApprovalGateFn
       context: { agentCalls: [], totalTokens: 0, totalCostUSD: 0, elapsedMs: 0 },
     };
     safeCall(o.on?.approvalRequested, request);
-    let decision: ApprovalDecision;
-    try {
-      decision = await resolveApprovalDecision(o.hitl, request);
-    } catch (err) {
+    /**
+     * A handler error. Before settlement the first is stored in the slot and
+     * each one goes to `on.error`; the model is told only that the handler
+     * failed.
+     */
+    const failed = (err: unknown): ApprovalRefusal => {
       if (!o.slot.settled) {
         // A rejection with no reason still fails the call.
         if (o.slot.error === undefined) o.slot.error = err === undefined ? new AgencyConfigError('HITL approval failed') : err;
         safeCall(o.on?.error, { agent: o.agentName, error: err instanceof Error ? err : new Error(String(err)), timestamp: Date.now() });
       }
       return refusal(HANDLER_FAILED);
+    };
+    let decision: ApprovalDecision;
+    try {
+      const answer: unknown = await resolveApprovalDecision(o.hitl, request);
+      // An answer whose `approved` is not a boolean (a webhook that answers
+      // `null`, a string) is a handler error, never an approval.
+      if (!isDecision(answer)) throw new AgencyConfigError('HITL handler returned a malformed decision: approved must be a boolean');
+      decision = answer;
+    } catch (err) {
+      return failed(err);
     }
     // A decision that arrives after the call ended (a concurrent approval
     // failed, or the owner settled) fires nothing and runs nothing.
     const late = stopped();
     if (late) return late;
-    safeCall(o.on?.approvalDecided, decision);
-    if (!decision.approved) return refusal(decision.reason ?? 'rejected by the approval handler');
-    // Arguments are rewritten in onBeforeToolExecution, never by a decision:
-    // an approval that names other arguments is refused, so the call never
-    // runs with the ones the approver meant to replace.
-    if (decision.modifications?.toolArgs != null) return refusal(TOOL_ARGS_NOT_APPLIED);
-    if (o.hitl.guardrailOverride !== false) {
-      const { runPostApprovalGuardrails } = await import('../agency.js');
-      const result = await runPostApprovalGuardrails(
-        info.name,
-        info.args,
-        o.hitl.postApprovalGuardrails ?? ['pii-redaction', 'code-safety'],
-        o.on,
-      );
-      // The guardrail check is awaited: a call that ended meanwhile fires nothing.
-      const afterGuardrails = stopped();
-      if (afterGuardrails) return afterGuardrails;
-      if (!result.passed) {
-        safeCall(o.on?.guardrailHitlOverride, { guardrailId: result.guardrailId!, reason: result.reason!, toolName: info.name, timestamp: Date.now() });
-        return refusal(`guardrail ${result.guardrailId}: ${result.reason}`);
+    try {
+      safeCall(o.on?.approvalDecided, decision);
+      if (!decision.approved) return refusal(decision.reason ?? 'rejected by the approval handler');
+      // Arguments are rewritten in onBeforeToolExecution, never by a decision:
+      // an approval that names other arguments is refused, so the call never
+      // runs with the ones the approver meant to replace.
+      if (decision.modifications?.toolArgs != null) return refusal(TOOL_ARGS_NOT_APPLIED);
+      if (o.hitl.guardrailOverride !== false) {
+        const { runPostApprovalGuardrails } = await import('../agency.js');
+        const result = await runPostApprovalGuardrails(
+          info.name,
+          info.args,
+          o.hitl.postApprovalGuardrails ?? ['pii-redaction', 'code-safety'],
+          o.on,
+        );
+        // The guardrail check is awaited: a call that ended meanwhile fires nothing.
+        const afterGuardrails = stopped();
+        if (afterGuardrails) return afterGuardrails;
+        if (!result.passed) {
+          safeCall(o.on?.guardrailHitlOverride, { guardrailId: result.guardrailId!, reason: result.reason!, toolName: info.name, timestamp: Date.now() });
+          return refusal(`guardrail ${result.guardrailId}: ${result.reason}`);
+        }
       }
+      return stopped() ?? APPROVAL_GRANTED;
+    } catch (err) {
+      // A failure after the handler answered (arguments the guardrails cannot
+      // serialize, such as a BigInt a hook added) is a handler error too.
+      return failed(err);
     }
-    return stopped() ?? APPROVAL_GRANTED;
   };
 }
 

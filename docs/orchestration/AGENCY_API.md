@@ -687,10 +687,12 @@ hierarchical manager and the specialists it spawns, and nested agencies.
   with the arguments the approver meant to replace. Rewrite arguments in the
   hook.
 - A rejection skips the tool and the model is told; the run goes on.
-- A handler that throws, and a timeout under `onTimeout: 'error'`, skip the
-  tool, go to `on.error`, and reject the call with that error once the
-  strategy has settled, after the run's usage has been added to the agency
-  totals. The model is told only that the approval handler failed: the
+- A handler that throws, a timeout under `onTimeout: 'error'`, a decision
+  whose `approved` is not a boolean (a webhook that answers `null`) and a
+  failure after the handler answered (arguments the post-approval guardrails
+  cannot serialize, such as a `BigInt` a hook added) skip the tool, go to
+  `on.error`, and reject the call with that error once the strategy has
+  settled, after the run's usage has been added to the agency totals. The model is told only that the approval handler failed: the
   error's message, which can name a URL or a credential, stays out of the
   conversation. Every later tool call of the run is skipped without asking the
   handler. No finalization step runs: no output guardrails, no `beforeReturn`

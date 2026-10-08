@@ -135,6 +135,27 @@ describe('a listed tool waits for the handler', () => {
     expect(JSON.stringify(chatBodies())).not.toContain('s3cret');
   });
 
+  it('a decision whose approved is not a boolean, and a guardrail check that throws after an approval, are handler errors: the tool never runs, on.error fires, the call rejects', async () => {
+    serve([
+      () => toolCall('search', { q: 'x' }), () => text('done'),
+      () => toolCall('search', { q: 'y' }), () => text('done'),
+      () => toolCall('search', { q: 'z' }), () => text('done'),
+    ]);
+    // hitl.webhook resolves whatever JSON the endpoint answers: a 200 with a null body is null.
+    const answers: unknown[] = [null, { approved: 'yes' }, { approved: true }];
+    const handler = vi.fn(async () => answers.shift() as ApprovalDecision);
+    const error = vi.fn();
+    const team = base({ approvals: { beforeTool: ['search'] }, handler }, { on: { error } });
+    await expect(team.generate('find x')).rejects.toThrow(/malformed decision/);
+    await expect(team.generate('find y')).rejects.toThrow(/malformed decision/);
+    // The hook leaves an argument JSON cannot hold, so the post-approval guardrails cannot serialize the call.
+    const addBigInt = async (info: { args: Record<string, unknown> }) => ({ ...info, args: { ...info.args, n: 10n } });
+    await expect(team.generate('find z', { onBeforeToolExecution: addBigInt })).rejects.toThrow(TypeError);
+    expect(handler).toHaveBeenCalledTimes(3);
+    expect(error).toHaveBeenCalledTimes(3);
+    expect(search.execute).not.toHaveBeenCalled();
+  });
+
   it("a timeout under onTimeout 'error' rejects generate() and stream() with the timeout error; usage is in the totals", async () => {
     serve([() => toolCall('search', { q: 'x' }), () => text('done'), () => toolCallStream('search', { q: 'y' }), () => textStream('done again')]);
     const team = base({ approvals: { beforeTool: ['search'] }, handler: waitForever, timeoutMs: 10, onTimeout: 'error' });
