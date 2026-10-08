@@ -1155,21 +1155,16 @@ export class GMI implements IGMI {
         const responseSchema = turnOptions.responseSchema as ZodType | undefined;
         const schemaName = turnOptions.schemaName as string | undefined;
 
-        // The gateway's route: the model asked for, the last user message (its text
-        // is the router's task hint: the text parts of a multimodal message, and on
-        // a continuation the message being answered, never the continuation's own
-        // internal text), the tools, and the call options each fallback hop derives
-        // its overrides from. Every hop that could not start is traced.
+        // The gateway's route: the model asked for, the user's text as the router's
+        // task hint, the tools, and the call options each fallback hop derives its
+        // overrides from. Every hop that could not start is traced.
         let lastHopError: Error | undefined;
-        let lastUserMessage: ChatMessage | undefined;
-        for (let i = historyAtTurnStart.length - 1; i >= 0 && !lastUserMessage; i--) {
-          if (historyAtTurnStart[i].role === 'user') lastUserMessage = historyAtTurnStart[i];
-        }
+        const userText = this.stringifyTurnContent(turnInput.content) ?? '';
         const route: CompletionRoute | undefined = gateway
           ? {
               modelId: modelIdToUse,
               providerId: providerIdForModel,
-              messages: lastUserMessage ? [lastUserMessage] : [],
+              messages: userText ? [{ role: 'user', content: userText }] : [],
               tools: llmOptions.tools,
               callOptions: { maxTokens: llmOptions.maxTokens, effort: llmOptions.effort, cache: llmOptions.cache },
               onFallback: ({ from, to, hop, error }) => this.addTraceEntry(ReasoningEntryType.WARNING, `Model fallback from '${from}' to '${to}' (hop ${hop}): ${error.message}`),
