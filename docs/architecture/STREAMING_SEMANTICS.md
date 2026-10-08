@@ -7,7 +7,7 @@ thing.
 Use the right one for the job:
 
 - `textStream`
-  - Raw live text chunks from the underlying strategy.
+  - Raw text chunks from the strategy, as it produces them.
   - Lowest latency.
   - May differ from the final approved answer if output guardrails or HITL
     rewrite the result.
@@ -24,7 +24,8 @@ Use the right one for the job:
     and `beforeReturn` HITL approval. See [Human-in-the-Loop](/features/human-in-the-loop) for the full HITL surface.
 - `finalTextStream`
   - Finalized-text iterable.
-  - Emits only the post-processing-approved text once it is actually finalized.
+  - Yields the post-processing-approved text as one chunk once the run is
+    finalized, and nothing when that text is empty.
 - `usage`
   - Finalized aggregate usage for the streamed run.
 - `agentCalls`
@@ -61,8 +62,8 @@ for await (const chunk of stream.finalTextStream) {
 }
 ```
 
-This yields after post-processing finishes, so it is higher-latency but
-truthful.
+It yields once, after post-processing finishes, so it waits for the whole
+run and never shows text that a guardrail or reviewer later changes.
 
 ### Audits, orchestration visualizers, and runtime tooling
 
@@ -103,21 +104,33 @@ That means:
 - `fullStream` is the only stream that shows both the raw path and the final
   approval/finalization events in one place.
 
-## Current Behavior
+## Which Strategies Stream Token by Token
 
-What is live today:
+- `sequential` and `graph` stream each agent's tokens as they arrive.
+  `fullStream` brackets every agent with `agent-start` and `agent-end` parts
+  and tags each `text` part with its `agent`. `graph` runs the agents of a tier
+  one after another while it streams, where `generate()` runs them in
+  parallel.
+- `parallel`, `debate`, `review-loop` and `hierarchical` run to completion
+  first. `textStream` then yields the whole text as one chunk, and
+  `fullStream` carries that one `text` part before the post-processing parts.
+  An agency created with `adaptive: true` runs any other strategy under a
+  hierarchical manager, so it streams this way too.
 
-- `textStream` and `fullStream` are live/incremental again.
-- `final-output` is emitted into `fullStream` after post-processing completes.
-- `agentCalls` and `usage` resolve for streamed runs.
-- `finalTextStream` replays the finalized approved text only.
+In `sequential` and `graph`, `textStream` carries the text of every agent in
+turn, not only the last one, and the streamed `text` joins all of it in
+order. `generate()` returns the last agent's text instead (for `graph`, the
+last agent of the final tier).
 
-What is not true today:
+## Guarantees
 
-- `textStream` is not a post-guardrail stream.
-- `textStream` is not a post-HITL stream.
-- mid-stream output guardrail intervention is not yet exposed as a separate live
-  finalized-token channel.
+- `final-output` is emitted into `fullStream` after post-processing completes,
+  followed by an agency-level `agent-end`.
+- `text`, `usage`, `agentCalls` and `parsed` resolve once the run is
+  finalized.
+- `textStream` carries the text before output guardrails and before
+  `beforeReturn` approval. Output guardrails act on the finalized text only,
+  so no stream carries guardrail-rewritten tokens while the run streams.
 
 ## Practical Rule
 
