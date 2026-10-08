@@ -68,6 +68,24 @@ describe('GmiTurnFolder', () => {
     expect(f.toGenerateTextResult().finishReason).toBe('tool-calls');
   });
 
+  it("a run whose last step ends by itself after a tool round reports that step's reason; tool-calls only when the step limit ran out", () => {
+    const toolRound = [
+      c(GMIOutputChunkType.TOOL_CALL_REQUEST, [{ id: 'c1', name: 'lookup', arguments: {} }]),
+      step(0, '', 'tool_calls'),
+      c(GMIOutputChunkType.TOOL_RESULT, { toolCallId: 'c1', name: 'lookup', result: 1, isError: false }),
+    ];
+    // The model ends the run itself with no text, as streamText reports it: the last step's own reason.
+    for (const [reason, expected] of [['stop', 'stop'], ['length', 'length']] as const) {
+      const f = new GmiTurnFolder();
+      [...toolRound, step(1, '', reason)].forEach((x) => f.push(x));
+      expect(f.finishReason()).toBe(expected);
+    }
+    // The last allowed step asked for tools again: the limit ran out with calls outstanding.
+    const exhausted = new GmiTurnFolder();
+    [...toolRound, c(GMIOutputChunkType.TOOL_CALL_REQUEST, [{ id: 'c2', name: 'lookup', arguments: {} }]), step(1, '', 'tool_calls'), c(GMIOutputChunkType.TOOL_RESULT, { toolCallId: 'c2', name: 'lookup', result: 2, isError: false })].forEach((x) => exhausted.push(x));
+    expect(exhausted.finishReason()).toBe('tool-calls');
+  });
+
   it('a structured step: text is the JSON string, the object is exposed, the turn ends with stop', () => {
     const f = new GmiTurnFolder();
     f.push(c(GMIOutputChunkType.TEXT_DELTA, 'Here you go.'));

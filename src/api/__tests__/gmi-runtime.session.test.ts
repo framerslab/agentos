@@ -82,6 +82,13 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     ]);
   });
 
+  it('a run that ends by itself with no text after a tool round reports the last step\'s reason, not tool-calls', async () => {
+    const k = key(); script('openai', k, { replies: [reply.tools([{ id: 'c1', name: 'lookup', args: { q: 'x' } }]), reply.text('')] });
+    const r = await agent(base(k, { tools: [lookupTool(async () => ({ success: true, output: 1 }))] })).session('s').send('find x');
+    expect(r.toolCalls).toHaveLength(1);
+    expect(r).toMatchObject({ text: '', finishReason: 'stop' });
+  });
+
   it('a tool-less agent sends no tools payload (the executor\'s built-in date tool is not offered)', async () => {
     const k = key(); const s = script('openai', k, { replies: [reply.text('ok')] });
     await agent(base(k)).session('s').send('hi');
