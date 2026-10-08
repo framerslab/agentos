@@ -4,7 +4,7 @@
  *
  * Requesty routes to many upstream vendors, so three shapes need to be
  * handled without throwing raw TypeErrors:
- *   1. `/models` entries without a `pricing` object.
+ *   1. `/models` entries without prices.
  *   2. SSE streams that reach [DONE] without ever sending finish_reason.
  *   3. `/embeddings` responses missing `data` or `usage`.
  *
@@ -42,18 +42,18 @@ async function mountProvider(models: Record<string, unknown>[]): Promise<{ provi
 
 const CHAT_MODEL = {
   id: 'openai/gpt-4o-mini',
-  name: 'GPT-4o mini',
   description: 'mock model',
-  context_length: 128000,
-  pricing: { prompt: '0.00000015', completion: '0.0000006' },
+  context_window: 128000,
+  input_price: 1.5e-7,
+  output_price: 6e-7,
 };
 
 const EMBEDDING_MODEL = {
   id: 'openai/text-embedding-3-small',
-  name: 'text-embedding-3-small',
   description: 'mock embedding model',
-  context_length: 8191,
-  pricing: { prompt: '0.00000002', completion: '0' },
+  context_window: 8191,
+  input_price: 2e-8,
+  output_price: 0,
 };
 
 describe('RequestyProvider response shape tolerance', () => {
@@ -61,9 +61,9 @@ describe('RequestyProvider response shape tolerance', () => {
     vi.restoreAllMocks();
   });
 
-  it('initializes when a /models entry has no pricing object', async () => {
+  it('initializes when a /models entry has no prices', async () => {
     const { provider } = await mountProvider([
-      { id: 'vendor/no-pricing', name: 'No pricing', description: 'mock', context_length: 4096 },
+      { id: 'vendor/no-pricing', description: 'mock', context_window: 4096 },
       CHAT_MODEL,
     ]);
 
@@ -121,12 +121,12 @@ describe('RequestyProvider response shape tolerance', () => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /v1/models, as Requesty documents and returns it.
+// GET /v1/models, as Requesty documents and returns it. Prices are USD per token.
 // https://docs.requesty.ai/api-reference/endpoint/models-list
-// Prices are USD per token.
+// https://docs.requesty.ai/api-reference/endpoint/models-chat-list (the schema)
 // ---------------------------------------------------------------------------
 
-/** An entry as the endpoint returns it: prices at the top level and as tiers. */
+/** An entry as the endpoint returns it: prices at the top level and as bands. */
 const LISTED_GPT_4O_MINI = {
   api: 'chat',
   id: 'openai/gpt-4o-mini',
@@ -150,7 +150,7 @@ const LISTED_GPT_4O_MINI = {
   model_canonical_name: 'gpt-4o-mini',
 };
 
-/** The example entry on the documentation page: its prices sit only in the tiers. */
+/** The example entry on the documentation page: its prices sit only in the bands. */
 const DOCUMENTED_CLAUDE_SONNET = {
   api: 'chat',
   id: 'vertex/claude-sonnet-4-5',
@@ -246,7 +246,7 @@ describe('RequestyProvider model list', () => {
     });
   });
 
-  it('reads the base tier when an entry lists its prices only under pricing', async () => {
+  it('reads the base band when an entry lists its prices only under pricing', async () => {
     const { provider } = await mountProvider([DOCUMENTED_CLAUDE_SONNET]);
 
     expect(await provider.getModelInfo('vertex/claude-sonnet-4-5')).toMatchObject({

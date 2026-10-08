@@ -87,26 +87,72 @@ interface RequestyEmbeddingAPIResponse {
   };
 }
 
+/**
+ * One pricing band of a model: its prices apply once the prompt exceeds
+ * `prompt_tokens_threshold` tokens. Prices are USD per token.
+ */
+interface RequestyPricingBand {
+  prompt_tokens_threshold?: number;
+  input_price?: number;
+  output_price?: number;
+}
+
+/**
+ * One entry of Requesty's `GET /v1/models` response, as far as it is read here.
+ * The endpoint is an alias of `/v1/models/chat`, whose page holds the schema:
+ * https://docs.requesty.ai/api-reference/endpoint/models-list
+ * https://docs.requesty.ai/api-reference/endpoint/models-chat-list
+ *
+ * Prices are USD per token. The top-level prices are those of the first band
+ * in `pricing`; the example response on the page lists them only there. The
+ * endpoint returns `max_output_tokens: 0` for some models, read here as no
+ * listed limit.
+ */
 interface RequestyModelAPIObject {
   id: string;
-  name: string;
-  description: string;
-  pricing?: {
-    prompt?: string;
-    completion?: string;
-    request?: string;
-    image?: string;
-  };
-  context_length: number | null;
-  architecture?: {
-    modality: string;
-    tokenizer: string;
-    instruct_type: string | null;
-  };
-  top_provider: {
-    max_retries: number | null;
-    is_fallback: boolean | null;
-  };
+  description?: string;
+  input_price?: number;
+  output_price?: number;
+  pricing?: RequestyPricingBand[];
+  context_window?: number;
+  max_output_tokens?: number;
+  supports_vision?: boolean;
+  supports_tool_calling?: boolean;
+  supports_output_json_object?: boolean;
+}
+
+/** Model-id patterns taken for tool calling and JSON mode when an entry carries no flag. */
+const TOOL_AND_JSON_MODEL_ID_PATTERNS = ['gpt-3.5', 'gpt-4', 'claude-2', 'claude-3', 'gemini', 'mistral', 'llama'];
+
+/**
+ * A price in USD per token as USD per million tokens, rounded to a millionth
+ * of a dollar so binary float noise does not reach the price. Anything but a
+ * finite number of at least 0 has no price.
+ */
+function pricePerMillionTokens(pricePerToken: unknown): number | undefined {
+  if (typeof pricePerToken !== 'number' || !Number.isFinite(pricePerToken) || pricePerToken < 0) {
+    return undefined;
+  }
+  return Math.round(pricePerToken * 1e12) / 1e6;
+}
+
+/** A count of tokens when it is a finite number above 0, else undefined. */
+function positiveTokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/** The band that prices the smallest prompts: the lowest `prompt_tokens_threshold`. */
+function basePricingBand(pricing: unknown): RequestyPricingBand | undefined {
+  if (!Array.isArray(pricing)) return undefined;
+  let base: RequestyPricingBand | undefined;
+  for (const band of pricing as unknown[]) {
+    if (band === null || typeof band !== 'object') continue;
+    const candidate = band as RequestyPricingBand;
+    if (!base || (candidate.prompt_tokens_threshold ?? 0) < (base.prompt_tokens_threshold ?? 0)) {
+      base = candidate;
+    }
+  }
+  return base;
 }
 
 interface RequestyListModelsAPIResponse {
@@ -202,34 +248,46 @@ export class RequestyProvider implements IProvider {
     }
   }
 
+  /**
+   * Maps one `GET /v1/models` entry to a {@link ModelInfo}.
+   *
+   * Prices come from the entry's top-level `input_price` / `output_price`, or
+   * from its base pricing band when it lists them only under `pricing`. Vision,
+   * tool calling and JSON mode come from the `supports_*` flags; an entry with
+   * no flag falls back to the model-id patterns.
+   */
   private mapApiToModelInfo(apiModel: RequestyModelAPIObject): ModelInfo {
+    const idMatchesPattern = TOOL_AND_JSON_MODEL_ID_PATTERNS.some(pattern =>
+      apiModel.id.toLowerCase().includes(pattern)
+    );
+    const supports = (flag: unknown, fallback: boolean): boolean =>
+      typeof flag === 'boolean' ? flag : fallback;
+
     const capabilities: ModelInfo['capabilities'] = ['chat', 'completion'];
-    if (apiModel.architecture?.modality === 'multimodal') {
+    if (supports(apiModel.supports_vision, false)) {
       capabilities.push('vision_input');
     }
-    const knownAdvancedModelPatterns = ['gpt-3.5', 'gpt-4', 'claude-2', 'claude-3', 'gemini', 'mistral', 'llama'];
-    if (knownAdvancedModelPatterns.some(pattern => apiModel.id.toLowerCase().includes(pattern))) {
-      capabilities.push('tool_use', 'json_mode');
+    if (supports(apiModel.supports_tool_calling, idMatchesPattern)) {
+      capabilities.push('tool_use');
+    }
+    if (supports(apiModel.supports_output_json_object, idMatchesPattern)) {
+      capabilities.push('json_mode');
     }
     if (apiModel.id.includes('embedding') || apiModel.id.includes('embed')) {
       capabilities.push('embeddings');
     }
 
-    const parsePrice = (priceStr: string | undefined, tokensFactor: number = 1000000): number | undefined => {
-      if (typeof priceStr !== 'string') return undefined;
-      const price = parseFloat(priceStr);
-      return isNaN(price) ? undefined : price * tokensFactor;
-    };
+    const baseBand = basePricingBand(apiModel.pricing);
 
     return {
       modelId: apiModel.id,
       providerId: this.providerId,
-      displayName: apiModel.name,
-      description: apiModel.description,
+      description: typeof apiModel.description === 'string' ? apiModel.description : undefined,
       capabilities: Array.from(new Set(capabilities)),
-      contextWindowSize: apiModel.context_length || undefined,
-      pricePer1MTokensInput: parsePrice(apiModel.pricing?.prompt),
-      pricePer1MTokensOutput: parsePrice(apiModel.pricing?.completion),
+      contextWindowSize: positiveTokenCount(apiModel.context_window),
+      outputTokenLimit: positiveTokenCount(apiModel.max_output_tokens),
+      pricePer1MTokensInput: pricePerMillionTokens(apiModel.input_price ?? baseBand?.input_price),
+      pricePer1MTokensOutput: pricePerMillionTokens(apiModel.output_price ?? baseBand?.output_price),
       supportsStreaming: true,
       status: 'active',
     };
