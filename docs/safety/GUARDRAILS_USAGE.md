@@ -325,7 +325,8 @@ class QualityGateGuardrail implements ICrossAgentGuardrailService {
 | `evaluateStreamingChunks` | `boolean` | `false` | Evaluate TEXT_DELTA chunks (real-time) vs only FINAL_RESPONSE |
 | `maxStreamingEvaluations` | `number` | `undefined` | Rate limit streaming evaluations per request |
 | `canSanitize` | `boolean` | `false` | Run this guardrail in Phase 1 so SANITIZE results chain deterministically |
-| `timeoutMs` | `number` | `undefined` | Per-guardrail timeout. On timeout/error the dispatcher fails open for that guardrail |
+| `timeoutMs` | `number` | `undefined` | Per-guardrail timeout. On timeout/error the dispatcher fails open for that guardrail, unless `failClosed` is set or the guard is required |
+| `failClosed` | `boolean` | `false` | A throw or a timeout blocks instead of passing. Forced on for a required guard |
 
 ### Output Payload Extras
 
@@ -337,6 +338,56 @@ class QualityGateGuardrail implements ICrossAgentGuardrailService {
 |------|---------|------|----------|
 | **Final-only** (default) | +1-500ms once | Low | Policy checks needing full context |
 | **Streaming** | +1-500ms per chunk | High | Real-time PII redaction, immediate blocking |
+
+## Required Guards, Hold Mode and Replacement Replies
+
+A product whose safety rules are code names the guards it cannot run without, and the runtime holds them to it:
+
+```typescript
+const agentos = await AgentOS.create({
+  extensionManifest: { packs: [{ factory: () => createPhraseListPack(neverDo) }, { factory: () => createPhraseListPack(selfHarm) }] },
+  requiredGuardrails: [
+    { id: 'never-do', stages: ['output'], timeoutMs: 8_000 },
+    { id: 'self-harm', stages: ['input', 'output'], timeoutMs: 8_000 },
+  ],
+});
+```
+
+- **Boot.** `initialize()` throws `SYS_CONFIGURATION_ERROR` (with `missing` and `missingStage` in its details) when a required id has no active guard, the guard is disabled by an override, or it does not implement a required stage.
+- **Every request.** `processRequest()`, `handleToolResults()` and `resumeExternalToolRequest()` check again and answer one error chunk, `SYS_GUARDRAIL_REQUIRED_MISSING`, while a required guard is missing. Nothing reaches a provider.
+- **Posture.** A required guard runs under its id, fail-closed (a throw, a timeout past `timeoutMs`, or an answer whose action is not a `GuardrailAction` blocks, as `GUARDRAIL_ERROR` or `GUARDRAIL_MALFORMED`), whatever its own `config` says.
+- **Hold mode.** A guard required on `output`, or `guardrailOutputMode: 'hold'`, holds every `TEXT_DELTA` until the final guards have judged the whole reply. Allowed or flagged, the deltas go out before the final chunk; blocked or sanitized, they are dropped. An actionable tool call closes the window: the text so far is judged as a final reply before the tool call goes out. The same guards run on the continuation after an external tool result.
+- **Replacement replies.** A `BLOCK` whose evaluation carries `replacementText` reaches the caller as a `FINAL_RESPONSE` holding that text in both text fields, with `metadata.guardrail.output[0].action === 'block'` and the guard's `reasonCode`, in place of an error chunk. A block without one yields the error chunk as before.
+- **The stored reply.** With conversational persistence on, a reply a guard blocked with a replacement or sanitized is rewritten in the conversation's history before the turn ends, so the history holds what the person saw. The message's `metadata.modificationInfo` records the guard's reason code.
+- **Every verdict names its guard.** `metadata.guardrailId` is set on each evaluation and on the error chunk when the guard has an `id`.
+
+### `PhraseListGuardrail`
+
+A guard over a reviewed list of phrases. Each entry blocks on a match, or asks a judge whether the match, read in the text, crosses the rule. Text is normalised before matching (NFKC, case, zero-width characters and combining marks removed, Cyrillic and Greek look-alikes mapped to Latin, curly quotes straightened), so a lookalike letter or an invisible joiner does not get past the list.
+
+```typescript
+import { PhraseListGuardrail, StaticPhraseListSource, createLlmPhraseJudge, createPhraseListPack } from '@framers/agentos';
+
+const neverDo = await PhraseListGuardrail.create({
+  id: 'never-do',
+  stages: ['output'],
+  source: new StaticPhraseListSource({
+    version: '2026-10-08', reviewedAt: '2026-10-08', reviewedBy: 'counsel',
+    entries: [
+      { phrase: 'you will pass', match: 'word', onMatch: 'block', ruleId: 'outcome_promise' },
+      { phrase: 'index fund', match: 'word', onMatch: 'judge', ruleId: 'money' },
+    ],
+  }),
+  judge: createLlmPhraseJudge({ provider: 'openai', model: 'gpt-6-luna', criteria: 'Investment, tax or legal advice.', apiKey, fallbackProviders: [] }),
+  replacementFor: (ruleId) => TEMPLATES[ruleId],
+});
+```
+
+`PhraseListGuardrail.create` refuses an empty list, a list that does not load, and judge entries without a judge; `reload()` swaps the list in whole and keeps the last good one when the new one fails. The judge fails closed: a throw, an answer without `block` and `confidence`, or a confidence under `judgeThreshold` (default 0.7) blocks. `createLlmPhraseJudge` takes `fallbackProviders: []` by default, so the judge reaches only the provider it was given.
+
+### Hard limits in the persona
+
+`IPersonaDefinition.hardLimits` (and `hardLimits:` in a SOUL file's front matter) renders as the last block of every system prompt, under the heading "Hard limits", after everything the turn added. The guards hold the same rules in code; the block tells the model.
 
 ## Using Multiple Guardrails
 

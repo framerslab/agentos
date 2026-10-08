@@ -108,6 +108,27 @@ export interface GuardrailOutputOptions {
 
   /** RAG sources to thread through to output guardrails for grounding verification */
   ragSources?: import('../../cognition/rag').RagRetrievedChunk[];
+
+  /**
+   * Hold every TEXT_DELTA until the final guards have judged the whole reply. Allowed or flagged, the held deltas
+   * go out before the final chunk; blocked or sanitized, they are dropped, so the caller never sees text the guards
+   * refused. An actionable tool call closes the window: the text so far is judged as a final reply before it.
+   */
+  holdUntilFinal?: boolean;
+
+  /** Called once with the final verdict on the reply: blocked, sanitized, flagged or allowed. A throw is logged and ignored. */
+  onVerdict?: (verdict: GuardrailOutputVerdict) => void | Promise<void>;
+}
+
+/** The verdict on a reply, as {@link GuardrailOutputOptions.onVerdict} receives it. */
+export interface GuardrailOutputVerdict {
+  streamId: string;
+  action: GuardrailAction;
+  /** The id of the guard that blocked, when it has one. */
+  guardrailId?: string;
+  reasonCode?: string;
+  /** The text the caller receives: the replacement after a block with one, the reply after a pass, else null. */
+  finalText: string | null;
 }
 
 /**

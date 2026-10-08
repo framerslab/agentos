@@ -44,6 +44,7 @@ import {
   IPersonaDefinition,
   PersonaRagConfigIngestionTrigger, // Ensure this type definition exists and is correctly imported
 } from './personas/IPersonaDefinition';
+import { hardLimitsBlock, HARD_LIMITS_PRIORITY } from './personas/hardLimits.js';
 import { IWorkingMemory } from './memory/IWorkingMemory';
 import { IPromptEngine, PromptExecutionContext, PromptComponents, PromptEngineResult, ModelTargetInfo } from '../../core/llm/IPromptEngine';
 import { IRetrievalAugmentor, RagRetrievalOptions, RagDocumentInput, RagIngestionOptions, RagMemoryCategory } from '../rag/IRetrievalAugmentor';
@@ -1068,6 +1069,11 @@ export class GMI implements IGMI {
             content: skillPromptContext,
             priority: 57,
           });
+        }
+        // the persona's hard limits close the system prompt, after everything the turn added above
+        const hardLimits = hardLimitsBlock(this.activePersona.hardLimits);
+        if (hardLimits) {
+          systemPrompts.push({ content: hardLimits, priority: HARD_LIMITS_PRIORITY });
         }
 
         const promptConversation = this.buildPromptConversation({

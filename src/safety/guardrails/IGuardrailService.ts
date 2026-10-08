@@ -151,6 +151,13 @@ export interface GuardrailEvaluationResult {
    * For output evaluation: replaces textDelta (streaming) or finalResponseText (final).
    */
   modifiedText?: string | null;
+
+  /**
+   * With {@link GuardrailAction.BLOCK} on an output's final response: the fixed reply the caller receives in place of
+   * the model's, as a FINAL_RESPONSE whose guardrail metadata records the block, instead of an error chunk. A
+   * product's safety templates answer this way, so a person reads a fixed text and never a raw failure.
+   */
+  replacementText?: string;
 }
 
 /**
@@ -396,6 +403,12 @@ export interface GuardrailConfig {
  * ```
  */
 export interface IGuardrailService {
+  /**
+   * A stable id for this guard. A required guard is named by it (`AgentOSConfig.requiredGuardrails`), and it travels
+   * with every verdict as `metadata.guardrailId`. Without one, a registered guard is known by its descriptor's id.
+   */
+  id?: string;
+
   /**
    * Configuration for evaluation behavior.
    * Controls streaming vs final-only evaluation and rate limiting.

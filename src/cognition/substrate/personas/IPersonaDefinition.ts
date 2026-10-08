@@ -407,6 +407,13 @@ export interface IPersonaDefinition {
    */
   baseSystemPrompt: string | { template: string; variables?: string[] } | Array<{ content: string; priority?: number }>;
 
+  /**
+   * The lines the persona's body cannot override: rendered as the last block of every system prompt, under a fixed
+   * heading, after every other instruction the runtime adds. A product's safety rules go here in words; its guardrails
+   * hold the same rules in code.
+   */
+  hardLimits?: string[];
+
   /** Default model id to target for this persona's typical tasks (can be routed or overridden). */
   defaultModelId?: string;
   /** Preferred provider if same model family exists across vendors (helps routing heuristics). */
