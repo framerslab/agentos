@@ -698,7 +698,11 @@ hierarchical manager and the specialists it spawns, and nested agencies.
   handler. No finalization step runs: no output guardrails, no `beforeReturn`
   approval, no `agentEnd` and no validation retry. Under `stream()` the
   result's promises reject with the error, and `textStream` and `fullStream`
-  end by throwing it.
+  end by throwing it. A strategy that fails after that error (a later seat's
+  own failure, a `beforeAgent` handler that throws) does not replace it: the
+  call still rejects with the approval error, and the strategy's error goes to
+  `on.error`. A strategy that fails returns no result, so that run adds no
+  usage to the totals.
 - After the handler approves, the post-approval guardrails
   (`hitl.postApprovalGuardrails`, default `pii-redaction` and `code-safety`)
   run over the arguments unless `hitl.guardrailOverride` is `false`; a block

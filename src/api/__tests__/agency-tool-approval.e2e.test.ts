@@ -386,6 +386,31 @@ describe('a listed tool waits for the handler', () => {
     expect(agentEnd).not.toHaveBeenCalled();
     expect(chatBodies().length).toBe(2);
   });
+
+  it('a strategy failure after a tool approval error does not replace it: generate() and stream() reject with the approval error, and the later one goes to on.error', async () => {
+    // One approval outage fails both triggers: the tool approval in the first
+    // seat, then the beforeAgent check the strategy runs for the second seat.
+    const toolDown = new Error('tool approval down');
+    const agentDown = new Error('agent approval down');
+    const handler = vi.fn(async (r: ApprovalRequest) => { throw r.type === 'tool' ? toolDown : agentDown; });
+    const error = vi.fn();
+    const team = agency({
+      provider: 'openai', model: 'gpt-4.1', apiKey: KEY, tools: { search },
+      agents: { first: { instructions: 'Use search.' }, second: { instructions: 'Summarize.' } },
+      strategy: 'sequential',
+      hitl: { approvals: { beforeTool: ['search'], beforeAgent: ['second'] }, handler },
+      on: { error },
+    } as never);
+    serve([() => toolCall('search', { q: 'x' }), () => text('first done'), () => toolCallStream('search', { q: 'y' }), () => textStream('first done')]);
+    await expect(team.generate('find x')).rejects.toBe(toolDown);
+    expect(error.mock.calls.map(([e]) => e.error)).toEqual([toolDown, agentDown]);
+    const s = team.stream('find y');
+    await expect(s.text).rejects.toBe(toolDown);
+    await expect(drain(s.textStream)).rejects.toBe(toolDown);
+    await expect(drain(s.fullStream)).rejects.toBe(toolDown);
+    expect(error.mock.calls.map(([e]) => e.error)).toEqual([toolDown, agentDown, toolDown, agentDown]);
+    expect(search.execute).not.toHaveBeenCalled();
+  });
 });
 
 describe('nested agencies', () => {

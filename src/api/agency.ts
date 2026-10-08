@@ -210,6 +210,16 @@ export function agency(opts: AgencyOptions): Agent {
   const isSlotError = (slot: ApprovalSlot, error: unknown): boolean =>
     slot.error !== undefined && error === slot.error;
 
+  /**
+   * The error a failed call rejects with. Once a tool approval has failed, a
+   * later failure (a seat's own error, a `beforeAgent` handler that throws)
+   * does not replace it: the call rejects with the approval error, which the
+   * gate reported, and the later one goes to `on.error` from the catch that
+   * receives it.
+   */
+  const rejectionOf = (slot: ApprovalSlot, error: unknown): unknown =>
+    slot.error !== undefined ? slot.error : error;
+
   /** Adds a run's usage to the agency and session totals before the call rejects with its slot's error. */
   const billBeforeRejecting = (result: Record<string, unknown>, sessionId?: string): void => {
     const usage = normalizeUsage(result.usage);
@@ -407,7 +417,7 @@ export function agency(opts: AgencyOptions): Agent {
           timestamp: Date.now(),
         });
       }
-      throw error;
+      throw rejectionOf(slot, error);
     }
   };
 
@@ -441,7 +451,14 @@ export function agency(opts: AgencyOptions): Agent {
 
     const deferredStream = (async () => {
       const preparedPrompt = await prepareExecutionPrompt(prompt);
-      return strategy.stream(preparedPrompt, callOpts) as CompiledStrategyStreamResult;
+      const streamResult = strategy.stream(preparedPrompt, callOpts) as CompiledStrategyStreamResult;
+      // The text is read from the strategy's parts, and its own text promise
+      // only when it streams none. That promise rejects when the strategy
+      // fails (a beforeAgent handler that throws ends the sequential stream),
+      // so it is marked handled here, and the failure is reported once,
+      // through the parts.
+      void Promise.resolve(streamResult.text).catch(() => undefined);
+      return streamResult;
     })();
 
     const rawPartReplay = createBufferedAsyncReplay<AgencyStreamPart>((async function* () {
@@ -534,7 +551,7 @@ export function agency(opts: AgencyOptions): Agent {
       } catch (error) {
         slot.settled = true;
         reportError(error);
-        throw error;
+        throw rejectionOf(slot, error);
       }
     })();
 
@@ -558,7 +575,10 @@ export function agency(opts: AgencyOptions): Agent {
           }
         } catch (error) {
           reportError(error);
-          throw error;
+          // After a tool approval error the stream ends as below: with that
+          // error, once the run has settled.
+          if (slot.error !== undefined) await finalizedResultPromise.catch(() => undefined);
+          throw rejectionOf(slot, error);
         }
         // A handler error or an 'error' timeout ends the call: a consumer
         // that reads only this stream gets that error here, once the run is
@@ -594,7 +614,8 @@ export function agency(opts: AgencyOptions): Agent {
           }
         } catch (error) {
           reportError(error);
-          throw error;
+          if (slot.error !== undefined) await finalizedResultPromise.catch(() => undefined);
+          throw rejectionOf(slot, error);
         }
       })(),
       text: derived(finalizedResultPromise.then((result) => (result.text as string) ?? '')),
