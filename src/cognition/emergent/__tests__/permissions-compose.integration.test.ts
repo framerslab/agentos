@@ -804,6 +804,21 @@ describe('compositions and workflows: one gate, one rule', () => {
     expect(withoutCaller.error).toContain('caller_context_required');
   });
 
+  it('a direct forge without a caller is asked for the caller when the executor, not the permission manager, refuses a capability', async () => {
+    // The permission manager lets every call through (as one that does not
+    // check capabilities does); the executor's own check refuses the step.
+    const host = await makeForgeHost({ tools: [readTool()] });
+
+    const withoutCaller = await host.engine.forge(composeOver('read_direct', 'read_it') as unknown as ForgeToolRequest, {
+      agentId: 'agent-1',
+      sessionId: 'sess-1',
+    });
+
+    expect(withoutCaller.success).toBe(false);
+    expect(withoutCaller.error).toContain('caller_context_required');
+    expect(host.judge).not.toHaveBeenCalled();
+  });
+
   it("a composed step that is another agent's tool is refused as the caller", async () => {
     const db = createSqliteAdapter();
     const host = await makeForgeHost({ db, config: { compose: { sideEffectingTools: ['double_it'] } } });

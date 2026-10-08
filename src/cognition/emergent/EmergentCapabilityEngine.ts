@@ -565,11 +565,18 @@ export class EmergentCapabilityEngine {
           });
           continue;
         }
-        const details = result.details as { code?: string } | undefined;
+        const details = result.details as { code?: string; missingCapabilities?: unknown } | undefined;
         if (details?.code === 'dry_run_needs_output') {
           return { success: false, error: result.error };
         }
-        if (details?.code === 'permission_denied' && !context.caller) {
+        // Refused a capability by the permission manager (permission_denied),
+        // or by the executor's own check, which names what is missing and
+        // carries no code (a manager that does not check capabilities lets
+        // the call through to it).
+        const missing = details?.missingCapabilities;
+        const capabilityRefused =
+          details?.code === 'permission_denied' || (Array.isArray(missing) && missing.length > 0);
+        if (capabilityRefused && !context.caller) {
           // A step needs a capability the stand-in context does not carry:
           // the test says nothing about the tool, so the forge asks for the
           // caller instead of recording a failed test.
