@@ -55,8 +55,7 @@ const manifest = await createCuratedManifest({
   secrets: { 'serper.apiKey': process.env.SERPER_API_KEY! },
 });
 
-const agentos = new AgentOS();
-await agentos.initialize({ extensionManifest: manifest });
+const agentos = await AgentOS.create({ extensionManifest: manifest });
 ```
 
 Only installed extension packages will load — missing ones are skipped silently.
@@ -72,16 +71,20 @@ npm install @framers/agentos-extensions
 
 [![npm](https://img.shields.io/npm/v/@framers/agentos-extensions?logo=npm&color=cb3837)](https://www.npmjs.com/package/@framers/agentos-extensions)
 
-**Available Extensions:**
+**Curated extensions** (110 manifests under `registry/curated/`), by category, with examples:
 
-| Category | Extensions |
+| Category | Examples |
 |----------|-----------|
-| **Research** | web-search, web-browser, news-search |
-| **Media** | giphy, image-search, speech-runtime, voice-synthesis |
-| **System** | cli-executor, auth |
-| **Integrations** | telegram, telegram-bot |
-| **Provenance** | anchor-providers, tip-ingestion |
-| **Channels** | telegram, whatsapp, discord, slack, webchat |
+| **Research** | web-search, web-browser, web-scraper, news-search, deep-research, citation-verifier |
+| **Media** | giphy, image-search, voice-synthesis, omdb |
+| **Voice** | streaming-stt-deepgram, streaming-stt-whisper, google-cloud-tts, piper |
+| **System** | cli-executor, browser-automation, credential-vault |
+| **Integrations** | telegram, github, clearbit |
+| **Provenance** | anchor-providers |
+| **Safety** | pii-redaction, ml-classifiers, topicality, code-safety, grounding-guard, content-policy-rewriter |
+| **Channels** | 37 adapters: telegram, whatsapp, discord, slack, webchat, email, sms and the rest |
+
+The other categories are auth, cloud, communications, domains, memory, productivity and tools.
 
 ---
 
@@ -110,7 +113,7 @@ const snapshot = await createCuratedSkillSnapshot({ skills: ['github', 'weather'
 npm install @framers/agentos-skills
 ```
 
-This is the content package for skills. The runtime engine (SkillLoader, SkillRegistry, path utilities) now lives in `@framers/agentos/cognition/skills`.
+This is the content package for skills. The runtime engine (SkillLoader, SkillRegistry, path utilities) lives in `@framers/agentos/cognition/skills`.
 
 ```
 @framers/agentos/cognition/skills               <- Engine (SkillLoader, SkillRegistry, path utils)
