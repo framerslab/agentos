@@ -120,6 +120,7 @@ export class TranscriptLedger {
       if (held === undefined) return false;
       this.retracted.add(itemId);
       this.lines.set(itemId, { itemId, text: '', isFinal: true });
+      this.trim(itemId);
       return true;
     }
     if (!event.isFinal && held !== undefined && held.text === event.text) return false;
