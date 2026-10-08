@@ -178,18 +178,27 @@ export async function* runGmiTurn(
   let ended = false;
   let releaseGmi: (() => Promise<void>) | undefined;
   const userMessage: SessionTranscriptMessage = { role: 'user', content: input };
-  let pending: { step: StepFinishedChunkPayload; calls: ToolCallRequest[]; results: ToolResultChunkPayload[]; first: boolean } | undefined;
-  // Writes the last finished step once its tool results are in.
+  // False until a step is kept with the turn's user message in front of it.
+  let userMessageKept = false;
+  let pending: { step: StepFinishedChunkPayload; calls: ToolCallRequest[]; results: ToolResultChunkPayload[] } | undefined;
+  // Writes the last finished step once its tool results are in. The turn's user
+  // message goes with the first step the store keeps: when the store refuses a
+  // step (a tool call left unanswered, two calls under one id), the message
+  // waits for the next one, so no later step is stored without the message it
+  // answers.
   const flush = (): void => {
     if (!pending) return;
     const messages = stepToTranscript({
       step: pending.step,
       calls: pending.calls,
       results: pending.results,
-      userMessage: pending.first ? userMessage : undefined,
+      userMessage: userMessageKept ? undefined : userMessage,
       textOverride: folder.stepText(pending.step),
     });
-    if (!writer || writer.appendStep(messages)) recorded.push(...messages);
+    if (!writer || writer.appendStep(messages)) {
+      recorded.push(...messages);
+      userMessageKept = true;
+    }
     pending = undefined;
   };
 
@@ -222,7 +231,6 @@ export async function* runGmiTurn(
     };
 
     let stepCalls: ToolCallRequest[] = [];
-    let firstStep = true;
     for await (const chunk of gmi.processTurnStream(turnInput)) {
       folder.push(chunk);
       switch (chunk.type) {
@@ -233,9 +241,8 @@ export async function* runGmiTurn(
           flush();
           const step = chunk.content as StepFinishedChunkPayload;
           await afterGeneration(deps.opts, folder, step, stepCalls);
-          pending = { step, calls: stepCalls, results: [], first: firstStep };
+          pending = { step, calls: stepCalls, results: [] };
           stepCalls = [];
-          firstStep = false;
           recordLedgerUsage(deps.ledger, step.providerId, step.modelId, step.usage);
           break;
         }
