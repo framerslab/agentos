@@ -638,7 +638,7 @@ import { hitl } from '@framers/agentos';
 
 hitl.autoApprove()                      // always approve — use in tests / CI
 hitl.autoReject('dry-run mode')         // always reject with an optional reason
-hitl.cli()                              // interactive stdin/stdout prompt
+hitl.cli()                              // interactive stdin/stdout prompt; prints the request's details (a tool call's arguments) first
 hitl.webhook('https://my-service/ok')   // POST to an HTTP endpoint
 hitl.slack({ channel: '#approvals', token: process.env.SLACK_BOT_TOKEN })
 hitl.llmJudge({                         // delegate to an LLM judge

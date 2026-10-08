@@ -75,7 +75,7 @@ Source: [`src/api/hitl.ts`](https://github.com/framerslab/agentos/blob/master/sr
 
 ### `hitl.cli()`
 
-Interactive terminal prompt. Reads from `process.stdin`. Use locally and in interactive scripts; **not safe for CI or serverless**.
+Interactive terminal prompt. Reads from `process.stdin`. Before it asks, it prints the request's description, agent, action, type and details; for a tool call the details hold the arguments the tool will run with, so the approver sees the recipient, the path or the query being approved. Use locally and in interactive scripts; **not safe for CI or serverless**.
 
 ```typescript
 handler: hitl.cli();
@@ -331,13 +331,14 @@ console.log(result.text);
 Running from a terminal pauses before the draft is returned and prints:
 
 ```
-[APPROVAL NEEDED] Final output for return to caller
-Agent: drafter | Action: return
+[APPROVAL NEEDED] Approve the final agency response before returning it.
+Agent: __agency__ | Action: return
 Type: output
+Details: { output: '<the drafted paragraph>' }
 Approve? (y/n):
 ```
 
-Approve and the draft returns. Reject and the run ends with the timeout policy applied.
+The agent line names the agency (`__agency__` when it has no `name`), and the details hold the draft being approved. Approve and the draft returns. Answer `n`, or nothing within the 60 seconds of `timeoutMs` (`onTimeout: 'reject'`), and `generate()` rejects with an `AgencyConfigError` whose message starts `Final output rejected by HITL`.
 
 ## Worked example — LLM judge with CLI fallback (production default)
 

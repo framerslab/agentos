@@ -3,13 +3,32 @@
  * `hitl.approvals.beforeTool` holds on every tool loop: native, prompt-shim
  * and streamed; on roster seats, pre-built seats, the hierarchical manager,
  * spawned specialists and nested agencies. Real agent(), agency(),
- * generateText, streamText and OpenAIProvider; only fetch is stubbed.
+ * generateText, streamText and OpenAIProvider; only fetch is stubbed, and
+ * node:readline for hitl.cli().
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
+
+// hitl.cli() asks through node:readline: this prompt answers it with
+// `answer`, records each question and calls `onQuestion` as it is asked.
+const cliPrompt = vi.hoisted(() => ({ answer: 'n', asked: [] as string[], onQuestion: undefined as (() => void) | undefined }));
+vi.mock('node:readline', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:readline')>();
+  return {
+    ...actual,
+    createInterface: () => ({
+      question: (query: string, reply: (answer: string) => void) => {
+        cliPrompt.asked.push(query);
+        cliPrompt.onQuestion?.();
+        reply(cliPrompt.answer);
+      },
+      close: () => undefined,
+    }),
+  };
+});
 
 import { agent } from '../agent.js';
 import { agency } from '../agency.js';
@@ -350,6 +369,29 @@ describe('a listed tool waits for the handler', () => {
     // The tool still runs with the hook's arguments on both paths.
     expect(search.execute).toHaveBeenNthCalledWith(1, { q: 'x', authToken: 'tok-secret' });
     expect(search.execute).toHaveBeenNthCalledWith(2, { q: 'y', authToken: 'tok-secret' });
+  });
+
+  it('hitl.cli() prints the arguments of the tool call before it asks, and the description does not carry them', async () => {
+    serve([() => toolCall('search', { q: 'quarterly numbers' }), () => text('done')]);
+    cliPrompt.asked.length = 0;
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let printedBeforeAsking = '';
+    cliPrompt.onQuestion = () => { printedBeforeAsking = log.mock.calls.map((call) => call.join(' ')).join('\n'); };
+    const approvalRequested = vi.fn();
+    try {
+      const team = base({ approvals: { beforeTool: ['search'] }, handler: hitl.cli() }, { on: { approvalRequested } });
+      const r = (await team.generate('find x')) as Json;
+      expect(r.text).toBe('done');
+      expect(cliPrompt.asked).toEqual(['Approve? (y/n): ']);
+      expect(printedBeforeAsking).toContain("q: 'quarterly numbers'");
+      // hitl.slack posts the description to a channel, so the arguments stay out of it.
+      expect((approvalRequested.mock.calls[0][0] as ApprovalRequest).description).not.toContain('quarterly numbers');
+      // The answer was n: the tool never ran.
+      expect(search.execute).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+      cliPrompt.onQuestion = undefined;
+    }
   });
 
   it('a hook that returns null skips the tool and the handler is never asked', async () => {
