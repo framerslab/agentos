@@ -75,6 +75,7 @@ import type {
   RagConfig,
   AgencyStreamPart,
   AgencyStreamResult,
+  AgencyResult,
   CompiledStrategyStreamResult,
 } from './types.js';
 import { AgencyConfigError } from './types.js';
@@ -613,6 +614,7 @@ export function agency(opts: AgencyOptions): Agent {
           yield finalText;
         }
       })(),
+      result: finalizedResultPromise as unknown as Promise<AgencyResult>,
     };
   };
 

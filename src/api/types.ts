@@ -8,6 +8,7 @@
  */
 
 import type { AdaptableToolInput } from './runtime/toolAdapter.js';
+import type { FallbackProviderEntry, FallbackSignal } from './generateText.js';
 
 // ---------------------------------------------------------------------------
 // Scalar union literals
@@ -50,6 +51,7 @@ export type MemoryType =
  * - `"review-loop"` — one agent produces output, another reviews and requests revisions.
  * - `"hierarchical"` — a coordinator agent dispatches sub-tasks to specialist agents.
  * - `"graph"` — explicit dependency DAG; agents run when all `dependsOn` predecessors complete.
+ * - `"panel"` — every seat answers the same prompt on its own model; healthy seats are counted against a quorum and a chair synthesizes (see AgencyOptions.modelPool, chair, panel).
  */
 export type AgencyStrategy =
   | 'sequential'
@@ -57,7 +59,8 @@ export type AgencyStrategy =
   | 'debate'
   | 'review-loop'
   | 'hierarchical'
-  | 'graph';
+  | 'graph'
+  | 'panel';
 
 // ---------------------------------------------------------------------------
 // Sub-config interfaces
@@ -777,6 +780,14 @@ export interface AgentCallRecord {
   };
   /** Wall-clock milliseconds for this agent call. */
   durationMs: number;
+  /** Provider that answered this call, when the seat's result reported one. */
+  provider?: string;
+  /** Model that answered this call, when reported. */
+  model?: string;
+  /** The seat's finish reason, when reported. */
+  finishReason?: string;
+  /** The seat's failover trail, when its call allowed failover. */
+  fallback?: FallbackSignal;
   /** Whether this agent was synthesised at runtime by the emergent subsystem. */
   emergent?: boolean;
 }
@@ -992,6 +1003,14 @@ export type AgencyStreamPart =
       agentCalls: AgentCallRecord[];
       parsed?: unknown;
       durationMs: number;
+      /** The seating that served the run, when a pool seated it. */
+      seating?: SeatingRecord;
+      /** A panel's seat records, on a panel run. */
+      seats?: PanelSeatRecord[];
+      /** A panel's chair record, on a panel run with a chair. */
+      chair?: PanelSeatRecord;
+      /** The quorum a panel reached, on a panel run. */
+      quorum?: PanelQuorumRecord;
     }
   | { type: 'permission-denied'; agent: string; action: string; reason: string };
 
@@ -1023,6 +1042,12 @@ export interface CompiledStrategyStreamResult {
   }>;
   /** Final per-agent ledger for the strategy run, when available. */
   agentCalls?: Promise<AgentCallRecord[]>;
+  /**
+   * The strategy's whole result, when it has more than text, usage and
+   * agent calls (a panel's ledger). The agency wrapper merges it into the
+   * finalized result.
+   */
+  result?: Promise<Record<string, unknown>>;
 }
 
 /**
@@ -1055,8 +1080,10 @@ export interface CompiledStrategyStreamResult {
  * console.log(await stream.agentCalls);
  * console.log(await stream.text);
  * ```
+ *
+ * @typeParam R - The finalized result type `result` resolves to: {@link PanelResult} for a `panel` agency.
  */
-export interface AgencyStreamResult {
+export interface AgencyStreamResult<R extends AgencyResult = AgencyResult> {
   /** Raw live text chunks from the underlying strategy. */
   textStream: AsyncIterable<string>;
   /**
@@ -1091,6 +1118,12 @@ export interface AgencyStreamResult {
    * For most runs it emits a single finalized chunk.
    */
   finalTextStream: AsyncIterable<string>;
+  /**
+   * The finalized result with its ledger, the same object `generate()` would
+   * return. Optional on the interface, so an object typed as it before this
+   * member existed still compiles; `AgencyInstance.stream()` returns it required.
+   */
+  result?: Promise<R>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1614,21 +1647,28 @@ export interface VerifyCitationsConfig {
  * See `BaseAgentConfig` for the shared config surface inherited by this interface.
  */
 export interface AgencyOptions extends BaseAgentConfig {
+  /** Named roster of seats: an {@link AgencySeatConfig} the agency instantiates, or a pre-built `Agent`. */
+  agents: Record<string, AgencySeatConfig | Agent>;
   /**
-   * Named roster of sub-agents.  Each value is either a `BaseAgentConfig`
-   * object (the agency will instantiate it) or a pre-built `Agent` instance.
+   * Every model a seat may sit on, named. A config seat that names neither
+   * `provider` nor `model` is then filled from the pool per call (see
+   * {@link SeatingConfig}). Declaration order is the preference order.
    */
-  agents: Record<string, BaseAgentConfig | Agent>;
+  modelPool?: Record<string, ModelPoolEntry>;
+  /** How pooled seats are filled. Requires `modelPool`. */
+  seating?: SeatingConfig;
+  /** `panel` only: the agent that synthesizes the seats' outputs (`from` picks its model from the pool), or `false` for no synthesis. */
+  chair?: AgencySeatConfig | false;
+  /** `panel` only: deadlines, a concurrency cap and the minimum text that counts as an answer. */
+  panel?: PanelOptions;
   /**
-   * Minimum viable panel for the `parallel` strategy, checked AFTER the
-   * fan-out against the agents that actually SUCCEEDED (HITL-rejected and
-   * errored agents don't count): `minAgents` = successful agents required;
-   * `minProviders` = distinct providers among them — provider diversity is
-   * what makes a multi-model panel meaningful, and a panel that quietly
-   * collapsed to one vendor must not synthesize a false consensus.
-   * Shortfall throws {@link AgencyQuorumError} by default; set
-   * `onShortfall: 'proceed'` to log a warning and synthesize anyway.
-   * Ignored by strategies other than `parallel`.
+   * The floor the fan-out must reach. Under `parallel`: successful seats and
+   * distinct provider ids, checked after the fan-out (a seat with empty text
+   * counts, `minAgents` defaults to 0, `'proceed'` is honoured with zero
+   * survivors). Under `panel`: healthy seats (those that returned text),
+   * distinct providers and distinct known vendors; `minAgents` defaults to 2
+   * for a roster of two or more, and zero healthy seats always throws.
+   * Ignored by the other strategies.
    */
   quorum?: AgencyQuorumConfig;
   /**
@@ -1694,11 +1734,15 @@ export class AgencyConfigError extends Error {
 }
 
 /**
- * Quorum requirements for a `parallel` panel run.
+ * Quorum requirements for a `parallel` fan-out or a `panel`.
  * @see AgencyOptions.quorum
  */
 export interface AgencyQuorumConfig {
-  /** Minimum number of agents that must SUCCEED (default 0 = no floor). */
+  /**
+   * Minimum number of agents that must SUCCEED. Under `parallel` the default
+   * is 0 (no floor); under `panel` the seats counted are the healthy ones
+   * (those that returned text) and the default is 2 for a roster of two or more.
+   */
   minAgents?: number;
   /**
    * Minimum number of DISTINCT providers among the successful agents
@@ -1706,21 +1750,261 @@ export interface AgencyQuorumConfig {
    */
   minProviders?: number;
   /**
+   * `panel` only: minimum number of DISTINCT known vendors (the organization
+   * that trained the model) among the healthy seats. An unknown vendor never
+   * counts; a pre-built seat never counts.
+   */
+  minVendors?: number;
+  /**
    * What a shortfall does: `'error'` (default) throws
    * {@link AgencyQuorumError} before synthesis; `'proceed'` logs a warning
-   * and synthesizes anyway.
+   * and synthesizes anyway. Under `panel`, zero healthy seats throws whatever
+   * this says.
    */
   onShortfall?: 'error' | 'proceed';
 }
 
 /**
- * Thrown by the `parallel` strategy when the post-fan-out panel falls below
- * the configured {@link AgencyQuorumConfig} — too few surviving agents or
- * too little provider diversity to synthesize an honest consensus.
+ * Thrown by the `parallel` strategy and by `panel` when the fan-out falls
+ * below the configured {@link AgencyQuorumConfig}; under `panel` it carries
+ * the ledger.
  */
-export class AgencyQuorumError extends Error {
-  constructor(message: string) {
+export class AgencyQuorumError extends Error implements PanelLedger {
+  /** Every seat's record, when a panel threw. */
+  seats?: PanelSeatRecord[];
+  /** The seating that served the run, when a pool seated it. */
+  seating?: SeatingRecord;
+  /** The quorum the panel reached. */
+  quorum?: PanelQuorumRecord;
+  /** The usage of every call that returned before the failure. */
+  usage?: AgencyResult['usage'];
+  /**
+   * @param message - Human-readable description of the shortfall.
+   * @param ledger - A panel's seats, seating, quorum and usage at the failure.
+   */
+  constructor(message: string, ledger?: PanelLedger) {
     super(message);
     this.name = 'AgencyQuorumError';
+    Object.assign(this, ledger);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Model pool, seating and panel
+// ---------------------------------------------------------------------------
+
+/** One model a seat can sit on. The record key is the entry's name. */
+export interface ModelPoolEntry {
+  /** One of the eleven text provider ids the provider manager builds, checked against its list and never against `PROVIDER_DEFAULTS`, which also holds media providers. */
+  provider: string;
+  /** A plain model id for that provider. A known `provider:` prefix is rejected. */
+  model: string;
+  /** Key for this entry. Falls back to a same-provider `setDefaultProvider()` key, then the provider's environment variable; never to the agency-level `apiKey`. */
+  apiKey?: string;
+  /** Base URL for this entry. Falls back as `apiKey` does, to a same-provider `setDefaultProvider()` URL, then the provider's URL variable. */
+  baseUrl?: string;
+  /** Defaults for a seat that sits here and sets none of its own. */
+  effort?: BaseAgentConfig['effort'];
+  /** Default thinking budget for a seat that sits here and sets none of its own. */
+  thinking?: BaseAgentConfig['thinking'];
+  /** Default output cap for a seat that sits here and sets none of its own. A positive integer. */
+  maxTokens?: number;
+  /** Relative share for the `weighted` and `round-robin` policies. A finite number greater than 0. Default 1. */
+  weight?: number;
+  /** Who trained the model, when it cannot be read from the provider and model id. */
+  vendor?: string;
+}
+
+/** How pooled seats are filled from the pool. */
+export interface SeatingConfig {
+  /** Default `'preferred'`. */
+  policy?: 'preferred' | 'weighted' | 'round-robin' | 'random';
+  /**
+   * For `'weighted'` and `'random'`: fixes the sequence of seatings this
+   * instance produces, call after call. A whole number from 0 to 4294967295,
+   * or a non-empty string.
+   */
+  seed?: number | string;
+  /**
+   * Keep seats on different vendors, providers or models while the pool allows it.
+   * Default `'vendor'` under `panel` and `parallel`, `false` under the other strategies.
+   */
+  distinct?: 'vendor' | 'provider' | 'model' | false;
+}
+
+/** A roster seat: an agent config plus the pool entries it may sit on. */
+export interface AgencySeatConfig extends BaseAgentConfig {
+  /** Names of pool entries this seat may sit on, in preference order. Default: every entry, in pool order. */
+  from?: string[];
+  /** For a fixed seat: who trained its model, when that cannot be read from its provider and model id. */
+  vendor?: string;
+  /** A fixed seat's own failover chain. Replaces the default for this seat. Rejected on a pooled seat. */
+  fallbackProviders?: FallbackProviderEntry[];
+  /** Called when a fixed seat's call moves to a hop of its chain. Rejected on a pooled seat. */
+  onFallback?: (error: Error, fallbackProvider: string) => void;
+}
+
+/** `panel` limits. */
+export interface PanelOptions {
+  /** Time a seat has, from taking its slot to answering, gate included. No default. */
+  seatDeadlineMs?: number;
+  /** Time the chair has. Default: `seatDeadlineMs`. */
+  chairDeadlineMs?: number;
+  /** How many seats the panel waits on at once. Default: all. */
+  concurrency?: number;
+  /** Non-whitespace characters a reply needs to count as an answer. Default 1. */
+  minChars?: number;
+}
+
+/** A panel seat's outcome. */
+export type PanelSeatStatus = 'ok' | 'empty' | 'error' | 'timeout' | 'rejected' | 'unseated';
+
+/** One seat's record in a panel result. */
+export interface PanelSeatRecord {
+  /** The seat's name in the roster, or `'chair'`. */
+  seat: string;
+  status: PanelSeatStatus;
+  /** Pool entry name, when the seat was filled from the pool. */
+  entry?: string;
+  /** The provider that answered; the assigned one when the call never returned. */
+  provider?: string;
+  model?: string;
+  /** The model id the provider reported. */
+  responseModel?: string;
+  /** The provider answered from another model than the one requested. */
+  substituted?: boolean;
+  /** Who trained the model that answered, when known. */
+  vendor?: string;
+  finishReason?: string;
+  /** Set on an `ok` seat whose `finishReason` is `'length'` or `'tool-calls'`. */
+  truncated?: boolean;
+  text: string;
+  usage?: AgentCallRecord['usage'];
+  durationMs: number;
+  /** Redacted: why the seat is not `ok`, when known. */
+  error?: string;
+  /** Present when the seat allowed failover and it fired. */
+  fallback?: FallbackSignal;
+}
+
+/** One seat's line in a seating record. */
+export interface SeatingSeatRecord {
+  entry?: string;
+  provider?: string;
+  model?: string;
+  vendor?: string;
+  fixed?: boolean;
+  prebuilt?: boolean;
+  unseated?: boolean;
+  reason?: string;
+}
+
+/** Which pool entry sat in every seat for one call. */
+export interface SeatingRecord {
+  policy: 'preferred' | 'weighted' | 'round-robin' | 'random';
+  /** As configured, or the number drawn at construction; for `'weighted'` and `'random'`. */
+  seed?: number | string;
+  /** The 32-bit value the draws used. */
+  seedUsed?: number;
+  /** This call's number on the instance, from 0. */
+  call: number;
+  distinct: 'vendor' | 'provider' | 'model' | false;
+  /** Names of the pool entries that were available when the seats were filled. */
+  available: string[];
+  seats: Record<string, SeatingSeatRecord>;
+  skipped: Array<{ entry: string; reason: string }>;
+}
+
+/** The quorum a panel reached. */
+export interface PanelQuorumRecord {
+  met: boolean;
+  /** Seats that returned text. */
+  healthy: number;
+  /** Distinct provider ids among the healthy seats. */
+  providers: string[];
+  /** Distinct known vendors among the healthy seats. */
+  vendors: string[];
+  /** What fell short, when `met` is false. */
+  shortfall?: string;
+}
+
+/** What `agency().generate()` resolves to. */
+export interface AgencyResult {
+  text: string;
+  usage: { promptTokens: number; completionTokens: number; totalTokens: number; costUSD?: number; cacheReadTokens?: number; cacheCreationTokens?: number };
+  agentCalls: AgentCallRecord[];
+  parsed?: unknown;
+  provenanceTrail?: import('./agency-provenance.js').AgencyProvenanceTrail;
+  provider?: string;
+  model?: string;
+  finishReason?: string;
+  /** Present when a pool seated the run. */
+  seating?: SeatingRecord;
+  [key: string]: unknown;
+}
+
+/** What a `panel` agency's `generate()` resolves to. */
+export interface PanelResult extends AgencyResult {
+  seats: PanelSeatRecord[];
+  chair?: PanelSeatRecord;
+  quorum: PanelQuorumRecord;
+}
+
+/** The ledger a failed panel run attaches to its error. */
+export interface PanelLedger {
+  seats?: PanelSeatRecord[];
+  seating?: SeatingRecord;
+  quorum?: PanelQuorumRecord;
+  /** The usage of every call that returned before the failure. */
+  usage?: AgencyResult['usage'];
+}
+
+/**
+ * What `agency()` returns: the {@link Agency} interface with typed results.
+ * Assignable to {@link Agency}.
+ *
+ * @typeParam R - What `generate()` resolves to: {@link PanelResult} for a `panel` agency.
+ */
+export interface AgencyInstance<R extends AgencyResult = AgencyResult> extends Agency {
+  generate(prompt: string, opts?: Record<string, unknown>): Promise<R>;
+  stream(prompt: string, opts?: Record<string, unknown>): AgencyStreamResult<R> & { result: Promise<R> };
+}
+
+/** Thrown when a panel's chair fails: it threw, timed out or returned no text. Carries the ledger. */
+export class AgencyPanelError extends Error implements PanelLedger {
+  /** Every seat's record. */
+  seats?: PanelSeatRecord[];
+  /** The seating that served the run, when a pool seated it. */
+  seating?: SeatingRecord;
+  /** The quorum the panel reached before the chair ran. */
+  quorum?: PanelQuorumRecord;
+  /** The usage of every call that returned before the failure. */
+  usage?: AgencyResult['usage'];
+  /**
+   * @param message - Human-readable description of the chair's failure.
+   * @param ledger - The panel's seats, seating, quorum and usage at the failure.
+   */
+  constructor(message: string, ledger?: PanelLedger) {
+    super(message);
+    this.name = 'AgencyPanelError';
+    Object.assign(this, ledger);
+  }
+}
+
+/** Thrown before any model is called when a seat or the chair cannot be seated (outside `panel`, any seat; under `panel`, the chair). */
+export class AgencySeatingError extends Error {
+  /** The seat that could not be seated, or `'chair'`. */
+  readonly seat: string;
+  /** The reason, as `seating.skipped` would record it. */
+  readonly reason: string;
+  /**
+   * @param seat - The seat's name, or `'chair'`.
+   * @param reason - Why it could not be seated (`no key (ANTHROPIC_API_KEY)`, `circuit open`, ...).
+   */
+  constructor(seat: string, reason: string) {
+    super(`Seat "${seat}" cannot be seated: ${reason}`);
+    this.name = 'AgencySeatingError';
+    this.seat = seat;
+    this.reason = reason;
   }
 }

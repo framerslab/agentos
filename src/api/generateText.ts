@@ -284,6 +284,16 @@ export interface FallbackProviderEntry {
   provider: string;
   /** Model identifier override. When omitted, the provider's default text model is used. */
   model?: string;
+  /** Key for this hop. Written by an agency's seating; omitted, the hop reads the provider's environment variable. */
+  apiKey?: string;
+  /** Base URL for this hop, written by seating; omitted, the provider's URL variable. */
+  baseUrl?: string;
+  /**
+   * Who trained this hop's model, when its id and endpoint cannot say; an
+   * agency seat's record reads it when this hop answered. Seating writes a
+   * pool entry's `vendor` here; a fixed seat's own chain may declare it.
+   */
+  vendor?: string;
   /**
    * Per-hop reasoning depth applied ONLY when THIS entry serves the call,
    * forwarded as `output_config.effort` (Anthropic) / `reasoning_effort`
@@ -765,6 +775,32 @@ export interface GenerateTextOptions {
    * @internal
    */
   __approvalGate?: ApprovalGateFn;
+  /**
+   * Internal — set by an agency's seating on every seat and the chair. With it,
+   * provider resolution ignores a `setDefaultProvider()` default that names no
+   * provider, for the key and for the URL, and never reroutes Anthropic to
+   * OpenRouter: a provider with no key of its own fails. Rides every failover hop.
+   *
+   * @internal
+   */
+  __strictCredentials?: boolean;
+  /**
+   * Internal — set by a panel when its own deadline is the smallest bound it
+   * passes as `requestTimeout`: a timeout error then does not count against
+   * the provider's circuit breaker.
+   *
+   * @internal
+   */
+  __panelDeadline?: boolean;
+  /**
+   * Internal — set by an agency's seating on every seat and the chair: the
+   * call's error mask. The tool loops pass a tool's error through it, as one
+   * redacted string, before they write the call record, the tool turn and the
+   * `tool-result` stream part.
+   *
+   * @internal
+   */
+  __maskError?: (error: unknown) => unknown;
   /**
    * @internal Used by generateObject and AgentSession.send (with
    * responseSchema) to forward a provider-specific response_format

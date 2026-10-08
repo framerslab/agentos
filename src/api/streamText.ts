@@ -36,6 +36,7 @@ import {
   usageOfError,
   resolveChainOfThought,
   type FallbackProviderEntry,
+  type FallbackSignal,
   type FallbackSkipReason,
   type GenerateTextOptions,
   type GenerationHookContext,
@@ -225,6 +226,14 @@ export interface StreamTextResult {
   provider: Promise<string>;
   /** Resolves to the resolved model id once the stream has started. */
   model: Promise<string>;
+  /**
+   * The failover trail, resolved when the stream ends: `fired` is true when a
+   * fallback leg served or was tried; `finalProvider` / `finalModel` name the
+   * run that answered; `undefined` only when the stream ended before routing.
+   * Optional in the type, so an object typed as `StreamTextResult` without it
+   * still compiles; `streamText` always sets it.
+   */
+  fallback?: Promise<FallbackSignal | undefined>;
   /**
    * Resolves to the reason the FINAL model step stopped emitting, on the
    * same cadence as {@link usage} (when the stream completes):
