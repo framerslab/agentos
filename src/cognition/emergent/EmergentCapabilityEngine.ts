@@ -561,7 +561,7 @@ export class EmergentCapabilityEngine {
           });
           continue;
         }
-        const details = result.details as { code?: string; effects?: unknown[] } | undefined;
+        const details = result.details as { code?: string } | undefined;
         if (details?.code === 'dry_run_needs_output') {
           return { success: false, error: result.error };
         }
@@ -581,7 +581,7 @@ export class EmergentCapabilityEngine {
           output: result.output,
           success: result.success,
           error: result.error,
-          ...(details?.effects && details.effects.length > 0 ? { effects: details.effects } : {}),
+          ...(result.effects && result.effects.length > 0 ? { effects: result.effects } : {}),
         });
       }
     } else {

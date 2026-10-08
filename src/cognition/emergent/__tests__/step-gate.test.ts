@@ -160,7 +160,7 @@ describe('ComposableToolBuilder with a gate', () => {
     const composed = builder.build('t', 't', {}, spec);
 
     const first = await composed.execute({ text: 'hi' }, ctx);
-    expect(first).toMatchObject({ success: true, output: { from: 'read', text: 'hi' }, details: { effects: [{ step: 'send', ran: true }] } });
+    expect(first).toMatchObject({ success: true, output: { from: 'read', text: 'hi' }, effects: [{ kind: 'step', step: 'send', ran: true }] });
 
     // The step tool is replaced by one that no longer declares its side effects.
     tools.set('send', tool('send', undefined));
@@ -184,9 +184,7 @@ describe('ComposableToolBuilder with a gate', () => {
 
     expect(sent).not.toHaveBeenCalled();
     expect(dry).toMatchObject({ success: true, output: { from: 'read', text: 'from the test case' } });
-    expect(dry.details).toMatchObject({
-      effects: [{ step: 'send', tool: 'send', wouldRun: true, args: { text: 'hi' } }],
-    });
+    expect(dry.effects).toMatchObject([{ kind: 'step', step: 'send', tool: 'send', wouldRun: true, args: { text: 'hi' } }]);
 
     const missing = await builder.runPipeline(spec, { text: 'hi' }, ctx, { dry: { stepOutputs: {} } });
     expect(missing.success).toBe(false);
@@ -215,7 +213,7 @@ describe('ComposableToolBuilder with a gate', () => {
     expect(dry).toMatchObject({
       success: true,
       output: { from: 'read', text: 'given' },
-      details: { effects: [{ step: 'inner', tool: 'inner', wouldRun: true, nested: true }] },
+      effects: [{ kind: 'step', step: 'inner', tool: 'inner', wouldRun: true, nested: true }],
     });
   });
 

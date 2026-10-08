@@ -669,8 +669,9 @@ export class ToolOrchestrator implements IToolOrchestrator {
           tool: step,
           ...(signal ? { signal } : {}),
         });
+        const effects = result.effects ? { effects: result.effects } : {};
         if (!result.isError) {
-          return { success: true, output: result.output };
+          return { success: true, output: result.output, ...effects };
         }
         const errorDetails = (result.errorDetails ?? {}) as {
           message?: string;
@@ -692,6 +693,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
             ...(code ? { code } : {}),
             ...(errorDetails.code ? { orchestratorCode: errorDetails.code } : {}),
           },
+          ...effects,
         };
       },
     };
@@ -1020,6 +1022,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
             details: coreExecutorResult.details,
           }
         : undefined,
+      ...(coreExecutorResult.effects ? { effects: coreExecutorResult.effects } : {}),
     };
   }
 

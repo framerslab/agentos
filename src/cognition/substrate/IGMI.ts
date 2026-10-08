@@ -17,6 +17,7 @@ import { AIModelProviderManager } from '../../core/llm/providers/AIModelProvider
 import { IUtilityAI } from '../nlp/ai_utilities/IUtilityAI';
 // Assuming IToolOrchestrator is correctly exported from this path
 import { IToolOrchestrator } from '../../core/tools/IToolOrchestrator';
+import type { ToolEffectRecord } from '../../core/tools/ITool';
 import { ModelUsage } from '../../core/llm/providers/IProvider';
 
 /**
@@ -104,6 +105,8 @@ export interface ToolCallResult {
   output: any;
   isError?: boolean;
   errorDetails?: any;
+  /** The call's effects, as the tool's result carried them (see `ToolExecutionResult.effects`). */
+  effects?: ToolEffectRecord[];
 }
 
 /**
