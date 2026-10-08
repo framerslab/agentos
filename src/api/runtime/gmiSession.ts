@@ -26,7 +26,7 @@ import type { StreamTextResult } from '../streamText.js';
 import { ObjectGenerationError } from '../generateObject.js';
 import type { SessionHistoryBuffer, SessionTurnWriter } from '../sessionHistory.js';
 import type { SessionTranscriptMessage } from '../sessionTranscript.js';
-import type { AgentOptions } from '../agent.js';
+import type { AgentMemoryProvider, AgentOptions } from '../agent.js';
 import { DEFAULT_MEMORY_TOKEN_BUDGET, MEMORY_TIMEOUT_MS } from './memoryProviderHooks.js';
 import type { AgentOSUsageLedgerOptions } from './usageLedger.js';
 import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
@@ -119,6 +119,20 @@ async function memoryProviderContext(opts: AgentOptions, userText: string): Prom
     return undefined;
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * `memoryProvider.observe` for one side of a finished turn. It is called on the
+ * provider, as `agent()` calls it, because a provider built from a class reads
+ * `this`; and it is never the turn's error: the turn has been answered and
+ * stored, and a memory store that fails to record it does not undo that.
+ */
+function observeTurn(provider: AgentMemoryProvider, role: 'user' | 'assistant', text: string): void {
+  try {
+    void Promise.resolve(provider.observe?.(role, text)).catch(() => undefined);
+  } catch (observeError) {
+    console.warn('[agentos] memoryProvider.observe failed:', observeError);
   }
 }
 
@@ -266,11 +280,11 @@ export async function* runGmiTurn(
       writer?.abort({ partial: true });
     } else {
       writer?.commit();
-      const observe = deps.opts.memoryProvider?.observe;
-      if (observe) {
-        void observe('user', userText).catch(() => undefined);
+      const memoryProvider = deps.opts.memoryProvider;
+      if (memoryProvider?.observe) {
+        observeTurn(memoryProvider, 'user', userText);
         const reply = folder.text();
-        if (reply) void observe('assistant', reply).catch(() => undefined);
+        if (reply) observeTurn(memoryProvider, 'assistant', reply);
       }
     }
     return recorded;
