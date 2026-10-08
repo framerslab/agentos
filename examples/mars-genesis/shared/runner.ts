@@ -7,7 +7,6 @@ import {
   EmergentJudge,
   EmergentToolRegistry,
   ComposableToolBuilder,
-  SandboxedToolForge,
   ForgeToolMetaTool,
   generateText,
   createStepGate,
@@ -201,7 +200,6 @@ function createEmergentEngine(toolMap: Map<string, ITool>): {
   // effects, so chaining one needs compose.sideEffectingTools, which this
   // example does not set.
   const composableBuilder = new ComposableToolBuilder(createStepGate({ resolve: (name) => toolMap.get(name) }));
-  const sandboxForge = new SandboxedToolForge();
 
   const engine = new EmergentCapabilityEngine({
     config: {
@@ -213,11 +211,14 @@ function createEmergentEngine(toolMap: Map<string, ITool>): {
       promotionThreshold: { uses: 5, confidence: 0.8 },
       allowSandboxTools: true,
       persistSandboxSource: true,
+      // The departments forge pure computations: a ceiling that grants
+      // nothing, and no storage adapter, so no effect records.
+      capabilities: {},
+      audit: { store: 'none' },
       judgeModel: 'claude-sonnet-4-20250514',
       promotionJudgeModel: 'claude-opus-4-20250514',
     },
     composableBuilder,
-    sandboxForge,
     judge,
     registry,
   });
