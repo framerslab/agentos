@@ -206,6 +206,12 @@ export function recheckStructuredReply(finalText: string | null, previous: Struc
 // The parsers generateObject and the structured turn share
 // ---------------------------------------------------------------------------
 
+/**
+ * The line of every schema instruction ({@link buildSchemaInstructionText})
+ * before the JSON Schema itself: a prompt that holds it states a schema.
+ */
+export const SCHEMA_INSTRUCTION_LEAD = 'The JSON MUST conform to this JSON Schema:';
+
 export function buildSchemaInstructionText(
   jsonSchema: Record<string, unknown>,
   schemaName?: string,
@@ -216,7 +222,7 @@ export function buildSchemaInstructionText(
   if (schemaName) parts.push(`The JSON object should be a "${schemaName}".`);
   if (schemaDescription) parts.push(schemaDescription);
   parts.push('');
-  parts.push('The JSON MUST conform to this JSON Schema:');
+  parts.push(SCHEMA_INSTRUCTION_LEAD);
   parts.push(JSON.stringify(jsonSchema, null, 2));
   return parts.join('\n');
 }

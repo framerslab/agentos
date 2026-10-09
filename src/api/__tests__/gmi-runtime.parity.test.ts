@@ -97,6 +97,27 @@ describe("agent({ runtime: 'gmi' }) keeps what agent() does", () => {
     expect(session.messages().map((m) => m.content)).toEqual(['where?', '{"city":"Lyon"}']);
   });
 
+  it.each([['legacy'], ['gmi']] as const)('%s runtime: an onBeforeGeneration hook that drops the system messages of a structured send drops its schema instructions too', async (runtime) => {
+    const k = key();
+    // `whole`: the legacy runtime asks for whole responses.
+    const s = script('anthropic', k, { replies: [reply.text('{"city":"Lyon"}')], whole: true });
+    // Every system message out, one of the hook's own in.
+    const onBeforeGeneration = async (ctx: { messages: Array<{ role: string; content: unknown }> }) => ({
+      ...ctx,
+      messages: [{ role: 'system', content: 'Be brief.' }, ...ctx.messages.filter((m) => m.role !== 'system')],
+    });
+    const session = agent({ runtime, provider: 'anthropic', model: 'claude-sonnet-5-5', apiKey: k, fallbackProviders: [], onBeforeGeneration } as unknown as AgentOptions).session('s');
+
+    const r = await session.send('Where?', { responseSchema: z.object({ city: z.string() }), schemaName: 'place' });
+    expect(r.object).toEqual({ city: 'Lyon' });
+    expect(s.seen).toHaveLength(1);
+    // Claude Sonnet 5.5 takes no forced tool, so no payload carries the schema: the prompt did, and the hook took it out.
+    expect(s.seen[0].options.responseFormat).toBeUndefined();
+    const sent = s.seen[0].messages.map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
+    expect(sent).toContain('Be brief.');
+    expect(sent).not.toContain('The JSON MUST conform to this JSON Schema:');
+  });
+
   it('an onBeforeToolExecution hook that resolves nothing is warned about, and the tool runs with its own arguments', async () => {
     const k = key(); script('openai', k, { replies: [reply.tools([{ id: 'c1', name: 'lookup', args: { q: 'x' } }]), reply.text('Found x.')] });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);

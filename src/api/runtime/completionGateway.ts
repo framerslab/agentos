@@ -90,6 +90,30 @@ export type CompletionOutcome =
 /** One provider attempt. `outcome` settles when iteration ends (a never-iterated attempt never calls the provider). */
 export interface CompletionAttempt extends AsyncIterable<ModelCompletionResponse> {
   outcome: Promise<CompletionOutcome>;
+  /**
+   * For an attempt with a response schema: true when the hop's provider
+   * payload carries the schema (a strict `json_schema`, Anthropic's forced
+   * schema tool, Gemini's `responseSchema`), false when the schema reaches the
+   * model in the prompt alone (no payload for the provider or model, or a JSON
+   * mode without one). Unset for an attempt with no schema.
+   */
+  schemaInPayload?: boolean;
+}
+
+/**
+ * Usage a provider reported for an attempt after the caller's signal ended it.
+ * The attempt ends at once, and a provider stream that had started is read to
+ * its end in the background, where a provider that bills the request may still
+ * report the bill: OpenRouter ends a held content-filter decline or a held
+ * error with an abort chunk carrying the usage line it was waiting for. Neither
+ * the attempt's `outcome` nor its chunks carry this usage.
+ */
+export interface LateAttemptUsage {
+  providerId: string;
+  modelId: string;
+  hop: number;
+  /** The usage beyond what the attempt reported before it ended (providers report a request's running total). */
+  usage: ModelUsage;
 }
 
 export interface CompletionGateway {
@@ -106,7 +130,22 @@ export interface CompletionGateway {
      * schema then gets no second copy.
      */
     schemaInPrompt?: boolean,
+    /**
+     * Receives the usage the provider reports for this attempt after the
+     * caller's signal ended it ({@link LateAttemptUsage}), once the stream left
+     * running has ended. Without a listener, or when it throws, that usage is
+     * logged at warn level with its token counts.
+     */
+    onLateUsage?: (report: LateAttemptUsage) => void,
   ): CompletionAttempt;
+  /**
+   * The schema instructions, in generateObject's words, that a hop's system
+   * prompt needs for `responseSchema`: the text when the hop's provider payload
+   * carries no schema (no payload for the provider or model, or a JSON mode
+   * without one), undefined when the payload carries it. A caller that puts
+   * the text in its prompt itself passes `schemaInPrompt` to `stream()`.
+   */
+  schemaInstruction?(resolution: CompletionResolution, responseSchema: ZodType, schemaName?: string): string | undefined;
 }
 
 /** The tool format a provider expects; the same mapping as GMI.determineToolFormat. */
@@ -233,6 +272,9 @@ function terminalErrorChunk(resolution: CompletionResolution, error: Error): Mod
   };
 }
 
+/** The error of an attempt the caller's signal stopped, as the providers word theirs. */
+const CALLER_ABORT: InBandError = { message: 'Stream aborted by caller', type: 'abort' };
+
 /** The chunk that ends an attempt the caller's signal stopped, in the shape the providers give theirs. */
 function abortChunk(resolution: CompletionResolution): ModelCompletionResponse {
   return {
@@ -242,21 +284,15 @@ function abortChunk(resolution: CompletionResolution): ModelCompletionResponse {
     modelId: resolution.modelId,
     choices: [],
     isFinal: true,
-    error: { message: 'Stream aborted by caller', type: 'abort' },
+    error: { ...CALLER_ABORT },
   };
 }
 
 const ABORTED = Symbol('aborted');
 
-/** The iterator's next result, or `ABORTED` once `signal` has aborted, whichever comes first. */
-function nextUnlessAborted<T>(iterator: AsyncIterator<T>, signal: AbortSignal): Promise<IteratorResult<T> | typeof ABORTED> {
-  const next = iterator.next();
-  if (signal.aborted) {
-    // Settled or not, the result is not read; a rejection is not left unhandled.
-    void next.catch(() => undefined);
-    return Promise.resolve(ABORTED);
-  }
-  return new Promise<IteratorResult<T> | typeof ABORTED>((resolve, reject) => {
+/** `next`'s result, or `ABORTED` once `signal` has aborted, whichever comes first. */
+function unlessAborted<T>(next: Promise<T>, signal: AbortSignal): Promise<T | typeof ABORTED> {
+  return new Promise<T | typeof ABORTED>((resolve, reject) => {
     const onAbort = (): void => resolve(ABORTED);
     signal.addEventListener('abort', onAbort, { once: true });
     next.then(
@@ -273,29 +309,116 @@ function nextUnlessAborted<T>(iterator: AsyncIterator<T>, signal: AbortSignal): 
 }
 
 /**
+ * Reads a provider stream the caller's abort left behind to its end, starting
+ * with the chunk it was asked for when the abort came (`pending`). Every
+ * provider ends its stream once it sees the signal, at its next event at the
+ * latest, through its own abort path. A read that fails ends the reading.
+ *
+ * @returns The last usage report read there (a chunk's, or the one a thrown
+ *   error carries), or undefined when none was.
+ */
+async function readToEnd(
+  iterator: AsyncIterator<ModelCompletionResponse>,
+  pending: Promise<IteratorResult<ModelCompletionResponse>> | undefined,
+): Promise<ModelUsage | undefined> {
+  let usage: ModelUsage | undefined;
+  try {
+    let result = pending ? await pending : await iterator.next();
+    while (!result.done) {
+      usage = asUsageReport(result.value?.usage) ?? usage;
+      result = await iterator.next();
+    }
+  } catch (error) {
+    // The attempt has ended already; the provider's own failure is not the caller's, its bill is.
+    usage = asUsageReport(usageOfError(error)) ?? usage;
+  }
+  return usage;
+}
+
+/**
+ * The part of `latest`, a request's running total, that `counted` (an earlier
+ * report of the same request) did not carry; undefined when nothing is left.
+ */
+function usageBeyond(latest: ModelUsage, counted: ModelUsage | undefined): ModelUsage | undefined {
+  const beyond: Record<string, number> = {};
+  for (const [field, value] of Object.entries(latest)) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+    const before = (counted as unknown as Record<string, unknown> | undefined)?.[field];
+    beyond[field] = Math.max(0, value - (typeof before === 'number' && Number.isFinite(before) ? before : 0));
+  }
+  return Object.values(beyond).some((count) => count > 0) ? (beyond as unknown as ModelUsage) : undefined;
+}
+
+/** Hands a late usage report to `onLateUsage`; without one, or when it throws, logs it with its token counts. */
+function reportLateUsage(report: LateAttemptUsage, onLateUsage: ((report: LateAttemptUsage) => void) | undefined): void {
+  if (onLateUsage) {
+    try {
+      onLateUsage(report);
+      return;
+    } catch (listenerError) {
+      console.warn('[agentos] completion gateway: the late usage listener failed:', listenerError);
+    }
+  }
+  const { promptTokens, completionTokens, totalTokens } = report.usage;
+  console.warn(
+    `[agentos] completion gateway: '${report.providerId}' reported usage for model '${report.modelId}' (hop ${report.hop}) ` +
+      `after its attempt was stopped, and nothing counted it: ${promptTokens ?? 0} prompt, ${completionTokens ?? 0} completion, ${totalTokens ?? 0} total tokens.`,
+  );
+}
+
+/**
  * The provider's chunks until `signal` aborts, then the abort chunk at once.
- * Anthropic, Gemini and Ollama read the signal only when a streamed event
- * arrives, so a request stalled before its first byte, or between two events,
- * would otherwise hold the turn (and a session's `close()`) until the
- * provider's own timeout. The provider's stream is ended in the background.
+ * Anthropic, Gemini, Ollama, OpenRouter and Requesty read the signal when a
+ * streamed event or line arrives, so a request stalled before its first byte,
+ * or between two events, would otherwise hold the turn (and a session's
+ * `close()`) until the provider's own timeout. The signal is read before every
+ * chunk is asked for: asking a stream that has not started for its first chunk
+ * sends its request, so once the signal has aborted, a stream that was never
+ * asked is closed and sends nothing, and one that has started is read to its
+ * end in the background. The usage reported there beyond what the attempt had
+ * reported (OpenRouter's abort chunk carries the bill of a held decline or a
+ * held error) goes to `onLateUsage` once that read ends ({@link LateAttemptUsage}).
  */
 async function* untilAborted(
   source: AsyncIterable<ModelCompletionResponse>,
   signal: AbortSignal,
   resolution: CompletionResolution,
+  onLateUsage: ((report: LateAttemptUsage) => void) | undefined,
 ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
   const iterator = source[Symbol.asyncIterator]();
+  let started = false;
   let leftRunning = false;
+  // The last usage report passed on: what the attempt reported before it ended.
+  let reported: ModelUsage | undefined;
+  // Hands the provider's stream over once the signal has aborted; `pending` is the chunk asked for when it did.
+  const leave = (pending?: Promise<IteratorResult<ModelCompletionResponse>>): void => {
+    leftRunning = true;
+    if (!started) {
+      void Promise.resolve(iterator.return?.()).catch(() => undefined);
+      return;
+    }
+    void readToEnd(iterator, pending).then((latest) => {
+      const late = latest ? usageBeyond(latest, reported) : undefined;
+      if (late) reportLateUsage({ providerId: resolution.providerId, modelId: resolution.modelId, hop: resolution.hop, usage: late }, onLateUsage);
+    });
+  };
   try {
     for (;;) {
-      const next = await nextUnlessAborted(iterator, signal);
+      if (signal.aborted) {
+        leave();
+        yield abortChunk(resolution);
+        return;
+      }
+      const pending = iterator.next();
+      started = true;
+      const next = await unlessAborted(pending, signal);
       if (next === ABORTED) {
-        leftRunning = true;
-        void Promise.resolve(iterator.return?.()).catch(() => undefined);
+        leave(pending);
         yield abortChunk(resolution);
         return;
       }
       if (next.done) return;
+      reported = asUsageReport(next.value.usage) ?? reported;
       yield next.value;
     }
   } finally {
@@ -463,6 +586,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     responseSchema?: ZodType,
     schemaName = 'response',
     schemaInPrompt = false,
+    onLateUsage?: (report: LateAttemptUsage) => void,
   ): CompletionAttempt {
     let settle!: (outcome: CompletionOutcome) => void;
     const outcome = new Promise<CompletionOutcome>((resolveOutcome) => {
@@ -498,6 +622,13 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
       let completed = false;
       const buffer: ModelCompletionResponse[] = [];
       try {
+        // A turn the caller stopped before this attempt began (a session's close()
+        // during a tool round) sends no request: a provider that does not pass the
+        // signal to fetch would send it, and it would be billed.
+        if (callOptions.abortSignal?.aborted) {
+          finish(failed(errorFromChunk(CALLER_ABORT), undefined, false));
+          return;
+        }
         const provider = resolution.providerManager.getProvider(resolution.providerId);
         if (!provider) {
           const error = Object.assign(new Error(`Provider '${resolution.providerId}' is not available.`), { name: 'ProviderInitializationError' });
@@ -507,7 +638,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         }
         const chunks = provider.generateCompletionStream(resolution.modelId, hopMessages, callOptions);
         const signal = callOptions.abortSignal;
-        for await (const raw of signal ? untilAborted(chunks, signal, resolution) : chunks) {
+        for await (const raw of signal ? untilAborted(chunks, signal, resolution, onLateUsage) : chunks) {
           const chunk = structured?.toolName ? liftSchemaToolCall(raw, structured.toolName) : raw;
           if (chunk.error) {
             // An abort is the caller's own stop: it is never walked to another
@@ -564,8 +695,16 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
       }
     }
 
-    return { [Symbol.asyncIterator]: () => run(), outcome };
+    return {
+      [Symbol.asyncIterator]: () => run(),
+      outcome,
+      ...(structured ? { schemaInPayload: responseFormatCarriesSchema(structured.responseFormat) } : {}),
+    };
   }
 
-  return { resolve, stream };
+  function schemaInstruction(resolution: CompletionResolution, responseSchema: ZodType, schemaName = 'response'): string | undefined {
+    return lowerForHop(resolution, responseSchema, schemaName).schemaInstruction;
+  }
+
+  return { resolve, stream, schemaInstruction };
 }

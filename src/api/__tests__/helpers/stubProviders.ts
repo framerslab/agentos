@@ -35,6 +35,12 @@ export interface ProviderScript {
   embedded: string[];
   /** How many requests ended because the caller aborted them: held ones (see `reply.hold`) and ones aborted before they started. */
   aborts: number;
+  /**
+   * True to answer `generateCompletion` as well, which agent()'s legacy path
+   * calls: the next reply's chunks folded into one response. Unset, it throws,
+   * because the GMI path streams.
+   */
+  whole?: boolean;
 }
 
 /** A held reply's second half: it is sent once `gate` resolves, unless the request is aborted first. */
@@ -159,8 +165,23 @@ export function stubProviderClass(providerId: string) {
       return { modelId, providerId, contextWindowSize: this.script?.window ?? 128_000, capabilities: ['chat', 'tool_use'] };
     }
 
-    async generateCompletion(): Promise<never> {
-      throw new Error(`${providerId}: the GMI path streams`);
+    async generateCompletion(modelId: string, messages: ChatMessage[], options: Record<string, unknown>) {
+      const s = this.script;
+      if (!s?.whole) throw new Error(`${providerId}: the GMI path streams`);
+      s.seen.push({ modelId, messages: JSON.parse(JSON.stringify(messages)), options });
+      const next = s.replies.shift();
+      if (!next) throw new Error(`${providerId}: unexpected model call`);
+      if (next instanceof Error) throw next;
+      // The streamed reply as one response: its last choice and its last usage.
+      let choice: unknown;
+      let usage: unknown;
+      for (const chunk of next) {
+        if (chunk instanceof Error) throw chunk;
+        const choices = chunk.choices as unknown[] | undefined;
+        if (choices?.length) choice = choices[0];
+        if (chunk.usage) usage = chunk.usage;
+      }
+      return { ...base, object: 'chat.completion', modelId, choices: choice ? [choice] : [], ...(usage ? { usage } : {}) };
     }
 
     async *generateCompletionStream(modelId: string, messages: ChatMessage[], options: Record<string, unknown>) {

@@ -103,6 +103,13 @@ function cacheDiagnosticsSeed(value: unknown): { previousMessageId: string | nul
   return { previousMessageId: typeof id === 'string' && id.length > 0 ? id : null };
 }
 
+/** `messages` with a system message of `text` after the leading system messages. */
+function withSystemMessage(messages: ChatMessage[], text: string): ChatMessage[] {
+  let at = 0;
+  while (at < messages.length && messages[at].role === 'system') at += 1;
+  return [...messages.slice(0, at), { role: 'system', content: text }, ...messages.slice(at)];
+}
+
 /** `value` when it is a usage report as a provider gives one: an object with a numeric token count. */
 function asUsageReport(value: unknown): ModelUsage | undefined {
   if (!value || typeof value !== 'object') return undefined;
@@ -1351,6 +1358,9 @@ export class GMI implements IGMI {
         let stepFinishReason: string | null = null;
         let stepFinalChunk: ModelCompletionResponse | undefined;
         let stepStructuredOutput: unknown;
+        // Whether the answering attempt's provider payload carried the response schema (the gateway says).
+        // Initialised through the assertion, so tsc does not narrow it to undefined where it is read.
+        let stepSchemaInPayload = undefined as boolean | undefined;
         let modelTargetInfo!: ModelTargetInfo;
 
         // One attempt per hop. A failure before any output moves to the next
@@ -1392,9 +1402,24 @@ export class GMI implements IGMI {
           }
           this.addTraceEntry(ReasoningEntryType.PROMPT_CONSTRUCTION_COMPLETE, `Prompt constructed for model ${modelTargetInfo.modelId}.`);
 
+          // A turn's response schema that the primary hop's payload does not carry
+          // rides the prompt. It goes in before the host's hook, as generateText puts
+          // it in before onBeforeGeneration, so a hook that removes it removes it,
+          // and the gateway adds no second copy on that hop. Fallback hops keep the
+          // gateway's per-hop rule.
+          let promptForHook: ChatMessage[] = promptMessages;
+          let attemptSchemaInPrompt = schemaInPrompt;
+          if (gateway && resolution && resolution.hop === 0 && responseSchema && !schemaInPrompt) {
+            const instruction = gateway.schemaInstruction?.(resolution, responseSchema, schemaName);
+            if (instruction) {
+              promptForHook = withSystemMessage(promptMessages, instruction);
+              attemptSchemaInPrompt = true;
+            }
+          }
+
           // The host's hook sees each attempt's prompt, a fallback hop's rebuilt one
           // included, and may replace it for that attempt; the history is untouched.
-          let sendMessages: ChatMessage[] = promptMessages;
+          let sendMessages: ChatMessage[] = promptForHook;
           if (this.config.beforeModelCall) {
             try {
               const replaced = await this.config.beforeModelCall({
@@ -1403,7 +1428,7 @@ export class GMI implements IGMI {
                 hop: resolution?.hop ?? 0,
                 providerId: modelTargetInfo.providerId,
                 modelId: modelTargetInfo.modelId,
-                messages: [...promptMessages],
+                messages: [...promptForHook],
               });
               if (Array.isArray(replaced)) {
                 if (replaced.length > 0) {
@@ -1420,9 +1445,10 @@ export class GMI implements IGMI {
           let attempt: AsyncIterable<ModelCompletionResponse>;
           let attemptOutcome: Promise<CompletionOutcome> | undefined;
           if (gateway && resolution) {
-            const gatewayAttempt: CompletionAttempt = gateway.stream(resolution, sendMessages, llmOptions, responseSchema, schemaName, schemaInPrompt);
+            const gatewayAttempt: CompletionAttempt = gateway.stream(resolution, sendMessages, llmOptions, responseSchema, schemaName, attemptSchemaInPrompt);
             attempt = gatewayAttempt;
             attemptOutcome = gatewayAttempt.outcome;
+            stepSchemaInPayload = gatewayAttempt.schemaInPayload;
           } else {
             const provider = this.llmProviderManager.getProvider(modelTargetInfo.providerId);
             if (!provider) {
@@ -1605,7 +1631,9 @@ export class GMI implements IGMI {
           structuredAttempts += 1;
           const lifted = stepStructuredOutput !== undefined;
           const check = lifted ? structuredReply.checkValue(stepStructuredOutput) : checkStructuredReply(currentIterationTextResponse, structuredReply);
-          const enforcement = lifted ? 'forced_tool' : gateway ? 'provider_schema' : 'prompt_only';
+          // 'provider_schema' only when the answering hop's payload carried the schema; a hop that sent it in the
+          // prompt alone reports 'prompt_only'. A gateway that does not say keeps the earlier report.
+          const enforcement = lifted ? 'forced_tool' : gateway && stepSchemaInPayload !== false ? 'provider_schema' : 'prompt_only';
           if (check.ok) {
             structuredResult = { value: check.value, meta: { schemaName: structuredReply.name, valid: true, attempts: structuredAttempts, enforcement, stage: 'model' } };
             if (lifted && !currentIterationTextResponse) {

@@ -1,3 +1,15 @@
+## [0.13.10](https://github.com/framerslab/agentos/compare/v0.13.9...v0.13.10) (2026-10-09)
+
+### fix
+
+* **config:** honor provider model and timeout defaults (#194) ([c5860d4](https://github.com/framerslab/agentos/commit/c5860d4bf96ca8c4c15af1f4df3d3ede20395095))
+
+### docs
+
+* fifth round of audit follow-ups to the guides (#171) ([e64d2d6](https://github.com/framerslab/agentos/commit/e64d2d6b764b019345d807c142dd3a3ec9a28b2f))
+* **publication:** publish the structured reply guide (#191) ([a5f0d51](https://github.com/framerslab/agentos/commit/a5f0d51b9678e2e50313b3317fb1d7685ae32e55))
+* the gmi() guide and agent({ runtime: 'gmi' }) (#192) ([e6c6305](https://github.com/framerslab/agentos/commit/e6c630523d0877528b6a8eae8e64891e0870a3f5))
+
 ## [0.13.9](https://github.com/framerslab/agentos/compare/v0.13.8...v0.13.9) (2026-10-09)
 
 ### feat

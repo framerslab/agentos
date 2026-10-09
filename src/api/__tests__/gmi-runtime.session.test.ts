@@ -301,8 +301,34 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     const pending = a.session('s').send('one');
     await a.session('s').close();
     await expect(pending).rejects.toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringMatching(/abort/i) });
-    expect(s.aborts).toBe(1);
+    // The turn reached its model call after close() had aborted it: no request was sent.
+    expect(s.seen).toHaveLength(0);
     expect(a.session('s').messages()).toEqual([]);
+  });
+
+  it('close() during a slow tool of step 0: the next step sends no provider request, and the send rejects with the abort error', async () => {
+    // A provider that does not pass the signal to fetch would send, and bill, a request started after close().
+    const k = key(); const toolStarted = gate(); const toolDone = gate();
+    const s = script('openai', k, { replies: [reply.tools([{ id: 'c1', name: 'lookup', args: { q: 'x' } }]), reply.text('Late.')] });
+    const slowLookup = lookupTool(async () => {
+      toolStarted.open();
+      await toolDone.opened;
+      return { success: true, output: { found: 'x' } };
+    });
+    const session = agent(base(k, { tools: [slowLookup] })).session('s');
+    try {
+      const outcome = session.send('find x').then(() => 'resolved', (error: unknown) => error);
+      await toolStarted.opened;
+      const closed = session.close();
+      toolDone.open();
+      expect(await Promise.race([closed.then(() => 'closed'), sleep(2_000).then(() => 'still waiting')])).toBe('closed');
+      expect(await outcome).toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringMatching(/abort/i) });
+      // Step 0's request only: step 1 started after close() and sent nothing.
+      expect(s.seen).toHaveLength(1);
+      expect(s.aborts).toBe(0);
+    } finally {
+      toolDone.open();
+    }
   });
 
   it('close() during a provider request held open aborts it and returns at once; the send rejects with the abort error', async () => {

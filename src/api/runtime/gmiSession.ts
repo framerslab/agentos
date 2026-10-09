@@ -31,6 +31,7 @@ import type { SessionTranscriptMessage } from '../sessionTranscript.js';
 import type { AgentMemoryProvider, AgentOptions } from '../agent.js';
 import { DEFAULT_MEMORY_TOKEN_BUDGET, MEMORY_TIMEOUT_MS } from './memoryProviderHooks.js';
 import type { AgentOSUsageLedgerOptions } from './usageLedger.js';
+import type { LateAttemptUsage } from './completionGateway.js';
 import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
 import { stepToTranscript, transcriptToConversation } from './gmiTranscript.js';
 
@@ -79,6 +80,12 @@ export interface GmiTurnContext {
   onModelCall?: (route: { providerId: string; modelId: string }) => void;
   /** True for a structured send: its model calls go without tools. */
   structured?: boolean;
+  /**
+   * Receives the usage a provider reports for one of the turn's model calls
+   * after the turn stopped it (the completion gateway's `onLateUsage`); it
+   * arrives once the turn has ended.
+   */
+  onLateUsage?: (report: LateAttemptUsage) => void;
 }
 
 /** The GMI that serves one turn. */
@@ -110,7 +117,10 @@ export interface GmiSessionDeps {
   history: SessionHistoryBuffer | null;
   /** Usage ledger options for this turn's events (session id and source included). */
   ledger?: AgentOSUsageLedgerOptions;
-  /** Receives the turn's usage once it ends, failed or not. */
+  /**
+   * Receives the turn's usage once it ends, failed or not, and again any usage
+   * a provider reports for a call of the turn after the turn stopped it.
+   */
   onUsage(usage: TokenUsage): void;
   lock: TurnLock;
 }
@@ -294,11 +304,30 @@ export async function* runGmiTurn(
     const gmi = served.gmi;
     gmi.replaceHistory?.(transcriptToConversation(priorMessages));
     const memoryContext = deps.useMemoryProviderContext ? await memoryProviderContext(deps.opts, userText) : undefined;
+    // When the model call in progress started: the turn's start, the end of the
+    // tool round before it, or the failure of the attempt it replaces.
+    let callStartedAt = Date.now();
     served.prepare?.({
       prompt: typeof input === 'string' ? input : undefined,
       memoryContext,
       onModelCall: ({ providerId, modelId }) => folder.route(providerId, modelId),
       structured: turn.responseSchema !== undefined,
+      // The bill a provider reports for a call this turn stopped (close() during
+      // the call) arrives after the turn has ended: it is metered and counted
+      // as a failed attempt's, as a billed failure during the turn is.
+      onLateUsage: (report) => {
+        void meterCall(deps.ledger, surface, {
+          providerId: report.providerId,
+          modelId: report.modelId,
+          usage: report.usage,
+          hop: report.hop,
+          finishReason: 'error',
+          startedAt: callStartedAt,
+        });
+        const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+        addModelUsage(usage, report.usage);
+        deps.onUsage(usage);
+      },
     });
     writer = deps.history?.beginTurn(turn.blockLabel, epochAtStart);
 
@@ -319,9 +348,6 @@ export async function* runGmiTurn(
     };
 
     let stepCalls: ToolCallRequest[] = [];
-    // When the model call in progress started: the turn's start, the end of the
-    // tool round before it, or the failure of the attempt it replaces.
-    let callStartedAt = Date.now();
     for await (const chunk of gmi.processTurnStream(turnInput)) {
       folder.push(chunk);
       switch (chunk.type) {

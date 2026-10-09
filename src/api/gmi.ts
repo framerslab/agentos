@@ -200,6 +200,7 @@ function gatewayFor(opts: AgentOptions): CompletionGateway {
   if (!listener) return base;
   return {
     stream: base.stream,
+    schemaInstruction: base.schemaInstruction,
     resolve: (route, after) =>
       base.resolve(
         {
@@ -348,7 +349,14 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // another's memories. `GMI.shutdown()` shuts down the memory it was given;
       // on the view that does nothing, and `agent.close()` closes the manager.
       ...(mem ? { cognitiveMemory: mem.manager.forSession() } : {}),
-      completionGateway: gateway,
+      // The usage a provider reports for a call after the call was stopped goes
+      // to the turn that made the call, which meters and counts it.
+      completionGateway: {
+        resolve: gateway.resolve,
+        stream: (resolution, messages, options, responseSchema, schemaName, schemaInPrompt) =>
+          gateway.stream(resolution, messages, options, responseSchema, schemaName, schemaInPrompt, turn.onLateUsage),
+        schemaInstruction: gateway.schemaInstruction,
+      },
       maxToolLoopIterations: steps,
       defaultLlmProviderId: persona.defaultProviderId,
       defaultLlmModelId: persona.defaultModelId,

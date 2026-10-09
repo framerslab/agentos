@@ -26,6 +26,7 @@ import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../errors/errorCodes.js';
 import { stripGeminiOnlyParams } from '../openrouter-only-params';
 import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
+import { buildSchemaInstructionText, SCHEMA_INSTRUCTION_LEAD } from '../../../../api/runtime/structuredReply.js';
 
 /**
  * Configuration specific to the OpenRouterProvider.
@@ -395,6 +396,15 @@ export function classifyOpenRouterDecline(
   }
   if (opts.inBody && env.code === 403) return { code: 'content_policy_violation', nativeType: 'in_body_403' };
   return undefined;
+}
+
+/** A message content's text: the string itself, or its text parts joined. */
+function textOfContent(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part) => (part && typeof (part as { text?: unknown }).text === 'string' ? (part as { text: string }).text : ''))
+    .join('\n');
 }
 
 export class OpenRouterProvider implements IProvider {
@@ -789,8 +799,13 @@ export class OpenRouterProvider implements IProvider {
    * typically because no host for the model supports `response_format`
    * with `require_parameters` routing), swap the payload down to loose
    * `json_object` mode and drop the routing restriction so the call still
-   * completes. Caller-side Zod validation remains the correctness
-   * backstop, exactly as before schema enforcement existed.
+   * completes. The schema leaves the payload, so the retried request states
+   * it in its system prompt, in generateObject's words
+   * (`buildSchemaInstructionText` over the payload's schema and name), after
+   * the leading system messages; a request whose system prompt states a
+   * schema already (generateObject's, a structured reply's) gets no second
+   * copy. Caller-side Zod validation remains the correctness backstop,
+   * exactly as before schema enforcement existed.
    *
    * @returns true when the payload was degraded and the caller should
    *          retry once; false when the error is unrelated.
@@ -799,7 +814,7 @@ export class OpenRouterProvider implements IProvider {
     payload: Record<string, unknown>,
     error: unknown,
   ): boolean {
-    const rf = payload.response_format as { type?: string } | undefined;
+    const rf = payload.response_format as { type?: string; json_schema?: { name?: unknown; schema?: unknown } } | undefined;
     if (rf?.type !== 'json_schema') return false;
     if (!(error instanceof OpenRouterProviderError)) return false;
     const noEndpoints =
@@ -811,6 +826,23 @@ export class OpenRouterProvider implements IProvider {
         `'${String(payload.model)}' — degrading to json_object for this call.`,
     );
     payload.response_format = { type: 'json_object' };
+    const schema = rf.json_schema?.schema;
+    const messages = payload.messages as Array<Partial<ChatMessage>> | undefined;
+    if (schema && typeof schema === 'object' && Array.isArray(messages)) {
+      const statesSchema = messages.some(
+        (message) => message.role === 'system' && textOfContent(message.content).includes(SCHEMA_INSTRUCTION_LEAD),
+      );
+      if (!statesSchema) {
+        const name = typeof rf.json_schema?.name === 'string' ? rf.json_schema.name : undefined;
+        let at = 0;
+        while (at < messages.length && messages[at].role === 'system') at += 1;
+        payload.messages = [
+          ...messages.slice(0, at),
+          { role: 'system', content: buildSchemaInstructionText(schema as Record<string, unknown>, name) },
+          ...messages.slice(at),
+        ];
+      }
+    }
     const provider = payload.provider as Record<string, unknown> | undefined;
     if (provider && typeof provider === 'object') {
       delete provider.require_parameters;
