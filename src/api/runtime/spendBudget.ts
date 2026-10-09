@@ -148,9 +148,14 @@ export class SpendBudget {
     });
   }
 
-  /** Records a finished call: its cost (undefined for a model with no price row, counted as nothing) and its tokens. */
+  /**
+   * Records a finished call: its cost (undefined for a model with no price row, counted as nothing) and its tokens. A
+   * token count the provider reported as `NaN` counts as none: added, it would make the count NaN, and a count of NaN
+   * never reaches `maxTotalTokens`, since every comparison with NaN is false.
+   */
   record(costUSD: number | undefined, tokens: number, what: string): void {
-    this.tokens += Math.max(0, tokens);
+    const counted = Math.max(0, tokens);
+    this.tokens += Number.isNaN(counted) ? 0 : counted;
     if (costUSD !== undefined && costUSD > 0) this.guard.recordCost(this.id, costUSD, undefined, { what });
   }
 

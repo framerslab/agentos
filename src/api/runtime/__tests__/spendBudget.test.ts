@@ -49,6 +49,14 @@ describe('SpendBudget', () => {
     expect(() => budget.assertCanSpend(0, 200, 'second')).toThrow(CostCapExceededError);
   });
 
+  it('counts a token count the provider reported as NaN as none, so the token budget still holds', () => {
+    const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 1000 });
+    budget.record(0, Number.NaN, 'first');
+    budget.record(0, 900, 'second');
+    expect(budget.tokensUsed()).toBe(900);
+    expect(() => budget.assertCanSpend(0, 200, 'third')).toThrow(CostCapExceededError);
+  });
+
   it('refuses a model with no price row unless told to allow it, and then counts it as nothing', () => {
     const refusing = new SpendBudget({ maxCostUSD: 1 });
     expect(() => refusing.assertCanSpend(undefined, 10, 'call')).toThrow(UnpricedModelError);
