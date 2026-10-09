@@ -24,7 +24,10 @@ export interface AudioWorkletCaptureOptions {
   stream: MediaStream;
   /** Where the host serves `capture-worklet.js`, the module beside this entry in the package's `dist`. */
   moduleUrl: string;
-  /** Samples per block. @defaultValue 2048 */
+  /**
+   * Samples per block: a positive whole number, or the constructor throws a `RangeError`.
+   * @defaultValue 2048
+   */
   blockSize?: number;
 }
 
@@ -44,7 +47,13 @@ export class AudioWorkletCapture {
   private generation = 0;
   private readonly listeners = new Set<(samples: Float32Array, sampleRate: number) => void>();
 
+  /** @throws {RangeError} When `blockSize` is not a positive whole number. */
   constructor(private readonly options: AudioWorkletCaptureOptions) {
+    // Checked here, on the page: a size the worklet's processor refuses would only fail inside the worklet, in silence.
+    const { blockSize } = options;
+    if (blockSize !== undefined && (!Number.isInteger(blockSize) || blockSize < 1)) {
+      throw new RangeError('AudioWorkletCapture: blockSize must be a positive whole number');
+    }
     this.stream = options.stream;
   }
 

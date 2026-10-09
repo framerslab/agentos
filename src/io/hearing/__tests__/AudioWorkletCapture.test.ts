@@ -197,4 +197,12 @@ describe('AudioWorkletCapture', () => {
     expect(context.createMediaStreamSource).toHaveBeenCalledTimes(2);
     expect(FakeNode.made).toHaveLength(1);
   });
+
+  it('refuses, when it is made, a block size that is not a positive whole number', () => {
+    const context = fakeContext() as unknown as AudioContext;
+    for (const blockSize of [0, -2048, 2.5, Number.NaN]) {
+      expect(() => new AudioWorkletCapture({ context, stream: {} as MediaStream, moduleUrl: '/w.js', blockSize })).toThrow(RangeError);
+    }
+    expect(() => new AudioWorkletCapture({ context, stream: {} as MediaStream, moduleUrl: '/w.js', blockSize: 1 })).not.toThrow();
+  });
 });
