@@ -57,10 +57,19 @@ export function warnOnDeferredLightweightAgentCapabilities(
     return deferredCapabilities;
   }
 
-  warn(
-    `[AgentOS] agent() accepted config that requires the full AgentOS runtime or agency(): ${deferredCapabilities.join(', ')}. `
-      + 'The lightweight helper preserves these fields for compatibility but does not actively enforce them.',
-  );
+  const parts: string[] = [];
+  const others = deferredCapabilities.filter((key) => key !== 'memory');
+  if (others.length > 0) {
+    parts.push(
+      `agent() accepted config that requires the full AgentOS runtime or agency(): ${others.join(', ')}. `
+        + 'The lightweight helper preserves these fields for compatibility but does not actively enforce them.',
+    );
+  }
+  // agency() does not apply `memory` either: only the GMI path reads it.
+  if (deferredCapabilities.includes('memory')) {
+    parts.push("agent() applies memory only with runtime: 'gmi' (cognitive memory for its sessions); this agent does not apply it.");
+  }
+  warn(`[AgentOS] ${parts.join(' ')}`);
 
   return deferredCapabilities;
 }
