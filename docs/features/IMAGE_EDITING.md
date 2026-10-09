@@ -34,6 +34,20 @@ AgentOS provides three image editing APIs. Unlike [Image Generation](./IMAGE_GEN
 
 Each takes the image as a `Buffer` or a string: a base64 data URL, a raw base64 string, a local file path, or an HTTP(S) URL. `editImage()` and `variateImage()` return `{ images, provider, model, usage }` and `upscaleImage()` returns `{ image, provider, model, usage }`, where each image is a `GeneratedImage` (`url`, `dataUrl`, `base64`, `mimeType`, `revisedPrompt` and `providerMetadata`, each set when the provider returns it). A provider that does not implement an operation throws `ImageEditNotSupportedError`, `ImageUpscaleNotSupportedError` or `ImageVariationNotSupportedError`.
 
+**Images from a model or a user.** A string image is read with `imageToBuffer()`, which reads local files and fetches any URL. When the string comes from a tool call or a user, read it with the untrusted option and pass the `Buffer`:
+
+```typescript
+import { editImage, imageToBuffer } from '@framers/agentos';
+
+// Stand-in for the URL a tool call gave.
+declare const imageUrl: string;
+
+const image = await imageToBuffer(imageUrl, { untrusted: true });
+const result = await editImage({ image, prompt: 'Make it a watercolor' });
+```
+
+With `untrusted: true`, a file path or `file:` URL is refused (`code: 'IMAGE_LOCAL_FILE_REFUSED'`). An http(s) URL is fetched only from public network addresses: an address in the URL is checked before connecting, every address a host name resolves to is checked when the connection is made, and each of up to five redirects is checked the same way (`code: 'IMAGE_URL_REFUSED'`). The fetch stops at `maxBytes` (default 50 MiB) and `timeoutMs` (default 30 seconds). `isPublicNetworkAddress()` is the address check on its own.
+
 **Mature edits:** `editImage` accepts a `policyTier` option. With `'mature'` or `'private-adult'`, Replicate's safety checker is turned off, and when the call pins neither `provider` nor `model`, the edit moves to the uncensored catalog's preferred Replicate model for its `capabilities` (default `['img2img']`). Pass `capabilities: ['face-consistency', 'img2img']` when preserving an existing character's identity matters. A mature edit has no fallback model. See [UNCENSORED_CONTENT.md](./UNCENSORED_CONTENT.md).
 
 ---

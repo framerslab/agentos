@@ -9,14 +9,36 @@
  * about the input shape.
  */
 import * as fs from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+
+import { fetchUntrustedImage } from './untrustedImageFetch.js';
+
+/** Options for {@link imageToBuffer}. */
+export interface ImageToBufferOptions {
+  /**
+   * The input comes from an untrusted source, such as a model's tool call or
+   * a user. A local file path or a `file:` URL is refused instead of read,
+   * and an http(s) URL is fetched only from a public network address: each
+   * connection's address is checked when the connection is made, so a host
+   * name that resolves to this machine or a private network is refused, and
+   * every redirect is checked the same way. The fetch stops at `maxBytes`
+   * and `timeoutMs`. Default `false`.
+   */
+  untrusted?: boolean;
+  /** For an untrusted http(s) URL: the most bytes the response may have (default 50 MiB). */
+  maxBytes?: number;
+  /** For an untrusted http(s) URL: how long the fetch may take in milliseconds, redirects and body included (default 30 seconds). */
+  timeoutMs?: number;
+}
 
 /**
  * Converts an image input from any of the supported formats into a `Buffer`.
  *
  * Supported input formats:
  * - **`Buffer`** — returned as-is.
- * - **Base64 data URL** — e.g. `data:image/png;base64,iVBOR...`.  The base64
- *   payload is extracted and decoded.
+ * - **Data URL** (RFC 2397) — `data:image/png;base64,iVBOR...` is decoded
+ *   from base64; one without `;base64`, such as
+ *   `data:image/svg+xml,%3Csvg%3E...`, is percent-decoded byte by byte.
  * - **Raw base64 string** — decoded. A string that does not look like a URL
  *   or a file path is decoded directly. One that looks like a path is read as
  *   a file first, and decoded when no file exists there and it is base64
@@ -25,18 +47,29 @@ import * as fs from 'node:fs/promises';
  *   uses `/` (RFC 4648, Table 1), so a JPEG's base64 begins with `/9j/`. A
  *   missing path is still an error; when the string is base64 of another
  *   format, the error says so without repeating the string.
- * - **`file://` URL** — resolved to a local filesystem path and read.
+ * - **`file:` URL** — converted to a local path with `fileURLToPath` and read.
  * - **HTTP/HTTPS URL** — fetched via `globalThis.fetch` and buffered.
  * - **Local file path** — a string that contains `/` or `\`, or ends in a
- *   file extension, is read with `fs.readFile`. A string from an
- *   untrusted caller can name any file the process can read, so pass such
- *   input as a `Buffer` or a data URL.
+ *   file extension, is read with `fs.readFile`.
+ *
+ * A string from an untrusted source can name any file the process can read,
+ * and a URL can point at this machine or a private network, a cloud
+ * metadata service among them. Pass `{ untrusted: true }` for such input:
+ * file paths and `file:` URLs are refused (raw base64 of a recognised image
+ * format is still decoded), and an http(s) URL is fetched only from public
+ * network addresses, checked at every connection and every redirect, within
+ * `maxBytes` and `timeoutMs`.
  *
  * @param input - The image in any supported format.
+ * @param options - {@link ImageToBufferOptions}; `untrusted` for input from
+ *   a model or a user.
  * @returns A `Buffer` containing the raw image bytes.
  *
  * @throws {TypeError} When `input` is neither a string nor a Buffer.
- * @throws {Error} When a remote URL fetch fails or the file cannot be read.
+ * @throws {Error} When a remote URL fetch fails or the file cannot be read;
+ *   with `untrusted`, also when the input names a local file
+ *   (`code: 'IMAGE_LOCAL_FILE_REFUSED'`) or a URL whose address or redirect
+ *   is refused (`code: 'IMAGE_URL_REFUSED'`).
  *
  * @example
  * ```ts
@@ -44,9 +77,11 @@ import * as fs from 'node:fs/promises';
  * const buf2 = await imageToBuffer(fs.readFileSync('photo.png'));
  * const buf3 = await imageToBuffer('https://example.com/photo.png');
  * const buf4 = await imageToBuffer('/absolute/path/to/image.jpg');
+ * // A URL a model's tool call gave: public hosts only, 50 MiB and 30 s at most.
+ * const buf5 = await imageToBuffer(toolArgs.imageUrl, { untrusted: true });
  * ```
  */
-export async function imageToBuffer(input: string | Buffer): Promise<Buffer> {
+export async function imageToBuffer(input: string | Buffer, options: ImageToBufferOptions = {}): Promise<Buffer> {
   // Already a Buffer — nothing to do.
   if (Buffer.isBuffer(input)) {
     return input;
@@ -58,24 +93,29 @@ export async function imageToBuffer(input: string | Buffer): Promise<Buffer> {
 
   const trimmed = input.trim();
 
-  // Base64 data URL (e.g. "data:image/png;base64,iVBOR...")
-  if (trimmed.startsWith('data:')) {
+  // Data URL (RFC 2397): base64 after ";base64", percent-encoded bytes otherwise.
+  if (/^data:/i.test(trimmed)) {
     const commaIdx = trimmed.indexOf(',');
     if (commaIdx === -1) {
       throw new Error('imageToBuffer: malformed data URL — missing comma separator.');
     }
-    // Everything after the comma is the base64 payload.
-    return Buffer.from(trimmed.slice(commaIdx + 1), 'base64');
+    const payload = trimmed.slice(commaIdx + 1);
+    return /;base64$/i.test(trimmed.slice(0, commaIdx)) ? Buffer.from(payload, 'base64') : percentDecodeBytes(payload);
   }
 
-  // file:// URL — convert to local path and read.
-  if (trimmed.startsWith('file://')) {
-    const filePath = new URL(trimmed).pathname;
-    return fs.readFile(filePath);
+  // file: URL — convert to a local path and read.
+  if (/^file:/i.test(trimmed)) {
+    if (options.untrusted) {
+      throw localFileRefusal(trimmed);
+    }
+    return fs.readFile(fileURLToPath(trimmed));
   }
 
   // Remote HTTP(S) URL — fetch and buffer.
-  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+  if (/^https?:\/\//i.test(trimmed)) {
+    if (options.untrusted) {
+      return fetchUntrustedImage(trimmed, { maxBytes: options.maxBytes, timeoutMs: options.timeoutMs });
+    }
     const response = await globalThis.fetch(trimmed);
     if (!response.ok) {
       throw new Error(
@@ -89,6 +129,14 @@ export async function imageToBuffer(input: string | Buffer): Promise<Buffer> {
   // treat it as a filesystem path.  Otherwise assume raw base64.
   const looksLikePath =
     trimmed.includes('/') || trimmed.includes('\\') || /\.\w{2,5}$/.test(trimmed);
+  if (looksLikePath && options.untrusted) {
+    // No file is read for untrusted input; base64 of an image is still decoded.
+    const bytes = imageBase64(trimmed);
+    if (bytes) {
+      return bytes;
+    }
+    throw localFileRefusal(trimmed);
+  }
   if (looksLikePath) {
     try {
       return await fs.readFile(trimmed);
@@ -120,6 +168,58 @@ export async function imageToBuffer(input: string | Buffer): Promise<Buffer> {
 
   // Fallback: raw base64 string (no data URL prefix).
   return Buffer.from(trimmed, 'base64');
+}
+
+/** The error for untrusted input that names a local file. */
+function localFileRefusal(value: string): Error {
+  return Object.assign(
+    new Error(
+      `imageToBuffer: ${preview(value)} looks like a local file path or file URL, and untrusted input is ` +
+        'not read from the file system. Pass the image as a data URL, an http(s) URL or a Buffer.',
+    ),
+    { code: 'IMAGE_LOCAL_FILE_REFUSED' },
+  );
+}
+
+/** The bytes of `text` when it is base64 (standard or URL-safe) of a recognised image format, else `undefined`. */
+function imageBase64(text: string): Buffer | undefined {
+  const compact = text.replace(/\s+/g, '');
+  if (!BASE64_PATTERN.test(compact)) {
+    return undefined;
+  }
+  const bytes = Buffer.from(compact, 'base64');
+  return hasImageSignature(bytes) ? bytes : undefined;
+}
+
+/** The value of an ASCII hex digit, or -1. */
+function hexValue(byte: number): number {
+  if (byte >= 0x30 && byte <= 0x39) return byte - 0x30;
+  if (byte >= 0x41 && byte <= 0x46) return byte - 0x37;
+  if (byte >= 0x61 && byte <= 0x66) return byte - 0x57;
+  return -1;
+}
+
+/**
+ * The bytes of a percent-encoded data URL payload: each `%XX` is one byte and
+ * any other character its UTF-8 bytes. A `%` that starts no valid escape is
+ * kept as it is, so decoding never throws.
+ */
+function percentDecodeBytes(payload: string): Buffer {
+  const text = Buffer.from(payload, 'utf8');
+  const out = Buffer.allocUnsafe(text.length);
+  let length = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const high = text[i] === 0x25 && i + 2 < text.length ? hexValue(text[i + 1]) : -1;
+    const low = high >= 0 ? hexValue(text[i + 2]) : -1;
+    if (low >= 0) {
+      out[length] = high * 16 + low;
+      i += 2;
+    } else {
+      out[length] = text[i];
+    }
+    length += 1;
+  }
+  return out.subarray(0, length);
 }
 
 /** The standard and URL-safe base64 alphabets of RFC 4648, with optional padding. */
