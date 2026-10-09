@@ -8,6 +8,9 @@ describe('normalizeTranscript', () => {
     expect(normalizeTranscript('')).toEqual([]);
     // U+2019, U+2018 and U+02BC are apostrophes as well: inside a word they keep it whole, at its edges they go
     expect(normalizeTranscript('Don\u2019t \u2018em, rock\u02BCn\u02BCroll')).toEqual(["don't", 'em', "rock'n'roll"]);
+    // a combining mark stays with the letter it follows: a Hindi word keeps its vowel signs and stays one word, and a
+    // decomposed accent reads as the composed letter; an emoji's variation selector is dropped with the emoji
+    expect(normalizeTranscript('\u0915\u093F\u0924\u093E\u092C cafe\u0301 nai\u0308ve I \u2764\uFE0F you')).toEqual(['\u0915\u093F\u0924\u093E\u092C', 'caf\u00E9', 'na\u00EFve', 'i', 'you']);
   });
 });
 
@@ -19,6 +22,9 @@ describe('wordErrorRate', () => {
     expect(wordErrorRate('the big cat sat', 'the cat sat')).toMatchObject({ substitutions: 0, deletions: 0, insertions: 1, rate: 1 / 3 });
     // a curly apostrophe against a straight one is no error
     expect(wordErrorRate('I don\u2019t know', "I don't know")).toMatchObject({ substitutions: 0, deletions: 0, insertions: 0, referenceWords: 3, rate: 0 });
+    // a changed vowel sign is a substitution, and a decomposed accent against the composed letter is no error
+    expect(wordErrorRate('\u0915\u093F', '\u0915')).toMatchObject({ substitutions: 1, deletions: 0, insertions: 0, referenceWords: 1, rate: 1 });
+    expect(wordErrorRate('cafe\u0301', 'caf\u00E9')).toMatchObject({ substitutions: 0, deletions: 0, insertions: 0, referenceWords: 1, rate: 0 });
   });
 
   it('answers 1 for an empty hypothesis, 0 for two empty texts, and the insertions for an empty reference', () => {
