@@ -226,6 +226,10 @@ export class ToolOrchestrator implements IToolOrchestrator {
 
     this.permissionManager = permissionManager;
     this.toolExecutor = toolExecutor;
+    // the executor's own console lines follow the same setting (a test may hand in a partial executor)
+    if (typeof (toolExecutor as any).setLogToolCalls === 'function') {
+      toolExecutor.setLogToolCalls(this.config.logToolCalls === true);
+    }
     this.hitlManager = hitlManager;
 
     if (initialTools && initialTools.length > 0) {

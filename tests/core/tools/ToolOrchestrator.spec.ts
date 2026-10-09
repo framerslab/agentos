@@ -244,6 +244,15 @@ describe('ToolOrchestrator', () => {
     expect(hitlManager.requestApproval).toHaveBeenCalledTimes(1);
     expect((toolExecutor as any).executeTool).toHaveBeenCalledTimes(0);
   });
+
+  it('hands its logToolCalls setting to the executor it is initialized with', async () => {
+    const executor = new ToolExecutor();
+    const handed = vi.spyOn(executor, 'setLogToolCalls');
+    const quiet = new ToolOrchestrator();
+    await quiet.initialize({ logToolCalls: false }, createPermissionManager(), executor);
+    expect(handed).toHaveBeenLastCalledWith(false);
+    const loud = new ToolOrchestrator();
+    await loud.initialize({ logToolCalls: true }, createPermissionManager(), executor);
+    expect(handed).toHaveBeenLastCalledWith(true);
+  });
 });
-
-

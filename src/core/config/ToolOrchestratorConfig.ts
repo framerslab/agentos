@@ -75,8 +75,10 @@ export interface ToolOrchestratorHITLConfig {
  * the underlying `ToolExecutor`, will attempt to process concurrently. This helps in managing system resources
  * and preventing overload from too many simultaneous tool executions. (Conceptual for orchestrator, executor enforces).
  * @property {boolean} [logToolCalls=true] - If true (default), detailed information about tool calls (including requests,
- * arguments, results, and any errors) will be logged by the orchestrator. This is highly beneficial for
- * debugging, auditing tool usage, and monitoring system behavior.
+ * arguments, results, and any errors) will be logged by the orchestrator, and the `ToolExecutor` it is initialized with
+ * prints each tool's arguments, an output preview and failure details. Off, the executor's lines name the tool, the
+ * duration and the error only, so a tool that reads a person's record keeps their words out of the process log. The
+ * default configuration turns it on only when `NODE_ENV` is `development`.
  * @property {string[]} [globalDisabledTools] - An array of tool names (`ITool.name`) or tool IDs (`ITool.id`)
  * that are globally disabled. These tools will not be registered or, if already present, will not be
  * executed, irrespective of other permission settings. This provides a system-wide mechanism to quickly
