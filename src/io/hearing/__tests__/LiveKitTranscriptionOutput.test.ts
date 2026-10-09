@@ -164,4 +164,19 @@ describe("LiveKitTranscriptionOutput: a final's times", () => {
       { 'lk.segment_id': 'i2', 'lk.transcription_final': 'true' },
     ]);
   });
+
+  it("writes a time of zero as '0', and a page's line holds 0 rather than no time", async () => {
+    const room = new FakeRoom();
+    const output = new LiveKitTranscriptionOutput({ room });
+    await output.write({ ...final('i1', 'Hello.'), startMs: 0, endMs: 850 });
+    expect(room.localParticipant.sendText.mock.calls.map(([, options]) => attributesOf(options))).toEqual([
+      { 'lk.segment_id': 'i1', 'lk.transcription_final': 'true', 'agentos.start_ms': '0', 'agentos.end_ms': '850' },
+    ]);
+    const page = new TranscriptLedger();
+    for (const [text, options] of room.localParticipant.sendText.mock.calls) {
+      const event = transcriptEventFromLiveKit(text, attributesOf(options));
+      if (event) page.apply(event);
+    }
+    expect(page.items()).toEqual([{ itemId: 'i1', text: 'Hello.', isFinal: true, startMs: 0, endMs: 850 }]);
+  });
 });
