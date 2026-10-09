@@ -127,6 +127,16 @@ describe("a day's reservations", () => {
     await expect(reserveSpend(store, { kind: 'call', micro: 1, at: AT, expires: LATER, capMicro: LIMIT })).rejects.toBeInstanceOf(CostCapExceededError);
   });
 
+  it('refuses a start or an expiry that is not a valid date, reserving nothing', async () => {
+    // An expiry that is not a date is never at or before any time, so no release of expired reservations would settle it.
+    const store = new InMemorySpendDayStore();
+    const noDate = new Date(Number.NaN);
+    await expect(reserveSpend(store, { kind: 'call', micro: 500, at: AT, expires: noDate, capMicro: LIMIT })).rejects.toBeInstanceOf(RangeError);
+    await expect(reserveSpend(store, { kind: 'call', micro: 500, at: noDate, expires: LATER, capMicro: LIMIT })).rejects.toBeInstanceOf(RangeError);
+    expect(await store.lockDay(utcDay(AT))).toBe(0);
+    expect(await releaseExpiredSpend(store, new Date('2026-10-13T00:00:00Z'))).toBe(0);
+  });
+
   it('refuses every admission while its store answers a total that is not a number', async () => {
     const store = new InMemorySpendDayStore();
     store.lockDay = () => Promise.resolve(Number.NaN);

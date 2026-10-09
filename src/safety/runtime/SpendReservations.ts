@@ -42,9 +42,9 @@ export interface SpendAdmission {
   kind: string;
   /** Its largest cost in whole micro-dollars, zero or more. */
   micro: number;
-  /** When it starts; the reservation belongs to this time's UTC day. */
+  /** When it starts, a valid date; the reservation belongs to this time's UTC day. */
   at: Date;
-  /** When the reservation's time is up, after which {@link releaseExpiredSpend} settles it at its whole amount. */
+  /** When the reservation's time is up, a valid date, after which {@link releaseExpiredSpend} settles it at its whole amount. */
   expires: Date;
   /**
    * The day's cap for this admission in whole micro-dollars, zero or more: the whole limit, or a share of it for a class
@@ -56,6 +56,11 @@ export interface SpendAdmission {
 /** A whole number, zero or more, small enough to count exactly: a token count or an amount in micro-dollars. */
 function isWholeCount(n: unknown): n is number {
   return typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
+}
+
+/** Whether a date holds a time: `new Date(NaN)` does not. */
+function isValidDate(date: Date): boolean {
+  return !Number.isNaN(date.getTime());
 }
 
 /** The UTC day of a time, `YYYY-MM-DD`. */
@@ -98,12 +103,18 @@ export function settledTokensMicro(promptTokens: unknown, completionTokens: unkn
 /**
  * Reserves an admission's largest cost in the day it starts and answers the reservation's id, or throws
  * CostCapExceededError (`daily`) reserving nothing. A cost that is not whole micro-dollars, zero or more, is a
- * RangeError; a committed total the store does not answer as whole micro-dollars, zero or more, refuses the admission,
- * since the day's spending is then not known, and so does a cap that is not whole micro-dollars, zero or more.
+ * RangeError, and so is a start or an expiry that is not a valid date; a committed total the store does not answer as
+ * whole micro-dollars, zero or more, refuses the admission, since the day's spending is then not known, and so does a
+ * cap that is not whole micro-dollars, zero or more.
  */
 export async function reserveSpend(store: SpendDayStore, admission: SpendAdmission): Promise<string> {
   if (!isWholeCount(admission.micro)) {
     throw new RangeError(`A reservation is whole micro-dollars, zero or more, not ${admission.micro}`);
+  }
+  // A start that is not a date has no day. An expiry that is not one is never at or before any time, so
+  // releaseExpiredSpend would never settle the reservation and its amount would stay in its day's total.
+  if (!isValidDate(admission.at) || !isValidDate(admission.expires)) {
+    throw new RangeError('A reservation starts and expires at valid dates');
   }
   const day = utcDay(admission.at);
   const committed = await store.lockDay(day);
