@@ -2,7 +2,7 @@
  * The spend budget on the paths beside the plain call: a stream's usage and its refusal, the usage a failed call's
  * error reports, the provider's health while a budget refuses calls, a fallback walk that meets a spent budget, a
  * model with no price row when the budget warns or tells a callback (and one named after a member every object
- * inherits), a guard hook's stop under `hookErrors: 'throw'`
+ * inherits), a token cap of NaN, estimated as a call that names none, a guard hook's stop under `hookErrors: 'throw'`
  * (never walked to another provider, never counted against one, and on the prompt-tool path before the tool runs),
  * and an agent on the GMI runtime, which takes no budget.
  */
@@ -197,6 +197,35 @@ describe('a spend budget and a model with no price row', () => {
     await expect(generateText({ model: 'openai:constructor', prompt: 'hello', budget, fallbackProviders: [] })).rejects.toBeInstanceOf(
       UnpricedModelError,
     );
+    expect(hoisted.generateCompletion).not.toHaveBeenCalled();
+  });
+});
+
+describe('a spend budget and a token cap of NaN', () => {
+  it('estimates the call as one that names no cap, so the budget still refuses a call that does not fit', async () => {
+    // A cap read from a setting that is not there (`Number(undefined)`) is NaN, and the request goes out with no cap.
+    // Priced with that cap, the estimate was NaN, which every check of the budget let through.
+    hoisted.generateCompletion.mockResolvedValue(reply('ok', 0));
+    const helper = agent({
+      provider: 'openai',
+      model: 'gpt-6-luna',
+      controls: { maxTotalTokens: Number.NaN },
+      budget: { maxCostUSD: 0.01 },
+    });
+    const session = helper.session('s1');
+    session.recordExternalCost(0.02, { kind: 'stt' });
+    await expect(session.send('hello')).rejects.toBeInstanceOf(CostCapExceededError);
+    // Nothing spent yet: 4,096 output tokens of gpt-6-luna, about 0.002 US dollars, do not fit a budget of 0.001.
+    await expect(
+      generateText({
+        provider: 'openai',
+        model: 'gpt-6-luna',
+        prompt: 'hello',
+        maxTokens: Number.NaN,
+        budget: { maxCostUSD: 0.001 },
+        fallbackProviders: [],
+      }),
+    ).rejects.toBeInstanceOf(CostCapExceededError);
     expect(hoisted.generateCompletion).not.toHaveBeenCalled();
   });
 });
