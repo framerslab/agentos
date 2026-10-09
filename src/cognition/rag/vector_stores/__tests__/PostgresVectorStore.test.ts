@@ -376,7 +376,7 @@ describe('PostgresVectorStore', () => {
       expect(queryCall).toBeDefined();
       expect(queryCall!.sql).toContain("metadata_json->>'topic'");
       expect(queryCall!.sql).toContain('::numeric >');
-      expect(queryCall!.sql).toContain("(CASE WHEN jsonb_typeof(metadata_json->'status') = 'array' THEN metadata_json->'status' ?| $4::text[] ELSE metadata_json->>'status' = ANY($4::text[]) END)");
+      expect(queryCall!.sql).toContain("(CASE WHEN jsonb_typeof(metadata_json->'status') = 'array' THEN metadata_json->'status' @> ANY($5::jsonb[]) ELSE metadata_json->>'status' = ANY($4::text[]) END)");
     });
   });
 
@@ -561,18 +561,19 @@ describe('PostgresVectorStore', () => {
       const lexicalEnd = hybridCall!.sql.indexOf('fused AS');
       const denseSql = hybridCall!.sql.slice(0, denseEnd);
       const lexicalSql = hybridCall!.sql.slice(denseEnd, lexicalEnd);
-      const filterSql = "metadata_json->>'visibility' = $3 AND (CASE WHEN jsonb_typeof(metadata_json->'product') = 'array' THEN metadata_json->'product' ?| $4::text[] ELSE metadata_json->>'product' = ANY($4::text[]) END)";
+      const filterSql = "metadata_json->>'visibility' = $3 AND (CASE WHEN jsonb_typeof(metadata_json->'product') = 'array' THEN metadata_json->'product' @> ANY($5::jsonb[]) ELSE metadata_json->>'product' = ANY($4::text[]) END)";
 
       expect(denseSql).toContain(`WHERE ${filterSql}`);
       expect(lexicalSql).toContain(`AND ${filterSql}`);
-      expect(hybridCall!.sql.match(/LIMIT \$5/g)).toHaveLength(2);
-      expect(hybridCall!.sql).toContain('$6 + COALESCE(d.rank');
-      expect(hybridCall!.sql).toContain('LIMIT $7');
+      expect(hybridCall!.sql.match(/LIMIT \$6/g)).toHaveLength(2);
+      expect(hybridCall!.sql).toContain('$7 + COALESCE(d.rank');
+      expect(hybridCall!.sql).toContain('LIMIT $8');
       expect(hybridCall!.params).toEqual([
         '[0.1,0.2,0.3,0.4]',
         'public docs',
         'public',
         ['agentos', 'frame'],
+        ['["agentos"]', '["frame"]'],
         15,
         60,
         5,
@@ -701,9 +702,10 @@ describe('PostgresVectorStore', () => {
 
       const q = queryCalls.find(c => c.sql.includes('= ANY('));
       expect(q).toBeDefined();
-      expect(q!.sql).toContain("(CASE WHEN jsonb_typeof(metadata_json->'category') = 'array' THEN metadata_json->'category' ?| $2::text[] ELSE metadata_json->>'category' = ANY($2::text[]) END)");
-      // $in values are stringified and sent as one array parameter.
+      expect(q!.sql).toContain("(CASE WHEN jsonb_typeof(metadata_json->'category') = 'array' THEN metadata_json->'category' @> ANY($3::jsonb[]) ELSE metadata_json->>'category' = ANY($2::text[]) END)");
+      // A single value is compared as text; an array's elements are compared as JSON values.
       expect(q!.params).toContainEqual(['a', 'b', 'c']);
+      expect(q!.params).toContainEqual(['["a"]', '["b"]', '["c"]']);
     });
   });
 
@@ -834,11 +836,11 @@ describe('PostgresVectorStore', () => {
       });
       const { sql, params } = queryCalls[0];
       expect(sql).toContain(`metadata_json->>'tenantId' = $2`);
-      expect(sql).toContain(`(CASE WHEN jsonb_typeof(metadata_json->'aclGroups') = 'array' THEN metadata_json->'aclGroups' ?| $3::text[] ELSE metadata_json->>'aclGroups' = ANY($3::text[]) END)`);
-      expect(sql).toContain(`metadata_json->'tags' @> $4::jsonb`);
-      expect(sql).toContain(`(metadata_json->'status' IS NOT NULL AND NOT (CASE WHEN jsonb_typeof(metadata_json->'status') = 'array' THEN metadata_json->'status' ?| $5::text[] ELSE metadata_json->>'status' = ANY($5::text[]) END))`);
-      expect(sql).toContain(`(CASE WHEN jsonb_typeof(metadata_json->'labels') = 'array' THEN metadata_json->'labels' ? $6 ELSE metadata_json->>'labels' LIKE $7 END)`);
-      expect(params).toEqual(['[0,0]', 'org1', ['acct:a', 'org:org1'], '["q3","budget"]', ['archived'], 'x', '%x%', 5]);
+      expect(sql).toContain(`(CASE WHEN jsonb_typeof(metadata_json->'aclGroups') = 'array' THEN metadata_json->'aclGroups' @> ANY($4::jsonb[]) ELSE metadata_json->>'aclGroups' = ANY($3::text[]) END)`);
+      expect(sql).toContain(`metadata_json->'tags' @> $5::jsonb`);
+      expect(sql).toContain(`(metadata_json->'status' IS NOT NULL AND NOT (CASE WHEN jsonb_typeof(metadata_json->'status') = 'array' THEN metadata_json->'status' @> ANY($7::jsonb[]) ELSE metadata_json->>'status' = ANY($6::text[]) END))`);
+      expect(sql).toContain(`(CASE WHEN jsonb_typeof(metadata_json->'labels') = 'array' THEN metadata_json->'labels' @> $8::jsonb ELSE metadata_json->>'labels' LIKE $9 END)`);
+      expect(params).toEqual(['[0,0]', 'org1', ['acct:a', 'org:org1'], ['["acct:a"]', '["org:org1"]'], '["q3","budget"]', ['archived'], ['["archived"]'], '["x"]', '%x%', 5]);
     });
 
     it('refuses a metadata key that is not a plain name', async () => {

@@ -944,10 +944,10 @@ export class PostgresVectorStore implements IVectorStore {
   }
 
   /**
-   * Build JSONB metadata filter SQL clauses.
-   * Uses Postgres JSONB operators for efficient GIN-indexed filtering. `$in`, `$nin`, `$all` and `$contains`
-   * also read a field that holds an array: `$in` matches when the array holds a string in the list, `$nin` when
-   * it holds none, `$all` when it holds every value, and `$contains` when it holds the string. `$textSearch`
+   * Build JSONB metadata filter SQL clauses. `$in`, `$nin`, `$all` and `$contains` also read a field that holds an
+   * array, comparing its elements as JSON values, so a number matches a number and not its text: `$in` matches
+   * when the array holds a value in the list, `$nin` when it holds none, `$all` when it holds every value, and
+   * `$contains` when it holds the value. A field that holds a single value is compared as text. `$textSearch`
    * matches a string value that contains the text, in any case.
    *
    * @param filter   - MetadataFilter to translate.
@@ -1021,14 +1021,14 @@ export class PostgresVectorStore implements IVectorStore {
         idx++;
       }
       if (cond.$in !== undefined && Array.isArray(cond.$in)) {
-        conditions.push(`(CASE WHEN jsonb_typeof(${json}) = 'array' THEN ${json} ?| $${idx}::text[] ELSE ${path} = ANY($${idx}::text[]) END)`);
-        params.push(cond.$in.map(String));
-        idx++;
+        conditions.push(`(CASE WHEN jsonb_typeof(${json}) = 'array' THEN ${json} @> ANY($${idx + 1}::jsonb[]) ELSE ${path} = ANY($${idx}::text[]) END)`);
+        params.push(cond.$in.map(String), cond.$in.map((value) => JSON.stringify([value])));
+        idx += 2;
       }
       if (cond.$nin !== undefined && Array.isArray(cond.$nin)) {
-        conditions.push(`(${json} IS NOT NULL AND NOT (CASE WHEN jsonb_typeof(${json}) = 'array' THEN ${json} ?| $${idx}::text[] ELSE ${path} = ANY($${idx}::text[]) END))`);
-        params.push(cond.$nin.map(String));
-        idx++;
+        conditions.push(`(${json} IS NOT NULL AND NOT (CASE WHEN jsonb_typeof(${json}) = 'array' THEN ${json} @> ANY($${idx + 1}::jsonb[]) ELSE ${path} = ANY($${idx}::text[]) END))`);
+        params.push(cond.$nin.map(String), cond.$nin.map((value) => JSON.stringify([value])));
+        idx += 2;
       }
       if (cond.$all !== undefined && Array.isArray(cond.$all)) {
         conditions.push(`${json} @> $${idx}::jsonb`);
@@ -1039,8 +1039,8 @@ export class PostgresVectorStore implements IVectorStore {
         conditions.push(cond.$exists ? `metadata_json ? '${key}'` : `NOT (metadata_json ? '${key}')`);
       }
       if (cond.$contains !== undefined) {
-        conditions.push(`(CASE WHEN jsonb_typeof(${json}) = 'array' THEN ${json} ? $${idx} ELSE ${path} LIKE $${idx + 1} END)`);
-        params.push(String(cond.$contains), `%${cond.$contains}%`);
+        conditions.push(`(CASE WHEN jsonb_typeof(${json}) = 'array' THEN ${json} @> $${idx}::jsonb ELSE ${path} LIKE $${idx + 1} END)`);
+        params.push(JSON.stringify([cond.$contains]), `%${cond.$contains}%`);
         idx += 2;
       }
       if (cond.$textSearch !== undefined) {

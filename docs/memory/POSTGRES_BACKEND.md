@@ -174,10 +174,12 @@ The third argument may also be the metric alone: `schemaSql('chunks', 1536, 'cos
 
 | Operator | Single value | Array |
 |---|---|---|
-| `$in: [...]` | the value, as text, is in the list | the array holds a string in the list |
-| `$nin: [...]` | the field is present and its value, as text, is not in the list | the field is present and the array holds no string in the list |
+| `$in: [...]` | the value, as text, is in the list | the array holds a value in the list |
+| `$nin: [...]` | the field is present and its value, as text, is not in the list | the field is present and the array holds no value in the list |
 | `$all: [...]` | no match | the array holds every value |
-| `$contains: v` | the text contains `v` | the array holds the string `v` |
+| `$contains: v` | the text contains `v` | the array holds `v` |
+
+An array's elements are compared as JSON values, so `$in: [5]` matches an array that holds the number 5 and not one that holds the string `'5'`; a single value is compared as text.
 
 ```typescript
 await store.query('chunks', embedding, {

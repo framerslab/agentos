@@ -6,7 +6,7 @@
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type { VectorDocument } from '../../IVectorStore.js';
+import type { MetadataFilter, VectorDocument } from '../../IVectorStore.js';
 import { PostgresVectorStore } from '../PostgresVectorStore.js';
 
 const URL = process.env.AGENTOS_TEST_POSTGRES_URL;
@@ -50,7 +50,7 @@ describe.skipIf(!URL)('PostgresVectorStore on Postgres', () => {
         id: `d${n}`,
         embedding: arc(n),
         textContent: mine ? `chapters of the budget review number ${n}` : `weather and travel notes number ${n}`,
-        metadata: { tenantId: mine ? 'a' : 'b', aclGroups: mine ? ['acct:1', 'folder:f1'] : ['acct:2'], status: 'active', sourceId: `s${n % 10}`, tags: mine ? ['q3', 'budget'] : ['misc'] },
+        metadata: { tenantId: mine ? 'a' : 'b', aclGroups: mine ? ['acct:1', 'folder:f1'] : ['acct:2'], status: 'active', sourceId: `s${n % 10}`, tags: mine ? ['q3', 'budget'] : ['misc'], ranks: mine ? [1, 2] : [3] },
       });
     }
     for (let from = 0; from < documents.length; from += 200) {
@@ -76,6 +76,16 @@ describe.skipIf(!URL)('PostgresVectorStore on Postgres', () => {
     expect(found.documents).toHaveLength(40);
     const none = await store.lexicalSearch('chunks', 'budget', { topK: 100, filter: { sourceId: { $textSearch: 'S1' } } });
     expect(none.documents).toHaveLength(0);
+  });
+
+  it('compares the values in an array field as JSON, so a number matches a number and not its text', async () => {
+    const budget = async (filter: MetadataFilter) => (await store.lexicalSearch('chunks', 'budget', { topK: 100, filter })).documents.length;
+    expect(await budget({ ranks: { $in: [2, 9] } })).toBe(40);
+    expect(await budget({ ranks: { $in: ['2'] } })).toBe(0);
+    expect(await budget({ ranks: { $nin: [2] } })).toBe(0);
+    expect(await budget({ ranks: { $nin: [9] } })).toBe(40);
+    expect(await budget({ ranks: { $contains: 1 } })).toBe(40);
+    expect(await budget({ aclGroups: { $nin: ['folder:f1'] } })).toBe(0);
   });
 
   it('fills a filtered top-K only with an iterative scan', async () => {
