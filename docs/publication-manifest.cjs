@@ -242,6 +242,7 @@ const publicationManifest = [
   agentosDoc('STRUCTURED_OUTPUT_API.md', 'features/structured-output-api.md', 'Structured Output API (generateObject / streamObject)', 'Tools & Capabilities', 5, {
     sidebar: false,
   }),
+  agentosDoc('features/STRUCTURED_REPLY.md', 'features/structured-reply.md', 'Structured Reply', 'Tools & Capabilities', 5.5),
 
   agentosDoc('CAPABILITY_DISCOVERY.md', 'features/capability-discovery.md', 'Capability Discovery', 'Tools & Capabilities', 1),
   agentosDoc('EMERGENT_CAPABILITIES.md', 'features/emergent-capabilities.md', 'Emergent Capabilities', 'Tools & Capabilities', 2),
