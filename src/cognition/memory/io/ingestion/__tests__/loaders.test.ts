@@ -1,7 +1,9 @@
 /**
  * @fileoverview Tests for the document loader system.
  *
- * Covers: TextLoader, MarkdownLoader, HtmlLoader, and LoaderRegistry.
+ * Covers: TextLoader, MarkdownLoader, HtmlLoader, LoaderRegistry, and
+ * DocxLoader's bound on what a Word file's archive inflates to (with Word
+ * files written in the test and read by the real mammoth).
  *
  * Each test creates temporary files in beforeEach / afterEach so all tests
  * are fully isolated and leave no artefacts on disk.
@@ -9,16 +11,19 @@
  * @module memory/ingestion/__tests__/loaders.test
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { crc32, deflateRawSync } from 'node:zlib';
+import mammoth from 'mammoth';
 
 import type { IDocumentLoader } from '../IDocumentLoader.js';
 import { TextLoader } from '../TextLoader.js';
 import { MarkdownLoader } from '../MarkdownLoader.js';
 import { HtmlLoader } from '../HtmlLoader.js';
 import { LoaderRegistry } from '../LoaderRegistry.js';
+import { DocxLoader, DocumentTooLargeError } from '../DocxLoader.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -451,5 +456,217 @@ describe('LoaderRegistry', () => {
     const registry = new LoaderRegistry();
 
     await expect(registry.loadFile(filePath)).rejects.toThrow(/no loader registered for extension/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DocxLoader bound
+// ---------------------------------------------------------------------------
+
+/** One file of an archive written by {@link zipOf}. */
+interface ArchiveEntry {
+  /** The entry's name inside the archive. */
+  name: string;
+  /** The entry's bytes before compression. */
+  data: Buffer;
+  /** The uncompressed size the headers state; the true size when left out. */
+  statedSize?: number;
+  /** The compression method: 8 deflates the data (the default), 0 stores it. */
+  method?: 0 | 8;
+}
+
+/**
+ * Writes a ZIP archive: each entry's local header and data, then the central
+ * directory and its end record, with no archive comment.
+ *
+ * @param entries - The archive's files, in order.
+ */
+function zipOf(entries: ArchiveEntry[]): Buffer {
+  const files: Buffer[] = [];
+  const directory: Buffer[] = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, 'utf8');
+    const method = entry.method ?? 8;
+    const body = method === 8 ? deflateRawSync(entry.data) : entry.data;
+    const checksum = crc32(entry.data);
+    const statedSize = entry.statedSize ?? entry.data.length;
+
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); // local file header signature
+    local.writeUInt16LE(20, 4); // version needed to extract
+    local.writeUInt16LE(method, 8);
+    local.writeUInt16LE(0x21, 12); // 1 January 1980
+    local.writeUInt32LE(checksum, 14);
+    local.writeUInt32LE(body.length, 18);
+    local.writeUInt32LE(statedSize, 22);
+    local.writeUInt16LE(name.length, 26);
+    files.push(local, name, body);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0); // central directory file header signature
+    central.writeUInt16LE(20, 4); // version made by
+    central.writeUInt16LE(20, 6); // version needed to extract
+    central.writeUInt16LE(method, 10);
+    central.writeUInt16LE(0x21, 14); // 1 January 1980
+    central.writeUInt32LE(checksum, 16);
+    central.writeUInt32LE(body.length, 20);
+    central.writeUInt32LE(statedSize, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE(offset, 42); // the local header's offset
+    directory.push(central, name);
+
+    offset += local.length + name.length + body.length;
+  }
+
+  const centralDirectory = Buffer.concat(directory);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); // end of central directory signature
+  end.writeUInt16LE(entries.length, 8); // entries on this disk
+  end.writeUInt16LE(entries.length, 10); // entries in all
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(offset, 16); // the central directory's offset
+  return Buffer.concat([...files, centralDirectory, end]);
+}
+
+/** The central directory's offset, read from an end record with no comment after it. */
+function directoryOffsetOf(zip: Buffer): number {
+  return zip.readUInt32LE(zip.length - 6);
+}
+
+/** The paragraph the test's Word file holds. */
+const PARAGRAPH = 'The quarterly review moved to Thursday.';
+
+/** The archive's content types part. */
+const CONTENT_TYPES: ArchiveEntry = {
+  name: '[Content_Types].xml',
+  data: Buffer.from(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/word/document.xml" ' +
+      'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+      '</Types>',
+    'utf8',
+  ),
+};
+
+/** The main document part: one paragraph. */
+const DOCUMENT: ArchiveEntry = {
+  name: 'word/document.xml',
+  data: Buffer.from(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      `<w:body><w:p><w:r><w:t>${PARAGRAPH}</w:t></w:r></w:p></w:body>` +
+      '</w:document>',
+    'utf8',
+  ),
+};
+
+/** The bound the refusals below are read against: 1 MiB. */
+const ONE_MIB = 1_048_576;
+
+/** 2 MiB of zeros, a few kilobytes once deflated. */
+const TWO_MIB_OF_ZEROS = Buffer.alloc(2 * ONE_MIB);
+
+describe('DocxLoader bound', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('loads a Word file within the default bound', async () => {
+    const doc = await new DocxLoader().load(zipOf([CONTENT_TYPES, DOCUMENT]));
+
+    expect(doc.content.trim()).toBe(PARAGRAPH);
+    expect(doc.format).toBe('docx');
+  });
+
+  it('refuses a file whose entries inflate past the bound, and mammoth never reads it', async () => {
+    const extractRawText = vi.spyOn(mammoth, 'extractRawText');
+    const file = zipOf([CONTENT_TYPES, DOCUMENT, { name: 'word/media/zeros.bin', data: TWO_MIB_OF_ZEROS }]);
+
+    const loading = new DocxLoader({ maxInflatedBytes: ONE_MIB }).load(file);
+
+    await expect(loading).rejects.toBeInstanceOf(DocumentTooLargeError);
+    await expect(loading).rejects.toMatchObject({ code: 'DOCUMENT_TOO_LARGE', limit: ONE_MIB });
+    expect(extractRawText).not.toHaveBeenCalled();
+  });
+
+  it('inflates an entry instead of trusting the size its headers state', async () => {
+    const extractRawText = vi.spyOn(mammoth, 'extractRawText');
+    const file = zipOf([
+      CONTENT_TYPES,
+      { name: 'word/document.xml', data: TWO_MIB_OF_ZEROS, statedSize: 10 },
+    ]);
+
+    const loading = new DocxLoader({ maxInflatedBytes: ONE_MIB }).load(file);
+
+    await expect(loading).rejects.toBeInstanceOf(DocumentTooLargeError);
+    await expect(loading).rejects.toMatchObject({ limit: ONE_MIB });
+    expect(extractRawText).not.toHaveBeenCalled();
+  });
+
+  it('counts a stored entry by its size', async () => {
+    const extractRawText = vi.spyOn(mammoth, 'extractRawText');
+    const file = zipOf([
+      CONTENT_TYPES,
+      DOCUMENT,
+      { name: 'word/media/zeros.bin', data: TWO_MIB_OF_ZEROS, method: 0 },
+    ]);
+
+    await expect(new DocxLoader({ maxInflatedBytes: ONE_MIB }).load(file)).rejects.toBeInstanceOf(
+      DocumentTooLargeError,
+    );
+    expect(extractRawText).not.toHaveBeenCalled();
+  });
+
+  it('refuses a buffer with no end record as no Word archive, before mammoth runs', async () => {
+    const extractRawText = vi.spyOn(mammoth, 'extractRawText');
+
+    await expect(new DocxLoader().load(Buffer.from('PK\x03\x04 and nothing else'))).rejects.toThrow(
+      'DocxLoader: not a Word archive',
+    );
+    expect(extractRawText).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, (zip: Buffer) => Buffer]>([
+    [
+      'a ZIP64 marker in the end record',
+      (zip) => {
+        zip.writeUInt16LE(0xffff, zip.length - 12); // entries in all
+        return zip;
+      },
+    ],
+    [
+      'bytes between the central directory and the end record',
+      (zip) => Buffer.concat([zip.subarray(0, zip.length - 22), Buffer.alloc(4), zip.subarray(zip.length - 22)]),
+    ],
+    [
+      'a local header past the end of the file',
+      (zip) => {
+        zip.writeUInt32LE(zip.length, directoryOffsetOf(zip) + 42);
+        return zip;
+      },
+    ],
+    [
+      'a compression method other than stored or deflated',
+      (zip) => {
+        zip.writeUInt16LE(12, directoryOffsetOf(zip) + 10); // bzip2
+        return zip;
+      },
+    ],
+  ])('refuses an archive with %s as no Word archive, before mammoth runs', async (_case, alter) => {
+    const extractRawText = vi.spyOn(mammoth, 'extractRawText');
+    const file = alter(zipOf([CONTENT_TYPES, DOCUMENT]));
+
+    await expect(new DocxLoader().load(file)).rejects.toThrow('DocxLoader: not a Word archive');
+    expect(extractRawText).not.toHaveBeenCalled();
+  });
+
+  it('refuses a bound that is not a positive number', () => {
+    for (const maxInflatedBytes of [0, -1, Number.NaN]) {
+      expect(() => new DocxLoader({ maxInflatedBytes })).toThrow(RangeError);
+    }
   });
 });
