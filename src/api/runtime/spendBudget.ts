@@ -190,10 +190,14 @@ export function asSpendBudget(input: SpendBudget | SpendBudgetOptions | undefine
   return input instanceof SpendBudget ? input : new SpendBudget(input);
 }
 
-/** The characters a request sends: its messages as JSON and its system prompt, which estimate its prompt tokens. */
-export function promptCharsOf(messages: unknown, system?: unknown): number {
+/**
+ * The characters a request sends: its messages as JSON, its system prompt and its tool definitions as JSON, which
+ * estimate its prompt tokens. A provider bills the tool definitions a call sends as prompt tokens.
+ */
+export function promptCharsOf(messages: unknown, system?: unknown, tools?: unknown): number {
   const systemText = typeof system === 'string' ? system : system === undefined ? '' : JSON.stringify(system);
-  return JSON.stringify(messages ?? []).length + systemText.length;
+  const toolsText = tools === undefined ? '' : JSON.stringify(tools);
+  return JSON.stringify(messages ?? []).length + systemText.length + toolsText.length;
 }
 
 /** The tokens a prompt of `chars` characters is assumed to hold: four characters a token, rounded up. */

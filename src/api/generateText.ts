@@ -2492,7 +2492,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         // Later steps are not checked again.
         if (step === 0) assertFitsContextWindow({ messages: effectiveMessages, tools: toolSchemas });
         if (budget) {
-          assertCallWithinBudget(budget, resolved, promptCharsOf(effectiveMessages), opts.maxTokens, 'generate_text.step');
+          assertCallWithinBudget(budget, resolved, promptCharsOf(effectiveMessages, undefined, toolSchemas), opts.maxTokens, 'generate_text.step');
         }
 
         const response = await withAgentOSSpan(

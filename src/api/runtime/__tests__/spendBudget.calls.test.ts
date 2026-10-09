@@ -2,10 +2,10 @@
  * The spend budget on the paths beside the plain call: a stream's usage and its refusal, the usage a failed call's
  * error reports, the provider's health while a budget refuses calls, a fallback walk that meets a spent budget, a
  * model with no price row when the budget warns or tells a callback (and one named after a member every object
- * inherits), a token cap of NaN, estimated as a call that names none, a budget's own token cap and an outside cost
- * of NaN, refused instead of ignored, a guard hook's stop under `hookErrors: 'throw'` (never walked to another
- * provider, never counted against one, and on the prompt-tool path before the tool runs), and an agent on the GMI
- * runtime, which takes no budget.
+ * inherits), a token cap of NaN, estimated as a call that names none, the tool definitions a call sends, counted in
+ * its estimate, a budget's own token cap and an outside cost of NaN, refused instead of ignored, a guard hook's stop
+ * under `hookErrors: 'throw'` (never walked to another provider, never counted against one, and on the prompt-tool
+ * path before the tool runs), and an agent on the GMI runtime, which takes no budget.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -228,6 +228,31 @@ describe('a spend budget and a token cap of NaN', () => {
       }),
     ).rejects.toBeInstanceOf(CostCapExceededError);
     expect(hoisted.generateCompletion).not.toHaveBeenCalled();
+  });
+});
+
+describe('a spend budget and the tool definitions a call sends', () => {
+  it('counts them in the estimate, as the provider bills them, on generateText and on streamText', async () => {
+    hoisted.generateCompletion.mockResolvedValue(reply('ok', 0));
+    hoisted.generateCompletionStream.mockImplementation(streamedReply('ok', 0));
+    // 40,000 characters of definitions are 10,000 prompt tokens, about 0.001 US dollars on gpt-6-luna, while the
+    // messages and a 100-token cap come to about 0.00005, well under the budget of 0.0005.
+    const tools = {
+      lookup: {
+        description: 'x'.repeat(40_000),
+        parameters: { type: 'object', properties: {} },
+        execute: vi.fn(async () => ({ found: 'nothing' })),
+      },
+    };
+    const call = { provider: 'openai', model: 'gpt-6-luna', prompt: 'hello', maxTokens: 100, fallbackProviders: [] };
+    await expect(generateText({ ...call, tools, budget: { maxCostUSD: 0.0005 } })).rejects.toBeInstanceOf(CostCapExceededError);
+    expect(errorOf(await partsOf(streamText({ ...call, tools, budget: { maxCostUSD: 0.0005 } }).fullStream))).toBeInstanceOf(
+      CostCapExceededError,
+    );
+    expect(hoisted.generateCompletion).not.toHaveBeenCalled();
+    expect(hoisted.generateCompletionStream).not.toHaveBeenCalled();
+    // The same call without the definitions fits.
+    await expect(generateText({ ...call, budget: { maxCostUSD: 0.0005 } })).resolves.toMatchObject({ text: 'ok' });
   });
 });
 

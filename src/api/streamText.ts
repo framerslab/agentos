@@ -802,7 +802,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         // A leg's first send is checked against its model's window; later
         // steps are not checked again.
         if (step === 0) assertFitsContextWindow({ messages: effectiveMessages, tools: toolSchemas });
-        if (budget) assertCallWithinBudget(budget, resolved, promptCharsOf(effectiveMessages), opts.maxTokens, 'stream_text');
+        if (budget) assertCallWithinBudget(budget, resolved, promptCharsOf(effectiveMessages, undefined, toolSchemas), opts.maxTokens, 'stream_text');
 
         const stepSpan = startAgentOSSpan('agentos.api.stream_text.step', {
           attributes: {
