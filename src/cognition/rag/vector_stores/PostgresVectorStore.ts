@@ -836,7 +836,8 @@ export class PostgresVectorStore implements IVectorStore {
       [tableName],
     );
     if (existing.rows.some((row: { indexdef: string }) => row.indexdef.includes(marker))) return;
-    await this.pool.query(`CREATE INDEX IF NOT EXISTS "${tableName}_${suffix}" ON ${this._t(collection)} ${using}`);
+    const indexName = PostgresVectorStore.quoted(`${tableName}_${suffix}`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${this._t(collection)} ${using}`);
   }
 
   /** Ensure the store is initialized before any operation. */
@@ -844,9 +845,17 @@ export class PostgresVectorStore implements IVectorStore {
     if (!this.isInitialized) await this.initialize();
   }
 
-  /** Prefix a table name for multi-tenancy. */
+  /**
+   * A collection's table, with the prefix, as one quoted identifier. A double quote in the prefix or the name is
+   * doubled, the SQL rule for a quoted identifier, so a name cannot close the identifier and write SQL of its own.
+   */
   private _t(name: string): string {
-    return this.prefix ? `"${this.prefix}${name}"` : `"${name}"`;
+    return PostgresVectorStore.quoted(`${this.prefix}${name}`);
+  }
+
+  /** A name as a quoted identifier, every double quote in it doubled. */
+  private static quoted(name: string): string {
+    return `"${name.replace(/"/g, '""')}"`;
   }
 
   /** Get collection metadata: from the collections table, or from the configuration when the schema is the caller's. */

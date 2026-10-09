@@ -720,6 +720,26 @@ describe('PostgresVectorStore', () => {
       const prefixed = queryCalls.find(c => c.sql.includes('"tenant1__collections"'));
       expect(prefixed).toBeDefined();
     });
+
+    it('doubles a double quote in the prefix or the collection name, so each name stays one identifier', async () => {
+      store = new PostgresVectorStore(makeConfig({ tablePrefix: 'te"n_' }));
+      await store.initialize();
+      expect(queryCalls.some(c => c.sql.includes('CREATE TABLE IF NOT EXISTS "te""n__collections" ('))).toBe(true);
+      resetMocks();
+
+      await store.createCollection('chu"nks', 4);
+      expect(queryCalls[0].sql).toContain('CREATE TABLE IF NOT EXISTS "te""n_chu""nks" (');
+      expect(queryCalls.filter(c => c.sql.includes('FROM pg_indexes')).map(c => c.params)).toEqual([['te"n_chu"nks'], ['te"n_chu"nks'], ['te"n_chu"nks']]);
+      expect(queryCalls.filter(c => c.sql.startsWith('CREATE INDEX')).map(c => c.sql)).toEqual([
+        'CREATE INDEX IF NOT EXISTS "te""n_chu""nks_hnsw" ON "te""n_chu""nks" USING hnsw (embedding vector_cosine_ops)',
+        'CREATE INDEX IF NOT EXISTS "te""n_chu""nks_metadata" ON "te""n_chu""nks" USING gin (metadata_json)',
+        'CREATE INDEX IF NOT EXISTS "te""n_chu""nks_fts" ON "te""n_chu""nks" USING gin (tsv)',
+      ]);
+
+      resetMocks();
+      await store.delete('chu"nks', undefined, { filter: { sourceId: 's1' } });
+      expect(queryCalls[0]).toEqual({ sql: `DELETE FROM "te""n_chu""nks" WHERE metadata_json->>'sourceId' = $1`, params: ['s1'] });
+    });
   });
 
   // =========================================================================
