@@ -82,6 +82,9 @@ const LANGUAGE_LIST_MODELS = ['gpt-live-transcribe', 'gpt-transcribe'];
 
 const MINUTE_MS = 60_000;
 
+/** Wait before the first reconnect after a drop; later ones wait `retryIntervalMs`. */
+const FIRST_RETRY_DELAY_MS = 100;
+
 async function defaultOpenAIProbe(apiKey: string) {
   const start = Date.now();
   const res = await fetch('https://api.openai.com/v1/models', {
@@ -749,6 +752,30 @@ class TranscriptionConnection {
   }
 }
 
+/**
+ * What a connection opened to replace a dropped one takes over from it: the
+ * age its rollover counts from, and the outcome of that rollover, so a refused
+ * or failed rollover still ends the session at the hard stop and the host is
+ * not asked again.
+ */
+interface RolloverClocks {
+  /** Where the dropped connection's age counted from. */
+  ageStartAt: number;
+  /** Its rollover was refused or failed: no new approval, and the session ends at the hard stop. */
+  rolloverRefused: boolean;
+  /** Why its next connection could not open; the session ends with it at the hard stop. */
+  rolloverFailure: Error | undefined;
+}
+
+/** A connection's rollover clocks, for the connection that replaces it. */
+function rolloverClocks(connection: TranscriptionConnection): RolloverClocks {
+  return {
+    ageStartAt: connection.ageStartAt,
+    rolloverRefused: connection.rolloverRefused,
+    rolloverFailure: connection.rolloverFailure,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
@@ -777,6 +804,12 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
   private ending = false;
   /** A client commit asked for while no connection was open; sent once one opens. */
   private commitOnAdopt = false;
+  /** Waiters of {@link waitAdopted}: a flush that found no connection taking audio. */
+  private adoptWaiters = new Set<() => void>();
+  /** Connections still connecting (a reconnect's, or a rollover's next one): `close()` abandons them. */
+  private readonly connecting = new Set<TranscriptionConnection>();
+  /** Ends of the waits before a retry: `close()` calls them. */
+  private readonly retryWaits = new Set<() => void>();
   private speaking = false;
   /** The connection that closed last: where its audio ended and its utterances, for the duplicate check. */
   private retired: ConnectionAudio | undefined;
@@ -818,6 +851,7 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
    * Ends the current turn: commits the buffer when turn detection is off (or
    * when speech is in progress under server turn detection), then resolves
    * once every committed item's final has arrived, or after `finalTimeoutMs`.
+   * During a reconnect it first waits for the connection that takes over.
    * The session stays open: at its end, flush before `close()` so the last
    * turn gets its final. Under server turn detection, speech is in progress
    * once the server has reported its start, so an utterance that began within
@@ -828,8 +862,10 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     if (this.closed) return;
     const lead = this.lead();
     if (!lead) {
-      // No connection takes audio now (a reconnect): commit once one opens.
+      // No connection takes audio now (a reconnect): commit once one opens, and wait for it.
       if (this.settings.clientCommits) this.commitOnAdopt = true;
+      await this.waitAdopted(this.settings.finalTimeoutMs);
+      if (this.closed) return;
     } else if (this.settings.clientCommits || lead.speaking) {
       lead.commit(this.sessionAudioMs);
     }
@@ -838,7 +874,26 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     );
   }
 
-  /** Closes every connection at once and emits `'close'`. Idempotent. */
+  /** Resolves when a connection is adopted or the session closes, or after `timeoutMs`. */
+  private waitAdopted(timeoutMs: number): Promise<void> {
+    if (this.lead() || this.closed) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const finish = (): void => {
+        clearTimeout(timer);
+        this.adoptWaiters.delete(finish);
+        this.off('close', finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, timeoutMs);
+      this.adoptWaiters.add(finish);
+      this.once('close', finish);
+    });
+  }
+
+  /**
+   * Closes every connection at once, abandons one still connecting, ends a
+   * wait before a retry, and emits `'close'`. Idempotent.
+   */
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -847,6 +902,10 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     const open = this.connections;
     this.connections = [];
     for (const connection of open) connection.close();
+    // Closing a connection still connecting abandons its connect: its socket is terminated, its timer cleared.
+    for (const connection of [...this.connecting]) connection.close();
+    this.connecting.clear();
+    for (const finish of [...this.retryWaits]) finish();
     this.backlog = [];
     this.backlogMs = 0;
     this.emit('close');
@@ -863,12 +922,21 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     });
   }
 
-  /** Makes an opened connection part of the session; it receives audio from now on. */
-  private adopt(connection: TranscriptionConnection): void {
+  /**
+   * Makes an opened connection part of the session; it receives audio from now on. A replacement for a dropped
+   * connection takes over its rollover clocks.
+   */
+  private adopt(connection: TranscriptionConnection, clocks?: RolloverClocks): void {
     this.openedConnections += 1;
     connection.index = this.openedConnections;
+    if (clocks) {
+      connection.ageStartAt = clocks.ageStartAt;
+      connection.rolloverRefused = clocks.rolloverRefused;
+      connection.rolloverFailure = clocks.rolloverFailure;
+    }
     this.connections.push(connection);
     this.releaseBacklog(connection);
+    for (const finish of [...this.adoptWaiters]) finish();
   }
 
   /** Sends the held frames to a connection that takes audio, then the commit a flush asked for meanwhile. */
@@ -898,10 +966,31 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     }
   }
 
-  /** A connection dropped: the session cannot go on without it. */
-  private handleDrop(_connection: TranscriptionConnection, reason: Error): void {
+  /** A connection dropped: retire it, and reconnect when no other connection receives audio. */
+  private handleDrop(connection: TranscriptionConnection, reason: Error): void {
     if (this.closed) return;
-    this.fail(reason);
+    if (Date.now() - connection.readyAt > this.settings.connectTimeoutMs) this.failures = 0;
+    this.retire(connection, true);
+    if (this.lead() || this.reconnecting || this.ending || this.rolloverInProgress) return;
+    this.reconnect(reason, rolloverClocks(connection));
+  }
+
+  /**
+   * Opens a replacement connection by the retry rules and adopts it with the dropped connection's rollover clocks,
+   * so the rollover (and the host's approval) comes at the same time as without the drop, and a refused or failed
+   * rollover stays refused or failed; a failure beyond the retries ends the session.
+   */
+  private reconnect(reason: Error, clocks: RolloverClocks): void {
+    this.reconnecting = true;
+    this.openConnection(reason)
+      .then((next) => {
+        this.reconnecting = false;
+        if (next) this.adopt(next, clocks);
+      })
+      .catch((err: unknown) => {
+        this.reconnecting = false;
+        this.fail(toError(err));
+      });
   }
 
   /** Ends the session after a failure it cannot recover from: `'error'`, then `'close'`. */
@@ -909,6 +998,87 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     if (this.closed) return;
     this.emitErrorSafe(err);
     this.close();
+  }
+
+  /**
+   * Opens a connection, retrying by the retry rules. With `firstError` (a
+   * drop), the first attempt waits too. A connection still connecting is in
+   * {@link connecting}, and a wait before a retry in {@link retryWaits}, so
+   * `close()` ends both at once. Resolves `undefined` when the session closed
+   * meanwhile; rejects with the error that ended the retries.
+   */
+  private async openConnection(firstError?: Error): Promise<TranscriptionConnection | undefined> {
+    let lastError = firstError;
+    for (;;) {
+      if (this.closed) return undefined;
+      if (lastError) {
+        const classified = VoicePipelineError.classifyError(lastError, {
+          kind: 'stt',
+          provider: this.settings.providerId,
+        });
+        if (!classified.retryable || this.failures >= this.settings.maxRetries) {
+          throw new VoicePipelineError({
+            kind: 'stt',
+            provider: this.settings.providerId,
+            errorClass: classified.errorClass,
+            message: `openai realtime transcription gave up after ${this.failures} ${this.failures === 1 ? 'retry' : 'retries'}: ${classified.message}`,
+            cause: lastError,
+            retryable: false,
+          });
+        }
+        const delay = this.failures === 0 ? FIRST_RETRY_DELAY_MS : this.settings.retryIntervalMs;
+        this.failures += 1;
+        await this.waitRetry(delay);
+        if (this.closed) return undefined;
+      }
+      const connection = this.createConnection();
+      this.connecting.add(connection);
+      try {
+        await connection.connect();
+      } catch (err) {
+        lastError = toError(err);
+        continue;
+      } finally {
+        this.connecting.delete(connection);
+      }
+      if (this.closed) {
+        connection.close();
+        return undefined;
+      }
+      return connection;
+    }
+  }
+
+  /** Waits `ms` before a retry; `close()` ends the wait at once and clears its timer. */
+  private waitRetry(ms: number): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const finish = (): void => {
+        clearTimeout(timer);
+        this.retryWaits.delete(finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, ms);
+      this.retryWaits.add(finish);
+    });
+  }
+
+  /**
+   * Takes a connection out of the session and closes it. With `retract`, an
+   * item that sent interim text but will get no final gets an empty final, so
+   * a consumer keyed by `itemId` drops the interim.
+   */
+  private retire(connection: TranscriptionConnection, retract: boolean): void {
+    if (!this.connections.includes(connection)) return;
+    this.connections = this.connections.filter((other) => other !== connection);
+    if (connection.feedEndMs === undefined) connection.feedEndMs = this.sessionAudioMs;
+    connection.close();
+    for (const item of connection.items.values()) {
+      if (item.finished || item.dropped) continue;
+      connection.intervals.delete(item.itemId);
+      if (retract && item.interimSent) this.emit('transcript', this.transcriptEvent(item, '', true));
+    }
+    this.setSpeaking(this.lead()?.speaking ?? false);
   }
 
   // -------------------------------------------------------------------------
