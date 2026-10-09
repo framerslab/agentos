@@ -540,3 +540,300 @@ describe('OpenAIRealtimeTranscriptionSTT: transcripts keyed by item id', () => {
     session.close();
   });
 });
+
+describe('OpenAIRealtimeTranscriptionSTT: reconnects, failures, flush and close', () => {
+  it('reconnects after a drop, first after 100 ms, and sends the audio pushed meanwhile', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
+    const session = await stt.startSession();
+    const log = record(session);
+    Sockets.instances[0].drop();
+    session.pushAudio(frame(2_400)); // 100 ms with no connection open
+    await vi.advanceTimersByTimeAsync(99);
+    await settle();
+    expect(Sockets.instances).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await settle();
+    expect(Sockets.instances).toHaveLength(2);
+    const second = Sockets.instances[1];
+    expect(second.sent[0].type).toBe('session.update');
+    expect(sentOfType(second, 'input_audio_buffer.append')).toHaveLength(1);
+    expect(log.errors).toEqual([]);
+    session.close();
+  });
+
+  it('ends with an error and then close after three failed reconnects, waiting 100 ms, 2 s and 2 s', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
+    const session = await stt.startSession();
+    const log = record(session);
+    Sockets.nextBehavior = 'reject-500';
+    Sockets.instances[0].drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    expect(Sockets.instances).toHaveLength(2);
+    Sockets.nextBehavior = 'reject-500';
+    await vi.advanceTimersByTimeAsync(2_000);
+    await settle();
+    expect(Sockets.instances).toHaveLength(3);
+    Sockets.nextBehavior = 'reject-500';
+    await vi.advanceTimersByTimeAsync(2_000);
+    await settle();
+    expect(Sockets.instances).toHaveLength(4);
+    expect(log.events.slice(-2)).toEqual(['error', 'close']);
+    expect(log.errors[0].message).toMatch(/gave up after 3 retries: .*HTTP 500/s);
+  });
+
+  it('resets the retry count after a final, so the next drop waits 100 ms again', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
+    const session = await stt.startSession();
+    record(session);
+    Sockets.nextBehavior = 'reject-500';
+    Sockets.instances[0].drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle(); // the first reconnect is refused: two failures counted
+    await vi.advanceTimersByTimeAsync(2_000);
+    await settle(); // the second reconnect opens
+    expect(Sockets.instances).toHaveLength(3);
+    const third = Sockets.instances[2];
+    third.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'Back again.',
+    });
+    third.drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    expect(Sockets.instances).toHaveLength(4); // 100 ms, not 2 s: the final reset the count
+    session.close();
+  });
+
+  it('resets the retry count when the dropped connection had stayed open longer than the connect timeout', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, connectTimeoutMs: 1_000 });
+    const session = await stt.startSession();
+    record(session);
+    Sockets.nextBehavior = 'reject-500';
+    Sockets.instances[0].drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await settle();
+    expect(Sockets.instances).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(1_500); // longer than connectTimeoutMs
+    Sockets.instances[2].drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    expect(Sockets.instances).toHaveLength(4);
+    session.close();
+  });
+
+  it('ends at once with an error when a reconnect is refused as unauthorised', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
+    const session = await stt.startSession();
+    const log = record(session);
+    Sockets.nextBehavior = 'reject-401';
+    Sockets.instances[0].drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    expect(Sockets.instances).toHaveLength(2);
+    expect(log.events.slice(-2)).toEqual(['error', 'close']);
+    expect(log.errors[0].message).toMatch(/gave up after 1 retry: .*HTTP 401/s);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(Sockets.instances).toHaveLength(2);
+  });
+
+  it('does not throw when it fails with no error listener attached', async () => {
+    fakeClock();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
+    const session = await stt.startSession();
+    const closed = vi.fn();
+    session.on('close', closed);
+    Sockets.nextBehavior = 'reject-401';
+    Sockets.instances[0].drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    expect(closed).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('session error (no listener attached)'),
+      expect.stringContaining('HTTP 401')
+    );
+    warn.mockRestore();
+  });
+
+  it('reports a server error it survives as a warning', async () => {
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
+    const session = await stt.startSession();
+    const log = record(session);
+    Sockets.instances[0].serve({
+      type: 'error',
+      event_id: 'event_9',
+      error: { type: 'invalid_request_error', code: null, message: 'Unknown parameter.', param: null, event_id: null },
+    });
+    expect(log.warnings).toHaveLength(1);
+    expect(log.errors).toEqual([]);
+    expect(log.events).not.toContain('close');
+    session.close();
+  });
+
+  it('commits the buffer on flush when turn detection is off, and resolves when that item is final', async () => {
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, turnDetection: null });
+    const session = await stt.startSession();
+    const log = record(session);
+    const socket = Sockets.instances[0];
+    session.pushAudio(frame(12_000)); // 500 ms
+    let flushed = false;
+    const flushing = session.flush().then(() => {
+      flushed = true;
+    });
+    expect(sentOfType(socket, 'input_audio_buffer.commit')).toEqual([
+      { type: 'input_audio_buffer.commit', event_id: 'commit_1_1' },
+    ]);
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    await settle();
+    expect(flushed).toBe(false);
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'One turn.',
+    });
+    await flushing;
+    expect(log.transcripts).toEqual([
+      { text: 'One turn.', confidence: 1, words: [], isFinal: true, itemId: 'item_A', startMs: 0, endMs: 500, durationMs: 500 },
+    ]);
+    session.close();
+  });
+
+  it('sends no commit when nothing was appended since the last one', async () => {
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, turnDetection: null });
+    const session = await stt.startSession();
+    await session.flush();
+    expect(sentOfType(Sockets.instances[0], 'input_audio_buffer.commit')).toEqual([]);
+    session.close();
+  });
+
+  it('stops waiting for a commit the server refused', async () => {
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, turnDetection: null, finalTimeoutMs: 60_000 });
+    const session = await stt.startSession();
+    const log = record(session);
+    session.pushAudio(frame(240));
+    let flushed = false;
+    const flushing = session.flush().then(() => {
+      flushed = true;
+    });
+    Sockets.instances[0].serve({
+      type: 'error',
+      event_id: 'event_5',
+      error: { type: 'invalid_request_error', code: null, message: 'The buffer is too small to commit.', param: null, event_id: 'commit_1_1' },
+    });
+    await settle();
+    expect(flushed).toBe(true); // at once, not after finalTimeoutMs
+    await flushing;
+    expect(log.warnings).toHaveLength(1);
+    session.close();
+  });
+
+  it('commits on flush under server turn detection only while speech is in progress', async () => {
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, finalTimeoutMs: 50 });
+    const session = await stt.startSession();
+    record(session);
+    const socket = Sockets.instances[0];
+    session.pushAudio(frame(4_800));
+    await session.flush();
+    expect(sentOfType(socket, 'input_audio_buffer.commit')).toEqual([]);
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    session.pushAudio(frame(4_800));
+    await session.flush(); // waits up to 50 ms for item_A's final
+    expect(sentOfType(socket, 'input_audio_buffer.commit')).toHaveLength(1);
+    session.close();
+  });
+
+  it('opens no connection after close, even when a socket drops later', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
+    const session = await stt.startSession();
+    session.close();
+    Sockets.instances[0].drop();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await settle();
+    expect(Sockets.instances).toHaveLength(1);
+  });
+
+  it('retries after a rate-limited refusal, since a 429 is retryable, and connects when the limit lifts', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
+    const session = await stt.startSession();
+    const log = record(session);
+    Sockets.nextBehavior = 'reject-429';
+    Sockets.instances[0].drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    expect(Sockets.instances).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await settle();
+    expect(Sockets.instances).toHaveLength(3);
+    expect(log.events).not.toContain('error');
+    expect(log.events).not.toContain('close');
+    session.close();
+  });
+
+  it('flush during a reconnect waits for the connection that takes over to commit and finalise', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, turnDetection: null });
+    const session = await stt.startSession();
+    const log = record(session);
+    Sockets.instances[0].drop();
+    session.pushAudio(frame(2_400));
+    let flushed = false;
+    const flushing = session.flush().then(() => {
+      flushed = true;
+    });
+    await settle();
+    expect(flushed).toBe(false);
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    const next = Sockets.instances[1];
+    expect(next.sent.filter((event) => event.type === 'input_audio_buffer.commit')).toHaveLength(1);
+    expect(flushed).toBe(false);
+    next.serve({ type: 'input_audio_buffer.committed', item_id: 'item_R', previous_item_id: null });
+    next.serve({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item_R', content_index: 0, transcript: 'Late words.' });
+    await flushing;
+    expect(log.transcripts.at(-1)).toMatchObject({ itemId: 'item_R', isFinal: true, text: 'Late words.' });
+    session.close();
+  });
+
+  it('abandons a reconnect still connecting when the session closes, and leaves no timer behind', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
+    const session = await stt.startSession();
+    const log = record(session);
+    Sockets.nextBehavior = 'silent'; // the replacement's session update goes unanswered
+    Sockets.instances[0].drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    expect(Sockets.instances).toHaveLength(2);
+    session.close();
+    expect(Sockets.instances[1].terminate).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0); // the connect timer went with it
+    await vi.advanceTimersByTimeAsync(10_000);
+    await settle();
+    expect(Sockets.instances).toHaveLength(2);
+    expect(log.events).toEqual(['close']);
+  });
+
+  it('ends a retry wait when the session closes', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
+    const session = await stt.startSession();
+    Sockets.instances[0].drop();
+    expect(vi.getTimerCount()).toBe(1); // the wait before the first retry
+    session.close();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await settle();
+    expect(Sockets.instances).toHaveLength(1);
+  });
+});
