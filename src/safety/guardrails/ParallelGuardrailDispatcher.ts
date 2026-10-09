@@ -33,6 +33,7 @@ import {
   type AgentOSResponse,
   AgentOSResponseChunkType,
   type AgentOSFinalResponseChunk,
+  isActionableToolCallRequestChunk,
 } from '../../api/types/AgentOSResponse';
 import {
   GuardrailAction,
@@ -40,7 +41,7 @@ import {
   type GuardrailEvaluationResult,
   type IGuardrailService,
 } from './IGuardrailService';
-import type { GuardrailInputOutcome, GuardrailOutputOptions } from './guardrailDispatcher';
+import type { GuardrailInputOutcome, GuardrailOutputOptions, GuardrailOutputVerdict } from './guardrailDispatcher';
 import {
   serializeEvaluation,
   withGuardrailMetadata,
@@ -443,6 +444,136 @@ export class ParallelGuardrailDispatcher {
     // evaluateOutput calls see the live state, not just the initial option.
     let currentRagSources = options.ragSources;
 
+    // -- Hold mode: the reply's text deltas wait for the final verdict ----
+    // With `holdUntilFinal`, no TEXT_DELTA reaches the caller before the
+    // final guards have passed the whole reply: the deltas are buffered and
+    // flushed only when the final chunk is allowed (or flagged). A block or a
+    // sanitize drops them, since they carry the text the guards refused.
+    const hold = options.holdUntilFinal === true;
+    let held: AgentOSResponse[] = [];
+
+    const notify = async (verdict: GuardrailOutputVerdict): Promise<void> => {
+      if (!options.onVerdict) return;
+      try {
+        await options.onVerdict(verdict);
+      } catch (error) {
+        console.warn('[AgentOS][Guardrails] onVerdict threw; the verdict stands.', error);
+      }
+    };
+
+    /**
+     * The final guards over one final chunk: Phase 1 sanitizers in order,
+     * then Phase 2 classifiers in parallel. Returns the first BLOCK, or the
+     * chunk as the sanitizers left it with every evaluation attached.
+     */
+    const evaluateFinal = async (
+      chunkIn: AgentOSResponse,
+    ): Promise<
+      | { outcome: 'block'; evaluation: GuardrailEvaluationResult }
+      | { outcome: 'pass'; chunk: AgentOSResponse; sanitized: boolean; worst: GuardrailAction }
+    > => {
+      const outputEvaluations: GuardrailEvaluationResult[] = [];
+      let workingChunk = chunkIn;
+      let sanitized = false;
+
+      // Phase 1: sequential final sanitizers
+      for (const svc of finalSanitizers) {
+        if (!svc.evaluateOutput) {
+          continue;
+        }
+
+        const timeoutMs = svc.config?.timeoutMs;
+        const raw = await callWithTimeout(
+          () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
+          timeoutMs,
+          svc.config?.failClosed,
+        );
+
+        if (!raw) {
+          continue;
+        }
+
+        const evaluation = stampGuardrailId(raw, svc);
+        outputEvaluations.push(evaluation);
+
+        // BLOCK terminates the stream
+        if (evaluation.action === GuardrailAction.BLOCK) {
+          return { outcome: 'block', evaluation };
+        }
+
+        // SANITIZE: modify every text field of the final response, or the textDelta
+        if (evaluation.action === GuardrailAction.SANITIZE && evaluation.modifiedText !== undefined) {
+          sanitized = true;
+          if (workingChunk.type === AgentOSResponseChunkType.FINAL_RESPONSE) {
+            workingChunk = {
+              ...(workingChunk as AgentOSFinalResponseChunk),
+              finalResponseText: evaluation.modifiedText,
+              finalResponseTextPlain: evaluation.modifiedText,
+            };
+          } else {
+            workingChunk = {
+              ...(workingChunk as any),
+              textDelta: evaluation.modifiedText,
+            };
+          }
+        }
+      }
+
+      // Phase 2: parallel final classifiers
+      if (finalParallel.length > 0) {
+        const tasks = finalParallel.map(({ svc, registrationIndex }) => {
+          if (!svc.evaluateOutput) {
+            return Promise.resolve({ evaluation: null, registrationIndex, svc });
+          }
+
+          const timeoutMs = svc.config?.timeoutMs;
+          return callWithTimeout(
+            () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
+            timeoutMs,
+            svc.config?.failClosed,
+          ).then((evaluation) => ({ evaluation, registrationIndex, svc }));
+        });
+
+        const results = await Promise.allSettled(tasks);
+
+        for (const result of results) {
+          if (result.status === 'rejected') {
+            console.warn(
+              '[AgentOS][Guardrails] Phase 2 final evaluateOutput rejected.',
+              result.reason,
+            );
+            continue;
+          }
+
+          const { evaluation: rawEvaluation, registrationIndex, svc } = result.value;
+          if (!rawEvaluation) {
+            continue;
+          }
+
+          // Downgrade SANITIZE → FLAG in Phase 2
+          const evaluation = stampGuardrailId(downgradePhase2Sanitize(rawEvaluation, registrationIndex), svc);
+          outputEvaluations.push(evaluation);
+
+          // BLOCK terminates the stream
+          if (evaluation.action === GuardrailAction.BLOCK) {
+            return { outcome: 'block', evaluation };
+          }
+        }
+      }
+
+      // Attach output evaluation metadata
+      if (outputEvaluations.length > 0) {
+        workingChunk = withGuardrailMetadata(workingChunk, {
+          output: outputEvaluations.map(serializeEvaluation),
+        });
+      }
+
+      return { outcome: 'pass', chunk: workingChunk, sanitized, worst: worstAction(outputEvaluations) };
+    };
+
+    const finalTextOf = (chunk: AgentOSResponse): string | null =>
+      chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE ? ((chunk as AgentOSFinalResponseChunk).finalResponseText ?? null) : null;
+
     // -- Main stream loop ----------------------------------------------
     for await (const chunk of stream) {
       let currentChunk = chunk;
@@ -482,7 +613,7 @@ export class ParallelGuardrailDispatcher {
 
         // Phase 1: sequential streaming sanitizers
         for (const svc of streamingSanitizers) {
-          const svcId = (svc as any).id || 'unknown';
+          const svcId = svc.id || (svc as any).id || 'unknown';
           const currentCount = streamingEvaluationCounts.get(svcId) || 0;
           const maxEvals = svc.config?.maxStreamingEvaluations;
 
@@ -492,7 +623,7 @@ export class ParallelGuardrailDispatcher {
           }
 
           const timeoutMs = svc.config?.timeoutMs;
-          const evaluation = await callWithTimeout(
+          const raw = await callWithTimeout(
             () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
             timeoutMs,
             svc.config?.failClosed,
@@ -500,15 +631,18 @@ export class ParallelGuardrailDispatcher {
 
           streamingEvaluationCounts.set(svcId, currentCount + 1);
 
-          if (!evaluation) {
+          if (!raw) {
             continue;
           }
 
+          const evaluation = stampGuardrailId(raw, svc);
           outputEvaluations.push(evaluation);
 
           // BLOCK terminates the stream immediately
           if (evaluation.action === GuardrailAction.BLOCK) {
-            yield* createGuardrailBlockedStream(context, evaluation, options);
+            held = [];
+            await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(evaluation), reasonCode: evaluation.reasonCode, finalText: evaluation.replacementText ?? null, originalText: null });
+            yield* blockedOutput(context, evaluation, options);
             return;
           }
 
@@ -524,13 +658,13 @@ export class ParallelGuardrailDispatcher {
         // Phase 2: parallel streaming classifiers
         if (streamingParallel.length > 0) {
           const tasks = streamingParallel.map(({ svc, registrationIndex }) => {
-            const svcId = (svc as any).id || `svc-${registrationIndex}`;
+            const svcId = svc.id || (svc as any).id || `svc-${registrationIndex}`;
             const currentCount = streamingEvaluationCounts.get(svcId) || 0;
             const maxEvals = svc.config?.maxStreamingEvaluations;
 
             // Rate-limited services return null immediately
             if (maxEvals !== undefined && currentCount >= maxEvals) {
-              return Promise.resolve({ evaluation: null, registrationIndex, svcId });
+              return Promise.resolve({ evaluation: null, registrationIndex, svcId, svc });
             }
 
             const timeoutMs = svc.config?.timeoutMs;
@@ -540,7 +674,7 @@ export class ParallelGuardrailDispatcher {
               svc.config?.failClosed,
             ).then((evaluation) => {
               streamingEvaluationCounts.set(svcId, currentCount + 1);
-              return { evaluation, registrationIndex, svcId };
+              return { evaluation, registrationIndex, svcId, svc };
             });
           });
 
@@ -555,18 +689,20 @@ export class ParallelGuardrailDispatcher {
               continue;
             }
 
-            const { evaluation: rawEvaluation, registrationIndex } = result.value;
+            const { evaluation: rawEvaluation, registrationIndex, svc } = result.value;
             if (!rawEvaluation) {
               continue;
             }
 
             // Downgrade SANITIZE → FLAG in Phase 2
-            const evaluation = downgradePhase2Sanitize(rawEvaluation, registrationIndex);
+            const evaluation = stampGuardrailId(downgradePhase2Sanitize(rawEvaluation, registrationIndex), svc);
             outputEvaluations.push(evaluation);
 
             // BLOCK terminates the stream immediately
             if (evaluation.action === GuardrailAction.BLOCK) {
-              yield* createGuardrailBlockedStream(context, evaluation, options);
+              held = [];
+              await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(evaluation), reasonCode: evaluation.reasonCode, finalText: evaluation.replacementText ?? null, originalText: null });
+              yield* blockedOutput(context, evaluation, options);
               return;
             }
           }
@@ -580,6 +716,42 @@ export class ParallelGuardrailDispatcher {
         }
 
         currentChunk = workingChunk;
+      }
+
+      // In hold mode a text delta waits for the final verdict.
+      if (hold && chunk.type === AgentOSResponseChunkType.TEXT_DELTA && !chunk.isFinal) {
+        held.push(currentChunk);
+        continue;
+      }
+
+      // An actionable tool call ends the turn's text for now: in hold mode the
+      // text so far is judged as a final reply before the tool call goes out.
+      if (hold && isActionableToolCallRequestChunk(chunk) && held.length > 0) {
+        const text = held.map((h) => String((h as any).textDelta ?? '')).join('');
+        const synthetic: AgentOSFinalResponseChunk = {
+          type: AgentOSResponseChunkType.FINAL_RESPONSE,
+          streamId: chunk.streamId,
+          gmiInstanceId: chunk.gmiInstanceId,
+          personaId: chunk.personaId,
+          isFinal: true,
+          timestamp: chunk.timestamp,
+          finalResponseText: text,
+          finalResponseTextPlain: text,
+        };
+        const verdict = await evaluateFinal(synthetic);
+        if (verdict.outcome === 'block') {
+          held = [];
+          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null, originalText: text });
+          yield* blockedOutput(context, verdict.evaluation, options);
+          return;
+        }
+        if (verdict.sanitized) {
+          held = [{ ...(held[0] as any), textDelta: finalTextOf(verdict.chunk) ?? '' }];
+        }
+        for (const h of held) yield h;
+        held = [];
+        yield currentChunk;
+        continue;
       }
 
       // ---------------------------------------------------------------
@@ -589,107 +761,74 @@ export class ParallelGuardrailDispatcher {
         chunk.isFinal &&
         (finalSanitizers.length > 0 || finalParallel.length > 0)
       ) {
-        const outputEvaluations: GuardrailEvaluationResult[] = [];
-        let workingChunk = currentChunk;
-
-        // Phase 1: sequential final sanitizers
-        for (const svc of finalSanitizers) {
-          if (!svc.evaluateOutput) {
-            continue;
-          }
-
-          const timeoutMs = svc.config?.timeoutMs;
-          const evaluation = await callWithTimeout(
-            () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
-            timeoutMs,
-            svc.config?.failClosed,
-          );
-
-          if (!evaluation) {
-            continue;
-          }
-
-          outputEvaluations.push(evaluation);
-
-          // BLOCK terminates the stream
-          if (evaluation.action === GuardrailAction.BLOCK) {
-            yield* createGuardrailBlockedStream(context, evaluation, options);
-            return;
-          }
-
-          // SANITIZE: modify finalResponseText or textDelta
-          if (
-            evaluation.action === GuardrailAction.SANITIZE &&
-            evaluation.modifiedText !== undefined
-          ) {
-            if (workingChunk.type === AgentOSResponseChunkType.FINAL_RESPONSE) {
-              workingChunk = {
-                ...(workingChunk as AgentOSFinalResponseChunk),
-                finalResponseText: evaluation.modifiedText,
-              };
-            } else {
-              workingChunk = {
-                ...(workingChunk as any),
-                textDelta: evaluation.modifiedText,
-              };
-            }
-          }
+        const originalText = finalTextOf(currentChunk);
+        const verdict = await evaluateFinal(currentChunk);
+        if (verdict.outcome === 'block') {
+          held = [];
+          await notify({ streamId: options.streamId, action: GuardrailAction.BLOCK, guardrailId: guardrailIdOf(verdict.evaluation), reasonCode: verdict.evaluation.reasonCode, finalText: verdict.evaluation.replacementText ?? null, originalText });
+          yield* blockedOutput(context, verdict.evaluation, options);
+          return;
         }
+        // the deltas carry the text a sanitizer changed: only the final chunk's text stands
+        if (verdict.sanitized) held = [];
+        await notify({
+          streamId: options.streamId,
+          action: verdict.sanitized ? GuardrailAction.SANITIZE : verdict.worst,
+          finalText: finalTextOf(verdict.chunk),
+          originalText,
+        });
+        currentChunk = verdict.chunk;
+      }
 
-        // Phase 2: parallel final classifiers
-        if (finalParallel.length > 0) {
-          const tasks = finalParallel.map(({ svc, registrationIndex }) => {
-            if (!svc.evaluateOutput) {
-              return Promise.resolve({ evaluation: null, registrationIndex });
-            }
-
-            const timeoutMs = svc.config?.timeoutMs;
-            return callWithTimeout(
-              () => svc.evaluateOutput!({ context, chunk: workingChunk, ragSources: currentRagSources }),
-              timeoutMs,
-              svc.config?.failClosed,
-            ).then((evaluation) => ({ evaluation, registrationIndex }));
-          });
-
-          const results = await Promise.allSettled(tasks);
-
-          for (const result of results) {
-            if (result.status === 'rejected') {
-              console.warn(
-                '[AgentOS][Guardrails] Phase 2 final evaluateOutput rejected.',
-                result.reason,
-              );
-              continue;
-            }
-
-            const { evaluation: rawEvaluation, registrationIndex } = result.value;
-            if (!rawEvaluation) {
-              continue;
-            }
-
-            // Downgrade SANITIZE → FLAG in Phase 2
-            const evaluation = downgradePhase2Sanitize(rawEvaluation, registrationIndex);
-            outputEvaluations.push(evaluation);
-
-            // BLOCK terminates the stream
-            if (evaluation.action === GuardrailAction.BLOCK) {
-              yield* createGuardrailBlockedStream(context, evaluation, options);
-              return;
-            }
-          }
+      if (chunk.isFinal && held.length > 0) {
+        // held text is sent only beside the final response the guards judged; a turn that ended in an error drops it unjudged
+        if (currentChunk.type === AgentOSResponseChunkType.FINAL_RESPONSE) {
+          for (const h of held) yield h;
         }
-
-        // Attach output evaluation metadata
-        if (outputEvaluations.length > 0) {
-          workingChunk = withGuardrailMetadata(workingChunk, {
-            output: outputEvaluations.map(serializeEvaluation),
-          });
-        }
-
-        currentChunk = workingChunk;
+        held = [];
       }
 
       yield currentChunk;
     }
+    // A stream that ended without a final chunk leaves its held text unjudged; it is dropped, never sent.
   }
+}
+
+/** The id of the guard that produced an evaluation, when it had one. */
+function guardrailIdOf(evaluation: GuardrailEvaluationResult): string | undefined {
+  const id = evaluation.metadata?.guardrailId;
+  return typeof id === 'string' ? id : undefined;
+}
+
+/** The evaluation with its guard's id in `metadata.guardrailId`, when the guard has an id. */
+function stampGuardrailId(evaluation: GuardrailEvaluationResult, svc: IGuardrailService): GuardrailEvaluationResult {
+  if (!svc.id) return evaluation;
+  return { ...evaluation, metadata: { ...(evaluation.metadata ?? {}), guardrailId: svc.id } };
+}
+
+/**
+ * What the caller receives in place of a blocked reply: the guard's fixed reply as a final response that records the
+ * block, when the guard gave one; otherwise the error chunk.
+ */
+async function* blockedOutput(
+  context: GuardrailContext,
+  evaluation: GuardrailEvaluationResult,
+  options: GuardrailOutputOptions,
+): AsyncGenerator<AgentOSResponse, void, undefined> {
+  if (typeof evaluation.replacementText === 'string' && evaluation.replacementText.length > 0) {
+    const replacement: AgentOSFinalResponseChunk = {
+      type: AgentOSResponseChunkType.FINAL_RESPONSE,
+      streamId: options.streamId,
+      gmiInstanceId: 'guardrail',
+      personaId: options.personaId ?? context.personaId ?? 'unknown_persona',
+      isFinal: true,
+      timestamp: new Date().toISOString(),
+      finalResponseText: evaluation.replacementText,
+      finalResponseTextPlain: evaluation.replacementText,
+      metadata: { guardrail: { output: [serializeEvaluation(evaluation)] } },
+    };
+    yield replacement;
+    return;
+  }
+  yield* createGuardrailBlockedStream(context, evaluation, options);
 }

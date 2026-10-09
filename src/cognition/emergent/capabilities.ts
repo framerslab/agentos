@@ -12,11 +12,23 @@ import type { CapabilityName, SandboxAPI } from './types.js';
  * its names in this order whatever order a request wrote them in, so one grant
  * has one stored form.
  */
-export const CAPABILITY_NAMES: readonly CapabilityName[] = ['fetch', 'fs.read', 'crypto'];
+export const CAPABILITY_NAMES: readonly CapabilityName[] = ['fetch', 'fs.read', 'fs.write', 'fs.delete', 'crypto'];
+
+/** The capabilities that change something outside the process: an isolating executor and a ceiling only. */
+export const EFFECT_CAPABILITIES: readonly CapabilityName[] = ['fs.write', 'fs.delete'];
 
 /** Names accepted in a request that are not catalogue names. */
 export const CAPABILITY_ALIASES: Readonly<Record<string, CapabilityName>> = {
   'fs.readFile': 'fs.read',
+  'fs.writeFile': 'fs.write',
+  'fs.unlink': 'fs.delete',
+};
+
+/** The function each file capability injects into forged code. */
+const INJECTED: Readonly<Partial<Record<CapabilityName, SandboxAPI>>> = {
+  'fs.read': 'fs.readFile',
+  'fs.write': 'fs.writeFile',
+  'fs.delete': 'fs.unlink',
 };
 
 /** The catalogue name a request's name stands for, or `undefined` for a name outside the catalogue. */
@@ -54,5 +66,5 @@ export function normalizeAllowlist(names: readonly string[]): {
 
 /** The names `SandboxedToolForge` injects for a set of catalogue names. */
 export function toSandboxApis(capabilities: readonly CapabilityName[]): SandboxAPI[] {
-  return capabilities.map((name) => (name === 'fs.read' ? 'fs.readFile' : name));
+  return capabilities.map((name) => INJECTED[name] ?? (name as SandboxAPI));
 }

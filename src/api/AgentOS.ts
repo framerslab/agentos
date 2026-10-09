@@ -112,6 +112,16 @@ import {
   type AgentOSObservabilityConfig,
 } from '../safety/evaluation/observability/otel';
 import type { IGuardrailService, GuardrailContext } from '../safety/guardrails/IGuardrailService';
+import type { GuardrailOutputVerdict } from '../safety/guardrails/guardrailDispatcher';
+import { MessageRole } from '../core/conversation/ConversationMessage';
+import {
+  assertRequiredGuardrails,
+  checkRequiredGuardrails,
+  withRequiredPosture,
+  type ActiveGuardrail,
+  type RequiredGuardrailReport,
+  type RequiredGuardrailSpec,
+} from '../safety/guardrails/requiredGuardrails';
 import { SpendMeterUnavailableError, type ISpendMeter, type SpendDenyReason } from '../safety/runtime/SpendMeter';
 import type { EmergentConfig } from '../cognition/emergent/types.js';
 // SelfImprovementToolDeps reserved for emergent capability integration
@@ -556,6 +566,18 @@ export interface AgentOSConfig {
   subscriptionService?: ISubscriptionService;
   /** Optional guardrail service implementation used for policy enforcement. */
   guardrailService?: IGuardrailService;
+  /**
+   * Guards the deployment cannot run without, by id and stage. `initialize()` refuses to finish when one is missing
+   * or does not implement a named stage; `processRequest()` refuses a request (`SYS_GUARDRAIL_REQUIRED_MISSING`) when
+   * one has gone missing since. Each runs fail-closed with its deadline, and a guard required on `output` puts the
+   * output in hold mode.
+   */
+  requiredGuardrails?: RequiredGuardrailSpec[];
+  /**
+   * `hold`: no TEXT_DELTA reaches the caller before the output guards have judged the whole reply. Default `stream`;
+   * forced to `hold` when a required guard covers the output stage.
+   */
+  guardrailOutputMode?: 'stream' | 'hold';
   /** Optional map of secretId -> value for extension/tool credentials. */
   extensionSecrets?: Record<string, string>;
   /**
@@ -989,6 +1011,13 @@ export class AgentOS implements IAgentOS {
     const extensionLifecycleContext: ExtensionLifecycleContext = { logger: this.logger };
     await this.extensionManager.loadManifest(extensionLifecycleContext);
     await this.registerConfigGuardrailService(extensionLifecycleContext);
+    if (this.config.requiredGuardrails?.length) {
+      try {
+        assertRequiredGuardrails(this.listActiveGuardrails(), this.config.requiredGuardrails);
+      } catch (error) {
+        throw AgentOSServiceError.wrap(error, GMIErrorCode.CONFIGURATION_ERROR, 'A required guardrail is missing.', 'AgentOS.initialize');
+      }
+    }
 
     if (this.config.schemaOnDemandTools?.enabled === true) {
       const allowPackages =
@@ -1374,8 +1403,13 @@ export class AgentOS implements IAgentOS {
     }
   }
 
+  /** True when the overrides disable the guard given in `config.guardrailService`. */
+  private configGuardrailDisabled(): boolean {
+    return this.config.extensionOverrides?.guardrails?.['config-guardrail-service']?.enabled === false;
+  }
+
   private async registerConfigGuardrailService(context: ExtensionLifecycleContext): Promise<void> {
-    if (!this.config.guardrailService) {
+    if (!this.config.guardrailService || this.configGuardrailDisabled()) {
       return;
     }
     const registry = this.extensionManager.getRegistry<IGuardrailService>(EXTENSION_KIND_GUARDRAIL);
@@ -1391,20 +1425,86 @@ export class AgentOS implements IAgentOS {
     );
   }
 
-  private getActiveGuardrailServices(): IGuardrailService[] {
-    const services: IGuardrailService[] = [];
+  /** Every active guard with the id a required guard is named by: its own `id`, else its descriptor's. */
+  private listActiveGuardrails(): ActiveGuardrail[] {
+    const active: ActiveGuardrail[] = [];
 
     if (this.extensionManager) {
       const registry =
         this.extensionManager.getRegistry<IGuardrailService>(EXTENSION_KIND_GUARDRAIL);
-      services.push(...registry.listActive().map((descriptor) => descriptor.payload));
+      for (const descriptor of registry.listActive()) {
+        active.push({ id: descriptor.payload?.id ?? descriptor.id, service: descriptor.payload });
+      }
     }
 
-    if (this.guardrailService && !services.includes(this.guardrailService)) {
-      services.push(this.guardrailService);
+    if (this.guardrailService && !this.configGuardrailDisabled() && !active.some((a) => a.service === this.guardrailService)) {
+      active.push({ id: this.guardrailService.id ?? 'config-guardrail-service', service: this.guardrailService });
     }
 
-    return services;
+    return active;
+  }
+
+  /** The required guards' report for this moment, or null when the deployment requires none. */
+  private requiredGuardrailReport(): RequiredGuardrailReport | null {
+    const required = this.config.requiredGuardrails;
+    if (!required?.length) return null;
+    return checkRequiredGuardrails(this.listActiveGuardrails(), required);
+  }
+
+  private getActiveGuardrailServices(): IGuardrailService[] {
+    const required = this.config.requiredGuardrails ?? [];
+    return this.listActiveGuardrails().map(({ id, service }) => {
+      const spec = required.find((r) => r.id === id);
+      return spec ? withRequiredPosture(id, service, spec) : service;
+    });
+  }
+
+  /**
+   * With conversational persistence on, the orchestrator stores the model's reply before the output guards run. When
+   * a guard replaced or rewrote it, the stored message is made to hold what the person saw, so the history never
+   * carries a reply the guards refused. A reply blocked with no replacement is emptied, with the reason recorded.
+   */
+  private async recordGuardedReply(conversationKey: string, verdict: GuardrailOutputVerdict): Promise<void> {
+    const rewritten = verdict.action === GuardrailAction.SANITIZE || verdict.action === GuardrailAction.BLOCK;
+    // a verdict on a streamed delta judged no whole reply, and the orchestrator stores the reply only once the turn
+    // ends: that case is left to hold mode, where nothing streams before the final verdict
+    if (!rewritten || verdict.originalText === null || !this.config.orchestratorConfig?.enableConversationalPersistence || !this.conversationManager) return;
+    try {
+      const context = await this.conversationManager.getConversation(conversationKey);
+      if (!context) return;
+      // the message the verdict was about, by its text (the orchestrator stored the same string the guards judged):
+      // the newest such message is this turn's, and an earlier turn's reply is never touched
+      const stored = [...context.getAllMessages()].reverse().find((m) => m.role === MessageRole.ASSISTANT && m.metadata?.source === 'agentos_output' && m.content === verdict.originalText);
+      if (!stored) return;
+      context.replaceMessageContent(stored.id, verdict.finalText ?? '', {
+        modificationInfo: { strategy: 'filtered', reason: `guardrail:${verdict.reasonCode ?? verdict.action}` },
+      });
+      await this.conversationManager.saveConversation(context);
+    } catch (error) {
+      this.logger.warn('The guarded reply could not be written to the conversation', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /** Hold mode: set, or forced by a guard required on the output stage. */
+  private holdsOutputUntilFinal(): boolean {
+    return this.config.guardrailOutputMode === 'hold' || (this.config.requiredGuardrails ?? []).some((r) => r.stages.includes('output'));
+  }
+
+  /** The error chunk a request is refused with while a required guard is missing. */
+  private requiredGuardrailMissingChunk(report: RequiredGuardrailReport, streamId: string, personaId: string): AgentOSErrorChunk {
+    return {
+      type: AgentOSResponseChunkType.ERROR,
+      streamId,
+      gmiInstanceId: 'guardrail',
+      personaId,
+      isFinal: true,
+      timestamp: new Date().toISOString(),
+      code: GMIErrorCode.GUARDRAIL_REQUIRED_MISSING,
+      message: 'A guardrail this deployment requires is not active, so the request was not run.',
+      details: { missing: report.missing, missingStage: report.missingStage },
+    };
   }
 
   private async ensureUtilityAIService(): Promise<void> {
@@ -1652,6 +1752,13 @@ export class AgentOS implements IAgentOS {
       metadata: input.options?.customFlags,
     };
 
+    const requiredReport = this.requiredGuardrailReport();
+    if (requiredReport && !requiredReport.ok) {
+      this.logger.error('A required guardrail is missing; the request was not run', { missing: requiredReport.missing, missingStage: requiredReport.missingStage });
+      yield this.requiredGuardrailMissingChunk(requiredReport, input.sessionId || `agentos-guardrail-${Date.now()}`, effectivePersonaId);
+      return;
+    }
+
     const guardrailServices = this.getActiveGuardrailServices();
 
     const guardrailReadyInput: AgentOSInput = {
@@ -1794,6 +1901,8 @@ export class AgentOS implements IAgentOS {
           streamId: streamIdToListen!,
           personaId: effectivePersonaId,
           inputEvaluations: guardrailInputOutcome.evaluations ?? [],
+          holdUntilFinal: this.holdsOutputUntilFinal(),
+          onVerdict: (verdict) => this.recordGuardedReply(orchestratorInput.conversationId || orchestratorInput.sessionId, verdict),
         }
       );
       if (orchestratorInput.workflowRequest) {
@@ -1970,12 +2079,34 @@ export class AgentOS implements IAgentOS {
         `AgentOS.handleToolResults: Bridge client ${bridge.id} registered to stream ${streamId}.`
       );
 
+      // The stream's identity and the required guards, before the continuation starts: a missing guard means no
+      // model call, and a continuation that ends the turn removes the stream's context when it finishes.
+      const identity = this.agentOSOrchestrator.getStreamIdentity(streamId);
+      const continuationContext: GuardrailContext = {
+        userId: identity?.userId ?? 'unknown_user',
+        sessionId: identity?.sessionId ?? streamId,
+        personaId: identity?.personaId,
+        conversationId: identity?.conversationId,
+      };
+      const continuationReport = this.requiredGuardrailReport();
+      if (continuationReport && !continuationReport.ok) {
+        yield this.requiredGuardrailMissingChunk(continuationReport, streamId, identity?.personaId ?? 'unknown_persona');
+        return;
+      }
+
       // This call is `async Promise<void>`; it triggers the orchestrator to process the tool result(s)
       // and push new chunks to the StreamingManager for the given streamId.
       await this.agentOSOrchestrator.orchestrateToolResults(streamId, toolResults);
 
-      // Yield new chunks received by our bridge client on the same stream
-      for await (const chunk of bridge.consume()) {
+      // Yield new chunks received by our bridge client on the same stream, through the same output guards a turn has
+      const continuationKey = identity?.conversationId || identity?.sessionId || streamId;
+      const guardedContinuation = wrapOutputGuardrails(this.getActiveGuardrailServices(), continuationContext, bridge.consume(), {
+        streamId,
+        personaId: identity?.personaId,
+        holdUntilFinal: this.holdsOutputUntilFinal(),
+        onVerdict: (verdict) => this.recordGuardedReply(continuationKey, verdict),
+      });
+      for await (const chunk of guardedContinuation) {
         yield chunk;
         if (isActionableToolCallRequestChunk(chunk)) {
           break;
@@ -2192,6 +2323,12 @@ export class AgentOS implements IAgentOS {
     );
 
     try {
+      // the required guards, before the resumed turn starts: a missing guard means no model call
+      const resumeReport = this.requiredGuardrailReport();
+      if (resumeReport && !resumeReport.ok) {
+        yield this.requiredGuardrailMissingChunk(resumeReport, pendingRequest.streamId, pendingRequest.personaId);
+        return;
+      }
       streamIdToListen = await this.agentOSOrchestrator.orchestrateResumedToolResults(
         pendingRequest,
         toolResults,
@@ -2199,7 +2336,19 @@ export class AgentOS implements IAgentOS {
       );
       await this.streamingManager.registerClient(streamIdToListen, bridge);
 
-      for await (const chunk of bridge.consume()) {
+      const resumeContext: GuardrailContext = {
+        userId: pendingRequest.userId,
+        sessionId: pendingRequest.sessionId,
+        personaId: pendingRequest.personaId,
+        conversationId: pendingRequest.conversationId,
+      };
+      const guardedResume = wrapOutputGuardrails(this.getActiveGuardrailServices(), resumeContext, bridge.consume(), {
+        streamId: streamIdToListen,
+        personaId: pendingRequest.personaId,
+        holdUntilFinal: this.holdsOutputUntilFinal(),
+        onVerdict: (verdict) => this.recordGuardedReply(pendingRequest.conversationId, verdict),
+      });
+      for await (const chunk of guardedResume) {
         yield chunk;
         if (isActionableToolCallRequestChunk(chunk)) {
           shouldDeregisterBridge = true;

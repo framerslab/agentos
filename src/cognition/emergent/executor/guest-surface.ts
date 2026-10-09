@@ -68,6 +68,8 @@ const INTL_METHODS: Readonly<Record<IntlServiceName, readonly string[]>> = {
 };
 
 const DATE_LOCALE_METHODS = ['toLocaleString', 'toLocaleDateString', 'toLocaleTimeString'] as const;
+/** The case conversions of String that take a locale. */
+const STRING_CASE_METHODS = ['toLocaleLowerCase', 'toLocaleUpperCase'] as const;
 
 type IntlService = Record<string, (...args: unknown[]) => unknown>;
 type IntlConstructor = {
@@ -218,17 +220,25 @@ export function guestBindings(
         orUndefined(locales) as string | string[] | undefined,
         orUndefined(options) as Intl.CollatorOptions | undefined,
       ),
+    string_case: (method, text, locales) => {
+      const methodName = String(method);
+      if (!(STRING_CASE_METHODS as readonly string[]).includes(methodName)) {
+        throw new TypeError(`String.prototype.${methodName} is not available`);
+      }
+      const given = orUndefined(locales) as string | string[] | undefined;
+      return methodName === 'toLocaleLowerCase' ? String(text).toLocaleLowerCase(given) : String(text).toLocaleUpperCase(given);
+    },
   };
 
   const fetchFn = globals.fetch;
   if (typeof fetchFn === 'function') {
     const budget = { left: limits.bodyBytes, limit: limits.bodyBytes };
-    bindings.fetch = async (input, init) => {
+    bindings.fetch = async (input, init, bodyText, bodyKind) => {
       let options = init === null || init === undefined ? undefined : (init as Record<string, unknown>);
-      // A byte body crosses out of the guest as latin1; fetch is handed the bytes.
-      if (options && typeof options.bodyBytes === 'string') {
-        const { bodyBytes, ...rest } = options;
-        options = { ...rest, body: Buffer.from(bodyBytes as string, 'latin1') };
+      // The body crosses out of the guest as its own string, bytes as latin1;
+      // fetch is handed the text or the bytes.
+      if (typeof bodyText === 'string') {
+        options = { ...options, body: bodyKind === 'bytes' ? Buffer.from(bodyText, 'latin1') : bodyText };
       }
       const response = (await (fetchFn as (i: unknown, o?: unknown) => Promise<Response>)(
         input,
@@ -250,10 +260,29 @@ export function guestBindings(
     };
   }
 
-  const fs = globals.fs as { readFile?: (filePath: unknown) => Promise<string> } | undefined;
+  const fs = globals.fs as
+    | {
+        readFile?: (filePath: unknown) => Promise<string>;
+        writeFile?: (filePath: unknown, data: unknown) => Promise<void>;
+        unlink?: (filePath: unknown) => Promise<void>;
+      }
+    | undefined;
   if (fs && typeof fs.readFile === 'function') {
     const readFile = fs.readFile.bind(fs);
     bindings.fs_readFile = (filePath) => readFile(filePath);
+  }
+  if (fs && typeof fs.writeFile === 'function') {
+    const writeFile = fs.writeFile.bind(fs);
+    // The data crosses out of the guest as its own string, bytes as latin1.
+    bindings.fs_writeFile = async (filePath, data, kind) => {
+      await writeFile(filePath, kind === 'bytes' ? Buffer.from(String(data), 'latin1') : String(data));
+    };
+  }
+  if (fs && typeof fs.unlink === 'function') {
+    const unlink = fs.unlink.bind(fs);
+    bindings.fs_unlink = async (filePath) => {
+      await unlink(filePath);
+    };
   }
 
   const crypto = globals.crypto as CryptoLike | undefined;

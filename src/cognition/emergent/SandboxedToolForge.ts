@@ -117,8 +117,9 @@ const ALWAYS_BANNED: ReadonlyArray<[RegExp, string]> = [
   [/\bimport\s*\(/, 'dynamic import() is forbidden'],
   [/\bprocess\s*\./, 'process access is forbidden'],
   [/\bchild_process\b/, 'child_process access is forbidden'],
-  [/\bfs\s*\.\s*write/, 'fs.write* is forbidden'],
-  [/\bfs\s*\.\s*unlink/, 'fs.unlink is forbidden'],
+  // Every fs.write* and fs.unlink* name but the two a grant can supply.
+  [/\bfs\s*\.\s*write(?!File\b)/, 'fs.write* other than fs.writeFile is forbidden'],
+  [/\bfs\s*\.\s*unlink\w/, 'fs.unlink* other than fs.unlink is forbidden'],
   [/\bfs\s*\.\s*rm\b/, 'fs.rm is forbidden'],
   [/\bfs\s*\.\s*rmdir/, 'fs.rmdir is forbidden'],
   [/\bfs\s*\.\s*appendFile/, 'fs.appendFile is forbidden'],
@@ -277,15 +278,19 @@ export class SandboxedToolForge {
    *
    * Scans the source string for banned API usage patterns using regex
    * matching. The list is read in catalogue names first (`fs.readFile`
-   * stands for `fs.read`), so a list naming either one allows `fs.` access.
+   * stands for `fs.read`, `fs.writeFile` for `fs.write`, `fs.unlink` for
+   * `fs.delete`).
    *
    * Checked patterns (always banned):
    * - `eval()`, `new Function()`, `require()`, `import`, `process.*`
-   * - `child_process`, `fs.write*`, `fs.unlink`, `fs.rm`, `fs.rmdir`
+   * - `child_process`; every `fs.write*` name but `fs.writeFile`, every
+   *   `fs.unlink*` name but `fs.unlink`; `fs.rm`, `fs.rmdir`,
+   *   `fs.appendFile`, `fs.truncate`
    *
    * Conditionally banned (when the list does not grant them):
    * - `fetch(` — without `fetch`
-   * - `fs.*` — without `fs.read` (or its alias `fs.readFile`)
+   * - `fs.writeFile` — without `fs.write`; `fs.unlink` — without `fs.delete`
+   * - any other `fs.` reference — without `fs.read` (or its alias `fs.readFile`)
    * - `crypto.*` — without `crypto`
    *
    * @param code - The raw source code string to validate.
@@ -317,9 +322,18 @@ export class SandboxedToolForge {
       violations.push('fetch() is not in the allowlist');
     }
 
-    // Without fs.read, ban any fs reference (writes, unlinks and removals
-    // were caught above).
-    if (!granted.includes('fs.read') && /\bfs\s*\./.test(code)) {
+    // The two functions a grant can supply, each with its own capability.
+    if (!granted.includes('fs.write') && /\bfs\s*\.\s*writeFile\b/.test(code)) {
+      violations.push('fs.writeFile is not in the allowlist');
+    }
+    if (!granted.includes('fs.delete') && /\bfs\s*\.\s*unlink\b/.test(code)) {
+      violations.push('fs.unlink is not in the allowlist');
+    }
+
+    // Without fs.read, ban any other fs reference (the banned forms were
+    // caught above). The lookahead holds the spaces too, so `fs . writeFile`
+    // cannot pass as another reference by backtracking.
+    if (!granted.includes('fs.read') && /\bfs\s*\.(?!\s*(?:writeFile|unlink)\b)/.test(code)) {
       // Only add if we haven't already flagged a more specific fs violation.
       const hasFsViolation = violations.some((v) => v.startsWith('fs.'));
       if (!hasFsViolation) {

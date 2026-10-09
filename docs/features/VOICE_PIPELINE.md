@@ -171,6 +171,40 @@ The voice server communicates via WebSocket:
 // Binary messages: encoded audio (mp3/opus) in negotiated format
 ```
 
+## LiveKit Rooms
+
+### Transcripts in the room
+
+`LiveKitTranscriptionOutput` (in `@framers/agentos/io/hearing/livekit`) writes a speech-to-text session's transcripts into the room as LiveKit's own transcription output does, so a page's standard `lk.transcription` handler shows them: each interim and each final is a text stream with the line's whole text and the attributes `lk.segment_id` (the transcript's `itemId`), `lk.transcription_final` (`'true'` on the final) and `lk.transcribed_track_id`. It keeps the finals, and `replayAfter(itemId, identity)` sends that participant the finals after the line the page names, a line taken back among them as its empty final, so a page that reconnects is whole again. The page names the line its own ledger's `resumeAfterId()` gives, the last final before its first line still being heard, since completion events from different turns can arrive out of order; a final it already holds comes again and is dropped.
+
+```typescript
+import { LiveKitTranscriptionOutput } from '@framers/agentos/io/hearing/livekit';
+
+const output = new LiveKitTranscriptionOutput({
+  room, // a connected @livekit/rtc-node Room
+  trackSid: () => heardTrack?.sid, // the track the session hears
+});
+session.on('transcript', (event) => {
+  output.write(event).catch((error) => console.warn('transcript not sent', error));
+});
+```
+
+The output takes the room through a structural type, so AgentOS needs no LiveKit package of its own. Writes go out in the order they were asked for. A send that fails rejects its write and leaves the line in the output's ledger, so writing the same transcript again sends nothing; `replayAfter` sends a final again to a participant. A transcript from a provider that does not key its results carries no `itemId`: give the line's id as `write(event, { itemId })`.
+
+On the page, `TranscriptLedger` (in `@framers/agentos/io/voice-pipeline/browser`) folds the streams into lines:
+
+```typescript
+import { LIVEKIT_TRANSCRIPTION_TOPIC, TranscriptLedger, transcriptEventFromLiveKit } from '@framers/agentos/io/voice-pipeline/browser';
+
+const ledger = new TranscriptLedger();
+room.registerTextStreamHandler(LIVEKIT_TRANSCRIPTION_TOPIC, async (reader) => {
+  const event = transcriptEventFromLiveKit(await reader.readAll(), reader.info.attributes);
+  if (event && ledger.apply(event)) render(ledger.items());
+});
+```
+
+A line the provider could not transcribe arrives as an empty final with `agentos.transcription_failed` holding a short reason; an empty final without it takes back the text the line showed, and the ledger hides the line.
+
 ## Error Recovery
 
 | Failure | Recovery |
@@ -459,6 +493,10 @@ interface TranscriptEvent {
     label: 'positive' | 'negative' | 'neutral';
     confidence: number;
   };
+  itemId?: string;   // the provider's key for the utterance (OpenAI Realtime's item_id)
+  startMs?: number;  // the utterance's start on the session's audio clock
+  endMs?: number;    // the utterance's end on the session's audio clock
+  language?: string; // the detected language, or the session's configured one
 }
 ```
 

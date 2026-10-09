@@ -1,6 +1,6 @@
 {
   "name": "@framers/agentos",
-  "version": "0.13.1",
+  "version": "0.13.4",
   "description": "AgentOS: open-source TypeScript framework for autonomous AI agents. Unified graph orchestration, cognitive memory, runtime tool forging, multi-tier guardrails, voice pipeline, and 11 LLM providers.",
   "homepage": "https://agentos.sh",
   "repository": {
@@ -280,6 +280,11 @@
       "default": "./dist/io/hearing/index.js",
       "types": "./dist/io/hearing/index.d.ts"
     },
+    "./io/hearing/livekit": {
+      "import": "./dist/io/hearing/livekit.js",
+      "default": "./dist/io/hearing/livekit.js",
+      "types": "./dist/io/hearing/livekit.d.ts"
+    },
     "./io/vision": {
       "import": "./dist/io/vision/index.js",
       "default": "./dist/io/vision/index.js",
@@ -309,6 +314,11 @@
       "import": "./dist/io/voice-pipeline/index.js",
       "default": "./dist/io/voice-pipeline/index.js",
       "types": "./dist/io/voice-pipeline/index.d.ts"
+    },
+    "./io/voice-pipeline/browser": {
+      "import": "./dist/io/voice-pipeline/browser.js",
+      "default": "./dist/io/voice-pipeline/browser.js",
+      "types": "./dist/io/voice-pipeline/browser.d.ts"
     },
     "./io/voice-pipeline/providers": {
       "import": "./dist/io/voice-pipeline/providers/index.js",

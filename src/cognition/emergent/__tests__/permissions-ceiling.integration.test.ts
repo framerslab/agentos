@@ -229,8 +229,8 @@ describe('a ceiling for code-forged tools', () => {
     // Without a forge of its own the engine builds one from the ceiling.
     expect(build(ceiling)).toBeInstanceOf(EmergentCapabilityEngine);
 
-    expect(() => build(withCeiling({ 'fs.write': { roots: ['/tmp'] } } as never))).toThrow(
-      'unknown_capability: capabilities.fs.write',
+    expect(() => build(withCeiling({ 'fs.wipe': { roots: ['/tmp'] } } as never))).toThrow(
+      'unknown_capability: capabilities.fs.wipe',
     );
     expect(() => build(withCeiling({ crypto: {} }, {}))).toThrow('audit_needs_storage: audit.store');
   });
@@ -290,7 +290,7 @@ describe('the ceiling at load', () => {
     const host = await makeForgeHost({ db, config: { capabilities: { 'fs.read': { roots: [root] } } } });
     seedReader(db);
     // A later release wrote a capability this one does not know.
-    const foreign = '{"kind":"sandbox","capabilities":["fs.read","fs.write"]}';
+    const foreign = '{"kind":"sandbox","capabilities":["fs.read","process.spawn"]}';
     seedStateRow(db, { toolId: 'reader-1', state: 'active', requestJson: foreign });
 
     expect((await host.engine.loadPersistedTools({ tiers: ['shared'] })).outcomes).toEqual([

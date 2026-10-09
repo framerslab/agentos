@@ -183,6 +183,16 @@ export {
   type DedupeResult,
 } from './TranscriptDedupe.js';
 export {
+  LIVEKIT_TRANSCRIPTION_ATTRIBUTES,
+  LIVEKIT_TRANSCRIPTION_TOPIC,
+  TRANSCRIPTION_FAILED_ATTRIBUTE,
+  TranscriptLedger,
+  transcriptEventFromLiveKit,
+  type LedgerEvent,
+  type LedgerItem,
+  type TranscriptLedgerOptions,
+} from './transcriptLedger.js';
+export {
   VoiceMetricsReporter,
   type VoiceMetricEvent,
   type VoiceMetricListener,
