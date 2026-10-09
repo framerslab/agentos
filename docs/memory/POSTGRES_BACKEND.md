@@ -197,6 +197,8 @@ await store.updateMetadata('chunks', { sourceId: 'doc_7' }, { aclGroups: ['org:o
 
 `delete()` deletes by `ids` when they are given; otherwise by `options.filter`, where a filter that yields no condition deletes nothing; otherwise every row when `deleteAll` is set. `updateMetadata()` merges the patch into the metadata of every document the filter matches: a key given as `null` is removed, the others replace the stored values, and the rest stays. It throws when the filter holds no condition, so that no call changes every document.
 
+A filter compiles each comparison of a key's value to an expression on `metadata_json->>'key'` or `metadata_json->'key'`, which the GIN index on `metadata_json` does not serve ([PostgreSQL: jsonb indexing](https://www.postgresql.org/docs/current/datatype-json.html#JSON-INDEXING)), so without an index of your own on that expression `delete()` and `updateMetadata()` by such a filter read every row of the collection, and a large collection changed this way is better split into narrower ones.
+
 ### Lexical search, and the words of a hybrid search
 
 ```typescript
