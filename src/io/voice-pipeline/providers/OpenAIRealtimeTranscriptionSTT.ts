@@ -51,6 +51,7 @@ import type {
   StreamingSTTSession,
   StreamingSTTConfig,
   AudioFrame,
+  TranscriptEvent,
 } from '../types.js';
 import {
   defaultCapabilities,
@@ -446,6 +447,14 @@ function describeServerError(event: ServerEvent): string {
   const code = typeof detail.code === 'string' ? ` (${detail.code})` : '';
   const message = typeof detail.message === 'string' ? detail.message : 'no message';
   return `${kind}${code}: ${message}`;
+}
+
+/** The first detected language code of a `completed` event, when the model reports one. */
+function detectedLanguage(event: ServerEvent): string | undefined {
+  const languages = event.languages;
+  if (!Array.isArray(languages) || languages.length === 0) return undefined;
+  const first = languages[0] as { code?: unknown } | null;
+  return first && typeof first.code === 'string' ? first.code : undefined;
 }
 
 function toError(err: unknown): Error {
@@ -908,7 +917,32 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
 
   private handleServerEvent(connection: TranscriptionConnection, event: ServerEvent): void {
     if (this.closed || connection.state === 'closed') return;
-    if (event.type === 'error') this.onServerError(connection, event);
+    switch (event.type) {
+      case 'input_audio_buffer.speech_started':
+        this.onSpeechStarted(connection, event);
+        break;
+      case 'input_audio_buffer.speech_stopped':
+        this.onSpeechStopped(connection, event);
+        break;
+      case 'input_audio_buffer.committed':
+        this.onCommitted(connection, event);
+        break;
+      case 'conversation.item.input_audio_transcription.delta':
+        this.onDelta(connection, event);
+        break;
+      case 'conversation.item.input_audio_transcription.completed':
+        this.onCompleted(connection, event);
+        break;
+      case 'conversation.item.input_audio_transcription.failed':
+        this.onFailed(connection, event);
+        break;
+      case 'error':
+        this.onServerError(connection, event);
+        break;
+      default:
+        // session.updated, conversation.item.* and the like carry nothing this session maps.
+        break;
+    }
   }
 
   /** A server `error`: the session stays open (most Realtime errors are recoverable). */
@@ -922,6 +956,223 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
       connection.settleIdle();
     }
     this.emitWarning(new Error(`openai realtime transcription server error: ${describeServerError(event)}`));
+  }
+
+  /** The item an event names, created on first sight. */
+  private item(connection: TranscriptionConnection, itemId: string): ItemState {
+    let item = connection.items.get(itemId);
+    if (!item) {
+      item = {
+        itemId,
+        text: '',
+        interimSent: false,
+        finished: false,
+        // Decided again on the audio clock once the item's start is known.
+        overlapping: this.heardByOlder(connection, undefined),
+        dropped: false,
+      };
+      connection.items.set(itemId, item);
+    }
+    return item;
+  }
+
+  /**
+   * Whether a connection older than this one (a lower index) received the
+   * audio where an item of this one begins, so both may transcribe it.
+   * Decided on the session's audio clock, not by which connections are open
+   * when the item's first event arrives: the onset (the start plus the prefix
+   * padding) lies before the older connection's audio end, for those still
+   * open or draining and for the one retired last. With no start yet, an
+   * older connection still in the session counts. Only server turn detection
+   * overlaps connections; client commits hand over at a turn boundary.
+   */
+  private heardByOlder(connection: TranscriptionConnection, startMs: number | undefined): boolean {
+    if (this.settings.clientCommits) return false;
+    if (startMs === undefined) return this.connections.some((other) => other.index < connection.index);
+    const onsetMs = startMs + this.settings.prefixPaddingMs;
+    return this.olderConnections(connection).some((older) => onsetMs < older.feedEndMs);
+  }
+
+  /**
+   * The connections older than this one (a lower index): those still open or
+   * draining, with `Infinity` as the audio end of one still receiving audio,
+   * and the one retired last.
+   */
+  private olderConnections(connection: TranscriptionConnection): ConnectionAudio[] {
+    const olders: ConnectionAudio[] = [];
+    if (this.retired && this.retired.index < connection.index) olders.push(this.retired);
+    for (const other of this.connections) {
+      if (other.index < connection.index) {
+        olders.push({
+          index: other.index,
+          feedEndMs: other.feedEndMs ?? Infinity,
+          intervals: [...other.intervals.values()],
+        });
+      }
+    }
+    return olders;
+  }
+
+  /** Session audio offset of a connection-relative offset from the server. */
+  private toSessionMs(connection: TranscriptionConnection, offsetMs: number | undefined): number | undefined {
+    if (offsetMs === undefined) return undefined;
+    return (connection.baseMs ?? this.sessionAudioMs) + offsetMs;
+  }
+
+  private onSpeechStarted(connection: TranscriptionConnection, event: ServerEvent): void {
+    const itemId = stringField(event, 'item_id');
+    if (itemId) {
+      const item = this.item(connection, itemId);
+      connection.vadItemId = itemId;
+      // Speech heard after a connection began draining belongs to the next connection.
+      if (connection.state === 'draining') item.dropped = true;
+      item.startMs = this.toSessionMs(connection, numberField(event, 'audio_start_ms'));
+      item.overlapping = this.heardByOlder(connection, item.startMs);
+      if (!item.dropped) {
+        connection.pending.add(itemId);
+        if (item.startMs !== undefined) connection.intervals.set(itemId, { startMs: item.startMs });
+      }
+    }
+    if (connection.state !== 'open') return;
+    connection.speaking = true;
+    if (this.lead() === connection) this.setSpeaking(true);
+  }
+
+  private onSpeechStopped(connection: TranscriptionConnection, event: ServerEvent): void {
+    const itemId = stringField(event, 'item_id');
+    // The speech has stopped: a later commit of this side moves no utterance.
+    connection.vadItemId = undefined;
+    if (itemId) {
+      const item = this.item(connection, itemId);
+      item.endMs = this.toSessionMs(connection, numberField(event, 'audio_end_ms'));
+      const interval = connection.intervals.get(itemId);
+      if (interval) interval.endMs = item.endMs;
+    }
+    if (connection.state !== 'open') return;
+    connection.speaking = false;
+    if (this.lead() === connection) this.setSpeaking(false);
+  }
+
+  private onCommitted(connection: TranscriptionConnection, event: ServerEvent): void {
+    const itemId = stringField(event, 'item_id');
+    const known = itemId ? connection.items.get(itemId) : undefined;
+    // Server turn detection commits on its own after speech_stopped; any other
+    // `committed` answers this side's oldest commit.
+    const ours = known?.endMs === undefined ? connection.commits.shift() : undefined;
+    if (itemId) {
+      const item = this.item(connection, itemId);
+      if (ours) {
+        // A commit during speech can name another item than speech_started did: the utterance moves here.
+        this.moveSpeechItem(connection, item);
+        if (item.startMs === undefined) {
+          item.startMs = ours.startMs;
+          item.overlapping = this.heardByOlder(connection, item.startMs);
+        }
+        if (item.endMs === undefined) item.endMs = ours.endMs;
+        if (connection.speaking) {
+          connection.speaking = false;
+          if (this.lead() === connection) this.setSpeaking(false);
+        }
+      }
+      if (!item.dropped && !item.finished) {
+        connection.pending.add(itemId);
+        if (item.startMs !== undefined) {
+          connection.intervals.set(itemId, { startMs: item.startMs, endMs: item.endMs });
+        }
+      }
+    }
+    connection.settleIdle();
+  }
+
+  /**
+   * A commit of this side during speech can give the utterance another id
+   * than its `speech_started` named ("unless the client manually commits the
+   * audio buffer during VAD activation"). The utterance moves to the
+   * committed item, which keeps the start the speech began at; the item
+   * `speech_started` named is finished and dropped, so no flush or drain
+   * waits for its final and its open interval leaves the duplicate check.
+   */
+  private moveSpeechItem(connection: TranscriptionConnection, committed: ItemState): void {
+    const startedId = connection.vadItemId;
+    connection.vadItemId = undefined;
+    if (startedId === undefined || startedId === committed.itemId) return;
+    const started = connection.items.get(startedId);
+    if (!started || started.finished) return;
+    if (committed.startMs === undefined && started.startMs !== undefined) {
+      committed.startMs = started.startMs;
+      committed.overlapping = started.overlapping;
+    }
+    started.finished = true;
+    started.dropped = true;
+    connection.pending.delete(startedId);
+    connection.intervals.delete(startedId);
+  }
+
+  private onDelta(connection: TranscriptionConnection, event: ServerEvent): void {
+    const itemId = stringField(event, 'item_id');
+    const delta = stringField(event, 'delta');
+    if (!itemId || !delta) return;
+    const item = this.item(connection, itemId);
+    if (item.dropped || item.finished) return;
+    item.text += delta;
+    if (item.overlapping || !this.settings.interimResults) return;
+    item.interimSent = true;
+    this.emit('transcript', this.transcriptEvent(item, item.text, false));
+  }
+
+  private onCompleted(connection: TranscriptionConnection, event: ServerEvent): void {
+    const itemId = stringField(event, 'item_id');
+    if (!itemId) return;
+    const item = this.item(connection, itemId);
+    // A recognised utterance resets the consecutive failure count.
+    this.failures = 0;
+    this.finishItem(connection, item);
+    if (item.dropped) return;
+    const transcript = stringField(event, 'transcript') ?? '';
+    if (!transcript && !item.interimSent) return;
+    this.emit('transcript', this.transcriptEvent(item, transcript, true, detectedLanguage(event)));
+  }
+
+  private onFailed(connection: TranscriptionConnection, event: ServerEvent): void {
+    const itemId = stringField(event, 'item_id');
+    if (!itemId) return;
+    const item = this.item(connection, itemId);
+    this.finishItem(connection, item);
+    connection.intervals.delete(itemId);
+    if (item.dropped) return;
+    this.emitWarning(
+      new Error(`openai realtime transcription failed for item ${itemId}: ${describeServerError(event)}`)
+    );
+    if (item.interimSent) this.emit('transcript', this.transcriptEvent(item, '', true));
+  }
+
+  private finishItem(connection: TranscriptionConnection, item: ItemState): void {
+    item.finished = true;
+    connection.pending.delete(item.itemId);
+    connection.settleIdle();
+  }
+
+  private transcriptEvent(
+    item: ItemState,
+    text: string,
+    isFinal: boolean,
+    detected?: string
+  ): TranscriptEvent {
+    const event: TranscriptEvent = { text, confidence: 1, words: [], isFinal, itemId: item.itemId };
+    if (item.startMs !== undefined) event.startMs = Math.round(item.startMs);
+    if (item.endMs !== undefined) event.endMs = Math.round(item.endMs);
+    if (isFinal && item.startMs !== undefined && item.endMs !== undefined) {
+      event.durationMs = Math.max(0, Math.round(item.endMs - item.startMs));
+    }
+    const language = detected ?? this.settings.language;
+    if (language) event.language = language;
+    return event;
+  }
+
+  private setSpeaking(speaking: boolean): void {
+    if (this.speaking === speaking) return;
+    this.speaking = speaking;
+    this.emit(speaking ? 'speech_start' : 'speech_end');
   }
 
   // -------------------------------------------------------------------------
