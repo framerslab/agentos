@@ -191,6 +191,18 @@ describe('PostgresVectorStore', () => {
       const ftsIdx = queryCalls.find(c => c.sql.includes('my_docs_fts'));
       expect(ftsIdx).toBeDefined();
 
+      // Each index is made after a read of the indexes the table already has.
+      const steps = queryCalls
+        .map(c => (c.sql.includes('FROM pg_indexes') ? 'read' : c.sql.startsWith('CREATE INDEX') ? 'index' : ''))
+        .filter(step => step !== '');
+      expect(steps).toEqual(['read', 'index', 'read', 'index', 'read', 'index']);
+      expect(queryCalls.filter(c => c.sql.includes('FROM pg_indexes')).map(c => c.params)).toEqual([['my_docs'], ['my_docs'], ['my_docs']]);
+      expect(queryCalls.filter(c => c.sql.startsWith('CREATE INDEX')).map(c => c.sql)).toEqual([
+        'CREATE INDEX IF NOT EXISTS "my_docs_hnsw" ON "my_docs" USING hnsw (embedding vector_cosine_ops)',
+        'CREATE INDEX IF NOT EXISTS "my_docs_metadata" ON "my_docs" USING gin (metadata_json)',
+        'CREATE INDEX IF NOT EXISTS "my_docs_fts" ON "my_docs" USING gin (tsv)',
+      ]);
+
       // _collections registration.
       const reg = queryCalls.find(c => c.sql.includes('INSERT INTO') && c.sql.includes('_collections'));
       expect(reg).toBeDefined();
@@ -210,6 +222,8 @@ describe('PostgresVectorStore', () => {
 
       expect(queryCalls.some(c => c.sql.includes('SELECT tsv FROM'))).toBe(true);
       expect(queryCalls.filter(c => /ALTER\s+TABLE/i.test(c.sql))).toEqual([]);
+      // The column is there, and its index is made when the table has none.
+      expect(queryCalls.some(c => c.sql === 'CREATE INDEX IF NOT EXISTS "my_docs_fts" ON "my_docs" USING gin (tsv)')).toBe(true);
       const reg = queryCalls.find(c => c.sql.includes('INSERT INTO') && c.sql.includes('_collections'));
       expect(reg).toBeDefined();
     });
@@ -362,7 +376,7 @@ describe('PostgresVectorStore', () => {
       expect(queryCall).toBeDefined();
       expect(queryCall!.sql).toContain("metadata_json->>'topic'");
       expect(queryCall!.sql).toContain('::numeric >');
-      expect(queryCall!.sql).toContain('IN (');
+      expect(queryCall!.sql).toContain("(CASE WHEN jsonb_typeof(metadata_json->'status') = 'array' THEN metadata_json->'status' ?| $4::text[] ELSE metadata_json->>'status' = ANY($4::text[]) END)");
     });
   });
 
@@ -547,19 +561,18 @@ describe('PostgresVectorStore', () => {
       const lexicalEnd = hybridCall!.sql.indexOf('fused AS');
       const denseSql = hybridCall!.sql.slice(0, denseEnd);
       const lexicalSql = hybridCall!.sql.slice(denseEnd, lexicalEnd);
-      const filterSql = "metadata_json->>'visibility' = $3 AND metadata_json->>'product' IN ($4, $5)";
+      const filterSql = "metadata_json->>'visibility' = $3 AND (CASE WHEN jsonb_typeof(metadata_json->'product') = 'array' THEN metadata_json->'product' ?| $4::text[] ELSE metadata_json->>'product' = ANY($4::text[]) END)";
 
       expect(denseSql).toContain(`WHERE ${filterSql}`);
       expect(lexicalSql).toContain(`AND ${filterSql}`);
-      expect(hybridCall!.sql.match(/LIMIT \$6/g)).toHaveLength(2);
-      expect(hybridCall!.sql).toContain('$7 + COALESCE(d.rank');
-      expect(hybridCall!.sql).toContain('LIMIT $8');
+      expect(hybridCall!.sql.match(/LIMIT \$5/g)).toHaveLength(2);
+      expect(hybridCall!.sql).toContain('$6 + COALESCE(d.rank');
+      expect(hybridCall!.sql).toContain('LIMIT $7');
       expect(hybridCall!.params).toEqual([
         '[0.1,0.2,0.3,0.4]',
         'public docs',
         'public',
-        'agentos',
-        'frame',
+        ['agentos', 'frame'],
         15,
         60,
         5,
@@ -674,7 +687,7 @@ describe('PostgresVectorStore', () => {
       expect(q!.params).toContain(0.8);
     });
 
-    it('translates $in to SQL IN clause', async () => {
+    it('translates $in to a match on the value, or on an array that shares one', async () => {
       store = new PostgresVectorStore(makeConfig());
       await store.initialize();
       resetMocks();
@@ -686,12 +699,11 @@ describe('PostgresVectorStore', () => {
         filter: { category: { $in: ['a', 'b', 'c'] } },
       });
 
-      const q = queryCalls.find(c => c.sql.includes('IN ('));
+      const q = queryCalls.find(c => c.sql.includes('= ANY('));
       expect(q).toBeDefined();
-      // $in values are stringified.
-      expect(q!.params).toContain('a');
-      expect(q!.params).toContain('b');
-      expect(q!.params).toContain('c');
+      expect(q!.sql).toContain("(CASE WHEN jsonb_typeof(metadata_json->'category') = 'array' THEN metadata_json->'category' ?| $2::text[] ELSE metadata_json->>'category' = ANY($2::text[]) END)");
+      // $in values are stringified and sent as one array parameter.
+      expect(q!.params).toContainEqual(['a', 'b', 'c']);
     });
   });
 
@@ -726,6 +738,12 @@ describe('PostgresVectorStore', () => {
       expect(queryCalls).toHaveLength(1);
       expect(queryCalls[0].sql).not.toContain('_collections');
       expect(queryCalls[0].sql).toContain('<=>');
+    });
+
+    it("refuses to drop a collection whose tables are the caller's", async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false });
+      await expect(store.dropCollection('chunks')).rejects.toThrow('manageSchema: false');
+      expect(queryCalls).toEqual([]);
     });
 
     it('uses a pool the caller owns and never ends it', async () => {
