@@ -1,39 +1,36 @@
 ---
-description: "Seven operational safety primitives that wrap every AgentOS LLM call: killswitch, cost guard, circuit breaker, provider health registry, stuck detection, action audit log. Prevent runaway loops, money fires, and zombie agents — independently or as one guard chain via wrapLLMCallback()."
-keywords: [agent safety, llm circuit breaker, provider health, llm fallback router, status-aware breaker, cost guard, stuck detector, agent killswitch, runaway agent, ai cost cap, agentos safety, operational guardrails]
+description: "Operational safety primitives in AgentOS: circuit breaker, provider health registry, action deduplicator, stuck detector, cost guard, spend meter and tool execution guard. The provider health registry and the spend meter run inside the runtime; a host composes the others around its own calls."
+keywords: [agent safety, llm circuit breaker, provider health, llm fallback router, status-aware breaker, cost guard, spend meter, stuck detector, runaway agent, ai cost cap, agentos safety, operational guardrails]
 ---
 
 # Safety Primitives
 
-Autonomous agents with LLM access can incur unbounded cost when a vendor API flakes, a retry policy misfires, or an output guardrail silently rejects every attempt. AgentOS ships six small, independent primitives that wrap every LLM and tool call to bound the failure modes that cause runaway spend, stuck loops, and zombie agents.
+Autonomous agents with LLM access can incur unbounded cost when a vendor API flakes, a retry policy misfires, or an output guardrail silently rejects every attempt. AgentOS ships small, independent primitives that bound the failure modes behind runaway spend, stuck loops and hung tools. Two run inside the runtime: `generateText()` and `streamText()` consult the [provider health registry](#llmproviderhealthregistry), and `processRequest()` reserves against a configured [spend meter](#spend-meter). The others are classes a host calls around its own model and tool calls.
 
-Each primitive is opt-in, has a safe default, and works standalone or composed. Composing all six via `wrapLLMCallback()` produces one guard chain that converts silent overspend into a paused agent with an audit-log entry naming the trip condition.
+Each has defaults and works alone or composed with the others ([How they work together](#how-they-work-together)).
 
 These are operational guards — they don't read message content. For content-level safety (toxicity, PII, prompt injection, folder-level filesystem permissions) see [Guardrails](./GUARDRAILS_USAGE.md).
 
-## The chain
+## A host's guard chain
 
 ```mermaid
 flowchart TB
-    Inv["Incoming LLM / Tool call"]:::input
-    SE["1 · SafetyEngine · <tt>canAct()</tt><br/><i>Killswitches (per-agent + emergency network halt)<br/>Rate limits: post · comment · vote · dm · browse · proposal</i>"]:::warning
-    CG1["2 · CostGuard · <tt>canAfford()</tt><br/><i>Session cap ($1) · daily cap ($5) · per-op cap ($0.50)</i>"]:::warning
-    CB["3 · CircuitBreaker · <tt>execute()</tt><br/><i>closed → open → half-open · opens after N failures · cools down · probes</i>"]:::warning
-    Exec["Actual LLM call or tool invocation"]:::process
-    CG2["4 · CostGuard · <tt>recordCost()</tt><br/><i>Records actual token cost from usage metadata</i>"]:::data
-    SD["5 · StuckDetector · <tt>recordOutput()</tt><br/><i>Detects repeated_output · repeated_error · oscillating · fast djb2 hashing</i>"]:::warning
-    AL["6 · ActionAuditLog · <tt>log()</tt><br/><i>Ring buffer + optional persistence · every action gets a trail entry</i>"]:::output
+    Inv["A host's LLM or tool call"]:::input
+    CG1["1 · CostGuard · <tt>canAfford()</tt><br/><i>Session cap ($1) · daily cap ($5) · per-op cap ($0.50)</i>"]:::warning
+    CB["2 · CircuitBreaker · <tt>execute()</tt><br/><i>closed → open → half-open · opens after N failures · cools down · probes</i>"]:::warning
+    Exec["The call itself"]:::process
+    CG2["3 · CostGuard · <tt>recordCost()</tt><br/><i>Records the cost the host computed from usage</i>"]:::data
+    SD["4 · StuckDetector · <tt>recordOutput()</tt><br/><i>repeated_output · repeated_error · oscillating · djb2 hashing</i>"]:::warning
 
-    Inv --> SE --> CG1 --> CB --> Exec --> CG2 --> SD --> AL
+    Inv --> CG1 --> CB --> Exec --> CG2 --> SD
 
     classDef input fill:#cffafe,stroke:#0891b2,color:#0e7490
     classDef process fill:#eef2ff,stroke:#6366f1,color:#3730a3
     classDef warning fill:#fee2e2,stroke:#f43f5e,color:#9f1239
     classDef data fill:#fef3c7,stroke:#f59e0b,color:#92400e
-    classDef output fill:#dcfce7,stroke:#10b981,color:#047857
 ```
 
-All six layers are independent. Use any subset. Wire them all into one chain via `wrapLLMCallback()`.
+Each layer is independent; use any subset.
 
 ## CircuitBreaker
 
@@ -111,14 +108,16 @@ The registry reads HTTP status from three sources, in order:
 
 If none of those resolves, the error is treated as the conservative transient class (5-failure threshold, 60 s cooldown). Better to under-protect on a one-off network blip than lock out a healthy provider.
 
+Errors that judge the request rather than the provider do not count: a 4xx other than 401, 402, 403, 408 and 429 (a malformed body, an unknown model), a content-policy decline (`code` or `type` of `content_filter`, `content_policy_violation` or `safety_violations`), and a request larger than the model's context window.
+
 ### Config
 
-The policy table above is currently hardcoded. Make a per-class config object exposable if a host needs to override (e.g. a stricter 429 threshold for a low-quota account).
+The policy table is fixed in code; the registry takes no options.
 
 ### Usage
 
 ```typescript
-import { globalLLMProviderHealth, LLMProviderHealthRegistry } from '@framers/agentos';
+import { globalLLMProviderHealth, LLMProviderHealthRegistry } from '@framers/agentos/core/safety';
 
 // Read state for an admin / diagnostics endpoint
 const stats = globalLLMProviderHealth.getStats('openrouter');
@@ -232,7 +231,7 @@ detector.clearAgent('agent-1');
 
 ## CostGuard
 
-Per-agent spending caps with three levels: session, daily, and single operation. Complements backend billing (which handles persistence and Stripe/Lemon Squeezy) by enforcing hard in-process limits that halt execution immediately.
+Per-agent spending caps with three levels: session, daily, and single operation, kept in process memory. CostGuard stops nothing itself: the host asks `canAfford()` before a call and records the cost after it, and `onCapReached` fires when a recorded cost reaches a cap. AgentOS runs no CostGuard of its own; `CostCapExceededError` is exported for a host to throw, and CostGuard does not throw it.
 
 ### Config
 
@@ -252,7 +251,7 @@ const guard = new CostGuard({
   maxDailyCostUsd: 2.00,
   onCapReached: (agentId, capType, cost, limit) => {
     console.log(`${agentId} hit ${capType} cap: $${cost.toFixed(4)} / $${limit.toFixed(2)}`);
-    safetyEngine.pauseAgent(agentId, `Cost cap '${capType}' reached`);
+    pauseAgent(agentId); // the host's own pause
   },
 });
 
@@ -272,7 +271,7 @@ guard.setAgentLimits('expensive-agent', { maxDailyCostUsd: 10.00 });
 const snapshot = guard.getSnapshot('agent-1');
 // { sessionCostUsd: 0.42, dailyCostUsd: 1.87, isSessionCapReached: false, ... }
 
-// Daily costs auto-reset at midnight. Manual reset:
+// Daily totals reset at the process's local midnight. Manual reset:
 guard.resetSession('agent-1');
 guard.resetDailyAll();
 ```
@@ -348,7 +347,7 @@ await meter.setAllowance(userId, 600);
 
 ## ToolExecutionGuard
 
-Wraps tool execution with a timeout and per-tool circuit breaker. Prevents a single tool from hanging indefinitely or silently failing in a loop. Each tool gets its own circuit breaker instance and health tracking.
+Wraps tool execution with a timeout and per-tool circuit breaker, so a hung tool returns a timeout result and a tool that keeps failing is refused while its breaker is open. Each tool gets its own circuit breaker instance and health tracking. `execute()` never throws: a timeout, an error or an open breaker comes back as `{ success: false }`. A timed-out call is not cancelled; its promise runs on and its result is dropped.
 
 ### Config
 
@@ -392,74 +391,49 @@ const health = guard.getToolHealth('web-search');
 const allHealth = guard.getAllToolHealth();
 ```
 
-## How They Work Together
+## How they work together
 
-All six primitives can be wired into a single guard chain via `wrapLLMCallback()`. Every LLM call passes through all layers in sequence:
+A host composes the primitives around its own model call:
 
 ```typescript
-// Simplified from WonderlandNetwork.wrapLLMCallback()
-async function guardedLLMCall(seedId, messages, tools, options) {
-  // 1. SafetyEngine killswitch check
-  const canAct = safetyEngine.canAct(seedId);
-  if (!canAct.allowed) throw new Error(canAct.reason);
+import { CostGuard, CircuitBreaker, StuckDetector } from '@framers/agentos';
 
-  // 2. CostGuard pre-check (estimated cost ~$0.001)
-  const affordable = costGuard.canAfford(seedId, 0.001);
+const costGuard = new CostGuard({ maxDailyCostUsd: 2 });
+const breaker = new CircuitBreaker({ name: 'llm' });
+const stuck = new StuckDetector();
+
+async function guardedCall(agentId: string, prompt: string) {
+  const affordable = costGuard.canAfford(agentId, 0.001); // the host's estimate
   if (!affordable.allowed) throw new Error(affordable.reason);
 
-  // 3. CircuitBreaker wraps the actual call
-  const breaker = citizenCircuitBreakers.get(seedId);
-  const start = Date.now();
-  const response = await breaker.execute(() => originalLLM(messages, tools, options));
+  const response = await breaker.execute(() => callModel(prompt)); // the host's model call
 
-  // 4. CostGuard records actual cost from token usage
-  if (response.usage) {
-    const cost = response.usage.prompt_tokens * 0.000003
-               + response.usage.completion_tokens * 0.000006;
-    costGuard.recordCost(seedId, cost);
-  }
+  costGuard.recordCost(agentId, priceOf(response.usage)); // the host's pricing
 
-  // 5. StuckDetector checks for repetition
-  if (response.content) {
-    const stuck = stuckDetector.recordOutput(seedId, response.content);
-    if (stuck.isStuck) {
-      safetyEngine.pauseAgent(seedId, `Stuck: ${stuck.details}`);
-    }
-  }
-
-  // 6. AuditLog records the event
-  auditLog.log({
-    seedId,
-    action: 'llm_call',
-    outcome: 'success',
-    durationMs: Date.now() - start,
-    metadata: { tokens: response.usage?.total_tokens },
-  });
+  const check = stuck.recordOutput(agentId, response.text);
+  if (check.isStuck) pauseAgent(agentId, check.details); // the host's own pause
 
   return response;
 }
 ```
 
-Additionally, [`ActionDeduplicator`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/ActionDeduplicator.ts) and [`ToolExecutionGuard`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/ToolExecutionGuard.ts) are used in other parts of the network:
-
-- **ActionDeduplicator** prevents duplicate votes and engagement actions in `recordEngagement()`
-- **ToolExecutionGuard** wraps all tool invocations via `newsroom.setToolGuard()`
-- **ContentSimilarityDedup** catches near-identical posts using Jaccard similarity on trigram shingles
+`ActionDeduplicator` fits around actions with side effects (a vote, a post, a message), and `ToolExecutionGuard` around tool calls.
 
 ## Defense Matrix
 
 | Layer | Protection | Default Trigger | Error Type |
 |-------|-----------|----------------|------------|
 | CircuitBreaker | Opens after failures, cooldown before retry | 5 fails in 60s | [`CircuitOpenError`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CircuitBreaker.ts) |
-| CostGuard | Hard spending cap per session/day/operation | $5/day per agent | [`CostCapExceededError`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts) |
-| StuckDetector | Pause on repeated output or oscillation | 3 identical outputs in 5 min | Callback-driven |
-| SafetyEngine | Killswitches + rate limiting | 10 posts/hr, 60 votes/hr | `{ allowed: false }` |
-| ToolExecutionGuard | Timeout + per-tool circuit breaker | 30s timeout | [`ToolTimeoutError`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/ToolExecutionGuard.ts) |
+| LLMProviderHealthRegistry | Skips a provider that keeps failing, in `generateText()` and `streamText()` | 402: 1 failure; 401/403: 1; 429: 3; 5xx: 5 | `LLMProviderCircuitOpenError` (status 503, routed to the fallback chain) |
+| CostGuard | Spending caps per session/day/operation, checked by the host | $5/day per agent | `{ allowed: false, reason }` from `canAfford()`; `onCapReached` callback |
+| Spend meter | A persisted allowance per account and period, in `processRequest()` | the host's allowance | `BILLING_ALLOWANCE_EXHAUSTED` error chunk |
+| StuckDetector | Flags repeated output or oscillation | 3 identical outputs in 5 min | `{ isStuck: true, reason }` |
+| ToolExecutionGuard | Timeout + per-tool circuit breaker | 30s timeout | `{ success: false, timedOut }` |
 | ActionDeduplicator | Prevent duplicate actions within window | 1 hr window, 10k entries | Boolean check |
 
 ## Imports
 
-All primitives are exported from the `@framers/agentos` package:
+The primitives are exported from the `@framers/agentos` package, the provider health registry from `@framers/agentos/core/safety`:
 
 ```typescript
 import {
@@ -471,10 +445,12 @@ import {
   CostCapExceededError,
   ToolExecutionGuard,
   ToolTimeoutError,
+  SqlSpendMeter,
 } from '@framers/agentos';
+import { globalLLMProviderHealth, LLMProviderHealthRegistry } from '@framers/agentos/core/safety';
 ```
 
-The social safety components (`SafetyEngine`, `ActionAuditLog`, `ContentSimilarityDedup`) are provided by the downstream social module and are not part of the core AgentOS package.
+Killswitches, social rate limits and an action audit log (`SafetyEngine`, `ActionAuditLog`, `ContentSimilarityDedup`) belong to Wunderland's social network, not to AgentOS.
 
 ---
 
@@ -487,21 +463,18 @@ The social safety components (`SafetyEngine`, `ActionAuditLog`, `ContentSimilari
 
 ### Cost guards + resource controls
 
-- Patel, A., Singh, A., Patel, V., Verma, V., & Patel, K. (2023). [*FrugalGPT: How to use large language models while reducing cost and improving performance.*](https://arxiv.org/abs/2305.05176) arXiv:2305.05176. — Cost-aware LLM routing methodology informing the [`CostGuard`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts) design — failover to cheaper providers when budgets approach limits.
+- Chen, L., Zaharia, M., & Zou, J. (2023). [*FrugalGPT: How to use large language models while reducing cost and improving performance.*](https://arxiv.org/abs/2305.05176) arXiv:2305.05176. — Cost-aware LLM cascades; background for budgeting model calls.
 - Chen, L., Zaharia, M., & Zou, J. (2020). [*FrugalML: How to use ML prediction APIs more accurately and cheaply.*](https://arxiv.org/abs/2006.07512) NeurIPS 2020. — Earlier work on prediction-API cost optimization that informed the model-cascade pattern.
 
 ### Stuck detection / liveness
 
 - Brewer, E. A. (2000). [*Towards robust distributed systems.*](https://people.eecs.berkeley.edu/~brewer/cs262b-2004/PODC-keynote.pdf) PODC 2000 keynote. — The CAP theorem framing that motivates aggressive timeout + stuck-detection in distributed agent runtimes where partial unavailability is normal.
-- Cantrill, B., Bonwick, J., & Marx, R. (2010). [*Hidden in plain sight.*](https://queue.acm.org/detail.cfm?id=1117401) *ACM Queue*, 8(1). — Operational practice for detecting stuck processes via watchdog timers + heartbeat-style liveness — informs the [`StuckDetector`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/StuckDetector.ts) design.
-
-### Rate limiting
-
-- van Beijnum, I. (2014). [*Token bucket and leaky bucket.*](https://en.wikipedia.org/wiki/Token_bucket) RFC 2475-adjacent traffic-shaping primitives. — The two algorithm families behind the rate-limiter implementation; AgentOS uses token-bucket for sub-second smoothing and leaky-bucket for windowed quota enforcement.
+- Cantrill, B. (2006). [*Hidden in plain sight.*](https://queue.acm.org/detail.cfm?id=1117401) *ACM Queue*, 4(1). — On instrumenting production systems to find pathological behaviour where it happens.
 
 ### Implementation references
 
 - [`src/safety/runtime/CircuitBreaker.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CircuitBreaker.ts) — three-state circuit breaker
-- [`src/safety/runtime/CostGuard.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts) — cost-cap enforcement with graceful degradation
-- [`src/safety/runtime/StuckDetector.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/StuckDetector.ts) — watchdog-based stuck-call detection
-- [`src/core/rate-limiting/`](https://github.com/framerslab/agentos/tree/master/src/core/rate-limiting) — token-bucket + leaky-bucket implementations
+- [`src/safety/runtime/CostGuard.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts) — per-agent cost caps in memory
+- [`src/safety/runtime/StuckDetector.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/StuckDetector.ts) — repeated-output and oscillation detection
+- [`src/safety/runtime/SqlSpendMeter.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/SqlSpendMeter.ts) — the persisted spend meter
+- [`src/core/safety/LLMProviderHealthRegistry.ts`](https://github.com/framerslab/agentos/blob/master/src/core/safety/LLMProviderHealthRegistry.ts) — per-provider health for the fallback router
