@@ -1,3 +1,9 @@
+## [0.13.6](https://github.com/framerslab/agentos/compare/v0.13.5...v0.13.6) (2026-10-09)
+
+### feat
+
+* **voice-pipeline:** an input level and a watch for an input that carries no sound (#180) ([7afa875](https://github.com/framerslab/agentos/commit/7afa875716c8ec1de35aab29905cfb4333d5648a))
+
 ## [0.13.5](https://github.com/framerslab/agentos/compare/v0.13.4...v0.13.5) (2026-10-09)
 
 ### feat
