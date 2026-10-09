@@ -1,3 +1,13 @@
+## [0.13.18](https://github.com/framerslab/agentos/compare/v0.13.17...v0.13.18) (2026-10-09)
+
+### fix
+
+* **speech:** a whisper-compatible server's model is asked for verbose_json by default (#214) ([e355fcb](https://github.com/framerslab/agentos/commit/e355fcb50e0c419a2e3ea4c4ee7aac8862ada25f))
+
+### docs
+
+* eighth round of audit follow-ups to the guides (#208) ([e178ecf](https://github.com/framerslab/agentos/commit/e178ecfabee3ad989ea75128e001001708833a95))
+
 ## [0.13.17](https://github.com/framerslab/agentos/compare/v0.13.16...v0.13.17) (2026-10-09)
 
 ### fix
