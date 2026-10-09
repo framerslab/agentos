@@ -27,3 +27,6 @@ export {
   type LedgerItem,
   type TranscriptLedgerOptions,
 } from './transcriptLedger.js';
+
+// An input's level and the watch for an input that carries no sound; inputLevel.ts imports nothing.
+export { InputSilenceWatch, inputLevelDb, type InputSilenceWatchOptions } from './inputLevel.js';
