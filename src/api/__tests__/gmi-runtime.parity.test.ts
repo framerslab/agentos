@@ -135,4 +135,17 @@ describe("agent({ runtime: 'gmi' }) keeps what agent() does", () => {
     expect(execute.mock.calls[0][0]).toEqual({ q: 'x' });
     expect(warn).toHaveBeenCalledWith('[agentos] onBeforeToolExecution hook error:', expect.any(TypeError));
   });
+
+  it.each([['legacy'], ['gmi']] as const)("%s runtime: verifyCitations checks generate()'s answer against the retrieved sources and returns result.grounding", async (runtime) => {
+    const k = key();
+    // `whole`: the legacy runtime asks for whole responses.
+    script('openai', k, { replies: [reply.text('Guardrails are set with the guardrails option.')], whole: true });
+    const retrieve = vi.fn(async (_query: string) => [{ content: 'Guardrails are set with the guardrails option.', title: 'Guardrails' }]);
+    // Every text embeds alike, so the answer's one claim is supported by the source.
+    const embedFn = vi.fn(async (texts: string[]) => texts.map(() => [1, 0, 0]));
+    const result = await agent(base(k, { runtime, verifyCitations: { retrieve, embedFn } })).generate('How do I configure a guardrail?');
+    expect(result.text).toBe('Guardrails are set with the guardrails option.');
+    expect(retrieve).toHaveBeenCalledWith('How do I configure a guardrail?');
+    expect(result.grounding).toMatchObject({ totalClaims: 1, supportedCount: 1, overallGrounded: true });
+  });
 });
