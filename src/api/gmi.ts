@@ -14,7 +14,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { Agent, AgentOptions, AgentSession, AgentSessionOptions, SessionSendOptions } from './agent.js';
-import { resolveChainOfThought, type GenerateTextOptions, type GenerateTextResult, type Message, type MessageContent } from './generateText.js';
+import { extractTextFromContent, resolveChainOfThought, type GenerateTextOptions, type GenerateTextResult, type Message, type MessageContent } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import { GMI } from '../cognition/substrate/GMI.js';
 import type { GMIBaseConfig, IGMI } from '../cognition/substrate/IGMI.js';
@@ -32,6 +32,7 @@ import type { ITool } from '../core/tools/ITool.js';
 import { ExtensionRegistry } from '../extensions/ExtensionRegistry.js';
 import { EXTENSION_KIND_TOOL } from '../extensions/types.js';
 import { APPROVAL_GRANTED, askApprovalGate, type ApprovalGateFn } from './runtime/approval-gate.js';
+import { runCitationVerification } from './runtime/citationVerification.js';
 import { createCompletionGateway, type CompletionGateway } from './runtime/completionGateway.js';
 import { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
 import { adaptTools } from './runtime/toolAdapter.js';
@@ -491,7 +492,13 @@ export function gmi(opts: GmiOptions): GmiHandle {
   const handle: Agent = {
     async generate(prompt: MessageContent, extra?: Partial<GenerateTextOptions>): Promise<GenerateTextResult> {
       const options = overridesOf(extra);
-      return sendGmiTurn(oneShotDeps('agent.generate', extra), prompt, { options });
+      const result = await sendGmiTurn(oneShotDeps('agent.generate', extra), prompt, { options });
+      // As agent().generate() does: the answer checked against the sources retrieved for the input.
+      if (opts.verifyCitations) {
+        const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
+        result.grounding = await runCitationVerification(result.text, userText, opts.verifyCitations);
+      }
+      return result;
     },
 
     stream(prompt: MessageContent, extra?: Partial<GenerateTextOptions>): StreamTextResult {
