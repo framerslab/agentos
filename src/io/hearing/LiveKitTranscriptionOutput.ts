@@ -4,10 +4,14 @@
  * LiveKit's own transcription output does, so a page's standard handler of the
  * `lk.transcription` topic shows them: each interim and each final as a text
  * stream holding the line's whole text, with `lk.segment_id` (the transcript's
- * `itemId`), `lk.transcription_final` and `lk.transcribed_track_id`. Writes go
- * out in the order they were asked for. The finals are kept in a
- * {@link TranscriptLedger}, so a participant that reconnects can be sent again
- * the finals after the last line it holds, a line taken back among them.
+ * `itemId`), `lk.transcription_final` and `lk.transcribed_track_id`, and on a
+ * final whose transcript has times, `agentos.start_ms` and `agentos.end_ms`
+ * (whole milliseconds on the session's audio clock), which
+ * `transcriptEventFromLiveKit()` reads back. Writes go out in the order they
+ * were asked for. The finals are kept in a {@link TranscriptLedger}, so a
+ * participant that reconnects can be sent again the finals after the last line
+ * it holds, a line taken back among them, each with the times it was first
+ * written with.
  *
  * The room is described by a structural type, so this module and its typings
  * carry no dependency on `@livekit/rtc-node`; a connected rtc-node `Room` is
@@ -28,6 +32,7 @@ import {
   LIVEKIT_TRANSCRIPTION_ATTRIBUTES,
   LIVEKIT_TRANSCRIPTION_TOPIC,
   TRANSCRIPTION_FAILED_ATTRIBUTE,
+  TRANSCRIPTION_TIME_ATTRIBUTES,
   TranscriptLedger,
   type LedgerItem,
 } from '../voice-pipeline/transcriptLedger.js';
@@ -79,7 +84,10 @@ export class LiveKitTranscriptionOutput {
   /**
    * Writes one transcript to every participant. Resolves `true` once it is
    * sent, `false` when the ledger already held it (a repeated final, or an
-   * interim after the final), which sends nothing.
+   * interim after the final), which sends nothing. A final carries the
+   * transcript's `startMs` and `endMs` as {@link TRANSCRIPTION_TIME_ATTRIBUTES},
+   * each rounded to whole milliseconds and left out when the rounded time is
+   * negative or not a safe integer; an interim carries neither.
    *
    * The ledger takes the line before it is sent, so a send that fails leaves
    * the line there: writing the same transcript again sends nothing, and
@@ -114,7 +122,8 @@ export class LiveKitTranscriptionOutput {
    * Sends again, to one participant, the final lines after the line with the
    * id, in order, a line taken back among them as its empty final, so a page
    * that missed the retraction drops the line; every one of them when the id
-   * is `undefined` or unknown. Resolves how many were sent.
+   * is `undefined` or unknown. Each final carries the times it was first
+   * written with, read from the ledger's line. Resolves how many were sent.
    */
   replayAfter(itemId: string | undefined, participantIdentity: string): Promise<number> {
     const finals = this.ledger.finalsAfter(itemId, { takenBack: true });
@@ -136,6 +145,8 @@ export class LiveKitTranscriptionOutput {
     const attributes: Record<string, string> = {
       [LIVEKIT_TRANSCRIPTION_ATTRIBUTES.segmentId]: line.itemId,
       [LIVEKIT_TRANSCRIPTION_ATTRIBUTES.final]: line.isFinal ? 'true' : 'false',
+      // The ledger's line keeps the times its final was written with, so a replay sends the same two.
+      ...(line.isFinal ? timeAttributes(line) : {}),
     };
     const sid = this.options.trackSid?.();
     if (sid) attributes[LIVEKIT_TRANSCRIPTION_ATTRIBUTES.trackId] = sid;
@@ -146,4 +157,27 @@ export class LiveKitTranscriptionOutput {
       ...(destinationIdentities ? { destinationIdentities } : {}),
     });
   }
+}
+
+/**
+ * A final's time attributes ({@link TRANSCRIPTION_TIME_ATTRIBUTES}): each time
+ * the line holds, rounded to whole milliseconds and written in decimal digits,
+ * the form `transcriptEventFromLiveKit()` reads back. A time that is negative,
+ * not a finite number or past the integers a number holds exactly is left out,
+ * since a reader would not take it.
+ */
+function timeAttributes(line: Pick<LedgerItem, 'startMs' | 'endMs'>): Record<string, string> {
+  const out: Record<string, string> = {};
+  const startMs = wholeMs(line.startMs);
+  if (startMs !== undefined) out[TRANSCRIPTION_TIME_ATTRIBUTES.startMs] = startMs;
+  const endMs = wholeMs(line.endMs);
+  if (endMs !== undefined) out[TRANSCRIPTION_TIME_ATTRIBUTES.endMs] = endMs;
+  return out;
+}
+
+/** A time as whole milliseconds in decimal digits, or `undefined` for a time no such string holds. */
+function wholeMs(ms: number | undefined): string | undefined {
+  if (ms === undefined) return undefined;
+  const whole = Math.round(ms);
+  return whole >= 0 && Number.isSafeInteger(whole) ? String(whole) : undefined;
 }
