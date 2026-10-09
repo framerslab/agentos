@@ -53,14 +53,14 @@ import type { ExecutorRunRequest, ExecutorRunResult, ForgedCodeExecutor } from '
 /** The version of both QuickJS packages this release runs on. */
 export const QUICKJS_VERSION = '0.32.0';
 
-/** Host calls (`fetch`, `fs.readFile`) one call may have in flight at once. */
+/** Host calls (`fetch` and the file functions) one call may have in flight at once. */
 export const MAX_PENDING_HOST_CALLS = 16;
 
 const CORE_PACKAGE = 'quickjs-emscripten-core';
 const VARIANT_PACKAGE = '@jitl/quickjs-wasmfile-release-sync';
 
 /** The bindings that start host work and answer with a promise. */
-const ASYNC_BINDINGS: ReadonlySet<string> = new Set(['fetch', 'fs_readFile']);
+const ASYNC_BINDINGS: ReadonlySet<string> = new Set(['fetch', 'fs_readFile', 'fs_writeFile', 'fs_unlink']);
 
 const PAGE_BYTES = 65_536;
 const MIB = 1_048_576;
@@ -86,7 +86,7 @@ const MAX_TIMER_MS = 2_147_483_647;
  * thrown value says, cut at a limit inside the guest.
  */
 const GUEST_HELPERS = [
-  '((AB, S, Str, slice) => [',
+  '((AB, S, P, Str, slice) => [',
   '  (n) => new AB(n),',
   '  (v) => S(v),',
   '  (e, limit) => {',
@@ -95,12 +95,23 @@ const GUEST_HELPERS = [
   "      const m = e !== null && typeof e === 'object' ? e.message : undefined;",
   "      text = typeof m === 'string' ? m : Str(e);",
   '    } catch (x) {',
-  "      return '(the thrown value could not be read)';",
+  "      text = '(the thrown value could not be read)';",
   '    }',
-  "    return text.length > limit ? slice(text, 0, limit) + ' (cut at ' + limit + ' characters)' : text;",
+  "    return S(text.length > limit ? slice(text, 0, limit) + ' (cut at ' + limit + ' characters)' : text);",
   '  },',
-  '])(ArrayBuffer, JSON.stringify, String, Function.prototype.call.bind(String.prototype.slice))',
+  '  (t) => P(t),',
+  '])(ArrayBuffer, JSON.stringify, JSON.parse, String, Function.prototype.call.bind(String.prototype.slice))',
 ].join('\n');
+
+/**
+ * A string the binding layer cannot copy whole: it copies a string as a C
+ * string, so a U+0000 ends it, and it encodes a lone surrogate wrongly. Such
+ * a string crosses as JSON, which escapes both.
+ */
+function needsJson(value: string): boolean {
+  // A string, not a regular expression: eslint's no-control-regex refuses U+0000 in one.
+  return value.includes('\u0000') || /[\uD800-\uDFFF]/.test(value);
+}
 
 /**
  * The QuickJS packages are missing, at another version, or failed to load.
@@ -178,9 +189,18 @@ async function loadEngine(): Promise<QuickJSEngine> {
   }
 }
 
-/** The pages of the call's memory: its `memoryMB`, held between the build's initial and maximum memory. */
+/**
+ * The pages of the call's memory: its `memoryMB`, held between the build's
+ * initial and maximum memory. A budget past the maximum, `Infinity` included,
+ * runs at the maximum; one that is not a positive number runs at the initial.
+ */
 function maximumPagesFor(memoryMB: number): number {
-  const requested = Number.isFinite(memoryMB) && memoryMB > 0 ? Math.ceil((memoryMB * MIB) / PAGE_BYTES) : 0;
+  const requested =
+    memoryMB === Number.POSITIVE_INFINITY
+      ? MAXIMUM_PAGES
+      : Number.isFinite(memoryMB) && memoryMB > 0
+        ? Math.ceil((memoryMB * MIB) / PAGE_BYTES)
+        : 0;
   return Math.min(MAXIMUM_PAGES, Math.max(INITIAL_PAGES, requested));
 }
 
@@ -199,7 +219,8 @@ function guestBytes(value: unknown): number {
     return 32;
   }
   if (typeof value === 'string') {
-    return 4 * value.length + 64;
+    // A string that crosses as JSON takes its escaped text and the parsed copy.
+    return (needsJson(value) ? 9 : 4) * value.length + 64;
   }
   if (value instanceof Uint8Array || value instanceof ArrayBuffer) {
     return value.byteLength + 64;
@@ -310,6 +331,7 @@ class GuestRun {
   private allocate: QuickJSHandle | undefined;
   private stringify: QuickJSHandle | undefined;
   private describe: QuickJSHandle | undefined;
+  private parse: QuickJSHandle | undefined;
   /** What the call has handed the host so far, in bytes, and how much it may. */
   private handed = 0;
   private handLimit = 0;
@@ -354,6 +376,7 @@ class GuestRun {
     this.allocate = context.getProp(made, 0);
     this.stringify = context.getProp(made, 1);
     this.describe = context.getProp(made, 2);
+    this.parse = context.getProp(made, 3);
     made.dispose();
     this.handLimit = memoryBytes;
 
@@ -388,7 +411,7 @@ class GuestRun {
     if (4 * wrapped.length > CHECKED_COPY_BYTES) {
       const room = this.allocateGuest(4 * wrapped.length + 64);
       if (!room) {
-        return { status: 'memory_exceeded', memoryUsedBytes: this.memoryUsed() };
+        return this.noRoom();
       }
       room.dispose();
     }
@@ -442,7 +465,7 @@ class GuestRun {
       }
     }
     this.deferreds.clear();
-    for (const helper of [this.allocate, this.stringify, this.describe]) {
+    for (const helper of [this.allocate, this.stringify, this.describe, this.parse]) {
       if (helper?.alive) {
         helper.dispose();
       }
@@ -450,6 +473,7 @@ class GuestRun {
     this.allocate = undefined;
     this.stringify = undefined;
     this.describe = undefined;
+    this.parse = undefined;
     const context = this.context;
     this.context = undefined;
     this.runtime = undefined;
@@ -459,6 +483,21 @@ class GuestRun {
 
   private memoryUsed(): number {
     return this.memory?.buffer.byteLength ?? 0;
+  }
+
+  /**
+   * How a probe that found no room ends the call. The probe runs guest code,
+   * so the interrupt handler can stop it at the deadline or on the call's
+   * signal; the handler marks that first, and the call then ends as timed
+   * out, not out of memory.
+   */
+  private noRoom(): ExecutorRunResult {
+    const memoryUsedBytes = this.memoryUsed();
+    if (this.interrupted) {
+      return { status: 'timeout', memoryUsedBytes };
+    }
+    this.exhausted = true;
+    return { status: 'memory_exceeded', memoryUsedBytes };
   }
 
   /** An ArrayBuffer of `bytes` made by QuickJS's checked allocator, or undefined when the guest's memory cannot hold it. */
@@ -495,7 +534,7 @@ class GuestRun {
     if (bytes > CHECKED_COPY_BYTES) {
       const room = this.allocateGuest(bytes);
       if (!room) {
-        this.exhausted = true;
+        this.noRoom();
         return context.undefined;
       }
       room.dispose();
@@ -567,10 +606,9 @@ class GuestRun {
     if (type === 'boolean') {
       return context.dump(handle) as boolean;
     }
-    if (type === 'string') {
-      return this.readString(handle);
-    }
-    if (type === 'object' && this.stringify) {
+    // A string crosses as its JSON too: the binding layer copies a string as
+    // a C string, which a U+0000 would end.
+    if ((type === 'string' || type === 'object') && this.stringify) {
       const made = context.callFunction(this.stringify, context.undefined, handle);
       if (made.error) {
         made.error.dispose();
@@ -605,8 +643,7 @@ class GuestRun {
     if (3 * length > CHECKED_COPY_BYTES) {
       const room = this.allocateGuest(3 * length + 64);
       if (!room) {
-        this.exhausted = true;
-        throw new RangeError('out of memory');
+        throw new RangeError(this.noRoom().status === 'timeout' ? 'interrupted' : 'out of memory');
       }
       room.dispose();
     }
@@ -682,7 +719,23 @@ class GuestRun {
     if (value === null) return context.null;
     if (typeof value === 'boolean') return value ? context.true : context.false;
     if (typeof value === 'number') return context.newNumber(value);
-    if (typeof value === 'string') return context.newString(value);
+    if (typeof value === 'string') {
+      if (!needsJson(value) || !this.parse) {
+        return context.newString(value);
+      }
+      // JSON escapes what the binding layer's C-string copy would lose.
+      const json = context.newString(JSON.stringify(value));
+      try {
+        const made = context.callFunction(this.parse, context.undefined, json);
+        if (made.error) {
+          made.error.dispose();
+          throw new TypeError('a string could not be copied into the guest');
+        }
+        return context.unwrapResult(made);
+      } finally {
+        json.dispose();
+      }
+    }
     if (value instanceof Uint8Array) {
       return context.newArrayBuffer(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
     }
@@ -780,7 +833,7 @@ class GuestRun {
     if (3 * length > CHECKED_COPY_BYTES) {
       const room = this.allocateGuest(3 * length + 64);
       if (!room) {
-        return { status: 'memory_exceeded', memoryUsedBytes: this.memoryUsed() };
+        return this.noRoom();
       }
       room.dispose();
     }
@@ -857,7 +910,9 @@ class GuestRun {
       }
       const text = context.unwrapResult(made);
       try {
-        return context.typeof(text) === 'string' ? this.readString(text, false) : '(the thrown value could not be read)';
+        return context.typeof(text) === 'string'
+          ? (JSON.parse(this.readString(text, false)) as string)
+          : '(the thrown value could not be read)';
       } finally {
         text.dispose();
       }

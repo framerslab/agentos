@@ -145,7 +145,7 @@ describe('stored tools: the loader, legacy rows and suspension', () => {
       outputSchema: DOUBLED_OUT,
     });
     // A newer release wrote a capability this one does not know.
-    const foreign = '{"kind":"sandbox","capabilities":["fs.read","fs.write"]}';
+    const foreign = '{"kind":"sandbox","capabilities":["fs.read","process.spawn"]}';
     seedStateRow(db, { toolId: 'raw-1', state: 'active', requestJson: foreign });
 
     const summary = await host.engine.loadPersistedTools({ tiers: ['shared'] });

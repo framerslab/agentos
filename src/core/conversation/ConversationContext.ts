@@ -263,6 +263,22 @@ export class ConversationContext {
   }
 
   /**
+   * Replaces a message's content in place, keeping its id, role and time. For a reply an output guardrail rewrote or
+   * replaced after it was stored: the history then holds what the person saw. Metadata given is merged over the
+   * message's own. False when no message has the id.
+   *
+   * @public
+   */
+  public replaceMessageContent(messageId: string, content: ConversationMessage['content'], metadata?: Partial<NonNullable<ConversationMessage['metadata']>>): boolean {
+    const message = this.messages.find(m => m.id === messageId);
+    if (!message) return false;
+    message.content = content;
+    if (metadata) message.metadata = { ...(message.metadata ?? {}), ...metadata };
+    this.sessionMetadata['_lastAccessed'] = Date.now();
+    return true;
+  }
+
+  /**
    * Calculates the current "turn number" based on the count of user messages.
    * This can be a simple proxy for conversation length from the user's perspective.
    *

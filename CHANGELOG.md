@@ -1,3 +1,44 @@
+## [0.13.5](https://github.com/framerslab/agentos/compare/v0.13.4...v0.13.5) (2026-10-09)
+
+### feat
+
+* **api:** a schema-validated structured reply on processRequest (#177) ([710f266](https://github.com/framerslab/agentos/commit/710f266ed7fe2164e8a83c68bae405c62c32a5b7))
+
+## [0.13.4](https://github.com/framerslab/agentos/compare/v0.13.3...v0.13.4) (2026-10-09)
+
+### docs
+
+* the capability ceiling and the effect capabilities in the self-extension and architecture pages (#188) ([8bf953d](https://github.com/framerslab/agentos/commit/8bf953d679dce2f8a2639cbc6375ba52afa91139))
+
+### feat
+
+* **emergent:** writes, deletes and state-changing requests for code-forged tools (#183) ([2ca7fa2](https://github.com/framerslab/agentos/commit/2ca7fa2e5a80ab2b65f65bd89d5bbc0875b80328))
+* **voice-pipeline:** write transcripts into a LiveKit room as transcription streams, and read them back (#174) ([a20ff4f](https://github.com/framerslab/agentos/commit/a20ff4f8e7c0079534814fc228c3813418c68a25))
+
+## [0.13.3](https://github.com/framerslab/agentos/compare/v0.13.2...v0.13.3) (2026-10-08)
+
+### feat
+
+* **guardrails:** required guards, hold-until-final output, phrase lists and hard limits (#169) ([032fcbf](https://github.com/framerslab/agentos/commit/032fcbf29d7c6ff2f3faded78765ced9fdd68d71))
+
+### fix
+
+* **emergent:** QuickJSExecutor follow-ups from the cold read of #160 (#178) ([2ec4535](https://github.com/framerslab/agentos/commit/2ec45351d794dcd69e54b4127097ed83ffc8bc7f))
+
+## [0.13.2](https://github.com/framerslab/agentos/compare/v0.13.1...v0.13.2) (2026-10-08)
+
+### fix
+
+* **api:** gmi() follow-ups (session privacy, stream stop, usage on errors) ([4e80849](https://github.com/framerslab/agentos/commit/4e8084965307e042a6ae39ce9eda051b6b6a2901))
+
+### ci
+
+* a gate that holds a breaking change until a maintainer approves it (#170) ([c288e60](https://github.com/framerslab/agentos/commit/c288e602b4569b238ed12a0a7bf773b59f7f0f11))
+
+### docs
+
+* fourth round of audit follow-ups to the guides (#162) ([a7ab6c2](https://github.com/framerslab/agentos/commit/a7ab6c2bf102c79cb87c72adf51d17471eb005a9))
+
 ## [0.13.1](https://github.com/framerslab/agentos/compare/v0.13.0...v0.13.1) (2026-10-08)
 
 ### fix

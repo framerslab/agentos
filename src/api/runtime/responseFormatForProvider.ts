@@ -133,28 +133,6 @@ export function responseFormatCarriesSchema(
 }
 
 /**
- * The schema instructions a structured call puts in its system prompt:
- * generateObject on every call, and session.send (both runtimes) on a call
- * whose payload carries no schema ({@link responseFormatCarriesSchema}).
- * Kept free of caller context so it can be composed with either a plain
- * string system prompt or a structured block array.
- */
-export function buildSchemaInstructionText(
-  jsonSchema: Record<string, unknown>,
-  schemaName?: string,
-  schemaDescription?: string,
-): string {
-  const parts: string[] = [];
-  parts.push('You MUST respond with ONLY a valid JSON object — no markdown, no code fences, no explanation.');
-  if (schemaName) parts.push(`The JSON object should be a "${schemaName}".`);
-  if (schemaDescription) parts.push(schemaDescription);
-  parts.push('');
-  parts.push('The JSON MUST conform to this JSON Schema:');
-  parts.push(JSON.stringify(jsonSchema, null, 2));
-  return parts.join('\n');
-}
-
-/**
  * Compact label for a structured-output payload shape, used by the
  * `fallback_fired` log line (`rebuiltResponseFormatType`) as the live
  * verification signal that per-leg rebuild is active.

@@ -27,7 +27,8 @@ import {
   type GenerateTextOptions,
 } from '../generateText.js';
 import { hostPolicyToRouteParams, mergeRequiredCapabilities, type HostLLMPolicy } from './hostPolicy.js';
-import { buildResponseFormatForProvider, buildSchemaInstructionText, responseFormatCarriesSchema } from './responseFormatForProvider.js';
+import { buildResponseFormatForProvider, responseFormatCarriesSchema } from './responseFormatForProvider.js';
+import { buildSchemaInstructionText } from './structuredReply.js';
 
 /** What a turn asks the gateway for. Unset fields take the gateway's defaults. */
 export interface CompletionRoute {

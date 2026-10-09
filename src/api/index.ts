@@ -135,3 +135,18 @@ export type {
 
 // --- Errors ---
 export * from './errors.js';
+
+// A reply that must match a schema on the full runtime (ProcessingOptions.structuredReply)
+export {
+  resolveStructuredReply,
+  resolveStructuredReplySpec,
+  checkStructuredReply,
+  recheckStructuredReply,
+  structuredRepairMessage,
+  StructuredReplyConfigError,
+  type StructuredReplySpec,
+  type StructuredOutputMeta,
+  type StructuredReplyOutput,
+  type IStructuredSchemaRegistry,
+  type ResolvedStructuredReply,
+} from './runtime/structuredReply';

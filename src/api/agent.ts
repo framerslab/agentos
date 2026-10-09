@@ -24,7 +24,8 @@ import {
   type MessageContent,
   type ToolCallHookInfo,
 } from './generateText.js';
-import { buildResponseFormatForProvider, buildSchemaInstructionText } from './runtime/responseFormatForProvider.js';
+import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
+import { buildSchemaInstructionText } from './runtime/structuredReply.js';
 import { resolveModelOption } from './model.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { ObjectGenerationError } from './generateObject.js';

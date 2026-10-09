@@ -18,8 +18,9 @@ import type { Message, SystemContentBlock, TokenUsage } from './generateText.js'
 import { resolveModelOption } from './model.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { estimateMaxTokensForZodSchema } from './runtime/schemaTokenEstimate.js';
-import { buildResponseFormatForProvider, buildSchemaInstructionText } from './runtime/responseFormatForProvider.js';
+import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
 import { buildResponseFormat } from '../core/llm/providers/structuredOutputFormat.js';
+import { buildSchemaInstructionText, extractJson, repairStringEncodedContainers, summarizeBadResponse, summarizeZodErrors } from './runtime/structuredReply.js';
 
 /**
  * Detect whether a Zod schema's outer type is `ZodArray`. We support
@@ -331,6 +332,7 @@ export interface GenerateObjectResult<T> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+
 /**
  * Builds the system prompt passed to generateText.
  *
@@ -391,130 +393,11 @@ function buildSchemaSystemPrompt(
   return parts.join('\n');
 }
 
-/**
- * Attempts to extract a JSON object from raw LLM text.
- *
- * First tries a direct `JSON.parse`. If that fails, looks for JSON inside
- * common markdown code fences (` ```json ... ``` ` or ` ``` ... ``` `).
- * This handles the common case where models wrap JSON in code blocks
- * despite being told not to.
- *
- * @param text - The raw text to parse.
- * @returns The parsed value.
- * @throws {SyntaxError} When no valid JSON can be extracted.
- */
-function extractJson(text: string): unknown {
-  const trimmed = text.trim();
 
-  // Fast path: direct JSON parse
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    // Fall through to code fence extraction
-  }
-
-  // Try extracting from markdown code fences (```json ... ``` or ``` ... ```)
-  const fenceMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
-  if (fenceMatch?.[1]) {
-    return JSON.parse(fenceMatch[1].trim());
-  }
-
-  // Last resort: find the first { and last } to extract a JSON object
-  const firstBrace = trimmed.indexOf('{');
-  const lastBrace = trimmed.lastIndexOf('}');
-  if (firstBrace !== -1 && lastBrace > firstBrace) {
-    return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
-  }
-
-  throw new SyntaxError(`No valid JSON found in LLM response: ${trimmed.slice(0, 200)}`);
-}
-
-/**
- * Re-parses string-encoded containers where the schema expects an array or
- * object but the model produced a JSON STRING containing one.
- *
- * Models on the tool-use / structured-output path intermittently
- * double-encode a nested container — `{"verdicts": "[{...}]"}` instead of
- * `{"verdicts": [{...}]}` — most often on long, deeply nested payloads. The
- * raw text extracts as valid JSON, so only Zod sees the defect
- * (`invalid_type: expected array, received string`), and a retry re-rolls
- * the same dice with the same prompt.
- *
- * Driven strictly by the validation issues: for each `invalid_type` issue
- * expecting a container whose actual value is a string that syntactically
- * starts like that container, `JSON.parse` the string in place on a clone.
- * One pass, no recursion; anything that does not parse is left untouched so
- * the caller's normal retry/feedback path still applies.
- *
- * @param value - The extracted-but-invalid candidate value.
- * @param error - The Zod error from the failed validation.
- * @returns The (possibly repaired) value and whether any repair applied.
- * @internal
- */
-function repairStringEncodedContainers(
-  value: unknown,
-  error: ZodError,
-): { value: unknown; repaired: boolean } {
-  type ContainerIssue = { code?: string; expected?: string; path?: PropertyKey[] };
-  const targets = (error.issues as unknown as ContainerIssue[]).filter(
-    issue =>
-      issue.code === 'invalid_type' &&
-      (issue.expected === 'array' || issue.expected === 'object'),
-  );
-  if (targets.length === 0) return { value, repaired: false };
-
-  let root: unknown;
-  try {
-    root = structuredClone(value);
-  } catch {
-    // Non-cloneable input (should never happen for JSON-derived data) —
-    // repair is best-effort, never a new failure mode.
-    return { value, repaired: false };
-  }
-
-  let repaired = false;
-  for (const issue of targets) {
-    const path = issue.path ?? [];
-    // Resolve the offending node and its parent inside the clone.
-    let parent: Record<PropertyKey, unknown> | null = null;
-    let node: unknown = root;
-    for (const key of path) {
-      if (node === null || typeof node !== 'object') {
-        node = undefined;
-        break;
-      }
-      parent = node as Record<PropertyKey, unknown>;
-      node = parent[key];
-    }
-    if (typeof node !== 'string') continue;
-    const trimmed = node.trim();
-    const expectsArray = issue.expected === 'array';
-    if (expectsArray ? !trimmed.startsWith('[') : !trimmed.startsWith('{')) continue;
-    let inner: unknown;
-    try {
-      inner = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-    if (path.length === 0) {
-      // The root itself was string-encoded.
-      root = inner;
-      repaired = true;
-      continue;
-    }
-    if (parent) {
-      parent[path[path.length - 1] as PropertyKey] = inner;
-      repaired = true;
-    }
-  }
-  return { value: root, repaired };
-}
 // ---------------------------------------------------------------------------
 // Retry feedback truncation
 // ---------------------------------------------------------------------------
 
-const MAX_FEEDBACK_BAD_RESPONSE_CHARS = 500;
-const MAX_FEEDBACK_VALIDATION_ISSUES = 5;
 
 /**
  * Ceiling for the truncation-aware budget escalation (see the retry loop).
@@ -531,27 +414,7 @@ const TRUNCATION_RETRY_FEEDBACK =
   'The token budget has been increased — respond again with ONLY the complete JSON object, ' +
   'keeping any long string fields as concise as the schema allows.';
 
-/**
- * Truncates a bad LLM response for retry feedback to avoid prompt-token bloat.
- * @internal
- */
-function summarizeBadResponse(text: string): string {
-  if (text.length <= MAX_FEEDBACK_BAD_RESPONSE_CHARS) return text;
-  return `${text.slice(0, MAX_FEEDBACK_BAD_RESPONSE_CHARS)}... (truncated, ${text.length - MAX_FEEDBACK_BAD_RESPONSE_CHARS} more chars)`;
-}
 
-/**
- * Truncates Zod validation errors for retry feedback.
- * @internal
- */
-function summarizeZodErrors(error: ZodError): string {
-  const issues = error.issues.slice(0, MAX_FEEDBACK_VALIDATION_ISSUES);
-  const lines = issues.map(i => `- ${i.path.join('.') || '<root>'}: ${i.message}`);
-  if (error.issues.length > MAX_FEEDBACK_VALIDATION_ISSUES) {
-    lines.push(`(${error.issues.length - MAX_FEEDBACK_VALIDATION_ISSUES} more issues omitted)`);
-  }
-  return lines.join('\n');
-}
 
 /**
  * Grows the output-token budget after a truncated attempt, capped at
