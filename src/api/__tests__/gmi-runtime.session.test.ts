@@ -320,6 +320,22 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     }
   });
 
+  it('close() during a request whose provider reads the abort signal only when an event arrives returns at once; the send rejects with the abort error', async () => {
+    // Anthropic, Gemini and Ollama check the signal per streamed event, so a request
+    // stalled before its first byte holds them until their own timeout (90 s for Anthropic).
+    const k = key(); const g = gate();
+    const s = script('anthropic', k, { replies: [reply.stall([], g.opened, reply.text('Late.'))] });
+    const session = agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-5-5' }).session('s');
+    try {
+      const outcome = session.send('one').then(() => 'resolved', (error: unknown) => error);
+      await vi.waitFor(() => expect(s.seen).toHaveLength(1));
+      expect(await Promise.race([session.close().then(() => 'closed'), sleep(2_000).then(() => 'still waiting')])).toBe('closed');
+      expect(await outcome).toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringMatching(/abort/i) });
+    } finally {
+      g.open();
+    }
+  });
+
   it('a session that streams many turns leaves no listener behind on the signal close() aborts', async () => {
     const warnings: Error[] = [];
     const onWarning = (warning: Error): void => {
