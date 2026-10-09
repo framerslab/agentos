@@ -817,6 +817,15 @@ describe('PostgresVectorStore', () => {
       ]);
     });
 
+    it("reads the indexes of the table in the store's own schema, so a same-named table in another schema does not count", async () => {
+      const store = new PostgresVectorStore({ ...base, tablePrefix: 'tenant1_' });
+      await store.initialize();
+      resetMocks();
+      await store.createCollection('chunks', 8);
+      const read = { sql: 'SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND tablename = $1', params: ['tenant1_chunks'] };
+      expect(queryCalls.filter((call) => call.sql.includes('FROM pg_indexes'))).toEqual([read, read, read]);
+    });
+
     it('matches an array field with $in, $nin, $all and $contains', async () => {
       const store = new PostgresVectorStore({ ...base, manageSchema: false });
       await store.query('chunks', [0, 0], {
