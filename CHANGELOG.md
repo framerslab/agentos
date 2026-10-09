@@ -1,3 +1,13 @@
+## [0.13.8](https://github.com/framerslab/agentos/compare/v0.13.7...v0.13.8) (2026-10-09)
+
+### fix
+
+* **gmi:** structured sends, tool hooks and close() follow-ups (#175) ([4628852](https://github.com/framerslab/agentos/commit/462885215f6788ecc3bcb44722a68b327beec2f6))
+
+### feat
+
+* **evaluation:** score a transcript by its word error rate (#187) ([3fc3fc5](https://github.com/framerslab/agentos/commit/3fc3fc5b94081c91537ec7d9cbef5b7ede90d7c9))
+
 ## [0.13.7](https://github.com/framerslab/agentos/compare/v0.13.6...v0.13.7) (2026-10-09)
 
 ### fix
