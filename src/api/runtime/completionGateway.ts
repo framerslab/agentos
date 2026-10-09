@@ -100,6 +100,12 @@ export interface CompletionGateway {
     options: ModelCompletionOptions,
     responseSchema?: ZodType,
     schemaName?: string,
+    /**
+     * True when `messages` already carry the schema's instructions (a structured
+     * reply puts its own in the system prompt): a hop whose payload carries no
+     * schema then gets no second copy.
+     */
+    schemaInPrompt?: boolean,
   ): CompletionAttempt;
 }
 
@@ -456,6 +462,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     options: ModelCompletionOptions,
     responseSchema?: ZodType,
     schemaName = 'response',
+    schemaInPrompt = false,
   ): CompletionAttempt {
     let settle!: (outcome: CompletionOutcome) => void;
     const outcome = new Promise<CompletionOutcome>((resolveOutcome) => {
@@ -475,8 +482,8 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     ): CompletionOutcome => ({ kind: 'hopFailed', error, retryable, ...(usage ? { usage } : {}) });
 
     const structured = responseSchema ? lowerForHop(resolution, responseSchema, schemaName) : undefined;
-    // A hop whose payload carries no schema gets it in its system prompt.
-    const hopMessages = structured?.schemaInstruction ? withSystemMessage(messages, structured.schemaInstruction) : messages;
+    // A hop whose payload carries no schema gets it in its system prompt, unless the prompt carries it already.
+    const hopMessages = structured?.schemaInstruction && !schemaInPrompt ? withSystemMessage(messages, structured.schemaInstruction) : messages;
     const callOptions: ModelCompletionOptions = {
       ...options,
       ...resolution.optionOverrides,
