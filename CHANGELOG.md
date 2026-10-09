@@ -1,3 +1,10 @@
+## [0.13.19](https://github.com/framerslab/agentos/compare/v0.13.18...v0.13.19) (2026-10-09)
+
+### fix
+
+* **export:** a Feishu channel's encryptKey is redacted (#218) ([cde68cf](https://github.com/framerslab/agentos/commit/cde68cf666dcc66ee2cc854a3713c4bebb905e06))
+* **routing:** the policy router matches a required capability under either spelling (#213) ([e8ab3b6](https://github.com/framerslab/agentos/commit/e8ab3b6ce8ce06ea329889b307e0a8468fff20b2))
+
 ## [0.13.18](https://github.com/framerslab/agentos/compare/v0.13.17...v0.13.18) (2026-10-09)
 
 ### fix
