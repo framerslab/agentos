@@ -1,3 +1,9 @@
+## [0.13.7](https://github.com/framerslab/agentos/compare/v0.13.6...v0.13.7) (2026-10-09)
+
+### fix
+
+* **guardrails:** the review's remaining findings on the required guards (#189) ([c3e37a9](https://github.com/framerslab/agentos/commit/c3e37a9b350b90a7bcf7662971c9e8db6a9268a1))
+
 ## [0.13.6](https://github.com/framerslab/agentos/compare/v0.13.5...v0.13.6) (2026-10-09)
 
 ### feat
