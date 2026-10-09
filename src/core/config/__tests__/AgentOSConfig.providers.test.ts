@@ -19,6 +19,12 @@ describe('createAgentOSConfig provider defaults', () => {
     requests = [];
     manager = new AIModelProviderManager();
     // Exercise provider initialization without contacting a model service.
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (input) => {
+      if (input !== 'https://api.openai.com/v1/models') {
+        throw new Error(`Unexpected fetch request: ${String(input)}`);
+      }
+      return Response.json({ data: [] });
+    }));
     const adapter: AxiosAdapter = async (config) => {
       requests.push(config);
       return { data: { data: [], models: [] }, status: 200, statusText: 'OK', headers: {}, config };
@@ -29,6 +35,7 @@ describe('createAgentOSConfig provider defaults', () => {
   afterEach(async () => {
     await manager.shutdown();
     axios.defaults.adapter = originalAdapter;
+    vi.unstubAllGlobals();
     vi.unstubAllEnvs();
   });
 
