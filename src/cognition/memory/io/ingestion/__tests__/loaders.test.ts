@@ -576,10 +576,27 @@ describe('DocxLoader bound', () => {
   });
 
   it('loads a Word file within the default bound', async () => {
-    const doc = await new DocxLoader().load(zipOf([CONTENT_TYPES, DOCUMENT]));
+    const extractRawText = vi.spyOn(mammoth, 'extractRawText');
+    const file = zipOf([CONTENT_TYPES, DOCUMENT]);
+
+    const doc = await new DocxLoader().load(file);
 
     expect(doc.content.trim()).toBe(PARAGRAPH);
     expect(doc.format).toBe('docx');
+    // The spy sees the loader's own call, so "not called" in the refusals
+    // below means mammoth never ran.
+    expect(extractRawText).toHaveBeenCalledTimes(1);
+    expect(extractRawText).toHaveBeenCalledWith({ buffer: file });
+  });
+
+  it('finds the end record in front of an archive comment', async () => {
+    const zip = zipOf([CONTENT_TYPES, DOCUMENT]);
+    const comment = Buffer.from('a comment after the end record', 'utf8');
+    zip.writeUInt16LE(comment.length, zip.length - 2); // the comment's length
+
+    const doc = await new DocxLoader().load(Buffer.concat([zip, comment]));
+
+    expect(doc.content.trim()).toBe(PARAGRAPH);
   });
 
   it('refuses a file whose entries inflate past the bound, and mammoth never reads it', async () => {
@@ -641,6 +658,22 @@ describe('DocxLoader bound', () => {
     [
       'bytes between the central directory and the end record',
       (zip) => Buffer.concat([zip.subarray(0, zip.length - 22), Buffer.alloc(4), zip.subarray(zip.length - 22)]),
+    ],
+    [
+      'a central directory whose stated size stops one byte short of the end record',
+      (zip) => {
+        // Every header is in place up to the end record, so the stated size
+        // alone tells that JSZip would move every offset by one byte.
+        zip.writeUInt32LE(zip.readUInt32LE(zip.length - 10) - 1, zip.length - 10);
+        return zip;
+      },
+    ],
+    [
+      'another archive in front of it',
+      // The last end record is the one read, as JSZip reads it. Its offsets
+      // count from its own archive's start, one archive further on, so a check
+      // of the first archive would say nothing about the one mammoth reads.
+      (zip) => Buffer.concat([zip, zipOf([CONTENT_TYPES, DOCUMENT])]),
     ],
     [
       'a local header past the end of the file',
