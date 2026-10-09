@@ -661,7 +661,7 @@ The Tool Choice column is what the provider does with the `toolChoice` option
 | OpenAI | `json_schema` with `strict: true` when the schema fits OpenAI's strict rules, otherwise JSON-object mode | Sent as `tool_choice` |
 | Anthropic | A forced tool call whose input is the schema; none on a model that rejects a forced tool choice | `'required'` is sent as `any` and a named function as `tool`; `'none'` is sent as `auto`. A model that rejects a forced choice gets `auto` |
 | Gemini | `responseSchema` with JSON output | Not sent; the API default applies |
-| OpenRouter | Strict `json_schema` when the schema fits, otherwise JSON-object mode | Sent as `tool_choice`; the routed model decides |
+| OpenRouter | Strict `json_schema` when the schema fits, otherwise JSON-object mode. When OpenRouter finds no endpoint that serves the strict schema (HTTP 404, "No endpoints found"), the request is sent once more in JSON-object mode with the schema written into its system prompt, unless the system prompt states a schema already | Sent as `tool_choice`; the routed model decides |
 | Requesty | None | Sent as `tool_choice`; the routed model decides |
 | Groq, Together, Mistral, xAI, LiteLLM | None | Sent as `tool_choice`; the vendor decides which values it accepts |
 | Ollama | None | Not sent |
