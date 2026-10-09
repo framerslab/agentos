@@ -108,7 +108,7 @@ const aria = await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents
 
 ## Generalized Mind Instances (GMIs)
 
-On the full runtime, every session is served by a **GMI**: a persistent agent with its own persona, mood, conversation history and reasoning trace; with `agent({ runtime: 'gmi' })` an agent's sessions are GMIs too. `agent()` without `runtime: 'gmi'` is the lightweight helper; it calls the model with a prompt and keeps session history. A GMI runs a turn loop around the same model, tools, guardrails and cognitive memory:
+On the full runtime, every session is served by a **GMI**: a persistent agent with its own persona, mood, conversation history and reasoning trace; with `agent({ runtime: 'gmi' })` an agent's sessions are GMIs too. `agent()` without `runtime: 'gmi'` is the lightweight helper; it calls the model with a prompt and keeps session history. A GMI of the full runtime runs a turn loop around the same model, tools, guardrails and cognitive memory:
 
 - **Sentiment → metaprompts.** When a persona enables sentiment tracking, every user turn is scored; sustained frustration or confusion fires recovery metaprompts, and a self-reflection metaprompt re-reads the GMI's mood and task context from evidence.
 - **Mood-weighted memory.** With cognitive memory attached, each exchange is encoded with the GMI's current mood and recalled with emotional congruence in the score.
@@ -130,7 +130,7 @@ for await (const chunk of agentos.processRequest({
 }
 ```
 
-`agent({ runtime: 'gmi' })`, also exported as `gmi()`, builds its GMIs in process from the agent's options, with no `AgentOS` runtime. The `'full'` profile adds cognitive memory, sentiment tracking and the five sentiment metaprompts; `'light'`, the default, keeps the reasoning trace and adds memory only when `memory` is set. The runtime's guardrails, retrieval and channels do not run on this path:
+`agent({ runtime: 'gmi' })`, also exported as `gmi()`, builds its GMIs in process from the agent's options, with no `AgentOS` runtime. Of the parts above, these GMIs run the reasoning trace, the mood-weighted memory when memory is on, and sentiment tracking with the five preset event metaprompts (frustration recovery, confusion clarification, satisfaction reinforcement, error recovery and engagement boost) when their profile turns them on. The `'full'` profile turns on cognitive memory, sentiment tracking and those five metaprompts; `'light'`, the default, keeps the reasoning trace and adds memory only when `memory` is set. The self-reflection metaprompt, the self-modification tools, persona overlays and the runtime's guardrails, retrieval and channels do not run on this path. This tutor's GMIs run every part this path has:
 
 ```ts
 import { agent } from '@framers/agentos';

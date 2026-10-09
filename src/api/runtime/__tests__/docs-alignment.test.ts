@@ -14,6 +14,29 @@ function exists(relativeToThisFile: string): boolean {
   } catch { return false; }
 }
 
+/**
+ * The options of each `agent({ ... })` call in `text` that set `memory` (to
+ * anything but `false`) without `runtime: 'gmi'`. agent() reads `memory` only on
+ * the GMI path, so such a call shows an option that does nothing.
+ */
+function plainAgentCallsWithMemory(text: string): string[] {
+  const found: string[] = [];
+  for (const match of text.matchAll(/\bagent\(\{/g)) {
+    const open = (match.index ?? 0) + match[0].length - 1;
+    let depth = 0;
+    let close = open;
+    for (; close < text.length; close += 1) {
+      if (text[close] === '{') depth += 1;
+      else if (text[close] === '}' && --depth === 0) break;
+    }
+    const options = text.slice(open, close + 1);
+    if (/\bmemory\s*:(?!\s*false\b)/.test(options) && !/\bruntime\s*:\s*['"]gmi['"]/.test(options)) {
+      found.push(options.replace(/\s+/g, ' ').slice(0, 120));
+    }
+  }
+  return found;
+}
+
 /** Skip tests that reference files outside the agentos package (e.g. in CI where submodules aren't checked out). */
 const hasLiveDocs = exists('../../../../../apps/agentos-live-docs/docs/index.md');
 const hasSkillsPackages = exists('../../../../agentos-skills/package.json');
@@ -67,10 +90,20 @@ describe('AgentOS docs alignment', () => {
     const readme = read('../../../../README.md');
     const guide = read('../../../../docs/getting-started/HIGH_LEVEL_API.md');
     const example = read('../../../../examples/high-level-api.mjs');
+    const gmiGuide = read('../../../../docs/GMI.md');
+    const personality = read('../../../../docs/memory/HEXACO_PERSONALITY.md');
 
     expect(readme).not.toContain('memory: { enabled: true, cognitive: true }');
-    expect(guide).toContain("types: ['episodic', 'semantic']");
-    expect(example).toContain("working: { enabled: true }");
+    // The guide's memory example runs on the GMI path, the one agent() path that reads memory.
+    expect(guide).toMatch(/agent\(\{\s*runtime: 'gmi',[^`]*\bmemory: \{ embedding: \{/);
+    // The guide names the MemoryConfig fields the GMI path reads, and says the other path reads none.
+    expect(guide).toContain('Of the `MemoryConfig` fields, this path reads `embedding` and `consolidation`');
+    expect(guide).toContain("without `runtime: 'gmi'` the agent reads no `memory` option at all");
+    // No example passes memory to an agent() that does not read it.
+    const pages = { 'README.md': readme, 'docs/getting-started/HIGH_LEVEL_API.md': guide, 'examples/high-level-api.mjs': example, 'docs/GMI.md': gmiGuide, 'docs/memory/HEXACO_PERSONALITY.md': personality };
+    for (const [page, text] of Object.entries(pages)) {
+      expect(plainAgentCallsWithMemory(text), page).toEqual([]);
+    }
   });
 
   it('keeps the high-level API guide aligned with provider-agnostic image generation', () => {

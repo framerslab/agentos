@@ -336,6 +336,7 @@ export * from './api/runtime/processRequestWithRegisteredTools.js';
 export * from './api/runtime/resumeExternalToolRequestWithRegisteredTools.js';
 export type {
   AgencyOptions,
+  AgencySeatConfig,
   AgencyStrategy,
   AgencyConfigError as AgencyConfigErrorType,
   AgencyCallbacks,

@@ -1,3 +1,19 @@
+## [0.13.14](https://github.com/framerslab/agentos/compare/v0.13.13...v0.13.14) (2026-10-09)
+
+### fix
+
+* **tools:** tool arguments and output previews reach the console only when tool-call logging is on (#207) ([ef8efd4](https://github.com/framerslab/agentos/commit/ef8efd44648eea04968c7a11b65aab4e42b585e1))
+
+## [0.13.13](https://github.com/framerslab/agentos/compare/v0.13.12...v0.13.13) (2026-10-09)
+
+### fix
+
+* **gmi:** follow-ups from the review of the gmi() guide (#199) ([e002c5b](https://github.com/framerslab/agentos/commit/e002c5b6c93ba0a04ed65fada8013bd63ebf2837))
+
+### docs
+
+* seventh round of audit follow-ups to the guides (#201) ([31219f0](https://github.com/framerslab/agentos/commit/31219f0ba6797954ff2408b0414f543cf4f8705b))
+
 ## [0.13.12](https://github.com/framerslab/agentos/compare/v0.13.11...v0.13.12) (2026-10-09)
 
 ### feat

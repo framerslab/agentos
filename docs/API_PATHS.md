@@ -10,7 +10,7 @@ AgentOS exposes two ways to run a model, and they do not share a runtime. The li
 
 ## GMIs from agent()
 
-`agent({ runtime: 'gmi' })` returns [`gmi(opts)`](https://github.com/framerslab/agentos/blob/master/src/api/gmi.ts), also exported as `gmi()` and `createGmi()`. It keeps the `agent()` options and the `Agent` surface, and serves each session with a GMI built in process from them, with no `AgentOS` runtime: a persona from the system prompt `agent()` sends and the `personality` traits, the agent's tools, a completion gateway built from its provider and fallback options, and, as its `cognition` profile sets them, cognitive memory, sentiment tracking and metaprompts. The session store holds the history; `generate()` and `stream()` run one turn on a GMI built for that call. The runtime's guardrails, retrieval, capability discovery, emergent tools, permissions and human-in-the-loop are accepted with a warning and not applied, and `voice`, `avatar` and `channels` throw at construction. [GMIs from agent()](./GMI.md#gmis-from-agent) describes the path.
+`agent({ runtime: 'gmi' })` returns [`gmi(opts)`](https://github.com/framerslab/agentos/blob/master/src/api/gmi.ts), also exported as `gmi()` and `createGmi()`. It keeps the `agent()` options and the `Agent` surface, and serves each session with a GMI built in process from them, with no `AgentOS` runtime: a persona from the system prompt `agent()` sends and the `personality` traits, the agent's tools, a completion gateway built from its provider and fallback options, and, as its `cognition` profile sets them, cognitive memory, sentiment tracking and metaprompts. The session store holds the history; `generate()` and `stream()` run one turn on a GMI built for that call. The runtime's guardrails, retrieval, capability discovery, emergent tools, permissions and human-in-the-loop are accepted with a warning and not applied, and `voice`, `avatar` and `channels` throw at construction when set (a config that sets only `enabled: false` is not). [GMIs from agent()](./GMI.md#gmis-from-agent) describes the path.
 
 ## The runtime path
 
@@ -23,7 +23,7 @@ AgentOS exposes two ways to run a model, and they do not share a runtime. The li
 | Option | `agent` | `generation` | `runtime` | `gmi` |
 |---|---|---|---|---|
 | `tools` | enforced | enforced | enforced | enforced |
-| `memory` | partially enforced | runtime only | enforced | enforced |
+| `memory` | accepted but deferred | runtime only | enforced | enforced |
 | `rag` | accepted but deferred | runtime only | enforced | accepted but deferred |
 | `discovery` | accepted but deferred | runtime only | enforced | accepted but deferred |
 | `guardrails` | accepted but deferred | partially enforced | enforced | accepted but deferred |
@@ -38,7 +38,7 @@ AgentOS exposes two ways to run a model, and they do not share a runtime. The li
 | `observability` | partially enforced | partially enforced | enforced | partially enforced |
 | `controls` | partially enforced | runtime only | enforced | partially enforced |
 
-`agent()` and `gmi()` each log one warning naming the options set that their surface accepts but defers, and `gmi()` throws at construction for `voice` and `channels` (and for `avatar`). `agent()` without `runtime: 'gmi'` and `agency()` warn when they receive a `cognitiveMechanisms` config, because they run no cognitive memory manager; with `runtime: 'gmi'` and memory on, the agent's memory manager runs the mechanisms.
+`agent()` and `gmi()` each log one warning naming the options set that their surface accepts but defers, and `gmi()` throws at construction for `voice` and `channels` (and for `avatar`), unless the config sets only `enabled: false`. `agent()` without `runtime: 'gmi'` reads no part of `memory`, and its warning says that `runtime: 'gmi'` applies it. `agent()` without `runtime: 'gmi'` and `agency()` warn when they receive a `cognitiveMechanisms` config, because they run no cognitive memory manager; with `runtime: 'gmi'` and memory on, the agent's memory manager runs the mechanisms.
 
 ## Choosing
 

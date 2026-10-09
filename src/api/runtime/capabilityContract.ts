@@ -33,7 +33,8 @@ export type CapabilityKey = (typeof CAPABILITY_KEYS)[number];
 
 export const BASE_AGENT_CONFIG_CAPABILITY_CONTRACT = {
   tools: { agent: 'enforced', generation: 'enforced', runtime: 'enforced', gmi: 'enforced' },
-  memory: { agent: 'partially_enforced', generation: 'runtime_only', runtime: 'enforced', gmi: 'enforced' },
+  // agent() reads `memory` only with runtime: 'gmi', which is the `gmi` surface.
+  memory: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'enforced' },
   rag: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
   discovery: { agent: 'accepted_but_deferred', generation: 'runtime_only', runtime: 'enforced', gmi: 'accepted_but_deferred' },
   guardrails: { agent: 'accepted_but_deferred', generation: 'partially_enforced', runtime: 'enforced', gmi: 'accepted_but_deferred' },

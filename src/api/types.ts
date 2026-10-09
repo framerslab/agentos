@@ -8,6 +8,7 @@
  */
 
 import type { AdaptableToolInput } from './runtime/toolAdapter.js';
+import type { CognitionConfig, CognitionProfile } from './runtime/gmiCognition.js';
 
 // ---------------------------------------------------------------------------
 // Scalar union literals
@@ -1602,6 +1603,41 @@ export interface VerifyCitationsConfig {
 }
 
 // ---------------------------------------------------------------------------
+// AgencySeatConfig — a roster seat written as a config
+// ---------------------------------------------------------------------------
+
+/**
+ * A roster seat of `agency()` written as a config. The agency builds the seat
+ * with `agent()`, so the two options that pick an agent's engine are read on a
+ * seat as `agent()` reads them.
+ *
+ * @example
+ * ```ts
+ * agency({
+ *   provider: 'openai',
+ *   agents: {
+ *     researcher: { runtime: 'gmi', instructions: 'Find relevant papers.' },
+ *     writer: { instructions: 'Write a clear summary.' },
+ *   },
+ * });
+ * ```
+ */
+export interface AgencySeatConfig extends BaseAgentConfig {
+  /**
+   * Which engine serves the seat. `'legacy'` (the default) calls the model through
+   * generateText and streamText; `'gmi'` serves each of the seat's calls with a
+   * Generalized Mind Instance (docs/GMI.md, "GMIs from agent()").
+   */
+  runtime?: 'legacy' | 'gmi';
+  /**
+   * GMI profile when `runtime` is `'gmi'`, validated each time a run builds the
+   * seat. The strategies call a seat's `generate()` and `stream()`, which run the
+   * `'light'` profile whatever this option names.
+   */
+  cognition?: CognitionProfile | CognitionConfig;
+}
+
+// ---------------------------------------------------------------------------
 // AgencyOptions — extends BaseAgentConfig with multi-agent fields
 // ---------------------------------------------------------------------------
 
@@ -1641,10 +1677,11 @@ export interface VerifyCitationsConfig {
  */
 export interface AgencyOptions extends BaseAgentConfig {
   /**
-   * Named roster of sub-agents.  Each value is either a `BaseAgentConfig`
-   * object (the agency will instantiate it) or a pre-built `Agent` instance.
+   * Named roster of sub-agents.  Each value is either a seat config (the agency
+   * builds it with `agent()`; see {@link AgencySeatConfig}) or a pre-built `Agent`
+   * instance.
    */
-  agents: Record<string, BaseAgentConfig | Agent>;
+  agents: Record<string, AgencySeatConfig | Agent>;
   /**
    * Minimum viable panel for the `parallel` strategy, checked AFTER the
    * fan-out against the agents that actually SUCCEEDED (HITL-rejected and

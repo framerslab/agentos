@@ -23,8 +23,12 @@ export interface ProviderScript {
    * any chunk. An Error among the chunks is thrown at that point of the stream.
    */
   replies: Array<Array<Record<string, unknown> | Error> | Error>;
-  /** Every model call: the model, a copy of the messages, and the options. */
-  seen: Array<{ modelId: string; messages: ChatMessage[]; options: Record<string, unknown> }>;
+  /**
+   * Every model call: the model, a copy of the messages, the options, and
+   * whether the caller asked for a stream. A GMI streams every model call;
+   * agent() without `runtime: 'gmi'` streams only for `stream()`.
+   */
+  seen: Array<{ modelId: string; messages: ChatMessage[]; options: Record<string, unknown>; streamed: boolean }>;
   /** How many embedding requests reached the provider. */
   embedCalls: number;
   /**
@@ -168,7 +172,7 @@ export function stubProviderClass(providerId: string) {
     async generateCompletion(modelId: string, messages: ChatMessage[], options: Record<string, unknown>) {
       const s = this.script;
       if (!s?.whole) throw new Error(`${providerId}: the GMI path streams`);
-      s.seen.push({ modelId, messages: JSON.parse(JSON.stringify(messages)), options });
+      s.seen.push({ modelId, messages: JSON.parse(JSON.stringify(messages)), options, streamed: false });
       const next = s.replies.shift();
       if (!next) throw new Error(`${providerId}: unexpected model call`);
       if (next instanceof Error) throw next;
@@ -186,7 +190,7 @@ export function stubProviderClass(providerId: string) {
 
     async *generateCompletionStream(modelId: string, messages: ChatMessage[], options: Record<string, unknown>) {
       const s = this.script!;
-      s.seen.push({ modelId, messages: JSON.parse(JSON.stringify(messages)), options });
+      s.seen.push({ modelId, messages: JSON.parse(JSON.stringify(messages)), options, streamed: true });
       const next = s.replies.shift();
       if (!next) throw new Error(`${providerId}: unexpected model call`);
       const signal = options.abortSignal as AbortSignal | undefined;
