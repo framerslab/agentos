@@ -177,6 +177,7 @@ export {
   type StateChangeEvent,
 } from './CircuitBreaker.js';
 export { AudioRingBuffer, type AudioRingBufferOptions } from './AudioRingBuffer.js';
+export { InputSilenceWatch, inputLevelDb, type InputSilenceWatchOptions } from './inputLevel.js';
 export {
   TranscriptDedupe,
   type TranscriptObservation,
