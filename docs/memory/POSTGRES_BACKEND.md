@@ -162,7 +162,7 @@ const statements = PostgresVectorStore.schemaSql('chunks', 1536, {
 // CREATE TABLE IF NOT EXISTS "app_chunks" (...), then CREATE INDEX for "app_chunks_hnsw", "_metadata" and "_fts"
 ```
 
-The third argument may also be the metric alone: `schemaSql('chunks', 1536, 'cosine')`. Give the store the same prefix, text search configuration and `similarityMetric`: with `manageSchema: false` it takes the metric from `similarityMetric` and reads no collections table. `schemaSql()` throws unless the collection's name, with and without its prefix, is letters, digits and underscores that do not start with a digit, and the dimension is a positive integer. `dropCollection()` throws on a store with `manageSchema: false`: its tables are dropped by a migration too.
+The third argument may also be the metric alone: `schemaSql('chunks', 1536, 'cosine')`. Give the store the same prefix, text search configuration and `similarityMetric`: with `manageSchema: false` it takes the metric from `similarityMetric` and reads no collections table. `schemaSql()` throws unless the collection's name, with and without its prefix, is letters, digits and underscores that do not start with a digit, the name with its prefix is at most 54 characters (Postgres keeps 63 bytes of a name, so the longest index name, ending in `_metadata`, stays whole), and the dimension is a positive integer. `dropCollection()` throws on a store with `manageSchema: false`: its tables are dropped by a migration too.
 
 ### Text search configuration
 

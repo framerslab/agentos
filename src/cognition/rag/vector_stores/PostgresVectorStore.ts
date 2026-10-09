@@ -152,12 +152,13 @@ export class PostgresVectorStore implements IVectorStore {
    * The statements that make one collection's table and its three indexes, for a caller that runs its own
    * migrations with `manageSchema: false`. The extension itself (`CREATE EXTENSION vector`) is the caller's.
    *
-   * @param collection - The collection's name: letters, digits and underscores.
+   * @param collection - The collection's name: letters, digits and underscores, at most 54 characters with the prefix.
    * @param dimension - The length of the embeddings the collection holds.
    * @param options - The similarity metric (`'cosine'` when left out), on its own or with the table prefix and the
    *   text search configuration (`'english'` when left out). Give the store the same three.
    * @returns The `CREATE TABLE` statement and the three `CREATE INDEX` statements, in the order to run them.
-   * @throws When a name or the dimension cannot be written into SQL as given.
+   * @throws When a name or the dimension cannot be written into SQL as given, or the name with its prefix is longer
+   *   than 54 characters.
    *
    * @example
    * for (const statement of PostgresVectorStore.schemaSql('chunks', 1536, { tablePrefix: 'app_', textSearchConfig: 'simple' })) {
@@ -177,6 +178,11 @@ export class PostgresVectorStore implements IVectorStore {
       typeof options === 'string' ? { metric: options } : (options ?? {});
     const name = `${settings.tablePrefix ?? ''}${PostgresVectorStore.plainName(collection, 'collection name')}`;
     PostgresVectorStore.plainName(name, 'collection name');
+    // Postgres keeps 63 bytes of a name. Up to 54 characters every index name stays whole; from 62 the three would
+    // cut to one name, and IF NOT EXISTS would skip two of the indexes.
+    if (name.length > 54) {
+      throw new Error('PostgresVectorStore: the collection name, with its prefix, must be at most 54 characters, so that its index names stay whole.');
+    }
     if (!Number.isInteger(dimension) || dimension < 1) throw new Error('PostgresVectorStore: the dimension must be a positive integer.');
     const config = PostgresVectorStore.textSearchConfigOf(settings.textSearchConfig);
     const ops = settings.metric === 'euclidean' ? 'vector_l2_ops' : settings.metric === 'dotproduct' ? 'vector_ip_ops' : 'vector_cosine_ops';

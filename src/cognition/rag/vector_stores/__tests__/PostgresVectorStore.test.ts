@@ -824,6 +824,9 @@ describe('PostgresVectorStore', () => {
       ]);
       expect(() => PostgresVectorStore.schemaSql('chunks', 8, { textSearchConfig: "simple'); DROP" })).toThrow('text search configuration');
       expect(() => PostgresVectorStore.schemaSql('chu"nks', 8)).toThrow('collection name');
+      const longest = 'c'.repeat(46);
+      expect(PostgresVectorStore.schemaSql(longest, 8, { tablePrefix: 'library_' })[2]).toBe(`CREATE INDEX IF NOT EXISTS "library_${longest}_metadata" ON "library_${longest}" USING gin (metadata_json)`);
+      expect(() => PostgresVectorStore.schemaSql(`${longest}c`, 8, { tablePrefix: 'library_' })).toThrow('at most 54 characters');
     });
 
     it('takes the metric alone as the third argument of schemaSql', () => {
