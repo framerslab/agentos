@@ -1,3 +1,14 @@
+## [0.13.4](https://github.com/framerslab/agentos/compare/v0.13.3...v0.13.4) (2026-10-09)
+
+### docs
+
+* the capability ceiling and the effect capabilities in the self-extension and architecture pages (#188) ([8bf953d](https://github.com/framerslab/agentos/commit/8bf953d679dce2f8a2639cbc6375ba52afa91139))
+
+### feat
+
+* **emergent:** writes, deletes and state-changing requests for code-forged tools (#183) ([2ca7fa2](https://github.com/framerslab/agentos/commit/2ca7fa2e5a80ab2b65f65bd89d5bbc0875b80328))
+* **voice-pipeline:** write transcripts into a LiveKit room as transcription streams, and read them back (#174) ([a20ff4f](https://github.com/framerslab/agentos/commit/a20ff4f8e7c0079534814fc228c3813418c68a25))
+
 ## [0.13.3](https://github.com/framerslab/agentos/compare/v0.13.2...v0.13.3) (2026-10-08)
 
 ### feat
