@@ -1,6 +1,6 @@
 ---
 title: Cognitive Pipeline
-description: Per-message LLM-as-judge routing for AgentOS — ingest, recall, read stages with one classifier call per query
+description: Per-message LLM-as-judge routing for AgentOS. Ingest, recall and read stages; recallAndRead() makes two classifier calls per query, three with the memory-or-not gate
 keywords:
   - cognitive pipeline
   - agent memory routing
