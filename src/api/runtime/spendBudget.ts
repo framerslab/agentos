@@ -58,8 +58,15 @@ export class UnpricedModelError extends Error {
   }
 }
 
-/** The output tokens a call is assumed to use when it names no cap. */
+/** The output tokens a call is assumed to use when it names no cap, or a cap of NaN. */
 export const DEFAULT_OUTPUT_ESTIMATE_TOKENS = 4096;
+
+/** The output tokens a call is estimated with: its cap, or {@link DEFAULT_OUTPUT_ESTIMATE_TOKENS} without one. */
+function outputTokensOf(maxOutputTokens: number | undefined): number {
+  // A cap of NaN (what `Number(undefined)` gives) limits nothing: OpenAI is sent it as null. An estimate made with it
+  // would be NaN, which every check lets through, since every comparison with NaN is false.
+  return maxOutputTokens === undefined || Number.isNaN(maxOutputTokens) ? DEFAULT_OUTPUT_ESTIMATE_TOKENS : maxOutputTokens;
+}
 
 let budgets = 0;
 
@@ -172,20 +179,21 @@ export function tokensOfChars(chars: number): number {
 }
 
 /**
- * The most a call could cost: its prompt's assumed tokens at the input rate and its output cap at the output rate.
+ * The most a call could cost: its prompt's assumed tokens at the input rate and its output cap at the output rate
+ * ({@link DEFAULT_OUTPUT_ESTIMATE_TOKENS} when it names none, or a cap of NaN).
  * Undefined when the provider's model has no price row (only OpenAI's table is known here).
  */
 export function estimateCallCostUSD(providerId: string, modelId: string, promptChars: number, maxOutputTokens: number | undefined): number | undefined {
   const price = providerId === 'openai' ? openAIModelPricing(modelId) : undefined;
   if (!price) return undefined;
-  const output = maxOutputTokens ?? DEFAULT_OUTPUT_ESTIMATE_TOKENS;
+  const output = outputTokensOf(maxOutputTokens);
   return (tokensOfChars(promptChars) / 1000) * price.input + (output / 1000) * price.output;
 }
 
 /**
  * Checks a provider call against a budget before it is sent: its prompt of `promptChars` characters and its output cap
- * (or {@link DEFAULT_OUTPUT_ESTIMATE_TOKENS} without one), priced at the model's row and counted against the token
- * budget, through {@link SpendBudget.assertCanSpend}.
+ * (or {@link DEFAULT_OUTPUT_ESTIMATE_TOKENS} without one, or for a cap of NaN), priced at the model's row and counted
+ * against the token budget, through {@link SpendBudget.assertCanSpend}.
  *
  * @internal Called by the generation helpers before each provider call.
  */
@@ -198,7 +206,7 @@ export function assertCallWithinBudget(
 ): void {
   budget.assertCanSpend(
     estimateCallCostUSD(route.providerId, route.modelId, promptChars, maxOutputTokens),
-    tokensOfChars(promptChars) + (maxOutputTokens ?? DEFAULT_OUTPUT_ESTIMATE_TOKENS),
+    tokensOfChars(promptChars) + outputTokensOf(maxOutputTokens),
     what,
     { providerId: route.providerId, modelId: route.modelId },
   );
