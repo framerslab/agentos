@@ -837,3 +837,569 @@ describe('OpenAIRealtimeTranscriptionSTT: reconnects, failures, flush and close'
     expect(Sockets.instances).toHaveLength(1);
   });
 });
+
+describe('OpenAIRealtimeTranscriptionSTT: rollover and usage', () => {
+  const ROLLOVER = { afterMs: 10_000, deadlineMs: 20_000, overlapMs: 1_000, hardStopMs: 30_000 };
+
+  it('opens the next connection at the first end of speech after 55 minutes by default', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
+    const session = await stt.startSession();
+    record(session);
+    const first = Sockets.instances[0];
+    await vi.advanceTimersByTimeAsync(54 * 60_000);
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    first.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 500 });
+    await settle();
+    expect(Sockets.instances).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_B', audio_start_ms: 1_000 });
+    first.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_B', audio_end_ms: 1_500 });
+    await settle();
+    expect(Sockets.instances).toHaveLength(2);
+    expect(Sockets.instances[1].sent[0]).toEqual(first.sent[0]);
+    session.close();
+  });
+
+  it('opens the next connection at 58 minutes when no speech ends, by default', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
+    const session = await stt.startSession();
+    record(session);
+    await vi.advanceTimersByTimeAsync(58 * 60_000 - 1);
+    await settle();
+    expect(Sockets.instances).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await settle();
+    expect(Sockets.instances).toHaveLength(2);
+    session.close();
+  });
+
+  it('sends the same audio to both connections through the overlap, then drains and closes the old one', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, rollover: ROLLOVER });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    await vi.advanceTimersByTimeAsync(10_000);
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    first.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 400 });
+    await settle();
+    const second = Sockets.instances[1];
+    session.pushAudio(frame(2_400));
+    expect(sentOfType(first, 'input_audio_buffer.append')).toHaveLength(1);
+    expect(sentOfType(second, 'input_audio_buffer.append')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1_000); // the overlap passes; the old connection is quiet
+    expect(sentOfType(first, 'input_audio_buffer.clear')).toHaveLength(1);
+    session.pushAudio(frame(2_400));
+    expect(sentOfType(first, 'input_audio_buffer.append')).toHaveLength(1);
+    expect(sentOfType(second, 'input_audio_buffer.append')).toHaveLength(2);
+    first.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'Before the switch.',
+    });
+    await settle();
+    expect(first.close).toHaveBeenCalledOnce();
+    expect(log.transcripts.map((t) => t.text)).toEqual(['Before the switch.']);
+    expect(log.usage).toEqual([
+      {
+        providerId: 'openai-realtime-transcription',
+        model: 'gpt-4o-mini-transcribe',
+        connectionIndex: 1,
+        audioSeconds: 0.1,
+        final: true,
+      },
+    ]);
+    session.close();
+  });
+
+  it('emits an utterance both connections transcribed once, from the old connection, with no interims from the new one', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, rollover: ROLLOVER });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    session.pushAudio(frame(24_000)); // 0 to 1000 ms on the session clock, first connection only
+    await vi.advanceTimersByTimeAsync(10_000);
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    first.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+    await settle();
+    const second = Sockets.instances[1];
+    session.pushAudio(frame(24_000)); // 1000 to 2000 ms, to both connections
+    // One utterance at 1100 to 1900 ms, heard by both: the second connection's clock starts at 1000.
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'old_B', audio_start_ms: 1_100 });
+    second.serve({ type: 'input_audio_buffer.speech_started', item_id: 'new_B', audio_start_ms: 100 });
+    first.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'old_B', audio_end_ms: 1_900 });
+    second.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'new_B', audio_end_ms: 900 });
+    second.serve({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'new_B', delta: 'Same words' });
+    first.serve({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'old_B', delta: 'Same words' });
+    second.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'new_B',
+      transcript: 'Same words.',
+    });
+    first.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'old_B',
+      transcript: 'Same words.',
+    });
+    first.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'First.',
+    });
+    expect(log.transcripts.map((t) => [t.itemId, t.isFinal, t.text])).toEqual([
+      ['old_B', false, 'Same words'],
+      ['old_B', true, 'Same words.'],
+      ['item_A', true, 'First.'],
+    ]);
+    session.close();
+  });
+
+  it('drops the repeat even when the old connection closed before the new one reported that audio', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, rollover: ROLLOVER });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    session.pushAudio(frame(24_000)); // 0 to 1000 ms, first connection only
+    await vi.advanceTimersByTimeAsync(10_000);
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    first.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+    await settle();
+    const second = Sockets.instances[1];
+    session.pushAudio(frame(24_000)); // 1000 to 2000 ms, to both
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'old_B', audio_start_ms: 1_100 });
+    first.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'old_B', audio_end_ms: 1_900 });
+    await vi.advanceTimersByTimeAsync(1_000); // the overlap passes: the first connection stops at 2000 ms
+    first.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'First.',
+    });
+    first.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'old_B',
+      transcript: 'Same words.',
+    });
+    await settle();
+    expect(first.close).toHaveBeenCalledOnce(); // its items are final: it has drained and closed
+    // Only now does the second connection report the same utterance, 1100 to 1900 ms on the session clock.
+    second.serve({ type: 'input_audio_buffer.speech_started', item_id: 'new_B', audio_start_ms: 100 });
+    second.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'new_B', audio_end_ms: 900 });
+    second.serve({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'new_B', delta: 'Same words' });
+    second.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'new_B',
+      transcript: 'Same words.',
+    });
+    expect(log.transcripts.map((t) => [t.itemId, t.isFinal, t.text])).toEqual([
+      ['item_A', true, 'First.'],
+      ['old_B', true, 'Same words.'],
+    ]);
+    session.close();
+  });
+
+  it('emits an utterance whose onset came after the old connection stopped receiving audio', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, rollover: ROLLOVER });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    session.pushAudio(frame(24_000)); // 0 to 1000 ms, first connection only
+    await vi.advanceTimersByTimeAsync(10_000);
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    first.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+    await settle();
+    const second = Sockets.instances[1];
+    session.pushAudio(frame(24_000)); // 1000 to 2000 ms, to both
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'old_B', audio_start_ms: 1_100 });
+    first.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'old_B', audio_end_ms: 1_900 });
+    await vi.advanceTimersByTimeAsync(1_000); // the overlap passes: the first connection stops at 2000 ms
+    session.pushAudio(frame(24_000)); // 2000 to 3000 ms, second connection only
+    // A short reply whose start (with 600 ms of prefix padding) reaches back to 1700 ms,
+    // inside old_B give or take the tolerance, but whose onset (2300 ms) the first connection never heard.
+    second.serve({ type: 'input_audio_buffer.speech_started', item_id: 'new_C', audio_start_ms: 700 });
+    second.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'new_C', audio_end_ms: 1_300 });
+    second.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'new_C',
+      transcript: 'Yes.',
+    });
+    first.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'old_B',
+      transcript: 'Earlier words.',
+    });
+    first.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'First.',
+    });
+    expect(log.transcripts.filter((t) => t.isFinal).map((t) => [t.itemId, t.text])).toEqual([
+      ['new_C', 'Yes.'],
+      ['old_B', 'Earlier words.'],
+      ['item_A', 'First.'],
+    ]);
+    session.close();
+  });
+
+  it('commits and drains an old connection still in speech at its hard stop', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, rollover: ROLLOVER });
+    const session = await stt.startSession();
+    record(session);
+    const first = Sockets.instances[0];
+    session.pushAudio(frame(2_400));
+    await vi.advanceTimersByTimeAsync(20_000); // the deadline: the next connection opens whatever is said
+    await settle();
+    expect(Sockets.instances).toHaveLength(2);
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_long', audio_start_ms: 50 });
+    session.pushAudio(frame(2_400));
+    await vi.advanceTimersByTimeAsync(1_000); // the overlap passes while the old connection is in speech
+    expect(sentOfType(first, 'input_audio_buffer.clear')).toEqual([]);
+    await vi.advanceTimersByTimeAsync(9_000); // 30 s: the old connection's hard stop
+    expect(sentOfType(first, 'input_audio_buffer.commit')).toHaveLength(1);
+    session.close();
+  });
+
+  it('keeps the connection when the rollover is refused, and closes the session at its hard stop', async () => {
+    fakeClock();
+    const approve = vi.fn(async (_request: unknown) => false);
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, rollover: { ...ROLLOVER, approve } });
+    const session = await stt.startSession();
+    const log = record(session);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await settle();
+    expect(approve).toHaveBeenCalledWith({ connectionIndex: 2, reason: 'deadline' });
+    expect(Sockets.instances).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await settle();
+    expect(log.events).toContain('close');
+    expect(log.errors).toEqual([]);
+  });
+
+  it('reports usage per connection: at every interval while open, and once more when each closes', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, rollover: ROLLOVER, usageIntervalMs: 5_000 });
+    const session = await stt.startSession();
+    const log = record(session);
+    session.pushAudio(frame(12_000)); // 0.5 s
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(log.usage).toEqual([
+      {
+        providerId: 'openai-realtime-transcription',
+        model: 'gpt-4o-mini-transcribe',
+        connectionIndex: 1,
+        audioSeconds: 0.5,
+        final: false,
+      },
+    ]);
+    await vi.advanceTimersByTimeAsync(15_000); // 20 s: the deadline opens connection 2
+    await settle();
+    session.pushAudio(frame(24_000)); // 1 s to both connections
+    await vi.advanceTimersByTimeAsync(1_000); // the overlap passes; connection 1 is quiet and closes
+    await settle();
+    session.pushAudio(frame(6_000)); // 0.25 s to connection 2 only
+    session.close();
+    expect(log.usage.filter((entry) => entry.final).map((entry) => [entry.connectionIndex, entry.audioSeconds])).toEqual([
+      [1, 1.5],
+      [2, 1.25],
+    ]);
+  });
+
+  it('with client commits, switches at the first flush after the rollover age, with no overlap', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, turnDetection: null, rollover: ROLLOVER });
+    const session = await stt.startSession();
+    record(session);
+    const first = Sockets.instances[0];
+    await vi.advanceTimersByTimeAsync(10_000);
+    session.pushAudio(frame(2_400));
+    const flushing = session.flush();
+    expect(sentOfType(first, 'input_audio_buffer.commit')).toHaveLength(1);
+    session.pushAudio(frame(2_400)); // after the turn: waits for the next connection
+    expect(sentOfType(first, 'input_audio_buffer.append')).toHaveLength(1);
+    first.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    first.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'The last turn here.',
+    });
+    await flushing;
+    await settle();
+    const second = Sockets.instances[1];
+    expect(sentOfType(second, 'input_audio_buffer.append')).toHaveLength(1);
+    expect(sentOfType(first, 'input_audio_buffer.clear')).toEqual([]);
+    expect(first.close).toHaveBeenCalledOnce();
+    session.close();
+  });
+
+  it('reconnects when the connection that took over drops during the overlap, once the old one has drained, on the clocks of the one that dropped', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, rollover: ROLLOVER });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    await vi.advanceTimersByTimeAsync(10_000);
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    first.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 400 });
+    await settle();
+    expect(Sockets.instances).toHaveLength(2);
+    Sockets.instances[1].drop();
+    await settle();
+    expect(Sockets.instances).toHaveLength(2); // the old connection still takes audio: no reconnect yet
+    await vi.advanceTimersByTimeAsync(1_000); // the overlap passes; the old connection drains
+    first.serve({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item_A', transcript: 'Before the switch.' });
+    await settle();
+    expect(first.close).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    expect(Sockets.instances).toHaveLength(3);
+    session.pushAudio(frame(2_400));
+    expect(sentOfType(Sockets.instances[2], 'input_audio_buffer.append')).toHaveLength(1);
+    // The replacement runs on the clocks of the connection that took over at 10 s, not on the old one's:
+    // an end of speech 1.1 s after that is no rollover.
+    Sockets.instances[2].serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_C', audio_start_ms: 0 });
+    Sockets.instances[2].serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_C', audio_end_ms: 50 });
+    await settle();
+    expect(Sockets.instances).toHaveLength(3);
+    expect(log.events).not.toContain('close');
+    session.close();
+  });
+
+  it('gives a connection opened after a drop the dropped connection\'s clocks, so the deadline keeps its time', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, rollover: ROLLOVER });
+    const session = await stt.startSession();
+    record(session);
+    await vi.advanceTimersByTimeAsync(15_000);
+    Sockets.instances[0].drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    expect(Sockets.instances).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(4_800);
+    await settle();
+    expect(Sockets.instances).toHaveLength(2); // 19.9 s after the first connection opened: no rollover yet
+    await vi.advanceTimersByTimeAsync(200);
+    await settle();
+    expect(Sockets.instances).toHaveLength(3); // the deadline counted from the first connection, not from the second
+    session.close();
+  });
+
+  it('keeps a refused rollover across a reconnect: no second approval, and the session ends at the hard stop', async () => {
+    fakeClock();
+    const approve = vi.fn(async (_request: unknown) => false);
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, rollover: { ...ROLLOVER, approve } });
+    const session = await stt.startSession();
+    const log = record(session);
+    await vi.advanceTimersByTimeAsync(20_000); // the deadline: the host refuses the next connection
+    await settle();
+    expect(approve).toHaveBeenCalledOnce();
+    Sockets.instances[0].drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    const replacement = Sockets.instances[1];
+    replacement.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    replacement.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 400 });
+    replacement.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'Still here.',
+    });
+    await settle();
+    expect(approve).toHaveBeenCalledOnce(); // an end of speech past the rollover age asks nothing again
+    await vi.advanceTimersByTimeAsync(10_000); // 30 s after the first connection opened: its hard stop
+    await settle();
+    expect(log.events).toContain('close');
+    expect(log.errors).toEqual([]);
+    expect(Sockets.instances).toHaveLength(2);
+  });
+
+  it('holds the new connection\'s final while the old item for the same words is unfinished, and emits it when that item fails or ends empty', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, rollover: ROLLOVER });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    session.pushAudio(frame(24_000)); // 0 to 1000 ms, first connection only
+    await vi.advanceTimersByTimeAsync(10_000);
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    first.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+    await settle();
+    const second = Sockets.instances[1];
+    session.pushAudio(frame(48_000)); // 1000 to 3000 ms, to both
+    // Two utterances heard by both, at 1100 to 1800 ms and 2000 to 2800 ms on the session clock.
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'old_B', audio_start_ms: 1_100 });
+    first.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'old_B', audio_end_ms: 1_800 });
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'old_C', audio_start_ms: 2_000 });
+    first.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'old_C', audio_end_ms: 2_800 });
+    second.serve({ type: 'input_audio_buffer.speech_started', item_id: 'new_B', audio_start_ms: 100 });
+    second.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'new_B', audio_end_ms: 800 });
+    second.serve({ type: 'input_audio_buffer.speech_started', item_id: 'new_C', audio_start_ms: 1_000 });
+    second.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'new_C', audio_end_ms: 1_800 });
+    second.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'new_B',
+      transcript: 'Second words.',
+    });
+    second.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'new_C',
+      transcript: 'Third words.',
+    });
+    expect(log.transcripts).toEqual([]); // held: the old connection's finals for the same words are still to come
+    first.serve({
+      type: 'conversation.item.input_audio_transcription.failed',
+      item_id: 'old_B',
+      content_index: 0,
+      error: { type: 'transcription_error', message: 'Audio could not be transcribed.' },
+    });
+    first.serve({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'old_C', transcript: '' });
+    first.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'First.',
+    });
+    expect(log.transcripts.map((t) => [t.itemId, t.isFinal, t.text])).toEqual([
+      ['new_B', true, 'Second words.'],
+      ['new_C', true, 'Third words.'],
+      ['item_A', true, 'First.'],
+    ]);
+    session.close();
+  });
+
+  it('emits the new connection\'s held final when the old connection drops before its own final for those words', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, rollover: ROLLOVER });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    session.pushAudio(frame(24_000)); // 0 to 1000 ms, first connection only
+    await vi.advanceTimersByTimeAsync(10_000);
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    first.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+    await settle();
+    const second = Sockets.instances[1];
+    session.pushAudio(frame(24_000)); // 1000 to 2000 ms, to both
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'old_B', audio_start_ms: 1_100 });
+    first.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'old_B', audio_end_ms: 1_900 });
+    second.serve({ type: 'input_audio_buffer.speech_started', item_id: 'new_B', audio_start_ms: 100 });
+    second.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'new_B', audio_end_ms: 900 });
+    second.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'new_B',
+      transcript: 'Same words.',
+    });
+    first.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'First.',
+    });
+    first.drop(); // old_B never gets its final
+    await settle();
+    expect(log.transcripts.map((t) => [t.itemId, t.isFinal, t.text])).toEqual([
+      ['item_A', true, 'First.'],
+      ['new_B', true, 'Same words.'],
+    ]);
+    expect(Sockets.instances).toHaveLength(2); // the second connection carries on: no reconnect
+    session.close();
+  });
+
+  it('ignores a late answer for a connection that dropped, and asks once for the connection that replaced it', async () => {
+    fakeClock();
+    const answers: Array<(approved: boolean) => void> = [];
+    const approve = vi.fn((_request: unknown) => new Promise<boolean>((resolve) => answers.push(resolve)));
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, rollover: { ...ROLLOVER, approve } });
+    const session = await stt.startSession();
+    record(session);
+    const first = Sockets.instances[0];
+    await vi.advanceTimersByTimeAsync(10_000);
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    first.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 400 });
+    await settle();
+    expect(approve).toHaveBeenCalledOnce(); // the first connection's rollover waits for the host
+    first.drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    const replacement = Sockets.instances[1];
+    replacement.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_B', audio_start_ms: 0 });
+    replacement.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_B', audio_end_ms: 400 });
+    await settle();
+    expect(approve).toHaveBeenCalledTimes(2); // the replacement keeps the first connection's age: it rolls over too
+    answers[0](true); // the dropped connection's answer comes late
+    await settle();
+    replacement.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_C', audio_start_ms: 500 });
+    replacement.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_C', audio_end_ms: 900 });
+    await settle();
+    expect(approve).toHaveBeenCalledTimes(2); // the replacement's rollover still waits for its own answer
+    expect(Sockets.instances).toHaveLength(2); // and the late answer opened nothing
+    answers[1](true);
+    await settle();
+    expect(Sockets.instances).toHaveLength(3);
+    session.close();
+  });
+
+  it('with client commits, ends the session at the hard stop while the approval is still awaited, and a late answer opens nothing', async () => {
+    fakeClock();
+    const answers: Array<(approved: boolean) => void> = [];
+    const approve = vi.fn((_request: unknown) => new Promise<boolean>((resolve) => answers.push(resolve)));
+    const stt = new OpenAIRealtimeTranscriptionSTT({
+      apiKey: KEY,
+      turnDetection: null,
+      rollover: { ...ROLLOVER, approve },
+    });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    await vi.advanceTimersByTimeAsync(10_000);
+    session.pushAudio(frame(2_400));
+    const flushing = session.flush(); // past the rollover age: the first connection stops taking audio, the host is asked
+    expect(approve).toHaveBeenCalledOnce();
+    first.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    first.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'The last turn here.',
+    });
+    await flushing;
+    await vi.advanceTimersByTimeAsync(20_000); // 30 s: the first connection's hard stop, with no answer yet
+    await settle();
+    expect(log.events).toContain('close');
+    expect(log.errors).toEqual([]);
+    expect(first.close).toHaveBeenCalledOnce();
+    answers[0](true); // the answer comes after the hard stop
+    await settle();
+    expect(Sockets.instances).toHaveLength(1);
+  });
+
+  it('reconnects at the old connection\'s hard stop when the connection that took over dropped during the overlap', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, rollover: ROLLOVER });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    session.pushAudio(frame(2_400));
+    await vi.advanceTimersByTimeAsync(20_000); // the deadline: the next connection opens whatever is said
+    await settle();
+    first.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_long', audio_start_ms: 50 });
+    Sockets.instances[1].drop(); // the connection that took over drops while the old one is in speech
+    await settle();
+    expect(Sockets.instances).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(10_000); // 30 s: the old connection's hard stop
+    expect(sentOfType(first, 'input_audio_buffer.commit')).toHaveLength(1);
+    first.serve({ type: 'input_audio_buffer.committed', item_id: 'item_long', previous_item_id: null });
+    first.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_long',
+      transcript: 'A long stretch.',
+    });
+    await settle();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    expect(Sockets.instances).toHaveLength(3); // the dropped connection counts as following: a reconnect, not the end
+    expect(log.events).not.toContain('close');
+    session.close();
+  });
+});
