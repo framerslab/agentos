@@ -656,6 +656,19 @@ describe('DocxLoader bound', () => {
         return zip;
       },
     ],
+    [
+      'entries that share their data',
+      (zip) => {
+        // The central directory three times over: each entry listed three times, at the same local header.
+        const offset = directoryOffsetOf(zip);
+        const directory = zip.subarray(offset, zip.length - 22);
+        const end = Buffer.from(zip.subarray(zip.length - 22));
+        end.writeUInt16LE(6, 8); // entries on this disk
+        end.writeUInt16LE(6, 10); // entries in all
+        end.writeUInt32LE(directory.length * 3, 12); // the central directory's size
+        return Buffer.concat([zip.subarray(0, offset), directory, directory, directory, end]);
+      },
+    ],
   ])('refuses an archive with %s as no Word archive, before mammoth runs', async (_case, alter) => {
     const extractRawText = vi.spyOn(mammoth, 'extractRawText');
     const file = alter(zipOf([CONTENT_TYPES, DOCUMENT]));

@@ -209,6 +209,10 @@ function inflatedLength(data: Buffer, method: number, remaining: number, bound: 
  * ZIP64 record, or bytes between the central directory and the end record,
  * which JSZip takes for data prepended to the archive and moves every offset
  * by) is refused rather than counted from bytes mammoth does not inflate.
+ * So is an archive whose entries' data together pass the bytes before its
+ * central directory: entries lie one after another there, so such entries
+ * share their data, and inflating each again from the same bytes would take
+ * time that grows with the square of the file's size.
  *
  * @param buffer - The whole file.
  * @param bound - The most the entries may inflate to, together.
@@ -231,6 +235,7 @@ function assertInflatesWithin(buffer: Buffer, bound: number): void {
   if (zip64 || directoryOffset + directorySize !== end) throw notAWordArchive();
 
   let inflated = 0;
+  let compressed = 0;
   let entry = directoryOffset;
   while (entry < end) {
     if (entry + CENTRAL_HEADER_LENGTH > end || buffer.readUInt32LE(entry) !== CENTRAL_HEADER_SIGNATURE) {
@@ -251,6 +256,10 @@ function assertInflatesWithin(buffer: Buffer, bound: number): void {
     if (next > end || compressedSize === ZIP64_MARK_32 || statedSize === ZIP64_MARK_32 || localOffset === ZIP64_MARK_32) {
       throw notAWordArchive();
     }
+    // Every entry's data lies before the central directory, apart from the
+    // others, so the data together fit there; past it, entries share bytes.
+    compressed += compressedSize;
+    if (compressed > directoryOffset) throw notAWordArchive();
 
     inflated += inflatedLength(entryData(buffer, localOffset, compressedSize), method, bound - inflated, bound);
     if (inflated > bound) throw new DocumentTooLargeError(bound);
