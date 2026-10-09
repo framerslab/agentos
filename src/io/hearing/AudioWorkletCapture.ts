@@ -93,11 +93,19 @@ export class AudioWorkletCapture {
     this.silent = silent;
   }
 
-  /** Hears another stream with the same node: a new microphone, or the tab's sound added. */
+  /**
+   * Hears another stream with the same node: a new microphone, or the tab's sound added. A stream with no audio track
+   * throws, and the capture keeps hearing the stream it had.
+   */
   setStream(stream: MediaStream): void {
+    if (this.node) {
+      // The new source is built before the old one is let go: a stream with no audio track throws here.
+      const source = this.options.context.createMediaStreamSource(stream);
+      this.source?.disconnect();
+      source.connect(this.node);
+      this.source = source;
+    }
     this.stream = stream;
-    this.source?.disconnect();
-    if (this.node) this.connectSource();
   }
 
   /**
@@ -114,11 +122,5 @@ export class AudioWorkletCapture {
     this.source = undefined;
     this.node = undefined;
     this.silent = undefined;
-  }
-
-  /** Connects the stream to the node. */
-  private connectSource(): void {
-    this.source = this.options.context.createMediaStreamSource(this.stream);
-    this.source.connect(this.node!);
   }
 }

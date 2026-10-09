@@ -137,6 +137,24 @@ describe('AudioWorkletCapture', () => {
     expect((context.createGain.mock.results[0]!.value as FakeLink).disconnect).toHaveBeenCalled();
   });
 
+  it('keeps hearing its stream when it is given one with no audio track', async () => {
+    vi.stubGlobal('AudioWorkletNode', FakeNode);
+    const context = fakeContext();
+    const first = { id: 'first' } as MediaStream;
+    const capture = new AudioWorkletCapture({ context: context as unknown as AudioContext, stream: first, moduleUrl: '/w.js' });
+    await capture.start();
+    context.createMediaStreamSource.mockImplementationOnce(() => {
+      throw new Error('the stream has no audio track');
+    });
+    expect(() => capture.setStream({ id: 'video only' } as MediaStream)).toThrow('the stream has no audio track');
+    const source = context.createMediaStreamSource.mock.results[0]!.value as FakeLink;
+    expect(source.connect).toHaveBeenCalledWith(FakeNode.made[0]);
+    expect(source.disconnect).not.toHaveBeenCalled();
+    capture.stop();
+    await capture.start();
+    expect(context.createMediaStreamSource).toHaveBeenLastCalledWith(first);
+  });
+
   it('builds nothing when stopped while its module loads, and one path however often it is started', async () => {
     vi.stubGlobal('AudioWorkletNode', FakeNode);
     const context = fakeContext();
