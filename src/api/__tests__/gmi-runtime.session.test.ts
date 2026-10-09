@@ -486,6 +486,12 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     await expect(agent(base(key())).generate('hi', { system: 'other' } as never)).rejects.toThrow(/system/);
     expect(() => agent(base(key())).stream('hi', { messages: [] } as never)).toThrow(/messages/);
   });
+
+  it("voice, avatar and channels configs that set only enabled: false count as unset, as agent() counts them: the agent constructs and answers", async () => {
+    const k = key(); script('openai', k, { replies: [reply.text('Hello.')] });
+    const a = agent(base(k, { voice: { enabled: false }, avatar: { enabled: false }, channels: { discord: { enabled: false } } }));
+    expect((await a.generate('hi')).text).toBe('Hello.');
+  });
 });
 
 describe("agent({ runtime: 'gmi' }) resolves the model and builds memory on first use", () => {
