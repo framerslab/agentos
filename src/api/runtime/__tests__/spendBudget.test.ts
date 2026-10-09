@@ -58,6 +58,15 @@ describe('SpendBudget', () => {
     expect(allowing.spentUSD()).toBe(0);
   });
 
+  it('still holds the token budget and a spent budget for a model it allows without a price', () => {
+    const byTokens = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 1000, unpriced: 'allow' });
+    byTokens.record(undefined, 900, 'first');
+    expect(() => byTokens.assertCanSpend(undefined, 200, 'second')).toThrow(CostCapExceededError);
+    const spent = new SpendBudget({ maxCostUSD: 0.001, unpriced: 'allow' });
+    spent.record(0.002, 0, 'a cost the provider reported');
+    expect(() => spent.assertCanSpend(undefined, 0, 'next')).toThrow(CostCapExceededError);
+  });
+
   it('records a cost made outside a provider call', () => {
     const budget = new SpendBudget({ maxCostUSD: 0.01 });
     budget.recordExternal(0.0095, 'stt');
