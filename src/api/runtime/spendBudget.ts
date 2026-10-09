@@ -99,12 +99,19 @@ export class SpendBudget {
   /**
    * Refuses (or warns about) a call that could cost up to `estimateUSD` and use up to `estimateTokens`, when it would
    * pass what is left; `estimateUSD` undefined means the model has no price row, which `unpriced: 'allow'` checks as
-   * a call that costs nothing.
+   * a call that costs nothing. `model`, the call's provider and model, is named in the refusal of a model with no
+   * price row.
    */
-  assertCanSpend(estimateUSD: number | undefined, estimateTokens: number, what: string): void {
+  assertCanSpend(
+    estimateUSD: number | undefined,
+    estimateTokens: number,
+    what: string,
+    model?: { providerId: string; modelId: string },
+  ): void {
     if (estimateUSD === undefined && this.options.unpriced !== 'allow') {
-      this.refuse({ budgetId: this.id, capType: 'unpriced', what, reason: 'the model has no price row' }, () => {
-        throw new UnpricedModelError('unknown', what);
+      const reason = model ? `${model.providerId}:${model.modelId} has no price row` : 'the model has no price row';
+      this.refuse({ budgetId: this.id, capType: 'unpriced', what, reason }, () => {
+        throw new UnpricedModelError(model?.providerId ?? 'unknown', model?.modelId ?? what);
       });
       return;
     }
@@ -173,6 +180,28 @@ export function estimateCallCostUSD(providerId: string, modelId: string, promptC
   if (!price) return undefined;
   const output = maxOutputTokens ?? DEFAULT_OUTPUT_ESTIMATE_TOKENS;
   return (tokensOfChars(promptChars) / 1000) * price.input + (output / 1000) * price.output;
+}
+
+/**
+ * Checks a provider call against a budget before it is sent: its prompt of `promptChars` characters and its output cap
+ * (or {@link DEFAULT_OUTPUT_ESTIMATE_TOKENS} without one), priced at the model's row and counted against the token
+ * budget, through {@link SpendBudget.assertCanSpend}.
+ *
+ * @internal Called by the generation helpers before each provider call.
+ */
+export function assertCallWithinBudget(
+  budget: SpendBudget,
+  route: { providerId: string; modelId: string },
+  promptChars: number,
+  maxOutputTokens: number | undefined,
+  what: string,
+): void {
+  budget.assertCanSpend(
+    estimateCallCostUSD(route.providerId, route.modelId, promptChars, maxOutputTokens),
+    tokensOfChars(promptChars) + (maxOutputTokens ?? DEFAULT_OUTPUT_ESTIMATE_TOKENS),
+    what,
+    { providerId: route.providerId, modelId: route.modelId },
+  );
 }
 
 /**

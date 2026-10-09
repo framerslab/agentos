@@ -48,6 +48,8 @@ import {
 } from './generateText.js';
 import { ContextWindowExceededError } from '../core/llm/providers/errors/ContextWindowExceededError.js';
 import { checkContextFit } from './runtime/contextWindowFit.js';
+import { asSpendBudget, assertCallWithinBudget, costOfUsageUSD, promptCharsOf } from './runtime/spendBudget.js';
+import { isCallerStop, markHookStop } from './runtime/callerStop.js';
 import type { CacheDiagnostics } from '../core/llm/providers/IProvider.js';
 import { toProviderReplayMessage } from './sessionTranscript.js';
 import type { ModelRouteParams } from '../core/llm/routing/IModelRouter.js';
@@ -317,6 +319,11 @@ function formatPlanForPrompt(plan: Plan): string {
  * ```
  */
 export function streamText(opts: GenerateTextOptions): StreamTextResult {
+  // One budget instance for the whole stream: every options object built from
+  // `opts` below (a fallback hop) carries it, so each hop is charged to the
+  // same budget.
+  const budget = asSpendBudget(opts.budget);
+  if (budget) opts = { ...opts, budget };
   let resolveText: (v: string) => void;
   let resolveUsage: (v: TokenUsage) => void;
   let resolveResponseModel: (v: string | undefined) => void;
@@ -630,6 +637,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             ...(planConfig?.thinking === false || opts.thinking === false ? { thinking: false as const } : {}),
           },
           usage,
+          budget ? { budget, providerId: resolved.providerId, what: 'stream_text.plan' } : undefined,
         );
 
         if (resolvedPlan) {
@@ -661,6 +669,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // The hook, then the approval gate, before each parsed call runs,
           // as on the native loop below.
           onBeforeToolExecution: opts.onBeforeToolExecution,
+          hookErrors: opts.hookErrors,
           approvalGate: opts.__approvalGate,
           // Native tool turns in the history become the shim's own
           // <tool_call> / <tool_response> text.
@@ -673,6 +682,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               shimSendChecked = true;
               assertFitsContextWindow({ messages: msgs });
             }
+            if (budget) assertCallWithinBudget(budget, resolved, promptCharsOf(msgs), opts.maxTokens, 'stream_text.shim');
             // provider is guaranteed non-undefined by the `if (!provider) throw`
             // guard above; the closure just loses TS's flow-narrowing.
             const r = await provider!.generateCompletion(resolved.modelId, msgs as any, {
@@ -712,6 +722,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
                 ? { customModelParams: opts.customModelParams }
                 : {}),
             } as any);
+            budget?.record(costOfUsageUSD(resolved.providerId, resolved.modelId, r.usage), r.usage?.totalTokens ?? 0, 'stream_text.shim');
             // Aggregate the COMPLETE normalized usage from every shim
             // roundtrip (spec batch-1 review fold) as each call returns, so
             // a stream that fails on a later round still reports what its
@@ -783,6 +794,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               effectiveMessages = modified.messages as any;
             }
           } catch (hookErr) {
+            if (opts.hookErrors === 'throw') throw markHookStop(hookErr);
             console.warn('[agentos] onBeforeGeneration hook error:', hookErr);
           }
         }
@@ -790,6 +802,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         // A leg's first send is checked against its model's window; later
         // steps are not checked again.
         if (step === 0) assertFitsContextWindow({ messages: effectiveMessages, tools: toolSchemas });
+        if (budget) assertCallWithinBudget(budget, resolved, promptCharsOf(effectiveMessages), opts.maxTokens, 'stream_text');
 
         const stepSpan = startAgentOSSpan('agentos.api.stream_text.step', {
           attributes: {
@@ -990,6 +1003,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           }
         } finally {
           stepSpan?.end();
+          // The budget is charged once per provider stream, whether it
+          // finished, failed or was abandoned: what its final chunks reported.
+          budget?.record(costOfUsageUSD(resolved.providerId, resolved.modelId, stepUsage), stepUsage.totalTokens, 'stream_text');
         }
 
         const stepText = reconstructor.getFullText();
@@ -1053,6 +1069,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               }
             }
           } catch (hookErr) {
+            if (opts.hookErrors === 'throw') throw markHookStop(hookErr);
             console.warn('[agentos] onAfterGeneration hook error:', hookErr);
           }
         }
@@ -1182,6 +1199,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               }
               parsedArgs = hookResult.args;
             } catch (hookErr) {
+              if (opts.hookErrors === 'throw') throw markHookStop(hookErr);
               console.warn('[agentos] onBeforeToolExecution hook error:', hookErr);
             }
           }
@@ -1299,13 +1317,24 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // That usage is the request's running total, so what the step's
       // earlier final chunks already reported is left out.
       const unreported = usageBeyond(usageOfError(err), stepUsage);
-      if (unreported) addTokenUsage(usage, unreported);
+      if (unreported) {
+        addTokenUsage(usage, unreported);
+        // The spend budget is charged it too: the step's stream charged only
+        // what its chunks reported.
+        budget?.record(
+          costOfUsageUSD(recordedProviderId ?? '', recordedModelId ?? '', unreported),
+          unreported.totalTokens,
+          'stream_text.failed',
+        );
+      }
       attemptUsage = { ...usage };
 
       // Record the failure on the provider-health registry. Synthetic
       // circuit-open errors are skipped because they're already a
-      // *consequence* of the registry, not a new failure to record.
-      if (recordedProviderId && error.name !== 'LLMProviderCircuitOpenError') {
+      // *consequence* of the registry, not a new failure to record, and so
+      // is a call the caller stopped (its spend budget's refusal, a hook's
+      // stop), which says nothing about the provider.
+      if (recordedProviderId && error.name !== 'LLMProviderCircuitOpenError' && !isCallerStop(err)) {
         globalLLMProviderHealth.recordFailure(recordedProviderId, error);
       }
 
@@ -1491,7 +1520,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               if (
                 toolsRanBefore(legError) ||
                 chainWalkedBefore(legError) ||
-                (legError as { type?: unknown }).type === 'abort'
+                (legError as { type?: unknown }).type === 'abort' ||
+                // The call's budget refused the leg, or a hook stopped it:
+                // every later leg would be stopped the same way.
+                isCallerStop(legError)
               ) {
                 break;
               }
@@ -1553,7 +1585,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               yield errorPart;
               break;
             }
-            if (toolsRanBefore(lastFallbackError) || chainWalkedBefore(lastFallbackError)) break;
+            if (toolsRanBefore(lastFallbackError) || chainWalkedBefore(lastFallbackError) || isCallerStop(lastFallbackError)) break;
             walkState = advanceFallbackWalk(walkState, fb.walkRole, lastFallbackError);
           }
         }

@@ -1,7 +1,9 @@
 /**
  * The spend budget on the paths beside the plain call: a stream's usage and its refusal, the usage a failed call's
- * error reports, the provider's health while a budget refuses calls, a model with no price row when the budget warns
- * or tells a callback, and an agent on the GMI runtime, which takes no budget.
+ * error reports, the provider's health while a budget refuses calls, a fallback walk that meets a spent budget, a
+ * model with no price row when the budget warns or tells a callback, a guard hook's stop under `hookErrors: 'throw'`
+ * (never walked to another provider, never counted against one, and on the prompt-tool path before the tool runs),
+ * and an agent on the GMI runtime, which takes no budget.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -127,6 +129,30 @@ describe('a spend budget and a failed call', () => {
     });
     expect(hoisted.generateCompletion).toHaveBeenCalledTimes(1);
   });
+
+  it('ends a fallback walk at the first leg the spent budget refuses', async () => {
+    // The primary is billed the whole budget and fails with a status a fallback is tried on.
+    hoisted.generateCompletion.mockRejectedValueOnce(Object.assign(billedFailure(0.001), { httpStatus: 503 }));
+    const onFallback = vi.fn();
+    const budget = new SpendBudget({ maxCostUSD: 0.001 });
+    await expect(
+      generateText({
+        provider: 'openai',
+        model: 'gpt-6-luna',
+        prompt: 'hello',
+        maxTokens: 100,
+        budget,
+        onFallback,
+        fallbackProviders: [
+          { provider: 'openai', model: 'gpt-6.1-sol' },
+          { provider: 'openai', model: 'gpt-6-luna' },
+        ],
+      }),
+    ).rejects.toBeInstanceOf(CostCapExceededError);
+    expect(onFallback).toHaveBeenCalledTimes(1);
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(1);
+    expect(budget.spentUSD()).toBeCloseTo(0.001, 10);
+  });
 });
 
 describe('a spend budget and a model with no price row', () => {
@@ -159,6 +185,57 @@ describe('a spend budget and a model with no price row', () => {
     ).resolves.toMatchObject({ text: 'ok' });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('openai:no-such-model has no price row'));
     warn.mockRestore();
+  });
+});
+
+describe("a guard hook under hookErrors: 'throw'", () => {
+  it('neither tries a call a guard hook stopped on another provider nor counts it against the provider', async () => {
+    hoisted.generateCompletion.mockResolvedValue(reply('ok', 0));
+    const onFallback = vi.fn();
+    // A guard's message can read like a provider's rate limit.
+    const guard = async (): Promise<void> => {
+      throw new Error('rate limit for this user reached');
+    };
+    for (let call = 0; call < 6; call += 1) {
+      await expect(
+        generateText({
+          provider: 'openai',
+          model: 'gpt-6-luna',
+          prompt: 'hello',
+          onBeforeGeneration: guard,
+          hookErrors: 'throw',
+          onFallback,
+          fallbackProviders: [{ provider: 'openai', model: 'gpt-6.1-sol' }],
+        }),
+      ).rejects.toThrow('rate limit for this user reached');
+    }
+    expect(onFallback).not.toHaveBeenCalled();
+    await expect(generateText({ provider: 'openai', model: 'gpt-6-luna', prompt: 'hello', fallbackProviders: [] })).resolves.toMatchObject({
+      text: 'ok',
+    });
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops a prompt-tool call when the tool hook throws, before the tool runs', async () => {
+    hoisted.generateCompletion.mockResolvedValueOnce(reply('<tool_call>{"name":"recall","arguments":{}}</tool_call>', 0));
+    const execute = vi.fn(async () => ({ found: 'beach' }));
+    await expect(
+      generateText({
+        provider: 'openai',
+        model: 'gpt-6-luna',
+        prompt: 'where did I go?',
+        tools: { recall: { description: 'recall past messages', parameters: { type: 'object', properties: {} }, execute } },
+        toolMode: 'prompt',
+        maxSteps: 5,
+        hookErrors: 'throw',
+        fallbackProviders: [],
+        onBeforeToolExecution: async () => {
+          throw new Error('stopped by the tool guard');
+        },
+      }),
+    ).rejects.toThrow('stopped by the tool guard');
+    expect(execute).not.toHaveBeenCalled();
+    expect(hoisted.generateCompletion).toHaveBeenCalledTimes(1);
   });
 });
 

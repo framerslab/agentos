@@ -57,6 +57,7 @@ import {
   type ExportAgentConfigOptions,
 } from './agentExportCore.js';
 import { applyMemoryProvider, type MemoryProviderHookOptions } from './runtime/memoryProviderHooks.js';
+import { asSpendBudget, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
 import {
   SessionHistoryBuffer,
   SESSION_HISTORY_DEFAULTS,
@@ -157,6 +158,13 @@ export interface AgentOptions extends BaseAgentConfig {
   router?: IModelRouter;
   /** Host-level routing hints forwarded to the high-level generation helpers. */
   hostPolicy?: HostLLMPolicy;
+  /**
+   * One spend budget for every call this agent and its sessions make: each provider call is checked against what is
+   * left before it is made and recorded after it, and {@link AgentSession.recordExternalCost} charges costs made
+   * outside AgentOS to it. Settings make one {@link SpendBudget} for the agent; pass an instance to share it wider.
+   * Not available with `runtime: 'gmi'`, which throws at construction.
+   */
+  budget?: SpendBudget | SpendBudgetOptions;
   /**
    * Caller's intended content policy tier, forwarded to every `generate()` /
    * `stream()` / session call this agent makes (same contract as
@@ -437,6 +445,8 @@ export interface AgentSession {
   drainHistoryEvents(): HistoryEvent[];
   /** Returns persisted usage totals for this session when the usage ledger is enabled. */
   usage(): Promise<AgentOSUsageAggregate>;
+  /** Charges a cost made outside AgentOS (speech-to-text minutes, a tool's own API) to the agent's budget; does nothing without one. */
+  recordExternalCost(costUSD: number, meta?: { kind?: string }): void;
   /** Clears all messages from this session's history. */
   clear(): void;
   /**
@@ -733,6 +743,9 @@ export function agent(opts: AgentOptions): Agent {
   // cross-process / historical totals continue to roll up correctly.
   const sessionUsageTallies = new Map<string, AgentOSUsageAggregate>();
   const agentUsageTally: AgentOSUsageAggregate = createEmptyUsageAggregate();
+  // One budget for every call this agent and its sessions make, and for the
+  // costs a session records from outside AgentOS.
+  const agentBudget = asSpendBudget(opts.budget);
   let avatarBindingOverrides: Record<string, unknown> = {};
   warnOnDeferredLightweightAgentCapabilities(opts);
 
@@ -812,6 +825,10 @@ export function agent(opts: AgentOptions): Agent {
     onBeforeGeneration: opts.onBeforeGeneration,
     onAfterGeneration: opts.onAfterGeneration,
     onBeforeToolExecution: opts.onBeforeToolExecution,
+    // The agent's one budget, on every generate / stream / session call
+    // (each spreads baseOpts). A `budget` passed to generate() or stream()
+    // replaces it for that call.
+    ...(agentBudget ? { budget: agentBudget } : {}),
   };
 
   const agentInstance: Agent = {
@@ -1154,6 +1171,10 @@ export function agent(opts: AgentOptions): Agent {
           return baseOpts.usageLedger?.enabled
             ? persisted
             : mergeAggregates(sessionUsageTally, persisted);
+        },
+
+        recordExternalCost(costUSD: number, meta?: { kind?: string }): void {
+          agentBudget?.recordExternal(costUSD, meta?.kind ?? 'external');
         },
 
         clear() {
