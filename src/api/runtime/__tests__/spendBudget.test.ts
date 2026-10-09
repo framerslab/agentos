@@ -29,6 +29,16 @@ describe('SpendBudget', () => {
     expect(guard.getSnapshot('run-1').sessionCostUsd).toBeCloseTo(0.0009, 10);
   });
 
+  it('keeps the daily cap its guard holds for its id', () => {
+    // setAgentLimits replaces an id's limits, so a budget that set its session cap alone would lift the id's daily cap.
+    const guard = new CostGuard({ maxDailyCostUsd: 100, maxSingleOperationCostUsd: 100 });
+    guard.setAgentLimits('run-2', { maxDailyCostUsd: 0.001 });
+    const budget = new SpendBudget({ maxCostUSD: 1, guard, budgetId: 'run-2' });
+    expect(guard.getSnapshot('run-2')).toMatchObject({ sessionLimit: 1, dailyLimit: 0.001 });
+    budget.record(0.0009, 0, 'first');
+    expect(() => budget.assertCanSpend(0.0002, 0, 'second')).toThrow(CostCapExceededError);
+  });
+
   it('warns and lets the call run when told to warn', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const budget = new SpendBudget({ maxCostUSD: 0.0001, onLimitReached: 'warn' });

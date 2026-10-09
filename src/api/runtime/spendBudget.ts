@@ -36,7 +36,10 @@ export interface SpendBudgetOptions {
    * what was about to be refused and the call is then refused as with `'throw'`.
    */
   onLimitReached?: 'throw' | 'warn' | ((info: SpendLimitInfo) => void);
-  /** The guard that holds the spending; a budget given none makes its own, with no daily or single-call cap. */
+  /**
+   * The guard that holds the spending; a budget given none makes its own, with no daily or single-call cap. On a guard
+   * given, the budget sets the session cap of its id to `maxCostUSD` and keeps the daily cap the guard holds for that id.
+   */
   guard?: CostGuard;
   /** The id the guard keeps the spending under; a budget given none makes one. */
   budgetId?: string;
@@ -104,7 +107,14 @@ export class SpendBudget {
         maxDailyCostUsd: Number.POSITIVE_INFINITY,
         maxSingleOperationCostUsd: Number.POSITIVE_INFINITY,
       });
-    if (options.guard) options.guard.setAgentLimits(this.id, { maxSessionCostUsd: options.maxCostUSD });
+    if (options.guard) {
+      // setAgentLimits replaces what the guard holds for an id, so the id's daily cap (one set for it, or the guard's
+      // own) goes back in with the session cap: making a budget lifts no cap the guard already holds.
+      options.guard.setAgentLimits(this.id, {
+        maxSessionCostUsd: options.maxCostUSD,
+        maxDailyCostUsd: options.guard.getSnapshot(this.id).dailyLimit,
+      });
+    }
   }
 
   /** What the run has spent, in US dollars, as the guard holds it. */
