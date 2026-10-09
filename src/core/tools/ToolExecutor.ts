@@ -355,7 +355,7 @@ export class ToolExecutor {
         if (logToolCalls) {
           console.warn(`${logContext}: Argument schema validation failed. Errors:`, JSON.stringify(validationErrors, null, 2), 'Parsed Args:', parsedArgs);
         } else {
-          console.warn(`${logContext}: Argument schema validation failed. Errors:`, JSON.stringify(validationErrors.map(({ path, message }) => ({ path, message })), null, 2));
+          console.warn(`${logContext}: Argument schema validation failed. Errors:`, JSON.stringify(validationErrors.map((e: { path?: string; message?: string }) => ({ path: e.path, message: e.message })), null, 2));
         }
         return { success: false, error: errorMsg, details: { toolName: tool.name, validationErrors, providedParsedArgs: parsedArgs } };
       }
