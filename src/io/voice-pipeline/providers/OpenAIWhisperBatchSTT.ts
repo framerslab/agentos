@@ -87,9 +87,11 @@ export class OpenAIWhisperBatchSTT implements IBatchSTT {
     // callers not to send both fields.
     if (takesLanguageList(model)) form.append('languages[]', language);
     else form.append('language', language);
-    // whisper-1 answers in verbose_json, which carries the duration; the newer
-    // models answer in json and report the duration under `usage`.
-    form.append('response_format', model.startsWith('whisper') ? 'verbose_json' : 'json');
+    // OpenAI's gpt- transcription models answer in json and report the
+    // duration under `usage`. Every other model, whisper-1 and a
+    // whisper-compatible server's own included, answers in verbose_json,
+    // which carries the duration.
+    form.append('response_format', model.startsWith('gpt-') ? 'json' : 'verbose_json');
 
     const res = await this.fetchImpl(this.baseUrl, {
       method: 'POST',

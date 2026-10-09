@@ -116,4 +116,27 @@ describe('OpenAIWhisperSpeechToTextProvider', () => {
     expect(forms[2].get('model')).toBe('distil-large-v3');
     expect(forms[2].get('response_format')).toBe('verbose_json');
   });
+
+  it('asks a whisper-compatible server for verbose_json when the call names no format', async () => {
+    const { forms, fetchImpl } = jsonFetch({
+      text: 'hello',
+      language: 'english',
+      duration: 1.5,
+      segments: [{ id: 0, start: 0, end: 1.5, text: 'hello' }],
+    });
+    // Model ids a compatible server serves: none starts with `whisper` or `gpt-`.
+    for (const model of ['distil-large-v3', 'openai/whisper-large-v3', 'Systran/faster-whisper-large-v3']) {
+      const provider = new OpenAIWhisperSpeechToTextProvider({
+        apiKey: 'sk-test',
+        baseUrl: 'http://localhost:8000/v1',
+        model,
+        fetchImpl,
+      });
+      const result = await provider.transcribe(AUDIO);
+
+      expect(forms.at(-1)?.get('model')).toBe(model);
+      expect(forms.at(-1)?.get('response_format'), model).toBe('verbose_json');
+      expect(result.segments, model).toHaveLength(1);
+    }
+  });
 });

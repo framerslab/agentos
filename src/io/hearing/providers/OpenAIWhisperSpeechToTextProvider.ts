@@ -64,11 +64,6 @@ const TIMESTAMP_FORMATS: ReadonlySet<SpeechResponseFormat> = new Set<SpeechRespo
   'vtt',
 ]);
 
-/** `whisper-1` keeps this provider's `verbose_json` default; the newer models answer in `json`. */
-function isWhisperModel(model: string): boolean {
-  return model.startsWith('whisper');
-}
-
 /**
  * Whether a configured model can answer a timestamped call itself. OpenAI's
  * `gpt-` transcription models cannot: the API reference limits the
@@ -76,7 +71,8 @@ function isWhisperModel(model: string): boolean {
  * for the diarize model), `gpt-transcribe` returns text and languages with no
  * segments, and OpenAI's guide sends callers who need timestamps to
  * `whisper-1`. Any other model, such as one a whisper-compatible server
- * serves under `baseUrl`, is trusted with the format.
+ * serves under `baseUrl`, is trusted with the format, and is asked for
+ * `verbose_json` when the caller names none.
  */
 function servesTimestampFormats(model: string): boolean {
   return !model.startsWith('gpt-');
@@ -195,8 +191,10 @@ function normalizeSegments(input: unknown): SpeechTranscriptionSegment[] | undef
  * - **Authentication:** `Authorization: Bearer <apiKey>`
  * - **Content-Type:** `multipart/form-data` (FormData with file blob)
  * - **Response format:** Controlled by the `response_format` field. When the
- *   caller names none, `whisper-1` is asked for `verbose_json` (segments,
- *   language and duration) and the other models for `json`.
+ *   caller names none, OpenAI's `gpt-` transcription models are asked for
+ *   `json`, and every other model, `whisper-1` and a whisper-compatible
+ *   server's own included, for `verbose_json` (segments, language and
+ *   duration).
  *
  * ## Models
  *
@@ -317,7 +315,7 @@ export class OpenAIWhisperSpeechToTextProvider implements SpeechToTextProvider {
     const requestedFormat = options.responseFormat;
     const model = pickModel(options.model, this.config.model, requestedFormat);
     const responseFormat: SpeechResponseFormat =
-      requestedFormat ?? (isWhisperModel(model) ? 'verbose_json' : 'json');
+      requestedFormat ?? (servesTimestampFormats(model) ? 'verbose_json' : 'json');
     // Generate a filename with the correct extension for Whisper's format detection
     const fileName = audio.fileName ?? `speech.${audio.format ?? 'wav'}`;
 
