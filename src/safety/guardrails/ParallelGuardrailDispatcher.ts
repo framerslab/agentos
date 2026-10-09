@@ -817,7 +817,7 @@ function stampGuardrailId(evaluation: GuardrailEvaluationResult, svc: IGuardrail
  * A copy of a serialized conversation (a final chunk's `updatedConversationContext`) in which the newest assistant
  * message that reads `from` reads `to`; anything that is not a conversation with messages is returned as it is.
  */
-function withReplyRewritten<T>(context: T, from: string | null, to: string): T {
+function withReplyRewritten<T>(context: T, from: string | null, to: string | null | undefined): T {
   if (from === null || !context || typeof context !== 'object') return context;
   const messages = (context as { messages?: unknown }).messages;
   if (!Array.isArray(messages)) return context;
@@ -831,7 +831,7 @@ function withReplyRewritten<T>(context: T, from: string | null, to: string): T {
   }
   if (index < 0) return context;
   const copy = messages.slice();
-  copy[index] = { ...(messages[index] as object), content: to };
+  copy[index] = { ...(messages[index] as object), content: to ?? '' };
   return { ...(context as object), messages: copy } as T;
 }
 
