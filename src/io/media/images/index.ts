@@ -11,6 +11,7 @@ import { FalImageProvider } from './providers/FalImageProvider.js';
 export * from './IImageProvider.js';
 export * from './providers/MiniMaxImageProvider.js';
 export * from './imageToBuffer.js';
+export * from './networkAddress.js';
 export * from './ImageOperationError.js';
 export * from './FallbackImageProxy.js';
 export { PolicyAwareImageRouter, type ImageProviderPreference } from './PolicyAwareImageRouter.js';
