@@ -1,9 +1,10 @@
 /**
  * @module AgentOS/Evaluation/wordErrorRate
  * The word error rate of a transcript against a reference, after one normalisation for every system: lower case;
- * letters, digits and a word's inner apostrophe kept; other punctuation, bracketed marks (`[laughter]`) and filler
- * words dropped; numbers left as written. The count is a word-level edit distance's substitutions, deletions and
- * insertions, and the rate their sum over the reference's word count.
+ * letters, digits and a word's inner apostrophe kept, the typographic apostrophes (U+2019, U+2018, U+02BC) read as
+ * `'`; other punctuation, bracketed marks (`[laughter]`) and filler words dropped; numbers left as written. The count
+ * is a word-level edit distance's substitutions, deletions and insertions, and the rate their sum over the
+ * reference's word count.
  */
 
 /** The filler words dropped before counting. */
@@ -24,6 +25,9 @@ export interface WordErrorRateCounts {
 export function normalizeTranscript(text: string): string[] {
   return text
     .toLowerCase()
+    // U+2019 is the apostrophe of typeset text and U+0027 the keyboard's; reading U+2019, U+2018 and U+02BC as
+    // U+0027 keeps a curly "don't" one word, so a system that prints curly apostrophes is not charged for them
+    .replace(/[\u2018\u2019\u02BC]/g, "'")
     .replace(/\[[^\]]*\]/g, ' ')
     .replace(/[^\p{L}\p{N}']+/gu, ' ')
     .split(' ')

@@ -89,7 +89,7 @@ console.log(`Similarity: ${(score * 100).toFixed(1)}%`);
 Both texts go through one normalisation before they are counted, so that measurements of different speech-to-text systems agree:
 
 - Lower case.
-- Letters, digits and a word's inner apostrophe are kept (`cat's`, `don't`).
+- Letters, digits and a word's inner apostrophe are kept (`cat's`, `don't`). The typographic apostrophes `’` (U+2019), `‘` (U+2018) and `ʼ` (U+02BC) count as `'`, so `don’t` and `don't` are the same word.
 - Other punctuation is dropped, and so are bracketed marks such as `[laughter]` and the filler words `um`, `uh`, `er`, `ah`, `hmm` and `mm`.
 - Numbers are left as written, so `3` and `three` are different words.
 
