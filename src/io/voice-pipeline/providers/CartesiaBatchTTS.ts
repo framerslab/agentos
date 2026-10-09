@@ -13,12 +13,15 @@
  * Cartesia has no natural-language instruction surface, so
  * `expressiveness.instructions` is ignored and never reported.
  *
- * Models (read 2026-10-07): the default is the dated snapshot
+ * Models (read 2026-10-09): the default is the dated snapshot
  * `sonic-3.6-2026-08-27`, which Cartesia never changes once released. The
  * `sonic-3.6` alias follows the latest stable 3.6 snapshot, and `sonic-3.5`
  * and `sonic-3` stay accepted. Cartesia retires dated snapshots on a published
- * schedule (`sonic-3-2025-10-27` sunsets on 2026-10-20), so the default needs
- * a newer snapshot before this one sunsets.
+ * schedule: its Deprecated Models page
+ * (https://docs.cartesia.ai/build-with-cartesia/tts-models/api-changes) lists
+ * `sonic-3-2025-10-27` for 2026-10-20 and gives no date for the default.
+ * When that page names the default snapshot, move the default to a newer one
+ * before its date.
  */
 
 import type { IBatchTTS, BatchTTSConfig, BatchTTSResult } from '../types.js';
