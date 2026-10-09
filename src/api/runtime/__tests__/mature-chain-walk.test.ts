@@ -125,6 +125,29 @@ describe('fallback walk on generateText', () => {
     expect(sent()).toEqual([LLAMA, MAGNUM]);
   });
 
+  it('a policy router picks the tool-capable catalog model when the tools come as an array', async () => {
+    // An array or a Map of tools makes the call require function_calling,
+    // which the catalog lists as tool_use.
+    keys('OPENROUTER_API_KEY');
+    hoisted.generateCompletion.mockResolvedValueOnce(ok('from llama'));
+    const lookup = {
+      name: 'lookup',
+      description: 'Looks something up',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async () => ({ success: true, output: { found: true } }),
+    };
+    const result = await generateText({
+      provider: 'openai',
+      model: 'gpt-5.5',
+      prompt: 'hi',
+      policyTier: 'mature',
+      router: new PolicyAwareRouter(createUncensoredModelCatalog()),
+      tools: [lookup] as never,
+    });
+    expect(result.text).toBe('from llama');
+    expect(sent()).toEqual([LLAMA]);
+  });
+
   it('builds the chain for a tier that only the router carries', async () => {
     keys('OPENROUTER_API_KEY');
     hoisted.generateCompletion.mockRejectedValueOnce(status(429)).mockResolvedValueOnce(ok());
@@ -311,6 +334,36 @@ describe('fallback walk on generateText', () => {
     // The size refusal is never recorded: llama's success alone would not
     // remove a record, so no record exists at all.
     expect(globalLLMProviderHealth.getStats('openrouter')).toBeNull();
+  });
+
+  it('a customModelParams.model override is checked against the window of the model the payload names', async () => {
+    keys('OPENROUTER_API_KEY');
+    // The call names magnum (32,768 tokens) but the payload carries llama
+    // (131,072), which holds the 40,000: the request is sent.
+    hoisted.generateCompletion.mockResolvedValueOnce(ok('held'));
+    const widened = await generateText({
+      provider: 'openrouter',
+      model: MAGNUM,
+      customModelParams: { model: LLAMA },
+      prompt: FORTY_K,
+      policyTier: 'mature',
+    });
+    expect(widened.text).toBe('held');
+    expect(sent()).toEqual([MAGNUM]);
+
+    // The reverse: the payload carries magnum on every OpenRouter leg, and
+    // none of them is sent a request magnum cannot hold.
+    hoisted.generateCompletion.mockReset();
+    await expect(
+      generateText({
+        provider: 'openrouter',
+        model: LLAMA,
+        customModelParams: { model: MAGNUM },
+        prompt: FORTY_K,
+        policyTier: 'mature',
+      }),
+    ).rejects.toThrow();
+    expect(sent()).toEqual([]);
   });
 
   it('the router pick over its window is not sent and the walk starts', async () => {
