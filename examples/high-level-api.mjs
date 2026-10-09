@@ -45,13 +45,12 @@ async function main() {
   console.log(`provider=${image.provider} images=${image.images.length}`);
 
   console.log('\n=== agent() — provider-first ===');
+  // Each session keeps its message history. Cognitive memory needs
+  // runtime: 'gmi' and an embedding model (memory.embedding); agent() does not
+  // read the other MemoryConfig fields, such as types or working: { enabled: true }.
   const assistant = agent({
     provider,
     instructions: 'You are a concise networking tutor.',
-    memory: {
-      types: ['episodic', 'semantic'],
-      working: { enabled: true },
-    },
     maxSteps: 3,
   });
 

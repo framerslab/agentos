@@ -11,6 +11,8 @@ import {
 import type { IStreamClient, StreamClientId } from '../../src/core/streaming/IStreamClient';
 import type { StreamId } from '../../src/core/streaming/StreamingManager';
 import type { ILogger } from '../../src/logging/ILogger';
+import { ConversationContext } from '../../src/core/conversation/ConversationContext';
+import { MessageRole } from '../../src/core/conversation/ConversationMessage';
 import {
   GuardrailAction,
   type GuardrailConfig,
@@ -86,6 +88,15 @@ class StubOrchestrator {
     this.streamingManager.prepareStream(this.streamId, this.responses);
     return this.streamId;
   }
+
+  /** The continuation after an external tool: the test prepares the stream's chunks itself, as the fake sends them at registration. */
+  public async orchestrateToolResults(): Promise<void> {
+    this.callCount += 1;
+  }
+
+  public getStreamIdentity(): { userId: string; sessionId: string; personaId: string; conversationId: string } {
+    return { userId: 'user-1', sessionId: 'session-1', personaId: 'persona-default', conversationId: 'conversation-1' };
+  }
 }
 
 class TestGuardrailService implements IGuardrailService {
@@ -135,6 +146,18 @@ const baseInput: AgentOSInput = {
   options: { customFlags: { source: 'test' } },
 };
 
+function buildDeltaChunk(streamId: StreamId, personaId: string, text: string): AgentOSResponse {
+  return {
+    type: AgentOSResponseChunkType.TEXT_DELTA,
+    streamId,
+    gmiInstanceId: 'gmi-1',
+    personaId,
+    isFinal: false,
+    timestamp: new Date().toISOString(),
+    textDelta: text,
+  } as AgentOSResponse;
+}
+
 function buildFinalChunk(streamId: StreamId, personaId: string, text: string): AgentOSFinalResponseChunk {
   return {
     type: AgentOSResponseChunkType.FINAL_RESPONSE,
@@ -151,6 +174,7 @@ function createAgentUnderTest(
   guardrailService: IGuardrailService | undefined,
   streamingManager: FakeStreamingManager,
   orchestrator: StubOrchestrator,
+  configExtras: Partial<AgentOSConfig> = {},
 ): AgentOS {
   const logger: ILogger = {
     debug: vi.fn(),
@@ -176,6 +200,7 @@ function createAgentUnderTest(
   agent.initialized = true;
   agent.config = {
     defaultPersonaId: 'persona-default',
+    ...configExtras,
   } as AgentOSConfig;
   agent.guardrailService = guardrailService;
   agent.agentOSOrchestrator = orchestrator;
@@ -315,6 +340,181 @@ describe('AgentOS.processRequest guardrail integration', () => {
     expect(errorChunk.details).toMatchObject({
       action: GuardrailAction.BLOCK,
     });
+  });
+
+  it('holds the deltas until the final verdict and sends them, in order, when the reply is allowed', async () => {
+    const streamId = 'stream-hold-allow';
+    const streamingManager = new FakeStreamingManager();
+    const chunks = [buildDeltaChunk(streamId, 'persona-default', 'safe '), buildDeltaChunk(streamId, 'persona-default', 'answer'), buildFinalChunk(streamId, 'persona-default', 'safe answer')];
+    const orchestrator = new StubOrchestrator(streamingManager, streamId, chunks);
+    const seen: string[] = [];
+    const guardrailService = new TestGuardrailService({ outputEvaluation: { action: GuardrailAction.ALLOW, reasonCode: 'OK' } });
+    const agent = createAgentUnderTest(guardrailService, streamingManager, orchestrator, { guardrailOutputMode: 'hold' });
+    const responses: AgentOSResponse[] = [];
+    for await (const chunk of agent.processRequest(baseInput)) {
+      responses.push(chunk);
+      seen.push(chunk.type);
+    }
+    expect(seen).toEqual([AgentOSResponseChunkType.TEXT_DELTA, AgentOSResponseChunkType.TEXT_DELTA, AgentOSResponseChunkType.FINAL_RESPONSE]);
+    // the guard saw the final chunk once, and never a delta
+    expect(guardrailService.receivedOutputPayloads.map((p) => p.chunk.type)).toEqual([AgentOSResponseChunkType.FINAL_RESPONSE]);
+  });
+
+  it('in hold mode a blocked reply with a replacement reaches the caller as one final response, with no delta before it', async () => {
+    const streamId = 'stream-hold-block';
+    const streamingManager = new FakeStreamingManager();
+    const chunks = [buildDeltaChunk(streamId, 'persona-default', 'you will '), buildDeltaChunk(streamId, 'persona-default', 'pass'), buildFinalChunk(streamId, 'persona-default', 'you will pass')];
+    const orchestrator = new StubOrchestrator(streamingManager, streamId, chunks);
+    const guardrailService = new TestGuardrailService({
+      outputEvaluation: { action: GuardrailAction.BLOCK, reason: 'an outcome promise', reasonCode: 'outcome_promise', replacementText: 'Your guide does not promise an outcome or a date.' },
+    });
+    const agent = createAgentUnderTest(guardrailService, streamingManager, orchestrator, { guardrailOutputMode: 'hold' });
+    const responses = await collectResponses(agent, baseInput);
+    expect(responses).toHaveLength(1);
+    const [chunk] = responses;
+    expect(chunk.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    const final = chunk as AgentOSFinalResponseChunk;
+    expect(final.finalResponseText).toBe('Your guide does not promise an outcome or a date.');
+    expect(final.finalResponseTextPlain).toBe('Your guide does not promise an outcome or a date.');
+    expect(final.gmiInstanceId).toBe('guardrail');
+    expect(chunk.metadata?.guardrail?.output?.[0]).toMatchObject({ action: GuardrailAction.BLOCK, reasonCode: 'outcome_promise' });
+  });
+
+  it('a sanitized final response carries the rewritten text in both text fields, and the held deltas are dropped', async () => {
+    const streamId = 'stream-hold-sanitize';
+    const streamingManager = new FakeStreamingManager();
+    const chunks = [buildDeltaChunk(streamId, 'persona-default', 'raw'), { ...buildFinalChunk(streamId, 'persona-default', 'raw completion text'), finalResponseTextPlain: 'raw completion text' }];
+    const orchestrator = new StubOrchestrator(streamingManager, streamId, chunks);
+    const guardrailService = new TestGuardrailService({ canSanitize: true, outputEvaluation: { action: GuardrailAction.SANITIZE, modifiedText: 'policy compliant text', reasonCode: 'OUTPUT_SANITISED' } });
+    const agent = createAgentUnderTest(guardrailService, streamingManager, orchestrator, { guardrailOutputMode: 'hold' });
+    const responses = await collectResponses(agent, baseInput);
+    expect(responses.map((r) => r.type)).toEqual([AgentOSResponseChunkType.FINAL_RESPONSE]);
+    const final = responses[0] as AgentOSFinalResponseChunk;
+    expect(final.finalResponseText).toBe('policy compliant text');
+    expect(final.finalResponseTextPlain).toBe('policy compliant text');
+  });
+
+  it('a sanitized final response rewrites the reply inside the serialized conversation it carries', async () => {
+    const streamId = 'stream-hold-sanitize-context';
+    const streamingManager = new FakeStreamingManager();
+    const context = { sessionId: 'session-1', messages: [{ role: 'user', content: 'Will I pass?' }, { role: 'assistant', content: 'you will pass' }], config: {} };
+    const chunks = [{ ...buildFinalChunk(streamId, 'persona-default', 'you will pass'), updatedConversationContext: context } as unknown as AgentOSResponse];
+    const orchestrator = new StubOrchestrator(streamingManager, streamId, chunks);
+    const guardrailService = new TestGuardrailService({ canSanitize: true, outputEvaluation: { action: GuardrailAction.SANITIZE, modifiedText: 'No promise is made.', reasonCode: 'outcome_promise' } });
+    const agent = createAgentUnderTest(guardrailService, streamingManager, orchestrator, { guardrailOutputMode: 'hold' });
+    const responses = await collectResponses(agent, baseInput);
+    const final = responses[0] as AgentOSFinalResponseChunk;
+    expect(final.finalResponseText).toBe('No promise is made.');
+    const carried = final.updatedConversationContext as unknown as { messages: Array<{ role: string; content: string }> };
+    expect(carried.messages).toEqual([{ role: 'user', content: 'Will I pass?' }, { role: 'assistant', content: 'No promise is made.' }]);
+    // the chunk the orchestrator sent is not changed under it
+    expect(context.messages[1].content).toBe('you will pass');
+  });
+
+  it('in hold mode the text before an actionable tool call is judged as a reply: a block replaces it and the tool call stays in', async () => {
+    const streamId = 'stream-hold-tool-block';
+    const streamingManager = new FakeStreamingManager();
+    const toolCall = { type: AgentOSResponseChunkType.TOOL_CALL_REQUEST, streamId, gmiInstanceId: 'gmi-1', personaId: 'persona-default', isFinal: false, timestamp: new Date().toISOString(), toolCalls: [{ id: 'call-1', type: 'function', function: { name: 'book_it', arguments: '{}' } }], executionMode: 'external', requiresExternalToolResult: true } as unknown as AgentOSResponse;
+    const chunks = [buildDeltaChunk(streamId, 'persona-default', "I'll book "), buildDeltaChunk(streamId, 'persona-default', 'it for you.'), toolCall];
+    const orchestrator = new StubOrchestrator(streamingManager, streamId, chunks);
+    const guardrailService = new TestGuardrailService({ outputEvaluation: { action: GuardrailAction.BLOCK, reasonCode: 'outward_act', replacementText: 'Your guide books nothing in your name.' } });
+    const agent = createAgentUnderTest(guardrailService, streamingManager, orchestrator, { guardrailOutputMode: 'hold' });
+    const responses = await collectResponses(agent, baseInput);
+    expect(responses.map((r) => r.type)).toEqual([AgentOSResponseChunkType.FINAL_RESPONSE]);
+    expect((responses[0] as AgentOSFinalResponseChunk).finalResponseText).toBe('Your guide books nothing in your name.');
+    // the guard read the held text as one reply, before the tool call
+    expect(guardrailService.receivedOutputPayloads.map((p) => [p.chunk.type, (p.chunk as AgentOSFinalResponseChunk).finalResponseText])).toEqual([[AgentOSResponseChunkType.FINAL_RESPONSE, "I'll book it for you."]]);
+  });
+
+  it('in hold mode an allowed text before an actionable tool call streams in order, then the tool call', async () => {
+    const streamId = 'stream-hold-tool-allow';
+    const streamingManager = new FakeStreamingManager();
+    const toolCall = { type: AgentOSResponseChunkType.TOOL_CALL_REQUEST, streamId, gmiInstanceId: 'gmi-1', personaId: 'persona-default', isFinal: false, timestamp: new Date().toISOString(), toolCalls: [{ id: 'call-1', type: 'function', function: { name: 'read_path', arguments: '{}' } }], executionMode: 'external', requiresExternalToolResult: true } as unknown as AgentOSResponse;
+    const chunks = [buildDeltaChunk(streamId, 'persona-default', 'Let me '), buildDeltaChunk(streamId, 'persona-default', 'read your path.'), toolCall];
+    const orchestrator = new StubOrchestrator(streamingManager, streamId, chunks);
+    const guardrailService = new TestGuardrailService({ outputEvaluation: { action: GuardrailAction.ALLOW, reasonCode: 'OK' } });
+    const agent = createAgentUnderTest(guardrailService, streamingManager, orchestrator, { guardrailOutputMode: 'hold' });
+    const responses = await collectResponses(agent, baseInput);
+    expect(responses.map((r) => r.type)).toEqual([AgentOSResponseChunkType.TEXT_DELTA, AgentOSResponseChunkType.TEXT_DELTA, AgentOSResponseChunkType.TOOL_CALL_REQUEST]);
+    expect(responses.slice(0, 2).map((r) => (r as { textDelta: string }).textDelta).join('')).toBe('Let me read your path.');
+    expect(guardrailService.receivedOutputPayloads.map((p) => p.chunk.type)).toEqual([AgentOSResponseChunkType.FINAL_RESPONSE]);
+  });
+
+  it('a required guard that throws, and one that times out, block the reply, and the verdict names the guard', async () => {
+    const cases: Array<{ name: string; service: IGuardrailService }> = [
+      { name: 'throws', service: { id: 'safety-gate', config: {}, evaluateOutput: async () => { throw new Error('judge down'); } } },
+      { name: 'hangs', service: { id: 'safety-gate', config: {}, evaluateOutput: () => new Promise(() => undefined) } },
+      { name: 'answers nonsense', service: { id: 'safety-gate', config: {}, evaluateOutput: async () => ({ action: 'maybe' } as unknown as GuardrailEvaluationResult) } },
+    ];
+    for (const { name, service } of cases) {
+      const streamId = `stream-required-${name.replace(/\s+/g, '-')}`;
+      const streamingManager = new FakeStreamingManager();
+      const orchestrator = new StubOrchestrator(streamingManager, streamId, [buildFinalChunk(streamId, 'persona-default', 'an answer')]);
+      const agent = createAgentUnderTest(service, streamingManager, orchestrator, { requiredGuardrails: [{ id: 'safety-gate', stages: ['output'], timeoutMs: 50 }] });
+      const responses = await collectResponses(agent, baseInput);
+      expect(responses, name).toHaveLength(1);
+      expect(responses[0].type, name).toBe(AgentOSResponseChunkType.ERROR);
+      const code = (responses[0] as AgentOSErrorChunk).code;
+      expect(['GUARDRAIL_ERROR', 'GUARDRAIL_MALFORMED'], name).toContain(code);
+      expect((responses[0] as AgentOSErrorChunk).details?.metadata, name).toMatchObject({ guardrailId: 'safety-gate' });
+    }
+  });
+
+  it('refuses a request while a required guard is missing, and runs it once the guard is back', async () => {
+    const streamId = 'stream-required-missing';
+    const streamingManager = new FakeStreamingManager();
+    const orchestrator = new StubOrchestrator(streamingManager, streamId, [buildFinalChunk(streamId, 'persona-default', 'an answer')]);
+    const agent = createAgentUnderTest(undefined, streamingManager, orchestrator, { requiredGuardrails: [{ id: 'safety-gate', stages: ['output'], timeoutMs: 1_000 }] });
+    const refused = await collectResponses(agent, baseInput);
+    expect(orchestrator.callCount).toBe(0);
+    expect(refused).toHaveLength(1);
+    expect((refused[0] as AgentOSErrorChunk).code).toBe('SYS_GUARDRAIL_REQUIRED_MISSING');
+    expect((refused[0] as AgentOSErrorChunk).details).toMatchObject({ missing: ['safety-gate'] });
+    (agent as unknown as { guardrailService?: IGuardrailService }).guardrailService = { id: 'safety-gate', evaluateOutput: async () => null };
+    const served = await collectResponses(agent, baseInput);
+    expect(orchestrator.callCount).toBe(1);
+    expect(served.map((r) => r.type)).toEqual([AgentOSResponseChunkType.FINAL_RESPONSE]);
+  });
+
+  it('runs the output guards on the continuation after an external tool result', async () => {
+    const streamId = 'stream-continuation';
+    const streamingManager = new FakeStreamingManager();
+    const orchestrator = new StubOrchestrator(streamingManager, streamId, []);
+    streamingManager.prepareStream(streamId, [buildFinalChunk(streamId, 'persona-default', 'you will pass')]);
+    const guardrailService = new TestGuardrailService({ outputEvaluation: { action: GuardrailAction.BLOCK, reasonCode: 'outcome_promise', replacementText: 'No promise is made.' } });
+    const agent = createAgentUnderTest(guardrailService, streamingManager, orchestrator);
+    const responses: AgentOSResponse[] = [];
+    for await (const chunk of agent.handleToolResults(streamId, [{ toolCallId: 'call-1', toolName: 'read_path', toolOutput: { ok: true }, isSuccess: true }])) {
+      responses.push(chunk);
+    }
+    expect(responses).toHaveLength(1);
+    expect(responses[0].type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
+    expect((responses[0] as AgentOSFinalResponseChunk).finalResponseText).toBe('No promise is made.');
+    expect(guardrailService.receivedOutputPayloads).toHaveLength(1);
+    expect(guardrailService.receivedOutputPayloads[0].context).toMatchObject({ userId: 'user-1', sessionId: 'session-1', personaId: 'persona-default', conversationId: 'conversation-1' });
+  });
+
+  it('rewrites the stored reply when a guard replaced it, so the history holds what the person saw', async () => {
+    const streamId = 'stream-persist';
+    const streamingManager = new FakeStreamingManager();
+    const orchestrator = new StubOrchestrator(streamingManager, streamId, [buildFinalChunk(streamId, 'persona-default', 'you will pass')]);
+    const context = new ConversationContext('conversation-1');
+    context.addMessage({ role: MessageRole.USER, content: 'How is the week?' });
+    const earlier = context.addMessage({ role: MessageRole.ASSISTANT, content: 'Two drills and a rest day.', metadata: { source: 'agentos_output' } });
+    context.addMessage({ role: MessageRole.USER, content: 'Will I pass?' });
+    const stored = context.addMessage({ role: MessageRole.ASSISTANT, content: 'you will pass', metadata: { source: 'agentos_output' } });
+    const saveConversation = vi.fn(async () => undefined);
+    const getConversation = vi.fn(async (id: string) => (id === 'conversation-1' ? context : null));
+    const guardrailService = new TestGuardrailService({ outputEvaluation: { action: GuardrailAction.BLOCK, reasonCode: 'outcome_promise', replacementText: 'No promise is made.' } });
+    const agent = createAgentUnderTest(guardrailService, streamingManager, orchestrator, { orchestratorConfig: { enableConversationalPersistence: true } } as Partial<AgentOSConfig>);
+    (agent as unknown as { conversationManager: unknown }).conversationManager = { getConversation, saveConversation };
+    const responses = await collectResponses(agent, baseInput);
+    expect((responses[0] as AgentOSFinalResponseChunk).finalResponseText).toBe('No promise is made.');
+    expect(getConversation).toHaveBeenCalledWith('conversation-1');
+    expect(context.getMessageById(stored.id)?.content).toBe('No promise is made.');
+    expect(context.getMessageById(stored.id)?.metadata?.modificationInfo).toMatchObject({ strategy: 'filtered', reason: 'guardrail:outcome_promise' });
+    expect(context.getMessageById(earlier.id)?.content).toBe('Two drills and a rest day.');
+    expect(saveConversation).toHaveBeenCalledWith(context);
   });
 });
 

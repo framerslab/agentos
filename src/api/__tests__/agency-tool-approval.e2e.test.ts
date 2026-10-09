@@ -3,13 +3,32 @@
  * `hitl.approvals.beforeTool` holds on every tool loop: native, prompt-shim
  * and streamed; on roster seats, pre-built seats, the hierarchical manager,
  * spawned specialists and nested agencies. Real agent(), agency(),
- * generateText, streamText and OpenAIProvider; only fetch is stubbed.
+ * generateText, streamText and OpenAIProvider; only fetch is stubbed, and
+ * node:readline for hitl.cli().
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
+
+// hitl.cli() asks through node:readline: this prompt answers it with
+// `answer`, records each question and calls `onQuestion` as it is asked.
+const cliPrompt = vi.hoisted(() => ({ answer: 'n', asked: [] as string[], onQuestion: undefined as (() => void) | undefined }));
+vi.mock('node:readline', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:readline')>();
+  return {
+    ...actual,
+    createInterface: () => ({
+      question: (query: string, reply: (answer: string) => void) => {
+        cliPrompt.asked.push(query);
+        cliPrompt.onQuestion?.();
+        reply(cliPrompt.answer);
+      },
+      close: () => undefined,
+    }),
+  };
+});
 
 import { agent } from '../agent.js';
 import { agency } from '../agency.js';
@@ -122,6 +141,40 @@ describe('a listed tool waits for the handler', () => {
     expect(((await team.usage()) as Json).totalTokens).toBe(14);
   });
 
+  it("a handler error's message never reaches the model: the tool result carries a fixed reason, the error goes to on.error and the rejection", async () => {
+    serve([() => toolCall('search', { q: 'x' }), () => text('done')]);
+    // The message fetch gives hitl.webhook for a URL that carries credentials names them.
+    const leak = new TypeError('Request cannot be constructed from a URL that includes credentials: https://approver:s3cret@hooks.example.com/decide');
+    const error = vi.fn();
+    const team = base({ approvals: { beforeTool: ['search'] }, handler: async () => { throw leak; } }, { on: { error } });
+    await expect(team.generate('find x')).rejects.toBe(leak);
+    expect(error).toHaveBeenCalledWith(expect.objectContaining({ error: leak }));
+    const toolMsg = chatBodies()[1].messages.find((m: Json) => m.role === 'tool');
+    expect(JSON.parse(toolMsg.content)).toEqual({ skipped: true, reason: 'the approval handler failed' });
+    expect(JSON.stringify(chatBodies())).not.toContain('s3cret');
+  });
+
+  it('a decision whose approved is not a boolean, and a guardrail check that throws after an approval, are handler errors: the tool never runs, on.error fires, the call rejects', async () => {
+    serve([
+      () => toolCall('search', { q: 'x' }), () => text('done'),
+      () => toolCall('search', { q: 'y' }), () => text('done'),
+      () => toolCall('search', { q: 'z' }), () => text('done'),
+    ]);
+    // hitl.webhook resolves whatever JSON the endpoint answers: a 200 with a null body is null.
+    const answers: unknown[] = [null, { approved: 'yes' }, { approved: true }];
+    const handler = vi.fn(async () => answers.shift() as ApprovalDecision);
+    const error = vi.fn();
+    const team = base({ approvals: { beforeTool: ['search'] }, handler }, { on: { error } });
+    await expect(team.generate('find x')).rejects.toThrow(/malformed decision/);
+    await expect(team.generate('find y')).rejects.toThrow(/malformed decision/);
+    // The hook leaves an argument JSON cannot hold, so the post-approval guardrails cannot serialize the call.
+    const addBigInt = async (info: { args: Record<string, unknown> }) => ({ ...info, args: { ...info.args, n: 10n } });
+    await expect(team.generate('find z', { onBeforeToolExecution: addBigInt })).rejects.toThrow(TypeError);
+    expect(handler).toHaveBeenCalledTimes(3);
+    expect(error).toHaveBeenCalledTimes(3);
+    expect(search.execute).not.toHaveBeenCalled();
+  });
+
   it("a timeout under onTimeout 'error' rejects generate() and stream() with the timeout error; usage is in the totals", async () => {
     serve([() => toolCall('search', { q: 'x' }), () => text('done'), () => toolCallStream('search', { q: 'y' }), () => textStream('done again')]);
     const team = base({ approvals: { beforeTool: ['search'] }, handler: waitForever, timeoutMs: 10, onTimeout: 'error' });
@@ -170,6 +223,36 @@ describe('a listed tool waits for the handler', () => {
     expect(search.execute).not.toHaveBeenCalled();
     const toolMsgs = (chatBodies()[1].messages as Json[]).filter((m) => m.role === 'tool');
     expect(toolMsgs.map((m) => JSON.parse(m.content).skipped)).toEqual([true, true]);
+  });
+
+  it('a call that ends while the guardrail module loads fires no guardrailResult event and no override warning', async () => {
+    // One prompt-tool turn gates both calls together. The first is approved
+    // and its guardrail check would block it; the second's handler throws
+    // while the first's gate is loading the guardrail module.
+    serve([
+      () => text('<tool_call>{"name":"search","arguments":{"q":"rm -rf /tmp/x"}}</tool_call>\n<tool_call>{"name":"search","arguments":{"q":"y"}}</tool_call>'),
+      () => text('done'),
+    ]);
+    const handler = vi.fn(async (r: ApprovalRequest): Promise<ApprovalDecision> => {
+      if ((r.details.args as Json).q === 'y') throw new Error('approval service down');
+      return { approved: true };
+    });
+    const approvalDecided = vi.fn();
+    const guardrailResult = vi.fn();
+    const guardrailHitlOverride = vi.fn();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const team = base({ approvals: { beforeTool: ['search'] }, handler }, { on: { approvalDecided, guardrailResult, guardrailHitlOverride } });
+      await expect(team.generate('clean up', { toolMode: 'prompt' })).rejects.toThrow('approval service down');
+      // The first call's approval was reported while the call was still running.
+      expect(approvalDecided).toHaveBeenCalledTimes(1);
+      expect(guardrailResult).not.toHaveBeenCalled();
+      expect(guardrailHitlOverride).not.toHaveBeenCalled();
+      expect(warn.mock.calls.some((call) => String(call[0]).includes('Overrode HITL approval'))).toBe(false);
+      expect(search.execute).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("a seat's own hook that throws does not bypass the gate", async () => {
@@ -233,6 +316,50 @@ describe('a listed tool waits for the handler', () => {
     expect(search.execute).not.toHaveBeenCalled();
   });
 
+  it("team.stream() with toolMode 'prompt' asks the handler before the tool runs", async () => {
+    serve([
+      () => text('<tool_call>{"name":"search","arguments":{"q":"x"}}</tool_call>'), () => text('refused, done'),
+      () => text('<tool_call>{"name":"search","arguments":{"q":"y"}}</tool_call>'), () => text('approved, done'),
+    ]);
+    const handler = vi.fn(async (r: ApprovalRequest): Promise<ApprovalDecision> => ({ approved: (r.details.args as Json).q === 'y' }));
+    const team = base({ approvals: { beforeTool: ['search'] }, handler });
+    let out = '';
+    for await (const t of team.stream('find x', { toolMode: 'prompt' }).textStream) out += t;
+    expect(out).toBe('refused, done');
+    expect(search.execute).not.toHaveBeenCalled();
+    out = '';
+    for await (const t of team.stream('find y', { toolMode: 'prompt' }).textStream) out += t;
+    expect(out).toBe('approved, done');
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(search.execute).toHaveBeenCalledWith({ q: 'y' });
+    expect(handler.mock.invocationCallOrder[1]).toBeLessThan(search.execute.mock.invocationCallOrder[0]);
+  });
+
+  it("seats of strategy 'parallel': a listed tool asks the handler, and a refusal skips it", async () => {
+    // The seats run concurrently, so each request is answered by what it
+    // holds: a seat asks for search until its tool result is in, and the
+    // chair's synthesis request carries the seats' outputs.
+    fetchMock.mockImplementation(async (url: unknown, init?: { body?: unknown }) => {
+      if (/\/v1\/models/.test(String(url))) return listing();
+      const messages = (JSON.parse(String(init?.body)) as Json).messages as Json[];
+      if (JSON.stringify(messages).includes('Synthesize these into a single coherent response')) return text('synthesis');
+      return messages.some((m) => m.role === 'tool') ? text('seat done') : toolCall('search', { q: 'x' });
+    });
+    const handler = vi.fn(hitl.autoReject('no'));
+    const team = agency({
+      provider: 'openai', model: 'gpt-4.1', apiKey: KEY, tools: { search },
+      agents: { a: { instructions: 'Search for it.' }, b: { instructions: 'Search for it too.' } },
+      strategy: 'parallel',
+      hitl: { approvals: { beforeTool: ['search'] }, handler },
+    } as never);
+    const result = (await team.generate('find x')) as Json;
+    expect(result.text).toBe('synthesis');
+    expect(handler.mock.calls.map(([r]) => r.action)).toEqual(['search', 'search']);
+    expect(search.execute).not.toHaveBeenCalled();
+    const toolResults = chatBodies().flatMap((b) => (b.messages as Json[]).filter((m) => m.role === 'tool'));
+    expect(toolResults.map((m) => JSON.parse(m.content).skipped)).toEqual([true, true]);
+  });
+
   it("a pre-built seat's tool, and its own hook still runs with and without beforeTool", async () => {
     const hook = vi.fn(async (info: { args: Record<string, unknown> }) => info as never);
     const mk = () => agent({ provider: 'openai', model: 'gpt-4.1', apiKey: KEY, tools: { search }, fallbackProviders: [], onBeforeToolExecution: hook as never });
@@ -252,6 +379,63 @@ describe('a listed tool waits for the handler', () => {
     expect(seen[0].details.args).toEqual({ q: 'rewritten' });
     // A plain tool definition's execute receives the arguments alone.
     expect(search.execute).toHaveBeenCalledWith({ q: 'rewritten' });
+  });
+
+  it('an approval that carries modifications.toolArgs is refused: the call never runs with the arguments the approver meant to replace', async () => {
+    serve([() => toolCall('search', { q: 'key: sk-live-abc123' }), () => text('done'), () => toolCall('search', { q: 'y' }), () => text('done again')]);
+    const approvalDecided = vi.fn();
+    const handler = vi.fn(async (): Promise<ApprovalDecision> => ({ approved: true, modifications: { toolArgs: { q: 'key: [REDACTED]' } } }));
+    const team = base({ approvals: { beforeTool: ['search'] }, handler }, { on: { approvalDecided } });
+    const r = (await team.generate('send the key')) as Json;
+    expect(r.text).toBe('done');
+    expect(search.execute).not.toHaveBeenCalled();
+    expect(approvalDecided).toHaveBeenCalledWith(expect.objectContaining({ approved: true }));
+    const toolMsg = chatBodies()[1].messages.find((m: Json) => m.role === 'tool');
+    expect(JSON.parse(toolMsg.content)).toMatchObject({ skipped: true, reason: expect.stringContaining('onBeforeToolExecution') });
+    // A null toolArgs names no arguments: that approval runs the call as asked.
+    handler.mockImplementationOnce(async () => ({ approved: true, modifications: { toolArgs: null } }));
+    await team.generate('find y');
+    expect(search.execute).toHaveBeenCalledWith({ q: 'y' });
+  });
+
+  it("the prompt-tool path records the model's arguments, as the native loop does, not a credential the hook added", async () => {
+    serve([
+      () => toolCall('search', { q: 'x' }), () => text('native done'),
+      () => text('<tool_call>{"name":"search","arguments":{"q":"y"}}</tool_call>'), () => text('prompt done'),
+    ]);
+    const team = base({ approvals: { beforeTool: ['search'] }, handler: hitl.autoApprove() });
+    const addToken = async (info: { args: Record<string, unknown> }) => ({ ...info, args: { ...info.args, authToken: 'tok-secret' } });
+    const native = (await team.generate('find x', { onBeforeToolExecution: addToken })) as Json;
+    const prompt = (await team.generate('find y', { toolMode: 'prompt', onBeforeToolExecution: addToken })) as Json;
+    expect(native.toolCalls[0].args).toEqual({ q: 'x' });
+    expect(prompt.toolCalls[0].args).toEqual({ q: 'y' });
+    expect(prompt.agentCalls[0].toolCalls[0].args).toEqual({ q: 'y' });
+    // The tool still runs with the hook's arguments on both paths.
+    expect(search.execute).toHaveBeenNthCalledWith(1, { q: 'x', authToken: 'tok-secret' });
+    expect(search.execute).toHaveBeenNthCalledWith(2, { q: 'y', authToken: 'tok-secret' });
+  });
+
+  it('hitl.cli() prints the arguments of the tool call before it asks, and the description does not carry them', async () => {
+    serve([() => toolCall('search', { q: 'quarterly numbers' }), () => text('done')]);
+    cliPrompt.asked.length = 0;
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let printedBeforeAsking = '';
+    cliPrompt.onQuestion = () => { printedBeforeAsking = log.mock.calls.map((call) => call.join(' ')).join('\n'); };
+    const approvalRequested = vi.fn();
+    try {
+      const team = base({ approvals: { beforeTool: ['search'] }, handler: hitl.cli() }, { on: { approvalRequested } });
+      const r = (await team.generate('find x')) as Json;
+      expect(r.text).toBe('done');
+      expect(cliPrompt.asked).toEqual(['Approve? (y/n): ']);
+      expect(printedBeforeAsking).toContain("q: 'quarterly numbers'");
+      // hitl.slack posts the description to a channel, so the arguments stay out of it.
+      expect((approvalRequested.mock.calls[0][0] as ApprovalRequest).description).not.toContain('quarterly numbers');
+      // The answer was n: the tool never ran.
+      expect(search.execute).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+      cliPrompt.onQuestion = undefined;
+    }
   });
 
   it('a hook that returns null skips the tool and the handler is never asked', async () => {
@@ -305,6 +489,31 @@ describe('a listed tool waits for the handler', () => {
     expect(agentEnd).not.toHaveBeenCalled();
     expect(chatBodies().length).toBe(2);
   });
+
+  it('a strategy failure after a tool approval error does not replace it: generate() and stream() reject with the approval error, and the later one goes to on.error', async () => {
+    // One approval outage fails both triggers: the tool approval in the first
+    // seat, then the beforeAgent check the strategy runs for the second seat.
+    const toolDown = new Error('tool approval down');
+    const agentDown = new Error('agent approval down');
+    const handler = vi.fn(async (r: ApprovalRequest) => { throw r.type === 'tool' ? toolDown : agentDown; });
+    const error = vi.fn();
+    const team = agency({
+      provider: 'openai', model: 'gpt-4.1', apiKey: KEY, tools: { search },
+      agents: { first: { instructions: 'Use search.' }, second: { instructions: 'Summarize.' } },
+      strategy: 'sequential',
+      hitl: { approvals: { beforeTool: ['search'], beforeAgent: ['second'] }, handler },
+      on: { error },
+    } as never);
+    serve([() => toolCall('search', { q: 'x' }), () => text('first done'), () => toolCallStream('search', { q: 'y' }), () => textStream('first done')]);
+    await expect(team.generate('find x')).rejects.toBe(toolDown);
+    expect(error.mock.calls.map(([e]) => e.error)).toEqual([toolDown, agentDown]);
+    const s = team.stream('find y');
+    await expect(s.text).rejects.toBe(toolDown);
+    await expect(drain(s.textStream)).rejects.toBe(toolDown);
+    await expect(drain(s.fullStream)).rejects.toBe(toolDown);
+    expect(error.mock.calls.map(([e]) => e.error)).toEqual([toolDown, agentDown, toolDown, agentDown]);
+    expect(search.execute).not.toHaveBeenCalled();
+  });
 });
 
 describe('nested agencies', () => {
@@ -344,6 +553,30 @@ describe('nested agencies', () => {
     expect(((await parent.usage()) as Json).totalTokens).toBe(14);
     await expect(parent.stream('y').text).rejects.toThrow(/timed out/);
     expect(((await parent.usage()) as Json).totalTokens).toBe(28);
+  });
+
+  it("a parent's approval that arrives after the nested call's own approval failed runs nothing", async () => {
+    // One prompt-tool turn gates both calls together. The nested agency's
+    // handler fails on search; the parent holds its approval of ping until then.
+    serve([() => text('<tool_call>{"name":"search","arguments":{"q":"x"}}</tool_call>\n<tool_call>{"name":"ping","arguments":{}}</tool_call>'), () => text('inner done')]);
+    const ping = { description: 'Ping.', parameters: { type: 'object' as const, properties: {} }, execute: vi.fn(async () => ({ ok: true })) };
+    let releasePing = (): void => undefined;
+    const pingApproved = new Promise<ApprovalDecision>((resolve) => { releasePing = () => resolve({ approved: true }); });
+    const parentHandler = vi.fn(async (r: ApprovalRequest): Promise<ApprovalDecision> => (r.action === 'ping' ? pingApproved : { approved: true }));
+    const childError = new Error('child approval down');
+    const inner = agency({
+      provider: 'openai', model: 'gpt-4.1', apiKey: KEY, tools: { search, ping },
+      agents: { inner: { instructions: 'Use the tools.' } },
+      strategy: 'sequential',
+      hitl: { approvals: { beforeTool: ['search'] }, handler: async () => { throw childError; } },
+      on: { error: () => releasePing() },
+    } as never);
+    const parent = agency({ agents: { c: inner }, hitl: { approvals: { beforeTool: ['*'] }, handler: parentHandler } });
+    await expect(parent.generate('x', { toolMode: 'prompt' })).rejects.toBe(childError);
+    expect(parentHandler).toHaveBeenCalledTimes(2);
+    expect(search.execute).not.toHaveBeenCalled();
+    // The nested agency does not list ping, so the parent's late approval was all it needed to run.
+    expect(ping.execute).not.toHaveBeenCalled();
   });
 
   it('a string or a throwing __approvalGate passed per call skips the tool, asks no handler and does not reject', async () => {

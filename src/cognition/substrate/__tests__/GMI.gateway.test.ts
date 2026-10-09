@@ -2,10 +2,10 @@
  * @file GMI.gateway.test.ts
  * A GMI turn through a completion gateway: the hop is resolved before the
  * prompt is built, a failure before any output rebuilds the prompt for the
- * next hop, a turn stays on the hop that served its last step and the next
- * user turn starts at the primary, the error codes of the chain's ends, no
- * fallback after output, the schema answer on STEP_FINISHED, and the usage
- * a failed attempt was billed.
+ * next hop (and runs beforeModelCall on it again), a turn stays on the hop
+ * that served its last step and the next user turn starts at the primary,
+ * the error codes of the chain's ends, no fallback after output, the schema
+ * answer on STEP_FINISHED, and the usage a failed attempt was billed.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -66,6 +66,24 @@ describe('GMI turn through the completion gateway', () => {
     expect(resolveCalls).toEqual([null, 0]);
     expect(of(chunks, GMIOutputChunkType.TEXT_DELTA).map((c) => c.content)).toEqual(['Aye.']);
     expect(of(chunks, GMIOutputChunkType.STEP_FINISHED)[0].content).toMatchObject({ stepIndex: 0, text: 'Aye.', providerId: 'anthropic', modelId: 'anthropic-model', hop: 1, finishReason: 'stop' });
+  });
+
+  it('beforeModelCall runs on every attempt, a fallback hop rebuilt prompt included, and the prompt it returns is the one streamed', async () => {
+    const { gateway, streamed } = fakeGateway(two, [{ hop: 0, fails: Object.assign(new Error('overloaded'), { httpStatus: 529 }) }, { hop: 1, chunks: textReply('Aye.') }]);
+    const calls: Array<[number, number, string, string]> = [];
+    const { gmi } = await createScriptedGmi({
+      gateway,
+      config: {
+        beforeModelCall: ({ stepIndex, hop, providerId, modelId, messages }) => {
+          calls.push([stepIndex, hop, providerId, modelId]);
+          return [...messages, { role: 'system', content: `hop ${hop}` }];
+        },
+      },
+    });
+    await runTurn(gmi, textTurn('t1', 'Hello?'));
+    expect(calls).toEqual([[0, 0, 'openai', 'openai-model'], [0, 1, 'anthropic', 'anthropic-model']]);
+    expect(streamed.map((s) => s.messages.at(-1))).toEqual([{ role: 'system', content: 'hop 0' }, { role: 'system', content: 'hop 1' }]);
+    expect(JSON.stringify(streamed[1].messages)).not.toContain('hop 0');
   });
 
   it('the next step of the turn stays on the serving hop; the next user turn starts at the primary', async () => {

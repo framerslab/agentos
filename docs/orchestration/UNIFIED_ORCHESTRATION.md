@@ -1,6 +1,6 @@
 # Unified Orchestration Layer
 
-Three authoring APIs. One compiled intermediate representation. A single runtime that executes every graph with streaming, checkpointing, guardrails, memory, and capability discovery built in.
+Three authoring APIs. One compiled intermediate representation. A single runtime that executes every graph, streams its events and checkpoints its state; the model calls, tools, guardrails and extensions a graph runs come from executors the host supplies.
 
 ## Architecture
 
@@ -11,7 +11,7 @@ graph TD
     subgraph Authoring["Authoring APIs"]
         AG["AgentGraph&lt;S&gt;<br/><em>Full graph control</em>"]
         WF["workflow()<br/><em>Deterministic DAG</em>"]
-        MS["mission()<br/><em>Goal-first, currently stub-compiled</em>"]
+        MS["mission()<br/><em>Goal-first, compiled from a plan template</em>"]
     end
 
     subgraph IR["Compiled IR"]
@@ -19,26 +19,29 @@ graph TD
     end
 
     subgraph Runtime["GraphRuntime"]
-        LC["LoopController"]
         CP["ICheckpointStore"]
-        SM["StreamingManager"]
-        TO["ToolOrchestrator"]
-        GE["GuardrailEngine"]
-        CD["CapabilityDiscoveryEngine"]
-        CM["CognitiveMemoryManager"]
+        NE["NodeExecutor"]
+    end
+
+    subgraph Deps["Executors the host supplies (compile({ deps }))"]
+        LC["loopController + providerCall<br/>(gmi nodes)"]
+        TO["toolOrchestrator<br/>(tool nodes)"]
+        GE["guardrailEngine<br/>(guardrail nodes)"]
+        EX["extensionExecutor, subgraphResolver,<br/>voiceExecutor"]
     end
 
     AG --> CEG
     WF --> CEG
     MS --> CEG
-    CEG --> LC
-    LC --> CP
-    LC --> SM
-    LC --> TO
-    LC --> GE
-    LC --> CD
-    LC --> CM
+    CEG --> NE
+    NE --> CP
+    NE --> LC
+    NE --> TO
+    NE --> GE
+    NE --> EX
 ```
+
+A node whose executor is missing does not throw. A `tool` or `voice` node fails (`success: false`); a `gmi` node succeeds with the output `'gmi-placeholder'`, an `extension` node with `'extension-not-configured'` and a `subgraph` node with `'subgraph-placeholder'`, so a graph compiled without `deps` runs to the end without calling a model; a `guardrail` node passes.
 
 ### Node Types
 
@@ -74,14 +77,15 @@ import { z } from 'zod';
 
 const graph = new AgentGraph({
   input: z.object({ topic: z.string() }),
-  output: z.object({ summary: z.string() }),
+  scratch: z.object({}),
+  artifacts: z.object({ summary: z.string().optional() }),
 })
   .addNode('search', toolNode('web_search'))
   .addNode('summarize', gmiNode({ instructions: 'Summarize the results.' }))
   .addEdge(START, 'search')
   .addEdge('search', 'summarize')
   .addEdge('summarize', END)
-  .compile();
+  .compile({ deps: { toolOrchestrator, loopController, providerCall } });
 ```
 
 ### workflow() — Deterministic DAG
@@ -97,12 +101,12 @@ const wf = workflow('onboarding')
   .returns(z.object({ welcomed: z.boolean() }))
   .step('fetch-user', { tool: 'get_user' })
   .step('send-email', { tool: 'send_email', effectClass: 'external' })
-  .compile();
+  .compile({ deps: { toolOrchestrator } });
 ```
 
 ### mission() — Intent-Driven Orchestration
 
-Describe what you want to achieve and let the mission compiler generate the current stub graph shape for you. Today that means a fixed phase-ordered mission skeleton with your goal preserved in generated reasoning nodes, plus any anchors and mission-level policies you attach.
+Describe what you want to achieve and the mission compiler builds the graph from a fixed plan template: `research`, `qa` or `creative`, picked by `planner.style` or from the goal text. Your goal is kept in the generated reasoning nodes, and the anchors and mission-level policies you attach are added.
 
 ```typescript
 import { mission } from '@framers/agentos/orchestration';
@@ -122,16 +126,15 @@ const m = mission('deep-research')
 | --- | --- |
 | Exact steps known upfront | `workflow()` |
 | Steps known but complex branching needed | [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) |
-| Goal-first authoring with a fixed mission skeleton today | `mission()` |
+| Goal-first authoring from a plan template | `mission()` |
 | Need agent loops / cycles | [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) |
 | Cost-bounded, deterministic execution | `workflow()` |
 | Prototype quickly, then reuse the generated IR directly | `mission()` -> `toWorkflow()` |
 
-## Why This Still Matters
+## Why One IR
 
-- One IR means one streaming/checkpointing model across all three authoring APIs.
-- Memory, guardrails, and tool orchestration are shared runtime concerns instead of separate orchestration stacks.
-- The runtime can keep evolving without forcing authors to rewrite every orchestration surface at once.
+- One IR means one streaming and checkpointing model across all three authoring APIs.
+- Tools, guardrails and model calls run through the same node executor, whichever API built the graph.
 
 ## Detailed Guides
 

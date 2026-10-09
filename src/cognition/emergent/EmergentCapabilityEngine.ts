@@ -31,6 +31,7 @@ import type {
   ComposableToolSpec,
   SandboxExecutionResult,
   SandboxedToolSpec,
+  ForgeTestResponse,
 } from './types.js';
 import { GMI_INSTANCE_ID_PREFIX } from './types.js';
 import {
@@ -45,10 +46,20 @@ import {
   toolFromRow,
   type PersistedSource,
 } from './persisted-source.js';
-import { normalizeAllowlist, toSandboxApis } from './capabilities.js';
+import { EFFECT_CAPABILITIES, normalizeAllowlist, toSandboxApis } from './capabilities.js';
 import { randomUUID } from 'node:crypto';
-import { checkRequest, narrowToForge, resolveCeiling, type ResolvedCeiling } from './ceiling.js';
+import {
+  CeilingError,
+  checkProtectedRoots,
+  checkRequest,
+  grantsEffects,
+  narrowToForge,
+  resolveCeiling,
+  type ResolvedCeiling,
+} from './ceiling.js';
 import { CapabilityBroker } from './broker/CapabilityBroker.js';
+import { protectedRealPaths } from './broker/protected.js';
+import { MAX_TEST_RESPONSES } from './broker/dry-run.js';
 import type { ToolCandidate } from './EmergentJudge.js';
 import type { ITool, ToolEffectRecord, ToolExecutionContext, ToolExecutionResult } from '../../core/tools/ITool.js';
 import type { PersonalityMutationStore } from './PersonalityMutationStore.js';
@@ -271,6 +282,8 @@ interface AdmissionCandidate {
   tier: ToolTier;
   /** The owner the row or the host-built object carries (`created_by_agent`). */
   createdBy: string;
+  /** The session the row (`created_by_session`) or the host-built object's source names. */
+  session?: string;
   /** False when the row's last state write did not finish its flag write; undefined for a host-built object. */
   flagSynced?: boolean;
   buildTool: (implementation: ToolImplementation) => EmergentTool;
@@ -302,8 +315,10 @@ export interface EmergentCapabilityEngineDeps {
   composableBuilder: ComposableToolBuilder;
 
   /**
-   * The executor for code-forged tools. Optional: without it the engine
-   * builds one from `config.sandboxMemoryMB` and `config.sandboxTimeoutMs`.
+   * The forge for code-forged tools. Optional: without it the engine
+   * builds one from `config.sandboxMemoryMB`, `config.sandboxTimeoutMs` and
+   * `config.executor`; with it, `config.executor` must be absent or this
+   * forge's own executor (`executor_conflict` otherwise).
    * Under a ceiling (`config.capabilities`) a forge given here must be no
    * wider than the ceiling (construction fails with
    * `forge_wider_than_ceiling` naming the option), narrows it where it is
@@ -333,6 +348,14 @@ export interface EmergentCapabilityEngineDeps {
 
   /** Optional callback used when a tool is removed from the live runtime. */
   onToolRemoved?: (tool: EmergentTool) => Promise<void>;
+
+  /**
+   * Optional callback used to register again a tool of the host's whose name
+   * a forged composition's executable took, when the forge takes that
+   * executable out again (the composition reached itself once registered).
+   * Without it the name is left empty in that case.
+   */
+  onToolRestored?: (tool: ITool) => Promise<void>;
 }
 
 // ============================================================================
@@ -420,6 +443,7 @@ export class EmergentCapabilityEngine {
   private readonly onToolForged?: (tool: EmergentTool, executable: ITool) => Promise<void>;
   private readonly onToolPromoted?: (tool: EmergentTool) => Promise<void>;
   private readonly onToolRemoved?: (tool: EmergentTool) => Promise<void>;
+  private readonly onToolRestored?: (tool: ITool) => Promise<void>;
 
   /** The host's ceiling for code-forged tools, resolved; absent on the legacy path. */
   private readonly ceiling?: ResolvedCeiling;
@@ -453,6 +477,7 @@ export class EmergentCapabilityEngine {
     this.onToolForged = deps.onToolForged;
     this.onToolPromoted = deps.onToolPromoted;
     this.onToolRemoved = deps.onToolRemoved;
+    this.onToolRestored = deps.onToolRestored;
     if (deps.stepGate) {
       this.composableBuilder.bind({ gate: deps.stepGate });
     }
@@ -460,15 +485,34 @@ export class EmergentCapabilityEngine {
       sideEffectingTools: this.config.compose?.sideEffectingTools ?? [],
     });
 
+    if (deps.sandboxForge && this.config.executor && deps.sandboxForge.executor !== this.config.executor) {
+      throw new Error(
+        `executor_conflict: emergentConfig.executor (${this.config.executor.name}) is not the executor of the sandboxForge passed beside it (${deps.sandboxForge.executor.name}); pass one or the other`,
+      );
+    }
     const forge =
       deps.sandboxForge ??
-      new SandboxedToolForge({ memoryMB: this.config.sandboxMemoryMB, timeoutMs: this.config.sandboxTimeoutMs });
+      new SandboxedToolForge({
+        memoryMB: this.config.sandboxMemoryMB,
+        timeoutMs: this.config.sandboxTimeoutMs,
+        ...(this.config.executor ? { executor: this.config.executor } : {}),
+      });
     if (this.config.capabilities) {
       // Throws a CeilingError naming the key of the first failure.
       const resolved = resolveCeiling(this.config.capabilities, this.config.audit, {
         hasStorage: this.registry.hasStorage(),
       });
       this.ceiling = deps.sandboxForge ? narrowToForge(resolved, deps.sandboxForge.effectiveOptions()) : resolved;
+      // Effects run only where the guest's heap is its own: no fallback.
+      if (grantsEffects(this.ceiling) && !forge.executor.isolates) {
+        throw new CeilingError(
+          'executor_does_not_isolate',
+          'capabilities',
+          `fs.write, fs.delete and state-changing methods need an executor that declares isolates: true; ${forge.executor.name} does not (pass emergentConfig.executor: await QuickJSExecutor.create())`,
+        );
+      }
+      const protectedReal = protectedRealPaths(this.config.protectedPaths ?? []);
+      checkProtectedRoots(this.ceiling, protectedReal);
       const store =
         this.ceiling.audit.store === 'storage'
           ? this.registry.effectsStore({
@@ -476,7 +520,10 @@ export class EmergentCapabilityEngine {
               ...(this.ceiling.audit.retainDays !== undefined ? { retainDays: this.ceiling.audit.retainDays } : {}),
             })
           : undefined;
-      this.broker = new CapabilityBroker(this.ceiling, store);
+      this.broker = new CapabilityBroker(this.ceiling, store, {
+        ...(this.config.effectPolicy ? { policy: this.config.effectPolicy } : {}),
+        protectedReal,
+      });
       forge.attachBroker(this.broker);
     } else if (this.config.allowSandboxTools) {
       // A direct host never calls the loader, so the line comes from here.
@@ -618,6 +665,20 @@ export class EmergentCapabilityEngine {
         };
       }
 
+      // Step 2a': without a ceiling nothing writes, deletes or sends a
+      // state-changing request: the legacy path forges as before.
+      if (!this.ceiling) {
+        const effects = list.capabilities.filter((name) => EFFECT_CAPABILITIES.includes(name));
+        if (effects.length > 0) {
+          return {
+            success: false,
+            error:
+              `effects_need_ceiling: ${effects.join(', ')} need a ceiling that grants them (emergentConfig.capabilities); ` +
+              'without one this host grants fetch, fs.read and crypto to code-forged tools',
+          };
+        }
+      }
+
       // Step 2b: under a ceiling the list is a request, and a name the ceiling
       // does not grant refuses the forge before any test case runs.
       if (this.ceiling) {
@@ -646,12 +707,33 @@ export class EmergentCapabilityEngine {
         };
       }
 
-      // Step 3: Execute test cases in the sandbox, each as a run of its own.
+      // Step 2d: an executor that has to load first is asked before any test
+      // case runs, so a forge on an executor that cannot run is refused with
+      // its reason and reaches neither a test nor the judge.
+      const executor = this.sandboxForge.executor;
+      if (executor.ready) {
+        try {
+          await executor.ready();
+        } catch (error: unknown) {
+          return { success: false, error: error instanceof Error ? error.message : String(error) };
+        }
+      }
+
+      // Step 2e: the answers a test case gives its state-changing requests.
+      const answersRefused = this.refuseTestResponses(request.testCases);
+      if (answersRefused) {
+        return { success: false, error: answersRefused };
+      }
+
+      // Step 3: Execute test cases in the sandbox, each as a run of its own,
+      // and each a dry run: nothing it writes, deletes or sends is real.
       for (const tc of request.testCases) {
-        const sandboxResult = await this.runSandboxed(request.implementation, tc.input, {
-          toolId,
-          agentId: context.agentId,
-        });
+        const sandboxResult = await this.runSandboxed(
+          request.implementation,
+          tc.input,
+          { toolId, agentId: context.agentId },
+          { responses: tc.responses ?? [] },
+        );
 
         testResults.push({
           input: tc.input,
@@ -763,8 +845,37 @@ export class EmergentCapabilityEngine {
             `(${written.reason ?? 'no reason recorded'})`,
         );
       }
+
+      if (request.implementation.mode === 'compose') {
+        // A composition forged while this one's state was written can close a
+        // cycle with it. Checked again here, with nothing awaited between this
+        // check and the registration of the executable below, so a cycle seen
+        // now is refused before the executor is touched and the name keeps the
+        // tool it has.
+        const cycle = this.compositionCycle(request.name, request.implementation.steps);
+        if (cycle) {
+          const held = this.registry.get(toolId);
+          // A load that adopted the tool from its row meanwhile registered its
+          // executable: that one goes too.
+          const registeredMeanwhile =
+            this.composableBuilder.resolve(request.name)?.id === `emergent-tool:${toolId}`;
+          this.registry.remove(toolId);
+          this.removeIndexedToolEverywhere(toolId);
+          if (held && registeredMeanwhile) {
+            await this.dropExecutable(held);
+          }
+          return {
+            success: false,
+            verdict,
+            error: `step_cycle: "${request.name}" reaches itself through ${cycle.join(' -> ')}`,
+          };
+        }
+      }
       this.indexTool(toolId, context.agentId, context.sessionId);
 
+      // What the name resolves to before this tool's executable takes it: a
+      // forge that takes its own executable out again hands the name back.
+      const displaced = this.composableBuilder.resolve(request.name);
       if (this.onToolForged) {
         // The object the registry holds (a registration stores a stamped copy;
         // an adoption above stores the object itself), so the settlement
@@ -796,10 +907,12 @@ export class EmergentCapabilityEngine {
       }
 
       if (request.implementation.mode === 'compose') {
-        // A composition registered between the check above and this one's own
-        // registration can close a cycle with it, and neither check saw the
-        // other: checked once more now that this one resolves by its name, and
-        // taken out again when it reaches itself.
+        // A composition forged while the host was registering this one's
+        // executable (inside its registerTool) can close a cycle with it, and
+        // neither check saw the other: checked once more now that this one
+        // resolves by its name, and taken out again when it reaches itself.
+        // The tool the name resolved to before is registered again, so a
+        // composition forged over that tool meanwhile keeps working.
         const cycle = this.compositionCycle(request.name, request.implementation.steps);
         if (cycle) {
           const held = this.registry.get(toolId);
@@ -808,6 +921,7 @@ export class EmergentCapabilityEngine {
           }
           this.registry.remove(toolId);
           this.removeIndexedToolEverywhere(toolId);
+          await this.restoreDisplaced(request.name, displaced, toolId);
           return {
             success: false,
             verdict,
@@ -869,7 +983,22 @@ export class EmergentCapabilityEngine {
     // A tool that no longer fits what is in force is suspended, not promoted.
     const refusal = this.refusalFor(tool.implementation, tool.name);
     if (refusal) {
-      await this.suspendAsLibrary(toolId, refusal);
+      const suspended = await this.suspendAsLibrary(toolId, refusal);
+      // The suspension took its turn behind the tool's admissions, and a
+      // fitting tool registered while it waited re-checked nothing (the tool
+      // was not suspended yet): checked again now against the tools
+      // registered now, as a run's suspension is.
+      const implementation = this.registry.get(toolId)?.implementation ?? tool.implementation;
+      if (suspended && this.refusalFor(implementation, tool.name) === null) {
+        try {
+          await this.recheck(toolId, false);
+        } catch (recheckError: unknown) {
+          console.warn(
+            `[agentos:emergent] could not re-check "${tool.name}" (${toolId}) after the promotion check suspended it:`,
+            recheckError instanceof Error ? recheckError.message : recheckError,
+          );
+        }
+      }
       return { success: false, error: `${refusal}: the tool no longer fits and was suspended.` };
     }
 
@@ -1045,6 +1174,7 @@ export class EmergentCapabilityEngine {
           legacyActive: (tool as EmergentTool & { isActive?: boolean }).isActive ?? true,
           tier: tool.tier,
           createdBy: tool.createdBy,
+          session: sessionFromSource(tool.source) ?? undefined,
           buildTool: () => tool,
         },
         { readAt },
@@ -1201,6 +1331,9 @@ export class EmergentCapabilityEngine {
       if (!row) {
         return false;
       }
+      if (row.tier === 'session') {
+        this.registry.noteStoredSession(toolId, row.created_by_session);
+      }
       await this.registry.setState(toolId, 'suspended', reason, { setBy: 'host' });
       return true;
     }
@@ -1223,6 +1356,9 @@ export class EmergentCapabilityEngine {
       const row = await this.registry.loadRow(toolId);
       if (!row) {
         return false;
+      }
+      if (row.tier === 'session') {
+        this.registry.noteStoredSession(toolId, row.created_by_session);
       }
       await this.registry.setState(toolId, 'demoted', reason, { setBy: 'host' });
       return true;
@@ -1305,6 +1441,7 @@ export class EmergentCapabilityEngine {
           legacyActive: true,
           tier: tool.tier,
           createdBy: tool.createdBy,
+          session: sessionFromSource(tool.source) ?? undefined,
           buildTool: () => tool,
         },
         { force, readAt },
@@ -1383,6 +1520,7 @@ export class EmergentCapabilityEngine {
         flagSynced: row.flag_synced == null ? undefined : !(row.flag_synced === 0 || row.flag_synced === false),
         tier: row.tier,
         createdBy: row.created_by_agent,
+        session: row.created_by_session,
         buildTool: (implementation) => toolFromRow(row, implementation),
       },
       options,
@@ -1416,14 +1554,18 @@ export class EmergentCapabilityEngine {
       });
     }
     // Nothing is written; the tool is held off here until the next load.
-    this.holdStored(toolId, {
+    this.holdStored(
       toolId,
-      state: 'suspended',
-      reason: 'contended',
-      setBy: 'library',
-      at: Date.now(),
-      request: null,
-    });
+      {
+        toolId,
+        state: 'suspended',
+        reason: 'contended',
+        setBy: 'library',
+        at: Date.now(),
+        request: null,
+      },
+      options.readAt,
+    );
     await this.unregisterIfLive(toolId);
     return { toolId, name, state: 'suspended', reason: 'contended' };
   }
@@ -1433,6 +1575,23 @@ export class EmergentCapabilityEngine {
     // The point after which a change makes what this admission holds stale:
     // where its row was read, or, for a caller that did not say, now.
     const readAt = options.readAt ?? this.registry.generation(toolId);
+    // A stored session tool's session, recorded before any state is held for
+    // it here: the session's cleanup lets go of that state before it returns.
+    if (candidate.tier === 'session' && candidate.session) {
+      this.registry.noteStoredSession(toolId, candidate.session);
+    }
+    // 0. A restriction the host set in this process that the row this
+    //    admission read may not show (its write is under way, landed after
+    //    the read, or failed) stays in force until the host reactivates the
+    //    tool, whatever the row reads, the library's own suspension included:
+    //    nothing is written, and the executable goes.
+    if (!options.force) {
+      const hostHeld = this.unreadHostRestriction(toolId, readAt);
+      if (hostHeld) {
+        await this.unregisterIfLive(toolId);
+        return { toolId, name, state: hostHeld.state, reason: hostHeld.reason };
+      }
+    }
     let legacyActive = candidate.legacyActive;
     // A row whose last state write did not finish its flag write: finish it
     // first, so the flag reads what the state row says before anything is
@@ -1457,7 +1616,7 @@ export class EmergentCapabilityEngine {
     if ((stored?.state === 'demoted' || hostTurnedOff) && !options.force) {
       const reason = stored?.state === 'demoted' ? stored.reason : 'legacy_inactive';
       if (stored?.state === 'demoted') {
-        this.holdStored(toolId, stored);
+        this.holdStored(toolId, stored, readAt);
       } else {
         // Written only while the row is as it was read: a host that
         // reactivated the tool meanwhile is not written over.
@@ -1479,7 +1638,7 @@ export class EmergentCapabilityEngine {
     if (stored?.state === 'suspended' && !options.force && stored.setBy === 'host') {
       // Another process may have set it: this one takes it in and lets go of
       // the executable, so the suspension holds wherever the tool is loaded.
-      this.holdStored(toolId, stored);
+      this.holdStored(toolId, stored, readAt);
       await this.unregisterIfLive(toolId);
       return { toolId, name, state: 'suspended', reason: stored.reason };
     }
@@ -1561,7 +1720,7 @@ export class EmergentCapabilityEngine {
         // The row already says so; this process holds it too. A row that
         // holds no request it can read is held with the one derived from its
         // source, so a registration of a step tool it names finds it.
-        this.holdStored(toolId, stored.request ? stored : { ...stored, request });
+        this.holdStored(toolId, stored.request ? stored : { ...stored, request }, readAt);
       }
       await this.unregisterIfLive(toolId);
       return { toolId, name, state: 'suspended', reason };
@@ -1607,7 +1766,7 @@ export class EmergentCapabilityEngine {
     // row and gives way to it.
     const held = written && written.state !== 'active' ? written : this.newerRestrictionHeld(toolId, readAt);
     if (held && held.state !== 'active') {
-      this.holdStored(toolId, held);
+      this.holdStored(toolId, held, readAt);
       await this.unregisterIfLive(toolId);
       return { toolId, name, state: held.state, reason: held.reason };
     }
@@ -1750,6 +1909,39 @@ export class EmergentCapabilityEngine {
   }
 
   /**
+   * Register again the tool a forge's executable took the name from, after
+   * the forge took its own executable out: only while nothing holds the name.
+   * A host's tool goes back through `onToolRestored`; another forged tool of
+   * the name, when this process still holds it active, through
+   * `onToolForged`. Best-effort.
+   */
+  private async restoreDisplaced(name: string, displaced: ITool | undefined, ownToolId: string): Promise<void> {
+    if (
+      !displaced ||
+      displaced.id === `emergent-tool:${ownToolId}` ||
+      this.composableBuilder.resolve(name) !== undefined
+    ) {
+      return;
+    }
+    try {
+      if (displaced.id.startsWith('emergent-tool:')) {
+        const forgedId = displaced.id.slice('emergent-tool:'.length);
+        const forged = this.registry.get(forgedId);
+        if (forged && forged.name === name && this.registry.isActive(forgedId) && this.onToolForged) {
+          await this.onToolForged(forged, this.createExecutableTool(forged));
+        }
+        return;
+      }
+      await this.onToolRestored?.(displaced);
+    } catch (error: unknown) {
+      console.warn(
+        `[agentos:emergent] could not register "${name}" again after the forge that took the name gave it up:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
+  /**
    * The forge's refusal of a composition under what is registered now: a step
    * that may not be chained, or a chain that reaches the composition itself,
    * with the step or the path named; `null` when it may be forged.
@@ -1786,6 +1978,9 @@ export class EmergentCapabilityEngine {
         if (list.unknown.length > 0 || !checkRequest(list.capabilities, this.ceiling).ok) {
           return 'capability_not_granted';
         }
+      } else if (normalizeAllowlist(implementation.allowlist).capabilities.some((name) => EFFECT_CAPABILITIES.includes(name))) {
+        // Writes and deletes need a ceiling; a stored tool that asks for them waits for one.
+        return 'effects_need_ceiling';
       }
       return null;
     }
@@ -1842,9 +2037,11 @@ export class EmergentCapabilityEngine {
    * the library's (so a later load, or a registration of the missing step
    * tool, re-checks it), held here, and the executable taken out. It gives
    * way to the host's word: when this process holds a host's suspension or a
-   * demotion nothing is written, and a row another process restricted that
-   * way is left as it is and held here (`yieldToHost`), so the library never
-   * turns a host's restriction into one of its own that a re-check lifts.
+   * demotion nothing is written, a row another process restricted that way
+   * is left as it is and held here (`yieldToHost`), and a row the host turned
+   * off with its own SQL (active, its flag lowered, the mark clear) is
+   * recorded as the host's demotion, so the library never turns a host's
+   * restriction into one of its own that a re-check lifts.
    *
    * It takes its turn with the tool's admissions (`serializeAdmission`): a
    * re-check that a registration starts while the suspension is written runs
@@ -1862,12 +2059,14 @@ export class EmergentCapabilityEngine {
     const held = this.registry.getState(toolId);
     let suspended = false;
     if (!held || !isHostRestriction(held)) {
+      let refusedOverActive = false;
       try {
         const inForce = await this.registry.setState(toolId, 'suspended', reason, {
           setBy: 'library',
           yieldToHost: true,
         });
         suspended = inForce.state === 'suspended' && inForce.setBy === 'library';
+        refusedOverActive = inForce.state === 'active';
       } catch (error: unknown) {
         // Held here even though the row did not take it.
         suspended = true;
@@ -1876,9 +2075,46 @@ export class EmergentCapabilityEngine {
           error instanceof Error ? error.message : error,
         );
       }
+      if (refusedOverActive) {
+        // The row reads active and did not take the suspension: when the host
+        // turned the tool row off with its own SQL, that is recorded now as
+        // the host's demotion, as a load records it, so no re-check of the
+        // library's raises the flag again.
+        try {
+          await this.demoteIfHostTurnedOff(toolId);
+        } catch (error: unknown) {
+          console.warn(
+            `[agentos:emergent] could not record the host's disable of "${toolId}":`,
+            error instanceof Error ? error.message : error,
+          );
+        }
+      }
     }
     await this.unregisterIfLive(toolId);
     return suspended;
+  }
+
+  /**
+   * A row that reads active, its mark clear, with its tool row's flag
+   * lowered: the host turned the tool off with its own SQL. Recorded as the
+   * host's demotion (`legacy_inactive`), as a load records it, only while the
+   * state row is still the one read here, so a host that reactivated the
+   * tool meanwhile is not written over. Only `reactivateTool` lifts it.
+   */
+  private async demoteIfHostTurnedOff(toolId: string): Promise<void> {
+    const row = await this.registry.loadRow(toolId);
+    if (!row || row.state !== 'active') {
+      return;
+    }
+    const markClear = !(row.flag_synced === 0 || row.flag_synced === false);
+    const flagLowered = row.is_active === 0 || row.is_active === false;
+    if (!markClear || !flagLowered) {
+      return;
+    }
+    await this.registry.setState(toolId, 'demoted', 'legacy_inactive', {
+      setBy: 'host',
+      ifRow: { at: Number(row.state_at ?? 0), state: 'active', setBy: stateSetterFromColumn(row.set_by) },
+    });
   }
 
   private async unregisterIfLive(toolId: string): Promise<void> {
@@ -1906,8 +2142,28 @@ export class EmergentCapabilityEngine {
     return this.registry.restrictionUnread(toolId, readAt) ? memory : undefined;
   }
 
-  /** A stored restriction, held in this process too when the tool is live here. */
-  private holdStored(toolId: string, record: ToolStateRecord): void {
+  /**
+   * A host's restriction (its suspension, or a demotion) this process holds
+   * that the row read from `readAt` on may not show: its write is still under
+   * way, landed after the read began, or failed. Only `reactivateTool` lifts
+   * it; nothing read from that row replaces it.
+   */
+  private unreadHostRestriction(toolId: string, readAt: number): ToolStateRecord | undefined {
+    const memory = this.registry.getState(toolId);
+    return memory && isHostRestriction(memory) && this.registry.restrictionUnread(toolId, readAt) ? memory : undefined;
+  }
+
+  /**
+   * A stored restriction, held in this process too when the tool is live
+   * here. With `readAt`, the point the record's row was read at, a host's
+   * restriction this process holds that the row may not show stays instead
+   * (see {@link unreadHostRestriction}).
+   */
+  private holdStored(toolId: string, record: ToolStateRecord, readAt?: number): void {
+    const kept = readAt === undefined ? undefined : this.unreadHostRestriction(toolId, readAt);
+    if (kept && kept !== record) {
+      return;
+    }
     const live = this.registry.get(toolId);
     if (live) {
       this.registry.adopt(live, record);
@@ -2292,6 +2548,52 @@ export class EmergentCapabilityEngine {
   }
 
   /**
+   * The answers a forge's test cases give their state-changing requests,
+   * checked before any test runs: at most {@link MAX_TEST_RESPONSES} a case,
+   * each with a method, an absolute URL, a status from 200 to 599 and a body
+   * within the ceiling's `maxResponseBytes`. Returns why they are refused, or
+   * undefined.
+   */
+  private refuseTestResponses(testCases: readonly { responses?: readonly ForgeTestResponse[] }[]): string | undefined {
+    const methods = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'];
+    const limit = this.ceiling?.fetch?.maxResponseBytes ?? 5 * 1024 * 1024;
+    for (const [index, tc] of testCases.entries()) {
+      const responses = tc.responses ?? [];
+      if (!Array.isArray(responses) || responses.length > MAX_TEST_RESPONSES) {
+        return `invalid_test_responses: test case ${index} gives more than ${MAX_TEST_RESPONSES} answers, or not a list`;
+      }
+      for (const answer of responses) {
+        let url = '';
+        try {
+          url = new URL(String(answer?.url)).href;
+        } catch {
+          url = '';
+        }
+        // The answers come from a forging agent's JSON: their types are not trusted.
+        const status: unknown = answer?.status;
+        const body: unknown = answer?.body;
+        const headers: unknown = answer?.headers;
+        if (
+          !methods.includes(String(answer?.method)) ||
+          url === '' ||
+          typeof status !== 'number' ||
+          !Number.isInteger(status) ||
+          status < 200 ||
+          status > 599 ||
+          (body !== undefined && typeof body !== 'string') ||
+          (headers !== undefined && (typeof headers !== 'object' || headers === null))
+        ) {
+          return `invalid_test_responses: test case ${index} has an answer without a method, an absolute URL and a status from 200 to 599`;
+        }
+        if (typeof body === 'string' && Buffer.byteLength(body, 'utf8') > limit) {
+          return `invalid_test_responses: test case ${index} has an answer body over ${limit} bytes`;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * One run of forged code, as a forge test or a call. Under a ceiling the
    * run has its own call handle, which ends when the run does, however it
    * ends (it returns, throws or times out): the broker refuses capability
@@ -2303,6 +2605,7 @@ export class EmergentCapabilityEngine {
     implementation: SandboxedToolSpec,
     input: unknown,
     who: { toolId: string; agentId: string },
+    dryRun?: { responses: readonly ForgeTestResponse[] },
   ): Promise<SandboxExecutionResult & { effects?: ToolEffectRecord[] }> {
     const request = {
       code: implementation.code,
@@ -2320,6 +2623,7 @@ export class EmergentCapabilityEngine {
       toolId: who.toolId,
       agentId: who.agentId,
       signal: controller.signal,
+      ...(dryRun ? { dryRun } : {}),
     };
     let result: SandboxExecutionResult;
     try {

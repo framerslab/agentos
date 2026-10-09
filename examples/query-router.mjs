@@ -26,12 +26,12 @@ async function main() {
     availableTools: ['web_search', 'deep_research'],
     onClassification: (result) => {
       console.log(
-        `[classification] tier=${result.tier} confidence=${result.confidence.toFixed(2)}`
+        `[classification] tier=${result.tier} strategy=${result.strategy} confidence=${result.confidence.toFixed(2)}`
       );
     },
     onRetrieval: (result) => {
       console.log(
-        `[retrieval] chunks=${result.chunks.length} strategy=${result.strategy} durationMs=${result.durationMs}`
+        `[retrieval] chunks=${result.chunks.length} durationMs=${result.durationMs}`
       );
     },
   });
@@ -54,7 +54,7 @@ async function main() {
 
   console.log('\n=== sources ===\n');
   for (const source of result.sources) {
-    console.log(`- ${source.title} (${source.uri})`);
+    console.log(`- ${source.heading} (${source.path})`);
   }
 
   await router.close();

@@ -61,7 +61,7 @@ Notes:
 - Enable trace correlation (`trace_id`/`span_id`) when you enable tracing.
 - Enable OTEL log export only when you explicitly want one unified OTLP pipeline for traces/metrics/logs.
 
-## SOTA Note (Node)
+## Correlating every pino log (Node)
 
 If you want trace/span correlation injected automatically across *all* pino logs in a service (not only AgentOS logs), consider using `@opentelemetry/instrumentation-pino` in your host app, and keep AgentOS correlation enabled for consistency.
 

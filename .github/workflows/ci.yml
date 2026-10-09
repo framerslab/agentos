@@ -50,6 +50,18 @@ jobs:
       - name: Package exports point at built files
         run: pnpm run verify:exports
 
+      # The executor from the built package, as a host loads it: its prelude and
+      # bindings are compiled source, and its engine resolves from node_modules.
+      - name: The QuickJS executor runs from the built package
+        run: |
+          node --input-type=module -e "
+          import { QuickJSExecutor } from './dist/cognition/emergent/executor/QuickJSExecutor.js';
+          const executor = await QuickJSExecutor.create();
+          const ran = await executor.run({ code: 'function execute(input) { return input.a + input.b; }', input: { a: 2, b: 3 }, globals: {}, timeoutMs: 2000, memoryMB: 16 });
+          if (ran.status !== 'ok' || ran.output !== 5) { console.error(ran); process.exit(1); }
+          console.log('QuickJSExecutor from dist:', ran.status, ran.output);
+          "
+
       - name: Lint
         run: pnpm run lint
 
@@ -61,7 +73,10 @@ jobs:
               docs/architecture/EMERGENT_CAPABILITIES.md docs/architecture/ARCHITECTURE.md \
               src/cognition/emergent/SandboxedToolForge.ts src/cognition/emergent/ComposableToolBuilder.ts \
               src/cognition/emergent/EmergentCapabilityEngine.ts src/cognition/emergent/types.ts \
-              src/safety/sandbox/executor/CodeSandbox.ts src/safety/sandbox/executor/ICodeSandbox.ts; then
+              src/safety/sandbox/executor/CodeSandbox.ts src/safety/sandbox/executor/ICodeSandbox.ts \
+              src/cognition/emergent/executor/types.ts src/cognition/emergent/executor/InProcessExecutor.ts \
+              src/cognition/emergent/executor/QuickJSExecutor.ts src/cognition/emergent/executor/guest-surface.ts \
+              src/cognition/emergent/executor/guest-prelude.ts README.md docs/SELF_EXTENSION.md; then
             echo "::error::the documentation claims an isolation the executor does not provide (see docs/architecture/EMERGENT_CAPABILITIES.md, Sandbox Mode)"
             exit 1
           fi

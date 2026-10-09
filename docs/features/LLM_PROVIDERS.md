@@ -1,6 +1,6 @@
 # LLM Providers — multi-provider configuration & routing
 
-AgentOS abstracts every LLM behind a single [`IProvider`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/IProvider.ts) interface. Eleven providers are wired in directly — nine via API key, two via local CLI bridges that ride an existing Claude Max or Google account subscription. OpenRouter, included in the eleven, fans out to 200+ additional models from the same set of vendors. Every provider speaks the same streaming protocol, supports the same tool-call shape (with the documented exceptions below), and participates in the same cost ledger. The fallback chain is auto-built from whichever keys are set in the environment and is overridable per agent.
+AgentOS abstracts every LLM behind a single [`IProvider`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/IProvider.ts) interface. Thirteen providers are wired in directly: eleven reached with an API key or a base URL, and two local CLI bridges that ride an existing Claude Max or Google account subscription. Three of the thirteen are gateways: OpenRouter and Requesty route to models from many vendors, and LiteLLM is a proxy you host. Every provider speaks the same streaming protocol, supports the same tool-call shape (with the documented exceptions below), and participates in the same cost ledger. The fallback chain is auto-built from whichever keys are set in the environment and is overridable per agent.
 
 ---
 
@@ -22,6 +22,8 @@ AgentOS abstracts every LLM behind a single [`IProvider`](https://github.com/fra
    - [Mistral AI](#mistral-ai)
    - [xAI (Grok)](#xai-grok)
    - [OpenRouter](#openrouter)
+   - [Requesty](#requesty)
+   - [LiteLLM](#litellm)
    - [Ollama](#ollama)
 9. [Programmatic Configuration](#programmatic-configuration)
 10. [Adding a Custom Provider](#adding-a-custom-provider)
@@ -36,11 +38,11 @@ AgentOS abstracts LLM access behind a unified [`IProvider`](https://github.com/f
 
 **Key features:**
 
-- **11 providers** supported out of the box (9 API-key + 2 CLI-based)
+- **13 providers** supported out of the box (11 by API key or base URL, 2 CLI-based)
 - **CLI providers**: Use your Claude Max or Google account subscription via local CLI — no API key needed
 - **Auto-detection**: Set an API key or install a CLI and the provider is available
 - **Fallback**: Automatic retry with alternate providers on failure (`fallbackProviders`)
-- **Cost-aware caps**: Per-run cost ceilings via `controls.maxCostUSD`; route requests to cheaper models with a custom router
+- **Cost-aware caps**: `agency()` checks `controls.maxCostUSD` and the other run limits after each run; `agent()` applies `controls.maxTotalTokens` and `controls.maxDurationMs` to each model call; a custom router sends requests to cheaper models
 - **Streaming**: All providers support streaming with a unified async iterator
 - **Tool calling**: Unified function/tool calling across providers that support it
 
@@ -58,6 +60,8 @@ AgentOS abstracts LLM access behind a unified [`IProvider`](https://github.com/f
 | **Mistral** | `MISTRAL_API_KEY` | `mistral-large-latest` | Yes | Yes | No | Yes | $$ |
 | **xAI** | `XAI_API_KEY` | `grok-2` | Yes | Yes | Yes | No | $$ |
 | **OpenRouter** | `OPENROUTER_API_KEY` | `openai/gpt-4o` | Yes | Yes | Yes* | Yes* | Varies |
+| **Requesty** | `REQUESTY_API_KEY` | `openai/gpt-4o` | Yes | Yes | Yes* | Yes* | Varies |
+| **LiteLLM** | _(none read; pass `apiKey`)_ | _(none; pass `model`)_ | Yes | Yes* | Yes* | Yes* | Varies |
 | **Ollama** | `OLLAMA_BASE_URL` | `llama3.2` | Yes | Partial | Model-dep. | Yes | Free |
 | **Claude Code CLI** | _(PATH detection)_ | `claude-sonnet-4-6` | Yes | Yes | Yes | No | Free* |
 | **Gemini CLI** | _(PATH detection)_ | `gemini-3.5-flash` | Yes | Partial** | Yes | No | Free* |
@@ -67,7 +71,7 @@ AgentOS abstracts LLM access behind a unified [`IProvider`](https://github.com/f
 
 > **Gemini CLI ToS Warning**: Google's Gemini CLI ToS may prohibit third-party subprocess invocation with OAuth auth. Use `gemini` with API key for production. See [CLI Providers](../getting-started/CLI_PROVIDERS.md) for details.
 
-*OpenRouter capabilities depend on the underlying model selected.
+*OpenRouter, Requesty and LiteLLM capabilities depend on the underlying model selected.
 
 ---
 
@@ -117,9 +121,12 @@ order and uses the first one found:
 6. `TOGETHER_API_KEY` → Together AI
 7. `MISTRAL_API_KEY` → Mistral
 8. `XAI_API_KEY` → xAI
-9. `which claude` → Claude Code CLI (PATH detection — no API key, uses Max subscription)
-10. `which gemini` → Gemini CLI (PATH detection — no API key, uses Google account)
-11. `OLLAMA_BASE_URL` → Ollama
+9. `REQUESTY_API_KEY` → Requesty
+10. `which claude` → Claude Code CLI (PATH detection — no API key, uses Max subscription)
+11. `which gemini` → Gemini CLI (PATH detection — no API key, uses Google account)
+12. `OLLAMA_BASE_URL` → Ollama
+
+LiteLLM is never auto-detected: name it with `provider: 'litellm'` ([LiteLLM](#litellm)).
 
 You can override auto-detection in four ways, highest priority first:
 
@@ -198,6 +205,11 @@ call their provider without a fallback chain; a GMI built with a completion
 gateway moves to the next hop when a hop cannot start or an attempt fails
 with a retryable error before any output
 ([Model calls through a completion gateway](../GMI.md#model-calls-through-a-completion-gateway)).
+An agent created with `runtime: 'gmi'` builds that gateway from its own
+`fallbackProviders` (unset, the same auto-built chain), `policyTier`, `router`
+and `onFallback`, so its sessions fall back as a gateway does: before a step's
+first output, and not after it
+([GMIs from agent()](../GMI.md#gmis-from-agent)).
 
 A failover never repeats work the caller already received or that had side
 effects. A stream that has delivered text or tool activity is not restarted
@@ -286,21 +298,43 @@ AgentOS tracks token usage and cost across all providers:
 
 ### Cost-Aware Caps
 
-Per-run hard cost caps live on `controls`:
+Run limits live on `controls`, and [`agency()`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts) is the surface that checks all of them:
 
 ```typescript
-import { agent } from '@framers/agentos';
+import { agency } from '@framers/agentos';
 
-const myAgent = agent({
+const team = agency({
   provider: 'anthropic',
+  agents: {
+    researcher: { instructions: 'Find the facts.' },
+    writer: { instructions: 'Write the summary.' },
+  },
   controls: {
-    maxCostUSD: 0.05,           // Stop the run if total cost exceeds $0.05
-    maxTotalTokens: 50_000,     // Stop on token cap
-    maxDurationMs: 30_000,      // Wall-clock cap
-    onLimitReached: 'stop',     // 'stop' | 'warn' | 'error'
+    maxCostUSD: 0.05,           // total cost of a run
+    maxTotalTokens: 50_000,     // prompt + completion tokens of a run
+    maxDurationMs: 30_000,      // wall-clock time of a run
+    maxAgentCalls: 10,          // agent invocations in a run
+    onLimitReached: 'error',    // 'stop' | 'warn' | 'error'
+  },
+  on: {
+    limitReached: (e) => console.warn(`${e.metric}: ${e.value} > ${e.limit}`),
   },
 });
 ```
+
+`agency()` compares a run against these limits when the run ends, and compares
+the agency's running token and cost totals against them before each new run
+starts. A breach calls `on.limitReached`; with `onLimitReached: 'error'` it
+throws an `AgencyConfigError` instead. `'stop'` and `'warn'` both report
+through the callback, and no limit interrupts a run that is in progress.
+
+`agent()` reads two of the fields, per model call: `controls.maxTotalTokens`
+becomes the call's completion-token cap (`maxTokens`) when the agent sets no
+`maxTokens`, and `controls.maxDurationMs` becomes the request timeout. It does
+not read `maxCostUSD`, `maxAgentCalls` or `onLimitReached`. To cap an agent's
+spend, read `result.usage.costUSD` or `agent.usage()` after each call and stop
+calling, or track it with
+[`CostGuard`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts).
 
 For cheap-first routing across multiple models, attach a custom [`IModelRouter`](https://github.com/framerslab/agentos/blob/master/src/core/llm/routing/IModelRouter.ts)
 via `agent({ router })` — the router decides which provider/model to call per
@@ -449,6 +483,54 @@ Popular OpenRouter models:
 - `google/gemini-2.5-flash`
 - `meta-llama/llama-3.3-70b-instruct`
 
+### Requesty
+
+```bash
+export REQUESTY_API_KEY=...
+```
+
+Requesty is an OpenAI-compatible gateway at `https://router.requesty.ai/v1`
+(`REQUESTY_BASE_URL` overrides it). Name models as `vendor/model`:
+
+```typescript
+import { agent } from '@framers/agentos';
+
+const myAgent = agent({
+  provider: 'requesty',
+  model: 'anthropic/claude-sonnet-4-5-20250929',
+});
+```
+
+`provider: 'requesty'` without a model uses `openai/gpt-4o`.
+
+### LiteLLM
+
+[LiteLLM](https://docs.litellm.ai/) is a proxy you host; it exposes the models
+you configure on it through an OpenAI-compatible API. AgentOS reaches it with
+`provider: 'litellm'` and three explicit fields, because it reads no
+environment variable for this provider and has no default model for it:
+
+```typescript
+import { generateText } from '@framers/agentos';
+
+const { text } = await generateText({
+  provider: 'litellm',
+  model: 'anthropic/claude-sonnet-4-6',     // a model name your proxy serves
+  apiKey: process.env.LITELLM_API_KEY,      // the proxy's master or virtual key
+  baseUrl: 'http://localhost:4000/v1',      // the default when omitted
+  prompt: 'Hello',
+});
+```
+
+`provider: 'litellm'` without `model` throws `Unknown provider "litellm"`, and
+without `apiKey` it throws `No API key for litellm`. The provider class has a
+default model of its own, `gpt-4o-mini`, used only when the class is driven
+directly without a model id; `generateText()`, `streamText()` and `agent()`
+never reach it. LiteLLM is not part of
+auto-detection or of the auto-built fallback chain; add it to
+`fallbackProviders` with its `model`, `apiKey` and `baseUrl` to use it as a
+fallback.
+
 ### Ollama
 
 ```bash
@@ -514,30 +596,45 @@ const result = await myAgent.generate(
 
 ## Adding a Custom Provider
 
-Implement the [`IProvider`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/IProvider.ts) interface from `@framers/agentos` to add a custom
-LLM provider. Provider registration today is wired up via
-[`AIModelProviderManager`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/AIModelProviderManager.ts) — there is no public `registerLLMProvider()`
-shortcut yet; instead, instantiate your provider and inject it via the
-manager surfaced on `AgentOSConfig.dependencies` when constructing the
-runtime.
+[`AIModelProviderManager`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/AIModelProviderManager.ts) builds providers from a fixed list of ids, skips
+an id it does not know, and has no method that registers another
+[`IProvider`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/IProvider.ts) class. There are three ways to reach a model the list
+does not cover:
 
-```typescript
-import type { IProvider } from '@framers/agentos';
+1. **An OpenAI-compatible endpoint.** Point the `openai` provider at it with
+   `baseUrl` (or `OPENAI_BASE_URL`):
 
-class MyProvider implements IProvider {
-  readonly id = 'my-provider';
-  readonly name = 'My Custom LLM';
+   ```typescript
+   import { generateText } from '@framers/agentos';
 
-  // ... implement generateCompletion / streamCompletion / listModels / etc.
-  // See src/core/llm/providers/IProvider.ts for the full
-  // contract; the existing OpenAI / Anthropic / Ollama implementations are
-  // good references.
-}
-```
+   const { text } = await generateText({
+     provider: 'openai',
+     baseUrl: 'https://llm.internal.example.com/v1',
+     apiKey: process.env.INTERNAL_LLM_KEY,
+     model: 'my-model',
+     prompt: 'Hello',
+   });
+   ```
 
-Look at any class under [`src/core/llm/providers/implementations/`](https://github.com/framerslab/agentos/tree/master/src/core/llm/providers/implementations) for a
-complete reference — the OpenAI and Anthropic providers are the most fully
-exercised paths.
+   The endpoint must answer `GET /models`: the provider lists the models when
+   it initializes, and a listing that fails fails the call.
+
+2. **A gateway.** [OpenRouter](#openrouter), [Requesty](#requesty) and a
+   self-hosted [LiteLLM](#litellm) proxy each put many vendors behind one
+   provider id.
+
+3. **A new provider in AgentOS.** Implement `IProvider` (`providerId`,
+   `isInitialized`, `initialize()`, `generateCompletion()`,
+   `generateCompletionStream()`, `generateEmbeddings()`,
+   `listAvailableModels()`, `getModelInfo()`, `checkHealth()`, `shutdown()`)
+   next to the classes under [`src/core/llm/providers/implementations/`](https://github.com/framerslab/agentos/tree/master/src/core/llm/providers/implementations), add
+   its id to the manager and to
+   [`provider-defaults.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/provider-defaults.ts), and open a pull request.
+   [Adding an LLM Provider](../contributing/new-provider.md) lists what a
+   provider pull request must include.
+
+The interface is importable for typing as
+`import type { IProvider } from '@framers/agentos/core/llm/providers/IProvider'`.
 
 ---
 
@@ -545,17 +642,30 @@ exercised paths.
 
 ### Tool Calling Support
 
-| Provider | Parallel Tools | Structured Output | Tool Choice | Notes |
-|----------|---------------|-------------------|-------------|-------|
-| OpenAI | Yes | Yes (strict mode) | `auto/none/required/specific` | Gold standard |
-| Anthropic | Yes | Yes | `auto/any/specific` | Strong tool use |
-| Gemini | Yes | Yes | `auto/none/any` | Good support |
-| Groq | Yes | Partial | `auto/none` | Fast but basic |
-| Together | Yes | No | `auto/none` | Model-dependent |
-| Mistral | Yes | No | `auto/none/any` | Good support |
-| xAI | Yes | No | `auto/none` | Basic tool use |
-| OpenRouter | Model-dependent | Model-dependent | Model-dependent | Pass-through |
-| Ollama | Partial | No | `auto/none` | Model-dependent |
+The Structured Output column is the provider-side enforcement that
+`generateObject()` and a session's `responseSchema` request. `generateObject()`
+also writes the schema into the system prompt on every provider. A session's
+`responseSchema`, on either agent runtime, writes it there only when the
+provider-side format carries no schema: on a provider whose entry is "None",
+on an Anthropic model that rejects a forced tool choice, and in JSON-object
+mode. Each fallback provider is checked for its own format. `streamObject()`
+sends no provider-side format on any provider: its schema travels in the system
+prompt only. All three validate the reply against the caller's Zod schema, and
+`send()` throws an `ObjectGenerationError` when the reply is not matching JSON.
+
+The Tool Choice column is what the provider does with the `toolChoice` option
+(`'auto'`, `'none'`, `'required'`, or `{ type: 'function', function: { name } }`).
+
+| Provider | Structured Output | Tool Choice |
+|----------|-------------------|-------------|
+| OpenAI | `json_schema` with `strict: true` when the schema fits OpenAI's strict rules, otherwise JSON-object mode | Sent as `tool_choice` |
+| Anthropic | A forced tool call whose input is the schema; none on a model that rejects a forced tool choice | `'required'` is sent as `any` and a named function as `tool`; `'none'` is sent as `auto`. A model that rejects a forced choice gets `auto` |
+| Gemini | `responseSchema` with JSON output | Not sent; the API default applies |
+| OpenRouter | Strict `json_schema` when the schema fits, otherwise JSON-object mode. When OpenRouter finds no endpoint that serves the strict schema (HTTP 404, "No endpoints found"), the request is sent once more in JSON-object mode with the schema written into its system prompt, unless the system prompt states a schema already | Sent as `tool_choice`; the routed model decides |
+| Requesty | None | Sent as `tool_choice`; the routed model decides |
+| Groq, Together, Mistral, xAI, LiteLLM | None | Sent as `tool_choice`; the vendor decides which values it accepts |
+| Ollama | None | Not sent |
+| Claude Code CLI, Gemini CLI | None | Written into the prompt as an instruction; `'none'` leaves the tool schemas out |
 
 ### Embedding Support
 

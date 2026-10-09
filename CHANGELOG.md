@@ -1,3 +1,258 @@
+## [0.13.14](https://github.com/framerslab/agentos/compare/v0.13.13...v0.13.14) (2026-10-09)
+
+### fix
+
+* **tools:** tool arguments and output previews reach the console only when tool-call logging is on (#207) ([ef8efd4](https://github.com/framerslab/agentos/commit/ef8efd44648eea04968c7a11b65aab4e42b585e1))
+
+## [0.13.13](https://github.com/framerslab/agentos/compare/v0.13.12...v0.13.13) (2026-10-09)
+
+### fix
+
+* **gmi:** follow-ups from the review of the gmi() guide (#199) ([e002c5b](https://github.com/framerslab/agentos/commit/e002c5b6c93ba0a04ed65fada8013bd63ebf2837))
+
+### docs
+
+* seventh round of audit follow-ups to the guides (#201) ([31219f0](https://github.com/framerslab/agentos/commit/31219f0ba6797954ff2408b0414f543cf4f8705b))
+
+## [0.13.12](https://github.com/framerslab/agentos/compare/v0.13.11...v0.13.12) (2026-10-09)
+
+### feat
+
+* **hearing:** carry the finals' times on the LiveKit transcription streams (#198) ([9a65feb](https://github.com/framerslab/agentos/commit/9a65feb0fcff7c7324ee59066f82d30dc9db896d))
+
+### docs
+
+* sixth round of audit follow-ups to the guides (#195) ([002b4ee](https://github.com/framerslab/agentos/commit/002b4ee4f3ce7e79aeb3f254aa2d2f2b8c80a0db))
+
+## [0.13.11](https://github.com/framerslab/agentos/compare/v0.13.10...v0.13.11) (2026-10-09)
+
+### fix
+
+* **gmi:** follow-ups from the review of #175 (#193) ([d9f0dd8](https://github.com/framerslab/agentos/commit/d9f0dd8b39a6daa7989dc3e0ff46c2f0b51ae6a5))
+
+## [0.13.10](https://github.com/framerslab/agentos/compare/v0.13.9...v0.13.10) (2026-10-09)
+
+### fix
+
+* **config:** honor provider model and timeout defaults (#194) ([c5860d4](https://github.com/framerslab/agentos/commit/c5860d4bf96ca8c4c15af1f4df3d3ede20395095))
+
+### docs
+
+* fifth round of audit follow-ups to the guides (#171) ([e64d2d6](https://github.com/framerslab/agentos/commit/e64d2d6b764b019345d807c142dd3a3ec9a28b2f))
+* **publication:** publish the structured reply guide (#191) ([a5f0d51](https://github.com/framerslab/agentos/commit/a5f0d51b9678e2e50313b3317fb1d7685ae32e55))
+* the gmi() guide and agent({ runtime: 'gmi' }) (#192) ([e6c6305](https://github.com/framerslab/agentos/commit/e6c630523d0877528b6a8eae8e64891e0870a3f5))
+
+## [0.13.9](https://github.com/framerslab/agentos/compare/v0.13.8...v0.13.9) (2026-10-09)
+
+### feat
+
+* **hearing:** capture a page's microphone through an AudioWorklet (#182) ([ea5ca2f](https://github.com/framerslab/agentos/commit/ea5ca2f40df6ff0a37a77e5875891b53e2179682))
+
+## [0.13.8](https://github.com/framerslab/agentos/compare/v0.13.7...v0.13.8) (2026-10-09)
+
+### fix
+
+* **gmi:** structured sends, tool hooks and close() follow-ups (#175) ([4628852](https://github.com/framerslab/agentos/commit/462885215f6788ecc3bcb44722a68b327beec2f6))
+
+### feat
+
+* **evaluation:** score a transcript by its word error rate (#187) ([3fc3fc5](https://github.com/framerslab/agentos/commit/3fc3fc5b94081c91537ec7d9cbef5b7ede90d7c9))
+
+## [0.13.7](https://github.com/framerslab/agentos/compare/v0.13.6...v0.13.7) (2026-10-09)
+
+### fix
+
+* **guardrails:** the review's remaining findings on the required guards (#189) ([c3e37a9](https://github.com/framerslab/agentos/commit/c3e37a9b350b90a7bcf7662971c9e8db6a9268a1))
+
+## [0.13.6](https://github.com/framerslab/agentos/compare/v0.13.5...v0.13.6) (2026-10-09)
+
+### feat
+
+* **voice-pipeline:** an input level and a watch for an input that carries no sound (#180) ([7afa875](https://github.com/framerslab/agentos/commit/7afa875716c8ec1de35aab29905cfb4333d5648a))
+
+## [0.13.5](https://github.com/framerslab/agentos/compare/v0.13.4...v0.13.5) (2026-10-09)
+
+### feat
+
+* **api:** a schema-validated structured reply on processRequest (#177) ([710f266](https://github.com/framerslab/agentos/commit/710f266ed7fe2164e8a83c68bae405c62c32a5b7))
+
+## [0.13.4](https://github.com/framerslab/agentos/compare/v0.13.3...v0.13.4) (2026-10-09)
+
+### docs
+
+* the capability ceiling and the effect capabilities in the self-extension and architecture pages (#188) ([8bf953d](https://github.com/framerslab/agentos/commit/8bf953d679dce2f8a2639cbc6375ba52afa91139))
+
+### feat
+
+* **emergent:** writes, deletes and state-changing requests for code-forged tools (#183) ([2ca7fa2](https://github.com/framerslab/agentos/commit/2ca7fa2e5a80ab2b65f65bd89d5bbc0875b80328))
+* **voice-pipeline:** write transcripts into a LiveKit room as transcription streams, and read them back (#174) ([a20ff4f](https://github.com/framerslab/agentos/commit/a20ff4f8e7c0079534814fc228c3813418c68a25))
+
+## [0.13.3](https://github.com/framerslab/agentos/compare/v0.13.2...v0.13.3) (2026-10-08)
+
+### feat
+
+* **guardrails:** required guards, hold-until-final output, phrase lists and hard limits (#169) ([032fcbf](https://github.com/framerslab/agentos/commit/032fcbf29d7c6ff2f3faded78765ced9fdd68d71))
+
+### fix
+
+* **emergent:** QuickJSExecutor follow-ups from the cold read of #160 (#178) ([2ec4535](https://github.com/framerslab/agentos/commit/2ec45351d794dcd69e54b4127097ed83ffc8bc7f))
+
+## [0.13.2](https://github.com/framerslab/agentos/compare/v0.13.1...v0.13.2) (2026-10-08)
+
+### fix
+
+* **api:** gmi() follow-ups (session privacy, stream stop, usage on errors) ([4e80849](https://github.com/framerslab/agentos/commit/4e8084965307e042a6ae39ce9eda051b6b6a2901))
+
+### ci
+
+* a gate that holds a breaking change until a maintainer approves it (#170) ([c288e60](https://github.com/framerslab/agentos/commit/c288e602b4569b238ed12a0a7bf773b59f7f0f11))
+
+### docs
+
+* fourth round of audit follow-ups to the guides (#162) ([a7ab6c2](https://github.com/framerslab/agentos/commit/a7ab6c2bf102c79cb87c72adf51d17471eb005a9))
+
+## [0.13.1](https://github.com/framerslab/agentos/compare/v0.13.0...v0.13.1) (2026-10-08)
+
+### fix
+
+* **emergent:** bound what QuickJSExecutor copies out of the guest (#168) ([5dd510e](https://github.com/framerslab/agentos/commit/5dd510ef0b40226c45e59ab6d640251474d5d72a))
+
+## [0.13.0](https://github.com/framerslab/agentos/compare/v0.12.24...v0.13.0) (2026-10-08)
+
+### ⚠ BREAKING CHANGE
+
+* **speech:** URL output (providerSpecificOptions.outputFormat 'url')
+downloads only from hosts listed in audioUrlHosts, or in
+MINIMAX_TTS_AUDIO_URL_HOSTS through SpeechRuntime; without one, synthesize()
+throws instead of fetching. MiniMaxAsyncSpeechResponse.task_id is
+number | string instead of string, and file_id is number | string instead
+of number.
+
+### feat
+
+* **safety:** a persisted spend meter that processRequest reserves against before any provider call (#167) ([b9c2e91](https://github.com/framerslab/agentos/commit/b9c2e91927d58fc40d02a95348ba3a4c2e29b58b))
+
+### fix
+
+* **api:** five defects from a cold read of the gmi() session runner (#165) ([5eec49c](https://github.com/framerslab/agentos/commit/5eec49c09d57ae1eec9fd23ed158fd2447ea909f))
+* **speech:** download MiniMax URL output only from allowed hosts, query async tasks with GET (#166) ([14b86bf](https://github.com/framerslab/agentos/commit/14b86bf6b7e029bbe00e5fe287398fd49aa01258))
+
+## [0.12.24](https://github.com/framerslab/agentos/compare/v0.12.23...v0.12.24) (2026-10-08)
+
+### fix
+
+* **llm:** map Requesty's model list from the shape its API returns (#164) ([bbcabc3](https://github.com/framerslab/agentos/commit/bbcabc3b85b658a604ca82a12af8f325b8ae3d01))
+
+## [0.12.23](https://github.com/framerslab/agentos/compare/v0.12.22...v0.12.23) (2026-10-08)
+
+### fix
+
+* **channels:** accept a Plivo callback once and sign V3 as plivo-python does (#163) ([fe31524](https://github.com/framerslab/agentos/commit/fe31524eb0b7e0cdb56465611e3959ae156ce6f2))
+
+## [0.12.22](https://github.com/framerslab/agentos/compare/v0.12.21...v0.12.22) (2026-10-08)
+
+### feat
+
+* **emergent:** QuickJSExecutor, an isolating executor for forged code (#160) ([598d041](https://github.com/framerslab/agentos/commit/598d041f4a70c6ab43e35b1d960a65bb77ac4748))
+
+## [0.12.21](https://github.com/framerslab/agentos/compare/v0.12.20...v0.12.21) (2026-10-08)
+
+### docs
+
+* third round of audit follow-ups to the guides (#158) ([2aa186b](https://github.com/framerslab/agentos/commit/2aa186b7a29e0cd73321c1354f15b7e3c6a33d74))
+
+### feat
+
+* add LiteLLM as AI gateway provider (#15) ([068e6ce](https://github.com/framerslab/agentos/commit/068e6cee65752eadf63536941eefcd72b883508e))
+* **api:** agent({ runtime: 'gmi' }) routes its sessions through gmi() ([cf3a637](https://github.com/framerslab/agentos/commit/cf3a637fd4fb5b8286f40604e00555bc7ebbf0bf))
+
+## [0.12.20](https://github.com/framerslab/agentos/compare/v0.12.19...v0.12.20) (2026-10-08)
+
+### feat
+
+* add MiniMax TTS provider (#39) ([b7f03ad](https://github.com/framerslab/agentos/commit/b7f03adce0e770feb34cad45b73502feb70160c6))
+
+## [0.12.19](https://github.com/framerslab/agentos/compare/v0.12.18...v0.12.19) (2026-10-08)
+
+### feat
+
+* add Requesty as an OpenAI-compatible LLM provider (#17) ([58f90a1](https://github.com/framerslab/agentos/commit/58f90a1ff91c366a660a5fe7ea7b50fd6e5e2e7e))
+
+## [0.12.18](https://github.com/framerslab/agentos/compare/v0.12.17...v0.12.18) (2026-10-08)
+
+### feat
+
+* **channels:** add Plivo SMS channel adapter (#20) ([d5ff215](https://github.com/framerslab/agentos/commit/d5ff21515137edb43d3485031862c292110c8aa1))
+
+## [0.12.17](https://github.com/framerslab/agentos/compare/v0.12.16...v0.12.17) (2026-10-08)
+
+### feat
+
+* add MiniMax image generation provider (#56) ([9d21348](https://github.com/framerslab/agentos/commit/9d21348742fbb5ce48c92ffb8ab5e40377fdfccc))
+
+## [0.12.16](https://github.com/framerslab/agentos/compare/v0.12.15...v0.12.16) (2026-10-08)
+
+### fix
+
+* **llm:** Gemini sends image parts; transferStyle sends a key only to a provider the call names (#156) ([e8b4d5f](https://github.com/framerslab/agentos/commit/e8b4d5f6636878aa825fe688620750f192f7264d))
+
+## [0.12.15](https://github.com/framerslab/agentos/compare/v0.12.14...v0.12.15) (2026-10-08)
+
+### fix
+
+* **emergent:** five defects from a second cold read of the stored-tool and composition code (#155) ([3229b10](https://github.com/framerslab/agentos/commit/3229b10638a0eb157adfb39e38137487e723ba48))
+
+### ci
+
+* a workflow that resolves the lockfile for a branch (#157) ([4457a40](https://github.com/framerslab/agentos/commit/4457a402f651bf7d26303e5702f457b3d0fd3059))
+
+## [0.12.14](https://github.com/framerslab/agentos/compare/v0.12.13...v0.12.14) (2026-10-08)
+
+### docs
+
+* second round of audit follow-ups to the guides (#150) ([3b74c6c](https://github.com/framerslab/agentos/commit/3b74c6ce76ba3e9c74e5850db06ce15689c1d570))
+
+### feat
+
+* **api:** gmi(), an agent whose sessions are GMIs ([daa9273](https://github.com/framerslab/agentos/commit/daa9273dd5b459377828c640a46d02b2bb401cce))
+
+### fix
+
+* **vision:** the cloud tier sends the image as an image part; vision and style transfer take a key (#154) ([1a4db02](https://github.com/framerslab/agentos/commit/1a4db02f049561489e67a61ba1474f1ee5abb978))
+
+## [0.12.13](https://github.com/framerslab/agentos/compare/v0.12.12...v0.12.13) (2026-10-08)
+
+### fix
+
+* **hitl:** close the review findings on the approval gate (#153) ([53547bc](https://github.com/framerslab/agentos/commit/53547bccdea440518a2c68e44e3266e44561ac9e))
+
+## [0.12.12](https://github.com/framerslab/agentos/compare/v0.12.11...v0.12.12) (2026-10-08)
+
+### fix
+
+* **sandbox:** the output limit is measured in bytes, and a forged call that passes it on either stream fails (#151) ([b83f058](https://github.com/framerslab/agentos/commit/b83f058ece33de2ef188649d556e36b64c5f1e92))
+
+## [0.12.11](https://github.com/framerslab/agentos/compare/v0.12.10...v0.12.11) (2026-10-08)
+
+### fix
+
+* **emergent:** a forged tool's result past the in-process output limit fails the call instead of coming back cut (#149) ([45570bb](https://github.com/framerslab/agentos/commit/45570bb0c2afc99a789b4117179c2f72b5a27227))
+
+## [0.12.10](https://github.com/framerslab/agentos/compare/v0.12.9...v0.12.10) (2026-10-08)
+
+### feat
+
+* **emergent:** forged code runs through an executor interface, and a CI run measures QuickJS (#148) ([3c5832a](https://github.com/framerslab/agentos/commit/3c5832ac978a511a03397201ec1a3c3379deceba))
+
+### docs
+
+* audit follow-ups to the GMI step contract and gateway docs (#147) ([000547a](https://github.com/framerslab/agentos/commit/000547a77f2fe57fd8c3f61fbb7008d490e41106))
+* **gmi:** correct the step contract and document completion options, history and the gateway (#145) ([ff883a4](https://github.com/framerslab/agentos/commit/ff883a43926dd46f1052d365d13cad969e5421da))
+
+### ci
+
+* check that package exports point at built files (#146) ([fee43be](https://github.com/framerslab/agentos/commit/fee43be4142aefe488667bbbd54d05f00a60074e))
+
 ## [0.12.9](https://github.com/framerslab/agentos/compare/v0.12.8...v0.12.9) (2026-10-08)
 
 ### fix

@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// Example: agent() — single GMI brain handles the whole task.
+// Example: agent() — one agent handles the whole task.
 //
 // The baseline before agency(). One agent reasons through the brief on
-// its own. No team, no shared state, no inter-agent flow. Cognition,
-// memory, persona, and tools live inside this single agent().
+// its own. No team, no shared state, no inter-agent flow. Its instructions
+// and model live inside this single agent(), which calls the model directly
+// (agent({ runtime: 'gmi' }) would serve it with a GMI instead).
 //
 // What this example shows:
 //   1. agent() with provider + model + instructions only

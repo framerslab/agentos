@@ -43,7 +43,7 @@ The `summarized` strategy implements Anthropic's "contextual retrieval" pattern 
 | `raw-chunks` (default) | every kind → raw-chunks | high-volume / cost-sensitive workloads; retrieval does the work |
 | `summarized` | long-* and code → summarized; short stays raw | documents/conversations with global context that aids recall |
 | `observational` | long-conversation → observational; long-article → summarized | conversational workloads with multi-session synthesis questions |
-| `hybrid` | long-* → hybrid; short stays raw | cost-tolerant workloads with heterogeneous retrieval needs |
+| `hybrid` | long-* → hybrid; code → summarized; the rest raw-chunks | cost-tolerant workloads with heterogeneous retrieval needs |
 
 ## Quickstart
 
@@ -82,8 +82,8 @@ const router = new IngestRouter({
 
 const { decision, outcome } = await router.decideAndDispatch(content);
 console.log(decision.classifier.kind);          // 'long-conversation'
-console.log(decision.routing.chosenStrategy);   // 'observational'
-console.log(decision.routing.estimatedCostUsd); // 0.020
+console.log(decision.routing.chosenStrategy);   // 'summarized' (the preset's pick for long-conversation)
+console.log(decision.routing.estimatedCostUsd); // 0.005
 console.log(outcome.writtenTraces);             // 47
 ```
 
@@ -118,12 +118,12 @@ const router = new IngestRouter({
   preset: 'observational',
   budget: {
     perIngestUsd: 0.005,
-    mode: 'cheapest-fallback',  // silently fall back to summarized or raw-chunks
+    mode: 'cheapest-fallback',  // over budget: the cheapest strategy that fits
   },
 });
 ```
 
-Three modes (same as MemoryRouter): `hard` / `soft` / `cheapest-fallback`. The default is `cheapest-fallback` for production safety.
+The mode decides what happens when the routed strategy costs more than `perIngestUsd`. `hard` throws `IngestRouterBudgetExceededError` and returns no decision. `soft` keeps the routed strategy and sets `budgetExceeded: true`. `cheapest-fallback` (the default) picks the cheapest strategy whose cost fits. In `soft` and `cheapest-fallback` mode, when no strategy fits, the router picks the cheapest strategy overall and sets `budgetExceeded: true`. With the default costs `skip` costs 0, so it always fits, and `cheapest-fallback` turns every over-budget ingest into `skip`: the content is not stored. To store it, use `soft`, or pass a `strategyCosts` map (it replaces the defaults, so give every strategy a cost) in which the cheapest strategy that fits the budget stores content.
 
 ## Few-shot classifier prompt
 

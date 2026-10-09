@@ -36,7 +36,7 @@ Three preset rules:
 
 | Rule | What it picks |
 |---|---|
-| `minimize-cost` | cheapest backend within `accuracyTolerance` (default 2pp) of the best meanAccuracy on this category. If no backend is within tolerance, picks the best-accuracy backend (the gap exceeds tolerance, so accuracy gain justifies cost). |
+| `minimize-cost` | cheapest backend within `accuracyTolerance` (default 2pp) of the best meanAccuracy on this category. When no cheaper backend is within tolerance, the best-accuracy backend is the pick. |
 | `balanced` | best $/correct ratio (meanCost / meanAccuracy). Backends with zero meanAccuracy are skipped to avoid div-by-zero. |
 | `maximize-accuracy` | highest meanAccuracy backend; ties broken by lower meanCost. |
 

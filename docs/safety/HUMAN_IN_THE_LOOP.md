@@ -1,6 +1,6 @@
 ---
 title: Human-in-the-Loop (HITL)
-description: Five approval triggers, six handler factories (cli, slack, webhook, llmJudge, autoApprove, autoReject), the workflow human step, and the runtime HumanInteractionManager. Pause AgentOS agent runs at any lifecycle event for human review.
+description: Five approval triggers, six handler factories (cli, slack, webhook, llmJudge, autoApprove, autoReject), the graph human node, and the runtime HumanInteractionManager. Pause AgentOS agent runs at any lifecycle event for human review.
 keywords:
   - human in the loop
   - hitl
@@ -19,9 +19,11 @@ keywords:
 
 # Human-in-the-Loop (HITL)
 
-Pause an agent run at specific lifecycle events, route the pending action to a human (or an LLM judge, or both), and resume with an approve / reject / modify decision. AgentOS exposes HITL on three integration surfaces — agency-level config, workflow / graph nodes, and a runtime manager — all converging on the same `ApprovalRequest → handler → ApprovalDecision` contract.
+Pause an agent run at specific lifecycle events, route the pending action to a human (or an LLM judge, or both), and resume with an approve / reject / modify decision. AgentOS exposes HITL on three integration surfaces, each with its own contract. `agency({ hitl })` passes an `ApprovalRequest` to `hitl.handler` and acts on the `ApprovalDecision` it returns (`approved`, `reason`, `modifications`). A graph's human node resolves from its own `autoAccept`, `autoReject` or `judge` options, or suspends the run with an interrupt. The runtime `HumanInteractionManager` takes a `PendingAction` in `requestApproval()` and answers with its own `ApprovalDecision` type (`actionId`, `approved`, `rejectionReason`, `decidedBy`, `decidedAt`).
 
-![Three-lane HITL architecture: Agency HitlConfig with 5 triggers and 6 handlers, Workflow human step with autoAccept/autoReject/judge modes, and the runtime HumanInteractionManager with severity-aware PendingAction + escalation surface. All three converge on the ApprovalRequest → handler → ApprovalDecision → guardrail-override contract.](/img/diagrams/human-in-the-loop.svg)
+![Three-lane HITL architecture: Agency HitlConfig with 5 triggers and 6 handlers, the graph human node with autoAccept/autoReject/judge modes, and the runtime HumanInteractionManager with severity-aware PendingAction + escalation surface, above a band for the agency's ApprovalRequest → handler → ApprovalDecision → post-approval check contract.](/img/diagrams/human-in-the-loop.svg)
+
+The diagram's bottom band, drawn under all three lanes, is the agency lane's contract alone.
 
 ## What HITL is in AgentOS
 
@@ -29,11 +31,11 @@ Three places HITL plugs in:
 
 | Layer | Primitive | Source | Use when |
 |---|---|---|---|
-| **Agency / agent** | [`HitlConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) on `agency({ hitl: {...} })` or `agent({ hitl: {...} })` | [`src/api/types.ts`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) | The host runs a multi-agent agency and wants declarative gates at specific lifecycle events (a tool name, the final return, a strategy override). |
-| **Workflow / graph** | `step({ human: { prompt, autoAccept?, autoReject?, judge? } })` | [`src/orchestration/builders/WorkflowBuilder.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/WorkflowBuilder.ts) + [`src/orchestration/ir/types.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) | The host owns an explicit DAG and wants a typed human node that suspends the graph until a decision payload arrives. |
+| **Agency** | [`HitlConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) on `agency({ hitl: {...} })`; `agent()` accepts the field and does not read it | [`src/api/types.ts`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) | The host runs a multi-agent agency and wants declarative gates at specific lifecycle events (a tool name, the final return, a strategy override). |
+| **Workflow / graph** | `humanNode({ prompt, autoAccept?, autoReject?, judge? })` in an `AgentGraph`; `workflow()`'s `step({ human: { prompt } })` | [`src/orchestration/builders/nodes.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/nodes.ts) + [`src/orchestration/runtime/NodeExecutor.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/NodeExecutor.ts) | The host owns an explicit graph and wants a node that suspends the run until the host resumes it. |
 | **Runtime** | [`HumanInteractionManager`](https://github.com/framerslab/agentos/blob/master/src/orchestration/hitl/HumanInteractionManager.ts) implementing [`IHumanInteractionManager`](https://github.com/framerslab/agentos/blob/master/src/orchestration/hitl/IHumanInteractionManager.ts) | [`src/orchestration/hitl/`](https://github.com/framerslab/agentos/tree/master/src/orchestration/hitl) | A subsystem (planner, custom orchestrator, evaluator) needs severity-aware approval with clarification, edit, and escalation flows in addition to approve/reject. |
 
-The agency-level surface is what most apps need. Reach for workflow nodes when you're already authoring a graph. Reach for the runtime manager when you need the full clarification/edit/escalation vocabulary outside of an `agency()` run.
+The agency-level surface is what most apps need. Reach for a human node when you're already authoring a graph. Reach for the runtime manager when you need the full clarification/edit/escalation vocabulary outside of an `agency()` run.
 
 ## Five approval triggers
 
@@ -63,7 +65,7 @@ const guarded = agency({
 | `beforeAgent: string[]` | Any agent in the agency whose name appears in the list | Specialists that should only run after human go-ahead (`billing-agent`, `legal-review`). |
 | `beforeEmergent: boolean` | Runtime synthesis of a new specialist via `spawn_specialist` | Production agencies that allow emergent capabilities but require approval before the roster grows. |
 | `beforeReturn: boolean` | The final answer leaves the agency | Customer-facing channels where the last response gets a human or judge review. |
-| `beforeStrategyOverride: boolean` | The orchestrator wants to switch execution strategies mid-run | Adaptive agencies whose strategy drift should be reviewed before it happens. |
+| `beforeStrategyOverride: boolean` | Nothing: no strategy makes a `strategy-override` request. Like every trigger, setting it makes `agency()` require a `handler` | Reserved; set it and nothing pauses. |
 
 Source: [`HitlConfig.approvals` in `src/api/types.ts`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts).
 
@@ -75,7 +77,7 @@ Source: [`src/api/hitl.ts`](https://github.com/framerslab/agentos/blob/master/sr
 
 ### `hitl.cli()`
 
-Interactive terminal prompt. Reads from `process.stdin`. Use locally and in interactive scripts; **not safe for CI or serverless**.
+Interactive terminal prompt. Reads from `process.stdin`. Before it asks, it prints the request's description, agent, action, type and details; for a tool call the details hold the arguments the tool will run with, so the approver sees the recipient, the path or the query being approved. Use locally and in interactive scripts; **not safe for CI or serverless**.
 
 ```typescript
 handler: hitl.cli();
@@ -107,7 +109,7 @@ handler: hitl.webhook('https://approvals.example.com/decide');
 
 ### `hitl.slack({ channel, token })`
 
-Posts a notification to a Slack channel and **auto-approves** in the current shipping. Reaction-polling (`:white_check_mark:` / `:x:`) is a planned future enhancement. Use it today as an audit trail; gate it behind another handler if you need to wait on reactions.
+Posts the request to a Slack channel and **approves it at once**. The message asks for a `:white_check_mark:` or `:x:` reaction, and the handler reads none. Use it as an audit trail, and pair it with a handler that decides when the team must answer.
 
 ```typescript
 handler: hitl.slack({ channel: '#approvals', token: process.env.SLACK_BOT_TOKEN! });
@@ -115,7 +117,7 @@ handler: hitl.slack({ channel: '#approvals', token: process.env.SLACK_BOT_TOKEN!
 
 ### `hitl.llmJudge({ ... })`
 
-Delegates the decision to a model. The judge replies with a structured `{approved, confidence, reasoning}` JSON object; if `confidence < confidenceThreshold` (default `0.7`), the request falls through to a `fallback` handler.
+Delegates the decision to a model (OpenAI and the central judge model by default). The judge replies with a structured `{approved, confidence, reasoning}` JSON object. When `confidence < confidenceThreshold` (default `0.7`), the reply lacks those fields, or the call fails, the request goes to the `fallback` handler, which rejects by default. The judge sees the request's type, agent, action, description and details.
 
 ```typescript
 handler: hitl.llmJudge({
@@ -158,14 +160,14 @@ interface ApprovalDecision {
   approved: boolean;
   reason?: string;
   modifications?: {
-    toolArgs?: unknown;     // overridden tool arguments
-    output?: string;        // overridden final text
-    instructions?: string;  // appended to the system prompt
+    toolArgs?: unknown;     // never applied: a beforeTool approval that carries it is refused
+    output?: string;        // replaces the final text (beforeReturn)
+    instructions?: string;  // added to the agent's input (beforeAgent)
   };
 }
 ```
 
-When `approved: true` and `modifications` are set, the orchestrator merges them over the original action before proceeding. This is the path for "approve but with these changes": the LLM judge rewrites the final answer, the webhook returns a sanitized version. A `beforeTool` approval is the exception: it approves or refuses the arguments the call will run with and does not apply `modifications.toolArgs`. Rewrite tool arguments in `onBeforeToolExecution`, which runs before the handler is asked.
+When `approved: true` and `modifications` are set, the orchestrator applies them before proceeding. This is the path for "approve but with these changes": `output` on a `beforeReturn` approval replaces the final text (the LLM judge rewrites the final answer, the webhook returns a sanitized version), and `instructions` on a `beforeAgent` approval are added to the input of the agent it lets run, under the sequential, parallel and hierarchical strategies. Tool arguments are the exception. A `beforeTool` approval approves or refuses the arguments the call will run with; it never applies `modifications.toolArgs`, and it refuses an approval that carries them (anything but `undefined` or `null`), so the call is skipped rather than run with the arguments the approver meant to replace. Rewrite tool arguments in `onBeforeToolExecution`, which runs before the handler is asked.
 
 ## Timeout policy
 
@@ -187,7 +189,7 @@ hitl: {
 
 ## Guardrail-override post-approval safety net
 
-A handler that returns `approved: true` doesn't bypass content safety. After approval, the orchestrator runs the guardrails in `postApprovalGuardrails` against the tool call (or output) and vetoes the approval if any guardrail returns `action: 'block'`. This catches the case where a human (or LLM judge) approves something the runtime's automated guards know is destructive.
+After a `beforeTool` or `beforeReturn` approval, `agency()` runs built-in pattern checks named by `postApprovalGuardrails` over the tool's name and arguments (or the final text) and vetoes the approval when one matches. These are fixed checks inside `agency()`, not the guardrail extension packs: `code-safety` looks for destructive commands and statements (`rm -rf /`, `mkfs.`, `dd ... of=/dev`, `DROP TABLE`, `TRUNCATE TABLE`, `chmod -R 777 /`, `shutdown` and others), `pii-redaction` for unredacted SSNs and card numbers, and any other id passes. A veto fires `guardrailHitlOverride` and skips the tool, or, for the final output, rejects `generate()` with an `AgencyConfigError`. This catches the case where a human (or LLM judge) approves something destructive.
 
 ```typescript
 hitl: {
@@ -200,55 +202,41 @@ hitl: {
 
 Set `guardrailOverride: false` to disable the safety net and give the handler full autonomy. Default `true` is the right setting for production.
 
-## Workflow `human` step
+## Graph `human` nodes
 
-For typed-graph workflows, the `human` step suspends the graph until a decision payload arrives. The runtime checkpoints state before suspending so resumption is exact.
-
-Source: [`step({ human })` in `WorkflowBuilder.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/WorkflowBuilder.ts), node IR in [`src/orchestration/ir/types.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts).
+A human node suspends a graph run until the host resumes it. `workflow()` lowers `step('id', { human: { prompt } })` to `humanNode({ prompt, timeout })`: the step takes a prompt and the step's `timeout`, and nothing else, so it always suspends. The resolution modes below are options of [`humanNode()`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/nodes.ts), which an [`AgentGraph`](../architecture/AGENT_GRAPH.md) takes as a node.
 
 ```typescript
-import { workflow } from '@framers/agentos/orchestration';
-import { z } from 'zod';
+import { humanNode } from '@framers/agentos/orchestration';
 
-const reviewPipeline = workflow('review-pipeline')
-  .input(z.object({ draft: z.string() }))
-  .returns(z.object({ approvedDraft: z.string() }))
-
-  // ... earlier GMI/tool steps that produce `result.draft` ...
-
-  .step('human-review', {
-    human: {
-      prompt: 'Approve the draft, or paste an edited version.',
-      autoAccept: false,
-      autoReject: false,
-      judge: {
-        model: 'gpt-4o-mini',
-        criteria: 'Approve unless the draft contains unverified claims or PII.',
-        confidenceThreshold: 0.8,
-      },
-    },
-    effectClass: 'human',
-    outputAs: 'approvedDraft',
-  })
-  .compile({ deps: { /* host deps */ } });
+graph.addNode('human-review', humanNode({
+  prompt: 'Approve the draft, or reject it with a reason.',
+  judge: {
+    model: 'gpt-4o-mini',
+    criteria: 'Approve unless the draft contains unverified claims or PII.',
+    confidenceThreshold: 0.8,
+  },
+}));
 ```
 
-Resolution modes (mutually exclusive — pick one):
+Resolution modes, checked in this order:
 
 | Mode | Behaviour |
 |---|---|
-| `autoAccept: true` | Resolve immediately as approved. Use in tests. |
-| `autoReject: true` or `'reason string'` | Resolve immediately as rejected. Use for dry-run pipelines. |
-| `judge: { ... }` | Route the decision through an LLM judge. Below `confidenceThreshold`, fall through to the normal human interrupt. |
-| (none of the above) | Suspend the graph and emit an approval event. The host wakes the workflow with the decision payload. |
+| `autoAccept: true` | Resolve at once as approved. Use in tests. |
+| `autoReject: true` or `'reason string'` | Resolve at once as rejected. Use for dry-run pipelines. |
+| `judge: { model?, provider?, criteria?, confidenceThreshold? }` | Ask a model for `{ approved, confidence, reasoning }`. At or above `confidenceThreshold` (default `0.7`) its decision stands; below it, or when the call fails, the node suspends as with no mode. |
+| (none of the above) | Suspend: the runtime saves a checkpoint and emits an `interrupt` event. |
 
-The `effectClass: 'human'` annotation is read by the workflow planner — it pessimistically schedules around human steps so the rest of the graph can advance maximally in parallel before stopping at the gate.
+After an approval that no human gave (auto-accept, the judge, or `onTimeout: 'accept'`), the node runs the guardrail ids `pii-redaction` and `code-safety` through the graph's `deps.guardrailEngine` when one is wired, and a block turns the decision into `approved: false`; `guardrailOverride: false` turns that off.
+
+`resume(checkpointId)` marks a suspended human node complete with its recorded output (`{ prompt }`). A host that has the human's answer writes it into the state with the checkpoint store's `fork(checkpointId, patch)` and resumes the fork ([Checkpointing](../orchestration/CHECKPOINTING.md)). Every human node has the effect class `human`, so on resume a node whose output is recorded is not run again.
 
 ## Runtime [`HumanInteractionManager`](https://github.com/framerslab/agentos/blob/master/src/orchestration/hitl/HumanInteractionManager.ts)
 
 Source: [`src/orchestration/hitl/HumanInteractionManager.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/hitl/HumanInteractionManager.ts) + interface [`IHumanInteractionManager`](https://github.com/framerslab/agentos/blob/master/src/orchestration/hitl/IHumanInteractionManager.ts).
 
-This is the richer surface used by the planner and custom orchestrators. It speaks four interaction modes plus checkpoints and feedback ingestion:
+This is the richer surface of the full runtime: pass one as `hitlManager` in the `AgentOS` config and, with `toolOrchestratorConfig.hitl.enabled`, its `ToolOrchestrator` asks `requestApproval()` before a tool with `hasSideEffects: true` runs; the emergent step gate asks it before a composed tool's side-effecting step. Custom orchestrators can call it too. It speaks four interaction modes plus checkpoints and feedback ingestion:
 
 ```typescript
 interface IHumanInteractionManager {
@@ -331,13 +319,14 @@ console.log(result.text);
 Running from a terminal pauses before the draft is returned and prints:
 
 ```
-[APPROVAL NEEDED] Final output for return to caller
-Agent: drafter | Action: return
+[APPROVAL NEEDED] Approve the final agency response before returning it.
+Agent: __agency__ | Action: return
 Type: output
+Details: { output: '<the drafted paragraph>' }
 Approve? (y/n):
 ```
 
-Approve and the draft returns. Reject and the run ends with the timeout policy applied.
+The agent line names the agency (`__agency__` when it has no `name`), and the details hold the draft being approved. Approve and the draft returns. Answer `n`, or nothing within the 60 seconds of `timeoutMs` (`onTimeout: 'reject'`), and `generate()` rejects with an `AgencyConfigError` whose message starts `Final output rejected by HITL`.
 
 ## Worked example — LLM judge with CLI fallback (production default)
 
@@ -391,7 +380,7 @@ const teamAgency = agency({
 });
 ```
 
-The current Slack handler posts a formatted approval message to the channel and auto-approves after notifying. Reaction polling (`:white_check_mark:` / `:x:`) is planned; until then, treat Slack as an audit trail and combine it with a gating handler if you need to *wait* on the team:
+The Slack handler posts the approval message to the channel and approves at once; it reads no reactions. Treat Slack as an audit trail and combine it with a gating handler when you need to *wait* on the team:
 
 ```typescript
 import type { HitlHandler } from '@framers/agentos';
@@ -402,61 +391,61 @@ const slackThenWebhook: HitlHandler = async (request) => {
 };
 ```
 
-## Worked example — workflow `human` step
+## Worked example — a graph `human` node
 
 ```typescript
-import { workflow } from '@framers/agentos/orchestration';
+import { AgentGraph, START, END, gmiNode, humanNode } from '@framers/agentos/orchestration';
 import { z } from 'zod';
 
-const draftThenReview = workflow('draft-then-review')
-  .input(z.object({ topic: z.string() }))
-  .returns(z.object({ finalDraft: z.string() }))
-  .step('draft', { gmi: { instructions: 'Draft a 2-paragraph post on {{topic}}.' } })
-  .step('review', {
-    human: {
-      prompt: 'Approve the draft (y) or paste an edited version.',
-      autoAccept: false,
-      judge: {
-        model: 'gpt-4o-mini',
-        criteria: 'Approve unless the draft contains unverified claims, PII, or marketing fluff.',
-        confidenceThreshold: 0.8,
-      },
+const draftThenReview = new AgentGraph({
+  input: z.object({ topic: z.string() }),
+  scratch: z.object({}),
+  artifacts: z.object({}),
+})
+  .addNode('draft', gmiNode({ instructions: 'Draft a 2-paragraph post on the topic.' }))
+  .addNode('review', humanNode({
+    prompt: 'Approve the draft (yes/no).',
+    judge: {
+      model: 'gpt-4o-mini',
+      criteria: 'Approve unless the draft contains unverified claims, PII, or marketing fluff.',
+      confidenceThreshold: 0.8,
     },
-    effectClass: 'human',
-    outputAs: 'finalDraft',
-  })
-  .compile({ deps: { /* host-provided runtime deps */ } });
+  }))
+  .addEdge(START, 'draft')
+  .addEdge('draft', 'review')
+  .addEdge('review', END)
+  .compile({ deps: { /* host bindings: loopController, providerCall, guardrailEngine */ } });
 ```
 
-For agencies that already use the higher-level `agency({ hitl: { approvals: { beforeReturn: true } } })`, prefer the agency-level surface — `workflow().step({ human })` is for explicit DAGs that mix LLM, non-LLM, and human nodes.
+For agencies that already use the higher-level `agency({ hitl: { approvals: { beforeReturn: true } } })`, prefer the agency-level surface; a human node is for explicit graphs that mix LLM, non-LLM, and human nodes.
 
 ## Pitfalls
 
 **`hitl.cli()` hangs in non-interactive environments.** It reads from `process.stdin`. In CI, serverless, or any environment without a TTY, the handler never resolves and the `onTimeout` policy fires after `timeoutMs`. Use `hitl.autoApprove()` in CI and `hitl.cli()` only locally.
 
-**`hitl.slack(...)` auto-approves after notifying.** The current shipping behavior does NOT block on a reaction. Use it for audit, or wrap it in a webhook for blocking approval.
+**`hitl.slack(...)` approves after notifying.** It does not wait for a reaction. Use it for audit, or wrap it in a webhook for blocking approval.
 
 **`beforeEmergent: true` requires emergent to be enabled.** Setting `beforeEmergent: true` without `emergent: { enabled: true }` on the agency does nothing — there's no emergent path to gate. Pair the two.
 
-**`postApprovalGuardrails` defaults to `['pii-redaction', 'code-safety']`.** If the guardrail packs aren't loaded into your runtime, the post-approval check silently passes. Verify the packs are wired (`@framers/agentos-extensions`) when you depend on the override.
+**`postApprovalGuardrails` names built-in checks, not loaded guardrails.** The two ids it knows are `code-safety` and `pii-redaction` (the default list); any other id passes without a check, and the guardrail packs registered with a runtime are not consulted.
 
-**Workflow `human` step resolution modes are mutually exclusive.** Setting both `autoAccept: true` and `judge: {...}` resolves to whichever the runtime evaluates first (currently `autoAccept`). Pick one mode per node.
+**A human node's resolution modes are checked in a fixed order.** `autoAccept` first, then `autoReject`, then `judge`: a node with `autoAccept: true` and a `judge` never asks the judge. Pick one mode per node.
 
 ## FAQ
 
 **Does `beforeReturn` block streaming?** Yes — when `beforeReturn: true`, the agency's `stream.finalTextStream` does not emit until the handler resolves. `stream.textStream` (raw live chunks) continues unaffected.
 
-**Can a handler modify the action without rejecting it?** Yes. Return `{ approved: true, modifications: { toolArgs: { ... } } }` and the orchestrator merges those over the original tool arguments before invocation. Same for `output` (overrides the final text) and `instructions` (injected into the system prompt).
+**Can a handler modify the action without rejecting it?** For the final answer and for an agent run, yes. Return `{ approved: true, modifications: { output: '...' } }` from a `beforeReturn` approval to replace the final text, or `{ approved: true, modifications: { instructions: '...' } }` from a `beforeAgent` approval to add instructions to that agent's input. For a tool call, no: a `beforeTool` approval does not apply `modifications.toolArgs`, and it refuses an approval that carries them, so a handler that redacts or redirects an argument gets a skipped call, never the original one. Rewrite tool arguments in `onBeforeToolExecution`, which runs before the handler is asked.
 
-**Do agency callbacks (`approvalRequested`, `approvalDecided`) fire for workflow `human` steps?** No — those callbacks are on [`AgencyCallbacks`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) and only fire for [`HitlConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts)-driven pauses. Workflow `human` nodes emit graph events instead. Subscribe via `workflow.compile({ on: { ... } })`.
+**Do agency callbacks (`approvalRequested`, `approvalDecided`) fire for graph human nodes?** No — those callbacks are on [`AgencyCallbacks`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) and only fire for [`HitlConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts)-driven pauses. A human node that suspends yields an `interrupt` event on the compiled graph's `stream()`.
 
-**Can the LLM judge see the full agent call history?** Yes. `ApprovalRequest.context.agentCalls` is the full record so far. The judge prompt receives it as part of the input.
+**Can the LLM judge see the full agent call history?** No. The request carries it in `ApprovalRequest.context.agentCalls`, but `hitl.llmJudge()` sends the judge only the request's type, agent, action, description and details. A handler of your own can read `context` and pass it on.
 
 ## See also
 
 - [Guardrails Usage](./GUARDRAILS_USAGE.md) — the post-approval guardrail safety net.
 - [Agency API](../orchestration/AGENCY_API.md) — full `agency()` reference, including the [`HitlConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) field.
-- [`workflow()` DSL](../orchestration/WORKFLOW_DSL.md) — typed-graph authoring with `human` steps.
+- [`workflow()` DSL](../orchestration/WORKFLOW_DSL.md) and [AgentGraph](../architecture/AGENT_GRAPH.md) — graphs with human nodes.
 - [Emergent Capabilities](../architecture/EMERGENT_CAPABILITIES.md) — how `beforeEmergent` gates `spawn_specialist`.
 - [Streaming Semantics](../architecture/STREAMING_SEMANTICS.md) — how `beforeReturn` interacts with the streaming surfaces.
 - [`src/api/hitl.ts`](https://github.com/framerslab/agentos/blob/master/src/api/hitl.ts) — source for the six handler factories.

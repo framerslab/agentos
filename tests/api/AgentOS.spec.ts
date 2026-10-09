@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { GMIErrorCode } from '../../src/core/utils/errors';
+import type { IGuardrailService } from '../../src/safety/guardrails/IGuardrailService';
 
 import { AgentOS, type AgentOSConfig } from '../../src/api/AgentOS';
 import { AgentOSOrchestrator } from '../../src/api/AgentOSOrchestrator';
@@ -456,6 +458,29 @@ describe('AgentOS memory tool auto-registration', () => {
         })
       )
     ).rejects.toThrow(/standaloneMemory\.memory\.close/);
+  });
+
+  it('refuses to start when a required guardrail is missing, lacks a required stage, or was disabled by an override', async () => {
+    const outputGuard: IGuardrailService = { id: 'safety-gate', evaluateOutput: async () => null };
+    const inputOnly: IGuardrailService = { id: 'safety-gate', evaluateInput: async () => null };
+    const required = [{ id: 'safety-gate', stages: ['output' as const], timeoutMs: 1_000 }];
+    const missing = new AgentOS();
+    await expect(missing.initialize(createConfig({ requiredGuardrails: required }))).rejects.toMatchObject({
+      code: GMIErrorCode.CONFIGURATION_ERROR,
+      details: { missing: ['safety-gate'], missingStage: [] },
+    });
+    const wrongStage = new AgentOS();
+    await expect(wrongStage.initialize(createConfig({ requiredGuardrails: required, guardrailService: inputOnly }))).rejects.toMatchObject({
+      code: GMIErrorCode.CONFIGURATION_ERROR,
+      details: { missing: [], missingStage: [{ id: 'safety-gate', stage: 'output' }] },
+    });
+    const disabled = new AgentOS();
+    await expect(
+      disabled.initialize(createConfig({ requiredGuardrails: required, guardrailService: outputGuard, extensionOverrides: { guardrails: { 'config-guardrail-service': { enabled: false } } } })),
+    ).rejects.toMatchObject({ code: GMIErrorCode.CONFIGURATION_ERROR, details: { missing: ['safety-gate'] } });
+    const present = new AgentOS();
+    await expect(present.initialize(createConfig({ requiredGuardrails: required, guardrailService: outputGuard }))).resolves.toBeUndefined();
+    await present.shutdown();
   });
 
   it('returns persisted pending external tool requests from conversation metadata', async () => {

@@ -245,16 +245,24 @@ describe('SandboxedToolForge', () => {
   });
 
   // -------------------------------------------------------------------------
-  // 12. fs.write* is always banned
+  // 12. fs.writeFile needs fs.write; every other fs.write* name is banned
   // -------------------------------------------------------------------------
-  it('bans fs.writeFile even when fs.readFile is in the allowlist', () => {
-    const result = forge.validateCode(
-      'function execute(input) { fs.writeFile("/tmp/x", "data"); }',
-      ['fs.readFile'],
-    );
+  it('refuses fs.writeFile unless the list names fs.write, and every other fs.write* or fs.unlink* name whatever it names', () => {
+    const writer = 'function execute(input) { fs.writeFile("/tmp/x", "data"); }';
+    expect(forge.validateCode(writer, ['fs.readFile']).violations).toContain('fs.writeFile is not in the allowlist');
+    expect(forge.validateCode(writer, ['fs.write'])).toEqual({ valid: true, violations: [] });
+    expect(forge.validateCode(writer, ['fs.writeFile'])).toEqual({ valid: true, violations: [] });
 
-    expect(result.valid).toBe(false);
-    expect(result.violations).toContain('fs.write* is forbidden');
+    for (const banned of ['fs.writeFileSync("/tmp/x", "d")', 'fs.write(1, "d")', 'fs.writeSync(1, "d")', 'fs.writev(1, [])']) {
+      const result = forge.validateCode(`function execute() { ${banned}; }`, ['fs.read', 'fs.write', 'fs.delete']);
+      expect(result.violations).toContain('fs.write* other than fs.writeFile is forbidden');
+    }
+    expect(forge.validateCode('function execute() { fs.unlinkSync("/tmp/x"); }', ['fs.read', 'fs.delete']).violations).toContain(
+      'fs.unlink* other than fs.unlink is forbidden',
+    );
+    expect(forge.validateCode('function execute() { fs.unlink("/tmp/x"); }', ['fs.read']).violations).toContain(
+      'fs.unlink is not in the allowlist',
+    );
   });
 
   // -------------------------------------------------------------------------
@@ -698,5 +706,49 @@ describe('the catalogue name and the broker', () => {
       call,
     });
     expect(asking).toMatchObject({ success: true, output: { kind: 'undefined' } });
+  });
+});
+
+describe('the in-process output limit', () => {
+  const forge = new SandboxedToolForge();
+
+  it('fails a call whose result passes the limit instead of returning a cut string', async () => {
+    const result = await forge.execute(makeRequest("function execute() { return 'x'.repeat(1100000); }"));
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('output limit');
+  });
+
+  it('fails a call whose console output pushes its result past the limit', async () => {
+    const result = await forge.execute(
+      makeRequest("function execute() { console.log('y'.repeat(1100000)); return { ok: true }; }"),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('output limit');
+  });
+
+  it('returns a result just under the limit whole', async () => {
+    const result = await forge.execute(makeRequest("function execute() { return 'z'.repeat(1000000); }"));
+
+    expect(result.success).toBe(true);
+    expect(result.output).toBe('z'.repeat(1000000));
+  });
+
+  it('measures the limit in bytes, so a multibyte result past it fails', async () => {
+    // 600,000 two-byte characters: under the limit in UTF-16 code units, over it in UTF-8.
+    const result = await forge.execute(makeRequest("function execute() { return '\\u00e9'.repeat(600000); }"));
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('output limit');
+  });
+
+  it('fails a call whose console.error output passes the limit', async () => {
+    const result = await forge.execute(
+      makeRequest("function execute() { console.error('w'.repeat(1100000)); return { ok: true }; }"),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('output limit');
   });
 });

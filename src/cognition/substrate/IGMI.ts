@@ -18,7 +18,7 @@ import { IUtilityAI } from '../nlp/ai_utilities/IUtilityAI';
 // Assuming IToolOrchestrator is correctly exported from this path
 import { IToolOrchestrator } from '../../core/tools/IToolOrchestrator';
 import type { ToolEffectRecord } from '../../core/tools/ITool';
-import { ModelUsage } from '../../core/llm/providers/IProvider';
+import type { ChatMessage, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
 
 /**
  * Defines the possible moods a GMI can be in, influencing its behavior and responses.
@@ -164,6 +164,19 @@ export interface CostAggregator {
 }
 
 
+/** What `GMIBaseConfig.beforeModelCall` receives for one model attempt. */
+export interface GMIModelCallContext {
+  turnId: string;
+  /** 0-based model step within the turn, as on the step's STEP_FINISHED. */
+  stepIndex: number;
+  /** 0 for the primary, n for the n-th fallback hop. */
+  hop: number;
+  providerId: string;
+  modelId: string;
+  /** The attempt's prompt, system messages included. A copy: return the messages to send instead. */
+  messages: ChatMessage[];
+}
+
 /**
  * Base configuration required to initialize a GMI instance.
  * @interface GMIBaseConfig
@@ -200,6 +213,14 @@ export interface GMIBaseConfig {
    * `GatewayProviderManager` (see `src/api/runtime/gatewayProviderManager.ts`).
    */
   completionGateway?: import('../../api/runtime/completionGateway.js').CompletionGateway;
+  /**
+   * Called for every model attempt after its prompt is built and before it is
+   * sent, a fallback hop's rebuilt prompt included. Messages it returns replace
+   * that attempt's prompt and do not enter the history; a hook that throws or
+   * returns an empty list is recorded on the reasoning trace and the built
+   * prompt is sent. `agent({ runtime: 'gmi' })` routes `onBeforeGeneration` here.
+   */
+  beforeModelCall?: (context: GMIModelCallContext) => Promise<ChatMessage[] | void> | ChatMessage[] | void;
 }
 
 /**
@@ -232,6 +253,12 @@ export interface GMITurnInput {
     userApiKeys?: Record<string, string>; // Added for GMI.ts usage
     userFeedback?: any; // Added for GMI.ts usage
     explicitPersonaSwitchId?: string; // Added for GMI.ts usage
+    /**
+     * The end-user id this turn's model calls send to the provider (OpenAI's
+     * `user` / `safety_identifier`). Unset, the GMI sends the turn's `userId`;
+     * `null` sends none. Pass an opaque or hashed id: the provider receives it.
+     */
+    providerUserId?: string | null;
     /**
      * Optional conversation history snapshot to use for prompt construction.
      * When provided, the GMI should prefer this over any internal ephemeral history so
@@ -294,7 +321,8 @@ export enum GMIOutputChunkType {
   RAG_SOURCES_AVAILABLE = 'rag_sources_available',
   /**
    * One per model step that completes: the step's text, finish reason, provider, model, hop and usage.
-   * A step that fails emits none; the turn's ERROR chunk follows. Content: StepFinishedChunkPayload.
+   * A step that fails emits none: a USAGE_UPDATE with `metadata.attemptFailed: true` reports what it was
+   * billed, when the provider reported that, and the turn's ERROR chunk follows. Content: StepFinishedChunkPayload.
    */
   STEP_FINISHED = 'step_finished',
   /**
@@ -344,6 +372,8 @@ export interface StepFinishedChunkPayload {
    * returned it as a forced tool call (Anthropic); other hops return the JSON as the step's text.
    */
   structuredOutput?: unknown;
+  /** The step's extended-thinking blocks (Anthropic), so a session store can replay the step. */
+  thinkingBlocks?: ThinkingBlock[];
 }
 
 /** Content of a TOOL_RESULT chunk. */
@@ -419,6 +449,8 @@ export interface GMIOutput {
      * verify generated claims against the same sources the model saw.
      */
     ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
+    /** On a structured turn: the parsed value and its check (see `api/runtime/structuredReply`). */
+    structuredOutput?: import('../../api/runtime/structuredReply.js').StructuredReplyOutput;
 }
 
 
@@ -619,9 +651,13 @@ export interface IGMI {
     conversationHistory: ConversationMessage[],
   ): void;
 
-  /** Makes `messages` the whole conversation history. An empty array is authoritative. */
+  /**
+   * Makes `messages` the whole conversation history. An empty array is authoritative.
+   * `GMI` also drops what it recorded about the turns the new history no longer holds
+   * (the details of their trace entries, the input excerpts of their sentiment records).
+   */
   replaceHistory?(messages: ConversationMessage[]): void;
-  /** Empties the conversation history. */
+  /** Empties the conversation history; `GMI` drops what it recorded about its turns, as for `replaceHistory`. */
   clearHistory?(): void;
 
   hydrateTurnContext?(

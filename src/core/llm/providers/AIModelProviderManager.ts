@@ -21,6 +21,7 @@
 import { IProvider, ModelInfo } from './IProvider';
 import { OpenAIProvider, OpenAIProviderConfig } from './implementations/OpenAIProvider';
 import { OpenRouterProvider, OpenRouterProviderConfig } from './implementations/OpenRouterProvider';
+import { RequestyProvider, RequestyProviderConfig } from './implementations/RequestyProvider';
 import { OllamaProvider, OllamaProviderConfig } from './implementations/OllamaProvider';
 import { AnthropicProvider, AnthropicProviderConfig } from './implementations/AnthropicProvider';
 import { GroqProvider, GroqProviderConfig } from './implementations/GroqProvider';
@@ -30,6 +31,7 @@ import { XAIProvider, XAIProviderConfig } from './implementations/XAIProvider';
 import { GeminiProvider, GeminiProviderConfig } from './implementations/GeminiProvider';
 import { ClaudeCodeProvider, ClaudeCodeProviderConfig } from './implementations/ClaudeCodeProvider';
 import { GeminiCLIProvider, GeminiCLIProviderConfig } from './implementations/GeminiCLIProvider';
+import { LiteLLMProvider, LiteLLMProviderConfig } from './implementations/LiteLLMProvider';
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../utils/errors.js'; // Corrected import path
 
 /**
@@ -39,7 +41,7 @@ import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../utils/err
 export interface ProviderConfigEntry {
   providerId: string;
   enabled: boolean;
-  config: Partial<OpenAIProviderConfig | OpenRouterProviderConfig | OllamaProviderConfig | AnthropicProviderConfig | GroqProviderConfig | TogetherProviderConfig | MistralProviderConfig | XAIProviderConfig | GeminiProviderConfig | ClaudeCodeProviderConfig | GeminiCLIProviderConfig | Record<string, any>>;
+  config: Partial<OpenAIProviderConfig | OpenRouterProviderConfig | RequestyProviderConfig | OllamaProviderConfig | AnthropicProviderConfig | GroqProviderConfig | TogetherProviderConfig | MistralProviderConfig | XAIProviderConfig | GeminiProviderConfig | ClaudeCodeProviderConfig | GeminiCLIProviderConfig | Record<string, any>>;
   isDefault?: boolean;
 }
 
@@ -129,6 +131,9 @@ export class AIModelProviderManager {
           case 'openrouter':
             providerInstance = new OpenRouterProvider();
             break;
+          case 'requesty':
+            providerInstance = new RequestyProvider();
+            break;
           case 'ollama':
             providerInstance = new OllamaProvider();
             break;
@@ -155,6 +160,9 @@ export class AIModelProviderManager {
             break;
           case 'gemini-cli':
             providerInstance = new GeminiCLIProvider();
+            break;
+          case 'litellm':
+            providerInstance = new LiteLLMProvider();
             break;
           default:
             console.warn(`AIModelProviderManager: Unknown provider ID '${providerEntry.providerId}'. Skipping.`);

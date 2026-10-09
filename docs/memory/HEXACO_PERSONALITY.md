@@ -7,9 +7,9 @@ keywords: [hexaco personality llm, ai agent personality, agent trait modeling, p
 
 # HEXACO Personality
 
-> Six trait dimensions, each in the range [0, 1], that bias every memory and reasoning surface in AgentOS. The same input encodes differently, the same context retrieves differently, the same response generates differently depending on who is doing the remembering.
+> Six trait dimensions, each in the range [0, 1]. They shape an agent's system prompt and, where a cognitive memory manager runs with them, how the agent encodes, holds, formats and reflects on memories.
 
-Personality is **opt-in**. The runtime behaves identically with or without a trait vector, and most production deployments do not pass one. Use it when persona consistency across sessions matters: roleplay agents, character-driven simulations, multi-specialist teams that need behavioral differentiation, or research probes where you want to vary the encoder rather than the input.
+Personality is **opt-in**: a trait left out counts as 0.5 everywhere it is read, and a vector of 0.5s adds no prompt directive. Use it when persona consistency across sessions matters: roleplay agents, character-driven simulations, multi-specialist teams that need behavioral differentiation, or research probes where you want to vary the encoder rather than the input.
 
 ![HEXACO trait radar showing three sample personas](/img/diagrams/hexaco-radar.svg)
 
@@ -46,48 +46,53 @@ The radar at the top of this page shows three example trait vectors. Trait *comb
 import { agent } from '@framers/agentos';
 
 const coach = agent({
+  runtime: 'gmi', // the agent() path that reads memory
   provider: 'anthropic',
   instructions: 'You are a personal coach helping users build daily habits.',
   personality: {
     openness: 0.85,           // creative, exploratory framing
     conscientiousness: 0.80,  // structured, follow-through-oriented
-    emotionality: 0.65,       // tone-aware without being clinical
-    agreeableness: 0.55,      // moderate, willing to push back
+    emotionality: 0.65,       // at the 0.65 line: no directive
+    agreeableness: 0.55,      // moderate
     extraversion: 0.50,       // neutral
     honesty: 0.75,            // transparent, no spin
   },
-  memory: {
-    types: ['episodic', 'semantic'],
-    working: { enabled: true },
-  },
+  // Cognitive memory built with these traits; Anthropic has no embedding models.
+  memory: { embedding: { provider: 'openai' } },
 });
 
 const session = coach.session('user-1');
 await session.send('Help me build a morning routine.');
 ```
 
-That single `personality` object propagates through five system surfaces simultaneously. Each is documented below with its source.
+The traits reach five surfaces, detailed below, and each runs on its own paths:
+
+- **System prompt directives** (1): `agent()`, with or without `runtime: 'gmi'`, writes them into the system prompt it builds from its options (`systemBlocks` replaces that prompt). The full runtime sends each persona's own system prompt and writes no directives from its traits.
+- **Encoding strength, working-memory capacity and memory prompt formatting** (2 to 4): a `CognitiveMemoryManager` built with the traits applies them: the one `agent({ runtime: 'gmi' })` builds when memory is on, as in the quickstart ([GMIs from agent()](../GMI.md#gmis-from-agent)), one the full runtime gets from `gmiManagerConfig.cognitiveMemoryFactory`, or one you build ([Memory subsystem](#memory-subsystem)).
+- **Observer and reflector bias** (5): a `CognitiveMemoryManager` runs the observer only when its config gives it a model invoker (`observer.llmInvoker`), and the reflector likewise (`reflector.llmInvoker`). The manager `agent({ runtime: 'gmi' })` builds has neither.
+
+Without `runtime: 'gmi'`, `agent()` builds no memory manager: of the five surfaces it applies the prompt directives alone, and it warns that `memory` is not applied.
 
 ---
 
 ## How traits propagate
 
-The propagation diagram at the top of this page shows the five surfaces a HEXACO vector touches. Each is detailed below.
+The propagation diagram at the top of this page shows the five surfaces. Each is detailed below.
 
 ### 1. System prompt directives
 
-`buildPersonalityDescription(traits)` in [`agent.ts`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) emits a `## Personality & Communication Style` section appended to the agent's system prompt. Each trait at > 0.65 or < 0.35 produces a specific instruction. Moderate values (0.35-0.65) are omitted.
+`buildPersonalityDescription(traits)` in [`agent.ts`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) emits a `## Personality & Communication Style` section in the agent's system prompt. Each trait above 0.65 or below 0.35 produces one instruction; values from 0.35 to 0.65 produce none.
 
 | Trait > 0.65 | Trait < 0.35 |
 |---|---|
 | **Honesty:** "Be straightforward and transparent. Avoid flattery, spin, or evasion. Acknowledge limitations directly." | **Honesty:** "Be strategically diplomatic. Frame information to serve the conversation goal. Emphasize advantages." |
-| **Emotionality:** "Respond with emotional awareness and empathy. Acknowledge feelings. Express concern when appropriate." | **Emotionality:** "Maintain emotional composure. Be matter-of-fact and solution-oriented." |
-| **Extraversion:** "Be energetic and engaging. Use vivid language. Take initiative. Offer suggestions proactively." | **Extraversion:** "Be measured and reflective. Listen more than you speak. Prefer depth over breadth." |
-| **Agreeableness:** "Prioritize harmony and cooperation. Validate the other perspective before offering alternatives." | **Agreeableness:** "Be direct and challenge-oriented. Question assumptions. Push back when something seems wrong." |
-| **Conscientiousness:** "Be thorough and systematic. Structure responses clearly. Prefer precision over speed." | **Conscientiousness:** "Be flexible and adaptive. Prioritize the big picture. Tolerate ambiguity and improvise." |
-| **Openness:** "Explore creative angles and unconventional ideas. Draw unexpected connections." | **Openness:** "Stick to proven approaches and established knowledge. Be practical and concrete." |
+| **Emotionality:** "Respond with emotional awareness and empathy. Acknowledge feelings in the conversation. Express concern when appropriate." | **Emotionality:** "Maintain emotional composure. Be matter-of-fact and solution-oriented. Keep responses grounded and pragmatic." |
+| **Extraversion:** "Be energetic and engaging. Use vivid language. Take initiative in the conversation. Offer suggestions proactively." | **Extraversion:** "Be measured and reflective. Listen more than you speak. Respond thoughtfully rather than quickly. Prefer depth over breadth." |
+| **Agreeableness:** "Prioritize harmony and cooperation. Validate the other perspective before offering alternatives. Be supportive and encouraging." | **Agreeableness:** "Be direct and challenge-oriented. Question assumptions. Prioritize accuracy over comfort. Push back when something seems wrong." |
+| **Conscientiousness:** "Be thorough and systematic. Structure responses clearly. Follow through on details. Prefer precision over speed." | **Conscientiousness:** "Be flexible and adaptive. Prioritize the big picture over details. Respond quickly. Tolerate ambiguity and improvise." |
+| **Openness:** "Explore creative angles and unconventional ideas. Draw unexpected connections. Question established approaches." | **Openness:** "Stick to proven approaches and established knowledge. Be practical and concrete. Favor reliability over novelty." |
 
-Source: [`src/api/agent.ts:386`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts#L386).
+Source: [`src/api/agent.ts:552`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts#L552).
 
 ### 2. Memory encoding strength
 
@@ -124,7 +129,7 @@ strength = base × arousalBoost × emotionalBoost × attentionMultiplier × cong
 
 The composite strength is clamped to [0, 1] and feeds the Ebbinghaus stability calculation — stronger encodings produce more stable traces, which decay more slowly.
 
-**Practical effect:** an agent with `emotionality: 0.85` encodes emotionally charged moments roughly 4x more strongly than an agent with `emotionality: 0.15` on the same input. Over thousands of interactions, the high-emotionality agent's memory is dominated by emotionally significant traces; the low-emotionality agent's memory is dominated by procedural and factual traces.
+**Practical effect:** emotionality enters the strength through `emotionalSensitivity` three times (the emotional boost, the emotion-feature attention bonus and the mood-congruence boost). On the same emotionally charged input (full intensity, congruent mood), `emotionality: 0.85` gives about 1.6 times the strength of `emotionality: 0.15`, before the cap at 1.0.
 
 Source: [`src/cognition/memory/core/encoding/EncodingModel.ts:38`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/encoding/EncodingModel.ts#L38).
 
@@ -182,7 +187,7 @@ Source: [`src/cognition/memory/core/prompt/MemoryPromptAssembler.ts:49`](https:/
 
 ### 5. Observer and Reflector bias
 
-The background observation pipeline (running when accumulated tokens cross a threshold) and the consolidation reflector (running periodically over accumulated notes) are both personality-biased.
+The observer (which runs when the accumulated conversation crosses its token threshold, 30,000 by default) and the reflector (which runs when the accumulated notes cross theirs, 40,000 by default) both put personality instructions into their prompts.
 
 **Observer** ([`MemoryObserver.ts:64`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryObserver.ts#L64)) — adds emphasis lines for each trait > 0.6:
 
@@ -196,89 +201,58 @@ The background observation pipeline (running when accumulated tokens cross a thr
 
 Two agents observing the same conversation will extract different note sets.
 
-**Reflector** ([`MemoryReflector.ts:72`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryReflector.ts#L72)) — picks a conflict-resolution strategy and a memory-writing style:
+**Reflector** ([`MemoryReflector.ts:77`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryReflector.ts#L77)) tells its model how to settle contradictions and how to write traces, checked in this order:
 
-```ts
-const conflictStrategy = clamp(traits.honesty) > 0.6
-  ? 'prefer newer information, supersede old'
-  : clamp(traits.agreeableness) > 0.6
-  ? 'keep both versions, note discrepancy'
-  : 'prefer higher confidence';
-
-const memoryStyle = clamp(traits.conscientiousness) > 0.6
-  ? 'structured, well-organized traces'
-  : clamp(traits.openness) > 0.6
-  ? 'rich, associative traces with connections'
-  : 'concise, factual traces';
-```
-
-A high-honesty reflector will update old beliefs when new contradicting evidence arrives. A high-agreeableness reflector will keep both versions and note the inconsistency rather than picking a winner. The default falls back to confidence-based resolution.
+| Condition | Contradictions | Condition | Trace style |
+|---|---|---|---|
+| honesty > 0.6 | prefer the newer information and flag the old memory for supersession | conscientiousness > 0.6 | structured, well-organized |
+| agreeableness > 0.6 | keep both versions and note the discrepancy | openness > 0.6 | rich, associative, with connections |
+| otherwise | keep the version with higher confidence | otherwise | concise, factual |
 
 ---
 
 ## Runtime self-modification
 
-Personality is not frozen at agent construction. Two mechanisms let traits evolve during operation.
+Two mechanisms address trait change during operation; only the first changes a trait.
 
 ### `adapt_personality` tool
 
-When `emergent.allowPersonalityAdaptation: true` is set on the agent config, the runtime exposes an `adapt_personality` tool the agent can call mid-decision.
-
-```ts
-const agent = createAgent({
-  provider: 'openai',
-  personality: { openness: 0.5, conscientiousness: 0.5 /* ... */ },
-  emergent: {
-    allowPersonalityAdaptation: true,
-    sessionBudget: {
-      maxAbsoluteDeltaPerTrait: 0.20,  // total drift per session capped
-      maxMutationsPerSession: 5,
-    },
-  },
-});
-```
-
-The tool accepts:
+On the full runtime, `AgentOS.create({ emergent: true, emergentConfig: { selfImprovement: { enabled: true } } })` registers the self-improvement tools, `adapt_personality` among them. The model calls it to change one trait of the GMI that runs the tool.
 
 ```ts
 interface AdaptPersonalityInput {
-  trait: 'honesty' | 'emotionality' | 'extraversion' |
-         'agreeableness' | 'conscientiousness' | 'openness';
-  delta: number;        // signed; clamped per session budget
-  reasoning: string;    // mandatory audit trail
+  trait: string;      // one of the six trait names
+  delta: number;      // signed change
+  reasoning: string;  // required, non-empty
 }
 ```
 
-Constraints enforced:
-- Only the six valid HEXACO trait names accepted.
-- `reasoning` is mandatory on every mutation.
-- Per-session absolute-delta budget per trait.
-- Final values clamped to [0, 1].
-- Every mutation persisted to a [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) (SQLite, JSON, or in-memory implementations available).
+- An unknown trait name or an empty `reasoning` returns an error and changes nothing.
+- The total change per trait per session is capped at `selfImprovement.personality.maxDeltaPerSession` (default 0.15); a larger delta is clamped to what remains.
+- The new value is clamped to [0, 1] and applied with `GMI.setPersonalityTrait()`.
+- A [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts) records the change only when the runtime has a storage adapter and `personality.persistWithDecay` is on (the default); stored mutations are not reloaded into later GMIs.
 
-This is how a roleplay agent's persona drifts toward what its interactions actually call for, rather than staying frozen at a static config.
+`agent()` registers no such tool; its traits stay as given.
 
 Source: [`src/cognition/emergent/AdaptPersonalityTool.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts).
 
 ### Persona Drift mechanism
 
-`PersonaDriftMechanism` is one of the optional cognitive mechanisms (off by default). When enabled, it runs heuristic analysis on accumulated episodic memories every N consolidation cycles and proposes bounded trait mutations based on emotional patterns and relationship-delta signals.
+`PersonaDriftMechanism` is an optional cognitive mechanism (off by default). When enabled, it analyzes accumulated episodic memories during consolidation, without an LLM call, and computes bounded trait-change proposals from emotional patterns and relationship signals. The consolidation pipeline discards those proposals, so no trait changes, and `analysisInterval` is not read: the analysis runs on every consolidation.
 
 ```ts
 const DEFAULT_PERSONA_DRIFT_CONFIG = {
   enabled: false,
-  analysisInterval: 5,        // every 5 consolidation cycles
+  analysisInterval: 5,        // declared, not read: analysis runs on every consolidation
   minTracesForAnalysis: 10,   // require 10+ episodic traces
   maxDeltaPerCycle: 0.05,     // bounded mutation magnitude
   emotionalWeighting: true,   // weight high-arousal memories more
 };
 ```
 
-This is heuristic-only (no LLM calls) and is the right choice when you want long-running agents to slowly adapt their disposition based on what they actually experience, without the cost or unpredictability of LLM-driven self-evaluation.
-
 Source: [`src/cognition/memory/mechanisms/PersonaDriftMechanism.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/PersonaDriftMechanism.ts).
 
-For the rest of the runtime adaptation surface — mood, inferred user skill, task complexity, working-memory imprints, and the metaprompt loop that drives them between turns — see [Adaptive Prompt Intelligence](/features/adaptive-prompt-intelligence). The trait-drift mechanisms above are the persistent-state slice of the same broader adaptation story.
+For the rest of the runtime adaptation surface — mood, inferred user skill, task complexity, working-memory imprints, and the metaprompt loop that drives them between turns — see [Adaptive Prompt Intelligence](../ADAPTIVE_PROMPT_INTELLIGENCE.md).
 
 ---
 
@@ -287,23 +261,18 @@ For the rest of the runtime adaptation surface — mood, inferred user skill, ta
 ### Agent-level
 
 ```ts
-import { agent, type AgentOptions } from '@framers/agentos';
-
-const opts: AgentOptions = {
-  provider: 'anthropic',
-  personality: {
-    honesty?: number;          // 0-1, defaults to 0.5
-    emotionality?: number;
-    extraversion?: number;
-    agreeableness?: number;
-    conscientiousness?: number;
-    openness?: number;
-  },
-  // ...
+// AgentOptions['personality']
+type Personality = {
+  honesty?: number;            // 0-1
+  emotionality?: number;
+  extraversion?: number;
+  agreeableness?: number;
+  conscientiousness?: number;
+  openness?: number;
 };
 ```
 
-All fields optional. Omitted traits default to 0.5 (neutral) at every consumer site (encoding, capacity calc, formatter selection).
+All fields are optional. An omitted trait counts as 0.5 wherever it is read (prompt directives, encoding weights, capacity, formatter selection).
 
 ### Memory subsystem
 
@@ -312,6 +281,7 @@ If you bypass the high-level `agent()` factory and configure [`CognitiveMemoryMa
 ```ts
 import { CognitiveMemoryManager } from '@framers/agentos/memory';
 
+const memory = new CognitiveMemoryManager();
 await memory.initialize({
   agentId: 'researcher-1',
   traits: {
@@ -360,12 +330,12 @@ const characters = {
 
 To be precise about scope:
 
-- **Does not bias retrieval ranking directly.** The 6-signal retrieval scorer (similarity, strength, recency, emotional congruence, graph activation, importance) does not include a personality term. Personality affects retrieval *indirectly* through what was encoded strongly enough to be retrievable.
+- **Does not enter the retrieval score.** The 6-signal retrieval scorer (similarity, strength, recency, emotional congruence, graph activation, importance) has no personality term. Personality reaches retrieval through what was encoded strongly, and through the cognitive mechanisms, whose parameters the traits scale and some of which run at retrieval.
 - **Does not modify provider/model selection.** Personality lives at the runtime layer above the LLM call.
-- **Does not affect tool-call permission.** Tool gating uses the security tier and permissions system, not traits.
+- **Does not affect tool-call permission.** Tool gating uses the permission system, not traits.
 - **Does not affect cost-routing.** Reader-router decisions are query-driven, not personality-driven.
 
-Personality is a memory-and-style modulator, not a policy enforcement mechanism.
+Personality is a memory-and-style modulator, not a policy enforcement mechanism. The one routing use is the agent graph's personality edge, which picks a branch by comparing a trait value with a threshold ([Agent Graph](../architecture/AGENT_GRAPH.md)).
 
 ---
 

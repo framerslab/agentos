@@ -69,6 +69,12 @@ export interface ToolExecutionRequestDetails {
    * runs.
    */
   signal?: AbortSignal;
+  /**
+   * Whether this call's console lines carry the tool's arguments, its output and the details of a failure.
+   * Set by `ToolOrchestrator.processToolCall` from the orchestrator's own `logToolCalls`, so two orchestrators
+   * sharing one executor each keep their own policy. Unset, the executor's own setting applies.
+   */
+  logToolCalls?: boolean;
 }
 
 /**
@@ -93,6 +99,13 @@ export class ToolExecutor {
    * @type {InstanceType<typeof Ajv>}
    */
   private readonly ajv: InstanceType<typeof Ajv>;
+  /**
+   * Whether the console lines of `executeTool` carry a tool's arguments, its output and the details of a failure.
+   * Off, the lines name the tool, the duration and the error only: a tool that reads a person's record must not put
+   * their words in the process log. A call's own `logToolCalls` (set by `ToolOrchestrator.processToolCall`) overrides it.
+   * @private
+   */
+  private logToolCalls: boolean;
 
   /**
   * Creates an instance of ToolExecutor.
@@ -105,12 +118,17 @@ export class ToolExecutor {
   * though primary permission logic resides in `ToolPermissionManager`.
   * @param {ISubscriptionService} [subscriptionService] - Optional. An instance of a subscription service.
   * Similarly used for potential future feature-based tool access control at the executor level.
+  * @param {ExtensionRegistry<ITool>} [toolRegistry] - Optional. The registry the tools live in; a new one when omitted.
+  * @param {{ logToolCalls?: boolean }} [options] - Optional. `logToolCalls` puts each tool's arguments, an output preview
+  * and failure details in the console lines of `executeTool`; off by default (see `setLogToolCalls`).
   */
   constructor(
     authService?: IAuthService,
     subscriptionService?: ISubscriptionService,
     toolRegistry?: ExtensionRegistry<ITool>,
+    options?: { logToolCalls?: boolean },
   ) {
+    this.logToolCalls = options?.logToolCalls === true;
     this.toolRegistry = toolRegistry ?? new ExtensionRegistry<ITool>(EXTENSION_KIND_TOOL);
     this.directRegistrations = new Set<string>();
     this.authService = authService;
@@ -123,6 +141,18 @@ export class ToolExecutor {
     console.log(
       `ToolExecutor initialized. Registered tools: ${this.toolRegistry.listActive().length}.`,
     );
+  }
+
+  /**
+  * Turns the content-bearing console lines of `executeTool` on or off: a tool's arguments, the preview of its output
+  * and the details of a failure, for calls that do not carry their own `logToolCalls`.
+  *
+  * @public
+  * @param {boolean} on - True to print them, false to print the tool's name, the duration and the error only.
+  * @returns {void}
+  */
+  public setLogToolCalls(on: boolean): void {
+    this.logToolCalls = on === true;
   }
 
   /**
@@ -259,10 +289,11 @@ export class ToolExecutor {
       sessionData,
       signal,
     } = requestDetails;
+    const logToolCalls = requestDetails.logToolCalls ?? this.logToolCalls;
     
     if (!toolCallRequest || !toolCallRequest.name || typeof toolCallRequest.name !== 'string') {
         const errorMsg = "Invalid ToolCallRequest provided to ToolExecutor: 'name' is missing or invalid.";
-        console.error(`ToolExecutor: ${errorMsg}`, requestDetails);
+        console.error(`ToolExecutor: ${errorMsg}`, logToolCalls ? requestDetails : { gmiId, personaId });
         return { success: false, error: errorMsg, details: { receivedRequest: toolCallRequest, code: GMIErrorCode.VALIDATION_ERROR } };
     }
     const toolName = toolCallRequest.name;
@@ -302,7 +333,10 @@ export class ToolExecutor {
       }
     } catch (parseError: any) {
       const errorMsg = `Failed to parse arguments for tool '${tool.name}'. Arguments must be a valid JSON string or object.`;
-      console.warn(`${logContext}: Argument parsing failed. Raw Args: "${JSON.stringify(toolCallRequest.arguments)}". Error: ${parseError.message}`);
+      // a JSON parse error quotes the text it failed on, so the message stays in with the raw arguments
+      console.warn(logToolCalls
+        ? `${logContext}: Argument parsing failed. Raw Args: "${JSON.stringify(toolCallRequest.arguments)}". Error: ${parseError.message}`
+        : `${logContext}: Argument parsing failed (${parseError?.name || 'Error'}).`);
       return { success: false, error: errorMsg, details: { toolName: tool.name, argumentParsingError: parseError.message, rawArguments: toolCallRequest.arguments } };
     }
     
@@ -317,7 +351,12 @@ export class ToolExecutor {
               params: err.params,
             }))
           : [{ message: 'Unknown schema validation error.' }];
-        console.warn(`${logContext}: Argument schema validation failed. Errors:`, JSON.stringify(validationErrors, null, 2), 'Parsed Args:', parsedArgs);
+        // a validation error's params can carry a name from the input (an additional property), so they stay in only with the arguments
+        if (logToolCalls) {
+          console.warn(`${logContext}: Argument schema validation failed. Errors:`, JSON.stringify(validationErrors, null, 2), 'Parsed Args:', parsedArgs);
+        } else {
+          console.warn(`${logContext}: Argument schema validation failed. Errors:`, JSON.stringify(validationErrors.map((e: { path?: string; message?: string }) => ({ path: e.path, message: e.message })), null, 2));
+        }
         return { success: false, error: errorMsg, details: { toolName: tool.name, validationErrors, providedParsedArgs: parsedArgs } };
       }
     }
@@ -334,16 +373,18 @@ export class ToolExecutor {
     };
 
     try {
-      console.log(`${logContext}: Executing tool '${tool.name}' (ID: '${tool.id}') with validated arguments:`, parsedArgs);
+      if (logToolCalls) console.log(`${logContext}: Executing tool '${tool.name}' (ID: '${tool.id}') with validated arguments:`, parsedArgs);
       const startTime = Date.now();
       const result: ToolExecutionResult = await tool.execute(parsedArgs, executionContext);
       const durationMs = Date.now() - startTime;
       
-      const outputPreview = result.output ? JSON.stringify(result.output).substring(0,150) + (JSON.stringify(result.output).length > 150 ? '...' : '') : 'N/A';
       if (result.success) {
-        console.log(`${logContext}: Tool execution successful. Duration: ${durationMs}ms. Output preview: ${outputPreview}`);
-      } else {
+        const outputPreview = !logToolCalls ? '' : ` Output preview: ${result.output ? JSON.stringify(result.output).substring(0, 150) + (JSON.stringify(result.output).length > 150 ? '...' : '') : 'N/A'}`;
+        console.log(`${logContext}: Tool execution successful. Duration: ${durationMs}ms.${outputPreview}`);
+      } else if (logToolCalls) {
         console.warn(`${logContext}: Tool execution reported failure. Duration: ${durationMs}ms. Error: ${result.error}`, result.details);
+      } else {
+        console.warn(`${logContext}: Tool execution reported failure. Duration: ${durationMs}ms. Error: ${result.error}`);
       }
       
       if (tool.outputSchema && result.success && result.output !== undefined) {
@@ -374,7 +415,7 @@ export class ToolExecutor {
 
     } catch (err: any) {
       const execErrorMsg = `Critical unhandled error during the execution of tool '${tool.name}'.`;
-      console.error(`${logContext}: ${execErrorMsg}`, err);
+      console.error(`${logContext}: ${execErrorMsg}`, logToolCalls ? err : `${err?.name || 'Error'}: ${err?.message ?? String(err)}`);
       const gmiErr = createGMIErrorFromError(err, GMIErrorCode.TOOL_EXECUTION_FAILED, { toolName: tool.name, arguments: parsedArgs }, execErrorMsg);
       return { 
         success: false, 

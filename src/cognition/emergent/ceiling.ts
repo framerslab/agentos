@@ -7,19 +7,37 @@
 
 import { realpathSync } from 'node:fs';
 import * as path from 'node:path';
+import { isProtectedRoot } from './broker/protected.js';
 import { CAPABILITY_NAMES } from './capabilities.js';
-import type { CapabilityName, EmergentAuditConfig, ForgedCapabilities } from './types.js';
+import type { CapabilityName, EffectApproval, EmergentAuditConfig, ForgedCapabilities, HttpMethod } from './types.js';
+
+/** The methods that change state: an isolating executor, a request bound and an approval setting. */
+export const STATE_CHANGING_METHODS: readonly HttpMethod[] = ['POST', 'PUT', 'PATCH', 'DELETE'];
+const ALL_METHODS: readonly HttpMethod[] = ['GET', 'HEAD', ...STATE_CHANGING_METHODS];
 
 /** A ceiling with every default applied and every list normalised. */
 export interface ResolvedCeiling {
   fetch?: {
     domains: string[] | '*';
-    methods: Array<'GET' | 'HEAD'>;
+    methods: HttpMethod[];
     maxResponseBytes: number;
     maxRedirects: number;
     timeoutMs: number;
+    /** Set exactly when `methods` holds a state-changing method. */
+    maxRequestBytes?: number;
+    approval?: EffectApproval;
   };
   'fs.read'?: { roots: string[]; maxBytesPerRead: number; timeoutMs: number };
+  'fs.write'?: {
+    roots: string[];
+    mode: 'create-only' | 'create-or-replace';
+    maxBytesPerFile: number;
+    maxBytesPerCall: number;
+    maxFilesPerCall: number;
+    timeoutMs: number;
+    approval: EffectApproval;
+  };
+  'fs.delete'?: { roots: string[]; maxFilesPerCall: number; timeoutMs: number; approval: EffectApproval };
   crypto?: true;
   audit: { store: 'storage' | 'none'; content: 'digest' | 'full'; retainDays?: number };
 }
@@ -32,7 +50,12 @@ export type CeilingErrorCode =
   | 'invalid_bound'
   | 'invalid_audit'
   | 'audit_needs_storage'
-  | 'forge_wider_than_ceiling';
+  | 'forge_wider_than_ceiling'
+  | 'invalid_mode'
+  | 'invalid_approval'
+  | 'approval_not_available'
+  | 'executor_does_not_isolate'
+  | 'protected_path';
 
 /** A ceiling the engine cannot build; the message starts with the code and the key. */
 export class CeilingError extends Error {
@@ -98,6 +121,42 @@ function bound(
   return value;
 }
 
+/** A bound with no default: absent fails construction, as a value out of range does. */
+function required(value: number | undefined, key: string, min: number, max: number = Number.MAX_SAFE_INTEGER): number {
+  if (value === undefined) {
+    throw new CeilingError('invalid_bound', key, `required, an integer from ${min} to ${max}`);
+  }
+  return bound(value, 0, key, min, max);
+}
+
+/**
+ * An effect capability's approval setting. This release builds `'none'`
+ * only: the other two fail construction until the release that asks for
+ * them, so no grant is ever built that skips an approval its host asked for.
+ */
+function approvalValue(value: unknown, key: string): EffectApproval {
+  if (value !== 'none' && value !== 'at-forge' && value !== 'per-call') {
+    throw new CeilingError('invalid_approval', key, `expected 'none', 'at-forge' or 'per-call', got ${shown(value)}`);
+  }
+  if (value !== 'none') {
+    throw new CeilingError('approval_not_available', key, `'${value}' is not available in this release; 'none' is`);
+  }
+  return value;
+}
+
+/** A capability's roots: absolute paths, resolved; an empty list grants nothing. */
+function rootsValue(value: unknown, key: string): string[] {
+  if (!Array.isArray(value)) {
+    throw new CeilingError('root_not_absolute', key, `expected a list of absolute paths, got ${shown(value)}`);
+  }
+  for (const root of value) {
+    if (typeof root !== 'string' || !path.isAbsolute(root)) {
+      throw new CeilingError('root_not_absolute', key, `${shown(root)} is not an absolute path`);
+    }
+  }
+  return (value as string[]).map((root) => path.resolve(root));
+}
+
 /** An audit setting: one of the values allowed, or the fallback when it is not set. */
 function auditValue<T extends string>(value: unknown, allowed: readonly T[], fallback: T, key: string): T {
   if (value === undefined) {
@@ -158,11 +217,31 @@ export function resolveCeiling(
       );
     }
     for (const method of givenMethods) {
-      if (method !== 'GET' && method !== 'HEAD') {
-        throw new CeilingError('method_not_allowed', 'capabilities.fetch.methods', `${String(method)}: stage 1 allows GET and HEAD`);
+      if (!(ALL_METHODS as readonly unknown[]).includes(method)) {
+        throw new CeilingError(
+          'method_not_allowed',
+          'capabilities.fetch.methods',
+          `${String(method)}: expected ${ALL_METHODS.join(', ')}`,
+        );
       }
     }
-    const methods = givenMethods as Array<'GET' | 'HEAD'>;
+    const methods = givenMethods as HttpMethod[];
+    const changesState = methods.some((method) => STATE_CHANGING_METHODS.includes(method));
+    if (!changesState && fetch.maxRequestBytes !== undefined) {
+      throw new CeilingError(
+        'invalid_bound',
+        'capabilities.fetch.maxRequestBytes',
+        'a request bound needs a state-changing method (POST, PUT, PATCH or DELETE) in methods',
+      );
+    }
+    const effectFields = changesState
+      ? {
+          maxRequestBytes: required(fetch.maxRequestBytes, 'capabilities.fetch.maxRequestBytes', 1),
+          approval: approvalValue(fetch.approval, 'capabilities.fetch.approval'),
+        }
+      : fetch.approval !== undefined
+        ? { approval: approvalValue(fetch.approval, 'capabilities.fetch.approval') }
+        : {};
     const givenDomains: unknown = fetch.domains;
     let domains: string[] | '*' = '*';
     if (givenDomains !== '*') {
@@ -194,6 +273,7 @@ export function resolveCeiling(
       maxResponseBytes: bound(fetch.maxResponseBytes, CEILING_DEFAULTS.maxResponseBytes, 'capabilities.fetch.maxResponseBytes', 1),
       maxRedirects: bound(fetch.maxRedirects, CEILING_DEFAULTS.maxRedirects, 'capabilities.fetch.maxRedirects', 0),
       timeoutMs: bound(fetch.timeoutMs, CEILING_DEFAULTS.timeoutMs, 'capabilities.fetch.timeoutMs', 1, MAX_TIMER_MS),
+      ...effectFields,
     };
     if (domains === '*' || domains.length > 0) {
       resolved.fetch = scope;
@@ -223,6 +303,41 @@ export function resolveCeiling(
     }
   }
 
+  const write = capabilities['fs.write'];
+  if (write) {
+    const roots = rootsValue(write.roots, 'capabilities.fs.write.roots');
+    const mode: unknown = write.mode;
+    if (mode !== 'create-only' && mode !== 'create-or-replace') {
+      throw new CeilingError('invalid_mode', 'capabilities.fs.write.mode', `expected 'create-only' or 'create-or-replace', got ${shown(mode)}`);
+    }
+    const scope = {
+      roots,
+      mode: mode as 'create-only' | 'create-or-replace',
+      maxBytesPerFile: required(write.maxBytesPerFile, 'capabilities.fs.write.maxBytesPerFile', 1),
+      maxBytesPerCall: required(write.maxBytesPerCall, 'capabilities.fs.write.maxBytesPerCall', 1),
+      maxFilesPerCall: required(write.maxFilesPerCall, 'capabilities.fs.write.maxFilesPerCall', 1),
+      timeoutMs: required(write.timeoutMs, 'capabilities.fs.write.timeoutMs', 1, MAX_TIMER_MS),
+      approval: approvalValue(write.approval, 'capabilities.fs.write.approval'),
+    };
+    if (roots.length > 0) {
+      resolved['fs.write'] = scope;
+    }
+  }
+
+  const remove = capabilities['fs.delete'];
+  if (remove) {
+    const roots = rootsValue(remove.roots, 'capabilities.fs.delete.roots');
+    const scope = {
+      roots,
+      maxFilesPerCall: required(remove.maxFilesPerCall, 'capabilities.fs.delete.maxFilesPerCall', 1),
+      timeoutMs: required(remove.timeoutMs, 'capabilities.fs.delete.timeoutMs', 1, MAX_TIMER_MS),
+      approval: approvalValue(remove.approval, 'capabilities.fs.delete.approval'),
+    };
+    if (roots.length > 0) {
+      resolved['fs.delete'] = scope;
+    }
+  }
+
   if (capabilities.crypto) {
     resolved.crypto = true;
   }
@@ -235,6 +350,47 @@ export function resolveCeiling(
     );
   }
   return resolved;
+}
+
+/**
+ * Whether a resolved ceiling grants anything that changes the world outside
+ * the process: a write, a delete or a state-changing method. Such a ceiling
+ * constructs only on an executor that declares `isolates: true`.
+ */
+export function grantsEffects(ceiling: ResolvedCeiling): boolean {
+  return (
+    ceiling['fs.write'] !== undefined ||
+    ceiling['fs.delete'] !== undefined ||
+    (ceiling.fetch?.methods ?? []).some((method) => STATE_CHANGING_METHODS.includes(method))
+  );
+}
+
+/**
+ * Refuses a write or delete root that holds, or lies inside, a protected
+ * path, or that passes through a `node_modules` directory. Roots that exist
+ * are checked by their real paths now; one that does not exist yet is
+ * checked by the broker when its real path is first resolved.
+ *
+ * @throws CeilingError (`protected_path`) naming the capability's roots key.
+ */
+export function checkProtectedRoots(ceiling: ResolvedCeiling, protectedReal: readonly string[]): void {
+  for (const key of ['fs.write', 'fs.delete'] as const) {
+    for (const root of ceiling[key]?.roots ?? []) {
+      let real: string;
+      try {
+        real = realpathSync.native(root);
+      } catch {
+        continue;
+      }
+      if (isProtectedRoot(real, protectedReal)) {
+        throw new CeilingError(
+          'protected_path',
+          `capabilities.${key}.roots`,
+          real === root ? `${root} holds or lies inside a protected path` : `${root} (resolves to ${real}) holds or lies inside a protected path`,
+        );
+      }
+    }
+  }
 }
 
 /** The capabilities a resolved ceiling grants, in catalogue order. */

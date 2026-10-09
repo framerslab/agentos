@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ExtensionManager } from '../../../extensions/ExtensionManager.js';
 import { EXTENSION_KIND_TTS_PROVIDER } from '../../../extensions/types.js';
 import { SpeechRuntime } from '../SpeechRuntime.js';
-import type { SpeechToTextProvider } from '../types.js';
+import type { SpeechToTextProvider, TextToSpeechProvider } from '../types.js';
 
 /**
  * Tests for {@link SpeechRuntime} — the high-level runtime that manages
@@ -17,6 +17,7 @@ describe('SpeechRuntime', () => {
       env: {
         OPENAI_API_KEY: 'sk-openai',
         ELEVENLABS_API_KEY: 'sk-elevenlabs',
+        MINIMAX_API_KEY: 'sk-minimax',
       },
     });
 
@@ -26,6 +27,7 @@ describe('SpeechRuntime', () => {
     expect(runtime.getProvider('openai-whisper')).toBeDefined();
     expect(runtime.getProvider('openai-tts')).toBeDefined();
     expect(runtime.getProvider('elevenlabs')).toBeDefined();
+    expect(runtime.getProvider('minimax-tts')).toBeDefined();
   });
 
   it('should hydrate speech providers from the extension manager', async () => {
@@ -145,6 +147,60 @@ describe('SpeechRuntime', () => {
       await (pinned.getProvider('openai-whisper') as SpeechToTextProvider).transcribe(audio);
       expect(forms[2].get('model')).toBe('whisper-1');
       expect(forms[2].get('response_format')).toBe('verbose_json');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('SpeechRuntime MiniMax URL output', () => {
+  // The env-registered provider captures the global fetch when it is built,
+  // so the stub goes in before the runtime is constructed.
+  function stubMiniMax(link: string) {
+    const fetchMock = vi.fn(async (url: string) =>
+      url.startsWith('https://api.minimax.io/')
+        ? new Response(
+            JSON.stringify({ data: { audio: link, status: 2 }, base_resp: { status_code: 0 } }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          )
+        : new Response('audio'),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  const urlOutput = { providerSpecificOptions: { outputFormat: 'url' } };
+
+  it('downloads from a host listed in MINIMAX_TTS_AUDIO_URL_HOSTS', async () => {
+    const fetchMock = stubMiniMax('https://audio.cdn.example.net/a.mp3');
+    try {
+      const runtime = new SpeechRuntime({
+        env: {
+          MINIMAX_API_KEY: 'sk-minimax',
+          MINIMAX_TTS_AUDIO_URL_HOSTS: 'cdn.example.com, *.cdn.example.net',
+        },
+      });
+      const tts = runtime.getProvider('minimax-tts') as TextToSpeechProvider;
+
+      const result = await tts.synthesize('hello', urlOutput);
+      expect(result.audioBuffer.toString()).toBe('audio');
+      expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+        'https://api.minimax.io/v1/t2a_v2',
+        'https://audio.cdn.example.net/a.mp3',
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('downloads nothing when MINIMAX_TTS_AUDIO_URL_HOSTS is unset', async () => {
+    const fetchMock = stubMiniMax('https://audio.cdn.example.net/a.mp3');
+    try {
+      const runtime = new SpeechRuntime({ env: { MINIMAX_API_KEY: 'sk-minimax' } });
+      const tts = runtime.getProvider('minimax-tts') as TextToSpeechProvider;
+
+      await expect(tts.synthesize('hello', urlOutput)).rejects.toThrow('not in audioUrlHosts');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       vi.unstubAllGlobals();
     }

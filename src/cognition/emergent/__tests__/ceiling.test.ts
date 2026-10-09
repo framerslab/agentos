@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { checkRequest, narrowToForge, resolveCeiling } from '../ceiling.js';
+import { checkProtectedRoots, checkRequest, grantsEffects, narrowToForge, resolveCeiling } from '../ceiling.js';
 
 const storage = { hasStorage: true };
 
@@ -29,15 +29,82 @@ describe('resolveCeiling', () => {
 
   it('names each failure with its key', () => {
     const cases: Array<[unknown, string]> = [
-      [{ 'fs.write': { roots: ['/tmp'] } }, 'unknown_capability: capabilities.fs.write'],
+      [{ 'fs.wipe': { roots: ['/tmp'] } }, 'unknown_capability: capabilities.fs.wipe'],
       [{ 'fs.read': { roots: ['relative/dir'] } }, 'root_not_absolute: capabilities.fs.read.roots'],
-      [{ fetch: { domains: '*', methods: ['POST'] } }, 'method_not_allowed: capabilities.fetch.methods'],
+      [{ fetch: { domains: '*', methods: ['TRACE'] } }, 'method_not_allowed: capabilities.fetch.methods'],
       [{ fetch: { domains: ['https://a.example/'] } }, 'invalid_domain: capabilities.fetch.domains'],
       [{ fetch: { domains: '*', maxRedirects: -1 } }, 'invalid_bound: capabilities.fetch.maxRedirects'],
     ];
     for (const [capabilities, message] of cases) {
       expect(() => resolveCeiling(capabilities as never, undefined, storage)).toThrow(message);
     }
+  });
+
+  it('resolves the effect capabilities, every field required, approval none only', () => {
+    const ceiling = resolveCeiling(
+      {
+        'fs.write': { roots: ['/tmp'], mode: 'create-only', maxBytesPerFile: 10, maxBytesPerCall: 20, maxFilesPerCall: 2, timeoutMs: 1000, approval: 'none' },
+        'fs.delete': { roots: ['/tmp'], maxFilesPerCall: 1, timeoutMs: 1000, approval: 'none' },
+        fetch: { domains: '*', methods: ['GET', 'POST'], maxRequestBytes: 100, approval: 'none' },
+      },
+      undefined,
+      storage,
+    );
+    expect(ceiling['fs.write']).toEqual({
+      roots: ['/tmp'],
+      mode: 'create-only',
+      maxBytesPerFile: 10,
+      maxBytesPerCall: 20,
+      maxFilesPerCall: 2,
+      timeoutMs: 1000,
+      approval: 'none',
+    });
+    expect(ceiling.fetch).toMatchObject({ methods: ['GET', 'POST'], maxRequestBytes: 100, approval: 'none' });
+    expect(grantsEffects(ceiling)).toBe(true);
+    expect(grantsEffects(resolveCeiling({ fetch: { domains: '*' } }, undefined, storage))).toBe(false);
+
+    const cases: Array<[unknown, string]> = [
+      [{ 'fs.write': { roots: ['/tmp'] } }, 'invalid_mode: capabilities.fs.write.mode'],
+      [{ 'fs.write': { roots: ['/tmp'], mode: 'create-only' } }, 'invalid_bound: capabilities.fs.write.maxBytesPerFile'],
+      [{ 'fs.write': { roots: ['/tmp'], mode: 'create-only', maxBytesPerFile: 10, maxBytesPerCall: 20, maxFilesPerCall: 2, timeoutMs: 1000 } }, 'invalid_approval: capabilities.fs.write.approval'],
+      [{ 'fs.write': { roots: ['/tmp'], mode: 'create-only', maxBytesPerFile: 10, maxBytesPerCall: 20, maxFilesPerCall: 2, timeoutMs: 1000, approval: 'per-call' } }, 'approval_not_available: capabilities.fs.write.approval'],
+      [{ 'fs.delete': { roots: ['/tmp'] } }, 'invalid_bound: capabilities.fs.delete.maxFilesPerCall'],
+      [{ fetch: { domains: '*', methods: ['POST'] } }, 'invalid_bound: capabilities.fetch.maxRequestBytes'],
+      [{ fetch: { domains: '*', methods: ['POST'], maxRequestBytes: 10 } }, 'invalid_approval: capabilities.fetch.approval'],
+      [{ fetch: { domains: '*', maxRequestBytes: 10 } }, 'invalid_bound: capabilities.fetch.maxRequestBytes'],
+    ];
+    for (const [capabilities, message] of cases) {
+      expect(() => resolveCeiling(capabilities as never, undefined, storage)).toThrow(message);
+    }
+  });
+
+  it('refuses a write or delete root that holds or lies inside a protected path, or passes through node_modules', () => {
+    const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'protected-')));
+    fs.mkdirSync(path.join(base, 'app', 'data'), { recursive: true });
+    fs.mkdirSync(path.join(base, 'node_modules', 'pkg'), { recursive: true });
+    const write = (root: string) =>
+      resolveCeiling(
+        {
+          'fs.write': {
+            roots: [root],
+            mode: 'create-only',
+            maxBytesPerFile: 10,
+            maxBytesPerCall: 20,
+            maxFilesPerCall: 2,
+            timeoutMs: 1000,
+            approval: 'none',
+          },
+        },
+        undefined,
+        storage,
+      );
+    const guarded = [path.join(base, 'app')];
+    expect(() => checkProtectedRoots(write(path.join(base, 'app', 'data')), guarded)).toThrow('protected_path: capabilities.fs.write.roots');
+    expect(() => checkProtectedRoots(write(base), guarded)).toThrow('protected_path');
+    expect(() => checkProtectedRoots(write(path.join(base, 'node_modules', 'pkg')), [])).toThrow('protected_path');
+    expect(() => checkProtectedRoots(write(path.join(base, 'elsewhere-not-made')), guarded)).not.toThrow();
+    fs.mkdirSync(path.join(base, 'elsewhere'));
+    expect(() => checkProtectedRoots(write(path.join(base, 'elsewhere')), guarded)).not.toThrow();
   });
 
   it('names the key of an audit value, a list of the wrong shape, and a bound out of range', () => {

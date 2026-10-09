@@ -455,6 +455,7 @@ export class ExternalToolResultHandler {
                 error: gmiOutputAfterTool.error,
                 updatedConversationContext: conversationContext.toJSON(),
                 activePersonaDetails: snapshotPersonaDetails(gmi.getPersona?.()),
+                ...(gmiOutputAfterTool.structuredOutput ? { structured: gmiOutputAfterTool.structuredOutput } : {}),
               },
             );
             this.activeStreamContexts.delete(agentOSStreamId);

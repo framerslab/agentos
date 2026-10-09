@@ -9,6 +9,7 @@
 
 import type { AdaptableToolInput } from './runtime/toolAdapter.js';
 import type { FallbackProviderEntry, FallbackSignal } from './generateText.js';
+import type { CognitionConfig, CognitionProfile } from './runtime/gmiCognition.js';
 
 // ---------------------------------------------------------------------------
 // Scalar union literals
@@ -84,13 +85,28 @@ export interface MemoryConfig {
     /** Eviction / summarisation strategy identifier. */
     strategy?: string;
   };
-  /** Configuration for periodic background consolidation of episodic → semantic memory. */
+  /**
+   * Configuration for periodic background consolidation of episodic → semantic memory.
+   * On the GMI path (`agent({ runtime: 'gmi' })`), `enabled: true` starts the memory
+   * manager's hourly consolidation cycle and `interval` is not applied (docs/GMI.md,
+   * "GMIs from agent()").
+   */
   consolidation?: {
     /** Whether automatic consolidation is enabled. */
     enabled: boolean;
     /** Cron-style or ISO-duration interval between consolidation passes (e.g. `"PT1H"`). */
     interval?: string;
   };
+  /**
+   * Embedding model for cognitive memory on the GMI path (`agent({ runtime: 'gmi' })`).
+   * Default: the global default provider (`setDefaultProvider`) when agentos has an
+   * embedding model for it, else the first of OpenAI, Gemini and Ollama whose
+   * OPENAI_API_KEY, GEMINI_API_KEY or OLLAMA_BASE_URL is set, with that provider's
+   * default embedding model. Anthropic, Groq, xAI and the Claude Code and Gemini CLIs
+   * have no embedding models in agentos. `dimension` is required for a model whose
+   * dimension agentos does not know.
+   */
+  embedding?: { provider: string; model?: string; dimension?: number };
 }
 
 /**
@@ -216,10 +232,14 @@ export interface HitlConfig {
      * covers every tool. Enforced on every tool loop of a config seat, a
      * pre-built seat that forwards per-call options, a spawned specialist and
      * a nested agency, after `onBeforeToolExecution` has run. A rejection skips
-     * the tool and the run goes on; a handler error, or a timeout under
-     * `onTimeout: 'error'`, skips that tool and every later one unasked, and
-     * rejects the call once the strategy settles, after the run's usage is
-     * counted.
+     * the tool and the run goes on; a handler error (a throw, a decision whose
+     * `approved` is not a boolean, a failure after the handler answered), or
+     * a timeout under `onTimeout: 'error'`, skips that tool and every later
+     * one unasked, and rejects the call once the strategy settles, after the
+     * run's usage is counted; the model is told only that the approval
+     * handler failed. A strategy that fails after it does not replace that
+     * error: the strategy's error goes to `on.error`, and with no result
+     * returned, that run adds no usage.
      */
     beforeTool?: string[];
     /** Agent names whose invocations require approval before execution. */
@@ -707,20 +727,25 @@ export interface ApprovalDecision {
   /** Optional human-provided rationale for the decision. */
   reason?: string;
   /**
-   * Optional in-line modifications the approver wishes to apply.
-   * The orchestrator merges these on top of the original action before
-   * proceeding (only when `approved` is `true`).
+   * Optional changes the approver asks for, read only when `approved` is
+   * `true`: `output` on a `beforeReturn` approval and `instructions` on a
+   * `beforeAgent` approval. `toolArgs` is never applied.
    */
   modifications?: {
     /**
-     * Overridden tool arguments. The `beforeTool` approval gate does not apply
-     * them: it approves or refuses the arguments `onBeforeToolExecution` left,
-     * so rewrite arguments in that hook, which runs first.
+     * Not applied. The `beforeTool` approval gate approves or refuses the
+     * arguments `onBeforeToolExecution` left, and it refuses an approval that
+     * carries `toolArgs` (anything but `undefined` or `null`), so the call is
+     * skipped rather than run with the arguments the approver meant to
+     * replace. Rewrite arguments in that hook, which runs first.
      */
     toolArgs?: unknown;
-    /** Overridden output text. */
+    /** Replaces the final text, on a `beforeReturn` approval. */
     output?: string;
-    /** Additional instructions injected into the agent's system prompt. */
+    /**
+     * Added to the input of the agent a `beforeAgent` approval lets run, under
+     * the sequential, parallel and hierarchical strategies.
+     */
     instructions?: string;
   };
 }
@@ -1418,10 +1443,11 @@ export interface BaseAgentConfig {
    */
   customModelParams?: Record<string, unknown>;
   /**
-   * Memory configuration.
-   * - `true` — enable in-memory conversation history with default settings.
-   * - `false` — disable memory; every call is stateless.
-   * - `MemoryConfig` — full control over memory subsystems.
+   * Memory configuration. `agent()` reads it only with `runtime: 'gmi'`, where `true`
+   * or a `MemoryConfig` turns on cognitive memory for the agent's sessions (its
+   * `embedding` and `consolidation` fields are read) and `false` keeps it off, also
+   * under `cognition: 'full'`. A session's message history is set by `history`, not
+   * by this field.
    */
   memory?: boolean | MemoryConfig;
   /** Retrieval-Augmented Generation configuration. */
@@ -1489,9 +1515,10 @@ export interface BaseAgentConfig {
    * defaults, or override fields per mechanism.
    *
    * The mechanisms run inside a `CognitiveMemoryManager` initialized with this
-   * config (`CognitiveMemoryConfig.cognitiveMechanisms`). The lightweight
-   * `agent()` and `agency()` helpers construct no memory manager, so they log
-   * a warning and leave this field unused. On the full runtime, a
+   * config (`CognitiveMemoryConfig.cognitiveMechanisms`). `agent()` without
+   * `runtime: 'gmi'` and `agency()` construct no memory manager, so they log a
+   * warning and leave this field unused; `agent({ runtime: 'gmi' })` with memory
+   * on passes it to the agent's memory manager. On the full runtime, a
    * `gmiManagerConfig.cognitiveMemoryFactory` builds the manager for each GMI.
    *
    * @see {@link https://docs.agentos.sh/features/cognitive-memory | Cognitive Memory}
@@ -1609,6 +1636,51 @@ export interface VerifyCitationsConfig {
 }
 
 // ---------------------------------------------------------------------------
+// AgencySeatConfig — a roster seat written as a config
+// ---------------------------------------------------------------------------
+
+/**
+ * A roster seat of `agency()` written as a config. The agency builds the seat
+ * with `agent()`, so the two options that pick an agent's engine are read on a
+ * seat as `agent()` reads them. In an agency with a `modelPool`, a seat that
+ * names neither `provider` nor `model` is filled from the pool on every call,
+ * from the entries `from` names.
+ *
+ * @example
+ * ```ts
+ * agency({
+ *   provider: 'openai',
+ *   agents: {
+ *     researcher: { runtime: 'gmi', instructions: 'Find relevant papers.' },
+ *     writer: { instructions: 'Write a clear summary.' },
+ *   },
+ * });
+ * ```
+ */
+export interface AgencySeatConfig extends BaseAgentConfig {
+  /**
+   * Which engine serves the seat. `'legacy'` (the default) calls the model through
+   * generateText and streamText; `'gmi'` serves each of the seat's calls with a
+   * Generalized Mind Instance (docs/GMI.md, "GMIs from agent()").
+   */
+  runtime?: 'legacy' | 'gmi';
+  /**
+   * GMI profile when `runtime` is `'gmi'`, validated each time a run builds the
+   * seat. The strategies call a seat's `generate()` and `stream()`, which run the
+   * `'light'` profile whatever this option names.
+   */
+  cognition?: CognitionProfile | CognitionConfig;
+  /** Names of pool entries this seat may sit on, in preference order. Default: every entry, in pool order. */
+  from?: string[];
+  /** For a fixed seat: who trained its model, when that cannot be read from its provider and model id. */
+  vendor?: string;
+  /** A fixed seat's own failover chain. Replaces the default for this seat. Rejected on a pooled seat. */
+  fallbackProviders?: FallbackProviderEntry[];
+  /** Called when a fixed seat's call moves to a hop of its chain. Rejected on a pooled seat. */
+  onFallback?: (error: Error, fallbackProvider: string) => void;
+}
+
+// ---------------------------------------------------------------------------
 // AgencyOptions — extends BaseAgentConfig with multi-agent fields
 // ---------------------------------------------------------------------------
 
@@ -1647,7 +1719,11 @@ export interface VerifyCitationsConfig {
  * See `BaseAgentConfig` for the shared config surface inherited by this interface.
  */
 export interface AgencyOptions extends BaseAgentConfig {
-  /** Named roster of seats: an {@link AgencySeatConfig} the agency instantiates, or a pre-built `Agent`. */
+  /**
+   * Named roster of sub-agents.  Each value is either a seat config (the agency
+   * builds it with `agent()`; see {@link AgencySeatConfig}) or a pre-built `Agent`
+   * instance.
+   */
   agents: Record<string, AgencySeatConfig | Agent>;
   /**
    * Every model a seat may sit on, named. A config seat that names neither
@@ -1830,18 +1906,6 @@ export interface SeatingConfig {
    * Default `'vendor'` under `panel` and `parallel`, `false` under the other strategies.
    */
   distinct?: 'vendor' | 'provider' | 'model' | false;
-}
-
-/** A roster seat: an agent config plus the pool entries it may sit on. */
-export interface AgencySeatConfig extends BaseAgentConfig {
-  /** Names of pool entries this seat may sit on, in preference order. Default: every entry, in pool order. */
-  from?: string[];
-  /** For a fixed seat: who trained its model, when that cannot be read from its provider and model id. */
-  vendor?: string;
-  /** A fixed seat's own failover chain. Replaces the default for this seat. Rejected on a pooled seat. */
-  fallbackProviders?: FallbackProviderEntry[];
-  /** Called when a fixed seat's call moves to a hop of its chain. Rejected on a pooled seat. */
-  onFallback?: (error: Error, fallbackProvider: string) => void;
 }
 
 /** `panel` limits. */

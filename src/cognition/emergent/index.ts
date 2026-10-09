@@ -18,6 +18,9 @@ export { createStepGate, checkChainable, COMPOSE_NEEDS_GATE_MESSAGE, MAX_COMPOSI
 export type { StepGate, StepGateOptions, Chainability, ChainRefusalCode } from './StepGate.js';
 export { SandboxedToolForge } from './SandboxedToolForge.js';
 export type { SandboxedToolForgeConfig } from './SandboxedToolForge.js';
+export { InProcessExecutor } from './executor/InProcessExecutor.js';
+export { QuickJSExecutor, QuickJSUnavailableError, QUICKJS_VERSION } from './executor/QuickJSExecutor.js';
+export type { ExecutorRunRequest, ExecutorRunResult, ForgedCodeExecutor } from './executor/types.js';
 export { CAPABILITY_NAMES, CAPABILITY_ALIASES, normalizeAllowlist, toSandboxApis } from './capabilities.js';
 export { CeilingError, checkRequest, grantedCapabilities, narrowToForge, resolveCeiling, CEILING_DEFAULTS } from './ceiling.js';
 export type { CeilingErrorCode, ResolvedCeiling } from './ceiling.js';

@@ -277,6 +277,7 @@ export type {
   CompletionOutcome,
   CompletionResolution,
   CompletionRoute,
+  LateAttemptUsage,
 } from './api/runtime/completionGateway.js';
 export { GatewayProviderManager } from './api/runtime/gatewayProviderManager.js';
 export { agent } from './api/agent.js';
@@ -285,11 +286,25 @@ export type { SouledAgentOptions, SouledAgent } from './api/souledAgent.js';
 export type {
   Agent,
   AgentSession,
+  AgentSessionOptions,
   AgentOptions,
   AgentMemoryProvider,
   SessionSendOptions,
   SessionSendStructuredResult,
 } from './api/agent.js';
+export { gmi, createGmi } from './api/gmi.js';
+export type { GmiOptions, GmiHandle } from './api/gmi.js';
+export { resolveCognition } from './api/runtime/gmiCognition.js';
+export type {
+  CognitionProfile,
+  CognitionConfig,
+  CognitionInputs,
+  MetapromptPreset,
+  ResolvedCognition,
+} from './api/runtime/gmiCognition.js';
+export { personaFromAgentOptions } from './api/runtime/gmiPersona.js';
+export { createAgentCognitiveMemory } from './api/runtime/agentCognitiveMemory.js';
+export type { AgentCognitiveMemory, AgentCognitiveMemoryOptions } from './api/runtime/agentCognitiveMemory.js';
 export type { MemoryProviderHookOptions } from './api/runtime/memoryProviderHooks.js';
 export type {
   IModelRouter,
@@ -322,6 +337,7 @@ export * from './api/runtime/processRequestWithRegisteredTools.js';
 export * from './api/runtime/resumeExternalToolRequestWithRegisteredTools.js';
 export type {
   AgencyOptions,
+  AgencySeatConfig,
   AgencyStrategy,
   AgencyConfigError as AgencyConfigErrorType,
   AgencyCallbacks,
@@ -336,7 +352,6 @@ export type {
   CompiledStrategy,
   CompiledStrategyStreamResult,
   Agency,
-  AgencySeatConfig,
   ModelPoolEntry,
   SeatingConfig,
   PanelOptions,
@@ -399,6 +414,15 @@ export type { DetectScenesOptions } from './api/detectScenes.js';
 export { performOCR } from './api/performOCR.js';
 export type { PerformOCROptions, OCRResult } from './api/performOCR.js';
 export { generateObject, ObjectGenerationError } from './api/generateObject.js';
+export {
+  resolveStructuredReply,
+  resolveStructuredReplySpec,
+  checkStructuredReply,
+  recheckStructuredReply,
+  structuredRepairMessage,
+  StructuredReplyConfigError,
+} from './api/runtime/structuredReply.js';
+export type { StructuredReplySpec, StructuredOutputMeta, StructuredReplyOutput, IStructuredSchemaRegistry, ResolvedStructuredReply } from './api/runtime/structuredReply.js';
 export type { GenerateObjectOptions, GenerateObjectResult } from './api/generateObject.js';
 export { streamObject } from './api/streamObject.js';
 export type { StreamObjectOptions, StreamObjectResult, DeepPartial } from './api/streamObject.js';

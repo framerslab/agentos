@@ -1,17 +1,21 @@
 #!/usr/bin/env node
 /**
- * Test script: Multi-Agent Workflow with Parallel + Sequential Execution
+ * Dependency ordering for a multi-agent task list, in plain JavaScript.
  *
- * Tests that AgentOS's WorkflowEngine correctly:
- * 1. Runs tasks with no dependencies in PARALLEL
- * 2. Waits for dependencies before starting sequential tasks
- * 3. Passes outputs between dependent tasks
+ * Defines four tasks with `dependsOn` lists, checks the list for cycles and
+ * missing references, prints the rounds in which the tasks become ready
+ * (tasks in one round do not depend on each other), and then makes one direct
+ * OpenAI chat completion call as a connectivity check.
+ *
+ * It does not run AgentOS's workflow engine and calls no AgentOS API. For
+ * workflows that execute, see examples/workflow-dsl.mjs (workflow() on
+ * GraphRuntime) and examples/agency-graph.mjs (agency() with dependsOn).
  *
  * Usage:
- *   OPENAI_API_KEY=sk-... node scripts/test-multi-agent-workflow.mjs
+ *   OPENAI_API_KEY=sk-... node examples/multi-agent-workflow.mjs
  *
  * Or with .env:
- *   node --env-file=.env scripts/test-multi-agent-workflow.mjs
+ *   node --env-file=.env examples/multi-agent-workflow.mjs
  */
 
 import { readFileSync } from 'fs';
@@ -35,34 +39,14 @@ if (!process.env.OPENAI_API_KEY) {
   process.exit(1);
 }
 
-console.log('🧪 Multi-Agent Workflow Test');
+console.log('🧪 Multi-Agent Task Ordering');
 console.log('=' .repeat(60));
 
-// ─── Step 1: Test WorkflowEngine DAG logic (no LLM needed) ───
+// ─── Step 1: Check the dependency graph (no LLM needed) ───
 
-console.log('\n📋 Step 1: Testing WorkflowEngine task scheduling...\n');
+console.log('\n📋 Step 1: Checking the task dependency graph...\n');
 
-// Import WorkflowEngine
-let WorkflowEngine, WorkflowTaskStatus;
-try {
-  const wfModule = await import('@framers/agentos/core/workflows');
-  WorkflowEngine = wfModule.WorkflowEngine;
-  WorkflowTaskStatus = wfModule.WorkflowTaskStatus;
-  console.log('  ✓ WorkflowEngine imported');
-} catch (e) {
-  // Try direct path
-  try {
-    const wfModule = await import('../packages/agentos/src/core/workflows/index.js');
-    WorkflowEngine = wfModule.WorkflowEngine;
-    WorkflowTaskStatus = wfModule.WorkflowTaskStatus;
-    console.log('  ✓ WorkflowEngine imported (direct path)');
-  } catch (e2) {
-    console.log('  ⚠ Could not import WorkflowEngine, testing types only');
-    console.log('    Error:', e2.message);
-  }
-}
-
-// Define the workflow
+// Define the task list
 const workflowDefinition = {
   id: 'test-market-analysis',
   name: 'Market Analysis Pipeline',
@@ -194,12 +178,13 @@ while (completed.size < workflowDefinition.tasks.length) {
 console.log(`\n  ✓ All ${workflowDefinition.tasks.length} tasks scheduled in ${round} rounds`);
 console.log('  ✓ Execution order is valid');
 
-// ─── Step 3: Test with real LLM (if WorkflowEngine available) ───
+// ─── Step 3: One direct OpenAI API call ───
 
-console.log('\n📋 Step 3: Testing with real OpenAI API...\n');
+console.log('\n📋 Step 3: Calling the OpenAI API directly...\n');
 
+let apiCallSucceeded = false;
 try {
-  // Use OpenAI directly for a quick smoke test
+  // A direct HTTP call, not an AgentOS call
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -219,6 +204,7 @@ try {
   const data = await response.json();
 
   if (data.choices?.[0]?.message?.content) {
+    apiCallSucceeded = true;
     console.log('  ✓ OpenAI API call successful');
     console.log(`  ✓ Model: ${data.model}`);
     console.log(`  ✓ Tokens: ${data.usage?.total_tokens}`);
@@ -232,12 +218,16 @@ try {
 
 // ─── Summary ───
 
+const graphValid = !cycleResult && allDepsValid;
+
 console.log('\n' + '=' .repeat(60));
-console.log('✅ Multi-Agent Workflow Test Complete');
+console.log(graphValid && apiCallSucceeded ? '✅ Complete' : '❌ Complete with failures');
 console.log('');
-console.log('  DAG validation:     ✓ No cycles, all deps valid');
+console.log(`  DAG validation:     ${graphValid ? '✓ No cycles, all deps valid' : '❌ see above'}`);
 console.log(`  Parallel tasks:     ${parallelTasks.length} (${parallelTasks.map(t => t.id).join(', ')})`);
 console.log(`  Sequential tasks:   ${sequentialTasks.length} (${sequentialTasks.map(t => t.id).join(', ')})`);
 console.log(`  Execution rounds:   ${round}`);
-console.log('  LLM integration:    ✓ OpenAI API verified');
+console.log(`  OpenAI API call:    ${apiCallSucceeded ? '✓ succeeded' : '❌ failed'}`);
 console.log('');
+
+if (!graphValid || !apiCallSucceeded) process.exitCode = 1;

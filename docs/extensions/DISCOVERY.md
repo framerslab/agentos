@@ -1,6 +1,6 @@
 # Capability Discovery — Token-Efficient Tool Context
 
-> Replace static tool dumps with per-turn semantic retrieval — ~90% token reduction while improving accuracy.
+> Per-turn semantic retrieval of tools, skills, extensions and channels, held to token budgets, in place of a static dump of every schema.
 
 ---
 
@@ -12,96 +12,77 @@
 4. [CapabilityGraph Relationships](#capabilitygraph-relationships)
 5. [CAPABILITY.yaml Format](#capabilityyaml-format)
 6. [Agent Self-Discovery via Meta-Tool](#agent-self-discovery-via-meta-tool)
-7. [Integration with PromptBuilder](#integration-with-promptbuilder)
+7. [Integration with the Prompt](#integration-with-the-prompt)
 8. [Configuration](#configuration)
 
 ---
 
 ## Overview
 
-At scale (20+ tools, 40 skills, 20 channels), dumping every tool schema
-into the system prompt creates ~20,000 tokens of static context per turn —
-most of it irrelevant to the current task. This is **context rot**: degraded
-output quality as irrelevant context accumulates.
+Putting every tool schema into the system prompt grows the prompt with each tool, skill and channel, and the model reads all of it on every turn, most of it irrelevant to the turn. This is **context rot**: output quality degrades as irrelevant context accumulates.
 
-The Capability Discovery Engine solves this with a three-tier model:
+The Capability Discovery Engine builds each turn's capability context from the user's message instead:
 
 ```
 User message
     ↓
-CapabilityIndex.search(userMessage)         // semantic vector search
+CapabilityIndex.search(userMessage)            // semantic vector search
     ↓
-CapabilityGraph.rerank(results)             // boost related capabilities via graph
+CapabilityGraph.rerank(results)                // boost related capabilities via graph
     ↓
 CapabilityContextAssembler.assemble(reranked)  // token-budgeted tier assembly
     ↓
-CapabilityDiscoveryResult → system prompt    // ~1,850 tokens total
+CapabilityDiscoveryResult → system prompt
 ```
 
-**Token budget comparison:**
+| Tier | Default budget | Content |
+|------|----------------|---------|
+| Tier 0 | 200 tokens | Category summaries, on every turn |
+| Tier 1 | 800 tokens | Top-5 capability summaries for this turn |
+| Tier 2 | 2,000 tokens | Full schema or skill content for the top 2 |
+| Total | at most 3,000 tokens | |
 
-| Approach | Tokens per turn |
-|----------|----------------|
-| Static dump (20 tools + 40 skills + 20 channels) | ~20,000 |
-| Discovery Engine (Tier 0 + 1 + 2) | ~1,850 |
-| Reduction | ~90% |
+The assembler counts four characters as one token.
 
 ---
 
 ## Three-Tier Context Model
 
-### Tier 0 — Always in Context (~150 tokens)
+### Tier 0 — Always in Context
 
-High-level category summaries. Always present regardless of the current query.
-Gives the model a map of what capabilities exist.
+Category summaries, grouped by each capability's `category`, largest group first, with the first four names of each. The text is cached and rebuilt only when the index changes.
 
 ```
 Available capability categories:
-- communication: telegram, discord, slack, whatsapp (+16 more) [20]
-- information: web-search, news-search, web-browser [3]
-- developer-tools: github, git, cli-executor [3]
-- social-media: twitter, linkedin, bluesky (+15 more) [18]
-- publishing: devto, hashnode, medium, wordpress [4]
-Use discover_capabilities tool to get full details on any capability.
+- Communication: telegram, discord, slack, whatsapp (+16 more) (20)
+- Information: web-search, news-search, web-browser (3)
+- Developer-tools: github, git, cli-executor (3)
+Use discover_capabilities tool to get details on any capability.
+Use load_capability_extension to activate a loadable curated extension at runtime.
 ```
 
-### Tier 1 — Semantic Matches (~200 tokens)
+### Tier 1 — Semantic Matches
 
-Top-5 capability summaries retrieved by semantic similarity to the current
-user message. One-line descriptions, no full schemas.
+The top 5 capabilities by similarity to the user's message (relevance at least 0.3), as one-line summaries without schemas.
 
 ```
-Relevant capabilities for this turn:
-1. web-search [tool] — Search the web for current information
-2. news-search [tool] — Search recent news articles
-3. arxiv-search [tool] — Search academic papers on arXiv
-4. web-browser [tool] — Open and read web pages
-5. summarize [skill] — Summarize documents into key points
+Relevant capabilities:
+1. web-search (tool). Search the web for current information. Params: query, max_results
+2. news-search (tool). Search news articles by keyword. Params: query, date_range
+3. web-browser (tool). Browse a URL and extract content. Params: url, selector
+4. github (skill). Use the GitHub CLI for issues, PRs, repos. Requires: gh
+5. summarizer (skill). Summarize long documents into key points
 ```
 
-### Tier 2 — Full Schemas (~1,500 tokens)
+### Tier 2 — Full Details
 
-Complete schemas for the top-2 capabilities — parameter names, types,
-examples. Only the most relevant tools get full schemas per turn.
-
-```typescript
-// discover_capabilities tool schema (always ~80 tokens in tool list)
-{
-  "name": "discover_capabilities",
-  "description": "Search for available tools, skills, and channels by name or intent.",
-  "parameters": {
-    "query": { "type": "string", "description": "What you want to do" },
-    "kind":  { "type": "string", "enum": ["tool", "skill", "channel", "all"] }
-  }
-}
-```
+The full input schema of a tool, or the `SKILL.md` content of a skill, for the top 2 of Tier 1.
 
 ---
 
 ## CapabilityDescriptor
 
-The unified shape that normalizes tools, skills, extensions, and channels
-into a single searchable type:
+The unified shape that normalizes tools, skills, extensions, channels and manifest entries into one searchable type:
 
 ```typescript
 import type { CapabilityDescriptor } from '@framers/agentos/discovery';
@@ -109,11 +90,11 @@ import type { CapabilityDescriptor } from '@framers/agentos/discovery';
 const descriptor: CapabilityDescriptor = {
   // Identity
   id:          'tool:web-search',       // "${kind}:${name}"
-  kind:        'tool',                  // 'tool' | 'skill' | 'extension' | 'channel' | 'voice'
+  kind:        'tool',
   name:        'web-search',
   displayName: 'Web Search',
 
-  // For embedding — describes WHEN and WHY to use it
+  // For embedding: describes when and why to use it
   description: 'Search the web for current information, news, and facts. Use when the answer requires up-to-date information not in training data.',
 
   // Classification
@@ -130,83 +111,72 @@ const descriptor: CapabilityDescriptor = {
   // Source reference (for lazy-loading the full schema)
   sourceRef: { type: 'tool', toolName: 'web_search' },
 
-  // Tier 2 data (full schema — only loaded on demand)
+  // Tier 2 data: the tool's input schema
   fullSchema: {
-    parameters: {
-      type: 'object',
-      properties: {
-        query:   { type: 'string', description: 'Search query' },
-        numResults: { type: 'number', default: 5 },
-      },
-      required: ['query'],
+    type: 'object',
+    properties: {
+      query:      { type: 'string', description: 'Search query' },
+      numResults: { type: 'number', default: 5 },
     },
-    examples: ['web_search({ query: "AgentOS release date" })'],
+    required: ['query'],
   },
 };
 ```
 
+`fullContent` holds a skill's `SKILL.md` text, and `hasSideEffects` is optional.
+
 ### Capability Kinds
+
+`CapabilityKind` is `'tool' | 'skill' | 'extension' | 'channel' | 'voice' | 'productivity' | 'emergent-tool'`. The index builds `tool`, `skill`, `extension` and `channel` descriptors from its sources; a `CAPABILITY.yaml` manifest names its own kind.
 
 | Kind | Examples |
 |------|---------|
 | `tool` | web_search, github_create_issue, send_email |
 | `skill` | research-assistant, code-reviewer, linkedin-bot |
-| `extension` | guardrail packs, provenance adapters |
+| `extension` | extension packs from the catalog |
 | `channel` | telegram, discord, slack, whatsapp |
-| `voice` | STT/TTS providers, telephony adapters |
-| `emergent-tool` | Runtime-generated tools from EmergentEngine |
+| `emergent-tool` | tools forged at run time |
 
 ---
 
 ## CapabilityGraph Relationships
 
-The [`CapabilityGraph`](https://github.com/framerslab/agentos/blob/master/src/cognition/discovery/CapabilityGraph.ts) tracks relationships between capabilities using a
-graphology graph. Four edge types:
+The [`CapabilityGraph`](https://github.com/framerslab/agentos/blob/master/src/cognition/discovery/CapabilityGraph.ts) builds a graphology graph from the descriptors' metadata in `buildGraph()`; it has no API for adding edges by hand. Four edge types:
 
-| Edge Type | Meaning | Example |
-|-----------|---------|---------|
-| `DEPENDS_ON` | A requires B to be available | `twitter-bot` depends on `web_search` |
-| `COMPOSED_WITH` | A and B work together | `web-search` + `summarize` |
-| `SAME_CATEGORY` | A and B serve the same category | `telegram` + `discord` |
-| `TAGGED_WITH` | A and B share a semantic tag | any two tools tagged `'social'` |
+| Edge Type | Built from | Weight |
+|-----------|------------|--------|
+| `DEPENDS_ON` | a skill's `requiredTools` | 1.0 |
+| `COMPOSED_WITH` | preset co-occurrences passed to `initialize()` | 0.5 |
+| `TAGGED_WITH` | two or more shared tags | 0.3 per shared tag |
+| `SAME_CATEGORY` | same kind and category, in groups of 2 to 8 | 0.1 |
 
-Edges provide **re-ranking boosts**: if `web-search` is a Tier 1 match,
-capabilities connected to it by `COMPOSED_WITH` edges receive a score boost
-and may surface in Tier 1 or 2 even if they weren't directly retrieved.
+Edges drive the **re-ranking** after the vector search: two results joined by an edge each gain `graphBoostFactor × weight`, and a capability linked to a result by `DEPENDS_ON` or `COMPOSED_WITH` joins the results with the score `parentScore × graphBoostFactor × weight`.
 
 ```typescript
 import { CapabilityGraph } from '@framers/agentos/discovery';
 
 const graph = new CapabilityGraph();
+await graph.buildGraph(descriptors, [
+  { presetName: 'research', capabilityIds: ['tool:web-search', 'skill:summarize'] },
+]);
 
-// Declare explicit relationships
-graph.addEdge('tool:web-search', 'skill:summarize',       'COMPOSED_WITH', { weight: 0.9 });
-graph.addEdge('skill:linkedin-bot', 'tool:web-search',    'DEPENDS_ON',    { weight: 1.0 });
-graph.addEdge('channel:telegram',   'channel:whatsapp',   'SAME_CATEGORY', { weight: 0.5 });
-
-// Query neighbors
-const related = graph.neighbors('tool:web-search', { edgeTypes: ['COMPOSED_WITH'] });
-console.log(related);
-// [{ id: 'skill:summarize', weight: 0.9 }]
+const related = graph.getRelated('tool:web-search');
+// [{ id: 'skill:summarize', weight: 0.5, relationType: 'COMPOSED_WITH' }, ...] by weight
 ```
 
 ---
 
 ## CAPABILITY.yaml Format
 
-Place a `CAPABILITY.yaml` in any directory under `~/.agentos/capabilities/`
-to register a custom capability. The [`CapabilityManifestScanner`](https://github.com/framerslab/agentos/blob/master/src/cognition/discovery/CapabilityManifestScanner.ts) hot-reloads
-on file changes.
+Place a folder with a `CAPABILITY.yaml` (or `CAPABILITY.yml`) under `~/.wunderland/capabilities/`, `./.wunderland/capabilities/` or a directory in `$WUNDERLAND_CAPABILITY_DIRS` (colon-separated); [`CapabilityManifestScanner`](https://github.com/framerslab/agentos/blob/master/src/cognition/discovery/CapabilityManifestScanner.ts) reads those by default, `scan(dirs)` and `watch(dirs, onChange)` take your own list, and `watch()` reports changes after a 500 ms debounce. The runtime does not run the scanner: a host scans and passes the descriptors to `turnPlanning.discovery.sources.manifests` or to `refreshIndex({ manifests })`.
 
 ```yaml
-# ~/.agentos/capabilities/my-tool/CAPABILITY.yaml
+# ~/.wunderland/capabilities/my-custom-search/CAPABILITY.yaml
 id: tool:my-custom-search
 kind: tool
 name: my-custom-search
 displayName: My Custom Search
-description: >
-  Search our internal knowledge base for company-specific information.
-  Use when the user asks about internal processes, policies, or documentation.
+description: Search our internal knowledge base for company-specific information. Use when the user asks about internal processes, policies, or documentation.
 category: information
 tags:
   - search
@@ -214,37 +184,16 @@ tags:
   - knowledge-base
 requiredSecrets:
   - MY_SEARCH_API_KEY
-requiredTools: []
-available: true
-
-# Declared relationships
-edges:
-  - target: tool:web-search
-    type: SAME_CATEGORY
-    weight: 0.6
-
-# Full schema (shown in Tier 2 when this capability is a top match)
-schema:
-  type: object
-  properties:
-    query:
-      type: string
-      description: Search query for the internal knowledge base
-    department:
-      type: string
-      enum: [engineering, product, design, finance, hr]
-      description: Filter results by department
-  required:
-    - query
-
-examples:
-  - 'my_custom_search({ query: "vacation policy", department: "hr" })'
+hasSideEffects: false
+inputSchema: {"type": "object", "properties": {"query": {"type": "string"}, "department": {"type": "string", "enum": ["engineering", "product", "design", "finance", "hr"]}}, "required": ["query"]}
 ```
 
-Optionally, place a `SKILL.md` alongside the YAML for full prompt content:
+The fields read are `id`, `kind`, `name`, `displayName`, `description`, `category`, `tags`, `requiredSecrets`, `requiredTools`, `hasSideEffects`, `inputSchema` and `skillContent`. `name`, `kind` and `description` are required. `id` defaults to `${kind}:${name}`, `displayName` to the name and `category` to `custom`; a manifest capability is always `available`. The scanner reads a simple YAML subset: one-line scalars, lists (inline, or one indented `- item` per line), and objects written inline as JSON; folded (`>`) and nested block values are not read.
+
+Optionally, place a `SKILL.md` alongside the YAML for full prompt content (or point `skillContent` at another file), and a `schema.json` for the input schema when `inputSchema` is not set:
 
 ```markdown
-<!-- ~/.agentos/capabilities/my-tool/SKILL.md -->
+<!-- ~/.wunderland/capabilities/my-custom-search/SKILL.md -->
 # My Custom Search Skill
 
 You have access to the internal knowledge base search tool.
@@ -259,105 +208,72 @@ When answering questions about company policies or internal processes:
 
 ## Agent Self-Discovery via Meta-Tool
 
-The `discover_capabilities` meta-tool lets the agent actively search for
-capabilities during a conversation — useful when Tier 0/1 passive context
-isn't enough.
+The `discover_capabilities` meta-tool lets the agent search for capabilities during a conversation, when the passive tiers are not enough. Its input is `query` (required), `kind` (`tool`, `skill`, `extension`, `channel` or `any`, default `any`) and `category`; it returns `{ capabilities: [{ id, name, kind, description, category, relevance, available, ... }], totalIndexed }`.
+
+The AgentOS runtime registers it, and `load_capability_extension`, when its turn planner builds the discovery engine ([Capability Discovery](./CAPABILITY_DISCOVERY.md#agentos-turn-planner-core-integration)). A host with its own tool orchestrator registers it itself:
 
 ```typescript
-import { agent } from '@framers/agentos';
-import { createDiscoverCapabilitiesTool, CapabilityDiscoveryEngine } from '@framers/agentos/discovery';
+import {
+  CapabilityDiscoveryEngine,
+  createDiscoverCapabilitiesTool,
+} from '@framers/agentos/discovery';
 
-const engine = new CapabilityDiscoveryEngine({ /* config */ });
-const discoverTool = createDiscoverCapabilitiesTool(engine);
+// embeddingManager and vectorStore come from your memory wiring; sources are your
+// catalog entries in the CapabilityIndexSources shape.
+const engine = new CapabilityDiscoveryEngine(embeddingManager, vectorStore);
+await engine.initialize(sources);
 
-// Register with your agent
-const myAgent = agent({
-  provider: 'openai',
-  tools:    [discoverTool, ...otherTools],
-  instructions: 'You have a discover_capabilities tool to find other tools you can use.',
-});
+// With the orchestrator, each result also says whether it is loadable at run time.
+await toolOrchestrator.registerTool(createDiscoverCapabilitiesTool(engine, toolOrchestrator));
 ```
 
-The agent uses the tool when it needs something not surfaced by passive tiers:
+The agent uses the tool when it needs something the passive tiers did not surface:
 
 ```
 User: "Can you post this announcement to our Slack and email the team?"
 
-Agent thinks: I see slack in Tier 1 context, but I need to find the email tool.
-
 Agent calls: discover_capabilities({ query: "send email", kind: "tool" })
 
-Response: Found: send_email [tool] — Send emails via SMTP or SendGrid...
+Response: { capabilities: [{ id: "tool:send_email", relevance: 0.86, ... }], totalIndexed: 66 }
 
 Agent calls: send_email({ to: "team@example.com", subject: "...", body: "..." })
 ```
 
 ---
 
-## Integration with PromptBuilder
+## Integration with the Prompt
 
-The discovery engine integrates directly with `PromptBuilder`:
+On the AgentOS runtime the turn planner runs discovery before each GMI turn, and the rendered tiers reach the GMI in the turn's `metadata.capabilityDiscovery.promptContext`; the GMI adds them to the system prompt under the heading `Capability Discovery Context`. With `toolSelectionMode` `discovered`, the turn's tool list holds the discovered tools and the meta-tools. A host with its own loop renders the result itself:
 
 ```typescript
-import { CapabilityDiscoveryEngine } from '@framers/agentos/discovery';
-import { PromptEngine } from '@framers/agentos';
-
-const discoveryEngine = new CapabilityDiscoveryEngine({
-  embeddingManager: myEmbeddingManager,
-  vectorStore:      myVectorStore,
-  graph:            myCapabilityGraph,
-  scanner:          myManifestScanner,
-});
-
-// Wire into the prompt engine
-const promptEngine = new PromptEngine({
-  // ...
-  capabilityDiscovery: {
-    enabled: true,
-    engine:  discoveryEngine,
-  },
-});
-
-// Each turn, the prompt engine calls:
-// discoveryEngine.discover(userMessage) → CapabilityDiscoveryResult
-// promptEngine.capabilityDiscoveryResult(result) → injects into system prompt
+const result = await engine.discover(userMessage);
+const capabilityContext = engine.renderForPrompt(result);   // text for the system prompt
+const tools = await toolOrchestrator.listDiscoveredTools(result);
 ```
 
 ---
 
 ## Configuration
 
+The engine's third constructor argument, or `turnPlanning.discovery.config` on the runtime, takes a partial `CapabilityDiscoveryConfig`; `discover(query, { config })` overrides it for one query.
+
 ```typescript
 import { CapabilityDiscoveryEngine } from '@framers/agentos/discovery';
 
-const engine = new CapabilityDiscoveryEngine({
-  // Token budgets per tier
-  budgets: {
-    tier0: 150,    // category summaries (always)
-    tier1: 200,    // semantic match summaries
-    tier2: 1500,   // full schemas (top-N capabilities)
-  },
-
-  // How many results per tier
-  topK: {
-    tier1: 5,     // top-5 summaries
-    tier2: 2,     // top-2 full schemas
-  },
-
-  // Graph re-ranking boost weight
-  graphBoostWeight: 0.3,
-
-  // Embedding cache (LRU)
-  embeddingCacheSize: 1000,
-
-  // Hot-reload manifests on file changes
-  watchManifests: true,
-  manifestDirs: [
-    `${process.env.HOME}/.agentos/capabilities`,
-    './capabilities',
-  ],
+const engine = new CapabilityDiscoveryEngine(embeddingManager, vectorStore, {
+  tier0TokenBudget: 200,          // category summaries (always)
+  tier1TokenBudget: 800,          // semantic match summaries
+  tier2TokenBudget: 2000,         // full schemas
+  tier1TopK: 5,                   // summaries per turn
+  tier2TopK: 2,                   // full schemas per turn
+  tier1MinRelevance: 0.3,         // 0-1
+  useGraphReranking: true,
+  graphBoostFactor: 0.15,         // 0-1
+  collectionName: 'capability_index',
 });
 ```
+
+The values shown are the defaults. Manifest hot-reload is the scanner's `watch()`, not an engine option.
 
 ---
 

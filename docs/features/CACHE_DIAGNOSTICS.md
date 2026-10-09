@@ -51,7 +51,19 @@ result.cacheDiagnostics; // null = prefix stable | { cacheMissReason: {...} }
 
 Per-step verdicts surface on the `onAfterGeneration` hook
 (`GenerationHookResult.cacheDiagnostics`); the final result carries the last
-step's verdict (`GenerateTextResult.cacheDiagnostics`).
+step's verdict (`GenerateTextResult.cacheDiagnostics`). `cacheDiagnostics: {
+previousMessageId }` seeds the first step with an earlier response's id, and
+`streamText()` takes the same option and resolves `result.cacheDiagnostics`
+when the stream ends.
+
+## GMI turns
+
+A [GMI](../GMI.md) turn threads the same way. Set `cacheDiagnostics` in the
+turn's `metadata.options`: `true` opts in with nothing to compare, and
+`{ previousMessageId }` compares the first step against an earlier response.
+Each later step of the turn compares against the previous step's response,
+and each step's verdict and message id arrive on its `STEP_FINISHED` chunk
+(`cacheDiagnostics`, `providerMessageId`).
 
 ## Single calls: thread the id yourself
 
@@ -92,7 +104,8 @@ many input tokens fell after the divergence point. Treat it as a magnitude
 indicator, not a billing number.
 
 Combine the verdict with usage: diagnostics answer "did my request change?",
-`usage.cacheReadInputTokens` answers "did the cache hit?". A `null` verdict
+`usage.cacheReadTokens` on a `generateText` result (`usage.cacheReadInputTokens`
+on a provider response) answers "did the cache hit?". A `null` verdict
 with zero cache reads means the entry expired (TTL) rather than a request bug
 — consider shorter gaps between turns or a 1-hour cache TTL on the
 breakpoint.

@@ -35,6 +35,9 @@ export type ProviderDefaultTask = 'text' | 'image' | 'embedding';
  * selects which sub-key to read.
  */
 export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
+  minimax: {
+    image: 'image-01',
+  },
   openai: {
     text: 'gpt-4o',
     image: 'gpt-image-1',
@@ -52,6 +55,10 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
     cheap: 'llama3.2',
   },
   openrouter: {
+    text: 'openai/gpt-4o',
+    cheap: 'openai/gpt-4o-mini',
+  },
+  requesty: {
     text: 'openai/gpt-4o',
     cheap: 'openai/gpt-4o-mini',
   },
@@ -110,6 +117,16 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
   },
 };
 
+/**
+ * Embedding model used when Gemini is the effective provider and no embedding
+ * model is named (`embedText`, and the cognitive memory `agent({ runtime: 'gmi' })`
+ * builds). It is kept out of {@link PROVIDER_DEFAULTS}: those defaults also decide
+ * embedding auto-detection, where Gemini comes before Ollama, so a registry entry
+ * would silently move a caller who has a Gemini key and embeds through Ollama
+ * onto a different vector space.
+ */
+export const GEMINI_DEFAULT_EMBEDDING_MODEL = 'gemini-embedding-2';
+
 /** Runtime probes checked for auto-detection, in priority order. */
 type AutoDetectProbe =
   | { provider: string; envKey: string }
@@ -141,6 +158,7 @@ const AUTO_DETECT_ORDER: AutoDetectProbe[] = [
   { envKey: 'TOGETHER_API_KEY', provider: 'together' },
   { envKey: 'MISTRAL_API_KEY', provider: 'mistral' },
   { envKey: 'XAI_API_KEY', provider: 'xai' },
+  { envKey: 'REQUESTY_API_KEY', provider: 'requesty' },
   { binaryName: 'claude', provider: 'claude-code-cli' },
   { binaryName: 'gemini', provider: 'gemini-cli' },
   { envKey: 'OLLAMA_BASE_URL', provider: 'ollama' },
@@ -149,6 +167,7 @@ const AUTO_DETECT_ORDER: AutoDetectProbe[] = [
   { envKey: 'STABLE_DIFFUSION_LOCAL_BASE_URL', provider: 'stable-diffusion-local' },
   { envKey: 'BFL_API_KEY', provider: 'bfl' },
   { envKey: 'FAL_API_KEY', provider: 'fal' },
+  { envKey: 'MINIMAX_API_KEY', provider: 'minimax' },
 ];
 
 function isBinaryOnPath(binaryName: string): boolean {

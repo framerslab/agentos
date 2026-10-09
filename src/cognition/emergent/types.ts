@@ -17,6 +17,7 @@
 
 import type { JSONSchemaObject } from '../../core/tools/ITool.js';
 import type { SelfImprovementConfig } from './SelfImprovementConfig.js';
+import type { ForgedCodeExecutor } from './executor/types.js';
 
 // ============================================================================
 // TIER SYSTEM
@@ -46,16 +47,29 @@ export type ToolTier = 'session' | 'agent' | 'shared';
  *
  * - `'fetch'`         — Outbound HTTP/HTTPS requests via the global `fetch` API.
  * - `'fs.readFile'`   — Synchronous read of files in a pre-approved path whitelist.
+ * - `'fs.writeFile'`  — A file written under a ceiling's write roots (`fs.write`).
+ * - `'fs.unlink'`     — A file removed under a ceiling's delete roots (`fs.delete`).
  * - `'crypto'`        — Access to the Node.js `crypto` module for hashing / HMAC.
  */
-export type SandboxAPI = 'fetch' | 'fs.readFile' | 'crypto';
+export type SandboxAPI = 'fetch' | 'fs.readFile' | 'fs.writeFile' | 'fs.unlink' | 'crypto';
 
 /**
  * A capability a code-forged tool can be granted, by its catalogue name.
- * `fs.read` is the catalogue name of the `fs.readFile` function injected into
+ * `fs.read`, `fs.write` and `fs.delete` are the catalogue names of the
+ * `fs.readFile`, `fs.writeFile` and `fs.unlink` functions injected into
  * forged code; `SandboxAPI` keeps the injected names.
  */
-export type CapabilityName = 'fetch' | 'fs.read' | 'crypto';
+export type CapabilityName = 'fetch' | 'fs.read' | 'fs.write' | 'fs.delete' | 'crypto';
+
+/** A method a forged tool's `fetch` may send. GET and HEAD read; the rest change state. */
+export type HttpMethod = 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+
+/**
+ * Who must agree before an effect capability's grant is used. This release
+ * builds `'none'` only; a ceiling naming `'at-forge'` or `'per-call'` fails
+ * construction with `approval_not_available`.
+ */
+export type EffectApproval = 'none' | 'at-forge' | 'per-call';
 
 /**
  * A name a request's list may hold: a catalogue name, or the injected name it
@@ -64,12 +78,20 @@ export type CapabilityName = 'fetch' | 'fs.read' | 'crypto';
  */
 export type AllowlistName = SandboxAPI | CapabilityName;
 
-/** The scope a host grants `fetch` under (stage 1: reads only). */
+/** The scope a host grants `fetch` under. */
 export interface FetchCeiling {
   /** Hosts a forged tool may reach, matched exactly and case-insensitively; `'*'` is every host; `[]` grants nothing. */
   domains: string[] | '*';
-  /** Methods a forged tool may send. Stage 1 allows GET and HEAD only. @default ['GET', 'HEAD'] */
-  methods?: Array<'GET' | 'HEAD'>;
+  /**
+   * Methods a forged tool may send. POST, PUT, PATCH and DELETE change state:
+   * they need an isolating executor, `maxRequestBytes` and `approval`.
+   * @default ['GET', 'HEAD']
+   */
+  methods?: HttpMethod[];
+  /** A state-changing request's body larger than this is refused before anything is sent. Required beside a state-changing method, refused without one. */
+  maxRequestBytes?: number;
+  /** Required beside a state-changing method. */
+  approval?: EffectApproval;
   /** A response body larger than this is refused while it streams. @default 5_242_880 */
   maxResponseBytes?: number;
   /** Redirects the broker follows, each one checked like the first request. @default 5 */
@@ -89,6 +111,38 @@ export interface FsReadCeiling {
 }
 
 /**
+ * The scope a host grants `fs.write` under. Every field is required: a
+ * forged tool writes only what the host has bounded. Granted only on an
+ * isolating executor.
+ */
+export interface FsWriteCeiling {
+  /** Absolute directories a forged tool may write under, after symlinks are resolved; `[]` grants nothing. */
+  roots: string[];
+  /** `'create-only'` refuses an existing file; `'create-or-replace'` replaces one whole, through a temporary file. */
+  mode: 'create-only' | 'create-or-replace';
+  /** One file's size, in bytes. */
+  maxBytesPerFile: number;
+  /** The bytes one call of the tool may write, together. */
+  maxBytesPerCall: number;
+  /** The files one call of the tool may write. */
+  maxFilesPerCall: number;
+  /** One write's time bound; at most 2_147_483_647. */
+  timeoutMs: number;
+  approval: EffectApproval;
+}
+
+/** The scope a host grants `fs.delete` under: single regular files. Every field is required; isolating executor only. */
+export interface FsDeleteCeiling {
+  /** Absolute directories a forged tool may delete files under, after symlinks are resolved; `[]` grants nothing. */
+  roots: string[];
+  /** The files one call of the tool may delete. */
+  maxFilesPerCall: number;
+  /** One removal's time bound; at most 2_147_483_647. */
+  timeoutMs: number;
+  approval: EffectApproval;
+}
+
+/**
  * What a host lets code-forged tools have. A key that is absent grants
  * nothing; with this set, a forging agent's `allowlist` is a request the
  * ceiling must cover, and every capability call goes through the broker.
@@ -96,7 +150,42 @@ export interface FsReadCeiling {
 export interface ForgedCapabilities {
   fetch?: FetchCeiling;
   'fs.read'?: FsReadCeiling;
+  'fs.write'?: FsWriteCeiling;
+  'fs.delete'?: FsDeleteCeiling;
   crypto?: Record<string, never>;
+}
+
+/** An effect a forged tool is about to have, as `effectPolicy` sees it. */
+export interface PendingEffect {
+  capability: 'fs.write' | 'fs.delete' | 'fetch';
+  /** The path as written (the parent's real path and the last component), or the URL. */
+  target: string;
+  /** A state-changing request's method. */
+  method?: HttpMethod;
+  /** The bytes a write or a request carries. */
+  bytes?: number;
+  toolId: string;
+  agentId: string;
+  callId: string;
+  /** A forge test's run: nothing it writes, deletes or sends is real. */
+  dryRun: boolean;
+}
+
+/**
+ * A host's last word on each write, delete and state-changing request, after
+ * the scope and the bounds and before the effect record. It may refuse,
+ * never allow what the scope refused; a throw, or no answer within one
+ * second, refuses.
+ */
+export type EffectPolicy = (effect: PendingEffect) => void | { deny: string } | Promise<void | { deny: string }>;
+
+/** The answer a forge test gives a state-changing request instead of sending it. */
+export interface ForgeTestResponse {
+  method: HttpMethod;
+  url: string;
+  status: number;
+  headers?: Record<string, string>;
+  body?: string;
 }
 
 /** Where a ceiling's effect records go. */
@@ -236,6 +325,13 @@ export interface CallHandle {
   toolId: string;
   agentId: string;
   signal: AbortSignal;
+  /**
+   * Present for a forge test's run: writes land in a temporary overlay,
+   * deletes mark their target gone for the run, state-changing requests are
+   * answered from `responses` (or a `204` with `x-agentos-forge-test:
+   * not-sent`) and never sent.
+   */
+  dryRun?: { responses: readonly ForgeTestResponse[] };
 }
 
 /**
@@ -695,6 +791,15 @@ export interface ForgeTestCase {
    * steps receive real data.
    */
   stepOutputs?: Record<string, unknown>;
+
+  /**
+   * Answers for the state-changing requests a code-forged tool makes while it
+   * is forged, which are never sent: a request takes the first unused answer
+   * whose method and URL match it, otherwise a `204` with the header
+   * `x-agentos-forge-test: not-sent`. At most 16, each body within the
+   * ceiling's `maxResponseBytes`.
+   */
+  responses?: ForgeTestResponse[];
 }
 
 /**
@@ -860,9 +965,9 @@ export interface EmergentConfig {
   persistSandboxSource: boolean;
 
   /**
-   * Nominal memory budget in megabytes for each sandboxed tool execution.
-   * The current node:vm-backed executor reports heap deltas but does not
-   * preemptively enforce this limit.
+   * Memory budget in megabytes for each sandboxed tool execution. The
+   * in-process executor reports a heap delta and does not enforce it;
+   * QuickJSExecutor stops the guest at it (never below 16 MiB).
    * Passed as `SandboxExecutionRequest.memoryMB`.
    * @default 128
    */
@@ -935,6 +1040,25 @@ export interface EmergentConfig {
 
   /** Effect records under a ceiling. Ignored without one. */
   audit?: EmergentAuditConfig;
+
+  /**
+   * Paths no `fs.write` or `fs.delete` root may hold or lie inside, beside the
+   * library's own directory, `node_modules` and the entry script's directory.
+   * The library cannot find a host's own code and data: list its source,
+   * build output, data directories and a file database here.
+   */
+  protectedPaths?: string[];
+
+  /** Called for every write, delete and state-changing request; see {@link EffectPolicy}. */
+  effectPolicy?: EffectPolicy;
+
+  /**
+   * What runs forged code in the forge the engine builds. Absent: the
+   * in-process executor (`isolates: false`). A host that passes its own
+   * `sandboxForge` brings that forge's executor; passing one beside a
+   * different `executor` fails construction with `executor_conflict`.
+   */
+  executor?: ForgedCodeExecutor;
 }
 
 /**

@@ -42,6 +42,7 @@ export type {
   CompletionOutcome,
   CompletionResolution,
   CompletionRoute,
+  LateAttemptUsage,
 } from './runtime/completionGateway.js';
 export { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
 export { generateObject } from './generateObject.js';
@@ -68,6 +69,23 @@ export {
 // --- Agent & Agency ---
 export { agent } from './agent.js';
 export { agency } from './agency.js';
+
+// --- GMIs from agent options (`agent({ runtime: 'gmi' })`) ---
+export { gmi, createGmi, type GmiOptions, type GmiHandle } from './gmi.js';
+export {
+  resolveCognition,
+  type CognitionProfile,
+  type CognitionConfig,
+  type CognitionInputs,
+  type MetapromptPreset,
+  type ResolvedCognition,
+} from './runtime/gmiCognition.js';
+export { personaFromAgentOptions } from './runtime/gmiPersona.js';
+export {
+  createAgentCognitiveMemory,
+  type AgentCognitiveMemory,
+  type AgentCognitiveMemoryOptions,
+} from './runtime/agentCognitiveMemory.js';
 export { souledAgent } from './souledAgent.js';
 export type { SouledAgentOptions, SouledAgent } from './souledAgent.js';
 export { exportAgent } from './exportAgent.js';
@@ -118,3 +136,18 @@ export type {
 
 // --- Errors ---
 export * from './errors.js';
+
+// A reply that must match a schema on the full runtime (ProcessingOptions.structuredReply)
+export {
+  resolveStructuredReply,
+  resolveStructuredReplySpec,
+  checkStructuredReply,
+  recheckStructuredReply,
+  structuredRepairMessage,
+  StructuredReplyConfigError,
+  type StructuredReplySpec,
+  type StructuredOutputMeta,
+  type StructuredReplyOutput,
+  type IStructuredSchemaRegistry,
+  type ResolvedStructuredReply,
+} from './runtime/structuredReply';

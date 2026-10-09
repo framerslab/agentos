@@ -19,3 +19,26 @@ export type { CostGuardConfig, CostCapType, CostRecord, CostSnapshot } from './C
 
 export { ToolExecutionGuard, ToolTimeoutError } from './ToolExecutionGuard.js';
 export type { ToolExecutionGuardConfig, GuardedToolResult, ToolHealthReport } from './ToolExecutionGuard.js';
+
+export {
+  SpendMeterUnavailableError,
+  withBoundedRetry,
+  isTransientStorageError,
+  DEFAULT_SPEND_RETRY_POLICY,
+} from './SpendMeter.js';
+export type {
+  ISpendMeter,
+  SpendOutcome,
+  SpendReservationState,
+  SpendDenyReason,
+  SpendUsage,
+  SpendReserveRequest,
+  SpendReserveResult,
+  SpendSettleRequest,
+  SpendSettleResult,
+  SpendMeterSnapshot,
+  SpendReconcileResult,
+  SpendRetryPolicy,
+} from './SpendMeter.js';
+export { SqlSpendMeter, SPEND_METER_DDL } from './SqlSpendMeter.js';
+export type { SqlSpendMeterOptions, SpendUnknownResolution } from './SqlSpendMeter.js';

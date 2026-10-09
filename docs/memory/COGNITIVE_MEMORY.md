@@ -5,7 +5,7 @@ keywords: [cognitive memory ai, llm memory architecture, ebbinghaus decay, hexac
 
 # Cognitive Memory System
 
-> **Memory benchmarks (full N=500, gpt-4o reader):** **85.6% on LongMemEval-S** at $0.0090 per correct, **+1.4 points above Mastra Observational Memory (84.23%)**. **70.2% on LongMemEval-M** on the 1.5M-token / 500-session haystack variant — the only open-source library on the public record above 65% on M with publicly reproducible methodology. Competitive with the strongest published M results in the LongMemEval paper ([Wu et al., ICLR 2025](https://arxiv.org/abs/2410.10813): round Top-5 65.7%, session Top-5 71.4%, round Top-10 72.0%). [Benchmarks](https://docs.agentos.sh/benchmarks) · [Run JSONs](https://github.com/framerslab/agentos-bench/tree/master/results/runs) · [SOTA writeup](https://agentos.sh/en/blog/agentos-memory-sota-longmemeval/)
+> **Memory benchmarks (full N=500, gpt-4o reader):** **85.6% on LongMemEval-S** at $0.0090 per correct, **+1.4 points above Mastra Observational Memory (84.23%)**. **70.2% on LongMemEval-M** on the 1.5M-token / 500-session haystack variant. Competitive with the strongest published M results in the LongMemEval paper ([Wu et al., ICLR 2025](https://arxiv.org/abs/2410.10813): round Top-5 65.7%, session Top-5 71.4%, round Top-10 72.0%). [Benchmarks](https://docs.agentos.sh/benchmarks) · [Run JSONs](https://github.com/framerslab/agentos-bench/tree/master/results/runs) · [SOTA writeup](https://agentos.sh/en/blog/agentos-memory-sota-longmemeval/)
 
 :::tip See also
 [HEXACO Personality](./HEXACO_PERSONALITY.md) for the trait-by-trait reference covering encoding weights, working-memory capacity, prompt formatting, observer/reflector bias, and runtime self-modification.
@@ -19,9 +19,7 @@ keywords: [cognitive memory ai, llm memory architecture, ebbinghaus decay, hexac
 
 A pure vector-similarity memory — embed every message, return the cosine-nearest neighbors at retrieval — works for a few thousand turns. Past that scale, undifferentiated retrieval treats every recorded experience as equally available, equally trustworthy, and equally relevant. The cognitive-science literature treats forgetting as the mechanism by which what mattered yesterday continues to matter today, not as a bug to be patched out. AgentOS encodes that principle directly: traces decay, retrieval bias shifts with mood, and consolidation rewrites the store between turns.
 
-The cognitive memory system in AgentOS is built on that argument. Encoding strength is set per-trace, modulated by the personality traits of the agent doing the encoding and by the emotional intensity of the moment ([Brown & Kulik, 1977](https://psycnet.apa.org/record/1977-29748-001) on flashbulb memories; [Yerkes & Dodson, 1908](https://onlinelibrary.wiley.com/doi/abs/10.1002/cne.920180503) on the inverted-U arousal curve). Strength then decays exponentially with time on Hermann Ebbinghaus's 1885 forgetting curve `S(t) = S₀ · e^(-Δt / stability)`, accelerated by interference from new similar memories and slowed by successful retrieval (the desirable-difficulty effect — harder retrievals grow stability more). Working memory is bounded by [Baddeley's slot model](https://www.sciencedirect.com/science/article/pii/S1364661303002479) of seven-plus-or-minus-two, modulated by traits. Retrieval composites six signals — vector similarity, current strength, recency, emotional congruence with the agent's mood, graph spreading-activation in the [ACT-R](https://act-r.psy.cmu.edu/) tradition (Anderson, 1983), and importance. The graph itself learns: co-retrieval of two traces tightens the edge between them via Hebbian weight updates ("neurons that fire together wire together").
-
-The result is a memory that behaves more like a person remembering. The agent forgets the irrelevant. It holds onto what hit it hard. It pulls the thing that's adjacent in concept-space, not just the thing that's adjacent in vector-space. And — because every mechanism is HEXACO-modulated — the same input encodes differently depending on who is doing the remembering.
+The cognitive memory system in AgentOS is built on that argument. Encoding strength is set per-trace, modulated by the personality traits of the agent doing the encoding and by the emotional intensity of the moment ([Brown & Kulik, 1977](https://psycnet.apa.org/record/1977-29748-001) on flashbulb memories; [Yerkes & Dodson, 1908](https://onlinelibrary.wiley.com/doi/abs/10.1002/cne.920180503) on the inverted-U arousal curve). Strength then decays exponentially with time on Hermann Ebbinghaus's 1885 forgetting curve `S(t) = S₀ · e^(-Δt / stability)`, and each successful retrieval grows the stability (the desirable-difficulty effect: weaker traces gain more). Working memory is bounded by [Baddeley's slot model](https://www.sciencedirect.com/science/article/pii/S1364661303002479): seven slots, one more or one fewer by traits, between five and nine. Retrieval composites six signals — vector similarity, current strength, recency, emotional congruence with the agent's mood, graph spreading-activation in the [ACT-R](https://act-r.psy.cmu.edu/) tradition (Anderson, 1983), and importance. The graph itself learns: co-retrieval of two traces tightens the edge between them via Hebbian weight updates ("neurons that fire together wire together").
 
 :::tip Eight cognitive mechanisms layered on top
 On top of the encoding/decay/retrieval substrate, the runtime ships eight optional neuroscience-grounded mechanisms — reconsolidation, retrieval-induced forgetting, involuntary recall, metacognitive feeling-of-knowing, temporal gist, schema encoding, source-confidence decay, and emotion regulation. All HEXACO-personality-modulated and individually configurable via `cognitiveMechanisms` on [`CognitiveMemoryConfig`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/config.ts). See the [Mechanism Implementation Reference](#mechanism-implementation-reference) below for hook points, APIs, and testing.
@@ -33,9 +31,9 @@ On top of the encoding/decay/retrieval substrate, the runtime ships eight option
 - **Forgetting** follows the Ebbinghaus exponential decay curve, with retrieval-induced reinforcement via spaced repetition
 - **Retrieval** combines six weighted signals (strength, embedding similarity, recency, emotional congruence, graph activation, importance) into a composite score
 - **Working memory** enforces Baddeley's slot-based capacity limits (7±2), modulated by traits
-- **Consolidation** runs periodically to prune weak traces, merge clusters into schemas, resolve contradictions, and feed observations back into long-term storage
+- **Consolidation** runs periodically to prune weak traces, link related traces in the graph, summarize clusters into schemas, resolve contradictions, and reinforce traces due for review
 
-Core encoding / decay / retrieval runs without any LLM calls. The optional Batch-2 layer (observer, reflector, graph, consolidation) activates when its config is wired in and falls through gracefully when it isn't. Same code runs over local SQLite + HNSW or against Postgres + Neo4j — no callsite changes.
+Core encoding, decay and retrieval make no LLM call with the `keyword` feature detector (retrieval embeds the query). In the Batch-2 layer, the observer and reflector run only when their config carries an `llmInvoker`. The memory graph is on unless `graph.disabled` is `true`, and with a graph (or a `consolidation` config) the manager builds the consolidation pipeline and starts its hourly timer unless `consolidation.enabled` is `false`. The manager takes its vector store and knowledge graph as interfaces, so the same calls run over any implementation of them.
 
 ### Cognitive science foundations
 
@@ -75,7 +73,8 @@ User message arrives
                          (personality-modulated strength)
 
 Outside the turn:
-  - checkProspective   — time/event/context triggers; the host calls it
+  - checkProspective   — time/event/context triggers, for the host to check directly
+                         (assembleForPrompt also checks them each turn)
   - runConsolidation   — periodic background sweep (timer-based when consolidation is enabled)
 ```
 
@@ -91,6 +90,7 @@ Based on Tulving's long-term memory taxonomy with extensions:
 | `semantic` | General knowledge/facts | Learned facts, preferences, schemas | "User prefers TypeScript over Python" |
 | `procedural` | Skills and how-to | Workflows, tool usage patterns | "To deploy, run the deployment pipeline" |
 | `prospective` | Future intentions | Goals, reminders, planned actions | "Remind user about the PR review" |
+| `relational` | Relationship knowledge | Trust signals, boundaries, emotional bonds | "User asked not to be contacted after 9pm" |
 
 ---
 
@@ -111,7 +111,7 @@ Collections in the vector store are named `{prefix}_{scope}_{scopeId}` (default 
 
 ## The MemoryTrace Envelope
 
-Every memory is wrapped in a [`MemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/SelfEvaluateTool.ts) — the universal envelope carrying content, provenance, emotional context, and decay parameters:
+Every memory is wrapped in a [`MemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts), the envelope carrying content, provenance, emotional context, and decay parameters:
 
 | Field Group | Key Fields | Purpose |
 |-------------|-----------|---------|
@@ -119,12 +119,13 @@ Every memory is wrapped in a [`MemoryTrace`](https://github.com/framerslab/agent
 | **Content** | `content`, `structuredData`, `entities`, `tags` | The actual memory data |
 | **Provenance** | `sourceType`, `sourceId`, `confidence`, `verificationCount`, `contradictedBy` | Source monitoring to prevent confabulation |
 | **Emotional Context** | `valence`, `arousal`, `dominance`, `intensity`, `gmiMood` | PAD snapshot at encoding time |
-| **Decay Parameters** | `encodingStrength` (S0), `stability` (tau), `retrievalCount`, `lastAccessedAt` | Ebbinghaus curve inputs |
+| **Decay Parameters** | `encodingStrength` (S0), `stability` (tau), `importance`, `retrievalCount`, `accessCount`, `lastAccessedAt` | Ebbinghaus curve inputs |
 | **Spaced Repetition** | `reinforcementInterval`, `nextReinforcementAt` | Interval doubling schedule |
 | **Graph** | `associatedTraceIds` | Links to related traces |
+| **Trust** | `policy` | Whether the trace may be used for authorization, personalization or fact claims |
 | **Lifecycle** | `createdAt`, `updatedAt`, `consolidatedAt`, `isActive` | Timestamps and soft-delete flag |
 
-Source types: `user_statement`, `agent_inference`, `tool_result`, `observation`, `reflection`, `external`.
+Source types: `user_statement`, `agent_inference`, `tool_result`, `observation`, `reflection`, `external`, `fact_graph`, `typed_network`, `retrieved_document`, `human_approval`, `identity_provider`, `system_config`, `external_api`, `memory_summary`.
 
 ---
 
@@ -147,7 +148,7 @@ Each HEXACO trait modulates attention to specific content features:
 | Agreeableness | `cooperativeAttention` | `0.2 + A * 0.8` | High A notices cooperation cues |
 | Honesty | `ethicalAttention` | `0.2 + H * 0.8` | High H notices ethical/moral content |
 
-The **composite attention multiplier** starts at 0.5 and adds weighted bonuses for each detected content feature (0.10-0.15 each), plus a base 0.15 for contradictions and topic relevance.
+The **composite attention multiplier** starts at 0.5 and adds, for each detected feature, its weight times 0.15 (novelty, procedure) or 0.10 (emotion, social, cooperation, ethics), plus 0.15 for a contradiction and `topicRelevance × 0.15`, capped at 1.0.
 
 ### 2. Yerkes-Dodson Arousal Curve
 
@@ -200,11 +201,11 @@ Default `baseStabilityMs = 3,600,000` (1 hour). Stronger memories are inherently
 
 The encoding model needs to know **what features** the content contains. Three detection strategies are available:
 
-| Strategy | Speed | Quality | LLM Calls | Best For |
-|----------|-------|---------|-----------|----------|
-| `keyword` | Fast | Moderate | 0 | Default; low-latency agents |
-| `llm` | Slow | High | 1 per encode | High-fidelity agents with budget |
-| `hybrid` | Medium | High | Periodic | Best balance; keyword first, LLM re-classification during consolidation |
+| Strategy | LLM calls | Behavior |
+|----------|-----------|----------|
+| `keyword` | 0 | Keyword rules |
+| `llm` | 1 per encode | The model classifies the content; `featureDetectionLlmInvoker` is required, and the detector throws without it |
+| `hybrid` | 0 | Keyword rules on encode; its LLM path (`detectWithLlm()`) has no caller in the runtime |
 
 Detected features ([`ContentFeatures`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts)): `hasNovelty`, `hasProcedure`, `hasEmotion`, `hasSocialContent`, `hasCooperation`, `hasEthicalContent`, `hasContradiction`, `topicRelevance`.
 
@@ -238,22 +239,17 @@ Each successful retrieval updates the trace via the **desirable difficulty** eff
 - **Emotional bonus**: `1 + intensity * 0.3` — emotional memories consolidate faster
 - **Growth factor**: `(1.5 + difficultyBonus * 2.0) * diminish * emotionalBonus`
 - **Interval doubling**: `reinforcementInterval *= 2` after each retrieval
+- **Strength**: `encodingStrength + 0.1`, capped at 1.0
 
 ### Interference
 
-When a new trace overlaps with existing traces (cosine similarity > threshold, default 0.7):
-
-- **Retroactive interference**: New trace weakens old similar traces (strength reduction ~0.15 at similarity 1.0)
-- **Proactive interference**: Old traces impair new encoding (capped at 0.3 total reduction)
+`computeInterference()` computes interference between a new trace and existing traces above the similarity threshold (default 0.7): a retroactive strength reduction for each old trace (0.15 at similarity 1.0) and a proactive reduction for the new one (capped at 0.3). The memory manager does not call it, so encoding applies no interference.
 
 ### Pruning
 
 Traces with `currentStrength < pruningThreshold` (default: 0.05) are soft-deleted during consolidation, **unless** their emotional intensity exceeds 0.3 (emotional memories are protected from pruning).
 
-Lifecycle note: these retention/decay sweeps are now operational on the
-built-in vector stores that implement `scanByMetadata()`. Adapters without
-metadata-scan support still need provider-specific work before they can
-participate fully in lifecycle enforcement.
+The retention sweeps of `MemoryLifecycleManager` read traces through a vector store's `scanByMetadata()`; on a store without it they cannot enumerate traces.
 
 ---
 
@@ -267,8 +263,8 @@ Retrieval combines six signals into a composite score:
 |--------|--------|-------|-------------|
 | `strength` | 0.25 | 0-1 | `S₀ * e^(-dt / stability)` |
 | `similarity` | 0.35 | 0-1 | Cosine similarity from vector search |
-| `recency` | 0.10 | 0-1 | `(e^(-elapsed / halfLife)) / 0.2` (normalised) |
-| `emotionalCongruence` | 0.15 | 0-1 | `max(0, moodValence * traceValence) / 0.25` (normalised) |
+| `recency` | 0.10 | 0-1 | `e^(-elapsed / recencyHalfLifeMs)` |
+| `emotionalCongruence` | 0.15 | 0-1 | `max(0, moodValence * traceValence)` |
 | `graphActivation` | 0.10 | 0-1 | Spreading activation score (0 without graph) |
 | `importance` | 0.05 | 0-1 | `confidence * 0.5 + 0.5` |
 
@@ -320,9 +316,9 @@ Each [`WorkingMemorySlot`](https://github.com/framerslab/agentos/blob/master/src
 
 ### Activation Lifecycle
 
-1. **Focus**: New trace enters at `initialActivation` (default 0.8). If at capacity, lowest-activation slot is evicted first.
+1. **Focus**: `focus(traceId, initialActivation)` adds a slot (default activation 0.8). The manager focuses each new trace at its encoding strength and each of the top five retrieved traces at its retrieval score. At capacity, the lowest-activation slot is evicted first.
 2. **Rehearsal**: `rehearse(slotId)` bumps activation by 0.15 (capped at 1.0).
-3. **Decay**: Each turn, all activations decrease by `activationDecayRate` (default 0.1).
+3. **Decay**: Each `retrieve()` lowers every slot's activation by `activationDecayRate` (default 0.1).
 4. **Eviction**: Slots below `minActivation` (default 0.15) are evicted. The `onEvict` callback can encode evicted items back to long-term memory.
 
 ### Prompt Formatting
@@ -387,6 +383,8 @@ Configure via `graph.backend` (default: `'knowledge-graph'`).
 | `CO_ACTIVATED` | Traces retrieved together (Hebbian) | grows |
 | `SCHEMA_INSTANCE` | Episodic trace is instance of semantic schema | 0.6 |
 
+Consolidation creates the `SHARED_ENTITY`, `TEMPORAL_SEQUENCE` and `SCHEMA_INSTANCE` edges; `recordCoActivation()` creates and strengthens `CO_ACTIVATED` edges.
+
 ---
 
 ## Spreading Activation
@@ -414,7 +412,7 @@ Implements Anderson's ACT-R spreading activation model. Given seed nodes (top re
 
 ### Hebbian Learning
 
-After retrieval, co-retrieved memories are recorded via `recordCoActivation()`. This strengthens `CO_ACTIVATED` edges between memories that are frequently retrieved together, implementing the Hebbian rule: "neurons that fire together wire together."
+After retrieval, the top five retrieved memories are recorded via `recordCoActivation()`. This strengthens `CO_ACTIVATED` edges between memories that are frequently retrieved together, implementing the Hebbian rule: "neurons that fire together wire together."
 
 The learning rate (default 0.1) controls how quickly edge weights grow.
 
@@ -446,7 +444,7 @@ Source: `src/cognition/memory/pipeline/observation/MemoryReflector.ts`
 
 The reflector consolidates accumulated observation notes into long-term memory traces. Activates when note tokens exceed threshold (default: 40,000 tokens).
 
-**Pipeline:**
+**Pipeline** (the reflector's instructions to its model):
 1. Merge redundant observations
 2. Elevate important facts to long-term traces
 3. Detect conflicts against existing memories
@@ -492,7 +490,7 @@ await manager.register({
 
 ### Checking
 
-Checked each turn before prompt construction. Triggered items are injected into the "Reminders" section of the assembled memory context. Items can be `recurring` (re-trigger) or one-shot (marked `triggered` after firing).
+`assembleForPrompt()` checks the items each turn and puts the triggered ones in the "Reminders" section of the assembled memory context. Commitment notes from the observer (importance 0.5 or more) and future-intent preference notes are registered as items automatically. Items can be `recurring` (re-trigger) or one-shot (marked `triggered` after firing).
 
 Context-based triggers use cosine similarity between the cue embedding and the current query embedding, with a configurable `similarityThreshold` (default 0.7).
 
@@ -548,14 +546,15 @@ interface ConsolidationResult {
 
 Source: `src/cognition/memory/core/prompt/MemoryPromptAssembler.ts`
 
-Assembles memory context into a single formatted string within a token budget, split across six sections with overflow redistribution.
+Assembles memory context into a single formatted string within a token budget, split across seven sections with overflow redistribution.
 
 ### Default Budget Allocation
 
 | Section | Budget % | Content |
 |---------|---------|---------|
+| Persistent Memory | 5% | The persistent markdown working memory, truncated to fit |
 | Working Memory | 15% | Active context from slot buffer |
-| Semantic Recall | 45% | Retrieved semantic/procedural traces |
+| Semantic Recall | 40% | Retrieved traces other than episodic |
 | Recent Episodic | 25% | Retrieved episodic traces |
 | Prospective Alerts | 5% | Triggered reminders (Batch 2) |
 | Graph Associations | 5% | Spreading activation context (Batch 2) |
@@ -563,11 +562,11 @@ Assembles memory context into a single formatted string within a token budget, s
 
 ### Overflow Redistribution
 
-If a section uses less than its budget, the overflow flows to Semantic Recall. If Batch 2 sections are empty (no observer, no graph, no prospective items), their budgets are also redistributed to Semantic Recall.
+The budget working memory leaves unused flows to Semantic Recall, and so do the budgets of empty Batch 2 sections (no prospective alerts, no graph context, no observation notes).
 
 ### Personality -> Formatting Style
 
-The assembler selects a formatting style based on the dominant HEXACO trait:
+The assembler selects a formatting style by comparing conscientiousness, openness and emotionality (ties go in that order):
 
 | Dominant Trait | Style | Output |
 |---------------|-------|--------|
@@ -578,24 +577,35 @@ The assembler selects a formatting style based on the dominant HEXACO trait:
 ### Output Sections
 
 ```
-## Active Context
+## How To Use Your Memories
+...
+
+## Persistent Memory
+...
+
+## Active Context (in focus — reference directly)
 - [ACTIVE] mt_1234 (activation: 0.85)
 
-## Relevant Memories
-- [semantic, score=0.82] User prefers TypeScript...
+## Relevant Memories (facts — use as background truth, don't announce)
+...
 
-## Recent Experiences
-- [episodic, score=0.71] Discussed deployment on Tuesday...
+## Recent Experiences (events — weave in naturally, never list)
+...
 
-## Reminders
+## Reminders (act on these — bring up naturally)
 - [time_based] PR review is due
 
-## Related Context
-- [associated, activation=0.45] Related discussion about CI/CD...
+## Related Context (connected memories — use for depth)
+...
 
 ## Observations
-- User tends to ask follow-up questions about error handling
+...
+
+## Something This Reminds Me Of
+[spontaneous memory] ...
 ```
+
+The preamble appears when the budget has room for it and 100 more tokens. `assembleForPrompt()` never fills the last two sections: it passes no observer notes (their 5% flows to Semantic Recall), and it passes neither the mechanisms engine nor the trace pool that the involuntary-recall section needs. Both sections appear only when a host calls `assembleMemoryContext()` (from `@framers/agentos/cognition/memory`) itself, with `observationNotes`, or with `mechanismsEngine` and `allTraces`. How each trace line reads depends on the formatting style.
 
 Token estimation uses ~4 chars per token heuristic.
 
@@ -619,7 +629,7 @@ interface CognitiveMemoryConfig {
   moodProvider: () => PADState;      // Callback to get current mood
 
   // --- Feature detection ---
-  featureDetectionStrategy: 'keyword' | 'llm' | 'hybrid'; // Default: 'keyword'
+  featureDetectionStrategy: 'keyword' | 'llm' | 'hybrid';
   featureDetectionLlmInvoker?: (systemPrompt: string, userPrompt: string) => Promise<string>;
 
   // --- Tuning ---
@@ -634,6 +644,14 @@ interface CognitiveMemoryConfig {
   reflector?: Partial<ReflectorConfig>;
   graph?: Partial<MemoryGraphConfig>;
   consolidation?: Partial<ConsolidationConfig>;
+
+  // --- Further options ---
+  persistentMemory?: PersistentMemorySource;   // the persistent markdown working memory
+  cognitiveMechanisms?: CognitiveMechanismsConfig;
+  infiniteContext?: Partial<InfiniteContextConfig>;
+  maxContextTokens?: number;                   // required for infiniteContext
+  enableGraphActivation?: boolean;
+  brain?: Brain;
 }
 ```
 
@@ -738,7 +756,7 @@ await memory.observe('user', 'I need to deploy by Friday', mood);
 await memory.observe('assistant', 'I can help with that deployment.', mood);
 
 // Prospective: register a reminder
-const pm = memory.getProspective();
+const pm = memory.getProspective()!; // built by initialize()
 await pm.register({
   content: 'User needs deployment done by Friday',
   triggerType: 'time_based',
@@ -748,8 +766,8 @@ await pm.register({
 });
 
 // Consolidation runs automatically on timer, or manually:
-const result = await memory.runConsolidation();
-console.log(`Pruned ${result.prunedCount}, created ${result.schemasCreated} schemas`);
+const consolidation = await memory.runConsolidation();
+console.log(`Pruned ${consolidation.prunedCount}, created ${consolidation.schemasCreated} schemas`);
 ```
 
 ---
@@ -795,24 +813,21 @@ await cognitiveMemory.encode(assistantResponse, mood, gmiMood, {
 
 ---
 
-## What's missing from flat-vector memory (vs. Mastra)
+## What the layer adds to a vector store
 
-Twelve specific gaps in Mastra's memory architecture that the cognitive memory layer fills. Each row maps to a paper, a primitive, and runtime code:
-
-| # | Mastra Limitation | AgentOS Improvement |
+| # | Plain vector memory | Cognitive memory |
 |---|-------------------|-------------------|
-| 1 | Flat strength (all memories equal) | HEXACO-modulated encoding strength with Yerkes-Dodson arousal curve |
-| 2 | No forgetting | Ebbinghaus exponential decay with configurable stability |
-| 3 | No spaced repetition | Desirable difficulty effect with interval doubling |
-| 4 | No working memory limits | Baddeley's model with personality-modulated capacity (5-9 slots) |
-| 5 | No emotional context | PAD model snapshot at encoding, mood-congruent retrieval bias |
-| 6 | Single retrieval signal (similarity) | 6-signal composite scoring (strength, similarity, recency, emotion, graph, importance) |
-| 7 | No memory graph | IMemoryGraph with 8 edge types and spreading activation |
-| 8 | No interference modeling | Proactive and retroactive interference with configurable thresholds |
-| 9 | No consolidation | 5-step pipeline: decay sweep, replay, schema integration, conflict resolution, reinforcement |
-| 10 | No prospective memory | Time, event, and context-based triggers with recurring support |
-| 11 | No observer/reflector | Personality-biased observation + LLM-driven consolidation into traces |
-| 12 | No provenance tracking | Full source monitoring with confidence, verification count, and contradiction detection |
+| 1 | Every memory equally strong | Encoding strength from HEXACO traits, arousal (Yerkes-Dodson) and mood |
+| 2 | No forgetting | Ebbinghaus decay with per-trace stability |
+| 3 | No spaced repetition | Retrieval grows stability (desirable difficulty) and doubles the review interval |
+| 4 | No working memory limit | Slot-based working memory, 5 to 9 slots by traits |
+| 5 | No emotional context | PAD snapshot at encoding, mood-congruent retrieval bias |
+| 6 | One retrieval signal (similarity) | Six-signal score (strength, similarity, recency, emotion, graph, importance) |
+| 7 | No memory graph | `IMemoryGraph` with 8 edge types and spreading activation |
+| 8 | No consolidation | Five steps: decay sweep, replay, schema integration, conflict resolution, reinforcement |
+| 9 | No prospective memory | Time, event and context triggers, one-shot or recurring |
+| 10 | No observer or reflector | Personality-biased observation notes, reflected into traces by an LLM |
+| 11 | No provenance | Source type, confidence, verification count and contradictions on each trace |
 
 ---
 
@@ -822,26 +837,26 @@ All source lives in `src/cognition/memory/`:
 
 | File | Export |
 |------|--------|
-| `types.ts` | All types: [`MemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/SelfEvaluateTool.ts), [`MemoryType`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts), [`MemoryScope`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts), [`ScoredMemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts), etc. |
-| `config.ts` | [`CognitiveMemoryConfig`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/config.ts), [`EncodingConfig`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/config.ts), [`DecayConfig`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/config.ts), defaults |
+| `core/types.ts` | [`MemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts), [`MemoryType`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts), [`MemoryScope`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts), [`ScoredMemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts) and the other shared types |
+| `core/config.ts` | [`CognitiveMemoryConfig`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/config.ts), [`EncodingConfig`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/config.ts), [`DecayConfig`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/config.ts), defaults |
 | `CognitiveMemoryManager.ts` | [`CognitiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/CognitiveMemoryManager.ts), [`ICognitiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/CognitiveMemoryManager.ts) |
-| `encoding/EncodingModel.ts` | [`computeEncodingStrength`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/encoding/EncodingModel.ts), [`yerksDodson`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/encoding/EncodingModel.ts), [`buildEmotionalContext`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/encoding/EncodingModel.ts) |
-| `encoding/ContentFeatureDetector.ts` | [`createFeatureDetector`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/encoding/ContentFeatureDetector.ts), [`IContentFeatureDetector`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/encoding/ContentFeatureDetector.ts) |
-| `decay/DecayModel.ts` | [`computeCurrentStrength`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/DecayModel.ts), [`updateOnRetrieval`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/DecayModel.ts), [`computeInterference`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/DecayModel.ts) |
-| `decay/RetrievalPriorityScorer.ts` | [`scoreAndRankTraces`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/RetrievalPriorityScorer.ts), [`detectPartiallyRetrieved`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/RetrievalPriorityScorer.ts) |
-| `working/CognitiveWorkingMemory.ts` | [`CognitiveWorkingMemory`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/working/CognitiveWorkingMemory.ts) |
-| `store/MemoryStore.ts` | [`MemoryStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/MemoryStore.ts) |
-| `prompt/MemoryPromptAssembler.ts` | [`assembleMemoryContext`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/prompt/MemoryPromptAssembler.ts) |
-| `prompt/MemoryFormatters.ts` | [`formatMemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/prompt/MemoryFormatters.ts), [`FormattingStyle`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/prompt/MemoryFormatters.ts) |
-| `graph/IMemoryGraph.ts` | [`IMemoryGraph`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/IMemoryGraph.ts), [`MemoryEdgeType`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/IMemoryGraph.ts), [`ActivatedNode`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/IMemoryGraph.ts) |
-| `graph/SpreadingActivation.ts` | `spreadActivation` |
-| `graph/GraphologyMemoryGraph.ts` | [`GraphologyMemoryGraph`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/GraphologyMemoryGraph.ts) |
-| `graph/KnowledgeGraphMemoryGraph.ts` | [`KnowledgeGraphMemoryGraph`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/KnowledgeGraphMemoryGraph.ts) |
-| `observation/MemoryObserver.ts` | [`MemoryObserver`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryObserver.ts), [`ObservationNote`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryObserver.ts) |
-| `observation/MemoryReflector.ts` | [`MemoryReflector`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryReflector.ts), [`MemoryReflectionResult`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryReflector.ts) |
-| `observation/ObservationBuffer.ts` | [`ObservationBuffer`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/ObservationBuffer.ts) |
-| `prospective/ProspectiveMemoryManager.ts` | [`ProspectiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/prospective/ProspectiveMemoryManager.ts), [`ProspectiveMemoryItem`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/prospective/ProspectiveMemoryManager.ts) |
-| `consolidation/ConsolidationPipeline.ts` | [`ConsolidationPipeline`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/consolidation/ConsolidationPipeline.ts), [`ConsolidationResult`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/facade/types.ts) |
+| `core/encoding/EncodingModel.ts` | [`computeEncodingStrength`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/encoding/EncodingModel.ts), [`yerksDodson`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/encoding/EncodingModel.ts), [`buildEmotionalContext`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/encoding/EncodingModel.ts) |
+| `core/encoding/ContentFeatureDetector.ts` | [`createFeatureDetector`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/encoding/ContentFeatureDetector.ts), [`IContentFeatureDetector`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/encoding/ContentFeatureDetector.ts) |
+| `core/decay/DecayModel.ts` | [`computeCurrentStrength`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/DecayModel.ts), [`updateOnRetrieval`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/DecayModel.ts), [`computeInterference`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/DecayModel.ts) |
+| `core/decay/RetrievalPriorityScorer.ts` | [`scoreAndRankTraces`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/RetrievalPriorityScorer.ts), [`detectPartiallyRetrieved`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/RetrievalPriorityScorer.ts) |
+| `core/working/CognitiveWorkingMemory.ts` | [`CognitiveWorkingMemory`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/working/CognitiveWorkingMemory.ts) |
+| `retrieval/store/MemoryStore.ts` | [`MemoryStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/MemoryStore.ts) |
+| `core/prompt/MemoryPromptAssembler.ts` | [`assembleMemoryContext`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/prompt/MemoryPromptAssembler.ts) |
+| `core/prompt/MemoryFormatters.ts` | [`formatMemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/prompt/MemoryFormatters.ts), [`FormattingStyle`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/prompt/MemoryFormatters.ts) |
+| `retrieval/graph/IMemoryGraph.ts` | [`IMemoryGraph`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/IMemoryGraph.ts), [`MemoryEdgeType`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/IMemoryGraph.ts), [`ActivatedNode`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/IMemoryGraph.ts) |
+| `retrieval/graph/SpreadingActivation.ts` | `spreadActivation` |
+| `retrieval/graph/GraphologyMemoryGraph.ts` | [`GraphologyMemoryGraph`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/GraphologyMemoryGraph.ts) |
+| `retrieval/graph/KnowledgeGraphMemoryGraph.ts` | [`KnowledgeGraphMemoryGraph`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/KnowledgeGraphMemoryGraph.ts) |
+| `pipeline/observation/MemoryObserver.ts` | [`MemoryObserver`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryObserver.ts), [`ObservationNote`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryObserver.ts) |
+| `pipeline/observation/MemoryReflector.ts` | [`MemoryReflector`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryReflector.ts), [`MemoryReflectionResult`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryReflector.ts) |
+| `pipeline/observation/ObservationBuffer.ts` | [`ObservationBuffer`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/ObservationBuffer.ts) |
+| `retrieval/prospective/ProspectiveMemoryManager.ts` | [`ProspectiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/prospective/ProspectiveMemoryManager.ts), [`ProspectiveMemoryItem`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/prospective/ProspectiveMemoryManager.ts) |
+| `pipeline/consolidation/ConsolidationPipeline.ts` | [`ConsolidationPipeline`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/consolidation/ConsolidationPipeline.ts), [`ConsolidationResult`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/consolidation/ConsolidationPipeline.ts) |
 
 ---
 
@@ -852,7 +867,7 @@ AgentOS provides two complementary working memory systems:
 | | Baddeley Cognitive Working Memory | Persistent Markdown Working Memory |
 |---|---|---|
 | Purpose | In-session attention modeling | Cross-session user context |
-| Lifespan | Single session (in-memory) | Persists on disk (~/.agentos/agents/{id}/working-memory.md) |
+| Lifespan | Single session (in-memory) | Persists in a markdown file the host names (Wunderland: `agents/<agent id>/working-memory.md` in its workspace) |
 | Updates | Automatic activation decay | Agent calls `update_working_memory` tool |
 | Format | Capacity-limited slots (7±2) | Free-form markdown template |
 | Budget | 15% of prompt tokens | 5% of prompt tokens |
@@ -863,7 +878,7 @@ Both are injected into the system prompt simultaneously. The persistent memory a
 
 ## Mechanism Implementation Reference {#mechanism-implementation-reference}
 
-The eight cognitive mechanisms live under `src/cognition/memory/mechanisms/`. Each mechanism is a pure function with one mutation responsibility on a [`MemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/SelfEvaluateTool.ts). The [`CognitiveMechanismsEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/CognitiveMechanismsEngine.ts) binds them to lifecycle hooks on [`MemoryStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/MemoryStore.ts) and `MemoryPromptAssembler`.
+The eight cognitive mechanisms live under `src/cognition/memory/mechanisms/`. Each mechanism is a pure function with one mutation responsibility on a [`MemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts). The [`CognitiveMechanismsEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/CognitiveMechanismsEngine.ts) binds them to lifecycle hooks on [`MemoryStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/MemoryStore.ts) and `MemoryPromptAssembler`.
 
 ### Source-tree layout
 
@@ -872,6 +887,7 @@ src/cognition/memory/mechanisms/
 ├── types.ts                          # CognitiveMechanismsConfig + shared types
 ├── defaults.ts                       # DEFAULT_MECHANISMS_CONFIG + resolveConfig()
 ├── CognitiveMechanismsEngine.ts      # Lifecycle hook orchestrator
+├── PersonaDriftMechanism.ts          # Trait drift proposals during consolidation
 ├── retrieval/
 │   ├── Reconsolidation.ts            # Emotional drift on access
 │   ├── RetrievalInducedForgetting.ts # Competitor suppression
@@ -891,10 +907,11 @@ src/cognition/memory/mechanisms/
 |---|---|---|---|
 | `store/MemoryStore.ts` | `recordAccess()` | `engine.onAccess(trace, mood)` | After spaced-repetition update |
 | `store/MemoryStore.ts` | `query()` | `engine.onRetrieval(scored, candidates, cutoff, entities)` | After scoring, before return |
-| `prompt/MemoryPromptAssembler.ts` | `assembleMemoryContext()` | `engine.onPromptAssembly(allTraces, retrievedIds)` | Before final return |
+| `prompt/MemoryPromptAssembler.ts` | `assembleMemoryContext()` | `engine.onPromptAssembly(allTraces, retrievedIds)` | Before final return, when the input carries `mechanismsEngine` and `allTraces`; `assembleForPrompt()` passes neither |
+| `CognitiveMemoryManager.ts` | `encode()` | `engine.onEncoding(trace, embedding)` | After the trace is embedded |
 | `CognitiveMemoryManager.ts` | `initialize()` | Engine construction | Dynamic import when config present |
 
-The consolidation hook (`engine.onConsolidation()`) is wired into `ConsolidationLoop.run()` only when the loop is instantiated with a mechanisms-aware config.
+`ConsolidationPipeline` calls `engine.onConsolidation()` in each run when the manager was initialized with `cognitiveMechanisms`.
 
 ### Per-mechanism API
 
@@ -928,18 +945,18 @@ Modulation runs once via `applyPersonalityModulation()`. Trait-to-parameter scal
 
 ### Guard conditions
 
-- **Flashbulb immunity:** traces with `encodingStrength >= 0.9` are skipped by reconsolidation, RIF, temporal gist, and emotion regulation.
+- **Flashbulb immunity:** traces with `encodingStrength >= 0.9` are skipped by RIF, temporal gist and emotion regulation. Reconsolidation skips a trace whose `encodingStrength` is at least `immuneAboveImportance`, whose default of 9 no strength (0 to 1) reaches, so by default no trace is immune to it.
 - **Dead-trace protection:** RIF skips traces with `encodingStrength < 0.1`.
 - **Inactive skip:** all consolidation mechanisms skip `isActive === false` traces.
 - **Disabled bypass:** every mechanism returns immediately when `config.enabled === false`.
 
 ### Rehydration
 
-Gisted or archived content can be inflated on demand via `CognitiveMemoryManager.rehydrate(traceId)`. Content does not decay while archived; age-based retention applies. The archive is backed by [`IMemoryArchive`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/archive/IMemoryArchive.ts) (default [`SqlStorageMemoryArchive`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/archive/SqlStorageMemoryArchive.ts)), which uses the same [`StorageAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/index.ts) contract as [`Brain`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts). Archive tables (`archived_traces`, `archive_access_log`) live in the same database when the adapter is shared. The `rehydrate_memory` LLM tool is opt-in via `MemoryToolsExtension({ includeRehydrate: true })`.
+`CognitiveMemoryManager.rehydrate(traceId)` returns a trace's archived verbatim content from the manager's `archive`. The manager passes that archive to neither the temporal-gist mechanism nor its consolidation pipeline, so gisting through the manager keeps no archived copy to rehydrate; the temporal-gist mechanism archives first only when its own config carries an archive. The archive is backed by [`IMemoryArchive`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/archive/IMemoryArchive.ts) (default [`SqlStorageMemoryArchive`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/archive/SqlStorageMemoryArchive.ts)), which uses the same [`StorageAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/index.ts) contract as [`Brain`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/store/Brain.ts). Archive tables (`archived_traces`, `archive_access_log`) live in the same database when the adapter is shared. `MemoryToolsExtension` declares an `includeRehydrate` option and does not read it, so no `rehydrate_memory` tool is registered.
 
 ### Perspective encoding
 
-Events witnessed by multiple agents are rewritten through each witness's HEXACO personality, current mood, and relationships before encoding. The objective event is archived via [`IMemoryArchive`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/archive/IMemoryArchive.ts); each witness receives an independent first-person trace. Perspective-encoded traces have their reconsolidation `driftRate` halved so retrieval-time drift does not compound the encoding-time shift. The `maxDriftPerTrace` cap (0.4) still bounds total drift. Gating: only `important`-tier witnesses with `event.importance >= 0.3` and entity overlap receive LLM rewrites; others fall back to objective encoding. Cost: ~$0.025/session on Haiku 4.5 for 5 NPCs.
+[`PerspectiveObserver`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/PerspectiveObserver.ts)`.rewrite()` rewrites an event witnessed by several agents through each witness's HEXACO personality, mood and relationships, and returns one first-person trace per witness; the host encodes each with `encode(..., { perspectiveSource })`. The observer does not archive the objective event. Perspective-encoded traces have their reconsolidation `driftRate` halved so retrieval-time drift does not compound the encoding-time shift. The `maxDriftPerTrace` cap (0.4) still bounds total drift. Gating: only `important`-tier witnesses with `event.importance >= 0.3` (`importanceThreshold`) and entity overlap receive LLM rewrites; others fall back to objective encoding.
 
 ### Metadata storage
 

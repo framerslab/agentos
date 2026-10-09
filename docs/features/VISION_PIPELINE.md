@@ -1,46 +1,8 @@
-# Vision Pipeline — OCR, Image Understanding & CLIP Embeddings
+# Vision Pipeline: OCR, Image Understanding and Embeddings
 
-> A 3-tier progressive enhancement pipeline for extracting text, understanding images, and generating visual embeddings.
+[`VisionPipeline`](https://github.com/framerslab/agentos/blob/master/src/io/vision/VisionPipeline.ts) runs an image through up to five tiers: OCR (PaddleOCR or Tesseract.js), handwriting recognition (TrOCR), document layout (Florence-2), a cloud vision model called through `generateText()`, and an image embedding (CLIP). [`createVisionPipeline()`](https://github.com/framerslab/agentos/blob/master/src/io/vision/index.ts) builds a pipeline from the packages installed and the API keys in the environment.
 
----
-
-## Table of Contents
-
-1. [Overview](#overview)
-2. [Quick Start](#quick-start)
-3. [Architecture](#architecture)
-4. [Three-Tier Progressive Enhancement](#three-tier-progressive-enhancement)
-5. [Processing Strategies](#processing-strategies)
-6. [Content Detection](#content-detection)
-7. [CLIP Embeddings](#clip-embeddings)
-8. [Integration with Multimodal RAG](#integration-with-multimodal-rag)
-9. [VisionPipeline API Reference](#visionpipeline-api-reference)
-10. [createVisionPipeline() Options](#createvisionpipeline-options)
-11. [VisionResult Shape](#visionresult-shape)
-12. [Installation](#installation)
-13. [Provider Configuration](#provider-configuration)
-14. [Examples](#examples)
-15. [Related Documentation](#related-documentation)
-
----
-
-## Overview
-
-The Vision Pipeline provides a unified interface for extracting text, detecting
-content types, and generating embeddings from images. It uses a tiered
-architecture that automatically selects the best available provider, from
-lightweight local OCR to high-accuracy cloud vision APIs.
-
-**Key capabilities:**
-
-| Capability | Description |
-|------------|-------------|
-| **OCR** | Extract printed and handwritten text from images |
-| **Document Layout** | Detect headers, paragraphs, tables, figures |
-| **Image Description** | Generate natural-language descriptions |
-| **Content Classification** | Identify content type (printed, handwritten, document, photo) |
-| **CLIP Embeddings** | Generate 512-d vectors for semantic image search |
-| **Region Detection** | Locate text regions with bounding boxes and confidence |
+Read [Limitations](#limitations) before relying on a local tier: with the current releases of the OCR and model packages, several local tiers return nothing.
 
 ---
 
@@ -50,316 +12,136 @@ lightweight local OCR to high-accuracy cloud vision APIs.
 import { createVisionPipeline } from '@framers/agentos';
 import { readFileSync } from 'node:fs';
 
-// Create a pipeline with progressive strategy (local-first, cloud fallback)
+// Needs an OCR package (npm install tesseract.js) for 'progressive'.
 const vision = await createVisionPipeline({ strategy: 'progressive' });
 
-// Process an image
-const image = readFileSync('./document.png');
-const result = await vision.process(image);
+const result = await vision.process(readFileSync('./document.png'));
+console.log(result.text);        // text of the tier with the highest confidence
+console.log(result.confidence);  // that tier's confidence, 0-1
+console.log(result.category);    // 'printed-text' | 'handwritten' | 'document-layout' | 'photograph' | 'mixed' | ...
+console.log(result.tiers);       // tiers that ran, e.g. ['ocr', 'cloud-vision']
+console.log(result.tierResults); // each tier's text, confidence and duration
 
-console.log(result.text);            // Extracted text content
-console.log(result.confidence);      // Overall confidence (0.0–1.0)
-console.log(result.contentType);     // 'printed' | 'handwritten' | 'document-layout' | 'photograph'
-console.log(result.regions);         // Array of detected text regions with bounding boxes
-console.log(result.tierBreakdown);   // Which tiers ran and their timing
+await vision.dispose();
 ```
 
-### Programmatic
+The other methods each run one tier:
 
 ```typescript
-// Extract text from an image
-const ocrResult = await vision.ocr(imageBuffer);
+const text = await vision.extractText(image);      // OCR tier, returns a string
+const layout = await vision.analyzeLayout(image);  // Florence-2 tier, returns a DocumentLayout
+const vector = await vision.embed(image);          // CLIP tier, returns number[]
 
-// Describe an image
-const description = await vision.describe(imageBuffer);
-
-// Generate a CLIP embedding
-const embedResult = await vision.embed(imageBuffer);
+// Cloud tier only: a description of the image plus the text it shows.
+const described = await vision.process(image, { tiers: ['cloud-vision'] });
 ```
+
+`image` is a `Buffer`, a file path, an `http(s)` URL or a data URL. Preprocessing applies to a `Buffer` only. A file path works for the local tiers only: the cloud tier sends a string to the provider as the image URL, and a provider cannot read a path on your machine. Pass a local file as a `Buffer` when the cloud tier can run.
 
 ---
 
-## Architecture
+## Tiers
 
-The pipeline uses a 3-tier progressive enhancement model. Each tier represents
-a different level of capability and cost:
+| Tier (`VisionTier`) | What runs | Needs | Confidence it reports |
+|---|---|---|---|
+| `ocr` | PaddleOCR (`ppu-paddle-ocr`) or Tesseract.js (`tesseract.js`, English), per the `ocr` option | the package | PaddleOCR: the mean of the region confidences. Tesseract.js: the page confidence divided by 100 |
+| `handwriting` | TrOCR, `microsoft/trocr-base-handwritten`, Transformers.js `image-to-text` task | `@huggingface/transformers` and `handwriting: true` | 0.75 when it returns text, else 0 |
+| `document-ai` | Florence-2, `microsoft/Florence-2-base`, Transformers.js `image-to-text` task with the prompt "Describe the document layout in detail." | `@huggingface/transformers` and `documentAI: true` | 0.8 when it returns text, else 0 |
+| `cloud-vision` | `generateText()` with the image and a fixed prompt: describe the image, extract all visible text, name the kind of content | `cloudProvider` | 0.95, fixed |
+| `embedding` | CLIP, `Xenova/clip-vit-base-patch32`, Transformers.js `feature-extraction` task | `@huggingface/transformers` and `embedding: true` | none; fills `result.embedding` |
 
-```mermaid
-flowchart LR
-    T0["Tier 0 · Local OCR<br/><i>PaddleOCR · Tesseract</i>"]:::process
-    T1["Tier 1 · Enhanced Local<br/><i>TrOCR · Florence-2 · CLIP</i>"]:::process
-    T2["Tier 2 · Cloud Vision<br/><i>Google Cloud Vision · GPT Vision</i>"]:::external
+`result.text` and `result.confidence` come from the tier with the highest confidence, so a cloud result (0.95) wins over every local tier that ran. `result.regions` holds that tier's text regions. The Florence-2 tier returns its whole output as one `text` block, with a zero bounding box, on page 1 of `result.layout`; it does not split headings, tables or figures into blocks.
 
-    T0 -- escalate --> T1 -- escalate --> T2
-
-    classDef process fill:#eef2ff,stroke:#6366f1,color:#3730a3
-    classDef external fill:#f3e8ff,stroke:#8b5cf6,color:#5b21b6
-```
-
-The pipeline dispatches to available tiers based on the chosen strategy, falling back gracefully when a tier is unavailable or fails.
+The cloud tier sends a `Buffer` as a data URL whose media type comes from the image's first bytes (PNG, JPEG, GIF or WebP); a string goes to the provider as given.
 
 ---
 
-## Three-Tier Progressive Enhancement
+## Strategies
 
-### Tier 0 — Local OCR (Lightweight)
+| Strategy | `ocr` | `handwriting`, `document-ai` | `cloud-vision` | `embedding` |
+|---|---|---|---|---|
+| `progressive` (default) | always | when the OCR confidence is below the threshold and the category calls for the tier | when the best local confidence is below the threshold | when enabled |
+| `local-only` | always | when the category calls for the tier | never | when enabled |
+| `cloud-only` | never | never | always | when enabled |
+| `parallel` | always | when the category calls for the tier | always | when enabled |
 
-The fastest tier, optimized for printed text. Zero cloud dependency.
+- The threshold is `confidenceThreshold`, default `0.7`. In `progressive`, an OCR result at or above it ends the run.
+- The text tiers run one after another. Only the embedding tier runs alongside them. `parallel` runs the `local-only` sequence and then the cloud tier.
+- The cloud tier runs only when `cloudProvider` is set; `cloud-only` without one throws.
+- The handwriting tier runs for the categories `handwritten` and `mixed`; the document tier for `document-layout` and `mixed`.
+- A handwriting, document or embedding tier that fails is skipped. A cloud tier that fails is skipped when a local tier produced a result; otherwise `process()` throws, as it does when the OCR tier fails.
 
-| Provider | Install | Strengths |
-|----------|---------|-----------|
-| **PaddleOCR** | `npm install ppu-paddle-ocr` | SOTA accuracy for printed text, fast inference |
-| **Tesseract.js** | `npm install tesseract.js` | 100+ languages, widely supported, pure JS |
-
-Tier 0 runs first in the `progressive` strategy. If confidence is high enough
-(default threshold: `0.85`), higher tiers are skipped.
-
-```typescript
-const vision = await createVisionPipeline({
-  strategy: 'local-only',
-  tier0: {
-    provider: 'paddle-ocr',    // 'paddle-ocr' | 'tesseract'
-    confidenceThreshold: 0.85,
-    languages: ['en'],          // Tesseract language codes
-  },
-});
-```
-
-### Tier 1 — Enhanced Local (Transformers)
-
-Uses `@huggingface/transformers` (already included in AgentOS) for
-capabilities beyond basic OCR:
-
-| Model | Purpose |
-|-------|---------|
-| **TrOCR** | Handwriting recognition — outperforms Tesseract on cursive/informal text |
-| **Florence-2** | Document layout understanding — headers, tables, figures, reading order |
-| **CLIP** | Image embeddings for semantic search — 512-dimensional vectors |
-
-Tier 1 activates when Tier 0 confidence is below threshold or when the
-content type requires it (e.g., handwritten text, document layout analysis).
-
-```typescript
-const vision = await createVisionPipeline({
-  strategy: 'progressive',
-  tier1: {
-    enableTrOCR: true,           // Handwriting recognition
-    enableFlorence2: true,       // Document layout
-    enableCLIP: true,            // Image embeddings
-    modelCacheDir: '~/.cache/huggingface',
-  },
-});
-```
-
-### Tier 2 — Cloud Vision (Highest Accuracy)
-
-Cloud APIs provide the highest accuracy and broadest capability set.
-
-| Provider | Env Var | Strengths |
-|----------|---------|-----------|
-| **Google Cloud Vision** | `GOOGLE_CLOUD_VISION_KEY` | Document AI, handwriting, 100+ languages |
-| **OpenAI GPT Vision** | `OPENAI_API_KEY` | Image understanding, description, reasoning |
-| **Anthropic Vision** | `ANTHROPIC_API_KEY` | Detailed analysis, document comprehension |
-
-Tier 2 is used as the final fallback in `progressive` strategy, or exclusively
-in `cloud-only` strategy.
-
-```typescript
-const vision = await createVisionPipeline({
-  strategy: 'progressive',
-  tier2: {
-    provider: 'google-cloud-vision',  // 'google-cloud-vision' | 'openai' | 'anthropic'
-    maxCostPerRequest: 0.02,          // Budget cap per image (USD)
-  },
-});
-```
+`process(image, { tiers: [...] })` runs the listed tiers instead of the strategy's sequence, whatever the `handwriting`, `documentAI` and `embedding` flags say; the handwriting and document tiers still need a matching category.
 
 ---
 
-## Processing Strategies
+## Content Category
 
-Four strategies control how tiers are orchestrated:
+The category comes from the OCR result, checked in this order:
 
-### `progressive` (Default)
+| Condition | Category |
+|---|---|
+| no OCR result | `mixed` |
+| confidence above 0.85 | `printed-text` |
+| confidence below 0.5 and at least one single-character region | `handwritten` |
+| more than 20 regions | `document-layout` |
+| confidence below 0.6 and fewer than 5 regions | `photograph` |
+| anything else | `mixed` |
 
-Starts at Tier 0, escalates to higher tiers only when confidence is below
-threshold. Optimal cost/quality tradeoff.
-
-```typescript
-const vision = await createVisionPipeline({ strategy: 'progressive' });
-// Tier 0 → if low confidence → Tier 1 → if still low → Tier 2
-```
-
-### `local-only`
-
-Never calls cloud APIs. Uses only Tier 0 and Tier 1. Suitable for
-air-gapped environments, privacy-sensitive content, or cost elimination.
+`diagram` and `screenshot` are never detected; they come only from `forceCategory`:
 
 ```typescript
-const vision = await createVisionPipeline({ strategy: 'local-only' });
-// Tier 0 → Tier 1 (never Tier 2)
+const result = await vision.process(image, { forceCategory: 'handwritten' });
 ```
 
-### `cloud-only`
-
-Skips local processing entirely and sends directly to cloud APIs. Best when
-accuracy is paramount and latency/cost are acceptable.
-
-```typescript
-const vision = await createVisionPipeline({ strategy: 'cloud-only' });
-// Tier 2 only
-```
-
-### `parallel`
-
-Runs all available tiers simultaneously and merges results. Highest accuracy
-but also highest resource usage. Useful for critical document processing.
-
-```typescript
-const vision = await createVisionPipeline({ strategy: 'parallel' });
-// Tier 0 + Tier 1 + Tier 2 in parallel → merge best results
-```
-
----
-
-## Content Detection
-
-The pipeline automatically classifies the type of visual content to route
-processing appropriately:
-
-| Content Type | Description | Best Tier |
-|-------------|-------------|-----------|
-| `printed` | Machine-printed text (documents, signs, screenshots) | Tier 0 (PaddleOCR) |
-| `handwritten` | Handwritten or cursive text | Tier 1 (TrOCR) |
-| `document-layout` | Structured documents with headers, tables, figures | Tier 1 (Florence-2) |
-| `photograph` | Natural photographs (people, scenes, objects) | Tier 2 (GPT/Cloud Vision) |
-
-Content detection runs as a lightweight pre-processing step using CLIP
-zero-shot classification. You can also force a content type:
-
-```typescript
-const result = await vision.process(image, {
-  contentType: 'handwritten',  // Skip auto-detection, go directly to TrOCR
-});
-```
-
----
-
-## CLIP Embeddings
-
-Generate 512-dimensional embedding vectors for semantic image search and
-retrieval. CLIP embeddings enable cross-modal search (find images by text
-description and vice versa).
-
-```typescript
-import { createVisionPipeline } from '@framers/agentos';
-
-const vision = await createVisionPipeline({
-  strategy: 'local-only',
-  tier1: { enableCLIP: true },
-});
-
-// Generate an embedding vector
-const result = await vision.embed(imageBuffer);
-console.log(result.embedding);     // Float32Array(512)
-console.log(result.model);         // 'clip-vit-base-patch32'
-
-// Use with vector stores for image search
-import { HnswlibVectorStore } from '@framers/agentos';
-
-const store = new HnswlibVectorStore({
-  id: 'image-index',
-  type: 'hnsw',
-  dimension: 512,
-});
-await store.initialize();
-await store.upsert({ id: 'img-1', vector: result.embedding, metadata: { path: './photo.jpg' } });
-
-// Search by text
-const textEmbedding = await vision.embedText('a sunset over the ocean');
-const matches = await store.query(textEmbedding, { topK: 5 });
-```
-
----
-
-## Integration with Multimodal RAG
-
-The vision pipeline integrates directly with the [Multimodal RAG](../memory/MULTIMODAL_RAG.md)
-system for indexing and retrieving image content. Configure RAG via the
-`rag` field on `agent({ ... })` — its shape is the [`RagConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts#L97) interface, with `multimodal.images` toggling image indexing.
-
-```typescript
-import { agent } from '@framers/agentos';
-
-const myAgent = agent({
-  provider: 'openai',
-  rag: {
-    multimodal: { images: true, audio: false },
-    vectorStore: { provider: 'hnswlib', embeddingModel: 'clip-vit-base-patch32' },
-    topK: 5,
-  },
-});
-
-// The agent can now answer questions about images in its indexed corpus
-const result = await myAgent.generate('What did the receipt from yesterday say?');
-console.log(result.text);
-```
-
-For richer indexing pipelines (auto-describe on ingest, multi-modal embedding fusion),
-see the lower-level [Multimodal RAG guide](../memory/MULTIMODAL_RAG.md) — it shows the
-[`VisionPipeline`](https://github.com/framerslab/agentos/blob/master/src/io/vision/VisionPipeline.ts) + [`IngestRouter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/ingest/IngestRouter.ts) wiring directly, without going through the
-high-level `agent()` helper.
-
----
-
-## VisionPipeline API Reference
-
-### Methods
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `process()` | `(image: Buffer, options?) => Promise<VisionResult>` | Full processing: OCR + content detection + layout |
-| `ocr()` | `(image: Buffer, options?) => Promise<OcrResult>` | Text extraction only |
-| `describe()` | `(image: Buffer, options?) => Promise<DescribeResult>` | Natural-language image description |
-| `embed()` | `(image: Buffer) => Promise<EmbedResult>` | CLIP embedding vector |
-| `embedText()` | `(text: string) => Promise<Float32Array>` | Text embedding (same CLIP space) |
-| `detectContent()` | `(image: Buffer) => Promise<ContentType>` | Content type classification |
-| `dispose()` | `() => Promise<void>` | Release model resources |
+`forceCategory` sets the reported category and routes the handwriting and document tiers. In `progressive` the OCR tier still runs first, and an OCR result at or above the threshold still ends the run. To run TrOCR alone, pass `{ tiers: ['handwriting'] }`.
 
 ---
 
 ## createVisionPipeline() Options
 
+`createVisionPipeline(config?)` takes a partial [`VisionPipelineConfig`](https://github.com/framerslab/agentos/blob/master/src/io/vision/types.ts). A field left out is filled in by detection: the optional packages installed, and the API keys in the environment. `new VisionPipeline(config)` detects nothing: its `handwriting`, `documentAI` and `embedding` default to off and its `ocr` to `'paddle'`.
+
 ```typescript
-interface VisionPipelineOptions {
-  /** Processing strategy. Default: 'progressive'. */
+interface VisionPipelineConfig {
+  /** How the tiers combine. Default: 'progressive'. */
   strategy: 'progressive' | 'local-only' | 'cloud-only' | 'parallel';
 
-  /** Tier 0 configuration (local OCR). */
-  tier0?: {
-    provider?: 'paddle-ocr' | 'tesseract';
-    confidenceThreshold?: number;   // Default: 0.85
-    languages?: string[];           // Default: ['en']
-  };
+  /** OCR engine. Detected: 'paddle' when ppu-paddle-ocr is installed, else 'tesseract' when tesseract.js is, else 'none'. */
+  ocr?: 'paddle' | 'tesseract' | 'none';
 
-  /** Tier 1 configuration (enhanced local). */
-  tier1?: {
-    enableTrOCR?: boolean;          // Default: true
-    enableFlorence2?: boolean;      // Default: true
-    enableCLIP?: boolean;           // Default: true
-    modelCacheDir?: string;         // Default: ~/.cache/huggingface
-  };
+  /** TrOCR handwriting, Florence-2 document layout and CLIP embeddings. Detected: on when @huggingface/transformers is installed. */
+  handwriting?: boolean;
+  documentAI?: boolean;
+  embedding?: boolean;
 
-  /** Tier 2 configuration (cloud vision). */
-  tier2?: {
-    provider?: 'google-cloud-vision' | 'openai' | 'anthropic';
-    maxCostPerRequest?: number;     // Budget cap in USD
-  };
+  /**
+   * Cloud vision provider, a provider id generateText() knows ('openai',
+   * 'anthropic', 'gemini', 'openrouter', ...). Detected: 'openai' when
+   * OPENAI_API_KEY is set, else 'anthropic' (ANTHROPIC_API_KEY), else 'google'
+   * (GOOGLE_API_KEY or GEMINI_API_KEY), else 'openrouter' (OPENROUTER_API_KEY);
+   * unset and undetected, there is no cloud tier. 'google' is not a provider
+   * id: for Gemini pass 'gemini'. Gemini does not fetch image URLs, so give
+   * it a Buffer or a data URL.
+   */
+  cloudProvider?: string;
+  /** Cloud model. Default: the provider's default text model. */
+  cloudModel?: string;
+  /** Key for the cloud provider. Default: its environment variable (OPENAI_API_KEY and so on). */
+  cloudApiKey?: string;
+  /** Base URL for the cloud provider, such as a proxy. */
+  cloudBaseUrl?: string;
 
-  /** Global options. */
-  maxImageSize?: number;            // Max dimension in pixels (auto-resize). Default: 4096
-  timeout?: number;                 // Per-tier timeout in ms. Default: 30000
-  enableRegionDetection?: boolean;  // Bounding boxes for text regions. Default: true
+  /** Confidence below which 'progressive' runs the next tier. Default: 0.7. */
+  confidenceThreshold?: number;
+
+  /** Applied with sharp to a Buffer before any tier runs. Without sharp installed, the image passes unchanged. */
+  preprocessing?: {
+    grayscale?: boolean;
+    resize?: { maxWidth?: number; maxHeight?: number };  // scales down only
+    sharpen?: boolean;
+    normalize?: boolean;
+  };
 }
 ```
 
@@ -369,174 +151,96 @@ interface VisionPipelineOptions {
 
 ```typescript
 interface VisionResult {
-  /** Extracted text content (all tiers merged). */
-  text: string;
-
-  /** Overall confidence score (0.0–1.0). */
-  confidence: number;
-
-  /** Detected content type. */
-  contentType: 'printed' | 'handwritten' | 'document-layout' | 'photograph';
-
-  /** Detected text regions with bounding boxes and per-region confidence. */
-  regions: VisionRegion[];
-
-  /** Document layout elements (headers, paragraphs, tables, figures). */
-  layout?: LayoutElement[];
-
-  /** Natural-language description of the image (if Tier 2 ran). */
-  description?: string;
-
-  /** CLIP embedding vector (if enabled). */
-  embedding?: Float32Array;
-
-  /** Breakdown of which tiers ran and their timing. */
-  tierBreakdown: TierReport[];
+  text: string;                 // text of the winning tier
+  confidence: number;           // confidence of the winning tier, 0-1
+  category: ContentCategory;    // 'printed-text' | 'handwritten' | 'document-layout' | 'photograph' | 'diagram' | 'screenshot' | 'mixed'
+  tiers: VisionTier[];          // tiers that ran: 'ocr' | 'handwriting' | 'document-ai' | 'embedding' | 'cloud-vision'
+  tierResults: TierResult[];    // one entry per text tier that produced a result, in run order
+  embedding?: number[];         // CLIP output, when the embedding tier ran
+  layout?: DocumentLayout;      // { pages: [{ pageNumber, width, height, blocks }] }, when Florence-2 ran
+  regions?: TextRegion[];       // text regions of the winning tier
+  durationMs: number;           // wall-clock time of process()
 }
 
-interface VisionRegion {
+interface TierResult {
+  tier: VisionTier;
+  provider: string;             // 'paddle', 'tesseract', 'trocr', 'florence-2', or the cloud provider id
+  text: string;
+  confidence: number;
+  durationMs: number;
+  regions?: TextRegion[];
+}
+
+interface TextRegion {
   text: string;
   confidence: number;
   bbox: { x: number; y: number; width: number; height: number };
-  tier: 0 | 1 | 2;
-}
-
-interface TierReport {
-  tier: 0 | 1 | 2;
-  provider: string;
-  durationMs: number;
-  confidence: number;
-  skipped: boolean;
-  skipReason?: string;
 }
 ```
+
+---
+
+## Indexing Images for Retrieval
+
+The multimodal indexer describes an image with a vision provider, embeds the description with your text embedding manager and stores it with `modality: 'image'`; `search()` embeds a text query the same way. [`createMultimodalIndexerFromResolver()`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/multimodal/createMultimodalIndexerFromResolver.ts) wraps a pipeline as that vision provider, so the indexed text is `process(image).text`.
+
+```typescript
+import { createVisionPipeline } from '@framers/agentos';
+import {
+  createMultimodalIndexerFromResolver,
+  type IEmbeddingManager,
+  type IVectorStore,
+} from '@framers/agentos/cognition/rag';
+import { readFileSync } from 'node:fs';
+
+declare const embeddingManager: IEmbeddingManager; // your text embedding manager
+declare const vectorStore: IVectorStore;           // your initialized vector store
+
+const visionPipeline = await createVisionPipeline({ strategy: 'cloud-only', cloudProvider: 'openai' });
+const indexer = createMultimodalIndexerFromResolver({ visionPipeline, embeddingManager, vectorStore });
+
+await indexer.indexImage({ image: readFileSync('./receipt.jpg'), metadata: { source: 'upload' } });
+const hits = await indexer.search('receipt total');
+```
+
+Pass the pipeline through this factory (or as `visionProvider: new PipelineVisionProvider(pipeline)`), not as `new MultimodalIndexer({ visionPipeline })`: that constructor path fails in the published ES module build. The indexer sends a `Buffer` to the pipeline as a data URL labelled `image/png`, so the pipeline skips preprocessing, and a provider that checks the label against the bytes (Anthropic does) rejects a JPEG.
+
+`agent()` accepts a `rag` field (including `rag.multimodal.images`) and does not read it.
+
+See [Multimodal RAG](../memory/MULTIMODAL_RAG.md) for the indexing design.
 
 ---
 
 ## Installation
 
-The vision pipeline works out of the box with `@huggingface/transformers`
-(bundled with AgentOS). Install optional providers for better results:
-
 ```bash
-# Tier 0: Local OCR providers (install one or both)
-npm install ppu-paddle-ocr          # SOTA OCR for printed text (~50 MB)
-npm install tesseract.js            # Fallback OCR, 100+ languages (~15 MB)
-
-# Tier 1: Already included via @huggingface/transformers
-# TrOCR, Florence-2, and CLIP models are downloaded on first use (~200 MB each)
-
-# Tier 2: Cloud providers — just set environment variables
-export GOOGLE_CLOUD_VISION_KEY=your-key    # Google Cloud Vision
-export OPENAI_API_KEY=sk-...               # OpenAI GPT Vision
-export ANTHROPIC_API_KEY=sk-ant-...        # Anthropic Vision
+npm install tesseract.js     # OCR tier (ppu-paddle-ocr also works as the engine; see Limitations)
+npm install sharp            # only for preprocessing
 ```
+
+`@huggingface/transformers` is an optional dependency of `@framers/agentos` and installs with it unless optional dependencies are skipped. Transformers.js downloads model weights from the Hugging Face Hub the first time a tier loads them.
+
+The cloud tier reads the provider's key from its environment variable: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` (with `cloudProvider: 'gemini'`) or `OPENROUTER_API_KEY`, unless `cloudApiKey` is set.
 
 ---
 
-## Provider Configuration
+## Limitations
 
-### PaddleOCR (Tier 0)
+These follow from how the pipeline calls each package, checked against `ppu-paddle-ocr` 6.6.1, `tesseract.js` 7.0.0 and `@huggingface/transformers` 3.8.1:
 
-```bash
-npm install ppu-paddle-ocr
-```
-
-PaddleOCR is a PaddlePaddle-based OCR engine with state-of-the-art accuracy on
-printed text. It supports English, Chinese, Japanese, Korean, and many other
-languages.
-
-### Tesseract.js (Tier 0)
-
-```bash
-npm install tesseract.js
-```
-
-Tesseract.js runs entirely in JavaScript/WASM. It supports 100+ languages and
-is a reliable fallback when PaddleOCR is not installed.
-
-### TrOCR (Tier 1)
-
-Loaded automatically via `@huggingface/transformers`. Excels at handwriting
-recognition. The model (`microsoft/trocr-base-handwritten`) is downloaded on
-first use.
-
-### Florence-2 (Tier 1)
-
-Loaded automatically via `@huggingface/transformers`. Provides document layout
-understanding including headers, tables, and reading order detection. The model
-(`microsoft/Florence-2-base`) is downloaded on first use.
-
-### CLIP (Tier 1)
-
-Loaded automatically via `@huggingface/transformers`. Generates 512-d embedding
-vectors for semantic image search. The model (`openai/clip-vit-base-patch32`)
-is downloaded on first use.
-
----
-
-## Examples
-
-### Batch OCR Processing
-
-```typescript
-import { createVisionPipeline } from '@framers/agentos';
-import { readdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
-
-const vision = await createVisionPipeline({ strategy: 'progressive' });
-
-const imageDir = './scanned-documents';
-const files = (await readdir(imageDir)).filter(f => /\.(png|jpg|jpeg|tiff)$/i.test(f));
-
-for (const file of files) {
-  const image = await readFile(join(imageDir, file));
-  const result = await vision.process(image);
-  console.log(`${file}: ${result.contentType} (${(result.confidence * 100).toFixed(1)}%)`);
-  console.log(`  Text: ${result.text.slice(0, 200)}...`);
-  console.log(`  Tiers: ${result.tierBreakdown.map(t => `T${t.tier}:${t.durationMs}ms`).join(', ')}`);
-}
-
-await vision.dispose();
-```
-
-### Image Search Index
-
-```typescript
-import { createVisionPipeline, HnswlibVectorStore } from '@framers/agentos';
-import { readFile } from 'node:fs/promises';
-
-const vision = await createVisionPipeline({
-  strategy: 'local-only',
-  tier1: { enableCLIP: true },
-});
-const store = new HnswlibVectorStore({
-  id: 'image-index',
-  type: 'hnsw',
-  dimension: 512,
-});
-await store.initialize();
-
-// Index images
-const images = ['photo1.jpg', 'photo2.jpg', 'photo3.jpg'];
-for (const path of images) {
-  const buffer = await readFile(path);
-  const { embedding } = await vision.embed(buffer);
-  await store.upsert({ id: path, vector: embedding, metadata: { path } });
-}
-
-// Search by text description
-const query = await vision.embedText('a dog playing in the park');
-const results = await store.query(query, { topK: 3 });
-console.log('Best matches:', results.map(r => r.metadata.path));
-```
+- **No OCR package.** `createVisionPipeline()` then sets `ocr: 'none'`, and any run that includes the OCR tier throws `OCR is set to "none" but OCR tier was requested.`: `extractText()`, `process()` under every strategy except `cloud-only`, and `process(image, { tiers })` with a list that names `'ocr'`. A `tiers` list without `'ocr'` skips the tier and does not throw.
+- **Gemini detection.** With only `GOOGLE_API_KEY` or `GEMINI_API_KEY` set, detection picks `cloudProvider: 'google'`, which `generateText()` rejects (`Unknown provider "google"`). Pass `cloudProvider: 'gemini'`.
+- **PaddleOCR.** The tier reads `regions` or `data` from `recognize()`; ppu-paddle-ocr 6.6.1 returns `{ text, lines, confidence }`, so the tier reports empty text with confidence 0.
+- **Tesseract.js.** The tier reads words from `data.words`; tesseract.js 7.0.0 reports words only inside `data.blocks`, which it leaves out by default. Text and confidence come through, `regions` stays empty, and detection then never returns `handwritten` or `document-layout`.
+- **TrOCR and Florence-2.** Transformers.js runs ONNX weights, and the `microsoft/trocr-base-handwritten` and `microsoft/Florence-2-base` repositories hold none, so both tiers fail to load: `process()` skips them and `analyzeLayout()` throws.
+- **CLIP.** The `feature-extraction` task tokenizes its input as text, and the tier passes the image as a data URL string, so the CLIP model gets no pixel values and the call fails: `process()` leaves `embedding` unset and `embed()` throws. Transformers.js computes CLIP image embeddings with the `image-feature-extraction` task. The pipeline has no text-embedding method in the CLIP space.
 
 ---
 
 ## Related Documentation
 
-- [Image Generation](./IMAGE_GENERATION.md) — Generate images from text
-- [Image Editing](./IMAGE_EDITING.md) — Edit, upscale, and variate images
-- [Image Segmentation](./IMAGE_SEGMENTATION.md) — Pixel masks via SAM2 / GroundedSAM
-- [Multimodal RAG](../memory/MULTIMODAL_RAG.md) — Image + audio retrieval-augmented generation
-- [High-Level API](../getting-started/HIGH_LEVEL_API.md) — Full API reference
+- [Image Generation](./IMAGE_GENERATION.md): generate images from text
+- [Image Editing](./IMAGE_EDITING.md): edit, upscale and vary images
+- [Image Segmentation](./IMAGE_SEGMENTATION.md): pixel masks via SAM2 / GroundedSAM
+- [Multimodal RAG](../memory/MULTIMODAL_RAG.md): image and audio retrieval
+- [High-Level API](../getting-started/HIGH_LEVEL_API.md): API reference

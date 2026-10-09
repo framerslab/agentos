@@ -1,8 +1,8 @@
 # AgentGraph
 
-When `workflow()` is too rigid and `mission()` is too far ahead of where the runtime currently plans, the answer is [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) — explicit node and edge construction with cycles, conditional routing, subgraph composition, and the discovery and personality edges that don't exist in any other open agent framework. It compiles to the same [`CompiledExecutionGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) IR as the higher-level builders, but it gets you full control over the topology before compilation.
+When `workflow()` is too rigid and you want to lay out the topology yourself, use [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts): explicit node and edge construction with cycles, conditional routing, subgraph composition, and discovery and personality edges. It compiles to the same [`CompiledExecutionGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) IR as the higher-level builders, but it gets you full control over the topology before compilation.
 
-**Honest runtime status.** Compilation is complete. Execution is partial: the base runtime executes `tool`, `router`, `guardrail`, and `human` nodes directly. `gmi`, `extension`, and `subgraph` execution still requires a higher-level runtime bridge today, and the discovery and personality edges activate fully only when those integrations are wired. If your graph uses only the four direct-execution node kinds, you're in production-ready territory; if it relies heavily on `gmi` nodes inside cycles, expect to wire the bridge.
+**Runtime status.** `compile({ deps })` hands the node executors to the runtime ([Unified Orchestration](../orchestration/UNIFIED_ORCHESTRATION.md)). `router` and `human` nodes run on their own. A `tool` node needs `deps.toolOrchestrator` and fails without it; a `guardrail` node needs `deps.guardrailEngine` and passes without it; a `gmi` node needs `deps.loopController` and `deps.providerCall` and otherwise succeeds with the output `'gmi-placeholder'`; an `extension` node needs `deps.extensionExecutor`, and a `subgraph` node `deps.subgraphResolver` and `deps.createSubgraphRuntime`; each otherwise succeeds with a placeholder output. The compiled graph's runtime has no discovery engine and no persona traits, so a discovery edge always takes its fallback target and a personality edge reads its trait from `scratch._personaTraits` (0.5 when absent). The runtime does not read a node's `memory`, `discovery` or `persona` policies; they stay in the IR.
 
 Use [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) when you need cycles, conditional fan-out, memory-driven state machines, or subgraph composition. Use [`workflow()`](../orchestration/WORKFLOW_DSL.md) for linear pipelines. Use [`mission()`](../orchestration/MISSION_API.md) when you'd rather declare intent than topology.
 
@@ -13,9 +13,32 @@ Use [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchest
 ```typescript
 import {
   AgentGraph, START, END,
-  gmiNode, toolNode,
+  gmiNode, toolNode, LoopController,
 } from '@framers/agentos/orchestration';
+import type { WorkflowRuntimeDeps } from '@framers/agentos/orchestration/builders/WorkflowBuilder';
 import { z } from 'zod';
+
+// Your application's own tool runner and model call.
+declare function runMyTool(name: string, args: Record<string, unknown>): Promise<unknown>;
+declare function callMyModel(instructions: string, scratch: unknown): Promise<string>;
+
+// Host bindings for the node executors. The WorkflowRuntimeDeps annotation
+// types every callback parameter (toolCallRequest, instructions, state).
+const deps: WorkflowRuntimeDeps = {
+  toolOrchestrator: {
+    async processToolCall({ toolCallRequest }) {
+      const output = await runMyTool(toolCallRequest.toolName, toolCallRequest.arguments);
+      return { success: true, output };
+    },
+  },
+  loopController: new LoopController(),
+  async *providerCall(instructions, state) {
+    const text = await callMyModel(instructions, state.scratch);
+    yield { type: 'text_delta', content: text };
+    // No tool calls: the node's loop ends after this turn.
+    return { responseText: text, toolCalls: [], finishReason: 'stop' };
+  },
+};
 
 const graph = new AgentGraph(
   {
@@ -30,7 +53,8 @@ const graph = new AgentGraph(
   .addEdge(START, 'search')
   .addEdge('search', 'summarize')
   .addEdge('summarize', END)
-  .compile();
+  // toolOrchestrator runs the tool node; loopController + providerCall run the gmi node.
+  .compile({ deps });
 
 const result = await graph.invoke({ topic: 'quantum computing' });
 ```
@@ -47,16 +71,16 @@ new AgentGraph(stateSchema, config?)
 | `stateSchema.scratch` | Zod schema | Shape of the mutable node-to-node communication bag |
 | `stateSchema.artifacts` | Zod schema | Shape of the accumulated outputs returned to the caller |
 | `config.reducers` | [`StateReducers`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) | Field-level merge strategies for parallel branches |
-| `config.memoryConsistency` | [`MemoryConsistencyMode`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) | Graph-wide memory isolation (default: `'snapshot'`) |
-| `config.checkpointPolicy` | `'every_node' \| 'explicit' \| 'none'` | When to persist checkpoints (default: `'none'`) |
+| `config.memoryConsistency` | [`MemoryConsistencyMode`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) | Recorded in the IR (default: `'snapshot'`); the runtime does not read it |
+| `config.checkpointPolicy` | `'every_node' \| 'explicit' \| 'none'` | When to persist checkpoints (default: `'none'`; see [Checkpointing](../orchestration/CHECKPOINTING.md)) |
 
 ## Node Builders
 
-All nodes are created with typed factory functions. Each accepts an optional `policies` object for memory, discovery, guardrail, and persona configuration.
+All nodes are created with typed factory functions. Each accepts an optional `policies` object for memory, discovery, guardrail, persona, effect class and checkpoint configuration; the runtime reads the effect class and the checkpoint flag, and evaluates no `guardrails` policy (a `guardrailNode` is the step that checks content during a run).
 
 ### gmiNode
 
-A General Model Invocation node that calls an LLM. The default `executionMode` is `react_bounded` — an internal ReAct tool-use loop capped by `maxInternalIterations`.
+A node that calls an LLM through the host's `deps.providerCall`, inside the `LoopController`'s ReAct tool-use loop, capped by `maxInternalIterations` (default 10). The executor passes the node's `instructions` and the graph state to `providerCall`; `temperature` and `maxTokens` are recorded in the IR and not passed on.
 
 ```typescript
 import { gmiNode } from '@framers/agentos/orchestration';
@@ -64,8 +88,8 @@ import { gmiNode } from '@framers/agentos/orchestration';
 gmiNode(
   {
     instructions: 'Research the topic thoroughly.',
-    executionMode: 'react_bounded', // default — bounded ReAct loop
-    maxInternalIterations: 5,       // default
+    executionMode: 'react_bounded', // default; recorded in the IR
+    maxInternalIterations: 5,       // default 10
     parallelTools: false,
     temperature: 0.7,
     maxTokens: 2048,
@@ -83,13 +107,7 @@ gmiNode(
 )
 ```
 
-**Execution modes:**
-
-| Mode | Description | Default for |
-|---|---|---|
-| `single_turn` | One LLM call, no internal tool loop | `workflow()` steps |
-| `react_bounded` | ReAct loop up to `maxInternalIterations` | [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) gmi nodes |
-| `planner_controlled` | PlanningEngine controls the loop | `mission()` steps |
+**Execution modes:** `executionMode` is `react_bounded` by default on a `gmiNode`, and `single_turn` on the other node factories and on `judgeNode`. The runtime does not read it: every `gmi` node runs the same bounded ReAct loop.
 
 ### toolNode
 
@@ -102,7 +120,7 @@ toolNode(
   'web_search',
   {
     timeout: 10_000,
-    // Accepted by the IR today; shared-runtime retries are still being wired.
+    // The runtime re-runs a failed node up to maxAttempts times with this backoff.
     retryPolicy: { maxAttempts: 3, backoff: 'exponential', backoffMs: 500 },
   },
   {
@@ -114,7 +132,7 @@ toolNode(
 
 ### humanNode
 
-Suspends execution and surfaces a prompt to a human operator. The run can be resumed with `.resume(checkpointId)` after the human responds.
+Suspends execution for a human decision. With `autoAccept`, `autoReject`, or a `judge` that decides with enough confidence, the node resolves at once. Otherwise it interrupts the run: the runtime saves a checkpoint and emits an `interrupt` event. `resume()` marks the human node complete with its recorded output (`{ prompt }`), so a host that has the human's answer puts it into the state with `fork(checkpointId, patch)` and resumes the fork ([Checkpointing](../orchestration/CHECKPOINTING.md)). After an auto-accept, a judge's approval or a timeout accept (`onTimeout: 'accept'`), the node runs the guardrails `pii-redaction` and `code-safety` through `deps.guardrailEngine` when one is wired, and a block turns the decision into `approved: false`; `guardrailOverride: false` turns that check off.
 
 ```typescript
 import { humanNode } from '@framers/agentos/orchestration';
@@ -138,7 +156,7 @@ routerNode("scratch.confidence > 0.8 ? 'summarize' : 'search'")
 
 ### guardrailNode
 
-Runs guardrails as an explicit step in the graph, not just on the edge. Use this for pre-flight checks or to gate progress through critical stages.
+Runs guardrails as an explicit step in the graph. The runtime does not evaluate the `guardrails` policy of a node or an edge, so this node is how a compiled graph checks content mid-run. Use it for pre-flight checks or to gate progress through critical stages.
 
 ```typescript
 import { guardrailNode } from '@framers/agentos/orchestration';
@@ -153,7 +171,7 @@ guardrailNode(['pii-redaction', 'content-safety'], {
 
 Embeds a previously compiled [`CompiledExecutionGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) as a single node. Input and output fields are mapped between the parent and child graphs.
 
-At the moment, this is a compile-time authoring primitive. Executing subgraphs requires a runtime bridge that knows how to resolve and invoke nested graphs.
+The node records the child graph's id. At run time the executor looks the child up with `deps.subgraphResolver(graphId)` and runs it on a runtime from `deps.createSubgraphRuntime`; without both, the node succeeds with the output `'subgraph-placeholder'`.
 
 ```typescript
 import { subgraphNode } from '@framers/agentos/orchestration';
@@ -190,7 +208,7 @@ The function must return a valid node id. The returned id is not validated at co
 
 ### Discovery Edge
 
-Target is resolved at runtime via semantic search over the capability registry. In the shared runtime today, this remains partial: when discovery is not wired, execution follows the declared fallback target.
+The runtime asks a discovery engine whether a capability matches the query. The compiled graph's runtime has none, so execution follows the declared fallback target.
 
 ```typescript
 graph.addDiscoveryEdge('plan', {
@@ -200,16 +218,11 @@ graph.addDiscoveryEdge('plan', {
 });
 ```
 
-**Runtime semantics (target state):**
-1. `CapabilityDiscoveryEngine.discover(query, { kind })` is called
-2. The top-1 result is selected
-3. A transient executable node is instantiated
-4. Execution continues through the resolved target
-5. If no results: route to `fallbackTarget`, or emit `DISCOVERY_NO_RESULTS`
+**Runtime semantics.** A [`GraphRuntime`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/GraphRuntime.ts) built with a `discoveryEngine` calls `discover(query, { kind })`. When the first result has an id or a name, execution continues to the edge's own target; with no engine, no result or an error, it continues to `fallbackTarget`. No node is created from the discovered capability.
 
 ### Personality Edge
 
-Routes based on the agent's current HEXACO/PAD trait value. No conditional logic required in your code once a personality source is wired into the runtime.
+Routes on a trait value: the runtime's `personaTraits[trait]`, else `scratch._personaTraits[trait]`, else 0.5. The compiled graph's runtime has no `personaTraits`, so the value comes from the scratch state or the default.
 
 ```typescript
 graph.addPersonalityEdge('draft', {
@@ -220,7 +233,7 @@ graph.addPersonalityEdge('draft', {
 });
 ```
 
-Available HEXACO traits: `honesty_humility`, `emotionality`, `extraversion`, `agreeableness`, `conscientiousness`, `openness`.
+`trait` is any key of that trait map, for example `openness` or `conscientiousness`.
 
 ## State Management
 
@@ -233,7 +246,7 @@ interface GraphState<TInput, TScratch, TArtifacts> {
   artifacts: TArtifacts;        // Accumulated outputs returned to caller
 
   // Runtime-managed:
-  memory: MemoryView;           // Read-only memory traces (populated by MemoryPolicy)
+  memory: MemoryView;           // Read-only memory view; the runtime leaves it empty
   diagnostics: DiagnosticsView; // Token usage, latency, discovery results
   currentNodeId: string;
   visitedNodes: string[];
@@ -262,9 +275,12 @@ const graph = new AgentGraph(stateSchema, {
 ## Compilation
 
 ```typescript
+import { InMemoryCheckpointStore } from '@framers/agentos/orchestration';
+
 const compiled = graph.compile({
-  checkpointStore: new InMemoryCheckpointStore('./runs.db'),
+  checkpointStore: new InMemoryCheckpointStore(), // the default when omitted
   validate: true, // default — throws on unreachable nodes or structural errors
+  deps, // the host bindings from the Quick Start
 });
 ```
 
@@ -279,7 +295,7 @@ const result = await compiled.invoke({ topic: 'quantum computing' });
 // Stream events
 for await (const event of compiled.stream({ topic: 'quantum computing' })) {
   console.log(event.type, event.nodeId);
-  // event.type: 'run_start' | 'node_start' | 'node_end' | 'edge_transition' | 'run_end'
+  // event.type: 'run_start' | 'node_start' | 'node_end' | 'edge_transition' | 'interrupt' | 'checkpoint_saved' | 'node_timeout' | 'error' | 'run_end', among others
 }
 
 // Resume from checkpoint after interruption
@@ -407,7 +423,8 @@ const graph = new AgentGraph(ResearchState, {
   .addEdge('review', END)
 
   .compile({
-    checkpointStore: new InMemoryCheckpointStore('./research-checkpoints.db'),
+    checkpointStore: new InMemoryCheckpointStore(),
+    deps, // the host bindings from the Quick Start
   });
 
 // Run
@@ -435,7 +452,7 @@ const result2 = await graph.resume(savedCheckpointId);
 
 ### Graph-structured agent orchestration
 
-- Wu, Q., Bansal, G., Zhang, J., Wu, Y., Li, B., Zhu, E., Jiang, L., Zhang, X., Zhang, S., Liu, J., Awadallah, A. H., White, R. W., Burger, D., & Wang, C. (2023). [*AutoGen: Enabling next-gen LLM applications via multi-agent conversation.*](https://arxiv.org/abs/2308.08155) arXiv:2308.08155. — Conversation-graph patterns that informed the `gmi` node + `delegate_to` edge semantics.
+- Wu, Q., Bansal, G., Zhang, J., Wu, Y., Li, B., Zhu, E., Jiang, L., Zhang, X., Zhang, S., Liu, J., Awadallah, A. H., White, R. W., Burger, D., & Wang, C. (2023). [*AutoGen: Enabling next-gen LLM applications via multi-agent conversation.*](https://arxiv.org/abs/2308.08155) arXiv:2308.08155. — Conversation-graph patterns that informed the `gmi` node semantics.
 - LangGraph contributors. [*LangGraph: A library for building stateful, multi-actor applications with LLMs.*](https://github.com/langchain-ai/langgraph) — Reference architecture for stateful graph orchestration with cycles and conditional branches; AgentGraph deliberately differs in the edge taxonomy (adds discovery + personality edges).
 
 ### Conditional + cyclic state machines

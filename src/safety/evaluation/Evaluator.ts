@@ -18,6 +18,7 @@ import {
   ScorerFunction,
   BuiltInScorer,
 } from './IEvaluator';
+import { wordErrorRate } from './wordErrorRate';
 
 // ============================================================================
 // Built-in Scorers
@@ -182,6 +183,12 @@ const rougeScorer: ScorerFunction = (actual, expected) => {
   return (2 * precision * recall) / (precision + recall);
 };
 
+/**
+ * Word error rate scorer - 1 less the word error rate of the actual transcript against the expected one
+ * (see {@link wordErrorRate}), never below 0, and 0 with no expected output.
+ */
+const wordErrorRateScorer: ScorerFunction = (actual, expected) => (expected === undefined ? 0 : Math.max(0, 1 - wordErrorRate(actual, expected).rate));
+
 // ============================================================================
 // Evaluator Implementation
 // ============================================================================
@@ -215,6 +222,7 @@ export class Evaluator implements IEvaluator {
     this.scorers.set('semantic_similarity', wordOverlapScorer);
     this.scorers.set('bleu', bleuScorer);
     this.scorers.set('rouge', rougeScorer);
+    this.scorers.set('word_error_rate', wordErrorRateScorer);
   }
 
   async runEvaluation(

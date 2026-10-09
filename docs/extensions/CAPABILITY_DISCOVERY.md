@@ -4,24 +4,24 @@
 For discovery architecture and integration points, see [Capability Discovery — Token-Efficient Tool Context](./DISCOVERY.md).
 :::
 
-> Semantic, tiered capability discovery that replaces static tool dumps with per-turn, token-budgeted context — cutting capability context by ~90% (from ~20,000 to ~1,850 tokens) while improving retrieval accuracy.
+> Semantic, tiered capability discovery that replaces a static dump of every tool schema with per-turn context held to token budgets (200 + 800 + 2,000 tokens at the defaults).
 
 ---
 
 ## Overview
 
-Traditional agent frameworks dump every registered tool schema into the system prompt. At scale (20+ tools, 40 skills, 20 channels), this creates ~20,000 tokens of static context that the model must parse every turn — most of it irrelevant. Research calls this **context rot** (Chroma 2025): degrading output quality as irrelevant context accumulates.
+Putting every registered tool schema into the system prompt grows the prompt with each tool, skill and channel, and the model reads all of it on every turn, most of it irrelevant to the turn. Research calls the quality loss that follows **context rot** (Chroma 2025).
 
 The Capability Discovery Engine solves this with a **three-tier context model**:
 
-| Tier | Budget | Content | When |
+| Tier | Default budget | Content | When |
 |------|--------|---------|------|
-| **Tier 0** | ~150 tokens | Category summaries | Always in context |
-| **Tier 1** | ~200 tokens | Top-5 capability summaries | Per-turn semantic retrieval |
-| **Tier 2** | ~1,500 tokens | Full schema/content for top-2 | Per-turn deep pull |
-| **Total** | **~1,850 tokens** | | |
+| **Tier 0** | 200 tokens | Category summaries | Always in context |
+| **Tier 1** | 800 tokens | Top-5 capability summaries | Per-turn semantic retrieval |
+| **Tier 2** | 2,000 tokens | Full schema/content for top-2 | Per-turn deep pull |
+| **Total** | **at most 3,000 tokens** | | |
 
-Agents also get a meta-tool (`discover_capabilities`, ~80 tokens in tool list) for active search when passive tiers miss something.
+The budgets, `tier1TopK` and `tier2TopK` are configurable ([Configuration](#configuration)). Agents also get a meta-tool, `discover_capabilities`, for active search when the passive tiers miss something.
 
 ---
 
@@ -75,7 +75,7 @@ User Message
 
 ## Three-Tier Context Model
 
-### Tier 0 — Always in Context (~150 tokens)
+### Tier 0 — Always in Context (200-token default budget)
 
 Category summaries giving the model a high-level map. Regenerated only when capabilities change (version-tracked cache).
 
@@ -87,9 +87,9 @@ Available capability categories:
 Use discover_capabilities tool to get details on any capability.
 ```
 
-### Tier 1 — Semantic Retrieval (~200 tokens)
+### Tier 1 — Semantic Retrieval (800-token default budget)
 
-Per-turn top-5 retrieval as compact summaries (~30-50 tokens each). Minimum relevance threshold: 0.3.
+Per-turn top-5 retrieval as compact summaries. Minimum relevance threshold: 0.3.
 
 ```
 Relevant capabilities:
@@ -100,7 +100,7 @@ Relevant capabilities:
 5. summarizer (skill). Summarize long documents into key points
 ```
 
-### Tier 2 — Full Details (~1,500 tokens)
+### Tier 2 — Full Details (2,000-token default budget)
 
 Full schema or SKILL.md content for the top-2 from Tier 1:
 
@@ -118,7 +118,7 @@ Search the web for current information using the Serper API.
 Required secrets: SERPER_API_KEY
 ```
 
-Token budgets are hard-enforced by the assembler using a ~4 chars/token heuristic.
+The assembler holds each tier to its budget, counting four characters as one token.
 
 ---
 
@@ -159,7 +159,7 @@ Fields **not** embedded: `fullSchema`, `fullContent`, `requiredSecrets` — thes
 
 ## Graph Relationships
 
-[`CapabilityGraph`](https://github.com/framerslab/agentos/blob/master/src/cognition/discovery/CapabilityGraph.ts) uses [graphology](https://graphology.github.io/) (shared with [`GraphRAGEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts)) for O(1) neighbor lookups and sub-millisecond traversal. All edges are built deterministically from metadata.
+[`CapabilityGraph`](https://github.com/framerslab/agentos/blob/master/src/cognition/discovery/CapabilityGraph.ts) uses [graphology](https://graphology.github.io/) (shared with [`GraphRAGEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts)) for neighbor lookups. All edges are built deterministically from metadata.
 
 ### Edge Types
 
@@ -185,7 +185,7 @@ If a user asks about GitHub issues and `skill:github` ranks high, `tool:cli-exec
 
 ## Meta-Tool: `discover_capabilities`
 
-When passive tiers miss something, agents actively search via the `discover_capabilities` tool (~80 tokens in tool list):
+When passive tiers miss something, agents actively search via the `discover_capabilities` tool:
 
 ```typescript
 discover_capabilities({ query: "send a message on Discord", kind: "channel" })
@@ -196,8 +196,10 @@ The tool runs through the same `discover()` pipeline and returns Tier 1 results.
 
 ```typescript
 import { createDiscoverCapabilitiesTool } from '@framers/agentos/discovery';
-const metaTool = createDiscoverCapabilitiesTool(discoveryEngine);
-toolOrchestrator.registerTool(metaTool);
+// With the tool orchestrator as the second argument, each result also says whether it is
+// loadable at run time (an extension in the registry catalog that is not loaded yet) and its extensionId.
+const metaTool = createDiscoverCapabilitiesTool(discoveryEngine, toolOrchestrator);
+await toolOrchestrator.registerTool(metaTool);
 ```
 
 ---
@@ -206,17 +208,17 @@ toolOrchestrator.registerTool(metaTool);
 
 Custom capabilities defined via `CAPABILITY.yaml`, scanned by [`CapabilityManifestScanner`](https://github.com/framerslab/agentos/blob/master/src/cognition/discovery/CapabilityManifestScanner.ts).
 
-**Scan directories** (priority order):
-1. `~/.agentos/capabilities/` (user-global)
-2. `./.agentos/capabilities/` (workspace-local)
-3. `$AGENTOS_CAPABILITY_DIRS` (env var, colon-separated)
+**Default scan directories** (`scanner.getDefaultDirs()`, in order; `scan(dirs)` takes your own list):
+1. `~/.wunderland/capabilities/` (user-global)
+2. `./.wunderland/capabilities/` (workspace-local)
+3. `$WUNDERLAND_CAPABILITY_DIRS` (env var, colon-separated)
 
-**Directory structure:**
+**Directory structure** (one folder per capability):
 ```
-~/.agentos/capabilities/my-custom-tool/
-  CAPABILITY.yaml   # required
-  SKILL.md          # optional (loaded as fullContent)
-  schema.json       # optional (loaded as fullSchema)
+~/.wunderland/capabilities/my-custom-tool/
+  CAPABILITY.yaml   # required (or CAPABILITY.yml)
+  SKILL.md          # optional (loaded as fullContent when skillContent is not set)
+  schema.json       # optional (loaded as fullSchema when inputSchema is not set)
 ```
 
 **CAPABILITY.yaml format:**
@@ -230,11 +232,11 @@ category: information
 tags: [search, internal, documents]
 requiredSecrets: [INTERNAL_API_KEY]
 hasSideEffects: false
-inputSchema: { type: object, properties: { query: { type: string } } }
+inputSchema: {"type": "object", "properties": {"query": {"type": "string"}}}
 skillContent: ./SKILL.md
 ```
 
-Required fields: `name`, `kind`, `description`. The `id` defaults to `${kind}:${name}`.
+Required fields: `name`, `kind`, `description`; a manifest without one is skipped with a warning. The `id` defaults to `${kind}:${name}`, `displayName` to the name and `category` to `custom`. The scanner reads a simple YAML subset: scalars, lists (inline, or one indented `- item` per line), and objects written inline as JSON, so `inputSchema` is JSON on one line or lives in `schema.json`.
 
 **Hot-reload** via `fs.watch` with debouncing (default 500ms):
 ```typescript
@@ -260,7 +262,7 @@ const toolSchemas = await toolOrchestrator.listDiscoveredTools(discoveryResult);
 // Returns only Tier 1/2 tools + discover_capabilities meta-tool
 ```
 
-**Chat runtime** — wire before prompt composition in the GMI loop:
+**A host's own loop** — wire it before prompt composition (`promptBuilder` and `provider` stand for the host's own; the AgentOS runtime does this itself through the turn planner below):
 ```typescript
 const discoveryResult = await discoveryEngine.discover(userMessage);
 const tools = await toolOrchestrator.listDiscoveredTools(discoveryResult);
@@ -271,17 +273,19 @@ const response = await provider.complete({ prompt, tools });
 
 ### AgentOS Turn Planner (Core Integration)
 
-AgentOS now supports a first-class turn planner that runs before each GMI turn:
+The AgentOS runtime runs a turn planner before each GMI turn:
 
 - Sets tool failure policy (`fail_open` or `fail_closed`)
 - Applies dynamic tool selection (`discovered` or `all`)
 - Injects discovery context into prompt metadata
 
-Default behavior is success-rate optimized:
+Defaults:
 
 - `defaultToolFailureMode: "fail_open"`
 - discovery enabled
 - fallback to full toolset when discovery fails or yields no tool matches
+
+With `autoInitializeEngine` (the default), the runtime builds the engine itself on an in-memory vector store: it indexes the runtime's tools, the loaded extension packs, the messaging channels, the curated registry's capability manifests and what `discovery.sources` adds (skills, manifests, extra extensions and channels), and registers the `discover_capabilities` and `load_capability_extension` tools unless `registerMetaTool` is `false`.
 
 ```typescript
 await agentos.initialize({
@@ -310,7 +314,7 @@ Per-request overrides can be provided via `options.customFlags`:
 - `toolSelectionMode`: `all` | `discovered`
 - `capabilityDiscoveryKind`: `tool` | `skill` | `extension` | `channel` | `any`
 
-Runtime metadata updates now also include `executionLifecycle` transitions:
+Runtime metadata updates include `executionLifecycle` transitions:
 
 - `planned` -> `executing`
 - `degraded` (if discovery fallback is applied in fail-open mode)
@@ -349,8 +353,8 @@ Task outcome telemetry can be configured under `orchestratorConfig.taskOutcomeTe
 When alerting is enabled and KPI degrades, metadata updates include `taskOutcomeAlert`
 with severity/reason/threshold/value so clients can trigger automated remediation.
 
-To persist KPI windows across restarts, provide `taskOutcomeTelemetryStore` in
-orchestrator dependencies. The store contract is:
+To persist KPI windows across restarts, set `AgentOSConfig.taskOutcomeTelemetryStore`
+(the runtime passes it to the orchestrator). The store contract is:
 
 - `loadWindows(): Promise<Record<string, TaskOutcomeKpiWindowEntry[]>>`
 - `saveWindow(scopeKey, entries): Promise<void>`
@@ -361,9 +365,10 @@ AgentOS includes a built-in SQL implementation:
 import { SqlTaskOutcomeTelemetryStore } from '@framers/agentos';
 
 const taskOutcomeTelemetryStore = new SqlTaskOutcomeTelemetryStore({
-  // Uses @framers/sql-storage-adapter resolution rules.
+  // @framers/sql-storage-adapter resolution options, plus an optional tableName
+  // (default agentos_task_outcome_kpi_windows).
   priority: ['better-sqlite3', 'sqljs'],
-  database: './data/agentos_task_outcomes.db',
+  filePath: './data/agentos_task_outcomes.db',
 });
 ```
 
@@ -414,19 +419,11 @@ const result = await engine.discover("search the web", {
 
 ---
 
-## Performance
+## Cost
 
-| Metric | Value | Notes |
-|--------|-------|-------|
-| Index build (`initialize`) | ~3s | One-time; embedding API calls for ~100 capabilities |
-| Per-turn `discover()` cold | ~50ms | Embedding generation for the query |
-| Per-turn `discover()` warm | ~5ms | Embedding cache hit (LRU) |
-| Graph re-ranking | <1ms | Sub-millisecond for ~100 nodes |
-| Memory overhead | ~2MB | Descriptor map + graphology graph + embedding cache |
-| Context tokens (static) | ~20,000 | All tools + skills + channels dumped |
-| Context tokens (discovery) | ~1,850 | Tier 0 + Tier 1 + Tier 2 combined |
-| Token reduction | **~90%** | 20,000 -> 1,850 |
-| Meta-tool cost | ~80 tokens | `discover_capabilities` in tool list |
+- `initialize()` embeds every indexed capability once; `refreshIndex()` embeds and upserts the capabilities it is given, then rebuilds the graph.
+- Each `discover()` embeds the query once, searches the vector store and re-ranks over the in-memory graph.
+- The prompt context is held to the tier budgets: at most 3,000 tokens at the defaults, counted at four characters a token. The `discover_capabilities` schema adds one tool to the tool list.
 
 ---
 
@@ -437,17 +434,16 @@ import {
   CapabilityDiscoveryEngine,
   CapabilityManifestScanner,
   createDiscoverCapabilitiesTool,
+  type CapabilityIndexSources,
 } from '@framers/agentos/discovery';
 
-// Stand-ins. Replace each with the runtime-supplied instance you already
-// have (embeddingManager / vectorStore from your memory wiring; the four
-// catalog managers from your AgentOS instance).
+// Stand-ins: an embedding manager and a vector store from your memory wiring,
+// the runtime's tool orchestrator, and your catalog entries in the
+// CapabilityIndexSources shape (tools, skills, extensions, channels).
 declare const embeddingManager: any;
 declare const vectorStore: any;
 declare const toolOrchestrator: any;
-declare const skillRegistry: any;
-declare const extensionCatalog: any;
-declare const channelRouter: any;
+declare const catalog: Omit<CapabilityIndexSources, 'manifests'>;
 
 // --- Initialization (once at startup) ---
 
@@ -455,33 +451,27 @@ const engine = new CapabilityDiscoveryEngine(embeddingManager, vectorStore);
 const scanner = new CapabilityManifestScanner();
 const manifests = await scanner.scan();
 
-await engine.initialize({
-  tools: toolOrchestrator.getToolDescriptors(),
-  skills: skillRegistry.getSkillEntries(),
-  extensions: extensionCatalog.listAll(),
-  channels: channelRouter.listPlatforms(),
-  manifests,
-});
+await engine.initialize({ ...catalog, manifests });
 
-toolOrchestrator.registerTool(createDiscoverCapabilitiesTool(engine));
+await toolOrchestrator.registerTool(createDiscoverCapabilitiesTool(engine, toolOrchestrator));
 
 scanner.watch(scanner.getDefaultDirs(), async (descs) => {
   await engine.refreshIndex({ manifests: descs });
 });
 
 console.log(engine.getStats());
-// { capabilityCount: 66, graphNodes: 66, graphEdges: 142, indexVersion: 1 }
+// { capabilityCount, graphNodes, graphEdges, indexVersion }
 
-// --- Per-turn discovery (in GMI loop) ---
+// --- Per-turn discovery ---
 
-const discoveryResult = await engine.discover("Search the web for AI news and summarize it");
-// discoveryResult.tokenEstimate.totalTokens ≈ 1,850
+const discoveryResult = await engine.discover('Search the web for AI news and summarize it');
+// discoveryResult.tokenEstimate.totalTokens stays within the tier budgets
 
 const tools = await toolOrchestrator.listDiscoveredTools(discoveryResult);
-// tools.length ≈ 3 (web-search, news-search, discover_capabilities)
+// the Tier 1/2 tools plus discover_capabilities
 
 const capabilityContext = engine.renderForPrompt(discoveryResult);
-// Inject into system prompt via PromptBuilder
+// Inject into the system prompt
 ```
 
 ---

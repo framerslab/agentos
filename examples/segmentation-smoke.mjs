@@ -14,7 +14,11 @@ if (!process.env.REPLICATE_API_TOKEN) {
   process.exit(1);
 }
 
-const imagePath = process.argv[2] ?? './examples/assets/sample.png';
+const imagePath = process.argv[2];
+if (!imagePath) {
+  console.error('Usage: node examples/segmentation-smoke.mjs <path to an image>');
+  process.exit(1);
+}
 const image = readFileSync(imagePath);
 
 console.log('1) text prompt: "main subject"');

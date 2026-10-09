@@ -38,9 +38,11 @@ export interface ResolvedProvider {
 }
 
 const ENV_KEY_MAP: Record<string, string> = {
+  minimax: 'MINIMAX_API_KEY',
   openai: 'OPENAI_API_KEY',
   anthropic: 'ANTHROPIC_API_KEY',
   openrouter: 'OPENROUTER_API_KEY',
+  requesty: 'REQUESTY_API_KEY',
   gemini: 'GEMINI_API_KEY',
   groq: 'GROQ_API_KEY',
   together: 'TOGETHER_API_KEY',
@@ -53,8 +55,10 @@ const ENV_KEY_MAP: Record<string, string> = {
 };
 
 const ENV_URL_MAP: Record<string, string> = {
+  minimax: 'MINIMAX_BASE_URL',
   openai: 'OPENAI_BASE_URL',
   openrouter: 'OPENROUTER_BASE_URL',
+  requesty: 'REQUESTY_BASE_URL',
   stability: 'STABILITY_BASE_URL',
   replicate: 'REPLICATE_BASE_URL',
   ollama: 'OLLAMA_BASE_URL',

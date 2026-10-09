@@ -2,8 +2,10 @@
 // Example: agency() with graph strategy — explicit agent dependencies
 //
 // The graph strategy topologically sorts agents into tiers based on their
-// `dependsOn` declarations and executes each tier concurrently.  Every agent
-// receives the original prompt plus the plain-text outputs of its dependencies.
+// `dependsOn` declarations. generate() runs the agents of a tier concurrently;
+// stream() runs them one after another so the streamed text stays in order.
+// An agent with dependencies receives the original prompt plus the plain-text
+// outputs of those dependencies.
 //
 // DAG for this example:
 //

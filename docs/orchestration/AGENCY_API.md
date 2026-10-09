@@ -24,18 +24,30 @@ named roster of sub-agents under a chosen orchestration strategy and returns a
 single `Agent`-compatible interface so callers can swap a single agent for an
 entire team without changing call sites.
 
-Implemented features: strategy orchestration, session history, aggregate
-usage/cost tracking, resource controls, [HITL](/features/human-in-the-loop), guardrail evaluation, structured
-Zod output, RAG context injection (v1 placeholder), `listen()` for voice
-WebSocket transport, `connect()` for channel adapters, and real per-agent
-streaming events on the sequential strategy.
+What it does: strategy orchestration, session history, aggregate usage and
+cost tracking, run limits (`controls`), [HITL](/features/human-in-the-loop) approval gates, structured Zod
+output with validation retries, an in-memory provenance trail, specialists
+spawned at runtime on the hierarchical strategy, a `listen()` WebSocket that
+exchanges JSON text, and per-agent streaming events on the sequential and graph
+strategies. It accepts `guardrails`, `rag`, `memory`, `security`,
+`permissions` and `observability` and applies none of them: guardrail ids are
+reported through `on.guardrailResult` with `enforced: false`, and no retrieved
+context is added to a prompt. `connect()` always rejects; channel adapters are
+wired outside `agency()`.
 
 ## Mental Model
 
-Agency is the multi-brain primitive. Each `agent()` in the roster carries a full
-[GMI](/architecture/gmi) brain: cognition (PAD mood, HEXACO traits, eight cognitive
-mechanisms), memory (episodic, semantic, procedural, working), persona, and
-tools. The agency layer adds three things on top of those brains.
+Agency is the multi-brain primitive. Each roster member is an `agent()`: a
+system prompt with its instructions and HEXACO traits, its tools and its hooks.
+A member whose config sets `runtime: 'gmi'`, or a pre-built
+`agent({ runtime: 'gmi' })`, is served by [GMIs](/architecture/gmi). The
+strategies call a member's `generate()` or `stream()`, and on the GMI path each
+call runs on a GMI built for it, on the `'light'` profile: a persona, a PAD mood
+and a reasoning trace, with no history and no cognitive memory, whatever the
+member's `cognition` and `memory` options say. In an agency whose
+`hitl.approvals.beforeTool` is set, a GMI member's tool calls wait for the
+approval handler as other members' calls do. The agency layer adds three things
+on top of those members.
 
 **1. Orchestration strategy declares how outputs flow between brains.**
 Sequential chains them, parallel fans them out and synthesises, debate has them
@@ -57,12 +69,12 @@ capability contract), and
 exported classes a host wires itself.
 
 **3. A team-wide coordination shell wraps the whole agency.** HITL approval
-gates (`hitl.approvals.beforeTool` is forwarded to every member), resource
-controls (the token, time and call caps on `controls`, enforced across the run)
-and structured Zod output (`output`). These apply to the team rather than
-per-agent. Options the lightweight path accepts and defers (`security`,
-`permissions`, `observability`, `rag`, `memory`) take effect on the full
-runtime; see the capability contract.
+gates (`hitl.approvals.beforeTool` is enforced on every member's tool calls),
+run limits (the token, cost, time and call limits on `controls`, checked when a
+run ends and before the next one starts) and structured Zod output (`output`).
+These apply to the team rather than per-agent. `agency()` accepts
+`guardrails`, `security`, `permissions`, `observability`, `rag` and `memory`
+without applying them; the full runtime configures each of these itself.
 
 ```mermaid
 graph TB
@@ -154,28 +166,20 @@ own orchestrator and reach into agentos for the lower-level primitives
 
 ## API Hierarchy
 
-AgentOS exposes a layered public API.  Each layer adds coordination features
-on top of the one below it.
+The public API has several entry points. `agency()` builds its members with
+`agent()`, and `agent()` calls `generateText()` and `streamText()`; the
+orchestration builders (`workflow()`, `mission()`, `AgentGraph`) compile to a
+graph that `GraphRuntime` executes, with node executors the host supplies.
 
-```
-generateText()     — single stateless LLM call, no history
-  └── agent()      — stateful multi-turn session, optional tools
-        └── agency()   — multi-agent team with orchestration strategy
-              └── workflow()   — imperative DAG of agency runs
-                    └── AgentGraph  — programmatic graph builder (advanced)
-```
-
-Use the lowest layer that satisfies your requirements:
-
-| Entry point | Adds over previous | Best for |
+| Entry point | Adds | Best for |
 |---|---|---|
 | `generateText()` | Nothing — raw call | One-shot prompts, evals |
 | `streamText()` | Streaming tokens | Chat UIs, long responses |
 | `generateImage()` | Image generation | Visuals, multi-modal pipelines |
 | `agent()` | Session history, tools | Single-agent assistants |
-| `agency()` | Multi-agent orchestration, HITL, guardrails, controls | Research pipelines, content teams, autonomous workflows |
-| `workflow()` | Imperative DAG sequencing of agencies | Multi-stage pipelines with branching logic |
-| [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) | Programmatic graph construction + edge callbacks | Custom topologies, dynamic routing |
+| `agency()` | Multi-agent orchestration, HITL approvals, run limits | Research pipelines, content teams, autonomous workflows |
+| `workflow()` | A typed DAG of tool, model and human steps | Multi-stage pipelines with branching logic |
+| [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) | Programmatic graph construction with conditional, discovery and personality edges | Custom topologies, dynamic routing |
 
 ---
 
@@ -317,8 +321,9 @@ tier for graph. review-loop results and `stream()` results carry neither.
 
 ### sequential (default)
 
-Agents run one after another.  Each agent receives the previous agent's output
-as context, forming a progressive refinement chain.
+Agents run one after another. The first receives the prompt; each later agent
+receives the original task followed by the previous agent's output, forming a
+progressive refinement chain.
 
 ```typescript
 const pipeline = agency({
@@ -460,24 +465,31 @@ const { text } = await team.generate('Explain and demonstrate the quicksort algo
 
 ### graph
 
-Agents declare explicit dependencies via `dependsOn`.  The orchestrator
-topologically sorts agents into tiers and runs each tier concurrently.  Every
-agent receives the original user prompt plus the concatenated plain-text outputs
-of its direct dependencies.
+Agents declare explicit dependencies via `dependsOn`. The orchestrator
+topologically sorts agents into tiers. `generate()` runs the agents of a tier
+concurrently; `stream()` runs them one after another so the streamed text stays
+in order. An agent with dependencies receives the original user prompt plus the
+plain-text outputs of its direct dependencies; an agent without any receives the
+prompt alone.
 
 **Auto-detection:** when _any_ agent in the roster has a `dependsOn` array, the
 strategy is automatically set to `'graph'` — you don't need to specify it
 explicitly (though doing so is fine).
 
-**Cycle detection:** the orchestrator validates the dependency DAG at
-construction time and throws if it contains a cycle.
+**Cycle detection:** `agency()` validates the dependency DAG when it is called
+and throws `AgencyConfigError` for a cycle or for a `dependsOn` entry that names
+no agent in the roster.
 
-**Context passing:** each agent's prompt is assembled as:
+**Context passing:** an agent with dependencies receives:
 
 ```
-<original user prompt>
+Original task: <original user prompt>
 
---- Output from <dependencyName> ---
+Outputs from dependencies:
+[<dependencyName>]:
+<plain text output>
+
+[<otherDependencyName>]:
 <plain text output>
 ```
 
@@ -538,8 +550,8 @@ for await (const chunk of stream.textStream) {
 }
 ```
 
-Important: `textStream` is the raw live stream. If output guardrails or
-`beforeReturn` HITL approval rewrite the answer, the finalized output is
+Important: `textStream` is the raw live stream. If a `beforeReturn` HITL
+approval rewrites the answer (`modifications.output`), the finalized output is
 available via:
 
 - `stream.text`
@@ -554,9 +566,11 @@ must only ever see the approved answer. See
 
 ## Adaptive Mode
 
-Set `adaptive: true` to let the orchestrator choose the best strategy at
-runtime based on task complexity signals.  The default strategy acts as a
-hint; the coordinator may override it.
+With `adaptive: true`, `agency()` compiles the hierarchical strategy whatever
+`strategy` says: a manager built from the agency-level model and instructions
+receives one `delegate_to_<name>` tool per roster agent and decides which to
+call. The declared `strategy` is not passed to the manager, so it plays no part
+in the run, and a `quorum` (read only by `parallel`) is skipped.
 
 ```typescript
 const smart = agency({
@@ -565,8 +579,7 @@ const smart = agency({
     analyst:  { instructions: 'Analyse data and trends.' },
     reporter: { instructions: 'Write clear reports.' },
   },
-  strategy: 'sequential', // default hint
-  adaptive: true,          // may switch to hierarchical if the task is complex
+  adaptive: true,          // runs as hierarchical
 });
 
 const { text } = await smart.generate('Analyse this dataset and write a report.');
@@ -638,7 +651,7 @@ import { hitl } from '@framers/agentos';
 
 hitl.autoApprove()                      // always approve — use in tests / CI
 hitl.autoReject('dry-run mode')         // always reject with an optional reason
-hitl.cli()                              // interactive stdin/stdout prompt
+hitl.cli()                              // interactive stdin/stdout prompt; prints the request's details (a tool call's arguments) first
 hitl.webhook('https://my-service/ok')   // POST to an HTTP endpoint
 hitl.slack({ channel: '#approvals', token: process.env.SLACK_BOT_TOKEN })
 hitl.llmJudge({                         // delegate to an LLM judge
@@ -661,7 +674,6 @@ const guarded = agency({
       beforeAgent:            ['financial-agent'],
       beforeEmergent:         true,
       beforeReturn:           true,
-      beforeStrategyOverride: true,
     },
     handler: hitl.autoApprove(), // replace with hitl.cli() in production
     timeoutMs:  30_000,
@@ -672,6 +684,9 @@ const guarded = agency({
 });
 ```
 
+`beforeStrategyOverride` is accepted and never asked: no strategy switches
+mid-run, so no `strategy-override` request is made.
+
 `beforeTool` lists tool names, or `'*'` for every tool. A listed call waits for
 the handler on every tool loop the agency runs: native tool calls, the
 prompt-tool path (`toolMode: 'prompt'`, and `'auto'` after a provider rejects
@@ -681,17 +696,28 @@ hierarchical manager and the specialists it spawns, and nested agencies.
 - The handler is asked after the seat's or the caller's
   `onBeforeToolExecution` has run, so it approves the arguments the tool will
   run with. A hook that returns `null` skips the tool without asking; a hook
-  that throws is logged and the handler is asked. A `modifications.toolArgs` on
-  the decision is not applied: rewrite arguments in the hook.
+  that throws is logged and the handler is asked. The gate never applies a
+  decision's `modifications.toolArgs`: an approval that carries them (anything
+  but `undefined` or `null`) is refused, so the call is skipped rather than run
+  with the arguments the approver meant to replace. Rewrite arguments in the
+  hook.
 - A rejection skips the tool and the model is told; the run goes on.
-- A handler that throws, and a timeout under `onTimeout: 'error'`, skip the
-  tool, go to `on.error`, and reject the call with that error once the
-  strategy has settled, after the run's usage has been added to the agency
-  totals. Every later tool call of the run is skipped without asking the
+- A handler that throws, a timeout under `onTimeout: 'error'`, a decision
+  whose `approved` is not a boolean (a webhook that answers `null`) and a
+  failure after the handler answered (arguments the post-approval guardrails
+  cannot serialize, such as a `BigInt` a hook added) skip the tool, go to
+  `on.error`, and reject the call with that error once the strategy has
+  settled, after the run's usage has been added to the agency totals. The model is told only that the approval handler failed: the
+  error's message, which can name a URL or a credential, stays out of the
+  conversation. Every later tool call of the run is skipped without asking the
   handler. No finalization step runs: no output guardrails, no `beforeReturn`
   approval, no `agentEnd` and no validation retry. Under `stream()` the
   result's promises reject with the error, and `textStream` and `fullStream`
-  end by throwing it.
+  end by throwing it. A strategy that fails after that error (a later seat's
+  own failure, a `beforeAgent` handler that throws) does not replace it: the
+  call still rejects with the approval error, and the strategy's error goes to
+  `on.error`. A strategy that fails returns no result, so that run adds no
+  usage to the totals.
 - After the handler approves, the post-approval guardrails
   (`hitl.postApprovalGuardrails`, default `pii-redaction` and `code-safety`)
   run over the arguments unless `hitl.guardrailOverride` is `false`; a block
@@ -816,30 +842,25 @@ the full runtime: see [Memory Model](../MEMORY_MODEL.md), [Cognitive Memory](../
 ### Voice pipeline
 
 When `voice.enabled` is `true` the agency exposes a `listen()` method that
-starts a local WebSocket server.  Callers receive the bound port and URL and can
-connect any audio client.  The full STT → LLM → TTS pipeline is provided by
-`src/io/voice-pipeline/`; the agency wires `generate()` as the LLM backend.
+starts a WebSocket server on `127.0.0.1` and returns its port, URL and a
+`close()` function. Each message a client sends must be JSON with a `text`
+field; the agency runs `generate()` on it and replies with `{ "text": "..." }`.
+`agency()` reads no other `voice` field and handles no audio: put
+speech-to-text and text-to-speech in front of the socket (the
+[Voice Pipeline](/features/voice-pipeline) and its providers live in
+`src/io/voice-pipeline/`).
 
 ```typescript
 const voiceAgent = agency({
   provider: 'openai', model: 'gpt-4o',
   agents: { assistant: { instructions: 'You are a helpful voice assistant.' } },
-  voice: {
-    enabled:     true,
-    transport:   'streaming',
-    stt:         'deepgram',
-    tts:         'elevenlabs',
-    ttsVoice:    'rachel',
-    endpointing: 'silero-vad',
-    bargeIn:     'threshold',
-    language:    'en-US',
-  },
+  voice: { enabled: true },
 });
 
-// Bind to an OS-assigned port; connect audio clients to the returned URL.
+// Bind to an OS-assigned port.
 const server = await voiceAgent.listen();
-console.log(`Voice WS server ready at ${server.url}`);
-// ...
+console.log(`WebSocket ready at ${server.url}`);
+// A client sends {"text":"Hello"} and receives {"text":"..."}.
 await server.close();
 ```
 
@@ -879,64 +900,43 @@ try {
 
 ## Guardrails and Security
 
-### Shorthand (applies to both input and output)
+`agency()` accepts guardrail ids, as a list or as `{ input, output }`, and
+evaluates none of them. For each id it calls `on.guardrailResult` with
+`passed: true`, `enforced: false` and `action: 'allow'`, and the text passes
+unchanged:
 
 ```typescript
-const safe = agency({
+const team = agency({
   provider: 'openai', model: 'gpt-4o',
   agents: { assistant: { instructions: 'Be helpful.' } },
-  guardrails: ['pii-redaction', 'toxicity-filter', 'grounding-guard'],
-});
-```
-
-### Structured guardrails config
-
-```typescript
-const audited = agency({
-  provider: 'openai', model: 'gpt-4o',
-  agents: { assistant: { instructions: 'Be helpful.' } },
-  guardrails: {
-    input:  ['injection-shield', 'pii-redaction'],
-    output: ['grounding-guard', 'code-safety'],
-    tier:   'strict',
+  guardrails: { input: ['pii-redaction'], output: ['grounding-guard'] },
+  on: {
+    guardrailResult: (e) => console.log(e.guardrailId, e.enforced), // 'pii-redaction' false
   },
-  security: { tier: 'balanced' }, // 'dangerous'|'permissive'|'balanced'|'strict'|'paranoid'
 });
 ```
 
-### Security tiers
-
-| Tier | Description |
-|---|---|
-| `"dangerous"` | No restrictions — internal trusted pipelines only |
-| `"permissive"` | Most capabilities on; network + filesystem allowed |
-| `"balanced"` | Sensible defaults; destructive actions require approval |
-| `"strict"` | Read-only filesystem, no shell spawn, narrow tool allow-list |
-| `"paranoid"` | Minimal surface; all side-effecting tools blocked |
+Guardrail packs run on the full runtime ([Guardrails](/features/guardrails)). The
+checks `agency()` does run are the post-approval patterns of the HITL gate:
+after an approval, `hitl.postApprovalGuardrails` (default `pii-redaction` and
+`code-safety`) are matched against the approved tool arguments, agent input or
+final text, and a match overrides the approval. `security` (`{ tier }`) is
+accepted and not read.
 
 ---
 
 ## Permissions
 
-```typescript
-const restricted = agency({
-  provider: 'openai', model: 'gpt-4o',
-  agents: { analyst: { instructions: 'Analyse data.' } },
-  permissions: {
-    tools:          ['read-file', 'query-db'],  // explicit allow-list
-    network:        false,
-    filesystem:     true,
-    spawn:          false,
-    requireApproval: ['delete-record'],          // not enforced by agency(): list tools in hitl.approvals.beforeTool
-  },
-});
-```
+`agency()` accepts `permissions` (`tools`, `network`, `filesystem`, `spawn`,
+`requireApproval`) and enforces none of it. To gate tools, list them in
+`hitl.approvals.beforeTool`; to limit what a member can call, give it only the
+tools it needs.
 
 ---
 
 ## Resource Controls
 
-Hard and soft limits on token spend, duration, and call counts.
+Limits on token spend, cost, duration and agent calls.
 
 ```typescript
 const budgeted = agency({
@@ -947,13 +947,11 @@ const budgeted = agency({
   },
   strategy: 'sequential',
   controls: {
-    maxTotalTokens:   50_000,   // across all agents in the run
-    maxCostUSD:       0.50,
-    maxDurationMs:    30_000,
-    maxAgentCalls:    20,
-    maxStepsPerAgent: 5,
-    maxEmergentAgents: 3,
-    onLimitReached:   'warn',   // 'stop' | 'warn' | 'error'
+    maxTotalTokens: 50_000,   // prompt + completion tokens of a run
+    maxCostUSD:     0.50,
+    maxDurationMs:  30_000,
+    maxAgentCalls:  20,
+    onLimitReached: 'warn',   // 'stop' | 'warn' | 'error'
   },
   on: {
     limitReached: (e) => {
@@ -962,6 +960,17 @@ const budgeted = agency({
   },
 });
 ```
+
+When a run ends, its tokens, cost, duration and agent calls are compared with
+the limits; before each run starts, the agency's cumulative tokens and cost are
+compared with them. A breach calls `on.limitReached`, and with
+`onLimitReached: 'error'` it throws an `AgencyConfigError` instead, so an agency
+past `maxCostUSD` refuses further runs. `'stop'` and `'warn'` both report
+through the callback. No limit interrupts a run in progress.
+`maxStepsPerAgent` and `maxEmergentAgents` are accepted and not read: cap a
+member's tool loop with its `maxSteps`, and spawned specialists with
+`emergent.planner.maxSpecialists`. `maxValidationRetries` is described under
+[Structured Output with Zod](#structured-output-with-zod).
 
 ---
 
@@ -972,29 +981,36 @@ const budgeted = agency({
 ```typescript
 const observed = agency({
   provider: 'openai', model: 'gpt-4o',
+  name: 'research-team',
   agents: {
     researcher: { instructions: 'Research.' },
     writer:     { instructions: 'Write.' },
   },
   strategy: 'sequential',
-  observability: {
-    logLevel:    'info',
-    traceEvents: true,
-    otel:        { enabled: true },
-  },
   on: {
-    agentStart:      (e) => console.log(`[START] ${e.agent} — ${e.input.slice(0, 60)}`),
-    agentEnd:        (e) => console.log(`[END]   ${e.agent} — ${e.durationMs}ms`),
-    handoff:         (e) => console.log(`[HANDOFF] ${e.fromAgent} -> ${e.toAgent}: ${e.reason}`),
-    toolCall:        (e) => console.log(`[TOOL] ${e.agent} called ${e.toolName}`),
-    guardrailResult: (e) => console.log(`[GUARD] ${e.guardrailId}: ${e.passed ? 'pass' : 'block'}`),
-    emergentForge:   (e) => console.log(`[FORGE] ${e.agentName} approved=${e.approved}`),
+    agentStart:        (e) => console.log(`[START] ${e.agent} — ${e.input.slice(0, 60)}`),
+    agentEnd:          (e) => console.log(`[END]   ${e.agent} — ${e.durationMs}ms`),
+    guardrailResult:   (e) => console.log(`[GUARD] ${e.guardrailId}: enforced=${e.enforced} passed=${e.passed}`),
+    emergentForge:     (e) => console.log(`[FORGE] ${e.agentName} approved=${e.approved}`),
     approvalRequested: (e) => console.log(`[HITL] ${e.type}: ${e.description}`),
-    limitReached:    (e) => console.warn(`[LIMIT] ${e.metric}: ${e.value}/${e.limit}`),
-    error:           (e) => console.error(`[ERROR] ${e.agent}: ${e.error.message}`),
+    limitReached:      (e) => console.warn(`[LIMIT] ${e.metric}: ${e.value}/${e.limit}`),
+    error:             (e) => console.error(`[ERROR] ${e.agent}: ${e.error.message}`),
   },
 });
+
+const result = await observed.generate('Summarise this week in AI.');
+for (const call of result.agentCalls) {
+  console.log(`${call.agent}: ${call.durationMs}ms, ${call.usage.totalTokens} tokens`);
+}
 ```
+
+`agentStart` and `agentEnd` fire once per run for the agency itself, with
+`agent` set to the agency's `name` (`'__agency__'` when it has none); the
+per-member record is `result.agentCalls`, and on the sequential and graph
+strategies `stream()` emits `agent-start` and `agent-end` parts per member on
+`fullStream`. `handoff` and `toolCall` are declared on the callback type and
+never fired. `observability` (`logLevel`, `traceEvents`, `otel`) is accepted
+and not read by `agency()`.
 
 ### Provenance / audit trail
 
@@ -1004,19 +1020,29 @@ const auditable = agency({
   agents: { worker: { instructions: 'Do auditable work.' } },
   provenance: {
     enabled:   true,
-    hashChain: true,
-    record:    { toolCalls: true, agentOutputs: true },
-    export:    'jsonl',  // 'jsonl' | 'otlp' | 'solana'
+    hashChain: true,                       // SHA-256 chain over the recorded events
+    record:    { guardrailResult: false }, // event kinds to leave out; the rest are recorded
   },
 });
+
+const result = await auditable.generate('Summarise the incident report.');
+console.log(result.provenanceTrail);
 ```
+
+The recorder keeps the trail in memory and attaches it to the result as
+`provenanceTrail`. It records the callbacks that fire (`agentStart`,
+`agentEnd`, `emergentForge`, `guardrailResult`, `approvalDecided`, `error`)
+and the final output. `record` turns kinds off by name; `export` is accepted
+and not read, so nothing is written to a file, a collector or a chain. Signed
+events and anchoring are on the full runtime's provenance pack
+([Provenance](/features/provenance-guide)).
 
 ---
 
 ## Structured Output with Zod
 
-Pass a Zod schema to `output` and the final agent's response is validated and
-parsed against it.  The result's `object` field carries the typed value.
+Pass a Zod schema to `output` and the agency's final text is parsed and
+validated against it. The result's `parsed` field carries the typed value.
 
 ```typescript
 import { z } from 'zod';
@@ -1038,9 +1064,16 @@ const extractor = agency({
 });
 
 const result = await extractor.generate('...article text...');
-const data = result.object as z.infer<typeof schema>;
-console.log(data.title, data.keyPoints);
+const data = result.parsed as z.infer<typeof schema> | undefined;
+console.log(data?.title, data?.keyPoints);
 ```
+
+`agency()` appends a short JSON instruction to the prompt; for an object
+schema it names the top-level keys. It reads the reply as JSON, then from a fenced code block, then
+from the first `{ ... }` object in the text. When that fails, the run is
+repeated up to `controls.maxValidationRetries` times (default `1`) with the
+previous reply quoted in the prompt; when every attempt fails, `parsed` is
+`undefined` and no error is thrown. A member's own `output` is not read.
 
 ---
 
@@ -1078,9 +1111,11 @@ const { text, agentCalls } = await publishingTeam.generate('Write about quantum 
 // agentCalls[0] represents the entire researchTeam run as a single call
 ```
 
-Nesting can go arbitrarily deep.  `usage` and `agentCalls` are aggregated
-through all layers.  `close()` propagates inward — the outer agency calls
-`close()` on every nested agency in its roster.
+Nesting can go arbitrarily deep. The nested agency's usage is added to the
+outer totals; its `agentCalls` are not flattened, so it appears as one record
+whose `output` is its final text. `close()` propagates inward: the outer agency
+calls `close()` on every pre-built member of its roster, nested agencies
+included.
 
 ---
 
@@ -1093,17 +1128,17 @@ in what order, and how to merge their outputs -- all at runtime. Combine with
 when the static roster is insufficient.
 
 ```typescript
-import { agency, type ITool } from '@framers/agentos';
+import { agency } from '@framers/agentos';
 
 // Stand-ins for the host-supplied tools the researcher delegates to.
 // Replace with real implementations (Tavily, arxiv-api, etc.).
-const webSearchTool: ITool = {
+const webSearchTool = {
   name: 'web_search',
   description: 'Search the web.',
   inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
   execute: async ({ query }) => ({ success: true, output: `(stub) ${query}` }),
 };
-const arxivTool: ITool = {
+const arxivTool = {
   name: 'arxiv_search',
   description: 'Search arXiv for papers.',
   inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
@@ -1227,19 +1262,15 @@ const contentPipeline = agency({
     },
   },
 
-  strategy: 'sequential',
-  adaptive: true,
+  // Hierarchical: a manager built from the agency-level model delegates to
+  // the members and, with `emergent`, can spawn specialists.
+  strategy: 'hierarchical',
+  instructions: 'Have the research team gather sources, then the writer draft and the editor polish.',
 
   emergent: {
     enabled: true,
     tier: 'session',
     judge: true,
-  },
-
-  guardrails: {
-    input:  ['injection-shield'],
-    output: ['grounding-guard', 'pii-redaction'],
-    tier:   'balanced',
   },
 
   hitl: {
@@ -1261,7 +1292,7 @@ const contentPipeline = agency({
   },
 
   on: {
-    agentStart:      (e) => console.log(`[>] ${e.agent}`),
+    agentStart:      (e) => console.log(`[>] ${e.agent}`),                      // 'content-pipeline'
     agentEnd:        (e) => console.log(`[<] ${e.agent} (${e.durationMs}ms)`),
     limitReached:    (e) => console.warn(`limit: ${e.metric} = ${e.value}`),
     error:           (e) => console.error(`error in ${e.agent}: ${e.error.message}`),
@@ -1277,7 +1308,7 @@ const contentPipeline = agency({
 
 // Non-streaming call
 const result = await contentPipeline.generate('Write an article about large language models.');
-console.log(result.text);
+console.log(result.parsed ?? result.text);
 console.log(result.agentCalls.length, 'agent calls');
 console.log(result.usage.totalTokens, 'total tokens');
 

@@ -1,346 +1,131 @@
 # Client-Side Storage for AgentOS
 
-## Overview
-
-AgentOS now supports **fully client-side operation** with persistent storage using `@framers/sql-storage-adapter`. This enables:
-
-- ✅ **Offline-first** web apps (no backend required)
-- ✅ **Privacy-first** (data never leaves browser/device)
-- ✅ **Progressive Web Apps** (PWAs)
-- ✅ **Desktop apps** (Electron)
-- ✅ **Mobile apps** (Capacitor)
-- ✅ **Hybrid architectures** (local + cloud sync)
+The full runtime keeps its data in a `StorageAdapter` from [`@framers/sql-storage-adapter`](https://github.com/framerslab/sql-storage-adapter), passed as `storageAdapter` in the AgentOS config. The adapter package runs SQLite in Node, Electron and Capacitor apps and in browsers (sql.js, with IndexedDB for persistence), so the same runtime code stores to a local file or to the browser.
 
 ---
 
 ## Quick Start
 
-### 1. Install sql-storage-adapter
-
 ```bash
-npm install @framers/sql-storage-adapter
+npm install @framers/agentos @framers/sql-storage-adapter
 ```
-
-### 2. Initialize AgentOS with Storage
 
 ```typescript
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
 import { AgentOS } from '@framers/agentos';
 
-// Auto-detects platform (web → IndexedDB, electron → better-sqlite3, capacitor → @capacitor-community/sqlite, node → better-sqlite3 fallback to sql.js)
-const storage = await resolveStorageAdapter({
-  // pass platform-specific options here, or leave empty for full auto
-});
+// Picks an adapter for the runtime and opens it: Capacitor on a native
+// Capacitor platform; IndexedDB then sql.js in a browser; Postgres first when
+// DATABASE_URL is set; otherwise better-sqlite3, IndexedDB, then sql.js.
+const storageAdapter = await resolveStorageAdapter();
 
-const agentos = new AgentOS();
-await agentos.initialize({
-  storageAdapter: storage,   // pass the StorageAdapter directly
-  // ... other config (modelProviderManagerConfig, etc.)
-});
+const agentos = await AgentOS.create({ storageAdapter });
 ```
 
-### 3. Use AgentOS Normally
+With a `storageAdapter`, the runtime:
 
-```typescript
-// All conversations, sessions, personas are persisted locally
-const response = await agentos.handleUserMessage({
-  userId: 'user-123',
-  personaId: 'v_researcher',
-  userMessage: 'Hello, AgentOS!',
-  conversationId: 'conv-1',
-});
+- persists conversations in the tables `conversations` and `conversation_messages`, which `ConversationManager` creates, unless `conversationManagerConfig.persistenceEnabled` is `false`;
+- hands the adapter to SQL vector-store providers that name no adapter of their own, unless `ragConfig.bindToStorageAdapter` is `false`;
+- wraps it so its writes go through the provenance hooks, when the provenance extension is active;
+- uses it for the self-improvement tools' storage.
 
-// Data is automatically saved to IndexedDB (web) or SQLite (desktop/mobile)
-```
+`initialize(config)` throws unless the config has a `storageAdapter` or a `prisma` client. `AgentOS.create()` sets `prisma` to AgentOS's built-in stub (`PrismaClient` from `src/core/storage/prismaClient.ts`), which answers every model call with a warning, so pass a `storageAdapter` for data you want kept.
 
 ---
 
-## Platform-Specific Guides
+## Platform Adapters
 
 ### Web (Browser)
-
-**Recommended Adapter:** IndexedDB
 
 ```typescript
 import { IndexedDbAdapter } from '@framers/sql-storage-adapter';
 
-const storage = new IndexedDbAdapter({
-  dbName: 'agentos-workbench',
-  autoSave: true,
-  saveIntervalMs: 5000,  // Batch writes every 5s
+const storageAdapter = new IndexedDbAdapter({
+  dbName: 'agentos-workbench', // default 'app-db'
+  autoSave: true,              // default true
+  saveIntervalMs: 5000,        // default 5000
 });
-
-await storage.open();
-
-await agentos.initialize({
-  storageAdapter: storage,
-  // ...
-});
+await storageAdapter.open();
 ```
 
-**Features:**
-- ✅ 50MB-1GB+ storage quota (browser-dependent)
-- ✅ Async, non-blocking
-- ✅ Works offline
-- ✅ Full SQL via sql.js (SQLite in WebAssembly)
+The adapter runs SQLite through sql.js (WebAssembly) and saves the database to IndexedDB. Pass `sqlJsConfig: { locateFile }` when the WebAssembly file is served from your own path. The browser sets the storage quota.
 
-**Export/Import:**
+`IndexedDbAdapter` can export and import the whole database as SQLite file bytes:
+
 ```typescript
-// Export conversations for backup
-const backup = storage.exportDatabase();  // Uint8Array
-const blob = new Blob([backup], { type: 'application/x-sqlite3' });
-const url = URL.createObjectURL(blob);
-// User downloads .db file
+const bytes = storageAdapter.exportDatabase(); // Uint8Array
+const link = document.createElement('a');
+link.href = URL.createObjectURL(new Blob([bytes], { type: 'application/x-sqlite3' }));
+link.download = 'agentos-backup.db';
+link.click();
 
-// Import on another device
 const file = await fileInput.files[0].arrayBuffer();
-await storage.importDatabase(new Uint8Array(file));
+await storageAdapter.importDatabase(new Uint8Array(file));
 ```
 
----
+These two methods belong to `IndexedDbAdapter`; for other adapters, use `exportAsJSON()` and `importFromJSON()` from the same package ([Storage & Scaling](../getting-started/SQL_STORAGE_QUICKSTART.md#moving-data-between-adapters)).
 
 ### Desktop (Electron)
 
-**Recommended Adapter:** better-sqlite3
-
 ```typescript
-import { BetterSqliteAdapter } from '@framers/sql-storage-adapter';
-import path from 'path';
+import { createElectronMainAdapter } from '@framers/sql-storage-adapter/electron';
+import path from 'node:path';
 import { app } from 'electron';
 
-const storage = new BetterSqliteAdapter({
+const storageAdapter = createElectronMainAdapter({
   filePath: path.join(app.getPath('userData'), 'agentos.db'),
 });
-
-await storage.open();
-
-await agentos.initialize({
-  storageAdapter: storage,
-  // ...
-});
+await storageAdapter.open();
 ```
 
-**Features:**
-- ✅ Native C++ performance (10-100x faster than WASM)
-- ✅ Full SQLite features (WAL, transactions, indexes)
-- ✅ Unlimited storage (file-based)
-- ✅ No quota limits
+The main-process adapter uses better-sqlite3; `createElectronRendererAdapter()` reaches it from a renderer over IPC. Outside Electron, `new BetterSqliteAdapter(filePath)` opens the same kind of file.
 
-**Fallback:** If better-sqlite3 fails to build, fall back to sql.js manually
-or via [`resolveStorageAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/resolver.ts) with a preferred-order list:
+To fall back to sql.js when better-sqlite3 does not load, give the resolver an order:
 
 ```typescript
 import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
 
-const storage = await resolveStorageAdapter({
-  preferred: ['better-sqlite3', 'sql.js'],
+const storageAdapter = await resolveStorageAdapter({
+  priority: ['better-sqlite3', 'sqljs'],
+  filePath: './db_data/agentos.sqlite3',
 });
 ```
 
----
+Without `priority`, the resolver reads the `STORAGE_ADAPTER` environment variable (for example `STORAGE_ADAPTER=sqljs`) before its own order. Its default file is `db_data/app.sqlite3` under the working directory.
 
 ### Mobile (Capacitor)
-
-**Recommended Adapter:** @capacitor-community/sqlite
 
 ```typescript
 import { CapacitorSqliteAdapter } from '@framers/sql-storage-adapter';
 
-const storage = new CapacitorSqliteAdapter({
-  database: 'agentos-mobile',
-  encrypted: true,  // iOS Keychain / Android Keystore
-});
-
-await storage.open();
-
-await agentos.initialize({
-  storageAdapter: storage,
-  // ...
-});
+const storageAdapter = new CapacitorSqliteAdapter({ database: 'agentos-mobile' });
+await storageAdapter.open();
 ```
 
-**Features:**
-- ✅ Native SQLite on iOS/Android
-- ✅ Encryption support
-- ✅ Multi-threaded (better performance)
-- ✅ Unlimited storage (device-dependent)
-
-**Fallback:** For WebView-based Ionic apps without Capacitor, use IndexedDB:
-
-```typescript
-import { IndexedDbAdapter } from '@framers/sql-storage-adapter';
-
-const storage = new IndexedDbAdapter({
-  dbName: 'agentos-mobile',
-});
-await storage.open();
-```
+The adapter uses the `@capacitor-community/sqlite` plugin. In a WebView without Capacitor, use `IndexedDbAdapter`.
 
 ---
 
-## Hybrid Architecture (Local + Cloud Sync)
+## Syncing a Local Database
 
-**Use Case:** Local-first for speed/offline, sync to cloud for multi-device access.
+The adapter package has two sync layers:
 
-The cross-platform sync layer ships in `@framers/sql-storage-adapter/sync` and
-takes a local adapter plus a remote one. See the dedicated sync guide in the
-adapter repo for the full schema; the minimal wiring is:
+- `createSyncManager({ primary, remote, sync })`, from the package root, keeps a local database and a remote one in step. `sync.mode` is `manual` (the default), `auto`, `periodic` (with `interval`), `realtime` or `on-reconnect`; `sync.conflictStrategy` is `last-write-wins` (the default), `local-wins`, `remote-wins`, `merge` or `keep-both`.
+- `createCrossPlatformSync({ localAdapter, endpoint, tables, ... })`, from `@framers/sql-storage-adapter/sync`, syncs a local adapter with a sync server at `endpoint` over WebSocket or HTTP.
 
-```typescript
-import { IndexedDbAdapter } from '@framers/sql-storage-adapter';
-import { createCrossPlatformSync } from '@framers/sql-storage-adapter/sync';
-import { createPostgresAdapter } from '@framers/sql-storage-adapter';
-
-const local  = new IndexedDbAdapter({ dbName: 'agentos-local' });
-const remote = createPostgresAdapter({ connectionString: process.env.SUPABASE_URL! });
-
-await local.open();
-await remote.open();
-
-const sync = createCrossPlatformSync({
-  local,
-  remote,
-  intervalMs: 30_000,
-});
-await sync.start();
-```
-
-**Sync Strategies:**
-
-| Strategy | Behavior | Use Case |
-|----------|----------|----------|
-| `local-only` | No sync | Offline-only apps |
-| `remote-only` | Cloud-only | Server-authoritative |
-| `optimistic` | Local first, sync async | **Recommended** for hybrid |
-| `pessimistic` | Remote first, cache local | Strong consistency |
+See the [sql-storage-adapter repository](https://github.com/framerslab/sql-storage-adapter) for their options.
 
 ---
 
-## Schema & Typed Queries
+## Choosing an Adapter
 
-AgentOS storage adapter auto-creates these tables:
-
-```sql
--- Conversations (GMI interactions)
-conversations (id, user_id, persona_id, created_at, updated_at, metadata)
-
--- Conversation events (streaming chunks, tool calls, etc.)
-conversation_events (id, conversation_id, event_type, event_data, timestamp)
-
--- Sessions (UI/UX grouping)
-sessions (id, user_id, display_name, target_type, target_id, created_at, updated_at, metadata)
-
--- Persona definitions (cached locally)
-personas (id, display_name, description, definition, created_at, updated_at)
-
--- Telemetry (token usage, costs, performance)
-telemetry (id, session_id, event_type, event_data, timestamp)
-
--- Workflows (cached definitions)
-workflows (id, name, definition, created_at, updated_at)
-```
-
-**Typed Query Builders (Future):**
-
-```typescript
-// Instead of raw SQL
-await storage.conversations.save('conv-1', 'user-1', 'v_researcher', events);
-const conversation = await storage.conversations.get('conv-1');
-const allConversations = await storage.conversations.list('user-1', { limit: 50 });
-
-// Sessions
-await storage.sessions.save('session-1', 'user-1', 'V Session', 'persona', 'v_researcher');
-const sessions = await storage.sessions.list('user-1');
-
-// Personas
-await storage.personas.cache('v_researcher', 'V', personaDefinition);
-const persona = await storage.personas.get('v_researcher');
-```
-
----
-
-## Migration from Prisma (Server-Side)
-
-If you're migrating from server-side AgentOS to client-side:
-
-### Before (Server-Side)
-
-```typescript
-const agentos = new AgentOS();
-await agentos.initialize({
-  prisma: new PrismaClient(),  // Server-only
-  // ...
-});
-```
-
-### After (Client-Side)
-
-```typescript
-import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
-import type { PrismaClient } from '@prisma/client';
-
-const storage = await resolveStorageAdapter();
-
-// Minimal stub: AgentOS.initialize still validates that `prisma` is set, but
-// when `storageAdapter` is provided it does not actually call into Prisma for
-// conversation/event/session storage. An empty object cast through unknown is
-// enough to satisfy the type at compile time.
-const mockPrisma = {} as unknown as PrismaClient;
-
-const agentos = new AgentOS();
-await agentos.initialize({
-  storageAdapter: storage,   // 🆕 Client-side
-  prisma: mockPrisma,        // Compatibility stub while Prisma remains required
-  // ...
-});
-```
-
-**Note:** Client-side AgentOS initialization still expects a Prisma-compatible object even when `storageAdapter` is provided, so keep the stub in place for now.
-
----
-
-## Performance & Quotas
-
-| Adapter | Read Speed | Write Speed | Storage Limit | Offline |
-|---------|-----------|-------------|---------------|---------|
-| IndexedDB | Fast | Moderate | 50MB-1GB+ | ✅ |
-| better-sqlite3 | **Fastest** | **Fastest** | Unlimited | ✅ |
-| sql.js | Fast | Slow | Unlimited (RAM) | ✅ |
-| capacitor | **Fastest** | **Fastest** | Unlimited | ✅ |
-| Postgres | Moderate | Moderate | Unlimited | ❌ |
-
-**Recommendations:**
-- **Web:** IndexedDB (best browser-native option)
-- **Electron:** better-sqlite3 (native performance)
-- **Capacitor:** capacitor (native mobile)
-- **Cloud:** Postgres (multi-user)
-
----
-
-## Export/Import for Data Portability
-
-All adapters support export/import:
-
-```typescript
-// Export
-const backup = storage.exportDatabase();  // Uint8Array (SQLite file format)
-
-// Save to file (browser)
-const blob = new Blob([backup], { type: 'application/x-sqlite3' });
-const link = document.createElement('a');
-link.href = URL.createObjectURL(blob);
-link.download = 'agentos-backup.db';
-link.click();
-
-// Import
-const file = await fileInput.files[0].arrayBuffer();
-await storage.importDatabase(new Uint8Array(file));
-```
-
-**Use Cases:**
-- Backup conversations before browser clear
-- Move data between devices
-- Switch platforms (web → desktop)
+| Platform | Adapter |
+|---------|-----------|
+| Browser | `IndexedDbAdapter` (sql.js in memory, saved to IndexedDB) |
+| Electron | `createElectronMainAdapter()` (better-sqlite3 in the main process) |
+| Node | `createDatabase({ type: 'sqlite', file })` or `new BetterSqliteAdapter(file)` |
+| Capacitor | `CapacitorSqliteAdapter` |
+| A shared server database | `createDatabase({ type: 'postgres', url })` |
 
 ---
 
@@ -348,53 +133,24 @@ await storage.importDatabase(new Uint8Array(file));
 
 ### "IndexedDB quota exceeded"
 
-**Solution:** Browsers limit IndexedDB to 50MB-1GB. Export old conversations and delete them:
+Export the database, then delete old rows, for example older messages:
 
 ```typescript
-// Export backup
-const backup = storage.exportDatabase();
-
-// Clear old data
-await storage.run('DELETE FROM conversation_events WHERE timestamp < ?', [cutoffDate]);
+const backup = storageAdapter.exportDatabase();
+await storageAdapter.run('DELETE FROM conversation_messages WHERE timestamp < ?', [cutoffMs]);
 ```
 
 ### "better-sqlite3 failed to build"
 
-**Solution:** Ensure native build tools are installed:
-
-```bash
-# Windows
-npm install --global windows-build-tools
-
-# macOS
-xcode-select --install
-
-# Linux
-sudo apt install python3 build-essential
-
-# Or fallback to sql.js
-STORAGE_ADAPTER=sqljs npm start
-```
+Install the native build tools (`xcode-select --install` on macOS; `python3` and `build-essential` on Debian and Ubuntu), or resolve with `priority: ['better-sqlite3', 'sqljs']` so sql.js takes over.
 
 ### "Storage not persisting across page refresh"
 
-**Solution:** Ensure `autoSave: true` for IndexedDB:
-
-```typescript
-const storage = new IndexedDbAdapter({
-  autoSave: true,  // ← Critical for persistence
-  saveIntervalMs: 5000,
-});
-```
+With `autoSave` on (the default), `IndexedDbAdapter` saves changed data to IndexedDB every `saveIntervalMs`. With `autoSave: false`, it saves only on `close()` and `importDatabase()`, so changes made since the last `close()` are lost when the page unloads first.
 
 ---
 
 ## Next Steps
 
-1. **Try the demo:** See `apps/agentos-workbench` for a working browser-side example
-2. **Read the Platform Strategy:** [PLATFORM_STRATEGY.md](../../sql-storage-adapter/PLATFORM_STRATEGY.md)
-3. **Contribute:** Submit issues/PRs for improvements
-
----
-
-**TL;DR:** Use `resolveStorageAdapter()` from `@framers/sql-storage-adapter` and AgentOS works offline everywhere. IndexedDB for web, better-sqlite3 for desktop, `@capacitor-community/sqlite` for mobile.
+- [Storage & Scaling](../getting-started/SQL_STORAGE_QUICKSTART.md): the adapter API, backups and migrations
+- [Platform strategy](https://github.com/framerslab/sql-storage-adapter/blob/master/PLATFORM_STRATEGY.md) in the sql-storage-adapter repository

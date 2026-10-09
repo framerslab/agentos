@@ -155,7 +155,7 @@ The first run embeds the whole corpus. Every run after only embeds the deltas. A
 | `upsert(name, documents)` | Insert-or-replace the changed and new chunks by id. |
 | `query(name, queryEmbedding, { topK, filter })` | Retrieval at read time (see below). |
 
-`fetchByIds` is the load-bearing optional method. A store that does not implement it (some remote or sparse-only indexes) cannot do the skip, and the recipe degrades to "embed everything every run." [`PostgresVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/PostgresVectorStore.ts) and the in-memory store both implement it.
+The skip depends on `fetchByIds`, an optional method. A store that does not implement it cannot do the skip, and the recipe embeds everything every run. Among the bundled stores only [`PostgresVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/PostgresVectorStore.ts) implements it; the in-memory, SQL, HNSW, Qdrant, Neo4j and Pinecone stores do not.
 
 ---
 
@@ -180,13 +180,13 @@ The recipe is backend-agnostic: it only calls interface methods. Choose the stor
 
 - [Postgres + pgvector](./POSTGRES_BACKEND.md): HNSW index, tsvector FTS, `fetchByIds`. The default for a server-side corpus.
 - [Pinecone](./PINECONE_BACKEND.md): managed, for large or multi-region indexes.
-- In-memory: tests and small static corpora, no persistence.
+- In-memory: tests and small static corpora, no persistence; it has no `fetchByIds`, so every run re-embeds.
 
 ---
 
 ## When to reach for `Memory.ingest()` instead
 
-When you want recall that decays, consolidates, and surfaces involuntarily, agent memory rather than a static index, use the [Document Ingestion](./MEMORY_DOCUMENT_INGESTION.md) pipeline. It already does content-hash idempotent re-ingestion, plus format loaders (PDF, DOCX, HTML, Markdown, CSV, JSON, YAML, URLs), four chunking strategies, and folder scanning with glob filters. The flat-collection recipe on this page is for when you specifically do not want a brain behind your vectors.
+When you want agent memory rather than a static index, with traces that decay and a brain you can consolidate, use the [Document Ingestion](./MEMORY_DOCUMENT_INGESTION.md) pipeline. It skips content it has already stored (by content hash), loads PDF, DOCX, HTML and Markdown files (CSV, JSON and YAML as plain text) and URLs, chunks the text, and scans folders with glob filters. It stores chunks as full-text-indexed traces without embeddings. The flat-collection recipe on this page is for when you do not want a brain behind your vectors.
 
 ---
 
@@ -196,7 +196,7 @@ When you want recall that decays, consolidates, and surfaces involuntarily, agen
 |------|---------|
 | `core/vector-store/IVectorStore.ts` | The interface: `createCollection`, `upsert`, `fetchByIds`, `query`, `delete`. |
 | `cognition/rag/vector_stores/PostgresVectorStore.ts` | pgvector backend with HNSW index, tsvector FTS, and `fetchByIds`. |
-| `cognition/rag/vector_stores/InMemoryVectorStore.ts` | In-process backend for tests and small corpora. |
+| `cognition/rag/vector_stores/InMemoryVectorStore.ts` | In-process backend for tests and small corpora (no `fetchByIds`). |
 
 ---
 

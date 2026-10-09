@@ -3,7 +3,7 @@
 Stage 3 of the [Cognitive Pipeline](./COGNITIVE_PIPELINE.md). Two sibling primitives, both at the read stage, both classifier-driven, both orthogonal:
 
 - **[Read Router](#read-router--read-strategy-selection)** picks the reader **strategy** (`single-call`, `two-call-extract-answer`, `commit-vs-abstain`, `verbatim-citation`, `scratchpad-then-answer`) based on a classified read **intent**. It controls *how* the reader generates the answer.
-- **[Reader Router](#reader-router--reader-model-selection)** picks the reader **model** (`gpt-4o` vs `gpt-5-mini`) based on the query **category** (single-session-user, multi-session, temporal-reasoning, etc.). It controls *which model* generates the answer.
+- **[Reader Router](#reader-router--reader-model-selection)** picks the reader **model** (`gpt-4o`, `gpt-5` or `gpt-5-mini`) based on the query **category** (single-session-user, multi-session, temporal-reasoning, etc.). It controls *which model* generates the answer.
 
 The two primitives compose. A typical Phase B configuration runs both: Reader Router decides the model, Read Router decides the strategy that model follows.
 
@@ -94,7 +94,7 @@ async function myScratchpadReader(_q: string, _e: any): Promise<Answer>      { r
 const router = new ReadRouter({
   classifier: new LLMReadIntentClassifier({ llm: openaiAdapter }),
   preset: 'precise-fact',
-  budget: { perReadUsd: 0.025, mode: 'cheapest-fallback' },
+  budget: { perReadUsd: 0.03, mode: 'cheapest-fallback' },
   dispatcher: new FunctionReadDispatcher<Answer>({
     'single-call': async (q, evidence) => mySingleCallReader(q, evidence),
     'two-call-extract-answer': async (q, evidence) => myTwoCallReader(q, evidence),
@@ -163,7 +163,7 @@ Validated on LongMemEval-S Phase B N=500 alongside MemoryRouter: **85.6% [82.4%,
 
 ### What it actually does
 
-When a query arrives, the [QueryClassifier](./QUERY_ROUTER.md) at Stage 1 already produced a category prediction (one of six: single-session-user, single-session-assistant, single-session-preference, knowledge-update, multi-session, temporal-reasoning). ReaderRouter consumes that prediction at Stage 3 and dispatches the answer call to the reader tier best-suited to that category:
+When a query arrives, the [MemoryRouter](./MEMORY_ROUTER.md)'s classifier at Stage 2 has already produced a category prediction (one of six: single-session-user, single-session-assistant, single-session-preference, knowledge-update, multi-session, temporal-reasoning). At Stage 3, `selectReader(category, preset)` returns the reader tier for that category, and the caller dispatches the answer call to it. With the `min-cost-best-cat-2026-04-28` preset:
 
 ```
 predicted_category ──► reader_tier
@@ -175,11 +175,11 @@ predicted_category ──► reader_tier
   multi-session ──► gpt-5-mini      (cross-session synthesis from chunks)
 ```
 
-Each reader gets the retrieved context from Stage 2 plus the question. The router itself adds zero LLM calls because it reuses Stage 1's classification output.
+Each reader gets the retrieved context from Stage 2 plus the question. `selectReader()` is a table lookup and makes no LLM call. The `min-cost-best-cat-gpt5-tr-2026-04-29` preset returns `gpt-5` instead of `gpt-4o` for temporal-reasoning and single-session-user.
 
 ### Why route at all
 
-Two readers behave very differently on the same retrieved evidence. Per-category Phase B at full N=500 on the same retrieval stack (canonical-hybrid + sem-embed):
+Two readers behave very differently on the same retrieved evidence. Per-category Phase B at full N=500 on the same retrieval stack (hybrid retrieval and Cohere rerank behind the `minimize-cost` policy router):
 
 | Category | gpt-4o reader | gpt-5-mini reader | Best pick |
 |---|---:|---:|---|
@@ -189,9 +189,10 @@ Two readers behave very differently on the same retrieved evidence. Per-category
 | single-session-assistant (n=56) | 98.2% | **100.0%** | gpt-5-mini (cheaper, ties or wins) |
 | knowledge-update (n=78) | 85.7% | **87.2%** | gpt-5-mini (cheaper, ties or wins) |
 | multi-session (n=133) | 76.2% | **79.7%** | gpt-5-mini (+3.5 pp) |
-| **Aggregate** | **83.2%** | **83.2%** | **tied** |
+| **Run score** | **83.2%** (416/500) | **83.2%** (416/500) | **tied** |
+| **Category rows weighted by n** | 84.2% | 83.2% | gpt-4o (+1.0 pp) |
 
-At a fixed reader, aggregate accuracy is the same. The two readers tie at 83.2% on aggregate, but their per-category profiles are mirror images. Routing per category produces a Pareto improvement over either reader alone: **+1.4 pp aggregate, dominated by the +10 pp lift on single-session-preference (76.7% gpt-4o → 86.7% gpt-5-mini at the same retrieval).** Plus 47% of cases now route to the cheaper gpt-5-mini reader, dropping cost-per-correct.
+Both runs scored 416 of 500. The gpt-4o run recorded six cases without a category, all scored wrong; its category rates cover the other 494 cases (temporal-reasoning 131, multi-session 130, knowledge-update 77), so its rows weight to 84.2%. The per-category profiles are mirror images. Picking the better reader per category reaches 87.0% (435/500): +2.8 pp over gpt-4o's weighted 84.2% and +3.8 pp over gpt-5-mini. A run that routed on the gpt-5-mini classifier's real predictions, with canonical-hybrid retrieval for every case, scored 85.6% (428/500). The largest per-category gap is single-session-preference (63.3% gpt-4o → 86.7% gpt-5-mini at the same retrieval), and about half of the cases (53% in the measured run) route to the cheaper gpt-5-mini reader.
 
 ### Calibration table
 
@@ -215,9 +216,9 @@ Use them to surface clear diagnostics in the calling pipeline.
 
 ### Standalone-classifier mode
 
-When ReaderRouter is the only classifier-firing primitive in the pipeline (no [MemoryRouter](./MEMORY_ROUTER.md), no [QueryClassifier T1+](./QUERY_ROUTER.md) producing a category), it fires its own gpt-5-mini few-shot classifier per query (~$0.0001 / query) to drive the dispatch.
+`selectReader()` never calls a model. Without a [MemoryRouter](./MEMORY_ROUTER.md) in the pipeline, the host gets the category from `LLMMemoryClassifier.classify(query)` (one gpt-5-mini-class call per query, ~$0.0001) and passes it in.
 
-When ReaderRouter runs alongside MemoryRouter (the typical config), it consumes the MemoryRouter classifier's output and adds zero LLM calls.
+Alongside MemoryRouter (the typical config), the host passes the category from the MemoryRouter's decision, and the reader pick adds zero LLM calls.
 
 ### Why the default classifier is gpt-5-mini and not gpt-4o
 
@@ -230,7 +231,7 @@ Two independent Phase B measurements at full N=500 on LongMemEval-S confirm that
 
 In both runs, the gpt-4o classifier reclassifies edge cases more aggressively, gaining marginally on SSU/SSA/SSP (always within CI) but losing meaningfully on KU (-3.9 to -5.1 pp) and MS (-5.2 pp on the second measurement) as edge cases get routed away from their gpt-5-mini-best dispatch tier.
 
-The `--om-classifier-model gpt-4o` flag remains wired in for per-workload empirical testing — workloads with very different category distributions from LongMemEval-S may see a meaningful lift — but on this benchmark's category mix the recommended default is unambiguously `gpt-5-mini`.
+The agentos-bench `--om-classifier-model gpt-4o` flag remains wired in for per-workload empirical testing — workloads with very different category distributions from LongMemEval-S may see a meaningful lift — but on this benchmark's category mix the recommended default is unambiguously `gpt-5-mini`.
 
 ### Cost per case
 
@@ -261,9 +262,9 @@ vs the prior 84.8% Tier 3 + ReaderRouter headline at $0.0410/correct, dropping t
 
 ## Related
 
-- [Cognitive Pipeline](./COGNITIVE_PIPELINE.md) — composition primitive that wires Read Router + Reader Router into a single pipeline
+- [Cognitive Pipeline](./COGNITIVE_PIPELINE.md) — composition primitive that runs Read Router as its read stage
 - [Ingest Router](./INGEST_ROUTER.md) — input stage sibling
 - [Memory Router](./MEMORY_ROUTER.md) — recall stage sibling (produces the evidence the read stage consumes)
-- [Query Router](./QUERY_ROUTER.md) — Stage 1, the memory-or-not gate (also produces the category that Reader Router consumes)
-- [Citation Verification](./features/citation-verification.md) — output-stage validation that runs after the reader
+- [Query Router](./QUERY_ROUTER.md) — Stage 1, the memory-or-not gate
+- [Citation Verification](/features/citation-verification) — output-stage validation that runs after the reader
 - [agentos-bench](https://github.com/framerslab/agentos-bench) — reproducible run JSONs, full transparency stack

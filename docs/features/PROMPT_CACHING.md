@@ -20,8 +20,8 @@ const result = await generateText({
   prompt: playerAction,
 });
 
-result.usage.cacheReadInputTokens;     // tokens served from cache
-result.usage.cacheCreationInputTokens; // tokens written to cache this call
+result.usage.cacheReadTokens;     // tokens served from cache, summed over the call's steps
+result.usage.cacheCreationTokens; // tokens written to cache this call
 ```
 
 ## What zero config does, per provider
@@ -62,11 +62,14 @@ Costs and floors (Anthropic pricing rules):
   0.1x. Break-even is 2 total requests within the TTL at 5m (one cache
   read), 3+ at 1h.
 - Every model has a minimum cacheable prefix below which markers are
-  **silently ignored** (no error, `cache_creation_input_tokens: 0`): 4096
-  tokens on Opus 4.5–4.8 and Haiku 4.5; 2048 on Fable/Mythos 5, Opus 5,
-  Sonnet 4.6, Sonnet 5, and Haiku 3.x; 1024 on Sonnet 3.7–4.5. (Opus 5's
-  documented floor is 512; agentos's floor heuristics hold the conservative
-  2048.) Marking a sub-floor prefix is safe — it just does nothing.
+  **silently ignored** (no error, `cache_creation_input_tokens: 0`). The
+  floors AgentOS applies
+  ([`model-cache-capabilities.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/model-cache-capabilities.ts)):
+  512 tokens on Fable 5 and 5.1, Mythos 5 and 5.1, Opus 5 and 5.5, and
+  Sonnet 5.5; 1024 on Opus 4.8, Sonnet 5, Sonnet 4.6, Sonnet 4.5 and older
+  Sonnets, Opus 4.0 and 4.1, and Opus 3; 2048 on Opus 4.7, Mythos Preview and
+  Haiku 3.x; 4096 on Opus 4.5 and 4.6 and Haiku 4.5. Marking a sub-floor
+  prefix is safe: it does nothing.
 - Caches are model-scoped: a fallback or retry on a different model is a
   cold start. AgentOS's canonical fallback chains pin `cache: false` on
   every leg for exactly this reason — failover hops are one-shots that
@@ -109,7 +112,7 @@ await streamText({
 ```
 
 - `cache?: { ttl?: '5m' | '1h' } | false` is accepted by `generateText`,
-  `streamText`, `generateObject`, agent configs (`AgentConfig.cache`), and
+  `streamText`, `generateObject`, `agent({ cache })`, and
   per-hop fallback entries (`FallbackProviderEntry.cache`). `false` strips
   every marker from the request, including caller markers. A per-call
   `'1h'` also raises caller system-marker TTLs so the request never orders
@@ -154,13 +157,19 @@ await generateText({
 
 ## Usage normalization and telemetry
 
-Every provider reports cache activity in the same two `ModelUsage` fields,
-with `promptTokens` always inclusive of the cached subset:
+Every provider reports cache activity in the same two fields of its
+`ModelUsage`, and `generateText()` / `streamText()` sum them over a call's
+steps into the result's `usage`:
 
-| Field | Meaning |
-|---|---|
-| `cacheReadInputTokens` | Prompt tokens served from cache this call |
-| `cacheCreationInputTokens` | Prompt tokens written to cache this call |
+| Provider response (`ModelUsage`) | Result (`usage`) | Meaning |
+|---|---|---|
+| `cacheReadInputTokens` | `cacheReadTokens` | Prompt tokens served from cache |
+| `cacheCreationInputTokens` | `cacheCreationTokens` | Prompt tokens written to cache |
+| `inclusiveInputTokens` | `inclusiveInputTokens` | All input tokens, cached ones included |
+
+`promptTokens` follows the provider: Anthropic's excludes the cached tokens,
+while OpenAI's and OpenRouter's include them. Use `inclusiveInputTokens` for a
+total that means the same on every provider.
 
 Sources: Anthropic `usage.cache_read_input_tokens` /
 `cache_creation_input_tokens`; OpenAI and OpenAI-compatible

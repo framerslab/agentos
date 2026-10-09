@@ -107,6 +107,8 @@ export interface ScriptedGmiOptions {
   toolResults?: Record<string, ToolCallResult | Error>;
   persona?: Partial<IPersonaDefinition>;
   maxToolLoopIterations?: number;
+  /** Merged last into the GMIBaseConfig the helper builds. */
+  config?: Partial<GMIBaseConfig>;
 }
 
 /**
@@ -140,6 +142,7 @@ export async function createScriptedGmi(opts: ScriptedGmiOptions) {
     toolOrchestrator: { orchestratorId: 'scripted-tools', listAvailableTools: vi.fn(async () => [LOOKUP_TOOL]), processToolCall } as unknown as IToolOrchestrator,
     ...(opts.gateway ? { completionGateway: opts.gateway } : {}),
     ...(opts.maxToolLoopIterations ? { maxToolLoopIterations: opts.maxToolLoopIterations } : {}),
+    ...(opts.config ?? {}),
   };
   await gmi.initialize({
     id: 'scripted-persona', name: 'Scripted Persona', version: '1.0.0', baseSystemPrompt: 'You are the scripted test persona.',

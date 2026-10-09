@@ -6,6 +6,11 @@ import { formatToolResponse } from './activation';
 
 export interface EmulatedLoopMessage { role: string; content: string; }
 
+/**
+ * One parsed call. `args` are the arguments the model sent, before
+ * `onBeforeToolExecution`, as the native tool loops record them, so a value a
+ * hook adds (a credential) never lands in the result.
+ */
 export interface EmulatedToolCallRecord { name: string; args: Record<string, unknown>; error?: string; }
 
 export interface RunEmulatedToolLoopOptions {
@@ -85,7 +90,7 @@ export async function runEmulatedToolLoop(
           try {
             const hooked = await opts.onBeforeToolExecution({ name: call.name, args, id: '', step });
             if (hooked === null) {
-              toolCalls.push({ name: call.name, args, error: 'Skipped by onBeforeToolExecution hook' });
+              toolCalls.push({ name: call.name, args: call.arguments, error: 'Skipped by onBeforeToolExecution hook' });
               return formatToolResponse(call.name, { success: false, error: 'skipped by onBeforeToolExecution hook' });
             }
             args = hooked.args;
@@ -96,7 +101,7 @@ export async function runEmulatedToolLoop(
         if (opts.approvalGate) {
           const verdict = await askApprovalGate(opts.approvalGate, { name: call.name, args: args ?? {}, id: '', step });
           if (verdict !== APPROVAL_GRANTED) {
-            toolCalls.push({ name: call.name, args, error: `Skipped: ${verdict.reason}` });
+            toolCalls.push({ name: call.name, args: call.arguments, error: `Skipped: ${verdict.reason}` });
             return formatToolResponse(call.name, { success: false, error: `skipped: ${verdict.reason}` });
           }
         }
@@ -111,13 +116,13 @@ export async function runEmulatedToolLoop(
               : raw;
           toolCalls.push({
             name: call.name,
-            args,
+            args: call.arguments,
             ...(result.success === false && typeof result.error === 'string' ? { error: result.error } : {}),
           });
           return formatToolResponse(call.name, result);
         } catch (err) {
           const error = opts.maskToolError ? opts.maskToolError(String(err)) : String(err);
-          toolCalls.push({ name: call.name, args, error });
+          toolCalls.push({ name: call.name, args: call.arguments, error });
           return formatToolResponse(call.name, { success: false, error });
         }
       })

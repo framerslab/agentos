@@ -52,6 +52,7 @@ import {
   AgentOSErrorChunk,
   AgentOSResponseChunkType,
   isActionableToolCallRequestChunk,
+  type AgentOSFinalResponseChunk,
 } from './types/AgentOSResponse';
 import {
   AgentOSOrchestrator,
@@ -112,6 +113,26 @@ import {
   type AgentOSObservabilityConfig,
 } from '../safety/evaluation/observability/otel';
 import type { IGuardrailService, GuardrailContext } from '../safety/guardrails/IGuardrailService';
+import type { GuardrailOutputVerdict } from '../safety/guardrails/guardrailDispatcher';
+import { MessageRole } from '../core/conversation/ConversationMessage';
+import {
+  assertRequiredGuardrails,
+  checkRequiredGuardrails,
+  withRequiredPosture,
+  type ActiveGuardrail,
+  type RequiredGuardrailReport,
+  type RequiredGuardrailSpec,
+} from '../safety/guardrails/requiredGuardrails';
+import { SpendMeterUnavailableError, type ISpendMeter, type SpendDenyReason } from '../safety/runtime/SpendMeter';
+import {
+  recheckStructuredReply,
+  resolveStructuredReply,
+  resolveStructuredReplySpec,
+  StructuredReplyConfigError,
+  type IStructuredSchemaRegistry,
+  type ResolvedStructuredReply,
+  type StructuredReplySpec,
+} from './runtime/structuredReply';
 import type { EmergentConfig } from '../cognition/emergent/types.js';
 // SelfImprovementToolDeps reserved for emergent capability integration
 import { GuardrailAction } from '../safety/guardrails/IGuardrailService';
@@ -410,6 +431,33 @@ export interface AgentOSStandaloneMemoryConfig {
  * the `AgentOS` service. This configuration object aggregates settings for all major
  * sub-components and dependencies of the AgentOS platform.
  */
+/** The spend meter `processRequest` reserves against, and how a request maps to an account and units. */
+export interface AgentOSSpendMeterConfig {
+  meter: ISpendMeter;
+  /** The account a request is metered under. Default: the organization, else the user. */
+  accountIdOf?(input: AgentOSInput): string;
+  /** The units a request reserves. Default 1. */
+  unitsOf?(input: AgentOSInput): number;
+}
+
+/** The error code a refused reservation answers with. */
+const SPEND_DENIAL_CODE: Record<SpendDenyReason, GMIErrorCode> = {
+  allowance_exhausted: GMIErrorCode.ALLOWANCE_EXHAUSTED,
+  in_flight: GMIErrorCode.ALREADY_EXISTS,
+  already_consumed: GMIErrorCode.ALREADY_EXISTS,
+  retries_exhausted: GMIErrorCode.RATE_LIMIT_EXCEEDED,
+};
+
+/**
+ * True when an output guardrail stopped the reply on this chunk: the error chunk a BLOCK yields, or a final response
+ * whose guardrail metadata records an output BLOCK (a guard that answers a block with a fixed reply).
+ */
+function isOutputGuardrailBlock(chunk: AgentOSResponse): boolean {
+  if (chunk.type === AgentOSResponseChunkType.ERROR && chunk.gmiInstanceId === 'guardrail') return true;
+  const output = (chunk.metadata as { guardrail?: { output?: Array<{ action?: unknown }> } } | undefined)?.guardrail?.output;
+  return chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE && Array.isArray(output) && output.some((e) => String(e?.action).toLowerCase() === 'block');
+}
+
 export interface AgentOSConfig {
   /** Configuration for the {@link GMIManager}. */
   gmiManagerConfig: GMIManagerConfig;
@@ -430,6 +478,14 @@ export interface AgentOSConfig {
    * When provided, rolling task-outcome telemetry survives orchestrator restarts.
    */
   taskOutcomeTelemetryStore?: ITaskOutcomeTelemetryStore;
+  /**
+   * A persisted per-account allowance. With one set, every `processRequest` needs an `operationId` and reserves its
+   * units before any provider is called: a refusal or a meter that cannot answer ends the request with an error chunk
+   * and no model call. The turn settles the reservation when it ends; a reply an output guardrail blocks is refunded.
+   */
+  spendMeter?: AgentOSSpendMeterConfig;
+  /** The schemas a request's `structuredReply.schemaRef` is looked up in. A `Map<string, ZodType | JsonSchemaObject>` is one. */
+  structuredSchemas?: IStructuredSchemaRegistry;
   /**
    * Optional retrieval augmentor enabling vector-based RAG and/or GraphRAG.
    * When provided, it is passed into GMIs via the GMIManager.
@@ -522,6 +578,18 @@ export interface AgentOSConfig {
   subscriptionService?: ISubscriptionService;
   /** Optional guardrail service implementation used for policy enforcement. */
   guardrailService?: IGuardrailService;
+  /**
+   * Guards the deployment cannot run without, by id and stage. `initialize()` refuses to finish when one is missing
+   * or does not implement a named stage; `processRequest()` refuses a request (`SYS_GUARDRAIL_REQUIRED_MISSING`) when
+   * one has gone missing since. Each runs fail-closed with its deadline, and a guard required on `output` puts the
+   * output in hold mode.
+   */
+  requiredGuardrails?: RequiredGuardrailSpec[];
+  /**
+   * `hold`: no TEXT_DELTA reaches the caller before the output guards have judged the whole reply. Default `stream`;
+   * forced to `hold` when a required guard covers the output stage.
+   */
+  guardrailOutputMode?: 'stream' | 'hold';
   /** Optional map of secretId -> value for extension/tool credentials. */
   extensionSecrets?: Record<string, string>;
   /**
@@ -815,8 +883,9 @@ export class AgentOS implements IAgentOS {
    * from the standard environment (`DATABASE_URL`, provider API keys, etc.)
    * and wires up sane defaults for every sub-system. Any fields passed in
    * `overrides` are deep-merged onto the generated config so callers can
-   * tweak observability, provenance, memoryTools, etc. without rebuilding
-   * the whole config object themselves.
+   * tweak observability, memoryTools, etc. without rebuilding the whole
+   * config object themselves. Provenance is an extension pack
+   * (`createProvenancePack()` in `extensionManifest`), not a config key.
    *
    * For fine-grained control, fall back to `new AgentOS()` +
    * `initialize(yourConfig)`.
@@ -824,8 +893,8 @@ export class AgentOS implements IAgentOS {
    * @param overrides - Optional partial `AgentOSConfig` whose fields are
    *   shallow-merged onto the auto-generated config. Pass `tools` /
    *   `externalTools` here to register them at construction time. Pass
-   *   `observability`, `provenance`, `memoryTools`, etc. to opt into
-   *   subsystems without touching the rest of the defaults.
+   *   `observability`, `memoryTools`, etc. to opt into subsystems without
+   *   touching the rest of the defaults.
    * @param logger - Optional logger override.
    * @returns A fully-initialised `AgentOS` instance.
    * @throws {AgentOSServiceError} If env config is invalid or initialisation fails.
@@ -837,10 +906,9 @@ export class AgentOS implements IAgentOS {
    * // Defaults — reads DATABASE_URL + provider keys from env.
    * const os = await AgentOS.create();
    *
-   * // With observability + provenance turned on.
+   * // With tracing turned on.
    * const observed = await AgentOS.create({
    *   observability: { tracing: { enabled: true } },
-   *   provenance:    { policy: 'sealed', keyPath: '~/.framers/key.pem' },
    * });
    * ```
    */
@@ -955,6 +1023,13 @@ export class AgentOS implements IAgentOS {
     const extensionLifecycleContext: ExtensionLifecycleContext = { logger: this.logger };
     await this.extensionManager.loadManifest(extensionLifecycleContext);
     await this.registerConfigGuardrailService(extensionLifecycleContext);
+    if (this.config.requiredGuardrails?.length) {
+      try {
+        assertRequiredGuardrails(this.listActiveGuardrails(), this.config.requiredGuardrails);
+      } catch (error) {
+        throw AgentOSServiceError.wrap(error, GMIErrorCode.CONFIGURATION_ERROR, 'A required guardrail is missing.', 'AgentOS.initialize');
+      }
+    }
 
     if (this.config.schemaOnDemandTools?.enabled === true) {
       const allowPackages =
@@ -1191,6 +1266,7 @@ export class AgentOS implements IAgentOS {
         rollingSummaryMemorySink: this.config.rollingSummaryMemorySink,
         longTermMemoryRetriever: this.config.longTermMemoryRetriever,
         taskOutcomeTelemetryStore: this.config.taskOutcomeTelemetryStore,
+        spendMeter: this.config.spendMeter?.meter,
       };
       this.agentOSOrchestrator = new AgentOSOrchestrator();
       await this.agentOSOrchestrator.initialize(
@@ -1339,8 +1415,13 @@ export class AgentOS implements IAgentOS {
     }
   }
 
+  /** True when the overrides disable the guard given in `config.guardrailService`. */
+  private configGuardrailDisabled(): boolean {
+    return this.config.extensionOverrides?.guardrails?.['config-guardrail-service']?.enabled === false;
+  }
+
   private async registerConfigGuardrailService(context: ExtensionLifecycleContext): Promise<void> {
-    if (!this.config.guardrailService) {
+    if (!this.config.guardrailService || this.configGuardrailDisabled()) {
       return;
     }
     const registry = this.extensionManager.getRegistry<IGuardrailService>(EXTENSION_KIND_GUARDRAIL);
@@ -1356,20 +1437,92 @@ export class AgentOS implements IAgentOS {
     );
   }
 
-  private getActiveGuardrailServices(): IGuardrailService[] {
-    const services: IGuardrailService[] = [];
+  /** Every active guard with the id a required guard is named by: its own `id`, else its descriptor's. */
+  private listActiveGuardrails(): ActiveGuardrail[] {
+    const active: ActiveGuardrail[] = [];
 
     if (this.extensionManager) {
       const registry =
         this.extensionManager.getRegistry<IGuardrailService>(EXTENSION_KIND_GUARDRAIL);
-      services.push(...registry.listActive().map((descriptor) => descriptor.payload));
+      for (const descriptor of registry.listActive()) {
+        active.push({ id: descriptor.payload?.id ?? descriptor.id, service: descriptor.payload });
+      }
     }
 
-    if (this.guardrailService && !services.includes(this.guardrailService)) {
-      services.push(this.guardrailService);
+    if (this.guardrailService && !this.configGuardrailDisabled() && !active.some((a) => a.service === this.guardrailService)) {
+      active.push({ id: this.guardrailService.id ?? 'config-guardrail-service', service: this.guardrailService });
     }
 
-    return services;
+    return active;
+  }
+
+  /** The required guards' report for this moment, or null when the deployment requires none. */
+  private requiredGuardrailReport(): RequiredGuardrailReport | null {
+    const required = this.config.requiredGuardrails;
+    if (!required?.length) return null;
+    return checkRequiredGuardrails(this.listActiveGuardrails(), required);
+  }
+
+  private getActiveGuardrailServices(): IGuardrailService[] {
+    const required = this.config.requiredGuardrails ?? [];
+    return this.listActiveGuardrails().map(({ id, service }) => {
+      const spec = required.find((r) => r.id === id);
+      return spec ? withRequiredPosture(id, service, spec) : service;
+    });
+  }
+
+  /**
+   * With conversational persistence on, the orchestrator stores the model's reply before the output guards run. When
+   * a guard replaced or rewrote it, the stored message is made to hold what the person saw, so the history never
+   * carries a reply the guards refused. A reply blocked with no replacement is emptied, with the reason recorded.
+   */
+  private async recordGuardedReply(conversationKey: string, verdict: GuardrailOutputVerdict): Promise<void> {
+    const rewritten = verdict.action === GuardrailAction.SANITIZE || verdict.action === GuardrailAction.BLOCK;
+    // a verdict on a streamed delta judged no whole reply, and the orchestrator stores the reply only once the turn
+    // ends: that case is left to hold mode, where nothing streams before the final verdict
+    if (!rewritten || verdict.originalText === null || !this.config.orchestratorConfig?.enableConversationalPersistence || !this.conversationManager) return;
+    try {
+      const context = await this.conversationManager.getConversation(conversationKey);
+      if (!context) return;
+      if (this.conversationManager.appendOnlyPersistence) {
+        this.logger.warn('The conversation store is append-only: the stored reply keeps the text a guard replaced; the history in memory is rewritten', {
+          conversationId: conversationKey,
+          reasonCode: verdict.reasonCode ?? verdict.action,
+        });
+      }
+      // the message the verdict was about, by its text (the orchestrator stored the same string the guards judged):
+      // the newest such message is this turn's, and an earlier turn's reply is never touched
+      const stored = [...context.getAllMessages()].reverse().find((m) => m.role === MessageRole.ASSISTANT && m.metadata?.source === 'agentos_output' && m.content === verdict.originalText);
+      if (!stored) return;
+      context.replaceMessageContent(stored.id, verdict.finalText ?? '', {
+        modificationInfo: { strategy: 'filtered', reason: `guardrail:${verdict.reasonCode ?? verdict.action}` },
+      });
+      await this.conversationManager.saveConversation(context);
+    } catch (error) {
+      this.logger.warn('The guarded reply could not be written to the conversation', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /** Hold mode: set, or forced by a guard required on the output stage. */
+  private holdsOutputUntilFinal(): boolean {
+    return this.config.guardrailOutputMode === 'hold' || (this.config.requiredGuardrails ?? []).some((r) => r.stages.includes('output'));
+  }
+
+  /** The error chunk a request is refused with while a required guard is missing. */
+  private requiredGuardrailMissingChunk(report: RequiredGuardrailReport, streamId: string, personaId: string): AgentOSErrorChunk {
+    return {
+      type: AgentOSResponseChunkType.ERROR,
+      streamId,
+      gmiInstanceId: 'guardrail',
+      personaId,
+      isFinal: true,
+      timestamp: new Date().toISOString(),
+      code: GMIErrorCode.GUARDRAIL_REQUIRED_MISSING,
+      message: 'A guardrail this deployment requires is not active, so the request was not run.',
+      details: { missing: report.missing, missingStage: report.missingStage },
+    };
   }
 
   private async ensureUtilityAIService(): Promise<void> {
@@ -1617,6 +1770,13 @@ export class AgentOS implements IAgentOS {
       metadata: input.options?.customFlags,
     };
 
+    const requiredReport = this.requiredGuardrailReport();
+    if (requiredReport && !requiredReport.ok) {
+      this.logger.error('A required guardrail is missing; the request was not run', { missing: requiredReport.missing, missingStage: requiredReport.missingStage });
+      yield this.requiredGuardrailMissingChunk(requiredReport, input.sessionId || `agentos-guardrail-${Date.now()}`, effectivePersonaId);
+      return;
+    }
+
     const guardrailServices = this.getActiveGuardrailServices();
 
     const guardrailReadyInput: AgentOSInput = {
@@ -1656,6 +1816,30 @@ export class AgentOS implements IAgentOS {
         this.selfImprovementManager.buildSessionRuntimeKey(guardrailInputOutcome.sanitizedInput.sessionId),
       ),
     });
+    // A structured reply: the schema is resolved here, before the turn, so a request that names a schema the runtime
+    // cannot reach is refused with no model call; the turn receives the spec with its schema in hand.
+    let structuredSpec: ResolvedStructuredReply | null = null;
+    if (orchestratorInput.options?.structuredReply) {
+      try {
+        const spec: StructuredReplySpec = resolveStructuredReplySpec(orchestratorInput.options.structuredReply, this.config.structuredSchemas);
+        structuredSpec = resolveStructuredReply(spec);
+        orchestratorInput.options = { ...orchestratorInput.options, structuredReply: spec };
+      } catch (error) {
+        const message = error instanceof StructuredReplyConfigError ? error.message : `The structured reply could not be set up: ${error instanceof Error ? error.message : String(error)}`;
+        yield {
+          type: AgentOSResponseChunkType.ERROR,
+          streamId: orchestratorInput.sessionId || `agentos-req-${Date.now()}`,
+          gmiInstanceId: 'structured_reply',
+          personaId: effectivePersonaId,
+          isFinal: true,
+          timestamp: new Date().toISOString(),
+          code: GMIErrorCode.VALIDATION_ERROR,
+          message,
+          details: { structuredReply: true },
+        } as AgentOSErrorChunk;
+        return;
+      }
+    }
     // Language negotiation (non-blocking)
     let languageNegotiation: any = null;
     if (this.languageService && this.config.languageConfig) {
@@ -1684,6 +1868,54 @@ export class AgentOS implements IAgentOS {
       personaId: orchestratorInput.selectedPersonaId,
     });
 
+    // The spend meter: the request's units are reserved before anything reaches a provider. A refusal, a missing
+    // operation id or a meter that cannot answer ends the request here with an error chunk and no model call.
+    const metering = this.config.spendMeter;
+    let meteredOperationId: string | undefined;
+    if (metering) {
+      const refuse = (code: GMIErrorCode, message: string, details: Record<string, unknown>): AgentOSErrorChunk => ({
+        type: AgentOSResponseChunkType.ERROR,
+        streamId: baseStreamDebugId,
+        gmiInstanceId: 'spend_meter',
+        personaId: effectivePersonaId,
+        isFinal: true,
+        timestamp: new Date().toISOString(),
+        code,
+        message,
+        details,
+      });
+      const operationId = typeof orchestratorInput.operationId === 'string' ? orchestratorInput.operationId.trim() : '';
+      if (!operationId) {
+        yield refuse(GMIErrorCode.VALIDATION_ERROR, 'A metered request needs an operationId.', {});
+        return;
+      }
+      try {
+        const reservation = await metering.meter.reserve({
+          accountId: metering.accountIdOf?.(orchestratorInput) ?? orchestratorInput.organizationId ?? orchestratorInput.userId,
+          operationId,
+          units: metering.unitsOf?.(orchestratorInput) ?? 1,
+        });
+        if (reservation.status === 'denied') {
+          yield refuse(SPEND_DENIAL_CODE[reservation.reason], `The request was not run: ${reservation.reason.replace(/_/g, ' ')}.`, {
+            reason: reservation.reason,
+            period: reservation.period,
+            remaining: reservation.remaining,
+          });
+          return;
+        }
+        meteredOperationId = operationId;
+      } catch (meterError) {
+        this.logger.error('The spend meter could not reserve; the request was not run', {
+          error: meterError instanceof Error ? meterError.message : String(meterError),
+        });
+        yield refuse(GMIErrorCode.SPEND_METER_UNAVAILABLE, 'The request could not be counted, so it was not run.', {
+          unavailable: meterError instanceof SpendMeterUnavailableError,
+        });
+        return;
+      }
+    }
+    let replacedByGuardrail = false;
+
     let streamIdToListen: StreamId | undefined;
     // Temporary client bridge to adapt push-based StreamingManager to pull-based AsyncGenerator
     const bridge = new AsyncStreamClientBridge(`client-processReq-${baseStreamDebugId}`);
@@ -1711,6 +1943,8 @@ export class AgentOS implements IAgentOS {
           streamId: streamIdToListen!,
           personaId: effectivePersonaId,
           inputEvaluations: guardrailInputOutcome.evaluations ?? [],
+          holdUntilFinal: this.holdsOutputUntilFinal(),
+          onVerdict: (verdict) => this.recordGuardedReply(orchestratorInput.conversationId || orchestratorInput.sessionId, verdict),
         }
       );
       if (orchestratorInput.workflowRequest) {
@@ -1737,7 +1971,33 @@ export class AgentOS implements IAgentOS {
       }
 
       // Yield chunks from the guardrail-wrapped stream
-      for await (const chunk of guardrailWrappedStream) {
+      for await (const guarded of guardrailWrappedStream) {
+        let chunk: AgentOSResponse = guarded;
+        if (meteredOperationId && isOutputGuardrailBlock(chunk)) replacedByGuardrail = true;
+        // A structured turn's final chunk, after the output guardrails: a sanitizer that rewrote the text may have
+        // broken the shape the model matched, so the text is checked again as it stands.
+        if (structuredSpec && chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE) {
+          const finalChunk = chunk as AgentOSFinalResponseChunk;
+          const sanitized = Array.isArray(finalChunk.metadata?.guardrail?.output) && finalChunk.metadata.guardrail.output.some((e: { action?: unknown }) => String(e?.action).toLowerCase() === 'sanitize');
+          if (finalChunk.structured && sanitized) {
+            const rechecked = recheckStructuredReply(finalChunk.finalResponseText, finalChunk.structured, structuredSpec);
+            if (!rechecked.meta.valid && structuredSpec.onExhausted === 'error') {
+              yield {
+                type: AgentOSResponseChunkType.ERROR,
+                streamId: finalChunk.streamId,
+                gmiInstanceId: finalChunk.gmiInstanceId,
+                personaId: finalChunk.personaId,
+                isFinal: true,
+                timestamp: new Date().toISOString(),
+                code: GMIErrorCode.STRUCTURED_OUTPUT_INVALID,
+                message: `The reply no longer matched the schema "${structuredSpec.name}" after an output guardrail rewrote it.`,
+                details: { schemaName: structuredSpec.name, stage: 'post_guardrail', issues: rechecked.meta.issues },
+              } as AgentOSErrorChunk;
+              break;
+            }
+            chunk = { ...finalChunk, structured: rechecked };
+          }
+        }
         if (languageNegotiation) {
           if (!chunk.metadata) chunk.metadata = {};
           chunk.metadata.language = languageNegotiation;
@@ -1778,6 +2038,19 @@ export class AgentOS implements IAgentOS {
       };
       yield errorChunk; // Yield the processed error
     } finally {
+      // The turn settles its own reservation when it ends. Two cases are this method's: a turn that never started
+      // (nothing reached a provider) is released, and a reply an output guardrail stopped is refunded.
+      if (meteredOperationId && metering) {
+        const outcome = !streamIdToListen ? 'released' : replacedByGuardrail ? 'replaced' : null;
+        if (outcome) {
+          await metering.meter.settle({ operationId: meteredOperationId, outcome }).catch((settleError: unknown) => {
+            this.logger.warn('The spend meter could not settle; its reconciler will', {
+              outcome,
+              error: settleError instanceof Error ? settleError.message : String(settleError),
+            });
+          });
+        }
+      }
       if (streamIdToListen) {
         const activeStreamIds = await this.streamingManager
           .getActiveStreamIds()
@@ -1873,12 +2146,34 @@ export class AgentOS implements IAgentOS {
         `AgentOS.handleToolResults: Bridge client ${bridge.id} registered to stream ${streamId}.`
       );
 
+      // The stream's identity and the required guards, before the continuation starts: a missing guard means no
+      // model call, and a continuation that ends the turn removes the stream's context when it finishes.
+      const identity = this.agentOSOrchestrator.getStreamIdentity(streamId);
+      const continuationContext: GuardrailContext = {
+        userId: identity?.userId ?? 'unknown_user',
+        sessionId: identity?.sessionId ?? streamId,
+        personaId: identity?.personaId,
+        conversationId: identity?.conversationId,
+      };
+      const continuationReport = this.requiredGuardrailReport();
+      if (continuationReport && !continuationReport.ok) {
+        yield this.requiredGuardrailMissingChunk(continuationReport, streamId, identity?.personaId ?? 'unknown_persona');
+        return;
+      }
+
       // This call is `async Promise<void>`; it triggers the orchestrator to process the tool result(s)
       // and push new chunks to the StreamingManager for the given streamId.
       await this.agentOSOrchestrator.orchestrateToolResults(streamId, toolResults);
 
-      // Yield new chunks received by our bridge client on the same stream
-      for await (const chunk of bridge.consume()) {
+      // Yield new chunks received by our bridge client on the same stream, through the same output guards a turn has
+      const continuationKey = identity?.conversationId || identity?.sessionId || streamId;
+      const guardedContinuation = wrapOutputGuardrails(this.getActiveGuardrailServices(), continuationContext, bridge.consume(), {
+        streamId,
+        personaId: identity?.personaId,
+        holdUntilFinal: this.holdsOutputUntilFinal(),
+        onVerdict: (verdict) => this.recordGuardedReply(continuationKey, verdict),
+      });
+      for await (const chunk of guardedContinuation) {
         yield chunk;
         if (isActionableToolCallRequestChunk(chunk)) {
           break;
@@ -2095,6 +2390,12 @@ export class AgentOS implements IAgentOS {
     );
 
     try {
+      // the required guards, before the resumed turn starts: a missing guard means no model call
+      const resumeReport = this.requiredGuardrailReport();
+      if (resumeReport && !resumeReport.ok) {
+        yield this.requiredGuardrailMissingChunk(resumeReport, pendingRequest.streamId, pendingRequest.personaId);
+        return;
+      }
       streamIdToListen = await this.agentOSOrchestrator.orchestrateResumedToolResults(
         pendingRequest,
         toolResults,
@@ -2102,7 +2403,19 @@ export class AgentOS implements IAgentOS {
       );
       await this.streamingManager.registerClient(streamIdToListen, bridge);
 
-      for await (const chunk of bridge.consume()) {
+      const resumeContext: GuardrailContext = {
+        userId: pendingRequest.userId,
+        sessionId: pendingRequest.sessionId,
+        personaId: pendingRequest.personaId,
+        conversationId: pendingRequest.conversationId,
+      };
+      const guardedResume = wrapOutputGuardrails(this.getActiveGuardrailServices(), resumeContext, bridge.consume(), {
+        streamId: streamIdToListen,
+        personaId: pendingRequest.personaId,
+        holdUntilFinal: this.holdsOutputUntilFinal(),
+        onVerdict: (verdict) => this.recordGuardedReply(pendingRequest.conversationId, verdict),
+      });
+      for await (const chunk of guardedResume) {
         yield chunk;
         if (isActionableToolCallRequestChunk(chunk)) {
           shouldDeregisterBridge = true;

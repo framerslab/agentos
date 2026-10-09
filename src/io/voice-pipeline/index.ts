@@ -177,11 +177,23 @@ export {
   type StateChangeEvent,
 } from './CircuitBreaker.js';
 export { AudioRingBuffer, type AudioRingBufferOptions } from './AudioRingBuffer.js';
+export { InputSilenceWatch, inputLevelDb, type InputSilenceWatchOptions } from './inputLevel.js';
 export {
   TranscriptDedupe,
   type TranscriptObservation,
   type DedupeResult,
 } from './TranscriptDedupe.js';
+export {
+  LIVEKIT_TRANSCRIPTION_ATTRIBUTES,
+  LIVEKIT_TRANSCRIPTION_TOPIC,
+  TRANSCRIPTION_FAILED_ATTRIBUTE,
+  TRANSCRIPTION_TIME_ATTRIBUTES,
+  TranscriptLedger,
+  transcriptEventFromLiveKit,
+  type LedgerEvent,
+  type LedgerItem,
+  type TranscriptLedgerOptions,
+} from './transcriptLedger.js';
 export {
   VoiceMetricsReporter,
   type VoiceMetricEvent,

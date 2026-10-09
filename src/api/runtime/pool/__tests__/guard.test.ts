@@ -18,7 +18,7 @@ const PANEL_DECISION: Record<keyof GenerateTextOptions, 'allow' | 'deny'> = {
   __fallbackWalk: 'deny', router: 'deny', routerParams: 'deny', hostPolicy: 'deny', policyTier: 'deny', onBeforeGeneration: 'deny',
   onAfterGeneration: 'allow', onBeforeToolExecution: 'allow', __approvalGate: 'allow', __strictCredentials: 'deny',
   __panelDeadline: 'allow', __maskError: 'deny', _responseFormat: 'deny', _responseFormatBuilder: 'deny',
-  _transcriptIncludeTrailingCallerMessages: 'deny', _continuation: 'deny',
+  _schemaInstruction: 'deny', _transcriptIncludeTrailingCallerMessages: 'deny', _continuation: 'deny',
 };
 
 describe('the pooled guard (deny list, presence not value)', () => {

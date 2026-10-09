@@ -1,31 +1,26 @@
 ---
 title: 'Document Ingestion'
 sidebar_position: 21
-description: 'Ingest PDFs, DOCX, HTML, Markdown, CSV, JSON, YAML, text, and URLs into the agent memory system with configurable chunking and multimodal image extraction.'
+description: 'Ingest files, folders and URLs (PDF, DOCX, HTML, Markdown, text, CSV, JSON, YAML) into a Memory brain as chunked, full-text-searchable traces.'
 ---
 
-> The Memory ingestion pipeline converts external documents into searchable memory traces. It handles format detection, multi-tier PDF extraction, four chunking strategies, folder scanning with glob patterns, and optional vision-LLM image captioning.
+> `Memory.ingest()` turns files, folders and URLs into memory traces: it picks a loader by file extension, extracts the text, splits it into chunks, and stores each chunk as a trace in the brain with a full-text index entry.
 
 ---
 
 ## Overview
 
-The ingestion pipeline transforms files and URLs into chunked, searchable memory traces stored in the agent's `brain.sqlite`:
-
-![Document ingestion pipeline: sources (file, directory with glob filters, URL) feed a LoaderRegistry that dispatches to nine format-specific loaders (PDF with 3-tier extraction, DOCX, HTML, Markdown, text, CSV, JSON, YAML, URL fetcher); chunks pass through one of four chunking strategies and land in Brain SQLite + FTS5 full-text index + knowledge graph](/img/diagrams/document-ingestion-pipeline.svg)
+![Document ingestion pipeline: a file, a folder (with glob filters) or a URL goes to the LoaderRegistry, which picks a loader by extension (PDF, DOCX, HTML, Markdown, plain text for txt/csv/tsv/json/yaml) or by the response content type for a URL; the text is split by the ChunkingEngine and stored as traces in the brain with FTS5 entries and graph nodes](/img/diagrams/document-ingestion-pipeline.svg)
 
 ```mermaid
 flowchart LR
-    Source["Source<br/><i>file · directory · URL</i>"]:::input
-    Loader["LoaderRegistry<br/><i>format detect</i>"]:::process
-    Chunker["ChunkingEngine<br/><i>split + index</i>"]:::process
-    Brain["Brain<br/><i>store traces</i>"]:::data
-    Multi["MultimodalAggregator<br/><i>image captions</i>"]:::process
-    Index["FTS5 + Graph<br/><i>search index</i>"]:::data
+    Source["Source<br/><i>file · folder · URL</i>"]:::input
+    Loader["LoaderRegistry<br/><i>loader by extension</i>"]:::process
+    Chunker["ChunkingEngine<br/><i>split</i>"]:::process
+    Brain["Brain<br/><i>documents · traces · chunks</i>"]:::data
+    Index["FTS5 + graph nodes"]:::data
 
-    Source --> Loader --> Chunker --> Brain
-    Loader --> Multi
-    Brain --> Index
+    Source --> Loader --> Chunker --> Brain --> Index
 
     classDef input fill:#cffafe,stroke:#0891b2,color:#0e7490
     classDef process fill:#eef2ff,stroke:#6366f1,color:#3730a3
@@ -37,136 +32,94 @@ flowchart LR
 ```ts
 import { Memory } from '@framers/agentos';
 
-const mem = await Memory.createSqlite({ path: './brain.sqlite' });
+const mem = await Memory.createSqlite('./brain.sqlite', {
+  ingestion: { chunkStrategy: 'fixed', chunkSize: 512, chunkOverlap: 64 },
+});
 
-// Single file
+// One file
 await mem.ingest('./report.pdf');
 
-// Directory with glob filters
+// A folder, with glob filters relative to it
 await mem.ingest('./docs', {
-  recursive: true,
   include: ['**/*.md', '**/*.pdf'],
   exclude: ['**/node_modules/**'],
 });
 
-// URL
+// A URL
 await mem.ingest('https://example.com/api-docs');
 
 await mem.close();
 ```
 
+`ingest()` decides what the source is in this order: an existing folder, an existing file, an `http://` or `https://` URL. Anything else lands in `result.failed`.
+
 ---
 
 ## Supported File Types
 
-| Format | Extensions | Loader | Notes |
-|--------|-----------|--------|-------|
-| **PDF** | `.pdf` | [`PdfLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/PdfLoader.ts) | 3-tier extraction (see below) |
-| **DOCX** | `.docx` | [`DocxLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/DocxLoader.ts) | Also supports Docling for high fidelity |
-| **HTML** | `.html`, `.htm` | [`HtmlLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/HtmlLoader.ts) | Strips scripts/styles, extracts text |
-| **Markdown** | `.md`, `.mdx` | [`MarkdownLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/MarkdownLoader.ts) | Preserves heading structure for hierarchical chunking |
-| **Plain text** | `.txt` | [`TextLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/TextLoader.ts) | Direct pass-through |
-| **CSV** | `.csv` | `CsvLoader` | Each row becomes a trace or chunk |
-| **JSON** | `.json` | `JsonLoader` | Extracts string values recursively |
-| **YAML** | `.yaml`, `.yml` | `YamlLoader` | Converted to JSON, then extracted |
-| **URLs** | `http://`, `https://` | [`UrlLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/UrlLoader.ts) | Fetches content, then routes to appropriate loader |
+| Format | Extensions | Loader | What it does |
+|--------|-----------|--------|--------------|
+| PDF | `.pdf` | [`PdfLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/PdfLoader.ts) | Text extraction with fallbacks (see below) |
+| DOCX | `.docx` | [`DocxLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/DocxLoader.ts) | `mammoth.extractRawText()`; replaced by the Docling loader when Docling is available |
+| HTML | `.html`, `.htm` | [`HtmlLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/HtmlLoader.ts) | Removes `<script>` and `<style>` blocks and tags, keeps the text |
+| Markdown | `.md`, `.mdx` | [`MarkdownLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/MarkdownLoader.ts) | Parses and strips YAML front matter (`gray-matter`); the title comes from the front matter or the first heading |
+| Text | `.txt`, `.csv`, `.tsv`, `.json`, `.yaml`, `.yml` | [`TextLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/TextLoader.ts) | Reads the file as UTF-8 text, unparsed; `format` names the extension |
+| URL | `http://`, `https://` | [`UrlLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/UrlLoader.ts) | Fetches the URL and routes by content type |
 
-The [`LoaderRegistry`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/LoaderRegistry.ts) auto-detects the correct loader based on file extension. When Docling or OCR loaders are available in the environment, they automatically override the default handlers for PDF and DOCX.
+[`LoaderRegistry`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/LoaderRegistry.ts) maps extensions to loaders. A folder scan considers only files whose extension a loader claims. `registry.register(loader)` adds a loader for its `supportedExtensions`, replacing an earlier one for the same extension.
+
+`UrlLoader` throws on a non-2xx response. A `text/html` response goes to the HTML loader, `application/pdf` to the PDF loader, and every other content type, Markdown included, is kept as raw text with `format: 'text'`.
 
 ---
 
-## 3-Tier PDF Extraction
+## PDF Extraction
 
-PDF extraction uses a cascading strategy that maximises text fidelity while remaining zero-dependency by default:
+The registry builds `PdfLoader` with two optional fallbacks, probed once when the registry is created:
 
-| Tier | Engine | Activation | Fidelity | Dependencies |
-|------|--------|-----------|----------|-------------|
-| **Tier 1** | `unpdf` | Always (built-in) | Good for born-digital PDFs | None (pure JS) |
-| **Tier 2** | `tesseract.js` OCR | Auto when Tier 1 yields sparse text (< 50 chars/page average) | Handles scanned documents | `pnpm add tesseract.js` |
-| **Tier 3** | Docling sidecar | Opt-in via `doclingEnabled: true` | Highest fidelity (tables, layouts, figures) | `pip install docling` |
+| Engine | Used when | Needs |
+|--------|-----------|-------|
+| Docling (`python3 -m docling --output-format json <file>`) | `python3 -m docling --version` succeeds; then every PDF and DOCX goes to Docling, and unpdf is not used | Python with `docling` installed |
+| `unpdf` | No Docling | Nothing: a dependency of `@framers/agentos` |
+| `tesseract.js` OCR | No Docling, `tesseract.js` resolves, and unpdf returns fewer than 50 characters per page on average | `tesseract.js` installed |
 
-### How the Cascade Works
-
-```
-PDF buffer arrives
-  │
-  ▼
-[Tier 1: unpdf]
-  │
-  ├── Text extraction succeeds and is dense?
-  │     └── YES → Return extracted text
-  │
-  └── Sparse text (< 50 chars/page)?
-        │
-        ▼
-      [Tier 2: tesseract.js OCR]  (if installed)
-        │
-        └── Return OCR text
-
-[Tier 3: Docling]  (if doclingEnabled)
-  │
-  └── Bypasses Tier 1+2 entirely
-      Runs `python3 -m docling --output-format json <file>`
-      Returns high-fidelity structured extraction
-```
-
-### Configuration
-
-```ts
-const mem = await Memory.createSqlite({
-  path: './brain.sqlite',
-  ingestion: {
-    extractImages: true,   // Pull images from PDFs/DOCX
-    ocrEnabled: true,      // Allow tesseract.js fallback
-    doclingEnabled: false,  // Opt into Docling sidecar
-  },
-});
-```
+No option switches these engines: the registry uses whatever it finds. The `ingestion` config fields `ocrEnabled` and `doclingEnabled` are declared and not read.
 
 ---
 
 ## Chunking Strategies
 
-The [`ChunkingEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/ChunkingEngine.ts) splits document text into indexable chunks. Four strategies are available:
+[`ChunkingEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/ChunkingEngine.ts) splits the extracted text. `ingest()` reads `chunkStrategy` (default `'semantic'`), `chunkSize` (default 512 characters) and `chunkOverlap` (default 64 characters) from the `ingestion` config the brain was opened with; the strategy cannot change per call.
 
-| Strategy | Best For | Algorithm |
-|----------|----------|-----------|
-| `fixed` | General-purpose, predictable sizing | Split at character count with word-boundary awareness and configurable overlap |
-| `semantic` | Topic-coherent chunks | Embed individual sentences, split where cosine similarity drops below threshold |
-| `hierarchical` | Markdown documents with heading structure | Each heading creates a chunk boundary; long sections sub-split with `fixed` |
-| `layout` | Code-heavy or table-heavy documents | Preserve fenced code blocks and pipe-delimited tables as atomic chunks |
+| Strategy | What it does |
+|----------|--------------|
+| `fixed` | Cuts every `chunkSize` characters, moved back to the last whitespace so no word is split (a window with no whitespace is cut hard), and starts the next chunk `chunkOverlap` characters before the cut |
+| `semantic` | With an embedding function, splits the text into sentences, embeds them, and starts a new chunk where the cosine similarity of two neighbouring sentences is below 0.3; a group longer than twice `chunkSize` is cut with `fixed`. Without one, it is `fixed` |
+| `hierarchical` | Starts a section at every Markdown heading (`#` to `######`); a section longer than `chunkSize` is cut with `fixed`; each chunk carries its heading, level and parent headings |
+| `layout` | Keeps each fenced code block and each run of lines containing `|` as one chunk; the prose between them is cut with `fixed` |
 
-### Configuration
-
-```ts
-const mem = await Memory.createSqlite({
-  path: './brain.sqlite',
-  ingestion: {
-    chunkStrategy: 'semantic',   // 'fixed' | 'semantic' | 'hierarchical' | 'layout'
-    chunkSize: 512,              // Target characters per chunk
-    chunkOverlap: 64,            // Overlap between consecutive chunks
-  },
-});
-```
-
-### Strategy Details
-
-**Fixed** splits at a fixed character count, snapping to the nearest word boundary. The `chunkOverlap` parameter (default 64 chars) controls how much text is repeated between consecutive chunks to prevent context loss at split boundaries.
-
-**Semantic** requires an embedding function. It embeds individual sentences, then splits wherever cosine similarity between adjacent sentences drops below a threshold (topic boundary detection). Falls back to `fixed` when no `embedFn` is supplied.
-
-**Hierarchical** respects Markdown heading structure (`#`, `##`, `###`, etc.). Each heading creates a new chunk boundary, with the heading text stored in chunk metadata. Sections that exceed `chunkSize` are sub-split using the `fixed` strategy.
-
-**Layout** detects fenced code blocks (` ``` `) and pipe-delimited tables (`| col |`) and preserves them as atomic chunks. Surrounding prose is split with `fixed`. This prevents code snippets and data tables from being cut mid-content.
+`ingest()` calls the engine without an embedding function, so through `Memory` the default `semantic` strategy runs as `fixed`. The brain stores each chunk's text and position; the heading and block-type metadata the engine attaches are not stored.
 
 ---
 
-## FolderScanner
+## What a document becomes
 
-[`FolderScanner`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/FolderScanner.ts) provides recursive directory ingestion with glob-based filtering via `minimatch`:
+For each loaded document, `ingest()`:
+
+1. Computes the SHA-256 of the extracted text. When any document in the brain already has that hash, the document is skipped: it stays in `succeeded` and adds no chunks.
+2. Inserts a `documents` row (path, format, title, hash, chunk count, the loader's metadata).
+3. For each chunk, inserts a `memory_traces` row (`type: 'semantic'`, scope `user`, strength 1.0, no embedding), its `memory_traces_fts` entry, a graph node when the graph is on (the default), and a `document_chunks` row.
+
+Chunk traces get no embedding, so `recall()` finds them through full-text search.
+
+The skip compares content, not paths. A file whose text changed is stored again as a new document, and the traces of its earlier version stay in the brain. For a flat vector collection without the brain (doc citations, a help index), see [Incremental Vector Ingestion](./INCREMENTAL_VECTOR_INGESTION.md).
+
+---
+
+## Folders
+
+[`FolderScanner`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/FolderScanner.ts) walks the folder and loads every candidate file before any chunk is stored:
 
 ```ts
-// Ingest an entire documentation folder
 const result = await mem.ingest('./project/docs', {
   recursive: true,
   include: ['**/*.md', '**/*.pdf', '**/*.txt'],
@@ -176,111 +129,49 @@ const result = await mem.ingest('./project/docs', {
   },
 });
 
-console.log(`Succeeded: ${result.succeeded.length}`);
-console.log(`Failed: ${result.failed.length}`);
-console.log(`Chunks created: ${result.chunksCreated}`);
-console.log(`Traces created: ${result.tracesCreated}`);
+console.log(result.succeeded.length, result.failed.length, result.chunksCreated, result.tracesCreated);
 ```
 
-### Behaviour
-
-- When `recursive` is `false` (default), only direct children of the directory are processed.
-- `include` patterns are evaluated first; only matching files are considered.
-- `exclude` patterns are evaluated second; matching files are skipped.
-- Patterns are matched against the path relative to the scanned root directory.
-- A single unreadable or unparseable file never aborts the entire scan --- errors are collected in `result.failed`.
-- The `onProgress` callback fires after each file attempt (success or failure).
-
-### IngestResult
+- `recursive` defaults to `true` in `ingest()` (the `IngestOptions` comment says `false`).
+- `include` and `exclude` are `minimatch` patterns (dot files included) matched against the path relative to the folder; a file must match an `include` pattern when there are any, and must match no `exclude` pattern.
+- A folder path containing a `..` segment is rejected, and the error lands in `result.failed`.
+- A file that fails to load goes to `failed` and the scan goes on. `onProgress(processed, total, current)` fires after each file is loaded or fails.
+- A file that loaded but failed to store appears in both `succeeded` and `failed`.
+- `IngestOptions.format` is declared and not read.
 
 ```ts
 interface IngestResult {
-  succeeded: string[];                         // Absolute paths of ingested files
-  failed: Array<{ path: string; error: string }>; // Files that could not be processed
-  chunksCreated: number;                       // Total chunks stored
-  tracesCreated: number;                       // Total memory traces created
+  succeeded: string[];                             // files (or the URL) that loaded
+  failed: Array<{ path: string; error: string }>;  // load or store errors
+  chunksCreated: number;
+  tracesCreated: number;                           // one trace per chunk
 }
 ```
 
 ---
 
-## MultimodalAggregator
+## Images
 
-When `extractImages: true` is configured, document loaders (PDF, DOCX) extract embedded images as [`ExtractedImage`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/facade/types.ts) objects. The [`MultimodalAggregator`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/MultimodalAggregator.ts) enriches them with natural-language captions via a vision-capable LLM:
+No loader extracts images, and `ingest()` writes nothing to `document_images`. The `ingestion` config fields `extractImages` and `visionLlm` are declared and not read.
 
-```ts
-const mem = await Memory.createSqlite({
-  path: './brain.sqlite',
-  ingestion: {
-    extractImages: true,
-    visionLlm: 'gpt-4o',   // Model used for image captioning
-  },
-});
-
-await mem.ingest('./slides.pdf');
-// Images are extracted, captioned, and stored in document_images table
-```
-
-### How It Works
-
-1. Document loaders produce [`ExtractedImage`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/facade/types.ts) objects (raw bytes + MIME type + optional page number).
-2. [`MultimodalAggregator`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/MultimodalAggregator.ts) receives the image batch and calls the `describeImage` function for each image lacking a caption.
-3. Images are processed in parallel via `Promise.allSettled` --- a single failed captioning attempt does not block the rest.
-4. Failed images retain their un-captioned state rather than propagating errors.
-5. Captions are stored in the `document_images.caption` column and indexed for text retrieval.
-
-### Passthrough Mode
-
-When no `describeImage` function is configured, the aggregator passes images through unchanged. This is the default behaviour when `visionLlm` is not set.
-
----
-
-## URL Ingestion
-
-The [`UrlLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/UrlLoader.ts) fetches content from HTTP/HTTPS URLs and routes it through the appropriate document loader:
-
-```ts
-// Single URL
-await mem.ingest('https://docs.example.com/guide');
-
-// The UrlLoader:
-// 1. Fetches the URL via HTTP GET
-// 2. Detects content type from response headers
-// 3. Routes to HtmlLoader, MarkdownLoader, etc.
-// 4. Chunks and stores as memory traces
-```
-
----
-
-## Idempotent Re-Ingestion
-
-Every ingested document is tracked in the `documents` table with a SHA-256 `content_hash`. When the same file is ingested again:
-
-- If the content hash matches the previously ingested version, the file is skipped.
-- If the content has changed, the old chunks are replaced with the new extraction.
-
-This makes it safe to re-run ingestion on the same directory without creating duplicates.
-
-For a flat vector collection without the cognitive-memory brain (doc citations, a help index, a product knowledge base), the same content-hash skip is a short recipe over [`IVectorStore`](https://github.com/framerslab/agentos/blob/master/src/core/vector-store/IVectorStore.ts) directly. See [Incremental Vector Ingestion](./INCREMENTAL_VECTOR_INGESTION.md).
+[`MultimodalAggregator`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/MultimodalAggregator.ts) is a separate utility for hosts that extract images themselves: `new MultimodalAggregator({ describeImage })` and `processImages(images)` add a caption to each `ExtractedImage` that lacks one, in parallel with `Promise.allSettled`; an image whose captioning fails keeps no caption, and without `describeImage` the images pass through unchanged. For image retrieval, see [Multimodal RAG](./MULTIMODAL_RAG.md).
 
 ---
 
 ## Configuration Reference
 
-All ingestion options can be set at the `Memory` constructor level (applied to every `ingest()` call) or per-call:
+Read by `ingest()`:
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `chunkStrategy` | `'semantic'` | Chunking algorithm: `fixed`, `semantic`, `hierarchical`, `layout` |
-| `chunkSize` | `512` | Target character count per chunk |
-| `chunkOverlap` | `64` | Character overlap between consecutive chunks |
-| `extractImages` | `false` | Extract embedded images from PDF/DOCX |
-| `ocrEnabled` | `false` | Allow tesseract.js fallback for sparse PDFs |
-| `doclingEnabled` | `false` | Use Docling sidecar for high-fidelity extraction |
-| `visionLlm` | `undefined` | Vision model for image captioning |
-| `recursive` | `false` | Descend into subdirectories (per-call) |
-| `include` | `undefined` | Glob patterns to include (per-call) |
-| `exclude` | `undefined` | Glob patterns to exclude (per-call) |
+| Where | Option | Default |
+|-------|--------|---------|
+| `ingestion` config | `chunkStrategy` | `'semantic'` (runs as `fixed` through `Memory`) |
+| `ingestion` config | `chunkSize` | `512` characters |
+| `ingestion` config | `chunkOverlap` | `64` characters |
+| `ingest()` options | `recursive` | `true` |
+| `ingest()` options | `include`, `exclude` | none |
+| `ingest()` options | `onProgress` | none |
+
+Declared and not read: `ingestion.extractImages`, `ingestion.ocrEnabled`, `ingestion.doclingEnabled`, `ingestion.visionLlm`, and the `format` option of `ingest()`.
 
 ---
 
@@ -288,12 +179,15 @@ All ingestion options can be set at the `Memory` constructor level (applied to e
 
 | File | Purpose |
 |------|---------|
-| `memory/ingestion/LoaderRegistry.ts` | Auto-detection and loader dispatch |
-| `memory/ingestion/PdfLoader.ts` | 3-tier PDF extraction (unpdf + OCR + Docling) |
-| `memory/ingestion/OcrPdfLoader.ts` | tesseract.js OCR fallback |
-| `memory/ingestion/DoclingLoader.ts` | Python Docling sidecar |
-| `memory/ingestion/FolderScanner.ts` | Recursive directory walking |
-| `memory/ingestion/ChunkingEngine.ts` | 4-strategy chunking |
-| `memory/ingestion/MultimodalAggregator.ts` | Image caption enrichment |
-| `memory/ingestion/UrlLoader.ts` | HTTP/HTTPS URL fetching |
-| `memory/facade/types.ts` | [`IngestOptions`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/facade/types.ts), [`IngestResult`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/multimodal/MultimodalMemoryBridge.ts), [`IngestionConfig`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/facade/types.ts) |
+| [`io/facade/Memory.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/facade/Memory.ts) | `ingest()` and the per-document storage |
+| [`io/ingestion/LoaderRegistry.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/LoaderRegistry.ts) | Extension routing and the optional loaders |
+| [`io/ingestion/PdfLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/PdfLoader.ts) | unpdf with the OCR and Docling fallbacks |
+| [`io/ingestion/OcrPdfLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/OcrPdfLoader.ts) | tesseract.js OCR |
+| [`io/ingestion/DoclingLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/DoclingLoader.ts) | Python Docling subprocess |
+| [`io/ingestion/FolderScanner.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/FolderScanner.ts) | Folder walking and glob filters |
+| [`io/ingestion/ChunkingEngine.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/ChunkingEngine.ts) | The four strategies |
+| [`io/ingestion/UrlLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/UrlLoader.ts) | URL fetching |
+| [`io/ingestion/MultimodalAggregator.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/MultimodalAggregator.ts) | Image captions for hosts |
+| [`io/facade/types.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/facade/types.ts) | `IngestionConfig`, `IngestOptions`, `IngestResult` |
+
+All paths are under `src/cognition/memory/`.

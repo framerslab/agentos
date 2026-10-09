@@ -29,7 +29,8 @@ import {
 | `generateMusic()` | Generate music | `await generateMusic({ prompt: '...' })` |
 | `performOCR()` | Extract text from images | `await performOCR({ imagePath: './doc.png' })` |
 | `embedText()` | Generate embeddings | `await embedText({ input: ['hello'] })` |
-| `agent()` | Multi-turn sessions with memory | `const a = agent({ provider: 'openai' })` |
+| `agent()` | Multi-turn sessions with history, tools and hooks | `const a = agent({ provider: 'openai' })` |
+| `gmi()` | `agent({ runtime: 'gmi' })`: sessions served by GMIs, with cognitive memory, sentiment tracking and metaprompts per profile | `const a = gmi({ provider: 'openai', cognition: 'full' })` |
 | `souledAgent()` | Soul-file agent whose long-term memory is its `memory/` wiki | `await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents/aria' })` |
 | `agency()` | Multi-agent teams | `const team = agency({ agents: {...}, strategy: 'parallel' })` |
 
@@ -57,18 +58,26 @@ for the requested task automatically:
 | Provider                 | Type  | Text default               | Image default                    | Embedding default        | Env var                           |
 | ------------------------ | ----- | -------------------------- | -------------------------------- | ------------------------ | --------------------------------- |
 | `openai`                 | Cloud | `gpt-4o`                   | `gpt-image-1`                    | `text-embedding-3-small` | `OPENAI_API_KEY`                  |
-| `anthropic`              | Cloud | `claude-sonnet-4-5-20250929` | —                                | —                        | `ANTHROPIC_API_KEY`               |
+| `anthropic`              | Cloud | `claude-sonnet-4-6`        | —                                | —                        | `ANTHROPIC_API_KEY`               |
 | `gemini`                 | Cloud | `gemini-2.5-flash`         | —                                | —                        | `GEMINI_API_KEY`                  |
 | `openrouter`             | Cloud | `openai/gpt-4o`            | —                                | —                        | `OPENROUTER_API_KEY`              |
-| `claude-code-cli`        | Local | `claude-sonnet-4-5-20250929` | —                                | —                        | `which claude`                    |
+| `claude-code-cli`        | Local | `claude-sonnet-4-6`        | —                                | —                        | `which claude`                    |
 | `gemini-cli`             | Local | `gemini-3.5-flash`         | —                                | —                        | `which gemini`                    |
 | `stability`              | Cloud | —                          | `stable-diffusion-xl-1024-v1-0`  | —                        | `STABILITY_API_KEY`               |
 | `replicate`              | Cloud | —                          | `black-forest-labs/flux-1.1-pro` | —                        | `REPLICATE_API_TOKEN`             |
-| `ollama`                 | Local | `llama3.2`                 | `stable-diffusion`               | `nomic-embed-text`       | `OLLAMA_BASE_URL`                 |
+| `groq`                   | Cloud | `llama-3.3-70b-versatile`  | —                                | —                        | `GROQ_API_KEY`                    |
+| `together`               | Cloud | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | —                 | —                        | `TOGETHER_API_KEY`                |
+| `mistral`                | Cloud | `mistral-large-latest`     | —                                | —                        | `MISTRAL_API_KEY`                 |
+| `xai`                    | Cloud | `grok-2`                   | —                                | —                        | `XAI_API_KEY`                     |
+| `requesty`               | Cloud | `openai/gpt-4o`            | —                                | —                        | `REQUESTY_API_KEY`                |
+| `bfl`                    | Cloud | —                          | `flux-pro-1.1`                   | —                        | `BFL_API_KEY`                     |
+| `fal`                    | Cloud | —                          | `fal-ai/flux/dev`                | —                        | `FAL_API_KEY`                     |
+| `minimax`                | Cloud | —                          | `image-01`                       | —                        | `MINIMAX_API_KEY`                 |
+| `ollama`                 | Local | `llama3.2`                 | —                                | `nomic-embed-text`       | `OLLAMA_BASE_URL`                 |
 | `stable-diffusion-local` | Local | —                          | `v1-5-pruned-emaonly`            | —                        | `STABLE_DIFFUSION_LOCAL_BASE_URL` |
 
 When neither `provider` nor `model` is given, AgentOS checks configured runtimes in order
-(`OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `which claude` → `which gemini` → `OLLAMA_BASE_URL`). Or call `setDefaultProvider({ provider, apiKey })` once at boot to skip env vars entirely; every subsequent function inherits that default while still letting inline `apiKey` win when supplied.
+(`OPENROUTER_API_KEY` → `OPENAI_API_KEY` → `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `GROQ_API_KEY` → `TOGETHER_API_KEY` → `MISTRAL_API_KEY` → `XAI_API_KEY` → `REQUESTY_API_KEY` → `which claude` → `which gemini` → `OLLAMA_BASE_URL`). Or call `setDefaultProvider({ provider, apiKey })` once at boot to skip env vars entirely; every subsequent function inherits that default while still letting inline `apiKey` win when supplied.
 
 ### Inline API Keys
 
@@ -122,8 +131,7 @@ console.log(text);
 console.log(usage.totalTokens);
 ```
 
-`generateText({ tools })` and `streamText({ tools })` now accept three useful
-forms:
+`generateText({ tools })` and `streamText({ tools })` accept three forms:
 
 - A named high-level tool map
 - An [`ExternalToolRegistry`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/externalToolRegistry.ts) (`Record`, `Map`, or iterable)
@@ -134,7 +142,7 @@ Prompt-only `ToolDefinitionForLLM[]` are exposed to the model too, but if the
 model calls one without an executor attached, AgentOS returns an explicit tool
 error instead of silently no-oping.
 
-The same `tools` forms now work on `agent({ tools })` and `agency({ tools })`.
+The same `tools` forms work on `agent({ tools })` and `agency({ tools })`.
 When an agency-level tool set is combined with per-agent tools, AgentOS
 normalizes both sides first and then merges by tool name, with the per-agent
 tool winning on collisions.
@@ -268,7 +276,7 @@ Built-in status meanings:
 Hosts can inject real `graphExpand`, `rerank`, and `deepResearch` hooks in the
 constructor; those modes then become `active`.
 
-See [Query Router](./QUERY_ROUTER.md) for the full contract and host-hook examples.
+See [Query Router](../QUERY_ROUTER.md) for the full contract and host-hook examples.
 
 ## `generateImage()`
 
@@ -383,8 +391,12 @@ order as fallbacks.
 | `stability`              | Cloud API | `stable-diffusion-xl-1024-v1-0`  | `STABILITY_API_KEY`   |
 | `replicate`              | Cloud API | `black-forest-labs/flux-1.1-pro` | `REPLICATE_API_TOKEN` |
 | `openrouter`             | Cloud API | —                                | `OPENROUTER_API_KEY`  |
-| `ollama`                 | Local     | `stable-diffusion`               | None (uses `baseUrl`) |
+| `bfl`                    | Cloud API | `flux-pro-1.1`                   | `BFL_API_KEY`         |
+| `fal`                    | Cloud API | `fal-ai/flux/dev`                | `FAL_API_KEY`         |
+| `minimax`                | Cloud API | `image-01`                       | `MINIMAX_API_KEY`     |
 | `stable-diffusion-local` | Local     | `v1-5-pruned-emaonly`            | None (uses `baseUrl`) |
+
+Ollama serves text and embeddings only: `generateImage({ provider: 'ollama' })` throws `Image generation is not supported for provider "ollama"`.
 
 ### Provider-Specific Options
 
@@ -432,18 +444,9 @@ const replicateResult = await generateImage({
 
 ### Local Image Generation
 
-Run Stable Diffusion locally without any API key:
+Run Stable Diffusion locally without any API key, through an Automatic1111 or Forge WebUI (`/sdapi/v1/txt2img`) or ComfyUI (`/prompt`) server:
 
 ```ts
-// Via Ollama (if your Ollama install has a stable-diffusion model)
-const local = await generateImage({
-  provider: 'ollama',
-  model: 'stable-diffusion',
-  prompt: 'A watercolor landscape of rolling hills',
-  baseUrl: 'http://localhost:11434', // or set OLLAMA_BASE_URL
-});
-
-// Via local Stable Diffusion WebUI (Automatic1111 / ComfyUI)
 const sdLocal = await generateImage({
   provider: 'stable-diffusion-local',
   model: 'v1-5-pruned-emaonly',
@@ -496,10 +499,6 @@ import { agent } from '@framers/agentos';
 const researcher = agent({
   provider: 'openai',
   instructions: 'You are a concise research assistant.',
-  memory: {
-    types: ['episodic', 'semantic'],
-    working: { enabled: true },
-  },
   maxSteps: 4,
 });
 
@@ -518,22 +517,41 @@ console.log(await session.usage());
 and `streamText({ tools })`: named tool maps, [`ExternalToolRegistry`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/externalToolRegistry.ts)
 (`Record`, `Map`, or iterable), and prompt-only `ToolDefinitionForLLM[]`.
 
-### Per-agent identity via SOUL.md
-
-Pass a `soul:` option to load identity, voice, hard limits, and HEXACO scores from a markdown workspace. The runtime injects `SOUL.md` body as the FIRST system message (before `instructions`, `chainOfThought`, or skills) and parses YAML frontmatter into structured persona config.
+### Sessions served by GMIs: `runtime: 'gmi'`
 
 ```ts
-// Workspace path — loads SOUL.md + companion files (STYLE.md, IDENTITY.md, AGENTS.md, memory/)
+import { agent } from '@framers/agentos';
+
+const tutor = agent({
+  runtime: 'gmi',
+  provider: 'openai',
+  instructions: 'You are a patient networking tutor.',
+  memory: { embedding: { provider: 'openai', model: 'text-embedding-3-small' } },
+});
+
+const session = tutor.session('demo', { userId: 'learner-42' });
+await session.send('What is QUIC?');
+await tutor.close();
+```
+
+With `runtime: 'gmi'` (or [`gmi()`](https://github.com/framerslab/agentos/blob/master/src/api/gmi.ts), the same function under its own name), every session is a Generalized Mind Instance built from the agent's options, and `memory` turns on cognitive memory: one manager for the agent's sessions, scoped per user, embedding with `memory.embedding` (unset, a model picked from the global default provider or the environment's keys). `cognition: 'full'` adds sentiment tracking and the metaprompt presets. Of the `MemoryConfig` fields, this path reads `embedding` and `consolidation`; `types: ['episodic', 'semantic']`, `working` and `shared` are read by neither runtime of `agent()`, and without `runtime: 'gmi'` the agent reads no `memory` option at all. [GMIs from agent()](../GMI.md#gmis-from-agent) lists what each option does on this path.
+
+### Per-agent identity via SOUL.md
+
+Pass a `soul:` option to give an agent its identity from a SOUL.md workspace. `agent()` builds its system prompt from the SOUL.md body first, then a `## Style` section from STYLE.md, then the `memory/index.md` catalog, then `instructions`, `name`, `personality` and skills. A soul that fails to load logs a warning, and the agent starts without it.
+
+```ts
+// Workspace path: SOUL.md, STYLE.md and memory/index.md shape the prompt
 agent({ provider: 'anthropic', soul: '~/.agentos/agents/aria' });
 
-// Direct file path — loads only SOUL.md
+// Direct file path: read as SOUL.md, with the companion files beside it
 agent({ provider: 'openai', soul: './personas/aria.soul.md' });
 
-// Inline content — for tests and ephemeral agents
+// Inline content: for tests and ephemeral agents
 agent({ provider: 'openai', soul: { content: SOUL_MARKDOWN_STRING } });
 ```
 
-The HEXACO frontmatter (`hexaco: { honestyHumility, emotionality, ... }`) flows into the same `PersonaDriftMechanism` and [`PersonaOverlayManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/persona_overlays/PersonaOverlayManager.ts) as inline `personality:` config. See [SOUL_FILES.md](../SOUL_FILES.md) for the full 6-file workspace spec.
+`agent({ soul })` uses the prose only. The frontmatter's structured fields (HEXACO scores, voice, mood, hard limits) land on the `personaDefinition` that `loadSoul()` returns, which the full runtime takes as a persona; give an `agent()` a trait paragraph with `personality`. See [SOUL_FILES.md](../SOUL_FILES.md) for the workspace files.
 
 ### `souledAgent()`: soul plus a `memory/` wiki
 
@@ -551,7 +569,8 @@ const aria = await souledAgent({
 
 What it wires:
 
-- **Read:** the `memory/index.md` catalog is injected into the system prelude, and the agent opens any page on demand with the `read_memory_page` tool.
+- **Read:** the `memory/index.md` catalog is injected into the system prelude, and the agent opens any page on demand with the `read_memory_page` tool. The tool is added when `tools` is absent or an array; a named tool map is passed through as given, without it.
+- **Recall:** before each call, up to eight traces from the store that match the user's message join the prompt as context.
 - **Capture:** conversation the agent observes is written to the same store as episodic traces.
 - **Fold:** those traces are merged into entity/concept pages when memory consolidates. `souledAgent` runs this on the agent's `close()`; call `await aria.memory.compileWiki()` to fold mid-session. Merges integrate new facts without clobbering human edits.
 
@@ -600,7 +619,7 @@ for await (const chunk of agent.processRequest({
 }
 ```
 
-`AgentOSConfig.tools` now accepts the same three forms as the high-level
+`AgentOSConfig.tools` accepts the same three forms as the high-level
 helpers: named tool maps, [`ExternalToolRegistry`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/externalToolRegistry.ts) (`Record`, `Map`, or
 iterable), and prompt-only `ToolDefinitionForLLM[]`. AgentOS normalizes those
 inputs during `initialize(...)` and registers them into the shared

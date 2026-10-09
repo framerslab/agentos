@@ -14,7 +14,7 @@ The Pinecone backend stores embeddings in [Pinecone](https://www.pinecone.io/), 
 ## Configuration
 
 ```typescript
-import { PineconeVectorStore } from '@framers/agentos/cognition/rag/implementations/vector_stores/PineconeVectorStore';
+import { PineconeVectorStore } from '@framers/agentos/cognition/rag';
 
 const store = new PineconeVectorStore({
   id: 'my-pinecone',
@@ -143,20 +143,6 @@ await MigrationEngine.migrate({
 
 The migration reads vectors via Pinecone's `list` + `fetch` APIs and writes them to the target backend. Non-vector data (knowledge graph, conversations) is not stored in Pinecone and will not be migrated.
 
-## Cost comparison
+## Cost
 
-| Tier | Vectors | Monthly cost | Notes |
-|---|---|---|---|
-| **Starter (free)** | 100K | $0 | 1 index, 1 project, community support |
-| **Standard** | 1M+ | ~$70+ | Multiple indexes, backup, 99.95% SLA |
-| **Enterprise** | 10M+ | Custom | Dedicated infra, HIPAA, SOC2 |
-
-Self-hosted alternatives for comparison:
-
-| Backend | Vectors | Monthly cost | Notes |
-|---|---|---|---|
-| **Postgres + pgvector** | 10M+ | ~$15 (Neon free) to ~$50 (RDS) | Full SQL, hybrid search included |
-| **Qdrant (Docker)** | 10M+ | Cost of your VM (~$5-20) | Built-in BM25, quantization |
-| **Qdrant Cloud** | 1M+ | ~$25+ | Managed Qdrant, auto-scaling |
-
-Pinecone is the easiest managed path to start with but becomes expensive at scale. For production agents processing large knowledge bases, Postgres or Qdrant usually offer better cost efficiency and more features, and Qdrant is the default OSS production recommendation.
+Pinecone bills by its own plans ([pinecone.io/pricing](https://www.pinecone.io/pricing/)); a self-hosted Qdrant or Postgres backend costs the machine it runs on. For production agents with large knowledge bases, Postgres or Qdrant add hybrid search, and Qdrant is the default open-source production recommendation.

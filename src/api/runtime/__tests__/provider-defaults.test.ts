@@ -13,7 +13,7 @@ import { resolveModelOption, resolveProvider } from '../model.js';
 
 describe('PROVIDER_DEFAULTS', () => {
   it('has text model for all major providers', () => {
-    for (const id of ['openai', 'anthropic', 'ollama', 'openrouter', 'gemini']) {
+    for (const id of ['openai', 'anthropic', 'ollama', 'openrouter', 'gemini', 'requesty']) {
       expect(PROVIDER_DEFAULTS[id]?.text).toBeDefined();
     }
   });
@@ -47,6 +47,7 @@ describe('autoDetectProvider', () => {
       'TOGETHER_API_KEY',
       'MISTRAL_API_KEY',
       'XAI_API_KEY',
+      'REQUESTY_API_KEY',
       'OLLAMA_BASE_URL',
       'STABILITY_API_KEY',
       'REPLICATE_API_TOKEN',
@@ -70,6 +71,19 @@ describe('autoDetectProvider', () => {
     process.env.OPENROUTER_API_KEY = 'or-test';
     process.env.OPENAI_API_KEY = 'openai-test';
     expect(autoDetectProvider()).toBe('openrouter');
+  });
+
+  it('detects requesty from REQUESTY_API_KEY', () => {
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GROQ_API_KEY;
+    delete process.env.TOGETHER_API_KEY;
+    delete process.env.MISTRAL_API_KEY;
+    delete process.env.XAI_API_KEY;
+    process.env.REQUESTY_API_KEY = 'requesty-test';
+    expect(autoDetectProvider()).toBe('requesty');
   });
 
   it('detects anthropic from ANTHROPIC_API_KEY', () => {

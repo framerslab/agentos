@@ -7,6 +7,9 @@
  * prompt builder.  Guardrail identifiers are accepted and stored in config but
  * are not actively enforced in this lightweight layer — use the full AgentOS
  * runtime (`AgentOSOrchestrator`) or `agency()` for guardrail enforcement.
+ *
+ * With `runtime: 'gmi'` the agent is built by {@link gmi} instead: every session
+ * is served by a Generalized Mind Instance (docs/GMI.md, "GMIs from agent()").
  */
 import type { ZodType, z } from 'zod';
 import {
@@ -22,6 +25,7 @@ import {
   type ToolCallHookInfo,
 } from './generateText.js';
 import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
+import { buildSchemaInstructionText } from './runtime/structuredReply.js';
 import { resolveModelOption } from './model.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { ObjectGenerationError } from './generateObject.js';
@@ -35,8 +39,7 @@ import {
   normalizeHexacoTraits,
   type HexacoTraitKey,
 } from '../cognition/substrate/personas/hexaco.js';
-import { CitationVerifier } from '../cognition/rag/citation/CitationVerifier.js';
-import type { VerifyCitationsConfig } from './types.js';
+import { runCitationVerification } from './runtime/citationVerification.js';
 import type {
   AgentOSUsageAggregate,
   AgentOSUsageLedgerOptions,
@@ -62,6 +65,9 @@ import {
   type SessionHistoryConfig,
 } from './sessionHistory.js';
 import type { SessionTranscriptMessage } from './sessionTranscript.js';
+import type { CognitionConfig, CognitionProfile } from './runtime/gmiCognition.js';
+// gmi.ts imports this module back (through gmiPersona.ts); each side calls the other only inside functions.
+import { gmi } from './gmi.js';
 
 /**
  * Provider hook interface consumed by `agent()` for memory integration.
@@ -298,6 +304,17 @@ export interface AgentOptions extends BaseAgentConfig {
    * @see https://github.com/aaronjmars/soul.md for the cross-framework convention.
    */
   soul?: string | { content: string } | { path: string };
+  /**
+   * Which engine serves this agent. `'legacy'` (the default) calls the model through
+   * generateText and streamText; `'gmi'` serves every session with a Generalized Mind
+   * Instance (docs/GMI.md, "GMIs from agent()").
+   */
+  runtime?: 'legacy' | 'gmi';
+  /**
+   * GMI profile when `runtime` is `'gmi'`: `'light'` (the default), `'full'`, or each
+   * switch set in a {@link CognitionConfig}.
+   */
+  cognition?: CognitionProfile | CognitionConfig;
 }
 
 /**
@@ -310,11 +327,15 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
    * the provider's native structured-output API (OpenAI json_schema,
    * Anthropic forced tool-use, Gemini responseSchema), and returns a
    * Zod-validated typed object on `result.object` alongside the JSON
-   * string in `result.text`.
+   * string in `result.text`. A call whose provider payload carries no
+   * schema (a provider with none, an Anthropic model that rejects a
+   * forced tool choice, JSON-object mode) gets the schema in its system
+   * prompt, in the words `generateObject` uses; each fallback provider is
+   * checked for its own payload.
    *
-   * Tools (caller-provided in baseOpts.tools) are still passed through;
-   * the structured-output mode adds its own forced tool on Anthropic
-   * but the existing tool definitions remain in the payload.
+   * The agent's tools are left out of a schema request, and with them the
+   * chain-of-thought instruction; `runtime: 'legacy'` (the default) warns
+   * that it leaves them out.
    */
   responseSchema?: S;
   /**
@@ -419,6 +440,32 @@ export interface AgentSession {
   usage(): Promise<AgentOSUsageAggregate>;
   /** Clears all messages from this session's history. */
   clear(): void;
+  /**
+   * Ends this session and releases its history. A send still running is returned
+   * to its caller but added to no history, and the next `agent.session(id)` with
+   * this id starts empty. The id's usage totals stay readable through
+   * `agent.usage(id)`. With `runtime: 'gmi'`, a send or stream still running is
+   * stopped instead: its model call is aborted, its caller gets the abort error,
+   * and the steps it had finished stay in this session's `messages()`, marked
+   * partial; then the session's GMI is shut down.
+   */
+  close(): Promise<void>;
+}
+
+/**
+ * Options for {@link Agent.session}.
+ */
+export interface AgentSessionOptions {
+  /**
+   * The user the session serves. With `runtime: 'gmi'` it scopes the session's
+   * cognitive memory: sessions opened with the same user id recall each other's
+   * facts, and a session opened without one has a scope of its own, its session
+   * id. The GMI also sends it with each model request as the end user's id
+   * (OpenAI's `user` or `safety_identifier`), so pass an opaque or hashed id,
+   * not an email address; a session opened without one sends none. Asking for an
+   * open session with another user id throws. The legacy runtime ignores it.
+   */
+  userId?: string;
 }
 
 /**
@@ -449,9 +496,10 @@ export interface Agent {
    * Returns (or creates) a named {@link AgentSession} with its own conversation history.
    *
    * @param id - Optional session ID. A unique ID is generated when omitted.
+   * @param options - The session's user; see {@link AgentSessionOptions}.
    * @returns The session object for this ID.
    */
-  session(id?: string): AgentSession;
+  session(id?: string, options?: AgentSessionOptions): AgentSession;
   /** Returns persisted usage totals for the whole agent or a single session. */
   usage(sessionId?: string): Promise<AgentOSUsageAggregate>;
   /** Releases all in-memory session state held by this agent. */
@@ -600,91 +648,6 @@ export function buildSystemPrompt(opts: AgentOptions): string | undefined {
 }
 
 /**
- * Resolve an `AgentOptions.soul` value (string path | { content } | { path })
- * into a `LoadedSoul`. Returns null on failure so the agent can still boot
- * (the soul is additive, not load-blocking).
- */
-/**
- * Run citation verification on a freshly-generated response. Retrieves
- * sources via the configured `retrieve` hook, then scores each atomic claim
- * in the response against those sources with {@link CitationVerifier}.
- *
- * Errors are non-fatal: a failed retrieval or verifier crash returns
- * `undefined` so the agent's response is still delivered to the caller
- * unchanged. Verification is a *check*, not a gate.
- *
- * @param text     - The generated response text to verify.
- * @param userText - The user's input — passed to the retriever as a query.
- * @param config   - Verifier wiring (embedder, retriever, thresholds).
- */
-async function runCitationVerification(
-  text: string,
-  userText: string,
-  config: VerifyCitationsConfig,
-): Promise<import('../cognition/rag/citation/types.js').VerifiedResponse | undefined> {
-  try {
-    // Resolve wiring: `retrievalAugmentor` shortcut takes precedence and
-    // auto-derives both retrieve + embedFn. Otherwise fall back to the
-    // explicit hooks. We require at least one valid combination; if neither
-    // is provided we no-op (verification is a check, not a gate, so a
-    // missing config should not fail the response).
-    const augmentor = config.retrievalAugmentor;
-
-    const retrieve = augmentor
-      ? async (query: string) => {
-          const result = await augmentor.retrieveContext(query, config.retrievalOptions);
-          // Convert RagRetrievedChunk -> VerificationSource. The verifier only
-          // looks at content/title/url; metadata + score are dropped (they
-          // do not feed cosine similarity).
-          return (result.retrievedChunks ?? []).map((chunk) => ({
-            content: chunk.content,
-            title:
-              typeof chunk.metadata?.title === 'string'
-                ? (chunk.metadata.title as string)
-                : undefined,
-            url:
-              chunk.source ??
-              (typeof chunk.metadata?.url === 'string'
-                ? (chunk.metadata.url as string)
-                : undefined),
-          }));
-        }
-      : config.retrieve;
-
-    const embedFn = augmentor
-      ? (texts: string[]) => augmentor.embedTexts(texts)
-      : config.embedFn;
-
-    if (!retrieve || !embedFn) {
-      if (process.env.NODE_ENV !== 'production') {
-        console.warn(
-          '[@framers/agentos] verifyCitations missing both retrievalAugmentor and explicit retrieve/embedFn. Skipping verification.',
-        );
-      }
-      return undefined;
-    }
-
-    const sources = await retrieve(userText);
-    if (!sources || sources.length === 0) return undefined;
-    const verifier = new CitationVerifier({
-      embedFn,
-      supportThreshold: config.supportThreshold,
-      unverifiableThreshold: config.unverifiableThreshold,
-      nliFn: config.nliFn,
-      extractClaims: config.extractClaims,
-    });
-    return await verifier.verify(text, sources);
-  } catch (err) {
-    if (process.env.NODE_ENV !== 'production') {
-      console.warn(
-        `[@framers/agentos] verifyCitations failed: ${(err as Error).message}. Returning response without grounding.`,
-      );
-    }
-    return undefined;
-  }
-}
-
-/**
  * Passes every error that leaves a stream result through `mask`: thrown by
  * the iterables, carried by an error part, or rejecting any of the result's
  * promises. The result's other members are returned as they are.
@@ -721,6 +684,11 @@ function maskStreamResult(result: StreamTextResult, mask: (error: unknown) => un
   return out as unknown as StreamTextResult;
 }
 
+/**
+ * Resolve an `AgentOptions.soul` value (string path | { content } | { path })
+ * into a `LoadedSoul`. Returns null on failure so the agent can still boot
+ * (the soul is additive, not load-blocking).
+ */
 export function loadSoulFromOption(
   soul: NonNullable<AgentOptions['soul']>,
 ): import('../cognition/substrate/personas/SoulLoader.js').LoadedSoul | null {
@@ -747,29 +715,6 @@ export function loadSoulFromOption(
 }
 
 /**
- * Creates a lightweight stateful agent backed by in-memory session storage.
- *
- * The agent wraps {@link generateText} and {@link streamText} with a persistent
- * system prompt built from `instructions`, `name`, and `personality` fields.
- * Multiple independent sessions can be opened via `Agent.session()`.
- *
- * @param opts - Agent configuration including model, instructions, and optional tools.
- *   All `BaseAgentConfig` fields are accepted; advanced fields (rag, discovery,
- *   permissions, emergent, voice, guardrails, etc.) are stored but not actively
- *   wired in the lightweight layer — they are consumed by `agency()` and the full runtime.
- * @returns An {@link Agent} instance with `generate`, `stream`, `session`, and `close` methods.
- *
- * @example
- * ```ts
- * const myAgent = agent({ provider: 'openai', model: 'gpt-4o', instructions: 'You are a helpful assistant.' });
- * const session = myAgent.session('user-123');
- * const reply = await session.send('Hello!');
- * console.log(reply.text);
- * ```
- *
- * @category Core
- */
-/**
  * Copies only the defined per-send generation overrides off SessionSendOptions
  * (spec §1f) so undefined keys never clobber agent-level baseOpts via spread.
  */
@@ -786,7 +731,38 @@ function pickSendGenerationOverrides(
   return out;
 }
 
+/**
+ * Creates a lightweight stateful agent backed by in-memory session storage.
+ *
+ * The agent wraps {@link generateText} and {@link streamText} with a persistent
+ * system prompt built from `instructions`, `name`, and `personality` fields.
+ * Multiple independent sessions can be opened via `Agent.session()`.
+ *
+ * With `runtime: 'gmi'`, `agent(opts)` returns `gmi(opts)`: the same `Agent`
+ * surface, with every session served by a Generalized Mind Instance built from
+ * these options, and the construction checks and diagnostics of that path.
+ *
+ * @param opts - Agent configuration including model, instructions, and optional tools.
+ *   All `BaseAgentConfig` fields are accepted; advanced fields (rag, discovery,
+ *   permissions, emergent, voice, guardrails, etc.) are stored but not actively
+ *   wired in the lightweight layer — they are consumed by `agency()` and the full runtime.
+ * @returns An {@link Agent} instance with `generate`, `stream`, `session`, and `close` methods.
+ * @throws {Error} With `runtime: 'gmi'`, at construction, naming an option the GMI path
+ *   cannot honour (see {@link gmi}).
+ *
+ * @example
+ * ```ts
+ * const myAgent = agent({ provider: 'openai', model: 'gpt-4o', instructions: 'You are a helpful assistant.' });
+ * const session = myAgent.session('user-123');
+ * const reply = await session.send('Hello!');
+ * console.log(reply.text);
+ * ```
+ *
+ * @category Core
+ */
 export function agent(opts: AgentOptions): Agent {
+  // Before anything of the legacy path runs: its diagnostics and warnings describe that path.
+  if (opts.runtime === 'gmi') return gmi(opts);
   const sessionBuffers = new Map<string, SessionHistoryBuffer | null>();
   // In-memory usage tally per session and per agent. Populated synchronously
   // after every generate/send/stream call so `agent.usage()` and
@@ -1002,6 +978,9 @@ export function agent(opts: AgentOptions): Agent {
           // passes the payload through to the provider via _responseFormat.
           let responseFormat: Record<string, unknown> | undefined;
           let responseFormatBuilder: GenerateTextOptions['_responseFormatBuilder'];
+          // The schema in generateObject's words, for a call or fallback leg
+          // whose payload carries none (generateText decides per leg).
+          let schemaInstruction: string | undefined;
           if (sendOpts?.responseSchema) {
             // Resolve the primary the same way generateText will (explicit
             // provider/model fields, then env auto-detect) so the payload is
@@ -1017,6 +996,7 @@ export function agent(opts: AgentOptions): Agent {
             const schema = sendOpts.responseSchema;
             const schemaName = sendOpts.schemaName ?? 'response';
             const jsonSchema = lowerZodToJsonSchema(schema);
+            schemaInstruction = buildSchemaInstructionText(jsonSchema, schemaName);
             responseFormat = buildResponseFormatForProvider({
               providerId,
               modelId,
@@ -1076,6 +1056,7 @@ export function agent(opts: AgentOptions): Agent {
               ...(responseFormatBuilder
                 ? { _responseFormatBuilder: responseFormatBuilder }
                 : {}),
+              ...(schemaInstruction ? { _schemaInstruction: schemaInstruction } : {}),
             },
             opts.memoryProvider,
             textForMemory,
@@ -1234,6 +1215,14 @@ export function agent(opts: AgentOptions): Agent {
 
         clear() {
           historyBuffer?.reseed([]);
+        },
+
+        async close(): Promise<void> {
+          // The reseed bumps the epoch, so a send still in flight drops its
+          // append; the next session(id) builds a new buffer. The usage tally
+          // stays, as agent.close() keeps it, so agent.usage(id) still counts.
+          historyBuffer?.reseed([]);
+          if (sessionBuffers.get(sessionId) === historyBuffer) sessionBuffers.delete(sessionId);
         },
       };
       // The send() implementation returns a union (GenerateTextResult |
