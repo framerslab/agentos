@@ -20,7 +20,10 @@ export interface OpenReservation {
 
 /** The rows a day's bound needs, kept by the caller; every method runs inside the caller's transaction. */
 export interface SpendDayStore {
-  /** Makes the day's row when it is missing, locks it for the transaction, and answers its committed total. */
+  /**
+   * Makes the day's row when it is missing, locks it for the transaction, and answers its committed total in whole
+   * micro-dollars; any other answer refuses the admission.
+   */
   lockDay(day: string): Promise<number>;
   /** Records a reservation in the locked day, adds it to the day's open total, and answers its id. */
   addReservation(reservation: { day: string; kind: string; micro: number; created: Date; expires: Date }): Promise<string>;
@@ -84,8 +87,8 @@ export function settledTokensMicro(promptTokens: unknown, completionTokens: unkn
 /**
  * Reserves an admission's largest cost in the day it starts and answers the reservation's id, or throws
  * CostCapExceededError (`daily`) reserving nothing. A cost that is not whole micro-dollars, zero or more, is a
- * RangeError; a committed total the store does not answer as a finite number refuses the admission, since the day's
- * spending is then not known.
+ * RangeError; a committed total the store does not answer as whole micro-dollars, zero or more, refuses the admission,
+ * since the day's spending is then not known.
  */
 export async function reserveSpend(store: SpendDayStore, admission: SpendAdmission): Promise<string> {
   if (!isWholeCount(admission.micro)) {
@@ -93,8 +96,10 @@ export async function reserveSpend(store: SpendDayStore, admission: SpendAdmissi
   }
   const day = utcDay(admission.at);
   const committed = await store.lockDay(day);
-  // Written as "not within the cap" so that a cap that is not a number refuses too: every comparison with NaN is false.
-  if (!Number.isFinite(committed) || !(committed + admission.micro <= admission.capMicro)) {
+  // A total that is not whole micro-dollars, zero or more, is not one a store keeping whole amounts answers, so the
+  // day's spending is not known, and minus infinity or a total below zero would pass the cap check. That check is written
+  // as "not within the cap" so that a cap that is not a number refuses too: every comparison with NaN is false.
+  if (!isWholeCount(committed) || !(committed + admission.micro <= admission.capMicro)) {
     throw new CostCapExceededError(admission.kind, 'daily', committed / 1_000_000, admission.capMicro / 1_000_000);
   }
   return store.addReservation({ day, kind: admission.kind, micro: admission.micro, created: admission.at, expires: admission.expires });

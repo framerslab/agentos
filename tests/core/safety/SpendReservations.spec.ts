@@ -108,4 +108,16 @@ describe("a day's reservations", () => {
     store.lockDay = () => Promise.resolve(Number.NaN);
     await expect(reserveSpend(store, { kind: 'call', micro: 1, at: AT, expires: LATER, capMicro: LIMIT })).rejects.toBeInstanceOf(CostCapExceededError);
   });
+
+  it('refuses every admission while its store answers a total that is not whole micro-dollars, which the cap alone would admit', async () => {
+    // Each passes the cap check alone: added to the admission, minus infinity, a total below zero and a fraction all fit.
+    for (const total of [Number.NEGATIVE_INFINITY, -1_000_000, 2.5]) {
+      const store = new InMemorySpendDayStore();
+      store.lockDay = () => Promise.resolve(total);
+      await expect(
+        reserveSpend(store, { kind: 'call', micro: 1, at: AT, expires: LATER, capMicro: LIMIT }),
+        `a total of ${total}`,
+      ).rejects.toBeInstanceOf(CostCapExceededError);
+    }
+  });
 });
