@@ -1,3 +1,9 @@
+## [0.13.5](https://github.com/framerslab/agentos/compare/v0.13.4...v0.13.5) (2026-10-09)
+
+### feat
+
+* **api:** a schema-validated structured reply on processRequest (#177) ([710f266](https://github.com/framerslab/agentos/commit/710f266ed7fe2164e8a83c68bae405c62c32a5b7))
+
 ## [0.13.4](https://github.com/framerslab/agentos/compare/v0.13.3...v0.13.4) (2026-10-09)
 
 ### docs
