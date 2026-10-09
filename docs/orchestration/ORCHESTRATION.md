@@ -1,8 +1,6 @@
 # Orchestration Guide
 
-Hands-on walkthrough of AgentOS orchestration — from single-node graphs to multi-agent missions with voice, memory, and checkpointing.
-
-All three APIs ([`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts), `workflow()`, `mission()`) compile to the same [`CompiledExecutionGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) IR and run on the same [`GraphRuntime`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/GraphRuntime.ts). You can compose them freely — a mission can embed a workflow as a subgraph step; a graph can invoke a compiled workflow as a node.
+A walkthrough of the three graph builders in `@framers/agentos/orchestration`: [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts), `workflow()` and `mission()`. Each compiles to the same [`CompiledExecutionGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) IR and runs on the same [`GraphRuntime`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/GraphRuntime.ts). The reference pages cover each one in full: [AgentGraph](../architecture/AGENT_GRAPH.md), [workflow() DSL](./WORKFLOW_DSL.md), [mission() API](./MISSION_API.md) and [Checkpointing](./CHECKPOINTING.md).
 
 ```mermaid
 graph LR
@@ -18,190 +16,234 @@ graph LR
     style RT fill:#0f3460,stroke:#533483,color:#e0e0e0
 ```
 
+Every compiled graph exposes its IR (`toIR()`, and `toWorkflow()` on a mission), and any IR can run inside another graph as a `subgraph` node.
+
 ---
 
-## AgentGraph — Full Graph Builder
+## How a Run Works
 
-Use [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) when you need cycles, complex conditional routing, subgraph composition, or fine-grained control over graph topology.
+### Executors come from the host
 
-### Minimal Example
+The runtime calls no model and no tool of its own. `compile({ deps })` passes the node executors to it ([`WorkflowRuntimeDeps`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/WorkflowBuilder.ts)), and each node type needs its own:
 
-A two-node graph: search the web, then summarize results.
+| Node type | Needs | Without it |
+|---|---|---|
+| `gmi` | `deps.loopController` and `deps.providerCall` | Succeeds with the output `'gmi-placeholder'` |
+| `tool` | `deps.toolOrchestrator` | Fails (`success: false`) |
+| `guardrail` | `deps.guardrailEngine` | Passes |
+| `subgraph` | `deps.subgraphResolver` and `deps.createSubgraphRuntime` | Succeeds with the output `'subgraph-placeholder'` |
+| `extension` | `deps.extensionExecutor` | Succeeds with the output `'extension-not-configured'` |
+| `voice` | `deps.voiceExecutor` | Fails |
+| `router`, `human` | Nothing | |
+
+The examples on this page share one set of host bindings:
 
 ```typescript
-import { AgentGraph, START, END, gmiNode, toolNode } from '@framers/agentos/orchestration';
-import { z } from 'zod';
+import { LoopController } from '@framers/agentos/orchestration';
+import type { WorkflowRuntimeDeps } from '@framers/agentos/orchestration/builders/WorkflowBuilder';
 
-const graph = new AgentGraph(
-  {
-    input:     z.object({ topic: z.string() }),
-    scratch:   z.object({ sources: z.array(z.string()).default([]) }),
-    artifacts: z.object({ summary: z.string().default('') }),
+// Your application's own tool runner and model call.
+declare function runMyTool(name: string, args: Record<string, unknown>): Promise<unknown>;
+declare function callMyModel(instructions: string, context: unknown): Promise<string>;
+
+const deps: WorkflowRuntimeDeps = {
+  toolOrchestrator: {
+    async processToolCall({ toolCallRequest }) {
+      const output = await runMyTool(toolCallRequest.toolName, toolCallRequest.arguments);
+      return { success: true, output };
+    },
   },
-  { reducers: { 'scratch.sources': 'concat' } },
-)
-  .addNode('search',    toolNode('web_search'))
-  .addNode('summarize', gmiNode({ instructions: 'Summarize the search results in 3 sentences.' }))
-  .addEdge(START, 'search')
-  .addEdge('search', 'summarize')
-  .addEdge('summarize', END)
-  .compile();
-
-const result = await graph.invoke({ topic: 'quantum computing' });
-console.log(result.artifacts.summary);
+  loopController: new LoopController(),
+  async *providerCall(instructions, state) {
+    // state.artifacts holds the outputs of the nodes that ran before this one.
+    const text = await callMyModel(instructions, { input: state.input, artifacts: state.artifacts });
+    yield { type: 'text_delta', content: text };
+    // No tool calls: the node's loop ends after this turn.
+    return { responseText: text, toolCalls: [], finishReason: 'stop' };
+  },
+};
 ```
 
-**State schema:** The graph declares `input` (immutable after start), `scratch` (mutable working state), and `artifacts` (final output). Reducers control how concurrent node writes merge — `concat` appends arrays, `merge` deep-merges objects, `replace` overwrites.
+A `gmi` node runs [`LoopController`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/LoopController.ts)'s loop for up to `maxInternalIterations` turns (default 10). Each turn calls `providerCall(instructions, state)`; when the returned `toolCalls` is not empty, the loop runs those calls through `deps.toolOrchestrator` and calls `providerCall` again with the same arguments, so the host keeps the conversation and the tool results itself. The node's output is the text of all its turns.
 
-### Conditional Routing
+### State and outputs
 
-Route execution based on intermediate results. The classifier determines intent, then a routing function sends the query to the appropriate handler.
+- `invoke(input)` freezes `input` into `state.input`. `state.scratch` and `state.artifacts` start empty. The Zod schemas passed to a builder are lowered to JSON Schema and stored in the IR; the runtime neither validates against them nor applies their defaults.
+- A node's output goes into `state.artifacts` under the node's id (a `workflow()` step's `outputAs` names another key). `invoke()` returns `state.artifacts`. A `gmi` node's output is its text, a `tool` node's is the tool's `output`.
+- `scratch` changes only through executors that return a scratch update: a `subgraph` node's `outputMapping`, an `extension` node whose output is an object, and a `voice` node (its checkpoint). Reducers merge those updates.
+- A `tool` node sends the tool the static `args` from `toolNode(name, { args })` and nothing from the graph state.
+
+### Scheduling
+
+- A node runs when every node with an edge into it has completed or been skipped, and it runs at most once per run. A router marks the targets it did not pick skipped; skipping goes no further, so a node whose incoming edges all come from skipped nodes still runs.
+- Nodes that become ready together run concurrently. After such a batch the runtime merges the branches' `scratch` with the reducers and keeps `artifacts` as they were before the batch, so the outputs of the nodes that ran in one batch are not in the result.
+- A node that fails stops the run: the runtime saves a checkpoint and emits `error`, `interrupt` and `run_end` (see [Checkpointing](./CHECKPOINTING.md)). `toolNode(name, { retryPolicy })` and a `workflow()` step's `retryPolicy` re-run a failed node first.
+
+---
+
+## AgentGraph
+
+Use [`AgentGraph`](../architecture/AGENT_GRAPH.md) when you lay out the nodes and edges yourself.
+
+### Minimal example
 
 ```typescript
 import { AgentGraph, START, END, gmiNode, toolNode } from '@framers/agentos/orchestration';
 import { z } from 'zod';
 
 const graph = new AgentGraph({
+  input:     z.object({ topic: z.string() }),
+  scratch:   z.object({}),
+  artifacts: z.object({}),
+})
+  .addNode('search',    toolNode('web_search', { args: { query: 'quantum computing' } }))
+  .addNode('summarize', gmiNode({ instructions: 'Summarize the search results in 3 sentences.' }))
+  .addEdge(START, 'search')
+  .addEdge('search', 'summarize')
+  .addEdge('summarize', END)
+  .compile({ deps });
+
+const result = await graph.invoke({ topic: 'quantum computing' });
+console.log(result.summarize); // the summary text; result.search holds the tool output
+```
+
+`compile()` validates the graph and throws on an edge to an unknown node, a missing entry or exit edge, or a node that cannot be reached from `START`.
+
+### Routing on a node's output
+
+A `routerNode` returns the id of the node to run next. Give it a static edge to every node it can return; the runtime follows the one it names and marks the others skipped.
+
+```typescript
+import { AgentGraph, START, END, gmiNode, routerNode } from '@framers/agentos/orchestration';
+import { z } from 'zod';
+
+const labels = ['factual', 'creative', 'code'];
+
+const graph = new AgentGraph({
   input:     z.object({ query: z.string() }),
-  scratch:   z.object({ intent: z.string().default('') }),
-  artifacts: z.object({ answer: z.string().default('') }),
+  scratch:   z.object({}),
+  artifacts: z.object({}),
 })
   .addNode('classify', gmiNode({
     instructions: 'Classify the query as "factual", "creative", or "code". Reply with only the label.',
   }))
-  .addNode('factual',  toolNode('web_search'))
+  .addNode('route', routerNode((state) => {
+    const label = String(state.artifacts.classify ?? '').toLowerCase();
+    return labels.find((id) => label.includes(id)) ?? 'creative';
+  }))
+  .addNode('factual',  gmiNode({ instructions: 'Answer with facts and name your sources.' }))
   .addNode('creative', gmiNode({ instructions: 'Write a creative, engaging response.' }))
   .addNode('code',     gmiNode({ instructions: 'Write clean, documented code with an explanation.' }))
   .addEdge(START, 'classify')
-  .addConditionalEdge('classify', (state) => state.scratch.intent, {
-    factual:  'factual',
-    creative: 'creative',
-    code:     'code',
-  })
+  .addEdge('classify', 'route')
+  .addEdge('route', 'factual')
+  .addEdge('route', 'creative')
+  .addEdge('route', 'code')
   .addEdge('factual',  END)
   .addEdge('creative', END)
   .addEdge('code',     END)
-  .compile();
+  .compile({ deps });
+
+const result = await graph.invoke({ query: 'Write a debounce function in TypeScript' });
+// { classify: 'code', code: '...' }
 ```
 
 ```mermaid
 graph TD
-    S["START"] --> C["classify<br/><em>gmi: determine intent</em>"]
-    C -->|factual| F["factual<br/><em>tool: web_search</em>"]
-    C -->|creative| CR["creative<br/><em>gmi: creative response</em>"]
-    C -->|code| CO["code<br/><em>gmi: write code</em>"]
+    S["START"] --> C["classify<br/><em>gmi: label the query</em>"]
+    C --> R["route<br/><em>router: read artifacts.classify</em>"]
+    R -->|factual| F["factual<br/><em>gmi</em>"]
+    R -->|creative| CR["creative<br/><em>gmi</em>"]
+    R -->|code| CO["code<br/><em>gmi</em>"]
     F --> E["END"]
     CR --> E
     CO --> E
 
-    style C fill:#533483,stroke:#0f3460,color:#e0e0e0
+    style R fill:#533483,stroke:#0f3460,color:#e0e0e0
     style F fill:#0f3460,stroke:#533483,color:#e0e0e0
     style CR fill:#0f3460,stroke:#533483,color:#e0e0e0
     style CO fill:#0f3460,stroke:#533483,color:#e0e0e0
 ```
 
-### Agent Loop with Cycle
+`addConditionalEdge(source, fn)` stores its target as the placeholder `__CONDITIONAL__`, and the scheduler counts that placeholder as an edge from the source to every node in the graph, the source included. The source then waits on itself and every other node waits on the source, so no node runs and `invoke()` returns `{}`. Route with a `routerNode` as above.
 
-A research loop that searches, evaluates whether it has enough information, and cycles back if not. The `maxIterations` guard prevents runaway loops.
+### Loops
 
-```typescript
-const graph = new AgentGraph({
-  input:     z.object({ question: z.string() }),
-  scratch:   z.object({ iterations: z.number().default(0), found: z.boolean().default(false) }),
-  artifacts: z.object({ answer: z.string().default('') }),
-})
-  .addNode('search',   toolNode('web_search'))
-  .addNode('evaluate', gmiNode({
-    instructions: 'Evaluate whether the search results contain enough information to answer the question. Set found=true if yes.',
-  }))
-  .addNode('answer',   gmiNode({
-    instructions: 'Synthesize the research into a comprehensive answer with citations.',
-  }))
-  .addEdge(START, 'search')
-  .addEdge('search', 'evaluate')
-  .addConditionalEdge('evaluate', (state) => {
-    if (state.scratch.found || state.scratch.iterations >= 3) return 'answer';
-    return 'search'; // cycle back for more research
-  })
-  .addEdge('answer', END)
-  .compile();
-```
+A node runs at most once per run, and a node in a cycle waits for the node before it in the same cycle, so a cycle never starts. `compile()` accepts cycles, and the run ends when only the nodes of the cycle and the nodes after it are left. Repeated work belongs inside a node, in the `gmi` node's tool loop (`maxInternalIterations`), or in a new run.
 
-```mermaid
-graph TD
-    S["START"] --> SE["search<br/><em>tool: web_search</em>"]
-    SE --> EV["evaluate<br/><em>gmi: enough info?</em>"]
-    EV -->|"found=false<br/>iterations < 3"| SE
-    EV -->|"found=true<br/>or iterations ≥ 3"| AN["answer<br/><em>gmi: synthesize</em>"]
-    AN --> E["END"]
+### Subgraphs
 
-    style SE fill:#0f3460,stroke:#533483,color:#e0e0e0
-    style EV fill:#533483,stroke:#0f3460,color:#e0e0e0
-    style AN fill:#0f3460,stroke:#533483,color:#e0e0e0
-```
-
-### Subgraph Composition
-
-Embed a compiled graph as a node inside another graph. The inner graph runs to completion and its artifacts merge into the outer state.
+`subgraphNode(ir, { inputMapping, outputMapping })` runs another compiled graph as one node. `inputMapping` maps paths in the parent's `scratch` to paths in the child's input, and `outputMapping` maps paths in the child's artifacts to paths in the parent's `scratch`; the child's artifacts are also the node's output. The node looks the child up with `deps.subgraphResolver(graphId)` and runs it on the runtime that `deps.createSubgraphRuntime()` returns.
 
 ```typescript
-const researchGraph = new AgentGraph({ /* ... research loop above ... */ }).compile();
+import {
+  AgentGraph, START, END, gmiNode, subgraphNode,
+  GraphRuntime, NodeExecutor, InMemoryCheckpointStore,
+} from '@framers/agentos/orchestration';
+import { z } from 'zod';
 
-const productionGraph = new AgentGraph({
-  input:     z.object({ topic: z.string() }),
-  scratch:   z.object({}),
-  artifacts: z.object({ post: z.string().default(''), image: z.string().default('') }),
+const research = new AgentGraph({
+  input: z.object({}), scratch: z.object({}), artifacts: z.object({}),
 })
-  .addNode('research', subgraphNode(researchGraph))
-  .addNode('write',    gmiNode({ instructions: 'Write a blog post from the research.' }))
-  .addNode('illustrate', toolNode('image_generate'))
+  .addNode('notes', gmiNode({ instructions: 'Collect research notes on fusion energy.' }))
+  .addEdge(START, 'notes')
+  .addEdge('notes', END)
+  .compile({ deps });
+const researchIR = research.toIR();
+
+const production = new AgentGraph({
+  input: z.object({ topic: z.string() }), scratch: z.object({}), artifacts: z.object({}),
+})
+  .addNode('research', subgraphNode(researchIR, { outputMapping: { notes: 'notes' } }))
+  .addNode('write',    gmiNode({ instructions: 'Write a blog post from the research notes.' }))
   .addEdge(START, 'research')
   .addEdge('research', 'write')
-  .addEdge('write', 'illustrate')
-  .addEdge('illustrate', END)
-  .compile();
+  .addEdge('write', END)
+  .compile({
+    deps: {
+      ...deps,
+      subgraphResolver: (graphId) => (graphId === researchIR.id ? researchIR : undefined),
+      createSubgraphRuntime: () => new GraphRuntime({
+        checkpointStore: new InMemoryCheckpointStore(),
+        nodeExecutor: new NodeExecutor(deps),
+      }),
+    },
+  });
+
+const result = await production.invoke({ topic: 'fusion energy' });
+// result.research = the child's artifacts ({ notes: '...' }); result.write = the post
 ```
 
-### Node Configuration
-
-Every node builder accepts an optional `policies` object controlling memory, guardrails, checkpointing, and execution mode:
+### Node options and policies
 
 ```typescript
 gmiNode(
   {
     instructions: 'Summarize the document.',
-    executionMode: 'react_bounded',
-    maxInternalIterations: 5,
-    maxTokens: 2048,
-    temperature: 0.3,
+    maxInternalIterations: 5, // read: caps the node's loop (default 10)
+    parallelTools: false,     // read: runs a turn's tool calls together when true
+    executionMode: 'react_bounded', // stored in the IR, not read
+    temperature: 0.3,               // stored in the IR, not passed to providerCall
+    maxTokens: 2048,                // stored in the IR, not passed to providerCall
   },
   {
-    memory: {
-      consistency: 'snapshot',
-      read:  { types: ['semantic', 'episodic'], semanticQuery: '{input.topic}', maxTraces: 10 },
-      write: { autoEncode: true, type: 'episodic', scope: 'session' },
-    },
-    guardrails: { output: ['content-safety', 'pii-redaction'], onViolation: 'sanitize' },
-    checkpoint: 'after',
-  }
+    checkpoint: 'after',      // read: save a checkpoint after the node
+    effectClass: 'read',      // read: on resume, a 'write', 'external' or 'human' node keeps its recorded output
+    memory: { consistency: 'snapshot', read: { types: ['semantic'], maxTraces: 10 } }, // stored, not read
+    guardrails: { output: ['pii-redaction'], onViolation: 'sanitize' },               // stored, not read
+  },
 )
 ```
 
-**Execution modes for [`gmiNode`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/nodes.ts):**
-
-| Mode | Behavior |
-|------|----------|
-| `single_turn` | One LLM call, no internal tool loop. Default in `workflow()` for cost-bounded execution. |
-| `react_bounded` | ReAct loop up to `maxInternalIterations`. Default in [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts). Agent can call tools, observe results, and reason across multiple turns. |
-| `planner_controlled` | PlanningEngine drives the loop. Default in `mission()`. The planner decides when to stop based on goal satisfaction. |
+The runtime reads a node's `checkpoint` flag and its `effectClass`. It does not read the `memory`, `discovery`, `persona` or `guardrails` policies; a `guardrailNode` is the step that checks content during a run, and a `humanNode` runs `pii-redaction` and `code-safety` through `deps.guardrailEngine` after an automatic or judged approval.
 
 ---
 
-## WorkflowBuilder — Sequential Pipelines
+## workflow()
 
-Use `workflow()` for deterministic pipelines where steps are known upfront. Cycles are rejected at compile time — if you need them, use `AgentGraph`.
+`workflow()` builds a graph from steps declared in order. `compile()` throws when `.input()` or `.returns()` is missing and when the graph has a cycle, and it always checkpoints after every node.
 
-### Quick Start
+### Quick start
 
 ```typescript
 import { workflow } from '@framers/agentos/orchestration';
@@ -209,20 +251,21 @@ import { z } from 'zod';
 
 const pipeline = workflow('content-pipeline')
   .input(z.object({ url: z.string() }))
-  .returns(z.object({ summary: z.string(), tags: z.array(z.string()) }))
+  .returns(z.object({ summary: z.string(), tags: z.string() }))
   .step('fetch',     { tool: 'web_fetch', effectClass: 'external' })
-  .step('summarize', { gmi: { instructions: 'Summarize in 3 sentences.' } })
-  .step('tag',       { gmi: { instructions: 'Extract 5 topic tags as a JSON array.' } })
-  .compile();
+  .step('summarize', { gmi: { instructions: 'Summarize the fetched page in 3 sentences.' }, outputAs: 'summary' })
+  .step('tag',       { gmi: { instructions: 'Extract 5 topic tags as a JSON array.' }, outputAs: 'tags' })
+  .compile({ deps });
 
 const result = await pipeline.invoke({ url: 'https://example.com/article' });
-console.log(result.summary);
-console.log(result.tags);
+console.log(result.summary, result.tags); // result.fetch holds the tool output
 ```
 
-### Branching
+A `tool` step sends the tool no arguments: `StepConfig` has no field for them, so the `web_fetch` step above receives `{}` and the URL reaches only the host's own `providerCall` through `state.input`. A `gmi` step is recorded as `single_turn` and runs the same loop as any `gmi` node, up to 10 turns while `providerCall` returns tool calls.
 
-Route to different processing paths based on classification:
+### Branches
+
+`.branch(condition, routes)` takes a function and a map from route key to step config. The compiler adds a router node that runs the function, and a node per route.
 
 ```typescript
 workflow('triage')
@@ -230,449 +273,215 @@ workflow('triage')
   .returns(z.object({ response: z.string() }))
   .step('classify', { gmi: { instructions: 'Classify as "billing", "technical", or "general".' } })
   .branch(
-    (state) => state.scratch.classification,
+    (state) => String(state.artifacts.classify ?? '').trim(),
     {
-      billing:   (wf) => wf.step('billing-agent',   { gmi: { instructions: 'Handle billing issue. Check account status, explain charges, process refunds.' } }),
-      technical: (wf) => wf.step('technical-agent',  { gmi: { instructions: 'Diagnose and resolve the technical issue. Check logs, suggest fixes.' } }),
-      general:   (wf) => wf.step('general-agent',    { gmi: { instructions: 'Handle general inquiry with helpful, clear responses.' } }),
-    }
+      billing:   { gmi: { instructions: 'Handle the billing issue.' } },
+      technical: { gmi: { instructions: 'Diagnose the technical issue.' } },
+      general:   { gmi: { instructions: 'Answer the general inquiry.' } },
+    },
   )
-  .compile();
+  .compile({ deps });
 ```
 
-### Parallel Steps
+The router node returns the route key itself, and the runtime takes a router's return value as the id of the node to run next. The route nodes have generated ids (`branch-<key>-<n>`), so no node matches: every route node is marked skipped and the run continues with the step declared after the branch. To route on a value, build the graph with `AgentGraph` and a `routerNode` that returns node ids.
 
-Execute independent steps concurrently with configurable reducers to merge results:
+### Parallel steps
+
+`.parallel(steps, join)` adds one node per step config, all connected from the previous step, and registers `join.merge` as reducers. `join.strategy`, `join.quorumCount` and `join.timeout` are stored and not read.
 
 ```typescript
 workflow('multi-source-research')
   .input(z.object({ query: z.string() }))
   .returns(z.object({ report: z.string() }))
   .parallel(
-    { reducers: { 'scratch.results': 'concat' } },
-    (wf) => wf.step('web',    { tool: 'web_search' }),
-    (wf) => wf.step('news',   { tool: 'news_search' }),
-    (wf) => wf.step('papers', { tool: 'arxiv_search' }),
+    [{ tool: 'web_search' }, { tool: 'news_search' }, { tool: 'arxiv_search' }],
+    { strategy: 'all', merge: { 'scratch.results': 'concat' } },
   )
-  .step('synthesize', {
-    gmi: { instructions: 'Synthesize all sources into a coherent research report with citations.' },
-    memory: { read: { types: ['semantic'], maxTraces: 5 } },
-  })
-  .compile();
+  .step('synthesize', { gmi: { instructions: 'Synthesize the sources into a report.' }, outputAs: 'report' })
+  .compile({ deps });
 ```
 
-```mermaid
-graph TD
-    S["START"] --> P["parallel"]
-    subgraph Par["Concurrent Execution"]
-        W["web_search"]
-        N["news_search"]
-        A["arxiv_search"]
-    end
-    P --> W
-    P --> N
-    P --> A
-    W --> J["join<br/><em>reducer: concat</em>"]
-    N --> J
-    A --> J
-    J --> SY["synthesize<br/><em>gmi: merge report</em>"]
-    SY --> E["END"]
+The three tool nodes become ready together and run concurrently. Their outputs are not in the result (see [Scheduling](#scheduling)), and `synthesize` runs after all three.
 
-    style Par fill:#1a1a2e,stroke:#0f3460,color:#e0e0e0
-    style SY fill:#533483,stroke:#0f3460,color:#e0e0e0
-```
-
-### Human-in-the-Loop Step
-
-Suspend execution and wait for human approval before proceeding:
+### Human step
 
 ```typescript
 workflow('content-approval')
   .input(z.object({ brief: z.string() }))
-  .returns(z.object({ publishedPost: z.string() }))
-  .step('draft',   { gmi: { instructions: 'Write a blog post draft based on the brief.' } })
+  .returns(z.object({ post: z.string() }))
+  .step('draft',   { gmi: { instructions: 'Write a blog post draft from the brief.' } })
   .step('approve', { human: { prompt: 'Review the draft. Approve or request changes.' } })
   .step('publish', { tool: 'cms_publish', effectClass: 'external' })
-  .compile();
+  .compile({ deps });
 ```
 
-The `human` step emits a `human_input_required` event on the stream and pauses execution. The host application presents the prompt to the user, collects their response, and calls `graph.resumeWithHumanInput(runId, response)` to continue.
+The `human` step interrupts the run: the runtime saves a checkpoint, emits an `interrupt` event with the reason `human_approval`, and ends the run with `run_end`. `resume(runId)` marks the step complete with its recorded output (`{ prompt }`) and runs the rest; a host that has the reviewer's answer writes it into a fork of the checkpoint and resumes the fork ([Checkpointing](./CHECKPOINTING.md), [Human-in-the-Loop](../safety/HUMAN_IN_THE_LOOP.md)).
 
-### Memory-Aware Steps
-
-Steps can read from and write to cognitive memory:
-
-```typescript
-workflow('personalized-response')
-  .input(z.object({ userId: z.string(), question: z.string() }))
-  .returns(z.object({ answer: z.string() }))
-  .step('recall', {
-    gmi: { instructions: 'Answer the question using past interaction context.' },
-    memory: {
-      read: { types: ['episodic', 'semantic'], semanticQuery: '{input.question}', maxTraces: 10 },
-      write: { autoEncode: true, type: 'episodic', scope: 'user' },
-    },
-  })
-  .compile();
-```
+A step's `memory`, `discovery` and `guardrails` policies are stored and not read; `requiresApproval` and `onFailure` are not read either, and `retryPolicy` re-runs a failed step whatever `onFailure` says.
 
 ---
 
-## MissionBuilder — Goal-Oriented Execution
+## mission()
 
-Use `mission()` when you want to describe what the agent should achieve rather than how to achieve it. The mission compiler uses Tree of Thought planning to decompose the goal into an execution graph.
-
-### Quick Start
+`mission()` builds a linear graph from a goal and a plan template ([mission() API](./MISSION_API.md)).
 
 ```typescript
 import { mission } from '@framers/agentos/orchestration';
 import { z } from 'zod';
 
-const researchMission = mission('research')
+const research = mission('research')
   .input(z.object({ topic: z.string() }))
-  .goal('Research {{topic}} and produce a concise 3-paragraph summary with citations.')
-  .returns(z.object({ summary: z.string(), citations: z.array(z.string()) }))
-  .planner({ strategy: 'tree_of_thought', branches: 3, maxSteps: 8 })
-  .autonomy('guardrailed')
-  .providerStrategy('balanced')
-  .costCap(5.00)
-  .compile();
+  .goal('Research quantum error correction and produce a concise 3-paragraph summary with citations.')
+  .returns(z.object({ summary: z.string() }))
+  .planner({ strategy: 'linear', maxSteps: 8, style: 'research' })
+  .compile({ deps });
 
-const result = await researchMission.invoke({ topic: 'quantum error correction' });
-console.log(result.summary);
+const artifacts = await research.invoke({ topic: 'quantum error correction' });
+// outputs under gather-info, process-info, deliver-result, refine-output
 ```
 
-### Planner Strategies
-
-The planner decomposes the goal into a graph structure. Three strategies are available:
-
-| Strategy | Behavior |
-|----------|----------|
-| `linear` | Sequential decomposition — each step feeds the next. Fastest planning, simplest graph. |
-| `tree_of_thought` | Generates N candidate decompositions, evaluates each on feasibility/cost/latency/robustness, selects the best or synthesizes a hybrid. Based on Yao et al. 2023. |
-| `react` | ReAct-style observe-think-act loop — the planner observes intermediate results and decides the next step dynamically. |
-
-```typescript
-// Tree of Thought — explores 3 candidate plans, picks the best
-.planner({ strategy: 'tree_of_thought', branches: 3, maxSteps: 12 })
-
-// Linear — fast, deterministic decomposition
-.planner({ strategy: 'linear', maxSteps: 8 })
-
-// ReAct — adaptive, observes results between steps
-.planner({ strategy: 'react', maxIterations: 5 })
-```
-
-### Autonomy Modes
-
-Control how much the mission can self-expand during execution:
-
-| Mode | Behavior |
-|------|----------|
-| `autonomous` | All expansion requests auto-approve. Only stops at cost/agent caps. |
-| `guided` | Every expansion proposal pauses for human approval. |
-| `guardrailed` | Auto-approves below thresholds (cost, agent count, tool forges). Above thresholds, pauses for approval. |
-
-```typescript
-mission('deep-research')
-  .goal('...')
-  .autonomy('guardrailed')
-  .costCap(10.00)
-  .maxAgents(8)
-  .compile();
-```
-
-### Provider Strategy
-
-Assign LLM providers per node based on task complexity:
-
-```typescript
-// Balanced — expensive models for complex reasoning, cheap for routing
-.providerStrategy('balanced')
-
-// Explicit — assign providers per role
-.providerStrategy('explicit', {
-  researcher: { provider: 'anthropic', model: 'claude-sonnet-4-6' },
-  writer: { provider: 'openai', model: 'gpt-4o' },
-  _default: { provider: 'openai', model: 'gpt-4o-mini' },
-})
-
-// Cheapest — minimize cost across all nodes
-.providerStrategy('cheapest')
-```
-
-### Anchor Nodes
-
-Inject fixed logic at specific positions in the planner's output — anchors persist regardless of what the planner generates:
-
-```typescript
-mission('audited-research')
-  .input(z.object({ topic: z.string() }))
-  .goal('Research {{topic}} thoroughly.')
-  .returns(z.object({ report: z.string() }))
-  .anchor({ position: 'before_first', node: humanNode({ prompt: 'Approve the research topic?' }) })
-  .anchor({ position: 'after_last',   node: toolNode('report_publisher') })
-  .compile();
-```
+- `planner.style` picks the template (`research`, `qa` or `creative`); without it the compiler classifies the goal's wording. `strategy` and `maxSteps` are required and not read; a pre-built plan goes in `planner.plan`.
+- The goal is wrapped in `<mission_goal>` tags at the start of every step's instructions. `{{variable}}` placeholders are not filled.
+- `.anchor(id, node, { phase, after })` splices a node of your own into the chain.
+- `autonomy()`, `providerStrategy()`, `costCap()`, `maxAgents()`, `branches()`, `plannerModel()` and `executionModel()` store values the compiler does not read.
 
 ---
 
-## Voice Nodes in Graphs
+## Voice Nodes
 
-Embed full voice pipeline turns directly inside any graph — STT, LLM reasoning, and TTS as a single node:
+`voiceNode(id, config)` builds a `voice` node; `.on(exitReason, target)` maps the reason the voice session ended to the next node, and `.build()` returns the node.
 
 ```typescript
-import { AgentGraph, START, END, voiceNode, gmiNode } from '@framers/agentos/orchestration';
+import { AgentGraph, START, END, voiceNode, gmiNode, toolNode } from '@framers/agentos/orchestration';
+import { VoiceNodeExecutor } from '@framers/agentos/orchestration/runtime/VoiceNodeExecutor';
 import { z } from 'zod';
 
 const callGraph = new AgentGraph({
   input:     z.object({ callerId: z.string() }),
-  scratch:   z.object({ transcript: z.string().default('') }),
-  artifacts: z.object({ resolution: z.string().default('') }),
+  scratch:   z.object({}),
+  artifacts: z.object({}),
 })
-  .addNode(
-    'listen',
-    voiceNode('listen', {
-      mode: 'conversation',
-      maxTurns: 10,
-      sttProvider: 'deepgram',
-      ttsProvider: 'elevenlabs',
-      bargeIn: true,
-    })
-      .on('completed',   'resolve')
-      .on('interrupted', 'listen')
-      .on('hangup',      'cleanup')
-      .build()
-  )
-  .addNode('resolve', gmiNode({ instructions: 'Determine the resolution based on the conversation transcript.' }))
+  // listen fails unless an earlier step has put the transport at state.scratch.voiceTransport (below).
+  .addNode('listen', voiceNode('listen', { mode: 'conversation', maxTurns: 10 })
+    .on('turns-exhausted', 'resolve')
+    .on('hangup', 'cleanup')
+    .build())
+  .addNode('resolve', gmiNode({ instructions: 'Determine the resolution from the call transcript.' }))
   .addNode('cleanup', toolNode('close_ticket'))
   .addEdge(START, 'listen')
+  .addEdge('listen', 'resolve')
+  .addEdge('listen', 'cleanup')
   .addEdge('resolve', END)
   .addEdge('cleanup', END)
-  .compile();
+  .compile({ deps: { ...deps, voiceExecutor: new VoiceNodeExecutor((event) => console.log(event.type)) } });
 ```
 
-```mermaid
-graph TD
-    S["START"] --> L["listen<br/><em>voice: STT → LLM → TTS</em>"]
-    L -->|completed| R["resolve<br/><em>gmi: determine resolution</em>"]
-    L -->|interrupted| L
-    L -->|hangup| CL["cleanup<br/><em>tool: close_ticket</em>"]
-    R --> E["END"]
-    CL --> E
+A `conversation` or `listen-only` node ends with the first of these exit reasons: `hangup` (the transport emits `close` or `disconnected`), `turns-exhausted` (`maxTurns` turns, when it is above 0), `keyword:<word>` (with `exitOn: 'keyword'`, a final transcript containing one of `exitKeywords`), `silence-timeout` (with `exitOn: 'silence-timeout'`, 30 seconds without speech) and `interrupted` (an `AbortSignal` placed at `state.scratch.abortSignal` fires; a barge-in emits `voice_barge_in` and does not end the node). A `speak-only` node delivers `speakText` and ends with `completed`. The executor returns the target mapped to the exit reason, and the runtime runs that node and skips the others. The node still needs a static edge to each target, because the scheduler and the validator read only edges. An exit reason with no mapping follows every static edge, and a mapping back to the voice node itself does not run it again.
 
-    style L fill:#533483,stroke:#0f3460,color:#e0e0e0
-    style R fill:#0f3460,stroke:#533483,color:#e0e0e0
-    style CL fill:#0f3460,stroke:#533483,color:#e0e0e0
-```
+The executor needs the voice transport at `state.scratch.voiceTransport` and fails without it. A run starts with an empty `scratch` and no builder puts a transport there (`workflow().transport('voice', ...)` stores its settings and nothing reads them), so the host writes it from an earlier node, for example an `extension` node, whose object output is merged into `scratch`. Voice events (`voice_session`, `voice_transcript`, `voice_barge_in`, `voice_turn_complete`) go to the callback passed to `VoiceNodeExecutor`, not to the graph's event stream.
 
-**Voice node options:**
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `mode` | `'single_turn' \| 'conversation'` | `'single_turn'` | One exchange vs multi-turn dialogue |
-| `maxTurns` | `number` | `5` | Hard cap on dialogue turns |
-| `sttProvider` | `string` | global config | Override STT provider for this node |
-| `ttsProvider` | `string` | global config | Override TTS provider for this node |
-| `bargeIn` | `boolean` | `false` | Allow user to interrupt TTS playback |
-| `vadSensitivity` | `number` | `0.5` | Voice activity detection threshold (0-1) |
+| Option | Type | Read by the executor |
+|---|---|---|
+| `mode` | `'conversation' \| 'listen-only' \| 'speak-only'` | Yes (required) |
+| `maxTurns` | `number` | Yes: ends the node with `turns-exhausted` (0 or unset = no limit) |
+| `exitOn` | `'hangup' \| 'silence-timeout' \| 'keyword' \| 'turns-exhausted' \| 'manual'` | `'keyword'` and `'silence-timeout'` add their exit condition; the other values add none |
+| `exitKeywords` | `string[]` | Yes, with `exitOn: 'keyword'` |
+| `speakText` | `string` | Yes, on a `speak-only` node |
+| `stt`, `tts`, `voice`, `endpointing`, `bargeIn`, `diarization`, `language` | | No: stored in the node's checkpoint and not applied |
 
 ---
 
 ## Checkpointing and Resume
 
-Any compiled graph supports durable checkpoints. Swap in a persistent store for production — the interface is the same.
-
 ```typescript
-import { InMemoryCheckpointStore } from '@framers/agentos/orchestration/checkpoint';
+import { AgentGraph, InMemoryCheckpointStore } from '@framers/agentos/orchestration';
 
-const store = new InMemoryCheckpointStore('./runs.db');
+const store = new InMemoryCheckpointStore();
 
-const graph = new AgentGraph({ /* ... */ })
-  .compile({ checkpointStore: store, checkpointPolicy: 'every_node' });
+const graph = new AgentGraph(stateSchema, { checkpointPolicy: 'every_node' })
+  // ...nodes and edges...
+  .compile({ checkpointStore: store, deps });
 
-// First run
-const runId = 'run-abc-123';
-try {
-  await graph.invoke({ topic: 'fusion energy' }, { runId });
-} catch (err) {
-  console.error('Run failed mid-way, will resume later.');
+let runId: string | undefined;
+for await (const event of graph.stream({ topic: 'fusion energy' })) {
+  if (event.type === 'run_start') runId = event.runId;
 }
 
-// Resume from the last completed node
-const resumed = await graph.resume(runId);
-console.log(resumed.artifacts);
+// After an interrupt or a failure: continue from the run's latest checkpoint.
+const artifacts = await graph.resume(runId!);
+
+// Fork a checkpoint with patched state and resume the fork.
+const [latest] = await store.list(graph.toIR().id, { runId, limit: 1 });
+const forkId = await store.fork(latest.id, { scratch: { approved: true } });
+const forked = await graph.resume(forkId);
 ```
 
-**Checkpoint policies:**
-
-| Policy | Behavior |
-|--------|----------|
-| `'none'` | No checkpoints. Default. |
-| `'every_node'` | Checkpoint after each node completes. Full recoverability, higher storage cost. |
-| `'explicit'` | Checkpoint only at nodes with `checkpoint: 'after'` in their policy. Selective. |
-
-### Time-Travel and Forking
-
-Fork from a historical checkpoint to explore alternative execution paths with modified state:
-
-```typescript
-// Fork from checkpoint, patch the state, run from that point
-const forkedRunId = await store.fork(checkpointId, {
-  scratch: { iterations: 0, confidence: 0.9 },
-});
-const altResult = await graph.resume(forkedRunId);
-
-// List all checkpoints for a run
-const checkpoints = await store.list(runId);
-// → [{ id, nodeId, timestamp, stateSnapshot }, ...]
-```
+`AgentGraph` takes `checkpointPolicy` in its constructor (`'none'` by default); `workflow()` and `mission()` checkpoint after every node. Under every policy the runtime also saves a checkpoint when a node fails or interrupts the run. `InMemoryCheckpointStore` keeps checkpoints in process memory and takes no arguments; implement [`ICheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts) for a durable store. Resume, forks and the policies are in [Checkpointing](./CHECKPOINTING.md).
 
 ---
 
-## GraphEvent Streaming
+## Graph Events
 
-All graph executions emit a unified event stream. Subscribe via `for await...of` for real-time UI updates, logging, and debugging:
+`stream(input)` yields [`GraphEvent`](https://github.com/framerslab/agentos/blob/master/src/orchestration/events/GraphEvent.ts) values:
 
 ```typescript
-const stream = graph.stream({ topic: 'AI safety' });
-
-for await (const event of stream) {
+for await (const event of graph.stream({ topic: 'AI safety' })) {
   switch (event.type) {
-    case 'node_started':
-      console.log(`→ ${event.nodeId} started`);
+    case 'node_start':
+      console.log(`-> ${event.nodeId}`);
       break;
-    case 'node_completed':
-      console.log(`✓ ${event.nodeId} completed in ${event.durationMs}ms`);
+    case 'node_end':
+      console.log(`ok ${event.nodeId} in ${event.durationMs}ms`);
       break;
-    case 'text_delta':
-      process.stdout.write(event.delta);
+    case 'interrupt':
+      console.log(`paused at ${event.nodeId}: ${event.reason}`);
       break;
-    case 'tool_call':
-      console.log(`  tool: ${event.toolName}(${JSON.stringify(event.args)})`);
+    case 'error':
+      console.error(event.nodeId, event.error.code, event.error.message);
       break;
-    case 'tool_result':
-      console.log(`  result: ${JSON.stringify(event.result).slice(0, 100)}`);
-      break;
-    case 'human_input_required':
-      console.log(`  PAUSED: ${event.prompt}`);
-      break;
-    case 'checkpoint_saved':
-      console.log(`  checkpoint: ${event.checkpointId}`);
-      break;
-    case 'guardrail_violation':
-      console.log(`  violation: ${event.guardrailId} — ${event.action}`);
-      break;
-    case 'graph_completed':
-      console.log('\nDone.', event.artifacts);
-      break;
-    case 'graph_error':
-      console.error('Failed:', event.error);
+    case 'run_end':
+      console.log('done', event.finalOutput);
       break;
   }
 }
 ```
 
-**Full event type reference:**
-
 | Event | Payload | When |
-|-------|---------|------|
-| `node_started` | `nodeId`, `nodeType` | Node execution begins |
-| `node_completed` | `nodeId`, `durationMs`, `output` | Node execution completes |
-| `text_delta` | `delta`, `nodeId` | Streaming LLM text chunk |
-| `tool_call` | `toolName`, `args`, `nodeId` | Tool invocation |
-| `tool_result` | `toolName`, `result`, `nodeId` | Tool execution result |
-| `human_input_required` | `prompt`, `nodeId`, `runId` | Human-in-the-loop pause |
-| `checkpoint_saved` | `checkpointId`, `runId`, `nodeId` | Checkpoint persisted |
-| `state_update` | `path`, `value`, `reducer` | Graph state mutation |
-| `guardrail_check` | `guardrailId`, `nodeId`, `passed` | Guardrail evaluation |
-| `guardrail_violation` | `guardrailId`, `action`, `details` | Guardrail triggered |
-| `memory_read` | `types`, `traceCount`, `nodeId` | Memory traces retrieved |
-| `memory_write` | `type`, `scope`, `nodeId` | Memory trace encoded |
-| `discovery_match` | `query`, `matchedCapability`, `confidence` | Capability discovery resolved |
-| `graph_completed` | `artifacts`, `durationMs`, `tokenCount` | Graph execution finished |
-| `graph_error` | `error`, `nodeId?` | Graph execution failed |
+|---|---|---|
+| `run_start` | `runId`, `graphId` | The run begins |
+| `node_start` | `nodeId`, `state` (input and scratch) | A node starts, and again before each retry |
+| `node_end` | `nodeId`, `output`, `durationMs`, `telemetry` | A node completes |
+| `edge_transition` | `sourceId`, `targetId`, `edgeType` | The runtime follows an edge to a node |
+| `checkpoint_saved` | `checkpointId`, `nodeId` | A checkpoint is saved |
+| `interrupt` | `nodeId`, `reason` (`human_approval`, `error`, `guardrail_violation`) | A human node pauses the run, or a node fails |
+| `node_timeout` | `nodeId`, `timeoutMs` | A node's `timeout` expired |
+| `error` | `nodeId`, `error.code`, `error.message` | A node failed (`NODE_EXECUTION_FAILED` or `NODE_TIMEOUT`) |
+| `guardrail:hitl-override` | `nodeId`, `guardrailId`, `reason` | A human node's post-approval guardrails rejected the approval |
+| `run_end` | `runId`, `finalOutput` (the artifacts), `totalDurationMs` | The run ends |
 
----
-
-## YAML Workflow Authoring
-
-For non-TypeScript environments or declarative pipeline definitions, workflows can be authored as YAML:
-
-```yaml
-# workflows/summarize.yaml
-name: summarize-article
-input:
-  schema:
-    type: object
-    properties:
-      url: { type: string }
-    required: [url]
-returns:
-  schema:
-    type: object
-    properties:
-      summary: { type: string }
-      tags: { type: array, items: { type: string } }
-
-steps:
-  - id: fetch
-    tool: web_fetch
-    effectClass: external
-
-  - id: summarize
-    gmi:
-      instructions: Summarize the article in 3 sentences.
-    memory:
-      read:
-        types: [semantic]
-        maxTraces: 5
-
-  - id: tag
-    gmi:
-      instructions: Extract 5 topic tags as a JSON array.
-
-  - id: review
-    human:
-      prompt: Review the summary and tags. Approve or request changes.
-```
-
-Load and execute:
-
-```typescript
-import { loadWorkflowFromYaml } from '@framers/agentos/orchestration';
-import { readFileSync } from 'fs';
-
-const yaml = readFileSync('./workflows/summarize.yaml', 'utf8');
-const wf = await loadWorkflowFromYaml(yaml);
-const result = await wf.invoke({ url: 'https://example.com/article' });
-```
-
-YAML workflows support the full feature set — branching, parallelism, memory, guardrails, and human-in-the-loop steps.
+A `GraphRuntime` built with an `expansionHandler` also emits `mission:*` events; none of the builders sets one. The other event types the union declares (`text_delta`, `tool_call`, `tool_result`, `memory_read`, `memory_write`, `discovery_result`, `guardrail_result`) are not emitted by the runtime.
 
 ---
 
 ## Choosing the Right API
 
-| If you need... | Use | Why |
-|----------------|-----|-----|
-| Known steps in a fixed order | `workflow()` | Compile-time DAG validation, deterministic cost |
-| Conditional branching or cycles | `AgentGraph` | Full graph model, arbitrary routing |
-| The agent to figure out its own steps | `mission()` | Tree of Thought planning, self-expansion |
-| Multiple specialized agents coordinating | `agency()` | Strategy-based multi-agent (debate, pipeline, supervisor) |
-| One-off LLM call | `generateText()` / `streamText()` | No graph overhead, direct provider call |
-| Voice conversation flow | `AgentGraph` + [`voiceNode`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/VoiceNodeBuilder.ts) | Full IVR support with barge-in and hangup handling |
-| Cost-bounded pipeline | `workflow()` | Single-turn GMI, no runaway loops |
-| Prototype → production | `mission()` → `AgentGraph` | Start with a goal, extract the generated IR, hand-tune |
+| If you need... | Use |
+|---|---|
+| Known steps in a fixed order | `workflow()` |
+| Routing on a node's output | `AgentGraph` with a `routerNode` |
+| A graph built from a goal and a plan template | `mission()` |
+| Several agents working on one task | [`agency()`](./AGENCY_API.md) (`sequential`, `parallel`, `debate`, `review-loop`, `hierarchical`, `graph`) |
+| One model call | `generateText()` / `streamText()` |
+| A voice turn inside a graph | `AgentGraph` with `voiceNode` |
 
 ---
 
 ## Related Guides
 
-- [AgentGraph](/features/agent-graph) — Complete API reference, all node/edge types, subgraph patterns
-- [workflow() DSL](/features/workflow-dsl) — Sequential pipelines, branching, parallel execution
-- [mission() API](/features/mission-api) — Intent-driven orchestration, planners, anchors, autonomy
-- [Checkpointing](/features/checkpointing) — [`ICheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts), resume semantics, time-travel
-- [Unified Orchestration](/features/unified-orchestration) — Shared IR, five differentiators, architecture
-- [Human-in-the-Loop](/features/human-in-the-loop) — HITL patterns, approval workflows, step-up auth
-- [Voice Pipeline](/features/voice-pipeline) — STT/TTS providers, VAD, telephony integration
+- [AgentGraph](../architecture/AGENT_GRAPH.md): node and edge types, state, subgraphs
+- [workflow() DSL](./WORKFLOW_DSL.md): steps, branches, parallel steps
+- [mission() API](./MISSION_API.md): plan templates, anchors, introspection
+- [Checkpointing](./CHECKPOINTING.md): [`ICheckpointStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/checkpoint/ICheckpointStore.ts), resume, forks
+- [Unified Orchestration](./UNIFIED_ORCHESTRATION.md): the shared IR and runtime
+- [Human-in-the-Loop](../safety/HUMAN_IN_THE_LOOP.md): approval flows
+- [Voice Pipeline](../features/VOICE_PIPELINE.md): STT, TTS and transports

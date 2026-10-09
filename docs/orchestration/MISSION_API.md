@@ -74,7 +74,7 @@ Without `style`, `MissionCompiler.classifyGoal()` picks one from the goal's word
 })
 ```
 
-`guardrails` becomes an output guardrail policy with `onViolation: 'warn'` on every node that has none. The graph runtime applies a node's guardrail policy only on human nodes, so on other nodes it is recorded and not enforced. `memory.consistency` sets the graph's memory consistency mode (default `'snapshot'`), which the runtime does not read; `discovery` and `personality` are accepted and not read.
+`guardrails` becomes an output guardrail policy with `onViolation: 'warn'` on every node that has none. The graph runtime does not read a node's guardrail policy, so it is recorded and not enforced; a human node runs `pii-redaction` and `code-safety` through `deps.guardrailEngine` after an automatic or judged approval, whatever its policy lists. `memory.consistency` sets the graph's memory consistency mode (default `'snapshot'`), which the runtime does not read; `discovery` and `personality` are accepted and not read.
 
 ### .anchor(id, node, constraints)
 
