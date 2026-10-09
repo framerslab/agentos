@@ -8,8 +8,11 @@ import { z } from 'zod';
 
 const week = z.object({ items: z.array(z.object({ date: z.string(), title: z.string(), heavy: z.boolean() })) });
 
+// A runtime whose persona list holds a 'planner' persona.
+const agentos = await AgentOS.create();
+
 for await (const chunk of agentos.processRequest({
-  userId, sessionId, selectedPersonaId: 'planner',
+  userId: 'user-1', sessionId: 'session-1', selectedPersonaId: 'planner',
   textInput: 'Draft my week from the path.',
   options: { structuredReply: { schema: week, name: 'week', maxRetries: 2 } },
 })) {

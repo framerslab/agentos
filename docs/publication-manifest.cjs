@@ -230,6 +230,7 @@ const publicationManifest = [
   agentosDoc('SOCIAL_POSTING.md', 'features/social-posting.md', 'Social Posting', 'Channels & Social', 2),
 
   agentosDoc('STRUCTURED_OUTPUT.md', 'features/structured-output.md', 'Structured Output', 'Tools & Capabilities', 1),
+  agentosDoc('features/STRUCTURED_REPLY.md', 'features/structured-reply.md', 'Structured Reply', 'Tools & Capabilities', 1.2),
   siteDoc('features/llm-output-validation.md', 'features/llm-output-validation.md', 'LLM Output Validation', 'Model Quality & Cost', 1.5),
   agentosDoc('EVALUATION.md', 'features/evaluation-guide.md', 'Evaluation Guide', 'Model Quality & Cost', 2),
   agentosDoc('features/PROMPT_CACHING.md', 'features/prompt-caching.md', 'Prompt Caching', 'Model Quality & Cost', 2.5),
