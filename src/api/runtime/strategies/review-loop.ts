@@ -36,6 +36,7 @@ import {
   checkBeforeAgent,
   accumulateExtraUsage,
   buildAgentCallUsage,
+  callRecordExtras,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -178,6 +179,7 @@ export function compileReviewLoop(
           toolCalls: prodToolCalls,
           usage: buildAgentCallUsage(prodUsage),
           durationMs: prodDuration,
+          ...callRecordExtras(prodResult),
         });
 
         totalUsage.promptTokens += prodUsage.promptTokens ?? 0;
@@ -213,6 +215,7 @@ export function compileReviewLoop(
           toolCalls: revToolCalls,
           usage: buildAgentCallUsage(revUsage),
           durationMs: revDuration,
+          ...callRecordExtras(revResult),
         });
 
         totalUsage.promptTokens += revUsage.promptTokens ?? 0;

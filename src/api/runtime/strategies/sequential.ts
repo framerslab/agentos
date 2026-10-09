@@ -30,6 +30,7 @@ import type {
   AgentCallRecord,
   AgencyStreamPart,
 } from '../types.js';
+import type { FallbackSignal } from '../generateText.js';
 import { createBufferedAsyncReplay } from '../streamBuffer.js';
 import {
   isAgent,
@@ -37,6 +38,7 @@ import {
   checkBeforeAgent,
   accumulateExtraUsage,
   buildAgentCallUsage,
+  callRecordExtras,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -125,6 +127,7 @@ export function compileSequential(
           toolCalls: resultToolCalls,
           usage: buildAgentCallUsage(resultUsage),
           durationMs,
+          ...callRecordExtras(result),
         });
 
         totalUsage.promptTokens += resultUsage.promptTokens ?? 0;
@@ -197,6 +200,7 @@ export function compileSequential(
             cacheCreationTokens?: number;
           } = {};
           let resultToolCalls: Array<{ name: string; args: unknown; result?: unknown; error?: string }> = [];
+          let recordExtras: ReturnType<typeof callRecordExtras>;
           try {
             const agentStream = a.stream(effectivePrompt, opts) as {
               textStream?: AsyncIterable<string>;
@@ -210,6 +214,10 @@ export function compileSequential(
                 cacheCreationTokens?: number;
               }>;
               toolCalls?: Promise<Array<{ name: string; args: unknown; result?: unknown; error?: string }>>;
+              provider?: Promise<string>;
+              model?: Promise<string>;
+              finishReason?: Promise<string>;
+              fallback?: Promise<FallbackSignal | undefined>;
             } | null;
 
             if (agentStream?.textStream) {
@@ -226,6 +234,19 @@ export function compileSequential(
               }
               resultUsage = (await Promise.resolve(agentStream.usage)) ?? {};
               resultToolCalls = (await Promise.resolve(agentStream.toolCalls)) ?? [];
+              // Who answered: the leg that served when the seat's chain fired.
+              const [streamProvider, streamModel, streamFinish, streamFallback] = await Promise.all([
+                Promise.resolve(agentStream.provider),
+                Promise.resolve(agentStream.model),
+                Promise.resolve(agentStream.finishReason),
+                Promise.resolve(agentStream.fallback),
+              ]);
+              recordExtras = callRecordExtras({
+                provider: streamFallback?.finalProvider ?? streamProvider,
+                model: streamFallback?.finalModel ?? streamModel,
+                finishReason: streamFinish,
+                fallback: streamFallback,
+              });
             } else {
               // Fallback: non-streaming generate() call.
               const result = (await a.generate(effectivePrompt, opts)) as Record<string, unknown>;
@@ -235,6 +256,7 @@ export function compileSequential(
               }
               resultUsage = (result.usage as typeof resultUsage) ?? {};
               resultToolCalls = (result.toolCalls as Array<{ name: string; args: unknown; result?: unknown; error?: string }>) ?? [];
+              recordExtras = callRecordExtras(result);
             }
 
             agentCalls.push({
@@ -244,6 +266,7 @@ export function compileSequential(
               toolCalls: resultToolCalls,
               usage: buildAgentCallUsage(resultUsage),
               durationMs: Date.now() - agentStart,
+              ...recordExtras,
             });
 
             totalUsage.promptTokens += resultUsage.promptTokens ?? 0;

@@ -1409,6 +1409,25 @@ const RETRYABLE_PROVIDER_ERROR_CODES = new Set([
 ]);
 
 /**
+ * Provider error codes for a request timeout: OpenAI's, Anthropic's and
+ * Gemini's REQUEST_TIMEOUT, Anthropic's hard and idle timeouts, and the CLI
+ * bridges' TIMEOUT. OpenRouter and Ollama raise none of their own.
+ */
+const TIMEOUT_ERROR_CODES = new Set(['REQUEST_TIMEOUT', 'REQUEST_HARD_TIMEOUT', 'STREAM_IDLE_TIMEOUT', 'TIMEOUT']);
+
+/**
+ * Whether a provider error names a request timeout by its code.
+ *
+ * @param error - The error a provider call threw or a stream reported.
+ * @returns True when the error's `code` is one of the providers' timeout codes.
+ * @internal Shared with streamText.
+ */
+export function isTimeoutError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' && TIMEOUT_ERROR_CODES.has(code);
+}
+
+/**
  * Error classes a provider's stream error event names for a server failure:
  * Anthropic's `api_error` (HTTP 500) and `overloaded_error` (529). A thrown
  * provider error carries the HTTP status; a stream event carries the class,
@@ -2033,6 +2052,13 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
   // so tools see one session across providers and steps keep counting.
   const helperToolRunId = opts._continuation?.helperToolRunId ?? randomUUID();
   const stepOffset = opts._continuation?.stepOffset ?? 0;
+  // A tool's error text as the call's mask leaves it (an agency seat's), one
+  // redacted string for the call record and the tool turn alike. Declared
+  // here so the prompt shim and the native tool loop both see it.
+  const maskToolText = (text: string): string => {
+    const masked = opts.__maskError?.(text);
+    return typeof masked === 'string' ? masked : text;
+  };
 
   try {
     const successResult: GenerateTextResult = await withAgentOSSpan('agentos.api.generate_text', async (span) => {
@@ -2093,6 +2119,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       const resolved = resolveProvider(providerId, modelId, {
         apiKey: opts.apiKey,
         baseUrl: opts.baseUrl,
+        // An agency seat resolves strictly: no provider-less default, no reroute.
+        strict: opts.__strictCredentials === true,
       });
       metricProviderId = resolved.providerId;
       metricModelId = resolved.modelId;
@@ -2300,6 +2328,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           // as on the native loop below.
           onBeforeToolExecution: opts.onBeforeToolExecution,
           approvalGate: opts.__approvalGate,
+          // A seat's mask reaches the shim's tool errors too.
+          maskToolError: opts.__maskError ? maskToolText : undefined,
           // Native tool turns (session history, a failover continuation)
           // become the shim's own <tool_call> / <tool_response> text.
           messages: toShimMessages(messages),
@@ -2809,19 +2839,22 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                     tcId || undefined,
                   ),
                 );
+                // One masked string serves the record and the tool turn: the
+                // seat's next request carries no key.
+                const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
                 record.result = result.output;
-                record.error = result.success ? undefined: result.error;
+                record.error = result.success ? undefined: errorText;
                 messages.push({
                   role: 'tool',
                   tool_call_id: tcId,
-                  content: JSON.stringify(result.output ?? result.error ?? ''),
+                  content: JSON.stringify(result.output ?? errorText ?? ''),
                 } as any);
               } catch (err: any) {
-                record.error = err?.message;
+                record.error = maskToolText(err?.message ?? String(err));
                 messages.push({
                   role: 'tool',
                   tool_call_id: tcId,
-                  content: JSON.stringify({ error: err?.message }),
+                  content: JSON.stringify({ error: record.error }),
                 } as any);
               }
             } else {
@@ -2955,7 +2988,13 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
     // Note: we record against `metricProviderId` not the inbound
     // `opts.provider` because the model router may have resolved a
     // different provider than the caller asked for.
-    if (metricProviderId && !(error instanceof LLMProviderCircuitOpenError)) {
+    // A timeout the panel's own deadline produced says nothing about the
+    // provider's health: with the deadline flag set, it is not recorded.
+    if (
+      metricProviderId &&
+      !(error instanceof LLMProviderCircuitOpenError) &&
+      !(opts.__panelDeadline && isTimeoutError(error))
+    ) {
       globalLLMProviderHealth.recordFailure(metricProviderId, error);
     }
     // The failed attempt is billed for its completed steps and for a step
@@ -3123,10 +3162,11 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             // zero cache_control (no write premium on one-shot failover
             // traffic).
             ...fallbackHopOverrides(opts, fb),
-            // Clear explicit keys/URLs so resolution uses env vars for the
-            // fallback provider rather than the primary's overrides.
-            apiKey: undefined,
-            baseUrl: undefined,
+            // The hop's own key and URL, when its entry carries them (an
+            // agency's seating writes them); otherwise the fallback
+            // provider's environment, never the primary's overrides.
+            apiKey: fb.apiKey,
+            baseUrl: fb.baseUrl,
             // Preserve the REMAINING resolved chain (entries AFTER the current
             // fb; `attempt` is 1-indexed so slice(attempt) drops fb and all
             // already-tried entries). This stops the recursion from rebuilding

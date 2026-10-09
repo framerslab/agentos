@@ -30,6 +30,8 @@ export interface RunEmulatedToolLoopOptions {
   onBeforeToolExecution?: (info: { name: string; args: Record<string, unknown>; id: string; step: number }) => Promise<{ args: Record<string, unknown> } | null>;
   /** The agency approval gate, called after the hook: anything but its exact approval skips the tool. */
   approvalGate?: ApprovalGateFn;
+  /** Masks a tool's error text before it is recorded and returned to the model (an agency seat's mask). */
+  maskToolError?: (text: string) => string;
 }
 
 export interface EmulatedToolLoopResult {
@@ -100,12 +102,23 @@ export async function runEmulatedToolLoop(
         }
         try {
           opts.onToolExecute?.(call.name);
-          const result = await tool.execute(args, opts.toolContext as ToolExecutionContext);
-          toolCalls.push({ name: call.name, args });
+          const raw = await tool.execute(args, opts.toolContext as ToolExecutionContext);
+          // A returned failure is masked before the model reads it, and
+          // recorded as the native loops record it.
+          const result =
+            opts.maskToolError && raw.success === false && typeof raw.error === 'string'
+              ? { ...raw, error: opts.maskToolError(raw.error) }
+              : raw;
+          toolCalls.push({
+            name: call.name,
+            args,
+            ...(result.success === false && typeof result.error === 'string' ? { error: result.error } : {}),
+          });
           return formatToolResponse(call.name, result);
         } catch (err) {
-          toolCalls.push({ name: call.name, args, error: String(err) });
-          return formatToolResponse(call.name, { success: false, error: String(err) });
+          const error = opts.maskToolError ? opts.maskToolError(String(err)) : String(err);
+          toolCalls.push({ name: call.name, args, error });
+          return formatToolResponse(call.name, { success: false, error });
         }
       })
     );

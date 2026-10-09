@@ -45,6 +45,7 @@ import {
   checkBeforeEmergentSpawn,
   accumulateExtraUsage,
   buildAgentCallUsage,
+  callRecordExtras,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -169,6 +170,11 @@ function refusal(reason: string): { success: false; output: string; error: strin
  * `error`): both tool-result consumers read `output`, so the manager receives
  * the delegate's text, a spawn's outcome and a refusal's reason.
  *
+ * With `mask` (a pooled agency's call mask), what a tool returns reaches the
+ * manager's provider masked: a delegate's error, whether the delegate is a
+ * roster config, a pre-built agent or a spawned specialist, and every text
+ * the spawn tool returns.
+ *
  * @internal Exported so tests can drive the spawn_specialist tool directly
  *   without spinning up a manager LLM.
  */
@@ -176,7 +182,14 @@ export function buildHierarchicalTools(
   initialRoster: Record<string, BaseAgentConfig | Agent>,
   agencyConfig: AgencyOptions,
   opts: Record<string, unknown> | undefined = {},
+  mask?: (error: unknown) => unknown,
 ): HierarchicalToolBundle {
+  // A string through the mask is redacted text.
+  const say = (text: string): string => {
+    if (!mask) return text;
+    const masked = mask(text);
+    return typeof masked === 'string' ? masked : text;
+  };
   const roster: Record<string, BaseAgentConfig | Agent> = { ...initialRoster };
   const tools: ToolDefinitionMap = {};
   const agentCalls: AgentCallRecord[] = [];
@@ -215,7 +228,15 @@ export function buildHierarchicalTools(
           : args.task;
 
         const start = Date.now();
-        const result = (await a.generate(effectiveTask, opts)) as Record<string, unknown>;
+        let result: Record<string, unknown>;
+        try {
+          result = (await a.generate(effectiveTask, opts)) as Record<string, unknown>;
+        } catch (err) {
+          // A delegate's error becomes a tool result the manager's provider
+          // reads: masked for every delegate, a roster config (already masked
+          // by agent()), a pre-built agent and a spawned specialist.
+          throw mask ? mask(err) : err;
+        }
         const durationMs = Date.now() - start;
 
         const resultText = (result.text as string) ?? '';
@@ -235,6 +256,7 @@ export function buildHierarchicalTools(
           toolCalls: resultToolCalls,
           usage: buildAgentCallUsage(resultUsage),
           durationMs,
+          ...callRecordExtras(result),
         });
 
         subAgentUsage.promptTokens += resultUsage.promptTokens ?? 0;
@@ -292,17 +314,20 @@ export function buildHierarchicalTools(
           ? (['role', 'instructions', 'justification'] as const)
           : (['role', 'instructions'] as const),
       },
+      // Every text this tool returns goes to the manager's provider, so each
+      // passes through the call's mask (a HITL handler's or the judge's reason
+      // may carry a credential).
       execute: async (args: { role: string; instructions: string; justification?: string }) => {
         if (spawnedCount.value >= maxSpecialists) {
-          return refusal(`Cannot spawn: maxSpecialists cap (${maxSpecialists}) reached for this run.`);
+          return refusal(say(`Cannot spawn: maxSpecialists cap (${maxSpecialists}) reached for this run.`));
         }
 
         if (requireJustification && (!args.justification || args.justification.trim().length === 0)) {
-          return refusal('spawn_specialist requires a non-empty justification when requireJustification is enabled.');
+          return refusal(say('spawn_specialist requires a non-empty justification when requireJustification is enabled.'));
         }
 
         if (roster[args.role]) {
-          return refusal(`Cannot spawn: role "${args.role}" already exists in roster — call delegate_to_${args.role} instead.`);
+          return refusal(say(`Cannot spawn: role "${args.role}" already exists in roster — call delegate_to_${args.role} instead.`));
         }
 
         // HITL gate (when hitl.approvals.beforeEmergent is true) — fires
@@ -317,7 +342,7 @@ export function buildHierarchicalTools(
           agencyConfig,
         );
         if (hitlDecision && !hitlDecision.approved) {
-          return refusal(`HITL rejected spawn of "${args.role}"${hitlDecision.reason ? `: ${hitlDecision.reason}` : ''}`);
+          return refusal(say(`HITL rejected spawn of "${args.role}"${hitlDecision.reason ? `: ${hitlDecision.reason}` : ''}`));
         }
 
         // Lazy import to avoid pulling EmergentAgentForge into hot path
@@ -345,7 +370,7 @@ export function buildHierarchicalTools(
         );
 
         if (!result.ok) {
-          return refusal(`Forge rejected: ${result.reason}`);
+          return refusal(say(`Forge rejected: ${result.reason}`));
         }
 
         // Judge gating: when emergent.judge is true, run the synthesised
@@ -353,7 +378,7 @@ export function buildHierarchicalTools(
         // short-circuits and the roster is not mutated.
         if (judgeEnabled) {
           if (judgeCallsUsed >= maxJudgeCalls) {
-            return refusal(`Cannot spawn: maxJudgeCalls cap (${maxJudgeCalls}) reached for this run.`);
+            return refusal(say(`Cannot spawn: maxJudgeCalls cap (${maxJudgeCalls}) reached for this run.`));
           }
 
           const { EmergentAgentJudge } = await import('../../../cognition/emergent/EmergentAgentJudge.js');
@@ -379,7 +404,7 @@ export function buildHierarchicalTools(
           });
 
           if (!verdict.approved) {
-            return refusal(`Judge rejected synthesised agent "${args.role}": ${verdict.reason}`);
+            return refusal(say(`Judge rejected synthesised agent "${args.role}": ${verdict.reason}`));
           }
         }
 
@@ -399,7 +424,7 @@ export function buildHierarchicalTools(
 
         return {
           success: true,
-          output: `Spawned ${args.role}. Call delegate_to_${args.role}({ task: '...' }) on the next turn to invoke them.`,
+          output: say(`Spawned ${args.role}. Call delegate_to_${args.role}({ task: '...' }) on the next turn to invoke them.`),
         };
       },
     };
@@ -422,6 +447,8 @@ export function buildHierarchicalTools(
  * @param agents - Named roster of agent configs or pre-built `Agent` instances.
  * @param agencyConfig - Agency-level configuration; must include `model` or `provider`
  *   for the manager agent.
+ * @param mask - The call's error mask in a pooled agency; the delegate and
+ *   spawn tools pass what they return to the manager through it.
  * @returns A {@link CompiledStrategy} with `execute` and `stream` methods.
  * @throws {AgencyConfigError} When no agency-level model/provider is available
  *   for the manager agent.
@@ -441,7 +468,8 @@ export function buildHierarchicalTools(
  */
 export function compileHierarchical(
   agents: Record<string, BaseAgentConfig | Agent>,
-  agencyConfig: AgencyOptions
+  agencyConfig: AgencyOptions,
+  mask?: (error: unknown) => unknown,
 ): CompiledStrategy {
   if (!agencyConfig.model && !agencyConfig.provider) {
     throw new AgencyConfigError(
@@ -455,7 +483,7 @@ export function compileHierarchical(
       // through the shared helper so the spawn_specialist path — which
       // mutates the same tool table at runtime — sees the same state.
       const { tools: agentTools, agentCalls, subAgentUsage } =
-        buildHierarchicalTools(agents, agencyConfig, opts);
+        buildHierarchicalTools(agents, agencyConfig, opts, mask);
 
       // Build the team roster description for the manager's system prompt.
       // This tells the manager who is on the team and what each member does.
