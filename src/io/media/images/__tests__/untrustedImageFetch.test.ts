@@ -1,5 +1,6 @@
 import * as http from 'node:http';
 import type { AddressInfo, LookupFunction } from 'node:net';
+import { gzipSync } from 'node:zlib';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
@@ -10,8 +11,9 @@ import { fetchUntrustedImage } from '../untrustedImageFetch.js';
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]);
 const JPEG_START = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01]);
 
-/** The paths the test server was asked for, in order. */
+/** The paths the test server was asked for, in order, and the last request's headers. */
 const received: string[] = [];
+let lastHeaders: http.IncomingHttpHeaders = {};
 let server: http.Server;
 let port: number;
 
@@ -30,6 +32,7 @@ const serverOnly = (address: string) => address === '127.0.0.1';
 beforeAll(async () => {
   server = http.createServer((req, res) => {
     received.push(req.url ?? '');
+    lastHeaders = req.headers;
     const redirect = (location: string) => {
       res.writeHead(302, { location });
       res.end();
@@ -58,6 +61,20 @@ beforeAll(async () => {
         res.writeHead(200, { 'content-type': 'image/png' });
         res.write(Buffer.alloc(2048));
         res.end(Buffer.alloc(2048));
+        return;
+      case '/gzip':
+        // Sent gzip-encoded although the request asked for identity.
+        res.writeHead(200, { 'content-type': 'image/png', 'content-encoding': 'gzip' });
+        res.end(gzipSync(PNG));
+        return;
+      case '/bomb':
+        // About a kilobyte on the wire, a megabyte decoded.
+        res.writeHead(200, { 'content-type': 'image/png', 'content-encoding': 'gzip' });
+        res.end(gzipSync(Buffer.alloc(1_000_000)));
+        return;
+      case '/zstd':
+        res.writeHead(200, { 'content-type': 'image/png', 'content-encoding': 'zstd' });
+        res.end(PNG);
         return;
       case '/stall':
         res.writeHead(200, { 'content-type': 'image/png' });
@@ -148,6 +165,41 @@ describe('fetchUntrustedImage', () => {
     await expect(
       fetchUntrustedImage(`http://127.0.0.1:${port}/stall`, { allowAddress: serverOnly, timeoutMs: 300 }),
     ).rejects.toThrow('took longer than 300 ms');
+  });
+
+  it('asks for identity, and decodes a gzip body a server sends anyway', async () => {
+    const image = await fetchUntrustedImage(`http://127.0.0.1:${port}/gzip`, { allowAddress: serverOnly });
+
+    expect(image).toEqual(PNG);
+    expect(lastHeaders['accept-encoding']).toBe('identity');
+  });
+
+  it('stops decoding a compressed body once it passes the limit', async () => {
+    await expect(
+      fetchUntrustedImage(`http://127.0.0.1:${port}/bomb`, { allowAddress: serverOnly, maxBytes: 10_000 }),
+    ).rejects.toThrow('larger than 10000 bytes');
+  });
+
+  it('refuses a content coding it does not decode', async () => {
+    await expect(fetchUntrustedImage(`http://127.0.0.1:${port}/zstd`, { allowAddress: serverOnly })).rejects.toThrow(
+      'content coding the fetch does not decode (zstd)',
+    );
+  });
+
+  it.each<['maxBytes' | 'timeoutMs', number]>([
+    ['maxBytes', Number.NaN],
+    ['maxBytes', Number.POSITIVE_INFINITY],
+    ['maxBytes', 0],
+    ['maxBytes', -1],
+    ['timeoutMs', Number.NaN],
+    ['timeoutMs', Number.POSITIVE_INFINITY],
+    ['timeoutMs', 2 ** 31],
+  ])('refuses %s %s before connecting', async (name, value) => {
+    const limits = name === 'maxBytes' ? { maxBytes: value } : { timeoutMs: value };
+    await expect(
+      fetchUntrustedImage(`http://127.0.0.1:${port}/image.png`, { allowAddress: serverOnly, ...limits }),
+    ).rejects.toBeInstanceOf(RangeError);
+    expect(received).toEqual([]);
   });
 
   it('reports a status other than 2xx with the URL but not its query', async () => {

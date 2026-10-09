@@ -9,6 +9,8 @@ import { lookup as dnsLookup, type LookupAddress } from 'node:dns';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import { isIP, type LookupFunction } from 'node:net';
+import { pipeline, type Readable } from 'node:stream';
+import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 
 import { isPublicNetworkAddress } from './networkAddress.js';
 
@@ -20,6 +22,9 @@ export const UNTRUSTED_IMAGE_TIMEOUT_MS = 30_000;
 
 /** The most redirects an untrusted image fetch follows. */
 const MAX_REDIRECTS = 5;
+
+/** The longest timer Node keeps: a longer one fires after 1 ms. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
 
 /** Options for {@link fetchUntrustedImage}. */
 export interface UntrustedImageFetchOptions {
@@ -41,6 +46,14 @@ function shown(url: URL): string {
 /** An error for an address or a URL the fetch refuses to reach. */
 function refusal(message: string): Error {
   return Object.assign(new Error(message), { code: 'IMAGE_URL_REFUSED' });
+}
+
+/** `value` when it is a positive number no larger than `most`; a RangeError otherwise. */
+function limit(value: number, name: string, most: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > most) {
+    throw new RangeError(`imageToBuffer: ${name} must be a positive number no larger than ${most}, not ${String(value)}.`);
+  }
+  return value;
 }
 
 /** `text`, resolved against `base` when given, as an http(s) URL. */
@@ -97,7 +110,7 @@ function get(url: URL, lookup: LookupFunction, signal: AbortSignal): Promise<htt
     const options: https.RequestOptions = {
       agent: false,
       lookup,
-      headers: { accept: 'image/*,*/*;q=0.8', 'user-agent': 'agentos' },
+      headers: { accept: 'image/*,*/*;q=0.8', 'accept-encoding': 'identity', 'user-agent': 'agentos' },
     };
     const onAbort = () => request.destroy(new Error('aborted'));
     const onResponse = (response: http.IncomingMessage) => {
@@ -120,7 +133,36 @@ function tooLarge(url: URL, maxBytes: number): Error {
   return new Error(`imageToBuffer: the image at ${shown(url)} is larger than ${maxBytes} bytes.`);
 }
 
-/** Reads the body of `response`, at most `maxBytes` of it, until it ends or `signal` aborts. */
+/**
+ * The body of `response`, decoded when the server sent it gzip, deflate or br
+ * encoded although the request asked for identity. The decoder is piped from
+ * the response, so destroying the response ends it too.
+ */
+function decodedBody(response: http.IncomingMessage, url: URL): Readable {
+  const coding = String(response.headers['content-encoding'] ?? '').trim().toLowerCase();
+  if (coding === '' || coding === 'identity') return response;
+  const decoder =
+    coding === 'gzip' || coding === 'x-gzip'
+      ? createGunzip()
+      : coding === 'deflate'
+        ? createInflate()
+        : coding === 'br'
+          ? createBrotliDecompress()
+          : undefined;
+  if (!decoder) {
+    response.destroy();
+    throw new Error(`imageToBuffer: ${shown(url)} sent the image in a content coding the fetch does not decode (${coding}).`);
+  }
+  // Errors reach the reader through the decoder, which pipeline destroys with them.
+  pipeline(response, decoder, () => {});
+  return decoder;
+}
+
+/**
+ * Reads the body of `response` until it ends or `signal` aborts, at most
+ * `maxBytes` of it after decoding, so a small compressed body that expands
+ * past the limit stops there.
+ */
 async function readBody(
   response: http.IncomingMessage,
   url: URL,
@@ -131,13 +173,14 @@ async function readBody(
     response.destroy();
     throw tooLarge(url, maxBytes);
   }
+  const body = decodedBody(response, url);
   const onAbort = () => response.destroy(new Error('aborted'));
   if (signal.aborted) onAbort();
   else signal.addEventListener('abort', onAbort, { once: true });
   try {
     const chunks: Buffer[] = [];
     let total = 0;
-    for await (const chunk of response) {
+    for await (const chunk of body) {
       const bytes = chunk as Buffer;
       total += bytes.length;
       if (total > maxBytes) {
@@ -165,21 +208,27 @@ async function readBody(
  * private network nor a name whose answer changes between two lookups (DNS
  * rebinding) gets through. Up to five redirects are followed here, each
  * checked the same way, and a redirect to another scheme is refused. The body
- * is read up to `maxBytes`, and the whole fetch stops after `timeoutMs`.
+ * is read up to `maxBytes` after decoding (the request asks for identity; a
+ * gzip, deflate or br body is decoded, any other coding refused), and the
+ * whole fetch stops after `timeoutMs`.
  *
+ * @throws {RangeError} When `maxBytes` or `timeoutMs` is not a positive
+ *   number (or `timeoutMs` is longer than Node's longest timer), before any
+ *   connection is made.
  * @throws {Error} With `code: 'IMAGE_URL_REFUSED'` when an address or a
  *   redirect is refused; otherwise when the response is not a 2xx, is too
- *   large, is cut short, or takes too long.
+ *   large, is cut short, comes in a coding the fetch does not decode, or
+ *   takes too long.
  */
 export async function fetchUntrustedImage(
   source: string,
   options: UntrustedImageFetchOptions = {},
 ): Promise<Buffer> {
-  const maxBytes = options.maxBytes ?? UNTRUSTED_IMAGE_MAX_BYTES;
-  const timeoutMs = options.timeoutMs ?? UNTRUSTED_IMAGE_TIMEOUT_MS;
+  const maxBytes = limit(options.maxBytes ?? UNTRUSTED_IMAGE_MAX_BYTES, 'maxBytes', Number.MAX_SAFE_INTEGER);
+  const timeoutMs = limit(options.timeoutMs ?? UNTRUSTED_IMAGE_TIMEOUT_MS, 'timeoutMs', MAX_TIMEOUT_MS);
   const allowed = options.allowAddress ?? isPublicNetworkAddress;
   const lookup = checkedLookup(options.lookup ?? (dnsLookup as unknown as LookupFunction), allowed);
-  const signal = AbortSignal.timeout(timeoutMs);
+  const signal = AbortSignal.timeout(Math.ceil(timeoutMs));
   let url = httpUrl(source, 'the image URL');
   try {
     for (let redirects = 0; ; redirects += 1) {
