@@ -1,11 +1,11 @@
 /**
  * Mars Genesis v2: Commander Dietrich Voss — "The Engineer"
  *
- * Multi-agent Mars colony simulation with deterministic kernel,
- * 5 department agents, emergent tool forging, and HEXACO personality.
+ * Multi-agent Mars colony simulation: a deterministic kernel, a commander
+ * agent, four department agents headed by the colonists the commander
+ * promotes, emergent tool forging, and HEXACO personality drift.
  *
- * Run:
- *   cd packages/agentos
+ * Run from the agentos repository root after `pnpm run build`:
  *   OPENAI_API_KEY=... npx tsx examples/mars-genesis/mars-genesis-engineer.ts [turns]
  *   OPENAI_API_KEY=... SERPER_API_KEY=... npx tsx examples/mars-genesis/mars-genesis-engineer.ts 3 --live
  */
