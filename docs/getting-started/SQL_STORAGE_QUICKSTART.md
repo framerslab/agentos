@@ -112,7 +112,7 @@ const json = await exportAsJSON(sqliteDb, { tables: ['notes'] });
 await importFromJSON(pgDb, json);
 ```
 
-The export reads each table in pages of `batchSize` rows (default 1000) and holds the whole document in memory. The import inserts in batches (default 100 rows) and, by default, stops at the first conflicting row (`onConflict: 'error'`).
+The export reads each table in pages of `batchSize` rows (default 1000) and holds the whole document in memory. The import inserts one row at a time, in batches of `batchSize` rows (default 100), with no transaction around a table or the whole import. With the default `onConflict: 'error'`, a row that fails ends that table's import: the rows inserted before it stay, the error goes into the result's `errors` with `success: false`, and the import goes on with the next table, so a failed import can leave a partial copy. `'replace'` and `'ignore'` write SQLite statements (`INSERT OR REPLACE`, `INSERT OR IGNORE`) and skip a failing row without an error; Postgres rejects those statements, so into Postgres both options skip every row.
 
 ## Wiring into AgentOS
 
@@ -161,7 +161,7 @@ const mem = await Memory.createSqlite('./brain.sqlite', {
 });
 ```
 
-A brain is one `brain.sqlite` file. With the optional `hnswlib-node` package installed, the facade keeps an HNSW index beside it as `brain.hnsw`, loads it at start, and builds it once the brain holds more than 1,000 traces with embeddings; without the package, recall runs without the index.
+A brain is one `brain.sqlite` file. With the optional `hnswlib-node` package installed, the facade keeps an HNSW index beside it as `brain.hnsw`, loads it at start, and builds it when `remember()` stores a trace with an embedding and the brain then holds at least 1,000 traces (deleted traces excluded, with or without embeddings); the build indexes every trace that has an embedding. Without the package, recall runs without the index.
 
 ### Postgres
 
@@ -189,15 +189,25 @@ const result = await MigrationEngine.migrate({
 });
 console.log(`Migrated ${result.totalRows} rows in ${result.durationMs} ms`, result.errors);
 
-// SQLite to Qdrant
+// SQLite to Qdrant: vectors to Qdrant, the other tables to a SQLite sidecar file
 await MigrationEngine.migrate({
   from: { type: 'sqlite', path: './brain.sqlite' },
-  to: { type: 'qdrant', url: 'http://localhost:6333', apiKey: process.env.QDRANT_API_KEY },
+  to: {
+    type: 'qdrant',
+    url: 'http://localhost:6333',
+    apiKey: process.env.QDRANT_API_KEY,
+    sidecarPath: './brain-sidecar.sqlite',
+  },
 });
 
-// Pinecone to SQLite (Pinecone is a source only)
+// Pinecone to SQLite (Pinecone is a source only); collectionPrefix is the namespace
 await MigrationEngine.migrate({
-  from: { type: 'pinecone', url: 'https://my-index-abc123.svc.aped-1234.pinecone.io', apiKey: process.env.PINECONE_API_KEY! },
+  from: {
+    type: 'pinecone',
+    url: 'https://my-index-abc123.svc.aped-1234.pinecone.io',
+    apiKey: process.env.PINECONE_API_KEY!,
+    collectionPrefix: 'my-namespace',
+  },
   to: { type: 'sqlite', path: './brain.sqlite' },
 });
 
@@ -210,7 +220,8 @@ await MigrationEngine.migrate({
 ```
 
 - A backend is `{ type: 'sqlite' | 'postgres' | 'qdrant' | 'pinecone' }` with `path` (SQLite), `connectionString` (Postgres), or `url` and `apiKey` (Qdrant, Pinecone), plus `sidecarPath` for Qdrant and `collectionPrefix` for Pinecone. The engine reads no environment variable and provisions nothing: every backend must be running and named in the call.
-- Pinecone is a source only; a Pinecone target throws.
+- A Qdrant target writes `memory_traces` and `document_chunks` as Qdrant collections of those names and every other table into the SQLite file at `sidecarPath`. Without `sidecarPath`, each of those other tables fails and lands in `errors`. A Qdrant source reads the same two collections, plus the sidecar's tables when `sidecarPath` is set.
+- Pinecone is a source only; a Pinecone target throws. The source reads one namespace, the `collectionPrefix` value as given (default: the default namespace, `''`), into the `memory_traces` table. Pass the exact namespace: when the index stats do not list it, the row count is the whole index's vector count. Each batch lists the namespace's first `batchSize` vector IDs and sends no pagination token, so a namespace with more vectors than `batchSize` migrates only that first page, written again for each batch and counted again in `totalRows`.
 - The result is `{ tablesProcessed, totalRows, durationMs, verified, errors }`. An error in one table is collected in `errors`, and the other tables still migrate.
 - From SQLite and Postgres the engine copies the brain tables that exist: `brain_meta`, `memory_traces`, `knowledge_nodes`, `knowledge_edges`, `documents`, `document_chunks`, `document_images`, `consolidation_log`, `retrieval_feedback`, `conversations` and `messages`.
 

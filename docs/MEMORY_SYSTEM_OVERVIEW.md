@@ -509,7 +509,7 @@ Consolidation is the analogue of slow-wave sleep. Each facade has its own implem
 | 5. Compact | Episodic-to-semantic migration: traces older than 7 days with retrieval count >= 3 change `type` to `semantic`. The content is unchanged. | No |
 | 6. Re-index | Rebuild the FTS5 full-text index over `memory_traces`. Log the consolidation run. | No |
 
-A personality-decay step runs between Compact and Re-index when a personality mutation store is configured.
+A personality-decay step runs between Compact and Re-index when a personality mutation store is configured. The `Memory` facade builds the loop with none of its options, so through the facade the merge step compares content hashes, the derive and personality-decay steps do not run, and a cycle runs only when `consolidate()` or the `memory_reflect` tool calls it.
 
 [`ConsolidationPipeline`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/consolidation/ConsolidationPipeline.ts) serves `CognitiveMemoryManager`, hourly by default: a decay sweep (prunes below 0.05, keeps traces with emotional intensity of 0.3 or more), co-activation replay (shared-entity and temporal-sequence edges, with a graph), schema integration (LLM summaries of episodic clusters, with a graph and an LLM invoker), conflict resolution over `CONTRADICTS` edges, spaced-repetition reinforcement, the consolidation-time mechanisms above, and a retention sweep over an archive passed in its own config (365 days by default).
 

@@ -243,7 +243,7 @@ Source: [`src/cognition/emergent/AdaptPersonalityTool.ts`](https://github.com/fr
 ```ts
 const DEFAULT_PERSONA_DRIFT_CONFIG = {
   enabled: false,
-  analysisInterval: 5,        // every 5 consolidation cycles
+  analysisInterval: 5,        // declared, not read: analysis runs on every consolidation
   minTracesForAnalysis: 10,   // require 10+ episodic traces
   maxDeltaPerCycle: 0.05,     // bounded mutation magnitude
   emotionalWeighting: true,   // weight high-arousal memories more
