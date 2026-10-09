@@ -1,3 +1,13 @@
+## [0.13.12](https://github.com/framerslab/agentos/compare/v0.13.11...v0.13.12) (2026-10-09)
+
+### feat
+
+* **hearing:** carry the finals' times on the LiveKit transcription streams (#198) ([9a65feb](https://github.com/framerslab/agentos/commit/9a65feb0fcff7c7324ee59066f82d30dc9db896d))
+
+### docs
+
+* sixth round of audit follow-ups to the guides (#195) ([002b4ee](https://github.com/framerslab/agentos/commit/002b4ee4f3ce7e79aeb3f254aa2d2f2b8c80a0db))
+
 ## [0.13.11](https://github.com/framerslab/agentos/compare/v0.13.10...v0.13.11) (2026-10-09)
 
 ### fix
