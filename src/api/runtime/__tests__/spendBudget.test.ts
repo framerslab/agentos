@@ -5,6 +5,7 @@ import {
   SpendBudget,
   UnpricedModelError,
   asSpendBudget,
+  assertCallWithinBudget,
   costOfUsageUSD,
   estimateCallCostUSD,
   promptCharsOf,
@@ -85,6 +86,15 @@ describe('SpendBudget', () => {
 describe('the estimates', () => {
   it("prices a gpt-6-luna call at its row's rates: 1,000 prompt tokens and a 1,000-token cap", () => {
     expect(estimateCallCostUSD('openai', 'gpt-6-luna', 4000, 1000)).toBeCloseTo(0.0006, 10);
+  });
+
+  it("counts an output cap above the model's ceiling at the ceiling, as the request is sent", () => {
+    // gpt-4o writes at most 16,384 tokens, and OpenAIProvider sends a cap of 32,000 as 16,384: 1,000 prompt tokens at
+    // 0.0025 and 16,384 output tokens at 0.01 per 1K.
+    expect(estimateCallCostUSD('openai', 'gpt-4o', 4000, 32_000)).toBeCloseTo(0.0025 + 0.16384, 10);
+    // 1,000 + 16,384 tokens fit a token budget of 20,000, where 1,000 + 32,000 would not.
+    const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 20_000 });
+    expect(() => assertCallWithinBudget(budget, { providerId: 'openai', modelId: 'gpt-4o' }, 4000, 32_000, 'call')).not.toThrow();
   });
 
   it('knows no price for a provider or model the table does not hold', () => {
