@@ -260,8 +260,10 @@ The strategies map to canonical patterns in the literature:
 |---|---|---|
 | T0 | answerable from context alone | no retrieval, no embedding, no rerank |
 | T1 | simple recall | vector search over the corpus |
-| T2 | moderate recall | HyDE retrieval |
-| T3 | complex synthesis | multi-source decomposition (the deep-research branch) |
+| T2 | moderate recall | a 15-chunk vector search, graph expansion when enabled, a rerank down to 5 |
+| T3 | complex synthesis | the query split into sub-queries and searched one by one, graph expansion when enabled, a rerank down to 10, deep research when enabled |
+
+The built-in `QueryRouter` generates no HyDE hypothesis for T2 or T3. HyDE runs there only when a `UnifiedRetriever` built with a `hydeRetriever` is attached with `setUnifiedRetriever()`.
 
 T0 is the decision that saves the most. Greetings, small talk, general-knowledge questions ("what's 2+2"), and questions whose answer is already in the running context window do not need to touch the memory database. Skipping retrieval for those queries saves the embedding cost, the rerank cost, and reduces the answer latency from ~3.5s to whatever the reader's TTFT is.
 

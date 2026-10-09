@@ -8,23 +8,26 @@ yielding better recall.
 
 ![HyDE retrieval flow: standard retrieval embeds the question directly (large embedding-space gap to answer-style documents); HyDE retrieval embeds an LLM-generated hypothetical answer instead (small gap); benchmark sidebar shows -1.9 points on LongMemEval-S and +1.0 point on LongMemEval-M](/img/diagrams/hyde-retrieval-flow.svg)
 
-**HyDE is opt-in (`enabled: false` by default).** It is not a free win. The
-AgentOS benchmark numbers tell the full story:
+**HyDE is opt-in (`enabled: false` by default).** The
+[`agentos-bench`](https://github.com/framerslab/agentos-bench) runs measured it
+both ways:
 
-- **LongMemEval-S (115K tokens, 50 sessions)**: HyDE *hurts*. The headline 85.6%
-  configuration runs with HyDE **off**; enabling it drops the score to 83.3%
-  (-1.9 points). At single-session scale the extra LLM call adds latency and
-  the hypothesis-generated embedding drifts away from the high-precision target
-  passage.
-- **LongMemEval-M (1.5M tokens, 500 sessions)**: HyDE *helps*. The 70.2%
-  configuration uses HyDE-augmented BM25 + dense retrieval; disabling it drops
-  the score to 69.2% (-1.0 point, within noise but consistently worse).
+- **LongMemEval-S (115K tokens, 50 sessions)**: the 85.6% headline
+  configuration runs with HyDE **off**. In a 54-case probe of the bench's
+  reader-router configuration, adding HyDE scored 83.3% against 85.2% without
+  it (-1.9 points).
+- **LongMemEval-M (1.5M tokens, 500 sessions)**: the 70.2% headline
+  configuration runs with HyDE **on**. The same run without HyDE scored 69.2%
+  (-1.0 point, with overlapping confidence intervals) at an average of 35
+  seconds a case against 84. By category, HyDE added 5.3 points on
+  multi-session questions and cost 3.9 on knowledge-update questions.
 
-Rule of thumb: turn HyDE on when the haystack is too big for the answer model's
-context window and you need recall improvements on multi-hop / synthesis
-questions. Leave it off for single-session and tight-latency paths. See
-[`agentos-bench`](https://github.com/framerslab/agentos-bench) for the full
-ablation table.
+Rule of thumb: turn HyDE on for multi-session questions over a haystack far
+larger than the answer model's context window, and leave it off at S scale and
+on tight-latency paths. The ablation rows are in the bench repository's
+[`results/LEADERBOARD.md`](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md)
+and
+[`results/eval-matrix-v1/transparency-notes.md`](https://github.com/framerslab/agentos-bench/blob/master/results/eval-matrix-v1/transparency-notes.md).
 
 Based on:
 - Gao et al. (2022). [*Precise Zero-Shot Dense Retrieval without Relevance Labels.*](https://arxiv.org/abs/2212.10496) arXiv:2212.10496.
@@ -60,38 +63,19 @@ producing higher cosine similarity scores.
 
 ## Configuration
 
-### agent.config.json
-
-HyDE is configured per-request, not globally. The [`HydeRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/HydeRetriever.ts) class and
-its config types are exported from `@framers/agentos/cognition/rag`.
-
-```json
-{
-  "rag": {
-    "hyde": {
-      "enabled": true,
-      "initialThreshold": 0.7,
-      "minThreshold": 0.3,
-      "thresholdStep": 0.1,
-      "adaptiveThreshold": true,
-      "maxHypothesisTokens": 200,
-      "fullAnswerGranularity": true
-    }
-  }
-}
-```
-
-### Configuration Options
+HyDE has no global switch: each integration turns it on per call, as shown below. [`HydeRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/HydeRetriever.ts) and its config types are exported from `@framers/agentos/cognition/rag`. A `HydeRetriever` takes this config:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enabled` | `boolean` | `false` | Master switch for HyDE |
-| `initialThreshold` | `number` | `0.7` | Starting similarity threshold |
-| `minThreshold` | `number` | `0.3` | Lowest threshold before giving up |
-| `thresholdStep` | `number` | `0.1` | How much to reduce threshold per step |
-| `adaptiveThreshold` | `boolean` | `true` | Enable step-down when no results found |
-| `maxHypothesisTokens` | `number` | `200` | Max tokens for hypothesis generation |
-| `fullAnswerGranularity` | `boolean` | `true` | Generate full prose answers vs keywords |
+| `enabled` | `boolean` | `false` | Read by callers through `retriever.enabled` |
+| `initialThreshold` | `number` | `0.7` | Starting similarity threshold for `retrieve()` |
+| `minThreshold` | `number` | `0.3` | Lowest threshold `retrieve()` steps down to |
+| `thresholdStep` | `number` | `0.1` | How much `retrieve()` lowers the threshold per step |
+| `adaptiveThreshold` | `boolean` | `true` | Step down while a search returns nothing |
+| `maxHypothesisTokens` | `number` | `200` | Written into the prompt as a length limit; not sent as a token cap |
+| `hypothesisSystemPrompt` | `string` | a short "answer factually, with technical terms" prompt | System prompt for hypothesis generation |
+| `fullAnswerGranularity` | `boolean` | `true` | Ask for prose answers rather than the shortest answer |
+| `hypothesisCount` | `number` | `3` | Hypotheses per query in `retrieveMulti()` and `generateMultipleHypotheses()` |
 
 ## Programmatic API
 
@@ -123,27 +107,20 @@ augmentor.setHydeLlmCaller(async (systemPrompt, userPrompt) => {
   return response.choices[0].message.content ?? '';
 });
 
-// Enable HyDE per-request
+// Enable HyDE per request
 const result = await augmentor.retrieveContext('What causes memory leaks?', {
   hyde: {
     enabled: true,
-    // Optional: pre-supply a hypothesis to skip the LLM call
+    // Optional: supply a hypothesis to skip the LLM call
     // hypothesis: 'Memory leaks are caused by...',
-    // Optional: tune thresholds for this request
-    // initialThreshold: 0.8,
-    // minThreshold: 0.4,
   },
 });
 
-// HyDE diagnostics are in the result
 console.log(result.diagnostics?.hyde);
-// {
-//   hypothesis: 'Memory leaks in Node.js are typically caused by...',
-//   hypothesisLatencyMs: 342,
-//   effectiveThreshold: 0.7,
-//   thresholdSteps: 0,
-// }
+// { hypothesis, hypothesisLatencyMs, effectiveThreshold: 0.7, thresholdSteps: 0 }
 ```
+
+The augmentor generates one hypothesis, embeds it in place of the query and runs its normal search with that vector. It does no threshold stepping: `diagnostics.hyde` reports the configured `initialThreshold` and `thresholdSteps: 0`. A retrieval policy with `hyde: 'always'` turns HyDE on without `options.hyde`.
 
 ### 2. MultimodalIndexer (cross-modal search)
 
@@ -162,14 +139,13 @@ const indexer = new MultimodalIndexer({
   visionProvider,
 });
 
-// Attach a HyDE retriever
 indexer.setHydeRetriever(new HydeRetriever({
   llmCaller: myLlmCaller,
   embeddingManager,
   config: { enabled: true },
 }));
 
-// Search with HyDE
+// Search with HyDE: HydeRetriever.retrieve(), with adaptive thresholds
 const results = await indexer.search('architecture diagram', {
   modalities: ['image'],
   hyde: { enabled: true },
@@ -178,26 +154,18 @@ const results = await indexer.search('architecture diagram', {
 
 ### 3. CognitiveMemoryManager (memory recall)
 
+`initialize()` builds a memory HyDE retriever from the first LLM invoker the config has (the reflector's, the observer's, then `featureDetectionLlmInvoker`); `setHydeRetriever()` replaces it.
+
 ```typescript
-import { CognitiveMemoryManager, HydeRetriever } from '@framers/agentos';
+import { CognitiveMemoryManager } from '@framers/agentos';
 
 // Stand-ins for the host-supplied dependencies.
 declare const config: any;
-declare const myLlmCaller: any;
-declare const embeddingManager: any;
 declare const currentMood: any;
 
 const memoryManager = new CognitiveMemoryManager();
 await memoryManager.initialize(config);
 
-// Attach a HyDE retriever
-memoryManager.setHydeRetriever(new HydeRetriever({
-  llmCaller: myLlmCaller,
-  embeddingManager,
-  config: { enabled: true },
-}));
-
-// Retrieve memories with HyDE
 const result = await memoryManager.retrieve(
   'that deployment discussion',
   currentMood,
@@ -205,26 +173,26 @@ const result = await memoryManager.retrieve(
 );
 ```
 
+With `hyde: true` (or a retrieval policy with `hyde: 'always'`), the manager asks for a hypothesis to "Recall a memory about: <query>" and searches with the hypothesis text in place of the query. Without a retriever, or when generation fails, it searches with the query.
+
 ### 4. Standalone HydeRetriever
 
 ```typescript
 import { HydeRetriever } from '@framers/agentos/cognition/rag';
 
+declare const embeddingManager: any;
+declare const myVectorStore: any;
+
 const retriever = new HydeRetriever({
   llmCaller: async (system, user) => {
-    // Your LLM call here
-    return hypotheticalAnswer;
+    // Call your model with the system and user prompts; return its text.
+    return 'Retrieval-augmented generation retrieves documents and adds them to the prompt...';
   },
   embeddingManager,
-  config: {
-    enabled: true,
-    adaptiveThreshold: true,
-    initialThreshold: 0.7,
-    minThreshold: 0.3,
-  },
+  config: { adaptiveThreshold: true, initialThreshold: 0.7, minThreshold: 0.3 },
 });
 
-// Generate hypothesis only
+// Generate a hypothesis only
 const { hypothesis, latencyMs } = await retriever.generateHypothesis(
   'What is retrieval augmented generation?',
 );
@@ -235,13 +203,41 @@ const result = await retriever.retrieve({
   vectorStore: myVectorStore,
   collectionName: 'knowledge-base',
 });
+
+// Several hypotheses from one LLM call, searched in parallel and merged
+const multi = await retriever.retrieveMulti({
+  query: 'What is RAG?',
+  vectorStore: myVectorStore,
+  collectionName: 'knowledge-base',
+});
 ```
+
+`retrieveMulti()` keeps the highest score per document and returns the top
+`queryOptions.topK` (5 by default). It applies no similarity threshold and
+does no threshold stepping. When the model's reply does not split into the
+requested number of hypotheses, the retriever makes one more call per missing
+hypothesis.
+
+### 5. Other callers
+
+- [`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts):
+  with a `hydeRetriever` dependency, it runs HyDE when the retrieval plan has
+  `hyde.enabled`. The default plans turn it on for the `moderate` strategy
+  (one hypothesis) and the `complex` strategy (three).
+- The memory [`HybridRetriever`](../architecture/hybrid-retriever.md): with
+  the `hydeRetriever` option, a hypothesis replaces the query for the dense
+  and sparse searches, and the reranker keeps the original query.
+- [`QueryRouter`](../QUERY_ROUTER.md): the built-in router generates no
+  hypothesis. Its T2 and T3 searches run the router's plain vector search
+  unless a `UnifiedRetriever` built with a `hydeRetriever` is attached with
+  `setUnifiedRetriever()`.
 
 ## Adaptive Thresholding
 
-HyDE supports adaptive threshold stepping: if no results are found at the
-initial similarity threshold, it steps down until content is found or the
-minimum threshold is reached. This ensures HyDE never "comes up empty."
+`HydeRetriever.retrieve()` (used directly or by `MultimodalIndexer`) steps the
+similarity threshold down while a search returns nothing, until it finds
+content or would pass `minThreshold`. The augmentor and the memory manager do
+not step.
 
 ```
 Initial threshold: 0.7  -->  No results
@@ -249,12 +245,12 @@ Step down to:      0.6  -->  No results
 Step down to:      0.5  -->  Found 3 results!  (stop here)
 ```
 
-The `thresholdSteps` diagnostic tells you how many steps were needed.
+`retrieve()` returns `effectiveThreshold` and `thresholdSteps`, the number of steps it took.
 
 ## Audit Trail
 
-When `includeAudit: true` is passed to `retrieveContext()`, HyDE operations
-appear in the audit trail with operation type `'hyde'`:
+When `includeAudit: true` is passed to `retrieveContext()`, the augmentor's
+HyDE step appears in the audit trail with operation type `'hyde'`:
 
 ```typescript
 const result = await augmentor.retrieveContext(query, {
@@ -268,7 +264,7 @@ const hydeOp = result.auditTrail?.operations.find(
 // hydeOp.hydeDetails.hypothesis
 // hydeOp.hydeDetails.effectiveThreshold
 // hydeOp.hydeDetails.thresholdSteps
-// hydeOp.tokenUsage (embedding + LLM tokens)
+// hydeOp.tokenUsage (estimated from text length: about 4 characters a token)
 ```
 
 ## Performance Implications
@@ -277,22 +273,16 @@ const hydeOp = result.auditTrail?.operations.find(
 |--------|-------------|-----------|
 | LLM calls per query | 0 | 1 |
 | Embedding calls | 1 | 1 (hypothesis instead of query) |
-| Vector searches | 1 | 1-N (N = adaptive steps) |
-| Typical added latency | 0 | 200-500ms (LLM generation) |
-| Recall improvement | baseline | +10-30% on vague queries |
+| Vector searches | 1 | 1, or up to one per threshold step in `HydeRetriever.retrieve()` |
+| Added latency | 0 | one LLM generation |
 
-The LLM call uses a small, fast model by default (configured via the caller).
-Using `gpt-4o-mini` or similar keeps latency under 300ms for most queries.
+The model is whatever the LLM caller you register calls.
 
 ## Graceful Degradation
 
-HyDE degrades gracefully in all failure scenarios:
-
-1. **No LLM caller registered**: Falls back to direct query embedding with a
-   diagnostic message.
-2. **LLM call fails**: Falls back to direct query embedding.
-3. **Hypothesis embedding fails**: Falls back to direct query embedding.
-4. **No results at any threshold**: Returns empty results (same as without HyDE).
-
-The system never throws due to HyDE failures -- it always falls back to the
-standard retrieval path.
+| Failure | RetrievalAugmentor | CognitiveMemoryManager | HydeRetriever / MultimodalIndexer |
+|---|---|---|---|
+| No LLM caller or retriever | direct query embedding, with a diagnostic message | raw query | (a retriever always has a caller) |
+| The LLM call throws | the error propagates from `retrieveContext()` | raw query | the error propagates |
+| The hypothesis embedding is empty | direct query embedding, with a diagnostic message | (the store embeds the text) | empty result |
+| No results at any threshold | (no stepping) | (no stepping) | empty result |

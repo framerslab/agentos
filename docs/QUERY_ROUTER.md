@@ -36,7 +36,7 @@ It replaces the boilerplate of chunker + vector store + tier classifier + retrie
 Each call to `route()` runs three stages in sequence:
 
 1. **Classify** the query into one of four tiers (T0 trivial → T3 deep research) using an LLM prompt that sees the corpus topics, recent conversation history, and any registered tool names.
-2. **Retrieve** the right amount of context for that tier — vector search for T1, HyDE for T2, multi-source decomposition for T3, nothing at all for T0.
+2. **Retrieve** the context for that tier: nothing for T0; a 5-chunk vector search for T1; for T2 a 15-chunk search, graph expansion when `graphEnabled` is on, and a rerank down to 5; for T3 the query split into sub-queries, a 10-chunk search for each, graph expansion, a rerank down to 10, and deep research when `deepResearchEnabled` is on. The built-in router generates no hypothetical answer (HyDE) for T2 or T3: both run its plain vector search unless a `UnifiedRetriever` built with a `hydeRetriever` is attached with `setUnifiedRetriever()`.
 3. **Generate** a grounded answer from the retrieved context, attaching `SourceCitation[]` entries that point back at the chunks the answer was drawn from.
 
 If no embedding provider is configured, the router degrades cleanly to keyword search instead of failing. The platform-knowledge entries that ship with `@framers/agentos` (68 in the published package: FAQ, API reference and troubleshooting) are merged into your corpus automatically, with no extra configuration.
