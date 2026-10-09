@@ -88,11 +88,13 @@ const result = await manager.generateFunctionCalls({
 });
 
 result.calls.forEach((call) => {
-  console.log(`${call.functionName}:`, call.argumentsValid ? call.executionResult : call.validationErrors);
+  if (!call.argumentsValid) console.log(`${call.functionName}: invalid arguments`, call.validationErrors);
+  else if (call.executionError) console.log(`${call.functionName}: handler failed`, call.executionError);
+  else console.log(`${call.functionName}:`, call.executionResult);
 });
 ```
 
-The manager makes one model call with the functions as tools (`toolChoice` defaults to `'auto'`) and takes every tool call in the reply. It validates each call's arguments against the function's `parameters` and runs the handler of each call whose arguments are valid, one call after another. `result.success` is `true` when every call has valid arguments and no handler threw. `maxParallelCalls` is not read. The provider must be `openai`, `anthropic` or `openrouter`; any other provider id throws `Provider <id> does not support function calling`.
+The manager makes one model call with the functions as tools (`toolChoice` defaults to `'auto'`) and takes every tool call in the reply. It validates each call's arguments against the function's `parameters` and runs the handler of each call whose arguments are valid, one call after another. A handler that throws leaves `argumentsValid` `true` and sets `executionError` to its message. `result.success` is `true` when every call has valid arguments and no handler threw. `maxParallelCalls` is not read. The provider must be `openai`, `anthropic` or `openrouter`; any other provider id throws `Provider <id> does not support function calling`.
 
 ### Entity Extraction
 

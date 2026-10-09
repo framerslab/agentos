@@ -91,7 +91,7 @@ console.log(decomposition.subtasks);
 
 | Action type | What runs |
 |---|---|
-| `tool_call` | The tool in `context.tools` whose `id` equals `step.action.toolId`, with `step.action.toolArgs`; a missing tool fails the step |
+| `tool_call` | With `step.action.toolId` and `context.tools` both set, the tool in `context.tools` whose `id` equals `toolId`, with `step.action.toolArgs`; when no tool has that id the step fails. When either is missing, nothing runs and the step succeeds with no output |
 | `reasoning` | A model call with the step's content and `context.previousResults` |
 | `information_gathering` | `context.retrieve(step.action.query)` when both are set; otherwise nothing, and the step succeeds with no output |
 | `synthesis` | A model call over `context.previousResults` |
@@ -120,7 +120,7 @@ while (!next.done) {
 console.log(next.value); // ExecutionSummary: goalAchieved, finalConfidence, iterations, outcomes, unresolvedIssues
 ```
 
-The loop generates a plan with the `react` strategy, then, once per iteration, runs the first step that has not completed or failed and whose `dependsOn` ids have all completed. A step whose action type is in `requireApprovalFor` runs only after `onApprovalRequired` returns `true`; a refusal marks it failed. Steps run with `context.tools` set to an empty list and no `retrieve` function, so a `tool_call` step fails (`Tool <id> not found`) and an `information_gathering` step does nothing. After each step the loop yields a `LoopProgress` (`progress` is completed steps over plan steps, `goalConfidence` is `progress` times the plan's confidence).
+The loop generates a plan with the `react` strategy, then, once per iteration, runs the first step that has not completed or failed and whose `dependsOn` ids have all completed. A step whose action type is in `requireApprovalFor` runs only after `onApprovalRequired` returns `true`; a refusal marks it failed. Steps run with `context.tools` set to an empty list and no `retrieve` function, so a `tool_call` step with a `toolId` fails (`Tool <id> not found`), one without a `toolId` succeeds with no output, and an `information_gathering` step does nothing. After each step the loop yields a `LoopProgress` (`progress` is completed steps over plan steps, `goalConfidence` is `progress` times the plan's confidence).
 
 Every `reflectionFrequency` iterations it calls `reflect()`. On `replan` it generates a new plan, passing the failed steps as `failedApproaches` (which the planning prompt does not include), and goes on with the old plan's execution state; on `abort` it stops. The loop ends when no step is ready (a step that depends on another step's id never is, see [Generating a Plan](#generating-a-plan)), when `maxIterations` is reached or when `goalConfidence` reaches the threshold, and returns an `ExecutionSummary` as the generator's return value. An error ends the loop with `goalAchieved: false` and the message in `unresolvedIssues`.
 

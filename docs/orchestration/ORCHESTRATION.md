@@ -55,8 +55,13 @@ const deps: WorkflowRuntimeDeps = {
   },
   loopController: new LoopController(),
   async *providerCall(instructions, state) {
-    // state.artifacts holds the outputs of the nodes that ran before this one.
-    const text = await callMyModel(instructions, { input: state.input, artifacts: state.artifacts });
+    // state.artifacts holds the outputs of the nodes that ran before this one;
+    // state.scratch holds what extension, subgraph and voice nodes wrote there.
+    const text = await callMyModel(instructions, {
+      input: state.input,
+      scratch: state.scratch,
+      artifacts: state.artifacts,
+    });
     yield { type: 'text_delta', content: text };
     // No tool calls: the node's loop ends after this turn.
     return { responseText: text, toolCalls: [], finishReason: 'stop' };
@@ -235,7 +240,7 @@ gmiNode(
 )
 ```
 
-The runtime reads a node's `checkpoint` flag and its `effectClass`. It does not read the `memory`, `discovery`, `persona` or `guardrails` policies; a `guardrailNode` is the step that checks content during a run, and a `humanNode` runs `pii-redaction` and `code-safety` through `deps.guardrailEngine` after an automatic or judged approval.
+The runtime reads a node's `checkpoint` flag and its `effectClass`. It does not read the `memory`, `discovery`, `persona` or `guardrails` policies; a `guardrailNode` is the step that checks content during a run, and a `humanNode` runs `pii-redaction` and `code-safety` through `deps.guardrailEngine` after an auto-accept, a judge's approval or a timeout accept, unless its `guardrailOverride` is `false`.
 
 ---
 
@@ -249,19 +254,31 @@ The runtime reads a node's `checkpoint` flag and its `effectClass`. It does not 
 import { workflow } from '@framers/agentos/orchestration';
 import { z } from 'zod';
 
+// Your application's own page fetcher.
+declare function fetchPage(url: string): Promise<string>;
+
 const pipeline = workflow('content-pipeline')
   .input(z.object({ url: z.string() }))
   .returns(z.object({ summary: z.string(), tags: z.string() }))
-  .step('fetch',     { tool: 'web_fetch', effectClass: 'external' })
+  .step('fetch',     { extension: { extensionId: 'web', method: 'fetchPage' } })
   .step('summarize', { gmi: { instructions: 'Summarize the fetched page in 3 sentences.' }, outputAs: 'summary' })
   .step('tag',       { gmi: { instructions: 'Extract 5 topic tags as a JSON array.' }, outputAs: 'tags' })
-  .compile({ deps });
+  .compile({
+    deps: {
+      ...deps,
+      // An extension step receives the run's input and scratch.
+      async extensionExecutor(_extensionId, _method, args) {
+        const { input } = args as { input: { url: string } };
+        return { success: true, output: { page: await fetchPage(input.url) } };
+      },
+    },
+  });
 
 const result = await pipeline.invoke({ url: 'https://example.com/article' });
-console.log(result.summary, result.tags); // result.fetch holds the tool output
+console.log(result.summary, result.tags); // result.fetch holds { page }
 ```
 
-A `tool` step sends the tool no arguments: `StepConfig` has no field for them, so the `web_fetch` step above receives `{}` and the URL reaches only the host's own `providerCall` through `state.input`. A `gmi` step is recorded as `single_turn` and runs the same loop as any `gmi` node, up to 10 turns while `providerCall` returns tool calls.
+A `tool` step sends the tool no arguments: `StepConfig` has no field for them, so a `tool` step cannot read the run's input. An `extension` step can: `deps.extensionExecutor` receives `{ input, scratch }`, and an object it returns is merged into `scratch` and kept as the step's artifact, so the `summarize` step's `providerCall` finds the page in `state.artifacts.fetch` and `state.scratch.page`. A `gmi` step is recorded as `single_turn` and runs the same loop as any `gmi` node, up to 10 turns while `providerCall` returns tool calls.
 
 ### Branches
 
@@ -290,18 +307,38 @@ The router node returns the route key itself, and the runtime takes a router's r
 `.parallel(steps, join)` adds one node per step config, all connected from the previous step, and registers `join.merge` as reducers. `join.strategy`, `join.quorumCount` and `join.timeout` are stored and not read.
 
 ```typescript
+// Your application's own search clients.
+declare function searchWeb(query: string): Promise<string[]>;
+declare function searchNews(query: string): Promise<string[]>;
+declare function searchArxiv(query: string): Promise<string[]>;
+const search: Record<string, (query: string) => Promise<string[]>> = {
+  web: searchWeb, news: searchNews, arxiv: searchArxiv,
+};
+
 workflow('multi-source-research')
   .input(z.object({ query: z.string() }))
   .returns(z.object({ report: z.string() }))
   .parallel(
-    [{ tool: 'web_search' }, { tool: 'news_search' }, { tool: 'arxiv_search' }],
+    [
+      { extension: { extensionId: 'search', method: 'web' } },
+      { extension: { extensionId: 'search', method: 'news' } },
+      { extension: { extensionId: 'search', method: 'arxiv' } },
+    ],
     { strategy: 'all', merge: { 'scratch.results': 'concat' } },
   )
   .step('synthesize', { gmi: { instructions: 'Synthesize the sources into a report.' }, outputAs: 'report' })
-  .compile({ deps });
+  .compile({
+    deps: {
+      ...deps,
+      async extensionExecutor(_extensionId, method, args) {
+        const { input } = args as { input: { query: string } };
+        return { success: true, output: { results: await search[method](input.query) } };
+      },
+    },
+  });
 ```
 
-The three tool nodes become ready together and run concurrently. Their outputs are not in the result (see [Scheduling](#scheduling)), and `synthesize` runs after all three.
+The three extension nodes become ready together and run concurrently. Each returns `{ results }`, which goes into its branch's `scratch`, and after the batch the `concat` reducer joins the three arrays into `scratch.results`. Their artifacts are not kept (see [Scheduling](#scheduling)), so `synthesize`, which runs after all three, reads the results from `state.scratch`. Parallel `tool` steps would give `synthesize` nothing: a tool node's output goes only to its artifact.
 
 ### Human step
 
@@ -353,32 +390,57 @@ const artifacts = await research.invoke({ topic: 'quantum error correction' });
 
 ```typescript
 import { AgentGraph, START, END, voiceNode, gmiNode, toolNode } from '@framers/agentos/orchestration';
+import type { GraphNode } from '@framers/agentos/orchestration';
 import { VoiceNodeExecutor } from '@framers/agentos/orchestration/runtime/VoiceNodeExecutor';
 import { z } from 'zod';
+
+// Your application's own telephony bridge: resolves to the call's voice transport.
+declare function openCallTransport(callerId: string): Promise<unknown>;
+
+// An extension node; the object its executor returns is merged into scratch.
+const connect: GraphNode = {
+  id: 'connect',
+  type: 'extension',
+  executorConfig: { type: 'extension', extensionId: 'telephony', method: 'connect' },
+  executionMode: 'single_turn',
+  effectClass: 'external',
+  checkpoint: 'none',
+};
 
 const callGraph = new AgentGraph({
   input:     z.object({ callerId: z.string() }),
   scratch:   z.object({}),
   artifacts: z.object({}),
 })
-  // listen fails unless an earlier step has put the transport at state.scratch.voiceTransport (below).
+  .addNode('connect', connect)
   .addNode('listen', voiceNode('listen', { mode: 'conversation', maxTurns: 10 })
     .on('turns-exhausted', 'resolve')
     .on('hangup', 'cleanup')
     .build())
   .addNode('resolve', gmiNode({ instructions: 'Determine the resolution from the call transcript.' }))
   .addNode('cleanup', toolNode('close_ticket'))
-  .addEdge(START, 'listen')
+  .addEdge(START, 'connect')
+  .addEdge('connect', 'listen')
   .addEdge('listen', 'resolve')
   .addEdge('listen', 'cleanup')
   .addEdge('resolve', END)
   .addEdge('cleanup', END)
-  .compile({ deps: { ...deps, voiceExecutor: new VoiceNodeExecutor((event) => console.log(event.type)) } });
+  .compile({
+    deps: {
+      ...deps,
+      voiceExecutor: new VoiceNodeExecutor((event) => console.log(event.type)),
+      // Puts the transport at state.scratch.voiceTransport, where the voice node reads it.
+      async extensionExecutor(_extensionId, _method, args) {
+        const { input } = args as { input: { callerId: string } };
+        return { success: true, output: { voiceTransport: await openCallTransport(input.callerId) } };
+      },
+    },
+  });
 ```
 
 A `conversation` or `listen-only` node ends with the first of these exit reasons: `hangup` (the transport emits `close` or `disconnected`), `turns-exhausted` (`maxTurns` turns, when it is above 0), `keyword:<word>` (with `exitOn: 'keyword'`, a final transcript containing one of `exitKeywords`), `silence-timeout` (with `exitOn: 'silence-timeout'`, 30 seconds without speech) and `interrupted` (an `AbortSignal` placed at `state.scratch.abortSignal` fires; a barge-in emits `voice_barge_in` and does not end the node). A `speak-only` node delivers `speakText` and ends with `completed`. The executor returns the target mapped to the exit reason, and the runtime runs that node and skips the others. The node still needs a static edge to each target, because the scheduler and the validator read only edges. An exit reason with no mapping follows every static edge, and a mapping back to the voice node itself does not run it again.
 
-The executor needs the voice transport at `state.scratch.voiceTransport` and fails without it. A run starts with an empty `scratch` and no builder puts a transport there (`workflow().transport('voice', ...)` stores its settings and nothing reads them), so the host writes it from an earlier node, for example an `extension` node, whose object output is merged into `scratch`. Voice events (`voice_session`, `voice_transcript`, `voice_barge_in`, `voice_turn_complete`) go to the callback passed to `VoiceNodeExecutor`, not to the graph's event stream.
+The executor needs the voice transport at `state.scratch.voiceTransport` and fails without it. A run starts with an empty `scratch` and no builder puts a transport there (`workflow().transport('voice', ...)` stores its settings and nothing reads them), so the host writes it from an earlier node, as the `connect` extension node does above. The transport is also kept as the `connect` artifact, so `invoke()` returns it. Voice events (`voice_session`, `voice_transcript`, `voice_barge_in`, `voice_turn_complete`) go to the callback passed to `VoiceNodeExecutor`, not to the graph's event stream.
 
 | Option | Type | Read by the executor |
 |---|---|---|

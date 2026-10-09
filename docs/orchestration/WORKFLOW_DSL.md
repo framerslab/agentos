@@ -11,9 +11,10 @@ import { workflow, LoopController } from '@framers/agentos/orchestration';
 import type { WorkflowRuntimeDeps } from '@framers/agentos/orchestration/builders/WorkflowBuilder';
 import { z } from 'zod';
 
-// Your application's own tool runner and model call.
+// Your application's own tool runner, model call and page fetcher.
 declare function runMyTool(name: string, args: Record<string, unknown>): Promise<unknown>;
 declare function callMyModel(instructions: string, context: unknown): Promise<string>;
+declare function fetchPage(url: string): Promise<string>;
 
 const deps: WorkflowRuntimeDeps = {
   toolOrchestrator: {
@@ -23,25 +24,34 @@ const deps: WorkflowRuntimeDeps = {
   },
   loopController: new LoopController(),
   async *providerCall(instructions, state) {
-    const text = await callMyModel(instructions, { input: state.input, artifacts: state.artifacts });
+    const text = await callMyModel(instructions, {
+      input: state.input,
+      scratch: state.scratch,
+      artifacts: state.artifacts,
+    });
     yield { type: 'text_delta', content: text };
     return { responseText: text, toolCalls: [], finishReason: 'stop' };
+  },
+  // An extension step receives the run's input and scratch.
+  async extensionExecutor(_extensionId, _method, args) {
+    const { input } = args as { input: { url: string } };
+    return { success: true, output: { page: await fetchPage(input.url) } };
   },
 };
 
 const wf = workflow('summarize-and-tag')
   .input(z.object({ url: z.string() }))
   .returns(z.object({ summary: z.string(), tags: z.string() }))
-  .step('fetch', { tool: 'web_fetch', effectClass: 'external' })
+  .step('fetch', { extension: { extensionId: 'web', method: 'fetchPage' } })
   .step('summarize', { gmi: { instructions: 'Summarize the document in 3 sentences.' }, outputAs: 'summary' })
   .step('tag', { gmi: { instructions: 'Extract 5 topic tags.' }, outputAs: 'tags' })
   .compile({ deps });
 
 const result = await wf.invoke({ url: 'https://example.com/article' });
-// { fetch: <tool output>, summary: '...', tags: '...' }
+// { fetch: { page: '...' }, summary: '...', tags: '...' }
 ```
 
-`deps` holds the node executors ([`WorkflowRuntimeDeps`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/WorkflowBuilder.ts)): a `tool` step needs `toolOrchestrator` and fails without it; a `gmi` step needs `loopController` and `providerCall` and otherwise succeeds with the output `'gmi-placeholder'`. The [Orchestration Guide](./ORCHESTRATION.md#how-a-run-works) lists every node type's executor.
+`deps` holds the node executors ([`WorkflowRuntimeDeps`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/WorkflowBuilder.ts)): a `tool` step needs `toolOrchestrator` and fails without it; a `gmi` step needs `loopController` and `providerCall` and otherwise succeeds with the output `'gmi-placeholder'`; an `extension` step needs `extensionExecutor` and otherwise succeeds with the output `'extension-not-configured'`. A `tool` step sends its tool no arguments, so the `fetch` step above reads the URL as an `extension` step, whose executor receives `{ input, scratch }`. The [Orchestration Guide](./ORCHESTRATION.md#how-a-run-works) lists every node type's executor.
 
 ## Factory Function
 
@@ -196,7 +206,12 @@ A `human` step interrupts the run: the runtime saves a checkpoint, emits `interr
 
 ```typescript
 import { workflow, InMemoryCheckpointStore } from '@framers/agentos/orchestration';
+import type { WorkflowRuntimeDeps } from '@framers/agentos/orchestration/builders/WorkflowBuilder';
 import { z } from 'zod';
+
+// The host bindings from the Quick Start: a toolOrchestrator that runs
+// get_user, provision_account and send_welcome_email, a loopController and a providerCall.
+declare const deps: WorkflowRuntimeDeps;
 
 const store = new InMemoryCheckpointStore();
 

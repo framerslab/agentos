@@ -20,7 +20,7 @@ import { z } from 'zod';
 
 // Your application's own tool runner and model call.
 declare function runMyTool(name: string, args: Record<string, unknown>): Promise<unknown>;
-declare function callMyModel(instructions: string, scratch: unknown): Promise<string>;
+declare function callMyModel(instructions: string, context: unknown): Promise<string>;
 
 // Host bindings for the node executors. The WorkflowRuntimeDeps annotation
 // types every callback parameter (toolCallRequest, instructions, state).
@@ -33,22 +33,21 @@ const deps: WorkflowRuntimeDeps = {
   },
   loopController: new LoopController(),
   async *providerCall(instructions, state) {
-    const text = await callMyModel(instructions, state.scratch);
+    // state.artifacts holds the outputs of the nodes that ran before this one.
+    const text = await callMyModel(instructions, { input: state.input, artifacts: state.artifacts });
     yield { type: 'text_delta', content: text };
     // No tool calls: the node's loop ends after this turn.
     return { responseText: text, toolCalls: [], finishReason: 'stop' };
   },
 };
 
-const graph = new AgentGraph(
-  {
-    input: z.object({ topic: z.string() }),
-    scratch: z.object({ sources: z.array(z.string()).default([]) }),
-    artifacts: z.object({ summary: z.string() }),
-  },
-  { reducers: { 'scratch.sources': 'concat' } }
-)
-  .addNode('search', toolNode('web_search'))
+const graph = new AgentGraph({
+  input: z.object({ topic: z.string() }),
+  scratch: z.object({}),
+  artifacts: z.object({ search: z.unknown(), summarize: z.string() }),
+})
+  // A tool node sends its tool the static args and nothing from the state.
+  .addNode('search', toolNode('web_search', { args: { query: 'quantum computing' } }))
   .addNode('summarize', gmiNode({ instructions: 'Summarize the search results.' }))
   .addEdge(START, 'search')
   .addEdge('search', 'summarize')
@@ -57,6 +56,7 @@ const graph = new AgentGraph(
   .compile({ deps });
 
 const result = await graph.invoke({ topic: 'quantum computing' });
+// { search: <the tool's output>, summarize: '...' }
 ```
 
 ## Constructor
