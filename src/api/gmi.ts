@@ -31,6 +31,7 @@ import type { IToolOrchestrator } from '../core/tools/IToolOrchestrator.js';
 import type { ITool } from '../core/tools/ITool.js';
 import { ExtensionRegistry } from '../extensions/ExtensionRegistry.js';
 import { EXTENSION_KIND_TOOL } from '../extensions/types.js';
+import { APPROVAL_GRANTED, askApprovalGate, type ApprovalGateFn } from './runtime/approval-gate.js';
 import { createCompletionGateway, type CompletionGateway } from './runtime/completionGateway.js';
 import { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
 import { adaptTools } from './runtime/toolAdapter.js';
@@ -53,10 +54,13 @@ export type GmiHandle = Agent;
 
 /** Options with no GMI-path implementation yet; set, they throw at construction. */
 const UNSUPPORTED_ON_GMI = ['voice', 'avatar', 'channels'] as const;
-/** Per-call overrides generate() and stream() accept on the GMI path (spec D10). */
-const ALLOWED_CALL_OVERRIDES = new Set(['temperature', 'maxTokens', 'topP', 'responseFormat', 'model', 'provider', 'maxSteps', 'usageLedger']);
-/** Per-call overrides that pick the route, the step limit or the ledger rather than a completion option. */
-const ROUTE_OVERRIDES = new Set(['model', 'provider', 'maxSteps', 'usageLedger']);
+/**
+ * Per-call overrides generate() and stream() accept on the GMI path (spec D10),
+ * and the tool-approval gate `agency()` passes with every call to a member.
+ */
+const ALLOWED_CALL_OVERRIDES = new Set(['temperature', 'maxTokens', 'topP', 'responseFormat', 'model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate']);
+/** Per-call overrides that pick the route, the step limit, the ledger or the approval gate rather than a completion option. */
+const ROUTE_OVERRIDES = new Set(['model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate']);
 /** `agent()`'s step limit. */
 const DEFAULT_MAX_STEPS = 5;
 
@@ -149,31 +153,49 @@ function toolExecutorWithoutBuiltIns(): ToolExecutor {
 }
 
 /**
- * The agent's `onBeforeToolExecution` around the shared orchestrator, for one
- * GMI, as `generateText` runs it: `null` skips the tool, returned arguments
- * replace the call's, and a hook that throws, or resolves with no result to
- * read arguments from, is warned about and the tool runs with the arguments
- * the model sent.
+ * The agent's `onBeforeToolExecution` and the call's tool-approval gate around
+ * the shared orchestrator, for one GMI, as `generateText` runs them. The hook
+ * runs first: `null` skips the tool, returned arguments replace the call's,
+ * and a hook that throws, or resolves with no result to read arguments from,
+ * is warned about and the tool runs with the arguments the model sent. The
+ * gate (`agency()`'s `hitl.approvals.beforeTool`) is then asked about a tool
+ * the orchestrator has, with the arguments the hook left; anything but the
+ * exact approval skips the tool, and the model is told why.
  */
-function hookTools(base: IToolOrchestrator, hook: AgentOptions['onBeforeToolExecution'], step: { index: number }): IToolOrchestrator {
-  if (!hook) return base;
+function hookTools(base: IToolOrchestrator, hook: AgentOptions['onBeforeToolExecution'], step: { index: number }, gate?: ApprovalGateFn): IToolOrchestrator {
+  if (!hook && !gate) return base;
   const processToolCall: IToolOrchestrator['processToolCall'] = async (details) => {
     const req = details.toolCallRequest;
     let args = (req.arguments ?? {}) as Record<string, unknown>;
-    try {
-      const hookResult = await hook({ name: req.name, args, id: req.id, step: step.index });
-      if (hookResult === null) {
+    if (hook) {
+      try {
+        const hookResult = await hook({ name: req.name, args, id: req.id, step: step.index });
+        if (hookResult === null) {
+          return {
+            toolCallId: req.id,
+            toolName: req.name,
+            output: { skipped: true },
+            isError: true,
+            errorDetails: { message: 'Skipped by onBeforeToolExecution hook' },
+          };
+        }
+        args = hookResult.args;
+      } catch (hookError) {
+        console.warn('[agentos] onBeforeToolExecution hook error:', hookError);
+      }
+    }
+    // A tool the orchestrator does not have is reported by it without asking anyone.
+    if (gate && (await base.getTool(req.name))) {
+      const verdict = await askApprovalGate(gate, { name: req.name, args: args ?? {}, id: req.id, step: step.index });
+      if (verdict !== APPROVAL_GRANTED) {
         return {
           toolCallId: req.id,
           toolName: req.name,
-          output: { skipped: true },
+          output: { skipped: true, reason: verdict.reason },
           isError: true,
-          errorDetails: { message: 'Skipped by onBeforeToolExecution hook' },
+          errorDetails: { message: `Skipped: ${verdict.reason}` },
         };
       }
-      args = hookResult.args;
-    } catch (hookError) {
-      console.warn('[agentos] onBeforeToolExecution hook error:', hookError);
     }
     return base.processToolCall({ ...details, toolCallRequest: { ...req, arguments: args } });
   };
@@ -333,7 +355,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
   // have finished, and the sessions opened after that share a new one.
   let memory = memoryForSessions();
 
-  async function buildGmi(id: string, persona: IPersonaDefinition, mem: AgentCognitiveMemory | undefined, steps: number): Promise<BuiltGmi> {
+  async function buildGmi(id: string, persona: IPersonaDefinition, mem: AgentCognitiveMemory | undefined, steps: number, gate?: ApprovalGateFn): Promise<BuiltGmi> {
     const s = await shared.get();
     const step = { index: 0 };
     let turn: GmiTurnContext = { prompt: undefined, memoryContext: undefined };
@@ -343,7 +365,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
       promptEngine: s.promptEngine,
       llmProviderManager: new GatewayProviderManager().asProviderManager(),
       utilityAI: s.utilityAI,
-      toolOrchestrator: hookTools(s.tools, opts.onBeforeToolExecution, step),
+      toolOrchestrator: hookTools(s.tools, opts.onBeforeToolExecution, step, gate),
       // The agent's memory as this GMI's session sees it: the shared store with a
       // working memory of its own, so one session's active context never lists
       // another's memories. `GMI.shutdown()` shuts down the memory it was given;
@@ -461,7 +483,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
         const persona = extra && (extra.model || extra.provider)
           ? personaFromAgentOptions({ ...opts, model: extra.model ?? opts.model, provider: extra.provider ?? opts.provider }, lightCognition, tools)
           : s.lightPersona;
-        return forOneTurn(await buildGmi(`gmi-${persona.id}-${callId}`, persona, undefined, extra?.maxSteps ?? maxSteps));
+        return forOneTurn(await buildGmi(`gmi-${persona.id}-${callId}`, persona, undefined, extra?.maxSteps ?? maxSteps, extra?.__approvalGate));
       },
     };
   }
