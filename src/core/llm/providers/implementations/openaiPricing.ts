@@ -1,8 +1,9 @@
 /**
  * @file openaiPricing.ts
- * @description OpenAI's list prices per 1K tokens, the table OpenAIProvider
- * prices its calls with, in a module of its own so that a caller can price a
- * call before it is made (the spend budget) without loading the provider.
+ * @description OpenAI's list prices: per 1K tokens, the table OpenAIProvider
+ * prices its calls with, and per minute of audio for its transcription models,
+ * in a module of their own so that a caller can price a call before it is made
+ * (the spend budget, a day's spend reservations) without loading the provider.
  */
 
 /** USD per 1K tokens: `input` for prompt tokens (an embedding model's whole count), `output` for completion tokens. */
@@ -102,8 +103,39 @@ export const OPENAI_MODEL_PRICING: Readonly<Record<string, OpenAIModelPrice>> = 
   'text-embedding-ada-002': { input: 0.0001, output: 0 },
 };
 
+/**
+ * The row a table holds under `key` itself. Read as a plain key, a model named after a member every object inherits
+ * (`constructor`, `toString`, `__proto__`) would find that member and be priced at NaN; it has no row.
+ */
+function ownRow<T>(table: Readonly<Record<string, T>>, key: string): T | undefined {
+  return Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined;
+}
+
 /** A model's row; a dated snapshot without its own row takes its base model's, as OpenAIProvider resolves it. */
 export function openAIModelPricing(modelId: string | undefined): OpenAIModelPrice | undefined {
   if (!modelId) return undefined;
-  return OPENAI_MODEL_PRICING[modelId] ?? OPENAI_MODEL_PRICING[modelId.replace(/-\d{4}-\d{2}-\d{2}$/, '')];
+  return ownRow(OPENAI_MODEL_PRICING, modelId) ?? ownRow(OPENAI_MODEL_PRICING, modelId.replace(/-\d{4}-\d{2}-\d{2}$/, ''));
+}
+
+/**
+ * USD per minute of audio for OpenAI's transcription models: the cost per minute that OpenAI's pricing page lists for
+ * each (https://developers.openai.com/api/docs/pricing, "Transcription models", read 8 October 2026). gpt-4o-transcribe
+ * and gpt-4o-mini-transcribe are billed by token, so their rows are the page's estimate of a minute's cost. A row that
+ * is added or changed names its source and the day it was read here.
+ */
+export const OPENAI_TRANSCRIPTION_PRICING: Readonly<Record<string, number>> = {
+  'gpt-4o-mini-transcribe': 0.003,
+  'gpt-realtime-whisper': 0.017,
+  'gpt-4o-transcribe': 0.006,
+  'gpt-transcribe': 0.0045,
+  'gpt-live-transcribe': 0.017,
+};
+
+/** A transcription model's price per minute; a dated snapshot without its own row takes its base model's. */
+export function openAITranscriptionPricing(modelId: string | undefined): number | undefined {
+  if (!modelId) return undefined;
+  return (
+    ownRow(OPENAI_TRANSCRIPTION_PRICING, modelId) ??
+    ownRow(OPENAI_TRANSCRIPTION_PRICING, modelId.replace(/-\d{4}-\d{2}-\d{2}$/, ''))
+  );
 }

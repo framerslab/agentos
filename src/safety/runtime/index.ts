@@ -43,3 +43,23 @@ export type {
 export type { SpendPurgeResult } from './SqlSpendMeter.js';
 export { SqlSpendMeter, SPEND_METER_DDL } from './SqlSpendMeter.js';
 export type { SqlSpendMeterOptions, SpendUnknownResolution } from './SqlSpendMeter.js';
+
+export {
+  InMemorySpendDayStore,
+  minutesMicro,
+  releaseExpiredSpend,
+  releaseSpend,
+  reserveSpend,
+  settledTokensMicro,
+  toMicro,
+  tokensMicro,
+  utcDay,
+} from './SpendReservations.js';
+export type { OpenReservation, SpendAdmission, SpendDayStore } from './SpendReservations.js';
+// The prices a spend admission reads, beside its rules, so `@framers/agentos/safety/runtime` carries both without loading a provider.
+export {
+  OPENAI_MODEL_PRICING,
+  OPENAI_TRANSCRIPTION_PRICING,
+  openAIModelPricing,
+  openAITranscriptionPricing,
+} from '../../core/llm/providers/implementations/openaiPricing.js';
