@@ -245,14 +245,42 @@ describe('ToolOrchestrator', () => {
     expect((toolExecutor as any).executeTool).toHaveBeenCalledTimes(0);
   });
 
-  it('hands its logToolCalls setting to the executor it is initialized with', async () => {
-    const executor = new ToolExecutor();
-    const handed = vi.spyOn(executor, 'setLogToolCalls');
+  it("keeps a tool's arguments and output out of the console when its logToolCalls is off, on an executor another orchestrator logs through", async () => {
+    const words = 'the words of the person';
+    const shared = new ToolExecutor();
+    const tool = buildEchoTool();
     const quiet = new ToolOrchestrator();
-    await quiet.initialize({ logToolCalls: false }, createPermissionManager(), executor);
-    expect(handed).toHaveBeenLastCalledWith(false);
+    await quiet.initialize({ logToolCalls: false }, createPermissionManager(), shared, [tool]);
     const loud = new ToolOrchestrator();
-    await loud.initialize({ logToolCalls: true }, createPermissionManager(), executor);
-    expect(handed).toHaveBeenLastCalledWith(true);
+    await loud.initialize({ logToolCalls: true }, createPermissionManager(), shared, [tool]);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const printed = () =>
+      [...log.mock.calls, ...warn.mock.calls]
+        .map((call) => call.map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' '))
+        .join('\n');
+    try {
+      const result = await quiet.processToolCall(makeRequest('echo', { text: words }));
+      expect(result.isError).toBe(false);
+      expect(result.output).toEqual({ echoed: words });
+      expect(printed()).toContain('Tool execution successful');
+      expect(printed()).not.toContain(words);
+
+      log.mockClear();
+      warn.mockClear();
+      const loudResult = await loud.processToolCall(makeRequest('echo', { text: words }));
+      expect(loudResult.isError).toBe(false);
+      expect(printed()).toContain('Output preview');
+      expect(printed()).toContain(words);
+
+      // the quiet orchestrator stays quiet after the loud one has used the same executor
+      log.mockClear();
+      warn.mockClear();
+      await quiet.processToolCall(makeRequest('echo', { text: words }));
+      expect(printed()).not.toContain(words);
+    } finally {
+      log.mockRestore();
+      warn.mockRestore();
+    }
   });
 });

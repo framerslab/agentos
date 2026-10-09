@@ -187,6 +187,14 @@ describe('ToolExecutor', () => {
         clear();
         await quiet.executeTool(request());
         expect(printed()).not.toContain(words);
+
+        // a call's own setting wins over the executor's
+        clear();
+        await quiet.executeTool({ ...request(), logToolCalls: true });
+        expect(printed()).toContain(words);
+        clear();
+        await loud.executeTool({ ...request(), logToolCalls: false });
+        expect(printed()).not.toContain(words);
       } finally {
         restore();
       }
@@ -211,6 +219,17 @@ describe('ToolExecutor', () => {
         expect(unparsable.success).toBe(false);
         expect(printed()).toContain('Argument parsing failed');
         expect(printed()).not.toContain(words);
+
+        // an unexpected property's name comes from the input: it stays out of the validation errors when logging is off
+        clear();
+        const strict = new ToolExecutor();
+        await strict.registerTool(
+          makeTool({ name: 'strict', id: 'strict', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, additionalProperties: false } }),
+        );
+        const extra = await strict.executeTool({ ...request({ text: 'hi', the_persons_own_key: 1 }), toolCallRequest: makeRequest('strict', { text: 'hi', the_persons_own_key: 1 }) });
+        expect(extra.success).toBe(false);
+        expect(printed()).toContain('Argument schema validation failed');
+        expect(printed()).not.toContain('the_persons_own_key');
       } finally {
         restore();
       }

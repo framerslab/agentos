@@ -129,7 +129,8 @@ export class ToolOrchestrator implements IToolOrchestrator {
     orchestratorId: '',
     defaultToolCallTimeoutMs: 30000,
     maxConcurrentToolCalls: 10,
-    logToolCalls: true,
+    // tool arguments and outputs reach the console in development only; a host turns it on elsewhere by name
+    logToolCalls: typeof process !== 'undefined' && process.env?.NODE_ENV === 'development',
     globalDisabledTools: [],
     toolRegistrySettings: {
       allowDynamicRegistration: true,
@@ -226,10 +227,6 @@ export class ToolOrchestrator implements IToolOrchestrator {
 
     this.permissionManager = permissionManager;
     this.toolExecutor = toolExecutor;
-    // the executor's own console lines follow the same setting (a test may hand in a partial executor)
-    if (typeof (toolExecutor as any).setLogToolCalls === 'function') {
-      toolExecutor.setLogToolCalls(this.config.logToolCalls === true);
-    }
     this.hitlManager = hitlManager;
 
     if (initialTools && initialTools.length > 0) {
@@ -721,9 +718,7 @@ export class ToolOrchestrator implements IToolOrchestrator {
     // Check if toolCallRequest and toolCallRequest.name are valid
     if (!toolCallRequest || !toolCallRequest.name || typeof toolCallRequest.name !== 'string') {
       const errorMsg = "Invalid ToolCallRequest: 'name' is missing or not a string.";
-      console.error(`ToolOrchestrator (ID: ${this.orchestratorId}): ${errorMsg}`, {
-        requestDetails,
-      });
+      console.error(`ToolOrchestrator (ID: ${this.orchestratorId}): ${errorMsg}`, this.config.logToolCalls ? { requestDetails } : { gmiId: requestDetails?.gmiId, personaId: requestDetails?.personaId });
       return {
         toolCallId: toolCallRequest?.id || `invalid-call-${uuidv4()}`,
         toolName: 'unknown',
@@ -994,7 +989,8 @@ export class ToolOrchestrator implements IToolOrchestrator {
 
     let coreExecutorResult: ToolExecutionResult;
     try {
-      coreExecutorResult = await this.toolExecutor.executeTool(requestDetails);
+      // the executor's console lines follow this orchestrator's setting for this call (another orchestrator may share the executor)
+      coreExecutorResult = await this.toolExecutor.executeTool({ ...requestDetails, logToolCalls: this.config.logToolCalls === true });
     } catch (executorPipelineError: any) {
       const errorMsg = `Critical error within ToolExecutor's internal pipeline while processing '${toolName}'. This is not an error from the tool's execute method itself.`;
       console.error(`${logPrefix} ${errorMsg}`, executorPipelineError);
