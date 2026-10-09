@@ -194,4 +194,26 @@ describe('GMI turn through the real completion gateway', () => {
       .join('\n');
     expect(system.split('The JSON MUST conform to this JSON Schema:')).toHaveLength(2);
   });
+
+  it("a structured reply answered by a hop whose payload carries no schema (Claude Sonnet 5.5) reports its enforcement as 'prompt_only'", async () => {
+    const k = key();
+    const s = script('anthropic', k, { replies: [reply.text('{"city":"Lyon"}')] });
+    const { gmi } = await createScriptedGmi({
+      gateway: createCompletionGateway({ apiKey: k, fallbackProviders: [] }),
+      persona: { defaultProviderId: 'anthropic', defaultModelId: 'claude-sonnet-5-5' },
+    });
+    const { output } = await runTurn(gmi, textTurn('t1', 'Where?', { options: { structuredReply: { schema: z.object({ city: z.string() }), name: 'place' } } }));
+    // No forced tool and no payload: the schema reached the model in the prompt alone.
+    expect(s.seen[0].options.responseFormat).toBeUndefined();
+    expect(output.structuredOutput).toMatchObject({ value: { city: 'Lyon' }, meta: { valid: true, enforcement: 'prompt_only' } });
+  });
+
+  it("a structured reply answered by a hop whose payload carries the schema (OpenAI's strict json_schema) reports 'provider_schema'", async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('{"city":"Lyon"}')] });
+    const { gmi } = await createScriptedGmi({ gateway: createCompletionGateway({ apiKey: k, fallbackProviders: [] }) });
+    const { output } = await runTurn(gmi, textTurn('t1', 'Where?', { options: { structuredReply: { schema: z.object({ city: z.string() }), name: 'place' } } }));
+    expect(s.seen[0].options.responseFormat).toMatchObject({ type: 'json_schema' });
+    expect(output.structuredOutput).toMatchObject({ value: { city: 'Lyon' }, meta: { valid: true, enforcement: 'provider_schema' } });
+  });
 });
