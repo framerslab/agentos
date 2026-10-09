@@ -1284,6 +1284,8 @@ export class GMI implements IGMI {
         // A schema travels to the gateway, which lowers it per hop (D9); it is not a provider option.
         const responseSchema = (turnOptions.responseSchema as ZodType | undefined) ?? structuredReply?.zod;
         const schemaName = (turnOptions.schemaName as string | undefined) ?? (structuredReply && responseSchema === structuredReply.zod ? structuredReply.name : undefined);
+        // The structured reply's instruction is in the system prompt already; the gateway adds none for its schema.
+        const schemaInPrompt = responseSchema !== undefined && responseSchema === structuredReply?.zod;
 
         // The gateway's route: the model asked for, the last user message (its text
         // is the router's task hint: the text parts of a multimodal message, and on
@@ -1418,7 +1420,7 @@ export class GMI implements IGMI {
           let attempt: AsyncIterable<ModelCompletionResponse>;
           let attemptOutcome: Promise<CompletionOutcome> | undefined;
           if (gateway && resolution) {
-            const gatewayAttempt: CompletionAttempt = gateway.stream(resolution, sendMessages, llmOptions, responseSchema, schemaName);
+            const gatewayAttempt: CompletionAttempt = gateway.stream(resolution, sendMessages, llmOptions, responseSchema, schemaName, schemaInPrompt);
             attempt = gatewayAttempt;
             attemptOutcome = gatewayAttempt.outcome;
           } else {

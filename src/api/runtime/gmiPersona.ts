@@ -3,15 +3,15 @@
  * The persona of a GMI built from agent options (`agent({ runtime: 'gmi' })`).
  *
  * The base system prompt is the text the legacy path sends: `buildSystemPrompt(opts)`
- * (or the joined `systemBlocks`), with the chain-of-thought instruction first when
- * the agent has tools, as `generateText` puts it. The completion options are the
+ * (or the joined `systemBlocks`). The chain-of-thought instruction is not part of
+ * it: `gmi()` puts it first in the system prompt of each model call that offers
+ * tools, as `generateText` does. The completion options are the
  * ones `agent()` forwards on every call. Sentiment presets are expanded into
  * metaprompts, as the persona loaders expand them, because the GMI runs only the
  * persona's `metaPrompts`.
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { buildSystemPrompt, type AgentOptions } from '../agent.js';
-import { resolveChainOfThought } from '../generateText.js';
 import { resolveModelOption } from '../model.js';
 import { normalizeHexacoTraits } from '../../cognition/substrate/personas/hexaco.js';
 import { normalizePersonaDefinition } from '../../cognition/substrate/personas/personaNormalization.js';
@@ -50,13 +50,10 @@ function completionOptionsOf(opts: AgentOptions): Partial<ModelCompletionOptions
   return out;
 }
 
-function basePrompt(opts: AgentOptions, hasTools: boolean): string {
-  const system = opts.systemBlocks
+function basePrompt(opts: AgentOptions): string {
+  return opts.systemBlocks
     ? opts.systemBlocks.map((block) => block.text).filter(Boolean).join('\n\n')
     : buildSystemPrompt(opts) ?? '';
-  const cot = hasTools ? resolveChainOfThought(opts.chainOfThought ?? true) : undefined;
-  if (!cot) return system;
-  return system ? `${cot}\n\n${system}` : cot;
 }
 
 /**
@@ -64,7 +61,7 @@ function basePrompt(opts: AgentOptions, hasTools: boolean): string {
  *
  * @param opts - The agent's options.
  * @param cognition - The resolved profile ({@link resolveCognition}): sentiment tracking and metaprompts.
- * @param tools - The agent's tools, adapted: they decide the chain-of-thought text and the persona's capabilities.
+ * @param tools - The agent's tools, adapted: they decide the persona's capabilities.
  * @throws {Error} When no provider or model can be resolved, as `generateText` throws.
  */
 export function personaFromAgentOptions(opts: AgentOptions, cognition: ResolvedCognition, tools: ITool[]): IPersonaDefinition {
@@ -78,7 +75,7 @@ export function personaFromAgentOptions(opts: AgentOptions, cognition: ResolvedC
     name,
     description: firstLine ?? name,
     version: '1.0.0',
-    baseSystemPrompt: basePrompt(opts, tools.length > 0),
+    baseSystemPrompt: basePrompt(opts),
     ...(opts.personality ? { personalityTraits: normalizeHexacoTraits(opts.personality) } : {}),
     defaultProviderId: providerId,
     defaultModelId: modelId,

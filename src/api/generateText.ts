@@ -39,7 +39,7 @@ import {
   type PolicyTier,
 } from '../core/llm/routing/UncensoredModelCatalog.js';
 import { checkContextFit } from './runtime/contextWindowFit.js';
-import { describeResponseFormatShape } from './runtime/responseFormatForProvider.js';
+import { describeResponseFormatShape, responseFormatCarriesSchema } from './runtime/responseFormatForProvider.js';
 
 const fallbackLogger = createLogger('fallback');
 
@@ -790,6 +790,15 @@ export interface GenerateTextOptions {
     providerId: string,
     modelId: string,
   ) => Record<string, unknown> | undefined;
+  /**
+   * @internal Schema instructions (`buildSchemaInstructionText`) that a call
+   * whose `_responseFormat` carries no schema sends as a system message after
+   * its system prompt: no payload for the provider or model, or a JSON mode
+   * without one. Each fallback leg decides for its own payload. AgentSession.send
+   * supplies this for a structured send; generateObject puts the schema in its
+   * own system prompt and leaves it unset.
+   */
+  _schemaInstruction?: string;
   /**
    * INTERNAL (sessions): how many TRAILING entries of `messages` belong to
    * THIS call's transcript delta rather than prior history. Sessions that
@@ -2130,9 +2139,15 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         messages.push({ role: 'system', content: parts });
       }
 
+      // A structured call whose payload carries no schema sends it after the
+      // system prompt, so the model sees what it has to answer in.
+      if (opts._schemaInstruction && !responseFormatCarriesSchema(opts._responseFormat as Record<string, unknown> | undefined)) {
+        messages.push({ role: 'system', content: opts._schemaInstruction });
+      }
+
       // Everything above is built from opts (system prompt, chain-of-thought
-      // instruction); a failover continuation rebuilds it, so it is left out
-      // of the conversation a continuation carries.
+      // instruction, schema instructions); a failover continuation rebuilds
+      // it, so it is left out of the conversation a continuation carries.
       const generatedSystemCount = messages.length;
       if (opts.messages) {
         // Session history replays through here, so keep the tool pairing

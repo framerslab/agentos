@@ -10,6 +10,7 @@ vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => (
 vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
 import { z } from 'zod';
 import { agent, type AgentOptions } from '../agent';
+import { DEFAULT_COT_INSTRUCTION } from '../generateText';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { GMIErrorCode } from '../../core/utils/errors';
@@ -29,6 +30,11 @@ function gate(): { opened: Promise<void>; open: () => void } {
 const base = (apiKey: string, extra: Record<string, unknown> = {}) =>
   ({ runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey, fallbackProviders: [], ...extra }) as unknown as AgentOptions;
 const lookupTool = (execute: (args: Record<string, unknown>) => Promise<unknown>) => ({ name: 'lookup', description: 'Look up.', inputSchema: { type: 'object', properties: { q: { type: 'string' } } }, execute });
+/** The system prompt a model call sent: the text of its system messages. */
+const systemText = (call: { messages: Array<{ role: string; content: unknown }> }): string =>
+  call.messages.filter((m) => m.role === 'system').map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
+/** The line generateObject's schema instructions carry, which a structured send repeats when nothing else carries the schema. */
+const SCHEMA_LINE = 'The JSON MUST conform to this JSON Schema:';
 /** Cognitive memory with no mechanisms, so recall depends on the scopes alone. */
 const plainMemory = (embedding: Record<string, unknown> = { provider: 'openai' }) => ({ cognition: { memory: { embedding }, mechanisms: false } });
 const FACT = 'The deploy key lives in the vault under ops/deploy.';
@@ -207,12 +213,49 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     expect(session.messages().at(-1)).toEqual({ role: 'assistant', content: '{"city":"Lyon"}' });
   });
 
-  it('a structured send on Claude Sonnet 5.5 (no forced tool): the JSON text answer is parsed', async () => {
+  it('a structured send on Claude Sonnet 5.5 (no forced tool): the schema rides the system prompt, and the JSON text answer is parsed', async () => {
     const k = key(); const s = script('anthropic', k, { replies: [reply.text('{"city":"Lyon"}')] });
     const r = await agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-5-5' }).session('s')
       .send('where?', { responseSchema: z.object({ city: z.string() }) });
     expect(r.object).toEqual({ city: 'Lyon' });
     expect(s.seen[0].options.responseFormat).toBeUndefined();
+    // No payload carries the schema to this model, so the request's system prompt does.
+    expect(systemText(s.seen[0])).toContain(SCHEMA_LINE);
+    expect(systemText(s.seen[0])).toContain('"city"');
+  });
+
+  it('a structured send in OpenAI JSON mode (a schema strict mode cannot take) carries the schema in its system prompt; a strict one does not repeat it', async () => {
+    const k = key(); const s = script('openai', k, { replies: [reply.text('{"city":"Lyon","scores":{"a":1}}'), reply.text('{"city":"Lyon"}')] });
+    const session = agent(base(k)).session('s');
+    const loose = await session.send('where?', { responseSchema: z.object({ city: z.string(), scores: z.record(z.string(), z.number()) }) });
+    expect(loose.object).toEqual({ city: 'Lyon', scores: { a: 1 } });
+    // JSON mode takes no schema: the model sees it only in the prompt.
+    expect(s.seen[0].options.responseFormat).toEqual({ type: 'json_object' });
+    expect(systemText(s.seen[0])).toContain(SCHEMA_LINE);
+    expect(systemText(s.seen[0])).toContain('"scores"');
+    const strict = await session.send('where?', { responseSchema: z.object({ city: z.string() }) });
+    expect(strict.object).toEqual({ city: 'Lyon' });
+    expect((s.seen[1].options.responseFormat as { type?: string }).type).toBe('json_schema');
+    expect(systemText(s.seen[1])).not.toContain(SCHEMA_LINE);
+  });
+
+  it('a structured send on an agent with tools carries no chain-of-thought instruction, as agent() sends none once the tools are stripped; a plain send keeps it', async () => {
+    const k = key(); const s = script('openai', k, { replies: [reply.text('{"city":"Lyon"}'), reply.text('Hi.')] });
+    const session = agent(base(k, { tools: [lookupTool(async () => ({ success: true }))] })).session('s');
+    expect((await session.send('where?', { responseSchema: z.object({ city: z.string() }) })).object).toEqual({ city: 'Lyon' });
+    // The step goes without tools, and an instruction to reason about which tool to pick invites prose before the JSON.
+    expect(s.seen[0].options.tools).toBeUndefined();
+    expect(systemText(s.seen[0])).not.toContain(DEFAULT_COT_INSTRUCTION);
+    await session.send('hi');
+    expect(s.seen[1].options.tools).toBeDefined();
+    expect(systemText(s.seen[1])).toContain(DEFAULT_COT_INSTRUCTION);
+  });
+
+  it('chainOfThought: false sends no chain-of-thought instruction, tools or not', async () => {
+    const k = key(); const s = script('openai', k, { replies: [reply.text('Hi.')] });
+    await agent(base(k, { tools: [lookupTool(async () => ({ success: true }))], chainOfThought: false })).session('s').send('hi');
+    expect(s.seen[0].options.tools).toBeDefined();
+    expect(systemText(s.seen[0])).not.toContain(DEFAULT_COT_INSTRUCTION);
   });
 
   it('generate keeps no history; close releases sessions', async () => {
@@ -271,6 +314,22 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
       await vi.waitFor(() => expect(s.seen).toHaveLength(1));
       expect(await Promise.race([session.close().then(() => 'closed'), sleep(2_000).then(() => 'still waiting')])).toBe('closed');
       expect(s.aborts).toBe(1);
+      expect(await outcome).toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringMatching(/abort/i) });
+    } finally {
+      g.open();
+    }
+  });
+
+  it('close() during a request whose provider reads the abort signal only when an event arrives returns at once; the send rejects with the abort error', async () => {
+    // Anthropic, Gemini and Ollama check the signal per streamed event, so a request
+    // stalled before its first byte holds them until their own timeout (90 s for Anthropic).
+    const k = key(); const g = gate();
+    const s = script('anthropic', k, { replies: [reply.stall([], g.opened, reply.text('Late.'))] });
+    const session = agent({ ...base(k), provider: 'anthropic', model: 'claude-sonnet-5-5' }).session('s');
+    try {
+      const outcome = session.send('one').then(() => 'resolved', (error: unknown) => error);
+      await vi.waitFor(() => expect(s.seen).toHaveLength(1));
+      expect(await Promise.race([session.close().then(() => 'closed'), sleep(2_000).then(() => 'still waiting')])).toBe('closed');
       expect(await outcome).toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringMatching(/abort/i) });
     } finally {
       g.open();

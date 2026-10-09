@@ -115,6 +115,24 @@ export function buildResponseFormatForProvider(
 }
 
 /**
+ * Whether a payload from {@link buildResponseFormatForProvider} carries the
+ * schema to the model. A strict `json_schema`, Anthropic's forced schema tool
+ * and Gemini's `responseSchema` (typed `json_object`, with the schema under
+ * `_gemini`) do; no payload, the loose `json_object` mode and any other shape
+ * do not, so the schema has to ride the prompt.
+ */
+export function responseFormatCarriesSchema(
+  responseFormat: Record<string, unknown> | undefined,
+): boolean {
+  if (!responseFormat) return false;
+  return (
+    responseFormat.type === 'json_schema' ||
+    responseFormat._agentosUseToolForStructuredOutput === true ||
+    responseFormat._gemini !== undefined
+  );
+}
+
+/**
  * Compact label for a structured-output payload shape, used by the
  * `fallback_fired` log line (`rebuiltResponseFormatType`) as the live
  * verification signal that per-leg rebuild is active.

@@ -10,7 +10,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
+import { z } from 'zod';
 import { agent, type AgentOptions } from '../agent';
+import { ObjectGenerationError } from '../generateObject';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 
@@ -76,5 +78,40 @@ describe("agent({ runtime: 'gmi' }) keeps what agent() does", () => {
       { role: 'user', content: 'look up a and b' },
       { role: 'assistant', content: 'Both looked up.' },
     ]);
+  });
+
+  it('a structured send whose answer does not parse or validate keeps nothing of the exchange, so a retry starts clean', async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Lyon'), reply.text('{"town":"Lyon"}'), reply.text('{"city":"Lyon"}')] });
+    const observe = vi.fn(async (_role: 'user' | 'assistant', _text: string): Promise<void> => undefined);
+    const session = agent(base(k, { memoryProvider: { observe } })).session('s');
+    const schema = z.object({ city: z.string() });
+    // Not JSON, then JSON the schema refuses: agent() parses before it appends, and appends nothing.
+    await expect(session.send('where?', { responseSchema: schema })).rejects.toBeInstanceOf(ObjectGenerationError);
+    await expect(session.send('where?', { responseSchema: schema })).rejects.toBeInstanceOf(ObjectGenerationError);
+    expect(session.messages()).toEqual([]);
+    expect(observe).not.toHaveBeenCalled();
+    expect((await session.send('where?', { responseSchema: schema })).object).toEqual({ city: 'Lyon' });
+    // The retry's request carries neither refused exchange.
+    expect(s.seen[2].messages.filter((m) => m.role !== 'system').map((m) => m.content)).toEqual(['where?']);
+    expect(session.messages().map((m) => m.content)).toEqual(['where?', '{"city":"Lyon"}']);
+  });
+
+  it('an onBeforeToolExecution hook that resolves nothing is warned about, and the tool runs with its own arguments', async () => {
+    const k = key(); script('openai', k, { replies: [reply.tools([{ id: 'c1', name: 'lookup', args: { q: 'x' } }]), reply.text('Found x.')] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const execute = vi.fn(async (_args: Record<string, unknown>) => ({ success: true, output: 'x' }));
+    const heard: string[] = [];
+    // A hook that only logs: it resolves undefined, neither the call's info nor null.
+    const onBeforeToolExecution = async (info: { name: string }): Promise<void> => {
+      heard.push(info.name);
+    };
+    const session = agent(base(k, { tools: [lookupTool(execute)], onBeforeToolExecution })).session('s');
+    // agent() reads the hook's result inside its try: it warns and runs the tool as the model called it.
+    expect((await session.send('find x')).text).toBe('Found x.');
+    expect(heard).toEqual(['lookup']);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0][0]).toEqual({ q: 'x' });
+    expect(warn).toHaveBeenCalledWith('[agentos] onBeforeToolExecution hook error:', expect.any(TypeError));
   });
 });

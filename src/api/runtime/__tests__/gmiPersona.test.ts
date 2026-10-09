@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { personaFromAgentOptions } from '../gmiPersona.js';
 import { resolveCognition } from '../gmiCognition.js';
 import { buildSystemPrompt, type AgentOptions } from '../../agent.js';
-import { resolveChainOfThought } from '../../generateText.js';
 import { ALL_METAPROMPT_PRESETS } from '../../../cognition/substrate/personas/metaprompt_presets.js';
 
 const tool = {
@@ -35,13 +34,11 @@ describe('personaFromAgentOptions', () => {
     expect(p.sentimentTracking).toEqual({ enabled: false });
   });
 
-  it('puts the chain-of-thought text first when tools exist, as generateText does, and unions the tools\' capabilities', () => {
+  it('leaves the chain-of-thought text out of the base prompt (gmi() adds it to each call that offers tools) and unions the tools\' capabilities', () => {
     const opts: AgentOptions = { name: 'A', instructions: 'Use tools.', provider: 'openai', model: 'gpt-4o' };
     const p = personaFromAgentOptions(opts, resolveCognition({}), [tool as never]);
-    expect(p.baseSystemPrompt).toBe(`${resolveChainOfThought(true)}\n\n${buildSystemPrompt(opts)}`);
+    expect(p.baseSystemPrompt).toBe(buildSystemPrompt(opts));
     expect(p.allowedCapabilities).toEqual(['capability:web']);
-    const withoutCot = personaFromAgentOptions({ ...opts, chainOfThought: false }, resolveCognition({}), [tool as never]);
-    expect(withoutCot.baseSystemPrompt).toBe(buildSystemPrompt(opts));
   });
 
   it('full profile turns on sentiment with every preset, and the persona carries the preset metaprompts the GMI runs', () => {

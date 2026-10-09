@@ -14,7 +14,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { Agent, AgentOptions, AgentSession, AgentSessionOptions, SessionSendOptions } from './agent.js';
-import type { GenerateTextOptions, GenerateTextResult, Message, MessageContent } from './generateText.js';
+import { resolveChainOfThought, type GenerateTextOptions, type GenerateTextResult, type Message, type MessageContent } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import { GMI } from '../cognition/substrate/GMI.js';
 import type { GMIBaseConfig, IGMI } from '../cognition/substrate/IGMI.js';
@@ -80,9 +80,9 @@ function isSet(value: unknown): boolean {
 /**
  * A memoised async build that is not kept when it fails: the next call after a
  * rejection builds again, so one transient failure does not fail every later
- * call. `reset()` drops a kept result.
+ * call.
  */
-function retryingOnce<T>(build: () => Promise<T>): { get(): Promise<T>; peek(): Promise<T> | undefined; reset(): void } {
+function retryingOnce<T>(build: () => Promise<T>): { get(): Promise<T>; peek(): Promise<T> | undefined } {
   let pending: Promise<T> | undefined;
   return {
     get() {
@@ -96,10 +96,21 @@ function retryingOnce<T>(build: () => Promise<T>): { get(): Promise<T>; peek(): 
       return pending;
     },
     peek: () => pending,
-    reset() {
-      pending = undefined;
-    },
   };
+}
+
+/**
+ * `messages` with `text` first in the system prompt: before the first system
+ * message's content, joined by a blank line, or as a system message of its
+ * own when the prompt has none.
+ */
+function withLeadingSystemText(messages: ChatMessage[], text: string): ChatMessage[] {
+  const first = messages[0];
+  if (first?.role !== 'system') return [{ role: 'system', content: text }, ...messages];
+  const content = first.content;
+  if (typeof content === 'string') return [{ ...first, content: content ? `${text}\n\n${content}` : text }, ...messages.slice(1)];
+  if (Array.isArray(content)) return [{ ...first, content: [{ type: 'text', text }, ...content] }, ...messages.slice(1)];
+  return [{ ...first, content: text }, ...messages.slice(1)];
 }
 
 /** `target` with some members replaced; every other method runs on `target` itself. */
@@ -139,34 +150,32 @@ function toolExecutorWithoutBuiltIns(): ToolExecutor {
 
 /**
  * The agent's `onBeforeToolExecution` around the shared orchestrator, for one
- * GMI: `null` skips the tool as `generateText` skips it, returned arguments
- * replace the call's, and a hook that throws is warned about and the tool runs.
+ * GMI, as `generateText` runs it: `null` skips the tool, returned arguments
+ * replace the call's, and a hook that throws, or resolves with no result to
+ * read arguments from, is warned about and the tool runs with the arguments
+ * the model sent.
  */
 function hookTools(base: IToolOrchestrator, hook: AgentOptions['onBeforeToolExecution'], step: { index: number }): IToolOrchestrator {
   if (!hook) return base;
   const processToolCall: IToolOrchestrator['processToolCall'] = async (details) => {
     const req = details.toolCallRequest;
-    let info: Awaited<ReturnType<NonNullable<AgentOptions['onBeforeToolExecution']>>> = {
-      name: req.name,
-      args: (req.arguments ?? {}) as Record<string, unknown>,
-      id: req.id,
-      step: step.index,
-    };
+    let args = (req.arguments ?? {}) as Record<string, unknown>;
     try {
-      info = await hook(info);
+      const hookResult = await hook({ name: req.name, args, id: req.id, step: step.index });
+      if (hookResult === null) {
+        return {
+          toolCallId: req.id,
+          toolName: req.name,
+          output: { skipped: true },
+          isError: true,
+          errorDetails: { message: 'Skipped by onBeforeToolExecution hook' },
+        };
+      }
+      args = hookResult.args;
     } catch (hookError) {
       console.warn('[agentos] onBeforeToolExecution hook error:', hookError);
     }
-    if (info === null) {
-      return {
-        toolCallId: req.id,
-        toolName: req.name,
-        output: { skipped: true },
-        isError: true,
-        errorDetails: { message: 'Skipped by onBeforeToolExecution hook' },
-      };
-    }
-    return base.processToolCall({ ...details, toolCallRequest: { ...req, arguments: info.args } });
+    return base.processToolCall({ ...details, toolCallRequest: { ...req, arguments: args } });
   };
   return withMembers(base, { processToolCall });
 }
@@ -271,6 +280,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
     console.warn('[agentos] gmi(): cognitive memory supplies the memory context; memoryProvider.getContext is skipped (observe still runs).');
   }
   const tools: ITool[] = adaptTools(opts.tools);
+  // Put first in the system prompt of every call that offers tools, as generateText puts it.
+  const chainOfThought = tools.length > 0 ? resolveChainOfThought(opts.chainOfThought ?? true) : undefined;
   const ledger = mergeLedger((opts.observability?.usageLedger as AgentOSUsageLedgerOptions | undefined) ?? opts.usageLedger);
   const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
   const gateway = gatewayFor(opts);
@@ -295,12 +306,31 @@ export function gmi(opts: GmiOptions): GmiHandle {
     return { persona, lightPersona, promptEngine, utilityAI, tools: orchestrator };
   });
 
-  const memory = retryingOnce<AgentCognitiveMemory | undefined>(async () => {
-    if (!cognition.memory) return undefined;
-    const { persona } = await shared.get();
-    // Reads the environment for the embedding provider when memory.embedding names none.
-    return createAgentCognitiveMemory({ persona, memory: cognition.memory, mechanisms: cognition.mechanisms });
-  });
+  /**
+   * One cognitive memory for the sessions that use it, built on first use.
+   * `close()` hands back the build it kept, if any; a build asked for after
+   * that fails, so nothing builds a memory that no one will close.
+   */
+  const memoryForSessions = () => {
+    let closed = false;
+    const build = retryingOnce<AgentCognitiveMemory | undefined>(async () => {
+      if (!cognition.memory) return undefined;
+      if (closed) throw new Error('gmi(): the agent was closed; agent.session() opens a new session.');
+      const { persona } = await shared.get();
+      // Reads the environment for the embedding provider when memory.embedding names none.
+      return createAgentCognitiveMemory({ persona, memory: cognition.memory, mechanisms: cognition.mechanisms });
+    });
+    return {
+      get: build.get,
+      close: (): Promise<AgentCognitiveMemory | undefined> | undefined => {
+        closed = true;
+        return build.peek();
+      },
+    };
+  };
+  // The memory of the sessions open now. agent.close() closes it once they
+  // have finished, and the sessions opened after that share a new one.
+  let memory = memoryForSessions();
 
   async function buildGmi(id: string, persona: IPersonaDefinition, mem: AgentCognitiveMemory | undefined, steps: number): Promise<BuiltGmi> {
     const s = await shared.get();
@@ -340,6 +370,13 @@ export function gmi(opts: GmiOptions): GmiHandle {
             const { name: _name, ...unnamed } = message;
             return unnamed;
           });
+          changed = true;
+        }
+        // A structured send's calls go without tools, and agent() then sends
+        // no chain-of-thought instruction; every other call of an agent with
+        // tools gets it first in its system prompt.
+        if (chainOfThought && !turn.structured) {
+          messages = withLeadingSystemText(messages, chainOfThought);
           changed = true;
         }
         if (turn.memoryContext) {
@@ -452,10 +489,12 @@ export function gmi(opts: GmiOptions): GmiHandle {
       let closing: Promise<void> | undefined;
       // Every turn of the session runs under this signal; close() aborts it.
       const stopTurns = new AbortController();
+      // The memory the agent's sessions shared when this one opened.
+      const sessionMemory = memory;
 
       const buildSessionGmi = async (gmiId: string): Promise<BuiltGmi> => {
         const { persona } = await shared.get();
-        return buildGmi(gmiId, persona, await memory.get(), maxSteps);
+        return buildGmi(gmiId, persona, await sessionMemory.get(), maxSteps);
       };
       // The session's own GMI, when it keeps history; a GMI per turn otherwise.
       const own = retryingOnce(() => buildSessionGmi(`gmi-${sessionId}`));
@@ -566,16 +605,17 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
     /**
      * Closes every session (each stops its running turn first, see
-     * `session.close()`), then the cognitive memory; a session opened from now
-     * on builds a new one. The tools stay as the caller passed them: the
-     * orchestrator is not shut down, because shutting it down would shut down
-     * the caller's tools.
+     * `session.close()`), then the cognitive memory they shared, including one
+     * that a turn still setting up built while the sessions closed; a session
+     * opened from now on builds a new one. The tools stay as the caller passed
+     * them: the orchestrator is not shut down, because shutting it down would
+     * shut down the caller's tools.
      */
     async close(): Promise<void> {
-      const pending = memory.peek();
-      memory.reset();
+      const closingMemory = memory;
+      memory = memoryForSessions();
       await Promise.all([...sessions.values()].map(({ session }) => session.close()));
-      const mem = await pending?.catch(() => undefined);
+      const mem = await closingMemory.close()?.catch(() => undefined);
       await mem?.close();
     },
 
