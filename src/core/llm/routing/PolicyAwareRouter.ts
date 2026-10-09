@@ -18,7 +18,7 @@ import type {
   PolicyTier,
   CatalogEntry,
 } from './UncensoredModelCatalog';
-import { catalogEntryHasCapability } from './UncensoredModelCatalog.js';
+import { catalogEntryHasCapability } from './UncensoredModelCatalog';
 
 /**
  * Manual override map: policyTier -> fixed modelId.

@@ -177,6 +177,16 @@ describe('checkContextFit', () => {
       maxTokens: 800,
     });
     expect(widened.fits).toBe(true);
+    // The provider clamps max_tokens by the call's own model before the override
+    // applies: gpt-4o's 16,384 ceiling here, not the 32,000 asked for.
+    const clamped = checkContextFit({
+      provider: 'openrouter',
+      model: 'openai/gpt-4o',
+      customModelParams: { model: MAGNUM },
+      messages: messagesOf(18_180),
+      maxTokens: 32_000,
+    });
+    expect(clamped).toEqual({ fits: true, contextWindow: 32_768, estimatedInputTokens: 5_000, outputTokens: 16_384 });
   });
 
   it('takes a model without a known window as fitting', () => {

@@ -336,6 +336,36 @@ describe('fallback walk on generateText', () => {
     expect(globalLLMProviderHealth.getStats('openrouter')).toBeNull();
   });
 
+  it('a customModelParams.model override is checked against the window of the model the payload names', async () => {
+    keys('OPENROUTER_API_KEY');
+    // The call names magnum (32,768 tokens) but the payload carries llama
+    // (131,072), which holds the 40,000: the request is sent.
+    hoisted.generateCompletion.mockResolvedValueOnce(ok('held'));
+    const widened = await generateText({
+      provider: 'openrouter',
+      model: MAGNUM,
+      customModelParams: { model: LLAMA },
+      prompt: FORTY_K,
+      policyTier: 'mature',
+    });
+    expect(widened.text).toBe('held');
+    expect(sent()).toEqual([MAGNUM]);
+
+    // The reverse: the payload carries magnum on every OpenRouter leg, and
+    // none of them is sent a request magnum cannot hold.
+    hoisted.generateCompletion.mockReset();
+    await expect(
+      generateText({
+        provider: 'openrouter',
+        model: LLAMA,
+        customModelParams: { model: MAGNUM },
+        prompt: FORTY_K,
+        policyTier: 'mature',
+      }),
+    ).rejects.toThrow();
+    expect(sent()).toEqual([]);
+  });
+
   it('the router pick over its window is not sent and the walk starts', async () => {
     keys('OPENROUTER_API_KEY');
     hoisted.generateCompletion.mockResolvedValueOnce(ok('from hermes'));
