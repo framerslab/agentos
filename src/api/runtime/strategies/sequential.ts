@@ -201,9 +201,12 @@ export function compileSequential(
           } = {};
           let resultToolCalls: Array<{ name: string; args: unknown; result?: unknown; error?: string }> = [];
           let recordExtras: ReturnType<typeof callRecordExtras>;
+          // The error the seat's stream ended on, when it reported one as a part.
+          let seatError: Error | undefined;
           try {
             const agentStream = a.stream(effectivePrompt, opts) as {
               textStream?: AsyncIterable<string>;
+              fullStream?: AsyncIterable<{ type: string; text?: unknown; error?: unknown }>;
               text?: Promise<string>;
               usage?: Promise<{
                 promptTokens?: number;
@@ -221,9 +224,25 @@ export function compileSequential(
             } | null;
 
             if (agentStream?.textStream) {
-              for await (const chunk of agentStream.textStream) {
-                yield { type: 'text' as const, text: chunk, agent: name };
-                agentText += chunk;
+              // streamText reports a failed call as an error part of
+              // `fullStream`, which `textStream` leaves out. A result that
+              // carries `fallback` is streamText's own (it always sets it), so
+              // its parts are read there: the text as before, and the error
+              // the stream ended on. Any other seat's stream is read as text.
+              if (agentStream.fallback !== undefined && agentStream.fullStream) {
+                for await (const part of agentStream.fullStream) {
+                  if (part.type === 'text' && typeof part.text === 'string') {
+                    yield { type: 'text' as const, text: part.text, agent: name };
+                    agentText += part.text;
+                  } else if (part.type === 'error') {
+                    seatError = part.error instanceof Error ? part.error : new Error(String(part.error));
+                  }
+                }
+              } else {
+                for await (const chunk of agentStream.textStream) {
+                  yield { type: 'text' as const, text: chunk, agent: name };
+                  agentText += chunk;
+                }
               }
               // If textStream didn't give us the full text, resolve the promise.
               if (!agentText && agentStream.text) {
@@ -273,6 +292,13 @@ export function compileSequential(
             totalUsage.completionTokens += resultUsage.completionTokens ?? 0;
             totalUsage.totalTokens += resultUsage.totalTokens ?? 0;
             accumulateExtraUsage(totalUsage, resultUsage);
+
+            // A seat whose stream ended on an error: the error is a part of
+            // this stream too, and the run goes on to the next seat, as it
+            // does for an error a seat throws.
+            if (seatError) {
+              yield { type: 'error' as const, error: seatError, agent: name };
+            }
           } catch (err) {
             const error = err instanceof Error ? err : new Error(String(err));
             yield { type: 'error' as const, error, agent: name };
