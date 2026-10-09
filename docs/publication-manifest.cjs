@@ -195,6 +195,8 @@ const publicationManifest = [
 
   agentosDoc('RAG_MEMORY_CONFIGURATION.md', 'features/rag-memory.md', 'RAG Memory Configuration', 'RAG & Retrieval', 1),
   agentosDoc('HYDE_RETRIEVAL.md', 'features/hyde-retrieval.md', 'HyDE Retrieval', 'RAG & Retrieval', 2),
+  agentosDoc('architecture/hybrid-retriever.md', 'architecture/hybrid-retriever.md', 'Hybrid BM25 + Dense Retriever', 'RAG & Retrieval', 3),
+  agentosDoc('architecture/session-retriever.md', 'architecture/session-retriever.md', 'Session-Level Hierarchical Retriever', 'RAG & Retrieval', 3.5),
   agentosDoc('QUERY_ROUTER.md', 'features/query-routing.md', 'Query Router (Stage 1: Memory-or-Not Gate)', 'Cognitive Pipeline', 4),
   agentosDoc('MEMORY_ROUTER.md', 'features/memory-router.md', 'Memory Router (Stage 2: Recall-Stage Smart Orchestration)', 'Cognitive Pipeline', 4.1),
   agentosDoc('INGEST_ROUTER.md', 'features/ingest-router.md', 'Ingest Router (Input-Stage Smart Orchestration)', 'Cognitive Pipeline', 4.2),
