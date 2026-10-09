@@ -1,3 +1,9 @@
+## [0.13.17](https://github.com/framerslab/agentos/compare/v0.13.16...v0.13.17) (2026-10-09)
+
+### fix
+
+* **openrouter:** the wait after a content_filter finish is bounded (#212) ([c9f60f7](https://github.com/framerslab/agentos/commit/c9f60f70b97bf7ec481cf953270870b5043da95e))
+
 ## [0.13.16](https://github.com/framerslab/agentos/compare/v0.13.15...v0.13.16) (2026-10-09)
 
 ### feat
