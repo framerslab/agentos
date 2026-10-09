@@ -64,7 +64,8 @@ interface GuardrailConfig {
   // PII redaction or immediate blocking.
   evaluateStreamingChunks?: boolean; // default: false
 
-  // Rate-limits how many streaming evaluations happen per request.
+  // Rate-limits how many streaming evaluations happen per guarded stream
+  // (the turn's stream and each continuation stream count on their own).
   // After this limit, remaining chunks pass through unevaluated.
   // Only applies when evaluateStreamingChunks is true.
   maxStreamingEvaluations?: number; // default: undefined (no limit)
@@ -115,12 +116,14 @@ interface GuardrailContext {
 
 ### evaluateOutput(payload)
 
-Called for chunks of the turn's output stream, the stream that `processRequest()` passes through the output guardrails. Which chunks depends on `config.evaluateStreamingChunks`:
+Called for chunks of the streams the runtime passes through the output guardrails: the one `processRequest()` returns, and the continuation streams that `handleToolResult()`, `handleToolResults()` and `resumeExternalToolRequest()` return after an external tool call. Which chunks depends on `config.evaluateStreamingChunks`:
 
 - **`false` (default)** -- each chunk that carries `isFinal: true`: the `FINAL_RESPONSE`, and an `ERROR` the turn yields.
 - **`true`** -- those, and each `TEXT_DELTA` chunk during streaming, up to `maxStreamingEvaluations` per stream. The dispatcher counts these evaluations by the guardrail object's `id` property: streaming sanitizers (`canSanitize: true`) without an `id` share one count, so give each of them an `id`.
 
-Other chunks (`TOOL_CALL_REQUEST`, `METADATA_UPDATE`, `SYSTEM_PROGRESS` and the rest that carry `isFinal: false`) are never passed to `evaluateOutput`. Two `ERROR` chunks never reach it either: the one `processRequest()` yields when an exception reaches its own `catch` (errors inside the turn arrive on the turn's stream and are evaluated), and the one an input guardrail's `BLOCK` produces. The streams that `handleToolResult()`, `handleToolResults()` and `resumeExternalToolRequest()` return do not pass through output guardrails.
+Other chunks (`TOOL_CALL_REQUEST`, `METADATA_UPDATE`, `SYSTEM_PROGRESS` and the rest that carry `isFinal: false`) are never passed to `evaluateOutput`. Three `ERROR` chunks never reach it either: the one `processRequest()` yields when an exception reaches its own `catch` (errors inside the turn arrive on the turn's stream and are evaluated), the one an input guardrail's `BLOCK` produces, and the `SYS_GUARDRAIL_REQUIRED_MISSING` chunk a request or a continuation gets while a guard named in `requiredGuardrails` is missing.
+
+With hold mode on (`guardrailOutputMode: 'hold'` on the runtime config, or a guard required on the `output` stage), the runtime holds every `TEXT_DELTA` until the final guardrails have judged the whole reply, and drops the held deltas when one blocks or sanitizes it. An actionable `TOOL_CALL_REQUEST` closes the window: the runtime first evaluates the held text as a `FINAL_RESPONSE` chunk it builds for the purpose (`isFinal: true`), then sends the held text, as the sanitizers left it, and the request; a block drops the text and ends the stream. See [Required Guards, Hold Mode and Replacement Replies](./GUARDRAILS_USAGE.md#required-guards-hold-mode-and-replacement-replies).
 
 ```typescript
 interface GuardrailOutputPayload {
@@ -163,6 +166,11 @@ interface GuardrailEvaluationResult {
   // For input: replaces textInput before orchestration.
   // For output: replaces textDelta (streaming) or finalResponseText (final).
   modifiedText?: string | null;
+
+  // With BLOCK on output: the fixed reply the caller receives, as a
+  // FINAL_RESPONSE whose metadata.guardrail records the block, in place of
+  // the error chunk. Input BLOCKs do not read it.
+  replacementText?: string;
 }
 ```
 
@@ -175,7 +183,7 @@ interface GuardrailEvaluationResult {
 | **ALLOW**    | `'allow'`    | Pass content unchanged. Use when all checks pass.                                                                                                                                         |
 | **FLAG**     | `'flag'`     | Pass content through but record metadata for audit/analytics. Content reaches the user; the evaluation is logged for review.                                                              |
 | **SANITIZE** | `'sanitize'` | Replace content with the value in `modifiedText`. Use for PII redaction, profanity masking, or content rewriting. Requires `canSanitize: true` in config to work in Phase 1.              |
-| **BLOCK**    | `'block'`    | Reject/terminate the interaction. For input evaluation, the request is never processed. For output evaluation during streaming, the stream is terminated immediately with an error chunk. |
+| **BLOCK**    | `'block'`    | Reject/terminate the interaction. For input evaluation, the request is never processed. For output evaluation, the stream ends at once: with a `FINAL_RESPONSE` holding the evaluation's `replacementText` when it has one, otherwise with an error chunk. |
 
 ### SANITIZE rules
 
@@ -262,7 +270,7 @@ not persisted in conversation metadata.
 
 ### TOOL_RESULT_EMISSION
 
-The result of an external tool call, emitted when the host returns it (`handleToolResult()`, `handleToolResults()` or a resumed request). The results of tools the runtime runs itself do not reach this stream: the GMI reports them as `TOOL_RESULT` chunks on its own stream, which `processRequest()` does not forward. `evaluateOutput` never receives this chunk: it arrives on the stream that continues the turn, which does not pass through output guardrails.
+The result of an external tool call, emitted when the host returns it (`handleToolResult()`, `handleToolResults()` or a resumed request). The results of tools the runtime runs itself do not reach this stream: the GMI reports them as `TOOL_RESULT` chunks on its own stream, which `processRequest()` does not forward. `evaluateOutput` never receives this chunk: it carries `isFinal: false` and is not a `TEXT_DELTA`.
 
 ```typescript
 {
@@ -283,7 +291,7 @@ The result of an external tool call, emitted when the host returns it (`handleTo
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SYSTEM_PROGRESS`  | No (`isFinal: false`). Progress updates.                                                                                                                            |
 | `UI_COMMAND`       | No (`isFinal: false`). Frontend rendering instructions.                                                                                                             |
-| `ERROR`            | Yes (`isFinal: true`) when the turn yields it. Not evaluated: the `ERROR` a guardrail's own BLOCK produces, and the `ERROR` that `processRequest()` yields when an exception reaches its own `catch`. |
+| `ERROR`            | Yes (`isFinal: true`) when the turn yields it. Not evaluated: the `ERROR` a guardrail's own BLOCK produces, the `ERROR` that `processRequest()` yields when an exception reaches its own `catch`, and `SYS_GUARDRAIL_REQUIRED_MISSING`. |
 | `METADATA_UPDATE`  | No (`isFinal: false`). Lifecycle and task-outcome metadata, and the turn's RAG sources, which the dispatcher passes to later evaluations as `ragSources`.           |
 | `WORKFLOW_UPDATE`  | No (`isFinal: false`). Workflow progress.                                                                                                                           |
 | `AGENCY_UPDATE`    | Only the update that carries `isFinal: true`, once every seat of the agency has completed or failed.                                                                |
@@ -296,7 +304,7 @@ Every chunk has an `isFinal: boolean` field. The flag describes its own chunk; `
 - **`isFinal: false`** -- every `TEXT_DELTA` of a GMI turn carries it, and so does every `TOOL_CALL_REQUEST`. When the request is actionable (`executionMode: 'external'` and `requiresExternalToolResult: true`), `processRequest()` returns right after it: the turn waits for the host's tool results, and the rest of it comes from `handleToolResult()`, `handleToolResults()` or `resumeExternalToolRequest()`.
 - **`isFinal: true`** -- `FINAL_RESPONSE` and `ERROR` chunks carry it, and so does an `AGENCY_UPDATE` once every seat of the agency has completed or failed. A GMI turn that fails on a `processRequest()` stream yields its `ERROR` and then the turn's `FINAL_RESPONSE`, which carries the error, so an `ERROR` is not always the stream's last chunk.
 
-`evaluateOutput` receives every chunk with `isFinal: true` on the turn's output stream, whatever `evaluateStreamingChunks` is set to. If your guardrail buffers streaming text, use `isFinal: true` as the signal to **flush your buffer** and perform a final evaluation. A turn that stops for an external tool ends its `processRequest()` stream with that `TOOL_CALL_REQUEST`, which has no `isFinal: true`, and output guardrails do not run on the streams that `handleToolResult()`, `handleToolResults()` and `resumeExternalToolRequest()` return. Text your guardrail buffered before the tool request gets no final evaluation from the runtime.
+`evaluateOutput` receives every chunk with `isFinal: true` on a guarded stream, whatever `evaluateStreamingChunks` is set to. If your guardrail buffers streaming text, use `isFinal: true` as the signal to **flush your buffer** and perform a final evaluation. A turn that stops for an external tool ends its `processRequest()` stream with that `TOOL_CALL_REQUEST`, which has no `isFinal: true`; the continuation stream that `handleToolResult()`, `handleToolResults()` or `resumeExternalToolRequest()` returns passes through the same output guardrails, which evaluate that stream's own chunks. Outside hold mode, text your guardrail buffered before the tool request gets no final evaluation of its own from the runtime. In hold mode the runtime evaluates that text as a `FINAL_RESPONSE` chunk it builds before the tool request goes out, and drops the text when a guardrail blocks it.
 
 ---
 
