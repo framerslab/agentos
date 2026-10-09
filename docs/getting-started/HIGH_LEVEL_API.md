@@ -29,7 +29,8 @@ import {
 | `generateMusic()` | Generate music | `await generateMusic({ prompt: '...' })` |
 | `performOCR()` | Extract text from images | `await performOCR({ imagePath: './doc.png' })` |
 | `embedText()` | Generate embeddings | `await embedText({ input: ['hello'] })` |
-| `agent()` | Multi-turn sessions with memory | `const a = agent({ provider: 'openai' })` |
+| `agent()` | Multi-turn sessions with history, tools and hooks | `const a = agent({ provider: 'openai' })` |
+| `gmi()` | `agent({ runtime: 'gmi' })`: sessions served by GMIs, with cognitive memory, sentiment tracking and metaprompts per profile | `const a = gmi({ provider: 'openai', cognition: 'full' })` |
 | `souledAgent()` | Soul-file agent whose long-term memory is its `memory/` wiki | `await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents/aria' })` |
 | `agency()` | Multi-agent teams | `const team = agency({ agents: {...}, strategy: 'parallel' })` |
 
@@ -498,10 +499,6 @@ import { agent } from '@framers/agentos';
 const researcher = agent({
   provider: 'openai',
   instructions: 'You are a concise research assistant.',
-  memory: {
-    types: ['episodic', 'semantic'],
-    working: { enabled: true },
-  },
   maxSteps: 4,
 });
 
@@ -519,6 +516,25 @@ console.log(await session.usage());
 `agent({ tools })` accepts the same three forms as `generateText({ tools })`
 and `streamText({ tools })`: named tool maps, [`ExternalToolRegistry`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/externalToolRegistry.ts)
 (`Record`, `Map`, or iterable), and prompt-only `ToolDefinitionForLLM[]`.
+
+### Sessions served by GMIs: `runtime: 'gmi'`
+
+```ts
+import { agent } from '@framers/agentos';
+
+const tutor = agent({
+  runtime: 'gmi',
+  provider: 'openai',
+  instructions: 'You are a patient networking tutor.',
+  memory: { embedding: { provider: 'openai', model: 'text-embedding-3-small' } },
+});
+
+const session = tutor.session('demo', { userId: 'learner-42' });
+await session.send('What is QUIC?');
+await tutor.close();
+```
+
+With `runtime: 'gmi'` (or [`gmi()`](https://github.com/framerslab/agentos/blob/master/src/api/gmi.ts), the same function under its own name), every session is a Generalized Mind Instance built from the agent's options, and `memory` turns on cognitive memory: one manager for the agent's sessions, scoped per user, embedding with `memory.embedding` (unset, a model picked from the global default provider or the environment's keys). `cognition: 'full'` adds sentiment tracking and the metaprompt presets. Of the `MemoryConfig` fields, this path reads `embedding` and `consolidation`; `types: ['episodic', 'semantic']`, `working` and `shared` are read by neither runtime of `agent()`, and without `runtime: 'gmi'` the agent reads no `memory` option at all. [GMIs from agent()](../GMI.md#gmis-from-agent) lists what each option does on this path.
 
 ### Per-agent identity via SOUL.md
 

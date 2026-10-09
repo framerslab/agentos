@@ -205,6 +205,11 @@ call their provider without a fallback chain; a GMI built with a completion
 gateway moves to the next hop when a hop cannot start or an attempt fails
 with a retryable error before any output
 ([Model calls through a completion gateway](../GMI.md#model-calls-through-a-completion-gateway)).
+An agent created with `runtime: 'gmi'` builds that gateway from its own
+`fallbackProviders` (unset, the same auto-built chain), `policyTier`, `router`
+and `onFallback`, so its sessions fall back as a gateway does: before a step's
+first output, and not after it
+([GMIs from agent()](../GMI.md#gmis-from-agent)).
 
 A failover never repeats work the caller already received or that had side
 effects. A stream that has delivered text or tool activity is not restarted
