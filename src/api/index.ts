@@ -42,6 +42,7 @@ export type {
   CompletionOutcome,
   CompletionResolution,
   CompletionRoute,
+  LateAttemptUsage,
 } from './runtime/completionGateway.js';
 export { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
 export { generateObject } from './generateObject.js';
