@@ -240,6 +240,9 @@ const MAX_STREAM_ERROR_BODY_BYTES = 8192;
 /** How long reading a streamed error body may take, in milliseconds. */
 const STREAM_ERROR_BODY_TIMEOUT_MS = 2000;
 
+/** How many characters of the text delivered before a decline go into its details. */
+const DECLINE_PARTIAL_TEXT_CHARS = 2000;
+
 /** Whether a value is a Node readable stream, as axios returns for `responseType: 'stream'`. */
 function isReadableStream(value: unknown): value is NodeJS.ReadableStream & { destroy?: () => void } {
   return (
@@ -954,6 +957,11 @@ export class OpenRouterProvider implements IProvider {
     // Text yielded so far (for the decline's partialText); the
     // decline held back when a content_filter finish arrives, while the
     // trailing usage chunk is read; a read error seen during that wait.
+    // Only the first DECLINE_PARTIAL_TEXT_CHARS of the text reach a decline,
+    // so no more is kept. The margin keeps a configured secret that crosses
+    // that mark whole, so the redaction that runs before the cut masks it.
+    const yieldedTextCap =
+      DECLINE_PARTIAL_TEXT_CHARS + Math.max(0, ...this.configuredSecrets().map((secret) => secret.length));
     let yieldedText = '';
     let held: { decline: OpenRouterDecline; refusal: string | null; usage?: ModelUsage } | null = null;
     let readError: unknown;
@@ -963,9 +971,10 @@ export class OpenRouterProvider implements IProvider {
     // assertion: tsc otherwise narrows the variable to its initial null at
     // the loop's first read and does not carry the later assignment back.
     let pendingError = null as ModelCompletionResponse | null;
-    // That wait is bounded: a timer ends the read when the stream stays open
-    // past STREAM_ERROR_BODY_TIMEOUT_MS, so an upstream that never closes
-    // after an error holds neither the walk nor a caller's abort longer.
+    // Both waits are bounded: a timer ends the read when the stream stays
+    // open past STREAM_ERROR_BODY_TIMEOUT_MS, so an upstream that never
+    // closes after a content_filter finish or an error holds neither the
+    // walk nor a caller's abort longer.
     let pendingWaitTimer: ReturnType<typeof setTimeout> | undefined;
     let pendingWaitEnded = false;
     const endPendingWait = () => {
@@ -1116,6 +1125,7 @@ export class OpenRouterProvider implements IProvider {
               refusal: choice.delta?.refusal ?? choice.message?.refusal ?? null,
               usage: mapOpenRouterUsage(apiChunk.usage),
             };
+            pendingWaitTimer = setTimeout(endPendingWait, STREAM_ERROR_BODY_TIMEOUT_MS);
             continue;
           }
 
@@ -1129,7 +1139,9 @@ export class OpenRouterProvider implements IProvider {
             console.warn('OpenRouterProvider: Failed to map stream chunk, skipping chunk. Data:', jsonData, 'Error:', this.describeError(error));
             continue;
           }
-          if (mapped.responseTextDelta) yieldedText += mapped.responseTextDelta;
+          if (mapped.responseTextDelta && yieldedText.length < yieldedTextCap) {
+            yieldedText = (yieldedText + mapped.responseTextDelta).slice(0, yieldedTextCap);
+          }
           yield mapped;
           // Don't break on finish_reason: with stream_options.include_usage,
           // OpenRouter (like OpenAI) emits a trailing usage-only chunk AFTER
@@ -1641,7 +1653,7 @@ export class OpenRouterProvider implements IProvider {
         providerName: typeof meta?.provider_name === 'string' ? meta.provider_name : undefined,
         providerCode: typeof meta?.provider_code === 'string' ? meta.provider_code : undefined,
         refusal: bounded(details.refusal, 300),
-        partialText: bounded(details.partialText, 2000),
+        partialText: bounded(details.partialText, DECLINE_PARTIAL_TEXT_CHARS),
         usage: details.usage,
         ...(details.readError !== undefined ? { readError: this.describeError(details.readError) } : {}),
       },
@@ -1738,7 +1750,7 @@ export class OpenRouterProvider implements IProvider {
         responseId: extra.responseId,
         ...(inBodyAuth ? { httpStatus: code } : {}),
         responseData: this.redactResponseData(error),
-        partialText: typeof extra.partialText === 'string' ? this.redactSecrets(extra.partialText).slice(0, 2000) : undefined,
+        partialText: typeof extra.partialText === 'string' ? this.redactSecrets(extra.partialText).slice(0, DECLINE_PARTIAL_TEXT_CHARS) : undefined,
         usage: extra.usage,
       },
     );
