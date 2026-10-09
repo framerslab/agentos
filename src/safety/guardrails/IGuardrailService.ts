@@ -408,6 +408,13 @@ export interface IGuardrailService {
    * with every verdict as `metadata.guardrailId`. Without one, a registered guard is known by its descriptor's id.
    */
   id?: string;
+  /**
+   * The stages this guard evaluates, for a guard whose methods say more than its configuration: one that implements
+   * both methods but runs on one stage declares that stage. A required guard is held to what it declares, and a stage
+   * it does not declare is reported as missing instead of passing on the method's existence. Without it, a stage counts
+   * as covered when its method exists.
+   */
+  stages?: ReadonlyArray<'input' | 'output'>;
 
   /**
    * Configuration for evaluation behavior.

@@ -1484,6 +1484,12 @@ export class AgentOS implements IAgentOS {
     try {
       const context = await this.conversationManager.getConversation(conversationKey);
       if (!context) return;
+      if (this.conversationManager.appendOnlyPersistence) {
+        this.logger.warn('The conversation store is append-only: the stored reply keeps the text a guard replaced; the history in memory is rewritten', {
+          conversationId: conversationKey,
+          reasonCode: verdict.reasonCode ?? verdict.action,
+        });
+      }
       // the message the verdict was about, by its text (the orchestrator stored the same string the guards judged):
       // the newest such message is this turn's, and an earlier turn's reply is never touched
       const stored = [...context.getAllMessages()].reverse().find((m) => m.role === MessageRole.ASSISTANT && m.metadata?.source === 'agentos_output' && m.content === verdict.originalText);

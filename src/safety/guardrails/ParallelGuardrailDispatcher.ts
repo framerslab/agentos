@@ -505,10 +505,13 @@ export class ParallelGuardrailDispatcher {
         if (evaluation.action === GuardrailAction.SANITIZE && evaluation.modifiedText !== undefined) {
           sanitized = true;
           if (workingChunk.type === AgentOSResponseChunkType.FINAL_RESPONSE) {
+            const before = workingChunk as AgentOSFinalResponseChunk;
             workingChunk = {
-              ...(workingChunk as AgentOSFinalResponseChunk),
+              ...before,
               finalResponseText: evaluation.modifiedText,
               finalResponseTextPlain: evaluation.modifiedText,
+              // the serialized conversation the chunk carries holds the reply as the model wrote it: it reads the rewrite too
+              updatedConversationContext: withReplyRewritten(before.updatedConversationContext, before.finalResponseText ?? null, evaluation.modifiedText),
             };
           } else {
             workingChunk = {
@@ -810,6 +813,28 @@ function stampGuardrailId(evaluation: GuardrailEvaluationResult, svc: IGuardrail
  * What the caller receives in place of a blocked reply: the guard's fixed reply as a final response that records the
  * block, when the guard gave one; otherwise the error chunk.
  */
+/**
+ * A copy of a serialized conversation (a final chunk's `updatedConversationContext`) in which the newest assistant
+ * message that reads `from` reads `to`; anything that is not a conversation with messages is returned as it is.
+ */
+function withReplyRewritten<T>(context: T, from: string | null, to: string): T {
+  if (from === null || !context || typeof context !== 'object') return context;
+  const messages = (context as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) return context;
+  let index = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i] as { role?: unknown; content?: unknown } | null;
+    if (m && m.role === 'assistant' && m.content === from) {
+      index = i;
+      break;
+    }
+  }
+  if (index < 0) return context;
+  const copy = messages.slice();
+  copy[index] = { ...(messages[index] as object), content: to };
+  return { ...(context as object), messages: copy } as T;
+}
+
 async function* blockedOutput(
   context: GuardrailContext,
   evaluation: GuardrailEvaluationResult,

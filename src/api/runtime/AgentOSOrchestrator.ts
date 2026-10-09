@@ -506,6 +506,13 @@ export class AgentOSOrchestrator {
     );
   }
 
+  /** Who a live stream belongs to, for the guardrails that judge its continuation; null once the stream has ended. */
+  public getStreamIdentity(streamId: StreamId): { userId: string; sessionId: string; personaId: string; conversationId: string } | null {
+    const ctx = this.activeStreamContexts.get(streamId);
+    if (!ctx) return null;
+    return { userId: ctx.userId, sessionId: ctx.sessionId, personaId: ctx.personaId, conversationId: ctx.conversationId };
+  }
+
   /**
    * Orchestrates a full logical turn for a user request.
    * This involves managing GMI interaction, tool calls, and streaming responses.
@@ -517,13 +524,6 @@ export class AgentOSOrchestrator {
    * @returns {Promise<StreamId>} The ID of the stream to which responses will be pushed.
    * @throws {GMIError} If critical initialization or setup fails.
    */
-  /** Who a live stream belongs to, for the guardrails that judge its continuation; null once the stream has ended. */
-  public getStreamIdentity(streamId: StreamId): { userId: string; sessionId: string; personaId: string; conversationId: string } | null {
-    const ctx = this.activeStreamContexts.get(streamId);
-    if (!ctx) return null;
-    return { userId: ctx.userId, sessionId: ctx.sessionId, personaId: ctx.personaId, conversationId: ctx.conversationId };
-  }
-
   public async orchestrateTurn(input: AgentOSInput): Promise<StreamId> {
     this.ensureInitialized();
     const agentOSStreamId = await this.dependencies.streamingManager.createStream();

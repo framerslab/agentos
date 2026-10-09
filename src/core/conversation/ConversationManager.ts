@@ -309,6 +309,11 @@ export class ConversationManager {
     return this.getConversationInfo(sessionId);
   }
 
+  /** True when the store never updates a saved row: a message rewritten in memory keeps its first text on disk. */
+  public get appendOnlyPersistence(): boolean {
+    return this.config.appendOnlyPersistence === true;
+  }
+
   /**
    * Saves a ConversationContext to persistent storage if persistence is enabled.
    * This is called automatically when a context is evicted from memory or during shutdown.

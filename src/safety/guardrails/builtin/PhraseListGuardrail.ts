@@ -26,6 +26,7 @@ import {
   type IGuardrailService,
 } from '../IGuardrailService';
 
+/** One entry of a list: the phrase, how it matches, and what a match does (a block at once, or the judge's read). */
 export interface PhraseEntry {
   phrase: string;
   /**
@@ -41,6 +42,7 @@ export interface PhraseEntry {
   ruleId?: string;
 }
 
+/** A reviewed version of a list: the entries with who reviewed them and when, so a verdict names the list it came from. */
 export interface PhraseListSnapshot {
   version: string;
   reviewedAt: string;
@@ -48,20 +50,24 @@ export interface PhraseListSnapshot {
   entries: PhraseEntry[];
 }
 
+/** Where a guard loads its list from; `reload()` asks it again. */
 export interface PhraseListSource {
   load(): Promise<PhraseListSnapshot>;
 }
 
+/** The judge's answer on a text the list flagged: whether to block, how sure, and why. */
 export interface PhraseJudgeVerdict {
   block: boolean;
   confidence: number;
   reason?: string;
 }
 
+/** Reads a flagged text in its sentence and confirms or clears the hit; it never sees a text the list did not flag. */
 export interface PhraseJudge {
   judge(text: string, matched: readonly PhraseEntry[], context: GuardrailContext): Promise<PhraseJudgeVerdict>;
 }
 
+/** How a phrase-list guard is built: its id, its list, the judge behind `onMatch: 'judge'`, the stages it runs on, the replacement a block carries. */
 export interface PhraseListGuardrailOptions {
   id: string;
   source: PhraseListSource;
@@ -139,13 +145,16 @@ export class PhraseListGuardrail implements IGuardrailService {
   private compiled: CompiledEntry[] = [];
   private loaded: PhraseListSnapshot | null = null;
   private readonly normalize: (t: string) => string;
-  private readonly stages: ReadonlySet<'input' | 'output'>;
+  /** The stages this guard evaluates; a required guard is held to them (`IGuardrailService.stages`). */
+  readonly stages: ReadonlyArray<'input' | 'output'>;
+  private readonly stageSet: ReadonlySet<'input' | 'output'>;
 
   private constructor(private readonly opts: PhraseListGuardrailOptions) {
     this.id = opts.id;
     this.config = { failClosed: true, timeoutMs: opts.timeoutMs ?? 8_000, canSanitize: false, evaluateStreamingChunks: false };
     this.normalize = opts.normalize ?? normalizePhraseText;
-    this.stages = new Set(opts.stages ?? ['input', 'output']);
+    this.stages = [...(opts.stages ?? ['input', 'output'])];
+    this.stageSet = new Set(this.stages);
   }
 
   /** Loads the list and compiles it. Refuses a list that does not load, is empty, or has judge entries and no judge. */
@@ -179,12 +188,12 @@ export class PhraseListGuardrail implements IGuardrailService {
   }
 
   async evaluateInput({ input, context }: GuardrailInputPayload): Promise<GuardrailEvaluationResult | null> {
-    if (!this.stages.has('input') || typeof input.textInput !== 'string' || !input.textInput) return null;
+    if (!this.stageSet.has('input') || typeof input.textInput !== 'string' || !input.textInput) return null;
     return this.evaluateText(input.textInput, context);
   }
 
   async evaluateOutput({ chunk, context }: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null> {
-    if (!this.stages.has('output') || chunk.type !== AgentOSResponseChunkType.FINAL_RESPONSE) return null;
+    if (!this.stageSet.has('output') || chunk.type !== AgentOSResponseChunkType.FINAL_RESPONSE) return null;
     const text = (chunk as AgentOSFinalResponseChunk).finalResponseText;
     if (typeof text !== 'string' || !text) return null;
     return this.evaluateText(text, context);
