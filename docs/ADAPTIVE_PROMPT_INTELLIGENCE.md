@@ -31,7 +31,19 @@ The dollar math, in one line: sentiment scoring is the one adaptive surface that
 
 This page is the source-verified map of that loop. Every class, interface, trigger name, and handler ID below corresponds to a real surface in [`packages/agentos`](https://github.com/framerslab/agentos/tree/master). If you only need one mental model: the persona definition is the static contract, and the metaprompt executor is the dynamic editor of the GMI's state turn over turn.
 
-All of it runs inside a GMI, so it applies to the sessions of the full runtime (`AgentOS.processRequest()`) and to a GMI a host builds itself. `agent()` and `agency()` do not create GMIs ([GMIs](./GMI.md)), and their options have no sentiment, metaprompt or contextual-element fields; the examples below are persona definitions.
+All of it runs inside a GMI, so it applies to the sessions of the full runtime (`AgentOS.processRequest()`), to a GMI a host builds itself, and to the sessions of `agent({ runtime: 'gmi' })`. On that path the `cognition` option turns on sentiment tracking (scored by the lexicon of `StatisticalUtilityAI`, with no LLM call) and picks the sentiment presets: `cognition: 'full'` runs all five, and a `CognitionConfig` names them ([GMIs from agent()](./GMI.md#gmis-from-agent)). It carries preset names only: custom `metaPrompts`, turn-interval and manual metaprompts, the self-reflection metaprompt and contextual elements come from a persona definition, which the examples below are.
+
+```typescript
+import { agent } from '@framers/agentos';
+
+const support = agent({
+  runtime: 'gmi',
+  instructions: 'You are a support agent for a billing product.',
+  cognition: { sentiment: true, metaprompts: ['frustration_recovery', 'confusion_clarification'] },
+});
+```
+
+`agent()` without `runtime: 'gmi'` and `agency()` create no GMI ([GMIs](./GMI.md)), so none of this runs on their sessions.
 
 ## What's actually adaptive
 
