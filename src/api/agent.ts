@@ -445,7 +445,11 @@ export interface AgentSession {
   drainHistoryEvents(): HistoryEvent[];
   /** Returns persisted usage totals for this session when the usage ledger is enabled. */
   usage(): Promise<AgentOSUsageAggregate>;
-  /** Charges a cost made outside AgentOS (speech-to-text minutes, a tool's own API) to the agent's budget; does nothing without one. */
+  /**
+   * Charges a cost made outside AgentOS (speech-to-text minutes, a tool's own API) to the agent's budget; does nothing
+   * without one. With a budget, a cost of zero or below records nothing, and a cost that is not a number throws a
+   * `RangeError`.
+   */
   recordExternalCost(costUSD: number, meta?: { kind?: string }): void;
   /** Clears all messages from this session's history. */
   clear(): void;

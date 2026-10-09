@@ -27,7 +27,7 @@ export interface SpendLimitInfo {
 export interface SpendBudgetOptions {
   /** The most the run may spend, in US dollars. */
   maxCostUSD: number;
-  /** The most prompt and completion tokens the run may use, counted by this budget. */
+  /** The most prompt and completion tokens the run may use, counted by this budget: zero or more. */
   maxTotalTokens?: number;
   /**
    * What a call that would pass the budget does: `'throw'` (the default) refuses it with
@@ -79,8 +79,17 @@ export class SpendBudget {
   private readonly guard: CostGuard;
   private tokens = 0;
 
+  /**
+   * @param options - The budget's settings.
+   * @throws {RangeError} When `maxCostUSD`, or a `maxTotalTokens` that is set, is not a number zero or more.
+   */
   constructor(options: SpendBudgetOptions) {
     if (!(options.maxCostUSD >= 0)) throw new RangeError('maxCostUSD must be zero or more');
+    // A token cap of NaN (what `Number(undefined)` gives) would never refuse a call, since every comparison with NaN
+    // is false.
+    if (options.maxTotalTokens !== undefined && !(options.maxTotalTokens >= 0)) {
+      throw new RangeError('maxTotalTokens must be zero or more');
+    }
     this.options = options;
     this.id = options.budgetId ?? `budget-${Date.now()}-${++budgets}`;
     this.guard =
@@ -145,8 +154,17 @@ export class SpendBudget {
     if (costUSD !== undefined && costUSD > 0) this.guard.recordCost(this.id, costUSD, undefined, { what });
   }
 
-  /** Records a cost made outside AgentOS, such as speech-to-text minutes billed by the minute. */
+  /**
+   * Records a cost made outside AgentOS, such as speech-to-text minutes billed by the minute. A cost of zero or below
+   * records nothing.
+   *
+   * @throws {RangeError} When `costUSD` is not a number, `NaN` included: a cost that could not be counted would let
+   *   the run spend past its cap.
+   */
   recordExternal(costUSD: number, kind: string): void {
+    if (typeof costUSD !== 'number' || Number.isNaN(costUSD)) {
+      throw new RangeError(`An outside cost must be a number of US dollars, not ${String(costUSD)}`);
+    }
     if (costUSD > 0) this.guard.recordCost(this.id, costUSD, undefined, { what: `external.${kind}` });
   }
 
