@@ -79,12 +79,16 @@ describe("a day's reservations", () => {
 
   it('settles each expired reservation at its whole amount, and counts each UTC day apart', async () => {
     const store = new InMemorySpendDayStore();
-    await reserveSpend(store, { kind: 'session', micro: 1_020_000, at: AT, expires: LATER, capMicro: LIMIT });
+    const expired = await reserveSpend(store, { kind: 'session', micro: 1_020_000, at: AT, expires: LATER, capMicro: LIMIT });
     const next = new Date('2026-10-13T00:00:01Z');
     await reserveSpend(store, { kind: 'session', micro: 1_020_000, at: next, expires: new Date('2026-10-13T01:00:01Z'), capMicro: LIMIT });
     expect(await releaseExpiredSpend(store, new Date('2026-10-12T12:00:00Z'))).toBe(1);
     expect(await store.lockDay('2026-10-12')).toBe(1_020_000);
     expect(await store.lockDay('2026-10-13')).toBe(1_020_000);
+    // An open reservation and one settled whole leave the same total, so the release that follows tells them apart:
+    // it finds nothing open to settle and changes nothing.
+    expect(await releaseSpend(store, expired, 0, new Date('2026-10-12T12:00:01Z'))).toBe(false);
+    expect(await store.lockDay('2026-10-12')).toBe(1_020_000);
   });
 
   it('refuses an amount that is not whole micro-dollars, and settles a cost that is not a number at the whole reservation', async () => {
