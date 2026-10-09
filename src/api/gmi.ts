@@ -562,11 +562,15 @@ export function gmi(opts: GmiOptions): GmiHandle {
       };
 
       const deps = (source: 'agent.session.send' | 'agent.session.stream'): GmiSessionDeps => ({
-        // The GMI files the replies under the session id it runs the turn under,
-        // and the user's messages under the user id: both are the session's scope.
-        sessionId: memoryScopeId,
+        // Tools, the user context and the reasoning trace see the id the caller
+        // opened and the user id (that session id unless the caller named one).
+        sessionId,
         opts,
-        userId: sessionOptions?.userId ?? memoryScopeId,
+        userId,
+        // Cognitive memory files the replies under the memory scope's session and
+        // the user's messages under its user: the session's own scope, a new one
+        // for an id opened again after close().
+        memoryScope: { sessionId: memoryScopeId, userId: sessionOptions?.userId ?? memoryScopeId },
         // Only a user id the caller passed reaches the provider's end-user field.
         providerUserId: sessionOptions?.userId,
         history,

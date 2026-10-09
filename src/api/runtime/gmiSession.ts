@@ -103,8 +103,15 @@ export interface GmiSessionDeps {
   opts: AgentOptions;
   /** The GMI that serves the next turn: the session's own, or one made for the turn when the session keeps no history. */
   gmiFor(): Promise<GmiForTurn>;
-  /** The user the GMI runs the turn as: it scopes cognitive memory. */
+  /** The user the GMI runs the turn as: tools and the user context see it, and it scopes cognitive memory unless `memoryScope` names another. */
   userId: string;
+  /**
+   * The ids the turn's cognitive memory files and recalls under, in place of
+   * `userId` and `sessionId` (`GMITurnInput.metadata.memoryScope`): a session
+   * id opened again after close() keeps its id for tools, and its memory gets
+   * a scope of its own. Unset, memory uses `userId` and `sessionId`.
+   */
+  memoryScope?: { userId: string; sessionId: string };
   /**
    * The end-user id the turn's model calls send to the provider (OpenAI's `user`
    * / `safety_identifier`): a user id the caller passed, never a session or call
@@ -339,6 +346,7 @@ export async function* runGmiTurn(
       content: input as GMITurnInput['content'],
       metadata: {
         providerUserId: deps.providerUserId ?? null,
+        ...(deps.memoryScope ? { memoryScope: deps.memoryScope } : {}),
         options: {
           ...(turn.options ?? {}),
           ...(turn.responseSchema ? { responseSchema: turn.responseSchema, schemaName: turn.schemaName ?? 'response' } : {}),

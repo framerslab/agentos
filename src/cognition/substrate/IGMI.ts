@@ -260,6 +260,14 @@ export interface GMITurnInput {
      */
     providerUserId?: string | null;
     /**
+     * The ids the turn's cognitive memory files and recalls traces under, in
+     * place of the turn's `userId` and `sessionId` (the session also stands in
+     * for the conversation when no `conversationId` is given). Tools, the user
+     * context and the reasoning trace keep the turn's own ids. Unset, memory
+     * uses the turn's ids.
+     */
+    memoryScope?: { userId?: string; sessionId?: string } | null;
+    /**
      * Optional conversation history snapshot to use for prompt construction.
      * When provided, the GMI should prefer this over any internal ephemeral history so
      * persona switches share conversation memory.
