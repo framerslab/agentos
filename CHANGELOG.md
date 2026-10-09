@@ -1,3 +1,9 @@
+## [0.13.11](https://github.com/framerslab/agentos/compare/v0.13.10...v0.13.11) (2026-10-09)
+
+### fix
+
+* **gmi:** follow-ups from the review of #175 (#193) ([d9f0dd8](https://github.com/framerslab/agentos/commit/d9f0dd8b39a6daa7989dc3e0ff46c2f0b51ae6a5))
+
 ## [0.13.10](https://github.com/framerslab/agentos/compare/v0.13.9...v0.13.10) (2026-10-09)
 
 ### fix

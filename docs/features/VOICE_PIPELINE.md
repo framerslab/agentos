@@ -5,90 +5,84 @@ sidebar_position: 8
 
 # Streaming voice pipeline
 
-A voice agent that talks back is straightforward to build if you don't care that it interrupts the user, never knows when they've stopped speaking, can't recover when the network blips for half a second, and will keep happily generating into a phone that the user already hung up. A voice agent you actually want to use has to handle all of those, which is why the voice path through AgentOS is its own subsystem rather than a thin wrapper over text generation. Turn-taking is a first-class concern. Barge-in is a first-class concern. The fact that audio chunks arrive on a different schedule than text tokens is a first-class concern. The state machine has six states because conversation has at least six distinct things going on at any moment.
-
-This page is the architectural map. The configuration surface is at the bottom; the conceptual model and the wiring sit on top.
+[`VoicePipelineOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoicePipelineOrchestrator.ts) runs one spoken conversation over a transport. Audio frames from the client go to a streaming speech-to-text (STT) session; its transcripts go to an endpoint detector, which decides when the user's turn is over; the turn's text goes to an agent session; the reply's tokens go to a streaming text-to-speech (TTS) session; and its audio goes back through the transport. A barge-in handler decides what happens when the user speaks over the reply.
 
 ## Architecture
 
-The pipeline is six interfaces wired together by the [`VoicePipelineOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoicePipelineOrchestrator.ts):
-
 ```mermaid
 graph LR
-    Client[Browser/App] -->|WebSocket| Transport[IStreamTransport]
-    Transport -->|Audio Frames| STT[IStreamingSTT]
-    Transport -->|Audio Frames| Diarization[IDiarizationEngine]
-    STT -->|Transcripts| Endpoint[IEndpointDetector]
-    Endpoint -->|Turn Complete| LLM[Agent LLM]
-    LLM -->|Token Stream| TTS[IStreamingTTS]
-    TTS -->|Audio Chunks| Transport
-    STT -->|Speech Start| Bargein[IBargeinHandler]
-    Bargein -->|Cancel/Pause| TTS
+    Client[Browser/App] -->|audio frames| Transport[IStreamTransport]
+    Transport -->|AudioFrame| STT[IStreamingSTT session]
+    STT -->|transcripts| Endpoint[IEndpointDetector]
+    Endpoint -->|turn_complete| Agent[IVoicePipelineAgentSession]
+    Agent -->|token stream| TTS[IStreamingTTS session]
+    TTS -->|audio chunks| Transport
+    STT -->|speech_start while speaking| Bargein[IBargeinHandler]
+    Bargein -->|cancel| TTS
 ```
+
+The orchestrator takes every component from the caller. `startSession(transport, agentSession, overrides)` throws when `overrides` lacks `streamingSTT`, `streamingTTS`, `endpointDetector` or `bargeinHandler`; it resolves no provider from configuration or from installed extension packs. `overrides.diarizationEngine` is accepted and not used. One orchestrator runs one session; start another with a new instance.
 
 ## State Machine
 
-The orchestrator manages a conversational loop through these states:
-
 ```mermaid
 stateDiagram-v2
-    [*] --> IDLE
-    IDLE --> LISTENING: startSession()
-    LISTENING --> PROCESSING: turn_complete
-    PROCESSING --> SPEAKING: LLM starts streaming
-    SPEAKING --> LISTENING: TTS complete
-    SPEAKING --> INTERRUPTING: barge-in detected
-    INTERRUPTING --> LISTENING: TTS cancelled
-    LISTENING --> CLOSED: disconnect
-    SPEAKING --> CLOSED: disconnect
+    [*] --> idle
+    idle --> listening: startSession()
+    listening --> processing: turn_complete
+    processing --> speaking: agent token stream opened
+    speaking --> listening: TTS flush_complete
+    speaking --> interrupting: barge-in cancel
+    interrupting --> listening: TTS cancelled
+    listening --> closed: transport close or stopSession()
+    speaking --> closed: transport close or stopSession()
 ```
+
+- On `turn_complete` the orchestrator sends `agent_thinking`, calls `agentSession.sendText(transcript, metadata)`, sends `agent_speaking` and pushes each token to TTS. When TTS reports `flush_complete` it sends `agent_done` with the spoken text and the played duration, resets the endpoint detector and returns to `listening`.
+- On a barge-in `cancel` it cancels the TTS session, calls `agentSession.abort()`, sends `barge_in` and returns to `listening` at once.
+- A transport `close` or `stopSession()` moves any state to `closed` and closes the STT and TTS sessions.
+- While `listening`, a watchdog gives the endpoint detector a synthetic `speech_end` after `maxTurnDurationMs` (default `30000`); the detector decides whether that ends the turn.
 
 ## Quick Start
 
-### Programmatic
-
-The `agent({ voice })` field is typed against [`VoiceConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts#L289). The factory is **synchronous** — it does not return a Promise.
-
 ```typescript
+import { randomUUID } from 'node:crypto';
+import { WebSocketServer } from 'ws';
 import { agent } from '@framers/agentos';
+import {
+  AgentSessionVoiceAdapter,
+  DeepgramStreamingSTT,
+  ElevenLabsStreamingTTS,
+  HardCutBargeinHandler,
+  HeuristicEndpointDetector,
+  VoicePipelineOrchestrator,
+  WebSocketStreamTransport,
+} from '@framers/agentos/io/voice-pipeline';
 
-// Basic voice mode (Whisper STT + OpenAI TTS)
-const basic = agent({
-  voice: { enabled: true },
-});
+const assistant = agent({ provider: 'openai', instructions: 'You are a voice assistant. Answer in short sentences.' });
+const wss = new WebSocketServer({ port: 8765 });
 
-// Deepgram STT + ElevenLabs TTS with diarization
-const advanced = agent({
-  provider: 'openai',                           // LLM provider
-  voice: {
-    enabled: true,
-    stt: 'deepgram',
-    tts: 'elevenlabs',
-    ttsVoice: 'nova',
-    endpointing: 'heuristic',
-    diarization: true,                          // boolean, not an object
-    bargeIn: 'hard-cut',
-    language: 'en-US',
-  },
+wss.on('connection', async (ws) => {
+  // The page sends 16 kHz mono 16-bit PCM as binary messages.
+  const transport = new WebSocketStreamTransport(ws, { sampleRate: 16000, inboundEncoding: 'linear16' });
+  const orchestrator = new VoicePipelineOrchestrator({ stt: 'deepgram', tts: 'elevenlabs', language: 'en-US' });
+
+  await orchestrator.startSession(transport, new AgentSessionVoiceAdapter(assistant.session(randomUUID())), {
+    streamingSTT: new DeepgramStreamingSTT({ apiKey: process.env.DEEPGRAM_API_KEY! }),
+    streamingTTS: new ElevenLabsStreamingTTS({ apiKey: process.env.ELEVENLABS_API_KEY! }),
+    endpointDetector: new HeuristicEndpointDetector(),
+    bargeinHandler: new HardCutBargeinHandler({ minSpeechMs: 0 }), // see Barge-in
+  });
 });
 ```
 
-Install the matching streaming voice packs and set the required API keys before
-enabling voice:
+`AgentSessionVoiceAdapter` sends each turn through `session.stream(text)` and hands its text deltas to TTS; `abort()` stops reading the stream without cancelling the model call. The config's `stt` and `tts` strings are required by the type and not read by the orchestrator; it reads `language` and `sttOptions` for the STT session, `voice`, `format`, `ttsOptions` and `ttsExpressiveness` for the TTS session, and `maxTurnDurationMs` for the watchdog.
 
-- `@framers/agentos-ext-streaming-stt-whisper` + `OPENAI_API_KEY`
-- `@framers/agentos-ext-streaming-stt-deepgram` + `DEEPGRAM_API_KEY`
-- `@framers/agentos-ext-streaming-tts-openai` + `OPENAI_API_KEY`
-- `@framers/agentos-ext-streaming-tts-elevenlabs` + `ELEVENLABS_API_KEY`
-
-`semantic` endpointing also requires an LLM callback to be wired into the
-pipeline; when that callback is absent, the runtime falls back to heuristic
-endpointing.
+`agent({ voice })` accepts a [`VoiceConfig`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts) and does not read it. `agency({ voice: { enabled: true } })` adds `listen()`, which exchanges JSON text messages over a WebSocket and runs no speech recognition or synthesis ([Agency API](../orchestration/AGENCY_API.md)).
 
 ### Wunderland CLI
 
-The same shape is consumed by the [Wunderland](https://wunderland.sh) CLI's
-`chat` command via `--voice` flags ([documented in TELEPHONY_PROVIDERS.md](./TELEPHONY_PROVIDERS.md#cli-flags)). For example:
+The [Wunderland](https://wunderland.sh) CLI's `chat --voice` starts a WebSocket voice server built on this orchestrator, with the reply streamed from the chat runtime and the model request aborted on barge-in ([flags](./TELEPHONY_PROVIDERS.md#cli-flags)):
 
 ```sh
 wunderland chat \
@@ -100,82 +94,86 @@ wunderland chat \
   --voice-port=8765
 ```
 
-CLI flags override values configured in code.
+## Components
 
-## Core Interfaces
-
-| Interface | Purpose |
+| Interface | Implementations in AgentOS |
 |-----------|---------|
-| [`IStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Bidirectional audio pipe (WebSocket now, WebRTC later) |
-| [`IStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Real-time speech-to-text with interim results |
-| [`IEndpointDetector`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Turn-taking: decides when the user is done speaking |
-| [`IDiarizationEngine`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Speaker identification and labeling |
-| [`IStreamingTTS`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Token-stream to audio synthesis |
-| [`IBargeinHandler`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Handles user interruption during agent speech |
+| [`IStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | `WebSocketStreamTransport`, `WebRTCStreamTransport`, `TelephonyStreamTransport` |
+| [`IStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | `DeepgramStreamingSTT` (default model `nova-3`), `ElevenLabsStreamingSTT`, and `StreamingSTTChain` over several of them |
+| [`IEndpointDetector`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | `HeuristicEndpointDetector`, `AcousticEndpointDetector` |
+| [`IStreamingTTS`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | `ElevenLabsStreamingTTS`, `DeepgramAuraStreamingTTS`, `CartesiaStreamingTTS`, `HumeStreamingTTS`, `OpenAIRealtimeTTS`, and `StreamingTTSChain` over several of them |
+| [`IBargeinHandler`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | `HardCutBargeinHandler`, `SoftFadeBargeinHandler` |
+| [`IDiarizationEngine`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | none in this package (see the diarization pack); the orchestrator does not call one |
 
-## Endpointing Modes
+`createVoiceProvidersFromEnv()` builds STT and TTS providers from the API keys in the environment.
 
-| Mode | How it works | Latency | Cost |
-|------|-------------|---------|------|
-| `acoustic` | Pure energy-based VAD + silence timeout | Highest (~3s) | Free |
-| `heuristic` | Punctuation/syntax analysis + silence fallback | Low (~0.5s for `. ? !`) | Free |
-| `semantic` | LLM classifier for ambiguous pauses | Lowest (smart) | LLM API call per ambiguous turn |
+## Endpointing
 
-## Barge-in Modes
+| Detector | The turn ends when | Text sent to the agent |
+|------|-------------|---------|
+| `HeuristicEndpointDetector` | speech ends and the last final transcript ends in `.`, `?` or `!`; otherwise after `silenceTimeoutMs` (default `1500`) of silence | the last final transcript it received; backchannel phrases such as "uh huh" are dropped |
+| `AcousticEndpointDetector` | silence lasts `utteranceEndThresholdMs` (default `3000`) after speech ends | none: its `turn_complete` carries an empty transcript, and the orchestrator sends that empty text to the agent |
+| `SemanticEndpointDetector` (pack `@framers/agentos-ext-endpoint-semantic`) | terminal punctuation as above; otherwise an LLM, called through the pack's `llmCall`, judges whether the turn is complete, with a silence timeout as the fallback | the transcript |
 
-| Mode | Behavior |
-|------|----------|
-| `hard-cut` | Immediately cancel TTS after 300ms of user speech. Injects `[interrupted]` marker into conversation history. |
-| `soft-fade` | Fade TTS over 200ms. If user speaks < 2s (backchannel), resume. If > 2s, cancel. |
-| `disabled` | Agent speaks to completion regardless of user speech. |
+Without an `llmCall`, the semantic pack's classifier answers `INCOMPLETE` and the silence timeout ends every turn without terminal punctuation.
+
+The orchestrator feeds the detectors the STT session's `speech_start` and `speech_end` events; it runs no voice activity detection of its own.
+
+## Barge-in
+
+The orchestrator asks the barge-in handler when the STT session reports `speech_start` while the pipeline is `speaking`, and passes `speechDurationMs: 0`, since the speech has just started.
+
+| Handler | Decision | With the orchestrator |
+|------|----------|----------|
+| `HardCutBargeinHandler` | `cancel` when `speechDurationMs` is at least `minSpeechMs` (default `300`), else `ignore` | cancels only with `minSpeechMs: 0`; at the default it never cancels |
+| `SoftFadeBargeinHandler` | `ignore` below `ignoreMs` (default `100`), `cancel` at `cancelMs` (default `2000`) or more, else `pause` with `fadeMs` (default `200`) | at the defaults it always ignores; with `ignoreMs: 0` it answers `pause` |
+
+- `cancel`: the pipeline goes `interrupting` and back to `listening`, as described under State Machine.
+- `pause`: the orchestrator sends `barge_in` with the action and keeps speaking; the client fades the audio. The orchestrator takes no action on a later `resume`.
+- A `cancel` action carries `injectMarker: '[interrupted]'`; the client receives it in the `barge_in` message, and nothing writes it into the conversation history.
+- There is no `disabled` handler, and the config's `bargeIn` field is not read. To never interrupt, pass a handler whose `handleBargein()` returns `{ type: 'ignore' }`.
 
 ## Extension Packs
 
-| Pack | npm Package | Provider | Env Var |
-|------|------------|----------|---------|
-| Deepgram STT | `@framers/agentos-ext-streaming-stt-deepgram` | Deepgram Nova-2 | `DEEPGRAM_API_KEY` |
-| Whisper STT | `@framers/agentos-ext-streaming-stt-whisper` | OpenAI Whisper | `OPENAI_API_KEY` |
-| OpenAI TTS | `@framers/agentos-ext-streaming-tts-openai` | OpenAI TTS-1 | `OPENAI_API_KEY` |
-| ElevenLabs TTS | `@framers/agentos-ext-streaming-tts-elevenlabs` | ElevenLabs | `ELEVENLABS_API_KEY` |
-| Diarization | `@framers/agentos-ext-diarization` | Local x-vector | — |
-| Semantic Endpoint | `@framers/agentos-ext-endpoint-semantic` | Any LLM | LLM API key |
+These packs live in [agentos-extensions](https://github.com/framerslab/agentos-extensions/tree/master/registry/curated/voice). The orchestrator does not load packs: a host builds a pack's provider or detector and passes it in `overrides`.
 
-## WebSocket Protocol
+| Pack | npm Package | Env Var |
+|------|------------|---------|
+| Deepgram streaming STT | `@framers/agentos-ext-streaming-stt-deepgram` | `DEEPGRAM_API_KEY` |
+| Whisper streaming STT | `@framers/agentos-ext-streaming-stt-whisper` | `OPENAI_API_KEY` |
+| OpenAI streaming TTS | `@framers/agentos-ext-streaming-tts-openai` | `OPENAI_API_KEY` |
+| ElevenLabs streaming TTS | `@framers/agentos-ext-streaming-tts-elevenlabs` | `ELEVENLABS_API_KEY` |
+| Speaker diarization | `@framers/agentos-ext-diarization` | — |
+| Semantic endpointing | `@framers/agentos-ext-endpoint-semantic` | the key of the model behind `llmCall` |
 
-The voice server communicates via WebSocket:
+## WebSocket Messages
 
-- **Binary messages**: Raw audio (client→server: PCM Float32 mono; server→client: encoded mp3/opus)
-- **Text messages**: JSON control/metadata
+`WebSocketStreamTransport` carries audio as binary messages and control as JSON text messages.
 
 ### Client → Server
 
-```typescript
-// Text messages
-{ type: 'config', sampleRate: 16000, voice: 'nova', language: 'en-US' }
-{ type: 'control', action: 'mute' | 'unmute' | 'stop' }
-
-// Binary messages: raw PCM Float32 mono audio
-```
+- **Binary**: mono samples at the transport's `sampleRate`, as serialized `Float32Array` bytes by default, or as 16-bit little-endian PCM with `inboundEncoding: 'linear16'`.
+- **Text**: JSON, emitted as the transport's `message` event. The protocol type names `{ type: 'config', config }` and `{ type: 'control', action: { type: 'mute' | 'unmute' | 'config' | 'stop' } }`; the orchestrator does not act on either, so a host that offers them handles the event itself.
 
 ### Server → Client
 
 ```typescript
-{ type: 'session_started', sessionId: '...', config: { sampleRate: 24000, format: 'opus' } }
-{ type: 'transcript', text: 'Hello', isFinal: false, speaker: 'Speaker_0' }
+{ type: 'transcript', text: 'Hello', isFinal: false, confidence: 0.92 }
 { type: 'agent_thinking' }
-{ type: 'agent_speaking', text: 'Hi there!' }
-{ type: 'agent_done' }
-{ type: 'barge_in', action: 'cancelled' }
-{ type: 'session_ended', reason: 'disconnect' }
+{ type: 'agent_speaking', text: '' }
+{ type: 'agent_done', text: 'Hi there!', durationMs: 1840 }
+{ type: 'barge_in', action: { type: 'cancel', injectMarker: '[interrupted]' } }
 
-// Binary messages: encoded audio (mp3/opus) in negotiated format
+// Binary messages: each TTS audio chunk, in the TTS provider's output format
 ```
+
+The protocol type also declares `session_started`, `error` and `session_ended` messages, which the orchestrator does not send.
 
 ## LiveKit Rooms
 
 ### Transcripts in the room
 
-`LiveKitTranscriptionOutput` (in `@framers/agentos/io/hearing/livekit`) writes a speech-to-text session's transcripts into the room as LiveKit's own transcription output does, so a page's standard `lk.transcription` handler shows them: each interim and each final is a text stream with the line's whole text and the attributes `lk.segment_id` (the transcript's `itemId`), `lk.transcription_final` (`'true'` on the final) and `lk.transcribed_track_id`. It keeps the finals, and `replayAfter(itemId, identity)` sends that participant the finals after the line the page names, a line taken back among them as its empty final, so a page that reconnects is whole again. The page names the line its own ledger's `resumeAfterId()` gives, the last final before its first line still being heard, since completion events from different turns can arrive out of order; a final it already holds comes again and is dropped.
+`LiveKitTranscriptionOutput` (in `@framers/agentos/io/hearing/livekit`) writes a speech-to-text session's transcripts into the room as LiveKit's own transcription output does, so a page's standard `lk.transcription` handler shows them: each interim and each final is a text stream with the line's whole text and the attributes `lk.segment_id` (the transcript's `itemId`), `lk.transcription_final` (`'true'` on the final) and `lk.transcribed_track_id`. A final whose transcript has `startMs` and `endMs` also carries `agentos.start_ms` and `agentos.end_ms` (`TRANSCRIPTION_TIME_ATTRIBUTES`, exported from `@framers/agentos/io/voice-pipeline` and `@framers/agentos/io/voice-pipeline/browser`): the line's start and end on the session's audio clock, rounded to whole milliseconds and written in decimal digits; an interim carries neither. It keeps the finals, and `replayAfter(itemId, identity)` sends that participant the finals after the line the page names, each with the times it was first written with, a line taken back among them as its empty final, so a page that reconnects is whole again. The page names the line its own ledger's `resumeAfterId()` gives, the last final before its first line still being heard, since completion events from different turns can arrive out of order; a final it already holds comes again and is dropped.
 
 ```typescript
 import { LiveKitTranscriptionOutput } from '@framers/agentos/io/hearing/livekit';
@@ -203,7 +201,7 @@ room.registerTextStreamHandler(LIVEKIT_TRANSCRIPTION_TOPIC, async (reader) => {
 });
 ```
 
-A line the provider could not transcribe arrives as an empty final with `agentos.transcription_failed` holding a short reason; an empty final without it takes back the text the line showed, and the ledger hides the line.
+A line the provider could not transcribe arrives as an empty final with `agentos.transcription_failed` holding a short reason; an empty final without it takes back the text the line showed, and the ledger hides the line. `transcriptEventFromLiveKit()` reads a final's `agentos.start_ms` and `agentos.end_ms` into the event's `startMs` and `endMs`, so the ledger's line holds the times its final carried; a value that is not whole milliseconds in decimal digits is ignored, and its field stays undefined.
 
 ## Speech-to-text in the browser
 
@@ -263,136 +261,135 @@ await copyFile(new URL('./capture-worklet.js', entry), 'public/audio/capture-wor
 
 `AudioProcessor` (in `@framers/agentos/io/hearing`) is the older capture: it reads the audio through a `ScriptProcessorNode` on the page's main thread, a node deprecated in favour of `AudioWorkletNode` ([MDN](https://developer.mozilla.org/en-US/docs/Web/API/ScriptProcessorNode)), and feeds its frames to `EnvironmentalCalibrator` and `AdaptiveVAD`.
 
-## Error Recovery
 
-| Failure | Recovery |
+## Failures
+
+| Failure | What happens |
 |---------|----------|
-| STT connection drops | Auto-reconnect with exponential backoff (100ms → 5s). Audio frames buffered during reconnect. |
-| TTS connection drops | Cancel current utterance, re-create session, re-send buffered text. |
-| Transport disconnects | Tear down all sessions. Client must reconnect. |
-| Endpoint stuck | 30s watchdog timer forces `turn_complete`. |
-| Diarization lag | Non-blocking. Transcript sent to LLM immediately; speaker labels backfilled. |
+| The transport closes | The pipeline goes `closed` and closes the STT and TTS sessions. The client reconnects into a new session. |
+| An STT or TTS provider fails to start | Through `StreamingSTTChain` or `StreamingTTSChain`, the next provider in priority order starts instead; a circuit breaker skips providers that failed recently. A single provider fails the `startSession()` call. |
+| An STT or TTS session fails during the call | Through a chain, the next provider takes over: the STT chain replays up to `ringBufferCapacityMs` (default `3000`) of buffered audio, and the TTS chain replays the text it was given. A single provider has no reconnect. |
+| No turn completes | The watchdog gives the endpoint detector a synthetic `speech_end` after `maxTurnDurationMs`. |
 
-## Known Limitations
-
-The voice pipeline is functional but has these known limitations that will be addressed in future releases:
-
-### No True Incremental LLM Streaming
-
-The current `chat --voice` implementation gets the full LLM text reply first, then chunks it for TTS. This means:
-- First audio playback is delayed until the LLM finishes generating
-- Barge-in cannot cancel in-flight LLM generation — only TTS playback
-- Future: wire a real streaming text-turn API from the chat runtime into [`IVoicePipelineAgentSession`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)
-
-### Semantic Endpointing Requires LLM Callback
-
-The semantic endpoint detector (`@framers/agentos-ext-endpoint-semantic`) only invokes the LLM turn-completeness classifier when an explicit `llmCall` callback is provided. Without it, the detector falls back to heuristic endpointing (punctuation + silence timeout).
-
-### Telephony Media Stream Bridge
-
-The [`TelephonyStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/channels/telephony/TelephonyStreamTransport.ts) bridges provider media streams (Twilio, Telnyx, Plivo) into the voice pipeline. Webhook routes handle call lifecycle via [`CallManager`](https://github.com/framerslab/agentos/blob/master/src/io/channels/telephony/CallManager.ts), and media stream WebSocket connections feed audio through the same [`VoicePipelineOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoicePipelineOrchestrator.ts) used by browser voice. The [`VoiceTransportAdapter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/VoiceTransportAdapter.ts) now fully wires `deliverNodeOutput()` to `pushToTTS()` and `getNodeInput()` to `waitForUserTurn()` for IVR graph flows.
-
-### Env-Based Provider Resolution
-
-The [`SpeechProviderResolver`](https://github.com/framerslab/agentos/blob/master/src/io/speech/SpeechProviderResolver.ts) and `createStreamingPipeline()` currently resolve voice components based on environment variables and static configuration. Future versions will resolve through a real [`ExtensionManager`](https://github.com/framerslab/agentos/blob/master/src/extensions/ExtensionManager.ts) runtime with dynamic pack loading and hot-swapping.
-
-### No Call Recording or Transcript Persistence
-
-Call transcripts are held in memory during the call but are not persisted to storage after the call ends. Future: integrate with AgentOS storage/memory system.
+Wunderland's `chat --voice` server and `TelephonyStreamTransport` (Twilio, Telnyx and Plivo media streams) build on the same orchestrator; see [Telephony Providers](./TELEPHONY_PROVIDERS.md).
 
 ---
 
-## Voice-Graph Integration
+## Voice in Orchestration Graphs
 
-AgentOS lets you embed voice I/O directly inside an orchestration graph. There are two complementary integration modes: **voice nodes** (one step in a larger graph is a voice session) and **voice transport** (the entire graph runs inside a phone call or real-time voice session).
+### Voice nodes
 
-### Voice as a Graph Node Type
-
-Use the `voiceNode()` builder to create a [`GraphNode`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) of type `'voice'`. The node manages a full multi-turn STT/TTS session and exits when one of its configured exit conditions fires.
+`voiceNode()` (from `@framers/agentos/orchestration`) builds a [`GraphNode`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) of type `'voice'`; so does a workflow step with a `voice` field, `step('listen', { voice: { mode: 'conversation', maxTurns: 3 } })`.
 
 ```typescript
 import { voiceNode } from '@framers/agentos/orchestration';
 
-const listenNode = voiceNode('intake', {
+const intake = voiceNode('intake', {
   mode: 'conversation',
-  stt: 'deepgram',
-  tts: 'elevenlabs',
   maxTurns: 5,
   exitOn: 'keyword',
   exitKeywords: ['confirmed', 'cancel'],
 })
   .on('keyword:confirmed', 'process-intake')
-  .on('keyword:cancel',    'goodbye')
-  .on('hangup',            'end')
-  .on('turns-exhausted',   'fallback')
+  .on('keyword:cancel', 'goodbye')
+  .on('hangup', 'end')
+  .on('turns-exhausted', 'fallback')
   .build();
 ```
-
-The builder produces a [`GraphNode`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) with:
 
 | Property | Value |
 |----------|-------|
 | `type` | `'voice'` |
 | `executorConfig.type` | `'voice'` |
-| `executionMode` | `'react_bounded'` — models the multi-turn loop |
-| `effectClass` | `'external'` — touches real-world audio I/O |
-| `checkpoint` | `'before'` — snapshot taken before the session starts |
+| `executionMode` | `'react_bounded'` |
+| `effectClass` | `'external'` |
+| `checkpoint` | `'before'` |
 
-Exit reasons map to the next node via `.on(exitReason, targetNodeId)`. The `.on()` chain is order-independent; the voice executor resolves the correct edge after the session ends.
+A voice node runs only when both of these hold; otherwise it returns `success: false`:
 
-### Voice Transport Mode
+- the compiled graph's dependencies include a [`VoiceNodeExecutor`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/VoiceNodeExecutor.ts): `compile({ deps: { voiceExecutor: new VoiceNodeExecutor(eventSink) } })`;
+- the run's `state.scratch.voiceTransport` holds the transport. [`VoiceTransportAdapter.init(state)`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/VoiceTransportAdapter.ts) puts it there, with itself as `state.scratch.voiceAdapter`.
 
-When the entire workflow should run inside a single phone call, declare a `transport` at the workflow level. All nodes in the graph then receive input from STT and deliver output to TTS via a [`VoiceTransportAdapter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/VoiceTransportAdapter.ts).
+`VoiceNodeExecutor` and `VoiceTransportAdapter` are imported from `@framers/agentos/orchestration/runtime/VoiceNodeExecutor` and `@framers/agentos/orchestration/runtime/VoiceTransportAdapter`.
+
+The executor reads the node's `mode`, `speakText`, `maxTurns`, `exitOn` and `exitKeywords`. The node's `stt`, `tts`, `voice`, `endpointing`, `bargeIn`, `diarization` and `language` are not read: the node uses whatever pipeline the transport carries.
+
+- `mode: 'speak-only'` sends `speakText` to TTS through the adapter's `deliverNodeOutput()` and exits with `completed`.
+- Any other mode listens for `interim_transcript`, `final_transcript`, `turn_complete`, `barge_in` and `speech_start` on `transport._voiceSession`, and races the exit conditions below. `VoiceTransportAdapter` sets `_voiceSession` to the `session` passed in its fourth argument, `new VoiceTransportAdapter(config, transport, eventSink, { pipeline, session })`. A `VoicePipelineSession` from `startSession()` emits only `state_change`, so the host passes an emitter that relays the pipeline's transcript, turn and barge-in events under those names.
+
+| `exitReason` | Trigger |
+|---|---|
+| `hangup` | the transport emits `close` or `disconnected` |
+| `turns-exhausted` | a `turn_complete` brings the turn count to `maxTurns` (`0` or unset: no limit) |
+| `keyword:<word>` | with `exitOn: 'keyword'`, a `final_transcript` contains one of `exitKeywords` (case-insensitive substring) |
+| `silence-timeout` | with `exitOn: 'silence-timeout'`, 30 s pass without `speech_start` or `turn_complete` |
+| `interrupted` | the node's abort signal fires, including through a [`VoiceInterruptError`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoiceInterruptError.ts) |
+| `completed` | a `speak-only` node finished |
+| `error` | the session threw |
+
+The exit reason picks the edge set with `.on(exitReason, target)`. A loopback edge restarts listening after a barge-in:
 
 ```typescript
-import { workflow } from '@framers/agentos/orchestration';
-import { VoiceTransportAdapter } from '@framers/agentos/orchestration/runtime/VoiceTransportAdapter';
-
-const callFlow = workflow('phone-intake')
-  .input(inputSchema)
-  .returns(outputSchema)
-  .transport('voice', { stt: 'deepgram', tts: 'openai', voice: 'alloy' })
-  .step('greet',    { voice: { mode: 'speak-only' } })
-  .step('listen',   { voice: { mode: 'conversation', maxTurns: 3 } })
-  .step('confirm',  { voice: { mode: 'conversation', exitOn: 'keyword', exitKeywords: ['yes', 'no'] } })
-  .step('process',  { tool: 'crm_update' })
-  .compile();
+voiceNode('listen', { mode: 'conversation' })
+  .on('interrupted', 'listen')
+  .on('turns-exhausted', 'summarize')
+  .on('hangup', 'end')
+  .build();
 ```
 
-The [`VoiceTransportAdapter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/VoiceTransportAdapter.ts) bridges the graph I/O cycle:
+### The adapter
 
-- `getNodeInput(nodeId)` — waits for the user's next speech turn (resolves on `turn_complete`).
-- `deliverNodeOutput(nodeId, text)` — sends the node's response to TTS and emits a `voice_audio` graph event.
-- `init(state)` — injects `state.scratch.voiceTransport` so voice nodes can access the transport.
-- `dispose()` — emits `voice_session ended` and tears down the adapter.
+`VoiceTransportAdapter` bridges graph input and output to a voice pipeline:
 
-### YAML Syntax
+- `init(state)` puts the transport and the adapter into `state.scratch`. Given `{ pipeline, session }`, it uses that pipeline; without them it constructs a `VoicePipelineOrchestrator` from its config and does not start a session, so `deliverNodeOutput()` then throws `No active TTS session` and `getNodeInput()` waits on a pipeline that never runs. Pass a pipeline whose session you started.
+- `getNodeInput(nodeId)` waits for the pipeline's next `turn_complete` and returns its transcript.
+- `deliverNodeOutput(nodeId, text)` sends text or a token stream to the pipeline's TTS session and emits a `voice_audio` graph event.
+- `dispose()` emits `voice_session` with `action: 'ended'`.
 
-#### Voice step in a YAML workflow
+`workflow().transport('voice', config)` stores the config on the builder; `compile()` does not read it and creates no adapter.
 
-```yaml
-name: phone-intake
-steps:
-  - id: greet
-    voice:
-      mode: speak-only
-      tts: openai
-      voice: alloy
+### Graph events
 
-  - id: collect-info
-    voice:
-      mode: conversation
-      stt: deepgram
-      endpointing: heuristic
-      bargeIn: hard-cut
-      maxTurns: 5
-      exitOn: keyword
-      exitKeywords:
-        - confirmed
-        - cancel
+| Event type | When |
+|---|---|
+| `voice_session` (action `started`) | the executor starts a listening node, or the adapter's `init()` runs |
+| `voice_transcript` (`isFinal: false`) | each `interim_transcript` on the session emitter |
+| `voice_transcript` (`isFinal: true`) | each `final_transcript` on the session emitter |
+| `voice_turn_complete` | each `turn_complete` on the session emitter, and each `getNodeInput()` result |
+| `voice_audio` (direction `outbound`) | `deliverNodeOutput()` |
+| `voice_barge_in` | each `barge_in` on the session emitter |
+| `voice_session` (action `ended`) | the node exits, with its `exitReason`, or the adapter is disposed |
+
+The executor and the adapter send these events to the sink each was constructed with:
+
+```typescript
+import { VoiceNodeExecutor } from '@framers/agentos/orchestration/runtime/VoiceNodeExecutor';
+
+const voiceExecutor = new VoiceNodeExecutor((event) => {
+  if (event.type === 'voice_transcript' && event.isFinal) console.log(event.text);
+  if (event.type === 'voice_session' && event.action === 'ended') console.log('exit:', event.exitReason);
+});
 ```
 
-#### Voice transport at workflow level
+### Checkpoints
+
+Voice nodes take a checkpoint before they run, so a resumed graph starts the voice node again. After each run the executor writes a [`VoiceNodeCheckpoint`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/VoiceNodeExecutor.ts) to `scratchUpdate[nodeId]`:
+
+```typescript
+interface VoiceNodeCheckpoint {
+  turnIndex: number;              // turns completed, including earlier runs of the node
+  transcript: Array<{ speaker: string; text: string; timestamp: number }>; // the buffered transcript
+  lastExitReason: string | null;
+  speakerMap: Record<string, string>;
+  sessionConfig: VoiceNodeConfig;
+}
+```
+
+When the node runs again, the executor reads `state.scratch[nodeId].turnIndex` and continues the turn count from it, so a call that spans several graph runs (for example around a human approval) counts its turns across them.
+
+### YAML workflows (Wunderland)
+
+AgentOS has no YAML workflow compiler. Wunderland's `compileWorkflowYaml()` (in the `wunderland` package) reads `voice` steps, which it lowers to the same `voice` nodes, and a top-level `transport` block, which it attaches to the compiled workflow as `_transport`:
 
 ```yaml
 name: phone-intake
@@ -400,9 +397,6 @@ transport:
   type: voice
   stt: deepgram
   tts: elevenlabs
-  voice: nova
-  bargeIn: hard-cut
-  endpointing: heuristic
 steps:
   - id: greet
     voice:
@@ -415,130 +409,39 @@ steps:
       exitKeywords: [confirmed, done]
 ```
 
-When `transport.type: voice` is present, `compileWorkflowYaml()` attaches the config to `compiled._transport` so the caller can detect that the workflow expects a `VoiceTransportAdapter` at runtime.
-
-#### YAML voice step fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `mode` | `conversation` \| `listen-only` \| `speak-only` | **Required.** Session direction. |
-| `stt` | string | STT provider override (e.g. `deepgram`, `openai`). |
-| `tts` | string | TTS provider override (e.g. `openai`, `elevenlabs`). |
-| `voice` | string | TTS voice name. |
-| `endpointing` | `acoustic` \| `heuristic` \| `semantic` | Endpoint detection mode. |
-| `bargeIn` | `hard-cut` \| `soft-fade` \| `disabled` | Barge-in handling. |
-| `diarization` | boolean | Enable speaker diarization. |
-| `language` | string | BCP-47 language tag (e.g. `en-US`). |
-| `maxTurns` | number | Maximum turns before `turns-exhausted` exit. `0` = unlimited. |
-| `exitOn` | string | Primary exit condition: `hangup`, `silence-timeout`, `keyword`, `turns-exhausted`, `manual`. |
-| `exitKeywords` | string[] | Phrases that trigger keyword exit. Case-insensitive substring match. |
-
-### Barge-in Routing with Exit Conditions
-
-The [`VoiceNodeExecutor`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/VoiceNodeExecutor.ts) races multiple exit conditions simultaneously via a `Promise.race`. The first condition to fire determines the `exitReason` string, which is then looked up in the node's edge map to resolve the `routeTarget`.
-
-| `exitReason` | Trigger | Typical edge target |
-|---|---|---|
-| `hangup` | Transport emits `close` or `disconnected` | `end` / cleanup node |
-| `turns-exhausted` | `turn_complete` fires and `turnCount >= maxTurns` | summarize / fallback node |
-| `keyword:<word>` | `final_transcript` contains a phrase from `exitKeywords` | intent-specific handler |
-| `silence-timeout` | No speech for 30 s when `exitOn: silence-timeout` | timeout handler / retry |
-| `interrupted` | `AbortController` fired with a [`VoiceInterruptError`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoiceInterruptError.ts) (barge-in) | re-listen / cancel TTS |
-
-When a barge-in occurs, the executor catches the [`VoiceInterruptError`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoiceInterruptError.ts) and returns `exitReason: 'interrupted'`. Wire a loopback edge `.on('interrupted', 'listen')` to restart the listen cycle:
-
-```typescript
-voiceNode('listen', { mode: 'conversation' })
-  .on('interrupted',      'listen')   // barge-in → re-listen
-  .on('turns-exhausted',  'summarize')
-  .on('hangup',           'end')
-  .build();
-```
-
-### Graph Events for Voice
-
-Voice nodes emit the following [`GraphEvent`](https://github.com/framerslab/agentos/blob/master/src/orchestration/events/GraphEvent.ts) values in causal order:
-
-| Event type | When |
-|---|---|
-| `voice_session` (action: `started`) | Immediately on `execute()` entry |
-| `voice_transcript` (isFinal: false) | Each `interim_transcript` from STT |
-| `voice_transcript` (isFinal: true) | Each confirmed `final_transcript` |
-| `voice_turn_complete` | Each `turn_complete` from endpoint detector |
-| `voice_audio` (direction: `outbound`) | When TTS delivery is triggered by `VoiceTransportAdapter.deliverNodeOutput()` |
-| `voice_barge_in` | Each `barge_in` event from the pipeline session |
-| `voice_session` (action: `ended`) | On node exit, with `exitReason` |
-
-Consume events via the [`GraphRuntime`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/GraphRuntime.ts) stream:
-
-```typescript
-for await (const event of runtime.stream(graph, input)) {
-  if (event.type === 'voice_transcript' && event.isFinal) {
-    console.log(`[${event.speaker}] ${event.text}`);
-  }
-  if (event.type === 'voice_session' && event.action === 'ended') {
-    console.log('Session exit reason:', event.exitReason);
-  }
-}
-```
-
-### Checkpoint Support
-
-Voice nodes use `checkpoint: 'before'` so the runtime takes a state snapshot before each voice session starts. If the process crashes mid-call, the graph can be resumed from the beginning of that voice node.
-
-In addition, the [`VoiceNodeExecutor`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/VoiceNodeExecutor.ts) writes a [`VoiceNodeCheckpoint`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/VoiceNodeExecutor.ts) to `scratchUpdate[nodeId]` after every execution:
-
-```typescript
-interface VoiceNodeCheckpoint {
-  turnIndex: number;          // total turns completed (inclusive of prior runs)
-  transcript: TranscriptEntry[]; // full buffered transcript
-  lastExitReason: string | null;
-  speakerMap: Record<string, string>;
-  sessionConfig: VoiceNodeConfig;
-}
-```
-
-Pass `state.scratch[nodeId].turnIndex` back as the `initialTurnCount` when constructing a [`VoiceTurnCollector`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/VoiceTurnCollector.ts) to resume the turn counter from where the previous run left off — enabling a call that spans multiple graph runs (e.g. after a human-approval pause) to count turns continuously rather than resetting to zero.
+A voice step takes the [`VoiceNodeConfig`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) fields; `mode` (`conversation`, `listen-only` or `speak-only`) is required.
 
 ---
 
 ## Provider Options (sttOptions / ttsOptions)
 
-The orchestrator forwards pipeline-level `sttOptions` and `ttsOptions` to providers via `providerOptions`. This enables provider-specific features without changing the core interfaces.
+`VoicePipelineConfig.sttOptions` and `ttsOptions` reach the providers as `providerOptions` when `startSession()` opens the STT and TTS sessions. Both sessions last for the whole pipeline session, so the options hold for every turn of it.
 
 ### Deepgram STT Options
 
-Pass through `VoicePipelineConfig.sttOptions`:
-
 ```typescript
 const orchestrator = new VoicePipelineOrchestrator({
-  stt: 'deepgram-streaming',
-  tts: 'elevenlabs-streaming',
+  stt: 'deepgram',
+  tts: 'elevenlabs',
   sttOptions: {
-    sentiment: true,           // Per-utterance sentiment analysis
-    smart_format: true,        // Auto-punctuation, capitalization, numbers
-    diarize: true,             // Speaker diarization labels
-    utterance_end_ms: 1000,    // Server-side silence endpoint (ms)
-    keywords: [                // Keyword boosting (name:weight format)
-      'Gideon:2',
-      'The Crevasse:1.5',
-      'fireball:1.5',
-    ],
+    sentiment: true,
+    smart_format: true,
+    diarize: true,
+    utterance_end_ms: 1000,
+    keywords: ['Gideon:2', 'fireball:1.5'],
   },
 });
 ```
 
-| Option | Type | Deepgram Param | Effect |
-|--------|------|---------------|--------|
-| `sentiment` | `boolean` | `sentiment=true` | Returns sentiment per utterance (`positive`/`negative`/`neutral` + confidence) |
-| `smart_format` | `boolean` | `smart_format=true` | Auto-punctuates, capitalizes, formats numbers and dates |
-| `diarize` | `boolean` | `diarize=true` | Labels speaker identity per word (`speaker: 0`, `speaker: 1`) |
-| `utterance_end_ms` | `number` | `utterance_end_ms=N` | Server-side silence endpoint detection (supplements client-side heuristic) |
-| `keywords` | `string[]` | `keywords=word:weight` | Boosts recognition of specific terms (names, game terms, spells) |
+| Option | Type | Deepgram query parameter |
+|--------|------|---------------|
+| `sentiment` | `boolean` | `sentiment=true` |
+| `smart_format` | `boolean` | `smart_format=true` |
+| `diarize` | `boolean` | `diarize=true` |
+| `utterance_end_ms` | `number` | `utterance_end_ms=N` |
+| `keywords` | `string[]` | `keywords=term:weight`; with a `nova-3` model (the default) each term goes as `keyterm` with its `:weight` dropped |
 
-#### Sentiment in TranscriptEvent
-
-When `sentiment: true` is enabled, [`TranscriptEvent`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) includes a `sentiment` field:
+With `sentiment: true`, the session's [`TranscriptEvent`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) carries `sentiment`:
 
 ```typescript
 interface TranscriptEvent {
@@ -558,77 +461,62 @@ interface TranscriptEvent {
 }
 ```
 
-Consumers can use this for mood modulation, game mechanics, or UI feedback without additional NLP processing.
+The orchestrator relays `text`, `isFinal` and `confidence` to the client; the other fields stay on the STT session's events.
 
 ### ElevenLabs TTS Options
 
-Pass through `VoicePipelineConfig.ttsOptions`:
-
 ```typescript
 const orchestrator = new VoicePipelineOrchestrator({
-  stt: 'deepgram-streaming',
-  tts: 'elevenlabs-streaming',
+  stt: 'deepgram',
+  tts: 'elevenlabs',
   ttsOptions: {
-    stability: 0.3,            // 0.0-1.0: lower = more expressive
-    similarityBoost: 0.75,     // 0.0-1.0: voice clone fidelity
-    style: 0.6,                // 0.0-1.0: style exaggeration
-    useSpeakerBoost: true,     // Clarity enhancement
-    speed: 0.85,               // 0.1-5.0: speaking rate
+    stability: 0.3,
+    similarityBoost: 0.75,
+    style: 0.6,
+    useSpeakerBoost: true,
+    speed: 0.85,
   },
 });
 ```
 
-| Option | Type | Range | Default | Effect |
-|--------|------|-------|---------|--------|
-| `stability` | `number` | 0.0-1.0 | 0.5 | Intonation variability. Low = more expressive. |
-| `similarityBoost` | `number` | 0.0-1.0 | 0.75 | Voice clone fidelity. |
-| `style` | `number` | 0.0-1.0 | 0.0 | Exaggeration of the voice's natural style. |
-| `useSpeakerBoost` | `boolean` | — | true | Clarity enhancement filter. |
-| `speed` | `number` | 0.1-5.0 | 1.0 | Speaking rate multiplier. |
+| Option | Type | Default | Sent as |
+|--------|------|---------|--------|
+| `stability` | `number` | `0.5` | `voice_settings.stability` |
+| `similarityBoost` | `number` | `0.75` | `voice_settings.similarity_boost` |
+| `style` | `number` | `0` | `voice_settings.style` |
+| `useSpeakerBoost` | `boolean` | `true` | `voice_settings.use_speaker_boost` |
+| `speed` | `number` | not sent | `generation_config.speed` |
 
-These are sent in the ElevenLabs WebSocket BOS (beginning-of-stream) message as `voice_settings` and `generation_config.speed`.
-
-### Dynamic Expressiveness
-
-For applications that modulate voice based on character state (personality, mood, game context), compute `ttsOptions` per turn rather than setting them once at session start. The orchestrator creates a new TTS session per utterance, so changing `ttsOptions` between turns takes effect immediately.
-
-```typescript
-// Example: mood-reactive voice
-const expressiveness = computeExpressiveness(personality, currentMood);
-const orchestrator = new VoicePipelineOrchestrator({
-  // ...
-  ttsOptions: expressiveness,
-});
-```
+They go in the first message of the ElevenLabs WebSocket stream. `ttsExpressiveness`, when set, takes precedence over these keys. Settings computed from a character's state apply from the next pipeline session, since the TTS session opens once per pipeline session.
 
 ---
 
 ## References
 
-### Voice activity detection + endpoint detection
+### Voice activity detection and endpoint detection
 
-- Tan, Z.-H., Sarkar, A. K., & Dehak, N. (2020). [*rVAD: An unsupervised segment-based robust voice activity detection method.*](https://arxiv.org/abs/1906.03588) *Computer Speech & Language*, 59, 1–21. — Robust VAD baseline informing the heuristic endpoint detector's silence-vs-speech discrimination.
-- Silero Team. (2024). [*Silero VAD: Pre-trained enterprise-grade voice activity detector.*](https://github.com/snakers4/silero-vad) — Production-grade VAD model widely used in real-time pipelines; reference for the acoustic endpoint detector design.
-- Skerry-Ryan, R. J., Battenberg, E., Xiao, Y., Wang, Y., Stanton, D., Shor, J., Weiss, R., Clark, R., & Saurous, R. A. (2018). [*Towards end-to-end prosody transfer for expressive speech synthesis with Tacotron.*](https://arxiv.org/abs/1803.09047) ICML 2018. — Prosody-aware synthesis foundations behind the TTS provider abstraction.
+- Tan, Z.-H., Sarkar, A. K., & Dehak, N. (2020). [*rVAD: An unsupervised segment-based robust voice activity detection method.*](https://arxiv.org/abs/1906.03588) *Computer Speech & Language*, 59, 1–21.
+- Silero Team. (2024). [*Silero VAD: Pre-trained enterprise-grade voice activity detector.*](https://github.com/snakers4/silero-vad)
+- Skerry-Ryan, R. J., Battenberg, E., Xiao, Y., Wang, Y., Stanton, D., Shor, J., Weiss, R., Clark, R., & Saurous, R. A. (2018). [*Towards end-to-end prosody transfer for expressive speech synthesis with Tacotron.*](https://arxiv.org/abs/1803.09047) ICML 2018.
 
 ### Streaming ASR
 
-- Graves, A., Fernández, S., Gomez, F., & Schmidhuber, J. (2006). [*Connectionist temporal classification: Labelling unsegmented sequence data with recurrent neural networks.*](https://dl.acm.org/doi/10.1145/1143844.1143891) ICML 2006. — CTC foundations behind streaming ASR — informs how partial-transcript timing flows through the endpoint detector.
-- Chiu, C.-C., Sainath, T. N., Wu, Y., Prabhavalkar, R., Nguyen, P., Chen, Z., Kannan, A., Weiss, R. J., Rao, K., Gonina, E., Jaitly, N., Li, B., Chorowski, J., & Bacchiani, M. (2018). [*State-of-the-art speech recognition with sequence-to-sequence models.*](https://arxiv.org/abs/1712.01769) ICASSP 2018. — Reference architecture for the streaming-STT provider interface.
-- Radford, A., Kim, J. W., Xu, T., Brockman, G., McLeavey, C., & Sutskever, I. (2023). [*Robust speech recognition via large-scale weak supervision.*](https://arxiv.org/abs/2212.04356) ICML 2023. — Whisper, the default fallback STT in the pipeline.
+- Graves, A., Fernández, S., Gomez, F., & Schmidhuber, J. (2006). [*Connectionist temporal classification: Labelling unsegmented sequence data with recurrent neural networks.*](https://dl.acm.org/doi/10.1145/1143844.1143891) ICML 2006.
+- Chiu, C.-C., Sainath, T. N., Wu, Y., Prabhavalkar, R., Nguyen, P., Chen, Z., Kannan, A., Weiss, R. J., Rao, K., Gonina, E., Jaitly, N., Li, B., Chorowski, J., & Bacchiani, M. (2018). [*State-of-the-art speech recognition with sequence-to-sequence models.*](https://arxiv.org/abs/1712.01769) ICASSP 2018.
+- Radford, A., Kim, J. W., Xu, T., Brockman, G., McLeavey, C., & Sutskever, I. (2023). [*Robust speech recognition via large-scale weak supervision.*](https://arxiv.org/abs/2212.04356) ICML 2023.
 
-### Barge-in / interruption handling
+### Barge-in and turn-taking
 
-- Edlund, J., Heldner, M., & Hirschberg, J. (2009). [*Pause and gap length in face-to-face interaction.*](https://www.isca-speech.org/archive/interspeech_2009/edlund09_interspeech.html) Interspeech 2009. — Pause statistics informing the heuristic endpoint detector's silence thresholds.
-- Skantze, G. (2021). [*Turn-taking in conversational systems and human-robot interaction: A review.*](https://doi.org/10.1016/j.csl.2020.101178) *Computer Speech & Language*, 67, 101178. — Survey of turn-taking strategies; the barge-in handler implements the "hard cut on speech-detected during TTS" pattern from this taxonomy.
+- Edlund, J., Heldner, M., & Hirschberg, J. (2009). [*Pause and gap length in face-to-face interaction.*](https://www.isca-speech.org/archive/interspeech_2009/edlund09_interspeech.html) Interspeech 2009.
+- Skantze, G. (2021). [*Turn-taking in conversational systems and human-robot interaction: A review.*](https://doi.org/10.1016/j.csl.2020.101178) *Computer Speech & Language*, 67, 101178.
 
-### Real-time voice agents
+### Real-time speech synthesis
 
-- Anastassiou, P., Chen, J., Chen, J., Chen, Y., Chen, Z., Chen, Z., Cong, J., Deng, L., Ding, C., Gao, L., Gong, M., Huang, P., Huang, Q., Huang, Z., Huo, Y., Jia, D., Li, C., Li, F., Li, H., ... Wei, X. (2024). [*Seed-TTS: A family of high-quality versatile speech generation models.*](https://arxiv.org/abs/2406.02430) arXiv:2406.02430. — Reference for low-latency, prosody-controllable TTS — informs the SPEAKING-state design where TTS is allowed to overlap with EOL planning.
+- Anastassiou, P., Chen, J., Chen, J., Chen, Y., Chen, Z., Chen, Z., Cong, J., Deng, L., Ding, C., Gao, L., Gong, M., Huang, P., Huang, Q., Huang, Z., Huo, Y., Jia, D., Li, C., Li, F., Li, H., ... Wei, X. (2024). [*Seed-TTS: A family of high-quality versatile speech generation models.*](https://arxiv.org/abs/2406.02430) arXiv:2406.02430.
 
 ### Implementation references
 
-- [`src/io/voice-pipeline/VoicePipelineOrchestrator.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoicePipelineOrchestrator.ts) — the state machine
-- [`src/io/voice-pipeline/HeuristicEndpointDetector.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/HeuristicEndpointDetector.ts) + [`AcousticEndpointDetector.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/AcousticEndpointDetector.ts) — endpoint detection strategies
-- [`src/io/voice-pipeline/HardCutBargeinHandler.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/HardCutBargeinHandler.ts) + [`SoftFadeBargeinHandler.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/SoftFadeBargeinHandler.ts) — barge-in handlers
-- [`src/io/voice-pipeline/types.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) — [`IStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts), [`IStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts), [`IStreamingTTS`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts), [`IBargeinHandler`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) interfaces
+- [`src/io/voice-pipeline/VoicePipelineOrchestrator.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoicePipelineOrchestrator.ts): the state machine
+- [`src/io/voice-pipeline/HeuristicEndpointDetector.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/HeuristicEndpointDetector.ts) and [`AcousticEndpointDetector.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/AcousticEndpointDetector.ts): endpoint detection
+- [`src/io/voice-pipeline/HardCutBargeinHandler.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/HardCutBargeinHandler.ts) and [`SoftFadeBargeinHandler.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/SoftFadeBargeinHandler.ts): barge-in handlers
+- [`src/io/voice-pipeline/types.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts): the transport, STT, TTS, endpoint and barge-in interfaces

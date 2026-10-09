@@ -647,10 +647,10 @@ by index; a `/` inside a key is written `~1`, and a `~` is written `~0`.
 
 An `apiKey` that is exactly `<<REDACTED>>` is a provider key when its
 object names a model provider agentos knows: a `provider` that is one of
-`openai`, `anthropic`, `openrouter`, `gemini`, `groq`, `together`,
-`mistral`, `xai`, `ollama`, `claude-code-cli`, `gemini-cli`, `stability`,
-`replicate`, `stable-diffusion-local`, `bfl` and `fal`, or, with no
-`provider`, a string `model`. With no usable `secrets` entry, import deletes
+`openai`, `anthropic`, `openrouter`, `requesty`, `gemini`, `groq`,
+`together`, `mistral`, `xai`, `minimax`, `ollama`, `claude-code-cli`,
+`gemini-cli`, `stability`, `replicate`, `stable-diffusion-local`, `bfl` and
+`fal`, or, with no `provider`, a string `model`. With no usable `secrets` entry, import deletes
 it, and the key resolves on each call as an unset key does:
 from the `apiKey` of the `setDefaultProvider()` default when that default
 names no provider or this provider, then from the provider's key variable
@@ -682,13 +682,15 @@ provider:
 
 - a `setDefaultProvider()` default that names the provider and carries a
   non-empty `baseUrl`, or
-- the provider's URL variable, set to a non-empty value. Six providers have
-  one:
+- the provider's URL variable, set to a non-empty value. Eight providers
+  have one:
 
 | Provider | URL variable |
 | --- | --- |
 | `openai` | `OPENAI_BASE_URL` |
 | `openrouter` | `OPENROUTER_BASE_URL` |
+| `requesty` | `REQUESTY_BASE_URL` |
+| `minimax` | `MINIMAX_BASE_URL` |
 | `stability` | `STABILITY_BASE_URL` |
 | `replicate` | `REPLICATE_BASE_URL` |
 | `ollama` | `OLLAMA_BASE_URL` |
