@@ -1,12 +1,12 @@
 # AgentGraph
 
-When `workflow()` is too rigid and you want to lay out the topology yourself, use [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts): explicit node and edge construction with cycles, conditional routing, subgraph composition, and discovery and personality edges. It compiles to the same [`CompiledExecutionGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) IR as the higher-level builders, but it gets you full control over the topology before compilation.
+When `workflow()` is too rigid and you want to lay out the topology yourself, use [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts): explicit node and edge construction with router nodes, subgraph composition, and discovery and personality edges. It compiles to the same [`CompiledExecutionGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) IR as the higher-level builders, but it gets you full control over the topology before compilation.
 
-**Runtime status.** `compile({ deps })` hands the node executors to the runtime ([Unified Orchestration](../orchestration/UNIFIED_ORCHESTRATION.md)). `router` and `human` nodes run on their own. A `tool` node needs `deps.toolOrchestrator` and fails without it; a `guardrail` node needs `deps.guardrailEngine` and passes without it; a `gmi` node needs `deps.loopController` and `deps.providerCall` and otherwise succeeds with the output `'gmi-placeholder'`; an `extension` node needs `deps.extensionExecutor`, and a `subgraph` node `deps.subgraphResolver` and `deps.createSubgraphRuntime`; each otherwise succeeds with a placeholder output. The compiled graph's runtime has no discovery engine and no persona traits, so a discovery edge always takes its fallback target and a personality edge reads its trait from `scratch._personaTraits` (0.5 when absent). The runtime does not read a node's `memory`, `discovery` or `persona` policies; they stay in the IR.
+**Runtime status.** `compile({ deps })` hands the node executors to the runtime ([Unified Orchestration](../orchestration/UNIFIED_ORCHESTRATION.md)). `router` and `human` nodes run on their own. A `tool` node needs `deps.toolOrchestrator` and fails without it; a `guardrail` node needs `deps.guardrailEngine` and passes without it; a `gmi` node needs `deps.loopController` and `deps.providerCall` and otherwise succeeds with the output `'gmi-placeholder'`; an `extension` node needs `deps.extensionExecutor`, and a `subgraph` node `deps.subgraphResolver` and `deps.createSubgraphRuntime`; each otherwise succeeds with a placeholder output. The compiled graph's runtime has no discovery engine and no persona traits, so a discovery edge always takes its fallback target and a personality edge reads its trait from `scratch._personaTraits` (0.5 when absent). The runtime does not read a node's `memory`, `discovery` or `persona` policies; they stay in the IR. A node runs at most once per run, so a cycle never runs ([Compilation](#compilation)), and a graph with an `addConditionalEdge()` edge runs none of its nodes ([Conditional Edge](#conditional-edge)).
 
-Use [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) when you need cycles, conditional fan-out, memory-driven state machines, or subgraph composition. Use [`workflow()`](../orchestration/WORKFLOW_DSL.md) for linear pipelines. Use [`mission()`](../orchestration/MISSION_API.md) when you'd rather declare intent than topology.
+Use [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) when you need routing on a node's output, personality or discovery edges, or subgraph composition. Use [`workflow()`](../orchestration/WORKFLOW_DSL.md) for linear pipelines. Use [`mission()`](../orchestration/MISSION_API.md) when you'd rather declare intent than topology.
 
-![AgentGraph topology: six node types (gmi, tool, router, guardrail, human, subgraph) connected by directed edges including conditional fan-out and a memory-driven retry cycle; compiles to the same CompiledExecutionGraph IR as workflow() and mission()](/img/diagrams/agent-graph-topology.svg)
+![AgentGraph topology: six node types (gmi, tool, router, guardrail, human, subgraph) connected by directed edges; compiles to the same CompiledExecutionGraph IR as workflow() and mission()](/img/diagrams/agent-graph-topology.svg)
 
 ## Quick Start
 
@@ -20,7 +20,7 @@ import { z } from 'zod';
 
 // Your application's own tool runner and model call.
 declare function runMyTool(name: string, args: Record<string, unknown>): Promise<unknown>;
-declare function callMyModel(instructions: string, scratch: unknown): Promise<string>;
+declare function callMyModel(instructions: string, context: unknown): Promise<string>;
 
 // Host bindings for the node executors. The WorkflowRuntimeDeps annotation
 // types every callback parameter (toolCallRequest, instructions, state).
@@ -33,22 +33,21 @@ const deps: WorkflowRuntimeDeps = {
   },
   loopController: new LoopController(),
   async *providerCall(instructions, state) {
-    const text = await callMyModel(instructions, state.scratch);
+    // state.artifacts holds the outputs of the nodes that ran before this one.
+    const text = await callMyModel(instructions, { input: state.input, artifacts: state.artifacts });
     yield { type: 'text_delta', content: text };
     // No tool calls: the node's loop ends after this turn.
     return { responseText: text, toolCalls: [], finishReason: 'stop' };
   },
 };
 
-const graph = new AgentGraph(
-  {
-    input: z.object({ topic: z.string() }),
-    scratch: z.object({ sources: z.array(z.string()).default([]) }),
-    artifacts: z.object({ summary: z.string() }),
-  },
-  { reducers: { 'scratch.sources': 'concat' } }
-)
-  .addNode('search', toolNode('web_search'))
+const graph = new AgentGraph({
+  input: z.object({ topic: z.string() }),
+  scratch: z.object({}),
+  artifacts: z.object({ search: z.unknown(), summarize: z.string() }),
+})
+  // A tool node sends its tool the static args and nothing from the state.
+  .addNode('search', toolNode('web_search', { args: { query: 'quantum computing' } }))
   .addNode('summarize', gmiNode({ instructions: 'Summarize the search results.' }))
   .addEdge(START, 'search')
   .addEdge('search', 'summarize')
@@ -57,6 +56,7 @@ const graph = new AgentGraph(
   .compile({ deps });
 
 const result = await graph.invoke({ topic: 'quantum computing' });
+// { search: <the tool's output>, summarize: '...' }
 ```
 
 ## Constructor
@@ -142,16 +142,16 @@ humanNode({ prompt: 'Does this summary look accurate? (yes/no)', timeout: 86_400
 
 ### routerNode
 
-A pure routing node with no LLM call and no output. Evaluates a condition and emits edges to the appropriate next node. Use this as the source of `addConditionalEdge()` calls when you need a dedicated branching point.
+A routing node with no LLM call and no output. Its function, or its expression over `input`, `scratch` and `artifacts`, returns the id of the node to run next; the runtime runs that node and marks the router's other targets skipped. Give the router a static edge to every node it can return: the scheduler and the validator read only edges.
 
 ```typescript
 import { routerNode } from '@framers/agentos/orchestration';
 
 // In-process function (not serializable)
-routerNode((state) => state.scratch.confidence > 0.8 ? 'summarize' : 'search')
+routerNode((state) => Number(state.artifacts.evaluate) > 0.8 ? 'summarize' : 'search')
 
 // Expression string (serializable to JSON/YAML)
-routerNode("scratch.confidence > 0.8 ? 'summarize' : 'search'")
+routerNode("artifacts.evaluate > 0.8 ? 'summarize' : 'search'")
 ```
 
 ### guardrailNode
@@ -169,7 +169,7 @@ guardrailNode(['pii-redaction', 'content-safety'], {
 
 ### subgraphNode
 
-Embeds a previously compiled [`CompiledExecutionGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) as a single node. Input and output fields are mapped between the parent and child graphs.
+Embeds a previously compiled [`CompiledExecutionGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) as a single node. `inputMapping` keys are paths in the parent's `scratch` and its values are paths in the child's input; `outputMapping` keys are paths in the child's artifacts and its values are paths in the parent's `scratch`. Without `inputMapping` the child's input is `{}`. The child's artifacts are also the node's output.
 
 The node records the child graph's id. At run time the executor looks the child up with `deps.subgraphResolver(graphId)` and runs it on a runtime from `deps.createSubgraphRuntime`; without both, the node succeeds with the output `'subgraph-placeholder'`.
 
@@ -177,8 +177,8 @@ The node records the child graph's id. At run time the executor looks the child 
 import { subgraphNode } from '@framers/agentos/orchestration';
 
 subgraphNode(compiledSubgraph, {
-  inputMapping: { 'scratch.query': 'input.topic' },  // parent scratch → child input
-  outputMapping: { 'artifacts.summary': 'scratch.result' }, // child artifacts → parent scratch
+  inputMapping: { query: 'topic' },     // parent scratch.query → child input.topic
+  outputMapping: { summary: 'result' }, // child artifacts.summary → parent scratch.result
 })
 ```
 
@@ -196,15 +196,15 @@ graph.addEdge('process', END);
 
 ### Conditional Edge
 
-Target is resolved at runtime by a function receiving the current [`GraphState`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts).
+`addConditionalEdge(source, fn)` stores the edge with the target placeholder `__CONDITIONAL__`. The scheduler counts that placeholder as an edge from the source to every node in the graph, the source included. The source then waits on itself and every other node waits on the source, so no node runs and `invoke()` returns `{}`. Route with a [`routerNode`](#routernode) and static edges instead:
 
 ```typescript
-graph.addConditionalEdge('evaluate', (state) =>
-  state.scratch.confidence > 0.8 ? 'summarize' : 'search'
-);
+graph
+  .addNode('route', routerNode((state) => Number(state.artifacts.evaluate) > 0.8 ? 'summarize' : 'report-gap'))
+  .addEdge('evaluate', 'route')
+  .addEdge('route', 'summarize')
+  .addEdge('route', 'report-gap');
 ```
-
-The function must return a valid node id. The returned id is not validated at compile time.
 
 ### Discovery Edge
 
@@ -284,7 +284,7 @@ const compiled = graph.compile({
 });
 ```
 
-`AgentGraph` allows cycles (`validate: false` is only needed for intentional orphan nodes).
+`compile()` accepts cycles (`validate: false` is needed only for orphan nodes). The runtime runs a node at most once per run, and a node in a cycle waits for the node before it in the same cycle, so a cycle never starts: the run ends when only the cycle's nodes and the nodes after them are left.
 
 ## Execution
 
@@ -310,26 +310,37 @@ const ir = compiled.toIR();
 Build modular graphs by nesting compiled graphs as single nodes:
 
 ```typescript
+import { GraphRuntime, NodeExecutor, InMemoryCheckpointStore } from '@framers/agentos/orchestration';
+
 // Build the inner graph
 const fetchGraph = new AgentGraph(fetchState)
-  .addNode('fetch', toolNode('web_fetch'))
+  .addNode('fetch', toolNode('web_fetch', { args: { url: 'https://example.com' } }))
   .addNode('parse', toolNode('html_parser'))
   .addEdge(START, 'fetch')
   .addEdge('fetch', 'parse')
   .addEdge('parse', END)
-  .compile();
+  .compile({ deps });
+const fetchIR = fetchGraph.toIR();
 
 // Embed it in the outer graph
 const outerGraph = new AgentGraph(outerState)
-  .addNode('gather', subgraphNode(fetchGraph.toIR(), {
-    inputMapping: { 'input.url': 'input.url' },
-    outputMapping: { 'artifacts.text': 'scratch.rawText' },
+  .addNode('gather', subgraphNode(fetchIR, {
+    outputMapping: { parse: 'rawText' }, // child artifacts.parse → parent scratch.rawText
   }))
   .addNode('analyze', gmiNode({ instructions: 'Analyze the text.' }))
   .addEdge(START, 'gather')
   .addEdge('gather', 'analyze')
   .addEdge('analyze', END)
-  .compile();
+  .compile({
+    deps: {
+      ...deps,
+      subgraphResolver: (graphId) => (graphId === fetchIR.id ? fetchIR : undefined),
+      createSubgraphRuntime: () => new GraphRuntime({
+        checkpointStore: new InMemoryCheckpointStore(),
+        nodeExecutor: new NodeExecutor(deps),
+      }),
+    },
+  });
 ```
 
 ## Complete Example — Research Graph
@@ -337,89 +348,40 @@ const outerGraph = new AgentGraph(outerState)
 ```typescript
 import {
   AgentGraph, START, END,
-  gmiNode, toolNode, humanNode,
+  gmiNode, toolNode, humanNode, routerNode,
 } from '@framers/agentos/orchestration';
 import { InMemoryCheckpointStore } from '@framers/agentos/orchestration/checkpoint';
 import { z } from 'zod';
 
 const ResearchState = {
   input: z.object({ topic: z.string() }),
-  scratch: z.object({
-    sources: z.array(z.string()).default([]),
-    confidence: z.number().default(0),
-  }),
-  artifacts: z.object({
-    summary: z.string(),
-    sources: z.array(z.string()),
-  }),
+  scratch: z.object({}),
+  artifacts: z.object({}),
 };
 
-const graph = new AgentGraph(ResearchState, {
-  reducers: { 'scratch.sources': 'concat' },
-  memoryConsistency: 'snapshot',
-  checkpointPolicy: 'every_node',
-})
-  .addNode('plan', gmiNode(
-    {
-      instructions: 'Break this research topic into sub-questions.',
-      executionMode: 'single_turn',
-    },
-    {
-      memory: {
-        consistency: 'snapshot',
-        read: { types: ['semantic'], semanticQuery: '{input.topic}', maxTraces: 10 },
-      },
-      discovery: { enabled: true, kind: 'tool' },
-      checkpoint: 'after',
-    }
-  ))
+const graph = new AgentGraph(ResearchState, { checkpointPolicy: 'every_node' })
+  .addNode('plan', gmiNode({ instructions: 'Break this research topic into sub-questions.' }))
   .addNode('search', toolNode(
     'web_search',
-    { timeout: 10_000 },
-    {
-      effectClass: 'external',
-      guardrails: { output: ['pii-redaction'], onViolation: 'sanitize' },
-    }
+    { timeout: 10_000, args: { query: 'quantum computing' } },
+    { effectClass: 'external' },
   ))
-  .addNode('evaluate', gmiNode(
-    {
-      instructions: 'Evaluate source quality and assign a confidence score (0–1).',
-      executionMode: 'single_turn',
-    },
-    {
-      memory: {
-        consistency: 'snapshot',
-        write: { autoEncode: true, type: 'episodic', scope: 'session' },
-      },
-    }
-  ))
-  .addNode('summarize', gmiNode(
-    {
-      instructions: 'Write a final summary from gathered sources.',
-      executionMode: 'single_turn',
-    },
-    {
-      guardrails: {
-        output: ['grounding-guard'],
-        onViolation: 'reroute',
-        rerouteTarget: 'search',
-      },
-    }
-  ))
+  .addNode('evaluate', gmiNode({
+    instructions: 'Rate the quality of the search results from 0 to 1. Reply with the number only.',
+  }))
+  .addNode('route', routerNode("artifacts.evaluate > 0.8 ? 'summarize' : 'report-gap'"))
+  .addNode('summarize', gmiNode({ instructions: 'Write a final summary from the search results.' }))
+  .addNode('report-gap', gmiNode({ instructions: 'List what the search results are missing.' }))
   .addNode('review', humanNode({ prompt: 'Does this summary look accurate?' }))
 
   .addEdge(START, 'plan')
   .addEdge('plan', 'search')
   .addEdge('search', 'evaluate')
-  .addConditionalEdge('evaluate', (state) =>
-    state.scratch.confidence > 0.8 ? 'summarize' : 'search'
-  )
-  .addPersonalityEdge('summarize', {
-    trait: 'conscientiousness',
-    threshold: 0.7,
-    above: 'review',
-    below: END,
-  })
+  .addEdge('evaluate', 'route')
+  .addEdge('route', 'summarize')
+  .addEdge('route', 'report-gap')
+  .addEdge('summarize', 'review')
+  .addEdge('report-gap', 'review')
   .addEdge('review', END)
 
   .compile({
@@ -427,18 +389,23 @@ const graph = new AgentGraph(ResearchState, {
     deps, // the host bindings from the Quick Start
   });
 
-// Run
+// Run: the review step interrupts the run; invoke() resolves to the artifacts so far,
+// keyed by node id (plan, search, evaluate, then summarize or report-gap)
 const result = await graph.invoke({ topic: 'quantum computing' });
 
 // Stream with progress
+let runId: string | undefined;
 for await (const event of graph.stream({ topic: 'quantum computing' })) {
+  if (event.type === 'run_start') runId = event.runId;
   if (event.type === 'node_start') console.log(`Starting: ${event.nodeId}`);
   if (event.type === 'node_end')   console.log(`Done: ${event.nodeId}`);
 }
 
-// Resume after interruption at human-review step
-const result2 = await graph.resume(savedCheckpointId);
+// Resume a run that the review step interrupted
+const result2 = await graph.resume(runId!);
 ```
+
+The router runs one of `summarize` and `report-gap` and marks the other skipped. `review` waits for both and runs after whichever ran, since a skipped node counts as done for the nodes after it.
 
 ## See Also
 

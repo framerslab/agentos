@@ -61,15 +61,17 @@ A node whose executor is missing does not throw. A `tool` or `voice` node fails 
 | Edge Type | Behavior |
 | --- | --- |
 | `static` | Unconditional transition |
-| `conditional` | Arbitrary routing function evaluates state and returns next node |
-| `discovery` | Semantic search over the capability registry determines the next node |
-| `personality` | HEXACO trait thresholds determine branching |
+| `conditional` | `workflow().branch()` adds one per route, behind a router node. `AgentGraph.addConditionalEdge()` stores one with the placeholder target `__CONDITIONAL__`, and a graph with such an edge runs none of its nodes ([AgentGraph](../architecture/AGENT_GRAPH.md)) |
+| `discovery` | Follows its target when the runtime's discovery engine finds a match, else its fallback target; the builders' runtimes have no discovery engine, so it takes the fallback |
+| `personality` | Routes on a trait value from `scratch._personaTraits` (0.5 when absent) against a threshold |
+
+A router node returns the id of the node to run next, and the runtime marks the router's other targets skipped. A node runs at most once per run, so the runtime runs no cycle.
 
 ## Three APIs
 
 ### AgentGraph — Full Graph Control
 
-Explicit nodes, edges, cycles, and subgraphs. Use this when you need the full graph model: conditional routing with arbitrary logic, agent loops that cycle back, memory-aware state machines, and personality-driven branching.
+Explicit nodes, edges and subgraphs. Use this when you lay out the graph yourself: router nodes that pick the next node from the state, personality and discovery edges, and subgraphs.
 
 ```typescript
 import { AgentGraph, END, START, gmiNode, toolNode } from '@framers/agentos/orchestration';
@@ -80,7 +82,7 @@ const graph = new AgentGraph({
   scratch: z.object({}),
   artifacts: z.object({ summary: z.string().optional() }),
 })
-  .addNode('search', toolNode('web_search'))
+  .addNode('search', toolNode('web_search', { args: { query: 'quantum computing' } }))
   .addNode('summarize', gmiNode({ instructions: 'Summarize the results.' }))
   .addEdge(START, 'search')
   .addEdge('search', 'summarize')
@@ -90,7 +92,7 @@ const graph = new AgentGraph({
 
 ### workflow() — Deterministic DAG
 
-Fluent DSL for sequential pipelines with branching and parallelism. Every workflow is a strict DAG, and cycles are caught at compile time. All GMI steps default to `single_turn` to keep execution deterministic and cost-bounded.
+Fluent DSL for steps declared in order, with parallel fan-out. `compile()` rejects a cycle. A `gmi` step is recorded as `single_turn`; the runtime does not read the mode, so the step runs the same bounded tool loop as any `gmi` node. A `.branch()` runs none of its routes ([workflow() DSL](./WORKFLOW_DSL.md)).
 
 ```typescript
 import { workflow } from '@framers/agentos/orchestration';
@@ -114,7 +116,7 @@ import { z } from 'zod';
 
 const m = mission('deep-research')
   .input(z.object({ topic: z.string() }))
-  .goal('Research {{topic}} and produce a structured report')
+  .goal('Research quantum computing and produce a structured report')
   .returns(z.object({ report: z.string() }))
   .planner({ strategy: 'linear', maxSteps: 8 })
   .compile();
@@ -125,10 +127,8 @@ const m = mission('deep-research')
 | Situation | Use |
 | --- | --- |
 | Exact steps known upfront | `workflow()` |
-| Steps known but complex branching needed | [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) |
+| Routing on a node's output | [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) with a router node |
 | Goal-first authoring from a plan template | `mission()` |
-| Need agent loops / cycles | [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) |
-| Cost-bounded, deterministic execution | `workflow()` |
 | Prototype quickly, then reuse the generated IR directly | `mission()` -> `toWorkflow()` |
 
 ## Why One IR

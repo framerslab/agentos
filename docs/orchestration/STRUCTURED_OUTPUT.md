@@ -2,28 +2,26 @@
 
 ## Overview
 
-The Structured Output Manager ensures LLM outputs conform to predefined JSON Schemas, enabling reliable parsing, validation, and type-safe consumption of agent responses.
+[`StructuredOutputManager`](https://github.com/framerslab/agentos/blob/master/src/api/structured/output/StructuredOutputManager.ts) asks a model for JSON, parses it, checks it against a JSON Schema and asks again when the check fails. It also turns a prompt into validated function calls and extracts entities from text. A host creates and calls it; nothing else in AgentOS does. For schema-typed results from the high-level API, use [`generateObject()` / `streamObject()`](./STRUCTURED_OUTPUT_API.md) or a [structured reply](../features/STRUCTURED_REPLY.md).
 
-## Key Features
-
-- **JSON Schema Validation**: Full JSON Schema draft 2020-12 support
-- **Multiple Strategies**: JSON mode, function calling, prompt engineering
-- **Parallel Function Calls**: Execute multiple tools in a single response
-- **Entity Extraction**: Pull structured data from unstructured text
-- **Automatic Retry**: Retry with feedback on validation failures
-- **Robust Parsing**: Handle malformed JSON from LLMs
+- **Validation**: a subset of JSON Schema, checked by the manager's own validator ([JSON Schema Support](#json-schema-support)).
+- **Strategies**: JSON mode, forced function calling, or the schema in the system prompt.
+- **Function calls**: the tool calls a model returns in one response, with their arguments validated and their handlers run.
+- **Entity extraction**: one or all entities of a schema from a text.
+- **Retries**: another attempt after a reply that does not parse or validate.
+- **Parsing**: markdown fences, surrounding text, trailing commas, single quotes and unquoted keys are repaired before giving up.
 
 ## Quick Start
 
 ### Basic Structured Generation
 
 ```typescript
-import { StructuredOutputManager, JSONSchema } from '@framers/agentos/structured/output';
+import { StructuredOutputManager, type JSONSchema } from '@framers/agentos';
 
 const manager = new StructuredOutputManager({
-  llmProviderManager,
-  defaultProviderId: 'openai',
-  defaultModelId: 'gpt-4o',
+  llmProviderManager,          // an initialised AIModelProviderManager
+  defaultProviderId: 'openai', // default 'openai'
+  defaultModelId: 'gpt-4o',    // default 'gpt-4o'
 });
 
 // Define your schema
@@ -49,13 +47,13 @@ const result = await manager.generate({
   schemaName: 'Person',
 });
 
-if (result.success) {
-  console.log(result.data);
-  // { name: 'John Doe', age: 30, email: 'john@example.com', interests: ['hiking', 'photography'] }
-}
+console.log(result.data);
+// { name: 'John Doe', age: 30, email: 'john@example.com', interests: ['hiking', 'photography'] }
 ```
 
-### Parallel Function Calling
+`generate()` resolves only with a valid result (`success: true`); when every attempt fails it throws a [`StructuredOutputError`](#error-handling).
+
+### Function Calls
 
 ```typescript
 const result = await manager.generateFunctionCalls({
@@ -87,14 +85,16 @@ const result = await manager.generateFunctionCalls({
       handler: async (args) => await stockAPI.getPrice(args.symbol),
     },
   ],
-  maxParallelCalls: 10,
 });
 
-// Both functions called in parallel
-result.calls.forEach(call => {
-  console.log(`${call.functionName}:`, call.executionResult);
+result.calls.forEach((call) => {
+  if (!call.argumentsValid) console.log(`${call.functionName}: invalid arguments`, call.validationErrors);
+  else if (call.executionError) console.log(`${call.functionName}: handler failed`, call.executionError);
+  else console.log(`${call.functionName}:`, call.executionResult);
 });
 ```
+
+The manager makes one model call with the functions as tools (`toolChoice` defaults to `'auto'`) and takes every tool call in the reply. It validates each call's arguments against the function's `parameters` and runs the handler of each call whose arguments are valid, one call after another. A handler that throws leaves `argumentsValid` `true` and sets `executionError` to its message. `result.success` is `true` when every call has valid arguments and no handler threw. `maxParallelCalls` is not read. The provider must be `openai`, `anthropic` or `openrouter`; any other provider id throws `Provider <id> does not support function calling`.
 
 ### Entity Extraction
 
@@ -115,7 +115,7 @@ const result = await manager.extractEntities({
     },
     required: ['name', 'email'],
   },
-  taskName: 'MeetingAttendeeExtraction',
+  taskName: 'MeetingAttendee',
   extractAll: true,
 });
 
@@ -127,89 +127,68 @@ console.log(result.entities);
 // ]
 ```
 
+`extractEntities()` runs `generate()` with a wrapper schema: `{ entities: [<entitySchema>] }` when `extractAll` is set, otherwise `{ entity, found }`. The prompt is `Extract <taskName> from the following text`, followed by `instructions` and `examples` when given. A failed generation does not throw here: the result has `success: false`, no entities and the error message in `issues`.
+
 ## Generation Strategies
 
-### JSON Mode (`json_mode`)
-
-Uses the provider's native JSON mode (OpenAI, OpenRouter, Ollama). Best for simple schemas.
+| Strategy | Request | Schema in the prompt |
+|---|---|---|
+| `json_mode` | `responseFormat: { type: 'json_object' }` | Yes, in the system prompt |
+| `function_calling` | One tool named `schemaName` with the schema as its parameters, and `toolChoice` forcing it; the result is the tool call's arguments | No |
+| `prompt_engineering` | No format option | Yes, in the system prompt |
+| `grammar` | No format option | No |
+| `auto` (default) | `recommendStrategy()` picks one of the first three | |
 
 ```typescript
 const result = await manager.generate({
   prompt: 'List 3 colors',
-  schema: { type: 'array', items: { type: 'string' }, minItems: 3, maxItems: 3 },
+  schema: {
+    type: 'object',
+    properties: { colors: { type: 'array', items: { type: 'string' }, minItems: 3, maxItems: 3 } },
+    required: ['colors'],
+  },
   schemaName: 'Colors',
   strategy: 'json_mode',
 });
 ```
 
-### Function Calling (`function_calling`)
+`recommendStrategy(providerId, modelId, schema)` reads the provider's row in the manager's capability table below. It returns `function_calling` when a top-level property of the schema is an object or an array and the provider supports function calling, else `json_mode` when the provider supports JSON mode, else `prompt_engineering`. A provider id missing from the table gets the `default` row, which supports neither, so `auto` sends it `prompt_engineering`.
 
-Uses tool/function calling API. Best for complex nested schemas.
-
-```typescript
-const result = await manager.generate({
-  prompt: 'Generate a complex report',
-  schema: complexReportSchema,
-  schemaName: 'Report',
-  strategy: 'function_calling',
-});
-```
-
-### Prompt Engineering (`prompt_engineering`)
-
-Instructs in the prompt and parses output. Fallback for providers without native support.
-
-```typescript
-const result = await manager.generate({
-  prompt: 'Generate data',
-  schema: mySchema,
-  schemaName: 'Data',
-  strategy: 'prompt_engineering',
-});
-```
-
-### Auto Selection (`auto`)
-
-Automatically selects the best strategy based on provider capabilities and schema complexity.
-
-```typescript
-const result = await manager.generate({
-  prompt: 'Generate data',
-  schema: mySchema,
-  schemaName: 'Data',
-  strategy: 'auto', // Default
-});
-```
+With `includeReasoning: true`, the system prompt of `json_mode` and `prompt_engineering` allows a `<reasoning>...</reasoning>` block before the JSON; the manager returns it as `result.reasoning` and parses the rest. Each call sends `temperature` (default 0.1) and `maxTokens` when set; `timeoutMs` and the manager's `defaultTimeoutMs` are not read.
 
 ## JSON Schema Support
 
-### Supported Keywords
+### Checked Keywords
 
 | Category | Keywords |
 |----------|----------|
-| **Type** | `type`, `enum`, `const` |
+| **Type** | `type` (one or a list), `enum`, `const` |
 | **String** | `minLength`, `maxLength`, `pattern`, `format` |
-| **Number** | `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf` |
-| **Array** | `items`, `minItems`, `maxItems`, `uniqueItems` |
-| **Object** | `properties`, `required`, `additionalProperties`, `minProperties`, `maxProperties` |
-| **Composition** | `allOf`, `anyOf`, `oneOf`, `not` |
-| **References** | `$ref`, `$defs` |
+| **Number** | `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum` (as numbers), `multipleOf` |
+| **Array** | `items` (one schema for every item), `minItems`, `maxItems`, `uniqueItems` |
+| **Object** | `properties`, `required`, `patternProperties`, `additionalProperties` (a schema, or `false` in strict mode), `minProperties`, `maxProperties` |
+| **Composition** | `allOf`, `anyOf`, `oneOf` |
+| **References** | `$ref` of the form `#/$defs/<Name>` |
+
+`JSONSchema` also declares `not`, `if`/`then`/`else`, `prefixItems`, `contains`, `propertyNames`, `dependentRequired`, `dependentSchemas` and `additionalItems`; the validator does not check them. `additionalProperties: false` is enforced only with `strict: true`. A `$ref` resolves against the `$defs` of the schema node that holds it, then against the schemas registered with `registerSchema()`; a `$ref` that resolves to neither is skipped and the node's other keywords are checked.
 
 ### Format Validators
 
-| Format | Description |
-|--------|-------------|
-| `email` | Email address |
-| `uri` | Full URI |
-| `uri-reference` | URI or relative reference |
-| [`uuid`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/util/crossPlatformCrypto.ts) | UUID v4 |
-| `date-time` | ISO 8601 datetime |
-| `date` | ISO 8601 date |
-| `time` | ISO 8601 time |
-| `hostname` | DNS hostname |
-| `ipv4` | IPv4 address |
-| `ipv6` | IPv6 address |
-| `regex` | Valid regex pattern |
+Formats are checked with simple patterns; an unknown format passes.
+
+| Format | Check |
+|--------|-------|
+| `email` | `text@text.text`, no spaces |
+| `uri` | Starts with `http://` or `https://` |
+| `uri-reference` | Starts with `http://`, `https://`, `/`, `./` or `../` |
+| `uuid` | 8-4-4-4-12 hexadecimal digits (any version) |
+| `date-time` | `Date.parse()` accepts it |
+| `date` | `YYYY-MM-DD` |
+| `time` | `HH:MM`, optional seconds, fraction and zone |
+| `hostname` | Dot-separated labels of letters, digits and hyphens |
+| `ipv4` | Four dot-separated groups of 1-3 digits |
+| `ipv6` | Eight colon-separated groups (no `::` shorthand) |
+| `regex` | `new RegExp()` accepts it |
 
 ## Validation
 
@@ -222,60 +201,55 @@ const issues = manager.validate(
   true // strict mode
 );
 
-if (issues.length > 0) {
-  issues.forEach(issue => {
-    console.log(`${issue.path}: ${issue.message}`);
-    // "age: Value must be >= 0"
-  });
-}
+issues.forEach((issue) => {
+  console.log(`${issue.path}: ${issue.message}`);
+  // "age: Value must be >= 0"
+  // "email: Missing required property: email"
+});
 ```
 
 ### Custom Validators
 
 ```typescript
 const result = await manager.generate({
-  prompt: 'Generate user data',
-  schema: userSchema,
-  schemaName: 'User',
+  prompt: 'Generate a booking',
+  schema: bookingSchema,
+  schemaName: 'Booking',
   customValidator: (data) => {
-    const issues = [];
-    
-    // Business logic validation
-    if (data.endDate < data.startDate) {
-      issues.push({
+    const booking = data as { startDate: string; endDate: string };
+    if (booking.endDate < booking.startDate) {
+      return [{
         path: 'endDate',
         message: 'End date must be after start date',
         keyword: 'custom',
         severity: 'error',
-      });
+      }];
     }
-    
-    return issues;
+    return [];
   },
 });
 ```
 
-## Retry Logic
+`customValidator` runs only when the schema check passed, and the issues it returns count as a failed attempt.
 
-The manager automatically retries on validation failure:
+## Retry Logic
 
 ```typescript
 const result = await manager.generate({
   prompt: 'Generate data',
   schema: strictSchema,
   schemaName: 'Data',
-  maxRetries: 5, // Default: 3
+  maxRetries: 5, // default: the manager's defaultMaxRetries, 3
 });
 
 console.log(`Succeeded after ${result.retryCount} retries`);
 ```
 
+`generate()` makes up to `maxRetries + 1` attempts. After a reply that does not parse or validate, the next attempt sends the same messages plus a user message saying the previous response did not conform to the schema; the validation errors and the previous reply are not included. A provider error is retried the same way, and on the last attempt it is thrown as it is.
+
 ## Schema Registration
 
-Register schemas for reuse:
-
 ```typescript
-// Register common schemas
 manager.registerSchema('Address', {
   type: 'object',
   properties: {
@@ -287,8 +261,9 @@ manager.registerSchema('Address', {
   required: ['street', 'city', 'country'],
 });
 
-// Use in other schemas via $ref
-const orderSchema = {
+// The validator resolves '#/$defs/Address' through the registry.
+// The model sees the schema as sent, so include the definition for it too.
+const orderSchema: JSONSchema = {
   type: 'object',
   properties: {
     orderId: { type: 'string' },
@@ -297,14 +272,12 @@ const orderSchema = {
   },
   required: ['orderId', 'shippingAddress'],
   $defs: {
-    Address: manager.getSchema('Address'),
+    Address: manager.getSchema('Address')!,
   },
 };
 ```
 
 ## Statistics
-
-Track structured output performance:
 
 ```typescript
 const stats = manager.getStatistics();
@@ -313,16 +286,17 @@ console.log(`Success rate: ${(stats.successRate * 100).toFixed(1)}%`);
 console.log(`Average retries: ${stats.avgRetries.toFixed(2)}`);
 console.log(`Average latency: ${stats.avgLatencyMs.toFixed(0)}ms`);
 console.log(`Total tokens: ${stats.totalTokensUsed}`);
-console.log('Top validation errors:', stats.topValidationErrors);
+console.log('Top validation errors:', stats.topValidationErrors); // [{ keyword, count }], up to 10
 
-// Reset if needed
 manager.resetStatistics();
 ```
+
+The statistics cover `generate()` calls (and the `extractEntities()` calls made through it), counted per call to `generate()`. `totalTokensUsed` adds the usage of successful attempts only, and `byStrategy` counts the strategy each call used.
 
 ## Error Handling
 
 ```typescript
-import { StructuredOutputError } from '@framers/agentos/structured/output';
+import { StructuredOutputError } from '@framers/agentos';
 
 try {
   const result = await manager.generate({
@@ -341,22 +315,29 @@ try {
 }
 ```
 
+`generate()` throws `StructuredOutputError` when every attempt fails validation or parsing, and when the provider id is not registered. A provider error on the last attempt is thrown unwrapped.
+
 ## Provider Capabilities
 
-| Provider | JSON Mode | Function Calling | Parallel Calls | Strict Mode |
+The manager's own table, used by `recommendStrategy()` and by `generateFunctionCalls()`:
+
+| Provider id | JSON Mode | Function Calling | Parallel Calls | Strict Mode |
 |----------|-----------|------------------|----------------|-------------|
-| OpenAI | ✅ | ✅ | ✅ | ✅ |
-| Anthropic | ❌ | ✅ | ✅ | ❌ |
-| OpenRouter | ✅ | ✅ | ✅ | ❌ |
-| Ollama | ✅ | ❌ | ❌ | ❌ |
+| `openai` | ✅ | ✅ | ✅ | ✅ |
+| `anthropic` | ❌ | ✅ | ✅ | ❌ |
+| `openrouter` | ✅ | ✅ | ✅ | ❌ |
+| `ollama` | ✅ | ❌ | ❌ | ❌ |
+| any other id | ❌ | ❌ | ❌ | ❌ |
+
+The parallel-calls and strict-mode columns are recorded and not read. `strict: true` on a `generate()` call turns on strict validation and is sent as the tool's `strict` flag under `function_calling`, whatever the provider.
 
 ## Best Practices
 
 ### 1. Use Descriptive Schemas
 
 ```typescript
-// ✅ Good: Rich descriptions help the LLM
-const schema = {
+// Descriptions reach the model with the schema
+const schema: JSONSchema = {
   type: 'object',
   description: 'A product review with sentiment analysis',
   properties: {
@@ -378,23 +359,13 @@ const schema = {
     },
   },
 };
-
-// ❌ Bad: Minimal schema
-const schema = {
-  type: 'object',
-  properties: {
-    summary: { type: 'string' },
-    sentiment: { type: 'string' },
-    score: { type: 'number' },
-  },
-};
 ```
 
 ### 2. Start Simple
 
 ```typescript
 // Start with simple schemas, add constraints as needed
-const v1Schema = {
+const v1Schema: JSONSchema = {
   type: 'object',
   properties: {
     name: { type: 'string' },
@@ -403,7 +374,7 @@ const v1Schema = {
 };
 
 // Later, add constraints based on real-world issues
-const v2Schema = {
+const v2Schema: JSONSchema = {
   type: 'object',
   properties: {
     name: { type: 'string', minLength: 1, maxLength: 100 },
@@ -413,27 +384,13 @@ const v2Schema = {
 };
 ```
 
-### 3. Use Appropriate Retries
+### 3. Choose the Retry Budget
 
-```typescript
-// Simple extraction: fewer retries needed
-const result1 = await manager.generate({
-  schema: simpleSchema,
-  maxRetries: 2,
-});
-
-// Complex generation: may need more retries
-const result2 = await manager.generate({
-  schema: complexSchema,
-  maxRetries: 5,
-});
-```
+Every retry is another full model call, so a simple extraction rarely needs more than the default 3, while a long schema with tight constraints may need more.
 
 ## Related Documentation
 
+- [Structured Output API](./STRUCTURED_OUTPUT_API.md) - `generateObject()` and `streamObject()`
 - [Architecture](../architecture/ARCHITECTURE.md) - Full system overview
-- [Planning Engine](./PLANNING_ENGINE.md) - Multi-step execution
+- [Planning Engine](./PLANNING_ENGINE.md) - LLM-generated step plans
 - [Human-in-the-Loop](../safety/HUMAN_IN_THE_LOOP.md) - Human oversight
-
-
-
