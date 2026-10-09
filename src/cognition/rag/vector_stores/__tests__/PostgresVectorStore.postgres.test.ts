@@ -1,7 +1,7 @@
 /**
  * @fileoverview PostgresVectorStore against a real Postgres with pgvector: the array-aware filter, deletion and
- * metadata changes by filter, the lexical leg, and an iterative scan that fills a filtered top-K. Gated on
- * AGENTOS_TEST_POSTGRES_URL, as Brain.postgres.test.ts is.
+ * metadata changes by filter, the lexical leg, and an iterative scan that fills a filtered top-K, for query() and
+ * for the hybrid search's dense leg. Gated on AGENTOS_TEST_POSTGRES_URL, as Brain.postgres.test.ts is.
  */
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -82,6 +82,13 @@ describe.skipIf(!URL)('PostgresVectorStore on Postgres', () => {
     expect(plain.documents.length).toBeLessThan(10);
     const hybrid = await iterative.hybridSearch('chunks', arc(0), 'budget review', { topK: 10, filter });
     expect(hybrid.documents).toHaveLength(10);
+    // Every one of the tenant's 40 passages holds 'budget review', so that search's lexical leg fills ten whatever
+    // the dense leg returns. A text no passage holds leaves the dense leg alone, which only the iterative scan fills.
+    const denseLeg = await iterative.hybridSearch('chunks', arc(0), 'zebra', { topK: 10, filter });
+    expect(denseLeg.documents).toHaveLength(10);
+    expect(denseLeg.documents.every((doc) => doc.metadata?.tenantId === 'a')).toBe(true);
+    const plainDenseLeg = await store.hybridSearch('chunks', arc(0), 'zebra', { topK: 10, filter });
+    expect(plainDenseLeg.documents.length).toBeLessThan(10);
   });
 
   it('finds words by prefix, every word or any word', async () => {

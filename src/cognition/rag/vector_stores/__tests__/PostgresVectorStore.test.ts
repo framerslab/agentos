@@ -878,5 +878,35 @@ describe('PostgresVectorStore', () => {
       ]);
       expect(mockClient.release).toHaveBeenCalled();
     });
+
+    it('runs a hybrid search in the same transaction, on one connection, with the pgvector settings', async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false, iterativeScan: 'relaxed_order', efSearch: 64 });
+      await store.hybridSearch('chunks', [0, 0], 'budget', { topK: 5, filter: { tenantId: 'org1' } });
+      expect(queryCalls.map((call) => call.sql.trim().split('\n')[0].trim())).toEqual([
+        'BEGIN',
+        `SET LOCAL hnsw.iterative_scan = 'relaxed_order'`,
+        'SET LOCAL hnsw.ef_search = 64',
+        'WITH dense AS (',
+        'COMMIT',
+      ]);
+      expect(queryCalls[3].params).toEqual(['[0,0]', 'budget', 'org1', 15, 60, 5]);
+      expect(mockPool.query).not.toHaveBeenCalled();
+      expect(mockClient.release).toHaveBeenCalledTimes(1);
+    });
+
+    it('sorts the rows of a relaxed scan again by similarity', async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false, iterativeScan: 'relaxed_order' });
+      // BEGIN and the setting answer first; then the search's rows come back slightly out of distance order.
+      queryResultQueue.push({ rows: [] }, { rows: [] }, {
+        rows: [
+          { id: 'b', embedding: null, metadata_json: null, text_content: null, distance: 0.2 },
+          { id: 'a', embedding: null, metadata_json: null, text_content: null, distance: 0.1 },
+          { id: 'c', embedding: null, metadata_json: null, text_content: null, distance: 0.3 },
+        ],
+        rowCount: 3,
+      });
+      const result = await store.query('chunks', [0, 0], { topK: 3, filter: { tenantId: 'org1' } });
+      expect(result.documents.map((doc) => doc.id)).toEqual(['a', 'b', 'c']);
+    });
   });
 });
