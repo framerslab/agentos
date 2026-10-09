@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 function read(relativeToThisFile: string): string {
@@ -204,5 +206,58 @@ describe('AgentOS docs alignment', () => {
     expect(packageSkillsGuide).toContain('@framers/agentos/cognition/skills');
     expect(packageSkillsGuide).toContain('@framers/agentos-skills');
     expect(packageSkillsGuide).toContain('@framers/agentos-skills-registry');
+  });
+  it('keeps every relative docs link from a published guide pointed at a published page', () => {
+    // docs.agentos.sh builds its guide pages from the publication manifest and
+    // rewrites a relative link by the target's file name. A link from a published
+    // guide to a docs file the manifest does not publish stays as written, and the
+    // site's build fails on it (docs/GMI.md linked features/STRUCTURED_REPLY.md
+    // before the manifest listed that page).
+    const requireCjs = createRequire(import.meta.url);
+    const { publicationManifest } = requireCjs('../../../../docs/publication-manifest.cjs') as {
+      publicationManifest: Array<{ sourcePath?: string }>;
+    };
+    const docsRoot = fileURLToPath(new URL('../../../../docs/', import.meta.url));
+    const searchSubdirs = [
+      'getting-started',
+      'architecture',
+      'features',
+      'memory',
+      'safety',
+      'observability',
+      'extensions',
+      'orchestration',
+    ];
+    // The site matches file names case-insensitively, with '-' read as '_'.
+    const publishedKey = (fileName: string) => fileName.toLowerCase().replace(/-/g, '_');
+    const published = new Set<string>();
+    const publishedGuides: string[] = [];
+    for (const entry of publicationManifest) {
+      const sourcePath = entry.sourcePath ?? '';
+      if (!sourcePath.endsWith('.md')) continue;
+      published.add(publishedKey(basename(sourcePath)));
+      if (!sourcePath.startsWith('packages/agentos/docs/')) continue;
+      const relativeSource = sourcePath.slice('packages/agentos/docs/'.length);
+      const candidates = [
+        join(docsRoot, relativeSource),
+        ...searchSubdirs.map((subdir) => join(docsRoot, subdir, basename(relativeSource))),
+      ];
+      const found = candidates.find((candidate) => existsSync(candidate));
+      if (found) publishedGuides.push(found);
+    }
+    expect(publishedGuides.length).toBeGreaterThan(50);
+
+    const offenders: string[] = [];
+    for (const guide of publishedGuides) {
+      const content = readFileSync(guide, 'utf8');
+      for (const match of content.matchAll(/\]\(((?:\.\.?\/)[^)#\s]+\.md)(?:#[^)]*)?\)/g)) {
+        const target = resolve(dirname(guide), match[1]);
+        if (!target.startsWith(docsRoot) || !existsSync(target)) continue;
+        if (!published.has(publishedKey(basename(target)))) {
+          offenders.push(`${relative(docsRoot, guide)} -> ${match[1]}`);
+        }
+      }
+    }
+    expect(offenders, 'published guides that link to a docs file the manifest does not publish').toEqual([]);
   });
 });

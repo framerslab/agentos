@@ -66,10 +66,10 @@ const tutor = agent({
   // model: 'claude-opus-4-8',                    // pin a specific model to override the default
   instructions: 'You are a patient CS tutor.',
   personality: { openness: 0.9, conscientiousness: 0.95 },
-  memory: { types: ['episodic', 'semantic'], working: { enabled: true } },
 });
 
 // Provider auto-detected from env when `provider` is omitted.
+// Cognitive memory, sentiment tracking and metaprompts: runtime: 'gmi' (see GMIs below).
 
 const session = tutor.session('student-1');
 await session.send('Explain recursion with an analogy.');
@@ -78,7 +78,7 @@ await session.send('Can you expand on that?'); // remembers context
 
 [Full quickstart](https://docs.agentos.sh/getting-started) * [Examples cookbook](https://docs.agentos.sh/getting-started/examples) * [API reference](https://docs.agentos.sh/api)
 
-**Sessions.** A session keeps the whole conversation whether memory is on or off: each `send()` records its tool calls, their results and the model's signed thinking, and every later request replays them. `stream()` records its turn as the prompt and the final text. History is capped at about 120K tokens by default. Set `history: false` for a stateless session, set `history: { maxTokens }` to change the cap, and call `reseed()` to replace the history with a shorter set of messages you build yourself. `close()` ends a session and frees its history: the next `session(id)` with that id starts empty, and `agent.usage(id)` still reports what the id spent.
+**Sessions.** A session keeps the whole conversation whether memory is on or off: each `send()` records its tool calls, their results and the model's signed thinking, and every later request replays them. `stream()` records its turn as the prompt and the final text (with `runtime: 'gmi'`, every step, as `send()` does). History is capped at about 120K tokens by default. Set `history: false` for a stateless session, set `history: { maxTokens }` to change the cap, and call `reseed()` to replace the history with a shorter set of messages you build yourself. `close()` ends a session and frees its history: the next `session(id)` with that id starts empty, and `agent.usage(id)` still reports what the id spent.
 
 ```ts
 const stateless = agent({ model, memory: false, history: false }).session('job-1');
@@ -108,7 +108,7 @@ const aria = await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents
 
 ## Generalized Mind Instances (GMIs)
 
-On the full runtime, every session is served by a **GMI**: a persistent agent with its own persona, mood, conversation history and reasoning trace. `agent()` is the lightweight helper; it calls the model with a prompt and keeps session history. A GMI runs a turn loop around the same model, tools, guardrails and cognitive memory:
+On the full runtime, every session is served by a **GMI**: a persistent agent with its own persona, mood, conversation history and reasoning trace; with `agent({ runtime: 'gmi' })` an agent's sessions are GMIs too. `agent()` without `runtime: 'gmi'` is the lightweight helper; it calls the model with a prompt and keeps session history. A GMI runs a turn loop around the same model, tools, guardrails and cognitive memory:
 
 - **Sentiment → metaprompts.** When a persona enables sentiment tracking, every user turn is scored; sustained frustration or confusion fires recovery metaprompts, and a self-reflection metaprompt re-reads the GMI's mood and task context from evidence.
 - **Mood-weighted memory.** With cognitive memory attached, each exchange is encoded with the GMI's current mood and recalled with emotional congruence in the score.
@@ -128,6 +128,22 @@ for await (const chunk of agentos.processRequest({
 })) {
   if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA) process.stdout.write(chunk.textDelta);
 }
+```
+
+`agent({ runtime: 'gmi' })`, also exported as `gmi()`, builds its GMIs in process from the agent's options, with no `AgentOS` runtime. The `'full'` profile adds cognitive memory, sentiment tracking and the five sentiment metaprompts; `'light'`, the default, keeps the reasoning trace and adds memory only when `memory` is set. The runtime's guardrails, retrieval and channels do not run on this path:
+
+```ts
+import { agent } from '@framers/agentos';
+
+const tutor = agent({
+  runtime: 'gmi',
+  cognition: 'full',
+  provider: 'openai',
+  instructions: 'You are a patient CS tutor.',
+  memory: { embedding: { provider: 'openai' } }, // cognitive memory embeds with text-embedding-3-small
+});
+const session = tutor.session('student-1', { userId: 'student-7f3a' }); // memory is scoped to the user id
+await session.send('Explain recursion with an analogy.');
 ```
 
 [What a GMI adds over a plain agent →](https://docs.agentos.sh/architecture/gmi)
@@ -226,12 +242,12 @@ Three layers, highest priority first: inline `apiKey` on the call, a module-leve
 
 ## API Surfaces
 
-- **`agent()`**: lightweight stateful agent. Prompts, sessions, personality, hooks, tools, memory.
+- **`agent()`**: lightweight stateful agent. Prompts, sessions, personality, hooks, tools, memory through `memoryProvider` hooks. With `runtime: 'gmi'` (or `gmi()`), every session is a GMI built from the same options, with cognitive memory, sentiment tracking and metaprompts per its `cognition` profile.
 - **`agency()`**: multi-agent teams built from `agent()` members, with HITL approval gates, run limits, structured output, provenance and, on the hierarchical strategy, specialists spawned at runtime. Its `guardrails` and `rag` options are reported or logged and not applied, and `voice.enabled` serves the agency as JSON text over a local WebSocket. It wires no channels; channel adapters run on the full runtime or with `ChannelRouter`.
 - **`generateText()` / `streamText()` / `generateObject()` / `generateImage()` / `generateVideo()` / `generateMusic()` / `performOCR()` / `embedText()`**: low-level multi-modal helpers with native tool calling.
 - **`workflow()` / `AgentGraph` / `mission()`**: three orchestration authoring APIs over one graph runtime.
 
-Provider fallback is on by default for `generateText()`, `streamText()`, `agent()` and `agency()`: when a call fails with a retryable error, it is retried on the other providers whose keys are in the environment. Pass `fallbackProviders: []` to turn it off, or a list to set the chain yourself. The GMIs of the full runtime (`processRequest()`) call their provider without a fallback chain.
+Provider fallback is on by default for `generateText()`, `streamText()`, `agent()` and `agency()`: when a call fails with a retryable error, it is retried on the other providers whose keys are in the environment. Pass `fallbackProviders: []` to turn it off, or a list to set the chain yourself. The GMIs of the full runtime (`processRequest()`) call their provider without a fallback chain. The GMIs of `agent({ runtime: 'gmi' })` call it through a completion gateway built from the agent's `fallbackProviders`, which moves to the next provider when a call fails with a retryable error before its first output, and not after it.
 
 [Full API reference ->](https://docs.agentos.sh/api) * [High-Level API guide ->](https://docs.agentos.sh/getting-started/high-level-api)
 

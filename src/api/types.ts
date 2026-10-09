@@ -81,7 +81,12 @@ export interface MemoryConfig {
     /** Eviction / summarisation strategy identifier. */
     strategy?: string;
   };
-  /** Configuration for periodic background consolidation of episodic → semantic memory. */
+  /**
+   * Configuration for periodic background consolidation of episodic → semantic memory.
+   * On the GMI path (`agent({ runtime: 'gmi' })`), `enabled: true` starts the memory
+   * manager's hourly consolidation cycle and `interval` is not applied (docs/GMI.md,
+   * "GMIs from agent()").
+   */
   consolidation?: {
     /** Whether automatic consolidation is enabled. */
     enabled: boolean;
@@ -90,9 +95,12 @@ export interface MemoryConfig {
   };
   /**
    * Embedding model for cognitive memory on the GMI path (`agent({ runtime: 'gmi' })`).
-   * Default: OpenAI's default embedding model when OPENAI_API_KEY is set, else Ollama's when
-   * OLLAMA_BASE_URL is set. Anthropic has no embedding models. `dimension` is required for a
-   * model whose dimension agentos does not know.
+   * Default: the global default provider (`setDefaultProvider`) when agentos has an
+   * embedding model for it, else the first of OpenAI, Gemini and Ollama whose
+   * OPENAI_API_KEY, GEMINI_API_KEY or OLLAMA_BASE_URL is set, with that provider's
+   * default embedding model. Anthropic, Groq, xAI and the Claude Code and Gemini CLIs
+   * have no embedding models in agentos. `dimension` is required for a model whose
+   * dimension agentos does not know.
    */
   embedding?: { provider: string; model?: string; dimension?: number };
 }
@@ -1401,10 +1409,11 @@ export interface BaseAgentConfig {
    */
   customModelParams?: Record<string, unknown>;
   /**
-   * Memory configuration.
-   * - `true` — enable in-memory conversation history with default settings.
-   * - `false` — disable memory; every call is stateless.
-   * - `MemoryConfig` — full control over memory subsystems.
+   * Memory configuration. `agent()` reads it only with `runtime: 'gmi'`, where `true`
+   * or a `MemoryConfig` turns on cognitive memory for the agent's sessions (its
+   * `embedding` and `consolidation` fields are read) and `false` keeps it off, also
+   * under `cognition: 'full'`. A session's message history is set by `history`, not
+   * by this field.
    */
   memory?: boolean | MemoryConfig;
   /** Retrieval-Augmented Generation configuration. */
@@ -1472,9 +1481,10 @@ export interface BaseAgentConfig {
    * defaults, or override fields per mechanism.
    *
    * The mechanisms run inside a `CognitiveMemoryManager` initialized with this
-   * config (`CognitiveMemoryConfig.cognitiveMechanisms`). The lightweight
-   * `agent()` and `agency()` helpers construct no memory manager, so they log
-   * a warning and leave this field unused. On the full runtime, a
+   * config (`CognitiveMemoryConfig.cognitiveMechanisms`). `agent()` without
+   * `runtime: 'gmi'` and `agency()` construct no memory manager, so they log a
+   * warning and leave this field unused; `agent({ runtime: 'gmi' })` with memory
+   * on passes it to the agent's memory manager. On the full runtime, a
    * `gmiManagerConfig.cognitiveMemoryFactory` builds the manager for each GMI.
    *
    * @see {@link https://docs.agentos.sh/features/cognitive-memory | Cognitive Memory}

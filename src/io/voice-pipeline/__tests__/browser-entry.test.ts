@@ -1,5 +1,5 @@
 /**
- * The browser entry's module graph, read from the build.
+ * The browser entries' module graphs, read from the build.
  *
  * `@framers/agentos/io/voice-pipeline/browser` is the entry a browser bundle
  * imports, so nothing it reaches may import a Node built-in, or any package:
@@ -8,6 +8,10 @@
  * every static import and re-export and every dynamic import of a literal
  * path on a line of code, and fails on any other specifier. A dynamic import
  * of a variable is not an edge of the graph, as it is not one for a bundler.
+ *
+ * `@framers/agentos/io/hearing/capture` is a browser entry as well, held to
+ * the same rule. Its worklet module, `capture-worklet.js`, is a file a host
+ * copies to its own origin and loads by its address, so it imports nothing.
  *
  * CI builds before it tests, and there the suite always runs: a missing build
  * fails it instead of skipping it. On a machine without a build it is skipped
@@ -86,5 +90,29 @@ describe.skipIf(!inCI && !existsSync(entry))('the browser entry of the voice pip
         'io/voice-pipeline/inputLevel.js',
       ])
     );
+  });
+});
+
+/** The capture entry, and the worklet module a host serves on its own. */
+const captureEntry = path.join(distRoot, 'io', 'hearing', 'AudioWorkletCapture.js');
+const captureWorklet = path.join(distRoot, 'io', 'hearing', 'capture-worklet.js');
+
+describe.skipIf(!inCI && !existsSync(captureEntry))('the capture entry of hearing', () => {
+  it("imports only the library's own modules, and its worklet module imports nothing", () => {
+    expect(existsSync(captureEntry), `${fromDist(captureEntry)} is not built`).toBe(true);
+    const graph = walk(captureEntry);
+    const outside = [...graph].flatMap(([file, specifiers]) =>
+      specifiers
+        .filter((specifier) => !specifier.startsWith('./') && !specifier.startsWith('../'))
+        .map((specifier) => `${fromDist(file)} imports ${specifier}`)
+    );
+    expect(outside).toEqual([]);
+    expect([...graph.keys()].map(fromDist)).toEqual(
+      expect.arrayContaining([
+        'io/hearing/AudioWorkletCapture.js',
+        'io/hearing/capture-worklet.js',
+      ])
+    );
+    expect(graph.get(captureWorklet), `${fromDist(captureWorklet)} imports`).toEqual([]);
   });
 });

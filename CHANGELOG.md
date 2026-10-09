@@ -1,3 +1,9 @@
+## [0.13.9](https://github.com/framerslab/agentos/compare/v0.13.8...v0.13.9) (2026-10-09)
+
+### feat
+
+* **hearing:** capture a page's microphone through an AudioWorklet (#182) ([ea5ca2f](https://github.com/framerslab/agentos/commit/ea5ca2f40df6ff0a37a77e5875891b53e2179682))
+
 ## [0.13.8](https://github.com/framerslab/agentos/compare/v0.13.7...v0.13.8) (2026-10-09)
 
 ### fix

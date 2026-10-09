@@ -37,10 +37,17 @@ wired outside `agency()`.
 
 ## Mental Model
 
-Agency is the multi-brain primitive. Each `agent()` in the roster carries a full
-[GMI](/architecture/gmi) brain: cognition (PAD mood, HEXACO traits, eight cognitive
-mechanisms), memory (episodic, semantic, procedural, working), persona, and
-tools. The agency layer adds three things on top of those brains.
+Agency is the multi-brain primitive. Each roster member is an `agent()`: a
+system prompt with its instructions and HEXACO traits, its tools and its hooks.
+A member whose config sets `runtime: 'gmi'`, or a pre-built
+`agent({ runtime: 'gmi' })`, is served by [GMIs](/architecture/gmi). The
+strategies call a member's `generate()` or `stream()`, and on the GMI path each
+call runs on a GMI built for it, on the `'light'` profile: a persona, a PAD mood
+and a reasoning trace, with no history and no cognitive memory, whatever the
+member's `cognition` and `memory` options say. A GMI member takes only the
+per-call options of that path, so in an agency whose `hitl.approvals.beforeTool`
+is set, which passes its approval gate with every member call, a GMI member's
+calls throw. The agency layer adds three things on top of those members.
 
 **1. Orchestration strategy declares how outputs flow between brains.**
 Sequential chains them, parallel fans them out and synthesises, debate has them
