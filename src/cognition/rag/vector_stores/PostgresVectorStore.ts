@@ -37,6 +37,7 @@ import type {
   MetadataScalarValue,
   MetadataValue,
 } from '../IVectorStore.js';
+import { sha256Hex } from '../../../core/utils/sha256.js';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -110,6 +111,26 @@ interface LexicalRow {
 const FILTER_OPERATORS: ReadonlySet<string> = new Set([
   '$eq', '$ne', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$all', '$exists', '$contains', '$textSearch',
 ]);
+
+/** The bytes Postgres keeps of a name; it cuts a longer one there. */
+const NAME_BYTES = 63;
+
+/** A text's length in bytes of UTF-8. Postgres counts a name in bytes of the database's encoding, taken here to be UTF-8. */
+function utf8Bytes(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+/** A name cut to at most `bytes` bytes, between two characters, the way Postgres cuts a name that is too long. */
+function cutToBytes(name: string, bytes: number): string {
+  let kept = '';
+  let used = 0;
+  for (const character of name) {
+    used += utf8Bytes(character);
+    if (used > bytes) break;
+    kept += character;
+  }
+  return kept;
+}
 
 // ---------------------------------------------------------------------------
 // PostgresVectorStore
@@ -267,8 +288,9 @@ export class PostgresVectorStore implements IVectorStore {
 
   /**
    * Create a new collection (Postgres table) with pgvector HNSW index. Each index is made only when the table
-   * has none of its kind, under a name that carries the table prefix. With `manageSchema: false` this does
-   * nothing: the caller's migrations made the table.
+   * has none of its kind, under a name that carries the table prefix; a name longer than the 63 bytes Postgres
+   * keeps is shortened so that it stays the index's own. With `manageSchema: false` this does nothing: the
+   * caller's migrations made the table.
    */
   async createCollection(
     name: string,
@@ -836,10 +858,11 @@ export class PostgresVectorStore implements IVectorStore {
   /**
    * Makes an index on a collection's table unless the table already has one of that access method on that column.
    * The table is looked up in the schema the store's unqualified names create it in, so a same-named table of
-   * another schema does not count.
+   * another schema does not count, and under the name the catalog holds, which is the 63 bytes Postgres keeps of
+   * a longer one.
    */
   private async _ensureIndex(collection: string, suffix: string, using: string): Promise<void> {
-    const tableName = `${this.prefix}${collection}`;
+    const tableName = cutToBytes(`${this.prefix}${collection}`, NAME_BYTES);
     // pg_indexes.indexdef prints `USING hnsw (embedding vector_cosine_ops)`, `USING gin (metadata_json)` and
     // `USING gin (tsv)`, so the text up to the first closing bracket matches an index of an older name too.
     const marker = using.slice(0, using.indexOf(')') + 1);
@@ -848,8 +871,22 @@ export class PostgresVectorStore implements IVectorStore {
       [tableName],
     );
     if (existing.rows.some((row: { indexdef: string }) => row.indexdef.includes(marker))) return;
-    const indexName = PostgresVectorStore.quoted(`${tableName}_${suffix}`);
+    const indexName = PostgresVectorStore.quoted(PostgresVectorStore.indexName(tableName, suffix));
     await this.pool.query(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${this._t(collection)} ${using}`);
+  }
+
+  /**
+   * The name of one of a table's indexes: the table's name, an underscore and the suffix, whole when Postgres
+   * keeps it whole. A longer name would be cut to the table's own name or to the name of another of its indexes,
+   * and IF NOT EXISTS would then skip the index. So the table's part is cut instead and eight hex digits of a hash
+   * of the table's name follow it: the indexes of one table, and those of two tables whose names start alike, keep
+   * names of their own.
+   */
+  private static indexName(tableName: string, suffix: string): string {
+    const whole = `${tableName}_${suffix}`;
+    if (utf8Bytes(whole) <= NAME_BYTES) return whole;
+    const hash = sha256Hex(tableName).slice(0, 8);
+    return `${cutToBytes(tableName, NAME_BYTES - hash.length - suffix.length - 2)}_${hash}_${suffix}`;
   }
 
   /** Ensure the store is initialized before any operation. */

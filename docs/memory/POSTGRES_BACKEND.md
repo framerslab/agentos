@@ -132,7 +132,7 @@ const storeB = new PostgresVectorStore({
 });
 ```
 
-Each prefix creates a separate set of tables: `"tenant_a_my_collection"`, `"tenant_a__collections"`, etc., with indexes named after each table (`"tenant_a_my_collection_hnsw"` and so on). Alternatively, use Postgres schemas (`SET search_path`) for stronger isolation. For many small tenants in one table, see [One collection, many tenants](#one-collection-many-tenants).
+Each prefix creates a separate set of tables: `"tenant_a_my_collection"`, `"tenant_a__collections"`, etc., with indexes named after each table (`"tenant_a_my_collection_hnsw"` and so on). Postgres keeps 63 bytes of a name: where a table's name leaves no room for a whole index name, `createCollection()` cuts the table's part of it and adds eight hex digits of a hash of the table's name, so each index keeps a name of its own. Alternatively, use Postgres schemas (`SET search_path`) for stronger isolation. For many small tenants in one table, see [One collection, many tenants](#one-collection-many-tenants).
 
 ## One collection, many tenants
 

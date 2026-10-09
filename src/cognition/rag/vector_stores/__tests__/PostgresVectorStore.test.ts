@@ -863,6 +863,59 @@ describe('PostgresVectorStore', () => {
       expect(queryCalls.filter((call) => call.sql.includes('FROM pg_indexes'))).toEqual([read, read, read]);
     });
 
+    it('keeps the index names of a long table name apart, each within the 63 bytes Postgres keeps', async () => {
+      const tablePrefix = `tenant_${'a'.repeat(42)}_`;
+      const store = new PostgresVectorStore({ ...base, tablePrefix });
+      await store.initialize();
+      const reads = () => queryCalls.filter((call) => call.sql.includes('FROM pg_indexes')).map((call) => call.params);
+      const indexNames = async (collection: string): Promise<string[]> => {
+        resetMocks();
+        await store.createCollection(collection, 8);
+        return queryCalls
+          .filter((call) => call.sql.startsWith('CREATE INDEX'))
+          .map((call) => {
+            expect(call.sql).toContain(`" ON "${tablePrefix}${collection}" USING `);
+            return call.sql.slice('CREATE INDEX IF NOT EXISTS "'.length, call.sql.indexOf('" ON "'));
+          });
+      };
+
+      // 62 characters: with its suffix each index name is longer than Postgres keeps, and cut there the three
+      // would be one name, of which IF NOT EXISTS makes only the first.
+      const table = `${tablePrefix}long_chunks1`;
+      expect(table).toHaveLength(62);
+      const names = await indexNames('long_chunks1');
+      const hash = names[0].slice(50, 58);
+      expect(hash).toMatch(/^[0-9a-f]{8}$/);
+      expect(names).toEqual([
+        `${table.slice(0, 49)}_${hash}_hnsw`,
+        `${table.slice(0, 45)}_${hash}_metadata`,
+        `${table.slice(0, 50)}_${hash}_fts`,
+      ]);
+      expect(names.map((name) => name.length)).toEqual([63, 63, 63]);
+      expect(reads()).toEqual([[table], [table], [table]]);
+
+      // A table whose name starts the same way gets names of its own.
+      const others = await indexNames('long_chunks2');
+      expect(others.map((name) => name.length)).toEqual([63, 63, 63]);
+      expect(others.some((name) => names.includes(name))).toBe(false);
+
+      // A table name longer than Postgres keeps is read under the 63 bytes the catalog holds.
+      const kept = `${tablePrefix}long_chunks_of_notes`.slice(0, 63);
+      expect((await indexNames('long_chunks_of_notes')).map((name) => name.length)).toEqual([63, 63, 63]);
+      expect(reads()).toEqual([[kept], [kept], [kept]]);
+
+      // Postgres counts a name in bytes: 31 of these two-byte letters fit in 63, and the cut falls between two letters.
+      const letter = String.fromCharCode(0xfc);
+      const plain = new PostgresVectorStore({ ...base });
+      await plain.initialize();
+      resetMocks();
+      await plain.createCollection(letter.repeat(40), 8);
+      expect(reads()).toEqual([[letter.repeat(31)], [letter.repeat(31)], [letter.repeat(31)]]);
+      const created = queryCalls.filter((call) => call.sql.startsWith('CREATE INDEX')).map((call) => call.sql.slice('CREATE INDEX IF NOT EXISTS "'.length, call.sql.indexOf('" ON "')));
+      expect(created).toHaveLength(3);
+      expect(created.every((name) => new TextEncoder().encode(name).length <= 63)).toBe(true);
+    });
+
     it('matches an array field with $in, $nin, $all and $contains', async () => {
       const store = new PostgresVectorStore({ ...base, manageSchema: false });
       await store.query('chunks', [0, 0], {

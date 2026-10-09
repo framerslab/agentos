@@ -1,7 +1,8 @@
 /**
  * @fileoverview PostgresVectorStore against a real Postgres with pgvector: the array-aware filter, deletion and
- * metadata changes by filter, the lexical leg, and an iterative scan that fills a filtered top-K, for query() and
- * for the hybrid search's dense leg. Gated on AGENTOS_TEST_POSTGRES_URL, as Brain.postgres.test.ts is.
+ * metadata changes by filter, the lexical leg, an iterative scan that fills a filtered top-K, for query() and
+ * for the hybrid search's dense leg, and the indexes createCollection() makes on a table with a long name. Gated
+ * on AGENTOS_TEST_POSTGRES_URL, as Brain.postgres.test.ts is.
  */
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -131,5 +132,32 @@ describe.skipIf(!URL)('PostgresVectorStore on Postgres', () => {
     expect(gone.deletedCount).toBe(40);
     expect((await store.lexicalSearch('chunks', 'budget', { topK: 5 })).documents).toHaveLength(0);
     expect((await store.lexicalSearch('chunks', 'weather', { topK: 5 })).documents).toHaveLength(5);
+  });
+
+  it('makes all three indexes of a table whose name leaves no room for their names whole', async () => {
+    // 62 characters: with its suffix each index name is longer than the 63 bytes Postgres keeps, and cut there the
+    // three would be one name, of which IF NOT EXISTS makes only the first.
+    const longPrefix = `${PREFIX}${'p'.repeat(49 - PREFIX.length)}_`;
+    const table = `${longPrefix}long_chunks1`;
+    expect(table).toHaveLength(62);
+    const managed = new PostgresVectorStore({ id: 'pg-long', type: 'postgres', pool, tablePrefix: longPrefix, textSearchConfig: 'simple' });
+    const indexes = async (): Promise<string[]> => {
+      const found = await pool.query<{ indexdef: string }>(
+        'SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND tablename = $1',
+        [table],
+      );
+      return found.rows.map((row) => row.indexdef.slice(row.indexdef.indexOf('USING '))).sort();
+    };
+    const made = ['USING btree (id)', 'USING gin (metadata_json)', 'USING gin (tsv)', 'USING hnsw (embedding vector_cosine_ops)'];
+    try {
+      await managed.createCollection('long_chunks1', DIM);
+      expect(await indexes()).toEqual(made);
+      // A second call finds each index the table has and adds none.
+      await managed.createCollection('long_chunks1', DIM);
+      expect(await indexes()).toEqual(made);
+    } finally {
+      await pool.query(`DROP TABLE IF EXISTS "${table}" CASCADE`);
+      await pool.query(`DROP TABLE IF EXISTS "${longPrefix}_collections" CASCADE`);
+    }
   });
 });
