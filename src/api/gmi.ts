@@ -450,6 +450,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
   const sessions = new Map<string, SessionEntry>();
   const sessionTallies = new Map<string, AgentOSUsageAggregate>();
+  /** The session ids opened so far; an id opened again after its close() is given a memory scope of its own. */
+  const openedSessionIds = new Set<string>();
   const agentTally = createEmptyUsageAggregate();
 
   /** The per-call overrides as completion options; throws naming an override the GMI path does not take. */
@@ -513,7 +515,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
       }
       // Each session's memory scope is its own unless the caller names the user:
       // sessions are often different people, and one person's facts must not
-      // reach another's replies.
+      // reach another's replies. An id opened again after close() is a new
+      // session, so its scope is a new id: it recalls nothing the closed one
+      // filed under its scope, and only a user id the caller names again is shared.
+      const memoryScopeId = openedSessionIds.has(sessionId) ? `${sessionId}:${randomUUID()}` : sessionId;
+      openedSessionIds.add(sessionId);
       const userId = sessionOptions?.userId ?? sessionId;
       const history = opts.history === false ? null : new SessionHistoryBuffer({ ...SESSION_HISTORY_DEFAULTS, ...(opts.history ?? {}) });
       if (!sessionTallies.has(sessionId)) sessionTallies.set(sessionId, createEmptyUsageAggregate(sessionId));
@@ -530,13 +536,13 @@ export function gmi(opts: GmiOptions): GmiHandle {
         return buildGmi(gmiId, persona, await sessionMemory.get(), maxSteps);
       };
       // The session's own GMI, when it keeps history; a GMI per turn otherwise.
-      const own = retryingOnce(() => buildSessionGmi(`gmi-${sessionId}`));
+      const own = retryingOnce(() => buildSessionGmi(`gmi-${memoryScopeId}`));
       let ownBuilt: BuiltGmi | undefined;
 
       // A send made after close() fails; one made before it runs, and close() waits for it.
       const gmiFor = (closedAtCall: boolean) => async (): Promise<GmiForTurn> => {
         if (closedAtCall) throw new Error(`gmi(): session '${sessionId}' is closed; agent.session('${sessionId}') opens a new one.`);
-        if (!history) return forOneTurn(await buildSessionGmi(`gmi-${sessionId}-${randomUUID()}`));
+        if (!history) return forOneTurn(await buildSessionGmi(`gmi-${memoryScopeId}-${randomUUID()}`));
         ownBuilt = await own.get();
         return ownBuilt;
       };
@@ -556,9 +562,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
       };
 
       const deps = (source: 'agent.session.send' | 'agent.session.stream'): GmiSessionDeps => ({
-        sessionId,
+        // The GMI files the replies under the session id it runs the turn under,
+        // and the user's messages under the user id: both are the session's scope.
+        sessionId: memoryScopeId,
         opts,
-        userId,
+        userId: sessionOptions?.userId ?? memoryScopeId,
         // Only a user id the caller passed reaches the provider's end-user field.
         providerUserId: sessionOptions?.userId,
         history,
