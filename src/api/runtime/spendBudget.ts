@@ -248,7 +248,8 @@ export function assertCallWithinBudget(
 
 /**
  * A finished call's cost: the provider's own `costUSD` when it reported one, else its tokens at the table's rates
- * (an embedding prices its prompt tokens alone); undefined when neither is known.
+ * (an embedding prices its prompt tokens alone); undefined when neither is known. A reported cost that is not a finite
+ * number, zero or more, is not used: a budget would record nothing for a cost of NaN.
  */
 export function costOfUsageUSD(
   providerId: string,
@@ -256,7 +257,8 @@ export function costOfUsageUSD(
   usage: { promptTokens?: number; completionTokens?: number; costUSD?: number } | undefined,
   isEmbedding = false,
 ): number | undefined {
-  if (typeof usage?.costUSD === 'number') return usage.costUSD;
+  const reported = usage?.costUSD;
+  if (typeof reported === 'number' && Number.isFinite(reported) && reported >= 0) return reported;
   const price = providerId === 'openai' ? openAIModelPricing(modelId) : undefined;
   if (!price || usage === undefined) return undefined;
   const prompt = usage.promptTokens ?? 0;

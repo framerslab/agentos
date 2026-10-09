@@ -108,6 +108,15 @@ describe('the estimates', () => {
     expect(costOfUsageUSD('openai', 'text-embedding-3-small', { promptTokens: 1000 }, true)).toBeCloseTo(0.00002, 12);
   });
 
+  it('prices the tokens when the reported cost is not a number zero or more, which a budget would record as nothing', () => {
+    for (const costUSD of [Number.NaN, Number.POSITIVE_INFINITY, -0.5]) {
+      expect(costOfUsageUSD('openai', 'gpt-6-luna', { promptTokens: 1000, completionTokens: 1000, costUSD }), String(costUSD)).toBeCloseTo(0.0006, 10);
+    }
+    const budget = new SpendBudget({ maxCostUSD: 0.001 });
+    budget.record(costOfUsageUSD('openai', 'gpt-6-luna', { promptTokens: 1000, completionTokens: 1000, costUSD: Number.NaN }), 2000, 'call');
+    expect(budget.spentUSD()).toBeCloseTo(0.0006, 10);
+  });
+
   it('counts the characters of the messages and the system prompt', () => {
     expect(promptCharsOf([{ role: 'user', content: 'hello' }], 'be brief')).toBeGreaterThan(13);
   });
