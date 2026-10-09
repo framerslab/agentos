@@ -111,6 +111,44 @@ describe('AudioWorkletCapture', () => {
     expect(node.connect).toHaveBeenCalledWith(gain);
   });
 
+  it("hands the listeners the blocks of the processor its worklet module registers, with the context's rate", async () => {
+    /** The registered processor as the test drives it; its posts go to the port of the node that made it. */
+    type Joined = { readonly port: { postMessage: (block: Float32Array) => void }; process(inputs: Float32Array[][]): boolean };
+    type JoinedClass = new (options?: { processorOptions?: { blockSize?: number } }) => Joined;
+    const registered = new Map<string, JoinedClass>();
+    class FakeProcessor {
+      readonly port: Joined['port'] = { postMessage: () => undefined };
+    }
+    vi.stubGlobal('AudioWorkletProcessor', FakeProcessor);
+    vi.stubGlobal('registerProcessor', (name: string, processor: JoinedClass) => registered.set(name, processor));
+    vi.resetModules();
+    await import('../capture-worklet.js');
+    const processors: Joined[] = [];
+    /** A node whose processor is the one registered under the node's name, built with the node's options. */
+    class JoinedNode extends FakeNode {
+      constructor(context: unknown, name: string, options: { processorOptions?: { blockSize?: number } }) {
+        super(context, name, options);
+        const Processor = registered.get(name);
+        if (!Processor) throw new Error(`no processor is registered as ${name}`);
+        const processor = new Processor(options);
+        processor.port.postMessage = (block) => this.port.onmessage?.({ data: block });
+        processors.push(processor);
+      }
+    }
+    vi.stubGlobal('AudioWorkletNode', JoinedNode);
+    const context = fakeContext();
+    const capture = new AudioWorkletCapture({ context: context as unknown as AudioContext, stream: {} as MediaStream, moduleUrl: '/w.js', blockSize: 4 });
+    const heard: Array<[number[], number]> = [];
+    capture.onBlock((samples, rate) => heard.push([[...samples], rate]));
+    await capture.start();
+    expect(processors).toHaveLength(1);
+    const processor = processors[0]!;
+    expect(processor.process([[new Float32Array([1, 1, 1]), new Float32Array([0, 0, 0])]])).toBe(true);
+    expect(heard).toEqual([]);
+    expect(processor.process([[new Float32Array([0, 0, 0])]])).toBe(true);
+    expect(heard).toEqual([[[0.5, 0.5, 0.5, 0], 48_000]]);
+  });
+
   it('takes a new stream without a new node, and hands on nothing once stopped', async () => {
     vi.stubGlobal('AudioWorkletNode', FakeNode);
     const context = fakeContext();
