@@ -19,9 +19,11 @@ keywords:
 
 # Human-in-the-Loop (HITL)
 
-Pause an agent run at specific lifecycle events, route the pending action to a human (or an LLM judge, or both), and resume with an approve / reject / modify decision. AgentOS exposes HITL on three integration surfaces: agency-level config, graph nodes, and a runtime manager. The agency config and the runtime manager share the `ApprovalRequest → handler → ApprovalDecision` shape; a graph's human node decides on its own options or suspends the run.
+Pause an agent run at specific lifecycle events, route the pending action to a human (or an LLM judge, or both), and resume with an approve / reject / modify decision. AgentOS exposes HITL on three integration surfaces, each with its own contract. `agency({ hitl })` passes an `ApprovalRequest` to `hitl.handler` and acts on the `ApprovalDecision` it returns (`approved`, `reason`, `modifications`). A graph's human node resolves from its own `autoAccept`, `autoReject` or `judge` options, or suspends the run with an interrupt. The runtime `HumanInteractionManager` takes a `PendingAction` in `requestApproval()` and answers with its own `ApprovalDecision` type (`actionId`, `approved`, `rejectionReason`, `decidedBy`, `decidedAt`).
 
-![Three-lane HITL architecture: Agency HitlConfig with 5 triggers and 6 handlers, the graph human node with autoAccept/autoReject/judge modes, and the runtime HumanInteractionManager with severity-aware PendingAction + escalation surface. All three converge on the ApprovalRequest → handler → ApprovalDecision → guardrail-override contract.](/img/diagrams/human-in-the-loop.svg)
+![Three-lane HITL architecture: Agency HitlConfig with 5 triggers and 6 handlers, the graph human node with autoAccept/autoReject/judge modes, and the runtime HumanInteractionManager with severity-aware PendingAction + escalation surface, above a band for the agency's ApprovalRequest → handler → ApprovalDecision → post-approval check contract.](/img/diagrams/human-in-the-loop.svg)
+
+The diagram's bottom band, drawn under all three lanes, is the agency lane's contract alone.
 
 ## What HITL is in AgentOS
 

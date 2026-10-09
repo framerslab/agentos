@@ -20,7 +20,7 @@
 
 ## Overview
 
-Provenance is an extension pack. [`createProvenancePack()`](https://github.com/framerslab/agentos/blob/master/src/extensions/packs/provenance-pack.ts) takes a [`ProvenanceSystemConfig`](https://github.com/framerslab/agentos/blob/master/src/safety/provenance/types.ts), a storage adapter, an agent id and an optional table prefix. When the runtime that loads the pack has a `storageAdapter`, AgentOS wraps that adapter with the pack's write hooks, so every write through it (conversation persistence, RAG, workflows, emergent tools) passes the storage policy and, with signing on, lands in a signed ledger. `AgentOSConfig` has no `provenance` key.
+Provenance is an extension pack. [`createProvenancePack()`](https://github.com/framerslab/agentos/blob/master/src/extensions/packs/provenance-pack.ts) takes a [`ProvenanceSystemConfig`](https://github.com/framerslab/agentos/blob/master/src/safety/provenance/types.ts), a storage adapter, an agent id and an optional table prefix. When the runtime that loads the pack has a `storageAdapter`, AgentOS wraps that adapter with the pack's write hooks and hands the wrapped adapter to conversation persistence, RAG, emergent tools and the self-improvement tools. The wrapper hooks `run()` and `batch()`, inside `transaction()` too: a write through those calls passes the storage policy and, with signing on, lands in a signed ledger. `exec()` and `prepare()` pass through without the hooks, so a write through either skips the policy and the ledger; a host that needs every write covered keeps its writes on `run()` and `batch()`. A workflow store (`AgentOSConfig.workflowStore`) is the host's own and is not wrapped. `AgentOSConfig` has no `provenance` key.
 
 The configuration has three parts that vary independently:
 
@@ -76,7 +76,7 @@ No enforcement. With signing on, writes are still recorded in the ledger.
 
 ### `revisioned`
 
-An `UPDATE` on a protected table first stores a snapshot of the rows it matches in the `revisions` table, then runs. A `DELETE` writes a tombstone to the `tombstones` table and does not run: the row stays. The table itself holds the latest version; earlier versions are read with `revisionManager.getRevisions(table, recordId)`, and deletions with `tombstoneManager.getTombstones(table?)`.
+An `UPDATE` on a protected table first stores a snapshot of the rows its `WHERE` clause matches in the `revisions` table, then runs; an `UPDATE` with no `WHERE` clause runs and saves no snapshot. A `DELETE` writes a tombstone for the rows its `WHERE` clause matches to the `tombstones` table and does not run: the row stays. A `DELETE` with no `WHERE` clause does not run either, and leaves no tombstone. The table itself holds the latest version; earlier versions are read with `revisionManager.getRevisions(table, recordId)`, and deletions with `tombstoneManager.getTombstones(table?)`.
 
 ### `sealed`
 
@@ -114,7 +114,10 @@ The ledger reads events back with `getAllEvents()`, `getEventsByRange(from, to)`
 import { ChainVerifier } from '@framers/agentos';
 
 const events = await ledger.getAllEvents();
-const result = await ChainVerifier.verify(events, keyManager.getPublicKeyBase64());
+// No key argument: each event is checked against its own signerPublicKey.
+const result = await ChainVerifier.verify(events);
+// With one imported key across restarts, pin it instead:
+// await ChainVerifier.verify(events, keyManager.getPublicKeyBase64());
 
 result.valid;           // true when no check failed
 result.eventsVerified;  // events checked
@@ -122,6 +125,8 @@ result.errors;          // [{ eventId, sequence, code, message }]: SEQUENCE_GAP,
                         // PAYLOAD_HASH_MISMATCH, EVENT_HASH_MISMATCH, SIGNATURE_INVALID
 result.warnings;        // e.g. a chain that does not start at sequence 1
 ```
+
+A key argument applies to every event. A chain signed by a preset's generated keys spans one key per activation (see [AgentKeyManager](#agentkeymanager)), so after a restart the current key reports `SIGNATURE_INVALID` for the events signed before it: verify such a chain without the key argument, and read the `Multiple signer public keys found` warning as the sign of more than one key. Without a key argument the check proves each event matches the key it names, not whose key that is; a host that needs the signer pinned signs with one imported key and passes it.
 
 `ChainVerifier.isValid(events, publicKey?)` returns the boolean alone, and `verifySubChain()` checks a slice.
 
@@ -196,6 +201,8 @@ const jsonl = await exporter.exportAsJSONL();            // the same as JSON Lin
 const result = await BundleExporter.importAndVerify(bundle);  // or BundleExporter.parseJSONL(jsonl) first
 result.valid;
 ```
+
+The bundle carries one public key, the exporter's current one, and `importAndVerify()` checks every event's signature with it. A bundle of events signed by a preset's generated keys across a restart therefore fails on the events signed before it; bundles verify end to end when the ledger is signed with one imported key (`provenance.keySource: { type: 'import', ... }`).
 
 ---
 

@@ -772,15 +772,20 @@ import {
   materializeEmergentToolFromPackage,
 } from '@framers/agentos';
 
-// Export a tool (an EmergentTool, for example from engine.getAgentTools('agent-1'))
+// Export a tool: an EmergentTool the engine holds, here one of agent-1's tools
+const tool = engine.getAgentTools('agent-1').find((t) => t.name === 'slugify');
+if (!tool) throw new Error("agent-1 has no tool named 'slugify'");
 const manifest = buildEmergentToolPackage(tool);
 await writeFile('./slugify.emergent-tool.yaml', serializeEmergentToolPackage(manifest));
 
 // Import into another agent
 const parsed = parseEmergentToolPackage(await readFile('./slugify.emergent-tool.yaml', 'utf8'));
 const imported = materializeEmergentToolFromPackage(parsed, { createdBy: 'agent-2' });
-// Writes the tool's row and registers it when its checks pass (deprecated in favour of loadPersistedTools for stored rows).
-await otherEngine.syncPersistedTool(imported);
+// Admit the tool to the other engine (deprecated in favour of loadPersistedTools for stored rows).
+// With storage configured and no row for this tool id, the tool's row is written first; when a row
+// exists, the stored row is admitted instead of the object passed in; without storage nothing is
+// written. A suspended or demoted tool is not registered: outcome.state and outcome.reason say why.
+const outcome = await otherEngine.syncPersistedTool(imported);
 ```
 
 - `compose` tools are portable by default

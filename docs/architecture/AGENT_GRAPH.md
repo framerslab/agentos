@@ -15,23 +15,30 @@ import {
   AgentGraph, START, END,
   gmiNode, toolNode, LoopController,
 } from '@framers/agentos/orchestration';
+import type { WorkflowRuntimeDeps } from '@framers/agentos/orchestration/builders/WorkflowBuilder';
 import { z } from 'zod';
 
-// Host bindings for the node executors (the NodeExecutorDeps shape).
-// runMyTool and callMyModel stand for your application's own tool runner and model call.
-const toolOrchestrator = {
-  async processToolCall({ toolCallRequest }) {
-    const output = await runMyTool(toolCallRequest.toolName, toolCallRequest.arguments);
-    return { success: true, output };
+// Your application's own tool runner and model call.
+declare function runMyTool(name: string, args: Record<string, unknown>): Promise<unknown>;
+declare function callMyModel(instructions: string, scratch: unknown): Promise<string>;
+
+// Host bindings for the node executors. The WorkflowRuntimeDeps annotation
+// types every callback parameter (toolCallRequest, instructions, state).
+const deps: WorkflowRuntimeDeps = {
+  toolOrchestrator: {
+    async processToolCall({ toolCallRequest }) {
+      const output = await runMyTool(toolCallRequest.toolName, toolCallRequest.arguments);
+      return { success: true, output };
+    },
+  },
+  loopController: new LoopController(),
+  async *providerCall(instructions, state) {
+    const text = await callMyModel(instructions, state.scratch);
+    yield { type: 'text_delta', content: text };
+    // No tool calls: the node's loop ends after this turn.
+    return { responseText: text, toolCalls: [], finishReason: 'stop' };
   },
 };
-const loopController = new LoopController();
-async function* providerCall(instructions, state) {
-  const text = await callMyModel(instructions, state.scratch);
-  yield { type: 'text_delta', content: text };
-  // No tool calls: the node's loop ends after this turn.
-  return { responseText: text, toolCalls: [], finishReason: 'stop' };
-}
 
 const graph = new AgentGraph(
   {
@@ -47,7 +54,7 @@ const graph = new AgentGraph(
   .addEdge('search', 'summarize')
   .addEdge('summarize', END)
   // toolOrchestrator runs the tool node; loopController + providerCall run the gmi node.
-  .compile({ deps: { toolOrchestrator, loopController, providerCall } });
+  .compile({ deps });
 
 const result = await graph.invoke({ topic: 'quantum computing' });
 ```
@@ -273,7 +280,7 @@ import { InMemoryCheckpointStore } from '@framers/agentos/orchestration';
 const compiled = graph.compile({
   checkpointStore: new InMemoryCheckpointStore(), // the default when omitted
   validate: true, // default — throws on unreachable nodes or structural errors
-  deps: { toolOrchestrator, loopController, providerCall }, // the host bindings from the Quick Start
+  deps, // the host bindings from the Quick Start
 });
 ```
 
@@ -417,8 +424,7 @@ const graph = new AgentGraph(ResearchState, {
 
   .compile({
     checkpointStore: new InMemoryCheckpointStore(),
-    // toolOrchestrator, loopController and providerCall: the host bindings from the Quick Start
-    deps: { toolOrchestrator, loopController, providerCall },
+    deps, // the host bindings from the Quick Start
   });
 
 // Run

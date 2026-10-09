@@ -167,9 +167,10 @@ interface GuardrailEvaluationResult {
   // For output: replaces textDelta (streaming) or finalResponseText (final).
   modifiedText?: string | null;
 
-  // With BLOCK on output: the fixed reply the caller receives, as a
-  // FINAL_RESPONSE whose metadata.guardrail records the block, in place of
-  // the error chunk. Input BLOCKs do not read it.
+  // With BLOCK on output, a non-empty string is the fixed reply the caller
+  // receives, as a FINAL_RESPONSE whose metadata.guardrail records the block,
+  // in place of the error chunk; an empty string or none yields the error
+  // chunk. Input BLOCKs do not read it.
   replacementText?: string;
 }
 ```
@@ -183,7 +184,7 @@ interface GuardrailEvaluationResult {
 | **ALLOW**    | `'allow'`    | Pass content unchanged. Use when all checks pass.                                                                                                                                         |
 | **FLAG**     | `'flag'`     | Pass content through but record metadata for audit/analytics. Content reaches the user; the evaluation is logged for review.                                                              |
 | **SANITIZE** | `'sanitize'` | Replace content with the value in `modifiedText`. Use for PII redaction, profanity masking, or content rewriting. Requires `canSanitize: true` in config to work in Phase 1.              |
-| **BLOCK**    | `'block'`    | Reject/terminate the interaction. For input evaluation, the request is never processed. For output evaluation, the stream ends at once: with a `FINAL_RESPONSE` holding the evaluation's `replacementText` when it has one, otherwise with an error chunk. |
+| **BLOCK**    | `'block'`    | Reject/terminate the interaction. For input evaluation, the request is never processed. For output evaluation, the stream ends at once: with a `FINAL_RESPONSE` holding the evaluation's `replacementText` when that is a non-empty string, otherwise with an error chunk. |
 
 ### SANITIZE rules
 

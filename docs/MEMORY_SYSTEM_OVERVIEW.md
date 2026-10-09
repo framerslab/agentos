@@ -32,7 +32,7 @@ The next sections explain each piece, why it earned its place, and which adjacen
 
 ## How it connects (60-second summary)
 
-The whole stack is up to three small classifier calls plus a hybrid retriever, on top of a SQL-backed brain with a decay loop running in the background. The calls depend on the host's path: the QueryClassifier gate's call when the host runs the gate (a T0 query ends there when the host skips recall on it), then the MemoryRouter's and the ReadRouter's. Every concept that sounds like a separate thing in this doc plugs into one of those four parts.
+The whole stack is up to three small classifier calls plus a hybrid retriever, on top of a SQL-backed brain that a consolidation pass maintains: `CognitiveMemoryManager` runs its `ConsolidationPipeline`, which opens with a decay sweep, on an hourly timer (`consolidation.intervalMs`, off with `consolidation.enabled: false`), and the `Memory` facade runs its `ConsolidationLoop` when `consolidate()` is called. The calls depend on the host's path: the QueryClassifier gate's call when the host runs the gate (a T0 query ends there when the host skips recall on it), then the MemoryRouter's and the ReadRouter's. Every concept that sounds like a separate thing in this doc plugs into one of those four parts.
 
 ![AgentOS memory pipeline: user query enters QueryClassifier (T0 short-circuits, T1+ proceeds), MemoryRouter picks retrieval architecture, canonical-hybrid retrieval runs BM25 + dense embeddings, fuses via RRF, then Cohere rerank-v3.5 cross-encoder, then a six-signal cognitive composite scorer (optional HyDE). Reranked traces feed ReaderRouter (gpt-4o vs gpt-5-mini) then ReadRouter (5 intents to 5 strategies) for the grounded answer. A consolidation box lists prune, merge, strengthen, derive, compact and reindex on the same brain, plus 8 cognitive mechanisms.](/img/diagrams/memory-system-overview.svg)
 
@@ -44,7 +44,8 @@ If a term in the doc below sounds new, here's where it plugs in:
 
 | You hear... | It's the... | And it lives in... |
 |---|---|---|
-| **BM25 / FTS5** | lexical leg of canonical-hybrid | retrieval, runs over the brain's full-text index |
+| **BM25** | lexical leg of canonical-hybrid | `HybridRetriever`'s own in-memory `BM25Index`, which the caller fills (`hybrid.bm25.addDocument()`) |
+| **FTS5 / tsvector** | the SQL brain's full-text index over `memory_traces` | the adapter's `IFullTextSearch`; the `memory_search` tool queries it, and the add, update and merge paths keep it in sync |
 | **Cohere rerank-v3.5** | cross-encoder rerank pass after RRF merge | the retrieval signal that moved accuracy most in the benchmark runs; v4.0-pro tested and dropped |
 | **HyDE** | hypothesis-then-embed retrieval mode | optional retrieval augmentation; on for M, off for S |
 | **Six-signal composite** | the cognitive memory layer's scorer on top of similarity | encoding strength, recency, mood, graph, importance, similarity |
@@ -52,7 +53,7 @@ If a term in the doc below sounds new, here's where it plugs in:
 | **HEXACO modulation** | personality vector that biases encoding strength, working-memory capacity and the cognitive mechanisms | optional; runtime works personality-neutral by default |
 | **Spreading activation (ACT-R)** | graph BFS that raises the score of retrieved traces linked in the memory graph | seeded by the top five retrieved traces; adds no trace retrieval did not return |
 | **OM-v10 / OM-v11** | observational-memory backends MemoryRouter can dispatch to | below canonical-hybrid with a semantic embedder in the benchmark runs; kept for cost-tolerant workloads |
-| **LLM-as-judge** | how every router's classifier picks a category | one classifier call per router; `selectReader()` reuses the MemoryRouter's category |
+| **LLM-as-judge** | how each classifier labels a query: QueryClassifier a tier (T0-T3), MemoryRouter a memory category, ReadRouter a read intent | one classifier call each; `ReadRouter.decide()` makes none when the host passes `manualIntent`; `selectReader()` reuses the MemoryRouter's category |
 | **Tiered presets** | shipped routing tables — `minimize-cost` / `balanced` / `maximize-accuracy` | calibrated from Phase B per-category cost-accuracy points |
 | **Adaptive variant** | [`AdaptiveMemoryRouter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/memory/adaptive.ts) self-calibrates from your workload | use when your category mix or reader differs from LongMemEval-S |
 | **Storage substrate** | `@framers/sql-storage-adapter` — same brain code, multiple backends | SQLite default, Postgres / IndexedDB / Capacitor / Electron all swap in |
@@ -122,7 +123,7 @@ const sharedBrain = await Brain.openWithAdapter(adapter, { brainId: 'companion-a
 Three things the adapter abstracts away so the brain code stays identical:
 
 1. **SQL Dialect.** `INSERT OR IGNORE`, `json_extract(...)`, `ifnull(...)`, `PRAGMA` get translated automatically between SQLite and Postgres via the [`SqlDialect`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/dialect.ts) interface. The brain writes one set of queries; the dialect rewrites them per backend.
-2. **Full-text search.** [`IFullTextSearch`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/fts.ts) abstracts FTS5 (SQLite Porter tokenizer) and tsvector + GIN (Postgres) behind one `createIndex` / `matchClause` / `rankExpression` / `rebuildCommand` API. The hybrid retriever's BM25 lexical leg works on both backends without branching.
+2. **Full-text search.** [`IFullTextSearch`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/fts.ts) abstracts FTS5 (SQLite Porter tokenizer) and tsvector + GIN (Postgres) behind one `createIndex` / `matchClause` / `rankExpression` / `rebuildCommand` API, so the brain's `memory_traces_fts` index and the `memory_search` tool's query work on both backends without branching. `HybridRetriever` does not read this index: its BM25 leg is a per-instance in-memory `BM25Index` that the caller fills.
 3. **BLOB codec.** Embeddings are stored as raw `Float32Array` BLOBs. [`NodeBlobCodec`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/codecs/NodeBlobCodec.ts) uses `Buffer`; [`BrowserBlobCodec`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/codecs/BrowserBlobCodec.ts) uses `DataView`. The 1536-dim `text-embedding-3-small` vector takes ~6 KB per trace on disk and round-trips byte-identical across backends.
 
 ### Multi-tenant Postgres mode
@@ -222,7 +223,7 @@ flowchart TB
     classDef external fill:#f3e8ff,stroke:#8b5cf6,color:#5b21b6
 ```
 
-A query costs up to three classifier calls: one in QueryClassifier when the host runs the gate, one in MemoryRouter and one in ReadRouter ([`CognitivePipeline.recallAndRead()`](./COGNITIVE_PIPELINE.md) makes the last two). The reader-model lookup, `selectReader()`, reuses the MemoryRouter's category and makes no call. Trivial queries (greetings, small talk, questions answerable from context alone) end at Stage 1 with no retrieval when the host skips recall on T0.
+A query costs up to three classifier calls: one in QueryClassifier when the host runs the gate, one in MemoryRouter and one in ReadRouter ([`CognitivePipeline.recallAndRead()`](./COGNITIVE_PIPELINE.md) makes the last two; a host that calls `ReadRouter.decide()` with `manualIntent` skips the ReadRouter's). The reader-model lookup, `selectReader()`, reuses the MemoryRouter's category and makes no call. Trivial queries (greetings, small talk, questions answerable from context alone) end at Stage 1 with no retrieval when the host skips recall on T0.
 
 ---
 

@@ -131,7 +131,7 @@ class CostCeilingGuardrail implements IGuardrailService {
 
 ### Example 2: Real-Time PII Redaction
 
-The `@framers/agentos-ext-pii-redaction` pack detects PII in four tiers (regex patterns from the `openredaction` library, an NLP prefilter, a BERT NER model, an LLM judge): emails, phone numbers, SSNs, payment cards, IP addresses, IBANs, passports, driver's licences, other government IDs, dates of birth, API and AWS keys, crypto addresses, medical terms, and person, organization and location names. See the [PII Redaction extension docs](/docs/extensions/built-in/pii-redaction) for full configuration reference.
+The `@framers/agentos-ext-pii-redaction` pack detects PII in four tiers (regex patterns from the `openredaction` library, an NLP prefilter, a BERT NER model, an LLM judge): emails, phone numbers, SSNs, payment cards, IP addresses, IBANs, passports, driver's licenses, other government IDs, dates of birth, API and AWS keys, crypto addresses, medical terms, and person, organization and location names. See the [PII Redaction extension docs](/docs/extensions/built-in/pii-redaction) for full configuration reference.
 
 ```typescript
 import { createPiiRedactionGuardrail } from '@framers/agentos-ext-pii-redaction';
@@ -488,7 +488,7 @@ interface GuardrailEvaluationResult {
   metadata?: Record<string, unknown>;
   details?: unknown;         // Debugging detail, not shown to users
   modifiedText?: string | null;  // For SANITIZE action
-  replacementText?: string;  // With BLOCK on output: the reply sent in place of the error chunk
+  replacementText?: string;  // With BLOCK on output, a non-empty string is the reply sent in place of the error chunk
 }
 ```
 
