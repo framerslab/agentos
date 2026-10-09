@@ -280,6 +280,11 @@
       "default": "./dist/io/hearing/index.js",
       "types": "./dist/io/hearing/index.d.ts"
     },
+    "./io/hearing/capture": {
+      "import": "./dist/io/hearing/AudioWorkletCapture.js",
+      "default": "./dist/io/hearing/AudioWorkletCapture.js",
+      "types": "./dist/io/hearing/AudioWorkletCapture.d.ts"
+    },
     "./io/hearing/livekit": {
       "import": "./dist/io/hearing/livekit.js",
       "default": "./dist/io/hearing/livekit.js",
