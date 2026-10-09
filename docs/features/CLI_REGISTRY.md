@@ -1,16 +1,12 @@
 # CLI Registry
 
-The CLI Registry is AgentOS's auto-discovery system for installed command-line tools. It scans the user's PATH for known binaries, detects versions, and exposes results to providers, extensions, and the capability discovery engine.
+The CLI Registry is AgentOS's detector for installed command-line tools. It scans the user's PATH for known binaries and detects their versions, and a host reads the results.
 
 ## Overview
 
-AgentOS ships with a JSON-based registry of 54 CLI descriptors across 8 categories. At startup (or on demand), the [`CLIRegistry`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLIRegistry.ts) runs `which` + `--version` for each registered binary in parallel, producing a scan result that tells the runtime exactly what's available on the host machine.
+AgentOS ships a JSON-based registry of 54 CLI descriptors across 8 categories. When a host calls `scan()`, the [`CLIRegistry`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLIRegistry.ts) runs `which` and the version flag for each registered binary in parallel and returns what is installed on the machine.
 
-This powers:
-- **LLM provider auto-detection** -- [`ClaudeCodeCLIBridge`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/ClaudeCodeCLIBridge.ts) and [`GeminiCLIBridge`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/GeminiCLIBridge.ts) check if their binary is installed before attempting subprocess calls.
-- **Health checks** -- detected CLIs can be included in diagnostic output.
-- **Capability discovery** -- the discovery engine indexes installed tools as capabilities agents can reference.
-- **cli-executor extension** -- `shell_execute` relies on the host having the right binaries.
+The registry is a standalone utility: nothing else in AgentOS calls it. A host uses it to report which tools are installed, to gate a feature on a binary, or to build capability descriptors for the discovery engine from the scan. The CLI bridges ([`ClaudeCodeCLIBridge`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/ClaudeCodeCLIBridge.ts), [`GeminiCLIBridge`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/GeminiCLIBridge.ts)) check their own binary with `checkBinaryInstalled()`, not through the registry, and the cli-executor pack's `shell_execute` runs whatever binaries the host has.
 
 ## Registry Categories
 
@@ -107,9 +103,9 @@ interface CLIScanResult extends CLIDescriptor {
 
 ## Adding Custom CLIs
 
-### Option 1: Edit JSON (permanent)
+### Option 1: Contribute a descriptor
 
-Add a new entry to an existing category file, or create a new `*.json` file in `src/safety/sandbox/subprocess/registry/`:
+A descriptor that belongs in every install goes into AgentOS itself: add an entry to a category file, or a new `*.json` file, in `src/safety/sandbox/subprocess/registry/`. The build ships those files in `dist/`, and the registry loads every `*.json` in that folder:
 
 ```json
 [
@@ -225,21 +221,11 @@ The `cli-executor` extension pack (`@framers/agentos-ext-cli-executor`) provides
 - **CLIRegistry** answers "what binaries exist?" -- discovery and detection.
 - **cli-executor** answers "can the agent run this command?" -- execution with security guardrails.
 
-When the host runtime loads the cli-executor extension, it configures filesystem roots, security checks, and the `dangerouslySkipSecurityChecks` flag based on the active security tier.
+The cli-executor pack takes its policy from its options: `filesystem` (read and write roots), its own command checks, and `dangerouslySkipSecurityChecks`. The host that loads the pack sets them.
 
 ## Security Considerations
 
-The CLI Registry itself is read-only and does not execute commands beyond `which` and `--version`. However, downstream consumers should respect the active security tier:
-
-| Security Tier | CLI Execution | File Writes | External APIs |
-|--------------|---------------|-------------|---------------|
-| `dangerous` | Allowed | Allowed | Allowed |
-| `permissive` | Allowed | Allowed | Allowed |
-| `balanced` | Allowed | Blocked | Allowed |
-| `strict` | Blocked | Blocked | Allowed |
-| `paranoid` | Blocked | Blocked | Blocked |
-
-The `balanced` tier is the recommended default. It permits CLI execution but blocks file writes unless the agent requests folder access through the HITL approval flow.
+The CLI Registry runs nothing beyond `which` and each binary's version flag. It applies no security policy, and neither does the rest of AgentOS for CLI execution: `SecurityTier` (`'dangerous' | 'permissive' | 'balanced' | 'strict' | 'paranoid'`) is a type AgentOS declares and does not enforce. Which commands an agent may run, and where it may write, is set by the host through the cli-executor pack's options.
 
 ## Error Handling
 
@@ -291,9 +277,7 @@ The registry reports a binary as not installed when `which <binary>` fails durin
 - **Binary not installed.** Follow the `installGuidance` field from the descriptor. Run the install command, then re-scan.
 - **PATH does not include the binary's directory.** GUI-launched processes (IDEs, Electron apps) may inherit a different PATH than your terminal. Verify with `echo $PATH` and add the directory to your shell profile (`~/.bashrc`, `~/.zshrc`, `~/.profile`).
 - **Binary has an unexpected name.** Some CLIs differ across platforms — `python` vs `python3`, `docker-compose` (v1) vs `docker compose` (v2 plugin). The registry tracks specific binary names; check the `binaryName` field.
-- **Version flag mismatch.** If the binary exists but `--version` exits non-zero, the registry marks it as not installed. Some CLIs use `-v`, `-V`, or `version` instead of `--version`. Provide a custom `versionFlag` in the descriptor.
-
-**Fix:** Install the binary, ensure its directory is on PATH, or register a custom descriptor with the correct `binaryName` and `versionFlag`.
+**Fix:** Install the binary, ensure its directory is on PATH, or register a custom descriptor with the correct `binaryName`.
 
 ### Version shows "unknown"
 
@@ -302,6 +286,7 @@ The binary was found on PATH (`installed: true`) but the version string could no
 **Common causes:**
 - The binary's version output does not match the default regex `/(\d+\.\d+\.\d+)/`. For example, a CLI that outputs `v2.1` (two segments) or `Build 20240315` (no semver) will not match.
 - The version output goes to stderr instead of stdout.
+- The version flag fails (some CLIs use `-v`, `-V`, or `version` instead of `--version`): the binary still reads as installed, with version `unknown`. Provide a custom `versionFlag` in the descriptor.
 
 **Fix:** Register the CLI with a custom `versionPattern` regex that matches its actual output format:
 
@@ -320,7 +305,7 @@ registry.register({
 
 Runtime registrations via `registry.register()` or `registry.registerAll()` are **per-process only**. They do not survive process restarts.
 
-**Fix:** For permanent additions, add a JSON file to `src/safety/sandbox/subprocess/registry/` or add entries to an existing category file. The [`CLIRegistry`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLIRegistry.ts) constructor automatically loads all `*.json` files from this directory.
+**Fix:** Register your descriptors each time the process starts, or contribute them to AgentOS (`src/safety/sandbox/subprocess/registry/`): the [`CLIRegistry`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLIRegistry.ts) constructor loads every `*.json` file the package ships in that folder.
 
 ### scan() is slow
 
