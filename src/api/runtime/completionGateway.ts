@@ -251,15 +251,9 @@ function abortChunk(resolution: CompletionResolution): ModelCompletionResponse {
 
 const ABORTED = Symbol('aborted');
 
-/**
- * The iterator's next result, or `ABORTED` once `signal` has aborted, whichever
- * comes first. The signal is read before `next()` is asked: asking a provider
- * stream that has not started for its first chunk sends its request.
- */
-function nextUnlessAborted<T>(iterator: AsyncIterator<T>, signal: AbortSignal): Promise<IteratorResult<T> | typeof ABORTED> {
-  if (signal.aborted) return Promise.resolve(ABORTED);
-  const next = iterator.next();
-  return new Promise<IteratorResult<T> | typeof ABORTED>((resolve, reject) => {
+/** `next`'s result, or `ABORTED` once `signal` has aborted, whichever comes first. */
+function unlessAborted<T>(next: Promise<T>, signal: AbortSignal): Promise<T | typeof ABORTED> {
+  return new Promise<T | typeof ABORTED>((resolve, reject) => {
     const onAbort = (): void => resolve(ABORTED);
     signal.addEventListener('abort', onAbort, { once: true });
     next.then(
@@ -276,11 +270,29 @@ function nextUnlessAborted<T>(iterator: AsyncIterator<T>, signal: AbortSignal): 
 }
 
 /**
+ * Reads a provider stream the caller's abort left behind to its end, starting
+ * with the chunk it was asked for when the abort came (`pending`). Every
+ * provider ends its stream once it sees the signal, at its next event at the
+ * latest, through its own abort path. A read that fails ends the reading.
+ */
+async function readToEnd<T>(iterator: AsyncIterator<T>, pending: Promise<IteratorResult<T>> | undefined): Promise<void> {
+  try {
+    let result = pending ? await pending : await iterator.next();
+    while (!result.done) result = await iterator.next();
+  } catch {
+    // The attempt has ended already; the provider's own failure is not the caller's.
+  }
+}
+
+/**
  * The provider's chunks until `signal` aborts, then the abort chunk at once.
  * Anthropic, Gemini and Ollama read the signal only when a streamed event
  * arrives, so a request stalled before its first byte, or between two events,
  * would otherwise hold the turn (and a session's `close()`) until the
- * provider's own timeout. The provider's stream is ended in the background.
+ * provider's own timeout. The signal is read before every chunk is asked for:
+ * asking a stream that has not started for its first chunk sends its request,
+ * so once the signal has aborted, a stream that was never asked is closed and
+ * sends nothing, and one that has started is read to its end in the background.
  */
 async function* untilAborted(
   source: AsyncIterable<ModelCompletionResponse>,
@@ -288,13 +300,26 @@ async function* untilAborted(
   resolution: CompletionResolution,
 ): AsyncGenerator<ModelCompletionResponse, void, undefined> {
   const iterator = source[Symbol.asyncIterator]();
+  let started = false;
   let leftRunning = false;
+  // Hands the provider's stream over once the signal has aborted; `pending` is the chunk asked for when it did.
+  const leave = (pending?: Promise<IteratorResult<ModelCompletionResponse>>): void => {
+    leftRunning = true;
+    if (started) void readToEnd(iterator, pending);
+    else void Promise.resolve(iterator.return?.()).catch(() => undefined);
+  };
   try {
     for (;;) {
-      const next = await nextUnlessAborted(iterator, signal);
+      if (signal.aborted) {
+        leave();
+        yield abortChunk(resolution);
+        return;
+      }
+      const pending = iterator.next();
+      started = true;
+      const next = await unlessAborted(pending, signal);
       if (next === ABORTED) {
-        leftRunning = true;
-        void Promise.resolve(iterator.return?.()).catch(() => undefined);
+        leave(pending);
         yield abortChunk(resolution);
         return;
       }
