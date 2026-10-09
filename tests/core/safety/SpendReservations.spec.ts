@@ -101,6 +101,17 @@ describe("a day's reservations", () => {
     expect(await store.lockDay(utcDay(AT))).toBe(500);
   });
 
+  it('settles a cost below zero at the whole reservation, and rounds a cost with a fraction down', async () => {
+    // A cost below zero is not a cost: settled at nothing, it would take the reservation out of the day's total.
+    const store = new InMemorySpendDayStore();
+    const wrong = await reserveSpend(store, { kind: 'call', micro: 500, at: AT, expires: LATER, capMicro: LIMIT });
+    expect(await releaseSpend(store, wrong, -1, AT)).toBe(true);
+    expect(await store.lockDay(utcDay(AT))).toBe(500);
+    const known = await reserveSpend(store, { kind: 'call', micro: 500, at: AT, expires: LATER, capMicro: LIMIT });
+    expect(await releaseSpend(store, known, 37.9, AT)).toBe(true);
+    expect(await store.lockDay(utcDay(AT))).toBe(537);
+  });
+
   it('settles each expired reservation at its whole amount, and counts each UTC day apart', async () => {
     const store = new InMemorySpendDayStore();
     const expired = await reserveSpend(store, { kind: 'session', micro: 1_020_000, at: AT, expires: LATER, capMicro: LIMIT });

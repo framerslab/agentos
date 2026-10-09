@@ -128,15 +128,15 @@ export async function reserveSpend(store: SpendDayStore, admission: SpendAdmissi
 }
 
 /**
- * Settles a reservation once at what its use cost, in whole micro-dollars and never below zero; false when it was
- * settled already. A cost that is not a finite number was never known, so the reservation settles at its whole amount,
- * as an expired one does.
+ * Settles a reservation once at what its use cost, rounded down to whole micro-dollars; false when it was settled
+ * already. A cost that is not a finite number, zero or more, was never known, so the reservation settles at its whole
+ * amount, as an expired one does: a cost below zero settled at nothing would take the reservation's whole amount out of
+ * the day's total.
  */
 export function releaseSpend(store: SpendDayStore, id: string, settledMicro: number, at: Date): Promise<boolean> {
   // The store holds what settles to the amount reserved, so the largest exact amount settles a reservation whole.
-  const settled = Number.isFinite(settledMicro)
-    ? Math.min(Math.max(0, Math.floor(settledMicro)), Number.MAX_SAFE_INTEGER)
-    : Number.MAX_SAFE_INTEGER;
+  const known = Number.isFinite(settledMicro) && settledMicro >= 0;
+  const settled = known ? Math.min(Math.floor(settledMicro), Number.MAX_SAFE_INTEGER) : Number.MAX_SAFE_INTEGER;
   return store.settleReservation(id, settled, at);
 }
 
