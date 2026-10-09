@@ -32,6 +32,11 @@ describe('InputSilenceWatch', () => {
     expect(watch.push(-Infinity, 20_100)).toBe(false);
     expect(watch.push(-Infinity, 25_100)).toBe(true);
     expect(watch.push(-40, 25_200)).toBe(false);
+    // The five seconds count from a dead signal's first block: time with no blocks
+    // after a block that carried a signal is not a dead signal.
+    expect(watch.push(-Infinity, 40_000)).toBe(false);
+    expect(watch.push(-Infinity, 44_999)).toBe(false);
+    expect(watch.push(-Infinity, 45_000)).toBe(true);
   });
 
   it('counts afresh on a restart and keeps whether the input was heard', () => {
