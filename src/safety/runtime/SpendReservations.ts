@@ -65,8 +65,16 @@ export function toMicro(usd: number): number {
   return Math.round(usd * 1_000_000);
 }
 
-/** Seconds at a price per minute in micro-dollars, rounded up to the micro-dollar. */
+/**
+ * Seconds at a price per minute in micro-dollars, rounded up to the micro-dollar.
+ *
+ * @throws {RangeError} When `microPerMinute` is not whole micro-dollars, zero or more: a price in US dollars passed in
+ *   its place (0.003 for 3,000) would price an hour at one micro-dollar.
+ */
 export function minutesMicro(seconds: number, microPerMinute: number): number {
+  if (!isWholeCount(microPerMinute)) {
+    throw new RangeError(`A price per minute is whole micro-dollars, zero or more, not ${microPerMinute}; toMicro() converts US dollars`);
+  }
   return Math.ceil((seconds * microPerMinute) / 60);
 }
 

@@ -27,6 +27,13 @@ describe('the arithmetic', () => {
     expect(toMicro(0.017)).toBe(17_000);
   });
 
+  it('refuses a price per minute that is not whole micro-dollars, as a price in US dollars passed in its place is', () => {
+    // 0.003 US dollars a minute read as micro-dollars would price an hour at one micro-dollar instead of 180,000.
+    expect(() => minutesMicro(3600, 0.003)).toThrow(RangeError);
+    expect(() => minutesMicro(3600, Number.NaN)).toThrow(RangeError);
+    expect(minutesMicro(3600, toMicro(0.003))).toBe(180_000);
+  });
+
   it('prices tokens at a row with each part rounded up, and settles never above the reservation', () => {
     expect(tokensMicro(1000, 160, LUNA)).toBe(180);
     expect(settledTokensMicro(1000, 160, 150, LUNA)).toBe(150);
