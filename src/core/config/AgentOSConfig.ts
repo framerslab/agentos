@@ -211,9 +211,9 @@ function createModelProviderManagerConfig(env: EnvironmentConfig): AIModelProvid
       config: {
         apiKey: env.OPENAI_API_KEY,
         baseURL: 'https://api.openai.com/v1',
-        defaultModel: 'gpt-4o',
+        defaultModelId: 'gpt-4o',
         maxRetries: 3,
-        timeout: 60000,
+        requestTimeout: 60000,
       },
     });
   }
@@ -232,9 +232,8 @@ function createModelProviderManagerConfig(env: EnvironmentConfig): AIModelProvid
         // and 'openai/gpt-4o' made that silent path the top LLM spend
         // twice (2026-06-07, 2026-07-02). Callers that want a stronger
         // model must name it explicitly.
-        defaultModel: 'openai/gpt-4o-mini',
-        maxRetries: 3,
-        timeout: 60000,
+        defaultModelId: 'openai/gpt-4o-mini',
+        requestTimeout: 60000,
       },
     });
   }
@@ -263,8 +262,8 @@ function createModelProviderManagerConfig(env: EnvironmentConfig): AIModelProvid
       isDefault: !env.OPENAI_API_KEY && !env.OPENROUTER_API_KEY && !env.REQUESTY_API_KEY,
       config: {
         baseURL: env.OLLAMA_BASE_URL,
-        defaultModel: 'llama3.2',
-        timeout: 120000, // Longer timeout for local models
+        defaultModelId: 'llama3.2',
+        requestTimeout: 120000, // Longer timeout for local models
       },
     });
   }
