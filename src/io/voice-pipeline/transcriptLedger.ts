@@ -6,12 +6,14 @@
  * nothing; lines keep the order they were first seen in. An empty final with
  * no failure takes a line back, and the ledger hides it. LiveKit carries
  * transcripts as text streams on its `lk.transcription` topic with the
- * attributes its own transcription output sets: `transcriptEventFromLiveKit()`
- * reads one, and `LiveKitTranscriptionOutput`
- * (`@framers/agentos/io/hearing/livekit`) writes them. The module imports
- * nothing, its types included, so a browser bundle takes it from
- * `@framers/agentos/io/voice-pipeline/browser` and a type check of it needs no
- * Node types.
+ * attributes its own transcription output sets, to which this library adds
+ * `agentos.transcription_failed` on a line the provider could not transcribe
+ * and `agentos.start_ms` and `agentos.end_ms` on a final with times:
+ * `transcriptEventFromLiveKit()` reads such a stream, and
+ * `LiveKitTranscriptionOutput` (`@framers/agentos/io/hearing/livekit`) writes
+ * them. The module imports nothing, its types included, so a browser bundle
+ * takes it from `@framers/agentos/io/voice-pipeline/browser` and a type check
+ * of it needs no Node types.
  */
 
 /** LiveKit's topic for transcription text streams. */
@@ -29,6 +31,18 @@ export const LIVEKIT_TRANSCRIPTION_ATTRIBUTES = {
 
 /** The attribute this library adds to a line the provider could not transcribe, holding a short reason. */
 export const TRANSCRIPTION_FAILED_ATTRIBUTE = 'agentos.transcription_failed';
+
+/**
+ * The attributes this library adds to a final: the line's start and end on the
+ * session's audio clock, when the provider gave them, each as whole
+ * milliseconds in decimal digits (`'1200'`). An interim carries neither.
+ */
+export const TRANSCRIPTION_TIME_ATTRIBUTES = {
+  /** The line's `startMs`. */
+  startMs: 'agentos.start_ms',
+  /** The line's `endMs`. */
+  endMs: 'agentos.end_ms',
+} as const;
 
 /** One line of a ledger. */
 export interface LedgerItem {
@@ -229,7 +243,10 @@ export class TranscriptLedger {
 
 /**
  * Reads one LiveKit transcription stream (its text and attributes) as a
- * {@link LedgerEvent}, or `null` when it carries no segment id.
+ * {@link LedgerEvent}, or `null` when it carries no segment id. The stream's
+ * {@link TRANSCRIPTION_TIME_ATTRIBUTES} become the event's `startMs` and
+ * `endMs`, each only when it holds whole milliseconds in decimal digits; a time
+ * the stream does not carry, or carries in any other form, is left undefined.
  */
 export function transcriptEventFromLiveKit(text: string, attributes: Readonly<Record<string, string>> | undefined): LedgerEvent | null {
   if (attributes === undefined) return null;
@@ -238,5 +255,21 @@ export function transcriptEventFromLiveKit(text: string, attributes: Readonly<Re
   const event: LedgerEvent = { itemId, text, isFinal: attributes[LIVEKIT_TRANSCRIPTION_ATTRIBUTES.final] === 'true' };
   const failed = attributes[TRANSCRIPTION_FAILED_ATTRIBUTE];
   if (failed) event.failed = failed;
+  const startMs = readMs(attributes[TRANSCRIPTION_TIME_ATTRIBUTES.startMs]);
+  if (startMs !== undefined) event.startMs = startMs;
+  const endMs = readMs(attributes[TRANSCRIPTION_TIME_ATTRIBUTES.endMs]);
+  if (endMs !== undefined) event.endMs = endMs;
   return event;
+}
+
+/**
+ * A time attribute's value as milliseconds: a string of decimal digits alone,
+ * read as a number while it is an integer a number holds exactly; `undefined`
+ * for anything else (no value, an empty string, a sign, a space, a fraction,
+ * an exponent, a hexadecimal form, a separator).
+ */
+function readMs(value: string | undefined): number | undefined {
+  if (value === undefined || !/^\d+$/.test(value)) return undefined;
+  const ms = Number(value);
+  return Number.isSafeInteger(ms) ? ms : undefined;
 }
