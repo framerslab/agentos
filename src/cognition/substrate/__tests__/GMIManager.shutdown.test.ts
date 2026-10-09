@@ -76,7 +76,7 @@ describe('GMIManager.shutdown', () => {
     vi.restoreAllMocks();
   });
 
-  it('shuts down every active GMI and waits for each before it clears the maps', async () => {
+  it('shuts down every active GMI, waits for each, and empties both maps', async () => {
     const { manager, gmis, memoryShutdown } = await createHarness();
     const gmiShutdowns = gmis.map((gmi) => vi.spyOn(gmi, 'shutdown'));
     const consoleError = vi.spyOn(console, 'error');
