@@ -14,7 +14,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { Agent, AgentOptions, AgentSession, AgentSessionOptions, SessionSendOptions } from './agent.js';
-import { resolveChainOfThought, type GenerateTextOptions, type GenerateTextResult, type Message, type MessageContent } from './generateText.js';
+import { extractTextFromContent, resolveChainOfThought, type GenerateTextOptions, type GenerateTextResult, type Message, type MessageContent } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import { GMI } from '../cognition/substrate/GMI.js';
 import type { GMIBaseConfig, IGMI } from '../cognition/substrate/IGMI.js';
@@ -31,6 +31,8 @@ import type { IToolOrchestrator } from '../core/tools/IToolOrchestrator.js';
 import type { ITool } from '../core/tools/ITool.js';
 import { ExtensionRegistry } from '../extensions/ExtensionRegistry.js';
 import { EXTENSION_KIND_TOOL } from '../extensions/types.js';
+import { APPROVAL_GRANTED, askApprovalGate, type ApprovalGateFn } from './runtime/approval-gate.js';
+import { runCitationVerification } from './runtime/citationVerification.js';
 import { createCompletionGateway, type CompletionGateway } from './runtime/completionGateway.js';
 import { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
 import { adaptTools } from './runtime/toolAdapter.js';
@@ -44,7 +46,7 @@ import type { SessionTranscriptMessage } from './sessionTranscript.js';
 import { accumulateUsage, createEmptyUsageAggregate, mergeAggregates } from './runtime/usageAccumulator.js';
 import type { AgentOSUsageAggregate, AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { exportAgentConfig, exportAgentConfigJSON } from './agentExportCore.js';
-import { getDeferredCapabilities } from './runtime/lightweightAgentDiagnostics.js';
+import { getDeferredCapabilities, isMeaningfullyConfigured } from './runtime/lightweightAgentDiagnostics.js';
 
 /** The options of {@link gmi}: the options of `agent()`. */
 export type GmiOptions = AgentOptions;
@@ -53,10 +55,13 @@ export type GmiHandle = Agent;
 
 /** Options with no GMI-path implementation yet; set, they throw at construction. */
 const UNSUPPORTED_ON_GMI = ['voice', 'avatar', 'channels'] as const;
-/** Per-call overrides generate() and stream() accept on the GMI path (spec D10). */
-const ALLOWED_CALL_OVERRIDES = new Set(['temperature', 'maxTokens', 'topP', 'responseFormat', 'model', 'provider', 'maxSteps', 'usageLedger']);
-/** Per-call overrides that pick the route, the step limit or the ledger rather than a completion option. */
-const ROUTE_OVERRIDES = new Set(['model', 'provider', 'maxSteps', 'usageLedger']);
+/**
+ * Per-call overrides generate() and stream() accept on the GMI path (spec D10),
+ * and the tool-approval gate `agency()` passes with every call to a member.
+ */
+const ALLOWED_CALL_OVERRIDES = new Set(['temperature', 'maxTokens', 'topP', 'responseFormat', 'model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate']);
+/** Per-call overrides that pick the route, the step limit, the ledger or the approval gate rather than a completion option. */
+const ROUTE_OVERRIDES = new Set(['model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate']);
 /** `agent()`'s step limit. */
 const DEFAULT_MAX_STEPS = 5;
 
@@ -70,12 +75,6 @@ const GMI_PROMPT_ENGINE_CONFIG: PromptEngineConfig = {
   contextualElementSelection: { maxElementsPerType: {}, defaultMaxElementsPerType: 3, priorityResolutionStrategy: 'highest_first', conflictResolutionStrategy: 'skip_conflicting' },
   performance: { enableCaching: false, cacheTimeoutSeconds: 60 },
 } as PromptEngineConfig;
-
-function isSet(value: unknown): boolean {
-  if (value == null || value === false) return false;
-  if (typeof value === 'object') return Object.keys(value as object).length > 0;
-  return true;
-}
 
 /**
  * A memoised async build that is not kept when it fails: the next call after a
@@ -149,31 +148,49 @@ function toolExecutorWithoutBuiltIns(): ToolExecutor {
 }
 
 /**
- * The agent's `onBeforeToolExecution` around the shared orchestrator, for one
- * GMI, as `generateText` runs it: `null` skips the tool, returned arguments
- * replace the call's, and a hook that throws, or resolves with no result to
- * read arguments from, is warned about and the tool runs with the arguments
- * the model sent.
+ * The agent's `onBeforeToolExecution` and the call's tool-approval gate around
+ * the shared orchestrator, for one GMI, as `generateText` runs them. The hook
+ * runs first: `null` skips the tool, returned arguments replace the call's,
+ * and a hook that throws, or resolves with no result to read arguments from,
+ * is warned about and the tool runs with the arguments the model sent. The
+ * gate (`agency()`'s `hitl.approvals.beforeTool`) is then asked about a tool
+ * the orchestrator has, with the arguments the hook left; anything but the
+ * exact approval skips the tool, and the model is told why.
  */
-function hookTools(base: IToolOrchestrator, hook: AgentOptions['onBeforeToolExecution'], step: { index: number }): IToolOrchestrator {
-  if (!hook) return base;
+function hookTools(base: IToolOrchestrator, hook: AgentOptions['onBeforeToolExecution'], step: { index: number }, gate?: ApprovalGateFn): IToolOrchestrator {
+  if (!hook && !gate) return base;
   const processToolCall: IToolOrchestrator['processToolCall'] = async (details) => {
     const req = details.toolCallRequest;
     let args = (req.arguments ?? {}) as Record<string, unknown>;
-    try {
-      const hookResult = await hook({ name: req.name, args, id: req.id, step: step.index });
-      if (hookResult === null) {
+    if (hook) {
+      try {
+        const hookResult = await hook({ name: req.name, args, id: req.id, step: step.index });
+        if (hookResult === null) {
+          return {
+            toolCallId: req.id,
+            toolName: req.name,
+            output: { skipped: true },
+            isError: true,
+            errorDetails: { message: 'Skipped by onBeforeToolExecution hook' },
+          };
+        }
+        args = hookResult.args;
+      } catch (hookError) {
+        console.warn('[agentos] onBeforeToolExecution hook error:', hookError);
+      }
+    }
+    // A tool the orchestrator does not have is reported by it without asking anyone.
+    if (gate && (await base.getTool(req.name))) {
+      const verdict = await askApprovalGate(gate, { name: req.name, args: args ?? {}, id: req.id, step: step.index });
+      if (verdict !== APPROVAL_GRANTED) {
         return {
           toolCallId: req.id,
           toolName: req.name,
-          output: { skipped: true },
+          output: { skipped: true, reason: verdict.reason },
           isError: true,
-          errorDetails: { message: 'Skipped by onBeforeToolExecution hook' },
+          errorDetails: { message: `Skipped: ${verdict.reason}` },
         };
       }
-      args = hookResult.args;
-    } catch (hookError) {
-      console.warn('[agentos] onBeforeToolExecution hook error:', hookError);
     }
     return base.processToolCall({ ...details, toolCallRequest: { ...req, arguments: args } });
   };
@@ -255,7 +272,8 @@ interface SessionEntry {
 /**
  * An agent whose sessions are GMIs (docs/GMI.md, "GMIs from agent()").
  *
- * @param opts - The options of `agent()`. `voice`, `avatar` and `channels` throw.
+ * @param opts - The options of `agent()`. `voice`, `avatar` and `channels` throw when set;
+ *   a config that sets only `enabled: false` is unset.
  * @returns The `Agent` surface: `generate`, `stream`, `session`, `usage`, `close`, `export`.
  * @throws {Error} At construction, naming the option: an option the GMI path
  *   cannot honour, an unknown cognition profile or metaprompt preset, or a
@@ -266,7 +284,8 @@ interface SessionEntry {
  */
 export function gmi(opts: GmiOptions): GmiHandle {
   for (const key of UNSUPPORTED_ON_GMI) {
-    if (isSet((opts as unknown as Record<string, unknown>)[key])) {
+    // Counted as agent() counts a deferred option: a config that sets only `enabled: false` is unset.
+    if (isMeaningfullyConfigured((opts as unknown as Record<string, unknown>)[key])) {
       throw new Error(`gmi(): '${key}' is not available on the GMI path; remove it or use runtime: 'legacy'.`);
     }
   }
@@ -333,7 +352,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
   // have finished, and the sessions opened after that share a new one.
   let memory = memoryForSessions();
 
-  async function buildGmi(id: string, persona: IPersonaDefinition, mem: AgentCognitiveMemory | undefined, steps: number): Promise<BuiltGmi> {
+  async function buildGmi(id: string, persona: IPersonaDefinition, mem: AgentCognitiveMemory | undefined, steps: number, gate?: ApprovalGateFn): Promise<BuiltGmi> {
     const s = await shared.get();
     const step = { index: 0 };
     let turn: GmiTurnContext = { prompt: undefined, memoryContext: undefined };
@@ -343,7 +362,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
       promptEngine: s.promptEngine,
       llmProviderManager: new GatewayProviderManager().asProviderManager(),
       utilityAI: s.utilityAI,
-      toolOrchestrator: hookTools(s.tools, opts.onBeforeToolExecution, step),
+      toolOrchestrator: hookTools(s.tools, opts.onBeforeToolExecution, step, gate),
       // The agent's memory as this GMI's session sees it: the shared store with a
       // working memory of its own, so one session's active context never lists
       // another's memories. `GMI.shutdown()` shuts down the memory it was given;
@@ -431,6 +450,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
   const sessions = new Map<string, SessionEntry>();
   const sessionTallies = new Map<string, AgentOSUsageAggregate>();
+  /** The session ids opened so far; an id opened again after its close() is given a memory scope of its own. */
+  const openedSessionIds = new Set<string>();
   const agentTally = createEmptyUsageAggregate();
 
   /** The per-call overrides as completion options; throws naming an override the GMI path does not take. */
@@ -461,7 +482,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
         const persona = extra && (extra.model || extra.provider)
           ? personaFromAgentOptions({ ...opts, model: extra.model ?? opts.model, provider: extra.provider ?? opts.provider }, lightCognition, tools)
           : s.lightPersona;
-        return forOneTurn(await buildGmi(`gmi-${persona.id}-${callId}`, persona, undefined, extra?.maxSteps ?? maxSteps));
+        return forOneTurn(await buildGmi(`gmi-${persona.id}-${callId}`, persona, undefined, extra?.maxSteps ?? maxSteps, extra?.__approvalGate));
       },
     };
   }
@@ -469,7 +490,13 @@ export function gmi(opts: GmiOptions): GmiHandle {
   const handle: Agent = {
     async generate(prompt: MessageContent, extra?: Partial<GenerateTextOptions>): Promise<GenerateTextResult> {
       const options = overridesOf(extra);
-      return sendGmiTurn(oneShotDeps('agent.generate', extra), prompt, { options });
+      const result = await sendGmiTurn(oneShotDeps('agent.generate', extra), prompt, { options });
+      // As agent().generate() does: the answer checked against the sources retrieved for the input.
+      if (opts.verifyCitations) {
+        const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
+        result.grounding = await runCitationVerification(result.text, userText, opts.verifyCitations);
+      }
+      return result;
     },
 
     stream(prompt: MessageContent, extra?: Partial<GenerateTextOptions>): StreamTextResult {
@@ -488,7 +515,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
       }
       // Each session's memory scope is its own unless the caller names the user:
       // sessions are often different people, and one person's facts must not
-      // reach another's replies.
+      // reach another's replies. An id opened again after close() is a new
+      // session, so its scope is a new id: it recalls nothing the closed one
+      // filed under its scope, and only a user id the caller names again is shared.
+      const memoryScopeId = openedSessionIds.has(sessionId) ? `${sessionId}:${randomUUID()}` : sessionId;
+      openedSessionIds.add(sessionId);
       const userId = sessionOptions?.userId ?? sessionId;
       const history = opts.history === false ? null : new SessionHistoryBuffer({ ...SESSION_HISTORY_DEFAULTS, ...(opts.history ?? {}) });
       if (!sessionTallies.has(sessionId)) sessionTallies.set(sessionId, createEmptyUsageAggregate(sessionId));
@@ -505,13 +536,13 @@ export function gmi(opts: GmiOptions): GmiHandle {
         return buildGmi(gmiId, persona, await sessionMemory.get(), maxSteps);
       };
       // The session's own GMI, when it keeps history; a GMI per turn otherwise.
-      const own = retryingOnce(() => buildSessionGmi(`gmi-${sessionId}`));
+      const own = retryingOnce(() => buildSessionGmi(`gmi-${memoryScopeId}`));
       let ownBuilt: BuiltGmi | undefined;
 
       // A send made after close() fails; one made before it runs, and close() waits for it.
       const gmiFor = (closedAtCall: boolean) => async (): Promise<GmiForTurn> => {
         if (closedAtCall) throw new Error(`gmi(): session '${sessionId}' is closed; agent.session('${sessionId}') opens a new one.`);
-        if (!history) return forOneTurn(await buildSessionGmi(`gmi-${sessionId}-${randomUUID()}`));
+        if (!history) return forOneTurn(await buildSessionGmi(`gmi-${memoryScopeId}-${randomUUID()}`));
         ownBuilt = await own.get();
         return ownBuilt;
       };
@@ -531,9 +562,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
       };
 
       const deps = (source: 'agent.session.send' | 'agent.session.stream'): GmiSessionDeps => ({
-        sessionId,
+        // The GMI files the replies under the session id it runs the turn under,
+        // and the user's messages under the user id: both are the session's scope.
+        sessionId: memoryScopeId,
         opts,
-        userId,
+        userId: sessionOptions?.userId ?? memoryScopeId,
         // Only a user id the caller passed reaches the provider's end-user field.
         providerUserId: sessionOptions?.userId,
         history,

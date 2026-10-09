@@ -486,6 +486,12 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     await expect(agent(base(key())).generate('hi', { system: 'other' } as never)).rejects.toThrow(/system/);
     expect(() => agent(base(key())).stream('hi', { messages: [] } as never)).toThrow(/messages/);
   });
+
+  it("voice, avatar and channels configs that set only enabled: false count as unset, as agent() counts them: the agent constructs and answers", async () => {
+    const k = key(); script('openai', k, { replies: [reply.text('Hello.')] });
+    const a = agent(base(k, { voice: { enabled: false }, avatar: { enabled: false }, channels: { discord: { enabled: false } } }));
+    expect((await a.generate('hi')).text).toBe('Hello.');
+  });
 });
 
 describe("agent({ runtime: 'gmi' }) resolves the model and builds memory on first use", () => {
@@ -553,6 +559,30 @@ describe("agent({ runtime: 'gmi' }) resolves the model and builds memory on firs
     expect(() => a.session('carol-1', { userId: 'mallory' })).toThrow(/already runs as user 'carol'/);
     await a.session('carol-1').close();
     await a.session('carol-2', { userId: 'carol' }).send(QUESTION);
+    expect(JSON.stringify(s.seen[3].messages)).toContain('vault');
+    await a.close();
+  });
+
+  it('a session id opened again after close() starts empty for cognitive memory as for history; opened with a user id, it keeps that user\'s memory', async () => {
+    const k = key(); const emb = key();
+    const s = script('openai', k, { replies: ['Noted.', 'No idea.', 'Noted.', 'In the vault.'].map((text) => reply.text(text)) });
+    script('openai', emb);
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = agent(base(k, plainMemory()));
+
+    // One kiosk session id, two people, no user id: the second must not recall the first's fact.
+    const first = a.session('kiosk-1');
+    await first.send(FACT);
+    await first.close();
+    const second = a.session('kiosk-1');
+    expect(second.messages()).toEqual([]);
+    await second.send(QUESTION);
+    expect(JSON.stringify(s.seen[1].messages)).not.toContain('vault');
+
+    // The same reuse with a user id: that user's fact is recalled.
+    await a.session('desk-1', { userId: 'dana' }).send(FACT);
+    await a.session('desk-1').close();
+    await a.session('desk-1', { userId: 'dana' }).send(QUESTION);
     expect(JSON.stringify(s.seen[3].messages)).toContain('vault');
     await a.close();
   });

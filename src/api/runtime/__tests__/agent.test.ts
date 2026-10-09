@@ -77,6 +77,21 @@ describe('agent', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it("warns once that memory is not applied without runtime: 'gmi', and names that option", () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // The review's input: agent() without runtime: 'gmi' reads no part of it.
+    agent({
+      model: 'openai:gpt-4.1-mini',
+      memory: { types: ['episodic'], working: { enabled: true } },
+    });
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const message = String(warn.mock.calls[0]?.[0]);
+    expect(message).toContain('memory');
+    expect(message).toContain("runtime: 'gmi'");
+  });
+
   it('warns that cognitiveMechanisms do not run on the lightweight helper', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 

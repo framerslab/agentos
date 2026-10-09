@@ -46,6 +46,7 @@ The radar at the top of this page shows three example trait vectors. Trait *comb
 import { agent } from '@framers/agentos';
 
 const coach = agent({
+  runtime: 'gmi', // the agent() path that reads memory
   provider: 'anthropic',
   instructions: 'You are a personal coach helping users build daily habits.',
   personality: {
@@ -56,13 +57,21 @@ const coach = agent({
     extraversion: 0.50,       // neutral
     honesty: 0.75,            // transparent, no spin
   },
+  // Cognitive memory built with these traits; Anthropic has no embedding models.
+  memory: { embedding: { provider: 'openai' } },
 });
 
 const session = coach.session('user-1');
 await session.send('Help me build a morning routine.');
 ```
 
-Through `agent()`, the traits reach the model as the system prompt section of surface 1 below. Surfaces 2 to 5 belong to cognitive memory: they apply where a `CognitiveMemoryManager` runs with these traits, as on a GMI with memory on ([GMIs from agent()](../GMI.md#gmis-from-agent)) or in a manager you build ([Memory subsystem](#memory-subsystem)).
+The traits reach five surfaces, detailed below, and each runs on its own paths:
+
+- **System prompt directives** (1): `agent()`, with or without `runtime: 'gmi'`, writes them into the system prompt it builds from its options (`systemBlocks` replaces that prompt). The full runtime sends each persona's own system prompt and writes no directives from its traits.
+- **Encoding strength, working-memory capacity and memory prompt formatting** (2 to 4): a `CognitiveMemoryManager` built with the traits applies them: the one `agent({ runtime: 'gmi' })` builds when memory is on, as in the quickstart ([GMIs from agent()](../GMI.md#gmis-from-agent)), one the full runtime gets from `gmiManagerConfig.cognitiveMemoryFactory`, or one you build ([Memory subsystem](#memory-subsystem)).
+- **Observer and reflector bias** (5): a `CognitiveMemoryManager` runs the observer only when its config gives it a model invoker (`observer.llmInvoker`), and the reflector likewise (`reflector.llmInvoker`). The manager `agent({ runtime: 'gmi' })` builds has neither.
+
+Without `runtime: 'gmi'`, `agent()` builds no memory manager: of the five surfaces it applies the prompt directives alone, and it warns that `memory` is not applied.
 
 ---
 
@@ -83,7 +92,7 @@ The propagation diagram at the top of this page shows the five surfaces. Each is
 | **Conscientiousness:** "Be thorough and systematic. Structure responses clearly. Follow through on details. Prefer precision over speed." | **Conscientiousness:** "Be flexible and adaptive. Prioritize the big picture over details. Respond quickly. Tolerate ambiguity and improvise." |
 | **Openness:** "Explore creative angles and unconventional ideas. Draw unexpected connections. Question established approaches." | **Openness:** "Stick to proven approaches and established knowledge. Be practical and concrete. Favor reliability over novelty." |
 
-Source: [`src/api/agent.ts:553`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts#L553).
+Source: [`src/api/agent.ts:552`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts#L552).
 
 ### 2. Memory encoding strength
 

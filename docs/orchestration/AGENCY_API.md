@@ -44,10 +44,10 @@ A member whose config sets `runtime: 'gmi'`, or a pre-built
 strategies call a member's `generate()` or `stream()`, and on the GMI path each
 call runs on a GMI built for it, on the `'light'` profile: a persona, a PAD mood
 and a reasoning trace, with no history and no cognitive memory, whatever the
-member's `cognition` and `memory` options say. A GMI member takes only the
-per-call options of that path, so in an agency whose `hitl.approvals.beforeTool`
-is set, which passes its approval gate with every member call, a GMI member's
-calls throw. The agency layer adds three things on top of those members.
+member's `cognition` and `memory` options say. In an agency whose
+`hitl.approvals.beforeTool` is set, a GMI member's tool calls wait for the
+approval handler as other members' calls do. The agency layer adds three things
+on top of those members.
 
 **1. Orchestration strategy declares how outputs flow between brains.**
 Sequential chains them, parallel fans them out and synthesises, debate has them
