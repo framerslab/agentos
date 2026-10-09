@@ -69,7 +69,7 @@ const reply = await a.generate('Tell me about the court intrigue.');
 A `policyTier` on the call overrides the router's default tier. On `mature` and `private-adult` the router returns, in order:
 
 1. the per-tier override model, when one is set (on OpenRouter);
-2. with required capabilities, the best-quality catalog model that lists each of them by that exact name and permits the content intent (`erotic` on `private-adult` and `romantic` on `mature` when the call names none). A call with tools requires `function_calling`, which the catalog lists as `tool_use`, so no catalog model matches it: the router hands such a call to its base router, or returns no route and the configured model answers;
+2. with required capabilities, the best-quality catalog model that lists each of them and permits the content intent (`erotic` on `private-adult` and `romantic` on `mature` when the call names none). A capability matches under either spelling: a call whose tools come as an array or a `Map` requires `function_calling`, which the catalog lists as `tool_use`, so it gets the catalog's tool-capable model for that intent. When no catalog model lists a required capability, the router hands the call to its base router, or returns no route and the configured model answers;
 3. otherwise `getPreferredTextModel(tier, contentIntent)`, the first model of the tier's ranking.
 
 On `safe` and `standard` the router hands the call to its base router, or returns no route.
@@ -104,7 +104,9 @@ the availability chain. The walk:
   (`checkContextFit`), the first model included, which is then never sent the
   turn. The check counts the output the provider will be asked for (a leg's
   `maxTokensHeadroom` and a `customModelParams.max_tokens` override included)
-  and, on the prompt shim, the tool text it renders. With `planning` on, the
+  and, on the prompt shim, the tool text it renders. On OpenRouter a
+  `customModelParams.model` override names the model the payload carries, so
+  its window is the one checked. With `planning` on, the
   planning call goes out before the check. A call that enables OpenRouter's
   context compression (`customModelParams: { plugins: [{ id: 'context-compression' }] }`)
   is sent as is: OpenRouter trims the prompt to the window.

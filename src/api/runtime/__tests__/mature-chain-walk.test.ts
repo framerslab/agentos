@@ -125,6 +125,29 @@ describe('fallback walk on generateText', () => {
     expect(sent()).toEqual([LLAMA, MAGNUM]);
   });
 
+  it('a policy router picks the tool-capable catalog model when the tools come as an array', async () => {
+    // An array or a Map of tools makes the call require function_calling,
+    // which the catalog lists as tool_use.
+    keys('OPENROUTER_API_KEY');
+    hoisted.generateCompletion.mockResolvedValueOnce(ok('from llama'));
+    const lookup = {
+      name: 'lookup',
+      description: 'Looks something up',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async () => ({ success: true, output: { found: true } }),
+    };
+    const result = await generateText({
+      provider: 'openai',
+      model: 'gpt-5.5',
+      prompt: 'hi',
+      policyTier: 'mature',
+      router: new PolicyAwareRouter(createUncensoredModelCatalog()),
+      tools: [lookup] as never,
+    });
+    expect(result.text).toBe('from llama');
+    expect(sent()).toEqual([LLAMA]);
+  });
+
   it('builds the chain for a tier that only the router carries', async () => {
     keys('OPENROUTER_API_KEY');
     hoisted.generateCompletion.mockRejectedValueOnce(status(429)).mockResolvedValueOnce(ok());

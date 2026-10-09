@@ -117,16 +117,19 @@ function compressesToFit(provider: string, customModelParams: Record<string, unk
  */
 export function checkContextFit(request: ContextFitRequest): ContextFit {
   // OpenRouterProvider spreads customModelParams over its payload last, so a
-  // `messages` or `tools` override there is what the model is sent.
+  // `messages`, `tools` or `model` override there is what is sent, and the
+  // window to fit is the overriding model's.
   const overrides = request.provider === 'openrouter' ? request.customModelParams : undefined;
+  const sentModel =
+    typeof overrides?.model === 'string' && overrides.model.trim() !== '' ? overrides.model : request.model;
   const sentTools = overrides?.tools !== undefined ? overrides.tools : request.tools;
   const messageChars = Array.isArray(overrides?.messages)
     ? textChars(overrides?.messages)
     : textChars(request.messages) + textChars(request.system) + textChars(request.prompt);
   const chars = messageChars + (sentTools === undefined ? 0 : (JSON.stringify(sentTools) ?? '').length);
   const estimatedInputTokens = Math.ceil((chars / CHARS_PER_TOKEN) * ESTIMATE_MARGIN);
-  const outputTokens = outputAllowance(request.provider, request.model, request.maxTokens, request.customModelParams);
-  const contextWindow = findCatalogTextModel(request.model, request.provider)?.contextWindow;
+  const outputTokens = outputAllowance(request.provider, sentModel, request.maxTokens, request.customModelParams);
+  const contextWindow = findCatalogTextModel(sentModel, request.provider)?.contextWindow;
   return {
     fits:
       contextWindow === undefined ||

@@ -160,6 +160,25 @@ describe('checkContextFit', () => {
     expect(toolsOverridden.estimatedInputTokens).toBeGreaterThan(base.estimatedInputTokens + 1_000);
   });
 
+  it('reads the window of an OpenRouter customModelParams model override, the model the payload names', () => {
+    const narrowed = checkContextFit({
+      provider: 'openrouter',
+      model: LLAMA,
+      customModelParams: { model: MAGNUM },
+      messages: messagesOf(145_452),
+      maxTokens: 800,
+    });
+    expect(narrowed).toEqual({ fits: false, contextWindow: 32_768, estimatedInputTokens: 40_000, outputTokens: 800 });
+    const widened = checkContextFit({
+      provider: 'openrouter',
+      model: MAGNUM,
+      customModelParams: { model: LLAMA },
+      messages: messagesOf(145_452),
+      maxTokens: 800,
+    });
+    expect(widened.fits).toBe(true);
+  });
+
   it('takes a model without a known window as fitting', () => {
     const fit = checkContextFit({ provider: 'openai', model: 'gpt-5.6-sol', messages: messagesOf(1_000_000) });
     expect(fit.fits).toBe(true);

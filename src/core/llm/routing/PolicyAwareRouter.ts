@@ -18,6 +18,7 @@ import type {
   PolicyTier,
   CatalogEntry,
 } from './UncensoredModelCatalog';
+import { catalogEntryHasCapability } from './UncensoredModelCatalog.js';
 
 /**
  * Manual override map: policyTier -> fixed modelId.
@@ -108,7 +109,9 @@ export class PolicyAwareRouter implements IModelRouter {
 
     // Required capabilities filtering: when the caller needs specific
     // capabilities (e.g. `json_mode` for structured output), only return
-    // uncensored models that explicitly support them. This prevents the
+    // uncensored models that explicitly support them. A capability matches
+    // under either spelling, as in the fallback walk: a call with tools
+    // requires `function_calling`, which the catalog lists as `tool_use`. This prevents the
     // router from picking a prose-only model like Dolphin Mixtral when the
     // agent has set `output: someZodSchema`, which would fail Zod validation
     // because the model returns natural language instead of JSON.
@@ -116,7 +119,7 @@ export class PolicyAwareRouter implements IModelRouter {
     if (required.length > 0) {
       const candidates = this.catalog
         .getTextModels({ contentPermissions: this.permissionsForTier(tier, params.contentIntent) })
-        .filter((entry) => required.every((cap) => entry.capabilities.includes(cap)))
+        .filter((entry) => required.every((cap) => catalogEntryHasCapability(entry, cap)))
         .sort((a, b) => this.qualityRank(b.quality) - this.qualityRank(a.quality));
 
       if (candidates.length > 0) {
