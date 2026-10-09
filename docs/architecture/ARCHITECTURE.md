@@ -1,5 +1,5 @@
 ---
-description: "The 26-module AgentOS architecture: API surface, orchestration, GMI cognitive engine, guardrails, tools and extensions, cognitive memory and RAG, LLM providers, perception channels — and how they compose into a runtime that manages state across hours and conversations."
+description: "The AgentOS architecture: API surface, orchestration, GMI cognitive engine, guardrails, tools and extensions, cognitive memory and RAG, LLM providers, perception channels — and how they compose into a runtime that manages state across hours and conversations."
 keywords: [agentos architecture, ai agent runtime architecture, agent framework system design, gmi, cognitive memory architecture, multi-agent orchestration]
 ---
 
@@ -7,7 +7,7 @@ keywords: [agentos architecture, ai agent runtime architecture, agent framework 
 
 AgentOS organizes the runtime around long-running agent state rather than around a single turn loop. Cross-session conversations, parallel agent instances with independent personality and memory, conditional tool execution, human-in-the-loop approval, and a memory layer that distinguishes verified user input from model-generated content are first-class subsystems with their own modules.
 
-The 26 top-level modules documented below are predominantly state-management subsystems. The turn loop itself is one component among them, not the central abstraction.
+The modules documented below are predominantly state-management subsystems. The turn loop itself is one component among them, not the central abstraction.
 
 This page is the system map. For the *what* of each subsystem — components, lifecycle ownership, source-tree location — read on. For deep-dives into individual concerns, follow the table of contents.
 
@@ -22,48 +22,33 @@ Each layer above corresponds to a section below. The mapping is one-to-one: laye
 
 ## Source Directory Layout
 
-The `src/` tree is organized into 26 domain-specific top-level modules. Only foundational infrastructure remains under `core/`.
+The `src/` tree has eleven top-level directories; each groups the modules of one domain, and foundational infrastructure lives under `core/`.
 
-**Perception model:** Vision, hearing, and speech are separated into three independent modules following the biological perception analogy -- **vision/** (OCR, scene detection, image analysis), **hearing/** (STT providers, VAD, silence detection), and **speech/** (TTS providers, resolver, session). Shared media generation (images, video, music, SFX) remains under **media/**.
+**Perception model:** Vision, hearing, and speech are separate modules under `io/`, following the biological perception analogy -- **io/vision/** (OCR, scene detection, image analysis), **io/hearing/** (STT providers, VAD, silence detection), and **io/speech/** (TTS providers, resolver, session). Shared media generation (images, video, music, SFX) is under **io/media/**.
 
 **Key architectural patterns:**
 
-- **GMI** (Generalized Mind Instance) delegates to focused collaborators: [`ConversationHistoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/ConversationHistoryManager.ts), [`CognitiveMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts), [`SentimentTracker`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/SentimentTracker.ts), and [`MetapromptExecutor`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts). Persona layering lives in `cognitive_substrate/persona_overlays/`. Personas can be loaded from JSON (the legacy [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts) format) or from `SOUL.md` workspace directories via `SoulLoader` (`cognitive_substrate/personas/SoulLoader.ts`) — both produce the same runtime [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts). See [SOUL_FILES.md](../SOUL_FILES.md) for the per-agent identity convention.
+- **GMI** (Generalized Mind Instance) delegates to focused collaborators: [`ConversationHistoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/ConversationHistoryManager.ts), [`CognitiveMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts), [`SentimentTracker`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/SentimentTracker.ts), and [`MetapromptExecutor`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts). Persona layering lives in `cognition/substrate/persona_overlays/`. Personas can be loaded from JSON (the legacy [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts) format) or from `SOUL.md` workspace directories via `SoulLoader` (`cognition/substrate/personas/SoulLoader.ts`) — both produce the same runtime [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts). See [SOUL_FILES.md](../SOUL_FILES.md) for the per-agent identity convention.
 
 - **AgentOS** is the public lifecycle facade. Setup and runtime concerns are in `api/runtime/` ([`WorkflowFacade`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/WorkflowFacade.ts), [`CapabilityDiscoveryInitializer`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/CapabilityDiscoveryInitializer.ts), [`RagMemoryInitializer`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/RagMemoryInitializer.ts)). High-level helpers (`generateText`, [`streamText`](https://github.com/framerslab/agentos/blob/master/src/api/streamText.ts), [`agent`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts), [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts)) live under `api/`.
 
 - **AgentOSOrchestrator** coordinates requests, delegating to [`TurnExecutionPipeline`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/TurnExecutionPipeline.ts) (pre-LLM preparation), [`GMIChunkTransformer`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/GMIChunkTransformer.ts) (stream mapping), and [`ExternalToolResultHandler`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/ExternalToolResultHandler.ts) (tool-result continuation).
 
-All paths below are under [`packages/agentos/src/`](https://github.com/framerslab/agentos/tree/master/src/).
+All paths below are under [`src/`](https://github.com/framerslab/agentos/tree/master/src/).
 
 | Module | Subdirs | Purpose |
 | --- | --- | --- |
-| `agents/` | `definitions/` · `agency/` | Agent type definitions and multi-agent coordination ([`AgencyRegistry`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyRegistry.ts)) |
-| `api/` | `runtime/` · `types/` | Public API surface — [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts), `generateText`, [`streamText`](https://github.com/framerslab/agentos/blob/master/src/api/streamText.ts), [`agent`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts), [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts), orchestrator collaborators, provider defaults |
-| `channels/` | `adapters/` · `telephony/` · `social-posting/` | Platform adapters (Discord, Slack), voice-call providers (Twilio, Vonage), social-post management |
-| `cognitive_substrate/` | `personas/` · `persona_overlays/` | The GMI itself plus [`ConversationHistoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/ConversationHistoryManager.ts), [`CognitiveMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts), [`SentimentTracker`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/SentimentTracker.ts), [`MetapromptExecutor`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts), and persona loaders (JSON + `SOUL.md` via `SoulLoader`) |
-| `core/` | `config/` · `conversation/` · `embeddings/` · `llm/` · `logging/` · `rate-limiting/` · `storage/` · `streaming/` · `tools/` · `utils/` · `vector-store/` | Foundational infrastructure: shared interfaces, the [`IStorageAdapter`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentToolRegistry.ts), the [`StreamingManager`](https://github.com/framerslab/agentos/blob/master/src/core/streaming/StreamingManager.ts), the [`ITool`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ITool.ts) / [`ToolOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts), embedding and vector-store abstractions |
-| `discovery/` | — | Capability-discovery engine (tiered semantic search) |
-| `emergent/` | — | Runtime tool forging and self-improvement (`forge_tool`, [`EmergentCapabilityEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentCapabilityEngine.ts), [`EmergentJudge`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentJudge.ts)) |
-| `evaluation/` | `observability/` | Eval framework + OpenTelemetry tracing and metrics |
-| `extensions/` | — | Extension system: [`ExtensionPack`](https://github.com/framerslab/agentos/blob/master/src/extensions/manifest.ts), descriptor kinds, activation lifecycle |
-| `hearing/` | — | Listening surface: STT providers, VAD, silence detection |
-| `marketplace/` | `store/` · `workspace/` | Agent-marketplace listings + per-agent workspace helpers |
-| `media/` | `audio/` · `images/` · `video/` | Creative generation: image (DALL-E, Stability), video, music, SFX |
-| `memory/` | `core/` · `io/facade/` · `io/tools/` · `mechanisms/` · `pipeline/` · `retrieval/` | Cognitive memory system: encoding/decay, the Memory API, memory tools, neuroscience-grounded mechanisms, consolidation, retrieval brain |
-| `nlp/` | `ai_utilities/` · `language/` · `tokenizers/` · `stemmers/` · normalizers · lemmatizers · filters | NLP processing — LLM-backed summarization, language detection, tokenizers |
-| `orchestration/` | `planner/` · `hitl/` · `workflows/` · `turn-planner/` · `ir/` · `compiler/` · `runtime/` · `checkpoint/` · `events/` | DAG workflow engine, [`PlanningEngine`](https://github.com/framerslab/agentos/blob/master/src/orchestration/planner/PlanningEngine.ts) (ReAct loops), human-in-the-loop, IR/compiler, event bus |
-| `provenance/` | — | Content provenance + blockchain anchoring |
-| `query-router/` | — | Query classification + routing |
-| `rag/` | `vector-search/` · `vector_stores/` · `chunking/` · `reranking/` · `unified/` · `graphrag/` | Retrieval-augmented generation: HNSW sidecar, vector-store implementations, chunking strategies, reranking, graph-augmented retrieval |
-| `safety/` | `guardrails/` · `runtime/` | Guardrails ([`IGuardrailService`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/IGuardrailService.ts), [`ParallelGuardrailDispatcher`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/ParallelGuardrailDispatcher.ts)) and runtime safety ([`CircuitBreaker`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CircuitBreaker.ts), [`CostGuard`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts), [`StuckDetector`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/StuckDetector.ts)) |
-| `sandbox/` | `executor/` · `subprocess/` | Sandboxed code execution (`node:vm`) and [`CLISubprocessBridge`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLISubprocessBridge.ts) / [`CLIRegistry`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLIRegistry.ts) |
-| `skills/` | — | `SKILL.md` loader (content lives in `agentos-skills`) |
-| `speech/` | — | Speaking surface: TTS providers, resolver, session |
-| `structured/` | `output/` · `prompting/` | Structured output ([`StructuredOutputManager`](https://github.com/framerslab/agentos/blob/master/src/api/structured/output/StructuredOutputManager.ts), JSON schema) + prompt routing |
-| `types/` | — | Shared types (auth) |
-| `vision/` | — | Seeing surface: OCR, scene detection, image analysis |
-| `voice-pipeline/` | — | Real-time voice-conversation orchestrator |
+| `agents/` | `agency/` · `definitions/` | Agent definitions and multi-agent coordination classes ([`AgencyRegistry`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyRegistry.ts), [`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts), [`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgentCommunicationBus.ts)) |
+| `api/` | `runtime/` · `types/` · `structured/` · `server/` · `interfaces/` | Public API surface — [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts), `generateText`, [`streamText`](https://github.com/framerslab/agentos/blob/master/src/api/streamText.ts), [`agent`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts), [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts), the media helpers, orchestrator collaborators, provider defaults, [`StructuredOutputManager`](https://github.com/framerslab/agentos/blob/master/src/api/structured/output/StructuredOutputManager.ts); a few other folders re-export modules that moved |
+| `cognition/` | `substrate/` · `memory/` · `rag/` · `emergent/` · `discovery/` · `nlp/` · `skills/` · `marketplace/` · `web-search/` | The GMI and personas (`substrate/`), cognitive memory, retrieval-augmented generation (vector stores, chunking, reranking, GraphRAG, HyDE), runtime tool forging, capability discovery, NLP utilities, the `SKILL.md` loader, marketplace listings and web search |
+| `config/` | — | Configuration types for the embedding manager, memory lifecycle, retrieval augmentor, tool orchestrator and vector stores |
+| `core/` | `config/` · `conversation/` · `embeddings/` · `guardrails/` · `llm/` · `logging/` · `providers/` · `rate-limiting/` · `safety/` · `storage/` · `streaming/` · `tools/` · `types/` · `utils/` · `vector-store/` | Foundational infrastructure: LLM providers and routing, shared interfaces, the [`IStorageAdapter`](https://github.com/framerslab/agentos/blob/master/src/core/storage/IStorageAdapter.ts), the [`StreamingManager`](https://github.com/framerslab/agentos/blob/master/src/core/streaming/StreamingManager.ts), the [`ITool`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ITool.ts) / [`ToolOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts), embedding and vector-store abstractions |
+| `extensions/` | `packs/` | Extension system: [`ExtensionPack`](https://github.com/framerslab/agentos/blob/master/src/extensions/manifest.ts), descriptor kinds, activation lifecycle, built-in packs |
+| `io/` | `channels/` · `hearing/` · `speech/` · `vision/` · `voice-pipeline/` · `media/` · `avatar/` · `segmentation/` | Messaging adapters, telephony and social posting; STT, VAD and TTS; OCR and image analysis; the real-time voice pipeline; image, video, music and SFX generation; avatars; image segmentation |
+| `logging/` | — | `ILogger` and the logger factory |
+| `orchestration/` | `builders/` · `checkpoint/` · `compiler/` · `events/` · `hitl/` · `ir/` · `pipeline/` · `planner/` · `planning/` · `runtime/` · `tools/` · `turn-planner/` · `workflows/` | `workflow()`, `mission()` and `AgentGraph` builders, the graph IR, compiler and runtime, checkpoints, [`PlanningEngine`](https://github.com/framerslab/agentos/blob/master/src/orchestration/planner/PlanningEngine.ts), human-in-the-loop, the query, memory, ingest and read routers (`pipeline/`), the turn planner and the workflow engine |
+| `safety/` | `guardrails/` · `runtime/` · `sandbox/` · `provenance/` · `evaluation/` · `validation/` · `auth/` | Guardrails ([`IGuardrailService`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/IGuardrailService.ts), [`ParallelGuardrailDispatcher`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/ParallelGuardrailDispatcher.ts)), runtime safety ([`CircuitBreaker`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CircuitBreaker.ts), [`CostGuard`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts), [`StuckDetector`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/StuckDetector.ts)), code execution (`node:vm`) and [`CLISubprocessBridge`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLISubprocessBridge.ts) / [`CLIRegistry`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLIRegistry.ts), provenance and blockchain anchoring, evaluation and OpenTelemetry tracing |
+| `utils/` | — | Shared error helpers |
 
 ### Architecture Layers
 
@@ -72,9 +57,9 @@ The diagram at the top of this page is the canonical layered view. From top to b
 1. **API surface** — `generateText` / [`streamText`](https://github.com/framerslab/agentos/blob/master/src/api/streamText.ts) / [`agent`](https://github.com/framerslab/agentos/blob/master/src/api/agent.ts) / [`agency`](https://github.com/framerslab/agentos/blob/master/src/api/agency.ts) / `generateImage`, plus the [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) lifecycle facade.
 2. **Orchestration** — DAG runtime, `workflow()`, `mission()`, [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts), HITL, checkpointing, planning engine.
 3. **GMI** — per-mind state: `ConversationHistory`, [`CognitiveMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts), [`SentimentTracker`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/SentimentTracker.ts), [`MetapromptExecutor`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts), persona overlays.
-4. **Safety & Guardrails** alongside **Tools & Extensions** — 5-tier security (PII, toxicity, grounding, circuit breakers, cost guard) and the 110-extension / 88-skill catalog with capability discovery and runtime tool forging.
-5. **Memory & RAG** — 4-tier cognitive memory, 8 mechanisms (Ebbinghaus decay, retrieval-induced forgetting, …), 7 vector backends, HyDE, GraphRAG, hybrid retrieval, [`CitationVerifier`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/citation/CitationVerifier.ts).
-6. **LLM providers** — 11 direct providers + OpenRouter fan-out with automatic fallback chains.
+4. **Safety & Guardrails** alongside **Tools & Extensions** — guardrail packs (PII, toxicity, grounding, code safety, topicality), circuit breakers and the cost guard, and the 110-extension / 88-skill catalog with capability discovery and runtime tool forging.
+5. **Memory & RAG** — cognitive memory (five trace types, working memory, Ebbinghaus decay, 8 mechanisms such as retrieval-induced forgetting and reconsolidation), 7 vector stores, HyDE, GraphRAG, hybrid retrieval, [`CitationVerifier`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/citation/CitationVerifier.ts).
+6. **LLM providers** — 13 providers, OpenRouter among them, with fallback chains in `generateText()`, `streamText()`, `agent()` and `agency()`.
 7. **Perception & channels** — vision (OCR), hearing (STT, VAD), speech (TTS, voice pipeline), 12 messaging adapters, telephony.
 
 The diagram above the prose shows how a typical request enters at layer 1 and traverses downward.
@@ -85,26 +70,25 @@ The diagram above the prose shows how a typical request enters at layer 1 and tr
 
 - `agent()` is the lightweight stateful facade for prompt assembly, sessions, tools, hooks, personality shaping, and usage-ledger forwarding.
 - `generateText()` / `streamText()` are low-level helper loops for provider selection, direct tool execution, and text-fallback tool calling.
-- The full `AgentOS` runtime and `agency()` own the deeper runtime systems: emergent tooling, guardrails, discovery, RAG bootstrapping, permissions/security tiers, HITL, voice/channels, and provenance-aware orchestration.
+- The full `AgentOS` runtime owns the deeper runtime systems: emergent tooling, guardrails, discovery, RAG bootstrapping, HITL, channels and provenance. `agency()` applies HITL approvals, emergent specialists (on `hierarchical`), output schemas and provenance records at the agency level; it accepts guardrails, RAG, permissions and security tiers without applying them ([Agencies](../AGENCIES.md)).
 
 ```mermaid
 graph TB
     Client[Client / Channel Adapter] --> API[AgentOS.processRequest]
-    API --> Auth[Auth & Rate Limiting]
-    Auth --> Orch[AgentOSOrchestrator]
+    API --> InputGuard[Input Guardrails]
+    InputGuard --> Orch[AgentOSOrchestrator]
     Orch --> TurnPipe[TurnExecutionPipeline]
-    TurnPipe --> CtxAssembly[Context Assembly]
-    TurnPipe --> MemRetrieve[Memory Retrieval]
-    TurnPipe --> PromptBuild[Prompt Construction]
-    TurnPipe --> InputGuard[Input Guardrails]
+    TurnPipe --> MemRetrieve[Long-term Memory Retrieval]
+    TurnPipe --> CtxAssembly[Conversation History]
     Orch --> GMI[GMI.processTurnStream]
-    GMI --> LLM[LLM Provider]
+    GMI --> PromptBuild[PromptEngine]
+    PromptBuild --> LLM[LLM Provider]
     LLM --> ToolCall{Tool Call?}
     ToolCall -->|Yes| ToolOrch[ToolOrchestrator]
     ToolOrch --> LLM
-    ToolCall -->|No| OutputGuard[Output Guardrails]
-    OutputGuard --> Stream[StreamingManager]
-    Stream --> Client
+    ToolCall -->|No| Stream[StreamingManager]
+    Stream --> OutputGuard[Output Guardrails]
+    OutputGuard --> Client
 ```
 
 ---
@@ -131,7 +115,7 @@ stateDiagram-v2
     SHUTTING_DOWN --> SHUTDOWN
 ```
 
-`ERRORED` records that the last turn failed; the next turn starts from it as from `READY` ([`GMIPrimeState`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts)).
+`ERRORED` records that the last turn failed; the next turn starts from it as from `READY` ([`GMIPrimeState`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts), which also defines `INITIALIZING` and `REFLECTING`).
 
 ### Initialization
 
@@ -194,11 +178,11 @@ The chunk types, their payloads and their order are on the [GMI page](../GMI.md#
 
 - [`GMIManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMIManager.ts) -- Pool of GMI instances keyed by persona/session
 - [`AgentOSOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/AgentOSOrchestrator.ts) -- Turn preparation and stream transformation
-- [`StreamingManager`](https://github.com/framerslab/agentos/blob/master/src/core/streaming/StreamingManager.ts) -- WebSocket/SSE stream multiplexing
+- [`StreamingManager`](https://github.com/framerslab/agentos/blob/master/src/core/streaming/StreamingManager.ts) -- In-process stream registry that hands each response chunk to the stream's registered clients
 - [`ExtensionManager`](https://github.com/framerslab/agentos/blob/master/src/extensions/ExtensionManager.ts) -- Tool, guardrail, and workflow extension loading
 - [`ConversationManager`](https://github.com/framerslab/agentos/blob/master/src/core/conversation/ConversationManager.ts) -- Cross-session conversation persistence
 
-[`AgentOSConfig`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) is the comprehensive configuration object (~50 fields) that wires all subsystems together. Key optional features activated via config: `ragConfig`, `turnPlanning`, `emergent`, `observability`, `standaloneMemory`, `workflowEngineConfig`.
+[`AgentOSConfig`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts) is the configuration object (about 40 fields) that wires all subsystems together. Key optional features activated via config: `ragConfig`, `turnPlanning`, `emergent`, `observability`, `standaloneMemory`, `workflowEngineConfig`.
 
 ---
 
@@ -206,11 +190,11 @@ The chunk types, their payloads and their order are on the [GMI page](../GMI.md#
 
 A request to the full runtime passes through five stages. The stage boundaries below are the ones in the code; the facade owns guardrails, the pipeline owns preparation, the GMI owns the model call.
 
-1. **Facade** ([`AgentOS.processRequest()`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts)) fills `selectedPersonaId` from `defaultPersonaId` when the request has none, applies the self-improvement session overrides and the skill prompt context ([`SelfImprovementSessionManager`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/SelfImprovementSessionManager.ts)), negotiates the language, evaluates the input guardrails with [`evaluateInputGuardrails`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/guardrailDispatcher.ts) (the dispatcher runs sanitizers first, then classifiers, in parallel through [`ParallelGuardrailDispatcher`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/ParallelGuardrailDispatcher.ts)), and hands the turn to the orchestrator. A blocked input ends the request with the guardrail's own stream (`createGuardrailBlockedStream`) before any turn starts. The facade performs no input validation (that is the pipeline's first phase), no authentication and no rate limiting; the host does the last two before calling it.
+1. **Facade** ([`AgentOS.processRequest()`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts)) fills `selectedPersonaId` from `defaultPersonaId` when the request has none, applies the self-improvement session overrides and the skill prompt context ([`SelfImprovementSessionManager`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/SelfImprovementSessionManager.ts)), negotiates the language, evaluates the input guardrails with [`evaluateInputGuardrails`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/guardrailDispatcher.ts) (the dispatcher runs sanitizers first, then classifiers, in parallel through [`ParallelGuardrailDispatcher`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/ParallelGuardrailDispatcher.ts)), and hands the turn to the orchestrator. A blocked input ends the request with the guardrail's own stream (`createGuardrailBlockedStream`) before any turn starts, and while a guard named in `requiredGuardrails` is not active the request gets one `SYS_GUARDRAIL_REQUIRED_MISSING` error chunk and runs nothing. The facade performs no input validation (that is the pipeline's first phase), no authentication and no rate limiting; the host does the last two before calling it.
 2. **Orchestrator** ([`AgentOSOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/AgentOSOrchestrator.ts)) registers the stream and runs the pre-model pipeline.
 3. **Preparation** ([`TurnExecutionPipeline.prepareTurn()`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/TurnExecutionPipeline.ts)), twelve phases: input validation (`selectedPersonaId` must be present; the facade fills it from `defaultPersonaId`), GMI acquisition through [`GMIManager.getOrCreateGMIForSession()`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMIManager.ts), stream context registration, GMI input construction, turn planning (when a turn planner is configured), adaptive execution policies, organization context and long-term memory policy, inbound message persistence, rolling summary compaction, prompt profile routing, long-term memory retrieval, and conversation history assembly with metadata and memory-sink persistence. The result is a `PreparedTurnContext`.
 4. **The GMI turn** ([`GMI.processTurnStream()`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMI.ts)): sentiment scoring when the persona enables it, the RAG trigger, memory context assembly through [`CognitiveMemoryBridge`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/CognitiveMemoryBridge.ts) (only when a cognitive memory manager is attached), prompt construction by the [`PromptEngine`](https://github.com/framerslab/agentos/blob/master/src/core/llm/PromptEngine.ts), the streaming model call through the provider manager, the tool loop through [`ToolOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts) (up to `maxToolLoopIterations`, five by default), history and memory updates, and the metaprompts. The turn yields `GMIOutputChunk`s. Metaprompts run after the model call; they do not build the prompt.
-5. **Delivery**: the orchestrator converts GMI chunks to `AgentOSResponseChunk`s with [`GMIChunkTransformer`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/GMIChunkTransformer.ts) and pushes them into the [`StreamingManager`](https://github.com/framerslab/agentos/blob/master/src/core/streaming/StreamingManager.ts). The facade registers an `AsyncStreamClientBridge` as one client of that stream, wraps the bridge's output with [`wrapOutputGuardrails`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/guardrailDispatcher.ts), and yields the guarded chunks to its caller. The output guardrails apply only to the stream `processRequest()` returns; any other client registered on the stream receives the chunks before and without them. When the model requests a tool the host executes, the facade yields that chunk and returns; the host continues the same turn through `resumeExternalToolRequest()`. Delivery does not call the model. Tracing spans are recorded throughout ([`Tracer`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/observability/Tracer.ts)).
+5. **Delivery**: the orchestrator converts GMI chunks to `AgentOSResponseChunk`s with [`GMIChunkTransformer`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/GMIChunkTransformer.ts) and pushes them into the [`StreamingManager`](https://github.com/framerslab/agentos/blob/master/src/core/streaming/StreamingManager.ts). The facade registers an `AsyncStreamClientBridge` as one client of that stream, wraps the bridge's output with [`wrapOutputGuardrails`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/guardrailDispatcher.ts), and yields the guarded chunks to its caller. The output guardrails apply to the stream `processRequest()` returns (in hold mode its `TEXT_DELTA` chunks wait for the final verdict); any other client registered on the stream receives the chunks before and without them. When the model requests a tool the host executes, the facade yields that chunk and returns; the host continues the same turn through `handleToolResult()`, `handleToolResults()` or `resumeExternalToolRequest()`, whose streams pass through the same output guardrails. Delivery does not call the model. Tracing spans are recorded throughout ([`Tracer`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/observability/Tracer.ts)).
 
 An error inside the GMI turn reaches the stream as an `ERROR` chunk carrying the original message, with the code `GMI_PROCESSING_ERROR` unless the error carries its own (an error chunk in the provider's stream carries `LLM_PROVIDER_ERROR`); the turn's `FINAL_RESPONSE` follows it with the same error and the usage counted before the failure. An error outside the GMI turn ends the stream with an `ERROR` chunk ([The turn lifecycle](../TURN_LIFECYCLE.md#what-a-gmi-emits)).
 
@@ -252,8 +236,8 @@ sequenceDiagram
 |------|--------|---------|
 | [`AgentOSInput`](https://github.com/framerslab/agentos/blob/master/src/api/types/AgentOSInput.ts) | `api/types/` | Normalized request envelope (text, audio, images, metadata) |
 | [`AgentOSResponse`](https://github.com/framerslab/agentos/blob/master/src/api/types/AgentOSResponse.ts) | `api/types/` | Streamed response chunks (TEXT_DELTA, TOOL_CALL_REQUEST, FINAL_RESPONSE, ERROR and others) |
-| [`GMITurnInput`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts) | `cognitive_substrate/IGMI` | Internal turn representation consumed by the GMI |
-| [`GMIOutputChunk`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts) | `cognitive_substrate/IGMI` | Per-chunk output from the cognitive engine |
+| [`GMITurnInput`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts) | `cognition/substrate/IGMI` | Internal turn representation consumed by the GMI |
+| [`GMIOutputChunk`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts) | `cognition/substrate/IGMI` | Per-chunk output from the cognitive engine |
 | [`ConversationContext`](https://github.com/framerslab/agentos/blob/master/src/core/conversation/ConversationContext.ts) | `core/conversation/` | Session state: history, active persona, user context |
 
 ---
@@ -290,8 +274,9 @@ export function createMyExtensionPack(): ExtensionPack {
     version: '1.0.0',
     descriptors: [
       {
+        id: 'search_documents',
         kind: EXTENSION_KIND_TOOL,
-        tool: {
+        payload: {
           id: 'my-search-tool',
           name: 'search_documents',
           displayName: 'Document Search',
@@ -319,16 +304,20 @@ export function createMyExtensionPack(): ExtensionPack {
 }
 ```
 
-Packs are loaded by including them in the `extensionManifest` passed to `AgentOS.initialize()`, or by using the schema-on-demand meta-tools (`extensions_list`, `extensions_enable`) at runtime.
+Packs are loaded by including them in the `extensionManifest` passed to `AgentOS.create()` (`{ packs: [{ factory: () => createMyExtensionPack() }] }`, or a `package` or `module` entry), or by using the schema-on-demand meta-tools (`extensions_list`, `extensions_enable`) at runtime.
 
 ### Descriptor Kinds
 
-| Kind | Constant | Payload Field | Description |
-|------|----------|---------------|-------------|
-| `tool` | [`EXTENSION_KIND_TOOL`](https://github.com/framerslab/agentos/blob/master/src/extensions/types.ts) | `tool: ITool` | Callable tool registered in ToolOrchestrator |
-| `guardrail` | [`EXTENSION_KIND_GUARDRAIL`](https://github.com/framerslab/agentos/blob/master/src/extensions/types.ts) | `guardrail: IGuardrailService` | Input/output guardrail |
-| [`workflow`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/WorkflowBuilder.ts) | [`EXTENSION_KIND_WORKFLOW`](https://github.com/framerslab/agentos/blob/master/src/extensions/types.ts) | `workflow: WorkflowDescriptorPayload` | Reusable workflow definition |
-| `provenance` | [`EXTENSION_KIND_PROVENANCE`](https://github.com/framerslab/agentos/blob/master/src/extensions/types.ts) | `provenance: IProvenanceProvider` | Content anchoring provider |
+Every descriptor carries an `id`, a `kind` and a `payload`, plus optional `priority`, `enableByDefault`, `requiredSecrets` and lifecycle hooks ([`ExtensionDescriptor`](https://github.com/framerslab/agentos/blob/master/src/extensions/types.ts)).
+
+| Kind | Constant | Payload | Description |
+|------|----------|---------|-------------|
+| `tool` | [`EXTENSION_KIND_TOOL`](https://github.com/framerslab/agentos/blob/master/src/extensions/types.ts) | `ITool` | Callable tool registered in ToolOrchestrator |
+| `guardrail` | [`EXTENSION_KIND_GUARDRAIL`](https://github.com/framerslab/agentos/blob/master/src/extensions/types.ts) | `IGuardrailService` | Input/output guardrail |
+| `workflow` | [`EXTENSION_KIND_WORKFLOW`](https://github.com/framerslab/agentos/blob/master/src/extensions/types.ts) | `WorkflowDescriptorPayload` | Reusable workflow definition |
+| `provenance` | [`EXTENSION_KIND_PROVENANCE`](https://github.com/framerslab/agentos/blob/master/src/extensions/types.ts) | provenance pack payload | Content anchoring provider |
+
+The other kinds are `response-processor`, `workflow-executor`, `persona`, `planning-strategy`, `hitl-handler`, `communication-channel`, `memory-provider`, `stt-provider`, `tts-provider`, `vad-provider`, `wake-word-provider`, `messaging-channel`, `http-handler`, `streaming-stt-provider`, `streaming-tts-provider` and `diarization-provider`.
 
 ### Guardrail Dispatch Model
 
@@ -355,7 +344,7 @@ graph LR
 
 [`GuardrailOutputPayload`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/IGuardrailService.ts) carries `ragSources?: RagRetrievedChunk[]` so grounding-aware guardrails can verify claims against retrieved evidence.
 
-Each guardrail service can also configure timeouts via `config.timeoutMs`. If a guardrail exceeds its timeout or throws, it fails open (returns `null`) rather than blocking the pipeline.
+Each guardrail service can also configure timeouts via `config.timeoutMs`. If a guardrail exceeds its timeout or throws, it fails open (returns `null`) rather than blocking the pipeline, unless its `config.failClosed` is true, in which case the failure counts as a `BLOCK`.
 
 ### Built-in Guardrail Packs
 
@@ -377,30 +366,31 @@ For details on writing custom guardrails, see [Creating Guardrails](../safety/CR
 Personas define the identity, expertise, and behavioral configuration for a GMI instance.
 
 **Key files:**
-- `cognitive_substrate/personas/IPersonaDefinition.ts` -- The [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts) interface
-- `cognitive_substrate/personas/PersonaLoader.ts` -- Loads persona JSON files from disk or registry
-- `cognitive_substrate/personas/PersonaValidation.ts` -- Schema validation
-- `cognitive_substrate/persona_overlays/PersonaOverlayManager.ts` -- Runtime persona layering
+- `cognition/substrate/personas/IPersonaDefinition.ts` -- The [`IPersonaDefinition`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/IPersonaDefinition.ts) interface
+- `cognition/substrate/personas/PersonaLoader.ts` -- Loads persona JSON files from disk or registry
+- `cognition/substrate/personas/PersonaValidation.ts` -- Schema validation
+- `cognition/substrate/persona_overlays/PersonaOverlayManager.ts` -- Runtime persona layering
 
 A persona definition includes:
 
-- **Identity** -- Name, role, title, personality traits, expertise domains, purpose/objectives
-- **Cognitive config** -- Memory settings (working memory capacity, decay rate, consolidation frequency), attention priorities
-- **Behavioral config** -- Communication style, problem-solving methodology, collaboration style
-- **HEXACO personality traits** -- Six-factor personality model that modulates memory encoding, retrieval, and cognitive mechanisms
+- **Identity** -- `id`, `name`, `description`, `version`, `strengths`, and the `baseSystemPrompt`
+- **Model settings** -- `defaultModelId`, `defaultProviderId`, `defaultModelCompletionOptions`, tool ids and capabilities
+- **Memory and context** -- `memoryConfig` (RAG retrieval and ingestion triggers), `cognitiveMemoryConfig`, `conversationContextConfig`
+- **Adaptation** -- `moodAdaptation`, `sentimentTracking`, `metaPrompts`, `contextualPromptElements`
+- **Personality traits** -- `personalityTraits`, where the HEXACO scores go (`honesty`, `emotionality`, `extraversion`, `agreeableness`, `conscientiousness`, `openness`)
 
 ### HEXACO Trait Modulation
 
-The HEXACO model provides six orthogonal personality dimensions. Each trait modulates specific cognitive subsystems:
+The HEXACO model provides six personality dimensions. In cognitive memory (the traits a host passes as `CognitiveMemoryConfig.traits`), each one weights a content feature at encoding and scales one mechanism:
 
 | HEXACO Trait | Range | Cognitive Effect |
 |---|---|---|
-| **Honesty-Humility** | 0-1 | Source confidence skepticism. High H penalizes unverified claims. |
-| **Emotionality** | 0-1 | Emotional drift in memory encoding. High E amplifies flashbulb memories. |
-| **Extraversion** | 0-1 | Feeling-of-knowing threshold. High X lowers the threshold to share uncertain knowledge. |
-| **Agreeableness** | 0-1 | Emotion regulation strategy. High A favors cooperative/supportive responses. |
-| **Conscientiousness** | 0-1 | Retrieval-induced forgetting strength. High C enables stronger competitive suppression. |
-| **Openness** | 0-1 | Involuntary recall sensitivity and novelty attention. High O increases creative associations. |
+| **Honesty-Humility** | 0-1 | Ethical-content attention at encoding; stronger source-confidence decay of reflections. |
+| **Emotionality** | 0-1 | Emotional-content attention at encoding; faster reconsolidation drift toward the current mood. |
+| **Extraversion** | 0-1 | Social-content attention at encoding; a lower feeling-of-knowing threshold, so more partial recalls surface. |
+| **Agreeableness** | 0-1 | Cooperative-content attention at encoding; a faster emotion-regulation reappraisal rate. |
+| **Conscientiousness** | 0-1 | Procedural-content attention at encoding; stronger retrieval-induced forgetting; above 0.6, one working-memory slot fewer. |
+| **Openness** | 0-1 | Novelty attention at encoding; a higher involuntary-recall probability; above 0.6, one working-memory slot more. |
 
 ### Persona Definition Example
 
@@ -408,25 +398,26 @@ The HEXACO model provides six orthogonal personality dimensions. Each trait modu
 const researchAssistant: IPersonaDefinition = {
   id: 'research-assistant',
   name: 'Research Assistant',
-  role: 'Academic research aide',
-  systemPrompt: 'You are a meticulous research assistant...',
+  description: 'Academic research aide',
+  version: '1.0.0',
+  baseSystemPrompt: 'You are a meticulous research assistant...',
   strengths: ['literature review', 'data analysis', 'citation management'],
-  hexaco: {
-    honestyHumility: 0.9,   // High source skepticism
-    emotionality: 0.3,       // Low emotional bias
-    extraversion: 0.5,       // Moderate sharing threshold
-    agreeableness: 0.7,      // Cooperative communication
-    conscientiousness: 0.9,  // Strong retrieval filtering
-    openness: 0.8,           // High novelty attention
+  personalityTraits: {
+    honesty: 0.9,
+    emotionality: 0.3,
+    extraversion: 0.5,
+    agreeableness: 0.7,
+    conscientiousness: 0.9,
+    openness: 0.8,
   },
   memoryConfig: {
-    workingMemoryCapacity: 9,
-    consolidationFrequencyMinutes: 15,
+    enabled: true,
     ragConfig: {
+      enabled: true,
       retrievalTriggers: { onUserQuery: true },
     },
   },
-  moodAdaptation: { enabled: true, defaultMood: 'NEUTRAL', sensitivityFactor: 0.3 },
+  moodAdaptation: { enabled: true, defaultMood: 'neutral', sensitivityFactor: 0.3 },
   defaultModelId: 'gpt-4o',
   defaultProviderId: 'openai',
 };
@@ -434,13 +425,13 @@ const researchAssistant: IPersonaDefinition = {
 
 The [`PersonaOverlayManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/persona_overlays/PersonaOverlayManager.ts) supports runtime persona blending -- applying temporary overlays (e.g., "be more formal") on top of the base persona definition without mutating the original.
 
-For preset persona definitions, see `packages/wunderland/presets/`.
+For the bundled persona definitions, see [Personas](../PERSONAS.md).
 
 ---
 
 ## Prompt Construction
 
-The GMI builds each model call's prompt with the [`PromptEngine`](https://github.com/framerslab/agentos/blob/master/src/core/llm/PromptEngine.ts), which fits the parts to the model's context window and assembles the messages. `MetapromptExecutor` (`cognitive_substrate/MetapromptExecutor.ts`) does not build the prompt: it runs metaprompts after the model call, on three trigger types: `turn_interval` (periodic self-reflection), `event_based` (driven by `SentimentTracker` events like frustration or confusion), and `manual` (flags in working memory).
+The GMI builds each model call's prompt with the [`PromptEngine`](https://github.com/framerslab/agentos/blob/master/src/core/llm/PromptEngine.ts), which fits the parts to the model's context window and assembles the messages. `MetapromptExecutor` (`cognition/substrate/MetapromptExecutor.ts`) does not build the prompt: it runs metaprompts after the model call, on three trigger types: `turn_interval` (periodic self-reflection), `event_based` (driven by `SentimentTracker` events like frustration or confusion), and `manual` (flags in working memory).
 
 ### Prompt Assembly Order
 
@@ -479,7 +470,7 @@ MetapromptExecutor includes pre-built handlers for common situations:
 - **Satisfaction reinforcement** -- When the user is pleased
 - **Error recovery** -- After tool failures
 - **Engagement boost** -- When the conversation stalls
-- **Trait adjustment** -- Periodic self-reflection that adjusts persona parameters within bounds
+- **Self-reflection** (`gmi_self_trait_adjustment`) -- Periodic review that updates the GMI's mood, the user's skill level and the task complexity from evidence; it does not change HEXACO traits
 
 See [Adaptive Prompt Intelligence](../ADAPTIVE_PROMPT_INTELLIGENCE.md) for the full guide: the three trigger types, the five preset templates, the state surfaces metaprompts mutate, and concrete cost numbers.
 
@@ -499,7 +490,7 @@ S(t) = S0 * e^(-dt / stability)
 
 where `S0` (initial encoding strength) is set by personality traits, emotional arousal, and content features. The `stability` time constant grows with each successful retrieval via the **desirable difficulty effect** -- memories that were harder to retrieve (lower current strength at retrieval time) receive a larger stability boost.
 
-From `memory/core/decay/DecayModel.ts`:
+From `cognition/memory/core/decay/DecayModel.ts`:
 
 ```typescript
 // Ebbinghaus forgetting curve
@@ -513,7 +504,7 @@ Traces below a configurable pruning threshold are soft-deleted (`isActive = fals
 
 ### Memory Type Taxonomy
 
-Four memory types (Tulving's taxonomy) across four ownership scopes:
+Five memory types (Tulving's taxonomy plus `relational`) across four ownership scopes:
 
 | Type | Description | Example |
 |------|-------------|---------|
@@ -521,6 +512,7 @@ Four memory types (Tulving's taxonomy) across four ownership scopes:
 | `semantic` | Facts, concepts, general knowledge | "The user's preferred language is Python" |
 | `procedural` | How-to knowledge, learned procedures | "When deploying, run tests first, then build, then push" |
 | `prospective` | Future intentions and reminders | "Remind user about the deadline next Monday" |
+| `relational` | Trust signals, boundaries and emotional bonds between the agent and the user | "The user asked not to be messaged after 9 pm" |
 
 | Scope | Visibility | Shared Across |
 |-------|------------|---------------|
@@ -538,13 +530,13 @@ flowchart TB
     D["DecayModel<br/><i>Ebbinghaus · spaced rep · interference</i>"]:::process
     W["CognitiveWorkingMemory<br/><i>Baddeley 7±2 · personality-modulated</i>"]:::process
     M["MemoryStore<br/><i>IVectorStore + IKnowledgeGraph</i>"]:::data
-    P["MemoryPromptAssembler<br/><i>6-section token-budgeted assembly</i>"]:::process
+    P["MemoryPromptAssembler<br/><i>7-section token-budgeted assembly</i>"]:::process
     G["IMemoryGraph<br/><i>Graphology · 8 edge types</i>"]:::data
     SA["SpreadingActivation<br/><i>Anderson ACT-R · Hebbian</i>"]:::process
     O["MemoryObserver<br/><i>personality-biased note extraction</i>"]:::process
     R["MemoryReflector<br/><i>LLM consolidates notes → traces</i>"]:::process
     Pr["ProspectiveMemoryManager<br/><i>time / event / context triggers</i>"]:::process
-    Co["ConsolidationPipeline<br/><i>5-step periodic maintenance</i>"]:::process
+    Co["ConsolidationPipeline<br/><i>7-step periodic maintenance</i>"]:::process
 
     CM --> E
     CM --> D
@@ -564,7 +556,7 @@ flowchart TB
 
 ### Cognitive Pipeline (per-message smart orchestration)
 
-Above the storage substrate sits an LLM-as-judge orchestration layer that picks strategy per message at three pipeline boundaries. Each stage is its own router primitive — independently shippable, independently testable, composable via the [`CognitivePipeline`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/index.ts) facade. This is **smart orchestration, not safety guardrails** — orchestration picks strategies, guardrails enforce safety/policy at the output stage. They live in different packages on purpose.
+Above the storage substrate sits an LLM-as-judge orchestration layer that picks strategy per message at three pipeline boundaries. Each stage is its own router primitive — independently shippable, independently testable, composable via the [`CognitivePipeline`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/index.ts) facade. This is **smart orchestration, not safety guardrails** — orchestration picks strategies, guardrails enforce safety/policy at the output stage. They live in different modules on purpose.
 
 ```mermaid
 flowchart TB
@@ -592,7 +584,7 @@ flowchart TB
     classDef external fill:#f3e8ff,stroke:#8b5cf6,color:#5b21b6
 ```
 
-Every router has the same internal structure: a classifier (LLM-as-judge that maps input to a category/intent token), a pure `select*` function (category + routing table + budget policy → strategy decision), a dispatcher (registry of executors per strategy), and three shipping presets calibrated from LongMemEval-S Phase B N=500 measurements.
+Every router has the same internal structure: a classifier (LLM-as-judge that maps input to a category/intent token), a pure `select*` function (category + routing table + budget policy → strategy decision), a dispatcher (registry of executors per strategy), and shipping presets (three for the memory and read routers, four for the ingest router) calibrated from LongMemEval-S Phase B N=500 measurements.
 
 | Primitive | Subpath | Categories | Strategies |
 |---|---|---|---|
@@ -604,17 +596,18 @@ Every router has the same internal structure: a classifier (LLM-as-judge that ma
 
 Each classifier is provider-agnostic — talks to a small `IXClassifierLLM` adapter interface, not an SDK. One OpenAI key reproduces the entire pipeline; no Claude / Gemini accounts required for the shipping configuration.
 
-Each router ships 26-38 contract tests; the entire family ships 163 tests. See the dedicated [Cognitive Pipeline](../COGNITIVE_PIPELINE.md) guide for the unified architecture overview, or the per-stage docs ([Memory Router](../MEMORY_ROUTER.md), [Ingest Router](../INGEST_ROUTER.md), [Read Router](../READ_ROUTER.md), [Adaptive Memory Router](../ADAPTIVE_MEMORY_ROUTER.md)) for the routing tables and presets each stage exposes.
+See the dedicated [Cognitive Pipeline](../COGNITIVE_PIPELINE.md) guide for the unified architecture overview, or the per-stage docs ([Memory Router](../MEMORY_ROUTER.md), [Ingest Router](../INGEST_ROUTER.md), [Read Router](../READ_ROUTER.md), [Adaptive Memory Router](../ADAPTIVE_MEMORY_ROUTER.md)) for the routing tables and presets each stage exposes.
 
 ### The MemoryTrace Envelope
 
-Every memory is stored as a [`MemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/SelfEvaluateTool.ts) (defined in `memory/core/types.ts`):
+Every memory is stored as a [`MemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts) (defined in `cognition/memory/core/types.ts`; abridged):
 
 ```typescript
 interface MemoryTrace {
   id: string;
-  type: MemoryType;                    // episodic | semantic | procedural | prospective
+  type: MemoryType;                    // episodic | semantic | procedural | prospective | relational
   scope: MemoryScope;                  // thread | user | persona | organization
+  scopeId: string;                     // Id of the thread, user, persona or organization
   content: string;                     // The memory content
   entities: string[];                  // Extracted entity references
   tags: string[];                      // Classification tags
@@ -626,26 +619,28 @@ interface MemoryTrace {
   lastAccessedAt: number;              // Unix ms of last access
   reinforcementInterval: number;       // Spaced repetition interval (ms)
   associatedTraceIds: string[];        // Graph linkage to related traces
+  createdAt: number;                   // Unix ms of creation
+  updatedAt: number;                   // Unix ms of the last update
   isActive: boolean;                   // Soft-delete flag
 }
 ```
 
 ### Retrieval Scoring
 
-Retrieval combines six weighted signals to rank candidate traces:
+Retrieval combines six weighted signals to rank candidate traces ([`RetrievalPriorityScorer`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/RetrievalPriorityScorer.ts); a recall's `scoringWeights` replaces the weights for that call):
 
 | Signal | Weight | Source |
 |--------|--------|--------|
 | Strength/decay | 0.25 | `computeCurrentStrength()` from DecayModel |
 | Vector similarity | 0.35 | Cosine similarity from IVectorStore |
-| Recency | 0.10 | Inverse time since last access |
-| Emotional congruence | 0.15 | PAD distance between current mood and encoding mood |
-| Graph activation | 0.10 | Spreading activation score from IMemoryGraph |
-| Importance | 0.05 | Normalized salience score |
+| Recency | 0.10 | A boost for traces accessed within about a day (24-hour half-life) |
+| Emotional congruence | 0.15 | Current mood valence times the trace's valence, when both have the same sign |
+| Graph activation | 0.10 | Spreading activation score from IMemoryGraph (0 without a graph) |
+| Importance | 0.05 | The trace's provenance confidence, scaled to 0.5–1 |
 
 ### Eight Cognitive Mechanisms
 
-Located in `memory/mechanisms/`, each mechanism is HEXACO-modulated:
+Located in `cognition/memory/mechanisms/`; six of the eight are scaled by a HEXACO trait. They run when `CognitiveMemoryManager` is initialized with a `cognitiveMechanisms` config:
 
 | Mechanism | HEXACO Modulator | Effect |
 |-----------|-----------------|--------|
@@ -653,16 +648,16 @@ Located in `memory/mechanisms/`, each mechanism is HEXACO-modulated:
 | Retrieval-induced forgetting | Conscientiousness | Retrieving one trace suppresses competitors; high C strengthens suppression |
 | Involuntary recall | Openness | Spontaneous memory surfacing; high O increases trigger sensitivity |
 | Feeling-of-knowing | Extraversion | Metacognitive confidence judgment; high X lowers sharing threshold |
-| Temporal gist extraction | Conscientiousness | Compresses episodic details into semantic gist over time |
-| Schema encoding | Openness | Assimilates new information into existing knowledge schemas |
-| Source confidence decay | Honesty-Humility | Provenance confidence degrades over time; high H accelerates skepticism |
-| Emotion regulation | Agreeableness | Modulates emotional coloring of retrieved memories |
+| Temporal gist extraction | None | Compresses old, rarely retrieved traces into a gist at consolidation |
+| Schema encoding | None | Strengthens novel traces and weakens schema-congruent ones at encoding, once the host sets cluster centroids |
+| Source confidence decay | Honesty-Humility | Shortens the stability of inferred and reflected traces at consolidation; high H decays reflections faster |
+| Emotion regulation | Agreeableness | Reappraises high-arousal traces at consolidation; high A reappraises faster |
 
 ### GMI Integration
 
-1. **After user message**: `CognitiveMemoryBridge.encode()` creates a MemoryTrace with personality-modulated strength
-2. **Before prompt construction**: `assembleForPrompt()` retrieves and formats memory within a token budget
-3. **After response**: [`MemoryObserver`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryObserver.ts) feeds the response to the observer buffer for background consolidation
+1. **Before prompt construction**: `CognitiveMemoryBridge.assembleContext()` calls the manager's `assembleForPrompt()`, which retrieves and formats memory within a token budget
+2. **After the turn**: `CognitiveMemoryBridge.syncForTurn()` encodes the user's input as an episodic trace (`user_statement`) and the reply as a semantic trace (`agent_inference`), each with personality-modulated strength
+3. **Before each encode**: the bridge passes the text to the manager's `observe()`, which feeds the [`MemoryObserver`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/observation/MemoryObserver.ts) buffer when an observer is configured
 
 For full details, see [Cognitive Memory](../memory/COGNITIVE_MEMORY.md) (theory + mechanism implementation reference) and the [Memory System Overview](../MEMORY_SYSTEM_OVERVIEW.md) (composition, archive, vendor comparison).
 
@@ -672,7 +667,7 @@ For full details, see [Cognitive Memory](../memory/COGNITIVE_MEMORY.md) (theory 
 
 The RAG subsystem provides retrieval-augmented generation with multiple vector backends and retrieval strategies.
 
-Runtime truth: the default AgentOS bootstrap path still wires [`EmbeddingManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/EmbeddingManager.ts) -> [`VectorStoreManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/VectorStoreManager.ts) -> [`RetrievalAugmentor`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/RetrievalAugmentor.ts). [`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts) is implemented as a higher-level orchestration layer, but it remains opt-in rather than the default runtime path.
+The AgentOS bootstrap path wires [`EmbeddingManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/EmbeddingManager.ts) -> [`VectorStoreManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/VectorStoreManager.ts) -> [`RetrievalAugmentor`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/RetrievalAugmentor.ts). [`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts) is a higher-level orchestration layer that runs only when a host wires it in.
 
 ### Retrieval Pipeline
 
@@ -680,11 +675,8 @@ Runtime truth: the default AgentOS bootstrap path still wires [`EmbeddingManager
 graph LR
     Q[User Query] --> HyDE[HyDE Generator<br/>Optional]
     HyDE --> Embed[Embedding<br/>Manager]
-    Q --> BM25[BM25 Sparse<br/>Index]
-    Embed --> VS[Vector Store<br/>ANN Search]
-    VS --> Fusion[Reciprocal Rank<br/>Fusion]
-    BM25 --> Fusion
-    Fusion --> Rerank[Reranker<br/>Optional]
+    Embed --> VS[Vector Store<br/>Search]
+    VS --> Rerank[Reranker<br/>Optional]
     Rerank --> Chunks[Top-K Chunks]
     Chunks --> Prompt[Prompt<br/>Assembly]
 ```
@@ -694,23 +686,23 @@ The GMI integrates with RAG through persona-configurable hooks:
 - `retrievalAugmentor.retrieveContext()` runs the default runtime retrieval pipeline
 - `performPostTurnIngestion()` summarizes and embeds conversation turns
 
-When a host explicitly wires `QueryRouter.setUnifiedRetriever(...)`, plan-aware retrieval can run through [`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts) instead of the legacy dispatcher path. That path is real, but not the default bootstrap today.
+When a host wires `QueryRouter.setUnifiedRetriever(...)`, plan-aware retrieval runs through [`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts) instead of the legacy dispatcher path. BM25 + dense fusion is available through [`HybridSearcher`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/search/HybridSearcher.ts) and, for memory traces, [`HybridRetriever`](./hybrid-retriever.md).
 
-Within the default QueryRouter path, `cacheResults` now provides in-memory `route()` result caching, and `verifyCitations` can attach `QueryResult.grounding` by running [`CitationVerifier`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/citation/CitationVerifier.ts) over retrieved chunks when embeddings are available.
+Within the default QueryRouter path, `cacheResults` provides in-memory `route()` result caching, and `verifyCitations` can attach `QueryResult.grounding` by running [`CitationVerifier`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/citation/CitationVerifier.ts) over retrieved chunks when embeddings are available.
 
 ### Vector Store Backends
 
-Seven [`IVectorStore`](https://github.com/framerslab/agentos/blob/master/src/core/vector-store/IVectorStore.ts) implementations provide different tradeoffs:
+Seven [`IVectorStore`](https://github.com/framerslab/agentos/blob/master/src/core/vector-store/IVectorStore.ts) implementations ship in [`cognition/rag/vector_stores/`](https://github.com/framerslab/agentos/tree/master/src/cognition/rag/vector_stores):
 
-| Backend | Latency (100K docs) | Persistence | Best For |
-|---------|---------------------|-------------|----------|
-| [`HnswlibVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/HnswlibVectorStore.ts) | 2-10ms (ANN) | File-based | Production (self-hosted) |
-| [`InMemoryVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/InMemoryVectorStore.ts) | 10-50ms (linear scan) | None | Development / testing |
-| [`PostgresVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/PostgresVectorStore.ts) | 5-20ms (pgvector) | PostgreSQL | Production (SQL-native) |
-| [`QdrantVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/QdrantVectorStore.ts) | 5-15ms (API) | Managed/self-hosted | Default OSS production |
-| [`PineconeVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/PineconeVectorStore.ts) | 20-50ms (API) | Managed cloud | Optional vendor-managed scale |
-| `SqliteVectorStore` | 10-30ms | SQLite file | Edge / embedded |
-| `IndexedDBVectorStore` | 20-80ms | Browser | Client-side apps |
+| Backend | Persistence | Best For |
+|---------|-------------|----------|
+| [`InMemoryVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/InMemoryVectorStore.ts) | None | Development / testing |
+| [`HnswlibVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/HnswlibVectorStore.ts) | File-based | Self-hosted approximate nearest-neighbour search |
+| [`SqlVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/SqlVectorStore.ts) | Any `@framers/sql-storage-adapter` backend (SQLite, PostgreSQL, IndexedDB, Capacitor) | Embedded, edge and browser apps |
+| [`PostgresVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/PostgresVectorStore.ts) | PostgreSQL with pgvector | SQL-native production |
+| [`QdrantVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/QdrantVectorStore.ts) | Managed or self-hosted Qdrant | Open-source vector database |
+| [`PineconeVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/PineconeVectorStore.ts) | Managed cloud | Vendor-managed scale |
+| [`Neo4jVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/Neo4jVectorStore.ts) | Neo4j | Vector search beside a knowledge graph |
 
 ### Retrieval Strategies
 
@@ -724,7 +716,7 @@ Seven [`IVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cor
 
 ### GraphRAG Engine
 
-[`GraphRAGEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) (`rag/graphrag/GraphRAGEngine.ts`) implements Microsoft GraphRAG-inspired retrieval:
+[`GraphRAGEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) (`cognition/memory/retrieval/graph/graphrag/`, re-exported from `cognition/rag/graphrag/`) implements Microsoft GraphRAG-inspired retrieval:
 
 1. **Ingestion**: Entity extraction (LLM or pattern-based) -> graph construction (graphology) -> Louvain community detection -> hierarchical meta-graph -> LLM community summarization
 2. **Global search**: Query community summary embeddings, synthesize across matched communities
@@ -732,17 +724,14 @@ Seven [`IVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cor
 
 ### Chunking Strategies
 
-Multiple strategies in `rag/chunking/`:
-- **Fixed-size** -- Split by token count with configurable overlap
-- **Semantic** -- Split at paragraph/section boundaries
-- **Recursive** -- Hierarchical splitting (headers -> paragraphs -> sentences)
-- **Code-aware** -- Split at function/class boundaries for source code
+[`SemanticChunker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/chunking/SemanticChunker.ts) in `cognition/rag/chunking/` splits text at headings, then paragraphs, then sentences, keeps fenced code blocks whole, and falls back to fixed-size splits for text with no boundaries.
 
 ### Reranking
 
-Pluggable providers in `rag/reranking/`:
-- **Cohere API** -- Cloud-hosted cross-encoder
-- **Transformers.js** -- Local cross-encoder ONNX model (no API calls)
+Pluggable providers in `cognition/rag/reranking/providers/`:
+- **Cohere API** ([`CohereReranker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/providers/CohereReranker.ts)) -- Cloud-hosted cross-encoder
+- **Transformers.js** ([`LocalCrossEncoderReranker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/providers/LocalCrossEncoderReranker.ts)) -- Local cross-encoder model (no API calls)
+- **LLM judge** ([`LlmJudgeReranker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/providers/LlmJudgeReranker.ts)) -- A model scores each passage
 
 For configuration details, see [RAG Memory Configuration](../memory/RAG_MEMORY_CONFIGURATION.md) and [HyDE Retrieval](../memory/HYDE_RETRIEVAL.md).
 
@@ -757,17 +746,17 @@ The agency system enables multi-agent coordination across six strategies (define
 | Strategy | Behavior |
 |---|---|
 | `sequential` | Each agent runs after the previous one completes; output of one feeds the next |
-| `parallel` | All agents run concurrently against the same input; results are aggregated |
+| `parallel` | All agents run concurrently against the same input; the agency's model synthesizes their results |
 | `debate` | Agents critique and refine each other's outputs across multiple rounds |
 | `review-loop` | One agent produces, another reviews; loop continues until reviewer accepts or `maxRounds` |
 | `hierarchical` | A coordinator agent delegates to sub-agents and synthesizes their results |
 | `graph` | Explicit DAG via `dependsOn` on each sub-agent; runs roots first, then dependents |
 
-Coordination state lives in three classes under [`src/agents/agency/`](https://github.com/framerslab/agentos/tree/master/src/agents/agency):
+`agency()` keeps its coordination state in the call itself. Three classes under [`src/agents/agency/`](https://github.com/framerslab/agentos/tree/master/src/agents/agency) serve the full runtime and hosts; `agency()` uses none of them:
 
-- [`AgencyRegistry`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyRegistry.ts) — tracks active agencies and the GMIs they contain
-- [`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts) — shared memory across the agency's GMIs (separate from each GMI's private cognitive memory)
-- [`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgentCommunicationBus.ts) — the message channel GMIs use to coordinate
+- [`AgencyRegistry`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyRegistry.ts) — tracks agencies and the GMIs they contain, for the workflow runtime ([`WorkflowRuntime`](https://github.com/framerslab/agentos/blob/master/src/orchestration/workflows/runtime/WorkflowRuntime.ts))
+- [`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts) — shared memory across an agency's GMIs (separate from each GMI's private cognitive memory)
+- [`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgentCommunicationBus.ts) — an in-process message channel a host wires between its agents ([Agent Communication](./AGENT_COMMUNICATION.md))
 
 ### Workflow DAG
 
@@ -788,19 +777,19 @@ graph TD
 Workflow definitions live in `orchestration/workflows/` with these key types:
 - [`WorkflowDefinition`](https://github.com/framerslab/agentos/blob/master/src/orchestration/workflows/WorkflowTypes.ts) -- The declarative task graph
 - [`WorkflowInstance`](https://github.com/framerslab/agentos/blob/master/src/orchestration/workflows/WorkflowTypes.ts) -- A running execution with state
-- [`IWorkflowStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/workflows/storage/IWorkflowStore.ts) -- Persistence interface (in-memory default, SQL optional)
+- [`IWorkflowStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/workflows/storage/IWorkflowStore.ts) -- Persistence interface; `InMemoryWorkflowStore` is the implementation that ships
 
-The compiler in `orchestration/compiler/` resolves task dependencies, detects cycles, and produces a topologically-sorted execution plan. The runtime in `orchestration/runtime/` executes tasks with configurable parallelism.
+[`WorkflowEngine`](https://github.com/framerslab/agentos/blob/master/src/orchestration/workflows/WorkflowEngine.ts) runs these definitions for the full runtime. The `workflow()`, `mission()` and `AgentGraph` builders are a separate path: [`GraphCompiler`](https://github.com/framerslab/agentos/blob/master/src/orchestration/compiler/GraphCompiler.ts) in `orchestration/compiler/` compiles them to the graph IR, and [`GraphRuntime`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/GraphRuntime.ts) in `orchestration/runtime/` runs it ([Unified Orchestration](../orchestration/UNIFIED_ORCHESTRATION.md)).
 
 ### Agent Communication Bus
 
-[`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgentCommunicationBus.ts) (`agents/agency/AgentCommunicationBus.ts`) provides structured messaging between GMIs:
+[`AgentCommunicationBus`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgentCommunicationBus.ts) (`agents/agency/AgentCommunicationBus.ts`) provides structured messaging between the agents a host registers on it:
 - **Direct send** -- Targeted messages to specific agents
 - **Broadcast** -- Send to all agents in an agency
 - **Request/Response** -- Query agents and await responses
 - **Handoff** -- Transfer context between agents with state, findings, and memory references
 
-Message types: `task_delegation`, `status_update`, `question`, `answer`, `finding`, `decision`, `critique`, `handoff`, `alert`, `proposal`, `agreement`, `disagreement`.
+Message types: `task_delegation`, `status_update`, `question`, `answer`, `finding`, `decision`, `critique`, `handoff`, `acknowledgment`, `error`, `broadcast`, `heartbeat`.
 
 ### Planning Engine
 
@@ -813,7 +802,7 @@ Message types: `task_delegation`, `status_update`, `question`, `answer`, `findin
 - **Clarification requests** for ambiguous situations
 - **Escalations** for transferring control to humans
 
-The [`ToolOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts) integrates HITL directly: tools declaring side effects can be gated through `hitlManager` before execution, with configurable `approvalTimeoutMs` and auto-approve fallback.
+The [`ToolOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolOrchestrator.ts) integrates HITL directly: with `hitl.enabled` in its config (off by default), a tool with `hasSideEffects` waits for the `hitlManager`'s approval before it runs, within `approvalTimeoutMs`; without a manager the call fails unless `autoApproveWhenNoManager` is set.
 
 ### Using the API
 
@@ -914,25 +903,25 @@ const weatherTool: ITool = {
 1. LLM emits a `tool_call` chunk with name and arguments
 2. `ToolOrchestrator` resolves the tool by name from its registry
 3. [`ToolPermissionManager`](https://github.com/framerslab/agentos/blob/master/src/core/tools/permissions/ToolPermissionManager.ts) checks persona capabilities and user subscription
-4. If `hasSideEffects` and HITL is enabled, [`HumanInteractionManager`](https://github.com/framerslab/agentos/blob/master/src/orchestration/hitl/HumanInteractionManager.ts) gates the execution
+4. If `hasSideEffects` and the orchestrator's `hitl.enabled` is set, [`HumanInteractionManager`](https://github.com/framerslab/agentos/blob/master/src/orchestration/hitl/HumanInteractionManager.ts) gates the execution
 5. [`ToolExecutor`](https://github.com/framerslab/agentos/blob/master/src/core/tools/ToolExecutor.ts) validates arguments against `inputSchema` and calls `execute()`
 6. Result is formatted as [`ToolCallResult`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/IGMI.ts) and fed back to the LLM
 
 ### Capability Discovery
 
-The [`CapabilityDiscoveryEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/discovery/CapabilityDiscoveryEngine.ts) (`discovery/`) replaces static tool schema dumps in the prompt with a three-tier semantic search system, reducing tool-related tokens by ~90%:
+The [`CapabilityDiscoveryEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/discovery/CapabilityDiscoveryEngine.ts) (`cognition/discovery/`) replaces static tool schema dumps in the prompt with a three-tier semantic search system:
 
-| Tier | Content | Token Cost | When Used |
+| Tier | Content | Default token budget | When Used |
 |------|---------|------------|-----------|
-| Tier 0 | Category summaries | ~150 tokens | Always included in system prompt |
-| Tier 1 | Top-5 semantic matches | ~200 tokens | Per-turn, based on user query |
-| Tier 2 | Full JSON schemas | ~1,500 tokens | On-demand via `discover_capabilities` meta-tool |
+| Tier 0 | Category summaries | 200 | Always included in system prompt |
+| Tier 1 | Top-5 semantic matches (name, description, key parameters) | 800 | Per-turn, based on user query |
+| Tier 2 | Full JSON schemas | 2,000 | On-demand via `discover_capabilities` meta-tool |
 
 The engine pipeline: `User Message -> CapabilityIndex.search() -> CapabilityGraph.rerank() -> CapabilityContextAssembler.assemble() -> CapabilityDiscoveryResult`.
 
 ### Extension-Provided Tools
 
-Tools are typically loaded via [`ExtensionPack`](https://github.com/framerslab/agentos/blob/master/src/extensions/manifest.ts) descriptors. The extension registry catalogs 23+ tools, 37 channels, 3 voice extensions, and 4 orchestration tools.
+Tools are typically loaded via [`ExtensionPack`](https://github.com/framerslab/agentos/blob/master/src/extensions/manifest.ts) descriptors. The curated registry in `@framers/agentos-extensions` holds 110 extension manifests, 37 of them channels and 16 voice extensions.
 
 For details, see [Tool Calling & Loading](../extensions/TOOL_CALLING_AND_LOADING.md) and [Capability Discovery](../extensions/CAPABILITY_DISCOVERY.md).
 
@@ -962,23 +951,16 @@ interface IGuardrailService {
     maxStreamingEvaluations?: number;   // Rate limit per stream
     canSanitize?: boolean;              // Runs in Phase 1 (sequential)
     timeoutMs?: number;                 // Per-evaluation timeout
+    failClosed?: boolean;               // Block instead of passing on a timeout or an error
   };
   evaluateInput?(payload: GuardrailInputPayload): Promise<GuardrailEvaluationResult | null>;
   evaluateOutput?(payload: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null>;
 }
 ```
 
-### Five Security Tiers
+### Security Tiers
 
-Security tiers define preset guardrail configurations for different deployment contexts:
-
-| Tier | Name | Input Guardrails | Output Guardrails | Use Case |
-|------|------|------------------|-------------------|----------|
-| 1 | `dangerous` | None | None | Internal development only |
-| 2 | `permissive` | PII redaction | Basic toxicity | Internal tools, trusted users |
-| 3 | `balanced` | PII + toxicity | Toxicity + grounding | General-purpose deployment |
-| 4 | `strict` | PII + toxicity + policy | Full suite | Customer-facing products |
-| 5 | `paranoid` | All + custom validators | All + streaming evaluation | Regulated industries (healthcare, finance) |
+`SecurityTier` names five levels: `dangerous`, `permissive`, `balanced`, `strict` and `paranoid` ([`types.ts`](https://github.com/framerslab/agentos/blob/master/src/api/types.ts)). `agency()` accepts one as `security.tier` and as `guardrails.tier`. AgentOS defines no guardrail set for any tier and applies none: a host that wants tiers maps each one to its own list of guardrail packs.
 
 ### Custom Guardrail Example
 
@@ -1009,7 +991,7 @@ For details, see [Safety Primitives](../safety/SAFETY_PRIMITIVES.md), [Creating 
 
 ## Voice Pipeline
 
-The real-time voice conversation pipeline lives in `voice-pipeline/` and is orchestrated by [`VoicePipelineOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoicePipelineOrchestrator.ts), a state machine that coordinates audio capture, speech recognition, endpoint detection, agent inference, text-to-speech synthesis, and barge-in handling.
+The real-time voice conversation pipeline lives in `io/voice-pipeline/` and is orchestrated by [`VoicePipelineOrchestrator`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoicePipelineOrchestrator.ts), a state machine that coordinates audio capture, speech recognition, endpoint detection, agent inference, text-to-speech synthesis, and barge-in handling.
 
 ### State Machine
 
@@ -1043,8 +1025,8 @@ graph LR
 | Interface | Purpose | Implementations |
 |-----------|---------|-----------------|
 | [`IStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Bidirectional audio/text transport | [`WebSocketStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/WebSocketStreamTransport.ts), [`WebRTCStreamTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/WebRTCStreamTransport.ts) |
-| [`IStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Speech-to-text recognition | Deepgram, Whisper, Google, Azure, browser WebSpeechAPI |
-| [`IStreamingTTS`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Text-to-speech synthesis | OpenAI TTS, ElevenLabs, Google, Azure, PlayHT |
+| [`IStreamingSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Speech-to-text recognition | In tree ([`providers/`](https://github.com/framerslab/agentos/tree/master/src/io/voice-pipeline/providers)): Deepgram streaming, ElevenLabs streaming, and batch fallbacks over Deepgram pre-recorded and OpenAI Whisper |
+| [`IStreamingTTS`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Text-to-speech synthesis | In tree: OpenAI, ElevenLabs, Deepgram Aura, Cartesia and Hume, streaming and batch |
 | [`IEndpointDetector`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Detect when the user finishes speaking | [`HeuristicEndpointDetector`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/HeuristicEndpointDetector.ts), [`AcousticEndpointDetector`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/AcousticEndpointDetector.ts) |
 | [`IBargeinHandler`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Handle user interruptions during playback | [`HardCutBargeinHandler`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/HardCutBargeinHandler.ts), [`SoftFadeBargeinHandler`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/SoftFadeBargeinHandler.ts) |
 | [`IDiarizationEngine`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts) | Multi-speaker identification | (optional, provider-specific) |
@@ -1062,7 +1044,7 @@ For details, see [Voice Pipeline](../features/VOICE_PIPELINE.md) and [Speech Pro
 
 ## Channels
 
-Twelve messaging adapters live in `src/io/channels/adapters/`, plus four telephony providers in `src/io/channels/telephony/providers/` (Twilio, Telnyx, Plivo, plus a mock for tests). Additional social-platform adapters ship as separate extension packs in [`packages/agentos-extensions/registry/curated/channels/`](https://github.com/framerslab/agentos-extensions/tree/master/registry/curated/channels). Each adapter implements the [`IChannelAdapter`](https://github.com/framerslab/agentos/blob/master/src/io/channels/IChannelAdapter.ts) interface and is loaded as an `ExtensionPack`.
+Twelve messaging adapters live in `src/io/channels/adapters/`, plus four telephony providers in `src/io/channels/telephony/providers/` (Twilio, Telnyx, Plivo, plus a mock for tests). Additional social-platform adapters ship as separate extension packs in [`registry/curated/channels/`](https://github.com/framerslab/agentos-extensions/tree/master/registry/curated/channels) of `agentos-extensions`. Each adapter implements the [`IChannelAdapter`](https://github.com/framerslab/agentos/blob/master/src/io/channels/IChannelAdapter.ts) interface; a host initializes an in-tree adapter and registers it on a `ChannelRouter`, or loads a channel extension pack through the manifest.
 
 ### Platform Table
 
@@ -1081,8 +1063,9 @@ In-tree messaging adapters (`src/io/channels/adapters/`):
 | WebChat | [`WebChatChannelAdapter`](https://github.com/framerslab/agentos/blob/master/src/io/channels/adapters/WebChatChannelAdapter.ts) | Web |
 | Teams | [`TeamsChannelAdapter`](https://github.com/framerslab/agentos/blob/master/src/io/channels/adapters/TeamsChannelAdapter.ts) | Enterprise |
 | Google Chat | [`GoogleChatChannelAdapter`](https://github.com/framerslab/agentos/blob/master/src/io/channels/adapters/GoogleChatChannelAdapter.ts) | Enterprise |
+| SMS (Plivo) | [`PlivoSmsChannelAdapter`](https://github.com/framerslab/agentos/blob/master/src/io/channels/adapters/PlivoSmsChannelAdapter.ts) | Messaging |
 
-Telephony (`src/io/channels/telephony/providers/`): Twilio, Telnyx, Plivo. Additional social-platform adapters (LinkedIn, Bluesky, Mastodon, Threads, etc.) ship as extension packs in [`packages/agentos-extensions/registry/curated/channels/`](https://github.com/framerslab/agentos-extensions/tree/master/registry/curated/channels) rather than in-tree.
+Telephony (`src/io/channels/telephony/providers/`): Twilio, Telnyx, Plivo. Additional social-platform adapters (LinkedIn, Bluesky, Mastodon, Threads, etc.) ship as extension packs in [`registry/curated/channels/`](https://github.com/framerslab/agentos-extensions/tree/master/registry/curated/channels) of `agentos-extensions` rather than in-tree.
 
 ### Channel Routing
 
@@ -1090,18 +1073,32 @@ Telephony (`src/io/channels/telephony/providers/`): Twilio, Telnyx, Plivo. Addit
 import { ChannelRouter } from '@framers/agentos/channels';
 
 const router = new ChannelRouter();
-router.register('telegram', telegramAdapter);
-router.register('discord', discordAdapter);
+router.registerAdapter(telegramAdapter); // an initialized IChannelAdapter
 
-// Route an inbound message to the appropriate adapter
-const response = await router.route(inboundMessage);
+// Bind a conversation to an agent; onMessage handlers run only for bound conversations
+router.addBinding({
+  bindingId: 'support-telegram',
+  seedId: 'support-agent',
+  ownerUserId: 'owner-1',
+  platform: 'telegram',
+  channelId: '123456789',
+  conversationType: 'direct',
+  isActive: true,
+  autoBroadcast: false,
+});
+
+router.onMessage(async (message, binding, session) => {
+  await router.sendMessage(binding.seedId, message.platform, message.conversationId, {
+    blocks: [{ type: 'text', text: `You said: ${message.text}` }],
+  });
+});
 ```
 
 ### Social Posting
 
 [`SocialPostManager`](https://github.com/framerslab/agentos/blob/master/src/io/channels/social-posting/SocialPostManager.ts) and [`ContentAdaptationEngine`](https://github.com/framerslab/agentos/blob/master/src/io/channels/social-posting/ContentAdaptationEngine.ts) (in `channels/social-posting/`) handle cross-platform publishing. The adaptation engine reformats content for each platform's constraints (character limits, media formats, hashtag conventions).
 
-Orchestration tools in `tools/`: `multi-channel-post`, `social-analytics`, `media-upload`, `bulk-scheduler`.
+The `multi-channel-post`, `social-analytics`, `media-upload` and `bulk-scheduler` tools ship as extension packs in [`registry/curated/tools/`](https://github.com/framerslab/agentos-extensions/tree/master/registry/curated/tools) of `agentos-extensions`.
 
 For details, see [Channels](../features/CHANNELS.md), [Social Posting](../features/SOCIAL_POSTING.md), and [Telephony Providers](../features/TELEPHONY_PROVIDERS.md).
 
@@ -1114,21 +1111,21 @@ AgentOS provides opt-in observability through OpenTelemetry integration, configu
 ### Tracing
 
 When `observability.tracing.enabled` is true, AgentOS creates spans for:
-- Agent turns (`agentos.turn`)
-- Tool executions (`agentos.tool.{name}`)
-- Guardrail evaluations (`agentos.guardrail.{phase}`)
-- LLM calls (`agentos.llm.completion`)
-- Memory retrieval (`agentos.memory.retrieve`)
+- Runtime turns (`agentos.turn`), GMI acquisition (`agentos.gmi.get_or_create`) and the GMI turn (`agentos.gmi.process_turn_stream`)
+- Tool-result handoffs (`agentos.tool_result`) and resumed external tool calls (`agentos.resume_external_tool_request`)
+- Conversation saves (`agentos.conversation.save`)
+- The high-level helpers (`agentos.api.generate_text`, `agentos.api.stream_text`, `agentos.api.generate_image` and the other media calls)
 
-The [`Tracer`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/observability/Tracer.ts) class (`evaluation/observability/Tracer.ts`) wraps `@opentelemetry/api` and uses the configured tracer name (default `"@framers/agentos"`). Trace context is propagated through [`AgentOSResponse`](https://github.com/framerslab/agentos/blob/master/src/api/types/AgentOSResponse.ts) metadata when `includeTraceInResponses` is enabled, allowing client-side correlation.
+The [`Tracer`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/observability/Tracer.ts) class (`safety/evaluation/observability/Tracer.ts`) wraps `@opentelemetry/api` and uses the configured tracer name (default `"@framers/agentos"`). Trace context is propagated through [`AgentOSResponse`](https://github.com/framerslab/agentos/blob/master/src/api/types/AgentOSResponse.ts) metadata when `includeTraceInResponses` is enabled, allowing client-side correlation.
 
 ### Metrics
 
-When `observability.metrics.enabled` is true, AgentOS exports:
-- `agentos.turn.duration_ms` -- Histogram of turn latencies
-- `agentos.turn.tokens` -- Counter of prompt/completion tokens
-- `agentos.tool.invocations` -- Counter by tool name and outcome
-- `agentos.guardrail.evaluations` -- Counter by guardrail name and action
+When `observability.metrics.enabled` is true, AgentOS exports ([`otel.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/observability/otel.ts)):
+- `agentos.turns` -- Counter of completed turns
+- `agentos.turn.duration_ms` and `agentos.turn.first_part_ms` -- Histograms of turn latency
+- `agentos.turn.tokens.total`, `.prompt`, `.completion`, `.cache_read`, `.cache_creation` -- Histograms of tokens per turn
+- `agentos.turn.cost.usd` and `agentos.turn.task_success_score` -- Histograms of cost and outcome score per turn
+- `agentos.tool_results` and `agentos.tool_result.duration_ms` -- Tool-result handoffs and their duration
 
 ### Logging
 
@@ -1136,7 +1133,7 @@ When `observability.metrics.enabled` is true, AgentOS exports:
 
 ### Evaluation Framework
 
-[`Evaluator`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/Evaluator.ts) and [`LLMJudge`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/LLMJudge.ts) (`evaluation/`) provide a grading framework for agent outputs. [`SqlTaskOutcomeTelemetryStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/turn-planner/SqlTaskOutcomeTelemetryStore.ts) persists per-turn outcome KPI windows so rolling quality metrics survive restarts.
+[`Evaluator`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/Evaluator.ts) and [`LLMJudge`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/LLMJudge.ts) (`safety/evaluation/`) provide a grading framework for agent outputs. [`SqlTaskOutcomeTelemetryStore`](https://github.com/framerslab/agentos/blob/master/src/orchestration/turn-planner/SqlTaskOutcomeTelemetryStore.ts) persists per-turn outcome KPI windows so rolling quality metrics survive restarts.
 
 For details, see [Observability](../observability/OBSERVABILITY.md), [Logging](../observability/LOGGING.md), and [Evaluation Framework](../observability/EVALUATION_FRAMEWORK.md).
 
@@ -1144,7 +1141,7 @@ For details, see [Observability](../observability/OBSERVABILITY.md), [Logging](.
 
 ## Emergent Capabilities
 
-The `emergent/` module enables agents to create new tools at runtime within safety bounds.
+The `cognition/emergent/` module enables agents to create new tools at runtime within safety bounds.
 
 ### SandboxedToolForge
 
@@ -1163,7 +1160,7 @@ When `emergent: true` is set in [`AgentOSConfig`](https://github.com/framerslab/
 ### Additional Emergent Tools
 
 - [`ComposableToolBuilder`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/ComposableToolBuilder.ts) -- Declarative tool composition by chaining existing tools
-- [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) / [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) -- Controlled personality adaptation within safety bounds (bounded parameter ranges, mutation logging)
+- [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) / [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts) -- Controlled personality adaptation within safety bounds (bounded parameter ranges, mutation logging)
 - [`SelfEvaluateTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/SelfEvaluateTool.ts) -- Agent self-assessment using LLM-as-judge
 
 For details, see [Emergent Capabilities](./EMERGENT_CAPABILITIES.md) and [Self-Extension](../SELF_EXTENSION.md).

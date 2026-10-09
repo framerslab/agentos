@@ -30,17 +30,17 @@ The BM25 index starts empty and is not filled from the store: traces the caller 
 
 `HybridRetriever` is the memory-domain sibling: it delegates dense search to `MemoryStore.query`, owns its BM25 index, and returns [`ScoredMemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts) results in a [`CognitiveRetrievalResult`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts). It is not built on `HybridSearcher`.
 
-[`SessionRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/session/SessionRetriever.ts), [`HydeRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/HydeRetriever.ts) and [`ProspectiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/prospective/ProspectiveMemoryManager.ts) are the other opt-in query-time strategies; `CognitiveMemoryManager` uses none of them on its own.
+`HybridRetriever` and [`SessionRetriever`](./session-retriever.md) are retrievers the caller builds next to a `CognitiveMemoryManager`; the manager's own `retrieve()` uses neither. The manager does run HyDE itself: with an LLM invoker in its config it builds a HyDE retriever and uses it on `retrieve({ hyde: true })`.
 
 ## Steps of `retrieve()`
 
 1. **HyDE (optional).** With `hydeRetriever`, a hypothetical answer replaces the query for the dense and sparse searches; the reranker keeps the original query. A generation failure falls back to the original query.
 2. **Dense.** `MemoryStore.query` with `topK = recallTopK × overFetchMultiplier` (30 at the defaults of 10 and 3), scoped to the call's scope.
-3. **Sparse.** `bm25.search` with the same `topK`. When it returns nothing, the retriever returns the dense results alone and adds `hybrid-retriever:sparse-empty` to `diagnostics.escalations`.
-4. **Merge.** [`reciprocalRankFusion`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hybrid/reciprocalRankFusion.ts) with weights 0.7 dense and 0.3 sparse and `k` = 60 (`defaultDenseWeight`, `defaultSparseWeight`, `defaultRrfK`, and per call `denseWeight`, `sparseWeight`, `rrfK`). Fusion uses ranks, so the two score scales need not match.
+3. **Sparse.** `bm25.search` with the same `topK`. When it returns nothing (an empty index, or no query term in it), the retriever skips fusion and reranking: it returns the fact-graph traces of step 6 followed by the dense results, truncated to `recallTopK`, and adds `hybrid-retriever:sparse-empty` to `diagnostics.escalations`.
+4. **Merge.** [`reciprocalRankFusion`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/hybrid/reciprocalRankFusion.ts) scores each id `weight / (k + rank)` summed over the lists it appears in, with weights 0.7 dense and 0.3 sparse and `k` = 60 (`defaultDenseWeight`, `defaultSparseWeight`, `defaultRrfK`, and per call `denseWeight`, `sparseWeight`, `rrfK`). Fusion uses ranks, so the two score scales need not match.
 5. **Hydrate.** Each merged id is resolved to its dense-side trace. A trace that only BM25 found is dropped.
 6. **Fact graph (optional).** With `factStore`, the facts that match `(subject, predicate)` pairs in the query are added at the top of the pool as synthetic traces with `retrievalScore` 1.0: the latest fact per pair, or every fact for the subject when the query is temporal. `factGraphQueryClassifier` replaces the keyword classifier that extracts the pairs.
-7. **Rerank (optional).** With `rerankerService`, each trace's score becomes `0.7 × retrievalScore + 0.3 × rerank score`, and the pool is re-sorted. With `splitAmbiguousThreshold` in (0, 1], each trace in that lowest-scoring fraction is split in two at the sentence boundary nearest its middle, the halves are reranked, and the trace's content becomes its better half when that half scores higher than the whole trace did. A reranker error keeps the merged order.
+7. **Rerank (optional).** With `rerankerService`, each trace's score becomes `0.7 × retrievalScore + 0.3 × rerank score`, and the pool is re-sorted. With `splitAmbiguousThreshold` in (0, 1], the traces in that fraction with the lowest rerank scores are split in two at the sentence end nearest the middle (or at the first space after the middle when no sentence ends near it; a trace under 50 characters is not split), the halves are reranked in a second call, and a trace's content becomes its better half when that half scores higher than the whole trace did. A reranker error keeps the merged order.
 8. **Truncate** to `recallTopK` (default 10).
 
 `diagnostics.stageIds` lists the trace ids at each step (`dense`, `sparse`, `merged`, `reranked`, `final`).
@@ -53,12 +53,12 @@ The BM25 index starts empty and is not filled from the store: traces the caller 
 ## When not to use
 
 - Very small corpora, where BM25's document-frequency statistics carry little signal.
-- No embedder at all: use [`BM25Index`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/search/BM25Index.ts) or `HybridSearcher` directly.
+- No embedder at all: use [`BM25Index`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/search/BM25Index.ts) directly. `HybridSearcher` needs an embedding manager too, and throws when it gets no query embedding.
 
 ## Cost
 
-- One dense search and one in-memory BM25 search per query, plus one HyDE generation call when `hydeRetriever` is set.
-- One reranker call over the merged pool when `rerankerService` is set, and a second over the split halves when `splitAmbiguousThreshold` is set.
+- One dense search (`MemoryStore.query`, which embeds the query) and one in-memory BM25 search per query, plus one HyDE generation call when `hydeRetriever` is set.
+- One reranker call over the merged pool when `rerankerService` is set, and a second over the split halves when `splitAmbiguousThreshold` is set and a trace was split.
 
 ## References
 

@@ -11,9 +11,9 @@ keywords: [agentos memory, llm memory architecture, longmemeval, cognitive memor
 
 AgentOS memory composes six operations per turn, and the central design decision is *which* of them run on a given query.
 
-Three classifier calls per turn (sharing one classification pass). A canonical hybrid retrieval pipeline: BM25 + dense + Cohere rerank-v3.5. A six-signal cognitive composite scorer on top of the rerank. An Ebbinghaus decay loop running in the background. A consolidation pass that prunes, merges, and re-strengthens traces while the agent is otherwise quiet. Underneath, a portable SQL brain — [`@framers/sql-storage-adapter`](https://www.npmjs.com/package/@framers/sql-storage-adapter) — that runs on SQLite (better-sqlite3), Postgres (pg + pgvector), IndexedDB (sql.js, browser/PWA), Capacitor SQLite (iOS/Android), Electron IPC, or in-memory, without a callsite change.
+Up to three classifier calls per query: the QueryClassifier gate when the host runs it, the MemoryRouter's and the ReadRouter's. A hybrid retrieval pipeline: BM25 + dense retrieval, fused by rank, with an optional reranker (Cohere rerank-v3.5 in the benchmark runs). A six-signal cognitive composite score on every dense hit. Ebbinghaus decay applied whenever a trace's strength is read. A consolidation pass that prunes, merges, and re-strengthens traces. Underneath, a portable SQL brain — [`@framers/sql-storage-adapter`](https://www.npmjs.com/package/@framers/sql-storage-adapter) — that runs on SQLite (better-sqlite3), Postgres (pg + pgvector), IndexedDB (sql.js, browser/PWA), Capacitor SQLite (iOS/Android), Electron IPC, or in-memory, without a callsite change.
 
-Same code, six backends, six judgement points per turn, one set of benchmarks: **85.6% on LongMemEval-S at $0.0090 per correct**, **70.2% on LongMemEval-M**.
+Same code on every storage backend, one set of benchmarks: **85.6% on LongMemEval-S at $0.0090 per correct**, **70.2% on LongMemEval-M**.
 
 | Headline | Number | Compared with |
 |---|---|---|
@@ -32,25 +32,28 @@ The next sections explain each piece, why it earned its place, and which adjacen
 
 ## How it connects (60-second summary)
 
-The whole stack is three small classifier calls plus a hybrid retriever, on top of a SQL-backed brain with a decay loop running in the background. Every concept that sounds like a separate thing in this doc plugs into one of those four parts.
+The whole stack is up to three small classifier calls plus a hybrid retriever, on top of a SQL-backed brain that a consolidation pass maintains: `CognitiveMemoryManager` runs its `ConsolidationPipeline`, which opens with a decay sweep, on an hourly timer (`consolidation.intervalMs`, off with `consolidation.enabled: false`), and the `Memory` facade runs its `ConsolidationLoop` when `consolidate()` is called. The calls depend on the host's path: the QueryClassifier gate's call when the host runs the gate (a T0 query ends there when the host skips recall on it), then the MemoryRouter's and the ReadRouter's. Every concept that sounds like a separate thing in this doc plugs into one of those four parts.
 
-![AgentOS memory pipeline: user query enters QueryClassifier (T0 short-circuits, T1+ proceeds), MemoryRouter picks retrieval architecture, canonical-hybrid retrieval runs BM25 + dense embeddings, fuses via RRF, then Cohere rerank-v3.5 cross-encoder, then a six-signal cognitive composite scorer (optional HyDE). Reranked traces feed ReaderRouter (gpt-4o vs gpt-5-mini) then ReadRouter (5 intents to 5 strategies) for the grounded answer. A background consolidation loop runs prune-merge-strengthen-derive-compact-reindex on the same brain, plus 8 cognitive mechanisms.](/img/diagrams/memory-system-overview.svg)
+![AgentOS memory pipeline: user query enters QueryClassifier (T0 short-circuits, T1+ proceeds), MemoryRouter picks retrieval architecture, canonical-hybrid retrieval runs BM25 + dense embeddings, fuses via RRF, then Cohere rerank-v3.5 cross-encoder, then a six-signal cognitive composite scorer (optional HyDE). Reranked traces feed ReaderRouter (gpt-4o vs gpt-5-mini) then ReadRouter (5 intents to 5 strategies) for the grounded answer. A consolidation box lists prune, merge, strengthen, derive, compact and reindex on the same brain, plus 8 cognitive mechanisms.](/img/diagrams/memory-system-overview.svg)
 
-The verbatim archive is write-ahead — destructive consolidation ops cannot lose content unless the archive write succeeds first.
+The diagram draws one consolidation loop. In the code each facade has its own: `ConsolidationLoop` (prune, merge, strengthen, derive, compact, re-index) serves the `Memory` facade, and `ConsolidationPipeline` serves `CognitiveMemoryManager`. The eight mechanisms run only when `CognitiveMemoryManager` is given a `cognitiveMechanisms` config ([Memory Consolidation](#memory-consolidation-the-background-loop), [The Eight Cognitive Mechanisms](#the-eight-cognitive-mechanisms)).
+
+Where a verbatim archive is wired, it is write-ahead: the temporal-gist mechanism (with an archive in its config) and `MemoryLifecycleManager` wait for the archive write before changing a trace, and abort if it fails. `CognitiveMemoryManager` passes its archive to neither the temporal-gist mechanism nor its consolidation pipeline, so its gisting keeps no archived copy (see [Memory Consolidation](#memory-consolidation-the-background-loop)).
 
 If a term in the doc below sounds new, here's where it plugs in:
 
 | You hear... | It's the... | And it lives in... |
 |---|---|---|
-| **BM25 / FTS5** | lexical leg of canonical-hybrid | retrieval, runs over the brain's full-text index |
-| **Cohere rerank-v3.5** | cross-encoder rerank pass after RRF merge | the most load-bearing retrieval signal; v4.0-pro tested and dropped |
+| **BM25** | lexical leg of canonical-hybrid | `HybridRetriever`'s own in-memory `BM25Index`, which the caller fills (`hybrid.bm25.addDocument()`) |
+| **FTS5 / tsvector** | the SQL brain's full-text index over `memory_traces` | the adapter's `IFullTextSearch`; the `memory_search` tool queries it, and the add, update and merge paths keep it in sync |
+| **Cohere rerank-v3.5** | cross-encoder rerank pass after RRF merge | the retrieval signal that moved accuracy most in the benchmark runs; v4.0-pro tested and dropped |
 | **HyDE** | hypothesis-then-embed retrieval mode | optional retrieval augmentation; on for M, off for S |
 | **Six-signal composite** | the cognitive memory layer's scorer on top of similarity | encoding strength, recency, mood, graph, importance, similarity |
 | **Ebbinghaus decay** | the forgetting curve that ages every trace | runs at retrieve time; consolidation prunes traces below threshold |
-| **HEXACO modulation** | personality vector that biases encoding + retrieval weights | optional; runtime works personality-neutral by default |
-| **Spreading activation (ACT-R)** | graph BFS that pulls in concept-adjacent traces | seeded by retrieval, augments the candidate pool |
-| **OM-v10 / OM-v11** | observational-memory backends MemoryRouter can dispatch to | currently underperform canonical-hybrid in sem-embed era; preserved for cost-tolerant workloads |
-| **LLM-as-judge** | how every router's classifier picks a category | one classifier call per query, shared across 3 routers |
+| **HEXACO modulation** | personality vector that biases encoding strength, working-memory capacity and the cognitive mechanisms | optional; runtime works personality-neutral by default |
+| **Spreading activation (ACT-R)** | graph BFS that raises the score of retrieved traces linked in the memory graph | seeded by the top five retrieved traces; adds no trace retrieval did not return |
+| **OM-v10 / OM-v11** | observational-memory backends MemoryRouter can dispatch to | below canonical-hybrid with a semantic embedder in the benchmark runs; kept for cost-tolerant workloads |
+| **LLM-as-judge** | how each classifier labels a query: QueryClassifier a tier (T0-T3), MemoryRouter a memory category, ReadRouter a read intent | one classifier call each; `ReadRouter.decide()` makes none when the host passes `manualIntent`; `selectReader()` reuses the MemoryRouter's category |
 | **Tiered presets** | shipped routing tables — `minimize-cost` / `balanced` / `maximize-accuracy` | calibrated from Phase B per-category cost-accuracy points |
 | **Adaptive variant** | [`AdaptiveMemoryRouter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/memory/adaptive.ts) self-calibrates from your workload | use when your category mix or reader differs from LongMemEval-S |
 | **Storage substrate** | `@framers/sql-storage-adapter` — same brain code, multiple backends | SQLite default, Postgres / IndexedDB / Capacitor / Electron all swap in |
@@ -66,7 +69,7 @@ A "memory library" can mean very different things. AgentOS ships:
 
 1. A **storage substrate** (`Memory.createSqlite()` / `Memory.createPostgres()` / `Memory.createWithAdapter()`): traces, embeddings, FTS5 (or Postgres tsvector + GIN) index, knowledge graph, memory graph, retrieval feedback, consolidation log, and an optional verbatim archive — all sitting on top of [`@framers/sql-storage-adapter`](https://www.npmjs.com/package/@framers/sql-storage-adapter). The adapter auto-selects the best backend per runtime (better-sqlite3 on Node, sql.js+IndexedDB in the browser, Capacitor SQLite on mobile, Postgres in production, in-memory for tests) so the same brain code runs everywhere. Zero infrastructure for the SQLite default, scales to multi-tenant Postgres without rewriting a callsite.
 2. A **cognitive layer** ([`CognitiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/CognitiveMemoryManager.ts)): personality-modulated encoding, Ebbinghaus decay, Baddeley working memory, ACT-R spreading activation, six-signal retrieval scoring, optional observer/reflector pipelines for conversation compression.
-3. A **classifier-driven orchestration layer** (the Cognitive Pipeline): three small `gpt-5-mini` classifier calls share one classification pass to route every message through the cheapest, most accurate path for that specific query.
+3. A **classifier-driven orchestration layer** (the [Cognitive Pipeline](./COGNITIVE_PIPELINE.md)): small classifier calls (the QueryClassifier gate, the MemoryRouter and the ReadRouter) route each message through the cheapest, most accurate path for that query.
 4. A **benchmark harness** ([`@framers/agentos-bench`](https://github.com/framerslab/agentos-bench)): the same primitives, run against LongMemEval-S, LongMemEval-M, LOCOMO, BEAM, and a battery of cognitive-mechanism micro-benchmarks. Per-case run JSONs at fixed seed, 95% confidence intervals from 10k bootstrap resamples, judge false-positive-rate probes per benchmark.
 
 Most "memory libraries" stop at layer 1 with a vector index pinned to one backend. AgentOS treats backend portability and orchestration (layer 3) as first-class, which is where it pulls ahead on the cost-accuracy frontier without sacrificing reproducibility or deployment flexibility.
@@ -75,7 +78,7 @@ Most "memory libraries" stop at layer 1 with a vector index pinned to one backen
 
 ## The Storage Substrate ([`@framers/sql-storage-adapter`](https://www.npmjs.com/package/@framers/sql-storage-adapter))
 
-The brain doesn't speak SQLite directly. It speaks [`IStorageAdapter`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentToolRegistry.ts), an abstraction over six concrete backends that auto-selects per runtime:
+The brain doesn't speak SQLite directly. It speaks the [`StorageAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/index.ts) interface of `@framers/sql-storage-adapter`, an abstraction over the concrete backends below, selected per runtime:
 
 | Adapter | Package | Where it runs | Use case |
 |---|---|---|---|
@@ -120,7 +123,7 @@ const sharedBrain = await Brain.openWithAdapter(adapter, { brainId: 'companion-a
 Three things the adapter abstracts away so the brain code stays identical:
 
 1. **SQL Dialect.** `INSERT OR IGNORE`, `json_extract(...)`, `ifnull(...)`, `PRAGMA` get translated automatically between SQLite and Postgres via the [`SqlDialect`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/dialect.ts) interface. The brain writes one set of queries; the dialect rewrites them per backend.
-2. **Full-text search.** [`IFullTextSearch`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/fts.ts) abstracts FTS5 (SQLite Porter tokenizer) and tsvector + GIN (Postgres) behind one `createIndex` / `matchClause` / `rankExpression` / `rebuildCommand` API. The hybrid retriever's BM25 lexical leg works on both backends without branching.
+2. **Full-text search.** [`IFullTextSearch`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/fts.ts) abstracts FTS5 (SQLite Porter tokenizer) and tsvector + GIN (Postgres) behind one `createIndex` / `matchClause` / `rankExpression` / `rebuildCommand` API, so the brain's `memory_traces_fts` index and the `memory_search` tool's query work on both backends without branching. `HybridRetriever` does not read this index: its BM25 leg is a per-instance in-memory `BM25Index` that the caller fills.
 3. **BLOB codec.** Embeddings are stored as raw `Float32Array` BLOBs. [`NodeBlobCodec`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/codecs/NodeBlobCodec.ts) uses `Buffer`; [`BrowserBlobCodec`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/codecs/BrowserBlobCodec.ts) uses `DataView`. The 1536-dim `text-embedding-3-small` vector takes ~6 KB per trace on disk and round-trips byte-identical across backends.
 
 ### Multi-tenant Postgres mode
@@ -167,7 +170,7 @@ The adapter's [`IDatabaseExporter`](https://github.com/framerslab/sql-storage-ad
 
 ### Why this matters for the benchmarks
 
-Every LongMemEval-S / LongMemEval-M run in the bench uses the SQLite adapter because the bench is a single-process harness measuring a single brain at a time. The same brain code runs over Postgres in production deployments (Wilds.ai, Paracosm, this voice-chat-assistant repo). The SQL dialect translation, full-text search abstraction, and BLOB codec are designed to preserve query semantics across backends, so retrieval-quality metrics (recall@K, NDCG@K, MRR) are expected to transfer; latency floors differ (Postgres has higher per-query network overhead than embedded SQLite, but scales horizontally on connection count where SQLite serializes).
+Every LongMemEval-S / LongMemEval-M run in the bench uses the SQLite adapter because the bench is a single-process harness measuring a single brain at a time. The same brain code runs over Postgres. The SQL dialect translation, full-text search abstraction, and BLOB codec are designed to preserve query semantics across backends, so retrieval-quality metrics (recall@K, NDCG@K, MRR) are expected to transfer; latency floors differ (Postgres has higher per-query network overhead than embedded SQLite, but scales horizontally on connection count where SQLite serializes).
 
 For the full adapter architecture, capability matrix, and lifecycle hooks, see [`@framers/sql-storage-adapter`](https://github.com/framerslab/sql-storage-adapter) (README, `ARCHITECTURE.md`, `PLATFORM_STRATEGY.md`).
 
@@ -204,7 +207,7 @@ flowchart TB
     subgraph read["READ"]
         direction TB
         D1["query + evidence"]:::input
-        D2["ReaderRouter<br/><i>gpt-4o (TR/SSU) vs gpt-5-mini</i>"]:::process
+        D2["selectReader()<br/><i>gpt-4o (TR/SSU) vs gpt-5-mini</i>"]:::process
         D3["ReadRouter<br/><i>intent → strategy</i>"]:::process
         D4["grounded answer"]:::output
         D5["Output guardrails<br/><i>(separate)</i>"]:::external
@@ -220,7 +223,7 @@ flowchart TB
     classDef external fill:#f3e8ff,stroke:#8b5cf6,color:#5b21b6
 ```
 
-Three classifier calls happen during a query (one in QueryClassifier, one in MemoryRouter, one in ReadRouter), but Stages 2 and 3 reuse Stage 1's classification, so the realized cost is **one classifier call per query** plus the retrieval and reader calls. Trivial queries (greetings, small talk, questions answerable from context alone) terminate at Stage 1 with no retrieval.
+A query costs up to three classifier calls: one in QueryClassifier when the host runs the gate, one in MemoryRouter and one in ReadRouter ([`CognitivePipeline.recallAndRead()`](./COGNITIVE_PIPELINE.md) makes the last two; a host that calls `ReadRouter.decide()` with `manualIntent` skips the ReadRouter's). The reader-model lookup, `selectReader()`, reuses the MemoryRouter's category and makes no call. Trivial queries (greetings, small talk, questions answerable from context alone) end at Stage 1 with no retrieval when the host skips recall on T0.
 
 ---
 
@@ -235,7 +238,7 @@ Three classifier calls happen during a query (one in QueryClassifier, one in Mem
 | long-article (blog, paper) | `summarized` (Anthropic contextual retrieval) | $0.005 |
 | code (source files, configs) | `summarized` | $0.005 |
 | structured-data (CSV, JSON) | `raw-chunks` | $0.0001 |
-| multimodal | `hybrid` (text representation indexed; modality embeddings optional) | $0.030 |
+| multimodal | `raw-chunks` (every preset; the text representation is indexed) | $0.0001 |
 
 Why this matters: a 3-turn chat snippet does not justify the LLM cost of observation extraction. A 50-turn customer support thread does. Picking the wrong strategy at ingest costs accuracy or money downstream. The bench's Phase B sweeps showed `observational` ingest on short conversations regresses on every category and pays a 200x cost premium for nothing.
 
@@ -256,19 +259,19 @@ The strategies map to canonical patterns in the literature:
 | Tier | Meaning | What runs |
 |---|---|---|
 | T0 | answerable from context alone | no retrieval, no embedding, no rerank |
-| T1 | simple recall | shallow retrieval (top-K small, no rerank if cheap) |
-| T2 | moderate recall | full canonical-hybrid retrieval |
-| T3 | complex synthesis | full retrieval plus optional GraphRAG / multi-hop |
+| T1 | simple recall | vector search over the corpus |
+| T2 | moderate recall | HyDE retrieval |
+| T3 | complex synthesis | multi-source decomposition (the deep-research branch) |
 
-T0 is the load-bearing decision. Greetings, small talk, general-knowledge questions ("what's 2+2"), and questions whose answer is already in the running context window do not need to touch the memory database. Skipping retrieval for those queries saves the embedding cost, the rerank cost, and reduces the answer latency from ~3.5s to whatever the reader's TTFT is.
+T0 is the decision that saves the most. Greetings, small talk, general-knowledge questions ("what's 2+2"), and questions whose answer is already in the running context window do not need to touch the memory database. Skipping retrieval for those queries saves the embedding cost, the rerank cost, and reduces the answer latency from ~3.5s to whatever the reader's TTFT is.
 
-The classifier is a `gpt-5-mini` call with corpus topics, recent conversation history, and optional tool names in context. Live demonstration: see the QueryRouter initialize a 1,720-chunk corpus across 50 topics and 333 sources on the [agentos.sh demo gallery](https://agentos.sh/#live-demo).
+The classifier is one call to `classifierModel` (by default the cheap model of the default provider, `gpt-4o-mini` for OpenAI) with corpus topics, recent conversation history, and optional tool names in context. Live demonstration: see the QueryRouter initialize a 1,720-chunk corpus across 50 topics and 333 sources on the [agentos.sh demo gallery](https://agentos.sh/#live-demo).
 
 ---
 
 ## Stage 2: MemoryRouter (architecture dispatch)
 
-[`MemoryRouter`](./MEMORY_ROUTER.md) decides, per T1+ query, which retrieval architecture handles it. Three backends ship:
+[`MemoryRouter`](./MEMORY_ROUTER.md) decides, per T1+ query, which retrieval architecture handles it. Its routing tables name three backends; the router only decides, and the host's dispatcher runs the chosen backend:
 
 | Backend ID | What it does |
 |---|---|
@@ -295,12 +298,12 @@ Why route at all: per-category Phase B N=500 measurements show different archite
 | `balanced` | trade 1.6x cost for 10x latency wins on KU/TR | 74.5% / $0.205 per correct (sim) |
 | `maximize-accuracy` | highest-accuracy backend per category | 75.6% / $0.243 per correct |
 
-The current production-validated config, however, is **canonical-hybrid for every category** paired with the ReaderRouter and `text-embedding-3-small`. That hits 85.6% at $0.0090 per correct, which is +9 pp above the `minimize-cost` CharHash baseline because:
+The configuration behind the headline, however, is **canonical-hybrid for every category** paired with `selectReader()` dispatch and `text-embedding-3-small`. That hits 85.6% at $0.0090 per correct, which is +9 pp above the `minimize-cost` CharHash baseline because:
 
 1. Wiring `text-embedding-3-small` instead of the bench's CharHash fallback. CharHash is a lexical-hash stub the bench falls back to when no embedder is configured. It is not the documented production path. Real consumers wire a real embedder; doing so on the same router lifts the same row from 76.6% to 83.2% (an extra +6.6 pp, concentrated on temporal-reasoning +14.5 pp and multi-session +14.5 pp, where semantic retrieval finds paraphrase-rich and multi-hop bridges that lexical hashing missed).
 2. Dropping the `minimize-cost` preset's MS+SSP-to-OM-v11 routing in favor of canonical-hybrid for all categories, paired with Stage 3 ReaderRouter dispatch. At gpt-4o reader, OM-v11 routing produces a mixed per-category effect: it costs SSP 13.4 pp (63.3% on OM-v11 vs 76.7% canonical) and gains MS 4 pp. The case-weighted aggregate favors canonical because SSP's 13.4 pp loss outweighs MS's 4 pp gain, and OM-v11's per-session observer pipeline imposes 60-120 seconds per OM-routed case, producing a 111,535 ms p95 in the prior 84.8% headline. Without OM-v11 routing, p95 drops to 7,264 ms (15.4x faster on the tail).
 
-For sem-embed deployments, use canonical-only plus ReaderRouter. The `minimize-cost` preset table targets CharHash retrieval and shouldn't be used in sem-embed mode.
+For sem-embed deployments, use canonical-only plus `selectReader()` dispatch. The `minimize-cost` preset table targets CharHash retrieval and shouldn't be used in sem-embed mode.
 
 ### Self-calibrating variant
 
@@ -316,11 +319,11 @@ Three preset rules: `minimize-cost` (cheapest backend within a 2pp accuracy tole
 
 ## Stage 3: ReaderRouter and ReadRouter (read-stage dispatch)
 
-Two sibling primitives, both at the read stage, both classifier-driven, both orthogonal. They compose: ReaderRouter picks the model, ReadRouter picks the strategy that model follows.
+Two sibling primitives at the read stage. They compose: the reader lookup picks the model, ReadRouter picks the strategy that model follows.
 
 ### ReaderRouter (model dispatch)
 
-[`ReaderRouter`](./READ_ROUTER.md#reader-router--reader-model-selection) reuses Stage 2's category classification (zero extra LLM calls) to dispatch the answer call to the best reader for that category. Calibrated from per-category Phase B accuracies:
+[`selectReader(category, preset)`](./READ_ROUTER.md#reader-router--reader-model-selection), exported from `@framers/agentos/memory-router`, is a table lookup over Stage 2's category (zero extra LLM calls) that names the reader model for the answer call; the host makes that call. Its tables come from per-category Phase B accuracies:
 
 | Category | Best gpt-4o accuracy | Best gpt-5-mini accuracy | Pick |
 |---|---:|---:|---|
@@ -351,51 +354,37 @@ ReadRouter ships its own `precise-fact`, `synthesis`, and `temporal` presets. Wo
 
 ## Inside Canonical-Hybrid Retrieval
 
-Stage 2's default backend is the production retrieval pipeline:
+In agentos, [`HybridRetriever`](./architecture/hybrid-retriever.md) implements this pipeline over a `MemoryStore`, and a host wires it in as the `canonical-hybrid` backend of its dispatcher:
 
 ```
 Query
   │
-  ▼  expand to lexical and semantic
-┌─────────────┐                          ┌─────────────┐
-│ BM25 search │                          │ Embed query │
-│  (FTS5)     │                          │ (text-      │
-│             │                          │  embedding- │
-│             │                          │  3-small)   │
-└──────┬──────┘                          └──────┬──────┘
-       │ top-K candidates                       │
-       ▼                                        ▼
-       └─── RRF merge (rank fusion) ────────────┘
-                       │
-                       ▼  candidate pool (multiplier x5 by default)
-       ┌──────────────────────────────────────┐
-       │ Cohere rerank-v3.5 cross-encoder      │
-       │ scores every (query, candidate) pair  │
-       └──────────────────────┬───────────────┘
-                              │  top-K rerank winners
+  ├──────────────────────────────┐
+  ▼                              ▼
+┌──────────────────────┐   ┌──────────────────────┐
+│ Dense search         │   │ BM25 search          │
+│ MemoryStore.query:   │   │ (in-memory BM25Index │
+│ embeddings + the     │   │  the caller fills)   │
+│ six-signal composite │   │                      │
+└──────────┬───────────┘   └──────────┬───────────┘
+           │ recallTopK × 3 each (30 at the defaults)
+           ▼                          ▼
+           └── RRF merge (0.7 dense, 0.3 sparse, k = 60) ──┘
+                              │
+                              ▼  optional reranker (Cohere rerank-v3.5
+                              │  in the benchmark runs): score =
+                              │  0.7 × composite + 0.3 × rerank score
                               ▼
-       ┌──────────────────────────────────────┐
-       │ Six-signal composite scorer (cognitive│
-       │ memory layer, optional)               │
-       │  • similarity (rerank score)          │
-       │  • encoding strength                  │
-       │  • recency (Ebbinghaus age)           │
-       │  • emotional congruence (PAD mood)    │
-       │  • graph activation (ACT-R BFS)       │
-       │  • importance                         │
-       └──────────────────────┬───────────────┘
-                              │  reranked top-K
-                              ▼
-                          to reader
+                     top recallTopK (10) to the reader
 ```
 
 ### Why each retrieval signal earns its place
 
-- **BM25 + dense embedding fusion**: BM25 catches rare terms and exact matches that dense embeddings miss; dense embeddings catch paraphrase-rich and multi-hop bridges that BM25 misses. RRF (Reciprocal Rank Fusion) merges the two ranked lists without per-corpus tuning.
-- **Cohere rerank-v3.5 cross-encoder**: this is the load-bearing one. The cross-encoder reads (query, candidate) jointly and reranks the merged candidate pool. Without it, top-K from BM25+dense alone misses bridge sessions and gets diluted by topically adjacent but irrelevant chunks. Cohere rerank-v3.5 sits on the cost-accuracy frontier; **rerank-v4.0-pro was tested at full N=500 and regresses 1.0 pp at point estimate while costing more per call** (see Negative Findings below).
-- **Six-signal composite**: the cognitive memory layer adds five signals on top of similarity. Encoding strength rewards traces that were attended-to at write time. Recency enforces Ebbinghaus decay. Emotional congruence biases toward memories that match the agent's current mood. Graph activation pulls in concept-adjacent traces via ACT-R spreading activation. Importance reflects explicit annotation or derived heuristics.
+- **BM25 + dense embedding fusion**: BM25 catches rare terms and exact matches that dense embeddings miss; dense embeddings catch paraphrase-rich and multi-hop bridges that BM25 misses. RRF (Reciprocal Rank Fusion) merges the two ranked lists by rank, so their score scales need not match.
+- **Cohere rerank-v3.5 cross-encoder**: the cross-encoder reads (query, candidate) jointly and reranks the merged candidate pool. In the benchmark runs it moved accuracy more than any other signal: without it, top-K from BM25+dense alone misses bridge sessions and gets diluted by topically adjacent but irrelevant chunks. **rerank-v4.0-pro was tested at full N=500 and regresses 1.0 pp at point estimate while costing more per call** (see Negative Findings below).
+- **Six-signal composite**: the dense side scores each hit on five signals besides similarity. Strength is the trace's encoding strength after Ebbinghaus decay. Recency favors traces accessed within about a day. Emotional congruence favors traces whose valence matches the current mood. Graph activation comes from spreading activation over the memory graph (0 without one). Importance is the trace's provenance confidence, scaled to 0.5–1.
 
-The composite is HEXACO-modulated when personality is configured. High Openness raises the graph-activation weight (concept-adjacent retrieval). High Conscientiousness raises the importance weight (rule-following retrieval). Low Emotionality flattens the emotional-congruence weight.
+The composite's weights are fixed defaults ([Six-signal retrieval scoring](#six-signal-retrieval-scoring)); a recall's `scoringWeights` option replaces them for that call. Personality does not change them.
 
 ### Embedder choice
 
@@ -413,20 +402,20 @@ Recommended use: enable HyDE only on temporal-reasoning queries, or at ingest ti
 
 ## The Cognitive Memory Layer
 
-The standalone `Memory` facade is sufficient for any TypeScript app that needs persistent retrieval. The cognitive layer wraps it for agents that benefit from personality-modulated encoding, decay, and consolidation.
+The standalone `Memory` facade (over `Brain`) is sufficient for any TypeScript app that needs persistent retrieval. The cognitive layer, [`CognitiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/CognitiveMemoryManager.ts), is a separate implementation over a vector-store-backed `MemoryStore` for agents that use personality-modulated encoding, working memory, the mechanisms below and consolidation; [`AgentMemory`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/AgentMemory.ts) fronts either one.
 
 ### Encoding (write time)
 
-Every trace is created with a [`MemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/SelfEvaluateTool.ts) shape that records:
+Every trace is created with a [`MemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts) shape that records:
 
 - the content
 - the embedding
 - the source (which agent, which session, which message)
 - the encoding timestamp
 - an `encodingStrength` in [0, 1] modulated by:
-  - the agent's HEXACO traits at encoding time (Conscientiousness raises strength on policy-relevant content; Openness raises it on novel content)
-  - the agent's current PAD mood (Pleasure/Arousal/Dominance from Mehrabian's Pleasure-Arousal-Dominance model)
-  - the emotional intensity of the moment (Brown & Kulik's flashbulb-memory model: high-emotion events get 2x strength and 5x stability multipliers)
+  - the agent's HEXACO traits at encoding time, which weight content features: Openness novel content, Conscientiousness procedural content, Emotionality emotional content, Extraversion social content, Agreeableness cooperative content, Honesty-Humility ethical content
+  - the agent's current PAD mood (Pleasure/Arousal/Dominance from Mehrabian's Pleasure-Arousal-Dominance model): content whose valence matches the mood's encodes stronger
+  - the emotional intensity of the moment (Brown & Kulik's flashbulb-memory model: an event with intensity above 0.8 gets 2x strength and 5x stability multipliers)
   - the Yerkes-Dodson arousal curve (encoding quality peaks at moderate arousal in an inverted U)
 
 `encodingStrength` plus a per-trace `stability` parameter feed into the Ebbinghaus forgetting curve.
@@ -439,80 +428,90 @@ Strength decays exponentially with time on Hermann Ebbinghaus's 1885 forgetting 
 S(t) = S₀ · e^(-Δt / stability)
 ```
 
-`stability` is the half-life parameter. Successful retrieval grows stability (the desirable-difficulty effect: harder retrievals consolidate more). Co-retrieval of two traces tightens the edge between them via Hebbian weight updates ("neurons that fire together wire together"). The retrieval-feedback signal (used vs ignored) feeds the Strengthen step of the consolidation loop.
+`stability` is the curve's time constant: after one stability period a trace keeps about 37% of its strength. Successful retrieval grows stability (the desirable-difficulty effect: harder retrievals consolidate more). Co-retrieval of two traces tightens the edge between them via Hebbian weight updates ("neurons that fire together wire together"). The retrieval-feedback signal (used vs ignored) feeds the Strengthen step of the consolidation loop.
 
-When decay drops a trace below `pruneThreshold` (default 0.05), the consolidation loop soft-deletes it. Emotional memories with intensity > 0.3 are protected from pruning regardless of strength. This matches the empirical finding that high-arousal memories persist longer than neutral ones (Cahill & McGaugh, 1998; LaBar & Cabeza, 2006).
+When decay drops a trace below the prune threshold (default 0.05), consolidation soft-deletes it. `CognitiveMemoryManager`'s consolidation keeps traces with an emotional intensity of 0.3 or more whatever their strength, which matches the empirical finding that high-arousal memories persist longer than neutral ones (Cahill & McGaugh, 1998; LaBar & Cabeza, 2006); the `Memory` facade's loop prunes by strength alone.
 
 ### Working memory (Baddeley slots)
 
-The runtime enforces a slot-based working-memory capacity following Baddeley's model. The default is `7±2` slots, modulated by HEXACO traits: Conscientiousness raises the floor, Honesty-Humility narrows the range. Each slot has its own activation level that decays per turn unless re-attended.
+`CognitiveMemoryManager` keeps a slot-based working memory following Baddeley's model ([`CognitiveWorkingMemory`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/working/CognitiveWorkingMemory.ts)). The base capacity is 7 slots (`workingMemoryCapacity`); Openness above 0.6 adds a slot and Conscientiousness above 0.6 removes one, within 5 to 9. Each slot has its own activation level, which drops by 0.1 on each retrieval; the traces a retrieval returns are focused again, and a slot below 0.15 is evicted.
 
-When the working memory is full, the lowest-activation slot is evicted (or written through to long-term memory if its strength exceeds a threshold). This implements the Atkinson-Shiffrin (1968) sensory→working→long-term pipeline directly.
+When the working memory is full, the lowest-activation slot is evicted. The trace stays in the long-term store; a slot only holds its id.
 
 ### Spreading activation (ACT-R)
 
-The memory graph stores edges between traces (same-session, same-entity, co-retrieved, derived-from). When a query retrieves a seed trace, the graph traversal performs a BFS up to `maxDepth` (default 2) with activation decay per hop. The activated set is added to the candidate pool before reranking.
+The memory graph stores edges between traces (same-session, same-entity, co-retrieved, derived-from). After scoring, `CognitiveMemoryManager` seeds a BFS with the five highest-scored traces, up to `maxDepth` (default 3) with activation halving per hop (`decayPerHop` 0.5). A retrieved trace the BFS reaches gets that activation as its graph signal and a new composite score, and the results are re-sorted; the five top traces then record a co-activation edge (Hebbian learning).
 
-Spreading activation is what makes "the thing that's adjacent in concept-space, not just adjacent in vector-space" work. Pure vector retrieval misses entity-linked but vocabulary-divergent traces. ACT-R-style activation finds them through the graph structure.
+Spreading activation raises the rank of retrieved traces that are linked in the graph. It adds no trace that the search did not return.
 
 ### Six-signal retrieval scoring
 
 When the cognitive layer is active, the final retrieval score is a weighted composite:
 
 ```
-score = w_sim · cosine(query, trace)
-      + w_str · trace.encodingStrength
-      + w_rec · ebbinghausDecayedRecency(trace)
-      + w_emo · padCongruence(trace.mood, agent.currentMood)
-      + w_grp · spreadingActivation(trace, queryEntities)
-      + w_imp · trace.importance
+score = 0.35 · similarity            (vector similarity)
+      + 0.25 · current strength      (encoding strength after Ebbinghaus decay)
+      + 0.10 · recency               (boost for a trace accessed within about a day)
+      + 0.15 · emotional congruence  (current mood valence × trace valence, when positive)
+      + 0.10 · graph activation      (spreading activation; 0 without a graph)
+      + 0.05 · importance            (provenance confidence, scaled to 0.5–1)
 ```
 
-Default weights are calibrated from LongMemEval-S Phase B sweeps. HEXACO modulation overrides the defaults.
+The weights are `DEFAULT_SCORING_WEIGHTS` ([`RetrievalPriorityScorer.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/decay/RetrievalPriorityScorer.ts)). A recall's `scoringWeights` replaces them for that call; the spreading-activation re-score uses the defaults. Personality does not change them.
 
 ---
 
 ## The Eight Cognitive Mechanisms
 
-On top of the encoding/decay/retrieval substrate, the runtime ships eight optional neuroscience-grounded mechanisms. Each is HEXACO-personality-modulated and individually configurable via `cognitiveMechanisms` on [`CognitiveMemoryConfig`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/config.ts).
+On top of the encoding/decay/retrieval substrate, `CognitiveMemoryManager` runs eight neuroscience-grounded mechanisms when it is initialized with a `cognitiveMechanisms` config: `{}` turns all eight on with their defaults, and per-mechanism fields on [`CognitiveMemoryConfig`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/config.ts) override them ([`defaults.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/defaults.ts)); without the config no mechanism runs. Six of them are scaled by a HEXACO trait: reconsolidation by Emotionality, RIF by Conscientiousness, involuntary recall by Openness, source confidence decay by Honesty-Humility, emotion regulation by Agreeableness and FOK by Extraversion.
 
-### Retrieval-time (synchronous)
+### Retrieval and prompt-assembly time
 
 | Mechanism | Effect | Reference |
 |---|---|---|
 | Reconsolidation | Mutates `trace.emotionalContext` on access; the trace's emotional valence drifts toward the agent's current mood | Nader, Schafe & LeDoux 2000 |
 | Retrieval-induced forgetting (RIF) | Suppresses the stability of competitor traces that were retrieved-but-not-cited | Anderson, Bjork & Bjork 1994 |
-| Involuntary recall | With small probability (default 1%), surfaces a random unretrieved memory alongside the deliberate retrieval set | Berntsen 2009 |
+| Involuntary recall | When the memory context is assembled for a prompt, with probability 0.08 (scaled 0.5x to 1.5x by Openness), adds an unretrieved memory at least 14 days old with strength of at least 0.15 | Berntsen 2009 |
 | Metacognitive feeling-of-knowing (FOK) | Detects when the retrieval cutoff is too tight (multiple candidates at similar scores near the boundary) and emits a signal the host can use to widen retrieval | Koriat 1993 |
 
-### Consolidation-time (background)
+### Encoding time
 
 | Mechanism | Effect | Reference |
 |---|---|---|
-| Temporal gist | Compresses verbatim content into a dense gist after a configurable retention window; preserves verbatim in archive on demand | Reyna & Brainerd 1995 (fuzzy-trace theory) |
-| Schema encoding | Detects schema-congruent traces against cluster centroids and encodes them with elevated strength | Bartlett 1932; Anderson 1981 |
-| Source confidence decay | Decays `trace.stability` at different rates per source type (user > assistant > tool-output > inferred) | Johnson, Hashtroudi & Lindsay 1993 source-monitoring framework |
+| Schema encoding | Compares a new trace's embedding with cluster centroids: a novel trace's strength is multiplied by 1.3, a schema-congruent one's by 0.85. It runs only once the host passes centroids to the mechanisms engine's `setClusterCentroids()`; nothing in agentos sets them | Bartlett 1932; Anderson 1981 |
+
+### Consolidation time
+
+| Mechanism | Effect | Reference |
+|---|---|---|
+| Temporal gist | Compresses verbatim content into a dense gist for traces older than 60 days with fewer than 2 retrievals | Reyna & Brainerd 1995 (fuzzy-trace theory) |
+| Source confidence decay | Multiplies `trace.stability` per source type on each consolidation: user statements and tool results 1.0 (unchanged), observations 0.95, external sources 0.90, agent inferences 0.80, reflections 0.75 | Johnson, Hashtroudi & Lindsay 1993 source-monitoring framework |
 | Emotion regulation | Reappraises high-arousal traces over time (suppression and reappraisal pathways from Gross's emotion-regulation model) | Gross 1998 |
 
-The flashbulb-immunity guard skips reconsolidation, RIF, temporal gist, and emotion regulation on traces with `encodingStrength >= 0.9`. The dead-trace guard skips RIF on traces with `encodingStrength < 0.1`. Disabled mechanisms return immediately.
+The flashbulb guard skips RIF, temporal gist and emotion regulation on traces with `encodingStrength >= 0.9`, and the dead-trace guard skips RIF on traces with `encodingStrength < 0.1`. Reconsolidation has its own threshold, `immuneAboveImportance`, compared with `encodingStrength`; its default of 9 is above the 0–1 range of the strength, so no trace is immune unless the host sets it below 1. Disabled mechanisms return immediately.
 
 ---
 
 ## Memory Consolidation (the background loop)
 
-[`ConsolidationLoop`](./memory/MEMORY_CONSOLIDATION.md) is the analogue of slow-wave sleep: background maintenance that prunes, merges, strengthens, derives, compacts, and reindexes. It runs in 6 (now 7) ordered steps with a boolean mutex preventing concurrent runs.
+Consolidation is the analogue of slow-wave sleep. Each facade has its own implementation ([Memory Consolidation](./memory/MEMORY_CONSOLIDATION.md)).
+
+[`ConsolidationLoop`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/consolidation/ConsolidationLoop.ts) serves the `Memory` facade. A boolean flag makes a call that arrives while a run is in progress return at once with zero counts.
 
 | Step | Action | LLM required |
 |---|---|---|
-| 1. Prune | Soft-delete traces below `pruneThreshold`. Emotional memories (intensity > 0.3) protected. | No |
-| 2. Merge | Deduplicate near-identical traces (cosine ≥ 0.95 with `embedFn`, or SHA-256 content match without). Tags unioned, older trace soft-deleted with a survivor reference. | No |
+| 1. Prune | Soft-delete traces whose decayed strength is below `pruneThreshold` (default 0.05). | No |
+| 2. Merge | Deduplicate near-identical traces (cosine ≥ 0.95 with `embedFn`, or SHA-256 content match without). The trace with more retrievals survives with the tags of both; the other is soft-deleted. | No |
 | 3. Strengthen | Read retrieval-feedback co-usage signals; record `CO_ACTIVATED` Hebbian edges in the memory graph (learning rate 0.1). | No |
 | 4. Derive | Detect clusters of related memories (`detectClusters`, min size 5); LLM-synthesize a higher-level insight trace per cluster as `type: 'semantic'`. Bounded by `maxDerivedPerCycle` (default 5). Skipped entirely without an LLM invoker. | Yes |
-| 5. Compact | Episodic-to-semantic migration: traces older than 7 days with retrieval count >= 3 change `type` to `semantic`. | No |
+| 5. Compact | Episodic-to-semantic migration: traces older than 7 days with retrieval count >= 3 change `type` to `semantic`. The content is unchanged. | No |
 | 6. Re-index | Rebuild the FTS5 full-text index over `memory_traces`. Log the consolidation run. | No |
-| 7. Prune Archive | Sweep archived traces past their retention age (default 365 days), respecting recent rehydration access. | No |
 
-The verbatim archive is **write-ahead**: any mechanism that would lose verbatim content (Step 5 compact, the temporal-gist mechanism) calls `archive.store()` and awaits success before mutating the trace. If the archive write fails, the destructive operation aborts. Rehydration (`archive.rehydrate(traceId)`) returns the original on demand without boosting encoding strength or incrementing retrieval count.
+A personality-decay step runs between Compact and Re-index when a personality mutation store is configured.
+
+[`ConsolidationPipeline`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/pipeline/consolidation/ConsolidationPipeline.ts) serves `CognitiveMemoryManager`, hourly by default: a decay sweep (prunes below 0.05, keeps traces with emotional intensity of 0.3 or more), co-activation replay (shared-entity and temporal-sequence edges, with a graph), schema integration (LLM summaries of episodic clusters, with a graph and an LLM invoker), conflict resolution over `CONTRADICTS` edges, spaced-repetition reinforcement, the consolidation-time mechanisms above, and a retention sweep over an archive passed in its own config (365 days by default).
+
+The verbatim archive is **write-ahead** where it is wired: the temporal-gist mechanism (when its resolved config carries an archive) and `MemoryLifecycleManager` call `archive.store()` and await success before changing the trace; if the archive write fails, the destructive operation aborts. `CognitiveMemoryManager` keeps its `archive` option for `rehydrate()` and passes it to neither the temporal-gist mechanism nor its consolidation pipeline. Rehydration (`archive.rehydrate(traceId)`) returns the original on demand without boosting encoding strength or incrementing retrieval count, and logs the access.
 
 [`SqlStorageMemoryArchive`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/archive/SqlStorageMemoryArchive.ts) wraps the same `@framers/sql-storage-adapter` interface as the brain, so archive tables (`archived_traces`, `archive_access_log`) live in the same database file by default. Postgres, IndexedDB, Capacitor SQLite, and sql.js are all supported through the shared adapter substrate (see [The Storage Substrate](#the-storage-substrate-framerssql-storage-adapter) above).
 
@@ -520,16 +519,16 @@ The verbatim archive is **write-ahead**: any mechanism that would lose verbatim 
 
 ## Multimodal RAG
 
-AgentOS's core RAG APIs are text-first. Multimodal support is a composable pattern on top:
+AgentOS's core RAG APIs are text-first. Multimodal support is a composable pattern on top, built from [`MultimodalIndexer`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/multimodal/MultimodalIndexer.ts) and its siblings; the asset table and the derivation steps belong to the host backend ([Multimodal RAG](./memory/MULTIMODAL_RAG.md)):
 
-1. Store the **binary asset** (optional) plus metadata in `media_assets`.
+1. Store the **binary asset** (optional) plus metadata in the host's asset table (`media_assets` in the reference backend).
 2. Derive a **text representation**: caption (image), transcript (audio), OCR (scanned doc), or extracted text (PDF, DOCX, HTML, Markdown, CSV).
 3. Index the derived text as a normal RAG document so the existing retrieval pipeline (vector, BM25, reranking, GraphRAG, HyDE) operates without any "special" multimodal database.
 4. Optionally add **modality-specific embeddings** (image-to-image, audio-to-audio) as an acceleration path.
 
-The unified `retrievalMode` contract supports `auto` (text-first plus native modality when available), `text` (derived text only), `native` (modality embeddings only), and `hybrid` (fuse both). Query-by-image and query-by-audio go through the same flow: derive text from the query (caption/transcript/OCR), then route through the standard pipeline, with optional modality-native nearest-neighbor as a fast path.
+The multimodal query routes take a `retrievalMode` of `auto` (text-first plus native modality when available), `text` (derived text only), `native` (modality embeddings only), or `hybrid` (fuse both). Query-by-image and query-by-audio go through the same flow: derive text from the query (caption/transcript/OCR), then route through the standard pipeline, with optional modality-native nearest-neighbor as a fast path.
 
-This is a strong production baseline, not a claim to ship the full current frontier of multimodal retrieval research. Direct visual late-interaction retrievers and page-native document retrieval remain follow-up work.
+Retrieval runs on derived text: AgentOS has no visual late-interaction retriever and no page-native document retrieval.
 
 ---
 
@@ -716,23 +715,24 @@ NODE_OPTIONS="--max-old-space-size=8192" pnpm exec tsx src/cli.ts run longmemeva
 
 Expected wall-clock (S): ~10-15 min at concurrency 5. Expected cost: ~$3.84 in OpenAI/Cohere fees.
 
-The same primitives ([`MemoryRouter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/memory/MemoryRouter.ts), `ReaderRouter`) are re-exported through `@framers/agentos` so a consuming app gets the same routing decisions:
+The routing primitives the bench uses ship in `@framers/agentos/memory-router` ([`MemoryRouter`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/memory/MemoryRouter.ts), [`selectReader()`](https://github.com/framerslab/agentos/blob/master/src/orchestration/pipeline/memory/reader-router.ts)), so a consuming app gets the same routing decisions:
 
 ```ts
+import OpenAI from 'openai';
 import { Memory } from '@framers/agentos';
-import { ReaderRouter } from '@framers/agentos/memory-router';
-import { OpenAIEmbedder } from '@framers/agentos-bench/cognitive';
+import { selectReader } from '@framers/agentos/memory-router';
 
-const mem = await Memory.createSqlite({
-  path: './memory.sqlite',
-  embedder: new OpenAIEmbedder('text-embedding-3-small'),
-  // canonical-hybrid for all categories; no policy router, no observational memory
-  readerRouter: new ReaderRouter({
-    preset: 'min-cost-best-cat-2026-04-28',
-    classifier: gpt5miniClassifier,
-    readers: { 'gpt-4o': gpt4o, 'gpt-5-mini': gpt5mini },
-  }),
+const openai = new OpenAI();
+const mem = await Memory.createSqlite('./memory.sqlite', {
+  embed: async (text) =>
+    (await openai.embeddings.create({ model: 'text-embedding-3-small', input: text })).data[0].embedding,
 });
+
+await mem.remember('The user moved to Lisbon in March.');
+const hits = await mem.recall('Where does the user live?');
+
+// The reader model for the category a MemoryRouter classifier returned:
+const readerModel = selectReader('single-session-user', 'min-cost-best-cat-2026-04-28'); // 'gpt-4o'
 ```
 
 ---
@@ -745,29 +745,27 @@ For readers who want to trace the architecture into code:
 |---|---|
 | Memory facade | `src/cognition/memory/io/facade/Memory.ts` |
 | Brain (SQLite + Postgres + adapter entry points) | `src/cognition/memory/retrieval/store/Brain.ts` |
-| Storage adapter (cross-platform substrate) | [`packages/sql-storage-adapter/src/`](https://github.com/framerslab/sql-storage-adapter/tree/master/src/) ([repo](https://github.com/framerslab/sql-storage-adapter)) |
-| SQL Dialect / FTS abstraction / BLOB codec | `packages/sql-storage-adapter/src/dialect/`, `src/fts/`, `src/blob/` |
+| Storage adapter (cross-platform substrate) | [`src/`](https://github.com/framerslab/sql-storage-adapter/tree/master/src/) in [`framerslab/sql-storage-adapter`](https://github.com/framerslab/sql-storage-adapter) |
+| SQL Dialect / FTS abstraction / BLOB codec | [`src/dialects/`](https://github.com/framerslab/sql-storage-adapter/tree/master/src/dialects), [`src/fts/`](https://github.com/framerslab/sql-storage-adapter/tree/master/src/fts), [`src/codecs/`](https://github.com/framerslab/sql-storage-adapter/tree/master/src/codecs) in `framerslab/sql-storage-adapter` |
 | Cognitive memory orchestrator | `src/cognition/memory/CognitiveMemoryManager.ts` |
 | Encoding model | `src/cognition/memory/core/encoding/EncodingModel.ts` |
 | Decay model (Ebbinghaus) | `src/cognition/memory/core/decay/DecayModel.ts` |
 | Working memory (Baddeley) | `src/cognition/memory/core/working/CognitiveWorkingMemory.ts` |
-| Memory graph + spreading activation | `src/cognition/memory/retrieval/store/SqlMemoryGraph.ts` |
+| Memory graph + spreading activation | `src/cognition/memory/retrieval/store/SqlMemoryGraph.ts`, `src/cognition/memory/retrieval/graph/SpreadingActivation.ts` |
 | Eight cognitive mechanisms | `src/cognition/memory/mechanisms/` |
-| Consolidation loop (6-step) | `src/cognition/memory/pipeline/consolidation/ConsolidationLoop.ts` |
+| Consolidation (`Memory` facade, `CognitiveMemoryManager`) | `src/cognition/memory/pipeline/consolidation/ConsolidationLoop.ts`, `src/cognition/memory/pipeline/consolidation/ConsolidationPipeline.ts` |
 | Verbatim archive | `src/cognition/memory/archive/SqlStorageMemoryArchive.ts` |
 | Hybrid retriever (BM25 + dense + Cohere) | `src/cognition/memory/retrieval/hybrid/HybridRetriever.ts` |
 | HyDE retriever | `src/cognition/rag/HydeRetriever.ts` |
 | Multimodal indexer | `src/cognition/rag/multimodal/MultimodalIndexer.ts` |
 | Ingest router (`IngestRouter.ts`) | `src/orchestration/pipeline/ingest/` |
 | Memory router + adaptive variant (`MemoryRouter.ts`, `adaptive.ts`) | `src/orchestration/pipeline/memory/` |
-| Reader router model dispatch (`reader-router.ts`) | `src/orchestration/pipeline/memory/reader-router.ts` |
+| Reader-model lookup (`selectReader()`) | `src/orchestration/pipeline/memory/reader-router.ts` |
 | Read router strategy dispatch (`ReadRouter.ts`) | `src/orchestration/pipeline/read/` |
 | Cognitive pipeline (composition) | `src/orchestration/pipeline/` |
-| Bench harness | `packages/agentos-bench/src/` |
-| Run JSONs | `packages/agentos-bench/results/runs/` |
-| Leaderboard | `packages/agentos-bench/results/LEADERBOARD.md` |
-
-Every public entrypoint has TSDoc; type-checked via `pnpm exec tsc --noEmit`.
+| Bench harness | [`src/`](https://github.com/framerslab/agentos-bench/tree/master/src) in `framerslab/agentos-bench` |
+| Run JSONs | [`results/runs/`](https://github.com/framerslab/agentos-bench/tree/master/results/runs) in `framerslab/agentos-bench` |
+| Leaderboard | [`results/LEADERBOARD.md`](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) in `framerslab/agentos-bench` |
 
 ---
 

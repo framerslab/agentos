@@ -651,8 +651,7 @@ Agent: [Calling validate_and_extract_json...]
 ```typescript
 import { AgentOS } from '@framers/agentos';
 
-const agent = await AgentOS.create({
-  provider: 'openai',
+const agentos = await AgentOS.create({
   emergent: true,
   emergentConfig: {
     maxSessionTools: 10,
@@ -662,8 +661,8 @@ const agent = await AgentOS.create({
   },
 });
 
-// Access the engine directly
-const engine = agent.orchestrator.getEmergentEngine();
+// Access the engine directly (undefined when emergent is off)
+const engine = agentos.getToolOrchestrator().getEmergentEngine?.();
 
 // Forge a tool programmatically
 const result = await engine.forge(
@@ -703,7 +702,7 @@ console.log(result.tool?.name); // 'slugify'
 console.log(result.verdict?.approved); // true
 
 // Clean up session tools when done
-agent.orchestrator.cleanupEmergentSession('session-1');
+agentos.getToolOrchestrator().cleanupEmergentSession?.('session-1');
 ```
 
 ### Building the engine yourself
@@ -747,7 +746,7 @@ A host that registers forged executables itself through `onToolForged` and `onTo
 ### Listing and Inspecting Tools
 
 ```typescript
-const engine = agent.orchestrator.getEmergentEngine();
+const engine = agentos.getToolOrchestrator().getEmergentEngine?.();
 
 // Get all tools for a session
 const sessionTools = engine.getSessionTools('session-1');
@@ -755,23 +754,38 @@ const sessionTools = engine.getSessionTools('session-1');
 // Get tools for an agent (includes promoted tools)
 const agentTools = engine.getAgentTools('agent-1');
 
-// Check tool usage stats
-const stats = engine.getToolStats('slugify', 'agent-1');
-console.log(stats.totalCalls, stats.successRate, stats.avgLatencyMs);
+// Each tool carries its usage stats
+const stats = sessionTools.find((tool) => tool.name === 'slugify')?.usageStats;
+console.log(stats?.totalUses, stats?.successCount, stats?.avgExecutionTimeMs, stats?.confidenceScore);
 ```
 
 ## Export and Reuse
 
-Emergent tools can be exported as portable `agentos.emergent-tool.v1` YAML packages and imported into another agent.
+Emergent tools can be exported as portable `agentos.emergent-tool.v1` packages (YAML by default, or JSON) and imported into another agent ([`ToolPackage.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/ToolPackage.ts)).
 
 ```typescript
-import { exportEmergentTool, importEmergentTool } from '@framers/agentos';
+import { readFile, writeFile } from 'node:fs/promises';
+import {
+  buildEmergentToolPackage,
+  serializeEmergentToolPackage,
+  parseEmergentToolPackage,
+  materializeEmergentToolFromPackage,
+} from '@framers/agentos';
 
-// Export a tool
-await exportEmergentTool(toolId, { output: './slugify.emergent-tool.yaml' });
+// Export a tool: an EmergentTool the engine holds, here one of agent-1's tools
+const tool = engine.getAgentTools('agent-1').find((t) => t.name === 'slugify');
+if (!tool) throw new Error("agent-1 has no tool named 'slugify'");
+const manifest = buildEmergentToolPackage(tool);
+await writeFile('./slugify.emergent-tool.yaml', serializeEmergentToolPackage(manifest));
 
 // Import into another agent
-await importEmergentTool('./slugify.emergent-tool.yaml', { seedId: agentSeedId });
+const parsed = parseEmergentToolPackage(await readFile('./slugify.emergent-tool.yaml', 'utf8'));
+const imported = materializeEmergentToolFromPackage(parsed, { createdBy: 'agent-2' });
+// Admit the tool to the other engine (deprecated in favour of loadPersistedTools for stored rows).
+// With storage configured and no row for this tool id, the tool's row is written first; when a row
+// exists, the stored row is admitted instead of the object passed in; without storage nothing is
+// written. A suspended or demoted tool is not registered: outcome.state and outcome.reason say why.
+const outcome = await otherEngine.syncPersistedTool(imported);
 ```
 
 - `compose` tools are portable by default
@@ -798,7 +812,7 @@ await importEmergentTool('./slugify.emergent-tool.yaml', { seedId: agentSeedId }
 
     // Promotion criteria
     promotionThreshold: {
-      uses: 5,                     // Minimum successful invocations
+      uses: 5,                     // Minimum invocations, successful or not
       confidence: 0.8,             // Minimum judge confidence score
     },
 
@@ -877,7 +891,7 @@ Configuration:
 }
 ```
 
-See [Emergent Capabilities](https://docs.agentos.sh/docs/features/emergent-capabilities#self-improvement-tools) for full documentation of each tool.
+See [Self-Extension](../SELF_EXTENSION.md) for how each tool is gated.
 
 ## Skill Export
 

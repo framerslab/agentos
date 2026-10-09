@@ -26,20 +26,21 @@ This keeps redaction deterministic while still allowing heavyweight classifiers 
 
 ## Built-in Guardrail Packs
 
-AgentOS ships five official guardrail extension packs as standalone packages:
+The extensions registry has six guardrail packs, each a standalone package:
 
 | Pack | Package | What It Does |
 |------|---------|-------------|
-| **PII Redaction** | `@framers/agentos-ext-pii-redaction` | Four-tier PII detection (regex + NLP + NER + LLM). Tools: `pii_scan`, `pii_redact` |
-| **ML Classifiers** | `@framers/agentos-ext-ml-classifiers` | Toxicity, injection, jailbreak via ONNX BERT models. Tool: `classify_content` |
-| **Topicality** | `@framers/agentos-ext-topicality` | Embedding-based topic enforcement + drift detection. Tool: `check_topic` |
+| **PII Redaction** | `@framers/agentos-ext-pii-redaction` | Four-tier PII detection (regex patterns from `openredaction`, an NLP prefilter, an NER model, an LLM judge) on input and output; a Phase 1 sanitizer. Tools: `pii_scan`, `pii_redact` |
+| **ML Classifiers** | `@framers/agentos-ext-ml-classifiers` | Toxicity, prompt injection, NSFW and threat classification (ONNX models, with LLM and keyword fallbacks). Tool: `classify_content` |
+| **Topicality** | `@framers/agentos-ext-topicality` | Embedding-based topic enforcement on user input, with LLM and keyword fallbacks; output passes unevaluated. Tool: `check_topic` |
 | **Code Safety** | `@framers/agentos-ext-code-safety` | OWASP Top 10 code scanning (25 regex rules). Tool: `scan_code` |
 | **Grounding Guard** | `@framers/agentos-ext-grounding-guard` | RAG-grounded hallucination detection via NLI. Tool: `check_grounding` |
+| **Content Policy Rewriter** | `@framers/agentos-ext-content-policy-rewriter` | Opt-in content policy: a keyword pre-filter on streamed text and an LLM judge on the final response that blocks or rewrites it |
 
 ## Quick Start
 
 ```typescript
-import { AgentOS } from '@framers/agentos';
+import { AgentOS, AgentOSResponseChunkType } from '@framers/agentos';
 import { createTestAgentOSConfig } from '@framers/agentos';
 import {
   IGuardrailService,
@@ -83,7 +84,7 @@ await agent.initialize({
 
 ## Mid-Stream Decision Override ("Changing Mind")
 
-Guardrails can evaluate streaming chunks in real-time and "change their mind" about allowing content. This enables:
+Guardrails can evaluate streaming chunks in real-time and "change their mind" about allowing content. The examples below import `AgentOSResponseChunkType` from `@framers/agentos` (as the Quick Start does): chunk types are lowercase strings such as `'text_delta'`, so compare against the enum. This enables:
 
 - Stopping generation when cost ceiling is exceeded
 - Blocking harmful content as it's being generated
@@ -106,7 +107,7 @@ class CostCeilingGuardrail implements IGuardrailService {
 
   async evaluateOutput({ chunk }: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null> {
     // Only evaluate text chunks
-    if (chunk.type !== 'TEXT_DELTA' || !chunk.textDelta) {
+    if (chunk.type !== AgentOSResponseChunkType.TEXT_DELTA || !chunk.textDelta) {
       return null;
     }
 
@@ -130,7 +131,7 @@ class CostCeilingGuardrail implements IGuardrailService {
 
 ### Example 2: Real-Time PII Redaction
 
-AgentOS provides a first-class PII redaction extension with four-tier detection (regex + NLP + NER + LLM-as-judge), covering 50+ country ID formats, person names, organizations, and context-dependent PII. See the [PII Redaction extension docs](/docs/extensions/built-in/pii-redaction) for full configuration reference.
+The `@framers/agentos-ext-pii-redaction` pack detects PII in four tiers (regex patterns from the `openredaction` library, an NLP prefilter, a BERT NER model, an LLM judge): emails, phone numbers, SSNs, payment cards, IP addresses, IBANs, passports, driver's licenses, other government IDs, dates of birth, API and AWS keys, crypto addresses, medical terms, and person, organization and location names. See the [PII Redaction extension docs](/docs/extensions/built-in/pii-redaction) for full configuration reference.
 
 ```typescript
 import { createPiiRedactionGuardrail } from '@framers/agentos-ext-pii-redaction';
@@ -149,7 +150,7 @@ const piiPack = createPiiRedactionGuardrail({
 const agent = new AgentOS();
 await agent.initialize({
   ...config,
-  manifest: { packs: [{ factory: () => piiPack }] },
+  extensionManifest: { packs: [{ factory: () => piiPack }] },
 });
 ```
 
@@ -173,7 +174,7 @@ class SimpleRegexPiiGuardrail implements IGuardrailService {
   ];
 
   async evaluateOutput({ chunk }: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null> {
-    if (chunk.type !== 'TEXT_DELTA' || !chunk.textDelta) return null;
+    if (chunk.type !== AgentOSResponseChunkType.TEXT_DELTA || !chunk.textDelta) return null;
 
     let text = chunk.textDelta;
     let modified = false;
@@ -210,7 +211,7 @@ class ContentPolicyGuardrail implements IGuardrailService {
   private accumulatedText = '';
 
   async evaluateOutput({ chunk }: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null> {
-    if (chunk.type === 'TEXT_DELTA' && chunk.textDelta) {
+    if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA && chunk.textDelta) {
       this.accumulatedText += chunk.textDelta;
 
       for (const pattern of this.prohibitedPatterns) {
@@ -231,7 +232,7 @@ class ContentPolicyGuardrail implements IGuardrailService {
 
 ## Cross-Agent Guardrails
 
-Cross-agent guardrails enable one agent (supervisor) to monitor and intervene in other agents' outputs. This is useful for:
+Cross-agent guardrails let one agent (supervisor) monitor and intervene in other agents' outputs. AgentOS attaches them to no stream on its own: neither `processRequest()` nor `agency()` reads them. The host wraps an agent's output stream with `wrapWithCrossAgentGuardrails(guardrails, { sourceAgentId, observerAgentId, agencyId }, guardrailContext, stream, { streamId })` from `@framers/agentos/safety/guardrails`. Each guardrail that observes the source agent (`observeAgentIds`, every agent when empty) evaluates every chunk in turn, a non-final `TEXT_DELTA` only with `evaluateStreamingChunks: true`; a `BLOCK` ends the stream with an error chunk, and a guardrail without `canInterruptOthers: true` has its `BLOCK` and `SANITIZE` downgraded to `FLAG`. This is useful for:
 
 - Supervisor patterns in multi-agent systems
 - Quality gates across an agency
@@ -263,7 +264,7 @@ class SupervisorGuardrail implements ICrossAgentGuardrailService {
     context,
   }: CrossAgentOutputPayload): Promise<GuardrailEvaluationResult | null> {
     // Check for confidential information leakage
-    if (chunk.type === 'TEXT_DELTA' && chunk.textDelta?.includes('CONFIDENTIAL')) {
+    if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA && chunk.textDelta?.includes('CONFIDENTIAL')) {
       return {
         action: GuardrailAction.BLOCK,
         reason: `Agent ${sourceAgentId} attempted to expose confidential information`,
@@ -292,7 +293,7 @@ class QualityGateGuardrail implements ICrossAgentGuardrailService {
     chunk,
   }: CrossAgentOutputPayload): Promise<GuardrailEvaluationResult | null> {
     // Only evaluate final responses
-    if (chunk.type !== 'FINAL_RESPONSE') {
+    if (chunk.type !== AgentOSResponseChunkType.FINAL_RESPONSE) {
       return null;
     }
 
@@ -323,7 +324,7 @@ class QualityGateGuardrail implements ICrossAgentGuardrailService {
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `evaluateStreamingChunks` | `boolean` | `false` | Evaluate TEXT_DELTA chunks (real-time) vs only FINAL_RESPONSE |
-| `maxStreamingEvaluations` | `number` | `undefined` | Rate limit streaming evaluations per request |
+| `maxStreamingEvaluations` | `number` | `undefined` | Rate limit streaming evaluations per guarded stream (the turn's stream and each continuation stream count on their own) |
 | `canSanitize` | `boolean` | `false` | Run this guardrail in Phase 1 so SANITIZE results chain deterministically |
 | `timeoutMs` | `number` | `undefined` | Per-guardrail timeout. On timeout/error the dispatcher fails open for that guardrail, unless `failClosed` is set or the guard is required |
 | `failClosed` | `boolean` | `false` | A throw or a timeout blocks instead of passing. Forced on for a required guard |
@@ -357,11 +358,11 @@ const agentos = await AgentOS.create({
 - **Every request.** `processRequest()`, `handleToolResults()` and `resumeExternalToolRequest()` check again and answer one error chunk, `SYS_GUARDRAIL_REQUIRED_MISSING`, while a required guard is missing. Nothing reaches a provider.
 - **Posture.** A required guard runs under its id, fail-closed (a throw, a timeout past `timeoutMs`, or an answer whose action is not a `GuardrailAction` blocks, as `GUARDRAIL_ERROR` or `GUARDRAIL_MALFORMED`), whatever its own `config` says.
 - **Hold mode.** A guard required on `output`, or `guardrailOutputMode: 'hold'`, holds every `TEXT_DELTA` until the final guards have judged the whole reply. Allowed or flagged, the deltas go out before the final chunk; blocked or sanitized, they are dropped. An actionable tool call closes the window: the text so far is judged as a final reply before the tool call goes out. The same guards run on the continuation after an external tool result.
-- **Replacement replies.** A `BLOCK` whose evaluation carries `replacementText` reaches the caller as a `FINAL_RESPONSE` holding that text in both text fields, with `metadata.guardrail.output[0].action === 'block'` and the guard's `reasonCode`, in place of an error chunk. A block without one yields the error chunk as before.
-- **The stored reply.** With conversational persistence on, a reply a guard blocked with a replacement or sanitized is rewritten in the conversation's history before the final chunk leaves, so the history holds what the person saw: the stored message is matched by the text the guards judged, never by position, on a turn and on a tool continuation alike. The message's `metadata.modificationInfo` records the guard's reason code. A block on a streamed delta judges no whole reply and rewrites nothing; hold mode is where nothing streams before the final verdict. With `appendOnlyPersistence` on the conversation manager the stored row keeps the first text and the rewrite stays in memory; the runtime logs a warning when that happens, and a product that must not keep a replaced reply does not run an append-only store. A sanitized final chunk's `updatedConversationContext` reads the rewrite too.
+- **Replacement replies.** A `BLOCK` whose evaluation carries a non-empty `replacementText` reaches the caller as a `FINAL_RESPONSE` holding that text in both text fields, with `metadata.guardrail.output[0].action === 'block'` and the guard's `reasonCode`, in place of an error chunk. A block without one (or with an empty string) yields the error chunk.
+- **The stored reply.** With conversational persistence on, a reply a guard blocked with a replacement or sanitized is rewritten in the conversation's history (and one blocked without a replacement is emptied) before the final chunk leaves, so the history holds what the person saw: the stored message is matched by the text the guards judged, never by position, on a turn and on a tool continuation alike. The message's `metadata.modificationInfo` records the guard's reason code. A block on a streamed delta judges no whole reply and rewrites nothing; hold mode is where nothing streams before the final verdict. With `appendOnlyPersistence` on the conversation manager the stored row keeps the first text and the rewrite stays in memory; the runtime logs a warning when that happens, and a product that must not keep a replaced reply does not run an append-only store. A sanitized final chunk's `updatedConversationContext` reads the rewrite too.
 - **Declared stages.** A guard that has both methods but runs on one stage declares it in `IGuardrailService.stages` (the phrase-list guard does, from its `stages` option); a required guard is held to the stages it declares, and a stage it does not declare is reported as missing instead of passing on the method's existence.
 - **The text before a tool call.** In hold mode the text held before an actionable tool call is judged as a reply of its own: a block replaces it and the tool call does not go out; a sanitize rewrites what streams. That verdict is not reported through `onVerdict`, since nothing is stored at that point; the turn's final chunk, which carries the whole text, is judged and recorded on its own.
-- **Every verdict names its guard.** `metadata.guardrailId` is set on each evaluation and on the error chunk when the guard has an `id`.
+- **Every verdict names its guard.** `metadata.guardrailId` is set on each evaluation when the guard has an `id`; a block's error chunk carries it in `details.metadata`.
 
 ### `PhraseListGuardrail`
 
@@ -389,7 +390,7 @@ const neverDo = await PhraseListGuardrail.create({
 
 ### Hard limits in the persona
 
-`IPersonaDefinition.hardLimits` (and `hardLimits:` in a SOUL file's front matter) renders as the last block of every system prompt, under the heading "Hard limits", after everything the turn added and after every fragment of the persona's own prompt whatever priority it carries. The guards hold the same rules in code; the block tells the model.
+`IPersonaDefinition.hardLimits` (and `hardLimits:` in a SOUL file's front matter, when the file is loaded as a persona) renders as the last block of the system prompt of every GMI turn for that persona, under the heading "Hard limits", after everything the turn added and after every fragment of the persona's own prompt whatever priority it carries. The guards hold the same rules in code; the block tells the model.
 
 ## Using Multiple Guardrails
 
@@ -398,7 +399,7 @@ Multiple guardrails are dispatched in two phases: sanitizers first, then paralle
 ```typescript
 import { createPiiRedactionGuardrail } from '@framers/agentos-ext-pii-redaction';
 import { createMLClassifierGuardrail } from '@framers/agentos-ext-ml-classifiers';
-import { createTopicalityGuardrail, TOPIC_PRESETS } from '@framers/agentos-ext-topicality';
+import { createTopicalityGuardrail } from '@framers/agentos-ext-topicality';
 import { createCodeSafetyGuardrail } from '@framers/agentos-ext-code-safety';
 import { createGroundingGuardrail } from '@framers/agentos-ext-grounding-guard';
 
@@ -408,13 +409,12 @@ const piiPack = createPiiRedactionGuardrail({
 });
 
 const mlPack = createMLClassifierGuardrail({
-  guardrailScope: 'both',
+  categories: ['toxic', 'injection'],
 });
 
 const topicalityPack = createTopicalityGuardrail({
-  allowedTopics: TOPIC_PRESETS.customerSupport,
-  forbiddenTopics: TOPIC_PRESETS.commonUnsafe,
-  guardrailScope: 'input',
+  allowedTopics: ['customer support', 'billing', 'product features'],
+  blockedTopics: ['politics', 'violence', 'gambling'],
 });
 
 const codeSafetyPack = createCodeSafetyGuardrail();
@@ -425,7 +425,7 @@ const groundingPack = createGroundingGuardrail({
 
 await agent.initialize({
   ...config,
-  manifest: {
+  extensionManifest: {
     packs: [
       { factory: () => piiPack },
       { factory: () => mlPack },
@@ -450,6 +450,7 @@ await agent.initialize({
 
 ```typescript
 interface IGuardrailService {
+  id?: string;               // Names the guard in verdicts and in requiredGuardrails
   config?: GuardrailConfig;
   evaluateInput?(payload: GuardrailInputPayload): Promise<GuardrailEvaluationResult | null>;
   evaluateOutput?(payload: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null>;
@@ -485,7 +486,9 @@ interface GuardrailEvaluationResult {
   reason?: string;           // User-facing message
   reasonCode?: string;       // Machine-readable code
   metadata?: Record<string, unknown>;
+  details?: unknown;         // Debugging detail, not shown to users
   modifiedText?: string | null;  // For SANITIZE action
+  replacementText?: string;  // With BLOCK on output, a non-empty string is the reply sent in place of the error chunk
 }
 ```
 
@@ -502,203 +505,9 @@ Extension packs that need expensive resources (NER models, ONNX classifiers, emb
 5. **Test edge cases** - Test with partial PII, edge cases in streaming chunks
 6. **Consider latency** - Each streaming evaluation adds latency to user experience
 
-## Folder-Level Permissions & Safe Guardrails
+## Folder-Level Permissions
 
-In addition to content guardrails, AgentOS provides **folder-level permission guardrails** that validate filesystem access before tool execution. This prevents agents from accessing sensitive system files or directories outside their permitted scope.
-
-### Overview
-
-Safe Guardrails intercept tool calls (like `file_read`, `file_write`, `read_document`, `create_pdf`, `create_spreadsheet`, `create_document`, `shell_execute`) and validate filesystem paths against folder permission rules **before execution**.
-
-```
-Tool Call → Safe Guardrails → Folder Permission Check → Allow/Deny → Execution
-```
-
-### Quick Example
-
-```json
-{
-  "security": {
-    "tier": "balanced",
-    "folderPermissions": {
-      "defaultPolicy": "deny",
-      "inheritFromTier": true,
-      "rules": [
-        { "pattern": "~/workspace/**", "read": true, "write": true },
-        { "pattern": "/tmp/**", "read": true, "write": true },
-        { "pattern": "/var/log/**", "read": true, "write": false },
-        { "pattern": "!/sensitive/*", "read": false, "write": false }
-      ]
-    }
-  }
-}
-```
-
-### Folder Permission Rules
-
-Each rule supports glob patterns with first-match-wins evaluation:
-
-| Pattern | Matches | Example |
-|---------|---------|---------|
-| `~/workspace/**` | All files under workspace recursively | `~/workspace/data/file.txt` |
-| `/tmp/*` | Direct children of /tmp | `/tmp/test.txt` |
-| `!/sensitive/*` | Negation: blocks all files | `/sensitive/data.json` (blocked) |
-| `/var/log/**` | System logs recursively | `/var/log/system/app.log` |
-
-### Security Tier Defaults
-
-Each security tier includes default folder permissions:
-
-**Dangerous** - Allow everything:
-```json
-{
-  "defaultPolicy": "allow",
-  "rules": []
-}
-```
-
-**Balanced** - Workspace + tmp + read-only logs:
-```json
-{
-  "defaultPolicy": "deny",
-  "rules": [
-    { "pattern": "~/workspace/**", "read": true, "write": true },
-    { "pattern": "/tmp/**", "read": true, "write": true },
-    { "pattern": "/var/log/**", "read": true, "write": false }
-  ]
-}
-```
-
-**Paranoid** - Workspace only:
-```json
-{
-  "defaultPolicy": "deny",
-  "rules": [
-    { "pattern": "~/workspace/**", "read": true, "write": true }
-  ]
-}
-```
-
-### Violation Handling
-
-When an agent attempts unauthorized access, Safe Guardrails:
-
-1. **Blocks the tool call** and returns an error
-2. **Logs the violation** to `~/.agentos/security/violations.log`
-3. **Sends notifications** (webhooks/email) for high/critical severity
-4. **Assesses severity** based on attempted path:
-   - **Critical**: `/etc`, `/root`, `/boot`, `passwd`, `shadow`
-   - **High**: `/usr`, `/var`, `/sys`, `.ssh`, credentials
-   - **Medium**: Write operations
-   - **Low**: Read operations
-
-### Audit Log Format
-
-```json
-{"timestamp":"2026-02-09T10:30:00Z","level":"SECURITY_VIOLATION","agentId":"agent-123","toolId":"file_write","operation":"file_write","attemptedPath":"/etc/passwd","reason":"Path /etc not in allowed folders","severity":"critical"}
-```
-
-### Shell Command Parsing
-
-Safe Guardrails extract paths from shell commands:
-
-```typescript
-// Agent tries: shell_execute({ command: "rm -rf /etc/config" })
-// Guardrails extract: ["/etc/config"]
-// Result: BLOCKED - /etc not permitted
-```
-
-Supported commands: `rm`, `cp`, `mv`, `cat`, `touch`, `mkdir`, `rmdir`, `chmod`, `chown`
-
-### Read-Only vs Read-Write
-
-Separate read and write permissions per folder:
-
-```json
-{
-  "rules": [
-    { "pattern": "/data/public/**", "read": true, "write": false },
-    { "pattern": "~/workspace/**", "read": true, "write": true }
-  ]
-}
-```
-
-- Agent can **read** from `/data/public/` but **cannot write**
-- Agent has **full access** to `~/workspace/`
-
-### Configuration in agent.config.json
-
-```json
-{
-  "seedId": "seed_research_bot",
-  "displayName": "Research Bot",
-  "security": {
-    "tier": "balanced",
-    "permissionSet": "autonomous",
-    "folderPermissions": {
-      "defaultPolicy": "deny",
-      "inheritFromTier": true,
-      "rules": [
-        {
-          "pattern": "~/workspace/**",
-          "read": true,
-          "write": true,
-          "description": "Agent workspace - full access"
-        },
-        {
-          "pattern": "/home/user/docs/**",
-          "read": true,
-          "write": false,
-          "description": "Read-only document access"
-        },
-        {
-          "pattern": "!/home/user/docs/sensitive/*",
-          "read": false,
-          "write": false,
-          "description": "Block sensitive subdirectory"
-        }
-      ]
-    }
-  }
-}
-```
-
-### Notification Configuration
-
-Configure webhooks or email alerts for violations:
-
-```typescript
-const guardrails = new SafeGuardrails({
-  auditLogPath: '~/.agentos/security/violations.log',
-  notificationWebhooks: ['https://hooks.slack.com/...'],
-  emailConfig: {
-    to: 'security@example.com',
-    smtpHost: 'smtp.example.com',
-    smtpPort: 587
-  },
-  enableAuditLogging: true,
-  enableNotifications: true
-});
-```
-
-### Querying Violations
-
-```typescript
-// Query recent violations
-const violations = await auditLogger.queryViolations({
-  agentId: 'agent-123',
-  startTime: new Date('2026-02-08'),
-  endTime: new Date('2026-02-09'),
-  severity: 'critical'
-});
-
-// Get statistics
-const stats = await guardrails.getViolationStats('agent-123', {
-  start: new Date('2026-02-01'),
-  end: new Date('2026-02-09')
-});
-// { total: 15, bySeverity: { critical: 3, high: 7, medium: 5 }, byTool: { file_write: 8, shell_execute: 7 } }
-```
+AgentOS has no folder-permission layer: its guardrails see the user's input and the response chunks, not tool arguments. [Wunderland](https://github.com/jddunn/wunderland), the agent CLI built on AgentOS, adds one. Its [`SafeGuardrails`](https://github.com/jddunn/wunderland/blob/master/src/security/SafeGuardrails.ts) class checks a tool call's file paths, and the paths it reads out of `rm`, `cp`, `mv`, `cat`, `touch`, `mkdir`, `rmdir`, `chmod` and `chown` commands, against glob rules with separate read and write flags before the tool runs. It writes each violation to `~/.wunderland/security/violations.log` and can notify webhooks or an email address of high and critical ones. An agent's `security.folderPermissions` in its `agent.config.json` sets the rules; see Wunderland's [guardrails documentation](https://github.com/jddunn/wunderland/blob/master/docs/features/GUARDRAILS.md).
 
 ## Related Documentation
 

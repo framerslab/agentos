@@ -153,9 +153,10 @@ export interface GuardrailEvaluationResult {
   modifiedText?: string | null;
 
   /**
-   * With {@link GuardrailAction.BLOCK} on an output's final response: the fixed reply the caller receives in place of
-   * the model's, as a FINAL_RESPONSE whose guardrail metadata records the block, instead of an error chunk. A
-   * product's safety templates answer this way, so a person reads a fixed text and never a raw failure.
+   * With {@link GuardrailAction.BLOCK} on output (a streamed delta or the final response): a non-empty string is the
+   * fixed reply the caller receives in place of the model's, as a FINAL_RESPONSE whose guardrail metadata records the
+   * block, instead of an error chunk; an empty string or no value yields the error chunk. A product's safety templates
+   * answer this way, so a person reads a fixed text and never a raw failure.
    */
   replacementText?: string;
 }
@@ -253,7 +254,8 @@ export interface GuardrailConfig {
   evaluateStreamingChunks?: boolean;
 
   /**
-   * Maximum streaming evaluations per request.
+   * Maximum streaming evaluations per guarded stream (the turn's stream and
+   * each continuation stream after a tool result count on their own).
    *
    * Rate-limits streaming evaluations to control cost and performance.
    * Only applies when {@link evaluateStreamingChunks} is `true`.
@@ -441,7 +443,8 @@ export interface IGuardrailService {
   /**
    * Evaluate agent output before streaming to client.
    *
-   * Called for each chunk of the turn's output stream that carries
+   * Called for each chunk of a guarded output stream (the turn's, and the
+   * continuation after an external tool result) that carries
    * `isFinal: true` (the FINAL_RESPONSE, an ERROR the turn yields) and, when
    * {@link GuardrailConfig.evaluateStreamingChunks} is set, for each
    * TEXT_DELTA chunk (real-time filtering). Other chunks, such as
@@ -452,7 +455,9 @@ export interface IGuardrailService {
    * @returns Evaluation result, or `null` to allow without action
    *
    * @remarks
-   * - Return `BLOCK` to immediately terminate the stream with an error
+   * - Return `BLOCK` to immediately terminate the stream with an error chunk, or
+   *   with a FINAL_RESPONSE holding `replacementText` when the result carries a
+   *   non-empty one
    * - Return `SANITIZE` with `modifiedText` to redact/modify content
    * - Streaming evaluation adds latency; use only when real-time filtering is required
    */

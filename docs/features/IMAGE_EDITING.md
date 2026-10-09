@@ -1,6 +1,6 @@
 # Image Editing — Img2Img, Inpainting & Upscaling
 
-> Edit, upscale, and create variations of existing images across multiple providers with a unified API.
+> Edit, upscale, and create variations of existing images across providers with one API.
 
 ---
 
@@ -24,26 +24,17 @@
 
 ## Overview
 
-AgentOS provides three image editing APIs that work across all supported
-providers. Unlike [Image Generation](./IMAGE_GENERATION.md) which creates from
-scratch, these APIs operate on existing images:
+AgentOS provides three image editing APIs. Unlike [Image Generation](./IMAGE_GENERATION.md), which creates from scratch, they operate on existing images:
 
 | API | Purpose |
 |-----|---------|
-| `editImage()` | Img2img, inpainting, outpainting — modify an existing image |
-| `upscaleImage()` | Super-resolution: 2x or 4x upscale with detail enhancement |
-| `variateImage()` | Create N variations of an image while preserving composition |
+| `editImage()` | Img2img and inpainting: modify an existing image |
+| `upscaleImage()` | Super-resolution: 2x or 4x upscale |
+| `variateImage()` | Create N variations of an image |
 
-All three accept a `Buffer`, `Uint8Array`, or file path as input and return
-the same `ImageResult` shape used by `generateImage()`.
+Each takes the image as a `Buffer` or a string: a base64 data URL, a raw base64 string, a local file path, or an HTTP(S) URL. `editImage()` and `variateImage()` return `{ images, provider, model, usage }` and `upscaleImage()` returns `{ image, provider, model, usage }`, where each image is a `GeneratedImage` (`url`, `dataUrl`, `base64`, `mimeType`, `revisedPrompt` and `providerMetadata`, each set when the provider returns it). A provider that does not implement an operation throws `ImageEditNotSupportedError`, `ImageUpscaleNotSupportedError` or `ImageVariationNotSupportedError`.
 
-**Mature edits:** `editImage` accepts a `policyTier` option. Pass
-`'mature'` or `'private-adult'` to route through an uncensored
-face-consistency model (IP-Adapter FaceID SDXL by default, SDXL as
-fallback) with the Replicate safety filter disabled automatically. Use
-`capabilities: ['face-consistency', 'img2img']` when preserving an
-existing character's identity matters. See
-[UNCENSORED_CONTENT.md](./UNCENSORED_CONTENT.md).
+**Mature edits:** `editImage` accepts a `policyTier` option. With `'mature'` or `'private-adult'`, Replicate's safety checker is turned off, and when the call pins neither `provider` nor `model`, the edit moves to the uncensored catalog's preferred Replicate model for its `capabilities` (default `['img2img']`). Pass `capabilities: ['face-consistency', 'img2img']` when preserving an existing character's identity matters. A mature edit has no fallback model. See [UNCENSORED_CONTENT.md](./UNCENSORED_CONTENT.md).
 
 ---
 
@@ -59,40 +50,38 @@ declare const maskBuffer: Buffer;
 
 const result = await editImage({
   // Required
-  image: imageBuffer,        // Buffer | Uint8Array | string (file path)
+  image: imageBuffer,        // Buffer | string (data URL, base64, file path or URL)
   prompt: 'Make it a sunset scene with warm golden lighting',
 
   // Optional
-  provider: 'openai',        // openai | stability | replicate | stable-diffusion-local
-  model: 'gpt-image-1',     // Provider-specific model override
+  provider: 'stability',     // openai | stability | replicate | fal | stable-diffusion-local
+  model: 'sd3-medium',       // Provider-specific model override
   mask: maskBuffer,          // Mask for inpainting (white = edit, black = keep)
   strength: 0.75,            // How much to transform (0.0 = identical, 1.0 = full regeneration)
-  size: '1024x1024',         // Output dimensions
-  negativePrompt: 'blurry, low quality',  // What to avoid (Stability, SD Local)
-  seed: 42,                  // Reproducible output (provider-dependent)
-  output: 'base64',          // 'base64' | 'url' (default varies by provider)
+  negativePrompt: 'blurry, low quality',  // What to avoid
+  seed: 42,                  // Reproducible output
 });
 
 // Result shape
-console.log(result.images[0].base64);   // Base64-encoded image data
-console.log(result.images[0].url);      // Temporary URL (cloud providers)
+console.log(result.images[0].base64 ?? result.images[0].url);
 console.log(result.provider);            // Which provider was used
 console.log(result.model);              // Which model was used
-console.log(result.usage);              // Token/cost tracking
+console.log(result.usage);              // { costUSD? }
 ```
+
+`mode` (`'img2img' | 'inpaint' | 'outpaint'`) is recorded on the call's trace span; no provider reads it. A provider inpaints when a `mask` is passed.
 
 ### Strength Parameter
 
-The `strength` parameter controls the balance between the source image and the
-prompt. It is supported by all providers, though the exact behavior varies:
+`strength` controls the balance between the source image and the prompt. Stability, Replicate, fal and the local A1111 provider pass it on; OpenAI's edit endpoint has no strength control and ignores it.
 
 | Strength | Behavior |
 |----------|----------|
 | `0.0` | Identical to input (no transformation) |
-| `0.1–0.3` | Subtle adjustments — color grading, minor touch-ups |
-| `0.4–0.6` | Moderate changes — style transfer, lighting changes |
-| `0.7–0.9` | Major transformation — composition preserved, content regenerated |
-| `1.0` | Full regeneration guided by prompt (source used only for composition) |
+| `0.1–0.3` | Subtle adjustments: color grading, minor touch-ups |
+| `0.4–0.6` | Moderate changes: style transfer, lighting changes |
+| `0.7–0.9` | Major transformation: composition kept, content regenerated |
+| `1.0` | Full regeneration guided by the prompt |
 
 ---
 
@@ -109,29 +98,30 @@ const result = await upscaleImage({
   image: imageBuffer,
 
   // Optional
-  provider: 'stability',     // stability | replicate | stable-diffusion-local
+  provider: 'replicate',     // stability | replicate | stable-diffusion-local
   scale: 4,                  // 2 | 4 (default: 2)
-  model: 'esrgan-v1-x2plus', // Provider-specific upscale model
-  output: 'base64',
+  // width / height: explicit target dimensions, which take precedence over scale
 });
 
-// 4x upscaled image
-const upscaled = result.images[0];
-console.log(`Upscaled to ${upscaled.width}x${upscaled.height}`);
+const upscaled = result.image;
+console.log(upscaled.url ?? `${upscaled.base64?.length} base64 chars`);
 ```
 
-### Upscale Models by Provider
+### Upscalers by Provider
 
-| Provider | Models | Max Scale |
-|----------|--------|-----------|
-| Stability AI | `esrgan-v1-x2plus`, `stable-diffusion-x4-latent-upscaler` | 4x |
-| Replicate | `real-esrgan`, `swinir` | 4x |
-| Local SD (A1111) | `ESRGAN_4x`, `R-ESRGAN 4x+`, `SwinIR_4x` | 4x |
-| Local SD (ComfyUI) | Any upscale model loaded in your workflow | 4x |
+| Provider | What it calls | Scale |
+|----------|---------------|-------|
+| Stability AI | the `stable-image/upscale/conservative` endpoint, with a target width of `width`, else 512 × `scale`, else 2048 | width-based |
+| Replicate | `nightmareai/real-esrgan` unless `model` names another | 2x or 4x |
+| Local SD (A1111) | `/sdapi/v1/extra-single-image` with the `R-ESRGAN 4x+` upscaler | `scale`, or `width`/`height` |
+
+OpenAI and fal do not upscale.
 
 ---
 
 ## variateImage() API
+
+Only the OpenAI provider implements variations.
 
 ```typescript
 import { variateImage } from '@framers/agentos';
@@ -145,34 +135,35 @@ const result = await variateImage({
 
   // Optional
   provider: 'openai',
-  n: 3,                       // Number of variations (default: 1, max varies by provider)
+  n: 3,                       // Number of variations (default: 1)
   size: '1024x1024',
-  strength: 0.6,              // How different each variation should be
 });
 
-// Multiple variations returned
 for (const variant of result.images) {
   console.log(variant.url || `base64: ${variant.base64?.length} chars`);
 }
 ```
 
+`variance` (0 to 1, default 0.5) is accepted for providers with a strength control; OpenAI's variations endpoint has none, so it has no effect there.
+
 ---
 
 ## Provider Matrix
 
-| Feature | OpenAI | Stability AI | Replicate | Local SD (A1111) | Local SD (ComfyUI) |
-|---------|--------|-------------|-----------|------------------|---------------------|
-| **Env Var** | `OPENAI_API_KEY` | `STABILITY_API_KEY` | `REPLICATE_API_TOKEN` | `STABLE_DIFFUSION_LOCAL_BASE_URL` | `STABLE_DIFFUSION_LOCAL_BASE_URL` |
+| Feature | OpenAI | Stability AI | Replicate | fal | Local SD (A1111) |
+|---------|--------|-------------|-----------|-----|------------------|
+| **Env Var** | `OPENAI_API_KEY` | `STABILITY_API_KEY` | `REPLICATE_API_TOKEN` | `FAL_API_KEY` | `STABLE_DIFFUSION_LOCAL_BASE_URL` |
 | **Img2Img** | Yes | Yes | Yes | Yes | Yes |
-| **Inpainting** | Yes | Yes | Yes | Yes | Yes |
-| **Outpainting** | Yes | Yes | Via model | Yes | Yes |
-| **Upscaling** | No | Yes | Yes | Yes | Yes |
-| **Variations** | Yes | Yes | Yes | No | No |
-| **Strength** | Yes | Yes | Yes | Yes | Yes |
-| **Negative Prompt** | No | Yes | Model-dependent | Yes | Yes |
+| **Inpainting (mask)** | Yes | Yes | Yes | Yes | Yes |
+| **Upscaling** | No | Yes | Yes | No | Yes |
+| **Variations** | Yes | No | No | No | No |
+| **Strength** | No | Yes | Yes | Yes | Yes |
+| **Negative Prompt** | No | Yes | Yes | Yes | Yes |
 | **Seed** | No | Yes | Yes | Yes | Yes |
-| **Cost Tier** | $$$ | $$ | $$ | Free | Free |
-| **Latency** | ~3–8s | ~3–6s | ~5–15s | ~2–10s | ~2–10s |
+| **`size`** | Yes | No | No | No | Yes |
+| **`n`** | Yes | No | Yes | Yes | Yes |
+
+A local server running ComfyUI serves text-to-image only; edits and upscales go to the A1111 endpoints.
 
 ---
 
@@ -223,32 +214,32 @@ const result = await editImage({
   image,
   mask,
   prompt: 'A large bookshelf filled with colorful books',
-  strength: 0.9,
   provider: 'openai',
 });
 ```
 
-**Mask format:** PNG with the same dimensions as the source image. White pixels
+**Mask format:** a PNG with the same dimensions as the source image. White pixels
 (`#FFFFFF`) mark the area to regenerate; black pixels (`#000000`) mark areas to
-preserve. Partial transparency (grayscale) controls blending at the boundary.
+preserve. How a provider treats gray values at the boundary is the provider's own.
 
 ---
 
 ## Outpainting
 
-Extend an image beyond its original borders:
+No provider extends a canvas by itself. To outpaint, place the original on a larger canvas, mask the new area, and inpaint:
 
 ```typescript
 import { editImage } from '@framers/agentos';
 
-// Extend the image to the right
+// Stand-ins: the original placed on a wider canvas, and a mask that is
+// white where the extension should go.
+declare const paddedCanvas: Buffer;
+declare const outpaintMask: Buffer;
+
 const result = await editImage({
-  image: originalBuffer,
+  image: paddedCanvas,
+  mask: outpaintMask,
   prompt: 'Continue the landscape with rolling hills and a distant village',
-  // Outpainting is achieved by providing a larger canvas with the original
-  // image placed at an offset, and a mask covering the new area
-  mask: outpaintMask,     // White where the extension should go
-  size: '1536x1024',      // Wider than the original
   provider: 'stability',
 });
 ```
@@ -257,7 +248,7 @@ const result = await editImage({
 
 ## Upscaling
 
-Increase image resolution with detail enhancement:
+Increase image resolution:
 
 ```typescript
 import { upscaleImage } from '@framers/agentos';
@@ -269,11 +260,11 @@ const lowRes = readFileSync('./thumbnail-256x256.jpg');
 const result = await upscaleImage({
   image: lowRes,
   scale: 4,
-  provider: 'stability',
+  provider: 'stable-diffusion-local',
 });
 
-if (result.images[0].base64) {
-  writeFileSync('./upscaled-1024x1024.png', Buffer.from(result.images[0].base64, 'base64'));
+if (result.image.base64) {
+  writeFileSync('./upscaled-1024x1024.png', Buffer.from(result.image.base64, 'base64'));
 }
 ```
 
@@ -285,37 +276,45 @@ if (result.images[0].base64) {
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `image` | `Buffer \| Uint8Array \| string` | **required** | Source image (buffer or file path) |
+| `image` | `Buffer \| string` | **required** | Source image (Buffer, data URL, base64, file path or URL) |
 | `prompt` | `string` | **required** | What to generate / how to transform |
 | `provider` | `string` | Auto-detect | Image provider ID |
-| `model` | `string` | Provider default | Model override |
-| `mask` | `Buffer \| Uint8Array \| string` | — | Inpainting mask (white = edit area) |
-| `strength` | `number` | `0.75` | Transformation strength (0.0–1.0) |
-| `size` | `string` | `'1024x1024'` | Output dimensions (`WxH`) |
-| `negativePrompt` | `string` | — | Content to avoid (Stability, SD Local) |
+| `model` | `string` | Provider default | Model override (`provider:model` also accepted) |
+| `mask` | `Buffer \| string` | — | Inpainting mask (white = edit area) |
+| `mode` | `'img2img' \| 'inpaint' \| 'outpaint'` | — | Recorded on the trace span; providers do not read it |
+| `strength` | `number` | Provider default | Transformation strength (0.0–1.0) |
+| `size` | `string` | Provider default | Output dimensions (`WxH`; OpenAI and local A1111) |
+| `negativePrompt` | `string` | — | Content to avoid |
 | `seed` | `number` | Random | Reproducibility seed |
-| `output` | `'base64' \| 'url'` | Provider default | Return format |
+| `n` | `number` | Provider default | Number of output images |
+| `policyTier` | `'safe' \| 'standard' \| 'mature' \| 'private-adult'` | — | Mature tiers route through the uncensored catalog |
+| `capabilities` | `string[]` | `['img2img']` | Capabilities a mature-tier model must have |
+| `apiKey`, `baseUrl` | `string` | Env vars | Credentials and endpoint override |
+| `providerOptions` | `object` | — | Provider-specific options |
+| `usageLedger` | `object` | — | Usage ledger options |
 
 ### upscaleImage() Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `image` | `Buffer \| Uint8Array \| string` | **required** | Source image |
+| `image` | `Buffer \| string` | **required** | Source image |
 | `provider` | `string` | Auto-detect | Upscale provider ID |
-| `scale` | `2 \| 4` | `2` | Upscale factor |
 | `model` | `string` | Provider default | Upscale model override |
-| `output` | `'base64' \| 'url'` | Provider default | Return format |
+| `scale` | `2 \| 4` | `2` (Replicate, A1111) | Upscale factor; Stability uses a 2048-pixel width when neither `scale` nor `width` is set |
+| `width`, `height` | `number` | — | Target dimensions; they take precedence over `scale` |
+| `apiKey`, `baseUrl`, `providerOptions`, `usageLedger` | | | As for `editImage()` |
 
 ### variateImage() Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `image` | `Buffer \| Uint8Array \| string` | **required** | Source image |
+| `image` | `Buffer \| string` | **required** | Source image |
 | `provider` | `string` | Auto-detect | Provider ID |
-| `n` | `number` | `1` | Number of variations (max varies by provider) |
-| `size` | `string` | Original size | Output dimensions |
-| `strength` | `number` | `0.6` | How different each variation should be |
-| `output` | `'base64' \| 'url'` | Provider default | Return format |
+| `model` | `string` | Provider default | Model override |
+| `n` | `number` | `1` | Number of variations |
+| `variance` | `number` | `0.5` | How different each variation should be; OpenAI ignores it |
+| `size` | `string` | Provider default | Output dimensions |
+| `apiKey`, `baseUrl`, `providerOptions` | | | As for `editImage()` |
 
 ---
 
@@ -332,8 +331,7 @@ cd stable-diffusion-webui
 export STABLE_DIFFUSION_LOCAL_BASE_URL=http://localhost:7860
 ```
 
-A1111 exposes `/sdapi/v1/img2img` and `/sdapi/v1/extra-single-image`
-endpoints. AgentOS calls these directly.
+AgentOS calls A1111's `/sdapi/v1/img2img` for edits and `/sdapi/v1/extra-single-image` for upscales.
 
 ### ComfyUI
 
@@ -342,52 +340,50 @@ endpoints. AgentOS calls these directly.
 cd ComfyUI
 python main.py --listen
 
-# Set environment variable
 export STABLE_DIFFUSION_LOCAL_BASE_URL=http://localhost:8188
-export STABLE_DIFFUSION_LOCAL_BACKEND=comfyui  # Tell AgentOS to use ComfyUI API
 ```
 
-ComfyUI uses workflow-based execution. AgentOS ships with default img2img and
-upscale workflows. You can override them by placing custom workflow JSON files
-in `~/.agentos/comfyui-workflows/`.
+The local provider detects the backend when it initializes: it probes A1111's model list first, then ComfyUI's `/system_stats`. On ComfyUI it runs text-to-image through a minimal built-in workflow; edits and upscales use the A1111 endpoints, so they need an A1111 server.
 
 ---
 
 ## Custom Provider
 
-Register a custom image editing provider:
+Register a factory for your own provider with `registerImageProviderFactory(providerId, factory)`. The factory returns an `IImageProvider`; `editImage`, `upscaleImage` and `variateImage` are optional methods, and the high-level API throws the matching not-supported error when one is missing:
 
 ```typescript
-import { registerImageProvider } from '@framers/agentos';
+import { registerImageProviderFactory } from '@framers/agentos';
+import type { IImageProvider, ImageEditRequest, ImageGenerationResult } from '@framers/agentos';
 
-registerImageProvider({
-  id: 'my-provider',
-  name: 'My Image Provider',
-  capabilities: {
-    edit: true,
-    upscale: true,
-    variate: false,
-    inpaint: true,
-  },
+class MyImageProvider implements IImageProvider {
+  readonly providerId = 'my-provider';
+  readonly defaultModelId = 'custom-v1';
+  isInitialized = false;
 
-  async edit(request) {
-    // Call your API
-    const response = await fetch('https://my-api.com/edit', {
+  async initialize(_config: Record<string, unknown>): Promise<void> {
+    this.isInitialized = true;
+  }
+
+  async generateImage(): Promise<ImageGenerationResult> {
+    throw new Error('my-provider edits only');
+  }
+
+  async editImage(request: ImageEditRequest): Promise<ImageGenerationResult> {
+    const response = await fetch('https://my-api.example/edit', {
       method: 'POST',
-      body: JSON.stringify({ image: request.image, prompt: request.prompt }),
+      body: JSON.stringify({ image: request.image.toString('base64'), prompt: request.prompt }),
     });
-    const data = await response.json();
+    const data = (await response.json()) as { result: string };
     return {
-      images: [{ base64: data.result, width: 1024, height: 1024 }],
-      provider: 'my-provider',
-      model: 'custom-v1',
+      created: Math.floor(Date.now() / 1000),
+      modelId: request.modelId,
+      providerId: this.providerId,
+      images: [{ base64: data.result, mimeType: 'image/png' }],
     };
-  },
+  }
+}
 
-  async upscale(request) {
-    // ...
-  },
-});
+registerImageProviderFactory('my-provider', () => new MyImageProvider());
 ```
 
 ---
