@@ -72,6 +72,7 @@ The framework includes several built-in scorers:
 | `semantic_similarity` | Word overlap score (0-1) | General similarity |
 | `bleu` | BLEU score approximation | Translation quality |
 | `rouge` | ROUGE-L F1 score | Summarization quality |
+| `word_error_rate` | 1 less the word error rate, never below 0 | Speech-to-text transcripts |
 
 ### Using Scorers Directly
 
@@ -79,6 +80,34 @@ The framework includes several built-in scorers:
 // Score individual outputs
 const score = await evaluator.score('levenshtein', 'actual output', 'expected output');
 console.log(`Similarity: ${(score * 100).toFixed(1)}%`);
+```
+
+### Word Error Rate
+
+`word_error_rate` scores a transcript against a reference transcript by its word error rate. `wordErrorRate()` returns the counts behind the score and `normalizeTranscript()` the words it compares; both are exported beside `Evaluator`, from `@framers/agentos` and from `@framers/agentos/safety/evaluation`.
+
+Both texts go through one normalisation before they are counted, so that measurements of different speech-to-text systems agree:
+
+- Unicode's composed form (NFC), so `é` written as one character and `e` followed by a combining accent are the same letter.
+- Lower case.
+- Letters, digits and a word's inner apostrophe are kept (`cat's`, `don't`), with the combining marks on them, such as an accent or a vowel sign, so `कि` and `क` are different words. The typographic apostrophes `’` (U+2019), `‘` (U+2018) and `ʼ` (U+02BC) count as `'`, so `don’t` and `don't` are the same word.
+- Other punctuation and symbols are dropped, with any combining mark on them (an emoji's variation selector, for one), and so are bracketed marks such as `[laughter]` and the filler words `um`, `uh`, `er`, `ah`, `hmm` and `mm`.
+- Numbers are left as written, so `3` and `three` are different words.
+
+The counts are the substitutions, deletions and insertions of a word-level edit distance from the reference to the transcript: a deletion is a reference word the transcript lacks, an insertion a transcript word the reference lacks. The rate is their sum over the reference's word count, taken as 1 when the reference is empty, so insertions can take it above 1. The scorer gives `1 - rate`, never below 0, and 0 when a test case has no expected output.
+
+```typescript
+import { Evaluator, normalizeTranscript, wordErrorRate } from '@framers/agentos';
+
+normalizeTranscript("Um, so the [laughter] meeting's at 3.");
+// ['so', 'the', "meeting's", 'at', '3']
+
+wordErrorRate('so the meeting is at three', "Um, so the [laughter] meeting's at 3.");
+// { substitutions: 2, deletions: 0, insertions: 1, referenceWords: 5, rate: 0.6 }
+
+const evaluator = new Evaluator();
+await evaluator.score('word_error_rate', 'so the meeting is at three', "so the meeting's at 3");
+// 0.4
 ```
 
 ## Custom Scorers
