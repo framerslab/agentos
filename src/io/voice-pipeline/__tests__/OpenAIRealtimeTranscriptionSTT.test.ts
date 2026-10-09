@@ -366,3 +366,177 @@ describe('OpenAIRealtimeTranscriptionSTT: the wire', () => {
     expect(await refused.healthCheck()).toMatchObject({ ok: false, error: { class: 'auth' } });
   });
 });
+
+describe('OpenAIRealtimeTranscriptionSTT: transcripts keyed by item id', () => {
+  async function started(
+    options: Partial<ConstructorParameters<typeof OpenAIRealtimeTranscriptionSTT>[0]> = {},
+    sessionConfig: Parameters<OpenAIRealtimeTranscriptionSTT['startSession']>[0] = {}
+  ) {
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, ...options });
+    const session = await stt.startSession(sessionConfig);
+    return { session, socket: Sockets.instances[Sockets.instances.length - 1], log: record(session) };
+  }
+
+  it('emits interims and a final for one item, with its id, its offsets and its language', async () => {
+    const { session, socket, log } = await started({}, { language: 'en-US' });
+    session.pushAudio(frame(24_000)); // one second
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 120 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 980 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'item_A',
+      content_index: 0,
+      delta: 'Hello',
+    });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'item_A',
+      content_index: 0,
+      delta: ' there.',
+    });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      content_index: 0,
+      transcript: 'Hello there.',
+    });
+    const shared = { confidence: 1, words: [], itemId: 'item_A', startMs: 120, endMs: 980, language: 'en' };
+    expect(log.transcripts).toEqual([
+      { ...shared, text: 'Hello', isFinal: false },
+      { ...shared, text: 'Hello there.', isFinal: false },
+      { ...shared, text: 'Hello there.', isFinal: true, durationMs: 860 },
+    ]);
+    expect(log.events.slice(0, 2)).toEqual(['speech_start', 'speech_end']);
+    session.close();
+  });
+
+  it('keeps the deltas of two items apart when they interleave, and finals each item', async () => {
+    const { session, socket, log } = await started();
+    session.pushAudio(frame(48_000));
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_B', audio_start_ms: 1_000 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_B', audio_end_ms: 1_900 });
+    const delta = (itemId: string, text: string) =>
+      socket.serve({ type: 'conversation.item.input_audio_transcription.delta', item_id: itemId, delta: text });
+    delta('item_A', 'Good');
+    delta('item_B', 'See');
+    delta('item_A', ' morning.');
+    delta('item_B', ' you.');
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_B',
+      transcript: 'See you.',
+    });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'Good morning.',
+    });
+    expect(log.transcripts.map((t) => [t.itemId, t.isFinal, t.text])).toEqual([
+      ['item_A', false, 'Good'],
+      ['item_B', false, 'See'],
+      ['item_A', false, 'Good morning.'],
+      ['item_B', false, 'See you.'],
+      ['item_B', true, 'See you.'],
+      ['item_A', true, 'Good morning.'],
+    ]);
+    session.close();
+  });
+
+  it('takes the detected language over the configured one when the model reports it', async () => {
+    const { session, socket, log } = await started({}, { language: 'en' });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'Bonjour.',
+      languages: [{ code: 'fr' }],
+    });
+    expect(log.transcripts.map((t) => t.language)).toEqual(['fr']);
+    session.close();
+  });
+
+  it('emits no interims when the session asks for none', async () => {
+    const { session, socket, log } = await started({}, { interimResults: false });
+    socket.serve({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'item_A', delta: 'Hi' });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'Hi.',
+    });
+    expect(log.transcripts.map((t) => [t.isFinal, t.text])).toEqual([[true, 'Hi.']]);
+    session.close();
+  });
+
+  it('closes a failed item that showed interim text with an empty final, and warns for every failed item', async () => {
+    const { session, socket, log } = await started();
+    socket.serve({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'item_A', delta: 'Half a' });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.failed',
+      item_id: 'item_A',
+      content_index: 0,
+      error: { type: 'transcription_error', message: 'Audio could not be transcribed.' },
+    });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.failed',
+      item_id: 'item_B',
+      content_index: 0,
+      error: { type: 'transcription_error', message: 'Audio could not be transcribed.' },
+    });
+    expect(log.transcripts.map((t) => [t.itemId, t.isFinal, t.text])).toEqual([
+      ['item_A', false, 'Half a'],
+      ['item_A', true, ''],
+    ]);
+    expect(log.warnings.map((warning) => warning.message)).toEqual([
+      expect.stringContaining('failed for item item_A'),
+      expect.stringContaining('failed for item item_B'),
+    ]);
+    session.close();
+  });
+
+  it('emits nothing for an item that ends with no words and showed no interim text', async () => {
+    const { session, socket, log } = await started();
+    socket.serve({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item_A', transcript: '' });
+    expect(log.transcripts).toEqual([]);
+    session.close();
+  });
+
+  it('ignores a frame that is not JSON or has no type, and goes on with the next', async () => {
+    const { session, socket, log } = await started();
+    socket.emit('message', 'not json');
+    socket.emit('message', JSON.stringify({ event_id: 'event_x' }));
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 600 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    socket.serve({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item_A', content_index: 0, transcript: 'Still here.' });
+    expect(log.transcripts.at(-1)).toMatchObject({ itemId: 'item_A', isFinal: true, text: 'Still here.' });
+    expect(log.warnings).toEqual([]);
+    expect(log.errors).toEqual([]);
+    session.close();
+  });
+
+  it('moves an utterance committed during speech to the item the commit names, and waits for no other', async () => {
+    const { session, socket, log } = await started();
+    session.pushAudio(frame(24_000)); // 0 to 1000 ms
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 200 });
+    let flushed = false;
+    void session.flush().then(() => {
+      flushed = true;
+    });
+    expect(sentOfType(socket, 'input_audio_buffer.commit')).toHaveLength(1); // a commit during speech
+    // The server may give the utterance another id than speech_started named.
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_B', previous_item_id: null });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_B',
+      transcript: 'Cut short.',
+    });
+    await settle();
+    expect(flushed).toBe(true); // nothing waits for item_A, whose final never comes
+    expect(log.transcripts.map((t) => [t.itemId, t.isFinal, t.text, t.startMs, t.endMs])).toEqual([
+      ['item_B', true, 'Cut short.', 200, 1000],
+    ]);
+    session.close();
+  });
+});
