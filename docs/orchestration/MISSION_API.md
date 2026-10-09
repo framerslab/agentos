@@ -1,10 +1,8 @@
 # mission() API
 
-> **Live run**: see `mission()` generate a step plan (gmi + tool steps) and return final artifacts with confidence in [the agentos.sh demo gallery](https://agentos.sh/#live-demo). Source: [`examples/mission-api.mjs`](https://github.com/framerslab/agentos/blob/master/examples/mission-api.mjs).
+> Source: [`examples/mission-api.mjs`](https://github.com/framerslab/agentos/blob/master/examples/mission-api.mjs).
 
-`workflow()` and [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) ask you to think in terms of nodes and edges before you've thought in terms of intent. `mission()` lets you state the intent first and shape the graph later. You declare what the mission is supposed to accomplish — the goal template, the input schema, the return schema, the planner hints — and the compiler emits a working execution graph from those declarations. When the shape stabilises through use, you export it via `.toWorkflow()` and pin it as a deterministic [workflow()](./WORKFLOW_DSL.md) or [AgentGraph](../architecture/AGENT_GRAPH.md) for production.
-
-Use `mission()` when you want a goal-centric authoring API and the runtime to choose the step plan. Use `workflow()` or [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts) when you need the graph shape pinned and reviewable.
+`mission()` builds an execution graph from a goal. You declare the goal, the input and return schemas and the planner settings; the compiler turns them into a linear graph of steps from a plan template, with any anchor nodes you add spliced in. `.toWorkflow()` exports the graph so you can inspect it or run it as a subgraph. Use [`workflow()`](./WORKFLOW_DSL.md) or [`AgentGraph`](../architecture/AGENT_GRAPH.md) when you want to write the graph yourself.
 
 ## Quick Start
 
@@ -14,13 +12,15 @@ import { z } from 'zod';
 
 const research = mission('deep-research')
   .input(z.object({ topic: z.string() }))
-  .goal('Research {{topic}} and produce a structured report with sources')
+  .goal('Research quantum computing and produce a structured report with sources')
   .returns(z.object({ report: z.string(), sources: z.array(z.string()) }))
   .planner({ strategy: 'linear', maxSteps: 8 })
-  .compile();
+  .compile({ deps: { loopController, providerCall, toolOrchestrator } });
 
-const result = await research.invoke({ topic: 'quantum computing' });
+const artifacts = await research.invoke({ topic: 'quantum computing' });
 ```
+
+`loopController`, `providerCall` and `toolOrchestrator` are your runtime's executors (see [Compilation](#compilation)); without them the graph runs placeholders.
 
 ## Factory Function
 
@@ -28,259 +28,154 @@ const result = await research.invoke({ topic: 'quantum computing' });
 mission(name: string): MissionBuilder
 ```
 
-Returns a new [`MissionBuilder`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/MissionBuilder.ts). The name is used as the graph's display name and as a prefix for run ids and checkpoint keys.
+Returns a new [`MissionBuilder`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/MissionBuilder.ts). The name becomes the compiled graph's name.
 
 ## Builder API
 
-All methods return `this` for chaining. `.compile()` throws if `input`, `goal`, `returns`, or `planner` are missing.
+All methods return `this` for chaining. `.compile()` throws if `input`, `goal`, `returns` or `planner` is missing.
 
-### .input(schema)
+### .input(schema) and .returns(schema)
 
-Declares the input schema. Accepts a Zod schema or a plain JSON Schema object.
-
-```typescript
-.input(z.object({
-  topic: z.string(),
-  depth: z.enum(['brief', 'detailed']).default('detailed'),
-}))
-```
-
-Variables declared in the input schema can be referenced in the goal template via `{{variable}}` syntax. The current stub compiler preserves that template verbatim in generated node instructions rather than interpolating it from runtime input.
+Declare the input and output schemas, as Zod schemas or plain JSON Schema objects. The compiler stores them as the graph's state schema; the runtime does not validate input or output against them.
 
 ### .goal(template)
 
-Sets the goal template. The template is a free-form string with optional `{{variable}}` placeholders.
-
-```typescript
-.goal('Research {{topic}} at {{depth}} depth and produce a structured report')
-```
-
-The goal template is the primary authoring input for `mission()`. In the current implementation it is passed through into the generated reasoning nodes; future planner-backed compilation can use the same template for dynamic decomposition.
-
-### .returns(schema)
-
-Declares the output schema. Accepts a Zod schema or a plain JSON Schema object.
-
-```typescript
-.returns(z.object({
-  report: z.string(),
-  sources: z.array(z.string()),
-  confidence: z.number(),
-}))
-```
+Sets the goal text. The compiler wraps it in `<mission_goal>` tags (removing any such tags from the text) and puts it at the start of every reasoning step's instructions. It does not fill `{{variable}}` placeholders from the input: the instructions reach your `providerCall` as written, with the graph state beside them.
 
 ### .planner(config)
 
-Configures planner hints for the mission.
-
 ```typescript
 .planner({
-  strategy: 'linear',   // see strategies below
-  maxSteps: 8,          // maximum nodes the planner may generate
+  strategy: 'linear',        // required; not read by the compiler
+  maxSteps: 8,               // required; not read by the compiler
+  style: 'research',         // 'research' | 'qa' | 'creative'; default: classified from the goal
+  maxIterationsPerNode: 4,   // cap on each reasoning node's internal iterations
+  parallelTools: true,       // passed to each reasoning node
+  plan,                      // optional pre-built SimplePlan; replaces the template
 })
 ```
 
-**Planner strategies:**
+The plan comes from `plan` when it is set (validated: at least one step, unique ids, known actions and phases), otherwise from the template `style` names:
 
-| Strategy | Description |
+| Style | Steps (phase) |
 |---|---|
-| `linear` | Accepted planner hint. The current compiler still emits the same fixed stub graph. |
-| `tree` | Accepted planner hint for future branching planners. No graph-shape change today. |
-| `adaptive` | Accepted planner hint for future replanning support. No runtime replanning today. |
-| `critic` | Accepted planner hint for future critique/refinement passes. |
-| `hierarchical` | Accepted planner hint for future sub-goal decomposition. |
-| `react` | Accepted planner hint for future stepwise planning loops. |
+| `research` | `gather-info` (gather, 8 iterations), `process-info` (process), `deliver-result` (deliver), `refine-output` (deliver) |
+| `qa` | `research-quick` (gather, 5 iterations), `answer` (deliver) |
+| `creative` | `brainstorm` (gather), `develop-concept` (process), `produce-artifact` (deliver), `polish` (deliver) |
+
+Without `style`, `MissionCompiler.classifyGoal()` picks one from the goal's wording: question openings (`what is`, `how do`, `explain`, `is ...`) give `qa`; artifact verbs (`write a`, `compose`, `draft a`, `design a`) give `creative`; a question of 120 characters or fewer ending in `?` gives `qa`; anything else gives `research`. Each template step is a reasoning (`gmi`) node whose instructions say which tools to use (the research template asks for several `web_search` calls, `image_search` and `web_scrape`). `maxIterationsPerNode` caps a step's iterations; it never raises them.
 
 ### .policy(config)
-
-Applies mission-level policy overrides to all compiled nodes. Node-level policies take precedence over mission-level policies.
 
 ```typescript
 .policy({
   guardrails: ['content-safety', 'pii-redaction'],
-  memory: {
-    consistency: 'snapshot',
-    write: { autoEncode: true, type: 'episodic', scope: 'session' },
-  },
-  onViolation: 'block',
+  memory: { consistency: 'snapshot' },
 })
 ```
 
+`guardrails` becomes an output guardrail policy with `onViolation: 'warn'` on every node that has none. The graph runtime applies a node's guardrail policy only on human nodes, so on other nodes it is recorded and not enforced. `memory.consistency` sets the graph's memory consistency mode (default `'snapshot'`), which the runtime does not read; `discovery` and `personality` are accepted and not read.
+
 ### .anchor(id, node, constraints)
 
-Splices a pre-built [`GraphNode`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts) into the execution order at a precise position. Anchors let you inject validation steps, human checkpoints, or specialised tool calls without modifying the planner output.
+Splices a node of your own into the step order.
 
 ```typescript
 import { toolNode, humanNode } from '@framers/agentos/orchestration';
 
 mission('research')
-  .anchor(
-    'source-verify',
-    toolNode('citation_checker', {}, { effectClass: 'read' }),
-    {
-      phase: 'gather',    // inject into the 'gather' phase of the plan
-      after: 'search',    // run after the 'search' step
-      before: 'summarize', // run before the 'summarize' step
-    }
-  )
-  .anchor(
-    'human-review',
-    humanNode({ prompt: 'Review the draft before publishing.' }),
-    { phase: 'deliver', after: 'draft' }
-  )
+  // ...
+  .anchor('source-verify', toolNode('citation_checker', {}, { effectClass: 'read' }), {
+    phase: 'gather',
+    after: 'gather-info',
+  })
+  .anchor('human-review', humanNode({ prompt: 'Review the draft before publishing.' }), {
+    phase: 'deliver',
+  });
 ```
 
-**Anchor constraints:**
-
-| Field | Description |
+| Field | Effect |
 |---|---|
-| `phase` | The current compiler supports `gather`, `process`, `validate`, and `deliver` |
-| `after` | Node id this anchor must run after |
-| `before` | Node id this anchor must run before |
+| `phase` | `gather`, `process`, `validate` or `deliver`; the anchor joins that phase, after the phase's plan steps |
+| `after` | The id of a node already placed; the anchor goes right after it. An id not placed yet puts the anchor at the phase's end |
+| `before` | Accepted and not read |
 
-All constraint fields are optional — an anchor with no constraints is appended at the end.
+An anchor without a phase goes at the end of the graph. The compiled node takes the anchor's `id`. The graph is a straight chain from the first step to the last.
+
+### Other builder methods
+
+`autonomy()`, `providerStrategy()`, `costCap()`, `maxAgents()`, `branches()`, `plannerModel()` and `executionModel()` store values in the mission config. The compiler does not read them.
 
 ## Compilation
 
 ```typescript
-const compiled = mission(...).compile({
-  checkpointStore: new InMemoryCheckpointStore('./missions.db'), // optional
-});
+const compiled = mission('...')
+  // ...
+  .compile({
+    checkpointStore: new InMemoryCheckpointStore(), // default: a new in-memory store
+    deps: { loopController, providerCall, toolOrchestrator },
+  });
 ```
 
-`compile()` validates that all required fields are present and returns a [`CompiledMission`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/MissionBuilder.ts). The IR is compiled lazily on each invocation from the current builder config; today that means the same stub graph shape is regenerated each time with anchors and policies applied.
+`compile()` checks the required fields and returns a [`CompiledMission`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/MissionBuilder.ts). Each `invoke()`, `stream()`, `resume()`, `explain()` and `toWorkflow()` call compiles the graph again from the builder's config.
+
+`deps` are the node executors' dependencies (`WorkflowRuntimeDeps`):
+
+- A reasoning node needs `loopController` and `providerCall`; `providerCall(instructions, state)` makes the model call. Without them the node succeeds with the output `'gmi-placeholder'`.
+- A tool node, and a tool call from a reasoning node, need `toolOrchestrator`; without it they fail.
 
 ## Execution
 
 ```typescript
-// Run to completion
-const result = await compiled.invoke({ topic: 'quantum computing' });
+const artifacts = await compiled.invoke({ topic: 'quantum computing' });
 
-// Stream events
 for await (const event of compiled.stream({ topic: 'quantum computing' })) {
-  console.log(event.type, event.nodeId);
+  console.log(event.type); // run_start, node_start, node_end, ..., run_end
 }
 
-// Resume after interruption
-const result = await compiled.resume(checkpointId);
+const resumed = await compiled.resume(checkpointId);
 ```
+
+`invoke()` resolves to the run's artifacts: each node's output under its node id (`gather-info`, `process-info`, `deliver-result`, `refine-output` for the research template), unless an executor returns its own artifact update. The graph checkpoints after every node. `resume(checkpointId, patch)` continues from a checkpoint and ignores `patch`. `inspect()` returns `{}`.
 
 ## Introspection
 
-### explain()
-
-Returns the compiled mission steps without running the mission. Useful for debugging, testing, and "what will happen" previews in UIs.
+`explain(input)` compiles the graph and returns its nodes without running anything:
 
 ```typescript
 const { steps, ir } = await compiled.explain({ topic: 'quantum computing' });
-
-console.log(steps);
-// [
-//   { id: 'plan-1', type: 'gmi', config: { type: 'gmi', instructions: '...' } },
-//   { id: 'search-1', type: 'tool', config: { type: 'tool', toolName: 'web_search' } },
-//   { id: 'summarize-1', type: 'gmi', config: { ... } },
-// ]
+console.log(steps.map((s) => `${s.type}:${s.id}`));
+// [ 'gmi:gather-info', 'tool:source-verify', 'gmi:process-info', 'gmi:deliver-result', 'gmi:refine-output', 'human:human-review' ]
 ```
 
-### toWorkflow() / toIR()
-
-Exports the compiled mission as a static [`CompiledExecutionGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts). Use this when you want to inspect or reuse the generated IR directly.
+`toWorkflow()` and `toIR()` return the [`CompiledExecutionGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/ir/types.ts), which can run as a subgraph:
 
 ```typescript
-const ir = compiled.toWorkflow();
+import { AgentGraph, subgraphNode, START, END } from '@framers/agentos/orchestration';
 
-// Now wire it directly to GraphRuntime, or use it as a subgraph:
-const outerGraph = new AgentGraph(outerState)
-  .addNode('research', subgraphNode(ir))
-  .compile();
-```
-
-## Complete Example — Deep Research Mission
-
-```typescript
-import { mission, toolNode, humanNode } from '@framers/agentos/orchestration';
-import { InMemoryCheckpointStore } from '@framers/agentos/orchestration/checkpoint';
-import { z } from 'zod';
-
-const deepResearch = mission('deep-research')
-  .input(z.object({
-    topic: z.string(),
-    depth: z.enum(['brief', 'detailed']).default('detailed'),
-  }))
-  .goal('Research {{topic}} at {{depth}} depth. Gather diverse sources, evaluate credibility, and produce a structured report with citations.')
-  .returns(z.object({
-    report: z.string(),
-    sources: z.array(z.string()),
-    confidence: z.number().min(0).max(1),
-  }))
-  .planner({
-    strategy: 'adaptive', // accepted today, used by planner-backed compilation later
-    maxSteps: 12,
-  })
-  .policy({
-    guardrails: ['grounding-guard', 'pii-redaction'],
-    onViolation: 'warn',
-    memory: {
-      consistency: 'snapshot',
-      write: { autoEncode: true, type: 'semantic', scope: 'session' },
-    },
-  })
-
-  // Inject a citation-verification step after any search phase node
-  .anchor(
-    'verify-sources',
-    toolNode('citation_checker', { timeout: 15_000 }, { effectClass: 'read' }),
-    { phase: 'gather', after: 'search' }
-  )
-
-  // Require human review before final output
-  .anchor(
-    'human-review',
-    humanNode({ prompt: 'Review the draft report. Approve to publish.' }),
-    { phase: 'deliver', before: 'finalize' }
-  )
-
-  .compile({
-    checkpointStore: new InMemoryCheckpointStore('./research.db'),
-  });
-
-// Inspect the plan before running
-const { steps } = await deepResearch.explain({ topic: 'quantum computing', depth: 'detailed' });
-console.log(`Plan has ${steps.length} steps:`);
-steps.forEach((s, i) => console.log(`  ${i + 1}. [${s.type}] ${s.id}`));
-
-// Run
-const result = await deepResearch.invoke({ topic: 'quantum computing', depth: 'detailed' });
-console.log(result.report);
-
-// Stream with progress
-for await (const event of deepResearch.stream({ topic: 'AI safety', depth: 'brief' })) {
-  if (event.type === 'node_start') console.log(`Running: ${event.nodeId}`);
-}
-
-// Graduate to a static workflow once the plan shape is stable
-const staticIR = deepResearch.toWorkflow();
-// Save staticIR to a file or pass directly to AgentGraph as a subgraph
+const outer = new AgentGraph({ input: z.object({ topic: z.string() }), scratch: z.object({}), artifacts: z.object({}) })
+  .addNode('research', subgraphNode(compiled.toWorkflow()))
+  .addEdge(START, 'research')
+  .addEdge('research', END)
+  .compile({ deps });
 ```
 
 ## See Also
 
-- [AgentGraph](../architecture/AGENT_GRAPH.md) — for explicit graph control
-- [workflow() DSL](./WORKFLOW_DSL.md) — for deterministic DAG pipelines
-- [Checkpointing](./checkpointing.md) — ICheckpointStore, resume semantics
+- [AgentGraph](../architecture/AGENT_GRAPH.md) — explicit graph control
+- [workflow() DSL](./WORKFLOW_DSL.md) — deterministic DAG pipelines
+- [Checkpointing](./CHECKPOINTING.md) — `ICheckpointStore` and resume semantics
 - [Unified Orchestration](./UNIFIED_ORCHESTRATION.md) — architecture overview
 
 ---
 
 ## References
 
-### Goal-first authoring patterns
-
-- Yao, S., Zhao, J., Yu, D., Du, N., Shafran, I., Narasimhan, K., & Cao, Y. (2023). [*ReAct: Synergizing reasoning and acting in language models.*](https://arxiv.org/abs/2210.03629) ICLR 2023. — Reasoning-and-acting pattern the `react` planner strategy targets.
-- Yao, S., Yu, D., Zhao, J., Shafran, I., Griffiths, T. L., Cao, Y., & Narasimhan, K. (2023). [*Tree of thoughts: Deliberate problem solving with large language models.*](https://arxiv.org/abs/2305.10601) NeurIPS 2023. — Branch-and-evaluate planning pattern informing the `tree` planner strategy.
-- Hong, S., Zhuge, M., Chen, J., et al. (2023). [*MetaGPT: Meta programming for a multi-agent collaborative framework.*](https://arxiv.org/abs/2308.00352) ICLR 2024. — Hierarchical task decomposition informing the `hierarchical` planner strategy.
+- Yao, S., Zhao, J., Yu, D., Du, N., Shafran, I., Narasimhan, K., & Cao, Y. (2023). [*ReAct: Synergizing reasoning and acting in language models.*](https://arxiv.org/abs/2210.03629) ICLR 2023. — Interleaved reasoning and tool use, the pattern of the template's reasoning nodes.
+- Hong, S., Zhuge, M., Chen, J., et al. (2023). [*MetaGPT: Meta programming for a multi-agent collaborative framework.*](https://arxiv.org/abs/2308.00352) ICLR 2024. — Task decomposition into ordered roles and phases.
 
 ### Implementation references
 
-- [`src/orchestration/builders/MissionBuilder.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/MissionBuilder.ts) — the `mission()` factory + builder
-- [`src/orchestration/compiler/`](https://github.com/framerslab/agentos/tree/master/src/orchestration/compiler) — IR + graph compiler shared with `workflow()` and [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/AgentGraph.ts)
+- [`src/orchestration/builders/MissionBuilder.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/builders/MissionBuilder.ts) — the `mission()` factory and builder
+- [`src/orchestration/compiler/MissionCompiler.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/compiler/MissionCompiler.ts) — templates, goal classification, anchor placement
+- [`src/orchestration/runtime/NodeExecutor.ts`](https://github.com/framerslab/agentos/blob/master/src/orchestration/runtime/NodeExecutor.ts) — what each node type needs from `deps`
