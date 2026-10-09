@@ -8,8 +8,17 @@
 
 /** USD per 1K tokens: `input` for prompt tokens (an embedding model's whole count), `output` for completion tokens. */
 export interface OpenAIModelPrice {
-  input: number;
-  output: number;
+  readonly input: number;
+  readonly output: number;
+}
+
+/**
+ * The table with each of its rows frozen, and the table itself. OpenAIProvider, every spend budget and every caller
+ * read the same rows, so a caller that changed one would change what every call in the process is priced at.
+ */
+function frozenRows(rows: Record<string, OpenAIModelPrice>): Readonly<Record<string, OpenAIModelPrice>> {
+  for (const row of Object.values(rows)) Object.freeze(row);
+  return Object.freeze(rows);
 }
 
 // Known pricing for common OpenAI models (USD per 1K tokens).
@@ -22,8 +31,11 @@ export interface OpenAIModelPrice {
 // (developers.openai.com/api/docs/pricing, 2026-09-30). Rows hold the rates
 // below that threshold, and calculateCost applies the tier from
 // openAiHasLongContextPricing.
-/** The rows, moved here unchanged from OpenAIProvider's `modelPricing`, comments and sources included. */
-export const OPENAI_MODEL_PRICING: Readonly<Record<string, OpenAIModelPrice>> = {
+/**
+ * The rows, moved here unchanged from OpenAIProvider's `modelPricing`, comments and sources included. The table and
+ * each of its rows are frozen.
+ */
+export const OPENAI_MODEL_PRICING: Readonly<Record<string, OpenAIModelPrice>> = frozenRows({
   // GPT-6 family (current flagship, Sep 2026). Astra $10/$50, Sol $2/$10,
   // Luna $0.10/$0.50 per 1M, from developers.openai.com/api/docs/models on
   // 2026-09-23; all three ids are on the first-party GET /v1/models listing.
@@ -101,7 +113,7 @@ export const OPENAI_MODEL_PRICING: Readonly<Record<string, OpenAIModelPrice>> = 
   'text-embedding-3-large': { input: 0.00013, output: 0 },
   'text-embedding-3-small': { input: 0.00002, output: 0 },
   'text-embedding-ada-002': { input: 0.0001, output: 0 },
-};
+});
 
 /**
  * The row a table holds under `key` itself. Read as a plain key, a model named after a member every object inherits
@@ -121,15 +133,15 @@ export function openAIModelPricing(modelId: string | undefined): OpenAIModelPric
  * USD per minute of audio for OpenAI's transcription models: the cost per minute that OpenAI's pricing page lists for
  * each (https://developers.openai.com/api/docs/pricing, "Transcription models", read 8 October 2026). gpt-4o-transcribe
  * and gpt-4o-mini-transcribe are billed by token, so their rows are the page's estimate of a minute's cost. A row that
- * is added or changed names its source and the day it was read here.
+ * is added or changed names its source and the day it was read here. The table is frozen, as the token prices are.
  */
-export const OPENAI_TRANSCRIPTION_PRICING: Readonly<Record<string, number>> = {
+export const OPENAI_TRANSCRIPTION_PRICING: Readonly<Record<string, number>> = Object.freeze<Record<string, number>>({
   'gpt-4o-mini-transcribe': 0.003,
   'gpt-realtime-whisper': 0.017,
   'gpt-4o-transcribe': 0.006,
   'gpt-transcribe': 0.0045,
   'gpt-live-transcribe': 0.017,
-};
+});
 
 /** A transcription model's price per minute; a dated snapshot without its own row takes its base model's. */
 export function openAITranscriptionPricing(modelId: string | undefined): number | undefined {

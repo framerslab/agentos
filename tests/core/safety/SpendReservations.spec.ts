@@ -12,7 +12,12 @@ import {
   tokensMicro,
   utcDay,
 } from '../../../src/safety/runtime/SpendReservations.js';
-import { openAIModelPricing, openAITranscriptionPricing } from '../../../src/core/llm/providers/implementations/openaiPricing.js';
+import {
+  OPENAI_MODEL_PRICING,
+  OPENAI_TRANSCRIPTION_PRICING,
+  openAIModelPricing,
+  openAITranscriptionPricing,
+} from '../../../src/core/llm/providers/implementations/openaiPricing.js';
 
 const AT = new Date('2026-10-12T10:00:00Z');
 const LATER = new Date('2026-10-12T11:00:00Z');
@@ -47,6 +52,18 @@ describe('the arithmetic', () => {
     expect(openAITranscriptionPricing('gpt-realtime-whisper')).toBe(0.017);
     expect(openAITranscriptionPricing('no-such-model')).toBeUndefined();
     expect(openAIModelPricing('gpt-6-luna')).toEqual(LUNA);
+  });
+
+  it('keeps every price row as it is listed: a caller can change neither a row nor a table', () => {
+    // The provider, every budget and every caller read the same rows. Reflect.set answers false for a frozen object,
+    // where an assignment would throw in strict code.
+    expect(Reflect.set(OPENAI_MODEL_PRICING['gpt-6-luna'], 'input', 0)).toBe(false);
+    expect(Reflect.set(OPENAI_MODEL_PRICING, 'gpt-6-luna', { input: 0, output: 0 })).toBe(false);
+    expect(Reflect.set(OPENAI_MODEL_PRICING, 'my-model', { input: 0, output: 0 })).toBe(false);
+    expect(Reflect.set(OPENAI_TRANSCRIPTION_PRICING, 'gpt-4o-mini-transcribe', 0)).toBe(false);
+    expect(openAIModelPricing('gpt-6-luna')).toEqual(LUNA);
+    expect(openAIModelPricing('my-model')).toBeUndefined();
+    expect(openAITranscriptionPricing('gpt-4o-mini-transcribe')).toBe(0.003);
   });
 
   it('has no price for a model named after a member every object inherits', () => {
