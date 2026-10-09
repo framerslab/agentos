@@ -988,13 +988,15 @@ export class OpenRouterProvider implements IProvider {
       try {
         for await (const rawChunk of this.parseSseStream(stream, () => pendingWaitEnded)) {
           if (abortSignal?.aborted) {
-            // The line that shows the abort is usually the usage line a held
-            // decline or a held error was waiting for: read what it reports
-            // before leaving.
-            if (held) held.usage = this.usageOfSseLine(rawChunk) ?? held.usage;
+            // The line that shows the abort is usually the trailing usage line:
+            // the one a held decline or a held error was waiting for, or the one
+            // that follows a normal finish. Read what it reports before leaving,
+            // so the request's bill rides the abort chunk.
+            const lineUsage = this.usageOfSseLine(rawChunk);
+            if (held) held.usage = lineUsage ?? held.usage;
             const pendingAtAbort: ModelCompletionResponse | null = pendingError;
-            if (pendingAtAbort) pendingError = { ...pendingAtAbort, usage: this.usageOfSseLine(rawChunk) ?? pendingAtAbort.usage };
-            yield abortChunk('Stream aborted by caller', held?.usage ?? (pendingError as ModelCompletionResponse | null)?.usage);
+            if (pendingAtAbort) pendingError = { ...pendingAtAbort, usage: lineUsage ?? pendingAtAbort.usage };
+            yield abortChunk('Stream aborted by caller', held?.usage ?? (pendingError as ModelCompletionResponse | null)?.usage ?? lineUsage);
             return;
           }
           if (!rawChunk.startsWith('data: ')) continue;

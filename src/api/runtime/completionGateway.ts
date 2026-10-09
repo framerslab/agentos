@@ -104,8 +104,9 @@ export interface CompletionAttempt extends AsyncIterable<ModelCompletionResponse
  * Usage a provider reported for an attempt after the caller's signal ended it.
  * The attempt ends at once, and a provider stream that had started is read to
  * its end in the background, where a provider that bills the request may still
- * report the bill: OpenRouter ends a held content-filter decline or a held
- * error with an abort chunk carrying the usage line it was waiting for. Neither
+ * report the bill: OpenRouter ends its stream with an abort chunk carrying the
+ * usage line it was reading (the one a held content-filter decline or a held
+ * error was waiting for, or the one that follows a normal finish). Neither
  * the attempt's `outcome` nor its chunks carry this usage.
  */
 export interface LateAttemptUsage {
@@ -376,8 +377,8 @@ function reportLateUsage(report: LateAttemptUsage, onLateUsage: ((report: LateAt
  * sends its request, so once the signal has aborted, a stream that was never
  * asked is closed and sends nothing, and one that has started is read to its
  * end in the background. The usage reported there beyond what the attempt had
- * reported (OpenRouter's abort chunk carries the bill of a held decline or a
- * held error) goes to `onLateUsage` once that read ends ({@link LateAttemptUsage}).
+ * reported (OpenRouter's abort chunk carries the bill its trailing usage line
+ * reports) goes to `onLateUsage` once that read ends ({@link LateAttemptUsage}).
  */
 async function* untilAborted(
   source: AsyncIterable<ModelCompletionResponse>,
