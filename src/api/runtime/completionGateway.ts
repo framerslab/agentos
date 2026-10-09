@@ -138,6 +138,14 @@ export interface CompletionGateway {
      */
     onLateUsage?: (report: LateAttemptUsage) => void,
   ): CompletionAttempt;
+  /**
+   * The schema instructions, in generateObject's words, that a hop's system
+   * prompt needs for `responseSchema`: the text when the hop's provider payload
+   * carries no schema (no payload for the provider or model, or a JSON mode
+   * without one), undefined when the payload carries it. A caller that puts
+   * the text in its prompt itself passes `schemaInPrompt` to `stream()`.
+   */
+  schemaInstruction?(resolution: CompletionResolution, responseSchema: ZodType, schemaName?: string): string | undefined;
 }
 
 /** The tool format a provider expects; the same mapping as GMI.determineToolFormat. */
@@ -694,5 +702,9 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     };
   }
 
-  return { resolve, stream };
+  function schemaInstruction(resolution: CompletionResolution, responseSchema: ZodType, schemaName = 'response'): string | undefined {
+    return lowerForHop(resolution, responseSchema, schemaName).schemaInstruction;
+  }
+
+  return { resolve, stream, schemaInstruction };
 }

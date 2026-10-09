@@ -200,6 +200,7 @@ function gatewayFor(opts: AgentOptions): CompletionGateway {
   if (!listener) return base;
   return {
     stream: base.stream,
+    schemaInstruction: base.schemaInstruction,
     resolve: (route, after) =>
       base.resolve(
         {
@@ -354,6 +355,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
         resolve: gateway.resolve,
         stream: (resolution, messages, options, responseSchema, schemaName, schemaInPrompt) =>
           gateway.stream(resolution, messages, options, responseSchema, schemaName, schemaInPrompt, turn.onLateUsage),
+        schemaInstruction: gateway.schemaInstruction,
       },
       maxToolLoopIterations: steps,
       defaultLlmProviderId: persona.defaultProviderId,
