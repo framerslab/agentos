@@ -52,6 +52,7 @@ import { IRetrievalAugmentor, RagRetrievalOptions, RagDocumentInput, RagIngestio
 import { ChatMessage, ModelCompletionOptions, ModelCompletionResponse, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
 import type { ZodType } from 'zod';
 import type { CompletionAttempt, CompletionOutcome, CompletionResolution, CompletionRoute } from '../../api/runtime/completionGateway.js';
+import { checkStructuredReply, resolveStructuredReply, structuredRepairMessage, StructuredReplyConfigError, type StructuredReplyOutput } from '../../api/runtime/structuredReply.js';
 
 import { AIModelProviderManager } from '../../core/llm/providers/AIModelProviderManager';
 import { IUtilityAI, SummarizationOptions } from '../nlp/ai_utilities/IUtilityAI';
@@ -1064,6 +1065,18 @@ export class GMI implements IGMI {
           : (this.activePersona.defaultModelCompletionOptions as Record<string, unknown> | undefined)?.cacheDiagnostics,
       );
       let lastRagSources: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[] | undefined;
+      // A structured turn (ProcessingOptions.structuredReply): the schema the reply must match, resolved once. Its
+      // instruction joins the system prompt, its Zod schema reaches the gateway, no delta streams before the check
+      // unless asked, and a reply that does not match is asked for again inside the turn.
+      let structuredReply: ReturnType<typeof resolveStructuredReply> = null;
+      try {
+        structuredReply = resolveStructuredReply((turnInput.metadata?.options as { structuredReply?: Parameters<typeof resolveStructuredReply>[0] } | undefined)?.structuredReply);
+      } catch (error) {
+        if (error instanceof StructuredReplyConfigError) throw new GMIError(error.message, GMIErrorCode.VALIDATION_ERROR, { code: error.code });
+        throw error;
+      }
+      let structuredAttempts = 0;
+      let structuredResult: StructuredReplyOutput | undefined;
       main_processing_loop: while (safetyBreak < maxToolLoopIterations) {
         safetyBreak++;
         let augmentedContextFromRAG = "";
@@ -1170,6 +1183,9 @@ export class GMI implements IGMI {
             priority: 57,
           });
         }
+        if (structuredReply) {
+          systemPrompts.push({ content: structuredReply.instruction, priority: 900 });
+        }
         // the persona's hard limits close the system prompt, after everything the turn added above
         const hardLimits = hardLimitsBlock(this.activePersona.hardLimits);
         if (hardLimits) {
@@ -1266,8 +1282,8 @@ export class GMI implements IGMI {
           stream: true,
         };
         // A schema travels to the gateway, which lowers it per hop (D9); it is not a provider option.
-        const responseSchema = turnOptions.responseSchema as ZodType | undefined;
-        const schemaName = turnOptions.schemaName as string | undefined;
+        const responseSchema = (turnOptions.responseSchema as ZodType | undefined) ?? structuredReply?.zod;
+        const schemaName = (turnOptions.schemaName as string | undefined) ?? (structuredReply && responseSchema === structuredReply.zod ? structuredReply.name : undefined);
 
         // The gateway's route: the model asked for, the last user message (its text
         // is the router's task hint: the text parts of a multimodal message, and on
@@ -1427,7 +1443,9 @@ export class GMI implements IGMI {
               if (chunk.responseTextDelta) {
                 currentIterationTextResponse += chunk.responseTextDelta;
                 aggregatedResponseText += chunk.responseTextDelta; // Aggregate for final output
-                yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TEXT_DELTA, chunk.responseTextDelta, { usage: chunk.usage });
+                if (!structuredReply || structuredReply.streamDeltas) {
+                  yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TEXT_DELTA, chunk.responseTextDelta, { usage: chunk.usage });
+                }
                 textDeltaEmitted = true;
               }
 
@@ -1470,7 +1488,9 @@ export class GMI implements IGMI {
               if (chunk.isFinal && !textDeltaEmitted && typeof choice?.message?.content === 'string' && choice.message.content.length > 0) {
                 currentIterationTextResponse = choice.message.content;
                 aggregatedResponseText += choice.message.content;
-                yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TEXT_DELTA, choice.message.content, { usage: chunk.usage });
+                if (!structuredReply || structuredReply.streamDeltas) {
+                  yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TEXT_DELTA, choice.message.content, { usage: chunk.usage });
+                }
                 textDeltaEmitted = true;
               }
 
@@ -1576,6 +1596,41 @@ export class GMI implements IGMI {
           ...(stepUsage ? { usage: stepUsage } : {}),
         });
 
+        // The structured check, on a step that answered with text rather than tool calls. A reply that does not match
+        // is asked for again: the invalid reply and the repair request join this turn's prompt and never the durable
+        // history, and the turn's text starts over with the next attempt.
+        if (structuredReply && currentIterationToolCallRequests.length === 0) {
+          structuredAttempts += 1;
+          const lifted = stepStructuredOutput !== undefined;
+          const check = lifted ? structuredReply.checkValue(stepStructuredOutput) : checkStructuredReply(currentIterationTextResponse, structuredReply);
+          const enforcement = lifted ? 'forced_tool' : gateway ? 'provider_schema' : 'prompt_only';
+          if (check.ok) {
+            structuredResult = { value: check.value, meta: { schemaName: structuredReply.name, valid: true, attempts: structuredAttempts, enforcement, stage: 'model' } };
+            if (lifted && !currentIterationTextResponse) {
+              // the forced tool call carried the reply: its text is the value, so the final response holds it too
+              currentIterationTextResponse = JSON.stringify(check.value);
+              aggregatedResponseText += currentIterationTextResponse;
+            }
+          } else {
+            const canRetry = structuredAttempts <= structuredReply.maxRetries && safetyBreak < maxToolLoopIterations;
+            if (canRetry) {
+              this.addTraceEntry(ReasoningEntryType.WARNING, `The reply did not match the schema "${structuredReply.name}" (attempt ${structuredAttempts}); asking again.`, { issues: check.issues });
+              turnMessages.push({ role: 'assistant', content: currentIterationTextResponse || null });
+              turnMessages.push({ role: 'user', content: structuredRepairMessage(check.issues, structuredReply, currentIterationTextResponse) });
+              aggregatedResponseText = '';
+              continue main_processing_loop;
+            }
+            if (structuredReply.onExhausted === 'error') {
+              throw new GMIError(
+                `The reply did not match the schema "${structuredReply.name}" after ${structuredAttempts} attempt(s).`,
+                GMIErrorCode.STRUCTURED_OUTPUT_INVALID,
+                { schemaName: structuredReply.name, attempts: structuredAttempts, issues: check.issues },
+              );
+            }
+            structuredResult = { value: check.value ?? null, meta: { schemaName: structuredReply.name, valid: false, attempts: structuredAttempts, enforcement, stage: 'model', issues: check.issues } };
+          }
+        }
+
         const assistantMessage: ChatMessage = {
           role: 'assistant',
           content: currentIterationTextResponse || null,
@@ -1680,6 +1735,7 @@ export class GMI implements IGMI {
         usage: aggregatedUsage,
         error: lastErrorForOutput,
         ragSources: lastRagSources,
+        ...(structuredResult ? { structuredOutput: structuredResult } : {}),
       };
       return finalTurnOutput; // Return the aggregated output
 

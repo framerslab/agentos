@@ -76,6 +76,8 @@ export enum GMIErrorCode {
   GMI_CONTEXT_ERROR = 'GMI_CONTEXT_ERROR',
   GMI_FEEDBACK_ERROR = 'GMI_FEEDBACK_ERROR',
   GMI_SHUTDOWN_ERROR = 'GMI_SHUTDOWN_ERROR',
+  /** A structured turn's reply did not match its schema after every attempt (or after an output guardrail rewrote it). */
+  STRUCTURED_OUTPUT_INVALID = 'GMI_STRUCTURED_OUTPUT_INVALID',
 
   TOOL_ERROR = 'TOOL_ERROR',
   TOOL_NOT_FOUND = 'TOOL_NOT_FOUND',
@@ -127,6 +129,7 @@ const statusCodeMap: Partial<Record<GMIErrorCode, number>> = {
   [GMIErrorCode.PERMISSION_DENIED]: 403,
   [GMIErrorCode.ACCESS_DENIED]: 403,
   [GMIErrorCode.SUBSCRIPTION_ERROR]: 402,
+  [GMIErrorCode.STRUCTURED_OUTPUT_INVALID]: 422,
   [GMIErrorCode.GUARDRAIL_REQUIRED_MISSING]: 503,
   [GMIErrorCode.ALLOWANCE_EXHAUSTED]: 402,
   [GMIErrorCode.SPEND_METER_UNAVAILABLE]: 503,

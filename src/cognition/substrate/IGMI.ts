@@ -449,6 +449,8 @@ export interface GMIOutput {
      * verify generated claims against the same sources the model saw.
      */
     ragSources?: import('../rag/IRetrievalAugmentor.js').RagRetrievedChunk[];
+    /** On a structured turn: the parsed value and its check (see `api/runtime/structuredReply`). */
+    structuredOutput?: import('../../api/runtime/structuredReply.js').StructuredReplyOutput;
 }
 
 
