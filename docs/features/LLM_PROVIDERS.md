@@ -42,7 +42,7 @@ AgentOS abstracts LLM access behind a unified [`IProvider`](https://github.com/f
 - **CLI providers**: Use your Claude Max or Google account subscription via local CLI — no API key needed
 - **Auto-detection**: Set an API key or install a CLI and the provider is available
 - **Fallback**: Automatic retry with alternate providers on failure (`fallbackProviders`)
-- **Cost-aware caps**: `agency()` checks `controls.maxCostUSD` and the other run limits after each run; `agent()` applies `controls.maxTotalTokens` and `controls.maxDurationMs` to each model call; a custom router sends requests to cheaper models
+- **Cost-aware caps**: `agency()` checks `controls.maxCostUSD` and the other run limits after each run; `agent()` applies `controls.maxTotalTokens` and `controls.maxDurationMs` to each model call; a `budget` on `generateText()`, `streamText()`, `generateObject()`, `embedText()` or `agent()` checks each provider call against a spend cap before it is sent; a custom router sends requests to cheaper models
 - **Streaming**: All providers support streaming with a unified async iterator
 - **Tool calling**: Unified function/tool calling across providers that support it
 
@@ -338,7 +338,7 @@ what is left before it is sent, and by default a call whose estimated cost
 would pass the cap is refused with `CostCapExceededError`. The budget holds its
 spending in a
 [`CostGuard`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts)
-([Cost Optimization](../safety/COST_OPTIMIZATION.md#budget-across-calls)).
+([Cost Optimization](../safety/COST_OPTIMIZATION.md#a-spend-budget-for-a-run-of-calls)).
 
 For cheap-first routing across multiple models, attach a custom [`IModelRouter`](https://github.com/framerslab/agentos/blob/master/src/core/llm/routing/IModelRouter.ts)
 via `agent({ router })` — the router decides which provider/model to call per
