@@ -33,7 +33,7 @@ On top of the encoding/decay/retrieval substrate, the runtime ships eight option
 - **Working memory** enforces Baddeley's slot-based capacity limits (7±2), modulated by traits
 - **Consolidation** runs periodically to prune weak traces, link related traces in the graph, summarize clusters into schemas, resolve contradictions, and reinforce traces due for review
 
-Core encoding, decay and retrieval make no LLM call with the `keyword` feature detector (retrieval embeds the query). The optional Batch-2 layer (observer, reflector, graph, consolidation) runs when its config is passed and is skipped when it is not. The manager takes its vector store and knowledge graph as interfaces, so the same calls run over any implementation of them.
+Core encoding, decay and retrieval make no LLM call with the `keyword` feature detector (retrieval embeds the query). In the Batch-2 layer, the observer and reflector run only when their config carries an `llmInvoker`. The memory graph is on unless `graph.disabled` is `true`, and with a graph (or a `consolidation` config) the manager builds the consolidation pipeline and starts its hourly timer unless `consolidation.enabled` is `false`. The manager takes its vector store and knowledge graph as interfaces, so the same calls run over any implementation of them.
 
 ### Cognitive science foundations
 
@@ -605,7 +605,7 @@ The assembler selects a formatting style by comparing conscientiousness, opennes
 [spontaneous memory] ...
 ```
 
-The preamble appears when the budget has room for it and 100 more tokens; the last section holds an involuntary recall from the cognitive mechanisms. How each trace line reads depends on the formatting style.
+The preamble appears when the budget has room for it and 100 more tokens. `assembleForPrompt()` never fills the last two sections: it passes no observer notes (their 5% flows to Semantic Recall), and it passes neither the mechanisms engine nor the trace pool that the involuntary-recall section needs. Both sections appear only when a host calls `assembleMemoryContext()` (from `@framers/agentos/cognition/memory`) itself, with `observationNotes`, or with `mechanismsEngine` and `allTraces`. How each trace line reads depends on the formatting style.
 
 Token estimation uses ~4 chars per token heuristic.
 
@@ -907,7 +907,7 @@ src/cognition/memory/mechanisms/
 |---|---|---|---|
 | `store/MemoryStore.ts` | `recordAccess()` | `engine.onAccess(trace, mood)` | After spaced-repetition update |
 | `store/MemoryStore.ts` | `query()` | `engine.onRetrieval(scored, candidates, cutoff, entities)` | After scoring, before return |
-| `prompt/MemoryPromptAssembler.ts` | `assembleMemoryContext()` | `engine.onPromptAssembly(allTraces, retrievedIds)` | Before final return |
+| `prompt/MemoryPromptAssembler.ts` | `assembleMemoryContext()` | `engine.onPromptAssembly(allTraces, retrievedIds)` | Before final return, when the input carries `mechanismsEngine` and `allTraces`; `assembleForPrompt()` passes neither |
 | `CognitiveMemoryManager.ts` | `encode()` | `engine.onEncoding(trace, embedding)` | After the trace is embedded |
 | `CognitiveMemoryManager.ts` | `initialize()` | Engine construction | Dynamic import when config present |
 

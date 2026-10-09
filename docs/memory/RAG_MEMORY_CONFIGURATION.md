@@ -1,6 +1,6 @@
 # RAG and Memory Configuration
 
-> **Memory benchmarks (full N=500, gpt-4o reader):** **85.6% on LongMemEval-S** at $0.0090 per correct, **+1.4 points above Mastra Observational Memory (84.23%)**. **70.2% on LongMemEval-M** on the 1.5M-token / 500-session haystack variant — the only open-source library on the public record above 65% on M with publicly reproducible methodology. Competitive with the strongest published M results in the LongMemEval paper (Wu et al., ICLR 2025: round Top-5 65.7%, session Top-5 71.4%, round Top-10 72.0%). [Benchmarks](https://docs.agentos.sh/benchmarks) · [Run JSONs](https://github.com/framerslab/agentos-bench/tree/master/results/runs) · [SOTA writeup](https://agentos.sh/en/blog/agentos-memory-sota-longmemeval/)
+> **Memory benchmarks (N=500, gpt-4o reader):** 85.6% on LongMemEval-S at $0.0090 per correct answer, and 70.2% on LongMemEval-M, the 1.5M-token, 500-session variant. The LongMemEval paper (Wu et al., ICLR 2025) reports 65.7% (round, top-5), 71.4% (session, top-5) and 72.0% (round, top-10) on M. [Benchmarks](https://docs.agentos.sh/benchmarks) · [Run JSONs](https://github.com/framerslab/agentos-bench/tree/master/results/runs) · [Write-up](https://agentos.sh/en/blog/agentos-memory-sota-longmemeval/)
 
 AgentOS provides three levels of memory API:
 
@@ -8,9 +8,9 @@ AgentOS provides three levels of memory API:
 2. **[`AgentMemory`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/AgentMemory.ts)** — Compatibility facade that can wrap either [`CognitiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/CognitiveMemoryManager.ts) or the standalone `Memory` engine.
 3. **Low-level RAG primitives** — [`EmbeddingManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/EmbeddingManager.ts), [`VectorStoreManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/VectorStoreManager.ts), [`RetrievalAugmentor`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/RetrievalAugmentor.ts), [`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts), [`GraphRAGEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) for custom pipelines.
 
-`Memory.create()` currently supports the SQLite-backed standalone memory facade at runtime. Postgres, Qdrant, Pinecone, and other backends are available through the lower-level RAG/vector-store layer.
+`Memory.createSqlite()` opens a brain in SQLite and `Memory.createPostgres()` one in Postgres. Qdrant, Pinecone and the other vector databases are reached through the vector-store layer of the RAG primitives.
 
-Runtime truth: `ragConfig` and the standard AgentOS bootstrap still create the classic [`RetrievalAugmentor`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/RetrievalAugmentor.ts) path. [`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts) exists as an opt-in orchestration layer for hosts that explicitly wire it in.
+`ragConfig` makes AgentOS build a [`RetrievalAugmentor`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/RetrievalAugmentor.ts). [`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts) runs only where a host wires it in.
 
 ![AgentOS RAG memory pipeline: ingestion lane feeds five swappable storage backends; retrieval lane runs hybrid dense plus sparse search, RRF fusion, optional Cohere rerank, and Top-K context into prompt assembly](/img/diagrams/rag-memory-pipeline.svg)
 
@@ -54,8 +54,8 @@ await agentos.getExtensionManager().loadPackFromFactory(
 );
 ```
 
-If you already bootstrap [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts), you can auto-load the same pack directly
-from `AgentOS.initialize()`:
+If you already bootstrap [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts), the runtime loads the same pack
+during `AgentOS.create()`:
 
 ```ts
 import { AgentOS, Memory } from '@framers/agentos';
@@ -71,7 +71,7 @@ const agentos = await AgentOS.create({
 });
 ```
 
-`manageLifecycle` is optional. Leave it unset when your app owns the
+`manageLifecycle` is optional (default `false`). Leave it unset when your app owns the
 `Memory` instance and closes it outside [`AgentOS`](https://github.com/framerslab/agentos/blob/master/src/api/AgentOS.ts).
 
 `memoryTools` only registers the tool pack. It does not automatically make the
@@ -130,8 +130,10 @@ const context = await cognitive.getContext('TMJ treatment', { tokenBudget: 2000 
 
 await cognitive.remind({
   content: 'Remind about deploy deadline',
-  triggerType: 'time',
-  triggerAt: Date.now() + 3600000,
+  triggerType: 'time_based', // or 'event_based', 'context_based'
+  triggerAt: Date.now() + 3_600_000,
+  importance: 0.8,
+  recurring: false,
 });
 
 // Consolidation (merge, strengthen, decay)
@@ -145,33 +147,29 @@ const rawManager = cognitive.raw;
 const rawMemory = memory.rawMemory;
 ```
 
-Use `Memory` directly for most local-first or ingestion-heavy workloads. Use [`AgentMemory`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/AgentMemory.ts) when you want a compatibility facade across both backends, or when you specifically need cognitive-only APIs such as `observe()`, `getContext()`, or `remind()`.
+Use `Memory` directly for most local-first or ingestion-heavy workloads. Use [`AgentMemory`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/AgentMemory.ts) when you want one facade over both backends, or when you need the cognitive-only APIs `observe()`, `getContext()` and `remind()`, which throw on the standalone path. `ingest()`, `importFrom()` and `export()` throw on the wrapped-manager path.
 
 ## Observational Memory
 
-Observational memory is a background system that compresses long-running conversation history into dense, searchable memory traces. Instead of keeping the entire conversation in context, the system progressively distills it through three tiers:
+Observational memory turns conversation into memory traces. `CognitiveMemoryManager` runs it when its config gives the observer and the reflector an `llmInvoker`:
 
 ```
-Recent Messages (raw conversation turns)
-  → Observations (concise notes extracted by MemoryObserver)
-    → Reflections (long-term memory traces produced by MemoryReflector)
+messages --> notes (MemoryObserver) --> traces (MemoryReflector)
 ```
 
 ### How It Works
 
-1. **ObservationBuffer** accumulates every message fed via `observe()`. It tracks approximate token count (~4 chars/token).
-2. **MemoryObserver** activates when the buffer reaches **30,000 tokens**. It sends buffered messages to a cheap LLM, which extracts typed observation notes (`factual`, `emotional`, `commitment`, `preference`, `creative`, `correction`). The LLM prompt is biased by the agent's HEXACO personality traits — high Emotionality focuses on tone shifts, high Conscientiousness on deadlines, high Openness on creative tangents.
-3. **MemoryReflector** accumulates observation notes. When they exceed **40,000 tokens**, it consolidates them into long-term [`MemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/SelfEvaluateTool.ts) objects with 5-40x compression. Conflict resolution is personality-driven: high Honesty prefers newer information and supersedes old traces; high Agreeableness keeps both versions.
+1. **ObservationBuffer** holds every message passed to `observe()` and estimates its tokens at 4 characters each.
+2. **MemoryObserver** runs when the buffer reaches `activationThresholdTokens` (default 30,000) or `activationThresholdMessages` (default 20). It sends the buffered messages to its LLM, which returns typed notes (`factual`, `emotional`, `commitment`, `preference`, `creative`, `correction`). The prompt adds an instruction for each HEXACO trait above 0.6: emotionality for tone shifts, conscientiousness for commitments and deadlines, openness for creative tangents, agreeableness for preferences and rapport, honesty for corrections.
+3. **MemoryReflector** collects the notes and runs when 6 are pending (`activationThresholdNotes`) or their content reaches an estimated `activationThresholdTokens` (default 40,000). Its LLM turns them into [`MemoryTrace`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/core/types.ts) data and lists traces to supersede. The prompt asks for 5-40x compression and picks one contradiction rule from the traits: honesty above 0.6 prefers the newer information and supersedes the old trace; otherwise agreeableness above 0.6 keeps both versions; otherwise the version with higher confidence stays.
 
-### Integration with RAG
+### What the manager does with them
 
-Reflection traces are encoded into the vector store via `CognitiveMemoryManager.encode()`, making them searchable through the standard RAG pipeline. When HyDE is enabled, a query like "what did we decide about deployment?" generates a hypothetical answer, and that embedding finds relevant reflection traces alongside regular memories.
-
-Superseded traces are soft-deleted so they no longer surface in retrieval results.
+`CognitiveMemoryManager.observe()` stores each reflected trace with `encode()`, which embeds it into the vector store, so retrieval finds it like any other trace. It soft-deletes the superseded traces, and it registers commitment notes (importance 0.5 or more) and future-intent preference notes as prospective reminders.
 
 ### API
 
-The high-level entry point is `AgentMemory.observe()`:
+On a wrapped manager, call `AgentMemory.observe()`:
 
 ```ts
 // Feed every conversation turn to the observer
@@ -179,7 +177,7 @@ await memory.observe('user', userMessage);
 await memory.observe('assistant', assistantResponse);
 ```
 
-Internally, `CognitiveMemoryManager.observe()` orchestrates the full pipeline: buffer → observer → reflector → encode traces → soft-delete superseded.
+`CognitiveMemoryManager.observe()` runs buffer, observer, reflector, `encode()` and the soft-deletes in that order, and returns the notes when the observer ran (else `null`).
 
 ### Configuration
 
@@ -193,7 +191,7 @@ await memory.initialize({
     llmInvoker,                         // (system, user) => Promise<string>
   },
   reflector: {
-    activationThresholdTokens: 40_000, // trigger reflection consolidation
+    activationThresholdTokens: 40_000, // or 6 pending notes (activationThresholdNotes)
     llmInvoker,
   },
 });
@@ -201,14 +199,14 @@ await memory.initialize({
 
 Both thresholds can be tuned. Lower thresholds produce more frequent, finer-grained observations at higher LLM cost. Higher thresholds batch more context but risk losing detail.
 
-In persona JSON, the observer/reflector activate automatically when `memoryConfig.enabled = true` and an `llmInvoker` is available. No additional persona-level config is required.
+A persona's `memoryConfig` does not create them. A GMI uses a `CognitiveMemoryManager` only when the host passes `gmiManagerConfig.cognitiveMemoryFactory`; the GMI then calls the manager's `observe()` and `encode()` with each user message and reply, and the observer and reflector run when the manager the factory built has their `llmInvoker`.
 
 ## Low-Level RAG Primitives
 
 The concrete RAG APIs live under `@framers/agentos/cognition/rag`:
 
-- **[`EmbeddingManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/EmbeddingManager.ts)** — Text → vector embeddings (OpenAI, Ollama, custom providers)
-- **[`VectorStoreManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/VectorStoreManager.ts)** — HNSW/InMemory vector storage with similarity search
+- **[`EmbeddingManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/EmbeddingManager.ts)** — Text → vectors through the embedding models of the providers in an `AIModelProviderManager`
+- **[`VectorStoreManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/VectorStoreManager.ts)** — Creates the vector stores named in its config and maps data sources onto them
 - **[`RetrievalAugmentor`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/RetrievalAugmentor.ts)** — Default runtime RAG pipeline for embedding + search + context assembly
 - **[`UnifiedRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/unified/UnifiedRetriever.ts)** — Opt-in plan-aware orchestration across multiple retrieval sources
 - **[`HydeRetriever`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/HydeRetriever.ts)** — Hypothetical Document Embedding for better recall (generates pseudo-answers before searching)
@@ -301,8 +299,8 @@ const agentos = await AgentOS.create({
 
 ### Option B: Let AgentOS create the RAG subsystem (`ragConfig`)
 
-If you don’t want to manage instantiation, use `AgentOSConfig.ragConfig`. AgentOS will create:
-[`EmbeddingManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/EmbeddingManager.ts) → [`VectorStoreManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/VectorStoreManager.ts) → `RetrievalAugmentor`, and pass the augmentor into GMIs.
+To let AgentOS build the parts, use `AgentOSConfig.ragConfig`. AgentOS creates:
+[`EmbeddingManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/EmbeddingManager.ts) → [`VectorStoreManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/VectorStoreManager.ts) → `RetrievalAugmentor`, and passes the augmentor to GMIs.
 
 ```ts
 import { AgentOS } from '@framers/agentos';
@@ -344,55 +342,51 @@ const agentos = await AgentOS.create({
 Notes:
 - If `retrievalAugmentor` is provided, it takes precedence over `ragConfig`.
 - `ragConfig.manageLifecycle` defaults to `true`.
-- `ragConfig.bindToStorageAdapter` defaults to `true` and will inject AgentOS’ `storageAdapter` into **SQL vector store providers that did not specify `adapter` or `storage`**.
+- `ragConfig.bindToStorageAdapter` defaults to `true` and injects the runtime's `storageAdapter` into **SQL vector store providers that did not specify `adapter` or `storage`**.
 - `ragConfig` does not instantiate `UnifiedRetriever`. If you want QueryRouter plan execution through `UnifiedRetriever`, wire that separately with `router.setUnifiedRetriever(...)`.
 
-## Long-Term Memory Recall (Aggressive Default)
+## Long-Term Memory Recall
 
-Prompt-injected durable memory retrieval (`longTermMemoryRetriever`) is controlled by `orchestratorConfig.longTermMemoryRecall`.
+When the runtime has a `longTermMemoryRetriever` (set directly, or derived through `standaloneMemory.longTermRetriever`), `orchestratorConfig.longTermMemoryRecall` sets how often it runs and how much text it injects:
 
-Default profile is intentionally **aggressive** for higher recall and task success:
+| Profile | `cadenceTurns` | `forceOnCompaction` | `maxContextChars` | `topKByScope` (user, persona, organization) |
+|---|---|---|---|---|
+| `aggressive` (default) | 2 | `true` | 4200 | 8, 8, 8 |
+| `balanced` | 4 | `true` | 3200 | 6, 6, 6 |
+| `conservative` | 8 | `false` | 2200 | 4, 4, 4 |
 
-- `profile: "aggressive"`
-- `cadenceTurns: 2`
-- `forceOnCompaction: true`
-- `maxContextChars: 4200`
-- `topKByScope: { user: 8, persona: 8, organization: 8 }`
-
-Example:
+Explicit fields override the profile's values (`cadenceTurns` 1-100, `maxContextChars` 300-12000, each top-K 1-50).
 
 ```ts
-await agentos.initialize({
-  // ...
+const agentos = await AgentOS.create({
   orchestratorConfig: {
+    // AgentOS.create() replaces a top-level key it is given, so keep the defaults:
+    maxToolCallIterations: 5,
+    defaultAgentTurnTimeoutMs: 120_000,
+    enableConversationalPersistence: false,
     longTermMemoryRecall: {
-      profile: 'aggressive',     // default
-      // Optional explicit overrides:
-      cadenceTurns: 2,
-      forceOnCompaction: true,
-      maxContextChars: 4200,
-      topKByScope: { user: 8, persona: 8, organization: 8 },
+      profile: 'balanced',
+      maxContextChars: 2500,
     },
   },
 });
 ```
 
-If you need lower token usage, switch to:
-
-- `profile: "balanced"`
-- `profile: "conservative"`
-
 ## Single-Tenant vs Multi-Tenant Routing
 
-`organizationId` routing behavior is controlled by `orchestratorConfig.tenantRouting`:
+`orchestratorConfig.tenantRouting` decides which `organizationId` a turn uses:
 
-- `multi_tenant` (default): uses request-scoped `organizationId` when provided.
-- `single_tenant`: collapses all turns to one org context (optional strict mode).
+- `multi_tenant` (default): the request's `organizationId`, when it has one.
+- `single_tenant`: the request's `organizationId`, or `defaultOrganizationId` when the request has none.
+
+With `strictOrganizationIsolation: true` in single-tenant mode, a request whose `organizationId` differs from `defaultOrganizationId` fails with a validation error, and so does a turn that ends up with no organization at all.
 
 ```ts
-await agentos.initialize({
-  // ...
+const agentos = await AgentOS.create({
   orchestratorConfig: {
+    maxToolCallIterations: 5,
+    defaultAgentTurnTimeoutMs: 120_000,
+    enableConversationalPersistence: false,
     tenantRouting: {
       mode: 'single_tenant',
       defaultOrganizationId: 'acme-org',
@@ -402,16 +396,13 @@ await agentos.initialize({
 });
 ```
 
-With strict single-tenant isolation enabled, mismatched `organizationId` values are rejected.
-
 ## Persona `memoryConfig.ragConfig` (Triggers and Data Sources)
 
-RAG retrieval/ingestion in the GMI is driven by persona configuration. At minimum:
+A GMI retrieves and ingests through the runtime's augmentor (`retrievalAugmentor` or `ragConfig`) as its persona's `memoryConfig.ragConfig` says:
 
-- `memoryConfig.ragConfig.enabled = true`
-- `retrievalTriggers.onUserQuery = true` to retrieve on user turns
-- `ingestionTriggers.onTurnSummary = true` to ingest post-turn summaries
-- `defaultIngestionDataSourceId` set to a data source you configured in the RAG subsystem
+- `enabled: true` turns both on for the persona.
+- Retrieval runs before the first model call of a user turn when `retrievalTriggers.onUserQuery` is `true` (`onToolFailure` and `onIntentDetected` are the other triggers). It asks for `defaultRetrievalTopK` chunks (default 5) from the enabled `dataSources` (by `dataSourceNameOrId`), with `defaultRetrievalStrategy` (`similarity`, `mmr` or `hybrid_search`) when set.
+- After the turn, `ingestionTriggers.onTurnSummary: true` stores the turn as a document in `defaultIngestionDataSourceId`.
 
 Minimal example (persona JSON):
 
@@ -440,7 +431,7 @@ Minimal example (persona JSON):
 
 ### Ingestion summarization is opt-in
 
-Turn-summary ingestion can be cheap by storing raw text. Summarization is enabled only when:
+Turn-summary ingestion stores the raw turn text. An LLM summary replaces it only when:
 
 ```json
 {
@@ -471,16 +462,20 @@ const result = await rag.retrieveContext('How do GMIs work?', { topK: 5 });
 console.log(result.augmentedContext);
 ```
 
-## Vector Store Providers In This Repo
+## Vector Store Providers
 
-AgentOS currently ships these vector-store implementations:
+`VectorStoreManager` builds a store for each provider `type` in its config:
 
-- [`InMemoryVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/InMemoryVectorStore.ts) (ephemeral, dev/testing)
-- [`SqlVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/SqlVectorStore.ts) (persistent via `@framers/sql-storage-adapter`; embeddings stored as JSON blobs; optional SQLite FTS for hybrid)
-- [`HnswlibVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/HnswlibVectorStore.ts) (ANN search via `hnswlib-node`, optional peer dependency; optional file persistence via `persistDirectory`)
-- [`QdrantVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/QdrantVectorStore.ts) (remote/self-hosted Qdrant via HTTP; optional BM25 sparse vectors + hybrid fusion)
+| `type` | Store | Notes |
+|---|---|---|
+| `in_memory` | [`InMemoryVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/InMemoryVectorStore.ts) | Lost on exit |
+| `sql` | [`SqlVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/SqlVectorStore.ts) | Through `@framers/sql-storage-adapter` (`storage` or `adapter`); embeddings as base64 Float32 text; `hybridSearch()` fuses dense and lexical rankings (RRF by default); with `hnswlib-node` installed, an HNSW index per collection once an upsert leaves it with `hnswThreshold` documents (default 1000) |
+| `hnswlib` | [`HnswlibVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/HnswlibVectorStore.ts) | Deprecated in the manager (it logs a warning and points to `sql`); needs `hnswlib-node` |
+| `qdrant` | [`QdrantVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/QdrantVectorStore.ts) | Qdrant over HTTP; BM25 sparse vectors and `hybridSearch()` unless `enableBm25: false` |
+| `pinecone` | [`PineconeVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/PineconeVectorStore.ts) | See [Pinecone Backend](./PINECONE_BACKEND.md) |
+| `neo4j` | `Neo4jVectorStore` | The manager loads it with `require()`, which the ES-module build of `@framers/agentos` does not define, so this type fails to load through the manager; construct the store directly |
 
-If you want “true” large-scale vector DB behavior (tens of millions of vectors, filtered search at scale, etc.), add a provider implementation and wire it into `VectorStoreManager`.
+[`PostgresVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/vector_stores/PostgresVectorStore.ts) has no manager type; construct it directly (see [Postgres Backend](./POSTGRES_BACKEND.md)). Any other `type` throws.
 
 ### Qdrant Provider (Remote or Self-Hosted)
 
@@ -499,7 +494,7 @@ const vsmConfig: VectorStoreManagerConfig = {
       type: 'qdrant',
       url: process.env.QDRANT_URL!,
       apiKey: process.env.QDRANT_API_KEY,
-      enableBm25: true,
+      enableBm25: true, // the default
     },
   ],
   defaultProviderId: 'qdrant-main',
@@ -509,7 +504,7 @@ const vsmConfig: VectorStoreManagerConfig = {
 
 ## GraphRAG (Optional)
 
-[`GraphRAGEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) exists as a TypeScript-native implementation (graphology + Louvain community detection). It is not automatically used by GMIs by default; treat it as an advanced subsystem you opt into when your problem benefits from entity/relationship structure.
+[`GraphRAGEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/retrieval/graph/graphrag/GraphRAGEngine.ts) is a TypeScript implementation built on `graphology` and Louvain community detection (`graphology` and `graphology-communities-louvain` are optional peer dependencies). GMIs do not use it; a host that wants entity and relationship structure constructs it.
 
 - If you use non-OpenAI embedding models (e.g., Ollama), set `GraphRAGConfig.embeddingDimension`, or provide an `embeddingManager` so the engine can probe the embedding dimension at runtime.
 - `GraphRAGEngine` can run without embeddings and/or without an LLM:
@@ -551,64 +546,31 @@ Troubleshooting updates:
 If you run with an append-only / sealed storage policy, avoid hard deletes of memory or history.
 Prefer append-only tombstones/redactions so retrieval can ignore forgotten items while the audit trail remains verifiable.
 
-## Combined Vector + GraphRAG Search
+## The reference HTTP service
 
-The HTTP API supports running vector retrieval and GraphRAG in a single request via `includeGraphRag: true`. This combines:
+Combined vector and GraphRAG search, pipeline traces and the hnswlib environment variables belong to the reference HTTP service (the `@framers/agentos-http` routes a host mounts under `/api/agentos/rag`), not to `RetrievalAugmentor`: `retrieveContext()` takes no `includeGraphRag` or `debug` option.
 
-1. **Vector + BM25 hybrid** — standard chunk retrieval with Reciprocal Rank Fusion
-2. **GraphRAG local search** — entity/relationship/community traversal
-
-The response includes both `chunks` (ranked vector results) and `graphContext` (entities, relationships, community context) in one payload.
+`POST /api/agentos/rag/query` accepts `includeGraphRag: true`, which adds GraphRAG context (entities, relationships, communities) beside the ranked chunks, and `debug: true`, which adds a `debugTrace` with the steps of the run:
 
 ```bash
 curl -s -X POST http://localhost:3001/api/agentos/rag/query \
-  -H ‘content-type: application/json’ \
-  -d ‘{“query”:”agent security model”,”includeGraphRag”:true,”topK”:5}’ | jq
+  -H 'content-type: application/json' \
+  -d '{"query":"agent security model","includeGraphRag":true,"debug":true,"topK":5}' | jq
 ```
 
-Alternatively, use the programmatic API: `await rag.retrieveContext('agent security model', { includeGraphRag: true })`.
+With `AGENTOS_RAG_VECTOR_PROVIDER=hnswlib`, the service builds an hnswlib store from these variables:
 
-When to use combined search:
-- Questions requiring both textual similarity AND relational/structural context
-- Queries about how entities relate to each other (e.g., “how does X affect Y”)
-- When you want chunk-level evidence plus knowledge graph context in a single call
-
-## Debug Pipeline Tracing
-
-Set `debug: true` in the query request (or use `--debug` CLI flag) to get a step-by-step trace of the retrieval pipeline. Each step reports timing and relevant metrics:
-
-| Step | Data |
-|------|------|
-| `query_received` | query text, preset, topK, vectorProvider, collectionIds |
-| `variants_resolved` | base query, variant count, variant texts |
-| `vector_search` | provider (sql/hnswlib/qdrant), candidate count, latency, embedding model |
-| `keyword_search` | enabled, match count, latency |
-| `fusion` | strategy (RRF), vector/keyword/merged counts |
-| `graphrag` | entities found, relationships, communities, search time |
-| `pipeline_complete` | total latency, results returned |
-
-Enable globally via `AGENTOS_RAG_DEBUG=true` environment variable, or per-request with the `debug` flag.
-
-Alternatively, use the programmatic API: `await rag.retrieveContext('security tiers', { debug: true })`.
-
-## HNSW Vector Store Configuration
-
-When using `AGENTOS_RAG_VECTOR_PROVIDER=hnswlib`, the following environment variables configure the HNSW index:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AGENTOS_RAG_HNSWLIB_M` | `16` | Max number of connections per node (higher = better recall, more memory) |
-| `AGENTOS_RAG_HNSWLIB_EF_CONSTRUCTION` | `200` | Construction-time search depth (higher = better index quality, slower build) |
-| `AGENTOS_RAG_HNSWLIB_EF_SEARCH` | `100` | Query-time search depth (higher = better recall, slower query) |
-| `AGENTOS_RAG_HNSWLIB_PERSIST_DIR` | `./db_data/agentos_rag_hnswlib` | Directory for persisted HNSW index files |
-
-The health endpoint (`/api/agentos/rag/health`) reports the active `vectorProvider` and HNSW params when applicable.
+| Variable | Default |
+|----------|---------|
+| `AGENTOS_RAG_HNSWLIB_M` | `16` |
+| `AGENTOS_RAG_HNSWLIB_EF_CONSTRUCTION` | `200` |
+| `AGENTOS_RAG_HNSWLIB_EF_SEARCH` | `100` |
+| `AGENTOS_RAG_HNSWLIB_PERSIST_DIR` | `./db_data/agentos_rag_hnswlib` |
 
 ## Practical Guidance
 
-- Default recommendation: start with **vector (dense) retrieval**, then add **keyword (BM25/FTS)** for recall, then add a **reranker** only where it’s worth the latency/cost.
-- GraphRAG tends to pay off when questions depend on multi-hop relationships and “global summaries” (org structures, timelines, dependency graphs), not for everyday chat retrieval.
-- Use `--debug` to understand pipeline behavior and identify bottlenecks before tuning parameters.
+- Start with dense retrieval, add keyword (lexical) search for recall, and add a reranker where its latency and cost are worth it.
+- GraphRAG helps questions that depend on relationships across documents (organization structures, timelines, dependency graphs) more than everyday chat retrieval.
 
 ## Retrieval Strategies (Implemented)
 
@@ -617,7 +579,7 @@ The health endpoint (`/api/agentos/rag/health`) reports the active `vectorProvid
 - `similarity`: Dense similarity search (bi-encoder) via `IVectorStore.query()`.
 - `hybrid`: Dense + lexical fusion via `IVectorStore.hybridSearch()` when the store implements it.
   - `SqlVectorStore.hybridSearch()` performs BM25-style lexical scoring and fuses dense + lexical rankings (default: RRF).
-- `mmr`: Maximal Marginal Relevance diversification. The augmentor requests embeddings for candidates and then selects a diverse top-K set using `strategyParams.mmrLambda` (0..1).
+- `mmr`: Maximal Marginal Relevance. The augmentor fetches five times `topK` candidates with their embeddings and selects a diverse top-K set using `strategyParams.mmrLambda` (0 to 1, default 0.7).
 
 Notes:
 - If a store does not implement `hybridSearch()`, AgentOS falls back to dense `query()`.
@@ -625,66 +587,33 @@ Notes:
 
 ## Reranking and the Reranker Chain {#reranker-chain}
 
-If `RetrievalAugmentorServiceConfig.rerankerServiceConfig` is provided, AgentOS initializes [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) and auto-registers built-in providers declared in config: `cohere` (requires `apiKey`) and `local` (offline cross-encoder, requires Transformers.js: `@huggingface/transformers` preferred, or `@xenova/transformers`). Reranking is opt-in per request via `RagRetrievalOptions.rerankerConfig.enabled=true`.
+If `RetrievalAugmentorServiceConfig.rerankerServiceConfig` is provided, the augmentor builds a [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) and registers the built-in providers its `providers` list names: `cohere` (needs `apiKey`) and `local` (an offline cross-encoder through Transformers.js: `@huggingface/transformers`, or `@xenova/transformers`). Reranking is opt-in per request with `RagRetrievalOptions.rerankerConfig.enabled: true`.
 
-AgentOS supports chaining multiple reranking providers into a sequential pipeline. Each stage narrows the result set, producing progressively higher-quality rankings:
+`RerankerService.rerankChain(query, chunks, stages)` runs several providers one after another, each stage keeping its `topK`. The caller passes the stages; no config file or research depth sets a chain.
 
-```
-120 search results
-  → Stage 1: Local Cross-Encoder (120 → 30)    [~300ms, free]
-  → Stage 2: Cohere Rerank (30 → 15)            [~100ms, ~$0.001]
-  → Stage 3: LLM Judge (15 → 5)                 [~2s, ~$0.002]
-  → 5 high-confidence results
-```
+### Providers
 
-### Chain configuration
+| Provider id | Class | What it does |
+|---|---|---|
+| `local` | `LocalCrossEncoderReranker` | Transformers.js cross-encoder; default model `cross-encoder/ms-marco-MiniLM-L-6-v2` (`LOCAL_RERANKER_MODELS` lists the others) |
+| `cohere` | `CohereReranker` | Cohere's rerank API with the `apiKey` in its config; `COHERE_RERANKER_MODELS` lists the model ids, `rerank-v4.0-pro`, `rerank-v4.0-fast` and `rerank-v3.5` among them |
+| `llm-judge` | `LlmJudgeReranker` | Your `llmCallFn(system, user, model?)`: phase 1 scores up to 100 documents 0-10 in batches of 10 with `scoringModel`; phase 2 ranks the best 20 with `rankingModel`, falling back to the phase-1 order when it fails |
 
-```json title="agent.config.json"
-{
-  "rag": {
-    "reranking": {
-      "chain": [
-        { "provider": "local", "topK": 30, "model": "cross-encoder/ms-marco-MiniLM-L-6-v2" },
-        { "provider": "cohere", "topK": 15, "model": "rerank-v4.0-fast" },
-        { "provider": "llm-judge", "topK": 5 }
-      ]
-    }
-  }
-}
-```
+### Skipped stages
 
-### Available providers
-
-**Local cross-encoder (free, offline).** ONNX transformer models that auto-download on first use (~80-560 MB).
-
-| Model | Size | Speed (50 docs) | Quality |
-|---|---|---|---|
-| `cross-encoder/ms-marco-MiniLM-L-6-v2` | 80 MB | ~200 ms | Good |
-| `cross-encoder/ms-marco-MiniLM-L-12-v2` | 120 MB | ~400 ms | Better |
-| `BAAI/bge-reranker-base` | 110 MB | ~300 ms | Good |
-| `BAAI/bge-reranker-large` | 560 MB | ~800 ms | Best |
-
-**Cohere Rerank (cloud).** Requires `COHERE_API_KEY`. Models: `rerank-v4.0-pro`, `rerank-v4.0-fast`, `rerank-v3.5`.
-
-**LLM-as-judge (two-phase).** Uses the agent's LLM for relevance scoring. Phase 1 batch-scores documents in groups of 10 with a cheap model (0–10 scale); Phase 2 ranks the top candidates with a stronger model. Cost ~$0.002 per rerank with gpt-4o-mini.
-
-### Default chains by research depth
-
-| Depth | Default chain |
-|---|---|
-| `quick` | `[{ provider: "local", topK: 5 }]` |
-| `moderate` | `[{ provider: "local", topK: 15 }, { provider: "cohere", topK: 5 }]` |
-| `deep` | `[{ provider: "local", topK: 30 }, { provider: "cohere", topK: 15 }, { provider: "llm-judge", topK: 5 }]` |
-
-### Graceful degradation
-
-If a provider is unavailable (missing API key, model not loaded, API error), that stage is silently skipped and the pipeline continues with the next. The chain always produces results.
+`rerankChain()` skips a stage whose provider is not registered or reports itself unavailable, and keeps the previous ranking when a stage throws. With every stage skipped, it returns the chunks in their original order.
 
 ### Programmatic usage
 
 ```typescript
-import { RerankerService, LlmJudgeReranker, CohereReranker, LocalCrossEncoderReranker } from '@framers/agentos';
+import {
+  RerankerService,
+  LlmJudgeReranker,
+  CohereReranker,
+  LocalCrossEncoderReranker,
+} from '@framers/agentos/cognition/rag/reranking';
 
+// myLlmCall: (system, user, model?) => Promise<string>; chunks: RagRetrievedChunk[]
 const service = new RerankerService({ config: { providers: [] } });
 service.registerProvider(new LocalCrossEncoderReranker({ providerId: 'local' }));
 service.registerProvider(new CohereReranker({ providerId: 'cohere', apiKey: '...' }));
@@ -699,143 +628,111 @@ const results = await service.rerankChain('quantum computing', chunks, [
 
 ### Memory retrieval reranking
 
-The reranker chain integrates with the [Cognitive Memory System](./COGNITIVE_MEMORY.md). When a [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) is passed to [`CognitiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/CognitiveMemoryManager.ts) via the `rerankerService` config field, it runs a neural reranking pass after the cognitive scoring pipeline:
+When a [`RerankerService`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/reranking/RerankerService.ts) is passed to [`CognitiveMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/CognitiveMemoryManager.ts) in the `rerankerService` config field (see [Cognitive Memory](./COGNITIVE_MEMORY.md)), retrieval reranks the scored traces with the service's default provider after the cognitive scoring. The service's constructor only records the provider configs; register each provider:
 
 ```typescript
-import { CognitiveMemoryManager } from '@framers/agentos/memory';
-import { RerankerService, CohereReranker } from '@framers/agentos/rag/reranking';
+import { CognitiveMemoryManager } from '@framers/agentos';
+import { RerankerService, CohereReranker } from '@framers/agentos/cognition/rag/reranking';
 
 const rerankerService = new RerankerService({
   config: {
-    providers: [
-      { providerId: 'cohere', apiKey: process.env.COHERE_API_KEY!, defaultModelId: 'rerank-v3.5' },
-      { providerId: 'llm-judge' },
-    ],
+    providers: [{ providerId: 'cohere', defaultModelId: 'rerank-v3.5' }],
     defaultProviderId: 'cohere',
   },
 });
+rerankerService.registerProvider(
+  new CohereReranker({ providerId: 'cohere', apiKey: process.env.COHERE_API_KEY! }),
+);
 
+const manager = new CognitiveMemoryManager();
 await manager.initialize({
-  // ... other config ...
+  // ... the rest of the CognitiveMemoryConfig ...
   rerankerService,
 });
 ```
 
-Reranker scores blend with the cognitive composite:
+For each trace the reranker returns, the score becomes:
 
 ```
-finalScore = 0.7 × cognitiveComposite + 0.3 × neuralRerankerScore
+retrievalScore = 0.7 × cognitiveComposite + 0.3 × rerankerScore
 ```
 
-The 0.7/0.3 weighting is fixed: the cognitive pipeline already accounts for 6 independent signals (Ebbinghaus decay, mood congruence, spreading activation, similarity, recency, importance) and the reranker adds a 7th dimension of semantic relevance. If the provider is unavailable, retrieval falls back to cognitive-only scoring with no degradation.
+The weights are fixed. The cognitive composite combines six signals (strength, similarity, recency, emotional congruence, graph activation, importance). Traces outside the reranker's top N keep their cognitive score. When the reranker throws (no provider registered, an API error), retrieval keeps the cognitive scores.
 
 ## Multimodal RAG (Image + Audio)
 
-AgentOS’ core RAG APIs are text-first. The recommended multimodal pattern is:
+The pattern for images and audio:
 
-- Persist asset metadata (and optionally bytes).
-- Derive a **text representation** (caption/transcript/OCR/etc).
-- Index that text as a normal RAG document (so the same vector/BM25/rerank pipeline applies).
-- Optionally add modality embeddings (image-to-image / audio-to-audio) as an acceleration path.
+- Keep the asset's metadata (and its bytes if needed).
+- Derive a text representation (caption, transcript, OCR text).
+- Index that text as a normal RAG document, so the same vector, lexical and rerank steps apply.
+- Optionally add modality embeddings for image-to-image or audio-to-audio search.
 
-See [MULTIMODAL_RAG.md](./MULTIMODAL_RAG.md) for the reference implementation and HTTP API.
+[Multimodal RAG](./MULTIMODAL_RAG.md) describes `MultimodalIndexer` and the reference HTTP routes.
 
 ---
 
 ## Query Classification and Deep Research {#query-classification}
 
+Research-depth classification is a Wunderland feature, built on AgentOS tools: `wunderland chat` and the `POST /chat` route of `wunderland start` classify each message and, when it needs research, put an instruction in front of it that names the research tools. The tools come from the `web-search`, `news-search` and `deep-research` extension packs.
 
+### Research depth tiers
 
-A trivial question like "what's 2+2" should answer instantly from the model's own weights. A research-grade question like "what are the latest treatment options for drug-resistant tuberculosis" should drive the agent to decompose the query, search across sources, and assemble cited evidence. Getting this wrong runs both directions: searching every trivial question wastes latency and tokens; never searching the hard ones produces under-grounded answers.
+The classifier (`classifyResearchDepth()` in Wunderland) sends the message to a small model with a fixed prompt and reads back one of four depths. The depth decides the instruction placed before the message:
 
-AgentOS routes this with a tiered pre-classifier. A cheap model (configurable; `gpt-4o-mini`, `claude-haiku`, or a local `qwen2.5:3b` via Ollama are all viable choices) runs _before_ the main LLM turn, examines the query and any conversation history, and assigns a research depth tier. Subsequent stages of the pipeline — retrieval, tool selection, generation — behave according to that tier.
+| Depth | The prompt's examples | Instruction added to the message |
+|-------|-----------------------|----------------------------------|
+| `none` | Greetings, general knowledge, code syntax, math, creative writing | None |
+| `quick` | Weather, a stock price, latest news, a recent term | Use `web_search` or `news_search` and cite sources |
+| `moderate` | Product comparisons, "best X for Y", travel | Use `researchAggregate` or `researchInvestigate` across sources, with citations |
+| `deep` | Medical, legal, scientific, financial planning, learning plans | Use `deep_research` with `depth="deep"`: decompose, search, analyze gaps, synthesize with citations |
 
-### Research Depth Tiers
+The instruction is text in the user message; the classifier does not change which tools the agent has. A classifier error or an unparseable answer gives `none`, so the turn goes on without research.
 
-| Tier       | When it triggers                                               | What happens                                                                       | Budget            |
-| ---------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ----------------- |
-| `none`     | Greetings, simple facts, code help, creative writing           | LLM answers from training data. No tools called.                                   | 0s, 0 searches    |
-| `quick`    | Weather, stock price, "what is X", latest news                 | 1-2 web searches, cite sources                                                     | 30s, 10 searches  |
-| `moderate` | Product comparisons, travel recs, "best X for Y"               | Multi-source research with `researchAggregate` or `researchInvestigate`            | 2min, 20 searches |
-| `deep`     | Medical, legal, scientific, financial planning, learning plans | Full `deep_research` pipeline: decompose, search, extract, gap-analyze, synthesize | 9min, 50 searches |
+The classifier model is `gpt-4o-mini`, or `gemini-2.0-flash-lite` with the `gemini` provider, or `qwen2.5:3b` with `ollama`. It runs on every message that has no explicit depth, and nothing caches its answers.
 
-The classifier defaults to `none` on failure. A broken classifier never blocks the main conversation.
+### Explicit depth
 
-### The Research Tools
+| Input | Depth |
+|-------|-------|
+| `/research <query>` | `moderate` |
+| `/deep <query>` | `deep` |
+| Any other message | Classified |
 
-Six tools form the research stack, from lightweight to heavy:
+The prefix is removed from the message before the instruction is added.
 
-| Tool                  | Purpose                                            | Side effects |
-| --------------------- | -------------------------------------------------- | ------------ |
-| `web_search`          | Single web search query                            | None         |
-| `news_search`         | Search recent news articles                        | None         |
-| `researchInvestigate` | Targeted investigation of a specific topic         | None         |
-| `researchAcademic`    | Search academic papers and scholarly sources       | None         |
-| `researchAggregate`   | Aggregate findings across multiple search results  | None         |
-| `deep_research`       | Full 3-phase pipeline with recursive decomposition | None         |
+### The research tools
 
-The classifier decides which tools to inject into the prompt based on the depth tier. `quick` gets `web_search` and `news_search`. `moderate` gets `researchAggregate` and `researchInvestigate`. `deep` triggers the full `deep_research` tool.
+| Tool | Pack | Purpose |
+|------|------|---------|
+| `web_search` | `web-search` | One web search |
+| `news_search` | `news-search` | Recent news articles |
+| `researchInvestigate` | `deep-research` | Targeted investigation of one topic |
+| `researchAcademic` | `deep-research` | Academic and scholarly sources |
+| `researchAggregate` | `deep-research` | Findings aggregated across searches |
+| `researchScrape`, `researchTrending` | `deep-research` | Page scraping and trending topics |
+| `deep_research` | `deep-research` | The three-phase pipeline below |
 
-### The 3-Phase Deep Research Pipeline
-
-When `deep_research` runs, it follows a structured process:
+### The `deep_research` pipeline
 
 ```mermaid
 flowchart TD
-    Q[User Query] --> P1
-
-    P1["Phase 1: DECOMPOSE<br/><i>small model</i><br/>LLM breaks query into sub-questions<br/>Creates a research tree"]
-    P1 --> P2
-
-    P2["Phase 2: SEARCH<br/>web_search → Extract pages →<br/>Analyze gaps → Recurse<br/><i>Repeat until budget exhausted</i>"]
-    P2 --> P3
-
-    P3["Phase 3: SYNTHESIZE<br/><i>primary model</i><br/>Merges all findings into a<br/>structured report with citations"]
+    Q[Query] --> P1["Decompose into sub-questions"]
+    P1 --> P2["Search, extract pages, analyze gaps, recurse"]
+    P2 --> P3["Synthesize a report with citations"]
 ```
 
-Phase 2 iterates. Each iteration searches, extracts, analyzes gaps, and optionally spawns child queries to fill those gaps. The number of iterations depends on depth:
+The search phase repeats until its iterations or a budget run out. [`ResearchBudgetTracker`](https://github.com/framerslab/agentos-extensions/blob/master/registry/curated/research/deep-research/src/engine/ResearchBudgetTracker.ts) enforces the limits for the requested depth, and the engine synthesizes from what it has when one is reached:
 
-| Depth      | Default iterations | Max searches | Max extractions | Max LLM calls | Time limit |
-| ---------- | ------------------ | ------------ | --------------- | ------------- | ---------- |
-| `quick`    | 1                  | 10           | 5               | 3             | 30s        |
-| `moderate` | 3                  | 20           | 10              | 8             | 2 min      |
-| `deep`     | 6                  | 50           | 25              | 20            | 9 min      |
+| Depth | Iterations | Searches | Page extractions | LLM calls | Time |
+|-------|-----------:|---------:|-----------------:|----------:|------|
+| `quick` | 1 | 10 | 5 | 3 | 30 s |
+| `moderate` | 3 | 20 | 10 | 8 | 2 min |
+| `deep` | 6 | 50 | 25 | 20 | 9 min |
 
-A [`ResearchBudgetTracker`](https://github.com/framerslab/agentos-extensions/blob/master/registry/curated/research/deep-research/src/engine/ResearchBudgetTracker.ts) enforces hard caps on all dimensions. When any budget is exhausted, the engine moves to synthesis with whatever findings it has.
+### HTTP API (`wunderland start`)
 
-### LLM-as-Judge Auto-Classifier
-
-Enabled by default. Before every chat turn, the classifier runs a fast LLM call with a structured prompt:
-
-```
-You are a query complexity classifier. Given a user query, classify it
-into ONE of these research depth tiers: none, quick, moderate, deep.
-
-Respond with ONLY a JSON object:
-{"depth": "none|quick|moderate|deep", "reasoning": "one sentence why"}
-```
-
-The classifier uses the cheapest available model:
-
-- OpenAI: `gpt-4o-mini`
-- Gemini: `gemini-2.5-flash-lite`
-- Ollama: `llama3.2`
-
-Classification typically adds 200-400ms to the turn. The result is cached per query.
-
-### Override Patterns
-
-Explicit prefixes bypass the classifier entirely:
-
-| Input                                                    | Resolved depth  |
-| -------------------------------------------------------- | --------------- |
-| `/research what are the best hiking trails in Patagonia` | `moderate`      |
-| `/deep explain the neurochemistry of psilocybin`         | `deep`          |
-| Regular message (no prefix)                              | Auto-classified |
-
-### HTTP API
-
-### Body Fields
+`POST /chat` takes the depth in the body:
 
 ```json
 {
@@ -844,25 +741,14 @@ Explicit prefixes bypass the classifier entirely:
 }
 ```
 
-| `research` value | Effect                    |
-| ---------------- | ------------------------- |
-| `true`           | Forces `moderate` depth   |
-| `"deep"`         | Forces `deep` depth       |
-| `"quick"`        | Forces `quick` depth      |
-| omitted          | Auto-classified (default) |
+| `research` | Depth |
+|------------|-------|
+| `true` | `moderate` |
+| `"deep"` | `deep` |
+| `"quick"` | `quick` |
+| omitted | Classified (unless `"autoClassify": false` in the body) |
 
-You can also disable auto-classification per request:
-
-```json
-{
-  "message": "Hello",
-  "autoClassify": false
-}
-```
-
-### Streaming Research Progress
-
-When `"stream": true` is set, research progress events are pushed as SSE:
+With `"stream": true`, the route answers with server-sent events: tool progress as `event: progress` with a `SYSTEM_PROGRESS` payload, and the answer as `event: reply`:
 
 ```bash
 curl -N -X POST http://localhost:3777/chat \
@@ -870,24 +756,15 @@ curl -N -X POST http://localhost:3777/chat \
   -d '{"message": "Explain CRISPR gene editing safety concerns", "research": "deep", "stream": true}'
 ```
 
-Progress events arrive as `event: progress` with a `SYSTEM_PROGRESS` payload:
-
 ```
 event: progress
 data: {"type":"SYSTEM_PROGRESS","toolName":"deep_research","phase":"decomposing","message":"Decomposing query into sub-questions","progress":0.1}
 
-event: progress
-data: {"type":"SYSTEM_PROGRESS","toolName":"deep_research","phase":"searching","message":"Searching sources \"CRISPR off-target effects\" (iter 1/6, 3 findings)","progress":0.3}
-
 event: reply
-data: {"type":"REPLY","reply":"## CRISPR Gene Editing Safety Concerns\n\n..."}
+data: {"type":"REPLY","reply":"## CRISPR Gene Editing Safety Concerns\n\n...","personaId":"..."}
 ```
 
-See [Streaming Semantics](/architecture/streaming-semantics) for the full SSE protocol.
-
-### Configuration
-
-### agent.config.json
+### Configuration (`agent.config.json`)
 
 ```json
 {
@@ -898,38 +775,21 @@ See [Streaming Semantics](/architecture/streaming-semantics) for the full SSE pr
 }
 ```
 
-| Field                       | Type                                        | Default   | Description                                                                                              |
-| --------------------------- | ------------------------------------------- | --------- | -------------------------------------------------------------------------------------------------------- |
-| `research.autoClassify`     | `boolean`                                   | `true`    | Enable the LLM-as-judge classifier                                                                       |
-| `research.minDepthToInject` | `"none" \| "quick" \| "moderate" \| "deep"` | `"quick"` | Minimum classified depth before research tools are injected. Set to `"moderate"` to skip quick searches. |
-
-Setting `autoClassify: false` disables all automatic research — the agent only researches when you explicitly use `/research`, `/deep`, or pass the `research` body field.
-
-Setting `minDepthToInject: "moderate"` means queries classified as `quick` are answered from training data. Only `moderate` and `deep` queries trigger tool injection.
-
-### Example Queries
-
-| Query                                                                    | Expected classification | Behavior                                       |
-| ------------------------------------------------------------------------ | ----------------------- | ---------------------------------------------- |
-| "Hello, how are you?"                                                    | `none`                  | Direct LLM response                            |
-| "What's the weather in Tokyo?"                                           | `quick`                 | Single web search                              |
-| "Best laptop for machine learning under $2000"                           | `moderate`              | Multi-source comparison                        |
-| "What are the treatment options for stage 3 non-small cell lung cancer?" | `deep`                  | Full research pipeline with medical literature |
-| "/research top AI startups in 2026"                                      | `moderate` (forced)     | Multi-source research                          |
-| "/deep history of the Byzantine Empire"                                  | `deep` (forced)         | Full pipeline                                  |
+| Field | Default | Effect |
+|-------|---------|--------|
+| `research.autoClassify` | `true` | `false` turns the classifier off; `/research`, `/deep` and the `research` body field keep working |
+| `research.minDepthToInject` | `"quick"` | The lowest classified depth that adds an instruction; `"moderate"` leaves `quick` messages without one |
 
 ### Key Files
 
-| File                                                                                                      | Purpose                      |
-| --------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| `packages/wunderland/src/runtime/research-classifier.ts`                                                  | LLM-as-judge classifier      |
-| [`packages/agentos-extensions/registry/curated/research/deep-research/src/engine/DeepResearchTool.ts`](https://github.com/framerslab/agentos-extensions/blob/master/registry/curated/research/deep-research/src/engine/DeepResearchTool.ts)      | ITool wrapper for the engine |
-| [`packages/agentos-extensions/registry/curated/research/deep-research/src/engine/DeepResearchEngine.ts`](https://github.com/framerslab/agentos-extensions/blob/master/registry/curated/research/deep-research/src/engine/DeepResearchEngine.ts)    | Core research pipeline       |
-| [`packages/agentos-extensions/registry/curated/research/deep-research/src/engine/ResearchBudgetTracker.ts`](https://github.com/framerslab/agentos-extensions/blob/master/registry/curated/research/deep-research/src/engine/ResearchBudgetTracker.ts) | Budget enforcement           |
-| [`packages/agentos-extensions/registry/curated/research/deep-research/src/engine/types.ts`](https://github.com/framerslab/agentos-extensions/blob/master/registry/curated/research/deep-research/src/engine/types.ts)                 | Type definitions             |
-| [`packages/agentos-extensions/registry/curated/research/deep-research/src/tools/investigate.ts`](https://github.com/framerslab/agentos-extensions/blob/master/registry/curated/research/deep-research/src/tools/investigate.ts)            | researchInvestigate tool     |
-| [`packages/agentos-extensions/registry/curated/research/deep-research/src/tools/academic.ts`](https://github.com/framerslab/agentos-extensions/blob/master/registry/curated/research/deep-research/src/tools/academic.ts)               | researchAcademic tool        |
-| [`packages/agentos-extensions/registry/curated/research/deep-research/src/tools/aggregate.ts`](https://github.com/framerslab/agentos-extensions/blob/master/registry/curated/research/deep-research/src/tools/aggregate.ts)              | researchAggregate tool       |
+| File | Purpose |
+|------|---------|
+| `wunderland`: `src/runtime/agentos-bridge/research-classifier.ts` | Classifier, instruction text, depth threshold |
+| `wunderland`: `src/cli/commands/start/routes/chat.ts` | `POST /chat` research handling and streaming |
+| [`deep-research/src/engine/DeepResearchTool.ts`](https://github.com/framerslab/agentos-extensions/blob/master/registry/curated/research/deep-research/src/engine/DeepResearchTool.ts) | The `deep_research` tool |
+| [`deep-research/src/engine/DeepResearchEngine.ts`](https://github.com/framerslab/agentos-extensions/blob/master/registry/curated/research/deep-research/src/engine/DeepResearchEngine.ts) | The pipeline |
+| [`deep-research/src/engine/types.ts`](https://github.com/framerslab/agentos-extensions/blob/master/registry/curated/research/deep-research/src/engine/types.ts) | Budgets and iterations per depth |
+| [`deep-research/src/tools/`](https://github.com/framerslab/agentos-extensions/tree/master/registry/curated/research/deep-research/src/tools) | `researchInvestigate`, `researchAcademic`, `researchAggregate`, `researchScrape`, `researchTrending` |
 
 ### Related
 
