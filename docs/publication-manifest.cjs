@@ -232,7 +232,6 @@ const publicationManifest = [
   agentosDoc('SOCIAL_POSTING.md', 'features/social-posting.md', 'Social Posting', 'Channels & Social', 2),
 
   agentosDoc('STRUCTURED_OUTPUT.md', 'features/structured-output.md', 'Structured Output', 'Tools & Capabilities', 1),
-  agentosDoc('features/STRUCTURED_REPLY.md', 'features/structured-reply.md', 'Structured Reply', 'Tools & Capabilities', 1.2),
   siteDoc('features/llm-output-validation.md', 'features/llm-output-validation.md', 'LLM Output Validation', 'Model Quality & Cost', 1.5),
   agentosDoc('EVALUATION.md', 'features/evaluation-guide.md', 'Evaluation Guide', 'Model Quality & Cost', 2),
   agentosDoc('features/PROMPT_CACHING.md', 'features/prompt-caching.md', 'Prompt Caching', 'Model Quality & Cost', 2.5),
@@ -242,7 +241,7 @@ const publicationManifest = [
   agentosDoc('EVALUATION_FRAMEWORK.md', 'features/evaluation-framework.md', 'Evaluation Framework', 'Model Quality & Cost', 4, {
     sidebar: false,
   }),
-  agentosDoc('STRUCTURED_OUTPUT_API.md', 'features/structured-output-api.md', 'Structured Output API (generateObject / streamObject)', 'Tools & Capabilities', 5, {
+  agentosDoc('STRUCTURED_OUTPUT_API.md', 'features/structured-output-api.md', 'Structured Output API (generateObject / streamObject / embedText)', 'Tools & Capabilities', 5, {
     sidebar: false,
   }),
   agentosDoc('features/STRUCTURED_REPLY.md', 'features/structured-reply.md', 'Structured Reply', 'Tools & Capabilities', 5.5),
@@ -254,7 +253,7 @@ const publicationManifest = [
     section: 'Orchestration',
   }),
   agentosDoc('AGENT_COMMUNICATION.md', 'features/agent-communication.md', 'Agent Communication', 'Orchestration', 4),
-  agentosDoc('MEMORY_CONSOLIDATION.md', 'features/memory-consolidation.md', 'Self-Improving Memory', 'Memory', 6, {
+  agentosDoc('MEMORY_CONSOLIDATION.md', 'features/memory-consolidation.md', 'Memory Consolidation', 'Memory', 6, {
     sidebar: false,
   }),
   staticDoc('features/self-improving-agents.md', 'features/self-improving-agents.md', 'Self-Improving Agents', 'Tools & Capabilities', 6.5),
