@@ -103,8 +103,9 @@ export class AudioWorkletCapture {
   }
 
   /**
-   * Hears another stream with the same node: a new microphone, or the tab's sound added. A stream with no audio track
-   * throws, and the capture keeps hearing the stream it had.
+   * Hears another stream with the same node: a new microphone, or the tab's sound added. The samples the worklet holds
+   * toward its next block are kept and open the first block after the change, so no sample it took in before the
+   * change is dropped. A stream with no audio track throws, and the capture keeps hearing the stream it had.
    */
   setStream(stream: MediaStream): void {
     if (this.node) {
