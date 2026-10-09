@@ -2,13 +2,16 @@
 /**
  * @module hearing/capture-worklet
  * The worklet module of `AudioWorkletCapture`: in an `AudioWorkletGlobalScope` it registers a processor that mixes its
- * first input to mono and posts blocks of `blockSize` samples to the page. It imports nothing, so its built file
- * (`dist/io/hearing/capture-worklet.js`) is served on its own from the host's origin; outside a worklet (a test, a
- * bundle) it registers nothing and exports its pure parts.
+ * first input to mono and posts blocks of `blockSize` samples to the page, and ends once the page posts it
+ * `CAPTURE_STOP_MESSAGE`. It imports nothing, so its built file (`dist/io/hearing/capture-worklet.js`) is served on
+ * its own from the host's origin; outside a worklet (a test, a bundle) it registers nothing and exports its pure parts.
  */
 
 /** The name the processor registers under. */
 export const CAPTURE_PROCESSOR_NAME = 'agentos-capture';
+
+/** The message the page posts the processor to end it: from then on its `process()` answers `false`. */
+export const CAPTURE_STOP_MESSAGE = 'stop';
 
 /** The channels of one input mixed to mono (their mean); `null` when the input has no channel or no sample. */
 export function mixToMono(channels: readonly Float32Array[]): Float32Array | null {
@@ -65,13 +68,19 @@ if (typeof scope.registerProcessor === 'function' && scope.AudioWorkletProcessor
     CAPTURE_PROCESSOR_NAME,
     class extends Base {
       private readonly blocks: BlockAccumulator;
+      /** Set by the page's stop message; `process()` then answers `false`, so the browser can end the node. */
+      private stopped = false;
 
       constructor(options?: { processorOptions?: { blockSize?: number } }) {
         super(options);
         this.blocks = new BlockAccumulator(options?.processorOptions?.blockSize ?? 2048);
+        this.port.onmessage = (event: MessageEvent) => {
+          if (event.data === CAPTURE_STOP_MESSAGE) this.stopped = true;
+        };
       }
 
       process(inputs: Float32Array[][]): boolean {
+        if (this.stopped) return false;
         const mono = mixToMono(inputs[0] ?? []);
         if (mono) for (const block of this.blocks.push(mono)) this.port.postMessage(block, [block.buffer as ArrayBuffer]);
         return true;

@@ -14,7 +14,7 @@
  * await capture.start();
  * ```
  */
-import { CAPTURE_PROCESSOR_NAME } from './capture-worklet.js';
+import { CAPTURE_PROCESSOR_NAME, CAPTURE_STOP_MESSAGE } from './capture-worklet.js';
 
 /** Options of {@link AudioWorkletCapture}. */
 export interface AudioWorkletCaptureOptions {
@@ -118,13 +118,17 @@ export class AudioWorkletCapture {
   }
 
   /**
-   * Stops: every node disconnected, every listener removed, and no block handed on after it; a start still loading the
-   * module builds nothing. A capture started again hands its blocks to the listeners added after the stop.
+   * Stops: every node disconnected, the worklet's processor told to end, every listener removed, and no block handed
+   * on after it; a start still loading the module builds nothing. A capture started again hands its blocks to the
+   * listeners added after the stop.
    */
   stop(): void {
     this.generation += 1;
     this.listeners.clear();
-    if (this.node) this.node.port.onmessage = null;
+    if (this.node) {
+      this.node.port.onmessage = null;
+      this.node.port.postMessage(CAPTURE_STOP_MESSAGE);
+    }
     this.source?.disconnect();
     this.node?.disconnect();
     this.silent?.disconnect();

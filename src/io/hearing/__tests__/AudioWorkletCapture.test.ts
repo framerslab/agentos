@@ -5,7 +5,7 @@ import { BlockAccumulator, CAPTURE_PROCESSOR_NAME, mixToMono } from '../capture-
 /** A fake AudioWorkletNode: the capture sets its port's handler, and `emit` plays a block the processor posted. */
 class FakeNode {
   static made: FakeNode[] = [];
-  readonly port = { onmessage: null as ((event: { data: Float32Array }) => void) | null };
+  readonly port = { onmessage: null as ((event: { data: Float32Array }) => void) | null, postMessage: vi.fn() };
   readonly connect = vi.fn();
   readonly disconnect = vi.fn();
   constructor(
@@ -111,13 +111,16 @@ describe('AudioWorkletCapture', () => {
     expect(node.connect).toHaveBeenCalledWith(gain);
   });
 
-  it("hands the listeners the blocks of the processor its worklet module registers, with the context's rate", async () => {
-    /** The registered processor as the test drives it; its posts go to the port of the node that made it. */
-    type Joined = { readonly port: { postMessage: (block: Float32Array) => void }; process(inputs: Float32Array[][]): boolean };
+  it("hands the listeners the blocks of the processor its worklet module registers, with the context's rate, and ends that processor when it stops", async () => {
+    /** The registered processor as the test drives it; its port is joined to the port of the node that made it. */
+    type Joined = {
+      readonly port: { onmessage: ((event: { data: unknown }) => void) | null; postMessage: (block: Float32Array) => void };
+      process(inputs: Float32Array[][]): boolean;
+    };
     type JoinedClass = new (options?: { processorOptions?: { blockSize?: number } }) => Joined;
     const registered = new Map<string, JoinedClass>();
     class FakeProcessor {
-      readonly port: Joined['port'] = { postMessage: () => undefined };
+      readonly port: Joined['port'] = { onmessage: null, postMessage: () => undefined };
     }
     vi.stubGlobal('AudioWorkletProcessor', FakeProcessor);
     vi.stubGlobal('registerProcessor', (name: string, processor: JoinedClass) => registered.set(name, processor));
@@ -132,6 +135,7 @@ describe('AudioWorkletCapture', () => {
         if (!Processor) throw new Error(`no processor is registered as ${name}`);
         const processor = new Processor(options);
         processor.port.postMessage = (block) => this.port.onmessage?.({ data: block });
+        this.port.postMessage.mockImplementation((message: unknown) => processor.port.onmessage?.({ data: message }));
         processors.push(processor);
       }
     }
@@ -147,6 +151,11 @@ describe('AudioWorkletCapture', () => {
     expect(heard).toEqual([]);
     expect(processor.process([[new Float32Array([0, 0, 0])]])).toBe(true);
     expect(heard).toEqual([[[0.5, 0.5, 0.5, 0], 48_000]]);
+    capture.setStream({} as MediaStream);
+    expect(processor.process([[new Float32Array([0.25, 0.25])]])).toBe(true);
+    expect(heard).toEqual([[[0.5, 0.5, 0.5, 0], 48_000], [[0, 0, 0.25, 0.25], 48_000]]);
+    capture.stop();
+    expect(processor.process([[new Float32Array([1, 1, 1, 1])]])).toBe(false);
   });
 
   it('takes a new stream without a new node, and hands on nothing once stopped', async () => {
