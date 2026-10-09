@@ -133,6 +133,18 @@ describe("a day's reservations", () => {
     await expect(reserveSpend(store, { kind: 'call', micro: 1, at: AT, expires: LATER, capMicro: LIMIT })).rejects.toBeInstanceOf(CostCapExceededError);
   });
 
+  it('refuses every admission whose cap is not whole micro-dollars, reserving nothing', async () => {
+    // A cap of infinity, or one with a fraction, would admit the amount; NaN and a cap below zero never do.
+    const store = new InMemorySpendDayStore();
+    for (const capMicro of [Number.POSITIVE_INFINITY, LIMIT + 0.5, Number.NaN, -1]) {
+      await expect(
+        reserveSpend(store, { kind: 'call', micro: 1, at: AT, expires: LATER, capMicro }),
+        `a cap of ${capMicro}`,
+      ).rejects.toBeInstanceOf(CostCapExceededError);
+    }
+    expect(await store.lockDay(utcDay(AT))).toBe(0);
+  });
+
   it('refuses every admission while its store answers a total that is not whole micro-dollars, which the cap alone would admit', async () => {
     // Each passes the cap check alone: added to the admission, minus infinity, a total below zero and a fraction all fit.
     for (const total of [Number.NEGATIVE_INFINITY, -1_000_000, 2.5]) {

@@ -46,7 +46,10 @@ export interface SpendAdmission {
   at: Date;
   /** When the reservation's time is up, after which {@link releaseExpiredSpend} settles it at its whole amount. */
   expires: Date;
-  /** The day's cap for this admission in micro-dollars: the whole limit, or a share of it for a class of admission. */
+  /**
+   * The day's cap for this admission in whole micro-dollars, zero or more: the whole limit, or a share of it for a class
+   * of admission. Any other cap, infinity included, refuses the admission.
+   */
   capMicro: number;
 }
 
@@ -96,7 +99,7 @@ export function settledTokensMicro(promptTokens: unknown, completionTokens: unkn
  * Reserves an admission's largest cost in the day it starts and answers the reservation's id, or throws
  * CostCapExceededError (`daily`) reserving nothing. A cost that is not whole micro-dollars, zero or more, is a
  * RangeError; a committed total the store does not answer as whole micro-dollars, zero or more, refuses the admission,
- * since the day's spending is then not known.
+ * since the day's spending is then not known, and so does a cap that is not whole micro-dollars, zero or more.
  */
 export async function reserveSpend(store: SpendDayStore, admission: SpendAdmission): Promise<string> {
   if (!isWholeCount(admission.micro)) {
@@ -105,9 +108,9 @@ export async function reserveSpend(store: SpendDayStore, admission: SpendAdmissi
   const day = utcDay(admission.at);
   const committed = await store.lockDay(day);
   // A total that is not whole micro-dollars, zero or more, is not one a store keeping whole amounts answers, so the
-  // day's spending is not known, and minus infinity or a total below zero would pass the cap check. That check is written
-  // as "not within the cap" so that a cap that is not a number refuses too: every comparison with NaN is false.
-  if (!isWholeCount(committed) || !(committed + admission.micro <= admission.capMicro)) {
+  // day's spending is not known, and minus infinity or a total below zero would pass the cap check. A cap that is not
+  // whole micro-dollars, zero or more, is refused too: a cap of infinity would admit every amount.
+  if (!isWholeCount(committed) || !isWholeCount(admission.capMicro) || !(committed + admission.micro <= admission.capMicro)) {
     throw new CostCapExceededError(admission.kind, 'daily', committed / 1_000_000, admission.capMicro / 1_000_000);
   }
   return store.addReservation({ day, kind: admission.kind, micro: admission.micro, created: admission.at, expires: admission.expires });
