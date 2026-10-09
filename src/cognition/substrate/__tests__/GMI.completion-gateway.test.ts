@@ -11,6 +11,7 @@
  * over a scripted gateway.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 vi.mock('../../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('../../../api/__tests__/helpers/stubProviders')).stubProviderClass('openai') }));
 vi.mock('../../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('../../../api/__tests__/helpers/stubProviders')).stubProviderClass('anthropic') }));
 import { createCompletionGateway } from '../../../api/runtime/completionGateway';
@@ -175,5 +176,22 @@ describe('GMI turn through the real completion gateway', () => {
     expect(of(chunks, GMIOutputChunkType.ERROR)[0]?.errorDetails?.code).toBe(GMIErrorCode.LLM_PROVIDER_ERROR);
     expect(failedBills(chunks)).toEqual([[reported, servedByPrimary]]);
     expect(output.usage).toMatchObject(reported);
+  });
+
+  it('a structured reply on a hop whose payload carries no schema (Claude Sonnet 5.5) has the schema instruction in its prompt once', async () => {
+    const k = key();
+    const s = script('anthropic', k, { replies: [reply.text('{"city":"Lyon"}')] });
+    const { gmi } = await createScriptedGmi({
+      gateway: createCompletionGateway({ apiKey: k, fallbackProviders: [] }),
+      persona: { defaultProviderId: 'anthropic', defaultModelId: 'claude-sonnet-5-5' },
+    });
+    // The GMI puts the structured reply's instruction in the system prompt and hands its Zod schema to the gateway.
+    const { output } = await runTurn(gmi, textTurn('t1', 'Where?', { options: { structuredReply: { schema: z.object({ city: z.string() }), name: 'place' } } }));
+    expect(output.structuredOutput?.value).toEqual({ city: 'Lyon' });
+    const system = s.seen[0].messages
+      .filter((m) => m.role === 'system')
+      .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
+      .join('\n');
+    expect(system.split('The JSON MUST conform to this JSON Schema:')).toHaveLength(2);
   });
 });
