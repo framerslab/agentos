@@ -132,6 +132,12 @@ export class SpendBudget {
    * pass what is left; `estimateUSD` undefined means the model has no price row, which `unpriced: 'allow'` checks as
    * a call that costs nothing. `model`, the call's provider and model, is named in the refusal of a model with no
    * price row.
+   *
+   * @throws {CostCapExceededError} At a cap. Its `capType`, `currentCost` and `limit` are those of the cap that refused
+   *   the call: the id's total for the session or the day and that cap, or, at the guard's single-operation cap, the
+   *   call's estimate and that cap. The token cap has no cap type of its own, so its refusal carries `session`, the
+   *   run's dollars and `maxCostUSD`, and a message that names the token cap and the token counts.
+   * @throws {UnpricedModelError} For a model with no price row, unless the budget allows one.
    */
   assertCanSpend(
     estimateUSD: number | undefined,
@@ -148,8 +154,13 @@ export class SpendBudget {
     }
     const max = this.options.maxTotalTokens;
     if (max !== undefined && this.tokens + estimateTokens > max) {
-      this.refuse({ budgetId: this.id, capType: 'tokens', what, reason: `${this.tokens + estimateTokens} tokens would pass ${max}` }, () => {
-        throw new CostCapExceededError(this.id, 'session', this.spentUSD(), this.options.maxCostUSD);
+      const reason = `${this.tokens + estimateTokens} tokens would pass ${max}`;
+      this.refuse({ budgetId: this.id, capType: 'tokens', what, reason }, () => {
+        // CostCapExceededError's cap types are the guard's and its numbers are dollars, so the token cap's refusal says
+        // which cap it was in its message.
+        const error = new CostCapExceededError(this.id, 'session', this.spentUSD(), this.options.maxCostUSD);
+        error.message = `Token cap exceeded for budget '${this.id}': ${reason}`;
+        throw error;
       });
       return;
     }
@@ -159,7 +170,14 @@ export class SpendBudget {
     if (verdict.allowed) return;
     const capType = verdict.capType ?? 'session';
     this.refuse({ budgetId: this.id, capType, what, reason: verdict.reason ?? 'the budget is spent' }, () => {
-      throw new CostCapExceededError(this.id, capType, this.spentUSD(), this.options.maxCostUSD);
+      // The numbers of the cap that refused the call: the day's total and its limit for the daily cap, the call's
+      // estimate and the limit for the single-operation cap, the run's own for the session cap.
+      throw new CostCapExceededError(
+        this.id,
+        capType,
+        verdict.currentCostUsd ?? this.spentUSD(),
+        verdict.limitUsd ?? this.options.maxCostUSD,
+      );
     });
   }
 

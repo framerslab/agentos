@@ -11,6 +11,16 @@ import {
   promptCharsOf,
 } from '../spendBudget.js';
 
+/** The error a call throws, or undefined when it throws none. */
+function thrownBy(call: () => void): unknown {
+  try {
+    call();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
+
 describe('SpendBudget', () => {
   it('lets a call through while its estimate fits what is left, and refuses the one that would pass the cap', () => {
     const budget = new SpendBudget({ maxCostUSD: 0.001 });
@@ -58,6 +68,25 @@ describe('SpendBudget', () => {
     const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 1000 });
     budget.record(0, 900, 'first');
     expect(() => budget.assertCanSpend(0, 200, 'second')).toThrow(CostCapExceededError);
+  });
+
+  it("names the cap that refused a call, with that cap's own numbers", () => {
+    // The token cap has no cap type of its own: its refusal is the cap error, with a message that names the token cap.
+    const byTokens = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 1000 });
+    byTokens.record(0.0001, 900, 'first');
+    expect(thrownBy(() => byTokens.assertCanSpend(0, 200, 'second'))).toMatchObject({
+      name: 'CostCapExceededError',
+      message: expect.stringContaining('1100 tokens would pass 1000'),
+    });
+    // The guard's daily cap and its single-operation cap: the total and the limit of the cap that refused, where the
+    // run's own total is nothing (its session starts again) and its own cap is one dollar.
+    const guard = new CostGuard({ maxDailyCostUsd: 0.01, maxSingleOperationCostUsd: 0.005 });
+    const budget = new SpendBudget({ maxCostUSD: 1, guard, budgetId: 'run-3' });
+    budget.record(0.009, 0, 'first');
+    guard.resetSession('run-3');
+    expect(budget.spentUSD()).toBe(0);
+    expect(thrownBy(() => budget.assertCanSpend(0.002, 0, 'second'))).toMatchObject({ capType: 'daily', currentCost: 0.009, limit: 0.01 });
+    expect(thrownBy(() => budget.assertCanSpend(0.006, 0, 'third'))).toMatchObject({ capType: 'single_operation', currentCost: 0.006, limit: 0.005 });
   });
 
   it('counts a token count the provider reported as NaN as none, so the token budget still holds', () => {

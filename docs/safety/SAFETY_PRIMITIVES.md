@@ -257,6 +257,7 @@ const guard = new CostGuard({
 
 // Before each operation, check affordability
 const check = guard.canAfford('agent-1', 0.003); // estimated cost
+// A refusal names its cap in check.capType, with the total so far and the cap in check.currentCostUsd and check.limitUsd
 if (!check.allowed) {
   throw new Error(check.reason); // "Daily cost $5.0031 would exceed limit $5.00"
 }
