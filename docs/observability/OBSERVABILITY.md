@@ -1,10 +1,8 @@
 # AgentOS Observability (OpenTelemetry)
 
-You can't operate an agent runtime in production without observability, and the cost of bolting it on after the fact is paid in incidents you can't reproduce. AgentOS treats spans, metrics, and log correlation as first-class concerns — but it does not own the OpenTelemetry SDK lifecycle. The SDK is an application-level concern: your host owns exporters, sampling, and context propagation, because the right answer for a CLI process is different from the right answer for a long-running server is different from the right answer for an edge worker.
+AgentOS emits OpenTelemetry signals and leaves the SDK to the host. The host installs and starts the SDK and owns exporters, sampling and context propagation; AgentOS creates spans, records metrics, adds trace ids to logs and streamed chunks, and can emit log records, all through [`@opentelemetry/api`](https://www.npmjs.com/package/@opentelemetry/api), so whatever exporter the host wires (OTLP to Honeycomb, Tempo, Jaeger, Grafana Cloud) receives them. Every signal is off by default.
 
-What AgentOS owns is the *emit side*: opt-in spans around turns and tool-result handling, opt-in counters and histograms for the operations worth measuring, optional trace-correlation in logs and streamed response metadata, and an optional path to export application logs as OTEL `LogRecord`s. All defaults are off. Turning them on is a single config change, and the runtime will surface to whatever exporter your host has wired (OTLP to Honeycomb, Tempo, Jaeger, Grafana Cloud — the runtime doesn't care, because your host SDK is what does the export).
-
-The implementation lives in [`src/safety/evaluation/observability/`](https://github.com/framerslab/agentos/tree/master/src/safety/evaluation/observability) and uses [`@opentelemetry/api`](https://www.npmjs.com/package/@opentelemetry/api) directly — never bundled, always peer-dep-style imported, so your host SDK is the one and only OTEL provider in the process.
+The implementation lives in [`src/safety/evaluation/observability/otel.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/evaluation/observability/otel.ts) and [`src/api/observability.ts`](https://github.com/framerslab/agentos/blob/master/src/api/observability.ts).
 
 ---
 
@@ -19,7 +17,7 @@ The implementation lives in [`src/safety/evaluation/observability/`](https://git
 7. [Logging (Pino + OTEL Logs)](#logging-pino--otel-logs)
 8. [Privacy & Cardinality](#privacy--cardinality)
 9. [Performance Notes](#performance-notes)
-10. [SOTA Techniques (TypeScript Agentic AI)](#sota-techniques-typescript-agentic-ai)
+10. [Practices](#practices)
 
 ---
 
@@ -35,8 +33,8 @@ Defaults (all OFF):
 
 When enabled, AgentOS emits:
 
-- **Spans** around turns and tool-result handling
-- **Metrics** for turn/tool counters + histograms
+- **Spans** around turns, tool-result handling, conversation saves and the high-level API calls
+- **Metrics** for turn and tool-result counters and histograms
 - Optional: **trace correlation** in logs and streamed response metadata
 - Optional: **OTEL LogRecords** (exported by your host, via OTLP)
 
@@ -50,14 +48,17 @@ There are two layers:
    - In Node: `@opentelemetry/sdk-node` + exporters/instrumentations.
    - In browsers: the web OTEL SDK (if you choose to export from the client).
 
-2. **AgentOS instrumentation toggles (controls what AgentOS *emits*)**
-   - Env flags (global defaults)
-   - `AgentOSConfig.observability` (per-agent control)
+2. **AgentOS instrumentation toggles (what AgentOS emits)**
+   - Environment variables
+   - `AgentOSConfig.observability`
+
+The toggles are process-wide: `AgentOS.initialize()` (and so `AgentOS.create()`) applies its `observability` config to the whole process, and the last runtime initialized wins. `generateText()` and the other high-level calls read the same state.
 
 Precedence:
 
-- `AgentOSConfig.observability.enabled = false` hard-disables all AgentOS observability helpers (even if env is set).
-- Otherwise, config fields override env fields, and env provides defaults.
+- `observability.enabled: false` turns every signal off, whatever the environment says.
+- Otherwise a specific config field wins, then `observability.enabled` (for tracing, metrics and log trace ids), then the specific environment variable, then `AGENTOS_OBSERVABILITY_ENABLED`.
+- `includeTraceInResponses` and `exportToOtel` follow only their own config field and environment variable; neither master switch turns them on.
 
 ---
 
@@ -68,13 +69,13 @@ import { AgentOS } from '@framers/agentos';
 
 const agentos = await AgentOS.create({
   observability: {
-    // Master switch: when true, defaults to enabling tracing/metrics + log correlation.
-    // Keep explicit per-signal toggles if you want a tighter blast radius.
+    // Master switch: true turns on tracing, metrics and log trace ids
+    // (not includeTraceInResponses or exportToOtel); false turns everything off.
     // enabled: true,
 
     tracing: {
       enabled: true,
-      includeTraceInResponses: true, // adds metadata.trace to select streamed chunks
+      includeTraceInResponses: true, // adds metadata.trace to METADATA_UPDATE, FINAL_RESPONSE and ERROR chunks
     },
     metrics: {
       enabled: true,
@@ -93,7 +94,7 @@ const agentos = await AgentOS.create({
 ## Enable via Environment Variables
 
 ```bash
-# Master switch: enables tracing + metrics + log trace_id/span_id injection defaults
+# Master switch: tracing, metrics and log trace_id/span_id, unless config says otherwise
 AGENTOS_OBSERVABILITY_ENABLED=true
 
 # Optional fine-grained toggles
@@ -160,37 +161,38 @@ export async function shutdownOtel(): Promise<void> {
 }
 ```
 
-In this monorepo, the backend bootstrap lives at `backend/src/observability/otel.ts`.
-
 ---
 
 ## What AgentOS Emits
 
 ### Spans
 
-When tracing is enabled, AgentOS emits spans such as:
+When tracing is enabled, the runtime emits:
 
-- `agentos.turn`
-- `agentos.gmi.get_or_create`
-- `agentos.gmi.process_turn_stream`
-- `agentos.tool_result`
-- `agentos.gmi.handle_tool_result`
-- `agentos.conversation.save` (stage-tagged)
+- `agentos.turn` (root of `processRequest()`), with `agentos.gmi.get_or_create` and `agentos.gmi.process_turn_stream`
+- `agentos.tool_result`, with `agentos.gmi.handle_tool_result`; `agentos.resume_external_tool_request` and `agentos.gmi.resume_get_or_create` for resumed external tool calls
+- `agentos.conversation.save`, tagged with `agentos.stage`
+
+and the high-level API emits `agentos.api.generate_text` (with `agentos.api.generate_text.step` per step), `agentos.api.stream_text` (with `.step`), `agentos.api.embed_text`, `agentos.api.generate_image`, `agentos.api.edit_image`, `agentos.api.upscale_image`, `agentos.api.variate_image`, `agentos.api.transfer_style`, `agentos.api.generate_video`, `agentos.api.analyze_video`, `agentos.api.generate_music` and `agentos.api.generate_sfx`.
+
+The turn span carries `agentos.stream_id`, `agentos.user_id`, `agentos.session_id`, `agentos.conversation_id` and `agentos.persona_id`. The `generateText()` and `streamText()` spans also carry the GenAI attributes (`gen_ai.provider.name`, `gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.usage.*`) beside the older `llm.*` ones.
 
 ### Metrics
 
 When metrics are enabled, AgentOS records:
 
-- `agentos.turns` (counter)
-- `agentos.turn.duration_ms` (histogram)
-- `agentos.turn.tokens.total|prompt|completion` (histograms; only when usage is available)
-- `agentos.turn.cost.usd` (histogram; only when cost is available)
-- `agentos.tool_results` (counter)
-- `agentos.tool_result.duration_ms` (histogram)
+- `agentos.turns` (counter) and `agentos.turn.duration_ms` (histogram)
+- `agentos.turn.tokens.total`, `.prompt`, `.completion`, `.cache_read` and `.cache_creation` (histograms, when usage is known)
+- `agentos.turn.cost.usd` (histogram, when cost is known)
+- `agentos.turn.first_part_ms` (histogram: from the call to the first stream part, streaming calls only)
+- `agentos.turn.task_success_score` (histogram, when a task outcome score is known)
+- `agentos.tool_results` (counter) and `agentos.tool_result.duration_ms` (histogram)
+
+Turn metrics carry `status`, `persona_id` and `task_outcome`; tool-result metrics carry `status`, `tool_name` and `tool_success`.
 
 ### Trace IDs in Streamed Responses
 
-When enabled, AgentOS attaches trace metadata to select streamed chunks:
+When enabled, AgentOS adds the active span's ids to `METADATA_UPDATE`, `FINAL_RESPONSE` and `ERROR` chunks:
 
 ```json
 {
@@ -210,7 +212,7 @@ When enabled, AgentOS attaches trace metadata to select streamed chunks:
 
 ### Stdout Logs (Default)
 
-AgentOS uses `pino` for structured logs. When `includeTraceIds` is enabled and an active span exists, AgentOS adds:
+AgentOS's `PinoLogger` writes structured logs with `pino`. When `includeTraceIds` is enabled and a span is active, it adds:
 
 - `trace_id`
 - `span_id`
@@ -243,31 +245,22 @@ Recommendation:
 
 ## Privacy & Cardinality
 
-Defaults are conservative:
-
-- Prompts, model outputs, and tool arguments are **not** recorded by default.
-- Prefer safe metadata only (durations, status, tool names, model/provider ids, token usage, cost).
-
-Cardinality guidance:
-
-- Avoid labeling metrics/spans with high-cardinality values (user ids, conversation ids, raw URLs, prompt text).
-- Keep attributes stable and low-cardinality (e.g. `status`, `tool_name`, `persona_id`).
+- AgentOS records no prompt text, model output or tool arguments on spans or metrics. Spans carry ids (stream, user, session, conversation, persona, tool call), names, counts, durations, models and usage.
+- Metric attributes are low-cardinality (`status`, `persona_id`, `task_outcome`, `tool_name`, `tool_success`). When you add your own, keep user ids, conversation ids, URLs and prompt text out of metric attributes.
 
 ---
 
 ## Performance Notes
 
-- AgentOS observability helpers are a safe no-op when disabled.
-- Traces/metrics are typically low overhead when sampling is enabled.
-- OTEL log export can add noticeable CPU/network overhead at `debug` volume; use it intentionally.
+- With a signal off, its helpers return without creating spans or recording values.
+- Without a host SDK, the OpenTelemetry API hands out no-op tracers and meters.
+- OTEL log export sends every log record through the host's pipeline; at `debug` volume that is a large stream.
 
 ---
 
-## SOTA Techniques (TypeScript Agentic AI)
+## Practices
 
-Patterns that work well in practice:
-
-- **Structured event stream**: emit agent lifecycle events (turn started, tool called, tool returned, policy decision, final output) as strongly-typed records (AgentOS already streams chunks; persist them if you need audits).
+- **Structured event stream**: AgentOS streams typed chunks for each turn (text, tool calls, tool results, guardrail decisions, the final response); persist them if you need an audit trail.
 - **W3C context propagation**: propagate `traceparent` across inbound HTTP, SSE/WebSocket streaming, and tool calls; use OTEL context managers (`AsyncLocalStorage`) in Node.
 - **GenAI semantic conventions**: add `gen_ai.*` attributes/events to spans when instrumenting model calls, tool calls, and token usage; keep raw content behind explicit opt-in and redaction.
 - **Redaction and data classification**: treat prompt/tool args/output as sensitive by default; add allowlists + hashing for debugging without content exfiltration.
@@ -284,24 +277,25 @@ Common library choices:
 
 ### OpenTelemetry
 
-- W3C. (2021). *Trace Context Level 1.* W3C Recommendation. — The W3C standard for distributed-trace context propagation across process boundaries; AgentOS uses it to correlate spans across microservices. [w3.org/TR/trace-context-1](https://www.w3.org/TR/trace-context-1/)
+- W3C. (2021). *Trace Context Level 1.* W3C Recommendation. — The `traceparent` format AgentOS writes into `metadata.trace`. [w3.org/TR/trace-context-1](https://www.w3.org/TR/trace-context-1/)
 - OpenTelemetry Specification (current). *OpenTelemetry signal specifications: traces, metrics, and logs.* — The protocol contract AgentOS emits against. [opentelemetry.io/docs/specs/otel](https://opentelemetry.io/docs/specs/otel/)
-- OpenTelemetry. (current). *Semantic conventions.* — Naming and attribute schema for spans/metrics/logs; AgentOS follows the GenAI semantic conventions for LLM-call attributes. [opentelemetry.io/docs/specs/semconv](https://opentelemetry.io/docs/specs/semconv/)
-- OpenTelemetry GenAI working group. *Generative AI semantic conventions.* — The schema for `gen_ai.*` attributes (provider.name, request.model, usage.input_tokens, usage.cache_read.input_tokens, etc.) AgentOS sets on LLM-call spans. **Pinned revision:** the semantic-conventions-genai repository has no release tags; AgentOS emits the attribute set as of commit [`c26a2c21d1ee70d5231bd440c7b48d3c94ee506a`](https://github.com/open-telemetry/semantic-conventions-genai/commit/c26a2c21d1ee70d5231bd440c7b48d3c94ee506a) (no schema URL is referenced — upstream's is still TODO). Attribute tests assert the names enumerated in `src/api/observability.ts`, not a moving upstream. [opentelemetry.io/docs/specs/semconv/gen-ai](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
+- OpenTelemetry. *Semantic conventions.* — Naming and attribute schema for spans, metrics and logs. [opentelemetry.io/docs/specs/semconv](https://opentelemetry.io/docs/specs/semconv/)
+- OpenTelemetry GenAI working group. *Generative AI semantic conventions.* — The schema for the `gen_ai.*` attributes (provider.name, request.model, usage.input_tokens, usage.cache_read.input_tokens and the rest) AgentOS sets on the `generateText()` and `streamText()` spans. **Pinned revision:** the semantic-conventions-genai repository has no release tags; AgentOS emits the attribute set as of commit [`c26a2c21d1ee70d5231bd440c7b48d3c94ee506a`](https://github.com/open-telemetry/semantic-conventions-genai/commit/c26a2c21d1ee70d5231bd440c7b48d3c94ee506a) (no schema URL is referenced — upstream's is still TODO). Attribute tests assert the names enumerated in `src/api/observability.ts`, not a moving upstream. [opentelemetry.io/docs/specs/semconv/gen-ai](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
 
 ### Distributed tracing foundations
 
 - Sigelman, B. H., Barroso, L. A., Burrows, M., Stephenson, P., Plakal, M., Beaver, D., Jaspan, S., & Shanbhag, C. (2010). *Dapper, a large-scale distributed systems tracing infrastructure.* Google Technical Report. — The original distributed-tracing paper that defined the span/trace abstractions used today. [Google Research](https://research.google/pubs/dapper-a-large-scale-distributed-systems-tracing-infrastructure/)
-- Mace, J., Roelke, R., & Fonseca, R. (2015). *Pivot tracing: Dynamic causal monitoring for distributed systems.* SOSP 2015. — Causal monitoring methodology informing the trace-id propagation through [`AgentOSResponse`](https://github.com/framerslab/agentos/blob/master/src/api/types/AgentOSResponse.ts) metadata. [DOI](https://doi.org/10.1145/2815400.2815415)
+- Mace, J., Roelke, R., & Fonseca, R. (2015). *Pivot tracing: Dynamic causal monitoring for distributed systems.* SOSP 2015. — Causal monitoring across components. [DOI](https://doi.org/10.1145/2815400.2815415)
 
 ### Logging
 
-- OpenTelemetry. (current). *OpenTelemetry logging specification.* — The bridge spec connecting `LogRecord` events to span context; AgentOS's optional `exportToOtel` log path follows it. [opentelemetry.io/docs/specs/otel/logs](https://opentelemetry.io/docs/specs/otel/logs/)
-- Pino contributors. (current). *Pino: Very low overhead Node.js logger.* — The logger AgentOS wraps via [`PinoLogger`](https://github.com/framerslab/agentos/blob/master/src/core/logging/PinoLogger.ts); chosen for its sub-microsecond per-line cost in hot paths. [GitHub](https://github.com/pinojs/pino)
+- OpenTelemetry. *OpenTelemetry logging specification.* — `LogRecord`s and their link to span context; the `exportToOtel` path emits them through `@opentelemetry/api-logs`. [opentelemetry.io/docs/specs/otel/logs](https://opentelemetry.io/docs/specs/otel/logs/)
+- Pino contributors. *Pino: Very low overhead Node.js logger.* — The logger [`PinoLogger`](https://github.com/framerslab/agentos/blob/master/src/core/logging/PinoLogger.ts) wraps. [GitHub](https://github.com/pinojs/pino)
 
 ### Implementation references
 
-- `src/safety/evaluation/observability/Tracer.ts` — span creation around turn / tool / guardrail / LLM-call boundaries
-- `src/safety/evaluation/observability/otel.ts` — OpenTelemetry API peer-dep wiring
-- `src/core/logging/PinoLogger.ts` — structured logger with trace-id / span-id field injection
-- `src/orchestration/turn-planner/SqlTaskOutcomeTelemetryStore.ts` — persisted per-turn outcome KPIs for rolling-quality dashboards
+- `src/safety/evaluation/observability/otel.ts` — the toggles, span helpers, metric instruments and trace metadata
+- `src/api/observability.ts` — usage and GenAI attributes on the high-level API spans
+- `src/api/runtime/StreamChunkEmitter.ts` — `metadata.trace` on streamed chunks
+- `src/core/logging/PinoLogger.ts` — log trace ids and the OTEL log path
+- `src/safety/evaluation/observability/Tracer.ts` — a standalone in-process tracer class (`ITracer`); the runtime's spans do not use it
