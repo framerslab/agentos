@@ -186,7 +186,7 @@ The recipe is backend-agnostic: it only calls interface methods. Choose the stor
 
 ## When to reach for `Memory.ingest()` instead
 
-When you want recall that decays, consolidates, and surfaces involuntarily, agent memory rather than a static index, use the [Document Ingestion](./MEMORY_DOCUMENT_INGESTION.md) pipeline. It already does content-hash idempotent re-ingestion, plus format loaders (PDF, DOCX, HTML, Markdown, CSV, JSON, YAML, URLs), four chunking strategies, and folder scanning with glob filters. The flat-collection recipe on this page is for when you specifically do not want a brain behind your vectors.
+When you want agent memory rather than a static index, with traces that decay and a brain you can consolidate, use the [Document Ingestion](./MEMORY_DOCUMENT_INGESTION.md) pipeline. It skips content it has already stored (by content hash), loads PDF, DOCX, HTML and Markdown files (CSV, JSON and YAML as plain text) and URLs, chunks the text, and scans folders with glob filters. It stores chunks as full-text-indexed traces without embeddings. The flat-collection recipe on this page is for when you do not want a brain behind your vectors.
 
 ---
 
