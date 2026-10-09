@@ -1,388 +1,215 @@
 # Provenance — Audit Trail and Tamper Evidence
 
-> From a simple signed hash chain to publicly-timestamped Merkle roots — choose the proof level your deployment needs.
+> A storage policy over the runtime's database writes, a signed hash chain of those writes, and Merkle roots anchored outside the database.
 
 ---
 
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Storage Policies](#storage-policies)
-3. [HashChain and ChainVerifier](#hashchain-and-chainverifier)
-4. [AgentKeyManager](#agentkeymanager)
-5. [ProofLevels](#prooflevels)
-6. [BundleExporter](#bundleexporter)
-7. [External Anchors](#external-anchors)
-8. [Toolset Pinning](#toolset-pinning)
-9. [Soft-Forget (Redactions)](#soft-forget-redactions)
-10. [Configuration](#configuration)
+2. [Enabling provenance](#enabling-provenance)
+3. [Storage policies](#storage-policies)
+4. [The signed event ledger](#the-signed-event-ledger)
+5. [Verifying a chain](#verifying-a-chain)
+6. [AgentKeyManager](#agentkeymanager)
+7. [Proof levels and anchors](#proof-levels-and-anchors)
+8. [Verification bundles](#verification-bundles)
+9. [What the pack does not do](#what-the-pack-does-not-do)
 
 ---
 
 ## Overview
 
-AgentOS provenance is optional and additive — you can run without it for
-development, then layer on as much tamper evidence as your use case requires.
+Provenance is an extension pack. [`createProvenancePack()`](https://github.com/framerslab/agentos/blob/master/src/extensions/packs/provenance-pack.ts) takes a [`ProvenanceSystemConfig`](https://github.com/framerslab/agentos/blob/master/src/safety/provenance/types.ts), a storage adapter, an agent id and an optional table prefix. When the runtime that loads the pack has a `storageAdapter`, AgentOS wraps that adapter with the pack's write hooks, so every write through it (conversation persistence, RAG, workflows, emergent tools) passes the storage policy and, with signing on, lands in a signed ledger. `AgentOSConfig` has no `provenance` key.
 
-The system has three concerns that are deliberately separated:
+The configuration has three parts that vary independently:
 
-| Concern | Mechanism |
-|---------|-----------|
-| **What the runtime is allowed to do** | Storage policy (`mutable`, `revisioned`, `sealed`) |
-| **What you can prove happened** | Signed hash chain (Ed25519 event ledger) |
-| **Who can verify the proof** | Proof level (local → archived → publicly auditable) |
-
-All three are independent. You can have a `sealed` policy with only local
-verification, or a `mutable` policy with full public anchoring for analytics
-purposes.
+| Concern | Field |
+|---------|-------|
+| **What a write may do** | `storagePolicy.mode`: `mutable`, `revisioned` or `sealed` |
+| **What you can prove happened** | `provenance`: the signed hash chain of write events (Ed25519) |
+| **Who can check the proof** | `provenance.anchorTarget`: where Merkle roots of the chain are published |
 
 ---
 
-## Storage Policies
-
-### `mutable` (default)
-
-No restrictions. Updates and deletes are allowed. Suitable for development
-and agents that users are expected to edit freely.
+## Enabling provenance
 
 ```typescript
-import { AgentOS } from '@framers/agentos';
+import { AgentOS, profiles } from '@framers/agentos';
+import { createProvenancePack } from '@framers/agentos/extensions/packs/provenance-pack';
 
-const agent = await AgentOS.create({
-  provenance: { policy: 'mutable' },
+// storageAdapter: a @framers/sql-storage-adapter instance
+const config = profiles.revisionedVerified(); // or mutableDev(), sealedAutonomous(), sealedAuditable(rekorUrl)
+const pack = createProvenancePack(config, storageAdapter, 'agent-001');
+
+const agentos = await AgentOS.create({
+  storageAdapter,
+  extensionManifest: { packs: [{ factory: () => pack }] },
 });
+
+// The components the pack built when it activated
+const { ledger, keyManager, anchorManager, revisionManager, tombstoneManager } = pack.getResult()!;
 ```
+
+On activation the pack makes or imports the Ed25519 key pair, creates its tables (`signed_events`, `revisions`, `tombstones`, `anchors`, `agent_keys`, each under the prefix), stores the public key, starts the ledger, builds the write hooks and the anchor manager, starts periodic anchoring when `anchorIntervalMs` is above 0, and, in `sealed` mode, appends a `genesis` event.
+
+The four presets ([`PolicyProfiles.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/provenance/config/PolicyProfiles.ts)):
+
+| Profile | Mode | Signing | Anchoring |
+|---|---|---|---|
+| `mutableDev()` | `mutable` | off | none |
+| `revisionedVerified()` | `revisioned` | every event | every 5 minutes, batches of 100 events, no provider set |
+| `sealedAutonomous()` | `sealed` on `conversations`, `conversation_messages`, `messages` | every event | every minute, batches of 50 events, no provider set |
+| `sealedAuditable(rekorUrl?)` | as `sealedAutonomous()` | every event | Rekor (`https://rekor.sigstore.dev` by default) |
+
+`profiles.custom(base, overrides)` merges overrides into a preset.
+
+---
+
+## Storage policies
+
+The write hooks read each statement's operation and table. `CREATE`, `ALTER` and `DROP` always pass, as do writes to the pack's own tables. `storagePolicy.protectedTables` limits the policy to the tables it names; without it every other table is protected, less those in `exemptTables`.
+
+### `mutable`
+
+No enforcement. With signing on, writes are still recorded in the ledger.
 
 ### `revisioned`
 
-Writes are allowed but fully audited. Updates append a new revision; deletes
-create a tombstone. Each write produces a signed ledger event.
-
-Use this when you need operational flexibility with a full audit trail.
-
-```typescript
-await agent.initialize({
-  provenance: {
-    policy: 'revisioned',
-    keyPath: '~/.framers/agent-key.pem',  // Ed25519 private key
-  },
-});
-```
-
-With `revisioned`, the conversation history shows every version of every
-message — nothing is truly overwritten.
+An `UPDATE` on a protected table first stores a snapshot of the rows it matches in the `revisions` table, then runs. A `DELETE` writes a tombstone to the `tombstones` table and does not run: the row stays. The table itself holds the latest version; earlier versions are read with `revisionManager.getRevisions(table, recordId)`, and deletions with `tombstoneManager.getTombstones(table?)`.
 
 ### `sealed`
 
-Append-only. `UPDATE` and `DELETE` are forbidden on protected tables.
-The agent's identity, history, and configuration become immutable after
-the seal is applied.
+`UPDATE`, `DELETE` and upsert-style statements (`REPLACE`, `INSERT OR REPLACE`, `ON CONFLICT ... DO UPDATE`) on a protected table throw a `ProvenanceViolationError` with the code `SEALED_MUTATION_BLOCKED`. Inserts pass.
 
-```typescript
-await agent.initialize({
-  provenance: {
-    policy: 'sealed',
-    keyPath: '~/.framers/agent-key.pem',
-    protectedTables: ['conversations', 'conversation_messages', 'agent_events'],
-    appendOnlyPersistence: true,
-  },
-});
-```
-
-To persist conversations correctly with `sealed`, set
-`ConversationManagerConfig.appendOnlyPersistence = true` so the
-conversation manager only inserts and never updates or deletes.
+The built-in `ConversationManager` updates and deletes rows unless `ConversationManagerConfig.appendOnlyPersistence` is `true`; a host that seals conversation tables sets it ([Provenance & Immutability](./PROVENANCE_IMMUTABILITY.md#append-only-conversation-persistence)).
 
 ---
 
-## HashChain and ChainVerifier
+## The signed event ledger
 
-Every write in `revisioned` or `sealed` mode produces a signed ledger event
-chained to the previous one. The hash chain provides tamper evidence:
-modifying any past event breaks the chain.
+With `provenance.enabled`, each write that changes rows appends one event to [`SignedEventLedger`](https://github.com/framerslab/agentos/blob/master/src/safety/provenance/ledger/SignedEventLedger.ts). The event's payload is the table, the operation, the number of rows changed and the write's operation id; the row contents are not in it. Its type follows the table: `message.created`, `message.revised` and `message.tombstoned` for a table whose name contains `message`, `conversation.*` for one that contains `conversation`, and `memory.stored`, `memory.revised` and `memory.tombstoned` for the rest.
 
-```typescript
-import { HashChain, ChainVerifier } from '@framers/agentos/provenance';
-
-// The runtime maintains the chain — this is the low-level API for inspection
-const chain = new HashChain({ keyPair: agentKeyPair });
-
-// Each event is: hash(previousHash + eventData + timestamp)
-const event = await chain.append({
-  type: 'agent_response',
-  sessionId: 'session-abc',
-  turnId: 'turn-001',
-  outputHash: sha256(responseText),
-});
-
-console.log(event.id);          // UUID
-console.log(event.hash);        // SHA-256 of this event
-console.log(event.signature);   // Ed25519 signature
-console.log(event.prevHash);    // hash of the previous event
-```
-
-**Verify the chain:**
+Each event carries a sequence number, the previous event's hash, the SHA-256 of its canonical-JSON payload, and its own hash over `sequence|type|timestamp|agentId|prevHash|payloadHash`. With `signatureMode: 'every-event'` the key signs that hash; with `'anchor-only'` events are unsigned and only anchors are signed. A host can append its own events:
 
 ```typescript
-const verifier = new ChainVerifier({ publicKey: agentPublicKey });
+const event = await ledger.appendEvent('tool.invoked', { tool: 'send_email', callId: 'c-17' });
 
-const result = await verifier.verify(events);
-
-console.log(result.valid);        // true if all signatures and links check out
-console.log(result.chainLength);  // number of events verified
-console.log(result.brokenAt);     // index of first broken link, if any
-console.log(result.errors);       // detailed error list
+event.sequence;     // position in the chain, from 1
+event.prevHash;     // hash of the previous event
+event.payloadHash;  // SHA-256 of the canonical JSON payload
+event.hash;         // hash of this event
+event.signature;    // Ed25519 signature of the hash, base64
 ```
+
+The ledger reads events back with `getAllEvents()`, `getEventsByRange(from, to)`, `getEventsByType(type)`, `getEvent(id)` and `getLatestEvent()`.
+
+---
+
+## Verifying a chain
+
+[`ChainVerifier`](https://github.com/framerslab/agentos/blob/master/src/safety/provenance/verification/ChainVerifier.ts) has static methods. It checks sequence continuity, timestamp order, each `prevHash` link, each payload hash, each event hash, and each signature, with the given public key or, without one, each event's `signerPublicKey`:
+
+```typescript
+import { ChainVerifier } from '@framers/agentos';
+
+const events = await ledger.getAllEvents();
+const result = await ChainVerifier.verify(events, keyManager.getPublicKeyBase64());
+
+result.valid;           // true when no check failed
+result.eventsVerified;  // events checked
+result.errors;          // [{ eventId, sequence, code, message }]: SEQUENCE_GAP, TIMESTAMP_REGRESSION, HASH_CHAIN_BROKEN,
+                        // PAYLOAD_HASH_MISMATCH, EVENT_HASH_MISMATCH, SIGNATURE_INVALID
+result.warnings;        // e.g. a chain that does not start at sequence 1
+```
+
+`ChainVerifier.isValid(events, publicKey?)` returns the boolean alone, and `verifySubChain()` checks a slice.
 
 ---
 
 ## AgentKeyManager
 
-[`AgentKeyManager`](https://github.com/framerslab/agentos/blob/master/src/safety/provenance/crypto/AgentKeyManager.ts) generates and manages the Ed25519 keypair used to sign
-ledger events. Keep the private key in your secure secret store; publish the
-public key for third-party verification.
+[`AgentKeyManager`](https://github.com/framerslab/agentos/blob/master/src/safety/provenance/crypto/AgentKeyManager.ts) holds the Ed25519 key pair. Keys travel as base64 (PKCS#8 and SPKI DER under Node).
 
 ```typescript
-import { AgentKeyManager } from '@framers/agentos/provenance';
+import { AgentKeyManager } from '@framers/agentos';
 
-const keyManager = new AgentKeyManager();
+const keys = await AgentKeyManager.generate('agent-001');
+const source = keys.toKeySource();        // { type: 'import', privateKeyBase64, publicKeyBase64 }: store it as a secret
 
-// Generate a new keypair (do once, store the private key securely)
-const { privateKeyPem, publicKeyPem, fingerprint } = await keyManager.generateKeyPair();
-
-console.log('Public key fingerprint:', fingerprint);
-// Store privateKeyPem in your secret manager
-
-// Load an existing key at runtime
-await keyManager.loadKey(process.env.AGENT_PRIVATE_KEY_PEM!);
-
-// Sign arbitrary data
-const signature = await keyManager.sign(Buffer.from('payload'));
-
-// Verify a signature with the public key
-const isValid = await keyManager.verify(
-  Buffer.from('payload'),
-  signature,
-  publicKeyPem,
-);
+const same = await AgentKeyManager.fromKeySource('agent-001', source);
+const signature = await same.sign('payload');                  // base64
+const ok = await same.verify('payload', signature);            // true
+const okWithKey = await same.verify('payload', signature, keys.getPublicKeyBase64());
 ```
+
+Every preset uses `keySource: { type: 'generate' }`, which makes a new key pair each time the pack activates and keeps the private key in memory only: after a restart, new events carry the new public key and earlier ones the old. To sign with one key across restarts, put `{ type: 'import', privateKeyBase64, publicKeyBase64 }` in `provenance.keySource`. `AgentKeySource.keyStorePath` is declared and not read.
 
 ---
 
-## ProofLevels
+## Proof levels and anchors
 
-Proof levels determine who can independently verify a claim about the agent's
-history. Each level builds on the previous.
+[`AnchorManager`](https://github.com/framerslab/agentos/blob/master/src/safety/provenance/anchoring/AnchorManager.ts) builds a Merkle root over a range of events, signs it, stores it in the `anchors` table and hands it to the anchor provider. Every `anchorIntervalMs` it anchors the events since the last anchor once there are at least `anchorBatchSize` of them; `createAnchor(from, to)` anchors a range on demand and `verifyAnchor(anchorId)` checks one.
 
-| Level | Description | Who can verify |
-|-------|-------------|----------------|
-| `verifiable` | Local signed hash chain only | Anyone with the public key |
-| `externally-archived` | Chain root exported to WORM storage (S3 Object Lock, Glacier) | Anyone with storage access |
-| `publicly-auditable` | Merkle root published to a transparency log | Anyone (no account required) |
-| `publicly-timestamped` | Merkle root anchored to a blockchain | Anyone, with on-chain timestamp |
+The provider comes from `provenance.anchorTarget`. AgentOS itself has two: `none` (the default; the anchor is stored locally) and `composite` (several targets). The others live in [`@framers/agentos-ext-anchor-providers`](https://www.npmjs.com/package/@framers/agentos-ext-anchor-providers), which registers them once its `registerExtensionProviders()` has run; an unregistered type logs a warning and falls back to `none`.
+
+| Proof level | Meaning | Provider types |
+|---|---|---|
+| `verifiable` | Local signed hash chain only | `none` |
+| `externally-archived` | The anchor is copied to write-once storage | `worm-snapshot` |
+| `publicly-auditable` | The anchor is logged in a transparency log | `rekor` |
+| `publicly-timestamped` | The anchor is timestamped on a blockchain | `opentimestamps`, `ethereum`, `solana` |
 
 ```typescript
-await agent.initialize({
+import { profiles } from '@framers/agentos';
+import { registerExtensionProviders } from '@framers/agentos-ext-anchor-providers';
+
+registerExtensionProviders(); // before the pack activates
+
+const config = profiles.custom(profiles.sealedAutonomous(), {
   provenance: {
-    policy:     'sealed',
-    proofLevel: 'publicly-auditable',
-    keyPath:    '~/.framers/agent-key.pem',
-    anchors: [
-      {
-        type:    'rekor',
-        baseUrl: 'https://rekor.sigstore.dev',
-      }
-    ],
+    enabled: true,
+    signatureMode: 'every-event',
+    hashAlgorithm: 'sha256',
+    keySource: { type: 'import', privateKeyBase64, publicKeyBase64 },
+    anchorTarget: { type: 'rekor', options: { serverUrl: 'https://rekor.sigstore.dev' /* and the provider's signing options */ } },
   },
 });
 ```
 
+Each provider reads its own `options`; see the package for them.
+
 ---
 
-## BundleExporter
+## Verification bundles
 
-Export a verifiable proof bundle for a time range — useful for audits,
-compliance reports, and third-party verification:
+[`BundleExporter`](https://github.com/framerslab/agentos/blob/master/src/safety/provenance/verification/BundleExporter.ts) packs a range of events, the anchors and the public key into one signed bundle that a third party can check without the runtime:
 
 ```typescript
-import { BundleExporter } from '@framers/agentos/provenance';
+import { BundleExporter } from '@framers/agentos';
 
-const exporter = new BundleExporter({
-  keyManager: agentKeyManager,
-  eventStore: agentEventStore,
-});
+const exporter = new BundleExporter(ledger, keyManager, storageAdapter /* the anchors' store, or null */);
+const bundle = await exporter.exportBundle(1, 500);      // sequences 1-500; no arguments exports every event
+const jsonl = await exporter.exportAsJSONL();            // the same as JSON Lines
 
-const bundle = await exporter.export({
-  from: '2026-01-01T00:00:00Z',
-  to:   '2026-03-31T23:59:59Z',
-});
-
-// Bundle contains:
-// - all events in the time range
-// - the hash chain with signatures
-// - the public key and its fingerprint
-// - a Merkle proof if anchoring is configured
-
-await bundle.save('./audit-bundle-Q1-2026.json');
-
-// Verify a bundle without the runtime
-const result = await BundleExporter.verifyBundle('./audit-bundle-Q1-2026.json');
-console.log(result.valid);        // true
-console.log(result.eventCount);   // e.g., 4821
-console.log(result.anchorProof);  // Rekor log entry if publicly-auditable
+// Elsewhere, with only the bundle
+const result = await BundleExporter.importAndVerify(bundle);  // or BundleExporter.parseJSONL(jsonl) first
+result.valid;
 ```
 
 ---
 
-## External Anchors
+## What the pack does not do
 
-Configure one or more anchor providers to publish Merkle roots outside your
-database, making tamper evidence verifiable by third parties.
-
-### Sigstore Rekor (transparency log)
-
-```typescript
-anchors: [
-  {
-    type:     'rekor',
-    baseUrl:  'https://rekor.sigstore.dev',
-    schedule: '0 * * * *',   // hourly cron expression
-  }
-]
-```
-
-### Solana (on-chain timestamp)
-
-```typescript
-anchors: [
-  {
-    type:    'solana',
-    network: 'mainnet-beta',
-    rpcUrl:  process.env.SOLANA_RPC_URL,
-    payer:   process.env.SOLANA_PAYER_KEYPAIR_JSON,
-    schedule: '0 0 * * *',  // daily
-  }
-]
-```
-
-### Ethereum (on-chain timestamp)
-
-```typescript
-anchors: [
-  {
-    type:      'ethereum',
-    rpcUrl:    process.env.ETH_RPC_URL,
-    contractAddress: '0x...',
-    privateKey: process.env.ETH_PRIVATE_KEY,
-    schedule:  '0 0 * * 0',  // weekly
-  }
-]
-```
-
-### S3 Object Lock (WORM archive)
-
-```typescript
-anchors: [
-  {
-    type:   's3-object-lock',
-    bucket: 'my-audit-bucket',
-    region: 'us-east-1',
-    retentionDays: 2555,   // 7 years
-  }
-]
-```
-
----
-
-## Toolset Pinning
-
-For sealed agents, pin the toolset at seal time so any toolset drift is
-detectable:
-
-```typescript
-import { computeToolsetHash } from '@framers/agentos/provenance';
-
-// At seal time — record the hash
-const hash = await computeToolsetHash(agent.listTools());
-await sealedMetadataStore.set('toolset_manifest_hash', hash);
-console.log('Toolset pinned:', hash);
-
-// At startup — verify the toolset hasn't changed
-const currentHash = await computeToolsetHash(agent.listTools());
-const pinnedHash  = await sealedMetadataStore.get('toolset_manifest_hash');
-
-if (currentHash !== pinnedHash) {
-  throw new Error(`Toolset drift detected! Expected ${pinnedHash}, got ${currentHash}`);
-}
-```
-
----
-
-## Soft-Forget (Redactions)
-
-Sealed mode is append-only, so "forgetting" a memory is done by appending a
-signed redaction event that retrievers filter on. The underlying data remains
-for audit purposes; the model stops seeing it.
-
-```typescript
-import { RedactionManager } from '@framers/agentos/provenance';
-
-const redaction = new RedactionManager({ hashChain, memoryStore });
-
-// Soft-forget a memory trace
-await redaction.redact({
-  memoryId:  'trace-abc-123',
-  reason:    'user-requested-deletion',
-  requestedBy: 'user-456',
-});
-
-// Retriever automatically filters redacted traces
-const memories = await memoryStore.retrieve({ query: '...', filterRedacted: true });
-```
-
----
-
-## Configuration
-
-Full provenance configuration object:
-
-```typescript
-import { AgentOS } from '@framers/agentos';
-
-const agent = await AgentOS.create({
-  provenance: {
-    // Storage policy
-    policy: 'sealed',   // 'mutable' | 'revisioned' | 'sealed'
-
-    // Signing key
-    keyPath: '~/.framers/agent-key.pem',   // or:
-    keyPem:  process.env.AGENT_PRIVATE_KEY_PEM,
-
-    // Append-only conversation persistence (required for 'sealed')
-    appendOnlyPersistence: true,
-
-    // Tables to protect (default: conversations, messages, agent_events)
-    protectedTables: ['conversations', 'conversation_messages', 'agent_events'],
-
-    // Proof level
-    proofLevel: 'publicly-auditable',
-
-    // External anchor(s)
-    anchors: [
-      { type: 'rekor', baseUrl: 'https://rekor.sigstore.dev', schedule: '0 * * * *' },
-    ],
-
-    // Anchor batch size before forcing an anchor
-    anchorBatchSize: 1000,
-  },
-});
-```
+- **Seal a toolset or redact memory.** AgentOS has no toolset hash or redaction API; [Immutable Agents](./IMMUTABLE_AGENTS.md) describes how a host builds them from these parts.
+- **Enforce autonomy rules.** The pack builds an [`AutonomyGuard`](https://github.com/framerslab/agentos/blob/master/src/safety/provenance/enforcement/AutonomyGuard.ts) from `config.autonomy`, and nothing in AgentOS calls its `checkHumanAction()`; a host that wants those rules enforced calls it.
+- **Record row contents.** Ledger events name the table and operation; the rows stay in their tables, and a revisioned update's earlier version stays in `revisions`.
 
 ---
 
 ## Related Guides
 
-- [PROVENANCE_IMMUTABILITY.md](./PROVENANCE_IMMUTABILITY.md) — original full reference
+- [PROVENANCE_IMMUTABILITY.md](./PROVENANCE_IMMUTABILITY.md) — the modes, append-only persistence and the pack
 - [IMMUTABLE_AGENTS.md](./IMMUTABLE_AGENTS.md) — toolset pinning, secret rotation, soft-forget
 - [CHECKPOINTING.md](../orchestration/CHECKPOINTING.md) — checkpoint consistency and storage
 - [OBSERVABILITY.md](../observability/OBSERVABILITY.md) — OpenTelemetry tracing alongside provenance

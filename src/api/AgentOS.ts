@@ -871,8 +871,9 @@ export class AgentOS implements IAgentOS {
    * from the standard environment (`DATABASE_URL`, provider API keys, etc.)
    * and wires up sane defaults for every sub-system. Any fields passed in
    * `overrides` are deep-merged onto the generated config so callers can
-   * tweak observability, provenance, memoryTools, etc. without rebuilding
-   * the whole config object themselves.
+   * tweak observability, memoryTools, etc. without rebuilding the whole
+   * config object themselves. Provenance is an extension pack
+   * (`createProvenancePack()` in `extensionManifest`), not a config key.
    *
    * For fine-grained control, fall back to `new AgentOS()` +
    * `initialize(yourConfig)`.
@@ -880,8 +881,8 @@ export class AgentOS implements IAgentOS {
    * @param overrides - Optional partial `AgentOSConfig` whose fields are
    *   shallow-merged onto the auto-generated config. Pass `tools` /
    *   `externalTools` here to register them at construction time. Pass
-   *   `observability`, `provenance`, `memoryTools`, etc. to opt into
-   *   subsystems without touching the rest of the defaults.
+   *   `observability`, `memoryTools`, etc. to opt into subsystems without
+   *   touching the rest of the defaults.
    * @param logger - Optional logger override.
    * @returns A fully-initialised `AgentOS` instance.
    * @throws {AgentOSServiceError} If env config is invalid or initialisation fails.
@@ -893,10 +894,9 @@ export class AgentOS implements IAgentOS {
    * // Defaults — reads DATABASE_URL + provider keys from env.
    * const os = await AgentOS.create();
    *
-   * // With observability + provenance turned on.
+   * // With tracing turned on.
    * const observed = await AgentOS.create({
    *   observability: { tracing: { enabled: true } },
-   *   provenance:    { policy: 'sealed', keyPath: '~/.framers/key.pem' },
    * });
    * ```
    */
