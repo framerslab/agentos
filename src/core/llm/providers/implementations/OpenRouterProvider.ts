@@ -908,6 +908,9 @@ export class OpenRouterProvider implements IProvider {
     this.applySchemaRoutingPrefs(payload, options);
 
     let stream: NodeJS.ReadableStream;
+    // True once the request goes again without its schema payload (the
+    // json_object retry below); the answer's chunks then say so.
+    let schemaLeftPayload = false;
     try {
       stream = await this.makeApiRequest<NodeJS.ReadableStream>(
         '/chat/completions',
@@ -920,6 +923,7 @@ export class OpenRouterProvider implements IProvider {
     } catch (error: unknown) {
       const degraded = this.degradeSchemaPayloadOnNoEndpoints(payload, error);
       if (!degraded) throw error;
+      schemaLeftPayload = true;
       stream = await this.makeApiRequest<NodeJS.ReadableStream>(
         '/chat/completions',
         'POST',
@@ -1144,7 +1148,7 @@ export class OpenRouterProvider implements IProvider {
           if (mapped.responseTextDelta && yieldedText.length < yieldedTextCap) {
             yieldedText = (yieldedText + mapped.responseTextDelta).slice(0, yieldedTextCap);
           }
-          yield mapped;
+          yield schemaLeftPayload ? { ...mapped, schemaInPayload: false } : mapped;
           // Don't break on finish_reason: with stream_options.include_usage,
           // OpenRouter (like OpenAI) emits a trailing usage-only chunk AFTER
           // the finish_reason chunk and BEFORE [DONE]. The [DONE] marker

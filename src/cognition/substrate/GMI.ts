@@ -1493,11 +1493,12 @@ export class GMI implements IGMI {
 
           let attempt: AsyncIterable<ModelCompletionResponse>;
           let attemptOutcome: Promise<CompletionOutcome> | undefined;
+          // Initialised through the assertion, as stepSchemaInPayload is.
+          let gatewayAttempt = undefined as CompletionAttempt | undefined;
           if (gateway && resolution) {
-            const gatewayAttempt: CompletionAttempt = gateway.stream(resolution, sendMessages, llmOptions, responseSchema, schemaName, attemptSchemaInPrompt);
+            gatewayAttempt = gateway.stream(resolution, sendMessages, llmOptions, responseSchema, schemaName, attemptSchemaInPrompt);
             attempt = gatewayAttempt;
             attemptOutcome = gatewayAttempt.outcome;
-            stepSchemaInPayload = gatewayAttempt.schemaInPayload;
           } else {
             const provider = this.llmProviderManager.getProvider(modelTargetInfo.providerId);
             if (!provider) {
@@ -1603,6 +1604,9 @@ export class GMI implements IGMI {
             }
             throw stepError;
           }
+          // Read once the stream has ended: a provider that sent the request again without the
+          // schema payload (OpenRouter's json_object retry) has said so by then.
+          stepSchemaInPayload = gatewayAttempt?.schemaInPayload;
 
           if (gateway && route && resolution && attemptOutcome) {
             const outcome = await attemptOutcome;

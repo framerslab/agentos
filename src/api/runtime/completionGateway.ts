@@ -95,7 +95,11 @@ export interface CompletionAttempt extends AsyncIterable<ModelCompletionResponse
    * payload carries the schema (a strict `json_schema`, Anthropic's forced
    * schema tool, Gemini's `responseSchema`), false when the schema reaches the
    * model in the prompt alone (no payload for the provider or model, or a JSON
-   * mode without one). Unset for an attempt with no schema.
+   * mode without one). Unset for an attempt with no schema. It describes the
+   * request that answered: a provider that sends the request again without
+   * the schema payload (OpenRouter's `json_object` retry when no endpoint
+   * takes the strict schema) says so on its chunks, and the value turns false,
+   * so read it once the attempt's stream has ended.
    */
   schemaInPayload?: boolean;
 }
@@ -607,6 +611,9 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     ): CompletionOutcome => ({ kind: 'hopFailed', error, retryable, ...(usage ? { usage } : {}) });
 
     const structured = responseSchema ? lowerForHop(resolution, responseSchema, schemaName) : undefined;
+    // Whether the answering request's payload carries the schema: as lowered for the hop,
+    // until the provider's chunks say it sent the request without it.
+    let schemaInPayload = structured ? responseFormatCarriesSchema(structured.responseFormat) : undefined;
     // A hop whose payload carries no schema gets it in its system prompt, unless the prompt carries it already.
     const hopMessages = structured?.schemaInstruction && !schemaInPrompt ? withSystemMessage(messages, structured.schemaInstruction) : messages;
     const callOptions: ModelCompletionOptions = {
@@ -640,6 +647,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         const chunks = provider.generateCompletionStream(resolution.modelId, hopMessages, callOptions);
         const signal = callOptions.abortSignal;
         for await (const raw of signal ? untilAborted(chunks, signal, resolution, onLateUsage) : chunks) {
+          if (structured && raw.schemaInPayload === false) schemaInPayload = false;
           const chunk = structured?.toolName ? liftSchemaToolCall(raw, structured.toolName) : raw;
           if (chunk.error) {
             // An abort is the caller's own stop: it is never walked to another
@@ -696,11 +704,9 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
       }
     }
 
-    return {
-      [Symbol.asyncIterator]: () => run(),
-      outcome,
-      ...(structured ? { schemaInPayload: responseFormatCarriesSchema(structured.responseFormat) } : {}),
-    };
+    const attempt: CompletionAttempt = { [Symbol.asyncIterator]: () => run(), outcome };
+    if (structured) Object.defineProperty(attempt, 'schemaInPayload', { enumerable: true, get: () => schemaInPayload });
+    return attempt;
   }
 
   function schemaInstruction(resolution: CompletionResolution, responseSchema: ZodType, schemaName = 'response'): string | undefined {
