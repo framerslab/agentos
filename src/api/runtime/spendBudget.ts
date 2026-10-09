@@ -41,7 +41,8 @@ export interface SpendBudgetOptions {
   budgetId?: string;
   /**
    * A call on a model with no price row: `'refuse'` (the default) refuses it with {@link UnpricedModelError},
-   * since its cost could not be counted; `'allow'` lets it run and counts it as nothing.
+   * since its cost could not be counted; `'allow'` lets it run and counts its cost as nothing, while the token
+   * budget and a budget already past its cap still refuse it.
    */
   unpriced?: 'refuse' | 'allow';
 }
@@ -97,11 +98,11 @@ export class SpendBudget {
 
   /**
    * Refuses (or warns about) a call that could cost up to `estimateUSD` and use up to `estimateTokens`, when it would
-   * pass what is left; `estimateUSD` undefined means the model has no price row.
+   * pass what is left; `estimateUSD` undefined means the model has no price row, which `unpriced: 'allow'` checks as
+   * a call that costs nothing.
    */
   assertCanSpend(estimateUSD: number | undefined, estimateTokens: number, what: string): void {
-    if (estimateUSD === undefined) {
-      if (this.options.unpriced === 'allow') return;
+    if (estimateUSD === undefined && this.options.unpriced !== 'allow') {
       this.refuse({ budgetId: this.id, capType: 'unpriced', what, reason: 'the model has no price row' }, () => {
         throw new UnpricedModelError('unknown', what);
       });
@@ -114,7 +115,9 @@ export class SpendBudget {
       });
       return;
     }
-    const verdict = this.guard.canAfford(this.id, estimateUSD);
+    // A call allowed without a price row is checked as costing nothing, so a budget already past its cap (through a
+    // cost a provider reported, or one recorded from outside) still stops it.
+    const verdict = this.guard.canAfford(this.id, estimateUSD ?? 0);
     if (verdict.allowed) return;
     const capType = verdict.capType ?? 'session';
     this.refuse({ budgetId: this.id, capType, what, reason: verdict.reason ?? 'the budget is spent' }, () => {
