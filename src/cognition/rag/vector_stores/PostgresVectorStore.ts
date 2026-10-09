@@ -106,6 +106,11 @@ interface LexicalRow {
   score: number;
 }
 
+/** The operators of a metadata filter's condition that the store writes into SQL. */
+const FILTER_OPERATORS: ReadonlySet<string> = new Set([
+  '$eq', '$ne', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$all', '$exists', '$contains', '$textSearch',
+]);
+
 // ---------------------------------------------------------------------------
 // PostgresVectorStore
 // ---------------------------------------------------------------------------
@@ -942,12 +947,15 @@ export class PostgresVectorStore implements IVectorStore {
    * Build JSONB metadata filter SQL clauses.
    * Uses Postgres JSONB operators for efficient GIN-indexed filtering. `$in`, `$nin`, `$all` and `$contains`
    * also read a field that holds an array: `$in` matches when the array holds a string in the list, `$nin` when
-   * it holds none, `$all` when it holds every value, and `$contains` when it holds the string.
+   * it holds none, `$all` when it holds every value, and `$contains` when it holds the string. `$textSearch`
+   * matches a string value that contains the text, in any case.
    *
    * @param filter   - MetadataFilter to translate.
    * @param startIdx - Starting parameter index ($N).
    * @returns SQL WHERE clause and parameter values.
-   * @throws When a key is not letters, digits, underscore, dot or hyphen.
+   * @throws When a key is not letters, digits, underscore, dot or hyphen, or when a key's condition holds an
+   *   operator the store does not know, `$in`, `$nin` or `$all` without an array, or no operator at all. A
+   *   condition left out of the SQL would widen the search, change or deletion the filter scopes.
    */
   private _buildMetadataFilter(
     filter: MetadataFilter,
@@ -971,6 +979,16 @@ export class PostgresVectorStore implements IVectorStore {
       }
 
       const cond = condition as MetadataFieldCondition;
+      for (const [operator, value] of Object.entries(cond)) {
+        if (value === undefined) continue;
+        if (!FILTER_OPERATORS.has(operator)) {
+          throw new Error(`PostgresVectorStore: '${operator}' on the metadata key '${key}' is not a filter operator.`);
+        }
+        if ((operator === '$in' || operator === '$nin' || operator === '$all') && !Array.isArray(value)) {
+          throw new Error(`PostgresVectorStore: ${operator} on the metadata key '${key}' needs an array.`);
+        }
+      }
+      const first = conditions.length;
 
       if (cond.$eq !== undefined) {
         conditions.push(`${path} = $${idx}`);
@@ -1024,6 +1042,14 @@ export class PostgresVectorStore implements IVectorStore {
         conditions.push(`(CASE WHEN jsonb_typeof(${json}) = 'array' THEN ${json} ? $${idx} ELSE ${path} LIKE $${idx + 1} END)`);
         params.push(String(cond.$contains), `%${cond.$contains}%`);
         idx += 2;
+      }
+      if (cond.$textSearch !== undefined) {
+        conditions.push(`(jsonb_typeof(${json}) = 'string' AND strpos(lower(${path}), lower($${idx})) > 0)`);
+        params.push(String(cond.$textSearch));
+        idx++;
+      }
+      if (conditions.length === first) {
+        throw new Error(`PostgresVectorStore: the filter on the metadata key '${key}' holds no condition.`);
       }
     }
 

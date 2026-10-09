@@ -846,6 +846,23 @@ describe('PostgresVectorStore', () => {
       await expect(store.query('chunks', [0], { filter: { "x' OR 1=1 --": 'y' } })).rejects.toThrow('metadata key');
     });
 
+    it('refuses a condition it cannot write into SQL, so no deletion, change or search runs wider than its filter', async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false });
+      const notAnArray = { $in: 'org1' as unknown as string[] };
+      await expect(store.delete('chunks', undefined, { filter: { tenantId: notAnArray, sourceId: 's1' } })).rejects.toThrow('$in on the metadata key \'tenantId\' needs an array');
+      await expect(store.updateMetadata('chunks', { tenantId: { $regex: 'org1' } as never, sourceId: 's1' }, { a: 1 })).rejects.toThrow('not a filter operator');
+      await expect(store.lexicalSearch('chunks', 'budget', { filter: { tenantId: { $eq: undefined } } })).rejects.toThrow('holds no condition');
+      await expect(store.query('chunks', [0, 0], { filter: { tenantId: {} } })).rejects.toThrow('holds no condition');
+      expect(queryCalls).toEqual([]);
+    });
+
+    it('matches $textSearch on a string value that contains the text, in any case', async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false });
+      await store.lexicalSearch('chunks', 'budget', { filter: { tenantId: 'org1', title: { $textSearch: 'Q3 Review' } } });
+      expect(queryCalls[0].sql).toContain(`AND metadata_json->>'tenantId' = $2 AND (jsonb_typeof(metadata_json->'title') = 'string' AND strpos(lower(metadata_json->>'title'), lower($3)) > 0)`);
+      expect(queryCalls[0].params).toEqual(['budget', 'org1', 'Q3 Review', 10]);
+    });
+
     it('deletes by filter', async () => {
       const store = new PostgresVectorStore({ ...base, manageSchema: false, tablePrefix: 'library_' });
       queryResultQueue.push({ rows: [], rowCount: 4 });

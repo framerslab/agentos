@@ -188,6 +188,8 @@ await store.query('chunks', embedding, {
 
 A metadata key in a filter, and a key `updateMetadata()` sets or removes, must be letters, digits, underscore, dot or hyphen, since a filter's key is written into the SQL; any other key throws.
 
+A key's condition takes `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$all`, `$exists`, `$contains` and `$textSearch`, which matches a string value that contains the text, in any case. Any other operator, `$in`, `$nin` or `$all` without an array, and a condition with no operator throw rather than drop out of the SQL, so no search, change or deletion runs wider than its filter.
+
 ### Deleting and changing by filter
 
 ```typescript

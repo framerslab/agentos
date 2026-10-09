@@ -71,6 +71,13 @@ describe.skipIf(!URL)('PostgresVectorStore on Postgres', () => {
     expect(all.documents).toHaveLength(40);
   });
 
+  it('matches $textSearch on a string value, in any case', async () => {
+    const found = await store.lexicalSearch('chunks', 'budget', { topK: 100, filter: { sourceId: { $textSearch: 'S0' } } });
+    expect(found.documents).toHaveLength(40);
+    const none = await store.lexicalSearch('chunks', 'budget', { topK: 100, filter: { sourceId: { $textSearch: 'S1' } } });
+    expect(none.documents).toHaveLength(0);
+  });
+
   it('fills a filtered top-K only with an iterative scan', async () => {
     const version = await pool.query<{ extversion: string }>("SELECT extversion FROM pg_extension WHERE extname = 'vector'");
     const [major, minor] = version.rows[0].extversion.split('.').map(Number);
