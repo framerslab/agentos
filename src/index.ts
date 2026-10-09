@@ -276,6 +276,7 @@ export type {
   CompletionOutcome,
   CompletionResolution,
   CompletionRoute,
+  LateAttemptUsage,
 } from './api/runtime/completionGateway.js';
 export { GatewayProviderManager } from './api/runtime/gatewayProviderManager.js';
 export { agent } from './api/agent.js';
