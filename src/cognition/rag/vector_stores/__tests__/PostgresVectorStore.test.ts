@@ -228,6 +228,38 @@ describe('PostgresVectorStore', () => {
       expect(reg).toBeDefined();
     });
 
+    it('lets a failure to add the tsv column, or to make its index, reach the caller', async () => {
+      store = new PostgresVectorStore(makeConfig());
+      await store.initialize();
+      resetMocks();
+      const failing = (statement: RegExp, error: Error) => {
+        mockPool.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+          queryCalls.push({ sql, params });
+          if (/^\s*SELECT tsv FROM /.test(sql)) throw new Error('column "tsv" does not exist');
+          if (statement.test(sql)) throw error;
+          return nextQueryResult;
+        });
+      };
+      failing(/^ALTER TABLE/, Object.assign(new Error('must be owner of table my_docs'), { code: '42501' }));
+      await expect(store.createCollection('my_docs', 4)).rejects.toThrow('must be owner');
+      failing(/USING gin \(tsv\)$/, new Error('could not extend file'));
+      await expect(store.createCollection('my_docs', 4)).rejects.toThrow('could not extend file');
+    });
+
+    it('still makes the full-text index when another caller added the tsv column first', async () => {
+      store = new PostgresVectorStore(makeConfig());
+      await store.initialize();
+      resetMocks();
+      mockPool.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        queryCalls.push({ sql, params });
+        if (/^\s*SELECT tsv FROM /.test(sql)) throw new Error('column "tsv" does not exist');
+        if (/^ALTER TABLE/.test(sql)) throw Object.assign(new Error('column "tsv" of relation "my_docs" already exists'), { code: '42701' });
+        return nextQueryResult;
+      });
+      await store.createCollection('my_docs', 4);
+      expect(queryCalls.some(c => c.sql === 'CREATE INDEX IF NOT EXISTS "my_docs_fts" ON "my_docs" USING gin (tsv)')).toBe(true);
+    });
+
     it('uses vector_l2_ops for euclidean metric', async () => {
       store = new PostgresVectorStore(makeConfig());
       await store.initialize();

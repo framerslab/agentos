@@ -309,15 +309,16 @@ export class PostgresVectorStore implements IVectorStore {
         await this.pool.query(
           `ALTER TABLE ${table} ADD COLUMN tsv tsvector GENERATED ALWAYS AS (to_tsvector('${this.textConfig}'::regconfig, COALESCE(text_content, ''))) STORED`,
         );
-        await this._ensureIndex(name, 'fts', 'USING gin (tsv)');
-      } catch {
-        // Another caller added the column between the read and the ALTER.
+      } catch (err) {
+        // Another caller added the column between the read and the ALTER (duplicate_column); any other failure
+        // reaches the caller.
+        if ((err as { code?: unknown } | null)?.code !== '42701') throw err;
       }
-    } else {
-      // A table that has the column may still lack its index: before index
-      // names carried the prefix, a second prefix's collection got none.
-      await this._ensureIndex(name, 'fts', 'USING gin (tsv)');
     }
+    // The index is made outside the ALTER's catch, so a failure to make it reaches the caller. A table that has
+    // the column may still lack its index: before index names carried the prefix, a second prefix's collection
+    // got none.
+    await this._ensureIndex(name, 'fts', 'USING gin (tsv)');
 
     // Register in collections metadata.
     await this.pool.query(
