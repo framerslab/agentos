@@ -622,6 +622,19 @@ export class GMIManager {
 
   public async deactivateGMIForSession(sessionId: string): Promise<boolean> {
     this.ensureInitialized();
+    return this.deactivateSession(sessionId);
+  }
+
+  /**
+   * Shuts down the GMI bound to a session and removes it from both maps. It
+   * skips the initialization check because `shutdown()` marks the manager
+   * uninitialized first, so that no new work starts, and then calls this for
+   * every session.
+   *
+   * @param sessionId - The session whose GMI is shut down.
+   * @returns `true` when the session had an active GMI, `false` when it had none.
+   */
+  private async deactivateSession(sessionId: string): Promise<boolean> {
     const gmiInstanceId = this.gmiSessionMap.get(sessionId);
     if (!gmiInstanceId) {
         console.warn(`GMIManager (ID: ${this.managerId}): No GMI instance ID found for session ${sessionId} during deactivation attempt.`);
@@ -702,12 +715,14 @@ export class GMIManager {
 
   public async shutdown(): Promise<void> {
     console.log(`GMIManager (ID: ${this.managerId}): Initiating shutdown. Deactivating all active GMIs...`);
+    // Calls that arrive from here on fail with the not-initialized error. The
+    // loop goes through deactivateSession(), which does not check the flag.
     this.isInitialized = false;
 
     const sessionIdsToDeactivate = Array.from(this.gmiSessionMap.keys());
     for (const sessionId of sessionIdsToDeactivate) {
       try {
-        await this.deactivateGMIForSession(sessionId);
+        await this.deactivateSession(sessionId);
       } catch (error: any) {
         console.error(`GMIManager (ID: ${this.managerId}): Error deactivating GMI for session ${sessionId} during manager shutdown: ${error.message}`, error);
       }
