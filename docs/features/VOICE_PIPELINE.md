@@ -244,10 +244,10 @@ capture.onBlock((samples, sampleRate) => session.pushAudio({ samples, sampleRate
 await capture.start(); // loads the module, once per context, and builds the path
 
 capture.setStream(otherStream); // another microphone, or a mix the page made, on the same node
-capture.stop(); // every node disconnected; no block is handed on after it
+capture.stop(); // every node disconnected and every listener removed; no block is handed on after it
 ```
 
-A second `start()` leaves a running capture as it is, and a `stop()` while the module loads leaves nothing built. A `start()` that fails, on a module that did not load or a stream with no audio track, leaves nothing connected, and the next `start()` tries again.
+A second `start()` leaves a running capture as it is, and a `stop()` while the module loads leaves nothing built. `stop()` removes the listeners as well, so a capture started again hands its blocks to the listeners added after it. A `start()` that fails, on a module that did not load or a stream with no audio track, leaves nothing connected, and the next `start()` tries again.
 
 The worklet module is `capture-worklet.js`, the file beside the entry's own in the package's `dist`. It imports nothing, so the host copies it into its static files at build time and passes its address as `moduleUrl`. A worklet's module is a script to the page's content security policy, so a page whose policy allows scripts from its own origin alone serves the file there.
 

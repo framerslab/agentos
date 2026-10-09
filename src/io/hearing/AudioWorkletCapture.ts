@@ -100,7 +100,10 @@ export class AudioWorkletCapture {
     if (this.node) this.connectSource();
   }
 
-  /** Stops: every node disconnected, and no block handed on after it; a start still loading the module builds nothing. */
+  /**
+   * Stops: every node disconnected, every listener removed, and no block handed on after it; a start still loading the
+   * module builds nothing. A capture started again hands its blocks to the listeners added after the stop.
+   */
   stop(): void {
     this.generation += 1;
     this.listeners.clear();
