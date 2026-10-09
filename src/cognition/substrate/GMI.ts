@@ -44,7 +44,7 @@ import {
   IPersonaDefinition,
   PersonaRagConfigIngestionTrigger, // Ensure this type definition exists and is correctly imported
 } from './personas/IPersonaDefinition';
-import { hardLimitsBlock, HARD_LIMITS_PRIORITY } from './personas/hardLimits.js';
+import { hardLimitsBlock, HARD_LIMITS_PRIORITY } from './personas/hardLimits';
 import { IWorkingMemory } from './memory/IWorkingMemory';
 import { IPromptEngine, PromptExecutionContext, PromptComponents, PromptEngineResult, ModelTargetInfo } from '../../core/llm/IPromptEngine';
 import { IRetrievalAugmentor, RagRetrievalOptions, RagDocumentInput, RagIngestionOptions, RagMemoryCategory } from '../rag/IRetrievalAugmentor';

@@ -43,7 +43,9 @@ export function checkRequiredGuardrails(active: readonly ActiveGuardrail[], requ
       continue;
     }
     for (const stage of spec.stages) {
-      const implemented = stage === 'input' ? typeof found.service.evaluateInput === 'function' : typeof found.service.evaluateOutput === 'function';
+      const method = stage === 'input' ? found.service.evaluateInput : found.service.evaluateOutput;
+      // a guard that declares its stages is held to them: a method that exists but is configured off is no coverage
+      const implemented = typeof method === 'function' && (found.service.stages === undefined || found.service.stages.includes(stage));
       if (!implemented) missingStage.push({ id: spec.id, stage });
     }
   }
