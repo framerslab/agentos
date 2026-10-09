@@ -587,6 +587,37 @@ describe("agent({ runtime: 'gmi' }) resolves the model and builds memory on firs
     await a.close();
   });
 
+  it("a session id opened again after close() runs its tools under the id the caller opened, and its memory still recalls nothing of the closed session", async () => {
+    const k = key(); const emb = key();
+    const s = script('openai', k, { replies: [reply.text('Noted.'), reply.tools([{ id: 'c1', name: 'lookup', args: { q: 'deploy key' } }]), reply.text('No idea.')] });
+    script('openai', emb);
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    // A tool that keys app state on the session: it records the ids its context carries.
+    const seenByTool: Array<Record<string, unknown>> = [];
+    const lookup = {
+      name: 'lookup',
+      description: 'Look up.',
+      inputSchema: { type: 'object', properties: { q: { type: 'string' } } },
+      execute: async (_args: Record<string, unknown>, ctx: { sessionData?: Record<string, unknown>; userContext?: { userId?: string } }) => {
+        seenByTool.push({ sessionId: ctx.sessionData?.sessionId, conversationId: ctx.sessionData?.conversationId, userId: ctx.userContext?.userId });
+        return { success: true, output: 'nothing filed' };
+      },
+    };
+    const a = agent(base(k, { ...plainMemory(), tools: [lookup] }));
+
+    const first = a.session('kiosk-1');
+    await first.send(FACT);
+    await first.close();
+    await a.session('kiosk-1').send(QUESTION);
+
+    expect(seenByTool).toEqual([{ sessionId: 'kiosk-1', conversationId: 'kiosk-1', userId: 'kiosk-1' }]);
+    // Both model calls of the reopened session's turn: no recall of the closed session's fact.
+    expect(s.seen).toHaveLength(3);
+    expect(JSON.stringify(s.seen[1].messages)).not.toContain('vault');
+    expect(JSON.stringify(s.seen[2].messages)).not.toContain('vault');
+    await a.close();
+  });
+
   it("a session's memory context names no memory of another session; sessions that share a user id still see each other's", async () => {
     const k = key(); const emb = key();
     const s = script('openai', k, { replies: ['Noted.', 'Kept.', 'No idea.', 'Noted.', 'Kept.', 'In the vault.'].map((text) => reply.text(text)) });
