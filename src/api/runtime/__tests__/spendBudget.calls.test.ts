@@ -2,9 +2,10 @@
  * The spend budget on the paths beside the plain call: a stream's usage and its refusal, the usage a failed call's
  * error reports, the provider's health while a budget refuses calls, a fallback walk that meets a spent budget, a
  * model with no price row when the budget warns or tells a callback (and one named after a member every object
- * inherits), a token cap of NaN, estimated as a call that names none, a guard hook's stop under `hookErrors: 'throw'`
- * (never walked to another provider, never counted against one, and on the prompt-tool path before the tool runs),
- * and an agent on the GMI runtime, which takes no budget.
+ * inherits), a token cap of NaN, estimated as a call that names none, a budget's own token cap and an outside cost
+ * of NaN, refused instead of ignored, a guard hook's stop under `hookErrors: 'throw'` (never walked to another
+ * provider, never counted against one, and on the prompt-tool path before the tool runs), and an agent on the GMI
+ * runtime, which takes no budget.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -227,6 +228,34 @@ describe('a spend budget and a token cap of NaN', () => {
       }),
     ).rejects.toBeInstanceOf(CostCapExceededError);
     expect(hoisted.generateCompletion).not.toHaveBeenCalled();
+  });
+});
+
+describe("a budget's own token cap and an outside cost that are not numbers", () => {
+  it('refuses the cap when the budget is made and the cost when it is recorded, instead of ignoring them', async () => {
+    // Read from a setting or a field that is not there (`Number(undefined)`), each is NaN, and every comparison with
+    // NaN is false: a token cap of NaN never refused a call, and an outside cost of NaN was never counted.
+    hoisted.generateCompletion.mockResolvedValue(reply('ok', 0));
+    expect(() => agent({ provider: 'openai', model: 'gpt-6-luna', budget: { maxCostUSD: 1, maxTotalTokens: Number.NaN } })).toThrow(
+      RangeError,
+    );
+    await expect(
+      generateText({
+        provider: 'openai',
+        model: 'gpt-6-luna',
+        prompt: 'hello',
+        budget: { maxCostUSD: 1, maxTotalTokens: Number.NaN },
+        fallbackProviders: [],
+      }),
+    ).rejects.toBeInstanceOf(RangeError);
+    expect(hoisted.generateCompletion).not.toHaveBeenCalled();
+
+    const budget = new SpendBudget({ maxCostUSD: 0.01 });
+    const session = agent({ provider: 'openai', model: 'gpt-6-luna', budget }).session('s1');
+    expect(() => session.recordExternalCost(Number.NaN, { kind: 'stt' })).toThrow(RangeError);
+    // A cost of zero or below still records nothing.
+    session.recordExternalCost(-1, { kind: 'stt' });
+    expect(budget.spentUSD()).toBe(0);
   });
 });
 
