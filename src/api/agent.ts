@@ -25,6 +25,7 @@ import {
   type ToolCallHookInfo,
 } from './generateText.js';
 import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
+import { buildSchemaInstructionText } from './runtime/structuredReply.js';
 import { resolveModelOption } from './model.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { ObjectGenerationError } from './generateObject.js';
@@ -326,11 +327,15 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
    * the provider's native structured-output API (OpenAI json_schema,
    * Anthropic forced tool-use, Gemini responseSchema), and returns a
    * Zod-validated typed object on `result.object` alongside the JSON
-   * string in `result.text`.
+   * string in `result.text`. A call whose provider payload carries no
+   * schema (a provider with none, an Anthropic model that rejects a
+   * forced tool choice, JSON-object mode) gets the schema in its system
+   * prompt, in the words `generateObject` uses; each fallback provider is
+   * checked for its own payload.
    *
-   * Tools (caller-provided in baseOpts.tools) are still passed through;
-   * the structured-output mode adds its own forced tool on Anthropic
-   * but the existing tool definitions remain in the payload.
+   * The agent's tools are left out of a schema request, and with them the
+   * chain-of-thought instruction; `runtime: 'legacy'` (the default) warns
+   * that it leaves them out.
    */
   responseSchema?: S;
   /**
@@ -997,6 +1002,9 @@ export function agent(opts: AgentOptions): Agent {
           // passes the payload through to the provider via _responseFormat.
           let responseFormat: Record<string, unknown> | undefined;
           let responseFormatBuilder: GenerateTextOptions['_responseFormatBuilder'];
+          // The schema in generateObject's words, for a call or fallback leg
+          // whose payload carries none (generateText decides per leg).
+          let schemaInstruction: string | undefined;
           if (sendOpts?.responseSchema) {
             // Resolve the primary the same way generateText will (explicit
             // provider/model fields, then env auto-detect) so the payload is
@@ -1012,6 +1020,7 @@ export function agent(opts: AgentOptions): Agent {
             const schema = sendOpts.responseSchema;
             const schemaName = sendOpts.schemaName ?? 'response';
             const jsonSchema = lowerZodToJsonSchema(schema);
+            schemaInstruction = buildSchemaInstructionText(jsonSchema, schemaName);
             responseFormat = buildResponseFormatForProvider({
               providerId,
               modelId,
@@ -1071,6 +1080,7 @@ export function agent(opts: AgentOptions): Agent {
               ...(responseFormatBuilder
                 ? { _responseFormatBuilder: responseFormatBuilder }
                 : {}),
+              ...(schemaInstruction ? { _schemaInstruction: schemaInstruction } : {}),
             },
             opts.memoryProvider,
             textForMemory,

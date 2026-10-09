@@ -83,6 +83,7 @@ describe('StreamChunkEmitter', () => {
         error: null,
         updatedConversationContext: null,
         activePersonaDetails: null,
+        structured: { value: { items: [] }, meta: { schemaName: 'week', valid: true, attempts: 1, enforcement: 'prompt_only', stage: 'model' } },
       };
 
       await emitter.pushChunk('s1', AgentOSResponseChunkType.FINAL_RESPONSE, 'gmi1', 'p1', true, data);
@@ -91,6 +92,8 @@ describe('StreamChunkEmitter', () => {
       expect(chunk.type).toBe(AgentOSResponseChunkType.FINAL_RESPONSE);
       expect(chunk.finalResponseText).toBe('done');
       expect(chunk.isFinal).toBe(true);
+      // a structured turn's parsed value rides the final chunk; a whitelist here is where it was dropped
+      expect(chunk.structured).toEqual(data.structured);
     });
 
     it('assembles SYSTEM_PROGRESS chunk correctly', async () => {

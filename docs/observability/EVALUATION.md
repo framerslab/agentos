@@ -129,6 +129,7 @@ const testCases: EvalTestCase[] = [
 | `semantic_similarity` | 0–1 | Paraphrases and near-matches |
 | `bleu` | 0–1 | Translation and generation quality |
 | `rouge` | 0–1 | Summarization quality (ROUGE-L F1) |
+| `word_error_rate` | 0–1 | Speech-to-text transcripts (1 less the word error rate) |
 | `json_valid` | 0 or 1 | Output is parseable JSON |
 | `length_check` | 0 or 1 | Output is within word/char limits |
 

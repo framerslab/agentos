@@ -640,11 +640,13 @@ The interface is importable for typing as
 The Structured Output column is the provider-side enforcement that
 `generateObject()` and a session's `responseSchema` request. `generateObject()`
 also writes the schema into the system prompt on every provider. A session's
-`responseSchema` does not, so on a provider whose entry is "None" the model
-never sees the schema and `send()` throws an `ObjectGenerationError` when the
-reply is not matching JSON. `streamObject()` sends no provider-side format on
-any provider: its schema travels in the system prompt only. All three validate
-the reply against the caller's Zod schema.
+`responseSchema`, on either agent runtime, writes it there only when the
+provider-side format carries no schema: on a provider whose entry is "None",
+on an Anthropic model that rejects a forced tool choice, and in JSON-object
+mode. Each fallback provider is checked for its own format. `streamObject()`
+sends no provider-side format on any provider: its schema travels in the system
+prompt only. All three validate the reply against the caller's Zod schema, and
+`send()` throws an `ObjectGenerationError` when the reply is not matching JSON.
 
 The Tool Choice column is what the provider does with the `toolChoice` option
 (`'auto'`, `'none'`, `'required'`, or `{ type: 'function', function: { name } }`).

@@ -60,6 +60,13 @@ export interface GmiTurnOptions {
   blockLabel?: string;
   /** Stops the turn: the model call in progress is aborted, and the turn ends with the abort error. */
   abortSignal?: AbortSignal;
+  /**
+   * Checks the reply of a turn that ended without error, before the session
+   * keeps it. A throw keeps nothing of the turn (no history, no
+   * `memoryProvider.observe`) and is the turn's error: a structured send whose
+   * answer does not parse adds nothing, as `agent()`'s send adds nothing.
+   */
+  acceptReply?: () => void;
 }
 
 /** What the GMI's hooks need to know about the turn about to run. */
@@ -70,6 +77,8 @@ export interface GmiTurnContext {
   memoryContext: string | undefined;
   /** Called before every model call of the turn with the provider and model its hop was routed to. */
   onModelCall?: (route: { providerId: string; modelId: string }) => void;
+  /** True for a structured send: its model calls go without tools. */
+  structured?: boolean;
 }
 
 /** The GMI that serves one turn. */
@@ -289,6 +298,7 @@ export async function* runGmiTurn(
       prompt: typeof input === 'string' ? input : undefined,
       memoryContext,
       onModelCall: ({ providerId, modelId }) => folder.route(providerId, modelId),
+      structured: turn.responseSchema !== undefined,
     });
     writer = deps.history?.beginTurn(turn.blockLabel, epochAtStart);
 
@@ -370,6 +380,13 @@ export async function* runGmiTurn(
     if (folder.error()) {
       writer?.abort({ partial: true });
     } else {
+      try {
+        turn.acceptReply?.();
+      } catch (refusal) {
+        // A refused reply leaves nothing of the turn behind.
+        writer?.abort();
+        throw refusal;
+      }
       writer?.commit();
       const memoryProvider = deps.opts.memoryProvider;
       if (memoryProvider?.observe) {
@@ -407,11 +424,11 @@ export async function* runGmiTurn(
 }
 
 /** Parses a structured send's answer: the schema tool's arguments when a step carried them, else the reply text. */
-function parseStructured(folder: GmiTurnFolder, result: GenerateTextResult, schema: ZodType): unknown {
+function parseStructured(folder: GmiTurnFolder, schema: ZodType): unknown {
   const structured = folder.structuredOutput();
   let raw: unknown = structured;
   if (structured === undefined || typeof structured === 'string') {
-    const source = typeof structured === 'string' ? structured : result.text;
+    const source = typeof structured === 'string' ? structured : folder.text();
     try {
       raw = JSON.parse(source);
     } catch (err) {
@@ -423,7 +440,7 @@ function parseStructured(folder: GmiTurnFolder, result: GenerateTextResult, sche
   }
   const safe = schema.safeParse(raw);
   if (!safe.success) {
-    throw new ObjectGenerationError('session.send: provider-enforced JSON failed Zod validation', result.text, safe.error);
+    throw new ObjectGenerationError('session.send: provider-enforced JSON failed Zod validation', folder.text(), safe.error);
   }
   return safe.data;
 }
@@ -432,7 +449,10 @@ function parseStructured(folder: GmiTurnFolder, result: GenerateTextResult, sche
  * `send()`: the whole turn, folded into a `GenerateTextResult` (with `object`
  * when a schema was given). Rejects with the GMI's error, its code kept, when
  * the turn failed; an error thrown before the turn ran (no provider or model
- * resolves, the memory cannot be built) is rethrown as it was thrown.
+ * resolves, the memory cannot be built) is rethrown as it was thrown. A
+ * structured answer is parsed before the session keeps the turn, so one that
+ * does not parse or validate rejects with `ObjectGenerationError` and leaves
+ * nothing in the history.
  */
 export async function sendGmiTurn(
   deps: GmiSessionDeps,
@@ -440,7 +460,17 @@ export async function sendGmiTurn(
   turn: GmiTurnOptions,
 ): Promise<GenerateTextResult & { object?: unknown }> {
   const folder = new GmiTurnFolder({ cacheDiagnostics: Boolean(turn.options?.cacheDiagnostics) });
-  const run = runGmiTurn(deps, input, turn, folder);
+  const schema = turn.responseSchema;
+  let object: unknown;
+  const checked: GmiTurnOptions = schema
+    ? {
+        ...turn,
+        acceptReply: () => {
+          object = parseStructured(folder, schema);
+        },
+      }
+    : turn;
+  const run = runGmiTurn(deps, input, checked, folder);
   let recorded: SessionTranscriptMessage[] = [];
   for (;;) {
     const next = await run.next();
@@ -452,8 +482,8 @@ export async function sendGmiTurn(
   const error = folder.toError();
   if (error) throw error;
   const result = folder.toGenerateTextResult(recorded);
-  if (!turn.responseSchema) return result;
-  return { ...result, object: parseStructured(folder, result, turn.responseSchema) };
+  if (!schema) return result;
+  return { ...result, object };
 }
 
 /**

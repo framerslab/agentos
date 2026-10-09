@@ -27,7 +27,8 @@ import {
   type GenerateTextOptions,
 } from '../generateText.js';
 import { hostPolicyToRouteParams, mergeRequiredCapabilities, type HostLLMPolicy } from './hostPolicy.js';
-import { buildResponseFormatForProvider } from './responseFormatForProvider.js';
+import { buildResponseFormatForProvider, responseFormatCarriesSchema } from './responseFormatForProvider.js';
+import { buildSchemaInstructionText } from './structuredReply.js';
 
 /** What a turn asks the gateway for. Unset fields take the gateway's defaults. */
 export interface CompletionRoute {
@@ -99,6 +100,12 @@ export interface CompletionGateway {
     options: ModelCompletionOptions,
     responseSchema?: ZodType,
     schemaName?: string,
+    /**
+     * True when `messages` already carry the schema's instructions (a structured
+     * reply puts its own in the system prompt): a hop whose payload carries no
+     * schema then gets no second copy.
+     */
+    schemaInPrompt?: boolean,
   ): CompletionAttempt;
 }
 
@@ -226,6 +233,77 @@ function terminalErrorChunk(resolution: CompletionResolution, error: Error): Mod
   };
 }
 
+/** The chunk that ends an attempt the caller's signal stopped, in the shape the providers give theirs. */
+function abortChunk(resolution: CompletionResolution): ModelCompletionResponse {
+  return {
+    id: `gateway-abort-${resolution.providerId}-${resolution.hop}`,
+    object: 'chat.completion.chunk',
+    created: Math.floor(Date.now() / 1000),
+    modelId: resolution.modelId,
+    choices: [],
+    isFinal: true,
+    error: { message: 'Stream aborted by caller', type: 'abort' },
+  };
+}
+
+const ABORTED = Symbol('aborted');
+
+/** The iterator's next result, or `ABORTED` once `signal` has aborted, whichever comes first. */
+function nextUnlessAborted<T>(iterator: AsyncIterator<T>, signal: AbortSignal): Promise<IteratorResult<T> | typeof ABORTED> {
+  const next = iterator.next();
+  if (signal.aborted) {
+    // Settled or not, the result is not read; a rejection is not left unhandled.
+    void next.catch(() => undefined);
+    return Promise.resolve(ABORTED);
+  }
+  return new Promise<IteratorResult<T> | typeof ABORTED>((resolve, reject) => {
+    const onAbort = (): void => resolve(ABORTED);
+    signal.addEventListener('abort', onAbort, { once: true });
+    next.then(
+      (result) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(result);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+/**
+ * The provider's chunks until `signal` aborts, then the abort chunk at once.
+ * Anthropic, Gemini and Ollama read the signal only when a streamed event
+ * arrives, so a request stalled before its first byte, or between two events,
+ * would otherwise hold the turn (and a session's `close()`) until the
+ * provider's own timeout. The provider's stream is ended in the background.
+ */
+async function* untilAborted(
+  source: AsyncIterable<ModelCompletionResponse>,
+  signal: AbortSignal,
+  resolution: CompletionResolution,
+): AsyncGenerator<ModelCompletionResponse, void, undefined> {
+  const iterator = source[Symbol.asyncIterator]();
+  let leftRunning = false;
+  try {
+    for (;;) {
+      const next = await nextUnlessAborted(iterator, signal);
+      if (next === ABORTED) {
+        leftRunning = true;
+        void Promise.resolve(iterator.return?.()).catch(() => undefined);
+        yield abortChunk(resolution);
+        return;
+      }
+      if (next.done) return;
+      yield next.value;
+    }
+  } finally {
+    // As a for-await loop ends its source; not one still waiting on the network.
+    if (!leftRunning) await iterator.return?.();
+  }
+}
+
 /** Text, tool activity or a lifted schema answer: the first such chunk ends the buffering. */
 function carriesContent(chunk: ModelCompletionResponse): boolean {
   if (chunk.responseTextDelta) return true;
@@ -260,17 +338,38 @@ function billedUsage(buffered: ReadonlyArray<ModelCompletionResponse>, error: Er
   return undefined;
 }
 
-/** The provider-native schema payload for this hop, built as session.send builds it. */
-function lowerForHop(resolution: CompletionResolution, schema: ZodType, schemaName: string): { responseFormat: Record<string, unknown> | undefined; toolName?: string } {
+/**
+ * The provider-native schema payload for this hop, built as session.send builds
+ * it, and, when that payload carries no schema (no payload for the provider or
+ * model, or a JSON mode without one), the schema instructions for the hop's
+ * system prompt, in generateObject's words.
+ */
+function lowerForHop(
+  resolution: CompletionResolution,
+  schema: ZodType,
+  schemaName: string,
+): { responseFormat: Record<string, unknown> | undefined; toolName?: string; schemaInstruction?: string } {
+  const jsonSchema = lowerZodToJsonSchema(schema);
   const responseFormat = buildResponseFormatForProvider({
     providerId: resolution.providerId,
     modelId: resolution.modelId,
-    jsonSchema: lowerZodToJsonSchema(schema),
+    jsonSchema,
     effectiveSchema: schema,
     schemaName,
   });
   const marker = responseFormat as { _agentosUseToolForStructuredOutput?: boolean; tool?: { name?: string } } | undefined;
-  return { responseFormat, toolName: marker?._agentosUseToolForStructuredOutput ? marker.tool?.name : undefined };
+  return {
+    responseFormat,
+    toolName: marker?._agentosUseToolForStructuredOutput ? marker.tool?.name : undefined,
+    ...(responseFormatCarriesSchema(responseFormat) ? {} : { schemaInstruction: buildSchemaInstructionText(jsonSchema, schemaName) }),
+  };
+}
+
+/** `messages` with a system message of `text` after the leading system messages. */
+function withSystemMessage(messages: ChatMessage[], text: string): ChatMessage[] {
+  let at = 0;
+  while (at < messages.length && messages[at].role === 'system') at += 1;
+  return [...messages.slice(0, at), { role: 'system', content: text }, ...messages.slice(at)];
 }
 
 /** A streamed forced schema tool call becomes `structuredOutput` on the chunk, never a tool call the GMI would dispatch. */
@@ -363,6 +462,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     options: ModelCompletionOptions,
     responseSchema?: ZodType,
     schemaName = 'response',
+    schemaInPrompt = false,
   ): CompletionAttempt {
     let settle!: (outcome: CompletionOutcome) => void;
     const outcome = new Promise<CompletionOutcome>((resolveOutcome) => {
@@ -382,6 +482,8 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     ): CompletionOutcome => ({ kind: 'hopFailed', error, retryable, ...(usage ? { usage } : {}) });
 
     const structured = responseSchema ? lowerForHop(resolution, responseSchema, schemaName) : undefined;
+    // A hop whose payload carries no schema gets it in its system prompt, unless the prompt carries it already.
+    const hopMessages = structured?.schemaInstruction && !schemaInPrompt ? withSystemMessage(messages, structured.schemaInstruction) : messages;
     const callOptions: ModelCompletionOptions = {
       ...options,
       ...resolution.optionOverrides,
@@ -403,7 +505,9 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
           finish(failed(error, undefined));
           return;
         }
-        for await (const raw of provider.generateCompletionStream(resolution.modelId, messages, callOptions)) {
+        const chunks = provider.generateCompletionStream(resolution.modelId, hopMessages, callOptions);
+        const signal = callOptions.abortSignal;
+        for await (const raw of signal ? untilAborted(chunks, signal, resolution) : chunks) {
           const chunk = structured?.toolName ? liftSchemaToolCall(raw, structured.toolName) : raw;
           if (chunk.error) {
             // An abort is the caller's own stop: it is never walked to another

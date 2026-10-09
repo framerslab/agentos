@@ -1,3 +1,21 @@
+## [0.13.7](https://github.com/framerslab/agentos/compare/v0.13.6...v0.13.7) (2026-10-09)
+
+### fix
+
+* **guardrails:** the review's remaining findings on the required guards (#189) ([c3e37a9](https://github.com/framerslab/agentos/commit/c3e37a9b350b90a7bcf7662971c9e8db6a9268a1))
+
+## [0.13.6](https://github.com/framerslab/agentos/compare/v0.13.5...v0.13.6) (2026-10-09)
+
+### feat
+
+* **voice-pipeline:** an input level and a watch for an input that carries no sound (#180) ([7afa875](https://github.com/framerslab/agentos/commit/7afa875716c8ec1de35aab29905cfb4333d5648a))
+
+## [0.13.5](https://github.com/framerslab/agentos/compare/v0.13.4...v0.13.5) (2026-10-09)
+
+### feat
+
+* **api:** a schema-validated structured reply on processRequest (#177) ([710f266](https://github.com/framerslab/agentos/commit/710f266ed7fe2164e8a83c68bae405c62c32a5b7))
+
 ## [0.13.4](https://github.com/framerslab/agentos/compare/v0.13.3...v0.13.4) (2026-10-09)
 
 ### docs

@@ -52,6 +52,7 @@ import {
   AgentOSErrorChunk,
   AgentOSResponseChunkType,
   isActionableToolCallRequestChunk,
+  type AgentOSFinalResponseChunk,
 } from './types/AgentOSResponse';
 import {
   AgentOSOrchestrator,
@@ -123,6 +124,15 @@ import {
   type RequiredGuardrailSpec,
 } from '../safety/guardrails/requiredGuardrails';
 import { SpendMeterUnavailableError, type ISpendMeter, type SpendDenyReason } from '../safety/runtime/SpendMeter';
+import {
+  recheckStructuredReply,
+  resolveStructuredReply,
+  resolveStructuredReplySpec,
+  StructuredReplyConfigError,
+  type IStructuredSchemaRegistry,
+  type ResolvedStructuredReply,
+  type StructuredReplySpec,
+} from './runtime/structuredReply';
 import type { EmergentConfig } from '../cognition/emergent/types.js';
 // SelfImprovementToolDeps reserved for emergent capability integration
 import { GuardrailAction } from '../safety/guardrails/IGuardrailService';
@@ -474,6 +484,8 @@ export interface AgentOSConfig {
    * and no model call. The turn settles the reservation when it ends; a reply an output guardrail blocks is refunded.
    */
   spendMeter?: AgentOSSpendMeterConfig;
+  /** The schemas a request's `structuredReply.schemaRef` is looked up in. A `Map<string, ZodType | JsonSchemaObject>` is one. */
+  structuredSchemas?: IStructuredSchemaRegistry;
   /**
    * Optional retrieval augmentor enabling vector-based RAG and/or GraphRAG.
    * When provided, it is passed into GMIs via the GMIManager.
@@ -1472,6 +1484,12 @@ export class AgentOS implements IAgentOS {
     try {
       const context = await this.conversationManager.getConversation(conversationKey);
       if (!context) return;
+      if (this.conversationManager.appendOnlyPersistence) {
+        this.logger.warn('The conversation store is append-only: the stored reply keeps the text a guard replaced; the history in memory is rewritten', {
+          conversationId: conversationKey,
+          reasonCode: verdict.reasonCode ?? verdict.action,
+        });
+      }
       // the message the verdict was about, by its text (the orchestrator stored the same string the guards judged):
       // the newest such message is this turn's, and an earlier turn's reply is never touched
       const stored = [...context.getAllMessages()].reverse().find((m) => m.role === MessageRole.ASSISTANT && m.metadata?.source === 'agentos_output' && m.content === verdict.originalText);
@@ -1798,6 +1816,30 @@ export class AgentOS implements IAgentOS {
         this.selfImprovementManager.buildSessionRuntimeKey(guardrailInputOutcome.sanitizedInput.sessionId),
       ),
     });
+    // A structured reply: the schema is resolved here, before the turn, so a request that names a schema the runtime
+    // cannot reach is refused with no model call; the turn receives the spec with its schema in hand.
+    let structuredSpec: ResolvedStructuredReply | null = null;
+    if (orchestratorInput.options?.structuredReply) {
+      try {
+        const spec: StructuredReplySpec = resolveStructuredReplySpec(orchestratorInput.options.structuredReply, this.config.structuredSchemas);
+        structuredSpec = resolveStructuredReply(spec);
+        orchestratorInput.options = { ...orchestratorInput.options, structuredReply: spec };
+      } catch (error) {
+        const message = error instanceof StructuredReplyConfigError ? error.message : `The structured reply could not be set up: ${error instanceof Error ? error.message : String(error)}`;
+        yield {
+          type: AgentOSResponseChunkType.ERROR,
+          streamId: orchestratorInput.sessionId || `agentos-req-${Date.now()}`,
+          gmiInstanceId: 'structured_reply',
+          personaId: effectivePersonaId,
+          isFinal: true,
+          timestamp: new Date().toISOString(),
+          code: GMIErrorCode.VALIDATION_ERROR,
+          message,
+          details: { structuredReply: true },
+        } as AgentOSErrorChunk;
+        return;
+      }
+    }
     // Language negotiation (non-blocking)
     let languageNegotiation: any = null;
     if (this.languageService && this.config.languageConfig) {
@@ -1929,8 +1971,33 @@ export class AgentOS implements IAgentOS {
       }
 
       // Yield chunks from the guardrail-wrapped stream
-      for await (const chunk of guardrailWrappedStream) {
+      for await (const guarded of guardrailWrappedStream) {
+        let chunk: AgentOSResponse = guarded;
         if (meteredOperationId && isOutputGuardrailBlock(chunk)) replacedByGuardrail = true;
+        // A structured turn's final chunk, after the output guardrails: a sanitizer that rewrote the text may have
+        // broken the shape the model matched, so the text is checked again as it stands.
+        if (structuredSpec && chunk.type === AgentOSResponseChunkType.FINAL_RESPONSE) {
+          const finalChunk = chunk as AgentOSFinalResponseChunk;
+          const sanitized = Array.isArray(finalChunk.metadata?.guardrail?.output) && finalChunk.metadata.guardrail.output.some((e: { action?: unknown }) => String(e?.action).toLowerCase() === 'sanitize');
+          if (finalChunk.structured && sanitized) {
+            const rechecked = recheckStructuredReply(finalChunk.finalResponseText, finalChunk.structured, structuredSpec);
+            if (!rechecked.meta.valid && structuredSpec.onExhausted === 'error') {
+              yield {
+                type: AgentOSResponseChunkType.ERROR,
+                streamId: finalChunk.streamId,
+                gmiInstanceId: finalChunk.gmiInstanceId,
+                personaId: finalChunk.personaId,
+                isFinal: true,
+                timestamp: new Date().toISOString(),
+                code: GMIErrorCode.STRUCTURED_OUTPUT_INVALID,
+                message: `The reply no longer matched the schema "${structuredSpec.name}" after an output guardrail rewrote it.`,
+                details: { schemaName: structuredSpec.name, stage: 'post_guardrail', issues: rechecked.meta.issues },
+              } as AgentOSErrorChunk;
+              break;
+            }
+            chunk = { ...finalChunk, structured: rechecked };
+          }
+        }
         if (languageNegotiation) {
           if (!chunk.metadata) chunk.metadata = {};
           chunk.metadata.language = languageNegotiation;

@@ -41,6 +41,8 @@ export interface ProviderScript {
 interface Hold {
   gate: Promise<void>;
   after: Array<Record<string, unknown>>;
+  /** True for a provider that reads the abort signal only when an event arrives (see `reply.stall`). */
+  ignoresSignal?: boolean;
 }
 
 export const scripts = new Map<string, ProviderScript>();
@@ -101,6 +103,14 @@ export const reply = {
    */
   hold: (before: Array<Record<string, unknown>>, gate: Promise<void>, after: Array<Record<string, unknown>> = []) =>
     Object.assign([...before], { hold: { gate, after } satisfies Hold }),
+  /**
+   * As `hold`, for a provider that reads the abort signal only when an event
+   * arrives, as Anthropic, Gemini and Ollama stream: the request stays open
+   * until `gate` resolves, aborted or not, and then ends with the abort chunk
+   * if the caller aborted meanwhile.
+   */
+  stall: (before: Array<Record<string, unknown>>, gate: Promise<void>, after: Array<Record<string, unknown>> = []) =>
+    Object.assign([...before], { hold: { gate, after, ignoresSignal: true } satisfies Hold }),
   /** One delta, then the provider throws `error` (a refusal that reports its usage in `details.usage`, a dropped connection). */
   textThenThrow: (text: string, error: Error) => [{ ...base, modelId: 'stub-model', choices: [], responseTextDelta: text }, error],
 };
@@ -176,9 +186,11 @@ export function stubProviderClass(providerId: string) {
       const hold = (next as { hold?: Hold }).hold;
       if (!hold) return;
       const aborted = await new Promise<boolean>((resolve) => {
-        if (signal?.aborted) return resolve(true);
-        signal?.addEventListener('abort', () => resolve(true), { once: true });
-        void hold.gate.then(() => resolve(false));
+        if (!hold.ignoresSignal) {
+          if (signal?.aborted) return resolve(true);
+          signal?.addEventListener('abort', () => resolve(true), { once: true });
+        }
+        void hold.gate.then(() => resolve(Boolean(signal?.aborted)));
       });
       if (aborted) {
         s.aborts += 1;

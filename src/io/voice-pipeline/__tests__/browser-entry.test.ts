@@ -83,6 +83,7 @@ describe.skipIf(!inCI && !existsSync(entry))('the browser entry of the voice pip
       expect.arrayContaining([
         'io/voice-pipeline/browser.js',
         'io/voice-pipeline/transcriptLedger.js',
+        'io/voice-pipeline/inputLevel.js',
       ])
     );
   });
