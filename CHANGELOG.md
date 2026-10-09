@@ -1,3 +1,9 @@
+## [0.13.16](https://github.com/framerslab/agentos/compare/v0.13.15...v0.13.16) (2026-10-09)
+
+### feat
+
+* **images:** imageToBuffer reads untrusted input from public addresses only (#211) ([31805b1](https://github.com/framerslab/agentos/commit/31805b14c26a14a8fe6d4ccce214d9df3b53ed57))
+
 ## [0.13.15](https://github.com/framerslab/agentos/compare/v0.13.14...v0.13.15) (2026-10-09)
 
 ### fix
