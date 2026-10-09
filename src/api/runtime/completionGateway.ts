@@ -233,6 +233,9 @@ function terminalErrorChunk(resolution: CompletionResolution, error: Error): Mod
   };
 }
 
+/** The error of an attempt the caller's signal stopped, as the providers word theirs. */
+const CALLER_ABORT: InBandError = { message: 'Stream aborted by caller', type: 'abort' };
+
 /** The chunk that ends an attempt the caller's signal stopped, in the shape the providers give theirs. */
 function abortChunk(resolution: CompletionResolution): ModelCompletionResponse {
   return {
@@ -242,20 +245,20 @@ function abortChunk(resolution: CompletionResolution): ModelCompletionResponse {
     modelId: resolution.modelId,
     choices: [],
     isFinal: true,
-    error: { message: 'Stream aborted by caller', type: 'abort' },
+    error: { ...CALLER_ABORT },
   };
 }
 
 const ABORTED = Symbol('aborted');
 
-/** The iterator's next result, or `ABORTED` once `signal` has aborted, whichever comes first. */
+/**
+ * The iterator's next result, or `ABORTED` once `signal` has aborted, whichever
+ * comes first. The signal is read before `next()` is asked: asking a provider
+ * stream that has not started for its first chunk sends its request.
+ */
 function nextUnlessAborted<T>(iterator: AsyncIterator<T>, signal: AbortSignal): Promise<IteratorResult<T> | typeof ABORTED> {
+  if (signal.aborted) return Promise.resolve(ABORTED);
   const next = iterator.next();
-  if (signal.aborted) {
-    // Settled or not, the result is not read; a rejection is not left unhandled.
-    void next.catch(() => undefined);
-    return Promise.resolve(ABORTED);
-  }
   return new Promise<IteratorResult<T> | typeof ABORTED>((resolve, reject) => {
     const onAbort = (): void => resolve(ABORTED);
     signal.addEventListener('abort', onAbort, { once: true });
@@ -498,6 +501,13 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
       let completed = false;
       const buffer: ModelCompletionResponse[] = [];
       try {
+        // A turn the caller stopped before this attempt began (a session's close()
+        // during a tool round) sends no request: a provider that does not pass the
+        // signal to fetch would send it, and it would be billed.
+        if (callOptions.abortSignal?.aborted) {
+          finish(failed(errorFromChunk(CALLER_ABORT), undefined, false));
+          return;
+        }
         const provider = resolution.providerManager.getProvider(resolution.providerId);
         if (!provider) {
           const error = Object.assign(new Error(`Provider '${resolution.providerId}' is not available.`), { name: 'ProviderInitializationError' });
