@@ -96,7 +96,7 @@ const team = agency({
 
 ## Budget across calls
 
-[`CostGuard`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts) keeps a per-key spend total for the session and the day and answers whether an operation fits. AgentOS does not call it for you; the host checks before a call and records after it:
+[`CostGuard`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts) keeps a per-key spend total for the session and the day and answers whether an operation fits. Given a `budget`, `generateText()`, `streamText()`, `generateObject()` and `embedText()` check each provider call against it before the call is sent and record the call's cost in it afterwards, and `agent()` does the same for the calls of its `generate()`, `stream()` and sessions. Without one, the host calls the guard itself, checking before a call and recording after it:
 
 ```typescript
 import { agent, CostGuard } from '@framers/agentos';

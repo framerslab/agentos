@@ -332,9 +332,13 @@ through the callback, and no limit interrupts a run that is in progress.
 becomes the call's completion-token cap (`maxTokens`) when the agent sets no
 `maxTokens`, and `controls.maxDurationMs` becomes the request timeout. It does
 not read `maxCostUSD`, `maxAgentCalls` or `onLimitReached`. To cap an agent's
-spend, read `result.usage.costUSD` or `agent.usage()` after each call and stop
-calling, or track it with
-[`CostGuard`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts).
+spend, give it a `budget` (`agent({ budget: { maxCostUSD: 0.25 } })`): each
+provider call of its `generate()`, `stream()` and sessions is checked against
+what is left before it is sent, and by default a call whose estimated cost
+would pass the cap is refused with `CostCapExceededError`. The budget holds its
+spending in a
+[`CostGuard`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts)
+([Cost Optimization](../safety/COST_OPTIMIZATION.md#budget-across-calls)).
 
 For cheap-first routing across multiple models, attach a custom [`IModelRouter`](https://github.com/framerslab/agentos/blob/master/src/core/llm/routing/IModelRouter.ts)
 via `agent({ router })` — the router decides which provider/model to call per
