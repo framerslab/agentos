@@ -46,7 +46,7 @@ import type { SessionTranscriptMessage } from './sessionTranscript.js';
 import { accumulateUsage, createEmptyUsageAggregate, mergeAggregates } from './runtime/usageAccumulator.js';
 import type { AgentOSUsageAggregate, AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { exportAgentConfig, exportAgentConfigJSON } from './agentExportCore.js';
-import { getDeferredCapabilities } from './runtime/lightweightAgentDiagnostics.js';
+import { getDeferredCapabilities, isMeaningfullyConfigured } from './runtime/lightweightAgentDiagnostics.js';
 
 /** The options of {@link gmi}: the options of `agent()`. */
 export type GmiOptions = AgentOptions;
@@ -75,12 +75,6 @@ const GMI_PROMPT_ENGINE_CONFIG: PromptEngineConfig = {
   contextualElementSelection: { maxElementsPerType: {}, defaultMaxElementsPerType: 3, priorityResolutionStrategy: 'highest_first', conflictResolutionStrategy: 'skip_conflicting' },
   performance: { enableCaching: false, cacheTimeoutSeconds: 60 },
 } as PromptEngineConfig;
-
-function isSet(value: unknown): boolean {
-  if (value == null || value === false) return false;
-  if (typeof value === 'object') return Object.keys(value as object).length > 0;
-  return true;
-}
 
 /**
  * A memoised async build that is not kept when it fails: the next call after a
@@ -278,7 +272,8 @@ interface SessionEntry {
 /**
  * An agent whose sessions are GMIs (docs/GMI.md, "GMIs from agent()").
  *
- * @param opts - The options of `agent()`. `voice`, `avatar` and `channels` throw.
+ * @param opts - The options of `agent()`. `voice`, `avatar` and `channels` throw when set;
+ *   a config that sets only `enabled: false` is unset.
  * @returns The `Agent` surface: `generate`, `stream`, `session`, `usage`, `close`, `export`.
  * @throws {Error} At construction, naming the option: an option the GMI path
  *   cannot honour, an unknown cognition profile or metaprompt preset, or a
@@ -289,7 +284,8 @@ interface SessionEntry {
  */
 export function gmi(opts: GmiOptions): GmiHandle {
   for (const key of UNSUPPORTED_ON_GMI) {
-    if (isSet((opts as unknown as Record<string, unknown>)[key])) {
+    // Counted as agent() counts a deferred option: a config that sets only `enabled: false` is unset.
+    if (isMeaningfullyConfigured((opts as unknown as Record<string, unknown>)[key])) {
       throw new Error(`gmi(): '${key}' is not available on the GMI path; remove it or use runtime: 'legacy'.`);
     }
   }

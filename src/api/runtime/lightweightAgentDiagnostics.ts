@@ -7,7 +7,13 @@ import {
   type CapabilitySurface,
 } from './capabilityContract.js';
 
-function isMeaningfullyConfigured(value: unknown): boolean {
+/**
+ * Whether a config value sets anything. `undefined`, `null`, `false`, a blank
+ * string, an empty Map or Set and an array of unset entries are unset; an
+ * object is set when an entry other than `enabled` is set, or when its only
+ * entry is `enabled: true`, so `{ enabled: false }` is unset.
+ */
+export function isMeaningfullyConfigured(value: unknown): boolean {
   if (value == null) return false;
   if (typeof value === 'boolean') return value;
   if (typeof value === 'string') return value.trim().length > 0;
