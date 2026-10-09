@@ -90,6 +90,14 @@ export type CompletionOutcome =
 /** One provider attempt. `outcome` settles when iteration ends (a never-iterated attempt never calls the provider). */
 export interface CompletionAttempt extends AsyncIterable<ModelCompletionResponse> {
   outcome: Promise<CompletionOutcome>;
+  /**
+   * For an attempt with a response schema: true when the hop's provider
+   * payload carries the schema (a strict `json_schema`, Anthropic's forced
+   * schema tool, Gemini's `responseSchema`), false when the schema reaches the
+   * model in the prompt alone (no payload for the provider or model, or a JSON
+   * mode without one). Unset for an attempt with no schema.
+   */
+  schemaInPayload?: boolean;
 }
 
 /**
@@ -679,7 +687,11 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
       }
     }
 
-    return { [Symbol.asyncIterator]: () => run(), outcome };
+    return {
+      [Symbol.asyncIterator]: () => run(),
+      outcome,
+      ...(structured ? { schemaInPayload: responseFormatCarriesSchema(structured.responseFormat) } : {}),
+    };
   }
 
   return { resolve, stream };

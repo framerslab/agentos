@@ -1351,6 +1351,9 @@ export class GMI implements IGMI {
         let stepFinishReason: string | null = null;
         let stepFinalChunk: ModelCompletionResponse | undefined;
         let stepStructuredOutput: unknown;
+        // Whether the answering attempt's provider payload carried the response schema (the gateway says).
+        // Initialised through the assertion, so tsc does not narrow it to undefined where it is read.
+        let stepSchemaInPayload = undefined as boolean | undefined;
         let modelTargetInfo!: ModelTargetInfo;
 
         // One attempt per hop. A failure before any output moves to the next
@@ -1423,6 +1426,7 @@ export class GMI implements IGMI {
             const gatewayAttempt: CompletionAttempt = gateway.stream(resolution, sendMessages, llmOptions, responseSchema, schemaName, schemaInPrompt);
             attempt = gatewayAttempt;
             attemptOutcome = gatewayAttempt.outcome;
+            stepSchemaInPayload = gatewayAttempt.schemaInPayload;
           } else {
             const provider = this.llmProviderManager.getProvider(modelTargetInfo.providerId);
             if (!provider) {
@@ -1605,7 +1609,9 @@ export class GMI implements IGMI {
           structuredAttempts += 1;
           const lifted = stepStructuredOutput !== undefined;
           const check = lifted ? structuredReply.checkValue(stepStructuredOutput) : checkStructuredReply(currentIterationTextResponse, structuredReply);
-          const enforcement = lifted ? 'forced_tool' : gateway ? 'provider_schema' : 'prompt_only';
+          // 'provider_schema' only when the answering hop's payload carried the schema; a hop that sent it in the
+          // prompt alone reports 'prompt_only'. A gateway that does not say keeps the earlier report.
+          const enforcement = lifted ? 'forced_tool' : gateway && stepSchemaInPayload !== false ? 'provider_schema' : 'prompt_only';
           if (check.ok) {
             structuredResult = { value: check.value, meta: { schemaName: structuredReply.name, valid: true, attempts: structuredAttempts, enforcement, stage: 'model' } };
             if (lifted && !currentIterationTextResponse) {
