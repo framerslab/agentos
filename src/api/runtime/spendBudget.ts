@@ -239,9 +239,12 @@ export function tokensOfChars(chars: number): number {
 }
 
 /**
- * The most a call could cost: its prompt's assumed tokens at the input rate and its output cap at the output rate
- * ({@link DEFAULT_OUTPUT_ESTIMATE_TOKENS} when it names none, or a cap of NaN), a cap above the model's known output
- * ceiling counted at the ceiling. Undefined when the provider's model has no price row (only OpenAI's table is known
+ * An estimate of the most a call could cost: its prompt's assumed tokens at the input rate and its output cap at the
+ * output rate ({@link DEFAULT_OUTPUT_ESTIMATE_TOKENS} when it names none, or a cap of NaN), a cap above the model's
+ * known output ceiling counted at the ceiling. The rates are the model's row's. OpenAI bills a prompt of more than
+ * 272,000 tokens on its models with a 1,050,000-token context window at twice the input rate and one and a half times
+ * the output rate; OpenAIProvider's reported cost carries those rates and this estimate does not, so such a call can
+ * cost up to twice its estimate. Undefined when the provider's model has no price row (only OpenAI's table is known
  * here).
  */
 export function estimateCallCostUSD(providerId: string, modelId: string, promptChars: number, maxOutputTokens: number | undefined): number | undefined {
