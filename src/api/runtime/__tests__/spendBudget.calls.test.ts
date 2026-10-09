@@ -1,7 +1,8 @@
 /**
  * The spend budget on the paths beside the plain call: a stream's usage and its refusal, the usage a failed call's
  * error reports, the provider's health while a budget refuses calls, a fallback walk that meets a spent budget, a
- * model with no price row when the budget warns or tells a callback, a guard hook's stop under `hookErrors: 'throw'`
+ * model with no price row when the budget warns or tells a callback (and one named after a member every object
+ * inherits), a guard hook's stop under `hookErrors: 'throw'`
  * (never walked to another provider, never counted against one, and on the prompt-tool path before the tool runs),
  * and an agent on the GMI runtime, which takes no budget.
  */
@@ -185,6 +186,18 @@ describe('a spend budget and a model with no price row', () => {
     ).resolves.toMatchObject({ text: 'ok' });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('openai:no-such-model has no price row'));
     warn.mockRestore();
+  });
+
+  it('refuses a model named after a member every object inherits, which has no price row either', async () => {
+    // Read from the table as a plain key, `constructor` found Object's own constructor and priced the call at NaN,
+    // which every cap let through.
+    (resolveModelOption as Mock).mockReturnValueOnce({ providerId: 'openai', modelId: 'constructor' });
+    hoisted.generateCompletion.mockResolvedValue(reply('ok', 0));
+    const budget = new SpendBudget({ maxCostUSD: 1 });
+    await expect(generateText({ model: 'openai:constructor', prompt: 'hello', budget, fallbackProviders: [] })).rejects.toBeInstanceOf(
+      UnpricedModelError,
+    );
+    expect(hoisted.generateCompletion).not.toHaveBeenCalled();
   });
 });
 
