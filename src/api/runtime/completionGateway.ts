@@ -227,6 +227,77 @@ function terminalErrorChunk(resolution: CompletionResolution, error: Error): Mod
   };
 }
 
+/** The chunk that ends an attempt the caller's signal stopped, in the shape the providers give theirs. */
+function abortChunk(resolution: CompletionResolution): ModelCompletionResponse {
+  return {
+    id: `gateway-abort-${resolution.providerId}-${resolution.hop}`,
+    object: 'chat.completion.chunk',
+    created: Math.floor(Date.now() / 1000),
+    modelId: resolution.modelId,
+    choices: [],
+    isFinal: true,
+    error: { message: 'Stream aborted by caller', type: 'abort' },
+  };
+}
+
+const ABORTED = Symbol('aborted');
+
+/** The iterator's next result, or `ABORTED` once `signal` has aborted, whichever comes first. */
+function nextUnlessAborted<T>(iterator: AsyncIterator<T>, signal: AbortSignal): Promise<IteratorResult<T> | typeof ABORTED> {
+  const next = iterator.next();
+  if (signal.aborted) {
+    // Settled or not, the result is not read; a rejection is not left unhandled.
+    void next.catch(() => undefined);
+    return Promise.resolve(ABORTED);
+  }
+  return new Promise<IteratorResult<T> | typeof ABORTED>((resolve, reject) => {
+    const onAbort = (): void => resolve(ABORTED);
+    signal.addEventListener('abort', onAbort, { once: true });
+    next.then(
+      (result) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(result);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+/**
+ * The provider's chunks until `signal` aborts, then the abort chunk at once.
+ * Anthropic, Gemini and Ollama read the signal only when a streamed event
+ * arrives, so a request stalled before its first byte, or between two events,
+ * would otherwise hold the turn (and a session's `close()`) until the
+ * provider's own timeout. The provider's stream is ended in the background.
+ */
+async function* untilAborted(
+  source: AsyncIterable<ModelCompletionResponse>,
+  signal: AbortSignal,
+  resolution: CompletionResolution,
+): AsyncGenerator<ModelCompletionResponse, void, undefined> {
+  const iterator = source[Symbol.asyncIterator]();
+  let leftRunning = false;
+  try {
+    for (;;) {
+      const next = await nextUnlessAborted(iterator, signal);
+      if (next === ABORTED) {
+        leftRunning = true;
+        void Promise.resolve(iterator.return?.()).catch(() => undefined);
+        yield abortChunk(resolution);
+        return;
+      }
+      if (next.done) return;
+      yield next.value;
+    }
+  } finally {
+    // As a for-await loop ends its source; not one still waiting on the network.
+    if (!leftRunning) await iterator.return?.();
+  }
+}
+
 /** Text, tool activity or a lifted schema answer: the first such chunk ends the buffering. */
 function carriesContent(chunk: ModelCompletionResponse): boolean {
   if (chunk.responseTextDelta) return true;
@@ -427,7 +498,9 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
           finish(failed(error, undefined));
           return;
         }
-        for await (const raw of provider.generateCompletionStream(resolution.modelId, hopMessages, callOptions)) {
+        const chunks = provider.generateCompletionStream(resolution.modelId, hopMessages, callOptions);
+        const signal = callOptions.abortSignal;
+        for await (const raw of signal ? untilAborted(chunks, signal, resolution) : chunks) {
           const chunk = structured?.toolName ? liftSchemaToolCall(raw, structured.toolName) : raw;
           if (chunk.error) {
             // An abort is the caller's own stop: it is never walked to another
