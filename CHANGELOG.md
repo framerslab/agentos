@@ -1,3 +1,9 @@
+## [0.13.15](https://github.com/framerslab/agentos/compare/v0.13.14...v0.13.15) (2026-10-09)
+
+### fix
+
+* **gmi:** shut every GMI down when the manager shuts down (#210) ([e4df6dd](https://github.com/framerslab/agentos/commit/e4df6dddf790796c0acc23aa7a4544c6526ddfee))
+
 ## [0.13.14](https://github.com/framerslab/agentos/compare/v0.13.13...v0.13.14) (2026-10-09)
 
 ### fix
