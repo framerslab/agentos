@@ -130,4 +130,50 @@ describe('transcriptEventFromLiveKit', () => {
     expect(transcriptEventFromLiveKit('Hi', {})).toBeNull();
     expect(transcriptEventFromLiveKit('Hi', undefined)).toBeNull();
   });
+
+  const finalStream = { [LIVEKIT_TRANSCRIPTION_ATTRIBUTES.segmentId]: 'item_x', [LIVEKIT_TRANSCRIPTION_ATTRIBUTES.final]: 'true' };
+
+  it("reads a final's agentos.start_ms and agentos.end_ms as numbers, and leaves both undefined without them", () => {
+    expect(transcriptEventFromLiveKit('Hi.', { ...finalStream, 'agentos.start_ms': '1200', 'agentos.end_ms': '3400' })).toEqual({
+      itemId: 'item_x',
+      text: 'Hi.',
+      isFinal: true,
+      startMs: 1200,
+      endMs: 3400,
+    });
+    const untimed = transcriptEventFromLiveKit('Hi.', finalStream);
+    expect(untimed?.itemId).toBe('item_x');
+    expect(untimed?.startMs).toBeUndefined();
+    expect(untimed?.endMs).toBeUndefined();
+  });
+
+  it('ignores a time that is not whole milliseconds in decimal digits, and still reads the other', () => {
+    const bad = ['', ' 1200', '1200 ', '-5', '+5', '12.5', '1e3', '0x10', '1,200', 'NaN', 'Infinity', '9'.repeat(400), '9007199254740993'];
+    for (const value of bad) {
+      const event = transcriptEventFromLiveKit('Hi.', { ...finalStream, 'agentos.start_ms': value, 'agentos.end_ms': '3400' });
+      expect([value, event?.startMs, event?.endMs]).toEqual([value, undefined, 3400]);
+    }
+  });
+
+  it("gives a page's ledger line the times its final carries, and none for a final without them", () => {
+    const stream = (itemId: string, text: string, isFinal: boolean, times: Record<string, string> = {}) =>
+      transcriptEventFromLiveKit(text, {
+        [LIVEKIT_TRANSCRIPTION_ATTRIBUTES.segmentId]: itemId,
+        [LIVEKIT_TRANSCRIPTION_ATTRIBUTES.final]: isFinal ? 'true' : 'false',
+        ...times,
+      });
+    const ledger = new TranscriptLedger();
+    for (const event of [
+      stream('i1', 'The off', false),
+      stream('i1', 'The offsite is in Lisbon.', true, { 'agentos.start_ms': '1200', 'agentos.end_ms': '3400' }),
+      stream('i2', 'Bud', false),
+      stream('i2', 'Budget.', true),
+    ]) {
+      if (event) ledger.apply(event);
+    }
+    expect(ledger.items()).toEqual([
+      { itemId: 'i1', text: 'The offsite is in Lisbon.', isFinal: true, startMs: 1200, endMs: 3400 },
+      { itemId: 'i2', text: 'Budget.', isFinal: true },
+    ]);
+  });
 });

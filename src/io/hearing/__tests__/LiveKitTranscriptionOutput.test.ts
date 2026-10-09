@@ -93,3 +93,75 @@ describe('LiveKitTranscriptionOutput', () => {
     expect(room.localParticipant.sendText).toHaveBeenLastCalledWith('One.', expect.objectContaining({ destinationIdentities: ['user-1'] }));
   });
 });
+
+describe("LiveKitTranscriptionOutput: a final's times", () => {
+  const attributesOf = (options: unknown) => (options as { attributes?: Record<string, string> } | undefined)?.attributes;
+
+  it('writes a final with times as agentos.start_ms and agentos.end_ms beside the three lk. attributes', async () => {
+    const room = new FakeRoom();
+    const output = new LiveKitTranscriptionOutput({ room, trackSid: () => 'TR_1' });
+    await output.write({ ...final('item_a', 'The offsite is in Lisbon.'), startMs: 1200, endMs: 3400 });
+    expect(room.localParticipant.sendText.mock.calls).toEqual([
+      [
+        'The offsite is in Lisbon.',
+        {
+          topic: 'lk.transcription',
+          attributes: {
+            'lk.segment_id': 'item_a',
+            'lk.transcription_final': 'true',
+            'lk.transcribed_track_id': 'TR_1',
+            'agentos.start_ms': '1200',
+            'agentos.end_ms': '3400',
+          },
+        },
+      ],
+    ]);
+  });
+
+  it('writes neither time on a final without them, nor on an interim that has them', async () => {
+    const room = new FakeRoom();
+    const output = new LiveKitTranscriptionOutput({ room, trackSid: () => 'TR_1' });
+    await output.write({ ...interim('item_a', 'The off'), startMs: 1200, endMs: 1900 });
+    await output.write(final('item_b', 'Budget.'));
+    expect(room.localParticipant.sendText.mock.calls.map(([, options]) => attributesOf(options))).toEqual([
+      { 'lk.segment_id': 'item_a', 'lk.transcription_final': 'false', 'lk.transcribed_track_id': 'TR_1' },
+      { 'lk.segment_id': 'item_b', 'lk.transcription_final': 'true', 'lk.transcribed_track_id': 'TR_1' },
+    ]);
+  });
+
+  it('replays a final with the times it was first written with, and a page reading the replay holds them on its line', async () => {
+    const room = new FakeRoom();
+    const output = new LiveKitTranscriptionOutput({ room });
+    await output.write({ ...final('i1', 'One.'), startMs: 1200, endMs: 3400 });
+    await output.write({ ...interim('i2', 'Tw'), startMs: 3600 });
+    room.localParticipant.sendText.mockClear();
+    expect(await output.replayAfter(undefined, 'user-1')).toBe(1);
+    expect(room.localParticipant.sendText.mock.calls).toEqual([
+      [
+        'One.',
+        {
+          topic: 'lk.transcription',
+          attributes: { 'lk.segment_id': 'i1', 'lk.transcription_final': 'true', 'agentos.start_ms': '1200', 'agentos.end_ms': '3400' },
+          destinationIdentities: ['user-1'],
+        },
+      ],
+    ]);
+    const page = new TranscriptLedger();
+    for (const [text, options] of room.localParticipant.sendText.mock.calls) {
+      const event = transcriptEventFromLiveKit(text, attributesOf(options));
+      if (event) page.apply(event);
+    }
+    expect(page.items()).toEqual([{ itemId: 'i1', text: 'One.', isFinal: true, startMs: 1200, endMs: 3400 }]);
+  });
+
+  it('writes whole milliseconds, the form a page reads back, and leaves out a time that is not one', async () => {
+    const room = new FakeRoom();
+    const output = new LiveKitTranscriptionOutput({ room });
+    await output.write({ ...final('i1', 'One.'), startMs: 1200.4, endMs: 3399.6 });
+    await output.write({ ...final('i2', 'Two.'), startMs: -5, endMs: Number.NaN });
+    expect(room.localParticipant.sendText.mock.calls.map(([, options]) => attributesOf(options))).toEqual([
+      { 'lk.segment_id': 'i1', 'lk.transcription_final': 'true', 'agentos.start_ms': '1200', 'agentos.end_ms': '3400' },
+      { 'lk.segment_id': 'i2', 'lk.transcription_final': 'true' },
+    ]);
+  });
+});
