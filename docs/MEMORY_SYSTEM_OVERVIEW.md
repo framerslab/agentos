@@ -32,11 +32,13 @@ The next sections explain each piece, why it earned its place, and which adjacen
 
 ## How it connects (60-second summary)
 
-The whole stack is three small classifier calls plus a hybrid retriever, on top of a SQL-backed brain with a decay loop running in the background. Every concept that sounds like a separate thing in this doc plugs into one of those four parts.
+The whole stack is up to three small classifier calls plus a hybrid retriever, on top of a SQL-backed brain with a decay loop running in the background. The calls depend on the host's path: the QueryClassifier gate's call when the host runs the gate (a T0 query ends there when the host skips recall on it), then the MemoryRouter's and the ReadRouter's. Every concept that sounds like a separate thing in this doc plugs into one of those four parts.
 
-![AgentOS memory pipeline: user query enters QueryClassifier (T0 short-circuits, T1+ proceeds), MemoryRouter picks retrieval architecture, canonical-hybrid retrieval runs BM25 + dense embeddings, fuses via RRF, then Cohere rerank-v3.5 cross-encoder, then a six-signal cognitive composite scorer (optional HyDE). Reranked traces feed ReaderRouter (gpt-4o vs gpt-5-mini) then ReadRouter (5 intents to 5 strategies) for the grounded answer. A background consolidation loop runs prune-merge-strengthen-derive-compact-reindex on the same brain, plus 8 cognitive mechanisms.](/img/diagrams/memory-system-overview.svg)
+![AgentOS memory pipeline: user query enters QueryClassifier (T0 short-circuits, T1+ proceeds), MemoryRouter picks retrieval architecture, canonical-hybrid retrieval runs BM25 + dense embeddings, fuses via RRF, then Cohere rerank-v3.5 cross-encoder, then a six-signal cognitive composite scorer (optional HyDE). Reranked traces feed ReaderRouter (gpt-4o vs gpt-5-mini) then ReadRouter (5 intents to 5 strategies) for the grounded answer. A consolidation box lists prune, merge, strengthen, derive, compact and reindex on the same brain, plus 8 cognitive mechanisms.](/img/diagrams/memory-system-overview.svg)
 
-The verbatim archive is write-ahead — destructive consolidation ops cannot lose content unless the archive write succeeds first.
+The diagram draws one consolidation loop. In the code each facade has its own: `ConsolidationLoop` (prune, merge, strengthen, derive, compact, re-index) serves the `Memory` facade, and `ConsolidationPipeline` serves `CognitiveMemoryManager`. The eight mechanisms run only when `CognitiveMemoryManager` is given a `cognitiveMechanisms` config ([Memory Consolidation](#memory-consolidation-the-background-loop), [The Eight Cognitive Mechanisms](#the-eight-cognitive-mechanisms)).
+
+Where a verbatim archive is wired, it is write-ahead: the temporal-gist mechanism (with an archive in its config) and `MemoryLifecycleManager` wait for the archive write before changing a trace, and abort if it fails. `CognitiveMemoryManager` passes its archive to neither the temporal-gist mechanism nor its consolidation pipeline, so its gisting keeps no archived copy (see [Memory Consolidation](#memory-consolidation-the-background-loop)).
 
 If a term in the doc below sounds new, here's where it plugs in:
 

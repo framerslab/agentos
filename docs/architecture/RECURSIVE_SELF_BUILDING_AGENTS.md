@@ -185,11 +185,11 @@ A host that writes its own pack declares each tool as a descriptor whose `payloa
 
 ### Autonomous loop
 
-[`PlanningEngine.runAutonomousLoop()`](https://github.com/framerslab/agentos/blob/master/src/orchestration/planner/PlanningEngine.ts) pursues a goal step by step and yields its progress:
+[`PlanningEngine.runAutonomousLoop()`](https://github.com/framerslab/agentos/blob/master/src/orchestration/planner/PlanningEngine.ts) pursues a goal step by step and yields its progress. It runs a plan's `reasoning`, `synthesis` and `validation` steps through the planner's model. It passes no tools and no retriever to `executeStep()`, so a `tool_call` step that names a tool fails with `Tool <id> not found` and an `information_gathering` step returns nothing: the loop plans and reasons, and it runs no CLI command or web request.
 
 ```typescript
 const loop = planningEngine.runAutonomousLoop(
-  'Build a real-time stock trading dashboard with React and WebSocket',
+  'Plan a real-time stock trading dashboard with React and WebSocket',
   {
     maxIterations: 100,
     goalConfidenceThreshold: 0.95,
@@ -206,6 +206,8 @@ for await (const progress of loop) {
 ```
 
 `requireApprovalFor` takes plan action types (`tool_call`, `reasoning`, `information_gathering`, `subgoal`, `synthesis`, `validation`, `human_input`, `checkpoint`), not tool names.
+
+To run a plan's tool steps, a host drives the plan itself: `generatePlan(goal)` returns the steps, and `executeStep(step, { previousResults, tools, retrieve })` runs one, finding a `tool_call` step's tool in `tools` by its `id` and answering an `information_gathering` step with `retrieve(query)`. The host runs a step once the steps in its `dependsOn` have succeeded, as the loop does.
 
 ---
 

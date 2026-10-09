@@ -13,9 +13,25 @@ Use [`AgentGraph`](https://github.com/framerslab/agentos/blob/master/src/orchest
 ```typescript
 import {
   AgentGraph, START, END,
-  gmiNode, toolNode,
+  gmiNode, toolNode, LoopController,
 } from '@framers/agentos/orchestration';
 import { z } from 'zod';
+
+// Host bindings for the node executors (the NodeExecutorDeps shape).
+// runMyTool and callMyModel stand for your application's own tool runner and model call.
+const toolOrchestrator = {
+  async processToolCall({ toolCallRequest }) {
+    const output = await runMyTool(toolCallRequest.toolName, toolCallRequest.arguments);
+    return { success: true, output };
+  },
+};
+const loopController = new LoopController();
+async function* providerCall(instructions, state) {
+  const text = await callMyModel(instructions, state.scratch);
+  yield { type: 'text_delta', content: text };
+  // No tool calls: the node's loop ends after this turn.
+  return { responseText: text, toolCalls: [], finishReason: 'stop' };
+}
 
 const graph = new AgentGraph(
   {
@@ -53,7 +69,7 @@ new AgentGraph(stateSchema, config?)
 
 ## Node Builders
 
-All nodes are created with typed factory functions. Each accepts an optional `policies` object for memory, discovery, guardrail, persona, effect class and checkpoint configuration; the runtime reads the effect class and the checkpoint flag, and a `human` node's guardrail policy.
+All nodes are created with typed factory functions. Each accepts an optional `policies` object for memory, discovery, guardrail, persona, effect class and checkpoint configuration; the runtime reads the effect class and the checkpoint flag, and evaluates no `guardrails` policy (a `guardrailNode` is the step that checks content during a run).
 
 ### gmiNode
 
@@ -109,7 +125,7 @@ toolNode(
 
 ### humanNode
 
-Suspends execution for a human decision. With `autoAccept`, `autoReject`, or a `judge` that decides with enough confidence, the node resolves at once. Otherwise it interrupts the run: the runtime saves a checkpoint and emits an `interrupt` event. `resume()` marks the human node complete with its recorded output (`{ prompt }`), so a host that has the human's answer puts it into the state with `fork(checkpointId, patch)` and resumes the fork ([Checkpointing](../orchestration/CHECKPOINTING.md)).
+Suspends execution for a human decision. With `autoAccept`, `autoReject`, or a `judge` that decides with enough confidence, the node resolves at once. Otherwise it interrupts the run: the runtime saves a checkpoint and emits an `interrupt` event. `resume()` marks the human node complete with its recorded output (`{ prompt }`), so a host that has the human's answer puts it into the state with `fork(checkpointId, patch)` and resumes the fork ([Checkpointing](../orchestration/CHECKPOINTING.md)). After an auto-accept, a judge's approval or a timeout accept (`onTimeout: 'accept'`), the node runs the guardrails `pii-redaction` and `code-safety` through `deps.guardrailEngine` when one is wired, and a block turns the decision into `approved: false`; `guardrailOverride: false` turns that check off.
 
 ```typescript
 import { humanNode } from '@framers/agentos/orchestration';
@@ -133,7 +149,7 @@ routerNode("scratch.confidence > 0.8 ? 'summarize' : 'search'")
 
 ### guardrailNode
 
-Runs guardrails as an explicit step in the graph, not just on the edge. Use this for pre-flight checks or to gate progress through critical stages.
+Runs guardrails as an explicit step in the graph. The runtime does not evaluate the `guardrails` policy of a node or an edge, so this node is how a compiled graph checks content mid-run. Use it for pre-flight checks or to gate progress through critical stages.
 
 ```typescript
 import { guardrailNode } from '@framers/agentos/orchestration';
@@ -252,10 +268,12 @@ const graph = new AgentGraph(stateSchema, {
 ## Compilation
 
 ```typescript
+import { InMemoryCheckpointStore } from '@framers/agentos/orchestration';
+
 const compiled = graph.compile({
-  checkpointStore: new InMemoryCheckpointStore(),
+  checkpointStore: new InMemoryCheckpointStore(), // the default when omitted
   validate: true, // default — throws on unreachable nodes or structural errors
-  deps: { toolOrchestrator, loopController, providerCall }, // node executors
+  deps: { toolOrchestrator, loopController, providerCall }, // the host bindings from the Quick Start
 });
 ```
 
@@ -399,6 +417,7 @@ const graph = new AgentGraph(ResearchState, {
 
   .compile({
     checkpointStore: new InMemoryCheckpointStore(),
+    // toolOrchestrator, loopController and providerCall: the host bindings from the Quick Start
     deps: { toolOrchestrator, loopController, providerCall },
   });
 
