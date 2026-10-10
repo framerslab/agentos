@@ -140,19 +140,28 @@ CREATE TABLE IF NOT EXISTS ${t.reservations} (
   settled_at BIGINT,
   usage_json TEXT
 );
-${indexDdlOf(t)}`;
+${indexesOf(t).map((index) => `${index.statement};`).join('\n')}
+`;
+}
+
+/** One of the meter's indexes: its name, and the statement that makes it unless an index of that name exists. */
+interface SpendMeterIndex {
+  name: string;
+  statement: string;
 }
 
 /**
- * The statements of the meter's indexes under the names one prefix gives. A purge's page reads `state <> 'reserved'
- * AND settled_at < ?`, and `<>` on an index's first column gives a B-tree no range to scan, so the purge's index leads
- * with `settled_at`, whose `<` does, and holds `state` beside it.
+ * The meter's indexes under the names one prefix gives, in the order its DDL makes them: the reconciler's, the
+ * window's and the purge's. A purge's page reads `state <> 'reserved' AND settled_at < ?`, and `<>` on an index's first
+ * column gives a B-tree no range to scan, so the purge's index leads with `settled_at`, whose `<` does, and holds
+ * `state` beside it.
  */
-function indexDdlOf(t: SpendMeterTables): string {
-  return `CREATE INDEX IF NOT EXISTS ${t.index}_due ON ${t.reservations} (state, expires_at);
-CREATE INDEX IF NOT EXISTS ${t.index}_account ON ${t.reservations} (account_id, reserved_at);
-CREATE INDEX IF NOT EXISTS ${t.index}_settled ON ${t.reservations} (settled_at, state);
-`;
+function indexesOf(t: SpendMeterTables): SpendMeterIndex[] {
+  return [
+    { name: `${t.index}_due`, columns: 'state, expires_at' },
+    { name: `${t.index}_account`, columns: 'account_id, reserved_at' },
+    { name: `${t.index}_settled`, columns: 'settled_at, state' },
+  ].map(({ name, columns }) => ({ name, statement: `CREATE INDEX IF NOT EXISTS ${name} ON ${t.reservations} (${columns})` }));
 }
 
 /**
@@ -285,9 +294,12 @@ export class SqlSpendMeter implements ISpendMeter {
   }
 
   /**
-   * Creates the tables and their indexes unless the tables answer a read already, and on tables that answer runs the
-   * indexes' `CREATE INDEX IF NOT EXISTS` statements, so a store an earlier release made gains the indexes it lacks.
-   * Called before the first statement; safe to call again. Does nothing with `ensureSchema: false`.
+   * Creates the tables and their indexes unless the tables answer a read already. On tables that answer it reads the
+   * store's catalogue for the meter's index names (`pg_indexes` on Postgres, `sqlite_master` on SQLite) and runs the
+   * `CREATE INDEX IF NOT EXISTS` statement of each index the tables lack, so a store an earlier release made gains the
+   * indexes it lacks, and a store that holds them all runs no index statement: on Postgres each one takes a SHARE lock
+   * on the reservations table, which holds back the table's writes, before it looks for the index's name. Called before
+   * the first statement; safe to call again. Does nothing with `ensureSchema: false`.
    */
   ensureSchema(): Promise<void> {
     if (this.opts.ensureSchema === false) return Promise.resolve();
@@ -299,15 +311,33 @@ export class SqlSpendMeter implements ISpendMeter {
         await this.db.exec(ddlOf(this.tables));
         return;
       }
-      // The indexes speed the meter's reads and change none of its answers, so tables that refuse them are used as they
-      // are: Postgres checks that the role owns a table before it looks for the index's name, and two processes adding
-      // one index at once can collide.
-      await this.db.exec(indexDdlOf(this.tables)).catch(() => undefined);
+      await this.addMissingIndexes();
     })().catch((e) => {
       this.schemaReady = null;
       throw e;
     });
     return this.schemaReady;
+  }
+
+  /**
+   * Runs, one at a time, the statement of each of the meter's indexes that the store's catalogue does not hold; a
+   * catalogue that cannot be read leaves every statement to run. The indexes speed the meter's reads and change none of
+   * its answers, so tables that refuse one are used as they are: Postgres checks that the role owns a table before it
+   * looks for the index's name, and two processes adding one index at once can collide.
+   */
+  private async addMissingIndexes(): Promise<void> {
+    const indexes = indexesOf(this.tables);
+    const names = indexes.map((index) => index.name);
+    const marks = names.map(() => '?').join(', ');
+    const catalogue = this.db.kind.includes('postgres')
+      ? `SELECT indexname AS name FROM pg_indexes WHERE schemaname = current_schema() AND indexname IN (${marks})`
+      : `SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (${marks})`;
+    const held = await this.db.all<{ name: string }>(catalogue, names).catch((): { name: string }[] => []);
+    const present = new Set(held.map((row) => row.name));
+    for (const index of indexes) {
+      if (present.has(index.name)) continue;
+      await this.db.exec(index.statement).catch(() => undefined);
+    }
   }
 
   private run<T>(fn: () => Promise<T>): Promise<T> {
