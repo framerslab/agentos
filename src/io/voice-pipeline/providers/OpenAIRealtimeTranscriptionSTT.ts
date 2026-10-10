@@ -945,7 +945,10 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     );
   }
 
-  /** Resolves when a connection is adopted or the session closes, or after `timeoutMs`. */
+  /**
+   * Resolves when a connection takes audio again (one is adopted, or a refused rollover keeps the old
+   * one) or the session closes, or after `timeoutMs`.
+   */
   private waitAdopted(timeoutMs: number): Promise<void> {
     if (this.lead() || this.closed) return Promise.resolve();
     return new Promise<void>((resolve) => {
@@ -1593,7 +1596,10 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     );
   }
 
-  /** No next connection: the old one keeps the audio (held frames first) until its hard stop. */
+  /**
+   * No next connection: the old one keeps the audio (held frames first) until its hard stop. A flush that
+   * found no connection taking audio waits for one, as during a reconnect, and goes on now that this one does.
+   */
   private keepOldConnection(old: TranscriptionConnection): void {
     old.rolloverRefused = true;
     this.rolloverOp = undefined;
@@ -1601,6 +1607,7 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
       old.state = 'open';
       old.feedEndMs = undefined;
       this.releaseBacklog(old);
+      for (const finish of [...this.adoptWaiters]) finish();
     }
   }
 
