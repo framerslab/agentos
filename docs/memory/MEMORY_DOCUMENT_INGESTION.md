@@ -70,6 +70,27 @@ await mem.close();
 
 `UrlLoader` throws on a non-2xx response. A `text/html` response goes to the HTML loader, `application/pdf` to the PDF loader, and every other content type, Markdown included, is kept as raw text with `format: 'text'`.
 
+### Word files and what they inflate to
+
+```ts
+import { DocxLoader, DocumentTooLargeError } from '@framers/agentos/cognition/memory';
+
+const loader = new DocxLoader({ maxInflatedBytes: 64 * 1024 * 1024 });
+try {
+  const doc = await loader.load(uploadedBuffer);
+} catch (error) {
+  if (error instanceof DocumentTooLargeError) {
+    // error.limit is the bound; mammoth never read the file
+  }
+}
+```
+
+A `.docx` file is a ZIP archive, and mammoth inflates every part it reads, so a file of a few megabytes can inflate to gigabytes. Before mammoth reads a file, `DocxLoader` inflates each entry of the archive with `node:zlib` under `maxInflatedBytes`, one entry's output at a time, and throws `DocumentTooLargeError` (`code` `'DOCUMENT_TOO_LARGE'`, `limit` the bound) once the entries pass it together. The size an entry states for itself is not trusted. The bound is 134,217,728 bytes (128 MiB) when `maxInflatedBytes` is left out, which is how `LoaderRegistry` registers the loader; `registry.register(new DocxLoader({ maxInflatedBytes }))` replaces it. When the Docling loader replaces `DocxLoader` for `.docx`, this bound does not apply.
+
+The bound is on what the archive inflates to, not on the memory a read takes. Every entry counts toward it, images and other media included, though `mammoth.extractRawText()` reads only the XML parts. mammoth parses each XML part it reads into an element tree, which takes a multiple of the part's size, so for files from people you do not know, set `maxInflatedBytes` well below the memory the process can spare.
+
+A file the loader cannot read as a ZIP archive the way mammoth's reader does is refused with `DocxLoader: not a Word archive` before mammoth runs: no end of central directory record, a ZIP64 record, a central directory that does not end where the end record starts (bytes between the two, or bytes in front of an archive whose offsets do not count them), an entry outside the file, entries that share their data (their compressed data together larger than the bytes before the central directory, where every entry's data lies apart), a compression method other than stored or deflated, or data that does not inflate.
+
 ---
 
 ## PDF Extraction
