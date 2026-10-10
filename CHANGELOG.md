@@ -1,3 +1,9 @@
+## [0.13.24](https://github.com/framerslab/agentos/compare/v0.13.23...v0.13.24) (2026-10-10)
+
+### feat
+
+* **safety:** SqlSpendMeter's tables named by a prefix (#226) ([379c8e6](https://github.com/framerslab/agentos/commit/379c8e692651fd2432745385fa7b50ed3cf509ff))
+
 ## [0.13.23](https://github.com/framerslab/agentos/compare/v0.13.22...v0.13.23) (2026-10-10)
 
 ### fix
