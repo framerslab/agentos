@@ -445,6 +445,31 @@ describe('VisionPipeline', () => {
       expect(result.tiers).toContain('handwriting');
     });
 
+    it('hands TrOCR a Buffer image as a Blob, not a data URL transformers.js would read as a path', async () => {
+      mockPaddleOcrInstance.recognize.mockResolvedValue(lowConfidencePaddleResult());
+      const inputs: unknown[] = [];
+      mockHfPipelineFactory = vi.fn(async (task: string) => {
+        if (task === 'image-to-text') {
+          return vi.fn(async (input: unknown) => {
+            inputs.push(input);
+            return [{ generated_text: 'HF pipeline output' }];
+          });
+        }
+        if (task === 'feature-extraction') return vi.fn(async () => [[0.1, 0.2, 0.3]]);
+        throw new Error(`Unknown pipeline task: ${task}`);
+      });
+
+      const pipeline = createFullPipeline({ strategy: 'local-only' });
+      const result = await pipeline.process(testImage());
+
+      expect(result.tiers).toContain('handwriting');
+      expect(inputs.length).toBeGreaterThan(0);
+      for (const input of inputs) {
+        expect(input).toBeInstanceOf(Blob);
+        expect((input as Blob).size).toBeGreaterThan(0);
+      }
+    });
+
     it('should not trigger TrOCR when handwriting is disabled', async () => {
       mockPaddleOcrInstance.recognize.mockResolvedValue(lowConfidencePaddleResult());
 
@@ -482,6 +507,33 @@ describe('VisionPipeline', () => {
       expect(result.tiers).toContain('document-ai');
       expect(result.layout).toBeDefined();
       expect(result.layout!.pages).toHaveLength(1);
+    });
+
+    it('hands Florence-2 a Buffer image as a Blob, and a URL string as it is', async () => {
+      const manyRegions = Array.from({ length: 25 }, (_, i) => ({
+        text: `Region ${i}`,
+        confidence: 0.7,
+        bbox: [[0, i * 30], [100, i * 30], [100, (i + 1) * 30], [0, (i + 1) * 30]],
+      }));
+      mockPaddleOcrInstance.recognize.mockResolvedValue({ regions: manyRegions });
+      const inputs: unknown[] = [];
+      mockHfPipelineFactory = vi.fn(async (task: string) => {
+        if (task === 'image-to-text') {
+          return vi.fn(async (input: unknown) => {
+            inputs.push(input);
+            return [{ generated_text: 'HF pipeline output' }];
+          });
+        }
+        if (task === 'feature-extraction') return vi.fn(async () => [[0.1, 0.2, 0.3]]);
+        throw new Error(`Unknown pipeline task: ${task}`);
+      });
+
+      const pipeline = createFullPipeline({ strategy: 'local-only' });
+      await pipeline.process(testImage());
+      await pipeline.process('https://example.com/scan.png');
+
+      expect(inputs[0]).toBeInstanceOf(Blob);
+      expect(inputs.at(-1)).toBe('https://example.com/scan.png');
     });
   });
 
