@@ -69,42 +69,50 @@ export interface LexicalIndexJSON {
 }
 
 /**
- * What keeps a saved index from having the shape {@link LexicalIndex.toJSON} writes, or undefined when nothing does:
- * `k1` and `b` are numbers, each document is `[id, length]` or `[id, length, metadata]`, and each term is
- * `[term, postings]` whose postings are `[position, count]` with the position of one of the documents.
+ * What keeps a saved index from being one {@link LexicalIndex.toJSON} could have written, or undefined when nothing
+ * does. `k1` and `b` are finite numbers. Each document is `[id, length]` or `[id, length, metadata]`, its id unlike
+ * every earlier one and its length in tokens a whole number of 0 or more; its metadata is taken as given. Each term
+ * is `[term, postings]`, unlike every earlier term, and each posting `[position, count]`: the position of one of the
+ * documents, given once for the term, and a whole count of 1 or more.
  */
 function shapeProblem(json: LexicalIndexJSON): string | undefined {
-  if (typeof json.k1 !== 'number' || typeof json.b !== 'number') return 'k1 or b is not a number';
+  if (!Number.isFinite(json.k1) || !Number.isFinite(json.b)) return 'k1 or b is not a finite number';
   const documents: unknown = json.documents;
   if (!Array.isArray(documents)) return 'documents are not an array';
+  const ids = new Set<string>();
   for (let at = 0; at < documents.length; at += 1) {
     const entry: unknown = documents[at];
-    if (
-      !Array.isArray(entry) ||
-      typeof entry[0] !== 'string' ||
-      typeof entry[1] !== 'number' ||
-      (entry[2] !== undefined && (typeof entry[2] !== 'object' || entry[2] === null))
-    ) {
+    if (!Array.isArray(entry) || typeof entry[0] !== 'string' || !Number.isInteger(entry[1]) || entry[1] < 0) {
       return `documents[${at}] is not [id, length] or [id, length, metadata]`;
     }
+    if (ids.has(entry[0])) return `documents[${at}] repeats the id of an earlier document`;
+    ids.add(entry[0]);
   }
   const terms: unknown = json.terms;
   if (!Array.isArray(terms)) return 'terms are not an array';
+  const seenTerms = new Set<string>();
+  // The term each document position was last seen under, so a position given twice in one term's postings shows.
+  const lastTerm = new Int32Array(documents.length).fill(-1);
   for (let at = 0; at < terms.length; at += 1) {
     const entry: unknown = terms[at];
     if (!Array.isArray(entry) || typeof entry[0] !== 'string' || !Array.isArray(entry[1])) {
       return `terms[${at}] is not [term, postings]`;
     }
+    if (seenTerms.has(entry[0])) return `terms[${at}] repeats an earlier term`;
+    seenTerms.add(entry[0]);
     for (const posting of entry[1] as unknown[]) {
       if (
         !Array.isArray(posting) ||
         !Number.isInteger(posting[0]) ||
         posting[0] < 0 ||
         posting[0] >= documents.length ||
-        typeof posting[1] !== 'number'
+        !Number.isInteger(posting[1]) ||
+        posting[1] < 1
       ) {
-        return `terms[${at}] holds a posting that is not [position of a document, count]`;
+        return `terms[${at}] holds a posting that is not [position of a document, count of 1 or more]`;
       }
+      if (lastTerm[posting[0]] === at) return `terms[${at}] holds the position ${posting[0]} twice`;
+      lastTerm[posting[0]] = at;
     }
   }
   return undefined;
@@ -315,8 +323,8 @@ export class LexicalIndex {
   /**
    * A saved index restored, with the tokenizer it was made with.
    *
-   * @throws {Error} When the saved index is of another version or lacks the shape {@link LexicalIndex.toJSON} writes;
-   * the message names what is wrong.
+   * @throws {Error} When the saved index is of another version or is not one {@link LexicalIndex.toJSON} could have
+   * written; the message names what is wrong.
    */
   static fromJSON(json: LexicalIndexJSON, config: Pick<LexicalIndexConfig, 'tokenize'>): LexicalIndex {
     const index = new LexicalIndex({ tokenize: config.tokenize });

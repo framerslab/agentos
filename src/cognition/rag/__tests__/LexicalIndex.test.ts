@@ -53,14 +53,24 @@ describe('LexicalIndex', () => {
     expect(() => LexicalIndex.fromJSON({ v: 2 } as never, { tokenize: lexicalTokens })).toThrow('version');
   });
 
-  it('refuses a saved index without the shape toJSON writes, naming what is wrong', () => {
-    expect(() => LexicalIndex.fromJSON({ v: 1, k1: 1.2, b: 0.75, terms: [] } as never, { tokenize: lexicalTokens })).toThrow(
-      'LexicalIndex: a saved index whose documents are not an array.',
+  it('refuses a saved index that toJSON could not have written, naming what is wrong', () => {
+    const restore = (saved: object) => () => LexicalIndex.fromJSON(saved as never, { tokenize: lexicalTokens });
+    const refused = (problem: string) => `LexicalIndex: a saved index whose ${problem}.`;
+    const tuning = { v: 1, k1: 1.2, b: 0.75 };
+    expect(restore({ ...tuning, terms: [] })).toThrow(refused('documents are not an array'));
+    expect(restore({ ...tuning, k1: Number.NaN, documents: [], terms: [] })).toThrow(refused('k1 or b is not a finite number'));
+    expect(restore({ ...tuning, documents: [['a', -1]], terms: [] })).toThrow(
+      refused('documents[0] is not [id, length] or [id, length, metadata]'),
     );
-    const pastTheDocuments = { v: 1, k1: 1.2, b: 0.75, documents: [['a', 1]], terms: [['word', [[1, 1]]]] };
-    expect(() => LexicalIndex.fromJSON(pastTheDocuments as never, { tokenize: lexicalTokens })).toThrow(
-      'LexicalIndex: a saved index whose terms[0] holds a posting that is not [position of a document, count].',
+    expect(restore({ ...tuning, documents: [['a', 1], ['a', 2]], terms: [] })).toThrow(
+      refused('documents[1] repeats the id of an earlier document'),
     );
+    const one = { ...tuning, documents: [['a', 2]] };
+    const badPosting = refused('terms[0] holds a posting that is not [position of a document, count of 1 or more]');
+    expect(restore({ ...one, terms: [['word', [[1, 1]]]] })).toThrow(badPosting);
+    expect(restore({ ...one, terms: [['word', [[0, 0]]]] })).toThrow(badPosting);
+    expect(restore({ ...one, terms: [['word', [[0, 1], [0, 1]]]] })).toThrow(refused('terms[0] holds the position 0 twice'));
+    expect(restore({ ...one, terms: [['word', [[0, 1]]], ['word', [[0, 1]]]] })).toThrow(refused('terms[1] repeats an earlier term'));
   });
 
   it('replaces a document added again, and forgets a removed one', () => {
