@@ -343,4 +343,37 @@ describe('RedirectOAuthFlow', () => {
     expect(await flow.accessToken('grant-2')).toBe('access-9');
     expect(sent).toHaveLength(3);
   });
+
+  it('keeps the grant that keep saves while forget of the same key waits on the revocation endpoint', async () => {
+    let answerRevocation!: () => void;
+    const revocationAnswered = new Promise<void>((resolve) => {
+      answerRevocation = resolve;
+    });
+    const { sent, fetchImpl } = endpoint(async () => {
+      await revocationAnswered;
+      return new Response(null, { status: 200 });
+    });
+    const { store } = sealedStore();
+    const flow = new ExampleFlow(store, fetchImpl, 'https://auth.example.test/revoke');
+    await store.save('grant-1', { accessToken: '', refreshToken: 'refresh-1', expiresAt: 0 });
+
+    // Disconnecting, then connecting again before the provider has answered the revocation.
+    const forgotten = flow.forget('grant-1');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent).toHaveLength(1);
+    const kept = flow.keep('grant-1', {
+      accessToken: 'access-9',
+      refreshToken: 'refresh-9',
+      expiresAt: Date.now() + 3_600_000,
+    });
+    answerRevocation();
+
+    expect(await forgotten).toEqual({ revoked: true });
+    await kept;
+    expect(Object.fromEntries(sent[0].form)).toEqual({ token: 'refresh-1' });
+    // forget cleared the grant it revoked; the grant kept after it stays, in the store and in memory.
+    expect((await store.load('grant-1'))?.refreshToken).toBe('refresh-9');
+    expect(await flow.accessToken('grant-1')).toBe('access-9');
+    expect(sent).toHaveLength(1);
+  });
 });
