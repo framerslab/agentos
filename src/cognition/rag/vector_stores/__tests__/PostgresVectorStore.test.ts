@@ -539,7 +539,8 @@ describe('PostgresVectorStore', () => {
       });
       queryResultQueue.push({
         rows: [
-          { id: 'h1', rrf_score: 0.025, embedding: '[0.1,0.2,0.3,0.4]', metadata_json: null, text_content: 'match' },
+          // rrf_score is a numeric, which pg hands back as text.
+          { id: 'h1', rrf_score: '0.025', embedding: '[0.1,0.2,0.3,0.4]', metadata_json: null, text_content: 'match' },
         ],
         rowCount: 1,
       });
@@ -564,6 +565,7 @@ describe('PostgresVectorStore', () => {
       expect(hybridCall!.params![4]).toBe(5);  // topK
 
       expect(result.documents.length).toBe(1);
+      expect(typeof result.documents[0].similarityScore).toBe('number');
       expect(result.documents[0].similarityScore).toBeCloseTo(0.025);
     });
 
