@@ -641,6 +641,10 @@ class TranscriptionConnection {
         const event = parseServerEvent(data);
         if (!event) return;
         if (!ready) {
+          // A connect that failed takes nothing more. ws still emits a message it was inflating or
+          // parsing when terminate() ran; a late confirmation would mark the failed connection open,
+          // and its close would then read as a drop and reconnect a session nobody holds.
+          if (settled) return;
           if (event.type === 'session.updated') {
             ready = true;
             settled = true;
