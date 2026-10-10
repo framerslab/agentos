@@ -706,6 +706,7 @@
     "eslint": "^10.12.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-import": "^2.29.1",
+    "officeparser": "8.1.1",
     "prettier": "^3.3.2",
     "quickjs-emscripten-core": "0.32.0",
     "rimraf": "^6.1.3",
@@ -750,6 +751,7 @@
     "graphology-types": ">=0.24.0",
     "hnswlib-node": ">=3.0.0",
     "neo4j-driver": ">=5.0.0",
+    "officeparser": "^8.1.1",
     "ppu-paddle-ocr": ">=3.0.0",
     "quickjs-emscripten-core": "0.32.0",
     "tesseract.js": ">=5.0.0",
@@ -772,6 +774,9 @@
       "optional": true
     },
     "neo4j-driver": {
+      "optional": true
+    },
+    "officeparser": {
       "optional": true
     },
     "ppu-paddle-ocr": {
