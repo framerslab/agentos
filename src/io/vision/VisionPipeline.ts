@@ -257,6 +257,12 @@ export class VisionPipeline {
   /** Whether dispose() has been called. Guards against use-after-free. */
   private _disposed = false;
 
+  /** The public calls in progress: dispose() waits for them before it releases the engines. */
+  private readonly _inFlight = new Set<Promise<unknown>>();
+
+  /** Engine loads in progress, by engine, so concurrent first calls share one load. */
+  private readonly _loading = new Map<string, Promise<unknown>>();
+
   // -------------------------------------------------------------------------
   // Constructor
   // -------------------------------------------------------------------------
@@ -329,8 +335,17 @@ export class VisionPipeline {
       tiers?: VisionTier[];
     },
   ): Promise<VisionResult> {
-    this._assertNotDisposed();
+    return this._track(() => this._process(image, options));
+  }
 
+  /** The work of {@link process}, which runs it tracked so dispose() waits for it. */
+  private async _process(
+    image: Buffer | string,
+    options?: {
+      forceCategory?: ContentCategory;
+      tiers?: VisionTier[];
+    },
+  ): Promise<VisionResult> {
     const startTime = Date.now();
     const { strategy } = this._config;
     const threshold = this._config.confidenceThreshold ?? DEFAULT_CONFIDENCE_THRESHOLD;
@@ -388,7 +403,15 @@ export class VisionPipeline {
     let ocrResult: TierResult | undefined;
 
     if (this._shouldRunTier('ocr', strategy, requestedTiers)) {
-      ocrResult = await this._runOcr(preprocessed);
+      try {
+        ocrResult = await this._runOcr(preprocessed);
+      } catch (error) {
+        // An OCR engine that fails is not fatal: the other tiers still run.
+        failedTiers.push({ tier: 'ocr', error: errorMessage(error) });
+      }
+    }
+
+    if (ocrResult) {
       tierResults.push(ocrResult);
       activeTiers.push('ocr');
 
@@ -487,6 +510,15 @@ export class VisionPipeline {
     embedding = await embeddingPromise;
     if (embedding) activeTiers.push('embedding');
 
+    // Every tier that was due to run failed: there is no result to give.
+    if (tierResults.length === 0 && !embedding && failedTiers.length > 0) {
+      throw new Error(
+        `VisionPipeline: every tier that was due to run failed: ${failedTiers
+          .map(({ tier, error }) => `${tier}: ${error}`)
+          .join('; ')}`,
+      );
+    }
+
     // -----------------------------------------------------------------------
     // Assemble final result
     // -----------------------------------------------------------------------
@@ -520,14 +552,14 @@ export class VisionPipeline {
    * ```
    */
   async extractText(image: Buffer | string): Promise<string> {
-    this._assertNotDisposed();
+    return this._track(async () => {
+      const preprocessed = Buffer.isBuffer(image)
+        ? await this._preprocess(image)
+        : image;
 
-    const preprocessed = Buffer.isBuffer(image)
-      ? await this._preprocess(image)
-      : image;
-
-    const result = await this._runOcr(preprocessed);
-    return result.text;
+      const result = await this._runOcr(preprocessed);
+      return result.text;
+    });
   }
 
   /**
@@ -553,17 +585,17 @@ export class VisionPipeline {
    * ```
    */
   async embed(image: Buffer | string): Promise<number[]> {
-    this._assertNotDisposed();
+    return this._track(async () => {
+      const preprocessed = Buffer.isBuffer(image)
+        ? await this._preprocess(image)
+        : image;
 
-    const preprocessed = Buffer.isBuffer(image)
-      ? await this._preprocess(image)
-      : image;
-
-    const result = await this._runClipEmbedding(preprocessed);
-    if (!result) {
-      throw new Error('VisionPipeline: CLIP embedding returned empty result.');
-    }
-    return result;
+      const result = await this._runClipEmbedding(preprocessed);
+      if (!result) {
+        throw new Error('VisionPipeline: CLIP embedding returned empty result.');
+      }
+      return result;
+    });
   }
 
   /**
@@ -590,21 +622,23 @@ export class VisionPipeline {
    * ```
    */
   async analyzeLayout(image: Buffer | string): Promise<DocumentLayout> {
-    this._assertNotDisposed();
+    return this._track(async () => {
+      const preprocessed = Buffer.isBuffer(image)
+        ? await this._preprocess(image)
+        : image;
 
-    const preprocessed = Buffer.isBuffer(image)
-      ? await this._preprocess(image)
-      : image;
-
-    const result = await this._runFlorence2(preprocessed);
-    return result.layout;
+      const result = await this._runFlorence2(preprocessed);
+      return result.layout;
+    });
   }
 
   /**
    * Shut down the pipeline and release all loaded model resources.
    *
    * After calling dispose(), any further calls to `process()`,
-   * `extractText()`, `embed()`, or `analyzeLayout()` will throw.
+   * `extractText()`, `embed()`, or `analyzeLayout()` will throw. Calls
+   * already in progress finish first, and the models they loaded are
+   * released with the rest.
    *
    * @example
    * ```typescript
@@ -618,6 +652,10 @@ export class VisionPipeline {
    */
   async dispose(): Promise<void> {
     this._disposed = true;
+
+    // Calls in progress finish before the engines they use are released, and
+    // an engine one of them loads on the way is released with the rest.
+    await Promise.allSettled([...this._inFlight]);
 
     // Release PaddleOCR resources: destroy() in ppu-paddle-ocr 6, dispose() before
     const paddle = this._paddleOcr;
@@ -1056,9 +1094,13 @@ export class VisionPipeline {
    * @returns Initialized PaddleOCR service instance.
    * @throws {Error} If ppu-paddle-ocr is not installed, with install instructions.
    */
-  private async _loadPaddleOcr(): Promise<any> {
-    if (this._paddleOcr) return this._paddleOcr;
+  private _loadPaddleOcr(): Promise<any> {
+    if (this._paddleOcr) return Promise.resolve(this._paddleOcr);
+    return this._loadOnce('paddle', () => this._startPaddleOcr());
+  }
 
+  /** The load of {@link _loadPaddleOcr}, which runs one at a time. */
+  private async _startPaddleOcr(): Promise<any> {
     try {
       const mod = await import('ppu-paddle-ocr');
       // ppu-paddle-ocr exports vary by version — handle both default and named
@@ -1093,9 +1135,13 @@ export class VisionPipeline {
    * @returns Initialized Tesseract worker ready for recognition.
    * @throws {Error} If tesseract.js is not installed, with install instructions.
    */
-  private async _loadTesseract(): Promise<any> {
-    if (this._tesseract) return this._tesseract;
+  private _loadTesseract(): Promise<any> {
+    if (this._tesseract) return Promise.resolve(this._tesseract);
+    return this._loadOnce('tesseract', () => this._startTesseract());
+  }
 
+  /** The load of {@link _loadTesseract}, which runs one at a time. */
+  private async _startTesseract(): Promise<any> {
     try {
       const mod = await import('tesseract.js');
       const Tesseract = mod.default ?? mod;
@@ -1122,9 +1168,13 @@ export class VisionPipeline {
    * @returns HuggingFace image-to-text pipeline configured with TrOCR weights.
    * @throws {Error} If @huggingface/transformers is not installed.
    */
-  private async _loadTrOcr(): Promise<any> {
-    if (this._trOcrPipeline) return this._trOcrPipeline;
+  private _loadTrOcr(): Promise<any> {
+    if (this._trOcrPipeline) return Promise.resolve(this._trOcrPipeline);
+    return this._loadOnce('trocr', () => this._startTrOcr());
+  }
 
+  /** The load of {@link _loadTrOcr}, which runs one at a time. */
+  private async _startTrOcr(): Promise<any> {
     try {
       const { pipeline } = await import('@huggingface/transformers');
       // TrOCR base, fine-tuned on handwriting: an image-to-text
@@ -1151,15 +1201,19 @@ export class VisionPipeline {
    * @returns The Florence-2 model, its processor, and transformers.js's `RawImage`.
    * @throws {Error} If @huggingface/transformers is not installed.
    */
-  private async _loadFlorence2(): Promise<{ model: any; processor: any; RawImage: any }> {
-    if (this._florence) return this._florence;
+  private _loadFlorence2(): Promise<{ model: any; processor: any; RawImage: any }> {
+    if (this._florence) return Promise.resolve(this._florence);
+    return this._loadOnce('florence-2', () => this._startFlorence2());
+  }
 
+  /** The load of {@link _loadFlorence2}, which runs one at a time. */
+  private async _startFlorence2(): Promise<{ model: any; processor: any; RawImage: any }> {
     try {
       const { AutoProcessor, Florence2ForConditionalGeneration, RawImage } = await import('@huggingface/transformers');
-      const [model, processor] = await Promise.all([
-        Florence2ForConditionalGeneration.from_pretrained(LAYOUT_MODEL),
-        AutoProcessor.from_pretrained(LAYOUT_MODEL),
-      ]);
+      // The processor first: a model loaded before a processor that failed
+      // would hold an ONNX session that nothing releases.
+      const processor = await AutoProcessor.from_pretrained(LAYOUT_MODEL);
+      const model = await Florence2ForConditionalGeneration.from_pretrained(LAYOUT_MODEL);
       this._florence = { model, processor, RawImage };
       return this._florence;
     } catch (err: any) {
@@ -1180,9 +1234,13 @@ export class VisionPipeline {
    * @returns HuggingFace image-feature-extraction pipeline configured with CLIP.
    * @throws {Error} If @huggingface/transformers is not installed.
    */
-  private async _loadClip(): Promise<any> {
-    if (this._clipPipeline) return this._clipPipeline;
+  private _loadClip(): Promise<any> {
+    if (this._clipPipeline) return Promise.resolve(this._clipPipeline);
+    return this._loadOnce('clip', () => this._startClip());
+  }
 
+  /** The load of {@link _loadClip}, which runs one at a time. */
+  private async _startClip(): Promise<any> {
     try {
       const { pipeline } = await import('@huggingface/transformers');
       // CLIP ViT-B/32. The image-feature-extraction task runs its vision
@@ -1277,8 +1335,8 @@ export class VisionPipeline {
     // Strategy-based routing
     switch (tier) {
       case 'ocr':
-        // OCR runs in all strategies except cloud-only
-        return strategy !== 'cloud-only';
+        // OCR runs in all strategies except cloud-only, when an engine is set
+        return strategy !== 'cloud-only' && (this._config.ocr ?? 'paddle') !== 'none';
 
       case 'handwriting':
         // Handwriting only runs if explicitly enabled in config
@@ -1446,6 +1504,37 @@ export class VisionPipeline {
     const { readFile } = await import('node:fs/promises');
     const filePath = url.startsWith('file://') ? url.slice(7) : url;
     return readFile(filePath);
+  }
+
+  /**
+   * Runs a public call: refused once dispose() has been called, and tracked
+   * until it settles, so dispose() waits for it.
+   */
+  private _track<T>(run: () => Promise<T>): Promise<T> {
+    this._assertNotDisposed();
+    const call = run();
+    this._inFlight.add(call);
+    const forget = () => {
+      this._inFlight.delete(call);
+    };
+    call.then(forget, forget);
+    return call;
+  }
+
+  /**
+   * Runs `load` for the engine `name` one at a time: a call while it runs
+   * gets the same promise, so concurrent first calls load one engine, not
+   * two of which dispose() would release one. A failed load is forgotten,
+   * so the next call tries again.
+   */
+  private _loadOnce<T>(name: string, load: () => Promise<T>): Promise<T> {
+    const pending = this._loading.get(name);
+    if (pending) return pending as Promise<T>;
+    const started = load().finally(() => {
+      this._loading.delete(name);
+    });
+    this._loading.set(name, started);
+    return started;
   }
 
   /**

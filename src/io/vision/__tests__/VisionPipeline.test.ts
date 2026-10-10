@@ -996,6 +996,82 @@ describe('VisionPipeline', () => {
   });
 
   // =========================================================================
+  // Failed engines, shared loads and disposal
+  // =========================================================================
+
+  describe('failed engines, shared loads and disposal', () => {
+    it('goes on to the cloud tier when the OCR engine fails, and lists the failure', async () => {
+      mockPaddleOcrInstance.recognize.mockRejectedValue(new Error('paddle: model download failed'));
+
+      const result = await createFullPipeline({ handwriting: false, documentAI: false, embedding: false })
+        .process(testImage());
+
+      expect(result.tiers).toEqual(['cloud-vision']);
+      expect(result.failedTiers).toEqual([{ tier: 'ocr', error: 'paddle: model download failed' }]);
+      expect(result.text).toContain('handwritten notes');
+    });
+
+    it('skips the OCR tier when no engine is set, instead of failing the call', async () => {
+      const result = await new VisionPipeline({ strategy: 'progressive', ocr: 'none', cloudProvider: 'openai' })
+        .process(testImage());
+
+      expect(result.tiers).toEqual(['cloud-vision']);
+      expect(result.failedTiers).toBeUndefined();
+    });
+
+    it('throws with every failure when no tier gave a result', async () => {
+      mockPaddleOcrInstance.recognize.mockRejectedValue(new Error('paddle down'));
+      mockHfPipelineFactory.mockRejectedValue(new Error('no tokenizer.json'));
+
+      await expect(
+        createFullPipeline({ strategy: 'local-only', documentAI: false, embedding: false }).process(testImage()),
+      ).rejects.toThrow('every tier that was due to run failed: ocr: paddle down; handwriting: no tokenizer.json');
+    });
+
+    it('loads an engine once for calls that start together', async () => {
+      const pipeline = createFullPipeline();
+
+      await Promise.all([pipeline.analyzeLayout(testImage()), pipeline.analyzeLayout(testImage())]);
+
+      expect(mockFlorenceModelLoad).toHaveBeenCalledTimes(1);
+      expect(mockFlorenceProcessorLoad).toHaveBeenCalledTimes(1);
+    });
+
+    it('loads the Florence-2 processor before the model, so a failed processor leaves no model behind', async () => {
+      mockFlorenceProcessorLoad.mockRejectedValueOnce(new Error('preprocessor_config.json: 404'));
+      const pipeline = createFullPipeline();
+
+      await expect(pipeline.analyzeLayout(testImage())).rejects.toThrow('preprocessor_config.json: 404');
+      expect(mockFlorenceModelLoad).not.toHaveBeenCalled();
+
+      // The failed load is forgotten: the next call loads again.
+      await expect(pipeline.analyzeLayout(testImage())).resolves.toMatchObject({ pages: [expect.anything()] });
+      expect(mockFlorenceModelLoad).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits for a call in progress before it releases the models', async () => {
+      let finish!: () => void;
+      mockFlorenceModel.generate.mockImplementation(
+        () => new Promise((resolve) => {
+          finish = () => resolve({ token_ids: 'generated' });
+        }),
+      );
+      const pipeline = createFullPipeline();
+      const layout = pipeline.analyzeLayout(testImage());
+      await vi.waitFor(() => expect(mockFlorenceModel.generate).toHaveBeenCalled());
+
+      const disposed = pipeline.dispose();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(mockFlorenceModel.dispose).not.toHaveBeenCalled();
+
+      finish();
+      await expect(layout).resolves.toMatchObject({ pages: [expect.anything()] });
+      await disposed;
+      expect(mockFlorenceModel.dispose).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // =========================================================================
   // Pipeline result structure
   // =========================================================================
 

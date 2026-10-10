@@ -52,7 +52,7 @@ const described = await vision.process(image, { tiers: ['cloud-vision'] });
 
 `result.text` and `result.confidence` come from the tier with the highest confidence, so a cloud result (0.95) wins over every local tier that ran. `result.regions` holds that tier's text regions. The Florence-2 tier reads the image line by line: `result.layout` holds one page the size of the image, with a `text` block for each line and the line's bounding box in the image's pixels, and the tier's text is the lines in reading order. It does not label headings, tables or figures.
 
-A tier that was due to run and failed, such as a model that did not load, is left out of `result.tiers` and listed in `result.failedTiers` with its error; the run goes on with the other tiers, and throws only when the cloud tier fails with no local text to fall back on.
+A tier that was due to run and failed, such as an OCR engine that could not start or a model that did not load, is left out of `result.tiers` and listed in `result.failedTiers` with its error, and the run goes on with the other tiers: an OCR failure leaves the category `mixed`, so both model tiers run, and the cloud tier after them as the strategy allows. `process()` throws only when no tier gave a result, naming each failure. `dispose()` waits for calls in progress, and concurrent first calls share one load of each engine.
 
 Each local model tier downloads its model from the Hugging Face Hub on first use and caches it: about 1.3 GB for TrOCR, 1.1 GB for Florence-2 and 350 MB for CLIP's vision tower, in fp32, the precision Transformers.js loads by default in Node. The [Vision models](https://github.com/framerslab/agentos/blob/master/.github/workflows/vision-models.yml) CI job runs the three tiers from the built package against these models every week and on every change to the vision code.
 
@@ -236,7 +236,7 @@ The cloud tier reads the provider's key from its environment variable: `OPENAI_A
 
 ## Limitations
 
-- **No OCR package.** `createVisionPipeline()` then sets `ocr: 'none'`, and any run that includes the OCR tier throws `OCR is set to "none" but OCR tier was requested.`: `extractText()`, `process()` under every strategy except `cloud-only`, and `process(image, { tiers })` with a list that names `'ocr'`. A `tiers` list without `'ocr'` skips the tier and does not throw.
+- **No OCR package.** `createVisionPipeline()` then sets `ocr: 'none'`: `process()` skips the OCR tier and goes on to the model and cloud tiers, while `extractText()` and a `process(image, { tiers })` call whose list names only `'ocr'` throw `OCR is set to "none" but OCR tier was requested.`
 - **Layout labels.** The Florence-2 tier gives every line as a `text` block; it does not label headings, tables, figures, lists or code.
 - **CLIP text.** The pipeline embeds images only; it has no method that embeds text into the CLIP space.
 
