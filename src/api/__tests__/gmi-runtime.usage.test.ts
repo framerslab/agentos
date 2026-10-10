@@ -230,4 +230,41 @@ describe("agent({ runtime: 'gmi' }) usage", () => {
       usageLine.open();
     }
   });
+
+  it('a model call close() stopped after it reported usage is counted once: the late report adds only what it reports beyond that', async () => {
+    // OpenRouter's finish line reports 12 tokens; close() runs before the usage-only line, which
+    // reports the request's running total, 16, once close() has returned.
+    const finishSent = gate(); const usageLine = gate();
+    openRouter.bodies.push(() =>
+      sseBody([
+        orLine({ choices: [{ index: 0, delta: { role: 'assistant', content: 'Partial answer' }, finish_reason: null }] }),
+        orLine({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } }),
+        finishSent.open,
+        usageLine.opened,
+        orLine({ choices: [], usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 } }),
+        'data: [DONE]',
+      ]),
+    );
+    const a = agent({ runtime: 'gmi', provider: 'openrouter', model: OR_MODEL, apiKey: key(), fallbackProviders: [] } as unknown as AgentOptions);
+    const session = a.session('s');
+    const bills = () => events.map((e) => [e.finishReason, e.usage.promptTokens, e.usage.completionTokens, e.usage.totalTokens]);
+    try {
+      const outcome = session.send('hi').then(() => 'resolved', (error: unknown) => error);
+      await finishSent.opened;
+      await sleep(50);
+      await session.close();
+      expect(await outcome).toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringMatching(/abort/i) });
+      // The stopped call's bill as its finish line reported it.
+      expect(bills()).toEqual([['error', 10, 2, 12]]);
+      expect(await session.usage()).toMatchObject({ promptTokens: 10, completionTokens: 2, totalTokens: 12 });
+
+      usageLine.open();
+      // Only the part of the 16 beyond the 12 already counted is added: 16 in all, not 28.
+      await vi.waitFor(() => expect(bills()).toEqual([['error', 10, 2, 12], ['error', 2, 2, 4]]));
+      expect(await session.usage()).toMatchObject({ promptTokens: 12, completionTokens: 4, totalTokens: 16 });
+      expect(await a.usage()).toMatchObject({ promptTokens: 12, completionTokens: 4, totalTokens: 16 });
+    } finally {
+      usageLine.open();
+    }
+  });
 });
