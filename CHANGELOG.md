@@ -1,3 +1,12 @@
+## [0.13.23](https://github.com/framerslab/agentos/compare/v0.13.22...v0.13.23) (2026-10-10)
+
+### fix
+
+* **gmi:** follow-ups from the reviews of #193 and #199 (#217) ([2bacb69](https://github.com/framerslab/agentos/commit/2bacb69f8fb03ce1b70517b65a52846881a3e9b2))
+* **gmi:** manager shutdown waits for creations in flight, bounds each GMI and runs once (#222) ([d99b126](https://github.com/framerslab/agentos/commit/d99b1269d3e5447e0dd43650e2cc4620ab4c67b5))
+* **images:** the untrusted fetch settles on a protocol upgrade, and four review follow-ups (#227) ([9efb4b5](https://github.com/framerslab/agentos/commit/9efb4b51b0e6017c1f2fd685dcd436a1c44a16d2))
+* **vision:** the TrOCR and Florence-2 tiers get a Buffer image as a Blob (#229) ([7fe444a](https://github.com/framerslab/agentos/commit/7fe444afc6ef0ecbe89ea2aecd8c97fc33caeda0))
+
 ## [0.13.22](https://github.com/framerslab/agentos/compare/v0.13.21...v0.13.22) (2026-10-10)
 
 ### feat
