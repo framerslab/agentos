@@ -58,4 +58,11 @@ describe('chunkTurns', () => {
     const chunks = chunkTurns([turn(1, 'a'.repeat(60)), turn(2, 'b'.repeat(60))], { maxChars: 100, overlapTurns: 1 });
     expect(chunks.map((chunk) => [chunk.firstSeq, chunk.lastSeq])).toEqual([[1, 1], [2, 2]]);
   });
+
+  it('opens a chunk at the overlap turn only when a new turn fits beside it', () => {
+    const lengths = [500, 600, 700, 400, 300];
+    const chunks = chunkTurns(lengths.map((length, at) => turn(at + 1, 'w'.repeat(length))));
+    expect(chunks.map((chunk) => [chunk.firstSeq, chunk.lastSeq])).toEqual([[1, 2], [3, 4], [4, 5]]);
+    expect(chunks.every((chunk) => chunk.text.length <= 1200)).toBe(true);
+  });
 });

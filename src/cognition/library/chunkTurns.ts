@@ -38,11 +38,17 @@ export interface TurnChunk {
 export interface ChunkTurnsOptions {
   /** The most characters a passage holds, unless one turn alone is longer. @default 1200 */
   maxChars?: number;
-  /** How many turns of the passage before open the next one. @default 1 */
+  /**
+   * At most how many turns from the end of a passage open the next one, never its first turn: only as many as fit
+   * within `maxChars` together with the next new turn. @default 1
+   */
   overlapTurns?: number;
 }
 
-/** Cuts turns into passages, in order. Turns that are empty or white space alone are left out. */
+/**
+ * Cuts turns into passages, in order. Turns that are empty or white space alone are left out. Every passage after
+ * the first holds at least one turn the passage before did not.
+ */
 export function chunkTurns(turns: readonly LibraryTurn[], options: ChunkTurnsOptions = {}): TurnChunk[] {
   const maxChars = options.maxChars ?? 1200;
   const overlap = Math.max(0, options.overlapTurns ?? 1);
@@ -73,9 +79,18 @@ export function chunkTurns(turns: readonly LibraryTurn[], options: ChunkTurnsOpt
       endMs: members[members.length - 1].endMs ?? null,
       turns: placed,
     });
-    if (to + 1 >= spoken.length) break;
-    // The next passage opens `overlap` turns back, but always moves forward by at least one turn.
-    from = Math.max(from + 1, to + 1 - overlap);
+    const next = to + 1;
+    if (next >= spoken.length) break;
+    // The next passage opens `overlap` turns back, past this passage's first turn, and keeps only the overlap turns
+    // that fit within maxChars together with the next new turn: every passage after the first then holds a turn the
+    // one before did not, and the walk always moves forward.
+    from = Math.max(from + 1, next - overlap);
+    let opening = spoken[next].text.length;
+    for (let kept = from; kept < next; kept += 1) opening += spoken[kept].text.length + 1;
+    while (from < next && opening > maxChars) {
+      opening -= spoken[from].text.length + 1;
+      from += 1;
+    }
   }
   return chunks;
 }
