@@ -1,3 +1,9 @@
+## [0.13.36](https://github.com/framerslab/agentos/compare/v0.13.35...v0.13.36) (2026-10-10)
+
+### fix
+
+* **memory:** read and write front matter as data, never as code (#265) ([af3801b](https://github.com/framerslab/agentos/commit/af3801b41a70b2c6974be39a144180e1a22bfc56))
+
 ## [0.13.35](https://github.com/framerslab/agentos/compare/v0.13.34...v0.13.35) (2026-10-10)
 
 ### feat
