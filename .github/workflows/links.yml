@@ -27,12 +27,18 @@ jobs:
             --remap "^https://github\.com/framerslab/agentos/(blob|tree)/master/ file://${{ github.workspace }}/"
             --exclude-path CHANGELOG.md
             './*.md' './.github/**/*.md' './docs/contributing/**/*.md' './docs/getting-started/RELEASING.md'
+      # github.com throttles a crawler on a runner with 429 and 503. Neither
+      # says anything about the link, so both count as reachable; a file or a
+      # repository that is gone still answers 404 and fails the step. Fewer
+      # requests at once and a wait between retries keep the throttling rare.
       - name: Links to other first-party repositories
         if: github.event_name != 'pull_request'
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
           args: >-
             --no-progress
+            --accept '100..=103,200..=299,429,503'
+            --max-concurrency 4 --max-retries 4 --retry-wait-time 5
             --include '^https://github\.com/(framerslab|jddunn|manicinc)/[^/]+/(blob|tree)/'
             --exclude-path CHANGELOG.md
             './*.md' './.github/**/*.md' './.github/ISSUE_TEMPLATE/*.yml' './docs/contributing/**/*.md' './docs/getting-started/RELEASING.md'
