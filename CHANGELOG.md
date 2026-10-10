@@ -1,3 +1,9 @@
+## [0.13.28](https://github.com/framerslab/agentos/compare/v0.13.27...v0.13.28) (2026-10-10)
+
+### fix
+
+* **api:** an abort during a call's last tool round or its after-generation hook ends the call on the signal's reason (#233) ([2270cf0](https://github.com/framerslab/agentos/commit/2270cf060d9f7747d63f3fea8292dcbe5262e505))
+
 ## [0.13.27](https://github.com/framerslab/agentos/compare/v0.13.26...v0.13.27) (2026-10-10)
 
 ### fix
