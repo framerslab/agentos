@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { editImage } from '../editImage.js';
 import { generateImage } from '../generateImage.js';
-import { transferStyle } from '../transferStyle.js';
+import { transferStyle } from '../../transferStyle.js';
 import { upscaleImage } from '../upscaleImage.js';
 import { variateImage } from '../variateImage.js';
 
