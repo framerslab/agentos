@@ -2,10 +2,13 @@
  * @fileoverview The spend meter over Postgres, where several processes share it: the contract, the rolling window and
  * the purge, both again on tables under a second prefix, what a prefix names and refuses, two meters with different
  * rules on one database, twenty concurrent reservations against an allowance of five in a period and of two in a
- * window, a settle racing a reconcile on one operation, and the indexes a store an earlier release made gains.
+ * window, a settle racing a reconcile on one operation, the indexes a store an earlier release made gains, and tables
+ * the meter's role does not own, used as they are.
  *
  * Gated on `AGENTOS_TEST_POSTGRES_URL` (CI's service container); skipped without it. Each test meters accounts and
- * operations under a prefix of its own and deletes them after, so runs never collide.
+ * operations under a prefix of its own and deletes them after, or makes tables of its own and drops them after, so
+ * runs never collide. The test of a role that does not own the tables creates that role, so the URL's user needs the
+ * right to create roles, as CI's superuser has.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPostgresAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
@@ -18,8 +21,10 @@ const describeIfPostgres = POSTGRES_URL ? describe : describe.skip;
 
 /** The second prefix both suites run under, on tables `spendMeterDdl` made. */
 const ALT_PREFIX = 'alt_spend';
-/** The prefix of the tables one test makes afresh from the DDL an earlier release ran, and drops after. */
-const OLDER_PREFIX = 'older_spend';
+/** This run's own mark, in the names of the tables and the role its tests make and drop. */
+const RUN = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+/** The prefix of the tables the tests of an earlier release's store make afresh from its DDL, and drop after. */
+const OLDER_PREFIX = `older_${RUN}`;
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
@@ -230,6 +235,36 @@ describeIfPostgres('SqlSpendMeter on Postgres', () => {
       ]);
       expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 0, reserved: 1, remaining: 1 });
     } finally {
+      await drop();
+    }
+  });
+
+  it('uses tables its role does not own as they are: Postgres refuses it the indexes they lack, and the meter still counts on them', async () => {
+    // tables the database's owner makes from the DDL an earlier release ran, and a role that reads and writes them but owns neither
+    const older = tablesOf(OLDER_PREFIX);
+    const role = `spend_writer_${RUN}`;
+    const password = `p${Math.random().toString(36).slice(2)}`;
+    // the tables go first, and their grants with them, so the role is referenced nowhere when it is dropped
+    const drop = async () => {
+      await db.exec(`DROP TABLE IF EXISTS ${older.reservations}; DROP TABLE IF EXISTS ${older.meter};`);
+      await db.exec(`DROP ROLE IF EXISTS ${role}`);
+    };
+    await drop();
+    let writer: StorageAdapter | undefined;
+    try {
+      await db.exec(olderDdl(OLDER_PREFIX));
+      await db.exec(`CREATE ROLE ${role} LOGIN PASSWORD '${password}'; GRANT SELECT, INSERT, UPDATE, DELETE ON ${older.meter}, ${older.reservations} TO ${role};`);
+      const url = new URL(POSTGRES_URL!);
+      url.username = role;
+      url.password = password;
+      writer = createPostgresAdapter({ connectionString: url.toString(), max: 2 });
+      await writer.open();
+      const meter = new SqlSpendMeter({ db: writer, tablePrefix: OLDER_PREFIX, allowanceFor: () => 1, windowMs: HOUR });
+      await expect(meter.ensureSchema()).resolves.toBeUndefined();
+      expect(await meter.reserve({ accountId: 'a', operationId: 'op', now: OCT })).toMatchObject({ status: 'reserved', remaining: 0 });
+      expect((await catalogue(db, older)).indexes.map((index) => index.name)).toEqual([`idx_${OLDER_PREFIX}_reservations_due`]);
+    } finally {
+      await writer?.close();
       await drop();
     }
   });
