@@ -24,6 +24,7 @@ import type {
   QueryResult,
   VectorDocument,
 } from '../../core/vector-store/IVectorStore.js';
+import { reciprocalRankFusion } from '../memory/retrieval/hybrid/reciprocalRankFusion.js';
 import { mergeMetadataFilters, scopeToMetadataFilter } from '../rag/scopeFilter.js';
 
 /** Who asks: the tenant, and the groups the principal is in. */
@@ -60,7 +61,10 @@ export interface LibraryPassage {
   kind: string;
   index: number;
   text: string;
-  /** The store's score for the passage, as the search's mode and the store compute it, read as a number. */
+  /**
+   * The store's score for the passage, as the search's mode and the store compute it, read as a number. A hybrid
+   * search with `anyOf` answers the index's fusion of the two legs' ranks instead.
+   */
   score: number;
   title?: string;
   folderId?: string;
@@ -80,10 +84,25 @@ export interface LibrarySearch {
   kinds?: string[];
   /** Only the sources filed in this folder. */
   folderId?: string;
+  /**
+   * Only the sources filed in any of these folders; an empty list finds nothing, without a call to the embedder or
+   * the store. With `folderId` as well, both apply.
+   */
+  folderIds?: string[];
   /** Every one of these tags; an empty list narrows nothing. */
   tags?: string[];
   /** Only these sources; an empty list finds nothing, without a call to the embedder or the store. */
   sourceIds?: string[];
+  /**
+   * Several narrowings at once: a passage is found when any one of them holds. Each is searched with the one
+   * embedding of the text under the same scope, a passage found twice kept once, and the answer is ranked as one
+   * search's: each leg by the passage's own score across every branch (its similarity to the text, the lexical rank
+   * of the text's words in it), the two legs of a hybrid search fused once. A branch's fields replace the search's
+   * own of the same name. An empty list finds nothing, as does a list whose every branch finds nothing by its own
+   * narrowing, and neither calls the embedder or the store. The legs are the store's `query` and `lexicalSearch`,
+   * never its `hybridSearch`; on a store without `lexicalSearch`, a hybrid search is answered by the dense leg alone.
+   */
+  anyOf?: Array<Pick<LibrarySearch, 'kinds' | 'folderId' | 'folderIds' | 'tags' | 'sourceIds'>>;
   /** For the lexical leg, alone or in a hybrid search: every word or any word (default), and whether a stored word may only begin with a query word. */
   match?: 'all' | 'any';
   prefix?: boolean;
@@ -133,7 +152,7 @@ function stringsOf(value: MetadataValue | undefined): string[] {
  * the tenant, the status `active`, at least one of the scope's groups, and each narrowing the search gives.
  */
 function meetsSearch(metadata: Record<string, MetadataValue>, query: LibrarySearch): boolean {
-  const { scope, kinds, folderId, tags, sourceIds } = query;
+  const { scope, kinds, folderId, folderIds, tags, sourceIds } = query;
   const held = (key: string): string[] => stringsOf(metadata[key]);
   return (
     metadata.tenantId === scope.tenantId &&
@@ -141,9 +160,22 @@ function meetsSearch(metadata: Record<string, MetadataValue>, query: LibrarySear
     held('aclGroups').some((group) => scope.aclGroups.includes(group)) &&
     (!kinds || kinds.length === 0 || held('kind').some((kind) => kinds.includes(kind))) &&
     (!folderId || held('folderId').includes(folderId)) &&
+    (!folderIds || held('folderId').some((id) => folderIds.includes(id))) &&
     (!tags || tags.every((tag) => held('tags').includes(tag))) &&
     (!sourceIds || held('sourceId').some((id) => sourceIds.includes(id)))
   );
+}
+
+/**
+ * Whether a narrowing finds nothing, whatever the collection holds: an empty `sourceIds` or `folderIds`, or a
+ * `folderId` that is not among the `folderIds`. The index answers it without a call to the embedder or the store.
+ */
+function findsNothing(query: Pick<LibrarySearch, 'folderId' | 'folderIds' | 'sourceIds'>): boolean {
+  const { folderId, folderIds, sourceIds } = query;
+  if (sourceIds && sourceIds.length === 0) return true;
+  if (!folderIds) return false;
+  if (folderIds.length === 0) return true;
+  return folderId ? !folderIds.includes(folderId) : false;
 }
 
 /**
@@ -245,17 +277,61 @@ export class LibraryIndex {
   /**
    * Searches what the scope may see. The store's filter selects the passages, and the index keeps only those whose
    * metadata meets the scope and the narrowing: a store whose filter drops or ignores a condition cannot widen the
-   * answer, which can then hold fewer than `topK` passages.
+   * answer, which can then hold fewer than `topK` passages. With `anyOf`, each narrowing is searched leg by leg under
+   * the same scope and the answers are ranked as one search's ({@link LibrarySearch.anyOf}).
    */
   async search(query: LibrarySearch): Promise<LibraryPassage[]> {
     if (!query.scope.tenantId || query.scope.aclGroups.length === 0) {
       throw new Error('LibraryIndex.search needs a tenant and at least one access group.');
     }
-    // An empty source list finds nothing on every store, whatever a store's filter makes of an empty `$in`.
-    if (query.sourceIds && query.sourceIds.length === 0) return [];
+    const { anyOf, ...base } = query;
+    if (anyOf === undefined) return this.searchWith(query, undefined);
+    // A branch narrows and nothing more: the text and the scope stay the search's own, whatever a branch holds at run
+    // time. A branch that finds nothing by its own narrowing is left out, so a choice of nothing embeds nothing.
+    const branches = anyOf
+      .map((branch) => ({ ...base, ...branch, text: base.text, scope: base.scope }))
+      .filter((narrowed) => !findsNothing(narrowed));
+    if (branches.length === 0) return [];
+    const mode = base.mode ?? 'hybrid';
+    const topK = base.topK ?? 10;
+    const dense = mode !== 'lexical';
+    const lexical = mode === 'lexical' || (mode === 'hybrid' && typeof this.store.lexicalSearch === 'function');
+    // A hybrid answer's score is a rank among one branch's own candidates, so a choice of several branches is searched
+    // leg by leg, each leg's score the passage's own, and the two legs are fused once over every branch.
+    const pool = dense && lexical ? topK * 3 : topK;
+    const vector = dense ? (await this.embed([base.text]))[0] : undefined;
+    const byDense = new Map<string, LibraryPassage>();
+    const byLexical = new Map<string, LibraryPassage>();
+    for (const narrowed of branches) {
+      if (dense) for (const passage of await this.searchWith({ ...narrowed, topK: pool, mode: 'dense' }, vector)) byDense.set(passage.id, passage);
+      if (lexical) for (const passage of await this.searchWith({ ...narrowed, topK: pool, mode: 'lexical' }, undefined)) byLexical.set(passage.id, passage);
+    }
+    const ranked = (found: Map<string, LibraryPassage>): LibraryPassage[] =>
+      [...found.values()].sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : 1)).slice(0, pool);
+    if (!lexical) return ranked(byDense).slice(0, topK);
+    if (!dense) return ranked(byLexical).slice(0, topK);
+    const ranks = (found: Map<string, LibraryPassage>) => ranked(found).map((passage, at) => ({ id: passage.id, rank: at + 1 }));
+    return reciprocalRankFusion(ranks(byDense), ranks(byLexical), { denseWeight: 1, sparseWeight: 1, k: 60 })
+      .slice(0, topK)
+      .flatMap(({ id, score }): LibraryPassage[] => {
+        const passage = byDense.get(id) ?? byLexical.get(id);
+        return passage === undefined ? [] : [{ ...passage, score }];
+      });
+  }
+
+  /**
+   * One search under one narrowing: the store's filter, then the check of every passage the store answers. `vector`
+   * is the text's embedding when the caller holds it already; without it, a dense or hybrid search embeds the text.
+   */
+  private async searchWith(query: LibrarySearch, vector: number[] | undefined): Promise<LibraryPassage[]> {
+    // An empty source or folder list finds nothing on every store, whatever a store's filter makes of an empty `$in`,
+    // and so does a folder that is not in the folder list.
+    if (findsNothing(query)) return [];
     const narrowed: MetadataFilter = {};
     if (query.kinds && query.kinds.length > 0) narrowed.kind = { $in: query.kinds };
     if (query.folderId) narrowed.folderId = query.folderId;
+    // With `folderId` as well, that folder is in the list (findsNothing holds the rest), so it alone narrows.
+    if (query.folderIds && !query.folderId) narrowed.folderId = { $in: query.folderIds };
     if (query.tags && query.tags.length > 0) narrowed.tags = { $all: query.tags };
     if (query.sourceIds) narrowed.sourceId = { $in: query.sourceIds };
     const filter = mergeMetadataFilters(narrowed, scopeToMetadataFilter({ tenantId: query.scope.tenantId, aclGroups: query.scope.aclGroups }));
@@ -266,11 +342,11 @@ export class LibraryIndex {
       if (typeof this.store.lexicalSearch !== 'function') throw new Error('LibraryIndex: the store has no lexicalSearch.');
       result = await this.store.lexicalSearch(this.collection, query.text, { topK: options.topK, match: query.match ?? 'any', prefix: query.prefix === true, includeMetadata: true, includeTextContent: true, filter });
     } else {
-      const [vector] = await this.embed([query.text]);
+      const [embedded] = vector === undefined ? await this.embed([query.text]) : [vector];
       result =
         mode === 'hybrid' && typeof this.store.hybridSearch === 'function'
-          ? await this.store.hybridSearch(this.collection, vector, query.text, { ...options, match: query.match ?? 'any', prefix: query.prefix === true })
-          : await this.store.query(this.collection, vector, options);
+          ? await this.store.hybridSearch(this.collection, embedded, query.text, { ...options, match: query.match ?? 'any', prefix: query.prefix === true })
+          : await this.store.query(this.collection, embedded, options);
     }
     // The store's filter selected these passages. A store whose filter drops or ignores a condition can still answer
     // one outside the scope or the narrowing, so each passage is checked against them again here.
