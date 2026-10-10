@@ -648,6 +648,53 @@ describe("agent({ runtime: 'gmi' }) resolves the model and builds memory on firs
     await a.close();
   });
 
+  /** A tool that records the id of the GMI it runs under, which a session names after its memory scope ('gmi-<scope id>'). */
+  const gmiIdTool = (gmiIds: string[]) => ({
+    name: 'lookup',
+    description: 'Look up.',
+    inputSchema: { type: 'object', properties: { q: { type: 'string' } } },
+    execute: async (_args: Record<string, unknown>, ctx: { gmiId?: string }) => {
+      gmiIds.push(String(ctx.gmiId));
+      return { success: true, output: 'nothing filed' };
+    },
+  });
+  const lookupThenAnswer = (id: string) => [reply.tools([{ id, name: 'lookup', args: { q: 'deploy key' } }]), reply.text('Done.')];
+
+  it("one record per session id gives each reopening a memory scope of its own, through 1,000 opens and closes of the id; agent.close() starts a new memory and empties the record, so the id's next opening is its first", async () => {
+    const k = key(); const emb = key();
+    script('openai', k, { replies: [...lookupThenAnswer('c1'), ...lookupThenAnswer('c2')] });
+    script('openai', emb);
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const gmiIds: string[] = [];
+    const a = agent(base(k, { ...plainMemory(), tools: [gmiIdTool(gmiIds)] }));
+
+    for (let i = 0; i < 1_000; i++) await a.session('kiosk-1').close();
+    await a.session('kiosk-1').send(QUESTION);
+    await a.close();
+    await a.session('kiosk-1').send(QUESTION);
+
+    // The opening after the 1,000 closes gets a scope of its own; the opening after
+    // agent.close() is the id's first in the new memory, so its scope is the id.
+    expect(gmiIds).toEqual([expect.stringMatching(/^gmi-kiosk-1:[0-9a-f-]{36}$/), 'gmi-kiosk-1']);
+    await a.close();
+  });
+
+  it('an agent without cognitive memory keeps no record of the session ids it opened: an id opened again after close() runs as it did the first time', async () => {
+    const k = key();
+    script('openai', k, { replies: [...lookupThenAnswer('c1'), ...lookupThenAnswer('c2')] });
+    const gmiIds: string[] = [];
+    // The review's input: a server agent with no memory that opens a session per request and closes it.
+    const a = agent(base(k, { tools: [gmiIdTool(gmiIds)] }));
+
+    const first = a.session('cart-1');
+    await first.send(QUESTION);
+    await first.close();
+    await a.session('cart-1').send(QUESTION);
+
+    expect(gmiIds).toEqual(['gmi-cart-1', 'gmi-cart-1']);
+    await a.close();
+  });
+
   it("a session's memory context names no memory of another session; sessions that share a user id still see each other's", async () => {
     const k = key(); const emb = key();
     const s = script('openai', k, { replies: ['Noted.', 'Kept.', 'No idea.', 'Noted.', 'Kept.', 'In the vault.'].map((text) => reply.text(text)) });
