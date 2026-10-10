@@ -220,4 +220,27 @@ describe('GMIManager.shutdown', () => {
       await shutdown;
     }
   });
+
+  it('shuts down a GMI that is in the active map with no session entry', async () => {
+    const { manager, memoryShutdown } = await createHarness();
+    // Two creations for one new session race: both build a GMI, and the later
+    // registration takes the session entry from the earlier one.
+    const created = await Promise.all([
+      manager.getOrCreateGMIForSession('user-9', 'session-9', persona.id),
+      manager.getOrCreateGMIForSession('user-9', 'session-9', persona.id),
+    ]);
+    const orphan = created.map(({ gmi }) => gmi).find((gmi) => manager.gmiSessionMap.get('session-9') !== gmi.gmiId);
+    if (!orphan) throw new Error('the two creations did not race');
+    expect(manager.activeGMIs.get(orphan.gmiId)).toBe(orphan);
+    const orphanShutdown = vi.spyOn(orphan, 'shutdown');
+
+    await manager.shutdown();
+
+    expect(orphanShutdown).toHaveBeenCalledTimes(1);
+    expect(orphan.getCurrentState()).toBe(GMIPrimeState.SHUTDOWN);
+    // session-1, session-2, session-9 and the orphan each closed their memory.
+    expect(memoryShutdown).toHaveBeenCalledTimes(4);
+    expect(manager.activeGMIs.size).toBe(0);
+    expect(manager.gmiSessionMap.size).toBe(0);
+  });
 });
