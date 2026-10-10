@@ -106,12 +106,13 @@ export interface CompletionAttempt extends AsyncIterable<ModelCompletionResponse
 
 /**
  * Usage a provider reported for an attempt after the caller's signal ended it.
- * The attempt ends at once, and a provider stream that had started is read to
- * its end in the background, where a provider that bills the request may still
- * report the bill: OpenRouter ends its stream with an abort chunk carrying the
- * usage line it was reading (the one a held content-filter decline or a held
- * error was waiting for, or the one that follows a normal finish). Neither
- * the attempt's `outcome` nor its chunks carry this usage.
+ * The attempt ends at once, and a provider stream that had started is read in
+ * the background until it ends (for a bounded number of chunks), where a
+ * provider that bills the request may still report the bill: OpenRouter ends
+ * its stream with an abort chunk carrying the usage line it was reading (the
+ * one a held content-filter decline or a held error was waiting for, or the
+ * one that follows a normal finish). Neither the attempt's `outcome` nor its
+ * chunks carry this usage.
  */
 export interface LateAttemptUsage {
   providerId: string;
@@ -314,10 +315,20 @@ function unlessAborted<T>(next: Promise<T>, signal: AbortSignal): Promise<T | ty
 }
 
 /**
- * Reads a provider stream the caller's abort left behind to its end, starting
- * with the chunk it was asked for when the abort came (`pending`). Every
- * provider ends its stream once it sees the signal, at its next event at the
- * latest, through its own abort path. A read that fails ends the reading.
+ * The most chunks read from a provider stream the caller's abort left behind.
+ * The built-in providers end their stream once they see the signal, at their
+ * next event at the latest, with their abort chunk; a custom IProvider that
+ * ignores the signal would otherwise stream, and its upstream bill, the whole
+ * reply in the background.
+ */
+const LEFT_STREAM_MAX_CHUNKS = 32;
+
+/**
+ * Reads a provider stream the caller's abort left behind, starting with the
+ * chunk it was asked for when the abort came (`pending`), until it ends, until
+ * the provider's abort or error chunk (a provider's last), or for at most
+ * {@link LEFT_STREAM_MAX_CHUNKS} chunks; a stream still open then is closed,
+ * which ends its request. A read that fails ends the reading.
  *
  * @returns The last usage report read there (a chunk's, or the one a thrown
  *   error carries), or undefined when none was.
@@ -329,8 +340,14 @@ async function readToEnd(
   let usage: ModelUsage | undefined;
   try {
     let result = pending ? await pending : await iterator.next();
-    while (!result.done) {
+    for (let read = 1; !result.done; read++) {
       usage = asUsageReport(result.value?.usage) ?? usage;
+      if (result.value?.error || read >= LEFT_STREAM_MAX_CHUNKS) {
+        void Promise.resolve()
+          .then(() => iterator.return?.())
+          .catch(() => undefined);
+        break;
+      }
       result = await iterator.next();
     }
   } catch (error) {
@@ -379,8 +396,9 @@ function reportLateUsage(report: LateAttemptUsage, onLateUsage: ((report: LateAt
  * `close()`) until the provider's own timeout. The signal is read before every
  * chunk is asked for: asking a stream that has not started for its first chunk
  * sends its request, so once the signal has aborted, a stream that was never
- * asked is closed and sends nothing, and one that has started is read to its
- * end in the background. The usage reported there beyond what the attempt had
+ * asked is closed and sends nothing, and one that has started is read in the
+ * background until it ends, for a bounded number of chunks (readToEnd), and
+ * then closed. The usage reported there beyond what the attempt had
  * reported (OpenRouter's abort chunk carries the bill its trailing usage line
  * reports) goes to `onLateUsage` once that read ends ({@link LateAttemptUsage}).
  */
