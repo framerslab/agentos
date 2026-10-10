@@ -196,7 +196,11 @@ export interface SqlSpendMeterOptions {
    * SQLite file per process would give every instance an allowance of its own. Default true; tests pass false.
    */
   requireShared?: boolean;
-  /** Create the tables when they are missing. Default true. */
+  /**
+   * Create the tables when they are missing, and on tables that exist the indexes they lack (see
+   * {@link SqlSpendMeter.ensureSchema}). Default true. With false the meter runs no DDL: the product's own migrations
+   * make the tables and their indexes.
+   */
   ensureSchema?: boolean;
   /**
    * The start of the two tables' names: `<prefix>_meter` and `<prefix>_reservations`, their indexes named after them
@@ -275,7 +279,11 @@ export class SqlSpendMeter implements ISpendMeter {
     this.windowMs = opts.windowMs === undefined ? undefined : Math.trunc(opts.windowMs);
   }
 
-  /** Creates the tables unless they answer a read already. Called before the first statement; safe to call again. */
+  /**
+   * Creates the tables and their indexes unless the tables answer a read already, and on tables that answer runs the
+   * indexes' `CREATE INDEX IF NOT EXISTS` statements, so a store an earlier release made gains the indexes it lacks.
+   * Called before the first statement; safe to call again. Does nothing with `ensureSchema: false`.
+   */
   ensureSchema(): Promise<void> {
     if (this.opts.ensureSchema === false) return Promise.resolve();
     this.schemaReady ??= (async () => {
@@ -284,7 +292,12 @@ export class SqlSpendMeter implements ISpendMeter {
         await this.db.get(`SELECT 1 FROM ${this.tables.reservations} LIMIT 1`);
       } catch {
         await this.db.exec(ddlOf(this.tables));
+        return;
       }
+      // The indexes speed the meter's reads and change none of its answers, so tables that refuse them are used as they
+      // are: Postgres checks that the role owns a table before it looks for the index's name, and two processes adding
+      // one index at once can collide.
+      await this.db.exec(indexDdlOf(this.tables)).catch(() => undefined);
     })().catch((e) => {
       this.schemaReady = null;
       throw e;
