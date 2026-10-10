@@ -88,12 +88,13 @@ function checkedLookup(resolve: LookupFunction, allowed: (address: string) => bo
         : [{ address: result, family: family ?? isIP(result) }];
       const refused = addresses.find((entry) => !allowed(entry.address));
       if (refused || addresses.length === 0) {
-        callback(
-          refusal(
-            `imageToBuffer: ${hostname} resolves to ${refused ? refused.address : 'no address'}, which is not a public network address.`,
-          ),
-          [],
-        );
+        // The message leaves out the address the name resolved to: it reaches
+        // whoever sent the URL, and a model told to try internal names could
+        // otherwise map the network one refusal at a time. The address stays
+        // on the error, out of its message and its own keys, for logs.
+        const error = refusal(`imageToBuffer: ${hostname} does not resolve to a public network address.`);
+        Object.defineProperty(error, 'resolvedAddress', { value: refused?.address, enumerable: false });
+        callback(error, []);
         return;
       }
       if (options.all) callback(null, addresses);
@@ -102,7 +103,15 @@ function checkedLookup(resolve: LookupFunction, allowed: (address: string) => bo
   };
 }
 
-/** Sends a GET for `url` on a connection of its own, and resolves with the response once its head arrives. */
+/**
+ * Sends a GET for `url` on a connection of its own, and resolves with the
+ * response once its head arrives. The promise settles however the request
+ * ends: a response, an error, the deadline, a protocol upgrade, or a close
+ * with none of these. Node closes the connection without an error on a
+ * `101 Switching Protocols` that nothing listens for, and a request it has
+ * closed ignores a later `destroy`, so neither the error nor the deadline
+ * would end the wait.
+ */
 function get(url: URL, lookup: LookupFunction, signal: AbortSignal): Promise<http.IncomingMessage> {
   return new Promise((resolve, reject) => {
     // agent: false gives every request a new connection, so no socket that an
@@ -112,17 +121,35 @@ function get(url: URL, lookup: LookupFunction, signal: AbortSignal): Promise<htt
       lookup,
       headers: { accept: 'image/*,*/*;q=0.8', 'accept-encoding': 'identity', 'user-agent': 'agentos' },
     };
-    const onAbort = () => request.destroy(new Error('aborted'));
+    let settled = false;
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      reject(error);
+    };
+    const onAbort = () => {
+      request.destroy();
+      fail(new Error('aborted'));
+    };
     const onResponse = (response: http.IncomingMessage) => {
+      if (settled) {
+        response.destroy();
+        return;
+      }
+      settled = true;
       signal.removeEventListener('abort', onAbort);
       resolve(response);
     };
     const request =
       url.protocol === 'https:' ? https.get(url, options, onResponse) : http.get(url, options, onResponse);
-    request.on('error', (error) => {
-      signal.removeEventListener('abort', onAbort);
-      reject(error);
+    request.on('error', fail);
+    // With a listener, Node hands over the socket of a 101 instead of closing it.
+    request.on('upgrade', (_response, socket) => {
+      socket.destroy();
+      fail(new Error(`imageToBuffer: ${shown(url)} answered with a protocol upgrade, not an image.`));
     });
+    request.on('close', () => fail(new Error(`imageToBuffer: the connection to ${shown(url)} closed before a response arrived.`)));
     if (signal.aborted) onAbort();
     else signal.addEventListener('abort', onAbort, { once: true });
   });

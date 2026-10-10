@@ -9,10 +9,12 @@
  * Whether an IPv4 address, as its four numbers, is off the public internet:
  * "this network" (0/8), private (10/8, 172.16/12, 192.168/16), carrier-grade
  * NAT (100.64/10), loopback (127/8), link-local (169.254/16, where cloud
- * metadata services answer), the IETF protocol block (192.0.0/24), the
- * documentation (192.0.2/24, 198.51.100/24, 203.0.113/24) and benchmarking
- * (198.18/15) ranges, and everything from 224.0.0.0 up: multicast, reserved
- * and broadcast.
+ * metadata services answer), the IETF protocol block (192.0.0/24), the 6to4
+ * relay anycast block (192.88.99/24), the documentation (192.0.2/24,
+ * 198.51.100/24, 203.0.113/24) and benchmarking (198.18/15) ranges, and
+ * everything from 224.0.0.0 up: multicast, reserved and broadcast. The list
+ * follows the IANA IPv4 Special-Purpose Address Registry's blocks that are
+ * not globally reachable.
  */
 function isNonPublicIPv4([a, b, c]: readonly number[]): boolean {
   return (
@@ -23,6 +25,7 @@ function isNonPublicIPv4([a, b, c]: readonly number[]): boolean {
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 0 && (c === 0 || c === 2)) ||
+    (a === 192 && b === 88 && c === 99) ||
     (a === 192 && b === 168) ||
     (a === 198 && (b === 18 || b === 19)) ||
     (a === 198 && b === 51 && c === 100) ||
@@ -70,20 +73,27 @@ function ipv6Groups(address: string): number[] | undefined {
  * the IPv4 address it carries included: unspecified and loopback,
  * IPv4-compatible (::/96) and IPv4-mapped (::ffff:0:0/96), NAT64
  * (64:ff9b::/96 by the address it carries; 64:ff9b:1::/48 and the rest of
- * 64:ff9b::/32 outright), 6to4 (2002::/16), discard (100::/64), documentation
- * (2001:db8::/32), unique local (fc00::/7), link-local (fe80::/10),
- * site-local (fec0::/10) and multicast (ff00::/8).
+ * 64:ff9b::/32 outright), 6to4 (2002::/16), discard and dummy (100::/63),
+ * the IETF protocol assignments (2001::/23, Teredo, benchmarking and ORCHID
+ * among them), documentation (2001:db8::/32 and 3fff::/20), SRv6 segment
+ * identifiers (5f00::/16), unique local (fc00::/7), link-local (fe80::/10),
+ * site-local (fec0::/10) and multicast (ff00::/8). The list follows the IANA
+ * IPv6 Special-Purpose Address Registry's blocks that are not globally
+ * reachable; a few globally reachable anycast blocks inside 2001::/23 are
+ * refused with the rest, since no image is served from them.
  */
 function isNonPublicIPv6(groups: readonly number[]): boolean {
-  const [g0, g1, g2, , , g5, g6, g7] = groups;
+  const [g0, g1, g2, g3, , g5, g6, g7] = groups;
   const zeros = (from: number, to: number) => groups.slice(from, to).every((group) => group === 0);
   const carried = (high: number, low: number) => isNonPublicIPv4([high >> 8, high & 255, low >> 8, low & 255]);
   if (zeros(0, 6)) return (g6 === 0 && g7 <= 1) || carried(g6, g7);
   if (zeros(0, 5) && g5 === 0xffff) return carried(g6, g7);
   if (g0 === 0x64 && g1 === 0xff9b) return g2 === 1 || !zeros(2, 6) || carried(g6, g7);
   if (g0 === 0x2002) return carried(g1, g2);
-  if (g0 === 0x100 && zeros(1, 4)) return true;
-  if (g0 === 0x2001 && g1 === 0xdb8) return true;
+  if (g0 === 0x100 && g1 === 0 && g2 === 0 && g3 <= 1) return true;
+  if (g0 === 0x2001 && (g1 <= 0x01ff || g1 === 0xdb8)) return true;
+  if (g0 === 0x3fff && g1 <= 0x0fff) return true;
+  if (g0 === 0x5f00) return true;
   return (
     (g0 & 0xfe00) === 0xfc00 ||
     (g0 & 0xffc0) === 0xfe80 ||

@@ -100,7 +100,8 @@ export async function imageToBuffer(input: string | Buffer, options: ImageToBuff
       throw new Error('imageToBuffer: malformed data URL — missing comma separator.');
     }
     const payload = trimmed.slice(commaIdx + 1);
-    return /;base64$/i.test(trimmed.slice(0, commaIdx)) ? Buffer.from(payload, 'base64') : percentDecodeBytes(payload);
+    // As WHATWG Fetch reads a data URL: spaces may stand around `;base64`.
+    return /; *base64 *$/i.test(trimmed.slice(0, commaIdx)) ? Buffer.from(payload, 'base64') : percentDecodeBytes(payload);
   }
 
   // file: URL — convert to a local path and read.
