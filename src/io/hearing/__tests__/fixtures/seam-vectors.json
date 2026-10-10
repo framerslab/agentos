@@ -1,0 +1,50 @@
+[
+  {
+    "previous": "We agreed to send the report on Friday",
+    "next": "the report on Friday and then review it together.",
+    "merged": "and then review it together.",
+    "why": "an exact repeat of the last four words is dropped"
+  },
+  {
+    "previous": "We agreed to send the report on Friday.",
+    "next": "The report on friday, and then review it together.",
+    "merged": "and then review it together.",
+    "why": "case and punctuation are not compared (Friday. against friday,)"
+  },
+  {
+    "previous": "Maya said the report is due Friday",
+    "next": "port is due Friday the agenda goes",
+    "merged": "the agenda goes",
+    "why": "a word cut at the start of the next piece is dropped with the run"
+  },
+  {
+    "previous": "We meet in Lisbon in March.",
+    "next": " The venue holds two hundred people. ",
+    "merged": "The venue holds two hundred people.",
+    "why": "with no repeat the next piece is kept whole, trimmed"
+  },
+  {
+    "previous": "We compared it with the",
+    "next": "The second quote was lower.",
+    "merged": "The second quote was lower.",
+    "why": "one shared word (the) is not a repeat: a run is two words or more"
+  },
+  {
+    "previous": "So the plan is this: we will send the final budget to the board on Monday and then book the flights for the whole team",
+    "next": "we will send the final budget to the board on Monday and then book the flights for the whole team before the hotel hold ends.",
+    "merged": "before the hotel hold ends.",
+    "why": "twenty words repeated, the longest run searched for, are dropped"
+  },
+  {
+    "previous": "We meet in Lisbon in March.",
+    "next": "",
+    "merged": "",
+    "why": "an empty next piece adds nothing"
+  },
+  {
+    "previous": "The hotel holds fourteen rooms until Friday",
+    "next": "Um, so fourteen rooms until Friday and Maya confirms tomorrow.",
+    "merged": "and Maya confirms tomorrow.",
+    "why": "two leading words of the next piece, the most the search skips, are dropped with the run"
+  }
+]

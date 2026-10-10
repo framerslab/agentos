@@ -279,6 +279,46 @@ See [RFC_EXTENSION_STANDARDS.md](../extensions/RFC_EXTENSION_STANDARDS.md) for t
 
 ---
 
+## Transcribing a Long Recording in Pieces
+
+A recording too long for one transcription request is sent in pieces. When the pieces overlap by a few seconds, the words of each overlap come back twice: at the end of one piece's text and at the start of the next. `transcribePieces` (in `@framers/agentos/io/hearing`) sends the pieces to a function you give it and joins their texts without the repeated words:
+
+```typescript
+import { OpenAIWhisperSpeechToTextProvider, transcribePieces } from '@framers/agentos/io/hearing';
+
+const provider = new OpenAIWhisperSpeechToTextProvider({ apiKey: process.env.OPENAI_API_KEY! });
+
+// One span per sentence. The last sentence of a piece's text is the next piece's prompt.
+const segmenter = new Intl.Segmenter('en', { granularity: 'sentence' });
+const sentences = (text: string) =>
+  [...segmenter.segment(text)].map(({ index, segment }) => ({ start: index, end: index + segment.length }));
+
+// `pieces`: the recording's pieces in order, each { index, startMs, durationMs, data, mimeType, fileName }.
+const { text, seconds } = await transcribePieces(
+  pieces,
+  async (piece, { prompt }) => {
+    const answer = await provider.transcribe(
+      { data: Buffer.from(piece.data), mimeType: piece.mimeType, fileName: piece.fileName },
+      { prompt },
+    );
+    return { text: answer.text, seconds: answer.durationSeconds ?? piece.durationMs / 1000 };
+  },
+  { sentences, inFlight: 2, onPiece: (outcome) => console.log(outcome.index, outcome.added) },
+);
+```
+
+The job answers `text` (the joined text), `pieces` (each piece's outcome, in order) and `seconds` (the sum of the seconds your function answered for the pieces).
+
+- **Order.** The pieces go to your function in the order given, at most `inFlight` at once (1 unless set, 4 at most). `onPiece` is called with each piece's outcome in that order, once the piece and every piece before it are done; `outcome.added` is what the piece added to the text after its seam.
+- **Context.** A call's `prompt` is the last sentence, by your `sentences` function, of the latest piece of the recording that had been transcribed when the call's piece was first sent. A piece sent before any has answered has no prompt, unless `previousText` is set.
+- **Retries.** A call that throws is made again, up to `attempts` tries for a piece in all (3 unless set). When a piece fails every try, the job rejects with `PiecesFailed`, which carries the piece's `index`, its `attempts` and the last error as `cause`. The pieces before it have been reported to `onPiece` by then; no piece after it is reported, even one that was transcribed.
+- **Going on.** To go on after a failure, call `transcribePieces` with the pieces from the failed one on and `previousText` set to the text so far: every `outcome.added` that is not empty, joined by one space. The first of those pieces is joined to that text at its seam and takes its prompt from it, and the answer's `text` begins with it.
+- **Stopping.** An aborted `signal` ends the job: no further try is made, and the job rejects with the signal's reason. Your function is given the same signal as `request.signal`.
+
+The join is `mergeSeam(previous, next)`, exported beside the job. It drops from the start of `next` the longest run of 2 to 20 words that also ends `previous`. Words are compared in lower case with the marks `. , ! ? ; : " ' ( ) [ ] { }` removed (`normalizeTranscriptText`, exported from `@framers/agentos/io/voice-pipeline`). The run may begin at the first, second or third word of `next`, since a cut can leave part of a word at the start of a piece, and the one or two words before the run are dropped with it. With no such run, `next` is kept whole.
+
+---
+
 ## Related Documentation
 
 - [VOICE_PIPELINE.md](./VOICE_PIPELINE.md) — end-to-end voice session orchestration
