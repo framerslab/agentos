@@ -1534,6 +1534,56 @@ describe('OpenAIRealtimeTranscriptionSTT: rollover and usage', () => {
       [2, 0.1],
     ]);
   });
+
+  it('with client commits, a flush that waits through a refused rollover goes on once the old connection takes audio again', async () => {
+    fakeClock();
+    const answers: Array<(approved: boolean) => void> = [];
+    const approve = vi.fn((_request: unknown) => new Promise<boolean>((resolve) => answers.push(resolve)));
+    const stt = new OpenAIRealtimeTranscriptionSTT({
+      apiKey: KEY,
+      turnDetection: null,
+      finalTimeoutMs: 60_000,
+      rollover: { ...ROLLOVER, approve },
+    });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    await vi.advanceTimersByTimeAsync(10_000);
+    session.pushAudio(frame(2_400));
+    const firstFlush = session.flush(); // past the rollover age: the connection stops taking audio, the host is asked
+    expect(approve).toHaveBeenCalledOnce();
+    first.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    first.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'The first turn.',
+    });
+    await firstFlush;
+    session.pushAudio(frame(2_400)); // the next turn, held while the host decides
+    let flushed = false;
+    const secondFlush = session.flush().then(() => {
+      flushed = true;
+    });
+    await settle();
+    expect(flushed).toBe(false); // no connection takes audio: the flush waits for one
+    answers[0](false); // refused: the first connection takes the held audio, and the commit the flush asked for
+    await settle();
+    expect(sentOfType(first, 'input_audio_buffer.commit')).toHaveLength(2);
+    first.serve({ type: 'input_audio_buffer.committed', item_id: 'item_B', previous_item_id: 'item_A' });
+    first.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_B',
+      transcript: 'The second turn.',
+    });
+    await settle();
+    expect(flushed).toBe(true); // with that turn's final, not after finalTimeoutMs
+    await secondFlush;
+    expect(log.transcripts.map((t) => [t.itemId, t.text])).toEqual([
+      ['item_A', 'The first turn.'],
+      ['item_B', 'The second turn.'],
+    ]);
+    session.close();
+  });
 });
 
 describe('OpenAIRealtimeTranscriptionSTT: turns in VoicePipelineOrchestrator', () => {
