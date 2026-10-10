@@ -362,6 +362,29 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     }
   });
 
+  it('close() during a reply from a provider that ignores the abort signal returns at once, and the stream left behind is closed after a bounded read, not at its end', async () => {
+    // A custom IProvider may never read options.abortSignal. This one sends a delta, then 1,999
+    // more once the gate opens, aborted or not; closing its generator is what ends its request.
+    const k = key(); const g = gate();
+    const streamed = reply.ignoringSignal(2_000, g.opened);
+    script('openai', k, { replies: [streamed] });
+    const session = agent(base(k)).session('s');
+    try {
+      const outcome = session.send('one').then(() => 'resolved', (error: unknown) => error);
+      await vi.waitFor(() => expect(streamed.record.yielded).toBe(1));
+      expect(await Promise.race([session.close().then(() => 'closed'), sleep(2_000).then(() => 'still waiting')])).toBe('closed');
+      expect(await outcome).toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringMatching(/abort/i) });
+
+      g.open();
+      await vi.waitFor(() => expect(streamed.record.closedAfter).toBeDefined());
+      // The delta sent before close(), then at most 32 read in the background before the
+      // generator is closed: not the whole reply.
+      expect(streamed.record.closedAfter).toBeLessThanOrEqual(1 + 32);
+    } finally {
+      g.open();
+    }
+  });
+
   it('a session that streams many turns leaves no listener behind on the signal close() aborts', async () => {
     const warnings: Error[] = [];
     const onWarning = (warning: Error): void => {
