@@ -239,4 +239,47 @@ describe('StreamingSTTChain: mid-utterance failover and close', () => {
     expect(failover).not.toHaveBeenCalled();
     expect(chain.currentProviderId).toBe('a');
   });
+
+  it('forwards usage reports and warnings from its sessions: the one in use, one that failed, and the backup', async () => {
+    const sessionA = mkClosingSession('a');
+    const sessionB = mkClosingSession('b');
+    const chain = new StreamingSTTChain(
+      [mkProvider('a', 10, async () => sessionA), mkProvider('b', 20, async () => sessionB)],
+      { enableMidUtteranceFailover: true }
+    );
+    const session = await chain.startSession();
+    const usage = vi.fn();
+    const warnings = vi.fn();
+    session.on('usage', usage);
+    session.on('warning', warnings);
+
+    const open = { providerId: 'a', connectionIndex: 1, audioSeconds: 2, final: false };
+    const warning = new Error('transcription failed for one item');
+    sessionA.emit('usage', open);
+    sessionA.emit('warning', warning);
+    expect(usage.mock.calls).toEqual([[open]]);
+    expect(warnings.mock.calls).toEqual([[warning]]);
+
+    // The session fails, and reports its connection's last usage as it closes; the backup takes over.
+    const last = { providerId: 'a', connectionIndex: 1, audioSeconds: 3, final: true };
+    sessionA.emit('error', new Error('socket dropped'));
+    sessionA.emit('usage', last);
+    await settle();
+    expect(chain.currentProviderId).toBe('b');
+    const fromBackup = { providerId: 'b', connectionIndex: 1, audioSeconds: 1, final: false };
+    sessionB.emit('usage', fromBackup);
+    expect(usage.mock.calls).toEqual([[open], [last], [fromBackup]]);
+  });
+
+  it('prints a warning nobody listens for, as a provider session by itself does', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const sessionA = mkClosingSession('a');
+    const chain = new StreamingSTTChain([mkProvider('a', 10, async () => sessionA)], {
+      enableMidUtteranceFailover: true,
+    });
+    await chain.startSession();
+    sessionA.emit('warning', new Error('transcription failed for one item'));
+    expect(warn).toHaveBeenCalledWith('[a] transcription failed for one item');
+    warn.mockRestore();
+  });
 });
