@@ -1,8 +1,8 @@
 /**
  * @fileoverview PostgresVectorStore against a real Postgres with pgvector: the array-aware filter, deletion and
  * metadata changes by filter, the lexical leg, an iterative scan that fills a filtered top-K, for query() and
- * for the hybrid search's dense leg, and the indexes createCollection() makes on a table with a long name. Gated
- * on AGENTOS_TEST_POSTGRES_URL, as Brain.postgres.test.ts is.
+ * for the hybrid search's dense leg, the hybrid search's score as a number, and the indexes createCollection()
+ * makes on a table with a long name. Gated on AGENTOS_TEST_POSTGRES_URL, as Brain.postgres.test.ts is.
  */
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -120,6 +120,18 @@ describe.skipIf(!URL)('PostgresVectorStore on Postgres', () => {
     const asked = await store.hybridSearch('chunks', arc(0), 'what did we decide about the budget', { topK: 5, match: 'any', filter: { tenantId: 'a' } });
     expect(asked.documents).toHaveLength(5);
     expect(asked.documents.every((doc) => doc.metadata?.tenantId === 'a')).toBe(true);
+  });
+
+  it('answers a hybrid search score as a number, highest first', async () => {
+    // The fused score is a numeric in SQL, which pg hands back as text.
+    const hybrid = await store.hybridSearch('chunks', arc(0), 'budget review', { topK: 10 });
+    expect(hybrid.documents).toHaveLength(10);
+    for (const doc of hybrid.documents) {
+      expect(typeof doc.similarityScore).toBe('number');
+      expect(Number.isFinite(doc.similarityScore)).toBe(true);
+    }
+    const scores = hybrid.documents.map((doc) => doc.similarityScore);
+    expect(scores).toEqual([...scores].sort((a, b) => b - a));
   });
 
   it('changes and deletes by filter', async () => {
