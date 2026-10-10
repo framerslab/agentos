@@ -63,7 +63,8 @@ export interface LibraryPassage {
   text: string;
   /**
    * The store's score for the passage, as the search's mode and the store compute it, read as a number. A hybrid
-   * search with `anyOf` answers the index's fusion of the two legs' ranks instead.
+   * search with `anyOf` on a store with `lexicalSearch` answers the index's fusion of the two legs' ranks instead; on
+   * a store without it, that search runs the dense leg alone and answers the store's score.
    */
   score: number;
   title?: string;
