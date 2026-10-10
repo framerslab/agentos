@@ -1,5 +1,5 @@
 ---
-title: 'Self-Improving Memory'
+title: 'Memory Consolidation'
 sidebar_position: 23
 description: 'How the Memory facade consolidates a brain (prune, merge, strengthen, derive, compact, re-index), how retrieval feedback changes trace decay, and how the observer extracts, compresses and reflects conversation notes.'
 ---

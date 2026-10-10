@@ -21,6 +21,7 @@ import { estimateMaxTokensForZodSchema } from './runtime/schemaTokenEstimate.js'
 import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
 import { buildResponseFormat } from '../core/llm/providers/structuredOutputFormat.js';
 import { buildSchemaInstructionText, extractJson, repairStringEncodedContainers, summarizeBadResponse, summarizeZodErrors } from './runtime/structuredReply.js';
+import { asSpendBudget, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
 
 /**
  * Detect whether a Zod schema's outer type is `ZodArray`. We support
@@ -290,6 +291,13 @@ export interface GenerateObjectOptions<T extends ZodType> {
    * call rolls up under the generic surface bucket.
    */
   source?: string;
+
+  /**
+   * A spend budget for this call and, when the same {@link SpendBudget} instance is passed to several calls, for all of
+   * them: each attempt's provider call is checked against what is left before it is made and recorded after it, so a
+   * refused attempt ends the call with no further attempt.
+   */
+  budget?: SpendBudget | SpendBudgetOptions;
 }
 
 /**
@@ -590,6 +598,10 @@ export async function generateObject<T extends ZodType>(
   let anyFallbackFired = false;
   const accumulatedFallbackHops: import('./generateText.js').FallbackSignal['hops'] = [];
 
+  // One budget instance for every attempt. A refusal is thrown by the
+  // attempt's generateText and ends the loop at once.
+  const budget = asSpendBudget(opts.budget);
+
   // Attempt generation up to 1 + maxRetries times (initial + retries)
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const result = await generateText({
@@ -635,6 +647,7 @@ export async function generateObject<T extends ZodType>(
       // callback (see generateText's fallback loop) instead of inheriting
       // the primary-shaped payload verbatim.
       _responseFormatBuilder: responseFormatBuilder,
+      ...(budget ? { budget } : {}),
     });
 
     // Accumulate token usage across attempts

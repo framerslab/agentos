@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { inspect } from 'node:util';
 
 import { describe, expect, it } from 'vitest';
@@ -148,6 +149,24 @@ describe('imageToBuffer', () => {
     const dir = await mkdtemp(join(tmpdir(), 'imageToBuffer-'));
     try {
       await expect(imageToBuffer(join(dir, 'missing.png'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('percent-decodes a data URL without ";base64", byte by byte (RFC 2397)', async () => {
+    expect((await imageToBuffer('data:image/svg+xml,%3Csvg%3E%3C/svg%3E')).toString('utf8')).toBe('<svg></svg>');
+    expect([...(await imageToBuffer('data:image/png,%89PNG'))]).toEqual([0x89, 0x50, 0x4e, 0x47]);
+    expect(await imageToBuffer('DATA:image/png;BASE64,aGVsbG8=')).toEqual(Buffer.from('hello'));
+  });
+
+  it('reads a file URL whose path has an escaped space', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'imageToBuffer-'));
+    try {
+      const file = join(dir, 'a photo.png');
+      await writeFile(file, PNG_START);
+
+      expect(await imageToBuffer(pathToFileURL(file).href)).toEqual(PNG_START);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

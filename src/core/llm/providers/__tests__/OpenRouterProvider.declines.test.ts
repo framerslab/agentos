@@ -630,6 +630,43 @@ describe('streams', () => {
     expect((err.details as { partialText?: string }).partialText).toBe('a'.repeat(1500) + 'b'.repeat(500));
   });
 
+  it('a key that crosses character 2,000 of a long stream is still masked in partial text', async () => {
+    const key = 'sk-or-v1-0123456789abcdef0123456789abcdef';
+    const deltas = ['x'.repeat(1990), key, 'y'.repeat(9000)];
+    const request = vi.fn().mockResolvedValueOnce({ data: sse([...deltas.map(textChunk), filterChunk, usageChunk, 'data: [DONE]']) });
+    const err = await thrown(drain(makeProvider(request, key).generateCompletionStream(MODEL, messages, {})));
+    const partial = (err.details as { partialText?: string }).partialText ?? '';
+    expect(partial).toBe('x'.repeat(1990) + '[redacted]');
+    expect(partial).not.toContain('sk-or');
+  });
+
+  it('the wait for a held decline\'s usage line ends after the bound when the stream stays open', async () => {
+    const open = new Readable({ read() {} });
+    open.push(Buffer.from(textChunk('Once ') + '\n\n'));
+    open.push(Buffer.from(filterChunk + '\n\n'));
+    const request = vi.fn().mockResolvedValueOnce({ data: open });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const started = Date.now();
+    const err = await thrown(drain(makeProvider(request).generateCompletionStream(MODEL, messages, {})));
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1500);
+    expect(err.code).toBe('content_filter');
+    expect((err.details as { partialText?: string }).partialText).toBe('Once ');
+    expect(open.destroyed).toBe(true);
+    // The deliberate close is not logged as a read error.
+    expect(errorSpy).not.toHaveBeenCalled();
+  }, 10_000);
+
+  it('an abort while the stream is idle after a content_filter finish is answered within the bound', async () => {
+    const controller = new AbortController();
+    const open = new Readable({ read() {} });
+    open.push(Buffer.from(filterChunk + '\n\n'));
+    const request = vi.fn().mockResolvedValueOnce({ data: open });
+    setTimeout(() => controller.abort(), 100);
+    const out = (await drain(makeProvider(request).generateCompletionStream(MODEL, messages, { abortSignal: controller.signal }))) as Array<{ error?: { type?: string } }>;
+    expect(out).toHaveLength(1);
+    expect(out[0]?.error?.type).toBe('abort');
+  }, 10_000);
+
   const errorEvent = (error: Record<string, unknown>) =>
     chunk({ error, choices: [{ index: 0, delta: { content: '' }, finish_reason: 'error' }] });
 

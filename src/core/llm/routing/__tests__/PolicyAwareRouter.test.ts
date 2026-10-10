@@ -79,6 +79,18 @@ describe('PolicyAwareRouter', () => {
     expect(result!.modelInfo.providerId).toBe('openrouter');
   });
 
+  it('matches a required capability under either spelling: function_calling picks the tool_use model', async () => {
+    const router = new PolicyAwareRouter(catalog);
+    for (const capability of ['function_calling', 'tool_use']) {
+      const result = await router.selectModel({
+        taskHint: 'narration',
+        policyTier: 'mature',
+        requiredCapabilities: [capability],
+      });
+      expect(result?.modelId, capability).toBe('meta-llama/llama-3.3-70b-instruct');
+    }
+  });
+
   it('respects contentIntent filter', async () => {
     const router = new PolicyAwareRouter(catalog);
     const result = await router.selectModel({

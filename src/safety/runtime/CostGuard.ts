@@ -70,12 +70,22 @@ export class CostGuard {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
-  canAfford(agentId: string, estimatedCostUsd: number): { allowed: boolean; reason?: string; capType?: CostCapType } {
+  /**
+   * Whether an operation estimated at `estimatedCostUsd` fits the caps that apply to `agentId`. A refusal names the cap
+   * that refused it in `capType`, says why in `reason`, and carries that cap's numbers: `currentCostUsd`, the id's total
+   * under the cap before the operation (for the single-operation cap, the estimate itself), and `limitUsd`, the cap.
+   */
+  canAfford(
+    agentId: string,
+    estimatedCostUsd: number,
+  ): { allowed: boolean; reason?: string; capType?: CostCapType; currentCostUsd?: number; limitUsd?: number } {
     if (estimatedCostUsd > this.config.maxSingleOperationCostUsd) {
       return {
         allowed: false,
         reason: `Single operation cost $${estimatedCostUsd.toFixed(4)} exceeds limit $${this.config.maxSingleOperationCostUsd.toFixed(2)}`,
         capType: 'single_operation',
+        currentCostUsd: estimatedCostUsd,
+        limitUsd: this.config.maxSingleOperationCostUsd,
       };
     }
 
@@ -91,6 +101,8 @@ export class CostGuard {
         allowed: false,
         reason: `Session cost $${(costs.sessionCost + estimatedCostUsd).toFixed(4)} would exceed limit $${sessionLimit.toFixed(2)}`,
         capType: 'session',
+        currentCostUsd: costs.sessionCost,
+        limitUsd: sessionLimit,
       };
     }
 
@@ -99,6 +111,8 @@ export class CostGuard {
         allowed: false,
         reason: `Daily cost $${(costs.dailyCost + estimatedCostUsd).toFixed(4)} would exceed limit $${dailyLimit.toFixed(2)}`,
         capType: 'daily',
+        currentCostUsd: costs.dailyCost,
+        limitUsd: dailyLimit,
       };
     }
 

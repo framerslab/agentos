@@ -18,6 +18,8 @@ describe('the property-name rule', () => {
     'privateKeys', 'secretKeys', 'accessKeys', 'apikey', 'accesstoken', 'secretkey', 'APIKEY', 'apikeys',
     'botTokens', 'refreshTokens', 'clientSecrets', 'dbPasswords', 'sessionCookies', 'encryptionKey', 'signingKey',
     'serviceRoleKey', 'accountKey', 'Ocp-Apim-Subscription-Key', 'openAIAPIKey',
+    // Feishu's event-callback credential, as the channel pack names it.
+    'encryptKey', 'feishu_encrypt_key', 'ENCRYPT_KEY', 'encryptKeys',
   ])('%s is a secret name', (name) => {
     expect(isSecretName(name)).toBe(true);
   });

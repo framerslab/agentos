@@ -53,8 +53,11 @@ export type GmiOptions = AgentOptions;
 /** The handle {@link gmi} returns: the `Agent` surface. */
 export type GmiHandle = Agent;
 
-/** Options with no GMI-path implementation yet; set, they throw at construction. */
-const UNSUPPORTED_ON_GMI = ['voice', 'avatar', 'channels'] as const;
+/**
+ * Options with no GMI-path implementation yet; set, they throw at construction. A `budget` would go unenforced, since
+ * a GMI's model calls do not pass through generateText or streamText.
+ */
+const UNSUPPORTED_ON_GMI = ['voice', 'avatar', 'channels', 'budget'] as const;
 /**
  * Per-call overrides generate() and stream() accept on the GMI path (spec D10),
  * and the tool-approval gate `agency()` passes with every call to a member.
@@ -272,7 +275,7 @@ interface SessionEntry {
 /**
  * An agent whose sessions are GMIs (docs/GMI.md, "GMIs from agent()").
  *
- * @param opts - The options of `agent()`. `voice`, `avatar` and `channels` throw when set;
+ * @param opts - The options of `agent()`. `voice`, `avatar`, `channels` and `budget` throw when set;
  *   a config that sets only `enabled: false` is unset.
  * @returns The `Agent` surface: `generate`, `stream`, `session`, `usage`, `close`, `export`.
  * @throws {Error} At construction, naming the option: an option the GMI path
@@ -612,6 +615,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
           const persisted = await recordedUsage(ledger, sessionId);
           return ledger?.enabled ? persisted : mergeAggregates(tally, persisted);
         },
+        // A GMI agent takes no budget (it throws at construction), so an
+        // outside cost has nothing to be charged to.
+        recordExternalCost: () => undefined,
         clear: () => {
           history?.reseed([]);
           syncGmiHistory();

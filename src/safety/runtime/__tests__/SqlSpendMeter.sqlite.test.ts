@@ -1,12 +1,13 @@
 /**
- * @fileoverview The spend meter's contract over an in-memory SQLite store, and the rollback of a refused reservation
- * when a later statement of its transaction fails.
+ * @fileoverview The spend meter's contract over an in-memory SQLite store, its rolling window and its purge there, and
+ * the rollback of a refused reservation when a later statement of its transaction fails.
  */
 import { describe, expect, it } from 'vitest';
 import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
 import { SpendMeterUnavailableError, withBoundedRetry, isTransientStorageError } from '../SpendMeter.js';
 import { SqlSpendMeter } from '../SqlSpendMeter.js';
 import { OCT, monthOf, runSpendMeterContractSuite } from './SpendMeter.contract.js';
+import { runSpendMeterWindowSuite } from './SqlSpendMeter.window.contract.js';
 
 const openSqlite = () => resolveStorageAdapter({ filePath: ':memory:', priority: ['better-sqlite3', 'sqljs'], quiet: true });
 
@@ -22,6 +23,24 @@ runSpendMeterContractSuite('SqlSpendMeter on SQLite', async ({ allowance, leaseM
     requireShared: false,
   });
   return { meter, cleanup: () => db.close() };
+});
+
+runSpendMeterWindowSuite('SqlSpendMeter on SQLite', async ({ allowance, leaseMs, windowMs, periodOf }) => {
+  const db = await openSqlite();
+  try {
+    const meter = new SqlSpendMeter({ db, allowanceFor: (accountId) => allowance.get(accountId) ?? 0, windowMs, periodOf, leaseMs, requireShared: false });
+    // the store is this harness's alone, so every row in it is one of its accounts'
+    const count = async (table: string) => Number((await db.get<{ n: number }>(`SELECT count(*) AS n FROM ${table}`))?.n ?? 0);
+    return {
+      meter,
+      rows: async () => ({ reservations: await count('agentos_spend_reservations'), periods: await count('agentos_spend_meter') }),
+      cleanup: () => db.close(),
+    };
+  } catch (e) {
+    // a meter the constructor refused leaves no harness to clean up after
+    await db.close();
+    throw e;
+  }
 });
 
 /** The adapter with one statement made to fail: the transaction view throws on the first statement that matches. */

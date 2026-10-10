@@ -54,4 +54,24 @@ describe('OpenAIWhisperBatchSTT', () => {
     expect(forms[0].has('languages[]')).toBe(false);
     expect(result.durationMs).toBe(1200);
   });
+
+  it('asks a whisper-compatible server for verbose_json, so the duration is read', async () => {
+    const forms: FormData[] = [];
+    const provider = new OpenAIWhisperBatchSTT({
+      apiKey: 'sk-test',
+      baseUrl: 'http://localhost:8000/v1/audio/transcriptions',
+      model: 'distil-large-v3',
+      fetchImpl: async (_url, init) => {
+        forms.push(init?.body as unknown as FormData);
+        return jsonResponse({ text: 'hi', duration: 2.5 });
+      },
+    });
+
+    const result = await provider.transcribe(AUDIO);
+
+    expect(forms[0].get('model')).toBe('distil-large-v3');
+    expect(forms[0].get('response_format')).toBe('verbose_json');
+    expect(forms[0].get('language')).toBe('en');
+    expect(result.durationMs).toBe(2500);
+  });
 });

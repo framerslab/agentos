@@ -88,6 +88,19 @@ beforeEach(() => { fetchMock.mockReset(); globalLLMProviderHealth.reset(); });
 afterEach(() => { vi.unstubAllEnvs(); });
 
 describe('export redacts by default', () => {
+  it('redacts every credential of a Feishu channel, the encrypt key included', () => {
+    const secrets = { appSecret: 'feishu-app-secret-1', verificationToken: 'feishu-vtoken-1', encryptKey: 'feishu-encrypt-key-1' };
+    const team = agency({
+      provider: 'openai', model: 'gpt-4.1', apiKey: KEY,
+      agents: { support: { instructions: 'Help.', channels: { feishu: { appId: 'cli_a1b2c3', ...secrets } } } as never },
+    } as never);
+    const feishu = (exportAgentConfig(team).agents!.support as Record<string, any>).channels.feishu;
+    expect(feishu).toEqual({ appId: 'cli_a1b2c3', appSecret: REDACTED, verificationToken: REDACTED, encryptKey: REDACTED });
+    for (const doc of [exportAgentConfigJSON(team), exportAgentConfigYAML(team)]) {
+      for (const secret of Object.values(secrets)) expect(doc).not.toContain(secret);
+    }
+  });
+
   it('no sentinel in the object, the JSON or the YAML; settings and limits unchanged; the webhook keeps its origin', () => {
     const { team } = buildAgency();
     const obj = exportAgentConfig(team);
