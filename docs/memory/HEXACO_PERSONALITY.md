@@ -232,7 +232,7 @@ interface AdaptPersonalityInput {
 - The new value is clamped to [0, 1] and applied with `GMI.setPersonalityTrait()`.
 - A [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts) records the change only when the runtime has a storage adapter and `personality.persistWithDecay` is on (the default); stored mutations are not reloaded into later GMIs.
 
-`agent()` registers no such tool; its traits stay as given.
+`agent()` registers no such tool, with or without `runtime: 'gmi'`: `gmi()` gives its tool orchestrator the agent's own tools and nothing else. Its traits stay as given.
 
 Source: [`src/cognition/emergent/AdaptPersonalityTool.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts).
 
