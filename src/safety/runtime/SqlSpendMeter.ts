@@ -76,10 +76,13 @@ CREATE INDEX IF NOT EXISTS idx_spend_reservations_settled ON agentos_spend_reser
 const DEFAULT_TABLE_PREFIX = 'agentos_spend';
 
 /**
- * The prefixes a meter takes: a lower-case letter, then at most 39 lower-case letters, digits or underscores. A prefix
- * becomes part of SQL identifiers, so it is checked against this before any statement is built.
+ * The prefixes a meter takes: a lower-case letter, then at most 37 lower-case letters, digits or underscores. A prefix
+ * becomes part of SQL identifiers, so it is checked against this before any statement is built. At 38 characters the
+ * longest names the meter gives, `idx_<prefix>_reservations_account` and `idx_<prefix>_reservations_settled`, take the
+ * 63 bytes Postgres keeps of an identifier; Postgres cuts a longer name short, and its catalogue would then hold a
+ * name other than the one {@link spendMeterDdl} gives.
  */
-const TABLE_PREFIX = /^[a-z][a-z0-9_]{0,39}$/;
+const TABLE_PREFIX = /^[a-z][a-z0-9_]{0,37}$/;
 
 /** The names one prefix gives the meter's two tables, and the start of its indexes' names. */
 interface SpendMeterTables {
@@ -97,7 +100,7 @@ function spendMeterTables(tablePrefix: string | undefined): SpendMeterTables {
   const prefix = tablePrefix ?? DEFAULT_TABLE_PREFIX;
   if (typeof prefix !== 'string' || !TABLE_PREFIX.test(prefix)) {
     throw new Error(
-      `A spend meter's tablePrefix is a lower-case letter and at most 39 more lower-case letters, digits or underscores; got ${JSON.stringify(prefix)}.`,
+      `A spend meter's tablePrefix is a lower-case letter and at most 37 more lower-case letters, digits or underscores, so that every name it gives fits the 63 bytes of a Postgres identifier; got ${JSON.stringify(prefix)}.`,
     );
   }
   // the default prefix keeps the index names SPEND_METER_DDL gives it, which are the ones `spend` would make
@@ -137,19 +140,28 @@ CREATE TABLE IF NOT EXISTS ${t.reservations} (
   settled_at BIGINT,
   usage_json TEXT
 );
-${indexDdlOf(t)}`;
+${indexesOf(t).map((index) => `${index.statement};`).join('\n')}
+`;
+}
+
+/** One of the meter's indexes: its name, and the statement that makes it unless an index of that name exists. */
+interface SpendMeterIndex {
+  name: string;
+  statement: string;
 }
 
 /**
- * The statements of the meter's indexes under the names one prefix gives. A purge's page reads `state <> 'reserved'
- * AND settled_at < ?`, and `<>` on an index's first column gives a B-tree no range to scan, so the purge's index leads
- * with `settled_at`, whose `<` does, and holds `state` beside it.
+ * The meter's indexes under the names one prefix gives, in the order its DDL makes them: the reconciler's, the
+ * window's and the purge's. A purge's page reads `state <> 'reserved' AND settled_at < ?`, and `<>` on an index's first
+ * column gives a B-tree no range to scan, so the purge's index leads with `settled_at`, whose `<` does, and holds
+ * `state` beside it.
  */
-function indexDdlOf(t: SpendMeterTables): string {
-  return `CREATE INDEX IF NOT EXISTS ${t.index}_due ON ${t.reservations} (state, expires_at);
-CREATE INDEX IF NOT EXISTS ${t.index}_account ON ${t.reservations} (account_id, reserved_at);
-CREATE INDEX IF NOT EXISTS ${t.index}_settled ON ${t.reservations} (settled_at, state);
-`;
+function indexesOf(t: SpendMeterTables): SpendMeterIndex[] {
+  return [
+    { name: `${t.index}_due`, columns: 'state, expires_at' },
+    { name: `${t.index}_account`, columns: 'account_id, reserved_at' },
+    { name: `${t.index}_settled`, columns: 'settled_at, state' },
+  ].map(({ name, columns }) => ({ name, statement: `CREATE INDEX IF NOT EXISTS ${name} ON ${t.reservations} (${columns})` }));
 }
 
 /**
@@ -208,11 +220,22 @@ export interface SqlSpendMeterOptions {
    * are `idx_spend_reservations_*`. Meters with different rules share one database each under a prefix of its own, so
    * one's count and one's purge never reach another's rows; meters under one prefix share its tables.
    *
-   * A lower-case letter, then at most 39 lower-case letters, digits or underscores, and not `spend`, whose index names
-   * are the default prefix's. The constructor checks the prefix before any statement is built and throws on any other
-   * value, so nothing unchecked reaches the SQL text. {@link spendMeterDdl} makes the tables for a prefix.
+   * A lower-case letter, then at most 37 lower-case letters, digits or underscores, and not `spend`, whose index names
+   * are the default prefix's. At 38 characters the longest names the meter gives, `idx_<prefix>_reservations_account`
+   * and `idx_<prefix>_reservations_settled`, take the 63 bytes Postgres keeps of an identifier. The constructor checks
+   * the prefix before any statement is built and throws on any other value, so nothing unchecked reaches the SQL text.
+   * {@link spendMeterDdl} makes the tables for a prefix.
    */
   tablePrefix?: string;
+  /**
+   * Told of each statement that failed while {@link SqlSpendMeter.ensureSchema} brought tables that exist up to the
+   * meter's indexes, with the statement and the error the store threw: the `CREATE INDEX` of an index the tables lack
+   * (refused, for example, to a role that does not own them, or stopped by a lock or statement timeout), or the read of
+   * the catalogue before them. Such a failure is not fatal: the indexes speed the meter's reads and change none of its
+   * answers, so the meter uses the tables as they are. An error the callback throws is dropped. Without a callback,
+   * nothing is reported.
+   */
+  onWarning?(warning: { statement: string; error: unknown }): void;
 }
 
 /** What one purge deleted. */
@@ -280,9 +303,13 @@ export class SqlSpendMeter implements ISpendMeter {
   }
 
   /**
-   * Creates the tables and their indexes unless the tables answer a read already, and on tables that answer runs the
-   * indexes' `CREATE INDEX IF NOT EXISTS` statements, so a store an earlier release made gains the indexes it lacks.
-   * Called before the first statement; safe to call again. Does nothing with `ensureSchema: false`.
+   * Creates the tables and their indexes unless the tables answer a read already. On tables that answer it reads the
+   * store's catalogue for the meter's index names (`pg_indexes` on Postgres, `sqlite_master` on SQLite) and runs the
+   * `CREATE INDEX IF NOT EXISTS` statement of each index the tables lack, so a store an earlier release made gains the
+   * indexes it lacks, and a store that holds them all runs no index statement: on Postgres each one takes a SHARE lock
+   * on the reservations table, which holds back the table's writes, before it looks for the index's name. An index
+   * statement that fails is reported to {@link SqlSpendMeterOptions.onWarning}, and the meter uses the tables as they
+   * are. Called before the first statement; safe to call again. Does nothing with `ensureSchema: false`.
    */
   ensureSchema(): Promise<void> {
     if (this.opts.ensureSchema === false) return Promise.resolve();
@@ -294,15 +321,46 @@ export class SqlSpendMeter implements ISpendMeter {
         await this.db.exec(ddlOf(this.tables));
         return;
       }
-      // The indexes speed the meter's reads and change none of its answers, so tables that refuse them are used as they
-      // are: Postgres checks that the role owns a table before it looks for the index's name, and two processes adding
-      // one index at once can collide.
-      await this.db.exec(indexDdlOf(this.tables)).catch(() => undefined);
+      await this.addMissingIndexes();
     })().catch((e) => {
       this.schemaReady = null;
       throw e;
     });
     return this.schemaReady;
+  }
+
+  /**
+   * Runs, one at a time, the statement of each of the meter's indexes that the store's catalogue does not hold; a
+   * catalogue that cannot be read leaves every statement to run. The indexes speed the meter's reads and change none of
+   * its answers, so tables that refuse one are used as they are, and the failed statement goes to
+   * {@link SqlSpendMeterOptions.onWarning}: Postgres checks that the role owns a table before it looks for the index's
+   * name, and two processes adding one index at once can collide.
+   */
+  private async addMissingIndexes(): Promise<void> {
+    const indexes = indexesOf(this.tables);
+    const names = indexes.map((index) => index.name);
+    const marks = names.map(() => '?').join(', ');
+    const catalogue = this.db.kind.includes('postgres')
+      ? `SELECT indexname AS name FROM pg_indexes WHERE schemaname = current_schema() AND indexname IN (${marks})`
+      : `SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (${marks})`;
+    const held = await this.db.all<{ name: string }>(catalogue, names).catch((error: unknown): { name: string }[] => {
+      this.warn(catalogue, error);
+      return [];
+    });
+    const present = new Set(held.map((row) => row.name));
+    for (const index of indexes) {
+      if (present.has(index.name)) continue;
+      await this.db.exec(index.statement).catch((error: unknown) => this.warn(index.statement, error));
+    }
+  }
+
+  /** Tells the product's `onWarning` of a schema statement that failed; a callback that throws stops nothing. */
+  private warn(statement: string, error: unknown): void {
+    try {
+      this.opts.onWarning?.({ statement, error });
+    } catch {
+      // the report is the product's own; the meter goes on with the tables as they are either way
+    }
   }
 
   private run<T>(fn: () => Promise<T>): Promise<T> {
