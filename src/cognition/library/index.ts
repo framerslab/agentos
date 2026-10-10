@@ -1,6 +1,6 @@
 /**
- * @fileoverview The library module: an index of sources over any vector store, a transcript's chunker, and the word
- * rule of the lexical legs with a search hit's snippet.
+ * @fileoverview The library module: an index of sources over any vector store, a transcript's chunker, the word
+ * rule of the lexical legs with a search hit's snippet, and a lexical index a device can hold.
  * @module agentos/cognition/library
  */
 
@@ -14,3 +14,4 @@ export {
   type LibrarySearch,
   type LibrarySource,
 } from './LibraryIndex.js';
+export { LexicalIndex, type LexicalIndexConfig, type LexicalIndexJSON, type LexicalSearchOptions } from '../rag/search/LexicalIndex.js';
