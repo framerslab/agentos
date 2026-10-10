@@ -69,6 +69,48 @@ export interface LexicalIndexJSON {
 }
 
 /**
+ * What keeps a saved index from having the shape {@link LexicalIndex.toJSON} writes, or undefined when nothing does:
+ * `k1` and `b` are numbers, each document is `[id, length]` or `[id, length, metadata]`, and each term is
+ * `[term, postings]` whose postings are `[position, count]` with the position of one of the documents.
+ */
+function shapeProblem(json: LexicalIndexJSON): string | undefined {
+  if (typeof json.k1 !== 'number' || typeof json.b !== 'number') return 'k1 or b is not a number';
+  const documents: unknown = json.documents;
+  if (!Array.isArray(documents)) return 'documents are not an array';
+  for (let at = 0; at < documents.length; at += 1) {
+    const entry: unknown = documents[at];
+    if (
+      !Array.isArray(entry) ||
+      typeof entry[0] !== 'string' ||
+      typeof entry[1] !== 'number' ||
+      (entry[2] !== undefined && (typeof entry[2] !== 'object' || entry[2] === null))
+    ) {
+      return `documents[${at}] is not [id, length] or [id, length, metadata]`;
+    }
+  }
+  const terms: unknown = json.terms;
+  if (!Array.isArray(terms)) return 'terms are not an array';
+  for (let at = 0; at < terms.length; at += 1) {
+    const entry: unknown = terms[at];
+    if (!Array.isArray(entry) || typeof entry[0] !== 'string' || !Array.isArray(entry[1])) {
+      return `terms[${at}] is not [term, postings]`;
+    }
+    for (const posting of entry[1] as unknown[]) {
+      if (
+        !Array.isArray(posting) ||
+        !Number.isInteger(posting[0]) ||
+        posting[0] < 0 ||
+        posting[0] >= documents.length ||
+        typeof posting[1] !== 'number'
+      ) {
+        return `terms[${at}] holds a posting that is not [position of a document, count]`;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
  * The BM25 engine over a caller's tokenizer. It imports nothing, so a page can load it; it ranks documents holding
  * any query word (or only those holding every one), matches a stored word whole or by a query word it begins with,
  * and is saved with {@link LexicalIndex.toJSON} and restored with {@link LexicalIndex.fromJSON}.
@@ -255,9 +297,11 @@ export class LexicalIndex {
     return { v: 1, k1: this.k1, b: this.b, documents, terms };
   }
 
-  /** Fills this index from a saved one. */
+  /** Fills this index from a saved one, or throws an Error naming what keeps it from being one `toJSON` writes. */
   protected restore(json: LexicalIndexJSON): void {
     if (json?.v !== 1) throw new Error('LexicalIndex: a saved index of an unknown version.');
+    const problem = shapeProblem(json);
+    if (problem !== undefined) throw new Error(`LexicalIndex: a saved index whose ${problem}.`);
     this.k1 = json.k1;
     this.b = json.b;
     this.documents = new Map(json.documents.map(([id, length, metadata]) => [id, { id, length, metadata }]));
@@ -268,7 +312,12 @@ export class LexicalIndex {
     this.idfDirty = true;
   }
 
-  /** A saved index restored, with the tokenizer it was made with. */
+  /**
+   * A saved index restored, with the tokenizer it was made with.
+   *
+   * @throws {Error} When the saved index is of another version or lacks the shape {@link LexicalIndex.toJSON} writes;
+   * the message names what is wrong.
+   */
   static fromJSON(json: LexicalIndexJSON, config: Pick<LexicalIndexConfig, 'tokenize'>): LexicalIndex {
     const index = new LexicalIndex({ tokenize: config.tokenize });
     index.restore(json);

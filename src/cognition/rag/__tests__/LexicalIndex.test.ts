@@ -53,6 +53,16 @@ describe('LexicalIndex', () => {
     expect(() => LexicalIndex.fromJSON({ v: 2 } as never, { tokenize: lexicalTokens })).toThrow('version');
   });
 
+  it('refuses a saved index without the shape toJSON writes, naming what is wrong', () => {
+    expect(() => LexicalIndex.fromJSON({ v: 1, k1: 1.2, b: 0.75, terms: [] } as never, { tokenize: lexicalTokens })).toThrow(
+      'LexicalIndex: a saved index whose documents are not an array.',
+    );
+    const pastTheDocuments = { v: 1, k1: 1.2, b: 0.75, documents: [['a', 1]], terms: [['word', [[1, 1]]]] };
+    expect(() => LexicalIndex.fromJSON(pastTheDocuments as never, { tokenize: lexicalTokens })).toThrow(
+      'LexicalIndex: a saved index whose terms[0] holds a posting that is not [position of a document, count].',
+    );
+  });
+
   it('replaces a document added again, and forgets a removed one', () => {
     const index = filled();
     index.addDocument('s2#0', 'Only hiring now');
