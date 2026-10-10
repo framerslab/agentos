@@ -243,7 +243,7 @@ const { heard, ratio, itemIds } = phraseHeard(notice, ledger.finalsAfter(undefin
 - `heard` is `true` when `ratio` is at or above `threshold` (`0.8` unless set);
 - `itemIds` names the lines that held a matched word, in order, each once.
 
-Words are lower-case runs of letters and digits (`lexicalTokens`, the library's word rule), so case, punctuation and spacing are ignored and an apostrophe splits a word: "doesn't" is the two words "doesn" and "t", which "does not" does not match. Nothing is stemmed. A phrase with no words throws. The function is pure, so a server and a page that read the same lines reach the same answer.
+Words are lower-case runs of letters and digits (`lexicalTokens`, the library's word rule), so case, punctuation and spacing are ignored and an apostrophe splits a word: "doesn't" is the two words "doesn" and "t", which "does not" does not match. Nothing is stemmed. A phrase with no words throws an `Error`, and a `threshold` outside `0` to `1` or a `maxWords` that is not a whole number, `0` or more, throws a `RangeError`. The function is pure, so a server and a page that read the same lines reach the same answer.
 
 ### Capture on the page
 
