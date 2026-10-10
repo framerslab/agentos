@@ -27,21 +27,28 @@ export interface PhraseHeardResult {
 
 /** How to read. */
 export interface PhraseHeardOptions {
-  /** The share needed. @default 0.8 */
+  /** The share needed, a number from 0 to 1. @default 0.8 */
   threshold?: number;
-  /** How many of the lines' words are read, from the first. @default 400 */
+  /** How many of the lines' words are read, from the first: a whole number, 0 or more. @default 400 */
   maxWords?: number;
 }
 
 /**
  * Whether `phrase` was said in `lines`: the lines' words, joined in order and read up to `maxWords`, hold at least
- * `threshold` of the phrase's words in order, other words between them allowed. Throws when the phrase has no words.
+ * `threshold` of the phrase's words in order, other words between them allowed.
+ *
+ * @throws {Error} When the phrase has no words.
+ * @throws {RangeError} When `threshold` is not a number from 0 to 1, or `maxWords` is not a whole number, 0 or more.
  */
 export function phraseHeard(phrase: string, lines: readonly HeardLine[], options: PhraseHeardOptions = {}): PhraseHeardResult {
   const want = lexicalTokens(phrase);
   if (want.length === 0) throw new Error('phraseHeard: the phrase has no words.');
   const threshold = options.threshold ?? 0.8;
   const maxWords = options.maxWords ?? 400;
+  if (!(threshold >= 0 && threshold <= 1)) throw new RangeError('phraseHeard: threshold must be a number from 0 to 1.');
+  if (!Number.isSafeInteger(maxWords) || maxWords < 0) {
+    throw new RangeError('phraseHeard: maxWords must be a whole number, 0 or more.');
+  }
   const words: string[] = [];
   const owners: string[] = [];
   for (const line of lines) {

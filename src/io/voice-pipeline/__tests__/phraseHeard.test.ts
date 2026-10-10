@@ -45,6 +45,13 @@ describe('phraseHeard', () => {
     expect(() => phraseHeard(' . ', [])).toThrow('no words');
   });
 
+  it('refuses a threshold outside 0 to 1 and a maxWords that is not a whole number, 0 or more', () => {
+    for (const threshold of [-0.1, 1.1, Number.NaN]) expect(() => phraseHeard('one', [], { threshold })).toThrow(RangeError);
+    for (const maxWords of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) expect(() => phraseHeard('one', [], { maxWords })).toThrow(RangeError);
+    expect(phraseHeard('one', [{ itemId: 'a', text: 'one' }], { threshold: 1 }).heard).toBe(true);
+    expect(phraseHeard('one', [{ itemId: 'a', text: 'one' }], { maxWords: 0 })).toEqual({ heard: false, ratio: 0, itemIds: [] });
+  });
+
   it("reads a TranscriptLedger's final lines as they are", () => {
     const ledger = new TranscriptLedger();
     ledger.apply({ itemId: 'i1', text: 'OK, so before we start.', isFinal: true });
