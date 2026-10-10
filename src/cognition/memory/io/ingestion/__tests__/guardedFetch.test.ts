@@ -27,8 +27,12 @@ let server: Server;
 let port = 0;
 let connections = 0;
 
+/** The Host header of each request the stand-in answered, in order. */
+const hosts: string[] = [];
+
 /** The stand-in web, one route per case. */
 function answer(request: IncomingMessage, response: ServerResponse): void {
+  hosts.push(request.headers.host ?? '');
   const path = request.url ?? '/';
   const redirect = /^\/redirect\/(\d+)$/.exec(path);
   if (path === '/page') {
@@ -164,8 +168,12 @@ describe('guardedFetch', () => {
     const answers = [[{ address: '127.0.0.1', family: 4 }], [{ address: '10.0.0.1', family: 4 }]];
     let calls = 0;
     const resolve = async () => answers[Math.min(calls++, 1)]!;
+    const asked = hosts.length;
     const read = await guardedFetch(at('/page'), reach({ resolve, deadlineMs: 2_000 }));
     expect(calls).toBe(1);
+    // The request went to the checked address and still names the host: a
+    // server that holds several sites answers by this header.
+    expect(hosts.slice(asked)).toEqual([`pages.test:${port}`]);
     expect(read).toMatchObject({ url: at('/page'), status: 200, contentType: 'text/html' });
     expect(read.body.toString('utf8')).toBe(PAGE);
   });
