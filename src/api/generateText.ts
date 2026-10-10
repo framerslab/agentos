@@ -2420,6 +2420,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             };
           },
         });
+        // An abort during the shim's last tool round ends the call here, once
+        // the round has run, instead of returning the round as the result.
+        opts.abortSignal?.throwIfAborted();
         const shimUsage: TokenUsage = { ...totalUsage };
         metricUsage = shimUsage;
         // Dual-emit the same root-span attribute pairs as the native
@@ -2709,6 +2712,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             console.warn('[agentos] onAfterGeneration hook error:', hookErr);
           }
         }
+        // An abort while the hook ran ends the call here: the step's reply is
+        // not returned, and its tools do not run.
+        opts.abortSignal?.throwIfAborted();
 
         if (textContent && toolCallsInChoice.length === 0) {
           metricUsage = totalUsage;
@@ -2958,6 +2964,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         }
         throw loopErr;
       }
+
+      // An abort during the last tool round ends the call here, once the round
+      // has run, instead of returning the round as the result.
+      opts.abortSignal?.throwIfAborted();
 
       const lastAssistant = messages.filter((m) => m.role === 'assistant').pop();
       metricUsage = totalUsage;

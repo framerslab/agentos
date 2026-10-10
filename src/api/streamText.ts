@@ -772,6 +772,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             };
           },
         });
+        // An abort during the shim's last tool round ends the stream on the
+        // signal's reason, once the round has run, instead of settling it.
+        opts.abortSignal?.throwIfAborted();
         finalText = loopResult.text;
         const shimToolCalls: ToolCallRecord[] = loopResult.toolCalls.map((c) => ({
           name: c.name,
@@ -1105,6 +1108,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             console.warn('[agentos] onAfterGeneration hook error:', hookErr);
           }
         }
+        // An abort while the hook ran ends the stream here: the step does not
+        // settle the stream, and its tools do not run.
+        opts.abortSignal?.throwIfAborted();
 
         // Always track the latest step's text so finalText is available even
         // when maxSteps is exhausted with outstanding tool calls.
@@ -1324,6 +1330,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         }
         throw loopErr;
       }
+
+      // An abort during the last tool round ends the stream on the signal's
+      // reason, once the round has run, instead of settling it as a success.
+      opts.abortSignal?.throwIfAborted();
 
       resolveText!(finalText);
       resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
