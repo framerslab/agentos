@@ -1,3 +1,9 @@
+## [0.13.27](https://github.com/framerslab/agentos/compare/v0.13.26...v0.13.27) (2026-10-10)
+
+### fix
+
+* **rag:** return a hybrid search's score as a number (#235) ([7981a08](https://github.com/framerslab/agentos/commit/7981a08bdd49cf89c29ff623e7c60818796886cf))
+
 ## [0.13.26](https://github.com/framerslab/agentos/compare/v0.13.25...v0.13.26) (2026-10-10)
 
 ### fix
