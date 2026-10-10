@@ -118,6 +118,32 @@ describe("agent({ runtime: 'gmi' }) keeps what agent() does", () => {
     expect(sent).not.toContain('The JSON MUST conform to this JSON Schema:');
   });
 
+  it.each([['legacy'], ['gmi']] as const)('%s runtime: on a fallback hop too, an onBeforeGeneration hook that drops the system messages of a structured send drops its schema instructions', async (runtime) => {
+    const k = key(); const fb = key();
+    // The OpenAI primary fails before any output with a retryable 503; the Anthropic leg answers.
+    // `whole`: the legacy runtime asks for whole responses.
+    const primary = script('openai', k, { replies: [Object.assign(new Error('Service Unavailable'), { httpStatus: 503 })], whole: true });
+    const s = script('anthropic', fb, { replies: [reply.text('{"city":"Lyon"}')], whole: true });
+    // Fallback legs take their credentials from the environment.
+    vi.stubEnv('ANTHROPIC_API_KEY', fb);
+    // Every system message out, one of the hook's own in.
+    const onBeforeGeneration = async (ctx: { messages: Array<{ role: string; content: unknown }> }) => ({
+      ...ctx,
+      messages: [{ role: 'system', content: 'Be brief.' }, ...ctx.messages.filter((m) => m.role !== 'system')],
+    });
+    const session = agent({
+      runtime, provider: 'openai', model: 'gpt-4o-mini', apiKey: k, fallbackProviders: [{ provider: 'anthropic', model: 'claude-sonnet-5-5' }], onBeforeGeneration,
+    } as unknown as AgentOptions).session('s');
+
+    const r = await session.send('Where?', { responseSchema: z.object({ city: z.string() }), schemaName: 'place' });
+    expect(r.object).toEqual({ city: 'Lyon' });
+    expect([primary.seen.length, s.seen.length]).toEqual([1, 1]);
+    // The Anthropic leg's payload carries no schema, so its prompt did, before the hook, which took it out.
+    const sent = s.seen[0].messages.map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
+    expect(sent).toContain('Be brief.');
+    expect(sent).not.toContain('The JSON MUST conform to this JSON Schema:');
+  });
+
   it('an onBeforeToolExecution hook that resolves nothing is warned about, and the tool runs with its own arguments', async () => {
     const k = key(); script('openai', k, { replies: [reply.tools([{ id: 'c1', name: 'lookup', args: { q: 'x' } }]), reply.text('Found x.')] });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
