@@ -1,7 +1,8 @@
 /**
  * @fileoverview The spend meter's contract over an in-memory SQLite store, its rolling window and its purge there,
  * both again on tables under a second prefix, what a prefix names and refuses, two meters with different rules on one
- * store, and the rollback of a refused reservation when a later statement of its transaction fails.
+ * store, the indexes a store an earlier release made gains, and the rollback of a refused reservation when a later
+ * statement of its transaction fails.
  */
 import { describe, expect, it } from 'vitest';
 import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
@@ -35,6 +36,16 @@ async function catalogue(db: StorageAdapter): Promise<{ tables: string[]; indexe
   }
   return { tables: rows.filter((r) => r.type === 'table').map((r) => r.name), indexes };
 }
+
+/**
+ * The DDL a store an earlier release made holds: the two tables and the reconciler's index, without the window's
+ * account index and the purge's settled index that came after it.
+ */
+const olderDdl = (tablePrefix?: string): string =>
+  spendMeterDdl(tablePrefix)
+    .split('\n')
+    .filter((line) => !/_reservations_(account|settled) ON /.test(line))
+    .join('\n');
 
 /**
  * Runs the contract and the window suite on SQLite stores of their own. Without a prefix each meter makes its tables
@@ -189,6 +200,30 @@ describe('SqlSpendMeter on SQLite, beyond the contract', () => {
       expect(await db.get('SELECT operation_id FROM agentos_spend_reservations WHERE operation_id = ?', ['op'])).toBeNull();
       // the same operation reserves cleanly once the store answers
       expect(await healthy.reserve({ accountId: 'a', operationId: 'op', now: OCT })).toMatchObject({ status: 'reserved', attempt: 1 });
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('gives a store an earlier release made the indexes it lacks once a meter ensures the schema, keeping its rows, and adds nothing with ensureSchema: false', async () => {
+    const db = await openSqlite();
+    try {
+      await db.exec(olderDdl());
+      const due = { name: 'idx_spend_reservations_due', table: 'agentos_spend_reservations', columns: ['state', 'expires_at'] };
+      expect((await catalogue(db)).indexes).toEqual([due]);
+      // a meter whose product runs its own migrations adds nothing, and counts on the tables as they are
+      const migrated = new SqlSpendMeter({ db, ensureSchema: false, allowanceFor: () => 2, windowMs: HOUR, requireShared: false });
+      expect(await migrated.reserve({ accountId: 'a', operationId: 'before', now: OCT })).toMatchObject({ status: 'reserved', remaining: 1 });
+      expect((await catalogue(db)).indexes).toEqual([due]);
+      // a meter that ensures the schema adds the two indexes, and the unit reserved before it still counts
+      const meter = new SqlSpendMeter({ db, allowanceFor: () => 2, windowMs: HOUR, requireShared: false });
+      await meter.ensureSchema();
+      expect((await catalogue(db)).indexes).toEqual([
+        { name: 'idx_spend_reservations_account', table: 'agentos_spend_reservations', columns: ['account_id', 'reserved_at'] },
+        due,
+        { name: 'idx_spend_reservations_settled', table: 'agentos_spend_reservations', columns: ['settled_at', 'state'] },
+      ]);
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 0, reserved: 1, remaining: 1 });
     } finally {
       await db.close();
     }

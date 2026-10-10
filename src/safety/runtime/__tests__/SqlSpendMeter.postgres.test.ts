@@ -2,7 +2,7 @@
  * @fileoverview The spend meter over Postgres, where several processes share it: the contract, the rolling window and
  * the purge, both again on tables under a second prefix, what a prefix names and refuses, two meters with different
  * rules on one database, twenty concurrent reservations against an allowance of five in a period and of two in a
- * window, and a settle racing a reconcile on one operation.
+ * window, a settle racing a reconcile on one operation, and the indexes a store an earlier release made gains.
  *
  * Gated on `AGENTOS_TEST_POSTGRES_URL` (CI's service container); skipped without it. Each test meters accounts and
  * operations under a prefix of its own and deletes them after, so runs never collide.
@@ -18,6 +18,8 @@ const describeIfPostgres = POSTGRES_URL ? describe : describe.skip;
 
 /** The second prefix both suites run under, on tables `spendMeterDdl` made. */
 const ALT_PREFIX = 'alt_spend';
+/** The prefix of the tables one test makes afresh from the DDL an earlier release ran, and drops after. */
+const OLDER_PREFIX = 'older_spend';
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
@@ -81,6 +83,16 @@ async function catalogue(db: StorageAdapter, tables: MeterTables): Promise<{ tab
       .sort(byName((r) => r.name)),
   };
 }
+
+/**
+ * The DDL a store an earlier release made holds: the two tables and the reconciler's index, without the window's
+ * account index and the purge's settled index that came after it.
+ */
+const olderDdl = (tablePrefix?: string): string =>
+  spendMeterDdl(tablePrefix)
+    .split('\n')
+    .filter((line) => !/_reservations_(account|settled) ON /.test(line))
+    .join('\n');
 
 describeIfPostgres('SqlSpendMeter on Postgres', () => {
   let db: StorageAdapter;
@@ -192,6 +204,33 @@ describeIfPostgres('SqlSpendMeter on Postgres', () => {
       expect(snap.used === 1 ? 'consumed' : 'released').toBe(row?.state);
     } finally {
       await cleanup();
+    }
+  });
+
+  it('gives a store an earlier release made the indexes it lacks once a meter ensures the schema, keeping its rows, and adds nothing with ensureSchema: false', async () => {
+    // tables of this test's own, made afresh from the DDL an earlier release ran
+    const older = tablesOf(OLDER_PREFIX);
+    const drop = () => db.exec(`DROP TABLE IF EXISTS ${older.reservations}; DROP TABLE IF EXISTS ${older.meter};`);
+    await drop();
+    try {
+      await db.exec(olderDdl(OLDER_PREFIX));
+      const due = { name: `idx_${OLDER_PREFIX}_reservations_due`, table: older.reservations, columns: ['state', 'expires_at'] };
+      expect((await catalogue(db, older)).indexes).toEqual([due]);
+      // a meter whose product runs its own migrations adds nothing, and counts on the tables as they are
+      const migrated = new SqlSpendMeter({ db, tablePrefix: OLDER_PREFIX, ensureSchema: false, allowanceFor: () => 2, windowMs: HOUR });
+      expect(await migrated.reserve({ accountId: 'a', operationId: 'before', now: OCT })).toMatchObject({ status: 'reserved', remaining: 1 });
+      expect((await catalogue(db, older)).indexes).toEqual([due]);
+      // a meter that ensures the schema adds the two indexes, and the unit reserved before it still counts
+      const meter = new SqlSpendMeter({ db, tablePrefix: OLDER_PREFIX, allowanceFor: () => 2, windowMs: HOUR });
+      await meter.ensureSchema();
+      expect((await catalogue(db, older)).indexes).toEqual([
+        { name: `idx_${OLDER_PREFIX}_reservations_account`, table: older.reservations, columns: ['account_id', 'reserved_at'] },
+        due,
+        { name: `idx_${OLDER_PREFIX}_reservations_settled`, table: older.reservations, columns: ['settled_at', 'state'] },
+      ]);
+      expect(await meter.snapshot('a', OCT)).toMatchObject({ used: 0, reserved: 1, remaining: 1 });
+    } finally {
+      await drop();
     }
   });
 
