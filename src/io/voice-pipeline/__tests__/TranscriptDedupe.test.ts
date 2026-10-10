@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { TranscriptDedupe } from '../TranscriptDedupe.js';
+import { TranscriptDedupe, normalizeTranscriptText } from '../TranscriptDedupe.js';
+
+describe('normalizeTranscriptText', () => {
+  it('lowers the case, drops punctuation and joins runs of white space', () => {
+    expect(normalizeTranscriptText('Hello, World!  Again.')).toBe('hello world again');
+  });
+});
 
 describe('TranscriptDedupe', () => {
   it('returns isDuplicate=false on first observation', () => {
