@@ -1,3 +1,10 @@
+## [0.13.20](https://github.com/framerslab/agentos/compare/v0.13.19...v0.13.20) (2026-10-10)
+
+### feat
+
+* **rag:** make PostgresVectorStore serve many tenants in one collection (#203) ([92c9806](https://github.com/framerslab/agentos/commit/92c9806a79b7b993f28c0f366d629b14357ab5f0))
+* **safety:** a rolling window and a purge for the SQL spend meter (#216) ([9aea463](https://github.com/framerslab/agentos/commit/9aea46371a5310775a3320058834ddddd2a89897))
+
 ## [0.13.19](https://github.com/framerslab/agentos/compare/v0.13.18...v0.13.19) (2026-10-09)
 
 ### fix
