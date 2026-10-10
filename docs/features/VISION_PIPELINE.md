@@ -2,7 +2,7 @@
 
 [`VisionPipeline`](https://github.com/framerslab/agentos/blob/master/src/io/vision/VisionPipeline.ts) runs an image through up to five tiers: OCR (PaddleOCR or Tesseract.js), handwriting recognition (TrOCR), document layout (Florence-2), a cloud vision model called through `generateText()`, and an image embedding (CLIP). [`createVisionPipeline()`](https://github.com/framerslab/agentos/blob/master/src/io/vision/index.ts) builds a pipeline from the packages installed and the API keys in the environment.
 
-Read [Limitations](#limitations) before relying on a local tier: with the current releases of the OCR and model packages, several local tiers return nothing.
+Every tier runs against the current releases of the packages it names: `ppu-paddle-ocr` 6.6.1, `tesseract.js` 7.0.0 and `@huggingface/transformers` 3.8.1. [Limitations](#limitations) lists what the pipeline does not do.
 
 ---
 
@@ -52,7 +52,7 @@ const described = await vision.process(image, { tiers: ['cloud-vision'] });
 
 `result.text` and `result.confidence` come from the tier with the highest confidence, so a cloud result (0.95) wins over every local tier that ran. `result.regions` holds that tier's text regions. The Florence-2 tier reads the image line by line: `result.layout` holds one page the size of the image, with a `text` block for each line and the line's bounding box in the image's pixels, and the tier's text is the lines in reading order. It does not label headings, tables or figures.
 
-A tier that was due to run and failed, such as a model that did not load, is left out of `result.tiers` and listed in `result.failedTiers` with its error; the run goes on with the other tiers, and throws only when the cloud tier fails with no local text to fall back on.
+A tier that was due to run and failed, such as an OCR engine that could not start or a model that did not load, is left out of `result.tiers` and listed in `result.failedTiers` with its error, and the run goes on with the other tiers: an OCR failure leaves the category `mixed`, so both model tiers run, and the cloud tier after them as the strategy allows. `process()` throws only when no tier gave a result, naming each failure. `dispose()` waits for calls in progress, and concurrent first calls share one load of each engine.
 
 Each local model tier downloads its model from the Hugging Face Hub on first use and caches it: about 1.3 GB for TrOCR, 1.1 GB for Florence-2 and 350 MB for CLIP's vision tower, in fp32, the precision Transformers.js loads by default in Node. The [Vision models](https://github.com/framerslab/agentos/blob/master/.github/workflows/vision-models.yml) CI job runs the three tiers from the built package against these models every week and on every change to the vision code.
 
@@ -122,11 +122,11 @@ interface VisionPipelineConfig {
   /**
    * Cloud vision provider, a provider id generateText() knows ('openai',
    * 'anthropic', 'gemini', 'openrouter', ...). Detected: 'openai' when
-   * OPENAI_API_KEY is set, else 'anthropic' (ANTHROPIC_API_KEY), else 'google'
-   * (GOOGLE_API_KEY or GEMINI_API_KEY), else 'openrouter' (OPENROUTER_API_KEY);
-   * unset and undetected, there is no cloud tier. 'google' is not a provider
-   * id: for Gemini pass 'gemini'. Gemini does not fetch image URLs, so give
-   * it a Buffer or a data URL.
+   * OPENAI_API_KEY is set, else 'anthropic' (ANTHROPIC_API_KEY), else 'gemini'
+   * (GEMINI_API_KEY, or GOOGLE_API_KEY, which detection passes as the key),
+   * else 'openrouter' (OPENROUTER_API_KEY); unset and undetected, there is no
+   * cloud tier. Gemini does not fetch image URLs, so give it a Buffer or a
+   * data URL.
    */
   cloudProvider?: string;
   /** Cloud model. Default: the provider's default text model. */
@@ -224,7 +224,7 @@ See [Multimodal RAG](../memory/MULTIMODAL_RAG.md) for the indexing design.
 ## Installation
 
 ```bash
-npm install tesseract.js     # OCR tier (ppu-paddle-ocr also works as the engine; see Limitations)
+npm install tesseract.js     # OCR tier, or ppu-paddle-ocr (with onnxruntime-node), which detection prefers
 npm install sharp            # only for preprocessing
 ```
 
@@ -236,12 +236,8 @@ The cloud tier reads the provider's key from its environment variable: `OPENAI_A
 
 ## Limitations
 
-These follow from how the pipeline calls each package, checked against `ppu-paddle-ocr` 6.6.1, `tesseract.js` 7.0.0 and `@huggingface/transformers` 3.8.1:
-
-- **No OCR package.** `createVisionPipeline()` then sets `ocr: 'none'`, and any run that includes the OCR tier throws `OCR is set to "none" but OCR tier was requested.`: `extractText()`, `process()` under every strategy except `cloud-only`, and `process(image, { tiers })` with a list that names `'ocr'`. A `tiers` list without `'ocr'` skips the tier and does not throw.
-- **Gemini detection.** With only `GOOGLE_API_KEY` or `GEMINI_API_KEY` set, detection picks `cloudProvider: 'google'`, which `generateText()` rejects (`Unknown provider "google"`). Pass `cloudProvider: 'gemini'`.
-- **PaddleOCR.** The tier reads `regions` or `data` from `recognize()`; ppu-paddle-ocr 6.6.1 returns `{ text, lines, confidence }`, so the tier reports empty text with confidence 0.
-- **Tesseract.js.** The tier reads words from `data.words`; tesseract.js 7.0.0 reports words only inside `data.blocks`, which it leaves out by default. Text and confidence come through, `regions` stays empty, and detection then never returns `handwritten` or `document-layout`.
+- **No OCR package.** `createVisionPipeline()` then sets `ocr: 'none'`: `process()` skips the OCR tier and goes on to the model and cloud tiers, while `extractText()` and a `process(image, { tiers })` call whose list names only `'ocr'` throw `OCR is set to "none" but OCR tier was requested.`
+- **Layout labels.** The Florence-2 tier gives every line as a `text` block; it does not label headings, tables, figures, lists or code.
 - **CLIP text.** The pipeline embeds images only; it has no method that embeds text into the CLIP space.
 
 ---

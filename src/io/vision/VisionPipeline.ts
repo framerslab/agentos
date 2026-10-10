@@ -148,6 +148,36 @@ function transformersImage(image: Buffer | string): Blob | string {
   return Buffer.isBuffer(image) ? new Blob([bufferToBlobPart(image)]) : image;
 }
 
+/**
+ * A PaddleOCR region's box. ppu-paddle-ocr 6 gives `{ x, y, width, height }`;
+ * older results give the four corners as `[x, y]` points, top-left first.
+ */
+function paddleBox(region: any): TextRegion['bbox'] {
+  const box = region?.box ?? region?.bbox;
+  if (box && typeof box.x === 'number' && typeof box.width === 'number') {
+    return { x: box.x, y: box.y ?? 0, width: box.width, height: box.height ?? 0 };
+  }
+  const corners = Array.isArray(box) ? box : [];
+  const x = corners[0]?.[0] ?? 0;
+  const y = corners[0]?.[1] ?? 0;
+  return { x, y, width: (corners[1]?.[0] ?? 0) - x, height: (corners[2]?.[1] ?? 0) - y };
+}
+
+/**
+ * The words of a tesseract.js result. tesseract.js 7 lists them only inside
+ * `blocks` (block, paragraph, line, word), which it returns when the call asks
+ * for them; tesseract.js 5 also lists them in `words`.
+ */
+function tesseractWords(data: any): any[] {
+  if (Array.isArray(data?.words)) return data.words;
+  const blocks: any[] = Array.isArray(data?.blocks) ? data.blocks : [];
+  return blocks.flatMap((block) =>
+    (block?.paragraphs ?? []).flatMap((paragraph: any) =>
+      (paragraph?.lines ?? []).flatMap((line: any) => line?.words ?? []),
+    ),
+  );
+}
+
 /** The message of an error, or the thrown value as text. */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -227,6 +257,12 @@ export class VisionPipeline {
   /** Whether dispose() has been called. Guards against use-after-free. */
   private _disposed = false;
 
+  /** The public calls in progress: dispose() waits for them before it releases the engines. */
+  private readonly _inFlight = new Set<Promise<unknown>>();
+
+  /** Engine loads in progress, by engine, so concurrent first calls share one load. */
+  private readonly _loading = new Map<string, Promise<unknown>>();
+
   // -------------------------------------------------------------------------
   // Constructor
   // -------------------------------------------------------------------------
@@ -299,8 +335,17 @@ export class VisionPipeline {
       tiers?: VisionTier[];
     },
   ): Promise<VisionResult> {
-    this._assertNotDisposed();
+    return this._track(() => this._process(image, options));
+  }
 
+  /** The work of {@link process}, which runs it tracked so dispose() waits for it. */
+  private async _process(
+    image: Buffer | string,
+    options?: {
+      forceCategory?: ContentCategory;
+      tiers?: VisionTier[];
+    },
+  ): Promise<VisionResult> {
     const startTime = Date.now();
     const { strategy } = this._config;
     const threshold = this._config.confidenceThreshold ?? DEFAULT_CONFIDENCE_THRESHOLD;
@@ -358,7 +403,15 @@ export class VisionPipeline {
     let ocrResult: TierResult | undefined;
 
     if (this._shouldRunTier('ocr', strategy, requestedTiers)) {
-      ocrResult = await this._runOcr(preprocessed);
+      try {
+        ocrResult = await this._runOcr(preprocessed);
+      } catch (error) {
+        // An OCR engine that fails is not fatal: the other tiers still run.
+        failedTiers.push({ tier: 'ocr', error: errorMessage(error) });
+      }
+    }
+
+    if (ocrResult) {
       tierResults.push(ocrResult);
       activeTiers.push('ocr');
 
@@ -457,6 +510,15 @@ export class VisionPipeline {
     embedding = await embeddingPromise;
     if (embedding) activeTiers.push('embedding');
 
+    // Every tier that was due to run failed: there is no result to give.
+    if (tierResults.length === 0 && !embedding && failedTiers.length > 0) {
+      throw new Error(
+        `VisionPipeline: every tier that was due to run failed: ${failedTiers
+          .map(({ tier, error }) => `${tier}: ${error}`)
+          .join('; ')}`,
+      );
+    }
+
     // -----------------------------------------------------------------------
     // Assemble final result
     // -----------------------------------------------------------------------
@@ -490,14 +552,14 @@ export class VisionPipeline {
    * ```
    */
   async extractText(image: Buffer | string): Promise<string> {
-    this._assertNotDisposed();
+    return this._track(async () => {
+      const preprocessed = Buffer.isBuffer(image)
+        ? await this._preprocess(image)
+        : image;
 
-    const preprocessed = Buffer.isBuffer(image)
-      ? await this._preprocess(image)
-      : image;
-
-    const result = await this._runOcr(preprocessed);
-    return result.text;
+      const result = await this._runOcr(preprocessed);
+      return result.text;
+    });
   }
 
   /**
@@ -523,17 +585,17 @@ export class VisionPipeline {
    * ```
    */
   async embed(image: Buffer | string): Promise<number[]> {
-    this._assertNotDisposed();
+    return this._track(async () => {
+      const preprocessed = Buffer.isBuffer(image)
+        ? await this._preprocess(image)
+        : image;
 
-    const preprocessed = Buffer.isBuffer(image)
-      ? await this._preprocess(image)
-      : image;
-
-    const result = await this._runClipEmbedding(preprocessed);
-    if (!result) {
-      throw new Error('VisionPipeline: CLIP embedding returned empty result.');
-    }
-    return result;
+      const result = await this._runClipEmbedding(preprocessed);
+      if (!result) {
+        throw new Error('VisionPipeline: CLIP embedding returned empty result.');
+      }
+      return result;
+    });
   }
 
   /**
@@ -560,21 +622,23 @@ export class VisionPipeline {
    * ```
    */
   async analyzeLayout(image: Buffer | string): Promise<DocumentLayout> {
-    this._assertNotDisposed();
+    return this._track(async () => {
+      const preprocessed = Buffer.isBuffer(image)
+        ? await this._preprocess(image)
+        : image;
 
-    const preprocessed = Buffer.isBuffer(image)
-      ? await this._preprocess(image)
-      : image;
-
-    const result = await this._runFlorence2(preprocessed);
-    return result.layout;
+      const result = await this._runFlorence2(preprocessed);
+      return result.layout;
+    });
   }
 
   /**
    * Shut down the pipeline and release all loaded model resources.
    *
    * After calling dispose(), any further calls to `process()`,
-   * `extractText()`, `embed()`, or `analyzeLayout()` will throw.
+   * `extractText()`, `embed()`, or `analyzeLayout()` will throw. Calls
+   * already in progress finish first, and the models they loaded are
+   * released with the rest.
    *
    * @example
    * ```typescript
@@ -589,10 +653,16 @@ export class VisionPipeline {
   async dispose(): Promise<void> {
     this._disposed = true;
 
-    // Release PaddleOCR resources
-    if (this._paddleOcr?.dispose) {
+    // Calls in progress finish before the engines they use are released, and
+    // an engine one of them loads on the way is released with the rest.
+    await Promise.allSettled([...this._inFlight]);
+
+    // Release PaddleOCR resources: destroy() in ppu-paddle-ocr 6, dispose() before
+    const paddle = this._paddleOcr;
+    const release = paddle?.destroy ?? paddle?.dispose;
+    if (typeof release === 'function') {
       try {
-        await this._paddleOcr.dispose();
+        await release.call(paddle);
       } catch {
         // Swallow disposal errors — we're tearing down anyway
       }
@@ -724,28 +794,32 @@ export class VisionPipeline {
     const start = Date.now();
     const ocr = await this._loadPaddleOcr();
 
-    // PaddleOCR expects a Buffer; convert URL/path to buffer if needed
+    // PaddleOCR reads the image from an ArrayBuffer. ppu-paddle-ocr 6 takes
+    // anything else that is not a string for a canvas, so a Node Buffer
+    // throws there; the bytes go in an ArrayBuffer of their own.
     const imageBuffer = Buffer.isBuffer(image) ? image : await this._urlToBuffer(image);
 
-    const ocrResult = await ocr.recognize(imageBuffer);
+    const ocrResult = await ocr.recognize(bufferToBlobPart(imageBuffer));
 
-    // Normalize PaddleOCR output into our standard shape.
-    // PaddleOCR returns an array of detected text regions with bounding
-    // boxes and per-region confidence scores.
-    const regions: TextRegion[] = (ocrResult?.regions ?? ocrResult?.data ?? []).map(
+    // Normalize PaddleOCR output into our standard shape. ppu-paddle-ocr 6
+    // returns { text, lines, confidence }, each line a list of { text, box,
+    // confidence }, and with `flatten` { text, results, confidence }; older
+    // results list the regions in `regions` or `data`.
+    const items: any[] = Array.isArray(ocrResult?.lines)
+      ? ocrResult.lines.flat()
+      : (ocrResult?.results ?? ocrResult?.regions ?? ocrResult?.data ?? []);
+    const regions: TextRegion[] = items.map(
       (r: any) => ({
         text: r.text ?? r.content ?? '',
         confidence: r.confidence ?? r.score ?? 0,
-        bbox: {
-          x: r.bbox?.[0]?.[0] ?? r.box?.[0]?.[0] ?? 0,
-          y: r.bbox?.[0]?.[1] ?? r.box?.[0]?.[1] ?? 0,
-          width: (r.bbox?.[1]?.[0] ?? r.box?.[1]?.[0] ?? 0) - (r.bbox?.[0]?.[0] ?? r.box?.[0]?.[0] ?? 0),
-          height: (r.bbox?.[2]?.[1] ?? r.box?.[2]?.[1] ?? 0) - (r.bbox?.[0]?.[1] ?? r.box?.[0]?.[1] ?? 0),
-        },
+        bbox: paddleBox(r),
       }),
     );
 
-    const text = regions.map((r) => r.text).join('\n');
+    // Grouped by line, the result's own text keeps a line's words on one line.
+    const text = Array.isArray(ocrResult?.lines) && typeof ocrResult.text === 'string'
+      ? ocrResult.text
+      : regions.map((r) => r.text).join('\n');
     const avgConfidence =
       regions.length > 0
         ? regions.reduce((sum, r) => sum + r.confidence, 0) / regions.length
@@ -775,13 +849,12 @@ export class VisionPipeline {
     const start = Date.now();
     const worker = await this._loadTesseract();
 
-    // Tesseract.js accepts Buffer, URL, or base64 string
-    const input = Buffer.isBuffer(image) ? image : image;
-    const result = await worker.recognize(input);
+    // Tesseract.js accepts a Buffer or a URL. The words, with their boxes,
+    // come back only when the call asks for the blocks output.
+    const result = await worker.recognize(image, {}, { blocks: true });
 
-    // Normalize Tesseract output into our standard shape.
-    // Tesseract returns paragraphs → lines → words with bounding boxes.
-    const regions: TextRegion[] = (result.data?.words ?? []).map(
+    // Normalize Tesseract output into our standard shape: one region per word.
+    const regions: TextRegion[] = tesseractWords(result.data).map(
       (w: any) => ({
         text: w.text ?? '',
         confidence: (w.confidence ?? 0) / 100, // Tesseract uses 0-100 scale
@@ -1021,18 +1094,24 @@ export class VisionPipeline {
    * @returns Initialized PaddleOCR service instance.
    * @throws {Error} If ppu-paddle-ocr is not installed, with install instructions.
    */
-  private async _loadPaddleOcr(): Promise<any> {
-    if (this._paddleOcr) return this._paddleOcr;
+  private _loadPaddleOcr(): Promise<any> {
+    if (this._paddleOcr) return Promise.resolve(this._paddleOcr);
+    return this._loadOnce('paddle', () => this._startPaddleOcr());
+  }
 
+  /** The load of {@link _loadPaddleOcr}, which runs one at a time. */
+  private async _startPaddleOcr(): Promise<any> {
     try {
       const mod = await import('ppu-paddle-ocr');
       // ppu-paddle-ocr exports vary by version — handle both default and named
       const PaddleOcrCls = mod.PaddleOcrService ?? mod.default?.PaddleOcrService ?? mod.default;
       const instance = new PaddleOcrCls();
 
-      // PaddleOCR requires async initialization to load ONNX models
-      if (typeof instance.init === 'function') {
-        await instance.init();
+      // PaddleOCR loads its ONNX models before the first call: initialize()
+      // in ppu-paddle-ocr 6, init() before.
+      const initialize = instance.initialize ?? instance.init;
+      if (typeof initialize === 'function') {
+        await initialize.call(instance);
       }
 
       this._paddleOcr = instance;
@@ -1056,9 +1135,13 @@ export class VisionPipeline {
    * @returns Initialized Tesseract worker ready for recognition.
    * @throws {Error} If tesseract.js is not installed, with install instructions.
    */
-  private async _loadTesseract(): Promise<any> {
-    if (this._tesseract) return this._tesseract;
+  private _loadTesseract(): Promise<any> {
+    if (this._tesseract) return Promise.resolve(this._tesseract);
+    return this._loadOnce('tesseract', () => this._startTesseract());
+  }
 
+  /** The load of {@link _loadTesseract}, which runs one at a time. */
+  private async _startTesseract(): Promise<any> {
     try {
       const mod = await import('tesseract.js');
       const Tesseract = mod.default ?? mod;
@@ -1085,9 +1168,13 @@ export class VisionPipeline {
    * @returns HuggingFace image-to-text pipeline configured with TrOCR weights.
    * @throws {Error} If @huggingface/transformers is not installed.
    */
-  private async _loadTrOcr(): Promise<any> {
-    if (this._trOcrPipeline) return this._trOcrPipeline;
+  private _loadTrOcr(): Promise<any> {
+    if (this._trOcrPipeline) return Promise.resolve(this._trOcrPipeline);
+    return this._loadOnce('trocr', () => this._startTrOcr());
+  }
 
+  /** The load of {@link _loadTrOcr}, which runs one at a time. */
+  private async _startTrOcr(): Promise<any> {
     try {
       const { pipeline } = await import('@huggingface/transformers');
       // TrOCR base, fine-tuned on handwriting: an image-to-text
@@ -1114,15 +1201,19 @@ export class VisionPipeline {
    * @returns The Florence-2 model, its processor, and transformers.js's `RawImage`.
    * @throws {Error} If @huggingface/transformers is not installed.
    */
-  private async _loadFlorence2(): Promise<{ model: any; processor: any; RawImage: any }> {
-    if (this._florence) return this._florence;
+  private _loadFlorence2(): Promise<{ model: any; processor: any; RawImage: any }> {
+    if (this._florence) return Promise.resolve(this._florence);
+    return this._loadOnce('florence-2', () => this._startFlorence2());
+  }
 
+  /** The load of {@link _loadFlorence2}, which runs one at a time. */
+  private async _startFlorence2(): Promise<{ model: any; processor: any; RawImage: any }> {
     try {
       const { AutoProcessor, Florence2ForConditionalGeneration, RawImage } = await import('@huggingface/transformers');
-      const [model, processor] = await Promise.all([
-        Florence2ForConditionalGeneration.from_pretrained(LAYOUT_MODEL),
-        AutoProcessor.from_pretrained(LAYOUT_MODEL),
-      ]);
+      // The processor first: a model loaded before a processor that failed
+      // would hold an ONNX session that nothing releases.
+      const processor = await AutoProcessor.from_pretrained(LAYOUT_MODEL);
+      const model = await Florence2ForConditionalGeneration.from_pretrained(LAYOUT_MODEL);
       this._florence = { model, processor, RawImage };
       return this._florence;
     } catch (err: any) {
@@ -1143,9 +1234,13 @@ export class VisionPipeline {
    * @returns HuggingFace image-feature-extraction pipeline configured with CLIP.
    * @throws {Error} If @huggingface/transformers is not installed.
    */
-  private async _loadClip(): Promise<any> {
-    if (this._clipPipeline) return this._clipPipeline;
+  private _loadClip(): Promise<any> {
+    if (this._clipPipeline) return Promise.resolve(this._clipPipeline);
+    return this._loadOnce('clip', () => this._startClip());
+  }
 
+  /** The load of {@link _loadClip}, which runs one at a time. */
+  private async _startClip(): Promise<any> {
     try {
       const { pipeline } = await import('@huggingface/transformers');
       // CLIP ViT-B/32. The image-feature-extraction task runs its vision
@@ -1240,8 +1335,8 @@ export class VisionPipeline {
     // Strategy-based routing
     switch (tier) {
       case 'ocr':
-        // OCR runs in all strategies except cloud-only
-        return strategy !== 'cloud-only';
+        // OCR runs in all strategies except cloud-only, when an engine is set
+        return strategy !== 'cloud-only' && (this._config.ocr ?? 'paddle') !== 'none';
 
       case 'handwriting':
         // Handwriting only runs if explicitly enabled in config
@@ -1409,6 +1504,37 @@ export class VisionPipeline {
     const { readFile } = await import('node:fs/promises');
     const filePath = url.startsWith('file://') ? url.slice(7) : url;
     return readFile(filePath);
+  }
+
+  /**
+   * Runs a public call: refused once dispose() has been called, and tracked
+   * until it settles, so dispose() waits for it.
+   */
+  private _track<T>(run: () => Promise<T>): Promise<T> {
+    this._assertNotDisposed();
+    const call = run();
+    this._inFlight.add(call);
+    const forget = () => {
+      this._inFlight.delete(call);
+    };
+    call.then(forget, forget);
+    return call;
+  }
+
+  /**
+   * Runs `load` for the engine `name` one at a time: a call while it runs
+   * gets the same promise, so concurrent first calls load one engine, not
+   * two of which dispose() would release one. A failed load is forgotten,
+   * so the next call tries again.
+   */
+  private _loadOnce<T>(name: string, load: () => Promise<T>): Promise<T> {
+    const pending = this._loading.get(name);
+    if (pending) return pending as Promise<T>;
+    const started = load().finally(() => {
+      this._loading.delete(name);
+    });
+    this._loading.set(name, started);
+    return started;
   }
 
   /**

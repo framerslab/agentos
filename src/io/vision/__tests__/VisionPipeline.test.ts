@@ -919,6 +919,159 @@ describe('VisionPipeline', () => {
   });
 
   // =========================================================================
+  // The OCR engines' current result shapes
+  // =========================================================================
+
+  describe('OCR engines as their current releases answer', () => {
+    it('hands ppu-paddle-ocr an ArrayBuffer, and reads its lines with their boxes', async () => {
+      mockPaddleOcrInstance.recognize.mockResolvedValue({
+        text: 'Hello World\nSecond line',
+        lines: [
+          [
+            { text: 'Hello', box: { x: 0, y: 0, width: 50, height: 30 }, confidence: 0.96 },
+            { text: 'World', box: { x: 55, y: 0, width: 45, height: 30 }, confidence: 0.92 },
+          ],
+          [{ text: 'Second line', box: { x: 0, y: 40, width: 100, height: 30 }, confidence: 0.94 }],
+        ],
+        confidence: 0.94,
+      });
+
+      const result = await createFullPipeline({ embedding: false }).process(Buffer.from([1, 2, 3, 4]), { tiers: ['ocr'] });
+
+      // ppu-paddle-ocr 6 takes a Node Buffer for a canvas and throws.
+      const [input] = mockPaddleOcrInstance.recognize.mock.calls[0];
+      expect(input).toBeInstanceOf(ArrayBuffer);
+      expect([...new Uint8Array(input)]).toEqual([1, 2, 3, 4]);
+      expect(result.text).toBe('Hello World\nSecond line');
+      expect(result.confidence).toBeCloseTo(0.94, 5);
+      expect(result.regions).toEqual([
+        { text: 'Hello', confidence: 0.96, bbox: { x: 0, y: 0, width: 50, height: 30 } },
+        { text: 'World', confidence: 0.92, bbox: { x: 55, y: 0, width: 45, height: 30 } },
+        { text: 'Second line', confidence: 0.94, bbox: { x: 0, y: 40, width: 100, height: 30 } },
+      ]);
+    });
+
+    it('starts ppu-paddle-ocr with initialize() and releases it with destroy()', async () => {
+      const initialize = vi.fn(async () => {});
+      const destroy = vi.fn(async () => {});
+      mockPaddleOcrInstance = { recognize: vi.fn(async () => highConfidencePaddleResult()), initialize, destroy } as any;
+
+      const pipeline = createFullPipeline({ embedding: false });
+      await pipeline.process(testImage(), { tiers: ['ocr'] });
+      await pipeline.dispose();
+
+      expect(initialize).toHaveBeenCalledTimes(1);
+      expect(destroy).toHaveBeenCalledTimes(1);
+    });
+
+    it('asks tesseract.js for the blocks output, and reads its words from them', async () => {
+      mockTesseractWorkerInstance.recognize.mockResolvedValue({
+        data: {
+          text: 'Total due\n',
+          confidence: 91,
+          blocks: [{
+            paragraphs: [{
+              lines: [{
+                words: [
+                  { text: 'Total', confidence: 93, bbox: { x0: 10, y0: 5, x1: 60, y1: 25 } },
+                  { text: 'due', confidence: 89, bbox: { x0: 66, y0: 5, x1: 95, y1: 25 } },
+                ],
+              }],
+            }],
+          }],
+        },
+      });
+      const image = testImage();
+
+      const result = await createFullPipeline({ ocr: 'tesseract', embedding: false }).process(image, { tiers: ['ocr'] });
+
+      expect(mockTesseractWorkerInstance.recognize).toHaveBeenCalledWith(image, {}, { blocks: true });
+      expect(result.text).toBe('Total due\n');
+      expect(result.confidence).toBeCloseTo(0.91, 5);
+      expect(result.regions).toEqual([
+        { text: 'Total', confidence: 0.93, bbox: { x: 10, y: 5, width: 50, height: 20 } },
+        { text: 'due', confidence: 0.89, bbox: { x: 66, y: 5, width: 29, height: 20 } },
+      ]);
+    });
+  });
+
+  // =========================================================================
+  // Failed engines, shared loads and disposal
+  // =========================================================================
+
+  describe('failed engines, shared loads and disposal', () => {
+    it('goes on to the cloud tier when the OCR engine fails, and lists the failure', async () => {
+      mockPaddleOcrInstance.recognize.mockRejectedValue(new Error('paddle: model download failed'));
+
+      const result = await createFullPipeline({ handwriting: false, documentAI: false, embedding: false })
+        .process(testImage());
+
+      expect(result.tiers).toEqual(['cloud-vision']);
+      expect(result.failedTiers).toEqual([{ tier: 'ocr', error: 'paddle: model download failed' }]);
+      expect(result.text).toContain('handwritten notes');
+    });
+
+    it('skips the OCR tier when no engine is set, instead of failing the call', async () => {
+      const result = await new VisionPipeline({ strategy: 'progressive', ocr: 'none', cloudProvider: 'openai' })
+        .process(testImage());
+
+      expect(result.tiers).toEqual(['cloud-vision']);
+      expect(result.failedTiers).toBeUndefined();
+    });
+
+    it('throws with every failure when no tier gave a result', async () => {
+      mockPaddleOcrInstance.recognize.mockRejectedValue(new Error('paddle down'));
+      mockHfPipelineFactory.mockRejectedValue(new Error('no tokenizer.json'));
+
+      await expect(
+        createFullPipeline({ strategy: 'local-only', documentAI: false, embedding: false }).process(testImage()),
+      ).rejects.toThrow('every tier that was due to run failed: ocr: paddle down; handwriting: no tokenizer.json');
+    });
+
+    it('loads an engine once for calls that start together', async () => {
+      const pipeline = createFullPipeline();
+
+      await Promise.all([pipeline.analyzeLayout(testImage()), pipeline.analyzeLayout(testImage())]);
+
+      expect(mockFlorenceModelLoad).toHaveBeenCalledTimes(1);
+      expect(mockFlorenceProcessorLoad).toHaveBeenCalledTimes(1);
+    });
+
+    it('loads the Florence-2 processor before the model, so a failed processor leaves no model behind', async () => {
+      mockFlorenceProcessorLoad.mockRejectedValueOnce(new Error('preprocessor_config.json: 404'));
+      const pipeline = createFullPipeline();
+
+      await expect(pipeline.analyzeLayout(testImage())).rejects.toThrow('preprocessor_config.json: 404');
+      expect(mockFlorenceModelLoad).not.toHaveBeenCalled();
+
+      // The failed load is forgotten: the next call loads again.
+      await expect(pipeline.analyzeLayout(testImage())).resolves.toMatchObject({ pages: [expect.anything()] });
+      expect(mockFlorenceModelLoad).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits for a call in progress before it releases the models', async () => {
+      let finish!: () => void;
+      mockFlorenceModel.generate.mockImplementation(
+        () => new Promise((resolve) => {
+          finish = () => resolve({ token_ids: 'generated' });
+        }),
+      );
+      const pipeline = createFullPipeline();
+      const layout = pipeline.analyzeLayout(testImage());
+      await vi.waitFor(() => expect(mockFlorenceModel.generate).toHaveBeenCalled());
+
+      const disposed = pipeline.dispose();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(mockFlorenceModel.dispose).not.toHaveBeenCalled();
+
+      finish();
+      await expect(layout).resolves.toMatchObject({ pages: [expect.anything()] });
+      await disposed;
+      expect(mockFlorenceModel.dispose).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // =========================================================================
   // Pipeline result structure
   // =========================================================================
 
@@ -1020,6 +1173,51 @@ describe('VisionPipeline cloud vision request', () => {
 
     const [request] = mockGenerateText.mock.calls[0];
     expect(request).toMatchObject({ provider: 'anthropic', apiKey: 'sk-from-config', baseUrl: 'https://gateway.example' });
+  });
+});
+
+describe('createVisionPipeline cloud provider detection', () => {
+  const KEYS = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'OPENROUTER_API_KEY'];
+  let saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    saved = Object.fromEntries(KEYS.map((name) => [name, process.env[name]]));
+    for (const name of KEYS) delete process.env[name];
+  });
+
+  afterEach(() => {
+    for (const name of KEYS) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+  });
+
+  /** The generateText request a cloud-only pipeline from detection sends. */
+  async function cloudRequest(): Promise<Record<string, unknown>> {
+    const pipeline = await createVisionPipeline({
+      strategy: 'cloud-only',
+      ocr: 'none',
+      handwriting: false,
+      documentAI: false,
+      embedding: false,
+    });
+    await pipeline.process(Buffer.from([0xff, 0xd8, 0xff, 0xdb]));
+    return mockGenerateText.mock.calls[0][0];
+  }
+
+  it('picks the gemini provider for a GEMINI_API_KEY, which the provider reads itself', async () => {
+    process.env.GEMINI_API_KEY = 'gemini-key';
+
+    const request = await cloudRequest();
+
+    expect(request.provider).toBe('gemini');
+    expect(request.apiKey).toBeUndefined();
+  });
+
+  it('picks the gemini provider for a GOOGLE_API_KEY alone, and passes that key', async () => {
+    process.env.GOOGLE_API_KEY = 'google-key';
+
+    expect(await cloudRequest()).toMatchObject({ provider: 'gemini', apiKey: 'google-key' });
   });
 });
 
