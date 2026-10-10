@@ -1,3 +1,9 @@
+## [0.13.32](https://github.com/framerslab/agentos/compare/v0.13.31...v0.13.32) (2026-10-10)
+
+### fix
+
+* **vision:** the OCR tiers read ppu-paddle-ocr 6 and tesseract.js 7, and Gemini detection names the gemini provider (#253) ([3e903f6](https://github.com/framerslab/agentos/commit/3e903f6e67125c60c9cc4770f9713fb45beac52b))
+
 ## [0.13.31](https://github.com/framerslab/agentos/compare/v0.13.30...v0.13.31) (2026-10-10)
 
 ### feat
