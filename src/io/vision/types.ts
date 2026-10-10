@@ -110,6 +110,20 @@ export interface TierResult {
 }
 
 /**
+ * A tier that was due to run and failed. A failed handwriting, document-ai
+ * or embedding tier is not fatal, and neither is a failed cloud tier when a
+ * local tier produced text: the result carries the tiers that ran, and lists
+ * each failure here.
+ */
+export interface FailedTier {
+  /** The tier that failed. */
+  tier: VisionTier;
+
+  /** The error's message, for example a model that could not be loaded. */
+  error: string;
+}
+
+/**
  * A detected text region within an image, with spatial coordinates
  * and per-region confidence.
  */
@@ -141,7 +155,9 @@ export interface TextRegion {
  * document understanding models.
  *
  * Captures the spatial arrangement of text, tables, figures, headings,
- * and other semantic blocks within a multi-page document.
+ * and other semantic blocks within a multi-page document. The Florence-2
+ * tier gives one page with a `text` block for each line it reads, with the
+ * line's bounding box.
  */
 export interface DocumentLayout {
   /** Pages in document order. */
@@ -246,6 +262,12 @@ export interface VisionResult {
   /** Bounding boxes for detected text regions from the winning tier. */
   regions?: TextRegion[];
 
+  /**
+   * The tiers that were due to run and failed, each with its error; absent
+   * when none failed. A tier listed here is not in {@link tiers}.
+   */
+  failedTiers?: FailedTier[];
+
   /** Total wall-clock processing time in milliseconds. */
   durationMs: number;
 }
@@ -325,7 +347,7 @@ export interface VisionPipelineConfig {
 
   /**
    * Enable document understanding via Florence-2 (`@huggingface/transformers`).
-   * Produces structured {@link DocumentLayout} with semantic block detection.
+   * Produces a {@link DocumentLayout} of the lines of text it reads, each with its box.
    * @default false
    */
   documentAI?: boolean;

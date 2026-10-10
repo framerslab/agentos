@@ -45,12 +45,16 @@ const described = await vision.process(image, { tiers: ['cloud-vision'] });
 | Tier (`VisionTier`) | What runs | Needs | Confidence it reports |
 |---|---|---|---|
 | `ocr` | PaddleOCR (`ppu-paddle-ocr`) or Tesseract.js (`tesseract.js`, English), per the `ocr` option | the package | PaddleOCR: the mean of the region confidences. Tesseract.js: the page confidence divided by 100 |
-| `handwriting` | TrOCR, `microsoft/trocr-base-handwritten`, Transformers.js `image-to-text` task | `@huggingface/transformers` and `handwriting: true` | 0.75 when it returns text, else 0 |
-| `document-ai` | Florence-2, `microsoft/Florence-2-base`, Transformers.js `image-to-text` task with the prompt "Describe the document layout in detail." | `@huggingface/transformers` and `documentAI: true` | 0.8 when it returns text, else 0 |
+| `handwriting` | TrOCR, `Xenova/trocr-base-handwritten` (Microsoft's checkpoint converted to ONNX), Transformers.js `image-to-text` task | `@huggingface/transformers` and `handwriting: true` | 0.75 when it returns text, else 0 |
+| `document-ai` | Florence-2, `onnx-community/Florence-2-base-ft`, loaded as a model and a processor and run with the `<OCR_WITH_REGION>` task | `@huggingface/transformers` and `documentAI: true` | 0.8 when it returns text, else 0 |
 | `cloud-vision` | `generateText()` with the image and a fixed prompt: describe the image, extract all visible text, name the kind of content | `cloudProvider` | 0.95, fixed |
-| `embedding` | CLIP, `Xenova/clip-vit-base-patch32`, Transformers.js `feature-extraction` task | `@huggingface/transformers` and `embedding: true` | none; fills `result.embedding` |
+| `embedding` | CLIP, `Xenova/clip-vit-base-patch32`, Transformers.js `image-feature-extraction` task: 512 numbers in the space of CLIP's text embeddings | `@huggingface/transformers` and `embedding: true` | none; fills `result.embedding` |
 
-`result.text` and `result.confidence` come from the tier with the highest confidence, so a cloud result (0.95) wins over every local tier that ran. `result.regions` holds that tier's text regions. The Florence-2 tier returns its whole output as one `text` block, with a zero bounding box, on page 1 of `result.layout`; it does not split headings, tables or figures into blocks.
+`result.text` and `result.confidence` come from the tier with the highest confidence, so a cloud result (0.95) wins over every local tier that ran. `result.regions` holds that tier's text regions. The Florence-2 tier reads the image line by line: `result.layout` holds one page the size of the image, with a `text` block for each line and the line's bounding box in the image's pixels, and the tier's text is the lines in reading order. It does not label headings, tables or figures.
+
+A tier that was due to run and failed, such as a model that did not load, is left out of `result.tiers` and listed in `result.failedTiers` with its error; the run goes on with the other tiers, and throws only when the cloud tier fails with no local text to fall back on.
+
+Each local model tier downloads its model from the Hugging Face Hub on first use and caches it: about 1.3 GB for TrOCR, 1.1 GB for Florence-2 and 350 MB for CLIP's vision tower, in fp32, the precision Transformers.js loads by default in Node. The [Vision models](https://github.com/framerslab/agentos/blob/master/.github/workflows/vision-models.yml) CI job runs the three tiers from the built package against these models every week and on every change to the vision code.
 
 The cloud tier sends a `Buffer` as a data URL whose media type comes from the image's first bytes (PNG, JPEG, GIF or WebP); a string goes to the provider as given.
 
@@ -159,6 +163,7 @@ interface VisionResult {
   embedding?: number[];         // CLIP output, when the embedding tier ran
   layout?: DocumentLayout;      // { pages: [{ pageNumber, width, height, blocks }] }, when Florence-2 ran
   regions?: TextRegion[];       // text regions of the winning tier
+  failedTiers?: FailedTier[];   // tiers that were due to run and failed, each { tier, error }; absent when none did
   durationMs: number;           // wall-clock time of process()
 }
 
@@ -169,6 +174,11 @@ interface TierResult {
   confidence: number;
   durationMs: number;
   regions?: TextRegion[];
+}
+
+interface FailedTier {
+  tier: VisionTier;
+  error: string;                // the error's message
 }
 
 interface TextRegion {
@@ -232,8 +242,7 @@ These follow from how the pipeline calls each package, checked against `ppu-padd
 - **Gemini detection.** With only `GOOGLE_API_KEY` or `GEMINI_API_KEY` set, detection picks `cloudProvider: 'google'`, which `generateText()` rejects (`Unknown provider "google"`). Pass `cloudProvider: 'gemini'`.
 - **PaddleOCR.** The tier reads `regions` or `data` from `recognize()`; ppu-paddle-ocr 6.6.1 returns `{ text, lines, confidence }`, so the tier reports empty text with confidence 0.
 - **Tesseract.js.** The tier reads words from `data.words`; tesseract.js 7.0.0 reports words only inside `data.blocks`, which it leaves out by default. Text and confidence come through, `regions` stays empty, and detection then never returns `handwritten` or `document-layout`.
-- **TrOCR and Florence-2.** Transformers.js runs ONNX weights, and the `microsoft/trocr-base-handwritten` and `microsoft/Florence-2-base` repositories hold none, so both tiers fail to load: `process()` skips them and `analyzeLayout()` throws.
-- **CLIP.** The `feature-extraction` task tokenizes its input as text, and the tier passes the image as a data URL string, so the CLIP model gets no pixel values and the call fails: `process()` leaves `embedding` unset and `embed()` throws. Transformers.js computes CLIP image embeddings with the `image-feature-extraction` task. The pipeline has no text-embedding method in the CLIP space.
+- **CLIP text.** The pipeline embeds images only; it has no method that embeds text into the CLIP space.
 
 ---
 

@@ -1,5 +1,5 @@
 import * as http from 'node:http';
-import type { AddressInfo, LookupFunction } from 'node:net';
+import { getDefaultAutoSelectFamily, setDefaultAutoSelectFamily, type AddressInfo, type LookupFunction } from 'node:net';
 import { brotliCompressSync, deflateSync, gzipSync } from 'node:zlib';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -170,10 +170,91 @@ describe('fetchUntrustedImage', () => {
     expect(received).toEqual([]);
   });
 
-  it('connects to the address its own check passed, after one lookup', async () => {
+  it('fetches a host name from the address its own check passed, after one lookup', async () => {
+    // A second lookup through the resolver would count twice, and a
+    // connection through the system resolver, which does not know the name,
+    // would never reach the test server.
+    const lookup = resolvesToAll(['127.0.0.1']);
+    const image = await fetchUntrustedImage(`http://images.example.test:${port}/image.png`, {
+      allowAddress: serverOnly,
+      lookup,
+    });
+
+    expect(image).toEqual(PNG);
+    expect(lookup.calls).toBe(1);
+    expect(received).toEqual(['/image.png']);
+  });
+
+  it('checks the address when Node asks the lookup for one address', async () => {
+    // With automatic family selection off, Node calls the lookup without
+    // options.all and connects to the one address it returns.
+    const autoSelectFamily = getDefaultAutoSelectFamily();
+    setDefaultAutoSelectFamily(false);
+    try {
+      expect(
+        await fetchUntrustedImage(`http://images.example.test:${port}/image.png`, {
+          allowAddress: serverOnly,
+          lookup: resolvesToAll(['127.0.0.1']),
+        }),
+      ).toEqual(PNG);
+      await expect(
+        fetchUntrustedImage(`http://images.example.test:${port}/image.png`, { lookup: resolvesTo('127.0.0.1') }),
+      ).rejects.toMatchObject({ code: 'IMAGE_URL_REFUSED' });
+    } finally {
+      setDefaultAutoSelectFamily(autoSelectFamily);
+    }
+    expect(received).toEqual(['/image.png']);
+  });
+
+  it('opens a connection of its own, so it reuses no kept-alive socket another lookup opened', async () => {
+    // Other code fetches the same URL through Node's global agent, which
+    // keeps the socket alive, with a lookup that checks nothing.
+    try {
+      await new Promise<void>((resolve, reject) => {
+        http
+          .get(`http://images.example.test:${port}/image.png`, { lookup: resolvesTo('127.0.0.1') }, (response) => {
+            response.resume();
+            response.on('end', resolve);
+          })
+          .on('error', reject);
+      });
+
+      await expect(
+        fetchUntrustedImage(`http://images.example.test:${port}/image.png`, { lookup: resolvesTo('127.0.0.1') }),
+      ).rejects.toMatchObject({ code: 'IMAGE_URL_REFUSED' });
+      expect(received).toEqual(['/image.png']);
+    } finally {
+      http.globalAgent.destroy();
+    }
+  });
+
+  it('gives a name that does not resolve the message a refused name gets, so neither tells which names exist', async () => {
+    const notFound: LookupFunction = (hostname, _options, callback) => {
+      callback(Object.assign(new Error(`getaddrinfo ENOTFOUND ${hostname}`), { code: 'ENOTFOUND' }), []);
+    };
+    const refused = await fetchUntrustedImage(`http://db.corp.example.test:${port}/x.png`, {
+      lookup: resolvesTo('10.1.2.3'),
+    }).catch((error: unknown) => error);
+    const missing = await fetchUntrustedImage(`http://nosuch.corp.example.test:${port}/x.png`, {
+      lookup: notFound,
+    }).catch((error: unknown) => error);
+
+    expect(refused).toMatchObject({
+      code: 'IMAGE_URL_REFUSED',
+      message: 'imageToBuffer: db.corp.example.test does not resolve to a public network address.',
+    });
+    expect(missing).toMatchObject({
+      code: 'IMAGE_URL_REFUSED',
+      message: 'imageToBuffer: nosuch.corp.example.test does not resolve to a public network address.',
+    });
+    // The resolver's error stays on the error for logs, out of its message.
+    expect((missing as { cause?: unknown }).cause).toMatchObject({ code: 'ENOTFOUND' });
+    expect(received).toEqual([]);
+  });
+
+  it('connects to the address its own check passed, and to no other', async () => {
     // The checked answer is a documentation address no host serves, so the
-    // request can only fail. A second, unchecked lookup would have found the
-    // test server; the server sees nothing, and the resolver ran once.
+    // request can only fail; the resolver ran once, and the server saw nothing.
     const lookup = resolvesToAll(['203.0.113.7']);
     await expect(
       fetchUntrustedImage(`http://images.example.test:${port}/image.png`, {
@@ -320,13 +401,14 @@ describe('imageToBuffer with untrusted input', () => {
   });
 
   it('reads the URL scheme in any case', async () => {
-    // HTTP:// is fetched under the untrusted rules (refused here), not read as a path.
-    await expect(imageToBuffer(`HTTP://127.0.0.1:${port}/image.png`, { untrusted: true })).rejects.toMatchObject({
-      code: 'IMAGE_URL_REFUSED',
-    });
-    await expect(imageToBuffer('FILE:///etc/hosts', { untrusted: true })).rejects.toMatchObject({
-      code: 'IMAGE_LOCAL_FILE_REFUSED',
-    });
+    // HTTP:// and HTTPS:// are fetched under the untrusted rules (refused
+    // here), not read as paths, which would give IMAGE_LOCAL_FILE_REFUSED.
+    for (const scheme of ['HTTP', 'HTTPS']) {
+      await expect(
+        imageToBuffer(`${scheme}://127.0.0.1:${port}/image.png`, { untrusted: true }),
+        scheme,
+      ).rejects.toMatchObject({ code: 'IMAGE_URL_REFUSED' });
+    }
   });
 
   it('reads no local file', async () => {

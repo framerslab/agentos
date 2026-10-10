@@ -109,6 +109,7 @@ export type {
   VisionTier,
   ContentCategory as VisionContentCategory,
   TierResult as VisionTierResult,
+  FailedTier as VisionFailedTier,
   TextRegion as VisionTextRegion,
   DocumentLayout,
   DocumentPage,

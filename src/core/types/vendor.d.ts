@@ -76,6 +76,9 @@ declare module '@xenova/transformers' {
 declare module '@huggingface/transformers' {
   export const env: any;
   export const pipeline: any;
+  export const AutoProcessor: any;
+  export const Florence2ForConditionalGeneration: any;
+  export const RawImage: any;
 }
 
 declare module '@framers/agentos-extensions-registry' {
