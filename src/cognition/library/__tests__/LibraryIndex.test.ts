@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { IVectorStore, MetadataValue } from '../../../core/vector-store/IVectorStore.js';
+import type { IVectorStore, MetadataFilter, MetadataValue, QueryOptions, QueryResult } from '../../../core/vector-store/IVectorStore.js';
 import { InMemoryVectorStore } from '../../rag/vector_stores/InMemoryVectorStore.js';
-import { LibraryIndex, type LibrarySource } from '../LibraryIndex.js';
+import { LibraryIndex, type LibrarySearch, type LibrarySource } from '../LibraryIndex.js';
 
 /** A deterministic embedding: four counts of letter classes, so texts about the same words sit together. */
 const embed = vi.fn(async (texts: string[]) =>
@@ -111,6 +111,127 @@ describe('LibraryIndex over a vector store', () => {
     expect(await ids({ tags: ['q3'] })).toEqual([...documentPassages, ...sessionPassages]);
     expect(await ids({ sourceIds: ['session:s1'] })).toEqual(sessionPassages);
     expect(await ask({ sourceIds: ['session:none'] })).toEqual([]);
+  });
+
+  it('narrows to any of several folders, and finds nothing for an empty list or a folder outside the list', async () => {
+    await index.indexSource(source({ sourceId: 'document:a', kind: 'document', folderId: 'a' }));
+    await index.indexSource(source({ sourceId: 'document:b', kind: 'document', folderId: 'b' }));
+    await index.indexSource(source({ sourceId: 'document:none', kind: 'document' }));
+    const scope = { tenantId: 'org1', aclGroups: ['acct:ann'] };
+    const sources = async (narrowing: Pick<LibrarySearch, 'folderId' | 'folderIds'>) =>
+      [...new Set((await index.search({ text: 'budget', mode: 'dense', topK: 10, scope, ...narrowing })).map((passage) => passage.sourceId))].sort();
+    expect(await sources({ folderIds: ['a', 'b'] })).toEqual(['document:a', 'document:b']);
+    expect(await sources({ folderId: 'a', folderIds: ['a', 'b'] })).toEqual(['document:a']);
+    embed.mockClear();
+    // An empty choice is an empty answer, not every folder; with both options, both apply.
+    expect(await sources({ folderIds: [] })).toEqual([]);
+    expect(await sources({ folderId: 'a', folderIds: ['b'] })).toEqual([]);
+    expect(embed).not.toHaveBeenCalled();
+  });
+
+  it('finds what any of several narrowings finds, and nothing for an empty list, without embedding', async () => {
+    await index.indexSource(source({ sourceId: 'document:a1', kind: 'document', folderId: 'a' }));
+    await index.indexSource(source({ sourceId: 'document:c', kind: 'document' }));
+    await index.indexSource(source({ sourceId: 'session:s1', kind: 'session' }));
+    const scope = { tenantId: 'org1', aclGroups: ['acct:ann'] };
+    const sources = async (anyOf: NonNullable<LibrarySearch['anyOf']>) =>
+      [...new Set((await index.search({ text: 'budget', topK: 10, scope, anyOf })).map((passage) => passage.sourceId))].sort();
+    const documents = [{ kinds: ['document'], folderIds: ['a'] }, { kinds: ['document'], sourceIds: ['document:c'] }];
+    expect(await sources(documents)).toEqual(['document:a1', 'document:c']);
+    expect(await sources([...documents, { kinds: ['session'] }])).toEqual(['document:a1', 'document:c', 'session:s1']);
+    embed.mockClear();
+    expect(await sources([])).toEqual([]);
+    expect(await sources([{ folderIds: [] }, { sourceIds: [] }])).toEqual([]);
+    expect(embed).not.toHaveBeenCalled();
+  });
+
+  it('embeds the text once for every branch, answers a passage once, and cuts the answer to topK, best first', async () => {
+    await index.indexSource(source({ sourceId: 'document:a1', kind: 'document', folderId: 'a', passages: [{ text: 'The budget grows.' }, { text: 'The weather turns.' }] }));
+    await index.indexSource(source({ sourceId: 'document:c', kind: 'document', passages: [{ text: 'Hiring opens in May.' }] }));
+    await index.indexSource(source({ sourceId: 'session:s1', kind: 'session', passages: [{ text: 'The budget and the weather.' }] }));
+    const scope = { tenantId: 'org1', aclGroups: ['acct:ann'] };
+    // The folder's first passage is found by the first two branches.
+    const anyOf = [{ folderIds: ['a'] }, { kinds: ['document'] }, { sourceIds: ['session:s1'] }];
+    embed.mockClear();
+    const all = await index.search({ text: 'budget', mode: 'dense', topK: 10, scope, anyOf });
+    expect(embed).toHaveBeenCalledTimes(1);
+    expect(all.map((passage) => passage.id)).toEqual(['document:a1#0', 'session:s1#0', 'document:a1#1', 'document:c#0']);
+    const best = await index.search({ text: 'budget', mode: 'dense', topK: 2, scope, anyOf });
+    expect(best.map((passage) => passage.id)).toEqual(['document:a1#0', 'session:s1#0']);
+    expect(best[0].score).toBeGreaterThan(best[1].score);
+  });
+
+  it('applies the scope to every branch', async () => {
+    await index.indexSource(source({ sourceId: 'document:mine', kind: 'document', folderId: 'a' }));
+    await index.indexSource(source({ sourceId: 'document:theirs', kind: 'document', tenantId: 'org2', folderId: 'a' }));
+    await index.indexSource(source({ sourceId: 'document:bobs', kind: 'document', aclGroups: ['acct:bob'], folderId: 'a' }));
+    const scope = { tenantId: 'org1', aclGroups: ['acct:ann'] };
+    const sources = async (anyOf: NonNullable<LibrarySearch['anyOf']>) =>
+      [...new Set((await index.search({ text: 'budget', topK: 10, scope, anyOf })).map((passage) => passage.sourceId))].sort();
+    expect(await sources([{ sourceIds: ['document:theirs'] }, { sourceIds: ['document:bobs'] }])).toEqual([]);
+    expect(await sources([{ sourceIds: ['document:theirs', 'document:bobs'] }, { folderIds: ['a'] }])).toEqual(['document:mine']);
+    embed.mockClear();
+    await expect(index.search({ text: 'budget', scope: { tenantId: 'org1', aclGroups: [] }, anyOf: [] })).rejects.toThrow('a tenant and at least one access group');
+    await expect(index.search({ text: 'budget', scope: { tenantId: '', aclGroups: ['acct:ann'] }, anyOf: [{ folderIds: ['a'] }] })).rejects.toThrow('a tenant and at least one access group');
+    expect(embed).not.toHaveBeenCalled();
+  });
+
+  it('ranks several narrowings as one search: a narrow branch\'s weak passage never outranks a wide branch\'s stronger ones', async () => {
+    // A store with both legs that answers each branch by the filter it is given: the folder's three passages, and one
+    // document's single passage, which is first of its own branch in both legs. Fused branch by branch, the two firsts
+    // would tie.
+    const held: Record<string, MetadataValue> = { tenantId: 'org1', aclGroups: ['acct:ann'], status: 'active', kind: 'document', tags: [] };
+    const folder = [
+      { dense: 0.9, lexical: 0.5 },
+      { dense: 0.8, lexical: 0.4 },
+      { dense: 0.7, lexical: 0.3 },
+    ];
+    const asks = (condition: MetadataFilter[string] | undefined, value: string): boolean =>
+      typeof condition === 'object' && (condition.$in ?? []).includes(value);
+    const answer = (leg: 'dense' | 'lexical', options?: QueryOptions): QueryResult => {
+      const filter: MetadataFilter = options?.filter ?? {};
+      const passages: Array<{ id: string; score: number; metadata: Record<string, MetadataValue> }> = asks(filter.folderId, 'a')
+        ? folder.map((scores, at) => ({ id: `document:f#${at}`, score: scores[leg], metadata: { ...held, sourceId: 'document:f', index: at, folderId: 'a' } }))
+        : asks(filter.sourceId, 'document:c')
+          ? [{ id: 'document:c#0', score: leg === 'dense' ? 0.1 : 0.01, metadata: { ...held, sourceId: 'document:c', index: 0 } }]
+          : [];
+      return {
+        documents: passages
+          .slice(0, options?.topK ?? 10)
+          .map(({ id, score, metadata }) => ({ id, similarityScore: score, embedding: [], textContent: id, metadata })),
+      };
+    };
+    const recording = {
+      query: vi.fn(async (_collection: string, _vector: number[], options?: QueryOptions) => answer('dense', options)),
+      lexicalSearch: vi.fn(async (_collection: string, _text: string, options?: QueryOptions) => answer('lexical', options)),
+      hybridSearch: vi.fn(async () => answer('dense')),
+    };
+    const ranking = new LibraryIndex({ store: recording as unknown as IVectorStore, collection: 'library', embed });
+    const scope = { tenantId: 'org1', aclGroups: ['acct:ann'] };
+    const choice = [{ folderIds: ['a'] }, { sourceIds: ['document:c'] }];
+    embed.mockClear();
+    const found = await ranking.search({ text: 'budget', scope, mode: 'hybrid', topK: 3, anyOf: choice });
+    expect(found.map((passage) => passage.id)).toEqual(['document:f#0', 'document:f#1', 'document:f#2']);
+    expect(found[0].score).toBeCloseTo(2 / 61, 12);
+    expect(found[0].score).toBeGreaterThan(found[1].score);
+    expect(found[1].score).toBeGreaterThan(found[2].score);
+    expect(recording.hybridSearch).not.toHaveBeenCalled();
+    expect(recording.query.mock.calls.map(([, , options]) => options?.topK)).toEqual([9, 9]);
+    expect(recording.lexicalSearch.mock.calls.map(([, , options]) => options?.topK)).toEqual([9, 9]);
+    expect(embed).toHaveBeenCalledTimes(1);
+
+    // The same choice, dense, over the in-memory store, where the document's passage is far from the text.
+    await index.indexSource(
+      source({
+        sourceId: 'document:f',
+        kind: 'document',
+        folderId: 'a',
+        passages: [{ text: 'The budget grows.' }, { text: 'The budget and the weather.' }, { text: 'The budget, the weather and hiring.' }],
+      }),
+    );
+    await index.indexSource(source({ sourceId: 'document:c', kind: 'document', passages: [{ text: 'Hiring opens in May.' }] }));
+    const dense = await index.search({ text: 'budget', scope, mode: 'dense', topK: 3, anyOf: choice });
+    expect(dense.map((passage) => passage.id)).toEqual(['document:f#0', 'document:f#1', 'document:f#2']);
   });
 });
 
@@ -222,6 +343,8 @@ describe('LibraryIndex over a store whose filter falls short', () => {
       expect(await ids({ kinds: ['session'] })).toEqual(['kept', 'another folder', 'one tag short', 'another source']);
       expect(await ids({ tags: ['q3', 'plan'] })).toEqual(['kept', 'another kind', 'another folder', 'another source']);
       expect(await ids({ kinds: ['session'], folderId: 'f1', tags: ['q3', 'plan'], sourceIds: ['session:s1'] })).toEqual(['kept']);
+      expect(await ids({ folderIds: ['f1', 'f9'] })).toEqual(['kept', 'another kind', 'one tag short', 'another source']);
+      expect(await ids({ anyOf: [{ folderIds: ['f2'] }, { sourceIds: ['session:s2'] }] })).toEqual(['another folder', 'another source']);
     }
   });
 });
