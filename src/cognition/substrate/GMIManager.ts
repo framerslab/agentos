@@ -516,6 +516,8 @@ export class GMIManager {
       defaultReasoningTraceMaxEntries: this.config.defaultGMIBaseConfigDefaults?.defaultReasoningTraceMaxEntries,
       defaultReasoningTraceMaxMessageLength: this.config.defaultGMIBaseConfigDefaults?.defaultReasoningTraceMaxMessageLength,
       customSettings: persona.customFields,
+      // A GMI waits as long for the turns its shutdown stops as the manager waits for the GMI.
+      shutdownTimeoutMs: this.config.shutdownTimeoutMs,
     };
   }
 

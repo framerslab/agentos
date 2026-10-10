@@ -70,6 +70,7 @@ import { SentimentTracker } from './SentimentTracker';
 import { MetapromptExecutor } from './MetapromptExecutor';
 import { feedbackTraceMessage, type NormalizedUserFeedback } from './userFeedback';
 import { resolveReasoningTraceLimits, type ReasoningTraceLimits } from './reasoningTraceLimits';
+import { settlesWithin, shutdownTimeoutOrDefault } from './shutdownBound';
 
 const DEFAULT_MAX_CONVERSATION_HISTORY_TURNS = 20;
 const DEFAULT_SELF_REFLECTION_INTERVAL_TURNS = 5;
@@ -108,6 +109,13 @@ function withSystemMessage(messages: ChatMessage[], text: string): ChatMessage[]
   let at = 0;
   while (at < messages.length && messages[at].role === 'system') at += 1;
   return [...messages.slice(0, at), { role: 'system', content: text }, ...messages.slice(at)];
+}
+
+/** `value` when it is an abort signal: an object that takes abort listeners. */
+function asAbortSignal(value: unknown): AbortSignal | undefined {
+  return value && typeof value === 'object' && typeof (value as AbortSignal).addEventListener === 'function'
+    ? (value as AbortSignal)
+    : undefined;
 }
 
 /** `value` when it is a usage report as a provider gives one: an object with a numeric token count. */
@@ -172,12 +180,20 @@ export class GMI implements IGMI {
 
   /**
    * Turn ownership. Each processTurnStream call takes the next number and
-   * owns the lifecycle state until a newer turn starts; a turn that no longer
-   * owns it (a failed turn whose generator is drained after the next turn
-   * began) leaves the state and the trace's turn id to the newer turn.
+   * owns the lifecycle state until a newer turn starts or shutdown() takes it
+   * back (0, which no turn has); a turn that no longer owns it (a failed turn
+   * whose generator is drained after the next turn began, a turn that ends
+   * after shutdown began) leaves the state and the trace's turn id alone.
    */
   private turnSequence = 0;
   private stateOwnerTurn = 0;
+
+  /**
+   * The turns whose work is still running, by turn number: the controller that
+   * stops each one and a promise that resolves once its work is done.
+   * shutdown() stops them and waits for them.
+   */
+  private readonly runningTurns = new Map<number, { stop: AbortController; ended: Promise<void> }>();
 
   /**
    * What the GMI needs to forget a turn once the history no longer holds it
@@ -957,6 +973,22 @@ export class GMI implements IGMI {
     const aggregatedUsage: CostAggregator = { totalTokens: 0, promptTokens: 0, completionTokens: 0, breakdown: [] };
       let lastErrorForOutput: GMIOutput['error'] = undefined;
 
+    // The turn's stop. The caller's abort signal (a session's close()) and this
+    // GMI's shutdown() both abort it; the model call in progress then ends with
+    // the provider's abort chunk (the gateway's, on a turn through a gateway).
+    const callerSignal = asAbortSignal(turnInput.metadata?.options?.abortSignal);
+    const stop = new AbortController();
+    const forwardAbort = (): void => stop.abort();
+    if (callerSignal?.aborted) stop.abort();
+    else callerSignal?.addEventListener('abort', forwardAbort, { once: true });
+    let endTurn!: () => void;
+    this.runningTurns.set(turnNumber, {
+      stop,
+      ended: new Promise<void>((resolve) => {
+        endTurn = resolve;
+      }),
+    });
+
     try {
       // A history replaced or cleared just before this turn has finished dropping
       // the sentiment records of the turns it removed.
@@ -1276,9 +1308,10 @@ export class GMI implements IGMI {
           ...pickCompletionOptions(personaOptions),
           ...pickCompletionOptions(turnOptions),
           ...(stepCacheDiagnostics ? { cacheDiagnostics: { ...stepCacheDiagnostics } } : {}),
-          // The turn's own abort signal: aborting it ends the model call in progress
-          // with the provider's abort chunk, and every later call of the turn at once.
-          ...(turnOptions.abortSignal ? { abortSignal: turnOptions.abortSignal as AbortSignal } : {}),
+          // The turn's stop (the caller's abort signal or shutdown()): aborting it ends
+          // the model call in progress with the provider's abort chunk, and every
+          // later call of the turn at once.
+          abortSignal: stop.signal,
           tools: toolsForLLM.length > 0 ? toolsForLLM.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema }})) : undefined,
           // Only with tools: OpenAI rejects a tool_choice on a request that offers none
           // (HTTP 400, "'tool_choice' is only allowed when 'tools' are specified").
@@ -1792,9 +1825,14 @@ export class GMI implements IGMI {
         usage: aggregatedUsage, // Could be partial
       };
     } finally {
+      // The turn's work is done: shutdown() stops waiting for it, and the
+      // caller's signal no longer reaches it.
+      this.runningTurns.delete(turnNumber);
+      callerSignal?.removeEventListener('abort', forwardAbort);
+      endTurn();
       // A newer turn may already own the lifecycle state (this generator was
-      // drained after a failure, once the next turn had started); leave the
-      // state and the trace's turn id to that turn.
+      // drained after a failure, once the next turn had started), or shutdown()
+      // took it back; leave the state and the trace's turn id alone then.
       if (
         ownsState() &&
         this.state !== GMIPrimeState.ERRORED &&
@@ -2175,15 +2213,27 @@ export class GMI implements IGMI {
     return report;
   }
 
-  /** @inheritdoc */
+  /**
+   * Shuts the GMI down. It stops the turns still running (each ends with the
+   * abort error) and waits for them at most `shutdownTimeoutMs`, gives
+   * metaprompt work in flight a bounded window to finish, then closes the
+   * cognitive and working memory. It owns the lifecycle state from the start,
+   * so a turn that ends later leaves the state SHUTDOWN.
+   */
   public async shutdown(): Promise<void> {
     if (this.state === GMIPrimeState.SHUTDOWN || (this.state === GMIPrimeState.IDLE && !this.isInitialized)) {
       console.log(`GMI (ID: ${this.gmiId}) already shut down or was never fully initialized.`);
       this.state = GMIPrimeState.SHUTDOWN; return;
     }
     this.state = GMIPrimeState.SHUTTING_DOWN;
+    // Shutdown owns the lifecycle state from here on: a turn that ends later
+    // writes neither READY nor ERRORED over SHUTTING_DOWN or SHUTDOWN.
+    this.stateOwnerTurn = 0;
     this.addTraceEntry(ReasoningEntryType.LIFECYCLE, "GMI shutting down.");
     try {
+      // Stop the turns still running, and give them the shutdown bound to end
+      // before the memories they write to are closed.
+      await this.stopRunningTurns();
       // Give metaprompt work still in flight a bounded window to store its
       // updates before the memories it writes to are closed, then stop the
       // queue: work not yet started is skipped, and late results are dropped.
@@ -2204,5 +2254,22 @@ export class GMI implements IGMI {
       this.addTraceEntry(ReasoningEntryType.LIFECYCLE, "GMI shutdown complete.");
       console.log(`GMI (ID: ${this.gmiId}) shut down.`);
     }
+  }
+
+  /**
+   * Aborts every running turn, so its model call ends with the provider's
+   * abort chunk, and waits for the turns to end, at most the shutdown bound
+   * (`GMIBaseConfig.shutdownTimeoutMs`). A turn whose consumer stops reading its
+   * stream does not end; shutdown goes on without it.
+   */
+  private async stopRunningTurns(): Promise<void> {
+    if (this.runningTurns.size === 0) return;
+    const turns = Array.from(this.runningTurns.values());
+    for (const turn of turns) turn.stop.abort();
+    const bound = shutdownTimeoutOrDefault(this.config?.shutdownTimeoutMs);
+    if (await settlesWithin(Promise.all(turns.map((turn) => turn.ended)), bound)) return;
+    const message = `${this.runningTurns.size} stopped turn(s) still running after ${bound} ms; closing the memories anyway.`;
+    this.addTraceEntry(ReasoningEntryType.WARNING, message);
+    console.warn(`GMI (ID: ${this.gmiId}): ${message}`);
   }
 }

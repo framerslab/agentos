@@ -221,6 +221,12 @@ export interface GMIBaseConfig {
    * prompt is sent. `agent({ runtime: 'gmi' })` routes `onBeforeGeneration` here.
    */
   beforeModelCall?: (context: GMIModelCallContext) => Promise<ChatMessage[] | void> | ChatMessage[] | void;
+  /**
+   * How long `shutdown()` waits, in milliseconds, for the turns it stopped to
+   * end before it closes the GMI's memories anyway. Defaults to `8000`.
+   * `GMIManager` passes its own `shutdownTimeoutMs`.
+   */
+  shutdownTimeoutMs?: number;
 }
 
 /**
