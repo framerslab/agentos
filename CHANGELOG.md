@@ -1,3 +1,9 @@
+## [0.13.29](https://github.com/framerslab/agentos/compare/v0.13.28...v0.13.29) (2026-10-10)
+
+### feat
+
+* **library:** add LibraryIndex over any vector store, chunkTurns and lexicalTokens (#224) ([2397507](https://github.com/framerslab/agentos/commit/2397507bce3967a835154fc5f0d2f7f13a584148))
+
 ## [0.13.28](https://github.com/framerslab/agentos/compare/v0.13.27...v0.13.28) (2026-10-10)
 
 ### fix
