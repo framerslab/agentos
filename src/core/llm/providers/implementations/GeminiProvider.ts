@@ -763,7 +763,7 @@ export class GeminiProvider implements IProvider {
     const endpoint = `/models/${modelId}:generateContent`;
     let apiResponse: GeminiResponse;
     try {
-      apiResponse = await this.makeApiRequest<GeminiResponse>(endpoint, payload, options.requestTimeout);
+      apiResponse = await this.makeApiRequest<GeminiResponse>(endpoint, payload, options.requestTimeout, options.abortSignal);
     } catch (error: unknown) {
       // A retired pinned id: serve the call from its alias, whose response
       // reports the alias as the model that answered.
@@ -1057,9 +1057,11 @@ export class GeminiProvider implements IProvider {
    *
    * @param {string} modelId - Embedding model (e.g., "gemini-embedding-001").
    * @param {string[]} texts - Input texts to embed.
-   * @param {ProviderEmbeddingOptions} [options] - Optional embedding parameters.
+   * @param {ProviderEmbeddingOptions} [options] - Optional embedding parameters; `abortSignal`
+   *   cancels the batch in flight, and no later batch is sent.
    * @returns {Promise<ProviderEmbeddingResponse>} Embedding vectors.
-   * @throws {GeminiProviderError} On API errors.
+   * @throws {GeminiProviderError} On API errors; `REQUEST_ABORTED` when the caller's signal ends
+   *   the call.
    */
   public async generateEmbeddings(
     modelId: string,
@@ -1085,7 +1087,13 @@ export class GeminiProvider implements IProvider {
       }));
       let apiResponse: GeminiBatchEmbedResponse;
       try {
-        apiResponse = await this.makeApiRequest<GeminiBatchEmbedResponse>(endpoint, { requests });
+        // The caller's signal cancels the batch in flight; no later batch is sent.
+        apiResponse = await this.makeApiRequest<GeminiBatchEmbedResponse>(
+          endpoint,
+          { requests },
+          undefined,
+          options?.abortSignal,
+        );
       } catch (error: unknown) {
         // The batches before this one were billed; keep their usage on the
         // error so the caller can still record it.
@@ -1760,14 +1768,19 @@ export class GeminiProvider implements IProvider {
    * @template T The expected response type.
    * @param {string} endpoint - API endpoint path (e.g., "/models/gemini-2.5-flash:generateContent").
    * @param {Record<string, unknown>} body - Request body.
+   * @param {number} [requestTimeoutOverride] - Per-call timeout in ms, over the configured default.
+   * @param {AbortSignal} [abortSignal] - Caller's signal. It aborts the fetch in flight, and once
+   *   it has fired no further attempt is sent.
    * @returns {Promise<T>} Parsed JSON response.
-   * @throws {GeminiProviderError} On authentication, validation, rate-limit, or network errors.
+   * @throws {GeminiProviderError} On authentication, validation, rate-limit, or network errors;
+   *   `REQUEST_ABORTED` when the caller's signal ends the request.
    * @private
    */
   private async makeApiRequest<T>(
     endpoint: string,
     body: Record<string, unknown>,
     requestTimeoutOverride?: number,
+    abortSignal?: AbortSignal,
   ): Promise<T> {
     const url = `${this.config.baseURL}${endpoint}`;
 
@@ -1784,6 +1797,9 @@ export class GeminiProvider implements IProvider {
         : this.config.requestTimeout;
 
     for (let attempt = 0; attempt < this.config.maxRetries!; attempt++) {
+      if (abortSignal?.aborted) {
+        throw new GeminiProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
       const apiKey = this.nextApiKey();
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), effectiveTimeout);
@@ -1793,7 +1809,8 @@ export class GeminiProvider implements IProvider {
           method: 'POST',
           headers: this.requestHeaders(apiKey),
           body: JSON.stringify(body),
-          signal: controller.signal,
+          // The caller's signal aborts this attempt's fetch as the timer does.
+          signal: abortSignal ? AbortSignal.any([controller.signal, abortSignal]) : controller.signal,
         });
         clearTimeout(timeoutId);
 
@@ -1857,6 +1874,10 @@ export class GeminiProvider implements IProvider {
         return (await response.json()) as T;
       } catch (error: unknown) {
         clearTimeout(timeoutId);
+        // A caller abort ends the request here; it is not a timeout to retry.
+        if (abortSignal?.aborted) {
+          throw new GeminiProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+        }
         if (error instanceof GeminiProviderError) {
           if (error.code === 'API_CLIENT_ERROR') throw error;
           lastError = error;

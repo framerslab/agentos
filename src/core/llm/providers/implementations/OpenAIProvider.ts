@@ -1130,7 +1130,8 @@ export class OpenAIProvider implements IProvider {
 
     // Responses-only models, GPT-6 tool calls and GPT-5/6 tool calls that
     // carry an effort go to /v1/responses; every other call takes the chat
-    // path. generateCompletionStream applies the same rule.
+    // path. generateCompletionStream applies the same rule. On both paths the
+    // caller's signal aborts the request in flight and stops its retries.
     if (shouldRouteToOpenAiResponsesApi(modelId, messages, options)) {
       const responsesBody = this.buildResponsesPayload(modelId, messages, options);
       const responsesApiResponse = await this.makeApiRequest<OpenAIAPITypes.ResponsesResponse>(
@@ -1139,7 +1140,8 @@ export class OpenAIProvider implements IProvider {
         apiKey,
         responsesBody,
         false,
-        options.requestTimeout
+        options.requestTimeout,
+        options.abortSignal
       );
       return this.mapResponsesToCompletionResponse(responsesApiResponse, modelId);
     }
@@ -1152,7 +1154,8 @@ export class OpenAIProvider implements IProvider {
       apiKey,
       requestBody,
       false,
-      options.requestTimeout
+      options.requestTimeout,
+      options.abortSignal
     );
 
     return this.mapApiToCompletionResponse(apiResponse);

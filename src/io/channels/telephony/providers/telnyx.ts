@@ -17,11 +17,11 @@
  *
  * ## Streaming after `call.answered`
  *
- * Telnyx requires a two-step flow for media streaming:
- * 1. Initiate the call via `POST /v2/calls` with a `webhook_url`.
- * 2. When the `call.answered` webhook fires, issue a separate
- *    `POST /v2/calls/{id}/actions/streaming_start` request with the
- *    WebSocket URL. This is handled by the CallManager, not by this provider.
+ * This provider starts no media stream. The call is initiated via
+ * `POST /v2/calls` with a `webhook_url` and no `stream_url`; when the
+ * `call.answered` webhook fires, the host issues
+ * `POST /v2/calls/{id}/actions/streaming_start` with the WebSocket URL.
+ * Neither this provider nor the CallManager sends that request.
  *
  * ## Webhook verification: Ed25519
  *
@@ -356,10 +356,9 @@ export class TelnyxVoiceProvider implements IVoiceCallProvider {
    * Initiate an outbound call via the Telnyx Call Control v2 API.
    *
    * POSTs to `/v2/calls` with a JSON body containing the `connection_id`,
-   * phone numbers, and webhook URL. The `mediaStreamUrl` (if provided) is
-   * stored internally for use after the call is answered -- it is NOT sent
-   * in the initial call creation request because Telnyx requires
-   * `streaming_start` to be issued as a separate action after `call.answered`.
+   * phone numbers, and webhook URL. The `mediaStreamUrl` is neither sent
+   * nor kept: the host starts a stream with the `streaming_start` action
+   * after `call.answered`.
    *
    * @param input - Call initiation parameters (from/to numbers, webhook URL).
    * @returns Result containing the Telnyx `call_control_id` on success.

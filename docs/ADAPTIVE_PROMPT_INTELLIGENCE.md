@@ -1,6 +1,6 @@
 ---
 title: Adaptive Prompt Intelligence
-description: Per-turn metaprompting and state-driven re-personalization in AgentOS. Three trigger types (turn_interval, event_based, manual), five built-in event handlers, the SentimentTracker, and the state surfaces (mood, user context, task context, working memory, HEXACO traits) that metaprompts mutate between turns.
+description: Per-turn metaprompting and state-driven re-personalization in AgentOS. Three trigger types (turn_interval, event_based, manual), five built-in event handlers, the SentimentTracker, the state surfaces (mood, user context, task context, working memory) that metaprompts mutate between turns, and the adapt_personality tool that changes HEXACO traits.
 keywords:
   - adaptive prompt intelligence
   - metaprompting
@@ -27,7 +27,7 @@ The agent stays the same persona; how it sounds, what it remembers, and how conf
 
 The dollar math, in one line: sentiment scoring is the one adaptive surface that runs on *every* user turn once it is enabled, and the runtime's utility AI decides whether it costs an LLM call, not `sentimentTracking.method`: the default `LLMUtilityAI` makes one call per scored user turn, and a second one when its reply is not valid JSON and it asks for a repair, while a `StatisticalUtilityAI` (or a `HybridUtilityAI` with a statistical part) scores with a lexicon at no cost. Contextual elements cost nothing extra. A metaprompt costs one call each time its trigger fires, and a repair call when its reply is not valid JSON: every `intervalTurns` user turns (every turn with `intervalTurns: 1`), on a sentiment event, or on a host-set flag. See [Operational notes](#operational-notes) below for a concrete per-1000-turn cost table.
 
-![Adaptive Prompt Intelligence: per-turn assembly loop on top (user message → PromptEngine.assemble → MetapromptExecutor.checkAndTriggerMetaprompts → state updates → LLM call); three trigger lanes in the middle (turn_interval periodic self-regulation, event_based SentimentTracker-driven, manual host or tool-driven flags); and the five state surfaces at the bottom (GMI mood, user context, task context, working-memory imprints, HEXACO traits) that metaprompts mutate via callbacks and that re-enter the next turn's prompt.](/img/diagrams/adaptive-intelligence.svg)
+![Adaptive Prompt Intelligence: per-turn assembly loop on top (user message → PromptEngine.assemble → MetapromptExecutor.checkAndTriggerMetaprompts → state updates → LLM call); three trigger lanes in the middle (turn_interval periodic self-regulation, event_based SentimentTracker-driven, manual host or tool-driven flags); and the state surfaces at the bottom (GMI mood, user context, task context, working-memory imprints) that metaprompts mutate via callbacks and that re-enter the next turn's prompt; the HEXACO traits the diagram also places there are changed by the adapt_personality tool or by a host's own GMI.setPersonalityTrait() call, not by metaprompts.](/img/diagrams/adaptive-intelligence.svg)
 
 This page is the source-verified map of that loop. Every class, interface, trigger name, and handler ID below corresponds to a real surface in [`packages/agentos`](https://github.com/framerslab/agentos/tree/master). If you only need one mental model: the persona definition is the static contract, and the metaprompt executor is the dynamic editor of the GMI's state turn over turn.
 
@@ -53,9 +53,9 @@ Three things change between turns without persona reload, model swap, or operato
 |---|---|---|
 | **Per-turn system prompt** | Composed by [`PromptEngine.constructPrompt()`](https://github.com/framerslab/agentos/blob/master/src/core/llm/PromptEngine.ts) | `ContextualPromptElement[]` whose [`criteria`](https://github.com/framerslab/agentos/blob/master/src/core/llm/PromptEngine.ts) match the current [`PromptExecutionContext`](https://github.com/framerslab/agentos/blob/master/src/core/llm/IPromptEngine.ts) |
 | **GMI state** (mood, user context, task context, working memory) | The [`GMI`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMI.ts) coordinator | [`MetapromptExecutor`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/MetapromptExecutor.ts) callbacks (`onMoodUpdate`, `onUserContextUpdate`, `onTaskContextUpdate`) and working-memory writes |
-| **HEXACO traits** | The GMI's copy of its persona (`personalityTraits`) | The [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) (`adapt_personality`, called by the model). The offline [`PersonaDriftMechanism`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/PersonaDriftMechanism.ts) computes proposals that nothing applies. |
+| **HEXACO traits** | The GMI's copy of its persona (`personalityTraits`) | The [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) (`adapt_personality`, called by the model), or the host calling `GMI.setPersonalityTrait()` itself. The offline [`PersonaDriftMechanism`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/mechanisms/PersonaDriftMechanism.ts) computes proposals that nothing applies. |
 
-Each surface has its own latency profile and its own gate. The contextual prompt elements run on every turn and cost nothing extra. Metaprompts run when their trigger fires and cost one extra LLM call each. A trait changes only when the model calls `adapt_personality`, within a per-session budget.
+Each surface has its own latency profile and its own gate. The contextual prompt elements run on every turn and cost nothing extra. Metaprompts run when their trigger fires and cost one extra LLM call each. The model changes a trait by calling `adapt_personality`, within a per-session budget; a host that holds the GMI can also set one with `GMI.setPersonalityTrait()`, which no budget limits.
 
 ## The shortest useful example
 
@@ -348,7 +348,7 @@ onMoodUpdate: (mood: GMIMood) => void;
 onUserContextUpdate: (updates: Partial<UserContext>) => void;
 onTaskContextUpdate: (updates: Partial<TaskContext>) => void;
 // Imprints: workingMemory.set(key, value) for each { key, value } in newMemoryImprints.
-// HEXACO traits are not a metaprompt surface; only the adapt_personality tool changes them.
+// HEXACO traits are not a metaprompt surface: adapt_personality (or a host's GMI.setPersonalityTrait() call) changes them.
 ```
 
 | Surface | Field name in metaprompt response | Where it surfaces in next turn |
@@ -357,7 +357,7 @@ onTaskContextUpdate: (updates: Partial<TaskContext>) => void;
 | **User context** | `updatedUserSkillLevel` | Matched against `criteria.userSkillLevel` on contextual prompt elements. |
 | **Task context** | `updatedTaskComplexity` | Matched against `criteria.taskComplexity` on contextual prompt elements. |
 | **Working memory imprints** | `newMemoryImprints: [{ key, value, description? }]` | Set on working memory via `workingMemory.set(key, value)`. Imprints persist across turns within the session; prompt assembly does not read them. A key that holds GMI state (`currentGmiMood`, `manual_trigger_*` and the like) is skipped. |
-| **HEXACO traits** | (Not a metaprompt surface; only the [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) changes them, on the GMI's copy of its persona.) | A GMI does not write traits into its prompt. The cognitive memory manager takes its traits from its own configuration (`traits`) when the host builds it. |
+| **HEXACO traits** | (Not a metaprompt surface; the [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts), or a host's own `GMI.setPersonalityTrait()` call, changes them on the GMI's copy of its persona.) | A GMI does not write traits into its prompt. The cognitive memory manager takes its traits from its own configuration (`traits`) when the host builds it. |
 
 A metaprompt that returns `{ updatedGmiMood: 'EMPATHETIC' }` does not edit the persona definition. It edits the GMI's current mood state, which is a separate field on the running coordinator. Persona reload at next session start resets mood to the persona default. Working-memory imprints are scoped to the session and survive across turns; trait changes from `adapt_personality` last as long as the GMI and are not reloaded into later GMIs.
 
@@ -407,7 +407,7 @@ The twelve [`ContextualElementType`](https://github.com/framerslab/agentos/blob/
 
 ## HEXACO trait drift
 
-HEXACO trait mutation is **not** a metaprompt surface. The metaprompt loop edits mood, context, and imprints, all of which are session-scoped or session-resettable. A GMI's traits change only through the `adapt_personality` tool below, and the change lasts as long as that GMI: `GMI.setPersonalityTrait()` replaces the trait on the GMI's own copy of its persona, so other sessions and GMIs created later keep the persona's original values. The cognitive memory manager takes its traits from its own configuration (`traits`) when the host builds it and uses them in encoding strength, working-memory capacity, consolidation and its mechanisms; a GMI's trait change does not reach it. `PersonaDriftMechanism` only proposes changes. A workflow role's `evolutionRules` are a separate path: `GMIManager` applies their trait patches to that agency seat's persona overlay, which it keeps in process memory for the seat.
+HEXACO trait mutation is **not** a metaprompt surface. The metaprompt loop edits mood, context, and imprints, all of which are session-scoped or session-resettable. A GMI's traits change through the `adapt_personality` tool below, or when the host calls `GMI.setPersonalityTrait()` itself (the method the tool's runtime wiring calls), and the change lasts as long as that GMI: `GMI.setPersonalityTrait()` replaces the trait on the GMI's own copy of its persona, so other sessions and GMIs created later keep the persona's original values. The cognitive memory manager takes its traits from its own configuration (`traits`) when the host builds it and uses them in encoding strength, working-memory capacity, consolidation and its mechanisms; a GMI's trait change does not reach it. `PersonaDriftMechanism` only proposes changes. A workflow role's `evolutionRules` are a separate path: `GMIManager` applies their trait patches to that agency seat's persona overlay, which it keeps in process memory for the seat.
 
 ### [`AdaptPersonalityTool`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/AdaptPersonalityTool.ts) (emergent, agent-driven)
 

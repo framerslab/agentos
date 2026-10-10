@@ -19,6 +19,7 @@ describe('isPublicNetworkAddress', () => {
     '198.18.0.1',
     '198.51.100.7',
     '203.0.113.9',
+    '192.88.99.2',
     '224.0.0.1',
     '255.255.255.255',
     // IPv6, and the IPv4 addresses it carries.
@@ -33,6 +34,13 @@ describe('isPublicNetworkAddress', () => {
     '2002:c0a8:101::',
     '100::1',
     '2001:db8::1',
+    // IETF protocol assignments: Teredo, benchmarking, ORCHID.
+    '2001::1',
+    '2001:2::1',
+    '2001:10::1',
+    '100:0:0:1::1',
+    '3fff::1',
+    '5f00::1',
     'fc00::1',
     'fd12:3456::1',
     'fe80::1',
@@ -55,6 +63,11 @@ describe('isPublicNetworkAddress', () => {
     '1.1.1.1',
     '172.32.0.1',
     '100.128.0.1',
+    // Just outside the ranges that end or start nearby: 192.88.99.0/24, 2001::/23 and 3fff::/20.
+    '192.88.98.255',
+    '192.88.100.1',
+    '2001:200::1',
+    '3fff:1000::1',
     '2001:4860:4860::8888',
     '[2606:4700:4700::1111]',
     '::ffff:8.8.8.8',

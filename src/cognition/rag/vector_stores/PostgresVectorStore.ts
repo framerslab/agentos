@@ -691,7 +691,8 @@ export class PostgresVectorStore implements IVectorStore {
     const documents: RetrievedVectorDocument[] = result.rows.map((row: any) => {
       const doc: RetrievedVectorDocument = {
         id: row.id,
-        similarityScore: row.rrf_score,
+        // rrf_score is a numeric, which pg returns as text.
+        similarityScore: Number(row.rrf_score),
         embedding: options?.includeEmbedding ? this._parseVectorString(row.embedding) : [],
       };
       if (options?.includeMetadata !== false && row.metadata_json) {

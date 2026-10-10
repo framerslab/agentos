@@ -70,6 +70,76 @@ await mem.close();
 
 `UrlLoader` throws on a non-2xx response. A `text/html` response goes to the HTML loader, `application/pdf` to the PDF loader, and every other content type, Markdown included, is kept as raw text with `format: 'text'`.
 
+### Word files and what they inflate to
+
+```ts
+import { DocxLoader, DocumentTooLargeError } from '@framers/agentos/cognition/memory';
+
+const loader = new DocxLoader({ maxInflatedBytes: 64 * 1024 * 1024 });
+try {
+  const doc = await loader.load(uploadedBuffer);
+} catch (error) {
+  if (error instanceof DocumentTooLargeError) {
+    // error.limit is the bound; mammoth never read the file
+  }
+}
+```
+
+A `.docx` file is a ZIP archive, and mammoth inflates every part it reads, so a file of a few megabytes can inflate to gigabytes. Before mammoth reads a file, `DocxLoader` inflates each entry of the archive with `node:zlib` under `maxInflatedBytes`, one entry's output at a time, and throws `DocumentTooLargeError` (`code` `'DOCUMENT_TOO_LARGE'`, `limit` the bound) once the entries pass it together. The size an entry states for itself is not trusted. The bound is 134,217,728 bytes (128 MiB) when `maxInflatedBytes` is left out, which is how `LoaderRegistry` registers the loader; `registry.register(new DocxLoader({ maxInflatedBytes }))` replaces it. When the Docling loader replaces `DocxLoader` for `.docx`, this bound does not apply.
+
+The bound is on what the archive inflates to, not on the memory a read takes. Every entry counts toward it, images and other media included, though `mammoth.extractRawText()` reads only the XML parts. mammoth parses each XML part it reads into an element tree, which takes a multiple of the part's size, so for files from people you do not know, set `maxInflatedBytes` well below the memory the process can spare, or read them with `loadIsolated` (next section).
+
+A file the loader cannot read as a ZIP archive the way mammoth's reader does is refused with `DocxLoader: not a Word archive` before mammoth runs: no end of central directory record, a ZIP64 record, a central directory that does not end where the end record starts (bytes between the two, or bytes in front of an archive whose offsets do not count them), an entry outside the file, entries that share their data (their compressed data together larger than the bytes before the central directory, where every entry's data lies apart), a compression method other than stored or deflated, or data that does not inflate.
+
+### A file from someone you do not know
+
+```ts
+import {
+  loadIsolated,
+  DocumentTooComplexError,
+  DocumentReadTimeoutError,
+  DocumentTooLargeError,
+} from '@framers/agentos/cognition/memory';
+
+try {
+  const doc = await loadIsolated('docx', upload, {
+    maxHeapMb: 256,
+    timeoutMs: 30_000,
+    maxExternalMb: 128,
+    maxInflatedBytes: 64 * 1024 * 1024,
+  });
+} catch (error) {
+  if (error instanceof DocumentTooComplexError) {
+    // error.resource is 'heap' or 'external'; error.limitMb is the bound the read passed
+  } else if (error instanceof DocumentReadTimeoutError) {
+    // error.timeoutMs is the deadline
+  } else if (error instanceof DocumentTooLargeError) {
+    // error.limit is the Word loader's bound
+  } else {
+    // the loader's own error, with its name and message
+  }
+}
+```
+
+`loadIsolated(kind, bytes, options)` reads with the loader of its kind (`'pdf'` with `PdfLoader`, `'docx'` with `DocxLoader`, `'text'` with `TextLoader`, `'markdown'` with `MarkdownLoader`) in a `node:worker_threads` worker, and answers the `content`, `metadata` and `format` that loader answers. It copies the bytes into a buffer of its own before it moves them to the worker, so the caller's buffer stays usable. It refuses a read in four ways:
+
+| Refusal | When | What it carries |
+|---------|------|-----------------|
+| `DocumentTooComplexError`, `code` `'DOCUMENT_TOO_COMPLEX'` | The worker reaches its heap cap (`resource` `'heap'`), or its memory outside the heap passes `maxExternalMb` (`resource` `'external'`) | `limitMb`, the bound the read passed |
+| `DocumentReadTimeoutError`, `code` `'DOCUMENT_READ_TIMEOUT'` | The read passes `timeoutMs` | `timeoutMs` |
+| `DocumentTooLargeError`, `code` `'DOCUMENT_TOO_LARGE'` | A Word file's entries inflate past `maxInflatedBytes`, which goes to `DocxLoader` (its default when left out) | `limit` |
+| The loader's own error | The loader throws anything else, such as `DocxLoader: not a Word archive` | An `Error` with the loader's error's name and message |
+
+On every path, an answer included, the worker is ended before the call settles. A kind outside the four or bytes that are not a `Uint8Array` reject with a `TypeError`, and a bound that is not a positive, finite number with a `RangeError`, before any worker starts.
+
+What each bound holds, and what it leaves:
+
+- `maxHeapMb` (default 256) caps the worker's old generation through `resourceLimits.maxOldGenerationSizeMb`. A read that reaches the cap ends the worker, and the process that called `loadIsolated` reads on. `--max-old-space-size` overrides the cap, as Node documents for `resourceLimits`.
+- `timeoutMs` (default 30,000, at most 2,147,483,647, the longest delay a Node timer holds) counts from the worker's start, the loading of the loader included.
+- `maxExternalMb` bounds what the heap cap does not count. Node's resource limits leave out array buffers, and the loaders hold large ones: JSZip, which mammoth reads a Word file with, keeps a part's inflated chunks and then their concatenation, and pdf.js keeps every decoded byte of a stream. With `maxExternalMb`, the worker's `external_memory` (its array buffers and external strings) is read with `worker.getHeapStatistics()` every 20 ms, and the worker is ended once it passes the bound. The check reads between allocations, so one allocation can pass the bound before the worker is ended. Without `maxExternalMb`, nothing bounds that memory. `worker.getHeapStatistics()` comes with Node 22.16 and 24.0; on an earlier Node, a read given `maxExternalMb` is refused with a `TypeError`.
+
+A read still shares its process: the caps end the worker, and a fault the worker cannot catch ends both. The worker's entry is `isolatedLoadWorker.js`, compiled beside `loadIsolated.js` in the package's `dist`; `loadIsolated` finds it from its own URL, so a bundler that moves `loadIsolated.js` has to carry that file beside it. The worker starts with none of the caller's command-line options (an empty `execArgv`): an `--input-type` given with `node -e` would refuse its entry file, and the caller's `--require` and `--import` preloads would load inside the capped heap. `NODE_OPTIONS` from the environment applies to it as to any Node process.
+
 ---
 
 ## PDF Extraction
@@ -184,6 +254,8 @@ Declared and not read: `ingestion.extractImages`, `ingestion.ocrEnabled`, `inges
 | [`io/ingestion/PdfLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/PdfLoader.ts) | unpdf with the OCR and Docling fallbacks |
 | [`io/ingestion/OcrPdfLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/OcrPdfLoader.ts) | tesseract.js OCR |
 | [`io/ingestion/DoclingLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/DoclingLoader.ts) | Python Docling subprocess |
+| [`io/ingestion/loadIsolated.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/loadIsolated.ts) | `loadIsolated`, `DocumentTooComplexError` and `DocumentReadTimeoutError` |
+| [`io/ingestion/isolatedLoadWorker.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/isolatedLoadWorker.ts) | The worker thread's entry: one read with the loader of its kind |
 | [`io/ingestion/FolderScanner.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/FolderScanner.ts) | Folder walking and glob filters |
 | [`io/ingestion/ChunkingEngine.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/ChunkingEngine.ts) | The four strategies |
 | [`io/ingestion/UrlLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/UrlLoader.ts) | URL fetching |

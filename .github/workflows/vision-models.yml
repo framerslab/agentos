@@ -1,0 +1,58 @@
+name: Vision models
+
+# The vision pipeline's local model tiers end to end: the built package loads
+# each Hugging Face Hub model the tiers name (TrOCR, Florence-2, CLIP) and runs
+# it on a sample image. The unit suite mocks transformers.js, so a model id
+# that does not load, or a call the model does not take, shows up here and
+# nowhere else. Each run downloads about 3 GB of models.
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - 'src/io/vision/**'
+      - 'src/io/media/images/**'
+      - 'src/core/types/vendor.d.ts'
+      - 'scripts/vision-models-check.mjs'
+      - '.github/workflows/vision-models.yml'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+  schedule:
+    # Weekly: a Hub repository can change under a model id.
+    - cron: '23 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vision-models-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  models:
+    name: Local vision tiers load and run
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Install PNPM
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build
+        run: pnpm run build
+
+      - name: TrOCR, Florence-2 and CLIP from the built package
+        run: node scripts/vision-models-check.mjs

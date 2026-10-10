@@ -125,6 +125,16 @@ function usageBeyond(report: unknown, counted: TokenUsage): TokenUsage | undefin
 }
 
 /**
+ * The error a stream that the caller's signal ended reports in its `error`
+ * part: the signal's reason when that is an Error (the `DOMException` an
+ * `abort()` or `AbortSignal.timeout()` gives is one), or an Error naming it.
+ */
+function abortReasonError(signal: AbortSignal): Error {
+  const reason: unknown = signal.reason;
+  return reason instanceof Error ? reason : new Error(String(reason));
+}
+
+/**
  * A discriminated union representing a single event emitted by the
  * `StreamTextResult.fullStream` iterable.
  *
@@ -492,6 +502,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
     let lastCacheDiagnostics: CacheDiagnostics | null = null;
 
     try {
+      // A stream whose signal has already aborted ends before anything is set up or sent.
+      opts.abortSignal?.throwIfAborted();
       let { providerId, modelId } = resolveModelOption(opts, 'text');
 
       // --- Model routing (optional) ---
@@ -676,7 +688,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           toolNames,
           // Inherit the root per-call cache control (planning-specific
           // override wins) — a cache:false stream's planning sub-call must
-          // not auto-cache behind the caller's back.
+          // not auto-cache behind the caller's back. The call's abort signal
+          // goes with it.
           {
             ...planConfig,
             requestTimeout: planConfig?.requestTimeout ?? opts.requestTimeout,
@@ -684,6 +697,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               ? { cache: planConfig?.cache ?? opts.cache }
               : {}),
             ...(planConfig?.thinking === false || opts.thinking === false ? { thinking: false as const } : {}),
+            ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
           },
           usage,
           budget ? { budget, providerId: resolved.providerId, what: 'stream_text.plan' } : undefined,
@@ -727,6 +741,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           messages: toShimMessages(messages),
           maxRoundtrips: opts.maxSteps ?? 5,
           callModel: async (msgs) => {
+            // No round starts once the caller's signal has aborted.
+            opts.abortSignal?.throwIfAborted();
             // The shim sends rendered tool text in place of native schemas,
             // so its first send is checked on its own.
             if (!shimSendChecked) {
@@ -743,6 +759,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               // prompt-tool-calling emulation honors the caller's bound,
               // matching generateText's own shim path.
               ...(opts.requestTimeout !== undefined ? { requestTimeout: opts.requestTimeout } : {}),
+              ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
               ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
               ...(opts.frequencyPenalty !== undefined ? { frequencyPenalty: opts.frequencyPenalty } : {}),
               ...(opts.presencePenalty !== undefined ? { presencePenalty: opts.presencePenalty } : {}),
@@ -796,6 +813,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             }
             if (typeof r.modelId === 'string' && r.modelId) lastResponseModelId = r.modelId;
             if (typeof r.serviceTier === 'string' && r.serviceTier) lastServiceTier = r.serviceTier;
+            // A request whose provider did not read the signal ran to its end:
+            // its usage is counted above, and the stream stops here.
+            opts.abortSignal?.throwIfAborted();
             const cc = r.choices?.[0]?.message?.content;
             return {
               text: typeof cc === 'string' ? cc : ((cc as any)?.text ?? ''),
@@ -803,6 +823,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             };
           },
         });
+        // An abort during the shim's last tool round ends the stream on the
+        // signal's reason, once the round has run, instead of settling it.
+        opts.abortSignal?.throwIfAborted();
         finalText = loopResult.text;
         const shimToolCalls: ToolCallRecord[] = loopResult.toolCalls.map((c) => ({
           name: c.name,
@@ -827,6 +850,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       let streamedAnyText = false;
       try {
       for (let step = 0; step < maxSteps; step++) {
+        // No step starts once the caller's signal has aborted.
+        opts.abortSignal?.throwIfAborted();
         stepUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
         // --- onBeforeGeneration hook ---
         let effectiveMessages = messages;
@@ -876,6 +901,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             // controls.maxDurationMs budget) bounds the provider request on
             // the stream path too, not only on the generate path.
             ...(opts.requestTimeout !== undefined ? { requestTimeout: opts.requestTimeout } : {}),
+            // The caller's signal stops the provider's stream, which ends with
+            // its abort chunk.
+            ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
             // Mirror generateText: forward the sampling controls so a
             // streaming caller's topP / frequency / presence penalties
             // actually reach the provider instead of being silently
@@ -1031,6 +1059,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
                 ...(chunk.error.details !== undefined ? { details: chunk.error.details } : {}),
               });
               const aborted = chunk.error.type === 'abort';
+              // The caller's signal ended the stream: its error part carries
+              // the signal's reason.
+              const signal = opts.abortSignal;
+              const stoppedBy = signal?.aborted ? abortReasonError(signal) : undefined;
               // Before anything reached the consumer, a provider error is this
               // attempt failing: thrown, it is recorded with the health
               // registry and walked like any thrown error. An abort is the
@@ -1038,7 +1070,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               if (!aborted && firstPartAt === undefined && !shimRanTool) throw error;
               // After output the stream ends here, and the failure is recorded,
               // unless it is a timeout the panel's own deadline produced.
-              if (!aborted && recordedProviderId && !(opts.__panelDeadline && isTimeoutError(error))) {
+              if (!aborted && !stoppedBy && recordedProviderId && !(opts.__panelDeadline && isTimeoutError(error))) {
                 globalLLMProviderHealth.recordFailure(recordedProviderId, error);
               }
               // Settled before the error part is handed over: a consumer that
@@ -1049,7 +1081,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               resolveToolCalls!(allToolCalls);
               resolveFinishReason!('error');
               settleFallback(false);
-              const part: StreamPart = { type: 'error', error };
+              const part: StreamPart = { type: 'error', error: stoppedBy ?? error };
               parts.push(part);
               yield part;
               return;
@@ -1061,6 +1093,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           // finished, failed or was abandoned: what its final chunks reported.
           budget?.record(costOfUsageUSD(resolved.providerId, resolved.modelId, stepUsage), stepUsage.totalTokens, 'stream_text');
         }
+        // A provider stream that did not read the signal ran to its end: its
+        // usage is charged above, and the stream ends here on the signal's reason.
+        opts.abortSignal?.throwIfAborted();
 
         const stepText = reconstructor.getFullText();
         const finalChunk = reconstructor.getFinalChunk();
@@ -1127,6 +1162,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
             console.warn('[agentos] onAfterGeneration hook error:', hookErr);
           }
         }
+        // An abort while the hook ran ends the stream here: the step does not
+        // settle the stream, and its tools do not run.
+        opts.abortSignal?.throwIfAborted();
 
         // Always track the latest step's text so finalText is available even
         // when maxSteps is exhausted with outstanding tool calls.
@@ -1351,6 +1389,10 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         throw loopErr;
       }
 
+      // An abort during the last tool round ends the stream on the signal's
+      // reason, once the round has run, instead of settling it as a success.
+      opts.abortSignal?.throwIfAborted();
+
       resolveText!(finalText);
       resolveUsage!(usage); resolveResponseModel!(lastResponseModelId); resolveServiceTier!(lastServiceTier);
       resolveToolCalls!(allToolCalls);
@@ -1370,7 +1412,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         globalLLMProviderHealth.recordSuccess(recordedProviderId);
       }
     } catch (err: any) {
-      const error = err instanceof Error ? err: new Error(String(err));
+      // The caller's signal ended the stream, whatever error the provider made
+      // of the abort: the stream ends on the signal's reason and walks no
+      // fallback leg.
+      const abortSignal = opts.abortSignal;
+      const stoppedBy = abortSignal?.aborted ? abortReasonError(abortSignal) : undefined;
+      const error = stoppedBy ?? (err instanceof Error ? err: new Error(String(err)));
       // A step the provider ended with usage attached (a refused turn) was
       // billed; the thrown error replaced the final chunk that reports it.
       // That usage is the request's running total, so what the step's
@@ -1392,11 +1439,12 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // circuit-open errors are skipped because they're already a
       // *consequence* of the registry, not a new failure to record; so is
       // a call the caller stopped (its spend budget's refusal, a hook's
-      // stop) and a timeout the panel's own deadline produced, neither of
-      // which says anything about the provider's health.
+      // stop, an abort) and a timeout the panel's own deadline produced,
+      // neither of which says anything about the provider's health.
       if (
         recordedProviderId &&
         error.name !== 'LLMProviderCircuitOpenError' &&
+        !stoppedBy &&
         !isCallerStop(err) &&
         !(opts.__panelDeadline && isTimeoutError(error))
       ) {
@@ -1433,7 +1481,7 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
       // a fresh one, and tools could run twice.
       // firstPartAt is stamped when the first part reaches the consumer.
       const deliveredOutput = firstPartAt !== undefined || shimRanTool;
-      const walks = isRetryableError(error) && !deliveredOutput;
+      const walks = !stoppedBy && isRetryableError(error) && !deliveredOutput;
       // The top-level walk resolves the chain once (the failed first model's
       // policy leg dropped, explicit requirements applied, standing legs and
       // refills marked); a leg receives its resolved slice. Resolved only
@@ -1468,6 +1516,8 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         let attempt = 0;
 
         for (const fb of effectiveFallbacks) {
+          // No leg starts once the caller's signal has aborted.
+          if (opts.abortSignal?.aborted) break;
           attempt += 1;
           // A refill runs only while a standing leg is owed one, and the
           // policy chain's Claude legs are passed over after a refusal.
@@ -1605,7 +1655,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
                 (legError as { type?: unknown }).type === 'abort' ||
                 // The call's budget refused the leg, or a hook stopped it:
                 // every later leg would be stopped the same way.
-                isCallerStop(legError)
+                isCallerStop(legError) ||
+                // The caller's signal ended the leg, whatever its reason.
+                opts.abortSignal?.aborted === true
               ) {
                 break;
               }
@@ -1671,7 +1723,14 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
               yield errorPart;
               break;
             }
-            if (toolsRanBefore(lastFallbackError) || chainWalkedBefore(lastFallbackError) || isCallerStop(lastFallbackError)) break;
+            if (
+              toolsRanBefore(lastFallbackError) ||
+              chainWalkedBefore(lastFallbackError) ||
+              isCallerStop(lastFallbackError) ||
+              opts.abortSignal?.aborted === true
+            ) {
+              break;
+            }
             walkState = advanceFallbackWalk(walkState, fb.walkRole, lastFallbackError);
           }
         }
@@ -1690,20 +1749,26 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
           resolveFinishReason!('error');
           settleFallback(false);
         } else {
-          fallbackLogger.warn('streaming provider fallbacks exhausted', {
-            event: 'fallback_exhausted',
-            api: 'streamText',
-            primaryProvider: recordedProviderId,
-            attempts: attempt,
-            errorType: lastFallbackError.name,
-            errorMessage: lastFallbackError.message.slice(0, 200),
-          });
+          // The caller's signal ended the walk: the stream ends on the
+          // signal's reason, and no exhausted chain is reported.
+          const walkSignal = opts.abortSignal;
+          const walkStoppedBy = walkSignal?.aborted ? abortReasonError(walkSignal) : undefined;
+          if (!walkStoppedBy) {
+            fallbackLogger.warn('streaming provider fallbacks exhausted', {
+              event: 'fallback_exhausted',
+              api: 'streamText',
+              primaryProvider: recordedProviderId,
+              attempts: attempt,
+              errorType: lastFallbackError.name,
+              errorMessage: lastFallbackError.message.slice(0, 200),
+            });
+          }
           metricStatus = 'error';
           // No leg answered: the trail names this attempt's provider.
           settleFallback(false);
           // Marked so a walker that called this one as a leg stops instead of
           // walking the same remaining entries again.
-          const terminal = markChainWalked(lastFallbackError) as Error;
+          const terminal = walkStoppedBy ?? (markChainWalked(lastFallbackError) as Error);
           const errorPart: StreamPart = { type: 'error', error: terminal };
           parts.push(errorPart);
           yield errorPart;
@@ -1716,8 +1781,9 @@ export function streamText(opts: GenerateTextOptions): StreamTextResult {
         metricStatus = 'error';
         settleFallback(false);
         // Marked so a walker that called this one as a leg does not run the
-        // tools again on another provider.
-        const terminal = (shimRanTool ? markToolsRan(error) : error) as Error;
+        // tools again on another provider. The signal's reason is the
+        // caller's own object and stays as it was given.
+        const terminal = (shimRanTool && !stoppedBy ? markToolsRan(error) : error) as Error;
         const part: StreamPart = { type: 'error', error: terminal };
         parts.push(part);
         yield part;

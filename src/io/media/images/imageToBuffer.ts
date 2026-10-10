@@ -13,6 +13,8 @@ import { fileURLToPath } from 'node:url';
 
 import { fetchUntrustedImage } from './untrustedImageFetch.js';
 
+export { bufferToBlobPart } from './blobPart.js';
+
 /** Options for {@link imageToBuffer}. */
 export interface ImageToBufferOptions {
   /**
@@ -95,12 +97,16 @@ export async function imageToBuffer(input: string | Buffer, options: ImageToBuff
 
   // Data URL (RFC 2397): base64 after ";base64", percent-encoded bytes otherwise.
   if (/^data:/i.test(trimmed)) {
-    const commaIdx = trimmed.indexOf(',');
+    // Read as WHATWG Fetch reads a data URL: the URL parser first drops every
+    // tab and line break, so a URL wrapped across lines reads as one, and
+    // spaces may then stand around `;base64`.
+    const url = trimmed.replace(/[\t\n\r]/g, '');
+    const commaIdx = url.indexOf(',');
     if (commaIdx === -1) {
       throw new Error('imageToBuffer: malformed data URL — missing comma separator.');
     }
-    const payload = trimmed.slice(commaIdx + 1);
-    return /;base64$/i.test(trimmed.slice(0, commaIdx)) ? Buffer.from(payload, 'base64') : percentDecodeBytes(payload);
+    const payload = url.slice(commaIdx + 1);
+    return /; *base64 *$/i.test(url.slice(0, commaIdx)) ? Buffer.from(payload, 'base64') : percentDecodeBytes(payload);
   }
 
   // file: URL — convert to a local path and read.
@@ -295,20 +301,4 @@ function isSvgText(bytes: Buffer): boolean {
 function isMissingFileError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
   return code === 'ENOENT' || code === 'ENOTDIR' || code === 'ENAMETOOLONG';
-}
-
-/**
- * Converts a Node.js `Buffer` into a DOM-compatible `BlobPart`.
- *
- * Recent TypeScript DOM typings require `BlobPart` byte views to be backed by a
- * concrete `ArrayBuffer`, while `Buffer` is typed as `ArrayBufferLike`. Returning
- * a plain `Uint8Array` avoids that mismatch for multipart image uploads.
- *
- * @param input - Raw image bytes stored in a Node.js `Buffer`.
- * @returns An `ArrayBuffer` safe to pass into `new Blob([...])`.
- */
-export function bufferToBlobPart(input: Buffer): ArrayBuffer {
-  const bytes = new ArrayBuffer(input.byteLength);
-  new Uint8Array(bytes).set(input);
-  return bytes;
 }

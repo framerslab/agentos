@@ -45,6 +45,17 @@ let mockTesseractWorkerInstance: {
 /** Mock HuggingFace pipeline function. */
 let mockHfPipelineFactory: Mock;
 
+/** Mock Florence-2 loads: `from_pretrained` of the model and of the processor. */
+let mockFlorenceModelLoad: Mock;
+let mockFlorenceProcessorLoad: Mock;
+
+/** The Florence-2 model and processor the loads return. */
+let mockFlorenceModel: { generate: Mock; dispose: Mock };
+let mockFlorenceProcessor: Mock & { batch_decode: Mock; post_process_generation: Mock };
+
+/** Mock `RawImage.read`, which the Florence-2 tier decodes its image with. */
+let mockRawImageRead: Mock;
+
 /** Mock generateText function for cloud vision. */
 let mockGenerateText: Mock;
 
@@ -129,10 +140,20 @@ vi.mock('tesseract.js', () => {
   };
 });
 
-// Mock @huggingface/transformers — the pipeline() factory
+// Mock @huggingface/transformers — the pipeline() factory, and the
+// Florence-2 model, processor and RawImage the layout tier uses.
 vi.mock('@huggingface/transformers', () => {
   return {
     pipeline: (...args: any[]) => mockHfPipelineFactory(...args),
+    Florence2ForConditionalGeneration: {
+      from_pretrained: (...args: any[]) => mockFlorenceModelLoad(...args),
+    },
+    AutoProcessor: {
+      from_pretrained: (...args: any[]) => mockFlorenceProcessorLoad(...args),
+    },
+    RawImage: {
+      read: (...args: any[]) => mockRawImageRead(...args),
+    },
   };
 });
 
@@ -188,11 +209,29 @@ beforeEach(() => {
     if (task === 'image-to-text') {
       return vi.fn(async () => [{ generated_text: 'HF pipeline output' }]);
     }
-    if (task === 'feature-extraction') {
+    if (task === 'image-feature-extraction') {
       return vi.fn(async () => [[0.1, 0.2, 0.3, 0.4, 0.5]]);
     }
     throw new Error(`Unknown pipeline task: ${task}`);
   });
+
+  // Florence-2 reads two lines, each with the four corners of its box.
+  mockFlorenceModel = { generate: vi.fn(async () => ({ token_ids: 'generated' })), dispose: vi.fn(async () => {}) };
+  mockFlorenceProcessor = Object.assign(vi.fn(async () => ({ input_ids: 'ids', pixel_values: 'pixels' })), {
+    batch_decode: vi.fn(() => ['</s><s>Invoice 42<loc_15><loc_41>...</s>']),
+    post_process_generation: vi.fn((_text: string, task: string) => ({
+      [task]: {
+        labels: ['Invoice 42', 'Total due'],
+        quad_boxes: [
+          [10, 20, 110, 20, 110, 40, 10, 40],
+          [12, 50, 90, 52, 90, 70, 12, 68],
+        ],
+      },
+    })),
+  });
+  mockFlorenceModelLoad = vi.fn(async () => mockFlorenceModel);
+  mockFlorenceProcessorLoad = vi.fn(async () => mockFlorenceProcessor);
+  mockRawImageRead = vi.fn(async () => ({ width: 640, height: 480, size: [640, 480] }));
 
   mockGenerateText = vi.fn(async () => cloudVisionResult());
 
@@ -437,12 +476,39 @@ describe('VisionPipeline', () => {
       const pipeline = createFullPipeline({ strategy: 'local-only' });
       const result = await pipeline.process(testImage());
 
-      // TrOCR pipeline should have been created
+      // TrOCR pipeline should have been created, from the conversion
+      // transformers.js loads (ONNX weights and tokenizer.json)
       expect(mockHfPipelineFactory).toHaveBeenCalledWith(
         'image-to-text',
-        'microsoft/trocr-base-handwritten',
+        'Xenova/trocr-base-handwritten',
       );
       expect(result.tiers).toContain('handwriting');
+      expect(result.failedTiers).toBeUndefined();
+    });
+
+    it('hands TrOCR a Buffer image as a Blob, not a data URL transformers.js would read as a path', async () => {
+      mockPaddleOcrInstance.recognize.mockResolvedValue(lowConfidencePaddleResult());
+      const inputs: unknown[] = [];
+      mockHfPipelineFactory = vi.fn(async (task: string) => {
+        if (task === 'image-to-text') {
+          return vi.fn(async (input: unknown) => {
+            inputs.push(input);
+            return [{ generated_text: 'HF pipeline output' }];
+          });
+        }
+        if (task === 'image-feature-extraction') return vi.fn(async () => [[0.1, 0.2, 0.3]]);
+        throw new Error(`Unknown pipeline task: ${task}`);
+      });
+
+      const pipeline = createFullPipeline({ strategy: 'local-only' });
+      const result = await pipeline.process(testImage());
+
+      expect(result.tiers).toContain('handwriting');
+      expect(inputs.length).toBeGreaterThan(0);
+      for (const input of inputs) {
+        expect(input).toBeInstanceOf(Blob);
+        expect((input as Blob).size).toBeGreaterThan(0);
+      }
     });
 
     it('should not trigger TrOCR when handwriting is disabled', async () => {
@@ -475,13 +541,77 @@ describe('VisionPipeline', () => {
       const pipeline = createFullPipeline({ strategy: 'local-only' });
       const result = await pipeline.process(testImage());
 
-      expect(mockHfPipelineFactory).toHaveBeenCalledWith(
-        'image-to-text',
-        'microsoft/Florence-2-base',
-      );
+      // Florence-2 is loaded as a model and a processor, not as an
+      // image-to-text pipeline, which does not take it.
+      expect(mockFlorenceModelLoad).toHaveBeenCalledWith('onnx-community/Florence-2-base-ft');
+      expect(mockFlorenceProcessorLoad).toHaveBeenCalledWith('onnx-community/Florence-2-base-ft');
+      expect(mockHfPipelineFactory).not.toHaveBeenCalledWith('image-to-text', expect.stringContaining('Florence'));
       expect(result.tiers).toContain('document-ai');
       expect(result.layout).toBeDefined();
       expect(result.layout!.pages).toHaveLength(1);
+    });
+
+    it('reads the lines of text with their boxes, and keeps the location tokens for the parser', async () => {
+      const pipeline = createFullPipeline();
+      const layout = await pipeline.analyzeLayout(testImage());
+
+      expect(mockFlorenceProcessor).toHaveBeenCalledWith(expect.anything(), '<OCR_WITH_REGION>');
+      expect(mockFlorenceModel.generate).toHaveBeenCalledWith(
+        expect.objectContaining({ input_ids: 'ids', pixel_values: 'pixels', max_new_tokens: 1024 }),
+      );
+      expect(mockFlorenceProcessor.batch_decode).toHaveBeenCalledWith(
+        { token_ids: 'generated' },
+        { skip_special_tokens: false },
+      );
+      expect(mockFlorenceProcessor.post_process_generation).toHaveBeenCalledWith(
+        '</s><s>Invoice 42<loc_15><loc_41>...</s>',
+        '<OCR_WITH_REGION>',
+        [640, 480],
+      );
+      expect(layout).toEqual({
+        pages: [{
+          pageNumber: 1,
+          width: 640,
+          height: 480,
+          blocks: [
+            { type: 'text', content: 'Invoice 42', bbox: { x: 10, y: 20, width: 100, height: 20 }, confidence: 0.8 },
+            { type: 'text', content: 'Total due', bbox: { x: 12, y: 50, width: 78, height: 20 }, confidence: 0.8 },
+          ],
+        }],
+      });
+    });
+
+    it('gives the lines in reading order as the tier text', async () => {
+      const manyRegions = Array.from({ length: 25 }, (_, i) => ({
+        text: `Region ${i}`,
+        confidence: 0.7,
+        bbox: [[0, i * 30], [100, i * 30], [100, (i + 1) * 30], [0, (i + 1) * 30]],
+      }));
+      mockPaddleOcrInstance.recognize.mockResolvedValue({ regions: manyRegions });
+
+      const pipeline = createFullPipeline({ strategy: 'local-only' });
+      const result = await pipeline.process(testImage());
+
+      const layoutTier = result.tierResults.find((t) => t.tier === 'document-ai');
+      expect(layoutTier).toMatchObject({ provider: 'florence-2', text: 'Invoice 42\nTotal due', confidence: 0.8 });
+    });
+
+    it('hands Florence-2 a Buffer image as a Blob, and a URL string as it is', async () => {
+      const manyRegions = Array.from({ length: 25 }, (_, i) => ({
+        text: `Region ${i}`,
+        confidence: 0.7,
+        bbox: [[0, i * 30], [100, i * 30], [100, (i + 1) * 30], [0, (i + 1) * 30]],
+      }));
+      mockPaddleOcrInstance.recognize.mockResolvedValue({ regions: manyRegions });
+      const pipeline = createFullPipeline({ strategy: 'local-only', handwriting: false });
+      await pipeline.process(testImage());
+      await pipeline.process('https://example.com/scan.png');
+
+      const inputs = mockRawImageRead.mock.calls.map(([input]) => input);
+      expect(inputs).toHaveLength(2);
+      expect(inputs[0]).toBeInstanceOf(Blob);
+      expect((inputs[0] as Blob).size).toBeGreaterThan(0);
+      expect(inputs[1]).toBe('https://example.com/scan.png');
     });
   });
 
@@ -510,7 +640,7 @@ describe('VisionPipeline', () => {
     it('should gracefully handle CLIP failure without affecting other tiers', async () => {
       // Make CLIP fail
       mockHfPipelineFactory.mockImplementation(async (task: string) => {
-        if (task === 'feature-extraction') {
+        if (task === 'image-feature-extraction') {
           throw new Error('CLIP load failed');
         }
         return vi.fn(async () => [{ generated_text: 'HF output' }]);
@@ -521,8 +651,31 @@ describe('VisionPipeline', () => {
 
       // OCR still succeeded
       expect(result.text).toContain('Hello World');
-      // Embedding failed silently
+      // The embedding failed, and the result says so
       expect(result.embedding).toBeUndefined();
+      expect(result.tiers).not.toContain('embedding');
+      expect(result.failedTiers).toEqual([{ tier: 'embedding', error: 'CLIP load failed' }]);
+    });
+
+    it('hands CLIP a Buffer image as a Blob, through the image task, and reads its Tensor', async () => {
+      const inputs: unknown[] = [];
+      mockHfPipelineFactory = vi.fn(async (task: string) => {
+        if (task === 'image-feature-extraction') {
+          return vi.fn(async (input: unknown) => {
+            inputs.push(input);
+            return { dims: [1, 3], data: Float32Array.from([0.5, 0.25, -1]) };
+          });
+        }
+        throw new Error(`Unknown pipeline task: ${task}`);
+      });
+
+      const pipeline = createFullPipeline();
+      const embedding = await pipeline.embed(testImage());
+
+      expect(mockHfPipelineFactory).toHaveBeenCalledWith('image-feature-extraction', 'Xenova/clip-vit-base-patch32');
+      expect(inputs).toHaveLength(1);
+      expect(inputs[0]).toBeInstanceOf(Blob);
+      expect(embedding).toEqual([0.5, 0.25, -1]);
     });
   });
 
@@ -661,12 +814,11 @@ describe('VisionPipeline', () => {
       const layout = await pipeline.analyzeLayout(testImage());
 
       expect(layout.pages).toHaveLength(1);
-      expect(layout.pages[0].blocks).toHaveLength(1);
-      // Florence-2 was loaded via the pipeline factory
-      expect(mockHfPipelineFactory).toHaveBeenCalledWith(
-        'image-to-text',
-        'microsoft/Florence-2-base',
-      );
+      expect(layout.pages[0].blocks).toHaveLength(2);
+      // Florence-2 was loaded as a model and a processor; no OCR or cloud call
+      expect(mockFlorenceModelLoad).toHaveBeenCalledTimes(1);
+      expect(mockPaddleOcrInstance.recognize).not.toHaveBeenCalled();
+      expect(mockGenerateText).not.toHaveBeenCalled();
     });
   });
 
@@ -684,6 +836,15 @@ describe('VisionPipeline', () => {
       await pipeline.dispose();
 
       expect(mockPaddleOcrInstance.dispose).toHaveBeenCalled();
+    });
+
+    it('releases the transformers.js models it loaded', async () => {
+      const pipeline = createFullPipeline();
+      await pipeline.analyzeLayout(testImage());
+
+      await pipeline.dispose();
+
+      expect(mockFlorenceModel.dispose).toHaveBeenCalledTimes(1);
     });
 
     it('should prevent further calls after disposal', async () => {
@@ -762,6 +923,37 @@ describe('VisionPipeline', () => {
   // =========================================================================
 
   describe('result structure', () => {
+    it('lists a local tier that failed, with its error, and goes on with the others', async () => {
+      mockPaddleOcrInstance.recognize.mockResolvedValue(lowConfidencePaddleResult());
+      mockHfPipelineFactory.mockImplementation(async (task: string) => {
+        if (task === 'image-to-text') throw new Error('Could not locate file: "tokenizer.json".');
+        return vi.fn(async () => [[0.1, 0.2]]);
+      });
+
+      const pipeline = createFullPipeline({ strategy: 'local-only' });
+      const result = await pipeline.process(testImage(), { forceCategory: 'handwritten' });
+
+      expect(result.tiers).toEqual(['ocr', 'embedding']);
+      expect(result.failedTiers).toEqual([
+        { tier: 'handwriting', error: 'Could not locate file: "tokenizer.json".' },
+      ]);
+      // The OCR text, its regions joined line by line
+      expect(result.text).toBe('H\ne\nl');
+    });
+
+    it('lists a failed cloud tier when a local tier gave text, and names its error when none did', async () => {
+      mockPaddleOcrInstance.recognize.mockResolvedValue(lowConfidencePaddleResult());
+      mockGenerateText.mockRejectedValue(new Error('401 invalid key'));
+
+      const withLocal = await createFullPipeline({ handwriting: false, documentAI: false, embedding: false })
+        .process(testImage());
+      expect(withLocal.failedTiers).toEqual([{ tier: 'cloud-vision', error: '401 invalid key' }]);
+
+      await expect(
+        createFullPipeline({ embedding: false }).process(testImage(), { tiers: ['cloud-vision'] }),
+      ).rejects.toThrow('cloud vision failed and no local results available: 401 invalid key');
+    });
+
     it('should always include durationMs >= 0', async () => {
       const pipeline = createFullPipeline();
       const result = await pipeline.process(testImage());

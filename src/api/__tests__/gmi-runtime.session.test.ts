@@ -362,6 +362,75 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     }
   });
 
+  it('close() during a reply from a provider that ignores the abort signal returns at once, and the stream left behind is closed after a bounded read, not at its end', async () => {
+    // A custom IProvider may never read options.abortSignal. This one sends a delta, then 1,999
+    // more once the gate opens, aborted or not; closing its generator is what ends its request.
+    const k = key(); const g = gate();
+    const streamed = reply.ignoringSignal(2_000, g.opened);
+    script('openai', k, { replies: [streamed] });
+    const session = agent(base(k)).session('s');
+    try {
+      const outcome = session.send('one').then(() => 'resolved', (error: unknown) => error);
+      await vi.waitFor(() => expect(streamed.record.yielded).toBe(1));
+      expect(await Promise.race([session.close().then(() => 'closed'), sleep(2_000).then(() => 'still waiting')])).toBe('closed');
+      expect(await outcome).toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringMatching(/abort/i) });
+
+      g.open();
+      await vi.waitFor(() => expect(streamed.record.closedAfter).toBeDefined());
+      // The delta sent before close(), then at most 32 read in the background before the
+      // generator is closed: not the whole reply.
+      expect(streamed.record.closedAfter).toBeLessThanOrEqual(1 + 32);
+    } finally {
+      g.open();
+    }
+  });
+
+  it("a send's own abort signal ends that turn with the signal's reason and leaves the session open; close() still ends a turn sent with a signal", async () => {
+    const k = key(); const g = gate();
+    const s = script('openai', k, { replies: [reply.hold([], g.opened, reply.text('Late.')), reply.text('Next.'), reply.hold([], g.opened, reply.text('Late.'))] });
+    const session = agent(base(k)).session('s');
+    try {
+      const controller = new AbortController();
+      const reason = new Error('deadline passed');
+      const first = session.send('one', { abortSignal: controller.signal }).then(() => 'resolved', (error: unknown) => error);
+      await vi.waitFor(() => expect(s.seen).toHaveLength(1));
+      controller.abort(reason);
+      expect(await first).toBe(reason);
+      // The session stays open: the next send runs on it.
+      expect((await session.send('two')).text).toBe('Next.');
+      // close() still stops a turn whose caller passed a signal of its own.
+      const third = session.send('three', { abortSignal: new AbortController().signal }).then(() => 'resolved', (error: unknown) => error);
+      await vi.waitFor(() => expect(s.seen).toHaveLength(3));
+      expect(await Promise.race([session.close().then(() => 'closed'), sleep(2_000).then(() => 'still waiting')])).toBe('closed');
+      expect(await third).toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringMatching(/abort/i) });
+    } finally {
+      g.open();
+    }
+  });
+
+  it("a stream's own abort signal ends that turn with an error part and leaves the session open", async () => {
+    const k = key(); const g = gate();
+    const s = script('openai', k, { replies: [reply.hold([], g.opened, reply.text('Late.')), reply.text('Next.')] });
+    const session = agent(base(k)).session('s');
+    try {
+      const controller = new AbortController();
+      const r = session.stream('one', { abortSignal: controller.signal });
+      await vi.waitFor(() => expect(s.seen).toHaveLength(1));
+      controller.abort(new Error('deadline passed'));
+      // Nobody opens the gate: the turn ends only because the caller's signal aborted its request.
+      expect(await Promise.race([r.finishReason, sleep(2_000).then(() => 'still running')])).toBe('error');
+      expect(s.aborts).toBe(1);
+      const parts: Array<{ type: string }> = [];
+      for await (const part of r.fullStream) parts.push(part);
+      expect(parts.some((part) => part.type === 'text')).toBe(false);
+      expect(parts.at(-1)?.type).toBe('error');
+      // The session stays open: the next send runs on it.
+      expect((await session.send('two')).text).toBe('Next.');
+    } finally {
+      g.open();
+    }
+  });
+
   it('a session that streams many turns leaves no listener behind on the signal close() aborts', async () => {
     const warnings: Error[] = [];
     const onWarning = (warning: Error): void => {
@@ -492,6 +561,13 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     const a = agent(base(k, { voice: { enabled: false }, avatar: { enabled: false }, channels: { discord: { enabled: false } } }));
     expect((await a.generate('hi')).text).toBe('Hello.');
   });
+
+  it('a voice, avatar or channels config that sets enabled: true throws at construction even when its other fields are all unset', () => {
+    // diarization is a boolean of VoiceConfig; a channel with an empty bot token is still turned on.
+    expect(() => agent({ ...base(key()), voice: { enabled: true, diarization: false } })).toThrow(/'voice'/);
+    expect(() => agent({ ...base(key()), avatar: { enabled: true, styleProjections: [] } as never })).toThrow(/'avatar'/);
+    expect(() => agent({ ...base(key()), channels: { discord: { enabled: true, botToken: '' } } })).toThrow(/'channels'/);
+  });
 });
 
 describe("agent({ runtime: 'gmi' }) resolves the model and builds memory on first use", () => {
@@ -584,6 +660,84 @@ describe("agent({ runtime: 'gmi' }) resolves the model and builds memory on firs
     await a.session('desk-1').close();
     await a.session('desk-1', { userId: 'dana' }).send(QUESTION);
     expect(JSON.stringify(s.seen[3].messages)).toContain('vault');
+    await a.close();
+  });
+
+  it("a session id opened again after close() runs its tools under the id the caller opened, and its memory still recalls nothing of the closed session", async () => {
+    const k = key(); const emb = key();
+    const s = script('openai', k, { replies: [reply.text('Noted.'), reply.tools([{ id: 'c1', name: 'lookup', args: { q: 'deploy key' } }]), reply.text('No idea.')] });
+    script('openai', emb);
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    // A tool that keys app state on the session: it records the ids its context carries.
+    const seenByTool: Array<Record<string, unknown>> = [];
+    const lookup = {
+      name: 'lookup',
+      description: 'Look up.',
+      inputSchema: { type: 'object', properties: { q: { type: 'string' } } },
+      execute: async (_args: Record<string, unknown>, ctx: { sessionData?: Record<string, unknown>; userContext?: { userId?: string } }) => {
+        seenByTool.push({ sessionId: ctx.sessionData?.sessionId, conversationId: ctx.sessionData?.conversationId, userId: ctx.userContext?.userId });
+        return { success: true, output: 'nothing filed' };
+      },
+    };
+    const a = agent(base(k, { ...plainMemory(), tools: [lookup] }));
+
+    const first = a.session('kiosk-1');
+    await first.send(FACT);
+    await first.close();
+    await a.session('kiosk-1').send(QUESTION);
+
+    expect(seenByTool).toEqual([{ sessionId: 'kiosk-1', conversationId: 'kiosk-1', userId: 'kiosk-1' }]);
+    // Both model calls of the reopened session's turn: no recall of the closed session's fact.
+    expect(s.seen).toHaveLength(3);
+    expect(JSON.stringify(s.seen[1].messages)).not.toContain('vault');
+    expect(JSON.stringify(s.seen[2].messages)).not.toContain('vault');
+    await a.close();
+  });
+
+  /** A tool that records the id of the GMI it runs under, which a session names after its memory scope ('gmi-<scope id>'). */
+  const gmiIdTool = (gmiIds: string[]) => ({
+    name: 'lookup',
+    description: 'Look up.',
+    inputSchema: { type: 'object', properties: { q: { type: 'string' } } },
+    execute: async (_args: Record<string, unknown>, ctx: { gmiId?: string }) => {
+      gmiIds.push(String(ctx.gmiId));
+      return { success: true, output: 'nothing filed' };
+    },
+  });
+  const lookupThenAnswer = (id: string) => [reply.tools([{ id, name: 'lookup', args: { q: 'deploy key' } }]), reply.text('Done.')];
+
+  it("one record per session id gives each reopening a memory scope of its own, through 1,000 opens and closes of the id; agent.close() starts a new memory and empties the record, so the id's next opening is its first", async () => {
+    const k = key(); const emb = key();
+    script('openai', k, { replies: [...lookupThenAnswer('c1'), ...lookupThenAnswer('c2')] });
+    script('openai', emb);
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const gmiIds: string[] = [];
+    const a = agent(base(k, { ...plainMemory(), tools: [gmiIdTool(gmiIds)] }));
+
+    for (let i = 0; i < 1_000; i++) await a.session('kiosk-1').close();
+    await a.session('kiosk-1').send(QUESTION);
+    await a.close();
+    await a.session('kiosk-1').send(QUESTION);
+
+    // The opening after the 1,000 closes gets a scope of its own; the opening after
+    // agent.close() is the id's first in the new memory, so its scope is the id.
+    expect(gmiIds).toEqual([expect.stringMatching(/^gmi-kiosk-1:[0-9a-f-]{36}$/), 'gmi-kiosk-1']);
+    await a.close();
+  });
+
+  it('an agent without cognitive memory keeps no record of the session ids it opened: an id opened again after close() runs as it did the first time', async () => {
+    const k = key();
+    script('openai', k, { replies: [...lookupThenAnswer('c1'), ...lookupThenAnswer('c2')] });
+    const gmiIds: string[] = [];
+    // The review's input: a server agent with no memory that opens a session per request and closes it.
+    const a = agent(base(k, { tools: [gmiIdTool(gmiIds)] }));
+
+    const first = a.session('cart-1');
+    await first.send(QUESTION);
+    await first.close();
+    await a.session('cart-1').send(QUESTION);
+
+    expect(gmiIds).toEqual(['gmi-cart-1', 'gmi-cart-1']);
     await a.close();
   });
 

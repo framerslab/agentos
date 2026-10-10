@@ -137,9 +137,12 @@ describe('DocxLoader', () => {
     const loader = new DocxLoader();
 
     // mammoth is mocked at the top of this file; this checks the loader's wiring.
-    // We pass a buffer so the loader skips disk I/O.
-    const fakeBuffer = Buffer.from([0x50, 0x4B, 0x03, 0x04]); // PK magic
-    const doc = await loader.load(fakeBuffer);
+    // We pass a buffer so the loader skips disk I/O. The loader reads the ZIP
+    // archive's central directory before mammoth runs, so the buffer is an
+    // empty archive: its end of central directory record alone.
+    const emptyArchive = Buffer.alloc(22);
+    emptyArchive.writeUInt32LE(0x06054b50, 0);
+    const doc = await loader.load(emptyArchive);
 
     expect(typeof doc.content).toBe('string');
     expect(doc.format).toBe('docx');

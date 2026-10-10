@@ -217,6 +217,48 @@ describe('OpenAIProvider typed cache/tier options', () => {
     expect(res.usage?.inclusiveInputTokens).toBe(120);
     expect(res.usage?.promptTokens).toBe(120);
   });
+
+  it("hands fetch a signal that aborts with the caller's, and rejects with REQUEST_ABORTED", async () => {
+    let sent: AbortSignal | undefined;
+    vi.spyOn(globalThis, 'fetch').mockImplementationOnce(
+      (_input: unknown, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          sent = init?.signal ?? undefined;
+          sent?.addEventListener('abort', () => reject(sent?.reason), { once: true });
+        }),
+    );
+    const controller = new AbortController();
+    const call = provider.generateCompletion('gpt-6-luna', messages, { abortSignal: controller.signal });
+    await vi.waitFor(() => expect(sent).toBeDefined());
+    expect(sent?.aborted).toBe(false);
+    controller.abort();
+    expect(sent?.aborted).toBe(true);
+    await expect(call).rejects.toMatchObject({ code: 'REQUEST_ABORTED' });
+  });
+
+  it("hands the /v1/responses request the caller's signal too (a GPT-6 tool call goes there)", async () => {
+    let sent: AbortSignal | undefined;
+    let url: unknown;
+    vi.spyOn(globalThis, 'fetch').mockImplementationOnce(
+      (input: unknown, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          url = input;
+          sent = init?.signal ?? undefined;
+          sent?.addEventListener('abort', () => reject(sent?.reason), { once: true });
+        }),
+    );
+    const tools: Array<Record<string, unknown>> = [
+      { type: 'function', function: { name: 'ping', description: 'Ping.', parameters: { type: 'object', properties: {} } } },
+    ];
+    const controller = new AbortController();
+    const call = provider.generateCompletion('gpt-6-luna', messages, { abortSignal: controller.signal, tools });
+    await vi.waitFor(() => expect(sent).toBeDefined());
+    expect(String(url)).toMatch(/\/responses$/);
+    expect(sent?.aborted).toBe(false);
+    controller.abort();
+    expect(sent?.aborted).toBe(true);
+    await expect(call).rejects.toMatchObject({ code: 'REQUEST_ABORTED' });
+  });
 });
 
 describe('promptCacheSessionId derivation source (spec review fold)', () => {

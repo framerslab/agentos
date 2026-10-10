@@ -1,3 +1,81 @@
+## [0.13.31](https://github.com/framerslab/agentos/compare/v0.13.30...v0.13.31) (2026-10-10)
+
+### feat
+
+* **library:** a search narrowed to several folders, and several narrowings at once (#251) ([6ba17b9](https://github.com/framerslab/agentos/commit/6ba17b95ebbc47d3d31d43440a97f7c1688d825c))
+* **memory:** read a document in a worker thread with a heap cap and a deadline (#248) ([46b109d](https://github.com/framerslab/agentos/commit/46b109d523279a89ce75aaba83389d51d1ef884e))
+
+### docs
+
+* tenth round of audit follow-ups to the guides (#228) ([1b8ad33](https://github.com/framerslab/agentos/commit/1b8ad331179b6bbfaaf5a923db579d40bbc40198))
+
+## [0.13.30](https://github.com/framerslab/agentos/compare/v0.13.29...v0.13.30) (2026-10-10)
+
+### fix
+
+* **vision:** the local model tiers load and run, and a failed tier is reported (#252) ([4da8895](https://github.com/framerslab/agentos/commit/4da8895d8b63ced7c7dc312e31f43158e3ac935f))
+
+## [0.13.29](https://github.com/framerslab/agentos/compare/v0.13.28...v0.13.29) (2026-10-10)
+
+### feat
+
+* **library:** add LibraryIndex over any vector store, chunkTurns and lexicalTokens (#224) ([2397507](https://github.com/framerslab/agentos/commit/2397507bce3967a835154fc5f0d2f7f13a584148))
+
+## [0.13.28](https://github.com/framerslab/agentos/compare/v0.13.27...v0.13.28) (2026-10-10)
+
+### fix
+
+* **api:** an abort during a call's last tool round or its after-generation hook ends the call on the signal's reason (#233) ([2270cf0](https://github.com/framerslab/agentos/commit/2270cf060d9f7747d63f3fea8292dcbe5262e505))
+
+## [0.13.27](https://github.com/framerslab/agentos/compare/v0.13.26...v0.13.27) (2026-10-10)
+
+### fix
+
+* **rag:** return a hybrid search's score as a number (#235) ([7981a08](https://github.com/framerslab/agentos/commit/7981a08bdd49cf89c29ff623e7c60818796886cf))
+
+## [0.13.26](https://github.com/framerslab/agentos/compare/v0.13.25...v0.13.26) (2026-10-10)
+
+### fix
+
+* **safety:** review follow-ups for the SQL spend meter's prefix (#232) ([0b50624](https://github.com/framerslab/agentos/commit/0b50624674bfe60c28c43e44220bfad3912bbd55))
+
+## [0.13.25](https://github.com/framerslab/agentos/compare/v0.13.24...v0.13.25) (2026-10-10)
+
+### feat
+
+* **api:** cancel generation and embedding calls with an AbortSignal (#231) ([59c8bdf](https://github.com/framerslab/agentos/commit/59c8bdfe8342275df51f5372f28b5bd144c8eda7))
+
+## [0.13.24](https://github.com/framerslab/agentos/compare/v0.13.23...v0.13.24) (2026-10-10)
+
+### feat
+
+* **safety:** SqlSpendMeter's tables named by a prefix (#226) ([379c8e6](https://github.com/framerslab/agentos/commit/379c8e692651fd2432745385fa7b50ed3cf509ff))
+
+## [0.13.23](https://github.com/framerslab/agentos/compare/v0.13.22...v0.13.23) (2026-10-10)
+
+### fix
+
+* **gmi:** follow-ups from the reviews of #193 and #199 (#217) ([2bacb69](https://github.com/framerslab/agentos/commit/2bacb69f8fb03ce1b70517b65a52846881a3e9b2))
+* **gmi:** manager shutdown waits for creations in flight, bounds each GMI and runs once (#222) ([d99b126](https://github.com/framerslab/agentos/commit/d99b1269d3e5447e0dd43650e2cc4620ab4c67b5))
+* **images:** the untrusted fetch settles on a protocol upgrade, and four review follow-ups (#227) ([9efb4b5](https://github.com/framerslab/agentos/commit/9efb4b51b0e6017c1f2fd685dcd436a1c44a16d2))
+* **vision:** the TrOCR and Florence-2 tiers get a Buffer image as a Blob (#229) ([7fe444a](https://github.com/framerslab/agentos/commit/7fe444afc6ef0ecbe89ea2aecd8c97fc33caeda0))
+
+## [0.13.22](https://github.com/framerslab/agentos/compare/v0.13.21...v0.13.22) (2026-10-10)
+
+### feat
+
+* **memory:** bound DocxLoader by what a Word file's archive inflates to (#205) ([b9931bf](https://github.com/framerslab/agentos/commit/b9931bf92cae58b6845bd21c6bc67c4cd0ac904a))
+
+### docs
+
+* ninth round of audit follow-ups to the guides (#221) ([c105869](https://github.com/framerslab/agentos/commit/c105869cbef700c49136cb193fd3e297a04679db))
+
+## [0.13.21](https://github.com/framerslab/agentos/compare/v0.13.20...v0.13.21) (2026-10-10)
+
+### feat
+
+* **api:** a spend budget for a run of calls (#185) ([6220c21](https://github.com/framerslab/agentos/commit/6220c218e35284294633bb9593b76ef0cbaf425a))
+
 ## [0.13.20](https://github.com/framerslab/agentos/compare/v0.13.19...v0.13.20) (2026-10-10)
 
 ### feat

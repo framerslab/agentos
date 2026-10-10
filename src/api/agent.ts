@@ -369,6 +369,13 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
   cacheDiagnostics?: GenerateTextOptions['cacheDiagnostics'];
   cache?: GenerateTextOptions['cache'];
   maxTokens?: number;
+  /**
+   * Ends this send when it aborts: the provider request in flight is cancelled, no further step, retry or fallback
+   * hop starts, and the send rejects with the signal's reason. The session stays open. With the default runtime
+   * nothing of the send is added to the session's history; with `runtime: 'gmi'` the turn ends as `close()` ends
+   * one, and the steps it finished stay in `messages()`, marked partial.
+   */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -394,9 +401,10 @@ export interface AgentSession {
    * Accepts plain text or multimodal content (text + image parts).
    *
    * @param input - User message as text string or MessageContent array.
+   * @param opts - Per-send options without a `responseSchema`: the generation overrides and `abortSignal`.
    * @returns The full generation result including text, usage, and tool calls.
    */
-  send(input: MessageContent): Promise<GenerateTextResult>;
+  send(input: MessageContent, opts?: SessionSendOptions): Promise<GenerateTextResult>;
   /**
    * Sends a user message with a Zod schema enforced server-side via the
    * provider's native structured-output API. The reply is parsed and
@@ -423,9 +431,11 @@ export interface AgentSession {
    * Accepts plain text or multimodal content (text + image parts).
    *
    * @param input - User message as text string or MessageContent array.
+   * @param opts - `abortSignal` ends this stream when it aborts, as {@link SessionSendOptions.abortSignal} ends a
+   *   send: the provider's stream stops and the stream ends with an `error` part. The session stays open.
    * @returns A {@link StreamTextResult} with async iterables and awaitable aggregates.
    */
-  stream(input: MessageContent): StreamTextResult;
+  stream(input: MessageContent, opts?: { abortSignal?: AbortSignal }): StreamTextResult;
   /**
    * Returns a snapshot of the current conversation transcript for this
    * session in provider-replayable shape (assistant tool_calls, tool
@@ -742,6 +752,7 @@ function pickSendGenerationOverrides(
   if (sendOpts.cacheDiagnostics !== undefined) out.cacheDiagnostics = sendOpts.cacheDiagnostics;
   if (sendOpts.cache !== undefined) out.cache = sendOpts.cache;
   if (sendOpts.maxTokens !== undefined) out.maxTokens = sendOpts.maxTokens;
+  if (sendOpts.abortSignal !== undefined) out.abortSignal = sendOpts.abortSignal;
   return out;
 }
 
@@ -1137,7 +1148,7 @@ export function agent(opts: AgentOptions): Agent {
             : result;
         },
 
-        stream(input: MessageContent): StreamTextResult {
+        stream(input: MessageContent, streamOpts?: { abortSignal?: AbortSignal }): StreamTextResult {
           const textForMemory = typeof input === 'string' ? input : extractTextFromContent(input);
           const userMessage: Message = { role: 'user', content: input };
 
@@ -1151,6 +1162,9 @@ export function agent(opts: AgentOptions): Agent {
                 sessionId,
                 source: 'agent.session.stream',
               }),
+              // The caller's signal ends the stream; a stream that ends in an
+              // error is added to no history (below).
+              ...(streamOpts?.abortSignal ? { abortSignal: streamOpts.abortSignal } : {}),
             },
             opts.memoryProvider,
             textForMemory,

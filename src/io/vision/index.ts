@@ -52,6 +52,7 @@ export type {
   VisionTier,
   ContentCategory,
   TierResult,
+  FailedTier,
   TextRegion,
   DocumentLayout,
   DocumentPage,

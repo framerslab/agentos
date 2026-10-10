@@ -221,6 +221,12 @@ export interface GMIBaseConfig {
    * prompt is sent. `agent({ runtime: 'gmi' })` routes `onBeforeGeneration` here.
    */
   beforeModelCall?: (context: GMIModelCallContext) => Promise<ChatMessage[] | void> | ChatMessage[] | void;
+  /**
+   * How long `shutdown()` waits, in milliseconds, for the turns it stopped to
+   * end before it closes the GMI's memories anyway. Defaults to `8000`.
+   * `GMIManager` passes its own `shutdownTimeoutMs`.
+   */
+  shutdownTimeoutMs?: number;
 }
 
 /**
@@ -259,6 +265,14 @@ export interface GMITurnInput {
      * `null` sends none. Pass an opaque or hashed id: the provider receives it.
      */
     providerUserId?: string | null;
+    /**
+     * The ids the turn's cognitive memory files and recalls traces under, in
+     * place of the turn's `userId` and `sessionId` (the session also stands in
+     * for the conversation when no `conversationId` is given). Tools, the user
+     * context and the reasoning trace keep the turn's own ids. Unset, memory
+     * uses the turn's ids.
+     */
+    memoryScope?: { userId?: string; sessionId?: string } | null;
     /**
      * Optional conversation history snapshot to use for prompt construction.
      * When provided, the GMI should prefer this over any internal ephemeral history so

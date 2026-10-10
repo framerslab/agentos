@@ -182,6 +182,50 @@ for await (const delta of result.textStream) {
 console.log(await result.text);
 ```
 
+## Cancellation
+
+```ts
+import { generateObject } from '@framers/agentos';
+import { z } from 'zod';
+
+try {
+  const { object } = await generateObject({
+    provider: 'openai',
+    schema: z.object({ planet: z.string() }),
+    prompt: 'Which planet in the solar system is the largest?',
+    // Give up after eight seconds: the request is cancelled, and no retry or fallback runs.
+    abortSignal: AbortSignal.timeout(8000),
+  });
+  console.log(object.planet);
+} catch (error) {
+  if (error instanceof DOMException && error.name === 'TimeoutError') {
+    console.log('No answer within eight seconds.');
+  } else {
+    throw error;
+  }
+}
+```
+
+`generateText()`, `streamText()`, `generateObject()`, `streamObject()` and `embedText()` take an `abortSignal`, and so do an agent session's `send(input, { abortSignal })` and `stream(input, { abortSignal })`. When the signal aborts:
+
+- The provider request in flight is cancelled. A non-streamed request to OpenAI, Anthropic or Gemini is aborted at once, and so is an OpenAI stream; an Anthropic or Gemini stream stops at its next event. `embedText()` aborts its request to the embeddings endpoint, Ollama or Gemini. A provider that does not read the signal runs its request to the end, and the call still ends as below.
+- No further step, retry or fallback hop starts, and `generateObject()` starts no further attempt. A tool round that `generateText()` or `streamText()` has started runs to its end first; the call then ends as below rather than returning that round as its result. The call is not counted against the provider's health.
+- The call rejects with the signal's reason: a `DOMException` named `AbortError` after `controller.abort()`, one named `TimeoutError` from `AbortSignal.timeout()`, or the value given to `controller.abort(reason)`. `streamText()` ends with an `error` part that carries the reason (in an `Error` when the reason is not one), a session's `stream()` ends with an `error` part, and `streamObject()`'s `object` rejects with the reason.
+- A call whose signal has already aborted sends no request.
+
+A session stays open after an aborted `send()` or `stream()`, and its next call runs as usual. Without `runtime: 'gmi'`, the aborted turn is added to no history. With it, the signal is joined with the session's own stop: the turn ends as one `close()` stops (the steps it finished stay in `messages()`, marked partial), and `close()` still stops a turn sent with a signal of its own. An agent's `generate()` and `stream()` pass an `abortSignal` in their options to `generateText()` and `streamText()`; with `runtime: 'gmi'` those two take no `abortSignal` ([GMIs from agent()](../GMI.md#gmis-from-agent)).
+
+```ts
+import { agent } from '@framers/agentos';
+
+const session = agent({ provider: 'openai' }).session('support');
+const turn = new AbortController();
+
+const pending = session.send('Draft a reply to the last message.', { abortSignal: turn.signal });
+turn.abort(); // the conversation moved on
+await pending.catch((error) => console.log(error.name)); // 'AbortError'
+```
+
 ## `agency().stream()`
 
 `streamText()` is a single-call raw stream. `agency().stream()` separates raw

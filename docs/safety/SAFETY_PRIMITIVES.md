@@ -94,7 +94,7 @@ The 5-minute window on 402 reflects operational reality: credits might get toppe
 ### How the router uses it
 
 1. **Before the primary call**, `generateText` consults `globalLLMProviderHealth.isOpen(resolvedProviderId)`. If the breaker is open, it throws a synthetic `LLMProviderCircuitOpenError` with `httpStatus: 503`. The existing [`isRetryableError`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts) check recognizes that status and routes the call into the fallback chain. No network round-trip, no TLS handshake, no waste.
-2. **On a real provider error** (anything caught in the outer try/catch except the breaker's own `LLMProviderCircuitOpenError` and a call the caller stopped: a spend budget's refusal, or a hook's error under `hookErrors: 'throw'`), `recordFailure(providerId, error)` classifies the error by HTTP status and either trips immediately (for 401/402/403) or increments the streak counter (for 429/5xx).
+2. **On a real provider error** (anything caught in the outer try/catch except the breaker's own `LLMProviderCircuitOpenError` and a call the caller stopped: a spend budget's refusal, a hook's error under `hookErrors: 'throw'`, or the call's `abortSignal` aborting), `recordFailure(providerId, error)` classifies the error by HTTP status and either trips immediately (for 401/402/403) or increments the streak counter (for 429/5xx).
 3. **On success**, `recordSuccess(providerId)` resets the streak counter so a future transient failure starts fresh. A single success does NOT shorten an already-open cooldown: the breaker is open precisely because we want to stop probing for a window.
 4. **In the fallback chain loop**, every fallback entry is checked against `isOpen()` before its attempt. A dead chain entry is skipped instantly, so the loop walks to the first healthy provider with O(N) constant-time checks rather than O(N) network calls.
 
@@ -312,11 +312,37 @@ Each refusal reaches the caller before any model call. The turn settles in the o
 | `retry` | 3 tries, 50 to 400 ms, 2 s deadline | Retries of transient store errors before `SpendMeterUnavailableError` |
 | `resolveUnknown(reservation)` | none | Asked by `reconcile()` what became of an expired reservation: `consumed`, `released` or `unknown` |
 | `unknownAfterLease` | `'release'` | How an expired reservation settles when the answer is `unknown` |
-| `ensureSchema` | `true` | Create the two tables when missing; a product that runs its own migrations copies `SPEND_METER_DDL` and passes `false` |
+| `ensureSchema` | `true` | Create the two tables when missing, and on tables that exist the indexes they lack; a product that runs its own migrations copies `SPEND_METER_DDL`, or `spendMeterDdl(prefix)` for its `tablePrefix`, and passes `false` |
+| `tablePrefix` | `'agentos_spend'` | The start of the two tables' names, `<prefix>_meter` and `<prefix>_reservations`; their indexes are named `idx_<prefix>_reservations_*`, and `idx_spend_reservations_*` under the default. A lower-case letter and at most 37 more lower-case letters, digits or underscores, and not `spend`: the constructor throws on any other value, before any statement is built. At 38 characters the longest names, `idx_<prefix>_reservations_account` and `idx_<prefix>_reservations_settled`, take the 63 bytes Postgres keeps of an identifier |
+| `onWarning(warning)` | none | Told of each statement that failed while `ensureSchema` brought tables that exist up to the meter's indexes, with the `statement` and the `error`: an index the store refused, or the catalogue read before them. The meter uses the tables as they are |
 
 With `windowMs` the meter counts from the reservations themselves, inside each reservation's own transaction and after it has taken the account row's lock, so two reservations cannot both take the last unit of a window. Every row then carries the period `window`, which is the period `allowanceFor` is asked for. A unit counts from its reservation until more than `windowMs` have passed. A released reservation never counts, and one whose lease ran out still counts until `reconcile()` releases it. `snapshot()` answers the units consumed and reserved inside the window and what remains. A meter given neither `periodOf` nor `windowMs` throws when it is constructed.
 
-The window's count reads the index `idx_spend_reservations_account`, which `SPEND_METER_DDL` creates with the tables. `ensureSchema` runs that text only where the tables are missing, so a store whose tables an earlier release made needs that one `CREATE INDEX IF NOT EXISTS` statement run on it.
+The window's count reads the index `idx_spend_reservations_account`, and `purge()` finds the reservations settled before its `before` through `idx_spend_reservations_settled`, on `settled_at` and `state` (`idx_<prefix>_reservations_account` and `idx_<prefix>_reservations_settled` under another prefix). The DDL creates both with the tables. On tables that exist, `ensureSchema` reads the store's catalogue before the meter's first statement (`pg_indexes` on Postgres, `sqlite_master` on SQLite) and runs the `CREATE INDEX IF NOT EXISTS` statement of each of the meter's indexes the tables lack, so a store whose tables an earlier release made gains them. A meter whose tables hold all three runs no index statement, so on Postgres its start takes no SHARE lock on the reservations table, the lock a `CREATE INDEX` takes before it checks `IF NOT EXISTS`. The indexes change no answer of the meter, so tables that refuse one, as Postgres does for a role that does not own them, are used as they are, and the statement and its error go to `onWarning`. Postgres holds back writes to a table while it builds an index on it, so a product with a large reservations table creates the two indexes first in its own migration, with `CREATE INDEX CONCURRENTLY IF NOT EXISTS` and the names and columns `spendMeterDdl(prefix)` gives them, and runs the meter with `ensureSchema: false`.
+
+### Several meters in one database
+
+Meters with different rules take a prefix each. Every statement a meter runs names its own two tables, so its count reads only its own rows and its `purge()` deletes only its own rows. Meters under one prefix share its two tables and every row in them, and a purge by one reaches the settled reservations of the others.
+
+```typescript
+import { SqlSpendMeter, spendMeterDdl } from '@framers/agentos';
+
+// Twenty calls an account in any hour, in the default tables
+const hourly = new SqlSpendMeter({ db, windowMs: 3_600_000, allowanceFor: () => 20 });
+
+// Five hundred a month, in tables of its own: monthly_spend_meter and monthly_spend_reservations
+const monthly = new SqlSpendMeter({
+  db,
+  tablePrefix: 'monthly_spend',
+  periodOf: (now) => new Date(now).toISOString().slice(0, 7),
+  allowanceFor: () => 500,
+});
+
+// The same tables and indexes for a product's own migration, with ensureSchema: false on the meter
+const migration = spendMeterDdl('monthly_spend');
+```
+
+With no prefix, `spendMeterDdl()` answers `SPEND_METER_DDL` word for word; given a prefix the constructor refuses, it throws.
 
 ### Usage
 
@@ -363,7 +389,7 @@ const hourly = new SqlSpendMeter({ db, windowMs: 3_600_000, allowanceFor: () => 
 const { reservations, periods } = await hourly.purge({ before: Date.now() - 3_600_000 });
 ```
 
-A reservation still reserved is never deleted, and neither is a period meter's period row, which holds the period's count: a month's `snapshot()` reads the same after its settled reservations are purged. For a window meter, a `before` at least one window back keeps every unit the window counts. Once an operation's row is purged the meter no longer knows the operation: a retry of it reserves and counts again, and a refund of it finds nothing, so `before` lies past the time either can come. `purge()` deletes across every account in the two tables, so two meters on one store share its retention.
+A reservation still reserved is never deleted, and neither is a period meter's period row, which holds the period's count: a month's `snapshot()` reads the same after its settled reservations are purged. For a window meter, a `before` at least one window back keeps every unit the window counts. Once an operation's row is purged the meter no longer knows the operation: a retry of it reserves and counts again, and a refund of it finds nothing, so `before` lies past the time either can come. `purge()` deletes across every account in its meter's two tables, so meters under one prefix share their retention, and a meter under a prefix of its own keeps its own.
 
 ## ToolExecutionGuard
 

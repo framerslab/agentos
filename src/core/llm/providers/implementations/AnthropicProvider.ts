@@ -881,6 +881,8 @@ export class AnthropicProvider implements IProvider {
       : undefined;
 
     // Escape hatch: single-shot JSON transport for SSE-hostile proxies.
+    // On both transports the caller's signal aborts the request in flight and
+    // stops its retries.
     if (this.config.streamCompletions === false) {
       const payload = this.buildRequestPayload(modelId, messages, options, false);
       const apiResponse = await this.makeApiRequest<AnthropicMessagesResponse>(
@@ -888,6 +890,7 @@ export class AnthropicProvider implements IProvider {
         'POST',
         payload,
         options.requestTimeout,
+        options.abortSignal,
       );
       this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
       return this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId);
@@ -901,7 +904,7 @@ export class AnthropicProvider implements IProvider {
     // streamIdleTimeoutMs means the connection is dead — fail fast and
     // let the caller (or the retry loop below) recover in seconds.
     const payload = this.buildRequestPayload(modelId, messages, options, true);
-    const apiResponse = await this.streamMessagesToResponse(payload, options.requestTimeout);
+    const apiResponse = await this.streamMessagesToResponse(payload, options.requestTimeout, options.abortSignal);
     this.recordCacheLeakSample(modelId, payload, apiResponse, options.cache === false);
     return this.mapResponseToCompletion(apiResponse, structuredOutputName, modelId);
   }
@@ -961,11 +964,16 @@ export class AnthropicProvider implements IProvider {
    *   timeout (headers phase only). The mid-body idle bound stays at
    *   `streamIdleTimeoutMs` regardless — a generous total budget must not
    *   extend how long a dead connection can sit silent.
+   * @param abortSignal Caller's signal. It aborts the request in flight, its
+   *   body read included, and once it has fired no further attempt is sent.
+   * @throws {AnthropicProviderError} `REQUEST_ABORTED` when the caller's signal
+   *   ends the request.
    * @private
    */
   private async streamMessagesToResponse(
     payload: Record<string, unknown>,
     requestTimeoutOverride?: number,
+    abortSignal?: AbortSignal,
   ): Promise<AnthropicMessagesResponse> {
     let lastError: AnthropicProviderError = new AnthropicProviderError(
       'Streaming completion failed after all retries.',
@@ -974,10 +982,17 @@ export class AnthropicProvider implements IProvider {
 
     const attempts = Math.max(1, this.config.maxRetries ?? 1);
     for (let attempt = 0; attempt < attempts; attempt++) {
+      if (abortSignal?.aborted) {
+        throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
       try {
-        const stream = await this.makeStreamRequest('/v1/messages', payload, requestTimeoutOverride);
+        const stream = await this.makeStreamRequest('/v1/messages', payload, requestTimeoutOverride, abortSignal);
         return await this.accumulateMessagesStream(stream);
       } catch (error: unknown) {
+        // A caller abort ends the request here; it is not a failure to retry.
+        if (abortSignal?.aborted) {
+          throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+        }
         lastError =
           error instanceof AnthropicProviderError
             ? error
@@ -2798,8 +2813,12 @@ export class AnthropicProvider implements IProvider {
    * @param {string} endpoint - API endpoint path (e.g., "/v1/messages").
    * @param {'POST'} method - HTTP method (Anthropic Messages API is POST-only).
    * @param {Record<string, unknown>} body - Request body.
+   * @param {number} [requestTimeoutOverride] - Per-call timeout in ms, over the configured default.
+   * @param {AbortSignal} [abortSignal] - Caller's signal. It aborts the fetch in flight, and once
+   *   it has fired no further attempt is sent.
    * @returns {Promise<T>} Parsed JSON response.
-   * @throws {AnthropicProviderError} On authentication, validation, rate-limit, or network errors.
+   * @throws {AnthropicProviderError} On authentication, validation, rate-limit, or network errors;
+   *   `REQUEST_ABORTED` when the caller's signal ends the request.
    * @private
    */
   private async makeApiRequest<T>(
@@ -2807,6 +2826,7 @@ export class AnthropicProvider implements IProvider {
     method: 'POST',
     body: Record<string, unknown>,
     requestTimeoutOverride?: number,
+    abortSignal?: AbortSignal,
   ): Promise<T> {
     const url = `${this.config.baseURL}${endpoint}`;
 
@@ -2825,6 +2845,9 @@ export class AnthropicProvider implements IProvider {
     );
 
     for (let attempt = 0; attempt < this.config.maxRetries!; attempt++) {
+      if (abortSignal?.aborted) {
+        throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
       // Rotate the key per attempt so a retry after a 429 fails over to a
       // different key from the pool instead of hammering the throttled one.
       const apiKey = this.nextApiKey();
@@ -2841,7 +2864,8 @@ export class AnthropicProvider implements IProvider {
           method,
           headers: { ...headers, ...this.betaHeaders(body), 'Content-Type': 'application/json', connection: 'close' },
           body: JSON.stringify(body),
-          signal: controller.signal,
+          // The caller's signal aborts this attempt's fetch as the timer does.
+          signal: abortSignal ? AbortSignal.any([controller.signal, abortSignal]) : controller.signal,
         });
         let hardTimeoutId: ReturnType<typeof setTimeout> | null = null;
         const hardTimeoutPromise = new Promise<never>((_, rej) => {
@@ -2922,6 +2946,10 @@ export class AnthropicProvider implements IProvider {
         }
       } catch (error: unknown) {
         clearTimeout(timeoutId);
+        // A caller abort ends the request here; it is not a timeout to retry.
+        if (abortSignal?.aborted) {
+          throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+        }
         if (error instanceof AnthropicProviderError) {
           if (error.code === 'API_CLIENT_ERROR') throw error;
           lastError = error;
@@ -2957,14 +2985,19 @@ export class AnthropicProvider implements IProvider {
    *
    * @param {string} endpoint - API endpoint.
    * @param {Record<string, unknown>} body - Request body (must include `stream: true`).
+   * @param {number} [requestTimeoutOverride] - Per-call connection timeout in ms, over the configured default.
+   * @param {AbortSignal} [abortSignal] - Caller's signal. It aborts the request in flight, the
+   *   returned body's reads included.
    * @returns {Promise<ReadableStream<Uint8Array>>} The response body stream.
-   * @throws {AnthropicProviderError} On connection errors.
+   * @throws {AnthropicProviderError} On connection errors; `REQUEST_ABORTED` when the caller's
+   *   signal ends the request before the body is returned.
    * @private
    */
   private async makeStreamRequest(
     endpoint: string,
     body: Record<string, unknown>,
     requestTimeoutOverride?: number,
+    abortSignal?: AbortSignal,
   ): Promise<ReadableStream<Uint8Array>> {
     const url = `${this.config.baseURL}${endpoint}`;
     const apiKey = this.nextApiKey();
@@ -2991,7 +3024,9 @@ export class AnthropicProvider implements IProvider {
         method: 'POST',
         headers: { ...headers, ...this.betaHeaders(body), 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: controller.signal,
+        // The caller's signal aborts the request as the connection timer does,
+        // and the body's reads after the headers have arrived.
+        signal: abortSignal ? AbortSignal.any([controller.signal, abortSignal]) : controller.signal,
       });
       let hardTimeoutId: ReturnType<typeof setTimeout> | null = null;
       const hardTimeout = new Promise<never>((_, reject) => {
@@ -3049,6 +3084,9 @@ export class AnthropicProvider implements IProvider {
       return response.body;
     } catch (error: unknown) {
       clearTimeout(timeoutId);
+      if (abortSignal?.aborted) {
+        throw new AnthropicProviderError('Request aborted by caller.', 'REQUEST_ABORTED');
+      }
       if (error instanceof AnthropicProviderError) throw error;
       // Masked like makeApiRequest's network failures: fetch's rejection
       // can name a credential-bearing base URL or quote the key header.

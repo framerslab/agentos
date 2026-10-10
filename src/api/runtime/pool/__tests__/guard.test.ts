@@ -20,7 +20,7 @@ const PANEL_DECISION: Record<keyof GenerateTextOptions, 'allow' | 'deny'> = {
   __panelDeadline: 'allow', __maskError: 'deny', _responseFormat: 'deny', _responseFormatBuilder: 'deny',
   _schemaInstruction: 'deny', _transcriptIncludeTrailingCallerMessages: 'deny', _continuation: 'deny',
   // Added on master after the allow list was written; rejected under panel until a decision allows them.
-  budget: 'deny', hookErrors: 'deny',
+  budget: 'deny', hookErrors: 'deny', abortSignal: 'deny',
 };
 
 describe('the pooled guard (deny list, presence not value)', () => {

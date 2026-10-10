@@ -1,6 +1,6 @@
 {
   "name": "@framers/agentos",
-  "version": "0.13.20",
+  "version": "0.13.31",
   "description": "AgentOS: open-source TypeScript framework for autonomous AI agents. Unified graph orchestration, cognitive memory, runtime tool forging, multi-tier guardrails, voice pipeline, and 11 LLM providers.",
   "homepage": "https://agentos.sh",
   "repository": {
@@ -219,6 +219,11 @@
       "import": "./dist/cognition/rag/graphrag/index.js",
       "default": "./dist/cognition/rag/graphrag/index.js",
       "types": "./dist/cognition/rag/graphrag/index.d.ts"
+    },
+    "./cognition/library": {
+      "import": "./dist/cognition/library/index.js",
+      "default": "./dist/cognition/library/index.js",
+      "types": "./dist/cognition/library/index.d.ts"
     },
     "./cognition/rag/*": {
       "import": "./dist/cognition/rag/*.js",

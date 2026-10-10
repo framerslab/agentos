@@ -158,6 +158,34 @@ describe('imageToBuffer', () => {
     expect((await imageToBuffer('data:image/svg+xml,%3Csvg%3E%3C/svg%3E')).toString('utf8')).toBe('<svg></svg>');
     expect([...(await imageToBuffer('data:image/png,%89PNG'))]).toEqual([0x89, 0x50, 0x4e, 0x47]);
     expect(await imageToBuffer('DATA:image/png;BASE64,aGVsbG8=')).toEqual(Buffer.from('hello'));
+    // Spaces around ;base64, as WHATWG Fetch reads a data URL.
+    expect(await imageToBuffer('data:image/png; base64,aGVsbG8=')).toEqual(Buffer.from('hello'));
+    expect(await imageToBuffer('data:image/png;base64 ,aGVsbG8=')).toEqual(Buffer.from('hello'));
+  });
+
+  it('drops tabs and line breaks from a data URL first, as the WHATWG URL parser does', async () => {
+    // A tab, or a line break where a long URL was wrapped, around ;base64 still reads as base64.
+    for (const url of [
+      'data:image/png;\tbase64,aGVsbG8=',
+      'data:image/png;base64\r\n,aGVsbG8=',
+      'data:image/png;ba\nse64,aGVs\nbG8=',
+    ]) {
+      expect(await imageToBuffer(url), JSON.stringify(url)).toEqual(Buffer.from('hello'));
+    }
+    // A percent-encoded payload loses them too.
+    expect([...(await imageToBuffer('data:image/png,%89P\nNG'))]).toEqual([0x89, 0x50, 0x4e, 0x47]);
+  });
+
+  it('reads a file URL whose scheme is in capitals', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'imageToBuffer-'));
+    try {
+      const file = join(dir, 'photo.png');
+      await writeFile(file, PNG_START);
+
+      expect(await imageToBuffer(pathToFileURL(file).href.replace(/^file:/, 'FILE:'))).toEqual(PNG_START);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('reads a file URL whose path has an escaped space', async () => {
