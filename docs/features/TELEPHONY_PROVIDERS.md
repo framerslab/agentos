@@ -65,7 +65,7 @@ import { TelnyxVoiceProvider } from '@framers/agentos';
 const provider = new TelnyxVoiceProvider({
   apiKey: process.env.TELNYX_API_KEY!,
   connectionId: process.env.TELNYX_CONNECTION_ID!,
-  publicKey: process.env.TELNYX_PUBLIC_KEY, // without it, webhooks are accepted unverified
+  publicKey: process.env.TELNYX_PUBLIC_KEY!, // without publicKey, verifyWebhook() accepts every webhook
 });
 ```
 
@@ -165,7 +165,7 @@ All three providers sign their webhook payloads:
 | Telnyx | Ed25519 over the timestamp and the raw body; a timestamp more than 300 seconds old is rejected | `telnyx-signature-ed25519`, `telnyx-timestamp` |
 | Plivo | HMAC-SHA256 (V3) over the URL, its query, the sorted form params and the nonce | `x-plivo-signature-v3` or `x-plivo-signature-ma-v3`, `x-plivo-signature-v3-nonce` |
 
-`CallManager.processWebhook()` calls the provider's `verifyWebhook()` before it parses any event, and drops a webhook that fails. A Telnyx provider constructed without `publicKey` skips the check and accepts every webhook; `webhookToleranceSec` (300 by default, 0 turns it off) sets the timestamp window.
+`CallManager.processWebhook()` calls the provider's `verifyWebhook()` before it parses any event, and drops a webhook that fails. A Telnyx provider constructed without `publicKey` skips the check and accepts every webhook, so anyone who can reach the webhook URL can post call events to `CallManager`; pass the key outside local development. `webhookToleranceSec` (300 by default, 0 turns it off) sets the timestamp window.
 
 ### Provider console settings
 
