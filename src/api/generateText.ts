@@ -40,6 +40,15 @@ import {
 } from '../core/llm/routing/UncensoredModelCatalog.js';
 import { checkContextFit } from './runtime/contextWindowFit.js';
 import { describeResponseFormatShape, responseFormatCarriesSchema } from './runtime/responseFormatForProvider.js';
+import {
+  asSpendBudget,
+  assertCallWithinBudget,
+  costOfUsageUSD,
+  promptCharsOf,
+  type SpendBudget,
+  type SpendBudgetOptions,
+} from './runtime/spendBudget.js';
+import { isCallerStop, markHookStop } from './runtime/callerStop.js';
 
 const fallbackLogger = createLogger('fallback');
 
@@ -751,6 +760,18 @@ export interface GenerateTextOptions {
    */
   onAfterGeneration?: (result: GenerationHookResult) => Promise<GenerationHookResult | void>;
   /**
+   * A spend budget for this call and, when the same {@link SpendBudget} instance is passed to several calls, for all of
+   * them: each provider call is checked against what is left before it is made and recorded after it, a failed
+   * request's billed usage included. A call the budget refuses is not tried on a fallback provider.
+   */
+  budget?: SpendBudget | SpendBudgetOptions;
+  /**
+   * What a generation or tool hook's error does: `'warn'` (the default) logs it and goes on; `'throw'` ends the call
+   * with it, so a guard written as a hook can stop a call. A call a hook stops is not tried on a fallback provider and
+   * does not count against the provider's health.
+   */
+  hookErrors?: 'warn' | 'throw';
+  /**
    * Called before each tool execution.  Can modify arguments, apply
    * permission checks, or return `null` to skip the tool call entirely.
    */
@@ -1058,6 +1079,8 @@ Return ONLY the JSON object: no markdown fences, no commentary.`;
  * @param toolNames - Names of available tools (informational context for the planner).
  * @param config - Optional planning configuration overrides.
  * @param totalUsage - Mutable usage aggregator: the planning call's tokens are added here.
+ * @param spend - The run's spend budget, the provider the planning call is sent to, and what to call the call in the
+ *   budget's records: the planning call is checked against the budget before it is made and recorded after it.
  * @returns The parsed {@link Plan}, or `undefined` if parsing fails gracefully.
  *
  * @internal
@@ -1069,6 +1092,7 @@ export async function createPlan(
   toolNames: string[],
   config: PlanningConfig | undefined,
   totalUsage: TokenUsage,
+  spend?: { budget: SpendBudget; providerId: string; what: string },
 ): Promise<Plan | undefined> {
   const systemPrompt = config?.systemPrompt ?? DEFAULT_PLANNING_SYSTEM_PROMPT;
   const temperature = config?.temperature ?? 0.2;
@@ -1093,6 +1117,9 @@ export async function createPlan(
     planMessages.push(msg);
   }
 
+  if (spend) {
+    assertCallWithinBudget(spend.budget, { providerId: spend.providerId, modelId }, promptCharsOf(planMessages), maxTokens, spend.what);
+  }
   const response = await provider.generateCompletion(modelId, planMessages, {
     temperature,
     maxTokens,
@@ -1102,6 +1129,8 @@ export async function createPlan(
     ...(config?.cache !== undefined ? { cache: config.cache } : {}),
     ...(config?.thinking === false ? { thinking: false } : {}),
   });
+
+  spend?.budget.record(costOfUsageUSD(spend.providerId, modelId, response.usage), response.usage?.totalTokens ?? 0, spend.what);
 
   // Accumulate planning call usage
   if (response.usage) {
@@ -1462,6 +1491,10 @@ export function isContentPolicyRefusal(error: unknown): boolean {
 
 export function isRetryableError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
+  // A call the caller stopped (its spend budget's refusal, a hook under
+  // `hookErrors: 'throw'`) never moves to another provider. The text match
+  // below would otherwise read a cap such as `$500.00` as an HTTP 500.
+  if (isCallerStop(error)) return false;
 
   // A primary that cannot initialize (rejected key, unreachable endpoint)
   // is unusable for this call whatever the cause; the next provider may not be.
@@ -1966,6 +1999,11 @@ function buildHelperToolExecutionContext(
  * ```
  */
 export async function generateText(opts: GenerateTextOptions): Promise<GenerateTextResult> {
+  // One budget instance for the whole call: every options object built from
+  // `opts` below (a fallback hop, a continuation leg) carries it, so each hop
+  // is charged to the same budget.
+  const budget = asSpendBudget(opts.budget);
+  if (budget) opts = { ...opts, budget };
   const startedAt = Date.now();
   // Root-of-call start for observer `durationMs`. On a provider-fallback the
   // primary attempt fails and generateText recurses (below) targeting the
@@ -2244,6 +2282,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             ...(planConfig?.thinking === false || opts.thinking === false ? { thinking: false as const } : {}),
           },
           totalUsage,
+          budget ? { budget, providerId: resolved.providerId, what: 'generate_text.plan' } : undefined,
         );
 
         if (resolvedPlan) {
@@ -2278,6 +2317,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           // The hook, then the approval gate, before each parsed call runs,
           // as on the native loop below.
           onBeforeToolExecution: opts.onBeforeToolExecution,
+          hookErrors: opts.hookErrors,
           approvalGate: opts.__approvalGate,
           // Native tool turns (session history, a failover continuation)
           // become the shim's own <tool_call> / <tool_response> text.
@@ -2290,6 +2330,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               shimSendChecked = true;
               assertFitsContextWindow({ messages: msgs });
             }
+            if (budget) assertCallWithinBudget(budget, resolved, promptCharsOf(msgs), opts.maxTokens, 'generate_text.shim');
             const r = await provider.generateCompletion(resolved.modelId, msgs as any, {
               temperature: opts.temperature,
               ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
@@ -2327,6 +2368,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               // ignoring the caller's requestTimeout bound.
               ...(opts.requestTimeout !== undefined ? { requestTimeout: opts.requestTimeout } : {}),
             } as any);
+            budget?.record(costOfUsageUSD(resolved.providerId, resolved.modelId, r.usage), r.usage?.totalTokens ?? 0, 'generate_text.shim');
             // Aggregate the COMPLETE normalized usage from every shim
             // roundtrip (spec batch-1 review fold) as each call returns, so
             // an attempt that fails on a later round still reports what its
@@ -2441,6 +2483,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               effectiveMessages = modified.messages as any;
             }
           } catch (hookErr) {
+            if (opts.hookErrors === 'throw') throw markHookStop(hookErr);
             console.warn('[agentos] onBeforeGeneration hook error:', hookErr);
           }
         }
@@ -2448,6 +2491,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         // A continuation leg's first send carries its completed tool rounds.
         // Later steps are not checked again.
         if (step === 0) assertFitsContextWindow({ messages: effectiveMessages, tools: toolSchemas });
+        if (budget) {
+          assertCallWithinBudget(budget, resolved, promptCharsOf(effectiveMessages, undefined, toolSchemas), opts.maxTokens, 'generate_text.step');
+        }
 
         const response = await withAgentOSSpan(
           'agentos.api.generate_text.step',
@@ -2556,6 +2602,11 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           lastProviderMessageId = typeof response.id === 'string' && response.id ? response.id : null;
           lastCacheDiagnostics = response.cacheDiagnostics;
         }
+        budget?.record(
+          costOfUsageUSD(resolved.providerId, resolved.modelId, response.usage),
+          response.usage?.totalTokens ?? 0,
+          'generate_text.step',
+        );
         if (response.usage) {
           totalUsage.promptTokens += response.usage.promptTokens ?? 0;
           totalUsage.completionTokens += response.usage.completionTokens ?? 0;
@@ -2625,6 +2676,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               }
             }
           } catch (hookErr) {
+            if (opts.hookErrors === 'throw') throw markHookStop(hookErr);
             console.warn('[agentos] onAfterGeneration hook error:', hookErr);
           }
         }
@@ -2750,6 +2802,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 }
                 parsedArgs = hookResult.args;
               } catch (hookErr) {
+                if (opts.hookErrors === 'throw') throw markHookStop(hookErr);
                 console.warn('[agentos] onBeforeToolExecution hook error:', hookErr);
               }
             }
@@ -2933,8 +2986,10 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
     // status-aware policy) and skip the network round-trip entirely.
     // Note: we record against `metricProviderId` not the inbound
     // `opts.provider` because the model router may have resolved a
-    // different provider than the caller asked for.
-    if (metricProviderId && !(error instanceof LLMProviderCircuitOpenError)) {
+    // different provider than the caller asked for. A call the caller
+    // stopped (its spend budget's refusal, a hook's stop) says nothing about
+    // the provider and is not recorded.
+    if (metricProviderId && !(error instanceof LLMProviderCircuitOpenError) && !isCallerStop(error)) {
       globalLLMProviderHealth.recordFailure(metricProviderId, error);
     }
     // The failed attempt is billed for its completed steps and for a step
@@ -2942,6 +2997,13 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
     // here, once: this call's ledger row and a usage event of its own; a
     // fallback leg meters itself.
     addModelUsage(attemptUsage, usageOfError(error));
+    // The spend budget is charged what the failed request was billed, as it
+    // is charged for each step that completed.
+    if (budget && usageOfError(error) !== undefined) {
+      const billed: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+      addModelUsage(billed, usageOfError(error));
+      budget.record(costOfUsageUSD(metricProviderId ?? '', metricModelId ?? '', billed), billed.totalTokens, 'generate_text.failed');
+    }
     metricUsage = attemptUsage;
     if (hasBillableUsage(attemptUsage)) {
       fireLlmUsageObserver({
@@ -3186,6 +3248,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           if (toolsRanBefore(fbError)) break;
           // The leg walked every entry after it and all of them failed.
           if (chainWalkedBefore(fbError)) break;
+          // The call's budget refused the leg, or a hook stopped it: every
+          // later leg would be stopped the same way.
+          if (isCallerStop(fbError)) break;
           walkState = advanceFallbackWalk(walkState, fb.walkRole, fbError);
         }
       }

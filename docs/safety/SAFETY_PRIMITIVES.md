@@ -1,11 +1,11 @@
 ---
-description: "Operational safety primitives in AgentOS: circuit breaker, provider health registry, action deduplicator, stuck detector, cost guard, spend meter and tool execution guard. The provider health registry and the spend meter run inside the runtime; a host composes the others around its own calls."
+description: "Operational safety primitives in AgentOS: circuit breaker, provider health registry, action deduplicator, stuck detector, cost guard, spend meter and tool execution guard. The provider health registry, the spend meter and a spend budget's cost guard run inside the runtime; a host composes the others around its own calls."
 keywords: [agent safety, llm circuit breaker, provider health, llm fallback router, status-aware breaker, cost guard, spend meter, stuck detector, runaway agent, ai cost cap, agentos safety, operational guardrails]
 ---
 
 # Safety Primitives
 
-Autonomous agents with LLM access can incur unbounded cost when a vendor API flakes, a retry policy misfires, or an output guardrail silently rejects every attempt. AgentOS ships small, independent primitives that bound the failure modes behind runaway spend, stuck loops and hung tools. Two run inside the runtime: `generateText()` and `streamText()` consult the [provider health registry](#llmproviderhealthregistry), and `processRequest()` reserves against a configured [spend meter](#spend-meter). The others are classes a host calls around its own model and tool calls.
+Autonomous agents with LLM access can incur unbounded cost when a vendor API flakes, a retry policy misfires, or an output guardrail silently rejects every attempt. AgentOS ships small, independent primitives that bound the failure modes behind runaway spend, stuck loops and hung tools. Three run inside the runtime: `generateText()` and `streamText()` consult the [provider health registry](#llmproviderhealthregistry), `processRequest()` reserves against a configured [spend meter](#spend-meter), and `generateText()`, `streamText()`, `generateObject()`, `embedText()` and `agent()` check each provider call against a [CostGuard](#costguard) when they are given a spend budget ([Cost Optimization](./COST_OPTIMIZATION.md#a-spend-budget-for-a-run-of-calls)). A host calls the others around its own model and tool calls, and can call a CostGuard of its own the same way.
 
 Each has defaults and works alone or composed with the others ([How they work together](#how-they-work-together)).
 
@@ -94,7 +94,7 @@ The 5-minute window on 402 reflects operational reality: credits might get toppe
 ### How the router uses it
 
 1. **Before the primary call**, `generateText` consults `globalLLMProviderHealth.isOpen(resolvedProviderId)`. If the breaker is open, it throws a synthetic `LLMProviderCircuitOpenError` with `httpStatus: 503`. The existing [`isRetryableError`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts) check recognizes that status and routes the call into the fallback chain. No network round-trip, no TLS handshake, no waste.
-2. **On a real provider error** (anything caught in the outer try/catch), `recordFailure(providerId, error)` classifies the error by HTTP status and either trips immediately (for 401/402/403) or increments the streak counter (for 429/5xx).
+2. **On a real provider error** (anything caught in the outer try/catch except the breaker's own `LLMProviderCircuitOpenError` and a call the caller stopped: a spend budget's refusal, or a hook's error under `hookErrors: 'throw'`), `recordFailure(providerId, error)` classifies the error by HTTP status and either trips immediately (for 401/402/403) or increments the streak counter (for 429/5xx).
 3. **On success**, `recordSuccess(providerId)` resets the streak counter so a future transient failure starts fresh. A single success does NOT shorten an already-open cooldown: the breaker is open precisely because we want to stop probing for a window.
 4. **In the fallback chain loop**, every fallback entry is checked against `isOpen()` before its attempt. A dead chain entry is skipped instantly, so the loop walks to the first healthy provider with O(N) constant-time checks rather than O(N) network calls.
 
@@ -231,7 +231,7 @@ detector.clearAgent('agent-1');
 
 ## CostGuard
 
-Per-agent spending caps with three levels: session, daily, and single operation, kept in process memory. CostGuard stops nothing itself: the host asks `canAfford()` before a call and records the cost after it, and `onCapReached` fires when a recorded cost reaches a cap. AgentOS runs no CostGuard of its own; `CostCapExceededError` is exported for a host to throw, and CostGuard does not throw it.
+Per-agent spending caps with three levels: session, daily, and single operation, kept in process memory. CostGuard stops nothing itself: the host asks `canAfford()` before a call and records the cost after it, and `onCapReached` fires when a recorded cost reaches a cap. CostGuard never throws `CostCapExceededError`, and AgentOS runs no CostGuard of its own unless a call carries a spend budget: a `budget` on `generateText()`, `streamText()`, `generateObject()`, `embedText()` or `agent()` keeps a CostGuard (the one passed as `guard`, or one it makes), checks each provider call against it before the call and records the call's cost after it, and refuses a call that would pass the budget with `CostCapExceededError` unless the budget is set to warn. `reserveSpend()` throws the same error, with the cap type `daily`, when an admission would take a day's committed spending past its cap; that day's total lives in the caller's own tables, not in a CostGuard.
 
 ### Config
 
@@ -257,6 +257,7 @@ const guard = new CostGuard({
 
 // Before each operation, check affordability
 const check = guard.canAfford('agent-1', 0.003); // estimated cost
+// A refusal names its cap in check.capType, with the total so far and the cap in check.currentCostUsd and check.limitUsd
 if (!check.allowed) {
   throw new Error(check.reason); // "Daily cost $5.0031 would exceed limit $5.00"
 }
@@ -278,7 +279,7 @@ guard.resetDailyAll();
 
 ## Spend meter
 
-A persisted allowance per account and period, for a product that sells a number of turns a month. `CostGuard` caps one process's spending in memory; the spend meter keeps the count in a database several processes share, so two servers cannot both sell the last turn, and a restart loses nothing.
+A persisted allowance per account and period, for a product that sells a number of turns a month, or per account over a rolling window, for one that allows a number of calls in any hour. `CostGuard` caps one process's spending in memory; the spend meter keeps the count in a database several processes share, so two servers cannot both sell the last turn, and a restart loses nothing.
 
 `processRequest` reserves before anything reaches a provider and the turn settles the reservation when it ends:
 
@@ -304,13 +305,18 @@ Each refusal reaches the caller before any model call. The turn settles in the o
 |--------|---------|-------------|
 | `db` | required | The store. It must offer transactions, persistence and concurrent access unless `requireShared: false` |
 | `allowanceFor(accountId, period)` | required | The account's allowance in units for the period, read at every reservation |
-| `periodOf(now, accountId)` | required | The period a moment falls in for the account, such as its calendar month in its own time zone |
+| `periodOf(now, accountId)` | required unless `windowMs` is set | The period a moment falls in for the account, such as its calendar month in its own time zone. Not read with a window |
+| `windowMs` | none | A rolling window in milliseconds, in place of periods: the allowance holds the units reserved or consumed in the `windowMs` before each reservation |
 | `leaseMs` | `45000` | How long a reservation lives without a heartbeat; the turn heartbeats on each tool iteration |
 | `maxAttemptsPerOperation` | `3` | Reservations one operation may take, its retries after a release included |
 | `retry` | 3 tries, 50 to 400 ms, 2 s deadline | Retries of transient store errors before `SpendMeterUnavailableError` |
 | `resolveUnknown(reservation)` | none | Asked by `reconcile()` what became of an expired reservation: `consumed`, `released` or `unknown` |
 | `unknownAfterLease` | `'release'` | How an expired reservation settles when the answer is `unknown` |
 | `ensureSchema` | `true` | Create the two tables when missing; a product that runs its own migrations copies `SPEND_METER_DDL` and passes `false` |
+
+With `windowMs` the meter counts from the reservations themselves, inside each reservation's own transaction and after it has taken the account row's lock, so two reservations cannot both take the last unit of a window. Every row then carries the period `window`, which is the period `allowanceFor` is asked for. A unit counts from its reservation until more than `windowMs` have passed. A released reservation never counts, and one whose lease ran out still counts until `reconcile()` releases it. `snapshot()` answers the units consumed and reserved inside the window and what remains. A meter given neither `periodOf` nor `windowMs` throws when it is constructed.
+
+The window's count reads the index `idx_spend_reservations_account`, which `SPEND_METER_DDL` creates with the tables. `ensureSchema` runs that text only where the tables are missing, so a store whose tables an earlier release made needs that one `CREATE INDEX IF NOT EXISTS` statement run on it.
 
 ### Usage
 
@@ -344,6 +350,20 @@ const { used, remaining } = await meter.snapshot(userId);
 // A plan change mid-period: the units used carry over, the new allowance applies at once
 await meter.setAllowance(userId, 600);
 ```
+
+### Retention
+
+A settled reservation's row stays, so that a retry of its operation is recognised, and a window meter keeps one row per account. `purge({ before, limit })` deletes the reservations settled before `before` and, for a window meter, the account rows that hold nothing reserved and were last written before `before`. One call deletes at most `limit` of each (default 1,000) and answers how many of each it deleted, so a sweep calls it again while a count comes back full.
+
+```typescript
+// Twenty calls an account in any hour
+const hourly = new SqlSpendMeter({ db, windowMs: 3_600_000, allowanceFor: () => 20 });
+
+// The sweep: what settled more than an hour ago is past the window, and goes
+const { reservations, periods } = await hourly.purge({ before: Date.now() - 3_600_000 });
+```
+
+A reservation still reserved is never deleted, and neither is a period meter's period row, which holds the period's count: a month's `snapshot()` reads the same after its settled reservations are purged. For a window meter, a `before` at least one window back keeps every unit the window counts. Once an operation's row is purged the meter no longer knows the operation: a retry of it reserves and counts again, and a refund of it finds nothing, so `before` lies past the time either can come. `purge()` deletes across every account in the two tables, so two meters on one store share its retention.
 
 ## ToolExecutionGuard
 
@@ -425,8 +445,9 @@ async function guardedCall(agentId: string, prompt: string) {
 |-------|-----------|----------------|------------|
 | CircuitBreaker | Opens after failures, cooldown before retry | 5 fails in 60s | [`CircuitOpenError`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CircuitBreaker.ts) |
 | LLMProviderHealthRegistry | Skips a provider that keeps failing, in `generateText()` and `streamText()` | 402: 1 failure; 401/403: 1; 429: 3; 5xx: 5 | `LLMProviderCircuitOpenError` (status 503, routed to the fallback chain) |
-| CostGuard | Spending caps per session/day/operation, checked by the host | $5/day per agent | `{ allowed: false, reason }` from `canAfford()`; `onCapReached` callback |
+| CostGuard | Spending caps per session/day/operation, checked by the host or by a spend budget ([Cost Optimization](./COST_OPTIMIZATION.md#a-spend-budget-for-a-run-of-calls)) | $5/day per agent | `{ allowed: false, reason }` from `canAfford()`; `onCapReached` callback; `CostCapExceededError` from a spend budget |
 | Spend meter | A persisted allowance per account and period, in `processRequest()` | the host's allowance | `BILLING_ALLOWANCE_EXHAUSTED` error chunk |
+| Spend reservations | A day's spending cap held in the caller's own tables, across processes ([Cost Optimization](./COST_OPTIMIZATION.md#a-days-bound-across-processes)) | the cap each admission names | `CostCapExceededError` (`daily`) from `reserveSpend()` |
 | StuckDetector | Flags repeated output or oscillation | 3 identical outputs in 5 min | `{ isStuck: true, reason }` |
 | ToolExecutionGuard | Timeout + per-tool circuit breaker | 30s timeout | `{ success: false, timedOut }` |
 | ActionDeduplicator | Prevent duplicate actions within window | 1 hr window, 10k entries | Boolean check |

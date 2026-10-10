@@ -3,6 +3,7 @@ import { APPROVAL_GRANTED, askApprovalGate, type ApprovalGateFn } from '../appro
 import { renderToolSystemBlock } from './renderer';
 import { parseToolCalls } from './parser';
 import { formatToolResponse } from './activation';
+import { markHookStop } from '../callerStop';
 
 export interface EmulatedLoopMessage { role: string; content: string; }
 
@@ -30,9 +31,17 @@ export interface RunEmulatedToolLoopOptions {
   /**
    * Called before each parsed call runs, on `{ name, args, id: '', step }`.
    * The returned `args` replace the call's; `null` skips the tool. A hook
-   * that throws is logged and the tool runs.
+   * that throws is logged and the tool runs, unless `hookErrors` is `'throw'`.
    */
   onBeforeToolExecution?: (info: { name: string; args: Record<string, unknown>; id: string; step: number }) => Promise<{ args: Record<string, unknown> } | null>;
+  /**
+   * What an error thrown by `onBeforeToolExecution` does: `'warn'` (the
+   * default) logs it and the tool runs; `'throw'` ends the loop with it,
+   * marked as the caller's stop, and that call's tool does not run. The calls
+   * of one turn run side by side, so a tool of another call in the same turn
+   * may still run.
+   */
+  hookErrors?: 'warn' | 'throw';
   /** The agency approval gate, called after the hook: anything but its exact approval skips the tool. */
   approvalGate?: ApprovalGateFn;
 }
@@ -93,6 +102,7 @@ export async function runEmulatedToolLoop(
             }
             args = hooked.args;
           } catch (hookErr) {
+            if (opts.hookErrors === 'throw') throw markHookStop(hookErr);
             console.warn('[agentos] onBeforeToolExecution hook error:', hookErr);
           }
         }

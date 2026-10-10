@@ -48,6 +48,8 @@ export { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
 export { generateObject } from './generateObject.js';
 export { streamObject } from './streamObject.js';
 export { embedText } from './embedText.js';
+export { SpendBudget, UnpricedModelError, asSpendBudget, costOfUsageUSD, estimateCallCostUSD } from './runtime/spendBudget.js';
+export type { SpendBudgetOptions, SpendLimitInfo } from './runtime/spendBudget.js';
 export { generateImage } from './generateImage.js';
 export { transferStyle } from './transferStyle.js';
 
