@@ -563,6 +563,13 @@ class TranscriptionConnection {
   rolloverFailure: Error | undefined;
   /** Session audio offset where this connection stopped receiving audio. */
   feedEndMs: number | undefined;
+  /**
+   * Why the socket closed when this side did not close it: the error it
+   * reported, or its close code. Set as the drop is reported, so whoever
+   * awaited {@link connect} can tell a connection that dropped before the
+   * session adopted it.
+   */
+  dropReason: Error | undefined;
   readonly timers: Array<ReturnType<typeof setTimeout>> = [];
   private lastError: Error | undefined;
   private commitCount = 0;
@@ -676,10 +683,10 @@ class TranscriptionConnection {
         }
         if (this.state === 'closed') return; // closed by this side
         this.release();
-        this.handlers.onDrop(
-          this,
-          this.lastError ?? new Error(`openai realtime transcription ws closed unexpectedly (${code})`)
-        );
+        const reason =
+          this.lastError ?? new Error(`openai realtime transcription ws closed unexpectedly (${code})`);
+        this.dropReason = reason;
+        this.handlers.onDrop(this, reason);
       });
     });
   }
@@ -867,10 +874,19 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     super();
   }
 
-  /** Opens the first connection. Rejects when it cannot open; there is no retry here, so a chain can fall back. */
+  /**
+   * Opens the first connection. Rejects when it cannot open; a connect that fails is not retried here,
+   * so a chain can fall back at once. A first connection whose socket closes in the turn its session
+   * update is confirmed never joins the session: a replacement opens by the retry rules before the
+   * start resolves, and the start rejects with the error that ends them, so the caller is not handed a
+   * session that fails before it can listen.
+   */
   async start(): Promise<void> {
-    const connection = this.createConnection();
-    await connection.connect();
+    const first = this.createConnection();
+    await first.connect();
+    const connection = first.dropReason ? await this.openConnection(first.dropReason) : first;
+    // openConnection() resolves no connection only once the session is closed, and nobody holds it yet.
+    if (!connection) return;
     this.adopt(connection);
     if (this.settings.usageIntervalMs > 0) {
       this.usageTimer = setInterval(() => this.reportUsage(), this.settings.usageIntervalMs);
@@ -1039,10 +1055,15 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
    * A connection dropped: retire it, and reconnect when no other connection
    * receives audio. A next connection that drops during its rollover's
    * overlap leaves its clocks for the connection that replaces it once the old
-   * one has drained.
+   * one has drained. A connection the session has not adopted yet is left to
+   * {@link start} or {@link openConnection}, which still awaits it and reads
+   * its {@link TranscriptionConnection.dropReason}: a reconnect started here
+   * as well would open a second connection beside the one a rollover retries.
    */
   private handleDrop(connection: TranscriptionConnection, reason: Error): void {
     if (this.closed) return;
+    // Not adopted (it has no index yet): its socket closed in the turn that confirmed it.
+    if (connection.index === 0) return;
     if (Date.now() - connection.readyAt > this.settings.connectTimeoutMs) this.failures = 0;
     if (this.rolloverOp?.next === connection) this.droppedSuccessor = rolloverClocks(connection);
     this.retire(connection, true);
@@ -1081,10 +1102,12 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
 
   /**
    * Opens a connection, retrying by the retry rules. With `firstError` (a
-   * drop), the first attempt waits too. A connection still connecting is in
-   * {@link connecting}, and a wait before a retry in {@link retryWaits}, so
-   * `close()` ends both at once. Resolves `undefined` when the session closed
-   * meanwhile; rejects with the error that ended the retries.
+   * drop), the first attempt waits too. A connection whose socket closes in
+   * the turn its session update is confirmed is a failed attempt like any
+   * other. A connection still connecting is in {@link connecting}, and a wait
+   * before a retry in {@link retryWaits}, so `close()` ends both at once.
+   * Resolves `undefined` when the session closed meanwhile; rejects with the
+   * error that ended the retries.
    */
   private async openConnection(firstError?: Error): Promise<TranscriptionConnection | undefined> {
     let lastError = firstError;
@@ -1123,6 +1146,11 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
       if (this.closed) {
         connection.close();
         return undefined;
+      }
+      if (connection.dropReason) {
+        // Its socket closed in the turn that confirmed it, before this went on: a failed attempt.
+        lastError = connection.dropReason;
+        continue;
       }
       return connection;
     }
@@ -1850,6 +1878,9 @@ export class OpenAIRealtimeTranscriptionSTT implements IStreamingSTT, HealthyPro
    * Opens a transcription session on a fresh key from the pool. Resolves once
    * OpenAI has confirmed the session update; rejects (with no retry) when the
    * first connection cannot open, so a {@link StreamingSTTChain} falls back.
+   * A first connection that closes as its session update is confirmed is
+   * replaced by the retry rules first: this resolves once the replacement is
+   * open, and rejects with the error that ends the retries.
    */
   async startSession(config?: StreamingSTTConfig): Promise<StreamingSTTSession> {
     const settings = resolveSettings(
