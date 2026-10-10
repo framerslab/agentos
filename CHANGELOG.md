@@ -1,3 +1,14 @@
+## [0.13.31](https://github.com/framerslab/agentos/compare/v0.13.30...v0.13.31) (2026-10-10)
+
+### feat
+
+* **library:** a search narrowed to several folders, and several narrowings at once (#251) ([6ba17b9](https://github.com/framerslab/agentos/commit/6ba17b95ebbc47d3d31d43440a97f7c1688d825c))
+* **memory:** read a document in a worker thread with a heap cap and a deadline (#248) ([46b109d](https://github.com/framerslab/agentos/commit/46b109d523279a89ce75aaba83389d51d1ef884e))
+
+### docs
+
+* tenth round of audit follow-ups to the guides (#228) ([1b8ad33](https://github.com/framerslab/agentos/commit/1b8ad331179b6bbfaaf5a923db579d40bbc40198))
+
 ## [0.13.30](https://github.com/framerslab/agentos/compare/v0.13.29...v0.13.30) (2026-10-10)
 
 ### fix
