@@ -1,6 +1,6 @@
 import * as http from 'node:http';
 import type { AddressInfo, LookupFunction } from 'node:net';
-import { gzipSync } from 'node:zlib';
+import { brotliCompressSync, deflateSync, gzipSync } from 'node:zlib';
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
@@ -24,6 +24,18 @@ function resolvesTo(address: string): LookupFunction {
     if (options.all) callback(null, [{ address, family }]);
     else callback(null, address, family);
   };
+}
+
+/** A resolver that answers every name with all of `addresses`, in that order, and counts its calls. */
+function resolvesToAll(addresses: string[]): LookupFunction & { calls: number } {
+  const lookup = ((_hostname, options, callback) => {
+    lookup.calls += 1;
+    const entries = addresses.map((address) => ({ address, family: address.includes(':') ? 6 : 4 }));
+    if (options.all) callback(null, entries);
+    else callback(null, entries[0].address, entries[0].family);
+  }) as LookupFunction & { calls: number };
+  lookup.calls = 0;
+  return lookup;
 }
 
 /** Stands in for a public host: the test server's loopback address is allowed, nothing else. */
@@ -76,6 +88,27 @@ beforeAll(async () => {
         res.writeHead(200, { 'content-type': 'image/png', 'content-encoding': 'zstd' });
         res.end(PNG);
         return;
+      case '/deflate':
+        res.writeHead(200, { 'content-type': 'image/png', 'content-encoding': 'deflate' });
+        res.end(deflateSync(PNG));
+        return;
+      case '/br':
+        res.writeHead(200, { 'content-type': 'image/png', 'content-encoding': 'br' });
+        res.end(brotliCompressSync(PNG));
+        return;
+      case '/silent':
+        // Accepts the request and never answers it.
+        return;
+      case '/upgrade':
+        // A protocol switch, written by hand: Node's own response cannot send a 101.
+        req.socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
+        return;
+      case '/slow-1':
+      case '/slow-2':
+      case '/slow-3':
+        // Each hop answers within the deadline; the chain does not.
+        setTimeout(() => redirect(`/slow-${Number((req.url ?? '').slice(-1)) + 1}`), 150);
+        return;
       case '/stall':
         res.writeHead(200, { 'content-type': 'image/png' });
         res.write(PNG.subarray(0, 4));
@@ -116,7 +149,49 @@ describe('fetchUntrustedImage', () => {
     // A public-looking name whose DNS answers 127.0.0.1 is refused when the connection is made.
     await expect(
       fetchUntrustedImage(`http://images.example.test:${port}/image.png`, { lookup: resolvesTo('127.0.0.1') }),
-    ).rejects.toMatchObject({ code: 'IMAGE_URL_REFUSED', message: expect.stringContaining('127.0.0.1') });
+    ).rejects.toMatchObject({
+      code: 'IMAGE_URL_REFUSED',
+      message: 'imageToBuffer: images.example.test does not resolve to a public network address.',
+      resolvedAddress: '127.0.0.1',
+    });
+    expect(received).toEqual([]);
+  });
+
+  it('refuses a name when any one of its addresses is refused, in either order, and sends nothing', async () => {
+    for (const addresses of [['127.0.0.1', '10.0.0.1'], ['10.0.0.1', '127.0.0.1']]) {
+      await expect(
+        fetchUntrustedImage(`http://images.example.test:${port}/image.png`, {
+          allowAddress: serverOnly,
+          lookup: resolvesToAll(addresses),
+        }),
+        addresses.join(', '),
+      ).rejects.toMatchObject({ code: 'IMAGE_URL_REFUSED' });
+    }
+    expect(received).toEqual([]);
+  });
+
+  it('connects to the address its own check passed, after one lookup', async () => {
+    // The checked answer is a documentation address no host serves, so the
+    // request can only fail. A second, unchecked lookup would have found the
+    // test server; the server sees nothing, and the resolver ran once.
+    const lookup = resolvesToAll(['203.0.113.7']);
+    await expect(
+      fetchUntrustedImage(`http://images.example.test:${port}/image.png`, {
+        allowAddress: (address) => address === '203.0.113.7',
+        lookup,
+        timeoutMs: 500,
+      }),
+    ).rejects.toThrow();
+    expect(lookup.calls).toBe(1);
+    expect(received).toEqual([]);
+  });
+
+  it('refuses an IPv6 literal of this machine, in brackets, before connecting', async () => {
+    for (const host of ['[::1]', '[::ffff:127.0.0.1]']) {
+      await expect(fetchUntrustedImage(`http://${host}:${port}/image.png`), host).rejects.toMatchObject({
+        code: 'IMAGE_URL_REFUSED',
+      });
+    }
     expect(received).toEqual([]);
   });
 
@@ -132,7 +207,7 @@ describe('fetchUntrustedImage', () => {
         allowAddress: serverOnly,
         lookup: resolvesTo('169.254.169.254'),
       }),
-    ).rejects.toMatchObject({ code: 'IMAGE_URL_REFUSED', message: expect.stringContaining('169.254.169.254') });
+    ).rejects.toMatchObject({ code: 'IMAGE_URL_REFUSED', resolvedAddress: '169.254.169.254' });
     expect(received).toEqual(['/to-name']);
   });
 
@@ -173,6 +248,30 @@ describe('fetchUntrustedImage', () => {
     expect(image).toEqual(PNG);
     expect(lastHeaders['accept-encoding']).toBe('identity');
   });
+
+  it('decodes a deflate or br body a server sends anyway', async () => {
+    for (const route of ['/deflate', '/br']) {
+      expect(await fetchUntrustedImage(`http://127.0.0.1:${port}${route}`, { allowAddress: serverOnly }), route).toEqual(PNG);
+    }
+  });
+
+  it('gives up on a server that never sends its headers', async () => {
+    await expect(
+      fetchUntrustedImage(`http://127.0.0.1:${port}/silent`, { allowAddress: serverOnly, timeoutMs: 300 }),
+    ).rejects.toThrow('took longer than 300 ms');
+  });
+
+  it('gives up on a redirect chain whose hops each answer in time but not all of them together', async () => {
+    await expect(
+      fetchUntrustedImage(`http://127.0.0.1:${port}/slow-1`, { allowAddress: serverOnly, timeoutMs: 400 }),
+    ).rejects.toThrow('took longer than 400 ms');
+  });
+
+  it('refuses a protocol upgrade at once, instead of waiting past the deadline', async () => {
+    await expect(
+      fetchUntrustedImage(`http://127.0.0.1:${port}/upgrade`, { allowAddress: serverOnly, timeoutMs: 10_000 }),
+    ).rejects.toThrow('answered with a protocol upgrade');
+  }, 5_000);
 
   it('stops decoding a compressed body once it passes the limit', async () => {
     await expect(
@@ -218,6 +317,16 @@ describe('imageToBuffer with untrusted input', () => {
       code: 'IMAGE_URL_REFUSED',
     });
     expect(received).toEqual([]);
+  });
+
+  it('reads the URL scheme in any case', async () => {
+    // HTTP:// is fetched under the untrusted rules (refused here), not read as a path.
+    await expect(imageToBuffer(`HTTP://127.0.0.1:${port}/image.png`, { untrusted: true })).rejects.toMatchObject({
+      code: 'IMAGE_URL_REFUSED',
+    });
+    await expect(imageToBuffer('FILE:///etc/hosts', { untrusted: true })).rejects.toMatchObject({
+      code: 'IMAGE_LOCAL_FILE_REFUSED',
+    });
   });
 
   it('reads no local file', async () => {

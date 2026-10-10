@@ -65,11 +65,12 @@ import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../core/util
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import type { AssembledMemoryContext } from '../memory/core/types.js';
 import { ConversationHistoryManager } from './ConversationHistoryManager';
-import { CognitiveMemoryBridge } from './CognitiveMemoryBridge';
+import { CognitiveMemoryBridge, type CognitiveMemoryTurnScope } from './CognitiveMemoryBridge';
 import { SentimentTracker } from './SentimentTracker';
 import { MetapromptExecutor } from './MetapromptExecutor';
 import { feedbackTraceMessage, type NormalizedUserFeedback } from './userFeedback';
 import { resolveReasoningTraceLimits, type ReasoningTraceLimits } from './reasoningTraceLimits';
+import { settlesWithin, shutdownTimeoutOrDefault } from './shutdownBound';
 
 const DEFAULT_MAX_CONVERSATION_HISTORY_TURNS = 20;
 const DEFAULT_SELF_REFLECTION_INTERVAL_TURNS = 5;
@@ -110,6 +111,13 @@ function withSystemMessage(messages: ChatMessage[], text: string): ChatMessage[]
   return [...messages.slice(0, at), { role: 'system', content: text }, ...messages.slice(at)];
 }
 
+/** `value` when it is an abort signal: an object that takes abort listeners. */
+function asAbortSignal(value: unknown): AbortSignal | undefined {
+  return value && typeof value === 'object' && typeof (value as AbortSignal).addEventListener === 'function'
+    ? (value as AbortSignal)
+    : undefined;
+}
+
 /** `value` when it is a usage report as a provider gives one: an object with a numeric token count. */
 function asUsageReport(value: unknown): ModelUsage | undefined {
   if (!value || typeof value !== 'object') return undefined;
@@ -127,6 +135,23 @@ function contentKey(content: unknown): string {
   } catch {
     return '';
   }
+}
+
+/** The ids a turn's cognitive memory works under (`metadata.memoryScope`). */
+interface TurnMemoryScope {
+  userId?: string;
+  sessionId?: string;
+}
+
+/** The memory scope a turn names in `metadata.memoryScope`, blank ids left out; undefined when it names none. */
+function memoryScopeOf(turnInput: GMITurnInput): TurnMemoryScope | undefined {
+  const named = turnInput.metadata?.memoryScope;
+  if (!named || typeof named !== 'object') return undefined;
+  const visible = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value : undefined);
+  const userId = visible(named.userId);
+  const sessionId = visible(named.sessionId);
+  if (!userId && !sessionId) return undefined;
+  return { ...(userId ? { userId } : {}), ...(sessionId ? { sessionId } : {}) };
 }
 
 /** Adds one provider usage report to the turn's total. */
@@ -172,12 +197,23 @@ export class GMI implements IGMI {
 
   /**
    * Turn ownership. Each processTurnStream call takes the next number and
-   * owns the lifecycle state until a newer turn starts; a turn that no longer
-   * owns it (a failed turn whose generator is drained after the next turn
-   * began) leaves the state and the trace's turn id to the newer turn.
+   * owns the lifecycle state until a newer turn starts or shutdown() takes it
+   * back (0, which no turn has); a turn that no longer owns it (a failed turn
+   * whose generator is drained after the next turn began, a turn that ends
+   * after shutdown began) leaves the state and the trace's turn id alone.
    */
   private turnSequence = 0;
   private stateOwnerTurn = 0;
+
+  /**
+   * The turns whose work is still running, by turn number: the controller that
+   * stops each one and a promise that resolves once its work is done.
+   * shutdown() stops them and waits for them.
+   */
+  private readonly runningTurns = new Map<number, { stop: AbortController; ended: Promise<void> }>();
+
+  /** The shutdown that is running, if any; a shutdown() call made meanwhile waits for it. */
+  private shutdownInProgress: Promise<void> | undefined;
 
   /**
    * What the GMI needs to forget a turn once the history no longer holds it
@@ -196,6 +232,14 @@ export class GMI implements IGMI {
    * Cleared when a user turn starts, so the next turn tries the primary again.
    */
   private turnResolution: CompletionResolution | undefined;
+
+  /**
+   * The ids the turn's cognitive memory files and recalls traces under, when
+   * the turn named them (`metadata.memoryScope`); tools, the user context and
+   * the reasoning trace keep the turn's own ids. Set when a user turn starts;
+   * a tool continuation keeps the scope of the turn it continues.
+   */
+  private turnMemoryScope: TurnMemoryScope | undefined;
 
   // (Self-reflection state is owned by MetapromptExecutor)
 
@@ -258,7 +302,7 @@ export class GMI implements IGMI {
       this.memoryBridge = new CognitiveMemoryBridge(
         this.cognitiveMemory,
         () => this.currentGmiMood,
-        () => this.currentUserContext,
+        () => this.memoryUserContext(),
         () => this.getCurrentPrimaryPersonaId(),
         () => this.gmiId,
         (type, message, details) => this.addTraceEntry(type as ReasoningEntryType, message, details),
@@ -650,6 +694,31 @@ export class GMI implements IGMI {
     }));
   }
 
+  /**
+   * The user context as cognitive memory reads it: the turn's memory scope user
+   * in place of the turn's user when the turn named one, so memory files and
+   * recalls under that id while tools and prompts keep the turn's user.
+   */
+  private memoryUserContext(): UserContext {
+    const userId = this.turnMemoryScope?.userId;
+    return userId ? { ...this.currentUserContext, userId } : this.currentUserContext;
+  }
+
+  /**
+   * The session, conversation and organization a turn's memory recall runs
+   * for. A memory scope session the turn named stands in for its session, and
+   * for its conversation unless the turn names a conversation.
+   */
+  private memoryTurnScope(turnInput: GMITurnInput): CognitiveMemoryTurnScope {
+    const organizationId = this.getOrganizationIdForTurn(turnInput);
+    const sessionId = this.turnMemoryScope?.sessionId;
+    if (!sessionId) {
+      return { sessionId: turnInput.sessionId, conversationId: this.getConversationIdForTurn(turnInput), organizationId };
+    }
+    const namedConversation = typeof turnInput.metadata?.conversationId === 'string' ? turnInput.metadata.conversationId.trim() : '';
+    return { sessionId, conversationId: namedConversation || sessionId, organizationId };
+  }
+
   private buildToolSessionData(turnInput: GMITurnInput): Record<string, any> | undefined {
     const sessionId = typeof turnInput.sessionId === 'string' ? turnInput.sessionId.trim() : '';
     const conversationId = this.getConversationIdForTurn(turnInput);
@@ -934,7 +1003,10 @@ export class GMI implements IGMI {
     const turnNumber = ++this.turnSequence;
     // A user turn starts at the primary hop; a tool continuation stays on the
     // hop that served the step it continues.
-    if (turnInput.metadata?.isToolContinuation !== true) this.turnResolution = undefined;
+    if (turnInput.metadata?.isToolContinuation !== true) {
+      this.turnResolution = undefined;
+      this.turnMemoryScope = memoryScopeOf(turnInput);
+    }
     this.stateOwnerTurn = turnNumber;
     // False once a newer turn has started; lifecycle writes below check it.
     const ownsState = (): boolean => this.stateOwnerTurn === turnNumber;
@@ -956,6 +1028,22 @@ export class GMI implements IGMI {
     const aggregatedUiCommands: UICommand[] = [];
     const aggregatedUsage: CostAggregator = { totalTokens: 0, promptTokens: 0, completionTokens: 0, breakdown: [] };
       let lastErrorForOutput: GMIOutput['error'] = undefined;
+
+    // The turn's stop. The caller's abort signal (a session's close()) and this
+    // GMI's shutdown() both abort it; the model call in progress then ends with
+    // the provider's abort chunk (the gateway's, on a turn through a gateway).
+    const callerSignal = asAbortSignal(turnInput.metadata?.options?.abortSignal);
+    const stop = new AbortController();
+    const forwardAbort = (): void => stop.abort();
+    if (callerSignal?.aborted) stop.abort();
+    else callerSignal?.addEventListener('abort', forwardAbort, { once: true });
+    let endTurn!: () => void;
+    this.runningTurns.set(turnNumber, {
+      stop,
+      ended: new Promise<void>((resolve) => {
+        endTurn = resolve;
+      }),
+    });
 
     try {
       // A history replaced or cleared just before this turn has finished dropping
@@ -1135,11 +1223,7 @@ export class GMI implements IGMI {
 
         if (isUserInitiatedTurn && currentTurnText) {
           // Recall is limited to this turn's user, session and conversation scopes.
-          assembledMemoryContext = await this.memoryBridge?.assembleContext(currentTurnText, {
-            sessionId: turnInput.sessionId,
-            conversationId: this.getConversationIdForTurn(turnInput),
-            organizationId: this.getOrganizationIdForTurn(turnInput),
-          }) ?? null;
+          assembledMemoryContext = await this.memoryBridge?.assembleContext(currentTurnText, this.memoryTurnScope(turnInput)) ?? null;
         }
 
         const promptExecContext = this.buildPromptExecutionContext();
@@ -1276,9 +1360,10 @@ export class GMI implements IGMI {
           ...pickCompletionOptions(personaOptions),
           ...pickCompletionOptions(turnOptions),
           ...(stepCacheDiagnostics ? { cacheDiagnostics: { ...stepCacheDiagnostics } } : {}),
-          // The turn's own abort signal: aborting it ends the model call in progress
-          // with the provider's abort chunk, and every later call of the turn at once.
-          ...(turnOptions.abortSignal ? { abortSignal: turnOptions.abortSignal as AbortSignal } : {}),
+          // The turn's stop (the caller's abort signal or shutdown()): aborting it ends
+          // the model call in progress with the provider's abort chunk, and every
+          // later call of the turn at once.
+          abortSignal: stop.signal,
           tools: toolsForLLM.length > 0 ? toolsForLLM.map(t => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema }})) : undefined,
           // Only with tools: OpenAI rejects a tool_choice on a request that offers none
           // (HTTP 400, "'tool_choice' is only allowed when 'tools' are specified").
@@ -1402,14 +1487,14 @@ export class GMI implements IGMI {
           }
           this.addTraceEntry(ReasoningEntryType.PROMPT_CONSTRUCTION_COMPLETE, `Prompt constructed for model ${modelTargetInfo.modelId}.`);
 
-          // A turn's response schema that the primary hop's payload does not carry
-          // rides the prompt. It goes in before the host's hook, as generateText puts
-          // it in before onBeforeGeneration, so a hook that removes it removes it,
-          // and the gateway adds no second copy on that hop. Fallback hops keep the
-          // gateway's per-hop rule.
+          // A turn's response schema that the hop's payload does not carry rides the
+          // prompt. It goes in before the host's hook, on every hop, as generateText
+          // puts it in before onBeforeGeneration on each fallback leg (a generateText
+          // call of its own), so a hook that removes it removes it, and the gateway
+          // adds no second copy on that hop.
           let promptForHook: ChatMessage[] = promptMessages;
           let attemptSchemaInPrompt = schemaInPrompt;
-          if (gateway && resolution && resolution.hop === 0 && responseSchema && !schemaInPrompt) {
+          if (gateway && resolution && responseSchema && !schemaInPrompt) {
             const instruction = gateway.schemaInstruction?.(resolution, responseSchema, schemaName);
             if (instruction) {
               promptForHook = withSystemMessage(promptMessages, instruction);
@@ -1444,11 +1529,12 @@ export class GMI implements IGMI {
 
           let attempt: AsyncIterable<ModelCompletionResponse>;
           let attemptOutcome: Promise<CompletionOutcome> | undefined;
+          // Initialised through the assertion, as stepSchemaInPayload is.
+          let gatewayAttempt = undefined as CompletionAttempt | undefined;
           if (gateway && resolution) {
-            const gatewayAttempt: CompletionAttempt = gateway.stream(resolution, sendMessages, llmOptions, responseSchema, schemaName, attemptSchemaInPrompt);
+            gatewayAttempt = gateway.stream(resolution, sendMessages, llmOptions, responseSchema, schemaName, attemptSchemaInPrompt);
             attempt = gatewayAttempt;
             attemptOutcome = gatewayAttempt.outcome;
-            stepSchemaInPayload = gatewayAttempt.schemaInPayload;
           } else {
             const provider = this.llmProviderManager.getProvider(modelTargetInfo.providerId);
             if (!provider) {
@@ -1554,6 +1640,9 @@ export class GMI implements IGMI {
             }
             throw stepError;
           }
+          // Read once the stream has ended: a provider that sent the request again without the
+          // schema payload (OpenRouter's json_object retry) has said so by then.
+          stepSchemaInPayload = gatewayAttempt?.schemaInPayload;
 
           if (gateway && route && resolution && attemptOutcome) {
             const outcome = await attemptOutcome;
@@ -1740,7 +1829,9 @@ export class GMI implements IGMI {
         break main_processing_loop; // Break if no tool calls
       }
 
-      await this.memoryBridge?.syncForTurn(turnInput, aggregatedResponseText);
+      // The exchange is filed under the turn's memory scope session, when it named one.
+      const memorySessionId = this.turnMemoryScope?.sessionId;
+      await this.memoryBridge?.syncForTurn(memorySessionId ? { ...turnInput, sessionId: memorySessionId } : turnInput, aggregatedResponseText);
 
       await this.performPostTurnIngestion(
         this.stringifyTurnContent(turnInput.content) ?? '',
@@ -1792,9 +1883,14 @@ export class GMI implements IGMI {
         usage: aggregatedUsage, // Could be partial
       };
     } finally {
+      // The turn's work is done: shutdown() stops waiting for it, and the
+      // caller's signal no longer reaches it.
+      this.runningTurns.delete(turnNumber);
+      callerSignal?.removeEventListener('abort', forwardAbort);
+      endTurn();
       // A newer turn may already own the lifecycle state (this generator was
-      // drained after a failure, once the next turn had started); leave the
-      // state and the trace's turn id to that turn.
+      // drained after a failure, once the next turn had started), or shutdown()
+      // took it back; leave the state and the trace's turn id alone then.
       if (
         ownsState() &&
         this.state !== GMIPrimeState.ERRORED &&
@@ -2175,15 +2271,42 @@ export class GMI implements IGMI {
     return report;
   }
 
-  /** @inheritdoc */
-  public async shutdown(): Promise<void> {
+  /**
+   * Shuts the GMI down. It stops the turns still running (each ends with the
+   * abort error) and waits for them at most `shutdownTimeoutMs`, gives
+   * metaprompt work in flight a bounded window to finish, then closes the
+   * cognitive and working memory. It owns the lifecycle state from the start,
+   * so a turn that ends later leaves the state SHUTDOWN.
+   *
+   * One shutdown runs at a time: a call made while one runs (a manager that
+   * shuts down while a session is deactivated, a second signal to the host)
+   * returns the same promise, so the memories are closed once. A call after
+   * the shutdown has finished returns at once.
+   */
+  public shutdown(): Promise<void> {
+    if (!this.shutdownInProgress) {
+      this.shutdownInProgress = this.shutDownOnce().finally(() => {
+        this.shutdownInProgress = undefined;
+      });
+    }
+    return this.shutdownInProgress;
+  }
+
+  /** The work of {@link GMI.shutdown}, run by one call at a time. */
+  private async shutDownOnce(): Promise<void> {
     if (this.state === GMIPrimeState.SHUTDOWN || (this.state === GMIPrimeState.IDLE && !this.isInitialized)) {
       console.log(`GMI (ID: ${this.gmiId}) already shut down or was never fully initialized.`);
       this.state = GMIPrimeState.SHUTDOWN; return;
     }
     this.state = GMIPrimeState.SHUTTING_DOWN;
+    // Shutdown owns the lifecycle state from here on: a turn that ends later
+    // writes neither READY nor ERRORED over SHUTTING_DOWN or SHUTDOWN.
+    this.stateOwnerTurn = 0;
     this.addTraceEntry(ReasoningEntryType.LIFECYCLE, "GMI shutting down.");
     try {
+      // Stop the turns still running, and give them the shutdown bound to end
+      // before the memories they write to are closed.
+      await this.stopRunningTurns();
       // Give metaprompt work still in flight a bounded window to store its
       // updates before the memories it writes to are closed, then stop the
       // queue: work not yet started is skipped, and late results are dropped.
@@ -2204,5 +2327,22 @@ export class GMI implements IGMI {
       this.addTraceEntry(ReasoningEntryType.LIFECYCLE, "GMI shutdown complete.");
       console.log(`GMI (ID: ${this.gmiId}) shut down.`);
     }
+  }
+
+  /**
+   * Aborts every running turn, so its model call ends with the provider's
+   * abort chunk, and waits for the turns to end, at most the shutdown bound
+   * (`GMIBaseConfig.shutdownTimeoutMs`). A turn whose consumer stops reading its
+   * stream does not end; shutdown goes on without it.
+   */
+  private async stopRunningTurns(): Promise<void> {
+    if (this.runningTurns.size === 0) return;
+    const turns = Array.from(this.runningTurns.values());
+    for (const turn of turns) turn.stop.abort();
+    const bound = shutdownTimeoutOrDefault(this.config?.shutdownTimeoutMs);
+    if (await settlesWithin(Promise.all(turns.map((turn) => turn.ended)), bound)) return;
+    const message = `${this.runningTurns.size} stopped turn(s) still running after ${bound} ms; closing the memories anyway.`;
+    this.addTraceEntry(ReasoningEntryType.WARNING, message);
+    console.warn(`GMI (ID: ${this.gmiId}): ${message}`);
   }
 }

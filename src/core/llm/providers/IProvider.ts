@@ -398,6 +398,14 @@ export interface ModelCompletionResponse {
    * {@link CacheDiagnostics}.
    */
   cacheDiagnostics?: CacheDiagnostics | null;
+  /**
+   * False on the chunks of a stream whose answering request left out the
+   * response schema the caller's `responseFormat` put in the payload, with the
+   * schema stated in the prompt instead: OpenRouter sends a strict
+   * `json_schema` request that no endpoint can serve again in `json_object`
+   * mode. Unset when the request carried the payload the caller asked for.
+   */
+  schemaInPayload?: boolean;
   /** Unified error envelope; present ONLY if an error occurred for this request/chunk. */
   error?: {
     /** Human readable message suitable for UI display or logging. */

@@ -10,8 +10,8 @@ import {
 /**
  * Whether a config value sets anything. `undefined`, `null`, `false`, a blank
  * string, an empty Map or Set and an array of unset entries are unset; an
- * object is set when an entry other than `enabled` is set, or when its only
- * entry is `enabled: true`, so `{ enabled: false }` is unset.
+ * object is set when its `enabled` is true, whatever its other entries are, or
+ * when an entry other than `enabled` is set, so `{ enabled: false }` is unset.
  */
 export function isMeaningfullyConfigured(value: unknown): boolean {
   if (value == null) return false;
@@ -21,9 +21,7 @@ export function isMeaningfullyConfigured(value: unknown): boolean {
   if (value instanceof Map || value instanceof Set) return value.size > 0;
   if (typeof value === 'object') {
     const entries = Object.entries(value).filter(([, entryValue]) => entryValue !== undefined);
-    if (entries.length === 0) return false;
-    return entries.some(([key, entryValue]) => key !== 'enabled' && isMeaningfullyConfigured(entryValue))
-      || (entries.length === 1 && entries[0]?.[0] === 'enabled' && entries[0][1] === true);
+    return entries.some(([key, entryValue]) => (key === 'enabled' ? entryValue === true : isMeaningfullyConfigured(entryValue)));
   }
   return true;
 }

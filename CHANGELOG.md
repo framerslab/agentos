@@ -1,3 +1,28 @@
+## [0.13.24](https://github.com/framerslab/agentos/compare/v0.13.23...v0.13.24) (2026-10-10)
+
+### feat
+
+* **safety:** SqlSpendMeter's tables named by a prefix (#226) ([379c8e6](https://github.com/framerslab/agentos/commit/379c8e692651fd2432745385fa7b50ed3cf509ff))
+
+## [0.13.23](https://github.com/framerslab/agentos/compare/v0.13.22...v0.13.23) (2026-10-10)
+
+### fix
+
+* **gmi:** follow-ups from the reviews of #193 and #199 (#217) ([2bacb69](https://github.com/framerslab/agentos/commit/2bacb69f8fb03ce1b70517b65a52846881a3e9b2))
+* **gmi:** manager shutdown waits for creations in flight, bounds each GMI and runs once (#222) ([d99b126](https://github.com/framerslab/agentos/commit/d99b1269d3e5447e0dd43650e2cc4620ab4c67b5))
+* **images:** the untrusted fetch settles on a protocol upgrade, and four review follow-ups (#227) ([9efb4b5](https://github.com/framerslab/agentos/commit/9efb4b51b0e6017c1f2fd685dcd436a1c44a16d2))
+* **vision:** the TrOCR and Florence-2 tiers get a Buffer image as a Blob (#229) ([7fe444a](https://github.com/framerslab/agentos/commit/7fe444afc6ef0ecbe89ea2aecd8c97fc33caeda0))
+
+## [0.13.22](https://github.com/framerslab/agentos/compare/v0.13.21...v0.13.22) (2026-10-10)
+
+### feat
+
+* **memory:** bound DocxLoader by what a Word file's archive inflates to (#205) ([b9931bf](https://github.com/framerslab/agentos/commit/b9931bf92cae58b6845bd21c6bc67c4cd0ac904a))
+
+### docs
+
+* ninth round of audit follow-ups to the guides (#221) ([c105869](https://github.com/framerslab/agentos/commit/c105869cbef700c49136cb193fd3e297a04679db))
+
 ## [0.13.21](https://github.com/framerslab/agentos/compare/v0.13.20...v0.13.21) (2026-10-10)
 
 ### feat

@@ -41,7 +41,7 @@ vi.mock('../../model.js', async (importOriginal) => {
   };
 });
 
-import { createCompletionGateway, type CompletionResolution } from '../completionGateway.js';
+import { createCompletionGateway, type CompletionResolution, type LateAttemptUsage } from '../completionGateway.js';
 
 const chain = (...entries: Array<[string, string]>) => entries.map(([provider, model]) => ({ provider, model }));
 
@@ -325,5 +325,47 @@ describe('CompletionGateway.stream', () => {
     const unbilled = gateway.stream(resolutionWith(async function* () { throw Object.assign(new Error('overloaded'), { httpStatus: 529 }); }), [], {});
     await drain(unbilled);
     expect(await unbilled.outcome).not.toHaveProperty('usage');
+  });
+
+  // A late report is the request's running total too: only what the attempt had not reported is new.
+  it("usage a provider reports after the caller's abort reaches onLateUsage as the part the attempt had not reported, and is logged without a listener", async () => {
+    /** A provider that reads the signal when its next event arrives: content reporting 12 tokens, then, once `opened`, its abort chunk reporting the request's 16. */
+    const readsSignalPerEvent = (opened: Promise<void>) => async function* (options: Record<string, unknown>) {
+      yield { choices: [], responseTextDelta: 'Partial', usage: { promptTokens: 10, completionTokens: 2, totalTokens: 12 } };
+      await opened;
+      if ((options.abortSignal as AbortSignal | undefined)?.aborted) {
+        yield { isFinal: true, choices: [], usage: { promptTokens: 12, completionTokens: 4, totalTokens: 16 }, error: { message: 'Stream aborted by caller', type: 'abort' } };
+      }
+    };
+    /** One attempt the caller aborts once its first chunk is in; the provider's abort chunk comes after the attempt has ended. */
+    async function abortAfterFirstChunk(onLateUsage?: (report: LateAttemptUsage) => void): Promise<Array<Record<string, any>>> {
+      const controller = new AbortController();
+      let open!: () => void;
+      const opened = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      const attempt = createCompletionGateway().stream(resolutionWith(readsSignalPerEvent(opened)), [], { abortSignal: controller.signal }, undefined, undefined, false, onLateUsage);
+      const chunks: Array<Record<string, any>> = [];
+      for await (const chunk of attempt) {
+        chunks.push(chunk as Record<string, any>);
+        controller.abort();
+      }
+      open();
+      return chunks;
+    }
+
+    const late: LateAttemptUsage[] = [];
+    const chunks = await abortAfterFirstChunk((report) => late.push(report));
+    // The attempt reported 12 tokens and ended with the gateway's own abort chunk.
+    expect(chunks.map((c) => [c.usage?.totalTokens, c.error?.type])).toEqual([[12, undefined], [undefined, 'abort']]);
+    await vi.waitFor(() => expect(late).toEqual([{ providerId: 'openai', modelId: 'gpt-4o', hop: 0, usage: { promptTokens: 2, completionTokens: 2, totalTokens: 4 } }]));
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await abortAfterFirstChunk();
+      await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining('2 prompt, 2 completion, 4 total tokens')));
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

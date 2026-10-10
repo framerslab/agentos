@@ -64,6 +64,7 @@
  * ```
  */
 
+import { bufferToBlobPart } from '../media/images/imageToBuffer.js';
 import type {
   VisionPipelineConfig,
   VisionResult,
@@ -108,6 +109,18 @@ const CLOUD_VISION_PROMPT =
 // ---------------------------------------------------------------------------
 // VisionPipeline
 // ---------------------------------------------------------------------------
+
+/**
+ * The image as the transformers.js image-to-text pipelines take it. A Buffer
+ * goes in a Blob, which transformers.js decodes with sharp in Node
+ * (`RawImage.fromBlob`). A data URL string does not work there: in Node,
+ * transformers.js reads a string that is not an http(s) or blob: URL as a
+ * file path (`getFile` in its utils/hub.js), and fails. A URL string goes as
+ * it is.
+ */
+function transformersImage(image: Buffer | string): Blob | string {
+  return Buffer.isBuffer(image) ? new Blob([bufferToBlobPart(image)]) : image;
+}
 
 /**
  * The media type of an image from its first bytes: PNG, JPEG, GIF or WebP,
@@ -754,12 +767,7 @@ export class VisionPipeline {
     const start = Date.now();
     const pipe = await this._loadTrOcr();
 
-    // The image-to-text pipeline accepts Buffer, URL, or base64 data URL
-    const input = Buffer.isBuffer(image)
-      ? `data:image/png;base64,${image.toString('base64')}`
-      : image;
-
-    const output = await pipe(input);
+    const output = await pipe(transformersImage(image));
 
     // The pipeline returns an array of { generated_text: string }
     const text = Array.isArray(output)
@@ -801,11 +809,7 @@ export class VisionPipeline {
 
     // Florence-2 uses a VQA-style interface — we ask it to describe
     // the document layout.
-    const input = Buffer.isBuffer(image)
-      ? `data:image/png;base64,${image.toString('base64')}`
-      : image;
-
-    const output = await pipe(input, 'Describe the document layout in detail.');
+    const output = await pipe(transformersImage(image), 'Describe the document layout in detail.');
 
     // Parse Florence-2 output into our structured layout format.
     // The model returns a description — we extract block annotations

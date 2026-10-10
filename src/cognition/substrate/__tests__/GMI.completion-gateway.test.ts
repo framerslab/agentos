@@ -5,15 +5,47 @@
  * start, open circuits, the router's task hint) and its `stream()` (the
  * delivery boundary, the usage of failed attempts), the provider manager it
  * creates and the real prompt engine. Only the provider classes are stubbed, at
- * their module boundary (src/api/__tests__/helpers/stubProviders.ts); each case
+ * their module boundary (src/api/__tests__/helpers/stubProviders.ts), and the
+ * real OpenRouter provider runs over a scripted HTTP client; each case
  * scripts its providers under keys of its own, because provider managers are
  * cached by provider, key and base URL. GMI.gateway.test.ts covers the hop loop
  * over a scripted gateway.
  */
+import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 vi.mock('../../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('../../../api/__tests__/helpers/stubProviders')).stubProviderClass('openai') }));
 vi.mock('../../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('../../../api/__tests__/helpers/stubProviders')).stubProviderClass('anthropic') }));
+
+/** The scripted OpenRouter HTTP client's answers to the chat requests, in order, and the bodies of the chat requests it was sent. */
+const openRouter = vi.hoisted(() => ({
+  answers: [] as Array<(request: { responseType?: string }) => unknown>,
+  bodies: [] as Array<{ messages: Array<{ role: string; content: unknown }>; response_format?: Record<string, unknown> }>,
+}));
+// The real OpenRouter provider over a scripted HTTP client (its initialize() would fetch the model list).
+vi.mock('../../../core/llm/providers/implementations/OpenRouterProvider', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../../core/llm/providers/implementations/OpenRouterProvider')>();
+  const { ApiKeyPool } = await import('../../../core/providers/ApiKeyPool');
+  class ScriptedOpenRouterProvider extends real.OpenRouterProvider {
+    override async initialize(config: { apiKey: string }): Promise<void> {
+      Object.assign(this as unknown as Record<string, unknown>, {
+        config: { apiKey: config.apiKey, baseURL: 'https://openrouter.test/api/v1', requestTimeout: 1_000, streamRequestTimeout: 5_000 },
+        keyPool: new ApiKeyPool(config.apiKey),
+        client: {
+          request: async (request: { url: string; data?: unknown; responseType?: string }) => {
+            if (request.url !== '/chat/completions') return { data: { data: [] } };
+            openRouter.bodies.push(JSON.parse(JSON.stringify(request.data)) as (typeof openRouter.bodies)[number]);
+            const answer = openRouter.answers.shift();
+            if (!answer) throw new Error('openrouter: unexpected request');
+            return { data: answer(request) };
+          },
+        },
+        isInitialized: true,
+      });
+    }
+  }
+  return { ...real, OpenRouterProvider: ScriptedOpenRouterProvider };
+});
 import { createCompletionGateway } from '../../../api/runtime/completionGateway';
 import { reply, script } from '../../../api/__tests__/helpers/stubProviders';
 import { createConversationMessage, MessageRole } from '../../../core/conversation/ConversationMessage';
@@ -45,7 +77,30 @@ function recordingRouter() {
   return { router, taskHints };
 }
 
-beforeEach(() => globalLLMProviderHealth.reset());
+const OR_MODEL = 'openai/gpt-4o-mini';
+/** OpenRouter's refusal of a request no endpoint can serve with its parameters (here, the strict json_schema). */
+const noEndpoints = (): never => {
+  throw Object.assign(new Error('Request failed with status code 404'), {
+    isAxiosError: true,
+    response: { status: 404, headers: {}, data: { error: { code: 404, message: 'No endpoints found that can handle the requested parameters.' } } },
+  });
+};
+/** A streamed OpenRouter answer with `content`: the text, the 'stop' finish, the usage line and [DONE]. */
+const streamedAnswer = (content: string) => (): NodeJS.ReadableStream => {
+  const line = (fields: Record<string, unknown>) => `data: ${JSON.stringify({ id: 'gen-1', object: 'chat.completion.chunk', created: 1, model: OR_MODEL, ...fields })}\n\n`;
+  return Readable.from([
+    line({ choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: null }] }),
+    line({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+    line({ choices: [], usage: { prompt_tokens: 20, completion_tokens: 6, total_tokens: 26 } }),
+    'data: [DONE]\n\n',
+  ]);
+};
+
+beforeEach(() => {
+  globalLLMProviderHealth.reset();
+  openRouter.answers.length = 0;
+  openRouter.bodies.length = 0;
+});
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
@@ -215,5 +270,19 @@ describe('GMI turn through the real completion gateway', () => {
     const { output } = await runTurn(gmi, textTurn('t1', 'Where?', { options: { structuredReply: { schema: z.object({ city: z.string() }), name: 'place' } } }));
     expect(s.seen[0].options.responseFormat).toMatchObject({ type: 'json_schema' });
     expect(output.structuredOutput).toMatchObject({ value: { city: 'Lyon' }, meta: { valid: true, enforcement: 'provider_schema' } });
+  });
+
+  it("a structured reply OpenRouter answers on its json_object retry reports 'prompt_only': the request that answered carried no schema payload", async () => {
+    // No endpoint takes the strict json_schema request (404), so OpenRouterProvider sends it again
+    // in json_object mode with the schema in the prompt alone, and that request answers.
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    openRouter.answers.push(noEndpoints, streamedAnswer('{"city":"Lyon"}'));
+    const { gmi } = await createScriptedGmi({
+      gateway: createCompletionGateway({ apiKey: key(), fallbackProviders: [] }),
+      persona: { defaultProviderId: 'openrouter', defaultModelId: OR_MODEL },
+    });
+    const { output } = await runTurn(gmi, textTurn('t1', 'Where?', { options: { structuredReply: { schema: z.object({ city: z.string() }), name: 'place' } } }));
+    expect(openRouter.bodies.map((body) => body.response_format?.type)).toEqual(['json_schema', 'json_object']);
+    expect(output.structuredOutput).toMatchObject({ value: { city: 'Lyon' }, meta: { valid: true, enforcement: 'prompt_only' } });
   });
 });

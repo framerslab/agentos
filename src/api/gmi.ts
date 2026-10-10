@@ -453,7 +453,14 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
   const sessions = new Map<string, SessionEntry>();
   const sessionTallies = new Map<string, AgentOSUsageAggregate>();
-  /** The session ids opened so far; an id opened again after its close() is given a memory scope of its own. */
+  /**
+   * The session ids opened since the sessions' memory was built: an id opened
+   * again after its close() is given a memory scope of its own. Only an agent
+   * with cognitive memory keeps them, since only memory reads the scope. An id
+   * stays after session.close(), so that its next opening does not reach the
+   * closed session's memory; agent.close() starts a new memory and empties the
+   * set. One entry per id, kept while the memory keeps that session's traces.
+   */
   const openedSessionIds = new Set<string>();
   const agentTally = createEmptyUsageAggregate();
 
@@ -522,7 +529,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // session, so its scope is a new id: it recalls nothing the closed one
       // filed under its scope, and only a user id the caller names again is shared.
       const memoryScopeId = openedSessionIds.has(sessionId) ? `${sessionId}:${randomUUID()}` : sessionId;
-      openedSessionIds.add(sessionId);
+      if (cognition.memory) openedSessionIds.add(sessionId);
       const userId = sessionOptions?.userId ?? sessionId;
       const history = opts.history === false ? null : new SessionHistoryBuffer({ ...SESSION_HISTORY_DEFAULTS, ...(opts.history ?? {}) });
       if (!sessionTallies.has(sessionId)) sessionTallies.set(sessionId, createEmptyUsageAggregate(sessionId));
@@ -565,11 +572,15 @@ export function gmi(opts: GmiOptions): GmiHandle {
       };
 
       const deps = (source: 'agent.session.send' | 'agent.session.stream'): GmiSessionDeps => ({
-        // The GMI files the replies under the session id it runs the turn under,
-        // and the user's messages under the user id: both are the session's scope.
-        sessionId: memoryScopeId,
+        // Tools, the user context and the reasoning trace see the id the caller
+        // opened and the user id (that session id unless the caller named one).
+        sessionId,
         opts,
-        userId: sessionOptions?.userId ?? memoryScopeId,
+        userId,
+        // Cognitive memory files the replies under the memory scope's session and
+        // the user's messages under its user: the session's own scope, a new one
+        // for an id opened again after close().
+        memoryScope: { sessionId: memoryScopeId, userId: sessionOptions?.userId ?? memoryScopeId },
         // Only a user id the caller passed reaches the provider's end-user field.
         providerUserId: sessionOptions?.userId,
         history,
@@ -654,13 +665,15 @@ export function gmi(opts: GmiOptions): GmiHandle {
      * Closes every session (each stops its running turn first, see
      * `session.close()`), then the cognitive memory they shared, including one
      * that a turn still setting up built while the sessions closed; a session
-     * opened from now on builds a new one. The tools stay as the caller passed
-     * them: the orchestrator is not shut down, because shutting it down would
-     * shut down the caller's tools.
+     * opened from now on builds a new one, in which its id is new. The tools
+     * stay as the caller passed them: the orchestrator is not shut down,
+     * because shutting it down would shut down the caller's tools.
      */
     async close(): Promise<void> {
       const closingMemory = memory;
       memory = memoryForSessions();
+      // Together with the memory, so a session opened while this closes the others is recorded in the new one.
+      openedSessionIds.clear();
       await Promise.all([...sessions.values()].map(({ session }) => session.close()));
       const mem = await closingMemory.close()?.catch(() => undefined);
       await mem?.close();
