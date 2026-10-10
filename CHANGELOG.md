@@ -1,3 +1,13 @@
+## [0.13.22](https://github.com/framerslab/agentos/compare/v0.13.21...v0.13.22) (2026-10-10)
+
+### feat
+
+* **memory:** bound DocxLoader by what a Word file's archive inflates to (#205) ([b9931bf](https://github.com/framerslab/agentos/commit/b9931bf92cae58b6845bd21c6bc67c4cd0ac904a))
+
+### docs
+
+* ninth round of audit follow-ups to the guides (#221) ([c105869](https://github.com/framerslab/agentos/commit/c105869cbef700c49136cb193fd3e297a04679db))
+
 ## [0.13.21](https://github.com/framerslab/agentos/compare/v0.13.20...v0.13.21) (2026-10-10)
 
 ### feat
