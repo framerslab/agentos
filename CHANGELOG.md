@@ -1,3 +1,13 @@
+## [0.13.33](https://github.com/framerslab/agentos/compare/v0.13.32...v0.13.33) (2026-10-10)
+
+### fix
+
+* **library:** a search with anyOf is documented as the index runs it: one embedding, and a fused score only when both legs run (#256) ([9bf616c](https://github.com/framerslab/agentos/commit/9bf616c08517b6430a52bcb7a787b410517705c8))
+
+### test
+
+* **vision:** Gemini detection through the real generateText and Gemini provider (#255) ([1deb685](https://github.com/framerslab/agentos/commit/1deb6850422fb6a6825612feb6ecea4ba8d4ff2b))
+
 ## [0.13.32](https://github.com/framerslab/agentos/compare/v0.13.31...v0.13.32) (2026-10-10)
 
 ### fix
