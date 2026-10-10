@@ -194,6 +194,7 @@ export {
   type LedgerItem,
   type TranscriptLedgerOptions,
 } from './transcriptLedger.js';
+export { phraseHeard, type HeardLine, type PhraseHeardOptions, type PhraseHeardResult } from './phraseHeard.js';
 export {
   VoiceMetricsReporter,
   type VoiceMetricEvent,
