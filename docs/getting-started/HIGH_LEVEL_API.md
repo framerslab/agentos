@@ -209,7 +209,7 @@ try {
 `generateText()`, `streamText()`, `generateObject()`, `streamObject()` and `embedText()` take an `abortSignal`, and so do an agent session's `send(input, { abortSignal })` and `stream(input, { abortSignal })`. When the signal aborts:
 
 - The provider request in flight is cancelled. A non-streamed request to OpenAI, Anthropic or Gemini is aborted at once, and so is an OpenAI stream; an Anthropic or Gemini stream stops at its next event. `embedText()` aborts its request to the embeddings endpoint, Ollama or Gemini. A provider that does not read the signal runs its request to the end, and the call still ends as below.
-- No further step, retry or fallback hop starts, and `generateObject()` starts no further attempt. The call is not counted against the provider's health.
+- No further step, retry or fallback hop starts, and `generateObject()` starts no further attempt. A tool round that `generateText()` or `streamText()` has started runs to its end first; the call then ends as below rather than returning that round as its result. The call is not counted against the provider's health.
 - The call rejects with the signal's reason: a `DOMException` named `AbortError` after `controller.abort()`, one named `TimeoutError` from `AbortSignal.timeout()`, or the value given to `controller.abort(reason)`. `streamText()` ends with an `error` part that carries the reason (in an `Error` when the reason is not one), a session's `stream()` ends with an `error` part, and `streamObject()`'s `object` rejects with the reason.
 - A call whose signal has already aborted sends no request.
 

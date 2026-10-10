@@ -408,6 +408,29 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     }
   });
 
+  it("a stream's own abort signal ends that turn with an error part and leaves the session open", async () => {
+    const k = key(); const g = gate();
+    const s = script('openai', k, { replies: [reply.hold([], g.opened, reply.text('Late.')), reply.text('Next.')] });
+    const session = agent(base(k)).session('s');
+    try {
+      const controller = new AbortController();
+      const r = session.stream('one', { abortSignal: controller.signal });
+      await vi.waitFor(() => expect(s.seen).toHaveLength(1));
+      controller.abort(new Error('deadline passed'));
+      // Nobody opens the gate: the turn ends only because the caller's signal aborted its request.
+      expect(await Promise.race([r.finishReason, sleep(2_000).then(() => 'still running')])).toBe('error');
+      expect(s.aborts).toBe(1);
+      const parts: Array<{ type: string }> = [];
+      for await (const part of r.fullStream) parts.push(part);
+      expect(parts.some((part) => part.type === 'text')).toBe(false);
+      expect(parts.at(-1)?.type).toBe('error');
+      // The session stays open: the next send runs on it.
+      expect((await session.send('two')).text).toBe('Next.');
+    } finally {
+      g.open();
+    }
+  });
+
   it('a session that streams many turns leaves no listener behind on the signal close() aborts', async () => {
     const warnings: Error[] = [];
     const onWarning = (warning: Error): void => {
