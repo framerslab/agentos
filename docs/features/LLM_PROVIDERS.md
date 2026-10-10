@@ -172,7 +172,7 @@ OPENROUTER_API_KEY=sk-or-...
 OLLAMA_BASE_URL=http://localhost:11434
 ```
 
-A key variable (or an `apiKey` you pass) may hold a comma-separated list of keys. The providers that draw a key from the list for each request, and the ones that rest a key after a quota error, are on [API Key Rotation](../KEY_ROTATION.md).
+For a provider that rotates keys, the key variable (or the `apiKey` you pass) may hold a comma-separated list that its requests draw their key from. [API Key Rotation](../KEY_ROTATION.md) lists those providers, the ones that rest a key after a quota error, and the ones that need a single key.
 
 ### Per-Agent Override
 
