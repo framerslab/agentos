@@ -3,7 +3,8 @@
  * the purge, on tables its meters make and again on tables a migration made, what a prefix names and refuses, two
  * meters with different rules on one database, twenty concurrent reservations against an allowance of five in a period
  * and of two in a window, a settle racing a reconcile on one operation, the indexes a store an earlier release made
- * gains and the statements a meter's start runs for them, and tables the meter's role does not own, used as they are.
+ * gains and the statements a meter's start runs for them, and tables the meter's role does not own, used as they are
+ * with each index Postgres refuses reported.
  *
  * Gated on `AGENTOS_TEST_POSTGRES_URL` (CI's service container); skipped without it. A reconcile or a purge reaches
  * every row of its meter's tables, so every test that runs one does so on tables named by a prefix of this run's own,
@@ -292,7 +293,7 @@ describeIfPostgres('SqlSpendMeter on Postgres', () => {
     }
   });
 
-  it('uses tables its role does not own as they are: Postgres refuses it the indexes they lack, and the meter still counts on them', async () => {
+  it('uses tables its role does not own as they are: Postgres refuses it the indexes they lack, the meter reports each refusal to onWarning, and still counts on them', async () => {
     // tables the database's owner makes from the DDL an earlier release ran, and a role that reads and writes them but owns neither
     const older = tablesOf(OLDER_PREFIX);
     const role = `spend_writer_${RUN}`;
@@ -312,8 +313,14 @@ describeIfPostgres('SqlSpendMeter on Postgres', () => {
       url.password = password;
       writer = createPostgresAdapter({ connectionString: url.toString(), max: 2 });
       await writer.open();
-      const meter = new SqlSpendMeter({ db: writer, tablePrefix: OLDER_PREFIX, allowanceFor: () => 1, windowMs: HOUR });
+      const warnings: { statement: string; error: unknown }[] = [];
+      const meter = new SqlSpendMeter({ db: writer, tablePrefix: OLDER_PREFIX, allowanceFor: () => 1, windowMs: HOUR, onWarning: (warning) => warnings.push(warning) });
       await expect(meter.ensureSchema()).resolves.toBeUndefined();
+      // each index the tables lack is refused, 42501 being insufficient_privilege; the one they hold is not tried
+      expect(warnings).toEqual([
+        { statement: expect.stringContaining(`idx_${OLDER_PREFIX}_reservations_account ON`), error: expect.objectContaining({ code: '42501' }) },
+        { statement: expect.stringContaining(`idx_${OLDER_PREFIX}_reservations_settled ON`), error: expect.objectContaining({ code: '42501' }) },
+      ]);
       expect(await meter.reserve({ accountId: 'a', operationId: 'op', now: OCT })).toMatchObject({ status: 'reserved', remaining: 0 });
       expect((await catalogue(db, older)).indexes.map((index) => index.name)).toEqual([`idx_${OLDER_PREFIX}_reservations_due`]);
     } finally {

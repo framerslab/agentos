@@ -1,8 +1,9 @@
 /**
  * @fileoverview The spend meter's contract over an in-memory SQLite store, its rolling window and its purge there,
  * both again on tables under a second prefix, what a prefix names and refuses, two meters with different rules on one
- * store, the indexes a store an earlier release made gains and the statements a meter's start runs for them, and the
- * rollback of a refused reservation when a later statement of its transaction fails.
+ * store, the indexes a store an earlier release made gains and the statements a meter's start runs for them, an index
+ * the store refuses reported, and the rollback of a refused reservation when a later statement of its transaction
+ * fails.
  */
 import { describe, expect, it } from 'vitest';
 import { resolveStorageAdapter, type StorageAdapter } from '@framers/sql-storage-adapter';
@@ -267,6 +268,28 @@ describe('SqlSpendMeter on SQLite, beyond the contract', () => {
       await new SqlSpendMeter({ db: recording(db, second), allowanceFor: () => 1, windowMs: HOUR, requireShared: false }).ensureSchema();
       expect(second).not.toEqual([]);
       expect(second.filter(createsIndex)).toEqual([]);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('reports to onWarning an index statement the store refuses, with its error, makes the indexes nothing stands in the way of, and counts on the tables as they are', async () => {
+    const db = await openSqlite();
+    try {
+      // a store an earlier release made, where a table holds the name of the window's index
+      await db.exec(olderDdl());
+      await db.exec('CREATE TABLE idx_spend_reservations_account (id INTEGER)');
+      const warnings: { statement: string; error: unknown }[] = [];
+      const meter = new SqlSpendMeter({ db, allowanceFor: () => 1, windowMs: HOUR, requireShared: false, onWarning: (warning) => warnings.push(warning) });
+      await expect(meter.ensureSchema()).resolves.toBeUndefined();
+      expect(warnings).toEqual([
+        {
+          statement: expect.stringContaining('idx_spend_reservations_account ON'),
+          error: expect.objectContaining({ message: expect.stringContaining('there is already a table named idx_spend_reservations_account') }),
+        },
+      ]);
+      expect((await catalogue(db)).indexes.map((index) => index.name)).toEqual(['idx_spend_reservations_due', 'idx_spend_reservations_settled']);
+      expect(await meter.reserve({ accountId: 'a', operationId: 'op', now: OCT })).toMatchObject({ status: 'reserved', remaining: 0 });
     } finally {
       await db.close();
     }
