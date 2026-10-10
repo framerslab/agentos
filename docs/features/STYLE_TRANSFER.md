@@ -40,7 +40,7 @@ console.log(result.model);     // 'black-forest-labs/flux-redux-dev'
 | `prompt` | `string` | **required** | Text guiding the output; the description of the style on the img2img path |
 | `strength` | `number` | `0.7` | img2img strength: how far the output may move from the source image (0 keeps it, 1 replaces it). Not sent on the Flux Redux path, and the OpenAI provider does not send it. |
 | `provider` | `string` | auto-detect | Override provider selection |
-| `model` | `string` | provider default | Override model selection |
+| `model` | `string` | see Provider Routing | Override model selection |
 | `size` | `string` | — | Output dimensions (e.g. `'1024x1024'`) |
 | `negativePrompt` | `string` | — | Content to avoid |
 | `seed` | `number` | — | Reproducibility seed |
@@ -57,8 +57,10 @@ When no provider is named, `transferStyle()` takes the first provider whose key 
 |----------|---------|----------|-------|--------------|
 | 1 | `REPLICATE_API_TOKEN` | Replicate | `black-forest-labs/flux-redux-dev` | Style reference + prompt |
 | 2 | `FAL_API_KEY` | Fal | `fal-ai/flux/dev` | Source image + prompt + `strength` |
-| 3 | `STABILITY_API_KEY` | Stability | `stable-image-core` | Source image + prompt + `strength` |
+| 3 | `STABILITY_API_KEY` | Stability | `sd3.5-medium` | Source image + prompt + `strength` |
 | 4 | `OPENAI_API_KEY` | OpenAI | `gpt-image-2.5-sunburst` | Source image + prompt (edit endpoint) |
+
+With `provider` named and no `model`, the call is an img2img edit on that provider's own edit default (OpenAI `gpt-image-2.5-sunburst`, Stability `sd3.5-medium`, Replicate `stability-ai/sdxl` at a pinned version), not on its text-to-image default. A provider that cannot edit generates from the prompt with its text-to-image default.
 
 ## Examples
 
