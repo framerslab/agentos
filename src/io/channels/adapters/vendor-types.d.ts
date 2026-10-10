@@ -102,6 +102,8 @@ declare module 'ws' {
     constructor(address: string | URL, options?: any);
     send(data: any, cb?: (err?: Error) => void): void;
     close(code?: number, reason?: string): void;
+    /** Forcibly closes the connection, or aborts the handshake while it is still connecting. */
+    terminate(): void;
     readyState: number;
     static OPEN: number;
     static CLOSED: number;
