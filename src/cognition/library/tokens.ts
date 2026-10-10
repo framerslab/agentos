@@ -18,8 +18,9 @@ export interface Snippet {
   /** Where in the text the first word that begins with a query word starts, or -1 when none does. */
   at: number;
   /**
-   * Whole words around that word, white space collapsed: about `before` characters ahead of it and about `after`
-   * past its start, each end moved to a space or to the text's end.
+   * Whole words around that word, white space collapsed: from just after the last space at or before `before`
+   * characters ahead of it (or from the text's start) to the first space at or after `after` characters past its
+   * start (or to the text's end). A text with no spaces, as Chinese and Japanese are written, comes back whole.
    */
   text: string;
 }
