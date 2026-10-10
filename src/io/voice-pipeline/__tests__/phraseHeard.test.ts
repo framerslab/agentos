@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { phraseHeard } from '../phraseHeard.js';
+import { TranscriptLedger } from '../transcriptLedger.js';
 
 const LINE = "I use a live note assistant. OpenAI turns what we say into text and doesn't keep it beyond its own checks. I'm keeping the transcript in my account. Nothing is recorded as audio. Tell me if you'd rather I didn't.";
 
@@ -22,6 +23,13 @@ describe('phraseHeard', () => {
     expect(phraseHeard(LINE, [{ itemId: 'i1', text: shuffled }]).heard).toBe(false);
   });
 
+  it('hears 80 words of 100 by default, and not 79', () => {
+    const words = Array.from({ length: 100 }, (_, k) => `w${k}`);
+    const phrase = words.join(' ');
+    expect(phraseHeard(phrase, [{ itemId: 'a', text: words.slice(0, 80).join(' ') }])).toEqual({ heard: true, ratio: 0.8, itemIds: ['a'] });
+    expect(phraseHeard(phrase, [{ itemId: 'a', text: words.slice(0, 79).join(' ') }]).heard).toBe(false);
+  });
+
   it('ignores case, punctuation and spacing, and takes another threshold', () => {
     expect(phraseHeard('Hello, World!', [{ itemId: 'a', text: 'hello world' }]).ratio).toBe(1);
     expect(phraseHeard('one two three four five', [{ itemId: 'a', text: 'one two three' }], { threshold: 0.6 }).heard).toBe(true);
@@ -35,5 +43,15 @@ describe('phraseHeard', () => {
 
   it('refuses an empty phrase', () => {
     expect(() => phraseHeard(' . ', [])).toThrow('no words');
+  });
+
+  it("reads a TranscriptLedger's final lines as they are", () => {
+    const ledger = new TranscriptLedger();
+    ledger.apply({ itemId: 'i1', text: 'OK, so before we start.', isFinal: true });
+    ledger.apply({ itemId: 'i2', text: 'I use a live note assistant, OpenAI turns what we say into text and does not keep it beyond its own checks.', isFinal: true });
+    ledger.apply({ itemId: 'i3', text: "I'm keeping the transcript in my account, nothing is recorded as audio.", isFinal: false });
+    expect(phraseHeard(LINE, ledger.finalsAfter(undefined)).heard).toBe(false);
+    ledger.apply({ itemId: 'i3', text: "I'm keeping the transcript in my account, nothing is recorded as audio. Tell me if you'd rather I didn't.", isFinal: true });
+    expect(phraseHeard(LINE, ledger.finalsAfter(undefined))).toMatchObject({ heard: true, itemIds: ['i2', 'i3'] });
   });
 });
