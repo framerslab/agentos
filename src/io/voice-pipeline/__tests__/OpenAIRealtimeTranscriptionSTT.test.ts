@@ -924,17 +924,24 @@ describe('OpenAIRealtimeTranscriptionSTT: reconnects, failures, flush and close'
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('starts, and reconnects, when the first connection closes as its session update is confirmed', async () => {
+  it('starts once a replacement is open when the first connection closes as its session update is confirmed', async () => {
     fakeClock();
     Sockets.nextBehavior = 'ack-then-drop';
     const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, usageIntervalMs: 5_000 });
-    const session = await stt.startSession();
-    const log = record(session);
-    session.pushAudio(frame(2_400)); // held: no connection has joined the session
-    await vi.advanceTimersByTimeAsync(100); // the first retry
+    let started = false;
+    const starting = stt.startSession().then((session) => {
+      started = true;
+      return session;
+    });
     await settle();
+    expect(Sockets.instances).toHaveLength(1);
+    expect(started).toBe(false); // confirmed, then closed at once: no session yet
+    await vi.advanceTimersByTimeAsync(100); // the first retry
+    const session = await starting;
+    const log = record(session);
     expect(Sockets.instances).toHaveLength(2);
     const second = Sockets.instances[1];
+    session.pushAudio(frame(2_400));
     expect(sentOfType(second, 'input_audio_buffer.append')).toHaveLength(1);
     // The connection that closed never joined the session, so the replacement is the session's first:
     // no older connection withholds its interim text, and usage is reported for it alone.
@@ -945,6 +952,17 @@ describe('OpenAIRealtimeTranscriptionSTT: reconnects, failures, flush and close'
     session.close();
     expect(vi.getTimerCount()).toBe(0); // and it left no rollover clock behind
     expect(log.errors).toEqual([]);
+  });
+
+  it('rejects the start when a first connection that closed as it was confirmed cannot be retried', async () => {
+    fakeClock();
+    Sockets.nextBehavior = 'ack-then-drop';
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, maxRetries: 0 });
+    await expect(stt.startSession()).rejects.toThrow(/gave up after 0 retries: .*closed unexpectedly \(1006\)/);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await settle();
+    expect(Sockets.instances).toHaveLength(1); // nothing reconnects for a session the caller never got
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('retries a reconnect whose connection closes as its session update is confirmed', async () => {
