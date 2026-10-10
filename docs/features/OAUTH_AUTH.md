@@ -122,7 +122,7 @@ Features:
 
 ## Web Server Flow
 
-A web server runs the grant across two requests: the one that sends the person to the provider, and the provider's redirect back. [`RedirectOAuthFlow`](https://github.com/framerslab/agentos/blob/master/src/core/llm/auth/RedirectOAuthFlow.ts) splits the authorization-code flow with PKCE at that redirect. `begin` answers the address with its `state` and PKCE `codeVerifier`; the server keeps both (in a short-lived row found by a cookie, for example) and hands them back to `complete`. The store keeps the refresh token; the access token stays in the process's memory and is never stored.
+A web server runs the grant across two requests: the one that sends the person to the provider, and the provider's redirect back. [`RedirectOAuthFlow`](https://github.com/framerslab/agentos/blob/master/src/core/llm/auth/RedirectOAuthFlow.ts) splits the authorization-code flow with PKCE at that redirect. `begin` answers the address with its `state` and PKCE `codeVerifier`; the server keeps both (in a short-lived row found by a cookie, for example) and hands them back to `complete`. The flow holds each grant's access token in the process's memory and hands the whole token set to its store; a [`SealedTokenStore`](#sealedtokenstore) keeps only the refresh token and the metadata, sealed, so with it the access token is never stored. A store that writes what it is given, such as `FileTokenStore`, writes the access token too.
 
 ```typescript
 import { RedirectOAuthFlow, SealedTokenStore, type RedirectOAuthConfig } from '@framers/agentos/auth';

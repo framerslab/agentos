@@ -39,6 +39,12 @@ export class SealedTokenStore implements IOAuthTokenStore {
    */
   constructor(private readonly values: SealedBytesStore, private readonly keys: SealingKeys) {}
 
+  /**
+   * The grant kept under `key`: its refresh token and metadata, with `accessToken: ''` and `expiresAt: 0` so a flow
+   * refreshes it; null when nothing is kept.
+   *
+   * @throws SealedSecretError when the kept value does not open with the keys given.
+   */
   async load(key: string): Promise<OAuthTokenSet | null> {
     const sealed = await this.values.get(key);
     if (sealed === null) return null;
@@ -46,11 +52,13 @@ export class SealedTokenStore implements IOAuthTokenStore {
     return { accessToken: '', expiresAt: 0, refreshToken: kept.refreshToken, metadata: kept.metadata };
   }
 
+  /** Seals the refresh token and the metadata of `tokens` with the current key, bound to `key`, and keeps them. */
   async save(key: string, tokens: OAuthTokenSet): Promise<void> {
     const kept = JSON.stringify({ refreshToken: tokens.refreshToken, metadata: tokens.metadata });
     await this.values.set(key, sealSecret(kept, this.keys.current.key, this.keys.current.id, key));
   }
 
+  /** Removes the grant kept under `key`. */
   async clear(key: string): Promise<void> {
     await this.values.delete(key);
   }
