@@ -3,6 +3,7 @@
  *
  * Concrete provider implementations for the voice pipeline:
  * - {@link DeepgramStreamingSTT} — Deepgram WebSocket streaming STT
+ * - {@link OpenAIRealtimeTranscriptionSTT}: OpenAI Realtime transcription streaming STT
  * - {@link ElevenLabsStreamingTTS} — ElevenLabs WebSocket streaming TTS
  * - {@link AgentSessionVoiceAdapter} — AgentOS session → voice pipeline adapter
  * - {@link OpenAIBatchTTS} — OpenAI batch (one-shot) TTS
@@ -15,6 +16,13 @@ export {
   ElevenLabsStreamingSTT,
   type ElevenLabsStreamingSTTConfig,
 } from './ElevenLabsStreamingSTT.js';
+export {
+  OpenAIRealtimeTranscriptionSTT,
+  type OpenAIRealtimeTranscriptionSTTConfig,
+  type OpenAIRealtimeTranscriptionRollover,
+  type OpenAIRealtimeRolloverRequest,
+  type OpenAIRealtimeTurnDetection,
+} from './OpenAIRealtimeTranscriptionSTT.js';
 export {
   ElevenLabsStreamingTTS,
   type ElevenLabsStreamingTTSConfig,

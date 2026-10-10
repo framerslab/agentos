@@ -86,4 +86,13 @@ describe('providerCatalog', () => {
     const speechEndpointModels = ['tts-1', 'tts-1-hd', 'gpt-4o-mini-tts', 'gpt-4o-mini-tts-2025-12-15'];
     expect(speechEndpointModels).toContain(findSpeechProviderCatalogEntry('openai-tts')!.defaultModel);
   });
+
+  it('should list OpenAI Realtime transcription as a streaming STT provider keyed by OPENAI_API_KEY', () => {
+    const entry = findSpeechProviderCatalogEntry('openai-realtime-transcription');
+    expect(entry).toBeDefined();
+    expect(entry!.kind).toBe('stt');
+    expect(entry!.streaming).toBe(true);
+    expect(entry!.envVars).toEqual(['OPENAI_API_KEY']);
+    expect(entry!.defaultModel).toBe('gpt-4o-mini-transcribe');
+  });
 });
