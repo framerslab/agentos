@@ -41,7 +41,7 @@ export type {
   SpendRetryPolicy,
 } from './SpendMeter.js';
 export type { SpendPurgeResult } from './SqlSpendMeter.js';
-export { SqlSpendMeter, SPEND_METER_DDL } from './SqlSpendMeter.js';
+export { SqlSpendMeter, SPEND_METER_DDL, spendMeterDdl } from './SqlSpendMeter.js';
 export type { SqlSpendMeterOptions, SpendUnknownResolution } from './SqlSpendMeter.js';
 
 export {
