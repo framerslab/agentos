@@ -565,6 +565,28 @@ describe('OpenAIRealtimeTranscriptionSTT: reconnects, failures, flush and close'
     session.close();
   });
 
+  it('holds a frame a closing socket did not take for the connection that replaces it, and counts it once', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    session.pushAudio(frame(2_400)); // 100 ms, sent
+    first.readyState = 2; // CLOSING: the close handshake has begun, and the close event has not come
+    session.pushAudio(frame(4_800)); // 200 ms the closing socket does not take
+    expect(sentOfType(first, 'input_audio_buffer.append')).toHaveLength(1);
+    first.drop();
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    const second = Sockets.instances[1];
+    expect(sentSamples(second).map((samples) => samples.length)).toEqual([4_800]);
+    session.close();
+    expect(log.usage.map((entry) => [entry.connectionIndex, entry.audioSeconds, entry.final])).toEqual([
+      [1, 0.1, true],
+      [2, 0.2, true],
+    ]);
+  });
+
   it('ends with an error and then close after three failed reconnects, waiting 100 ms, 2 s and 2 s', async () => {
     fakeClock();
     const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
