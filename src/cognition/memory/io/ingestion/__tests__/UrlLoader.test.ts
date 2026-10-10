@@ -113,6 +113,34 @@ describe('UrlLoader', () => {
     expect(doc.metadata).toMatchObject({ pageCount: 1, source: 'https://pages.test/review.pdf' });
   });
 
+  it('refuses an HTML, XHTML or PDF answer the source has no loader for, and names no address in the refusal', async () => {
+    const none: LoaderSource = { getLoader: () => undefined };
+    const address = 'https://pages.test/minutes?key=held-back';
+    const answers: Array<[string, Buffer]> = [
+      ['text/html', Buffer.from('<html><body><p>Minutes of the review.</p><script>var shown = 1;</script></body></html>')],
+      ['application/xhtml+xml', Buffer.from('<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Minutes of the review.</p></body></html>')],
+      ['application/pdf', pdfOf('Minutes of the review.')],
+    ];
+    for (const [contentType, body] of answers) {
+      // Markup returned as it came would keep its tags and scripts as words.
+      const outcome: unknown = await new UrlLoader(none, { fetchDocument: answering(address, contentType, body) })
+        .load(address)
+        .catch((error: unknown) => error);
+      expect(outcome, contentType).toBeInstanceOf(Error);
+      const message = (outcome as Error).message;
+      expect(message, contentType).toContain(contentType);
+      expect(message, contentType).toMatch(/no \.(html|pdf) loader/);
+      expect(message, contentType).not.toContain('pages.test');
+      expect(message, contentType).not.toContain('held-back');
+    }
+
+    // Text needs no loader: it is kept as it came.
+    const text = await new UrlLoader(none, {
+      fetchDocument: answering(address, 'text/plain', Buffer.from('Minutes of the review.')),
+    }).load(address);
+    expect(text).toMatchObject({ content: 'Minutes of the review.', format: 'text', metadata: { source: address } });
+  });
+
   it('still takes a LoaderRegistry and reads through the global fetch, canLoad unchanged', async () => {
     const loader = new UrlLoader(new LoaderRegistry());
     expect(loader.supportedExtensions).toEqual([]);
