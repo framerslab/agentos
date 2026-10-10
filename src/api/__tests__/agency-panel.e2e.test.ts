@@ -6,7 +6,6 @@
  * (axios, which OpenRouter and Ollama send through, is forwarded to it).
  * OpenRouter and Ollama seats are in agency-panel-axios.e2e.test.ts.
  */
-// @ts-nocheck -- the types this file imports land in Task 15 and the typed results in Task 23, which removes this line.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
@@ -140,7 +139,10 @@ const calls = (p: RegExp, method?: string): Captured[] =>
   fetchMock.mock.calls
     .filter(([u, init]) => p.test(String(u)) && (method === undefined || ((init as RequestInit)?.method ?? 'GET') === method))
     .map(([u, init]) => { let body: Json | undefined; try { body = (init as RequestInit)?.body ? JSON.parse(String((init as RequestInit).body)) : undefined; } catch { body = undefined; } return { url: String(u), init: (init ?? {}) as Captured['init'], body }; });
-const header = (c: Captured, name: string) => (c.init.headers ?? {})[name] ?? (c.init.headers ?? {})[name.toLowerCase()];
+const header = (c: Captured, name: string): string | undefined => {
+  const headers = (c.init.headers ?? {}) as Record<string, string>;
+  return headers[name] ?? headers[name.toLowerCase()];
+};
 const threeProviders = (texts = { opus: 'A finds a bug', astra: 'B finds a bug', gemini: 'C finds a bug' }, chairText = 'Merged findings') =>
   route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText(texts.astra)], [ANTHROPIC, [anthropicText(texts.opus), anthropicText(chairText)]], [GEMINI, geminiText(texts.gemini)]]);
 
@@ -207,7 +209,7 @@ describe('3. quorum failures keep the ledger and the bill', () => {
     threeProviders();
     const team = panel({ controls: { maxTotalTokens: 30, onLimitReached: 'error' } });
     await expect(team.generate('review')).rejects.toThrow(/Token limit exceeded/);
-    expect((await team.usage()).totalTokens).toBe(60); // three seats and the chair, 15 each, counted before the limit check threw
+    expect(((await team.usage()) as { totalTokens: number }).totalTokens).toBe(60); // three seats and the chair, 15 each, counted before the limit check threw
     await expect(team.generate('again')).rejects.toThrow(/Token limit exceeded/);
     expect(calls(ANTHROPIC, 'POST')).toHaveLength(2);
   });
@@ -234,7 +236,7 @@ describe('4. the per-call guard', () => {
     }
     expect(fetchMock).not.toHaveBeenCalled();
     const ok = await team.generate('x', { temperature: 0.2 });
-    expect(ok.seating.call).toBe(0);
+    expect(ok.seating!.call).toBe(0);
     const seq = agency({ modelPool: POOL(), agents: { one: { instructions: 'a' } }, strategy: 'sequential' } as never);
     await expect(seq.generate('x', { system: 'allowed outside panel' })).resolves.toBeTruthy();
   });
@@ -243,7 +245,7 @@ describe('4. the per-call guard', () => {
     const team = panel({ seating: { policy: 'round-robin' } });
     await expect(team.generate('x', { apiKey: 'x' })).rejects.toBeInstanceOf(AgencyConfigError);
     const r = (await (team.session('s') as { send: (t: string) => Promise<PanelResult> }).send('hello')) as PanelResult;
-    expect(r.seating.call).toBe(0);
+    expect(r.seating!.call).toBe(0);
   });
 });
 
@@ -366,7 +368,7 @@ describe('7. keys on the first call', () => {
     vi.stubEnv('OPENROUTER_API_KEY', K.orEnv);
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('B')], [GEMINI, geminiText('C')]]);
     const result = await agency({ strategy: 'panel', modelPool: { opus: { provider: 'anthropic', model: 'claude-opus-5-5' }, blank: { provider: 'anthropic', model: 'claude-opus-5-5', apiKey: '' }, astra: POOL().astra, gemini: POOL().gemini }, agents: SEATS(), chair: { from: ['astra'] } } as never).generate('review');
-    expect(result.seating.skipped).toEqual([{ entry: 'opus', reason: 'no key (ANTHROPIC_API_KEY)' }, { entry: 'blank', reason: 'no key (ANTHROPIC_API_KEY)' }]);
+    expect(result.seating!.skipped).toEqual([{ entry: 'opus', reason: 'no key (ANTHROPIC_API_KEY)' }, { entry: 'blank', reason: 'no key (ANTHROPIC_API_KEY)' }]);
     expect(fetchMock.mock.calls.every(([u]) => !OPENROUTER.test(String(u)))).toBe(true);
   });
   it("an agency-level key and URL serve the chair only; a nameless setDefaultProvider reaches no seat and not the chair", async () => {
@@ -430,7 +432,7 @@ describe('8. keys on a hop', () => {
     expect(fixed).toMatchObject({ status: 'ok', provider: 'gemini', text: 'rescued' });
     expect(fixed.fallback?.fired).toBe(true);
     expect(header(calls(GEMINI, 'POST')[0], 'x-goog-api-key')).toBe(K.gemEnv);
-    expect(result.seating.skipped).toContainEqual({ entry: 'fixed/fallbackProviders/0', reason: 'no key (MISTRAL_API_KEY)' });
+    expect(result.seating!.skipped).toContainEqual({ entry: 'fixed/fallbackProviders/0', reason: 'no key (MISTRAL_API_KEY)' });
   });
   it("after a native hop the fixed seat's record carries the answering leg's vendor, not the primary's: an Anthropic seat answered by its OpenAI hop is openai", async () => {
     vi.stubEnv('OPENAI_API_KEY', K.oaiEnv);
@@ -471,19 +473,19 @@ describe('8. keys on a hop', () => {
     const build = () => agency({ strategy: 'panel', modelPool: { opus: POOL().opus }, agents: { pooled: { instructions: 'a' }, fixed: { provider: 'openai', model: 'gpt-4.1', apiKey: K.fixed, instructions: 'x', fallbackProviders: [{ provider: 'claude-code-cli', model: 'claude-sonnet-4-6' }] } }, chair: { from: ['opus'] } } as never);
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('B')], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]]]);
     const dropped = await build().generate('review');
-    expect(dropped.seating.skipped).toContainEqual({ entry: 'fixed/fallbackProviders/0', reason: 'binary not found (claude)' });
+    expect(dropped.seating!.skipped).toContainEqual({ entry: 'fixed/fallbackProviders/0', reason: 'binary not found (claude)' });
     binariesOnPath.add('claude');
     try {
       route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('B')], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]]]);
       const kept = await build().generate('review');
-      expect(kept.seating.skipped).toEqual([]);
+      expect(kept.seating!.skipped).toEqual([]);
       expect(kept.seats.find((s) => s.seat === 'fixed')).toMatchObject({ status: 'ok', provider: 'openai' });
     } finally { binariesOnPath.delete('claude'); }
   });
   it("a fixed seat's Ollama hop with a URL and no key is kept: the availability rule, not a key, decides", async () => {
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('B')], [ANTHROPIC, [anthropicText('A'), anthropicText('Merged')]]]);
     const r = await agency({ strategy: 'panel', modelPool: { opus: POOL().opus }, agents: { pooled: { instructions: 'a' }, fixed: { provider: 'openai', model: 'gpt-4.1', apiKey: K.fixed, instructions: 'x', fallbackProviders: [{ provider: 'ollama', model: 'llama3.2', baseUrl: 'http://127.0.0.1:11434' }] } }, chair: { from: ['opus'] } } as never).generate('review');
-    expect(r.seating.skipped).toEqual([]);
+    expect(r.seating!.skipped).toEqual([]);
     expect(r.seats.find((s) => s.seat === 'fixed')).toMatchObject({ status: 'ok', provider: 'openai' });
   });
   it('a pooled seat that sets fallbackProviders fails construction', () => {
@@ -555,7 +557,7 @@ describe('10-12. vendors, shortfalls, truncation and pre-built seats', () => {
     const r = await agency({ strategy: 'panel', modelPool: POOL(), agents: { ...SEATS(), pre }, chair: { from: ['opus'] }, panel: { minChars: 3 }, quorum: { minAgents: 2 } } as never).generate('review');
     expect(r.seats.find((s) => s.entry === 'astra')).toMatchObject({ status: 'ok', truncated: true, finishReason: 'length' });
     expect(r.seats.find((s) => s.entry === 'opus')).toMatchObject({ status: 'empty' });
-    expect(r.seating.seats.pre).toEqual({ prebuilt: true });
+    expect(r.seating!.seats.pre).toEqual({ prebuilt: true });
     expect(r.seats.find((s) => s.seat === 'pre')).toMatchObject({ status: 'ok', provider: 'openai' });
     expect(r.quorum.met).toBe(true);
   });
@@ -795,9 +797,9 @@ describe('14. stream() and session().stream() carry the ledger', () => {
     const ss = (team.session('s') as { stream: (t: string) => { result: Promise<PanelResult> } }).stream('review');
     expect((await ss.result).seats).toHaveLength(3);
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiError(500, 'down')], [ANTHROPIC, anthropicText('A')], [GEMINI, geminiError(500, 'down')]]);
-    const before = (await team.usage()).totalTokens;
+    const before = ((await team.usage()) as { totalTokens: number }).totalTokens;
     await expect(team.stream('review').text).rejects.toBeInstanceOf(AgencyQuorumError);
-    expect((await team.usage()).totalTokens).toBe(before + 15);
+    expect(((await team.usage()) as { totalTokens: number }).totalTokens).toBe(before + 15);
   });
 });
 
@@ -806,7 +808,7 @@ describe('15-16. seating outside panel', () => {
     route([[ANTHROPIC, anthropicError(529, 'overloaded')], [OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('rescued')]]);
     const team = agency({ modelPool: POOL(), agents: { a: { instructions: 'x' } }, strategy: 'sequential' } as never);
     const r = await team.generate('go');
-    expect(r.seating.seats.a).toMatchObject({ entry: 'opus', provider: 'anthropic' });
+    expect(r.seating!.seats.a).toMatchObject({ entry: 'opus', provider: 'anthropic' });
     expect(r.text).toBe('rescued');
     expect(header(calls(OPENAI_CHAT, 'POST')[0], 'Authorization')).toBe(`Bearer ${K.oai}`);
     expect(r.agentCalls[0]).toMatchObject({ provider: 'openai', model: 'gpt-4.1' });
@@ -822,7 +824,7 @@ describe('15-16. seating outside panel', () => {
     await expect(team.generate('go')).rejects.toBeInstanceOf(AgencySeatingError);
     expect(fetchMock).not.toHaveBeenCalled();
     vi.stubEnv('ANTHROPIC_API_KEY', K.antEnv);
-    expect((await team.generate('go')).seating.call).toBe(0);
+    expect((await team.generate('go')).seating!.call).toBe(0);
     vi.unstubAllEnvs();
     const g = agency({ modelPool: { opus: { provider: 'anthropic', model: 'claude-opus-5-5' } }, agents: { root: { instructions: 'r' }, leaf: { instructions: 'l', dependsOn: ['root'] } }, strategy: 'graph' } as never);
     await expect(g.generate('go')).rejects.toBeInstanceOf(AgencySeatingError);
@@ -830,16 +832,16 @@ describe('15-16. seating outside panel', () => {
   it('a pooled parallel agency with minProviders 2 and no seating meets its quorum', async () => {
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, openaiText('B')], [ANTHROPIC, anthropicText('A')], [GEMINI, geminiText('C')]]);
     const r = await agency({ provider: 'openai', model: 'gpt-4.1', apiKey: K.chair, modelPool: POOL(), agents: { a: { instructions: 'x' }, b: { instructions: 'y' } }, strategy: 'parallel', quorum: { minProviders: 2 } } as never).generate('go');
-    expect(r.seating.distinct).toBe('vendor');
-    expect(new Set(Object.values(r.seating.seats).map((s) => s.provider)).size).toBe(2);
+    expect(r.seating!.distinct).toBe('vendor');
+    expect(new Set(Object.values(r.seating!.seats).map((s) => s.provider)).size).toBe(2);
   });
   it('a nested panel in last position leaks no ledger into a pooled sequential parent', async () => {
     threeProviders();
     const inner = panel();
     const parent = agency({ modelPool: { gemini: POOL().gemini }, agents: { first: { instructions: 'f' }, inner }, strategy: 'sequential' } as never);
     const r = await parent.generate('go');
-    expect(r.seating.seats.first).toMatchObject({ entry: 'gemini' });
-    expect(r.seating.seats.inner).toEqual({ prebuilt: true });
+    expect(r.seating!.seats.first).toMatchObject({ entry: 'gemini' });
+    expect(r.seating!.seats.inner).toEqual({ prebuilt: true });
     expect((r as Json).seats).toBeUndefined(); expect((r as Json).chair).toBeUndefined(); expect((r as Json).quorum).toBeUndefined();
   });
 });
@@ -866,6 +868,26 @@ describe('17. construction and seating errors', () => {
       ['minAgents above the seats', { strategy: 'panel', modelPool: POOL(), agents: SEATS(), chair: false, quorum: { minAgents: 4 } }],
     ];
     for (const [label, opts] of bad) expect(() => agency(opts as never), label).toThrow(AgencyConfigError);
+  });
+  it('rejects a config seat or a chair on the GMI runtime in an agency with a pool or a panel', () => {
+    // A GMI seat's calls would skip the strict credentials and the error mask seating gives every seat.
+    const gmiSeats: Array<[string, Json]> = [
+      ['a pooled seat', { modelPool: POOL(), agents: { a: { instructions: 'x', runtime: 'gmi' } }, strategy: 'sequential' }],
+      ['a fixed seat of a panel', { strategy: 'panel', modelPool: POOL(), agents: { ...SEATS(), own: { provider: 'openai', model: 'gpt-4.1', runtime: 'gmi' } }, chair: false }],
+      ['a chair', { strategy: 'panel', modelPool: POOL(), agents: SEATS(), chair: { from: ['opus'], runtime: 'gmi' } }],
+    ];
+    for (const [label, opts] of gmiSeats) {
+      expect(() => agency(opts as never), label).toThrow(AgencyConfigError);
+      expect(() => agency(opts as never), label).toThrow(/runtime 'gmi' is not available/);
+    }
+  });
+  it("rejects a panel seat named 'chair', the name the chair's record, approvals and callbacks carry, with an AgencyPanelError that names it", () => {
+    for (const chair of [{ instructions: 'Merge.' }, agent({ provider: 'openai', model: 'gpt-4.1', apiKey: K.oai })]) {
+      expect(() => agency({ strategy: 'panel', modelPool: POOL(), agents: { ...SEATS(), chair }, chair: false } as never)).toThrow(AgencyPanelError);
+      expect(() => agency({ strategy: 'panel', modelPool: POOL(), agents: { ...SEATS(), chair }, chair: false } as never)).toThrow(/seat "chair"/);
+    }
+    // The name is only reserved under panel.
+    expect(() => agency({ modelPool: POOL(), agents: { chair: { instructions: 'x' } }, strategy: 'sequential' } as never)).not.toThrow();
   });
   it('an unseatable chair throws at call time before any seat request', async () => {
     threeProviders();
@@ -919,8 +941,8 @@ describe('19-21. callbacks, gates, CLI entries', () => {
   it('a CLI entry whose binary is missing is skipped with a reason and the seat takes its next candidate', async () => {
     threeProviders();
     const r = await agency({ strategy: 'panel', modelPool: { cli: { provider: 'claude-code-cli', model: 'claude-sonnet-4-6' }, ...POOL() }, agents: { a: { instructions: 'x', from: ['cli', 'astra'] }, b: { instructions: 'y' } }, chair: { from: ['opus'] } } as never).generate('review');
-    expect(r.seating.skipped).toContainEqual({ entry: 'cli', reason: 'binary not found (claude)' });
-    expect(r.seating.seats.a).toMatchObject({ entry: 'astra' });
+    expect(r.seating!.skipped).toContainEqual({ entry: 'cli', reason: 'binary not found (claude)' });
+    expect(r.seating!.seats.a).toMatchObject({ entry: 'astra' });
   });
 });
 
@@ -954,7 +976,7 @@ describe('22-23. rotation, copies, retries, empty text', () => {
     threeProviders();
     const rr = agency({ strategy: 'panel', modelPool: POOL(), seating: { policy: 'round-robin', distinct: false }, agents: SEATS(), chair: { from: ['opus'] } } as never);
     const [c1, c2] = await Promise.all([rr.generate('one'), rr.generate('two')]);
-    expect([c1.seating.call, c2.seating.call]).toEqual([0, 1]);
+    expect([c1.seating!.call, c2.seating!.call]).toEqual([0, 1]);
     // The requests above (three attempts per failing OpenAI call, and the round-robin seats) are not this part's.
     fetchMock.mockClear();
     route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiText('not json'), openaiText('{"ok":true}')]]]);
@@ -997,6 +1019,23 @@ describe('25-26. approvals under panel and nested agencies', () => {
     const team = agency({ modelPool: { astra: POOL().astra }, agents: { one: { instructions: 'x' } }, strategy: 'sequential', tools, hitl: { approvals: { beforeTool: ['search'] }, handler: async () => ({ approved: true }) }, on: { guardrailResult: () => { throw new Error('ui down'); } } } as never);
     const r = await team.generate('clean up');
     expect(r.text).toBe('done');
+    expect(tools.search.execute).not.toHaveBeenCalled();
+  });
+  it("under a pooled sequential agency a handler error that echoes a key rejects the call masked and reaches on.error masked, and the handler's own error is left as it is", async () => {
+    const tools = searchTool();
+    route([[OPENAI_LIST, openaiListing], [OPENAI_CHAT, [openaiToolCall('search', { q: 'x' }), openaiText('done')]]]);
+    const own = new Error(`approval service saw ${K.oai}`);
+    const errors: Json[] = [];
+    const team = agency({ modelPool: { astra: POOL().astra }, agents: { one: { instructions: 'x' } }, strategy: 'sequential', tools, hitl: { approvals: { beforeTool: ['search'] }, handler: async () => { throw own; } }, on: { error: (e: Json) => errors.push(e) } } as never);
+    const err = await team.generate('go').catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBe(own);
+    expect(err.message).toContain('[redacted]');
+    expect(ownStrings(err)).not.toContain(K.oai);
+    // The handler's error belongs to the caller: the agency masks a copy and never writes the original.
+    expect(own.message).toBe(`approval service saw ${K.oai}`);
+    expect(errors).toHaveLength(1);
+    expect(ownStrings(errors[0].error)).not.toContain(K.oai);
     expect(tools.search.execute).not.toHaveBeenCalled();
   });
   it('a chair whose approval errors throws AgencyPanelError with the ledger; a seat already timed out stays timeout', async () => {
@@ -1073,6 +1112,6 @@ describe('25-26. approvals under panel and nested agencies', () => {
     await expect(parent.generate('go')).rejects.toThrow('parent handler failed');
     expect(childHandler).not.toHaveBeenCalled();
     expect(tools.search.execute).not.toHaveBeenCalled();
-    expect((await child.usage()).totalTokens).toBe(30);
+    expect(((await child.usage()) as { totalTokens: number }).totalTokens).toBe(30);
   });
 });

@@ -18,11 +18,18 @@ export const POOL_DENIED_KEYS = [
 /** `customModelParams` keys a call may not carry in a pooled agency: each would change the model on the wire. */
 export const CUSTOM_MODEL_PARAMS_DENIED_POOL = ['model', 'models'] as const;
 
-/** The only keys a call may carry under `panel`. */
+/**
+ * The only keys a call may carry under `panel`. `budget`, `hookErrors` and
+ * `abortSignal` can stop a seat's call (a refused spend, a hook's error, the
+ * caller's abort) but change no seat's provider, model, key, URL, prompt or
+ * tools. A `budget` given as settings makes one budget per seat call; pass a
+ * `SpendBudget` instance to cap the whole run.
+ */
 export const PANEL_ALLOWED_KEYS = [
   'temperature', 'topP', 'frequencyPenalty', 'presencePenalty', 'maxTokens', 'thinking', 'effort', 'requestTimeout', 'cache',
   'promptCacheKey', 'promptCacheRetention', 'serviceTier', 'cacheDiagnostics', 'sessionId', 'usageLedger', 'source', 'toolChoice',
   'chainOfThought', 'planning', 'onAfterGeneration', 'onBeforeToolExecution', '__approvalGate', '__panelDeadline', 'customModelParams',
+  'budget', 'hookErrors', 'abortSignal',
 ] as const;
 
 /** `customModelParams` keys a panel call may not carry: each would give every seat one shared prompt, tool set or model. */

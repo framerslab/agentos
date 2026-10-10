@@ -471,6 +471,7 @@ export function validateAgentExport(config: unknown): { valid: boolean; errors: 
       'review-loop',
       'hierarchical',
       'graph',
+      'panel',
     ]);
     if (c.strategy !== undefined && !validStrategies.has(c.strategy as string)) {
       errors.push(

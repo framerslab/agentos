@@ -19,8 +19,8 @@ const PANEL_DECISION: Record<keyof GenerateTextOptions, 'allow' | 'deny'> = {
   onAfterGeneration: 'allow', onBeforeToolExecution: 'allow', __approvalGate: 'allow', __strictCredentials: 'deny',
   __panelDeadline: 'allow', __maskError: 'deny', _responseFormat: 'deny', _responseFormatBuilder: 'deny',
   _schemaInstruction: 'deny', _transcriptIncludeTrailingCallerMessages: 'deny', _continuation: 'deny',
-  // Added on master after the allow list was written; rejected under panel until a decision allows them.
-  budget: 'deny', hookErrors: 'deny', abortSignal: 'deny',
+  // Added on master after the allow list was written, and allowed: each can stop a seat's call, none moves a seat off its seating.
+  budget: 'allow', hookErrors: 'allow', abortSignal: 'allow',
 };
 
 describe('the pooled guard (deny list, presence not value)', () => {
@@ -50,5 +50,13 @@ describe('the panel guard (allow list)', () => {
   });
   it('rejects an unknown key too', () => {
     expect(() => guardPerCallOptions({ somethingNew: 1 }, 'panel')).toThrow(AgencyConfigError);
+  });
+});
+
+describe('per-call options added on master after the lists were written', () => {
+  it('lets a spend budget, hookErrors and an abort signal through, under panel and in a pooled agency', () => {
+    const opts = { budget: { maxCostUSD: 1 }, hookErrors: 'throw', abortSignal: new AbortController().signal };
+    expect(() => guardPerCallOptions(opts, 'panel')).not.toThrow();
+    expect(() => guardPerCallOptions(opts, 'pool')).not.toThrow();
   });
 });

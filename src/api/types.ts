@@ -2034,7 +2034,12 @@ export interface AgencyInstance<R extends AgencyResult = AgencyResult> extends A
   stream(prompt: string, opts?: Record<string, unknown>): AgencyStreamResult<R> & { result: Promise<R> };
 }
 
-/** Thrown when a panel's chair fails: it threw, timed out or returned no text. Carries the ledger. */
+/**
+ * Thrown when a panel's chair fails: it threw, timed out or returned no text.
+ * Carries the ledger. `agency()` also throws it, with no ledger, for a panel
+ * whose roster names a seat `'chair'`, the name the chair's record, approval
+ * requests and callbacks carry.
+ */
 export class AgencyPanelError extends Error implements PanelLedger {
   /** Every seat's record. */
   seats?: PanelSeatRecord[];

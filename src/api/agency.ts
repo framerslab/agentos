@@ -64,6 +64,10 @@
  */
 
 import { compileStrategy, isAgent } from './runtime/strategies/index.js';
+import { validatePoolOptions, hasPoolSurface } from './runtime/pool/validate.js';
+import { createSeatingState, seatRoster, type SeatingState, type SeatedRoster } from './runtime/pool/seating.js';
+import { guardPerCallOptions } from './runtime/pool/guard.js';
+import { collectCallSecrets, createErrorMask, maskedCopyOf, redactStrings, redactText } from './runtime/pool/redact.js';
 import type {
   AgencyOptions,
   Agent,
@@ -76,9 +80,14 @@ import type {
   AgencyStreamPart,
   AgencyStreamResult,
   AgencyResult,
+  AgencyInstance,
+  PanelResult,
+  PanelSeatRecord,
+  PanelQuorumRecord,
+  SeatingRecord,
   CompiledStrategyStreamResult,
 } from './types.js';
-import { AgencyConfigError } from './types.js';
+import { AgencyConfigError, AgencyPanelError, AgencyQuorumError } from './types.js';
 import {
   exportAgentConfig,
   exportAgentConfigJSON,
@@ -111,18 +120,36 @@ import {
  * {@link AgencyConfigError} on any structural problem so issues surface at
  * wiring time rather than the first call.
  *
+ * With a `modelPool` or `strategy: 'panel'`, every call is guarded, seated
+ * and masked: a per-call option that would move every seat off its seating is
+ * refused, the roster is seated from the pool, and no credential the call can
+ * send reaches a record, a thrown error or a callback.
+ *
  * @param opts - Full agency configuration including the `agents` roster, optional
  *   `strategy`, `controls`, `hitl`, and `observability` settings.
- * @returns An {@link Agent} instance whose `generate` / `stream` / `session` methods
- *   invoke the compiled strategy over the configured sub-agents.
+ * @returns An {@link AgencyInstance} whose `generate` / `stream` / `session` methods
+ *   invoke the compiled strategy over the configured sub-agents; `generate()`
+ *   resolves to a {@link PanelResult} for a `panel` agency.
  * @throws {AgencyConfigError} When the configuration is structurally invalid
  *   (e.g. no agents defined, emergent enabled without hierarchical strategy,
  *   HITL approvals configured without a handler, parallel/debate without a
  *   synthesis model).
+ * @throws {AgencyPanelError} For a `panel` whose roster names a seat `'chair'`.
  *
  * @category Core
  */
-export function agency(opts: AgencyOptions): Agent {
+export function agency(opts: AgencyOptions & { strategy: 'panel' }): AgencyInstance<PanelResult>;
+/**
+ * Creates a multi-agent agency: the same factory, for any strategy. See the
+ * overload above for what it validates and returns.
+ *
+ * @param opts - Full agency configuration.
+ * @returns An {@link AgencyInstance} whose `generate()` resolves to an {@link AgencyResult}.
+ * @throws {AgencyConfigError} When the configuration is structurally invalid.
+ * @throws {AgencyPanelError} For a `panel` whose roster names a seat `'chair'`.
+ */
+export function agency(opts: AgencyOptions): AgencyInstance;
+export function agency(opts: AgencyOptions): AgencyInstance {
   // 1. Validate options — throw early on bad configuration.
   validateAgencyOptions(opts);
 
@@ -151,17 +178,49 @@ export function agency(opts: AgencyOptions): Agent {
   const chosenStrategy = opts.adaptive
     ? 'hierarchical'
     : (opts.strategy ?? (hasDependsOn ? 'graph' : 'sequential'));
+  const isPanel = chosenStrategy === 'panel';
+  // A pool, a panel or a pool-only option: checked here, and every call is
+  // guarded, seated and masked. After the check, such an agency has a pool or
+  // is a panel.
+  const pooled = hasPoolSurface(opts, chosenStrategy);
+  if (pooled) validatePoolOptions(opts, chosenStrategy);
 
+  // The construction-time compile stays for every agency, over the roster as
+  // written: it reports a graph cycle, a one-seat review-loop and a manager
+  // without a model now, not at the first call. An agency with a pool or a
+  // panel compiles again for every call, over that call's seating.
   const strategy: CompiledStrategy = compileStrategy(
     chosenStrategy,
     opts.agents,
     opts,
   );
+  const seatingState: SeatingState | undefined = pooled ? createSeatingState(opts, chosenStrategy) : undefined;
 
   // 3. Extract resource controls (may be undefined).
   const controls: ResourceControls | undefined = opts.controls;
   const agencyName = opts.name ?? '__agency__';
   const agencyUsage: UsageTotals = emptyUsageTotals();
+
+  // 3a. No credential in any record. In an agency with a pool or a panel, an
+  //     error that leaves a seat or this agency, and a string of a result
+  //     that a seat's loops could not mask, passes through a mask built from
+  //     every credential the agency's calls can send. Each seating adds that
+  //     call's list to the lists before it, so overlapping calls never unmask
+  //     each other's errors; the mask reads the list when it runs.
+  const secretsHolder: { list: readonly string[] } = { list: [] };
+  /** An error masked in place where its strings can be written (its class and shape stay), else a masked plain Error. */
+  const mask = createErrorMask(secretsHolder);
+  /** A masked stand-in that never writes `error`: for an error someone else owns, a HITL handler's. */
+  const maskedCopy = (error: unknown): unknown => (pooled ? maskedCopyOf(error, secretsHolder.list) : error);
+  const toError = (error: unknown): Error => (error instanceof Error ? error : new Error(String(error)));
+  /** Runs one of this agency's own callbacks: a callback that throws is logged and never fails the call. */
+  const fire = (call: () => void): void => {
+    try {
+      call();
+    } catch (err) {
+      console.warn('[AgentOS][Agency] callback threw:', err);
+    }
+  };
 
   // 3b. Provenance recorder (in-memory event trail with optional hash chain).
   //     Hooks into opts.on so every callback the runtime fires is also written
@@ -175,6 +234,21 @@ export function agency(opts: AgencyOptions): Agent {
   if (provenanceRecorder) {
     opts = { ...opts, on: provenanceRecorder.wrapCallbacks(opts.on) };
   }
+  // 3c. In an agency with a pool or a panel, an error event that a strategy,
+  //     a gate or this agency fires carries a masked error before the trail
+  //     and the caller's handler see it. The stand-in never writes the error
+  //     it is given: a HITL handler's error stays as the handler made it.
+  if (pooled && opts.on?.error) {
+    const on = opts.on;
+    opts = {
+      ...opts,
+      on: {
+        ...on,
+        error: (event: { agent: string; error: Error; timestamp: number }) =>
+          on.error?.({ ...event, error: toError(maskedCopy(event.error)) }),
+      },
+    };
+  }
 
   // 4. In-memory session store keyed by session ID.
   const sessions = new Map<string, AgencySession>();
@@ -182,8 +256,11 @@ export function agency(opts: AgencyOptions): Agent {
 
   // 5. Tool-approval gate. It exists only when `beforeTool` is listed (the
   //    handler's presence was checked by validateAgencyOptions); each call
-  //    gets its own gate and slot.
+  //    gets its own gate and slot. Under panel each seat and the chair get a
+  //    gate and a slot of their own, built by the strategy, and the call
+  //    forwards only a gate it received.
   const gateEnabled = (opts.hitl?.approvals?.beforeTool?.length ?? 0) > 0;
+  const ownGate = gateEnabled && !isPanel;
 
   /**
    * The per-call options the strategy receives: the caller's, with
@@ -197,36 +274,83 @@ export function agency(opts: AgencyOptions): Agent {
     slot: ApprovalSlot,
   ): Record<string, unknown> | undefined => {
     const received = composeReceivedGate(execOpts?.__approvalGate);
-    if (!gateEnabled && received === execOpts?.__approvalGate) return execOpts;
+    if (!ownGate && received === execOpts?.__approvalGate) return execOpts;
     const callOpts: Record<string, unknown> = { ...execOpts };
     delete callOpts.__approvalGate;
-    const gate = gateEnabled
+    const gate = ownGate
       ? createApprovalGate({ hitl: opts.hitl!, agentName: agencyName, on: opts.on, slot, received })
       : received;
     if (gate) callOpts.__approvalGate = gate;
     return callOpts;
   };
 
-  /** The error a call takes from its slot: the gate already reported it to `on.error`. */
-  const isSlotError = (slot: ApprovalSlot, error: unknown): boolean =>
-    slot.error !== undefined && error === slot.error;
+  /**
+   * How one call reports and rejects. Every error is masked once per call, so
+   * `on.error`, the stream's members and every rejection carry the same
+   * object; in an agency with a pool or a panel, the slot's error leaves as a
+   * masked copy, and the handler's own object is left as it is.
+   */
+  const callErrors = (slot: ApprovalSlot) => {
+    const maskedOnce = new WeakMap<object, unknown>();
+    let slotCopy: { value: unknown } | undefined;
+    /** The slot's error as the call rejects with it. */
+    const slotRejection = (): unknown => {
+      if (!slotCopy) slotCopy = { value: maskedCopy(slot.error) };
+      return slotCopy.value;
+    };
+    /** An error other than the slot's, masked the first time it is seen. */
+    const maskOnce = (error: unknown): unknown => {
+      if (!pooled) return error;
+      if (error === null || typeof error !== 'object') return mask(error);
+      if (!maskedOnce.has(error)) maskedOnce.set(error, mask(error));
+      return maskedOnce.get(error);
+    };
+    return {
+      maskOnce,
+      slotRejection,
+      /** The error a call takes from its slot, raw or as its masked copy: the gate already reported it to `on.error`. */
+      isSlotError: (error: unknown): boolean =>
+        slot.error !== undefined && (error === slot.error || error === slotRejection()),
+      /**
+       * The error a failed call rejects with. Once a tool approval has failed,
+       * a later failure (a seat's own error, a `beforeAgent` handler that
+       * throws) does not replace it: the call rejects with the approval error,
+       * which the gate reported, and the later one goes to `on.error` from the
+       * catch that receives it.
+       */
+      rejectionOf: (error: unknown): unknown => (slot.error !== undefined ? slotRejection() : maskOnce(error)),
+    };
+  };
 
   /**
-   * The error a failed call rejects with. Once a tool approval has failed, a
-   * later failure (a seat's own error, a `beforeAgent` handler that throws)
-   * does not replace it: the call rejects with the approval error, which the
-   * gate reported, and the later one goes to `on.error` from the catch that
-   * receives it.
+   * Seats the roster for one call and compiles the strategy over it. Throws
+   * `AgencySeatingError` before any model is called; a failed seating commits
+   * nothing. Without a pool or a panel, the construction-time strategy.
    */
-  const rejectionOf = (slot: ApprovalSlot, error: unknown): unknown =>
-    slot.error !== undefined ? slot.error : error;
+  const seatForCall = (
+    callOpts: Record<string, unknown> | undefined,
+  ): { strategy: CompiledStrategy; seated?: SeatedRoster } => {
+    if (!seatingState) return { strategy };
+    const seated = seatRoster(opts, seatingState, chosenStrategy, callOpts, mask);
+    secretsHolder.list = [...new Set([...secretsHolder.list, ...collectCallSecrets(opts, seated.secrets)])]
+      .sort((a, b) => b.length - a.length);
+    seated.commit();
+    return { strategy: compileStrategy(chosenStrategy, seated.roster, opts, seated), seated };
+  };
 
-  /** Adds a run's usage to the agency and session totals before the call rejects with its slot's error. */
-  const billBeforeRejecting = (result: Record<string, unknown>, sessionId?: string): void => {
-    const usage = normalizeUsage(result.usage);
-    addUsageTotals(agencyUsage, usage);
+  /** Adds usage to the agency's and the session's totals. */
+  const billUsage = (usage: unknown, sessionId?: string): void => {
+    const totals = normalizeUsage(usage);
+    addUsageTotals(agencyUsage, totals);
     if (sessionId) {
-      addUsageTotals(getSessionUsage(sessionUsage, sessionId), usage);
+      addUsageTotals(getSessionUsage(sessionUsage, sessionId), totals);
+    }
+  };
+
+  /** A panel's ledger error carries the usage of every call that returned before the failure: it is billed before the call rejects. */
+  const billLedger = (error: unknown, sessionId?: string): void => {
+    if ((error instanceof AgencyQuorumError || error instanceof AgencyPanelError) && error.usage) {
+      billUsage(error.usage, sessionId);
     }
   };
 
@@ -265,29 +389,72 @@ export function agency(opts: AgencyOptions): Agent {
     start: number,
     sessionId?: string,
     streamPartBuffer?: AgencyStreamPart[],
+    seated?: SeatedRoster,
   ): Promise<FinalizedExecutionResult> => {
     const guardConfig = normalizeGuardrails(opts.guardrails);
     const outputGuards = guardConfig?.output ?? [];
     const finalized: FinalizedExecutionResult = { ...result };
     const elapsedMs = Date.now() - start;
 
-    if (outputGuards.length && typeof finalized.text === 'string') {
-      finalized.text = await runGuardrails(finalized.text, outputGuards, 'output', opts.on);
+    // A result always carries a text: sequential and graph return none when
+    // every seat was rejected.
+    if (typeof finalized.text !== 'string') finalized.text = '';
+    // The ledger describes the agency that returns it. sequential and graph
+    // spread their last seat's result into their own, so a nested panel's
+    // seats, chair, quorum and seating are removed from any result that is
+    // not this agency's own panel run, and this agency's seating is attached.
+    // A nested agency's provenance trail is that agency's own record, which
+    // accumulates across its calls with raw strings: it is dropped, never
+    // rewritten, and this agency attaches its own trail below.
+    if (!isPanel) {
+      delete finalized.seats;
+      delete finalized.chair;
+      delete finalized.quorum;
+      delete finalized.seating;
+    }
+    delete finalized.provenanceTrail;
+    if (seated) finalized.seating = seated.record;
+    if (pooled) {
+      // What the seats' own loops cannot mask: a pre-built seat's or a nested
+      // agency's tool errors, conversation delta and tool calls come back raw.
+      const secrets = secretsHolder.list;
+      if (Array.isArray(finalized.agentCalls)) {
+        finalized.agentCalls = (finalized.agentCalls as AgentCallRecord[]).map((call) =>
+          call && Array.isArray(call.toolCalls) && call.toolCalls.some((t) => typeof t?.error === 'string')
+            ? {
+                ...call,
+                toolCalls: call.toolCalls.map((t) => {
+                  const error = t?.error;
+                  return typeof error === 'string' ? { ...t, error: redactText(error, secrets) } : t;
+                }),
+              }
+            : call,
+        );
+      }
+      if (finalized.transcriptDelta !== undefined) {
+        finalized.transcriptDelta = redactStrings(finalized.transcriptDelta, secrets);
+      }
+      if (Array.isArray(finalized.toolCalls)) {
+        finalized.toolCalls = redactStrings(finalized.toolCalls, secrets);
+      }
     }
 
-    if (opts.output && typeof finalized.text === 'string') {
-      finalized.parsed = parseStructuredOutput(finalized.text, opts.output);
+    if (outputGuards.length) {
+      finalized.text = await runGuardrails(finalized.text as string, outputGuards, 'output', opts.on);
     }
+
+    if (opts.output) {
+      finalized.parsed = parseStructuredOutput(finalized.text as string, opts.output);
+    }
+
+    // A run's usage is counted before the limits are checked, so a run that
+    // itself breaches a limit is billed and the next call's pre-check sees it.
+    const resultUsage = normalizeUsage(finalized.usage);
+    finalized.usage = resultUsage;
+    billUsage(resultUsage, sessionId);
 
     if (controls) {
       checkLimits(controls, finalized, elapsedMs, opts.on);
-    }
-
-    const resultUsage = normalizeUsage(finalized.usage);
-    finalized.usage = resultUsage;
-    addUsageTotals(agencyUsage, resultUsage);
-    if (sessionId) {
-      addUsageTotals(getSessionUsage(sessionUsage, sessionId), resultUsage);
     }
 
     const approvedResult = await maybeApproveFinalResult(
@@ -309,14 +476,22 @@ export function agency(opts: AgencyOptions): Agent {
       agentCalls: ((approvedResult.agentCalls as AgentCallRecord[] | undefined) ?? []),
       parsed: approvedResult.parsed,
       durationMs: elapsedMs,
+      ...(approvedResult.seating ? { seating: approvedResult.seating as SeatingRecord } : {}),
+      ...(isPanel
+        ? {
+            seats: approvedResult.seats as PanelSeatRecord[] | undefined,
+            chair: approvedResult.chair as PanelSeatRecord | undefined,
+            quorum: approvedResult.quorum as PanelQuorumRecord | undefined,
+          }
+        : {}),
     });
 
-    opts.on?.agentEnd?.({
+    fire(() => opts.on?.agentEnd?.({
       agent: agencyName,
       output: (approvedResult.text as string) ?? '',
       durationMs: elapsedMs,
       timestamp: Date.now(),
-    });
+    }));
 
     // Seal the provenance trail with the final output and attach to result.
     // The recorder has already observed every callback that fired during the
@@ -354,17 +529,23 @@ export function agency(opts: AgencyOptions): Agent {
     execOpts?: Record<string, unknown>,
     sessionId?: string,
   ): Promise<Record<string, unknown>> => {
+    // A pooled or panel agency refuses a per-call option that would move every
+    // seat off its seating: generate() rejects before anything runs.
+    if (pooled) guardPerCallOptions(execOpts, isPanel ? 'panel' : 'pool');
     const start = Date.now();
     const slot = createApprovalSlot();
     const callOpts = buildCallOptions(execOpts, slot);
-    opts.on?.agentStart?.({
+    const errors = callErrors(slot);
+    fire(() => opts.on?.agentStart?.({
       agent: agencyName,
       input: prompt,
       timestamp: start,
-    });
+    }));
 
     try {
       const preparedPrompt = await prepareExecutionPrompt(prompt);
+      // Seated once per call: a validation retry runs on the same seating.
+      const { strategy: strategyForCall, seated } = seatForCall(callOpts);
 
       // Validation retry loop — when `opts.output` is a Zod schema and the
       // LLM returns unparseable/invalid text, retry with the previous error
@@ -378,16 +559,17 @@ export function agency(opts: AgencyOptions): Agent {
       const maxAttempts = hasValidation ? maxValidationRetries + 1 : 1;
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        const result = (await strategy.execute(currentPrompt, callOpts)) as Record<string, unknown>;
+        const result = (await strategyForCall.execute(currentPrompt, callOpts)) as Record<string, unknown>;
         if (slot.error !== undefined) {
           // A handler error or an 'error' timeout inside a tool loop: the run
-          // is billed and the call rejects with the handler's own error,
-          // before any finalization step and before a validation retry.
+          // is billed and the call rejects with the handler's own error (in
+          // an agency with a pool, a masked copy of it), before any
+          // finalization step and before a validation retry.
           slot.settled = true;
-          billBeforeRejecting(result, sessionId);
+          billUsage(result.usage, sessionId);
           throw slot.error;
         }
-        const finalized = await finalizeExecutionResult(result, start, sessionId);
+        const finalized = await finalizeExecutionResult(result, start, sessionId, undefined, seated);
         lastFinalized = finalized;
 
         // Success path: no validation required, OR validation produced a `parsed` value
@@ -411,14 +593,17 @@ export function agency(opts: AgencyOptions): Agent {
       return lastFinalized!;
     } catch (error) {
       slot.settled = true;
-      if (!isSlotError(slot, error)) {
-        opts.on?.error?.({
+      billLedger(error, sessionId);
+      // The slot's error was reported by the gate that stored it; any other
+      // error is reported here, masked, as the call rejects with it.
+      if (!errors.isSlotError(error)) {
+        fire(() => opts.on?.error?.({
           agent: agencyName,
-          error: error instanceof Error ? error : new Error(String(error)),
+          error: toError(errors.maskOnce(error)),
           timestamp: Date.now(),
-        });
+        }));
       }
-      throw rejectionOf(slot, error);
+      throw errors.rejectionOf(error);
     }
   };
 
@@ -426,39 +611,55 @@ export function agency(opts: AgencyOptions): Agent {
     prompt: string,
     streamOpts?: Record<string, unknown>,
     sessionId?: string,
-  ): AgencyStreamResult => {
+  ): AgencyStreamResult & { result: Promise<AgencyResult> } => {
     const start = Date.now();
     const slot = createApprovalSlot();
     const callOpts = buildCallOptions(streamOpts, slot);
+    const errors = callErrors(slot);
     let errorReported = false;
     const postStreamParts: AgencyStreamPart[] = [];
+    // The call's seating, once the deferred stream has seated the roster.
+    const seatedRef: { seated?: SeatedRoster } = {};
 
-    const reportError = (error: unknown): void => {
-      // The slot's error was reported by the gate that stored it.
-      if (errorReported || isSlotError(slot, error)) return;
-      errorReported = true;
-      opts.on?.error?.({
-        agent: agencyName,
-        error: error instanceof Error ? error : new Error(String(error)),
-        timestamp: Date.now(),
-      });
+    /**
+     * Reports a failure to `on.error` once per call, masked, and returns what
+     * the caller rethrows. The slot's error was reported by the gate that
+     * stored it, and leaves as its masked copy.
+     */
+    const reportError = (error: unknown): unknown => {
+      if (errors.isSlotError(error)) return errors.slotRejection();
+      const masked = errors.maskOnce(error);
+      if (!errorReported) {
+        errorReported = true;
+        fire(() => opts.on?.error?.({
+          agent: agencyName,
+          error: toError(masked),
+          timestamp: Date.now(),
+        }));
+      }
+      return masked;
     };
 
-    opts.on?.agentStart?.({
+    fire(() => opts.on?.agentStart?.({
       agent: agencyName,
       input: prompt,
       timestamp: start,
-    });
+    }));
 
     const deferredStream = (async () => {
       const preparedPrompt = await prepareExecutionPrompt(prompt);
-      const streamResult = strategy.stream(preparedPrompt, callOpts) as CompiledStrategyStreamResult;
+      // Under stream() a seating error rejects the stream's promises, as a strategy error does.
+      const { strategy: strategyForCall, seated } = seatForCall(callOpts);
+      seatedRef.seated = seated;
+      const streamResult = strategyForCall.stream(preparedPrompt, callOpts) as CompiledStrategyStreamResult;
       // The text is read from the strategy's parts, and its own text promise
       // only when it streams none. That promise rejects when the strategy
       // fails (a beforeAgent handler that throws ends the sequential stream),
       // so it is marked handled here, and the failure is reported once,
-      // through the parts.
+      // through the parts. A strategy's whole result is read only by the
+      // finalized result, after the parts.
       void Promise.resolve(streamResult.text).catch(() => undefined);
+      void Promise.resolve(streamResult.result).catch(() => undefined);
       return streamResult;
     })();
 
@@ -466,7 +667,11 @@ export function agency(opts: AgencyOptions): Agent {
       const streamResult = await deferredStream;
 
       if (streamResult.fullStream) {
-        yield* streamResult.fullStream;
+        // A strategy's error parts (a pre-built seat's, a sequential seat's)
+        // leave masked in an agency with a pool or a panel.
+        for await (const part of streamResult.fullStream) {
+          yield part.type === 'error' && pooled ? { ...part, error: toError(errors.maskOnce(part.error)) } : part;
+        }
         return;
       }
 
@@ -489,8 +694,7 @@ export function agency(opts: AgencyOptions): Agent {
       try {
         await rawPartReplay.ensureDraining();
       } catch (error) {
-        reportError(error);
-        throw error;
+        throw reportError(error);
       }
     };
 
@@ -533,26 +737,32 @@ export function agency(opts: AgencyOptions): Agent {
           resolvedAgentCallsPromise,
         ]);
 
-        const result: Record<string, unknown> = {
-          text,
-          usage,
-          agentCalls: Array.isArray(agentCalls) ? agentCalls : [],
-        };
+        // A strategy with more than text, usage and agent calls (a panel's
+        // ledger) resolves its whole result, which finalization reads.
+        const streamResult = await deferredStream;
+        const result: Record<string, unknown> = streamResult.result
+          ? { ...(await streamResult.result) }
+          : {
+              text,
+              usage,
+              agentCalls: Array.isArray(agentCalls) ? agentCalls : [],
+            };
 
         if (slot.error !== undefined) {
           // As on the generate path: billed, then rejected with the
           // handler's own error, before any finalization step.
           slot.settled = true;
-          billBeforeRejecting(result, sessionId);
+          billUsage(result.usage, sessionId);
           throw slot.error;
         }
-        const finalized = await finalizeExecutionResult(result, start, sessionId, postStreamParts);
+        const finalized = await finalizeExecutionResult(result, start, sessionId, postStreamParts, seatedRef.seated);
         slot.settled = true;
         return finalized;
       } catch (error) {
         slot.settled = true;
+        billLedger(error, sessionId);
         reportError(error);
-        throw rejectionOf(slot, error);
+        throw errors.rejectionOf(error);
       }
     })();
 
@@ -579,14 +789,14 @@ export function agency(opts: AgencyOptions): Agent {
           // After a tool approval error the stream ends as below: with that
           // error, once the run has settled.
           if (slot.error !== undefined) await finalizedResultPromise.catch(() => undefined);
-          throw rejectionOf(slot, error);
+          throw errors.rejectionOf(error);
         }
         // A handler error or an 'error' timeout ends the call: a consumer
         // that reads only this stream gets that error here, once the run is
         // billed. fullStream ends the same way, through the finalized result.
         if (slot.error !== undefined) {
           await finalizedResultPromise.catch(() => undefined);
-          throw slot.error;
+          throw errors.slotRejection();
         }
       })(),
       fullStream: (async function* () {
@@ -616,7 +826,7 @@ export function agency(opts: AgencyOptions): Agent {
         } catch (error) {
           reportError(error);
           if (slot.error !== undefined) await finalizedResultPromise.catch(() => undefined);
-          throw rejectionOf(slot, error);
+          throw errors.rejectionOf(error);
         }
       })(),
       text: derived(finalizedResultPromise.then((result) => (result.text as string) ?? '')),
@@ -653,7 +863,9 @@ export function agency(opts: AgencyOptions): Agent {
      * aggregated result (non-streaming).
      *
      * @param prompt - User prompt text.
-     * @param opts - Optional per-call overrides.
+     * @param opts - Optional per-call overrides. In an agency with a pool or a
+     *   panel, an option that would move every seat off its seating makes the
+     *   returned promise reject with {@link AgencyConfigError}.
      * @returns The aggregated result including `text`, `agentCalls`, and `usage`.
      */
     async generate(prompt: string, generateOpts?: Record<string, unknown>): Promise<unknown> {
@@ -666,13 +878,17 @@ export function agency(opts: AgencyOptions): Agent {
      * as a single text chunk.
      *
      * @param prompt - User prompt text.
-     * @param streamOpts - Optional per-call overrides.
+     * @param streamOpts - Optional per-call overrides. In an agency with a pool
+     *   or a panel, an option that would move every seat off its seating throws
+     *   {@link AgencyConfigError} here, before a stream object exists.
      * @returns An object with raw `textStream`, `fullStream`, awaitable `text`/`usage`
      *   promises, an awaitable `agentCalls` ledger, an awaitable `parsed` value
-     *   when structured output is configured, and `finalTextStream` for the
-     *   finalized post-processing text.
+     *   when structured output is configured, `finalTextStream` for the
+     *   finalized post-processing text, and `result`, the finalized result
+     *   with its ledger.
      */
     stream(prompt: string, streamOpts?: Record<string, unknown>): AgencyStreamResult {
+      if (pooled) guardPerCallOptions(streamOpts, isPanel ? 'panel' : 'pool');
       return createStreamResult(prompt, streamOpts);
     },
 
@@ -935,7 +1151,9 @@ export function agency(opts: AgencyOptions): Agent {
     };
   }
 
-  return agentObj;
+  // generate() resolves the finalized result and stream() carries `result`:
+  // the types.ts Agent surface, with the result types AgencyInstance names.
+  return agentObj as unknown as AgencyInstance;
 }
 
 // ---------------------------------------------------------------------------
@@ -964,8 +1182,11 @@ interface AgencySession {
  * - At least one agent must be defined in `opts.agents`.
  * - `emergent.enabled` requires `strategy === "hierarchical"` or `adaptive: true`.
  * - HITL approvals require a `handler` to be configured.
+ * - `strategy: 'panel'` cannot be combined with `adaptive: true`.
  * - `parallel` and `debate` strategies require an agency-level `model` or `provider`
  *   for their synthesis step.
+ *
+ * An agency with a pool or a panel is checked further by `validatePoolOptions`.
  *
  * @param opts - The agency options to validate.
  * @throws {AgencyConfigError} On the first validation failure encountered.
@@ -995,6 +1216,13 @@ function validateAgencyOptions(opts: AgencyOptions): void {
 
   if (hasApprovalTrigger && !opts.hitl?.handler) {
     throw new AgencyConfigError('HITL approvals configured but no handler provided');
+  }
+
+  // adaptive replaces the strategy with hierarchical, which has no health,
+  // quorum, chair or deadline. The raw option is read, for every agency, so a
+  // panel without a pool surface is rejected too.
+  if (opts.strategy === 'panel' && opts.adaptive) {
+    throw new AgencyConfigError('strategy "panel" cannot be combined with adaptive: true');
   }
 
   if (opts.strategy === 'parallel' && !opts.model && !opts.provider) {

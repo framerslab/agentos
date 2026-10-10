@@ -4,7 +4,6 @@
  * replaced by a client that forwards to the stubbed global fetch, so the
  * same request capture works; the providers themselves are the real classes.
  */
-// @ts-nocheck -- the types this file imports land in Task 15 and the typed results in Task 23, which removes this line.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fetchMock = vi.fn();

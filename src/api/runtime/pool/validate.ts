@@ -5,7 +5,7 @@
  * as seating will at the call.
  */
 import type { AgencyOptions, AgencySeatConfig, AgencyStrategy, Agent, ModelPoolEntry } from '../../types.js';
-import { AgencyConfigError } from '../../types.js';
+import { AgencyConfigError, AgencyPanelError } from '../../types.js';
 import { isAgent } from '../strategies/shared.js';
 import { TEXT_PROVIDER_IDS, resolveSeatCredentials } from './resolve.js';
 import { vendorOf } from './vendor.js';
@@ -18,6 +18,15 @@ function fail(msg: string): never {
   throw new AgencyConfigError(msg);
 }
 const isPositiveInt = (v: unknown): boolean => typeof v === 'number' && Number.isInteger(v) && v >= 1;
+/**
+ * Why a config seat or the chair cannot run on the GMI path in an agency with a
+ * pool or a panel: a GMI resolves its failover hops' keys from the environment,
+ * with neither the strict rule nor the call's error mask that seating gives
+ * every seated config.
+ */
+const GMI_SEAT_REASON =
+  "runtime 'gmi' is not available in an agency with a pool or a panel: a GMI seat's calls skip the strict credentials " +
+  "and the error mask seating gives every seat. Use runtime: 'legacy', or place a gmi() agent in the roster as a pre-built seat";
 const isNonNegInt = (v: unknown): boolean => typeof v === 'number' && Number.isInteger(v) && v >= 0;
 
 /** A config seat that names neither a provider nor a model. */
@@ -74,6 +83,10 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
   // `adaptive` replaces the strategy with hierarchical before this runs, so the raw option is read here;
   // validateAgencyOptions repeats the check for every agency, pool or not.
   if (opts.strategy === 'panel' && opts.adaptive) fail('strategy "panel" cannot be combined with adaptive: true');
+  // The chair's record, its approval requests and its callbacks carry the name 'chair'; a roster seat of that name would share them.
+  if (isPanel && Object.prototype.hasOwnProperty.call(opts.agents, 'chair')) {
+    throw new AgencyPanelError('seat "chair": under strategy "panel" the chair is named "chair" in seats, approvals and callbacks; rename the seat');
+  }
   if (isPanel && opts.output !== undefined) fail('output is not supported under strategy "panel" in this version; structured panel output arrives with the refuter stage');
   if (isPanel && opts.chair && typeof opts.chair === 'object' && (opts.chair as AgencySeatConfig).output !== undefined) fail('chair.output is not supported');
   if (opts.panel) {
@@ -128,6 +141,7 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
       for (const k of ['router', 'routerParams', 'hostPolicy'] as const) {
         if ((seat as Record<string, unknown>)[k] !== undefined) fail(`seat "${name}": ${k} is not allowed in an agency with a pool or a panel`);
       }
+      if (seat.runtime === 'gmi') fail(`seat "${name}": ${GMI_SEAT_REASON}`);
       const cmp = seat.customModelParams;
       if ((pooled || isPanel) && cmp && ('model' in cmp || 'models' in cmp)) fail(`seat "${name}": customModelParams.model and .models change the model on the wire behind the seating record`);
     }
@@ -153,6 +167,7 @@ export function validatePoolOptions(opts: AgencyOptions, strategy: AgencyStrateg
     if (chair !== false) {
       const c = (chair ?? {}) as AgencySeatConfig;
       for (const k of ['router', 'routerParams', 'hostPolicy'] as const) if ((c as Record<string, unknown>)[k] !== undefined) fail(`chair: ${k} is not allowed`);
+      if (c.runtime === 'gmi') fail(`chair: ${GMI_SEAT_REASON}`);
       if (c.customModelParams && ('model' in c.customModelParams || 'models' in c.customModelParams)) fail('chair: customModelParams.model and .models are not allowed');
       if (c.from !== undefined) {
         if (!pool) fail('chair.from requires modelPool');

@@ -339,6 +339,34 @@ export function maskError(error: unknown, secrets: readonly string[]): unknown {
 }
 
 /**
+ * A masked stand-in for `error` that never writes `error` or anything it
+ * references: `error` itself when no secret can be reached from it, else a
+ * plain Error with its name, code and httpStatus and its masked message and
+ * stack. A string comes back redacted. For an error that belongs to someone
+ * else, such as a HITL handler's, which {@link maskError} would write in
+ * place. Never throws.
+ *
+ * @param error - What was thrown, or an error text.
+ * @param secrets - The call's redaction list ({@link collectCallSecrets}).
+ * @returns `error` itself, a plain Error, or the redacted string.
+ */
+export function maskedCopyOf(error: unknown, secrets: readonly string[]): unknown {
+  try {
+    if (typeof error === 'string') return redactText(error, secrets);
+    if (!isObject(error) || secrets.length === 0) return error;
+    let clean = false;
+    try {
+      clean = !containsSecret(error, secrets);
+    } catch {
+      // Too large to walk, or a proxy that refuses: the plain Error below references none of it.
+    }
+    return clean ? error : plainErrorCopy(error, secrets);
+  } catch {
+    return new Error('error masked: the original could not be read');
+  }
+}
+
+/**
  * A mask that reads its secret list from `holder` when it is called, so one
  * function serves every call of an agency.
  *
