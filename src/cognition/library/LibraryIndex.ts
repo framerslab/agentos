@@ -6,9 +6,12 @@
  * runs without a tenant and at least one group.
  *
  * The store's own filter selects what a search reads, and the index checks every passage the store answers against
- * the search's scope and narrowing, so a store whose filter drops or ignores a condition cannot widen a search. The
- * store must honour DeleteOptions.filter. Lexical search needs the store's optional lexicalSearch, a change of scope
- * its optional updateMetadata; PostgresVectorStore has both.
+ * the search's scope and narrowing, so a store whose filter drops or ignores a condition cannot widen a search. A
+ * store serves the index fully when it honours these MetadataFilter rules: a plain value and `$eq`; `$in`, which on an
+ * array field keeps a passage whose field holds at least one of the values; `$all` on an array field; and
+ * DeleteOptions.filter on `delete`. Lexical search needs the store's optional lexicalSearch, a change of scope its
+ * optional updateMetadata. PostgresVectorStore honours every rule and has both members; InMemoryVectorStore honours
+ * every rule and has neither.
  *
  * @module agentos/cognition/library/LibraryIndex
  */
@@ -200,14 +203,21 @@ export class LibraryIndex {
     return { passages: source.passages.length };
   }
 
-  /** Removes a source's passages; answers how many went. Throws when the store reports the delete as failed. */
+  /**
+   * Removes a source's passages and answers the store's `deletedCount`: how many went on a store that counts a delete
+   * by filter, as PostgresVectorStore and InMemoryVectorStore do, and the store's own value on one that does not (-1
+   * on PineconeVectorStore, 0 on QdrantVectorStore). Throws when the store reports the delete as failed.
+   */
   async removeSource(sourceId: string): Promise<number> {
     const result = await this.store.delete(this.collection, undefined, { filter: { sourceId } });
     throwOnReportedFailure(result, `delete the passages of ${sourceId}`);
     return result.deletedCount;
   }
 
-  /** Removes everything of one tenant. Throws when the store reports the delete as failed. */
+  /**
+   * Removes every passage of one tenant and answers the store's `deletedCount`, as `removeSource` does. Throws when
+   * the store reports the delete as failed.
+   */
   async removeTenant(tenantId: string): Promise<number> {
     const result = await this.store.delete(this.collection, undefined, { filter: { tenantId } });
     throwOnReportedFailure(result, `delete the passages of tenant ${tenantId}`);
