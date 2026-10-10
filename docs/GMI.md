@@ -62,6 +62,8 @@ Persona definitions, the three loading paths (a directory of JSON files, an inli
 
 A request that names no `selectedPersonaId` uses the configuration's `defaultPersonaId`; the turn pipeline rejects the request only when neither is set ([`TurnExecutionPipeline.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/TurnExecutionPipeline.ts)). The pipeline hands the turn to [`GMIManager.getOrCreateGMIForSession()`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/GMIManager.ts), which loads the persona, checks that the user may use it, and either reuses the GMI already bound to the session or creates one. A GMI serves its session until the session asks for a persona refresh or the host removes it. `GMIManager.cleanupInactiveGMIs()` removes GMIs idle longer than a threshold (60 minutes by default); nothing in the runtime calls it on a schedule, so a long-running host calls it.
 
+`AgentOS.shutdown()` shuts the manager down after the orchestrator. From then on `getOrCreateGMIForSession()` and the manager's other calls fail with `NOT_INITIALIZED`, and a call already in flight shuts down the GMI it built instead of registering it. Every active GMI is shut down at the same time, each within `gmiManagerConfig.shutdownTimeoutMs` (8000 ms by default); a GMI that has not finished by then is logged at warn and finishes on its own while the runtime shuts down its other components.
+
 ## GMIs from agent()
 
 ```typescript

@@ -34,6 +34,7 @@ import { resolveSecretForProvider } from '../../core/config/extensionSecrets';
 import type { PersonaEvolutionRule } from '../../orchestration/workflows/WorkflowTypes';
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import { feedbackTraceMessage, normalizeUserFeedback } from './userFeedback';
+import { settlesWithin, shutdownTimeoutOrDefault } from './shutdownBound';
 
 /**
  * Custom error class for GMIManager-specific operational errors.
@@ -58,6 +59,16 @@ export interface GMIManagerConfig {
   personaValidationStrict?: PersonaValidationStrictConfig;
   /** Optional per-GMI cognitive memory factory used by devtools and advanced runtimes. */
   cognitiveMemoryFactory?: GMICognitiveMemoryFactory;
+  /**
+   * How long the manager waits for one GMI to shut down, in milliseconds, when
+   * it shuts down, deactivates a session or cleans up idle GMIs. A GMI that has
+   * not finished by then is logged at warn and finishes on its own while the
+   * manager goes on. `shutdown()` shuts every GMI down at the same time, so it
+   * takes about one bound however many GMIs are active. Defaults to 8000: inside
+   * the 10 seconds `docker stop` waits before it kills a container, and above
+   * the 5 seconds a GMI gives its metaprompt work to finish.
+   */
+  shutdownTimeoutMs?: number;
 }
 
 export interface GMICognitiveMemoryFactoryInput {
@@ -143,6 +154,7 @@ export class GMIManager {
       defaultGMIBaseConfigDefaults: config.defaultGMIBaseConfigDefaults,
       personaValidationStrict: config.personaValidationStrict,
       cognitiveMemoryFactory: config.cognitiveMemoryFactory,
+      shutdownTimeoutMs: shutdownTimeoutOrDefault(config.shutdownTimeoutMs),
     };
 
     this.subscriptionService = subscriptionService;
@@ -633,7 +645,7 @@ export class GMIManager {
       if (!this.isInitialized) {
         // shutdown() began while this GMI was built and will not find it in the
         // maps, so it is shut down here and never registered.
-        await this.shutDownGMI(newGMI, newGmiInstanceId);
+        await this.shutDownGMI(newGMI, newGmiInstanceId, sessionId);
         throw new GMIManagerError(
           `GMIManager (ID: ${this.managerId}) shut down while GMI ${newGmiInstanceId} was being created for session ${sessionId}.`,
           GMIErrorCode.NOT_INITIALIZED,
@@ -705,7 +717,7 @@ export class GMIManager {
     if (gmi) {
       console.log(`GMIManager (ID: ${this.managerId}): Deactivating GMI instance ${gmiInstanceId} for session ${sessionId}.`);
       try {
-        await this.shutDownGMI(gmi, gmiInstanceId);
+        await this.shutDownGMI(gmi, gmiInstanceId, sessionId);
       } finally {
         this.activeGMIs.delete(gmiInstanceId);
         this.gmiSessionMap.delete(sessionId);
@@ -720,18 +732,44 @@ export class GMIManager {
   }
 
   /**
-   * Shuts one GMI down. A GMI whose shutdown throws is logged, and the error
-   * does not reach the caller.
+   * Shuts one GMI down and waits for it at most `shutdownTimeoutMs`. A GMI
+   * that has not finished by then is logged at warn and finishes on its own; a
+   * GMI whose shutdown throws is logged at error. Neither reaches the caller.
    *
    * @param gmi - The GMI to shut down.
    * @param gmiInstanceId - Its instance id, for the log.
+   * @param sessionId - The session it serves, for the log.
    */
-  private async shutDownGMI(gmi: IGMI, gmiInstanceId: string): Promise<void> {
+  private async shutDownGMI(gmi: IGMI, gmiInstanceId: string, sessionId?: string): Promise<void> {
+    const logFailure = (error: any): void => {
+      console.error(`GMIManager (ID: ${this.managerId}): Error during gmi.shutdown() for GMI ${gmiInstanceId}: ${error?.message}`, error);
+    };
+    const bound = this.config.shutdownTimeoutMs;
     try {
-      await gmi.shutdown();
+      const shutdown = Promise.resolve(gmi.shutdown());
+      if (await settlesWithin(shutdown, bound)) return;
+      console.warn(
+        `GMIManager (ID: ${this.managerId}): GMI ${gmiInstanceId}${sessionId ? ` (session ${sessionId})` : ''} did not finish shutting down within ${bound} ms; going on without it.`,
+      );
+      // It goes on in the background; a failure it ends with is still logged.
+      shutdown.catch(logFailure);
     } catch (error: any) {
-      console.error(`GMIManager (ID: ${this.managerId}): Error during gmi.shutdown() for GMI ${gmiInstanceId}: ${error.message}`, error);
+      logFailure(error);
     }
+  }
+
+  /**
+   * Waits, at most `shutdownTimeoutMs`, for the getOrCreateGMIForSession()
+   * calls in flight to settle. A call still running after that shuts down the
+   * GMI it builds once it gets that far.
+   */
+  private async creationsSettled(): Promise<void> {
+    if (this.creationsInFlight.size === 0) return;
+    const bound = this.config.shutdownTimeoutMs;
+    if (await settlesWithin(Promise.allSettled(Array.from(this.creationsInFlight)), bound)) return;
+    console.warn(
+      `GMIManager (ID: ${this.managerId}): ${this.creationsInFlight.size} GMI creation(s) still in flight after ${bound} ms; each shuts its GMI down when it finishes.`,
+    );
   }
 
   public async cleanupInactiveGMIs(inactivityThresholdMinutes?: number): Promise<number> {
@@ -789,20 +827,23 @@ export class GMIManager {
   public async shutdown(): Promise<void> {
     console.log(`GMIManager (ID: ${this.managerId}): Initiating shutdown. Deactivating all active GMIs...`);
     // Calls that arrive from here on fail with the not-initialized error. The
-    // loop goes through deactivateSession(), which does not check the flag.
+    // sessions go through deactivateSession(), which does not check the flag.
     this.isInitialized = false;
 
+    // Every GMI shuts down at the same time, each within shutdownTimeoutMs, so
+    // the manager takes about one bound however many GMIs are active. In the
+    // same bound it waits for the getOrCreateGMIForSession() calls in flight:
+    // one that began before the flag was cleared and has not registered its
+    // GMI shuts that GMI down itself.
     const sessionIdsToDeactivate = Array.from(this.gmiSessionMap.keys());
-    for (const sessionId of sessionIdsToDeactivate) {
-      try {
-        await this.deactivateSession(sessionId);
-      } catch (error: any) {
-        console.error(`GMIManager (ID: ${this.managerId}): Error deactivating GMI for session ${sessionId} during manager shutdown: ${error.message}`, error);
-      }
-    }
-    // A getOrCreateGMIForSession() call that began before the flag was cleared
-    // and has not registered its GMI shuts that GMI down itself; wait for it.
-    await Promise.allSettled(Array.from(this.creationsInFlight));
+    await Promise.allSettled([
+      ...sessionIdsToDeactivate.map((sessionId) =>
+        this.deactivateSession(sessionId).catch((error: any) => {
+          console.error(`GMIManager (ID: ${this.managerId}): Error deactivating GMI for session ${sessionId} during manager shutdown: ${error.message}`, error);
+        }),
+      ),
+      this.creationsSettled(),
+    ]);
 
     this.activeGMIs.clear();
     this.gmiSessionMap.clear();
