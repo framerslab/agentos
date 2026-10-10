@@ -375,6 +375,42 @@ describe('OpenAIRealtimeTranscriptionSTT: the wire', () => {
     });
     expect(await refused.healthCheck()).toMatchObject({ ok: false, error: { class: 'auth' } });
   });
+
+  it('probes the models endpoint of the host its sessions use, with the same key', async () => {
+    const fetched = vi.fn(async (_url: string, _init?: RequestInit) => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetched);
+    try {
+      const baseUrls = [
+        'wss://gateway.example.test/v1/realtime',
+        'http://localhost:4000/realtime/',
+        'wss://gateway.example.test/openai',
+      ];
+      for (const baseUrl of baseUrls) {
+        const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, baseUrl });
+        expect(await stt.healthCheck()).toMatchObject({ ok: true });
+      }
+      expect(fetched.mock.calls.map((call) => call[0])).toEqual([
+        'https://gateway.example.test/v1/models',
+        'http://localhost:4000/models',
+        'https://gateway.example.test/openai/models',
+      ]);
+      expect(fetched.mock.calls[0][1]).toMatchObject({ headers: { Authorization: `Bearer ${KEY}` } });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("probes OpenAI's models endpoint when no base URL is set", async () => {
+    const fetched = vi.fn(async (_url: string, _init?: RequestInit) => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetched);
+    try {
+      const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
+      expect(await stt.healthCheck()).toMatchObject({ ok: true });
+      expect(fetched.mock.calls.map((call) => call[0])).toEqual(['https://api.openai.com/v1/models']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe('OpenAIRealtimeTranscriptionSTT: transcripts keyed by item id', () => {
