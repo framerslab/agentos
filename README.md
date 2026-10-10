@@ -1,0 +1,329 @@
+<div align="center">
+
+<a href="https://agentos.sh">
+  <img src="https://raw.githubusercontent.com/framerslab/agentos/master/assets/agentos-primary-no-tagline-transparent-2x.png" alt="AgentOS: TypeScript AI Agent Framework with Cognitive Memory" height="100" />
+</a>
+
+<br />
+
+# **AgentOS** · TypeScript AI Agent Framework
+
+**Agents that remember, forge their own tools, and survive long-running sessions.** Persistent cognitive memory, optional HEXACO personality, multi-agent orchestration, and one dispatch interface across 13 LLM providers. Apache-2.0.
+
+[![npm](https://img.shields.io/npm/v/@framers/agentos?style=flat-square&logo=npm&color=cb3837)](https://www.npmjs.com/package/@framers/agentos)
+[![CI](https://img.shields.io/github/actions/workflow/status/framerslab/agentos/ci.yml?branch=master&style=flat-square&logo=github&label=CI)](https://github.com/framerslab/agentos/actions/workflows/ci.yml)
+[![tests](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/framerslab/agentos/master/.github/badges/tests.json&style=flat-square&logo=vitest&logoColor=white)](https://github.com/framerslab/agentos/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/framerslab/agentos/graph/badge.svg)](https://codecov.io/gh/framerslab/agentos)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.4+-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue?style=flat-square)](https://opensource.org/licenses/Apache-2.0)
+[![NVIDIA Inception](https://img.shields.io/badge/NVIDIA_Inception-Member-76B900?style=flat-square&logo=nvidia&logoColor=white)](https://www.nvidia.com/en-us/startups/)
+[![LongMemEval-S](https://img.shields.io/badge/LongMemEval--S-85.6%25-2ea043?style=flat-square)](https://docs.agentos.sh/blog/2026/04/27/longmemeval-s-83-with-semantic-embedder)
+[![LongMemEval-M](https://img.shields.io/badge/LongMemEval--M-70.2%25-2ea043?style=flat-square)](https://docs.agentos.sh/blog/2026/04/29/longmemeval-m-70-with-topk5)
+[![agentos-bench](https://img.shields.io/badge/bench-public-blue?style=flat-square)](https://github.com/framerslab/agentos-bench)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Us-5865F2?style=flat-square&logo=discord)](https://wilds.ai/discord)
+
+[**Benchmarks**](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) * [Website](https://agentos.sh) * [Docs](https://docs.agentos.sh) * [npm](https://www.npmjs.com/package/@framers/agentos) * [Discord](https://wilds.ai/discord) * [Blog](https://docs.agentos.sh/blog)
+
+</div>
+
+---
+
+AgentOS is an open-source TypeScript framework for AI agents that **remember, adapt, and write their own tools**.
+
+- **Top open-source memory benchmarks:** [85.6% on LongMemEval-S](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) at $0.0090/correct (gpt-4o), and 70.2% on LongMemEval-M, the only open-source library above 65% on M with reproducible methodology.
+- **Runtime tool forging.** An agent writes a JavaScript function with JSON Schemas for its input and output, the declared test cases run it, an LLM judge reviews the result, and on approval the tool joins the session's tool list. Forged code runs in an in-process `node:vm` context or, with `QuickJSExecutor`, in a QuickJS WebAssembly instance of its own for each call.
+- **Persistent [cognitive memory](https://docs.agentos.sh/features/cognitive-memory)** with Ebbinghaus decay and 8 neuroscience-backed mechanisms, among them retrieval-induced forgetting, reconsolidation and source-confidence decay.
+- **Optional [HEXACO personality](https://docs.agentos.sh/features/hexaco-personality)**, [6 orchestration strategies](https://docs.agentos.sh/features/agency-collaboration), [guardrails](https://docs.agentos.sh/features/guardrails-architecture), and [voice](https://docs.agentos.sh/features/voice-pipeline) across **13 LLM providers**; 100+ extensions and 88 skills ship as separate packages with registries that load them.
+
+---
+
+<div align="center">
+
+<picture>
+  <source srcset="https://raw.githubusercontent.com/framerslab/agentos/master/assets/agentos-forge-demo.webp" type="image/webp" />
+  <img src="https://raw.githubusercontent.com/framerslab/agentos/master/assets/agentos-forge-demo.gif"
+       alt="Three AgentOS agents with distinct HEXACO personalities collaborate on a code review, forge a new tool at runtime once they hit a gap their static toolkit can't cover, the LLM judge approves the spec, and all three invoke it on the next turn."
+       width="900" />
+</picture>
+
+<sub>Runtime tool forging + multi-agent collaboration. Reproduce with <code>node <a href="https://github.com/framerslab/agentos/blob/master/examples/emergent-hierarchical-spawning.mjs">examples/emergent-hierarchical-spawning.mjs</a></code>.</sub>
+
+</div>
+
+---
+
+## Install
+
+```bash
+npm install @framers/agentos
+```
+
+```typescript
+import { agent } from '@framers/agentos';
+
+const tutor = agent({
+  provider: 'anthropic',                          // resolves to claude-sonnet-4-6 (provider default)
+  // model: 'claude-opus-4-8',                    // pin a specific model to override the default
+  instructions: 'You are a patient CS tutor.',
+  personality: { openness: 0.9, conscientiousness: 0.95 },
+});
+
+// Provider auto-detected from env when `provider` is omitted.
+// Cognitive memory, sentiment tracking and metaprompts: runtime: 'gmi' (see GMIs below).
+
+const session = tutor.session('student-1');
+await session.send('Explain recursion with an analogy.');
+await session.send('Can you expand on that?'); // remembers context
+```
+
+[Full quickstart](https://docs.agentos.sh/getting-started) * [Examples cookbook](https://docs.agentos.sh/getting-started/examples) * [API reference](https://docs.agentos.sh/api)
+
+**Sessions.** A session keeps the whole conversation whether memory is on or off: each `send()` records its tool calls, their results and the model's signed thinking, and every later request replays them. `stream()` records its turn as the prompt and the final text (with `runtime: 'gmi'`, every step, as `send()` does). History is capped at about 120K tokens by default. Set `history: false` for a stateless session, set `history: { maxTokens }` to change the cap, and call `reseed()` to replace the history with a shorter set of messages you build yourself. `close()` ends a session and frees its history: the next `session(id)` with that id starts empty, and `agent.usage(id)` still reports what the id spent.
+
+```ts
+const stateless = agent({ model, memory: false, history: false }).session('job-1');
+const bounded = agent({ model, history: { maxTokens: 60_000 } }).session('job-2');
+bounded.reseed([{ role: 'user', content: 'compact resume snapshot' }]);
+```
+
+---
+
+## Emergent Design
+
+Three things accumulate across a session and compose into behavior: **memory** (what was said, decided, retrieved), the **tool surface** (which grows when an agent forges a tool the judge approves), and an optional **HEXACO personality** vector that shapes the prompt and scales memory encoding. Each is configurable and observable.
+
+**Runtime tool forging.** When no tool covers a sub-task, the agent calls `forge_tool` with a chain of existing tools or a JavaScript function, JSON Schemas for input and output, and test cases. Code mode is off until the host sets `emergentConfig.allowSandboxTools`. Source that uses `eval`, `require` or `process` is rejected before it runs. Forged code runs in an in-process `node:vm` context by default, with a 5 s timeout, and `node:vm` is not a security boundary; with `QuickJSExecutor`, each call runs in a QuickJS WebAssembly instance of its own with its memory limited. A separate LLM judge reviews the candidate with its test results, and an approved tool joins the session's tool list. A forged tool exports as a `SKILL.md` skill. [Emergent capabilities ->](https://docs.agentos.sh/features/emergent-capabilities)
+
+**HEXACO personality (optional).** Off by default. `agent()` writes the trait values into the system prompt as directives, one for each trait above 0.65 or below 0.35. A cognitive memory manager given the same traits scales its encoding and seven of its eight mechanisms by them, and an `AgentGraph` branches on a trait with `addPersonalityEdge()`. [HEXACO docs ->](https://docs.agentos.sh/features/hexaco-personality)
+
+**Soul files.** Identity, voice, hard limits, and HEXACO scores can live in a `SOUL.md` workspace. Its `memory/` directory is a markdown wiki (an `index.md` catalog plus `entities/`, `concepts/`, `log/` pages with `[[wikilinks]]`) that *is* the agent's long-term memory: markdown is the source of truth, the vector/graph index is rebuilt from it, and [`souledAgent()`](https://docs.agentos.sh/getting-started/high-level-api) wires it end to end. [Soul Files ->](https://docs.agentos.sh/features/soul-files)
+
+```ts
+import { souledAgent } from '@framers/agentos';
+
+const aria = await souledAgent({ provider: 'anthropic', soul: '~/.agentos/agents/aria' });
+```
+
+---
+
+## Generalized Mind Instances (GMIs)
+
+On the full runtime, every session is served by a **GMI**: a persistent agent with its own persona, mood, conversation history and reasoning trace; with `agent({ runtime: 'gmi' })` an agent's sessions are GMIs too. `agent()` without `runtime: 'gmi'` is the lightweight helper; it calls the model with a prompt and keeps session history. A GMI of the full runtime runs a turn loop around the same model, tools, guardrails and cognitive memory:
+
+- **Sentiment → metaprompts.** When a persona enables sentiment tracking, every user turn is scored; sustained frustration or confusion fires recovery metaprompts, and a self-reflection metaprompt re-reads the GMI's mood and task context from evidence.
+- **Mood-weighted memory.** With cognitive memory attached, each exchange is encoded with the GMI's current mood and recalled with emotional congruence in the score.
+- **Self-modification tools.** With `selfImprovement.enabled`, the runtime registers `adapt_personality`, `manage_skills`, `create_workflow` and `self_evaluate`; `adapt_personality` changes the running GMI's traits within bounds, and a mutation store records the changes when a storage adapter and `persistWithDecay` are configured.
+- **A reasoning trace** of the last 500 decisions by default (`reasoningTraceConfig` on the persona or the runtime's default), and persona overlays per session.
+
+```ts
+import { AgentOS, AgentOSResponseChunkType, BUILT_IN_PERSONAS } from '@framers/agentos';
+
+// AgentOS.create() reads persona files from ./personas by default. Personas can
+// also be given inline, as parsed JSON or code-built objects; here, the five the
+// package ships. A custom loader covers any other source.
+const agentos = await AgentOS.create({ personas: BUILT_IN_PERSONAS });
+for await (const chunk of agentos.processRequest({
+  userId: 'user-42', sessionId: 'research-q1', selectedPersonaId: 'v_researcher',
+  textInput: 'Summarize the open incidents from this week.',
+})) {
+  if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA) process.stdout.write(chunk.textDelta);
+}
+```
+
+`agent({ runtime: 'gmi' })`, also exported as `gmi()`, builds its GMIs in process from the agent's options, with no `AgentOS` runtime. Of the parts above, these GMIs run the reasoning trace, the mood-weighted memory when memory is on, and sentiment tracking with the five preset event metaprompts (frustration recovery, confusion clarification, satisfaction reinforcement, error recovery and engagement boost) when their profile turns them on. The `'full'` profile turns on cognitive memory, sentiment tracking and those five metaprompts; `'light'`, the default, keeps the reasoning trace and adds memory only when `memory` is set. The self-reflection metaprompt, the self-modification tools, persona overlays and the runtime's guardrails, retrieval and channels do not run on this path. This tutor's GMIs run every part this path has:
+
+```ts
+import { agent } from '@framers/agentos';
+
+const tutor = agent({
+  runtime: 'gmi',
+  cognition: 'full',
+  provider: 'openai',
+  instructions: 'You are a patient CS tutor.',
+  memory: { embedding: { provider: 'openai' } }, // cognitive memory embeds with text-embedding-3-small
+});
+const session = tutor.session('student-1', { userId: 'student-7f3a' }); // memory is scoped to the user id
+await session.send('Explain recursion with an analogy.');
+```
+
+[What a GMI adds over a plain agent →](https://docs.agentos.sh/architecture/gmi)
+
+---
+
+## Memory Benchmarks
+
+`gpt-4o` reader, `gpt-4o-2024-08-06` judge, full N=500, single-CLI reproduction with bootstrap 95% CIs and per-benchmark judge-FPR probes.
+
+- **LongMemEval-S: 85.6%** at $0.0090/correct, 3,558 ms p50: +1.4 points over Mastra OM gpt-4o (84.23%), 0.4 behind Emergence.ai's closed-source 86%. The highest publicly reproducible open-source number at `gpt-4o`.
+- **LongMemEval-M: 70.2%** (1.5M-token haystacks, 500 sessions): the only open-source library above 65% on M with reproducible methodology.
+
+[Full leaderboard ->](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md) * [Transparency audit ->](https://agentos.sh/en/blog/memory-benchmark-transparency-audit/) * [LongMemEval paper](https://arxiv.org/abs/2410.10813) (Wu et al., ICLR 2025)
+
+---
+
+## Why AgentOS
+
+| vs. | AgentOS differentiator |
+|---|---|
+| **LangChain / LangGraph** | Cognitive memory ([8 neuroscience-backed mechanisms](https://docs.agentos.sh/features/cognitive-memory)), HEXACO personality, runtime tool forging |
+| **Vercel AI SDK** | Multi-agent teams (6 strategies), 7 vector backends, [guardrails](https://docs.agentos.sh/features/guardrails-architecture), voice/telephony, [zero-config prompt caching](https://docs.agentos.sh/features/prompt-caching) |
+| **CrewAI / Mastra** | Unified orchestration (DAGs + graphs + missions), personality-driven routing, **published reproducible numbers on LongMemEval-S (85.6%) and LongMemEval-M (70.2%) with full methodology disclosure** |
+
+[Full framework comparison ->](https://docs.agentos.sh/blog/2026/02/20/agentos-vs-langgraph-vs-crewai)
+
+---
+
+## Key Features
+
+| Category | Highlights |
+|---|---|
+| **LLM Providers** | 13 (11 by API key or base URL + 2 local CLI): OpenAI, Anthropic, Gemini, Groq, Ollama, OpenRouter, Requesty, LiteLLM, Together, Mistral, xAI, Claude CLI, Gemini CLI. Plus image/video/audio generation providers. |
+| **Prompt Caching** | Zero config on every provider: automatic Anthropic breakpoints incl. multi-turn history (direct + OpenRouter) * OpenAI cache-key routing * normalized cache usage + leak detection * per-call TTL/opt-out * [guide](https://docs.agentos.sh/features/prompt-caching) |
+| **Cognitive Memory** | 8 mechanisms: reconsolidation, retrieval-induced forgetting, involuntary recall, FOK, gist extraction, schema encoding, source decay, emotion regulation |
+| **HEXACO Personality** | 6 traits modulate memory, retrieval bias, response style |
+| **GMI Runtime** | Per-session persona, mood and reasoning trace * sentiment-triggered metaprompts (opt-in per persona) * mood-weighted memory bridge * bounded `adapt_personality` trait changes (opt-in) |
+| **RAG Pipeline** | 7 vector backends * 4 retrieval strategies * GraphRAG * HyDE * Cohere rerank-v3.5 |
+| **Multi-Agent Teams** | 6 coordination strategies * manager delegation and specialist spawning * panel quorum on the parallel strategy * HITL approval gates |
+| **Orchestration** | `workflow()` DAGs * `AgentGraph` router, personality and discovery edges * `mission()` graphs from plan templates * checkpointing |
+| **Guardrails** | 5 security tiers * 6 packs (PII, ML classifiers, topicality, code safety, grounding, content policy) |
+| **Emergent Capabilities** | Runtime tool forging * 4 self-improvement tools * tiered promotion * skill export |
+| **Voice & Telephony** | ElevenLabs, Deepgram, Whisper * Twilio, Telnyx, Plivo |
+| **Channels** | 37 platform adapters (Telegram, Discord, Slack, WhatsApp, webchat, ...) |
+| **Observability** | OpenTelemetry * usage ledger * cost guard * circuit breaker |
+
+---
+
+## Multi-Agent in 6 Lines
+
+```typescript
+import { agency } from '@framers/agentos';
+
+const team = agency({
+  strategy: 'graph',
+  agents: {
+    researcher: { provider: 'anthropic', instructions: 'Find relevant facts.' },                            // -> claude-sonnet-4-6
+    writer:     { provider: 'openai',    instructions: 'Summarize clearly.', dependsOn: ['researcher'] },   // -> gpt-4o
+    reviewer:   { provider: 'gemini',    instructions: 'Check accuracy.',    dependsOn: ['writer'] },       // -> gemini-2.5-flash
+  },
+});
+
+const result = await team.generate('Compare TCP vs UDP for game networking.');
+```
+
+Strategies: `sequential`, `parallel`, `debate`, `review-loop`, `hierarchical`, `graph`. With `hierarchical` + `emergent: { enabled: true }`, the manager forges new sub-agents at runtime. Every roster agent can set its own `provider`, `model`, `apiKey` and `effort`; a `parallel` agency can require a provider quorum (`quorum: { minProviders: 2 }`) before it synthesizes. [Multi-agent docs ->](https://docs.agentos.sh/features/agency-api)
+
+---
+
+## Ecosystem
+
+| Package | Role |
+|---|---|
+| [`@framers/agentos`](https://www.npmjs.com/package/@framers/agentos) | Core runtime: agents, cognitive memory, orchestration, guardrails, voice, 13 LLM providers. Apache-2.0. |
+| [`@framers/agentos-extensions`](https://www.npmjs.com/package/@framers/agentos-extensions) | 100+ first-party extensions: channel adapters, tool packs, integrations, guardrail packs. |
+| [`@framers/agentos-extensions-registry`](https://www.npmjs.com/package/@framers/agentos-extensions-registry) | Discovery + auto-loader for the extensions catalog. |
+| [`@framers/agentos-skills`](https://www.npmjs.com/package/@framers/agentos-skills) | 88 curated `SKILL.md` skills. |
+| [`@framers/agentos-skills-registry`](https://www.npmjs.com/package/@framers/agentos-skills-registry) | Discovery + auto-loader for skills; where promoted forged tools land. |
+| [`@framers/agentos-bench`](https://github.com/framerslab/agentos-bench) | Open benchmark harness: bootstrap 95% CIs, judge-FPR probes, per-case run JSONs. MIT. |
+| [`@framers/sql-storage-adapter`](https://www.npmjs.com/package/@framers/sql-storage-adapter) | Cross-platform SQL persistence: SQLite, Postgres, IndexedDB, Capacitor SQLite. |
+| [`paracosm`](https://www.npmjs.com/package/paracosm) | AI agent swarm simulation on AgentOS. [Live demo](https://paracosm.agentos.sh/sim). |
+| [`wunderland`](https://www.npmjs.com/package/wunderland) | Batteries-included CLI + daemon over the AgentOS registries (preview). Apache-2.0. |
+
+Extensions load from the manifest a host passes to `AgentOS.create({ extensionManifest })`; `createCuratedManifest()` from `@framers/agentos-extensions-registry` builds one from the curated extensions that are installed, and a runtime without a manifest loads none. [Extensions architecture ->](https://docs.agentos.sh/architecture/extension-loading)
+
+---
+
+## Configure API Keys
+
+Three layers, highest priority first: inline `apiKey` on the call, a module-level `setDefaultProvider()` at boot, or environment-variable auto-detection (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and the rest, resolved in priority order and reorderable with `setProviderPriority([...])`). A comma-separated list of keys rotates per request on the providers that support it ([Key rotation](https://github.com/framerslab/agentos/blob/master/docs/KEY_ROTATION.md)).
+
+[Full credential resolution + default models per provider ->](https://docs.agentos.sh/architecture/llm-providers)
+
+---
+
+## API Surfaces
+
+- **`agent()`**: lightweight stateful agent. Prompts, sessions, personality, hooks, tools, memory through `memoryProvider` hooks. With `runtime: 'gmi'` (or `gmi()`), every session is a GMI built from the same options, with cognitive memory, sentiment tracking and metaprompts per its `cognition` profile.
+- **`agency()`**: multi-agent teams built from `agent()` members, with HITL approval gates, run limits, structured output, provenance and, on the hierarchical strategy, specialists spawned at runtime. Its `guardrails` and `rag` options are reported or logged and not applied, and `voice.enabled` serves the agency as JSON text over a local WebSocket. It wires no channels; channel adapters run on the full runtime or with `ChannelRouter`.
+- **`generateText()` / `streamText()` / `generateObject()` / `generateImage()` / `generateVideo()` / `generateMusic()` / `performOCR()` / `embedText()`**: low-level multi-modal helpers with native tool calling.
+- **`workflow()` / `AgentGraph` / `mission()`**: three orchestration authoring APIs over one graph runtime.
+
+Provider fallback is on by default for `generateText()`, `streamText()`, `agent()` and `agency()`: when a call fails with a retryable error, it is retried on the other providers whose keys are in the environment. Pass `fallbackProviders: []` to turn it off, or a list to set the chain yourself. The GMIs of the full runtime (`processRequest()`) call their provider without a fallback chain. The GMIs of `agent({ runtime: 'gmi' })` call it through a completion gateway built from the agent's `fallbackProviders`, which moves to the next provider when a call fails with a retryable error before its first output, and not after it.
+
+[Full API reference ->](https://docs.agentos.sh/api) * [High-Level API guide ->](https://docs.agentos.sh/getting-started/high-level-api)
+
+---
+
+## Documentation & Community
+
+- **[Benchmarks](https://github.com/framerslab/agentos-bench/blob/master/results/LEADERBOARD.md)**: benchmark tables, 95% confidence intervals, methodology audit
+- **[Architecture](https://docs.agentos.sh/architecture/system-architecture)**: system design, layer breakdown
+- **[Cognitive Memory](https://docs.agentos.sh/features/cognitive-memory)**: 8 mechanisms with 30+ APA citations
+- **[RAG Configuration](https://docs.agentos.sh/features/rag-memory)**: vector stores, embeddings, sources
+- **[Guardrails](https://docs.agentos.sh/features/guardrails-architecture)**: 5 tiers, 6 packs
+- **[Voice Pipeline](https://docs.agentos.sh/features/voice-pipeline)**: TTS, STT, telephony
+- **[Blog](https://docs.agentos.sh/blog)**: engineering posts, benchmark publications, transparency audits
+- **[Discord](https://wilds.ai/discord)** * **[GitHub Issues](https://github.com/framerslab/agentos/issues)** * **[Wilds.ai](https://wilds.ai)** (AI game worlds powered by AgentOS)
+
+---
+
+## Contributing
+
+```bash
+git clone https://github.com/framerslab/agentos.git && cd agentos
+pnpm install && pnpm build && pnpm test
+```
+
+We use [Conventional Commits](https://www.conventionalcommits.org/). Project guides:
+
+| Guide | What |
+|---|---|
+| [Contributing](https://github.com/framerslab/agentos/blob/master/CONTRIBUTING.md) | Development setup, commit and pull request rules, review threads, contribution licensing |
+| [Adding an LLM provider](https://github.com/framerslab/agentos/blob/master/docs/contributing/new-provider.md) | Provider interface, acceptance checklist, sponsorship and disclosure |
+| [Release guide](https://github.com/framerslab/agentos/blob/master/docs/getting-started/RELEASING.md) | How a merge to master becomes an npm release |
+| [Agent instructions](https://github.com/framerslab/agentos/blob/master/AGENTS.md) | Commands and conventions for coding agents |
+| [Maintainers](https://github.com/framerslab/agentos/blob/master/MAINTAINERS.md) | Who reviews and merges changes |
+| [Code of Conduct](https://github.com/framerslab/agentos/blob/master/.github/CODE_OF_CONDUCT.md) | Community standards |
+| [Security Policy](https://github.com/framerslab/agentos/blob/master/.github/SECURITY.md) | Reporting vulnerabilities privately |
+| [Support](https://github.com/framerslab/agentos/blob/master/SUPPORT.md) | Where to get help |
+| [Sponsors](https://github.com/framerslab/agentos/blob/master/SPONSORS.md) | Funding, sponsor placement and disclosure |
+
+---
+
+## Startups & Partnerships
+
+AgentOS is Apache-2.0 and free. We integrate any quality provider on technical merit, and partners and sponsors are featured in the README and docs, labeled as such. Companies engage through partner startup programs, sponsorship, or a provider integration. See [SPONSORS.md](./SPONSORS.md).
+
+### Programs & partners
+
+| Partner | Type | Provides | Since |
+|:-:|:--|:--|:-:|
+| [![Deepgram](https://img.shields.io/badge/Deepgram-13EF93?style=for-the-badge&logo=deepgram&logoColor=000000)](https://deepgram.com/startups) | Startup Program | Speech-to-text + text-to-speech credits, go-to-market | 2026 |
+
+### Ways to engage
+
+| Track | What it is | Where |
+|:--|:--|:--|
+| **Sponsor** | Fund development. Disclosed logo placement + release-notes credit. | [SPONSORS.md](./SPONSORS.md) |
+| **Provider integration** | Ship your model or API as a supported provider. Free, on technical merit. | [Provider guide](./docs/contributing/new-provider.md) |
+
+Interested? Email team@frame.dev.
+
+---
+
+## License
+
+[Apache 2.0](./LICENSE)
+
+<div align="center">
+
+<a href="https://agentos.sh">
+  <img src="https://raw.githubusercontent.com/framerslab/agentos/master/assets/agentos-primary-transparent-2x.png" alt="AgentOS" height="40" />
+</a>
+&nbsp;&nbsp;&nbsp;
+<a href="https://frame.dev">
+  <img src="https://raw.githubusercontent.com/framerslab/agentos/master/assets/frame-logo-green-no-tagline.svg" alt="Frame.dev" height="40" />
+</a>
+
+**Built by [Frame](https://frame.dev) * [Wilds.ai](https://wilds.ai)**
+
+</div>
