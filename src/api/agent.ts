@@ -30,6 +30,7 @@ import { resolveModelOption } from './model.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { ObjectGenerationError } from './generateObject.js';
 import { streamText, type StreamTextResult } from './streamText.js';
+import type { SeatInternals } from './runtime/pool/seating.js';
 import type { HostLLMPolicy } from './runtime/hostPolicy.js';
 import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
 import type { SkillEntry } from '../cognition/skills/types.js';
@@ -671,6 +672,43 @@ export function buildSystemPrompt(opts: AgentOptions): string | undefined {
 }
 
 /**
+ * Passes every error that leaves a stream result through `mask`: thrown by
+ * the iterables, carried by an error part, or rejecting any of the result's
+ * promises. The result's other members are returned as they are.
+ *
+ * @param result - The stream result `streamText` returned for a seated config.
+ * @param mask - The seat's error mask.
+ * @returns A stream result with the same members, whose errors come out masked.
+ */
+function maskStreamResult(result: StreamTextResult, mask: (error: unknown) => unknown): StreamTextResult {
+  const wrapIterable = <T>(iterable: AsyncIterable<T>, mapPart: (part: T) => T): AsyncIterable<T> => ({
+    async *[Symbol.asyncIterator]() {
+      try {
+        for await (const part of iterable) yield mapPart(part);
+      } catch (error) {
+        throw mask(error);
+      }
+    },
+  });
+  const out = { ...result } as Record<string, unknown>;
+  for (const [key, value] of Object.entries(result)) {
+    if (value && typeof (value as Promise<unknown>).then === 'function') {
+      out[key] = (value as Promise<unknown>).then(
+        (settled) => settled,
+        (error: unknown) => {
+          throw mask(error);
+        },
+      );
+    }
+  }
+  out.textStream = wrapIterable(result.textStream, (text) => text);
+  out.fullStream = wrapIterable(result.fullStream, (part) =>
+    part.type === 'error' ? { ...part, error: mask(part.error) as Error } : part,
+  );
+  return out as unknown as StreamTextResult;
+}
+
+/**
  * Resolve an `AgentOptions.soul` value (string path | { content } | { path })
  * into a `LoadedSoul`. Returns null on failure so the agent can still boot
  * (the soul is additive, not load-blocking).
@@ -786,6 +824,12 @@ export function agent(opts: AgentOptions): Agent {
   const effectiveLedger: AgentOSUsageLedgerOptions | undefined =
     (opts.observability?.usageLedger as AgentOSUsageLedgerOptions | undefined) ?? opts.usageLedger;
 
+  // What an agency's seating writes onto a seated config: strict provider
+  // resolution, and the call's error mask, which every error that leaves
+  // generate() or stream() passes through before a strategy sees it.
+  const seatInternals = opts as AgentOptions & Partial<SeatInternals>;
+  const maskError = seatInternals.__maskError;
+
   const baseOpts: Partial<GenerateTextOptions> = {
     provider: opts.provider,
     model: opts.model,
@@ -840,6 +884,12 @@ export function agent(opts: AgentOptions): Agent {
     onBeforeGeneration: opts.onBeforeGeneration,
     onAfterGeneration: opts.onAfterGeneration,
     onBeforeToolExecution: opts.onBeforeToolExecution,
+    // Set by an agency's seating: strict provider resolution on every call
+    // and every failover hop.
+    ...(seatInternals.__strictCredentials ? { __strictCredentials: true } : {}),
+    // The call's mask reaches the tool loops, which mask a tool's error
+    // before they write it anywhere.
+    ...(maskError ? { __maskError: maskError } : {}),
     // The agent's one budget, on every generate / stream / session call
     // (each spreads baseOpts). A `budget` passed to generate() or stream()
     // replaces it for that call.
@@ -851,34 +901,39 @@ export function agent(opts: AgentOptions): Agent {
       prompt: MessageContent,
       extra?: Partial<GenerateTextOptions>
     ): Promise<GenerateTextResult> {
-      const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
-      const genOpts: Partial<GenerateTextOptions> = applyMemoryProvider(
-        {
-          ...baseOpts,
-          ...extra,
-          usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
-            source: extra?.usageLedger?.source ?? 'agent.generate',
-          }),
-        },
-        opts.memoryProvider,
-        userText,
-        opts.memoryProviderOptions,
-      );
-      if (typeof prompt === 'string') {
-        genOpts.prompt = prompt;
-      } else {
-        genOpts.messages = [...(genOpts.messages ?? []), { role: 'user', content: prompt }];
-      }
-      const result = await generateText(genOpts as GenerateTextOptions);
-      accumulateUsage(agentUsageTally, result.usage);
-      if (opts.verifyCitations) {
-        result.grounding = await runCitationVerification(
-          result.text,
+      try {
+        const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
+        const genOpts: Partial<GenerateTextOptions> = applyMemoryProvider(
+          {
+            ...baseOpts,
+            ...extra,
+            usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
+              source: extra?.usageLedger?.source ?? 'agent.generate',
+            }),
+          },
+          opts.memoryProvider,
           userText,
-          opts.verifyCitations,
+          opts.memoryProviderOptions,
         );
+        if (typeof prompt === 'string') {
+          genOpts.prompt = prompt;
+        } else {
+          genOpts.messages = [...(genOpts.messages ?? []), { role: 'user', content: prompt }];
+        }
+        const result = await generateText(genOpts as GenerateTextOptions);
+        accumulateUsage(agentUsageTally, result.usage);
+        if (opts.verifyCitations) {
+          result.grounding = await runCitationVerification(
+            result.text,
+            userText,
+            opts.verifyCitations,
+          );
+        }
+        return result;
+      } catch (error) {
+        // A seated config's error leaves the seat masked.
+        throw maskError ? maskError(error) : error;
       }
-      return result;
     },
 
     stream(prompt: MessageContent, extra?: Partial<GenerateTextOptions>): StreamTextResult {
@@ -904,7 +959,9 @@ export function agent(opts: AgentOptions): Agent {
       void result.usage
         .then((usage) => accumulateUsage(agentUsageTally, usage))
         .catch(() => { /* stream errored; usage tally unchanged */ });
-      return result;
+      // A seated config's errors leave the seat masked: error parts, a
+      // throwing iterable and rejected result promises alike.
+      return maskError ? maskStreamResult(result, maskError) : result;
     },
 
     session(id?: string): AgentSession {

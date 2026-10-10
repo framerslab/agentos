@@ -293,6 +293,16 @@ export interface FallbackProviderEntry {
   provider: string;
   /** Model identifier override. When omitted, the provider's default text model is used. */
   model?: string;
+  /** Key for this hop. Written by an agency's seating; omitted, the hop reads the provider's environment variable. */
+  apiKey?: string;
+  /** Base URL for this hop, written by seating; omitted, the provider's URL variable. */
+  baseUrl?: string;
+  /**
+   * Who trained this hop's model, when its id and endpoint cannot say; an
+   * agency seat's record reads it when this hop answered. Seating writes a
+   * pool entry's `vendor` here; a fixed seat's own chain may declare it.
+   */
+  vendor?: string;
   /**
    * Per-hop reasoning depth applied ONLY when THIS entry serves the call,
    * forwarded as `output_config.effort` (Anthropic) / `reasoning_effort`
@@ -793,6 +803,32 @@ export interface GenerateTextOptions {
    * @internal
    */
   __approvalGate?: ApprovalGateFn;
+  /**
+   * Internal — set by an agency's seating on every seat and the chair. With it,
+   * provider resolution ignores a `setDefaultProvider()` default that names no
+   * provider, for the key and for the URL, and never reroutes Anthropic to
+   * OpenRouter: a provider with no key of its own fails. Rides every failover hop.
+   *
+   * @internal
+   */
+  __strictCredentials?: boolean;
+  /**
+   * Internal — set by a panel when its own deadline is the smallest bound it
+   * passes as `requestTimeout`: a timeout error then does not count against
+   * the provider's circuit breaker.
+   *
+   * @internal
+   */
+  __panelDeadline?: boolean;
+  /**
+   * Internal — set by an agency's seating on every seat and the chair: the
+   * call's error mask. The tool loops pass a tool's error through it, as one
+   * redacted string, before they write the call record, the tool turn and the
+   * `tool-result` stream part.
+   *
+   * @internal
+   */
+  __maskError?: (error: unknown) => unknown;
   /**
    * @internal Used by generateObject and AgentSession.send (with
    * responseSchema) to forward a provider-specific response_format
@@ -1418,6 +1454,25 @@ const RETRYABLE_PROVIDER_ERROR_CODES = new Set([
   CONTEXT_WINDOW_EXCEEDED_CODE,
   'server_error',
 ]);
+
+/**
+ * Provider error codes for a request timeout: OpenAI's, Anthropic's and
+ * Gemini's REQUEST_TIMEOUT, Anthropic's hard and idle timeouts, and the CLI
+ * bridges' TIMEOUT. OpenRouter and Ollama raise none of their own.
+ */
+const TIMEOUT_ERROR_CODES = new Set(['REQUEST_TIMEOUT', 'REQUEST_HARD_TIMEOUT', 'STREAM_IDLE_TIMEOUT', 'TIMEOUT']);
+
+/**
+ * Whether a provider error names a request timeout by its code.
+ *
+ * @param error - The error a provider call threw or a stream reported.
+ * @returns True when the error's `code` is one of the providers' timeout codes.
+ * @internal Shared with streamText.
+ */
+export function isTimeoutError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' && TIMEOUT_ERROR_CODES.has(code);
+}
 
 /**
  * Error classes a provider's stream error event names for a server failure:
@@ -2058,6 +2113,13 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
   // so tools see one session across providers and steps keep counting.
   const helperToolRunId = opts._continuation?.helperToolRunId ?? randomUUID();
   const stepOffset = opts._continuation?.stepOffset ?? 0;
+  // A tool's error text as the call's mask leaves it (an agency seat's), one
+  // redacted string for the call record and the tool turn alike. Declared
+  // here so the prompt shim and the native tool loop both see it.
+  const maskToolText = (text: string): string => {
+    const masked = opts.__maskError?.(text);
+    return typeof masked === 'string' ? masked : text;
+  };
 
   try {
     const successResult: GenerateTextResult = await withAgentOSSpan('agentos.api.generate_text', async (span) => {
@@ -2118,6 +2180,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       const resolved = resolveProvider(providerId, modelId, {
         apiKey: opts.apiKey,
         baseUrl: opts.baseUrl,
+        // An agency seat resolves strictly: no provider-less default, no reroute.
+        strict: opts.__strictCredentials === true,
       });
       metricProviderId = resolved.providerId;
       metricModelId = resolved.modelId;
@@ -2335,6 +2399,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           onBeforeToolExecution: opts.onBeforeToolExecution,
           hookErrors: opts.hookErrors,
           approvalGate: opts.__approvalGate,
+          // A seat's mask reaches the shim's tool errors too.
+          maskToolError: opts.__maskError ? maskToolText : undefined,
           // Native tool turns (session history, a failover continuation)
           // become the shim's own <tool_call> / <tool_response> text.
           messages: toShimMessages(messages),
@@ -2876,19 +2942,22 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                     tcId || undefined,
                   ),
                 );
+                // One masked string serves the record and the tool turn: the
+                // seat's next request carries no key.
+                const errorText = typeof result.error === 'string' ? maskToolText(result.error) : result.error;
                 record.result = result.output;
-                record.error = result.success ? undefined: result.error;
+                record.error = result.success ? undefined: errorText;
                 messages.push({
                   role: 'tool',
                   tool_call_id: tcId,
-                  content: JSON.stringify(result.output ?? result.error ?? ''),
+                  content: JSON.stringify(result.output ?? errorText ?? ''),
                 } as any);
               } catch (err: any) {
-                record.error = err?.message;
+                record.error = maskToolText(err?.message ?? String(err));
                 messages.push({
                   role: 'tool',
                   tool_call_id: tcId,
-                  content: JSON.stringify({ error: err?.message }),
+                  content: JSON.stringify({ error: record.error }),
                 } as any);
               }
             } else {
@@ -3030,8 +3099,15 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
     // `opts.provider` because the model router may have resolved a
     // different provider than the caller asked for. A call the caller
     // stopped (its spend budget's refusal, a hook's stop, an abort) says
-    // nothing about the provider and is not recorded.
-    if (metricProviderId && !(error instanceof LLMProviderCircuitOpenError) && !aborted && !isCallerStop(error)) {
+    // nothing about the provider and is not recorded; neither is a timeout
+    // the panel's own deadline produced, when the deadline flag is set.
+    if (
+      metricProviderId &&
+      !(error instanceof LLMProviderCircuitOpenError) &&
+      !aborted &&
+      !isCallerStop(error) &&
+      !(opts.__panelDeadline && isTimeoutError(error))
+    ) {
       globalLLMProviderHealth.recordFailure(metricProviderId, error);
     }
     // The failed attempt is billed for its completed steps and for a step
@@ -3212,10 +3288,11 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             // zero cache_control (no write premium on one-shot failover
             // traffic).
             ...fallbackHopOverrides(opts, fb),
-            // Clear explicit keys/URLs so resolution uses env vars for the
-            // fallback provider rather than the primary's overrides.
-            apiKey: undefined,
-            baseUrl: undefined,
+            // The hop's own key and URL, when its entry carries them (an
+            // agency's seating writes them); otherwise the fallback
+            // provider's environment, never the primary's overrides.
+            apiKey: fb.apiKey,
+            baseUrl: fb.baseUrl,
             // Preserve the REMAINING resolved chain (entries AFTER the current
             // fb; `attempt` is 1-indexed so slice(attempt) drops fb and all
             // already-tried entries). This stops the recursion from rebuilding

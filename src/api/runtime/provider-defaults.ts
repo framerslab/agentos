@@ -176,6 +176,23 @@ function isBinaryOnPath(binaryName: string): boolean {
   return result.status === 0;
 }
 
+const binaryProbeCache = new Map<string, boolean>();
+
+/**
+ * Whether `binaryName` is on `PATH`, probed once per process. Seating uses it
+ * for the CLI providers' availability.
+ *
+ * @param binaryName - The executable to look for, such as `'claude'`.
+ * @returns True when the lookup found it the first time it was asked.
+ */
+export function isBinaryOnPathCached(binaryName: string): boolean {
+  const cached = binaryProbeCache.get(binaryName);
+  if (cached !== undefined) return cached;
+  const found = isBinaryOnPath(binaryName);
+  binaryProbeCache.set(binaryName, found);
+  return found;
+}
+
 // Provider-id → probe lookup so a custom priority list (just provider
 // ids) can be resolved back to its env-var or CLI-binary probe. Stays
 // in sync automatically with `AUTO_DETECT_ORDER`.

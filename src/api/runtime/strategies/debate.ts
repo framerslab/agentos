@@ -39,6 +39,7 @@ import {
   checkBeforeAgent,
   accumulateExtraUsage,
   buildAgentCallUsage,
+  callRecordExtras,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -167,6 +168,7 @@ export function compileDebate(
             toolCalls: resultToolCalls,
             usage: buildAgentCallUsage(resultUsage),
             durationMs,
+            ...callRecordExtras(result),
           });
 
           totalUsage.promptTokens += resultUsage.promptTokens ?? 0;

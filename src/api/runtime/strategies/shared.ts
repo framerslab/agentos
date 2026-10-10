@@ -198,6 +198,28 @@ export function buildAgentCallUsage(
 }
 
 /**
+ * The provider, model, finish reason and failover trail a seat's result
+ * reports, for its call record. A field the result does not report is left
+ * out, so a pre-built seat whose result names none adds nothing.
+ *
+ * @param result - The seat's result (`generate()`'s, or the values a stream
+ *   resolved to). May be undefined.
+ * @returns The members to spread into the seat's {@link AgentCallRecord}.
+ */
+export function callRecordExtras(
+  result: Record<string, unknown> | undefined,
+): Pick<AgentCallRecord, 'provider' | 'model' | 'finishReason' | 'fallback'> {
+  const out: Pick<AgentCallRecord, 'provider' | 'model' | 'finishReason' | 'fallback'> = {};
+  if (!result) return out;
+  const { provider, model, finishReason, fallback } = result;
+  if (typeof provider === 'string' && provider) out.provider = provider;
+  if (typeof model === 'string' && model) out.model = model;
+  if (typeof finishReason === 'string') out.finishReason = finishReason;
+  if (fallback && typeof fallback === 'object') out.fallback = fallback as AgentCallRecord['fallback'];
+  return out;
+}
+
+/**
  * Merge agency-level defaults into an agent config.
  *
  * Agent-level values take precedence over agency-level defaults. Tools are

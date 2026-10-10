@@ -33,6 +33,7 @@ import type {
   AgentCallRecord,
   AgencyStreamPart,
 } from '../types.js';
+import type { FallbackSignal } from '../generateText.js';
 import { createBufferedAsyncReplay } from '../streamBuffer.js';
 import { AgencyConfigError } from '../types.js';
 import {
@@ -41,6 +42,7 @@ import {
   checkBeforeAgent,
   accumulateExtraUsage,
   buildAgentCallUsage,
+  callRecordExtras,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -188,6 +190,7 @@ export function compileGraph(
               toolCalls: resultToolCalls,
               usage: buildAgentCallUsage(resultUsage),
               durationMs,
+              ...callRecordExtras(result),
             });
 
             totalUsage.promptTokens += resultUsage.promptTokens ?? 0;
@@ -249,12 +252,17 @@ export function compileGraph(
             let agentText = '';
             let resultUsage: ResultUsageSnapshot = {};
             let resultToolCalls: Array<{ name: string; args: unknown; result?: unknown; error?: string }> = [];
+            let recordExtras: ReturnType<typeof callRecordExtras>;
             const agentStart = Date.now();
             const agentStream = a.stream(context, opts) as {
               textStream?: AsyncIterable<string>;
               text?: Promise<string>;
               usage?: Promise<ResultUsageSnapshot>;
               toolCalls?: Promise<Array<{ name: string; args: unknown; result?: unknown; error?: string }>>;
+              provider?: Promise<string>;
+              model?: Promise<string>;
+              finishReason?: Promise<string>;
+              fallback?: Promise<FallbackSignal | undefined>;
             } | null;
 
             if (agentStream?.textStream) {
@@ -270,6 +278,19 @@ export function compileGraph(
               }
               resultUsage = (await Promise.resolve(agentStream.usage)) ?? {};
               resultToolCalls = (await Promise.resolve(agentStream.toolCalls)) ?? [];
+              // Who answered: the leg that served when the seat's chain fired.
+              const [streamProvider, streamModel, streamFinish, streamFallback] = await Promise.all([
+                Promise.resolve(agentStream.provider),
+                Promise.resolve(agentStream.model),
+                Promise.resolve(agentStream.finishReason),
+                Promise.resolve(agentStream.fallback),
+              ]);
+              recordExtras = callRecordExtras({
+                provider: streamFallback?.finalProvider ?? streamProvider,
+                model: streamFallback?.finalModel ?? streamModel,
+                finishReason: streamFinish,
+                fallback: streamFallback,
+              });
             } else {
               const result = (await a.generate(context, opts)) as Record<string, unknown>;
               agentText = (result.text as string) ?? '';
@@ -278,6 +299,7 @@ export function compileGraph(
               }
               resultUsage = (result.usage as ResultUsageSnapshot) ?? {};
               resultToolCalls = (result.toolCalls as Array<{ name: string; args: unknown; result?: unknown; error?: string }>) ?? [];
+              recordExtras = callRecordExtras(result);
             }
 
             outputs.set(name, agentText);
@@ -288,6 +310,7 @@ export function compileGraph(
               toolCalls: resultToolCalls,
               usage: buildAgentCallUsage(resultUsage),
               durationMs: Date.now() - agentStart,
+              ...recordExtras,
             });
 
             totalUsage.promptTokens += resultUsage.promptTokens ?? 0;

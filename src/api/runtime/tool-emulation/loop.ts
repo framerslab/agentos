@@ -44,6 +44,8 @@ export interface RunEmulatedToolLoopOptions {
   hookErrors?: 'warn' | 'throw';
   /** The agency approval gate, called after the hook: anything but its exact approval skips the tool. */
   approvalGate?: ApprovalGateFn;
+  /** Masks a tool's error text before it is recorded and returned to the model (an agency seat's mask). */
+  maskToolError?: (text: string) => string;
 }
 
 export interface EmulatedToolLoopResult {
@@ -115,12 +117,23 @@ export async function runEmulatedToolLoop(
         }
         try {
           opts.onToolExecute?.(call.name);
-          const result = await tool.execute(args, opts.toolContext as ToolExecutionContext);
-          toolCalls.push({ name: call.name, args: call.arguments });
+          const raw = await tool.execute(args, opts.toolContext as ToolExecutionContext);
+          // A returned failure is masked before the model reads it, and
+          // recorded as the native loops record it.
+          const result =
+            opts.maskToolError && raw.success === false && typeof raw.error === 'string'
+              ? { ...raw, error: opts.maskToolError(raw.error) }
+              : raw;
+          toolCalls.push({
+            name: call.name,
+            args: call.arguments,
+            ...(result.success === false && typeof result.error === 'string' ? { error: result.error } : {}),
+          });
           return formatToolResponse(call.name, result);
         } catch (err) {
-          toolCalls.push({ name: call.name, args: call.arguments, error: String(err) });
-          return formatToolResponse(call.name, { success: false, error: String(err) });
+          const error = opts.maskToolError ? opts.maskToolError(String(err)) : String(err);
+          toolCalls.push({ name: call.name, args: call.arguments, error });
+          return formatToolResponse(call.name, { success: false, error });
         }
       })
     );

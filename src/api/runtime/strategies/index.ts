@@ -4,7 +4,7 @@
  *
  * Maps an {@link AgencyStrategy} discriminant to the concrete compiler that
  * produces a {@link CompiledStrategy}. Supports sequential, parallel, debate,
- * review-loop, hierarchical, and graph strategies.
+ * review-loop, hierarchical, graph and panel strategies.
  *
  * ## Adaptive mode
  *
@@ -29,12 +29,14 @@ import type {
   Agent,
   BaseAgentConfig,
 } from '../types.js';
+import type { SeatedRoster, SeatedConfig } from '../pool/seating.js';
 import { compileSequential } from './sequential.js';
 import { compileParallel } from './parallel.js';
 import { compileDebate } from './debate.js';
 import { compileReviewLoop } from './review-loop.js';
 import { compileHierarchical } from './hierarchical.js';
 import { compileGraph } from './graph.js';
+import { compilePanel } from './panel.js';
 
 /**
  * Compile an orchestration strategy into an executable {@link CompiledStrategy}.
@@ -47,6 +49,8 @@ import { compileGraph } from './graph.js';
  * @param strategy - Strategy discriminant (e.g. `"sequential"`, `"parallel"`).
  * @param agents - Named roster of agent configs or pre-built `Agent` instances.
  * @param agencyConfig - Full agency-level configuration providing fallback values.
+ * @param seating - The call's seating, in an agency with a pool or a panel;
+ *   undefined at the construction-time compile and in any other agency.
  * @returns A compiled strategy with `execute` and `stream` methods.
  * @throws {Error} When the requested strategy is not yet implemented (e.g. a
  *         future strategy discriminant that has been added to `AgencyStrategy`
@@ -62,16 +66,17 @@ export function compileStrategy(
   strategy: AgencyStrategy,
   agents: Record<string, BaseAgentConfig | Agent>,
   agencyConfig: AgencyOptions,
+  seating?: SeatedRoster,
 ): CompiledStrategy {
   // When adaptive mode is enabled on non-hierarchical strategies, wrap with
   // a manager that can override the strategy at runtime. Hierarchical is
   // excluded because it IS the manager pattern -- wrapping it again would
   // create a pointless double-manager layer.
   if (agencyConfig.adaptive && strategy !== 'hierarchical') {
-    return compileAdaptiveWrapper(strategy, agents, agencyConfig);
+    return compileAdaptiveWrapper(strategy, agents, agencyConfig, seating?.mask);
   }
 
-  return compileStrategyCore(strategy, agents, agencyConfig);
+  return compileStrategyCore(strategy, agents, agencyConfig, seating);
 }
 
 /**
@@ -84,6 +89,7 @@ export function compileStrategy(
  * @param strategy - Strategy discriminant.
  * @param agents - Named agent roster.
  * @param agencyConfig - Agency-level configuration.
+ * @param seating - The call's seating, when one ran.
  * @returns A compiled strategy.
  * @throws {Error} When the strategy is not recognised.
  * @internal
@@ -92,6 +98,7 @@ function compileStrategyCore(
   strategy: AgencyStrategy,
   agents: Record<string, BaseAgentConfig | Agent>,
   agencyConfig: AgencyOptions,
+  seating?: SeatedRoster,
 ): CompiledStrategy {
   switch (strategy) {
     case 'sequential':
@@ -103,9 +110,16 @@ function compileStrategyCore(
     case 'review-loop':
       return compileReviewLoop(agents, agencyConfig);
     case 'hierarchical':
-      return compileHierarchical(agents, agencyConfig);
+      // The call's mask reaches the delegate and spawn tools; undefined at
+      // the construction-time compile and in an agency without a pool.
+      return compileHierarchical(agents, agencyConfig, seating?.mask);
     case 'graph':
       return compileGraph(agents, agencyConfig);
+    case 'panel':
+      // Compiled again for every call over its seated roster; at the
+      // construction-time compile there is no seating, and the strategy
+      // that comes back refuses to run.
+      return compilePanel(agents as Record<string, SeatedConfig | Agent>, agencyConfig, seating);
     default:
       throw new Error(`Strategy '${strategy}' not yet implemented`);
   }
@@ -129,6 +143,7 @@ function compileStrategyCore(
  * @param defaultStrategy - The user-declared default strategy (e.g. `"sequential"`).
  * @param agents - Named agent roster.
  * @param agencyConfig - Agency-level configuration.
+ * @param mask - The call's error mask in a pooled agency, for the delegate tools.
  * @returns A compiled hierarchical strategy with adaptive instructions.
  * @internal
  */
@@ -136,6 +151,7 @@ function compileAdaptiveWrapper(
   defaultStrategy: AgencyStrategy,
   agents: Record<string, BaseAgentConfig | Agent>,
   agencyConfig: AgencyOptions,
+  mask?: (error: unknown) => unknown,
 ): CompiledStrategy {
   const adaptiveInstructions =
     (agencyConfig.instructions ? agencyConfig.instructions + '\n\n' : '') +
@@ -149,7 +165,7 @@ function compileAdaptiveWrapper(
     adaptive: false,
   };
 
-  return compileHierarchical(agents, adaptiveConfig);
+  return compileHierarchical(agents, adaptiveConfig, mask);
 }
 
 export { compileSequential } from './sequential.js';
@@ -158,6 +174,7 @@ export { compileDebate } from './debate.js';
 export { compileReviewLoop } from './review-loop.js';
 export { compileHierarchical } from './hierarchical.js';
 export { compileGraph } from './graph.js';
+export { compilePanel } from './panel.js';
 export { isAgent, mergeDefaults, resolveAgent, checkBeforeAgent } from './shared.js';
 export { compileAgencyToGraph, mapGraphResultToAgencyResult, mapGraphEventToAgencyEvent } from './graphCompiler.js';
 export { agentGraph, AgentGraphBuilder } from './agentGraphBuilder.js';
