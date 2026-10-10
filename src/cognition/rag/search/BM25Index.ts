@@ -25,7 +25,7 @@
  * @see HybridSearcher for combining BM25 with dense vector search
  */
 
-import { getNaturalStopWords } from '../../nlp/filters/StopWordFilter';
+import { getNaturalStopWords } from '../../nlp/filters/StopWordFilter.js';
 import { LexicalIndex, type LexicalIndexJSON } from './LexicalIndex.js';
 
 export type { BM25Document, BM25Result, BM25Stats } from './LexicalIndex.js';
@@ -51,7 +51,7 @@ export interface BM25Config {
    * stemming, lemmatization, and stop word handling.
    * @see createRagPipeline from nlp for the recommended default.
    */
-  pipeline?: import('../../nlp/TextProcessingPipeline').TextProcessingPipeline;
+  pipeline?: import('../../nlp/TextProcessingPipeline.js').TextProcessingPipeline;
   /** A tokenizer in place of the pipeline and the built-in one. When given, `pipeline` is not used. */
   tokenize?: (text: string) => string[];
 }
