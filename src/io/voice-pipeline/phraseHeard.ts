@@ -29,13 +29,40 @@ export interface PhraseHeardResult {
 export interface PhraseHeardOptions {
   /** The share needed, a number from 0 to 1. @default 0.8 */
   threshold?: number;
-  /** How many of the lines' words are read, from the first: a whole number, 0 or more. @default 400 */
+  /**
+   * How many of the lines' words are read, from the first: a whole number, 0 or more. A line is read no further than
+   * the last of them. @default 400
+   */
   maxWords?: number;
+}
+
+/** A run of letters and digits: a word of the library's word rule, as the text holds it before its lower case. */
+const WORD = /[\p{L}\p{N}]+/gu;
+
+/**
+ * The first `count` words of `text` by the library's word rule, with the text read no further than the last of them:
+ * what follows that word is neither lower-cased nor split, however long it is. The part read is lower-cased on its
+ * own, so a Greek capital sigma that ends the last word taken reads as one that ends a text, whatever follows it.
+ */
+function firstWords(text: string, count: number): string[] {
+  let end = text.length;
+  let found = 0;
+  for (const match of text.matchAll(WORD)) {
+    found += 1;
+    if (found === count) {
+      end = (match.index ?? 0) + match[0].length;
+      break;
+    }
+  }
+  // Lower case can part a run in two (a capital I with a dot becomes an i and a combining dot), so the part read may
+  // hold more words than `count`.
+  return lexicalTokens(text.slice(0, end)).slice(0, count);
 }
 
 /**
  * Whether `phrase` was said in `lines`: the lines' words, joined in order and read up to `maxWords`, hold at least
- * `threshold` of the phrase's words in order, other words between them allowed.
+ * `threshold` of the phrase's words in order, other words between them allowed. A line is read no further than the
+ * last word `maxWords` takes, so a long line costs no more than the words read from it.
  *
  * @throws {Error} When the phrase has no words.
  * @throws {RangeError} When `threshold` is not a number from 0 to 1, or `maxWords` is not a whole number, 0 or more.
@@ -52,12 +79,11 @@ export function phraseHeard(phrase: string, lines: readonly HeardLine[], options
   const words: string[] = [];
   const owners: string[] = [];
   for (const line of lines) {
-    for (const word of lexicalTokens(line.text)) {
-      if (words.length >= maxWords) break;
+    if (words.length >= maxWords) break;
+    for (const word of firstWords(line.text, maxWords - words.length)) {
       words.push(word);
       owners.push(line.itemId);
     }
-    if (words.length >= maxWords) break;
   }
   const n = want.length;
   const m = words.length;

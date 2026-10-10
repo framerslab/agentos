@@ -237,7 +237,7 @@ const notice = 'This call is transcribed. Tell me if you would rather it was not
 const { heard, ratio, itemIds } = phraseHeard(notice, ledger.finalsAfter(undefined)); // the ledger's final lines, in order
 ```
 
-`phraseHeard(phrase, lines, { threshold, maxWords })` answers whether a sentence a speaker was asked to say, such as a recording notice or an enrollment phrase, is in a transcript's first lines. A line is any `{ itemId, text }`, so a `TranscriptLedger`'s lines fit as they are. It joins the lines' words in order, reads at most `maxWords` of them (`400` unless set), and counts the most of the phrase's words they hold in order, other words between them allowed (the longest common subsequence of words):
+`phraseHeard(phrase, lines, { threshold, maxWords })` answers whether a sentence a speaker was asked to say, such as a recording notice or an enrollment phrase, is in a transcript's first lines. A line is any `{ itemId, text }`, so a `TranscriptLedger`'s lines fit as they are. It joins the lines' words in order, reads at most `maxWords` of them (`400` unless set) and no further into a line than the last of those, and counts the most of the phrase's words they hold in order, other words between them allowed (the longest common subsequence of words):
 
 - `ratio` is that count over the phrase's word count, from `0` to `1`;
 - `heard` is `true` when `ratio` is at or above `threshold` (`0.8` unless set);
