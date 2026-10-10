@@ -1,6 +1,6 @@
 ---
 title: Adaptive Prompt Intelligence
-description: Per-turn metaprompting and state-driven re-personalization in AgentOS. Three trigger types (turn_interval, event_based, manual), five built-in event handlers, the SentimentTracker, and the state surfaces (mood, user context, task context, working memory, HEXACO traits) that metaprompts mutate between turns.
+description: Per-turn metaprompting and state-driven re-personalization in AgentOS. Three trigger types (turn_interval, event_based, manual), five built-in event handlers, the SentimentTracker, the state surfaces (mood, user context, task context, working memory) that metaprompts mutate between turns, and the adapt_personality tool that changes HEXACO traits.
 keywords:
   - adaptive prompt intelligence
   - metaprompting
@@ -27,7 +27,7 @@ The agent stays the same persona; how it sounds, what it remembers, and how conf
 
 The dollar math, in one line: sentiment scoring is the one adaptive surface that runs on *every* user turn once it is enabled, and the runtime's utility AI decides whether it costs an LLM call, not `sentimentTracking.method`: the default `LLMUtilityAI` makes one call per scored user turn, and a second one when its reply is not valid JSON and it asks for a repair, while a `StatisticalUtilityAI` (or a `HybridUtilityAI` with a statistical part) scores with a lexicon at no cost. Contextual elements cost nothing extra. A metaprompt costs one call each time its trigger fires, and a repair call when its reply is not valid JSON: every `intervalTurns` user turns (every turn with `intervalTurns: 1`), on a sentiment event, or on a host-set flag. See [Operational notes](#operational-notes) below for a concrete per-1000-turn cost table.
 
-![Adaptive Prompt Intelligence: per-turn assembly loop on top (user message → PromptEngine.assemble → MetapromptExecutor.checkAndTriggerMetaprompts → state updates → LLM call); three trigger lanes in the middle (turn_interval periodic self-regulation, event_based SentimentTracker-driven, manual host or tool-driven flags); and the five state surfaces at the bottom (GMI mood, user context, task context, working-memory imprints, HEXACO traits) that metaprompts mutate via callbacks and that re-enter the next turn's prompt.](/img/diagrams/adaptive-intelligence.svg)
+![Adaptive Prompt Intelligence: per-turn assembly loop on top (user message → PromptEngine.assemble → MetapromptExecutor.checkAndTriggerMetaprompts → state updates → LLM call); three trigger lanes in the middle (turn_interval periodic self-regulation, event_based SentimentTracker-driven, manual host or tool-driven flags); and the state surfaces at the bottom (GMI mood, user context, task context, working-memory imprints) that metaprompts mutate via callbacks and that re-enter the next turn's prompt; the HEXACO traits the diagram also places there change only through the adapt_personality tool.](/img/diagrams/adaptive-intelligence.svg)
 
 This page is the source-verified map of that loop. Every class, interface, trigger name, and handler ID below corresponds to a real surface in [`packages/agentos`](https://github.com/framerslab/agentos/tree/master). If you only need one mental model: the persona definition is the static contract, and the metaprompt executor is the dynamic editor of the GMI's state turn over turn.
 
