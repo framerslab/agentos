@@ -230,11 +230,14 @@ export class OpenAIImageProvider implements IImageProvider {
   }
 
   /**
-   * Creates visual variations of an image using the OpenAI `/v1/images/variations` endpoint.
+   * Makes variations of an image through the `/v1/images/edits` endpoint, with
+   * a GPT image model and a prompt that asks for a variation. OpenAI retired
+   * `/v1/images/variations` and the DALL·E models it served: "Use the image
+   * edits endpoint with a GPT Image model and a prompt to create a variation
+   * of an image" (openai-node, `src/resources/images.ts`).
    *
-   * The `variance` field in the request is not natively supported by OpenAI's
-   * variations API (there is no strength parameter), so it is currently ignored.
-   * Every call produces images with the model's default level of variation.
+   * The edits endpoint has no strength parameter, so `variance` picks the
+   * prompt: below 0.5 asks for a close variation, otherwise a looser one.
    *
    * @param request - Variation request with the source image buffer.
    * @returns Generation result containing the variation image(s).
@@ -242,59 +245,17 @@ export class OpenAIImageProvider implements IImageProvider {
    * @throws {Error} When the provider is not initialised.
    * @throws {Error} When the API returns an HTTP error status.
    *
-   * @see https://platform.openai.com/docs/api-reference/images/createVariation
+   * @see https://github.com/openai/openai-node/blob/master/src/resources/images.ts
    */
   async variateImage(request: ImageVariateRequest): Promise<ImageGenerationResult> {
-    if (!this.isInitialized) {
-      throw new Error('OpenAI image provider is not initialized.');
-    }
-
-    const formData = new FormData();
-    formData.append(
-      'image',
-      new Blob([bufferToBlobPart(request.image)], { type: 'image/png' }),
-      'image.png'
-    );
-
-    const model = request.modelId || this.defaultModelId || 'dall-e-2';
-    formData.append('model', model);
-
-    if (typeof request.n === 'number') formData.append('n', String(request.n));
-    if (request.size) formData.append('size', request.size);
-
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.keyPool.next()}`,
-    };
-    if (this.config.organizationId) headers['OpenAI-Organization'] = this.config.organizationId;
-
-    const response = await fetch(`${this.config.baseURL}/images/variations`, {
-      method: 'POST',
-      headers,
-      body: formData,
+    return this.editImage({
+      modelId: request.modelId,
+      image: request.image,
+      prompt: variationPrompt(request.variance),
+      n: request.n,
+      size: request.size,
+      providerOptions: request.providerOptions,
     });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`OpenAI image variation failed (${response.status}): ${errorText}`);
-    }
-
-    const json = (await response.json()) as OpenAIImageResponse;
-    const images: GeneratedImage[] = (json.data ?? []).map((item) => {
-      if (item.b64_json) {
-        const dataUrl = `data:image/png;base64,${item.b64_json}`;
-        const parsed = parseDataUrl(dataUrl);
-        return { ...parsed, revisedPrompt: item.revised_prompt };
-      }
-      return { url: item.url, revisedPrompt: item.revised_prompt };
-    });
-
-    return {
-      created: json.created ?? Math.floor(Date.now() / 1000),
-      modelId: model,
-      providerId: this.providerId,
-      images,
-      usage: { totalImages: images.length },
-    };
   }
 
   async listAvailableModels(): Promise<ImageModelInfo[]> {
@@ -302,7 +263,16 @@ export class OpenAIImageProvider implements IImageProvider {
       { providerId: this.providerId, modelId: 'gpt-image-1.5', displayName: 'GPT Image 1.5' },
       { providerId: this.providerId, modelId: 'gpt-image-1', displayName: 'GPT Image 1' },
       { providerId: this.providerId, modelId: 'gpt-image-1-mini', displayName: 'GPT Image 1 Mini' },
-      { providerId: this.providerId, modelId: 'dall-e-3', displayName: 'DALL·E 3' },
     ];
   }
+}
+
+/**
+ * The prompt that asks the edits endpoint for a variation: a close one below a
+ * `variance` of 0.5, a looser one otherwise (default 0.5).
+ */
+function variationPrompt(variance = 0.5): string {
+  return variance < 0.5
+    ? 'Make a close variation of this image: keep its subject, composition, colours and style, and change only small details.'
+    : 'Make a variation of this image: keep its subject and style, and vary the composition, pose, lighting and details.';
 }

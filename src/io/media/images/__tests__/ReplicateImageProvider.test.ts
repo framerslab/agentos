@@ -214,7 +214,7 @@ describe('ReplicateImageProvider', () => {
       expect(requestUrl).toContain('flux-fill-pro');
     });
 
-    it('uses stability-ai/sdxl for img2img without mask', async () => {
+    it('uses SDXL pinned to a version for img2img without mask, with the strength as prompt_strength', async () => {
       mockFetch.mockResolvedValueOnce(
         mockPredictionResponse(['https://example.com/edited.png'])
       );
@@ -223,10 +223,36 @@ describe('ReplicateImageProvider', () => {
         modelId: '',
         image: Buffer.from('fake-image'),
         prompt: 'transform style',
+        strength: 0.4,
       });
 
-      const requestUrl = mockFetch.mock.calls[0][0] as string;
-      expect(requestUrl).toContain('stability-ai/sdxl');
+      // SDXL is not an official Replicate model, so it runs only by version:
+      // the legacy endpoint, with the pinned version in the body.
+      const [requestUrl, requestInit] = mockFetch.mock.calls[0];
+      expect(requestUrl).toBe('https://api.replicate.com/v1/predictions');
+      const body = JSON.parse(requestInit.body);
+      expect(body.version).toMatch(/^stability-ai\/sdxl:[0-9a-f]{64}$/);
+      // SDXL's input is prompt_strength; it has no strength input.
+      expect(body.input.prompt_strength).toBe(0.4);
+      expect(body.input.strength).toBeUndefined();
+    });
+
+    it('keeps a prompt_strength the caller set for SDXL', async () => {
+      mockFetch.mockResolvedValueOnce(
+        mockPredictionResponse(['https://example.com/edited.png'])
+      );
+
+      await provider.editImage({
+        modelId: '',
+        image: Buffer.from('fake-image'),
+        prompt: 'transform style',
+        strength: 0.4,
+        providerOptions: { replicate: { input: { prompt_strength: 0.9 } } },
+      });
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.input.prompt_strength).toBe(0.9);
+      expect(body.input.strength).toBeUndefined();
     });
 
     it('re-maps the source image to input_image for Kontext models', async () => {

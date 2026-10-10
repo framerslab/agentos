@@ -223,7 +223,7 @@ export type ImageEditMode = 'img2img' | 'inpaint' | 'outpaint';
  * {@link editImage} helper after normalising user input.
  */
 export interface ImageEditRequest {
-  /** Model identifier to use for the edit. */
+  /** Model identifier to use for the edit. An empty string asks for the provider's own default for edits. */
   modelId: string;
   /** Source image as a raw `Buffer`. */
   image: Buffer;
@@ -261,7 +261,7 @@ export interface ImageEditRequest {
  * {@link upscaleImage} helper.
  */
 export interface ImageUpscaleRequest {
-  /** Model identifier to use for upscaling. */
+  /** Model identifier to use for upscaling. An empty string asks for the provider's own upscale default. */
   modelId: string;
   /** Source image as a raw `Buffer`. */
   image: Buffer;
@@ -286,7 +286,7 @@ export interface ImageUpscaleRequest {
  * {@link variateImage} helper.
  */
 export interface ImageVariateRequest {
-  /** Model identifier to use for variation generation. */
+  /** Model identifier to use for variation generation. An empty string asks for the provider's own default. */
   modelId: string;
   /** Source image as a raw `Buffer`. */
   image: Buffer;

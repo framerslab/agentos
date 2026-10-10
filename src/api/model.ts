@@ -344,32 +344,7 @@ export interface ModelOption {
  *   or the provider has no default model for the requested task.
  */
 export function resolveModelOption(opts: ModelOption, task: TaskType = 'text'): ParsedModel {
-  // Apply global default for `provider` / `model` when neither is inlined.
-  // Inline opts always win; the default kicks in only when the caller
-  // supplied nothing. Env-var auto-detect happens later as a final
-  // fallback if the default also doesn't pin a provider. The default's
-  // model applies only to a task it can serve (see globalModelForTask);
-  // otherwise the provider's default model for the task is used.
-  if (!opts.provider && !opts.model) {
-    const def = getDefaultProvider();
-    if (def?.provider) {
-      // A custom endpoint (the default's baseUrl, an inline baseUrl on
-      // callers such as embedText, or the provider's base-URL env var) may
-      // serve any model under any name, so the default's model stays.
-      const inlineBaseUrl = (opts as { baseUrl?: unknown }).baseUrl;
-      const envBaseUrlVar = def.provider ? ENV_URL_MAP[def.provider] : undefined;
-      const customEndpoint = Boolean(
-        def.baseUrl ||
-          (typeof inlineBaseUrl === 'string' && inlineBaseUrl) ||
-          (envBaseUrlVar && process.env[envBaseUrlVar]),
-      );
-      opts = {
-        ...opts,
-        provider: def.provider,
-        model: customEndpoint ? def.model : globalModelForTask(def, task),
-      };
-    }
-  }
+  opts = withGlobalDefault(opts, task);
 
   // 1. Explicit model string (backwards compat and direct override)
   if (opts.model) {
@@ -461,6 +436,48 @@ const CHAT_MODEL_FAMILY =
 
 /** Names that mark a non-chat model inside a chat family (gpt-image-1, gemini-embedding-2). */
 const NON_CHAT_MODEL_MARKER = /embed|image|dall-e|imagen|tts|whisper|transcri|audio|realtime|moderation/i;
+
+/**
+ * `opts` with the global default's `provider` and `model` filled in when the
+ * call inlines neither. Inline options always win; the default applies only
+ * when the caller supplied nothing, and env-var auto-detection stays the last
+ * fallback if the default pins no provider. The default's model applies only
+ * to a task it can serve (see {@link globalModelForTask}); otherwise the
+ * provider's default model for the task is used.
+ */
+function withGlobalDefault(opts: ModelOption, task: TaskType): ModelOption {
+  if (opts.provider || opts.model) return opts;
+  const def = getDefaultProvider();
+  if (!def?.provider) return opts;
+  // A custom endpoint (the default's baseUrl, an inline baseUrl on callers
+  // such as embedText, or the provider's base-URL env var) may serve any
+  // model under any name, so the default's model stays.
+  const inlineBaseUrl = (opts as { baseUrl?: unknown }).baseUrl;
+  const envBaseUrlVar = def.provider ? ENV_URL_MAP[def.provider] : undefined;
+  const customEndpoint = Boolean(
+    def.baseUrl ||
+      (typeof inlineBaseUrl === 'string' && inlineBaseUrl) ||
+      (envBaseUrlVar && process.env[envBaseUrlVar]),
+  );
+  return {
+    ...opts,
+    provider: def.provider,
+    model: customEndpoint ? def.model : globalModelForTask(def, task),
+  };
+}
+
+/**
+ * Whether {@link resolveModelOption} takes the model for `task` from a name:
+ * the call's `model`, or the global default's. False when the model is the
+ * provider's default for the task.
+ *
+ * The image operations use it: a call that names no model runs on the
+ * provider's own default for the operation, not on the text-to-image default
+ * `resolveModelOption` returns for the provider.
+ */
+export function modelIsNamed(opts: ModelOption, task: TaskType = 'text'): boolean {
+  return Boolean(withGlobalDefault(opts, task).model);
+}
 
 /**
  * The global default's model when it can serve `task` on the provider's own

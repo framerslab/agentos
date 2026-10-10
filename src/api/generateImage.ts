@@ -199,7 +199,7 @@ export interface GenerateImageOptions {
    * Model identifier. Prefer the plain model name with `provider` set;
    * the combined `"provider:model"` string is also accepted.
    *
-   * @example `"dall-e-3"` (with `provider: 'openai'`), `"stable-diffusion-xl-1024-v1-0"`
+   * @example `"gpt-image-1"` (with `provider: 'openai'`), `"stable-diffusion-xl-1024-v1-0"`
    *
    * Either `provider` or `model` (or an API key env var for auto-detection) is required.
    */
@@ -300,7 +300,7 @@ export interface GenerateImageResult {
  * ```ts
  * const result = await generateImage({
  *   provider: 'openai',
- *   model: 'dall-e-3',
+ *   model: 'gpt-image-1',
  *   prompt: 'A photorealistic red panda sitting on a moonlit rooftop.',
  *   size: '1024x1024',
  * });

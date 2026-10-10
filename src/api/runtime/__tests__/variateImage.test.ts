@@ -28,7 +28,7 @@ describe('variateImage', () => {
     vi.restoreAllMocks();
   });
 
-  it('creates N variations via the OpenAI variations endpoint', async () => {
+  it('creates N variations through the OpenAI edits endpoint, with a GPT image model and a variation prompt', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -44,15 +44,21 @@ describe('variateImage', () => {
     );
 
     const result = await variateImage({
-      model: 'openai:dall-e-2',
+      provider: 'openai',
       image: TINY_PNG,
       n: 3,
       apiKey: 'test-key',
     });
 
-    // Verify the variations endpoint was used (not edits or generations).
-    const [url] = vi.mocked(globalThis.fetch).mock.calls[0];
-    expect(String(url)).toContain('/images/variations');
+    // OpenAI retired /images/variations: a variation is an edit by a GPT
+    // image model whose prompt asks for one.
+    const [url, requestInit] = vi.mocked(globalThis.fetch).mock.calls[0];
+    expect(String(url)).toMatch(/\/images\/edits$/);
+    const form = requestInit?.body as FormData;
+    expect(form.get('model')).toBe('gpt-image-1');
+    expect(String(form.get('prompt'))).toContain('variation of this image');
+    expect(form.get('n')).toBe('3');
+    expect(form.get('image')).toBeInstanceOf(Blob);
 
     expect(result.provider).toBe('openai');
     expect(result.images).toHaveLength(3);
