@@ -287,7 +287,11 @@ describe('6. deadlines (fake timers)', () => {
     await vi.advanceTimersByTimeAsync(10);
     expect(calls(ANTHROPIC, 'POST')).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(500);
-    expect(calls(ANTHROPIC, 'POST')).toHaveLength(1);
+    // The security seat (opus) started when the first seat timed out. The stubs answer at once, so the failure seat
+    // and then the chair, also on opus, have run too: the chair's request is the second.
+    const anthropicPosts = calls(ANTHROPIC, 'POST');
+    expect(anthropicPosts).toHaveLength(2);
+    expect(JSON.stringify(anthropicPosts[0].body)).toContain('Find security defects.');
     await vi.advanceTimersByTimeAsync(2_000);
     const result = await pending;
     expect(result.seats.map((s) => s.status).sort()).toEqual(['ok', 'ok', 'timeout']);
@@ -301,7 +305,9 @@ describe('6. deadlines (fake timers)', () => {
     const seats = { s1: { instructions: 'a' }, s2: { instructions: 'b' }, s3: { instructions: 'c' }, s4: { instructions: 'd' }, s5: { instructions: 'e' }, security: { instructions: 'f', from: ['gemini'] } };
     const team = agency({ strategy: 'panel', modelPool: { astra: POOL().astra, opus: POOL().opus, gemini: POOL().gemini }, seating: { distinct: false }, agents: seats, chair: { from: ['opus'] }, quorum: { minAgents: 0 }, panel: { seatDeadlineMs: 1_000 },
       hitl: { approvals: { beforeAgent: ['s1', 's2', 's3', 's4', 's5', 'security'] }, handler, guardrailOverride: false } } as never);
-    const pending = team.generate('review');
+    // Every seat times out, and zero healthy seats always rejects: the rejection is observed from the start, so it is
+    // never unhandled while the timers advance.
+    const pending = team.generate('review').catch((e) => e);
     await vi.advanceTimersByTimeAsync(300);
     const first = calls(OPENAI_CHAT)[0];
     expect(first).toBeDefined();
@@ -313,7 +319,8 @@ describe('6. deadlines (fake timers)', () => {
     // The late approval starts no request: the security seat's only candidate is gemini, which is never called.
     await vi.advanceTimersByTimeAsync(10);
     expect(calls(GEMINI).length).toBe(0);
-    const result = await pending.catch((e) => e);
+    const result = await pending;
+    expect(result).toBeInstanceOf(AgencyQuorumError);
     expect(result.seats.find((s: Json) => s.seat === 'security').status).toBe('timeout');
     expect(result.seats.filter((s: Json) => s.status === 'timeout')).toHaveLength(6);
     // Each aborted request surfaces REQUEST_TIMEOUT once the provider's own retries end (five of them, the breaker's
