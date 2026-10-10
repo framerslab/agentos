@@ -174,6 +174,56 @@ What each bound holds, and what it leaves:
 
 A read still shares its process: the caps end the worker, and a fault the worker cannot catch ends both. The worker's entry is `isolatedLoadWorker.js`, compiled beside `loadIsolated.js` in the package's `dist`; `loadIsolated` finds it from its own URL, so a bundler that moves `loadIsolated.js` has to carry that file beside it. The worker starts with none of the caller's command-line options (an empty `execArgv`): an `--input-type` given with `node -e` would refuse its entry file, and the caller's `--require` and `--import` preloads would load inside the capped heap. `NODE_OPTIONS` from the environment applies to it as to any Node process.
 
+### PowerPoint, Excel, OpenDocument, RTF and EPUB files
+
+```ts
+import { OfficeLoader, DocumentTooLargeError } from '@framers/agentos/cognition/memory';
+
+const loader = new OfficeLoader({
+  maxInflatedBytes: 32 * 1024 * 1024,
+  maxXmlElements: 400_000,
+  maxTableCells: 200_000,
+});
+try {
+  const doc = await loader.load(uploadedBuffer, { format: 'pptx' });
+} catch (error) {
+  if (error instanceof DocumentTooLargeError) {
+    // the document reached a bound; error.cause names it by officeparser's code
+  }
+}
+```
+
+[`OfficeLoader`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/OfficeLoader.ts) reads `.pptx`, `.xlsx`, `.odt`, `.ods`, `.odp`, `.rtf` and `.epub` documents in memory through [officeparser](https://github.com/harshankur/officeParser), an optional peer dependency: `npm install officeparser` (the peer range is `^8.1.1`; officeparser 8.1.1 asks for Node.js 22.13 or later). The package is imported on the first read, and a read without it throws an error that starts `OfficeLoader needs the optional peer dependency officeparser`. `LoaderRegistry` does not register the loader, so `Memory.ingest()` does not read these formats: a host builds the loader and calls `load` itself.
+
+`load(bytes, { format })` takes the file's bytes and its format's name: `pptx`, `xlsx`, `odt`, `ods`, `odp`, `rtf` or `epub`, with or without a leading dot (`OFFICE_TYPES` maps each extension to its name). It reads no file from a path and does not guess a format from the bytes, so a path throws, and so does a call that names none of the formats. `content` is the document's text as officeparser writes it, with comments and pictures left out; `metadata` carries `wordCount`, and `pageCount` when officeparser reports a page count.
+
+officeparser inflates the parts of an archive it reads, builds an element tree from each XML part and a node for each table cell, so a small file can ask for far more memory than its size. The loader passes it three bounds:
+
+| Option | What it bounds | When left out |
+|--------|----------------|---------------|
+| `maxInflatedBytes` | What the parts officeparser reads from an archive inflate to, together, counted as they inflate | 67,108,864 bytes (64 MiB) |
+| `maxXmlElements` | The XML elements read from a document's parts. A workbook's sheets are read without building elements, so their cells count toward `maxTableCells` alone | officeparser's default (2,000,000 in 8.1.1) |
+| `maxTableCells` | The cells of an `.xlsx` workbook's sheets, and of an OpenDocument file's sheets and tables. officeparser allows a document one more cell for each byte of its file; the loader takes that allowance out of the limit it passes, so the option is the bound itself | officeparser's default (1,000,000 in 8.1.1, and one more for each byte of the file) |
+
+A document that reaches a bound is refused with `DocumentTooLargeError`, the error `DocxLoader` throws. So is a document past a bound officeparser only warns of and reads on from (a sheet's cells are one), and a document that reaches another of officeparser's own limits: an archive of more than 10,000 entries (in 8.1.1), the content a document repeats by reference, the grid its tables fill when written as text, and a PDF's content budgets. The error's `limit` is the loader's `maxInflatedBytes` whichever bound was reached, and its `cause` names the bound by officeparser's code, such as `XML_ELEMENT_LIMIT_EXCEEDED` or `TABLE_CELL_LIMIT_EXCEEDED`. An `.rtf` file is not an archive and holds no XML: none of the three bounds its read. A bound that is not a positive, finite number is refused with a `RangeError` when the loader is built.
+
+`signal` cancels a read: officeparser checks it between its steps and ends OCR and the pdf.js process on it, and `load` rejects with officeparser's `AbortError`. A step that reads one part's markup finishes before an abort is seen, so a signal alone does not bound the time a document takes. A deadline is a signal, `AbortSignal.timeout(ms)`.
+
+#### A scanned PDF
+
+```ts
+const loader = new OfficeLoader({ ocrPages: 3, pdfProcessMemoryMb: 256, signal: AbortSignal.timeout(60_000) });
+const doc = await loader.load(scannedBuffer, { format: 'pdf' });
+```
+
+With `ocrPages` at 0, the default, `load(bytes, { format: 'pdf' })` throws `ScannedDocumentError` (`code` `'SCANNED_DOCUMENT'`). With a whole number above 0, officeparser reads the first `ocrPages` pages with pdf.js, and tesseract.js recognizes the text in each picture on them, in English. `content` holds that text with any text the pages themselves carry, and a scan whose pages give no text throws `ScannedDocumentError`.
+
+- pdf.js runs in a Node process of its own, which officeparser starts with a heap of `pdfProcessMemoryMb` (256 MB when left out; 64 or more, since officeparser replaces a smaller heap with its own 1,024 MB) and keeps for later reads. Where no process can start, pdf.js runs in the caller's process.
+- tesseract.js 7 fetches its English data from `cdn.jsdelivr.net` the first time a worker starts, and writes a copy, `eng.traineddata`, into the process's working directory, which later workers read. A failed write is not an error: the next worker fetches the data again.
+- officeparser ends its OCR workers after ten seconds without a picture to read.
+
+An `ocrPages` that is not a whole number of 0 or more, and a `pdfProcessMemoryMb` under 64, are refused with a `RangeError` when the loader is built: officeparser reads a page range it cannot parse as every page.
+
 ---
 
 ## PDF Extraction
@@ -288,6 +338,7 @@ Declared and not read: `ingestion.extractImages`, `ingestion.ocrEnabled`, `inges
 | [`io/ingestion/PdfLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/PdfLoader.ts) | unpdf with the OCR and Docling fallbacks |
 | [`io/ingestion/OcrPdfLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/OcrPdfLoader.ts) | tesseract.js OCR |
 | [`io/ingestion/DoclingLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/DoclingLoader.ts) | Python Docling subprocess |
+| [`io/ingestion/OfficeLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/OfficeLoader.ts) | `OfficeLoader`, `OFFICE_TYPES` and `ScannedDocumentError`: the office formats through officeparser, and a scanned PDF by OCR |
 | [`io/ingestion/loadIsolated.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/loadIsolated.ts) | `loadIsolated`, `DocumentTooComplexError` and `DocumentReadTimeoutError` |
 | [`io/ingestion/isolatedLoadWorker.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/isolatedLoadWorker.ts) | The worker thread's entry: one read with the loader of its kind |
 | [`io/ingestion/FolderScanner.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/FolderScanner.ts) | Folder walking and glob filters |
