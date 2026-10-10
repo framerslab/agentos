@@ -34,7 +34,7 @@ interface Sent {
 }
 
 /** A fetch stand-in that keeps every request and answers each with `answer`. */
-function endpoint(answer: (sent: Sent) => Response): { sent: Sent[]; fetchImpl: typeof fetch } {
+function endpoint(answer: (sent: Sent) => Response | Promise<Response>): { sent: Sent[]; fetchImpl: typeof fetch } {
   const sent: Sent[] = [];
   const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
     const request: Sent = {
@@ -85,7 +85,7 @@ afterEach(() => {
 /**
  * Tests for {@link RedirectOAuthFlow}: the authorization code grant with PKCE split across a web server's two
  * requests, the state checked before any call, the standard token calls, one refresh at a time per kept grant with
- * the access token held in memory, and revocation.
+ * the access token held in memory, revocation, and keep, refresh and forget of one key taking turns.
  */
 describe('RedirectOAuthFlow', () => {
   it('begins with an address on the authorization endpoint, answering a new state and verifier to keep', () => {
@@ -292,5 +292,55 @@ describe('RedirectOAuthFlow', () => {
     expect(await flow.forget('grant-2')).toEqual({ revoked: false });
     expect(Object.fromEntries(sent[2].form)).toEqual({ token: 'refresh-unavailable' });
     expect(rows.has('grant-2')).toBe(false);
+  });
+
+  it('runs keep, a refresh and forget of one key in turn, so a refresh in flight neither outlives forget nor overwrites keep', async () => {
+    let answerToken!: () => void;
+    let tokenAnswered = Promise.resolve();
+    /** Holds the token endpoint's next answers until `answerToken` is called. */
+    const holdTokenAnswers = (): void => {
+      tokenAnswered = new Promise<void>((resolve) => {
+        answerToken = resolve;
+      });
+    };
+    const { sent, fetchImpl } = endpoint(async (request) => {
+      if (request.url !== 'https://auth.example.test/token') return new Response(null, { status: 200 });
+      await tokenAnswered;
+      return json(200, { access_token: 'access-2', token_type: 'Bearer', expires_in: 3600, refresh_token: 'refresh-2', scope: 'files.read' });
+    });
+    const { rows, store } = sealedStore();
+    const flow = new ExampleFlow(store, fetchImpl, 'https://auth.example.test/revoke');
+    /** Lets every step that is not waiting on the held answer run. */
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    // A grant forgotten while its refresh is in flight: forget revokes the refresh token that refresh leaves.
+    await store.save('grant-1', { accessToken: '', refreshToken: 'refresh-1', expiresAt: 0 });
+    holdTokenAnswers();
+    const refreshed = flow.accessToken('grant-1');
+    const forgotten = flow.forget('grant-1');
+    await settle();
+    answerToken();
+
+    expect(await refreshed).toBe('access-2');
+    expect(await forgotten).toEqual({ revoked: true });
+    expect(sent.map((request) => request.url)).toEqual(['https://auth.example.test/token', 'https://auth.example.test/revoke']);
+    expect(Object.fromEntries(sent[1].form)).toEqual({ token: 'refresh-2' });
+    // Nothing comes back once forgotten: not in the store, not in memory.
+    expect(rows.has('grant-1')).toBe(false);
+    await expect(flow.accessToken('grant-1')).rejects.toMatchObject({ reason: 'missing' });
+
+    // A grant kept while a refresh of the one before it is in flight: the kept grant is the one that stays.
+    await store.save('grant-2', { accessToken: '', refreshToken: 'refresh-1', expiresAt: 0 });
+    holdTokenAnswers();
+    const refreshedBefore = flow.accessToken('grant-2');
+    const kept = flow.keep('grant-2', { accessToken: 'access-9', refreshToken: 'refresh-9', expiresAt: Date.now() + 3_600_000 });
+    await settle();
+    answerToken();
+
+    expect(await refreshedBefore).toBe('access-2');
+    await kept;
+    expect((await store.load('grant-2'))?.refreshToken).toBe('refresh-9');
+    expect(await flow.accessToken('grant-2')).toBe('access-9');
+    expect(sent).toHaveLength(3);
   });
 });
