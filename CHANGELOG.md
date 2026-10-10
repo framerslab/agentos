@@ -1,3 +1,13 @@
+## [0.13.35](https://github.com/framerslab/agentos/compare/v0.13.34...v0.13.35) (2026-10-10)
+
+### feat
+
+* **memory:** a guarded fetch, and UrlLoader over any loader source (#249) ([a531e02](https://github.com/framerslab/agentos/commit/a531e026cda9230ecce7fae00cbcaf1da40b1092))
+
+### ci
+
+* **links:** the online link check takes github.com's 429 and 503 as reachable (#259) ([90ca3c7](https://github.com/framerslab/agentos/commit/90ca3c79b3bb34c1f71b68fb069b7fc4aa3a3ff9))
+
 ## [0.13.34](https://github.com/framerslab/agentos/compare/v0.13.33...v0.13.34) (2026-10-10)
 
 ### feat
