@@ -1,3 +1,9 @@
+## [0.13.21](https://github.com/framerslab/agentos/compare/v0.13.20...v0.13.21) (2026-10-10)
+
+### feat
+
+* **api:** a spend budget for a run of calls (#185) ([6220c21](https://github.com/framerslab/agentos/commit/6220c218e35284294633bb9593b76ef0cbaf425a))
+
 ## [0.13.20](https://github.com/framerslab/agentos/compare/v0.13.19...v0.13.20) (2026-10-10)
 
 ### feat
