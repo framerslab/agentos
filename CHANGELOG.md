@@ -1,3 +1,33 @@
+## [0.13.21](https://github.com/framerslab/agentos/compare/v0.13.20...v0.13.21) (2026-10-10)
+
+### feat
+
+* **api:** a spend budget for a run of calls (#185) ([6220c21](https://github.com/framerslab/agentos/commit/6220c218e35284294633bb9593b76ef0cbaf425a))
+
+## [0.13.20](https://github.com/framerslab/agentos/compare/v0.13.19...v0.13.20) (2026-10-10)
+
+### feat
+
+* **rag:** make PostgresVectorStore serve many tenants in one collection (#203) ([92c9806](https://github.com/framerslab/agentos/commit/92c9806a79b7b993f28c0f366d629b14357ab5f0))
+* **safety:** a rolling window and a purge for the SQL spend meter (#216) ([9aea463](https://github.com/framerslab/agentos/commit/9aea46371a5310775a3320058834ddddd2a89897))
+
+## [0.13.19](https://github.com/framerslab/agentos/compare/v0.13.18...v0.13.19) (2026-10-09)
+
+### fix
+
+* **export:** a Feishu channel's encryptKey is redacted (#218) ([cde68cf](https://github.com/framerslab/agentos/commit/cde68cf666dcc66ee2cc854a3713c4bebb905e06))
+* **routing:** the policy router matches a required capability under either spelling (#213) ([e8ab3b6](https://github.com/framerslab/agentos/commit/e8ab3b6ce8ce06ea329889b307e0a8468fff20b2))
+
+## [0.13.18](https://github.com/framerslab/agentos/compare/v0.13.17...v0.13.18) (2026-10-09)
+
+### fix
+
+* **speech:** a whisper-compatible server's model is asked for verbose_json by default (#214) ([e355fcb](https://github.com/framerslab/agentos/commit/e355fcb50e0c419a2e3ea4c4ee7aac8862ada25f))
+
+### docs
+
+* eighth round of audit follow-ups to the guides (#208) ([e178ecf](https://github.com/framerslab/agentos/commit/e178ecfabee3ad989ea75128e001001708833a95))
+
 ## [0.13.17](https://github.com/framerslab/agentos/compare/v0.13.16...v0.13.17) (2026-10-09)
 
 ### fix

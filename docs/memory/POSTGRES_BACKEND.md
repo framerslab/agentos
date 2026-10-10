@@ -7,7 +7,7 @@ The Postgres backend stores embeddings, metadata, and full-text content in a sin
 | Requirement | Minimum version |
 |---|---|
 | PostgreSQL | 14+ (15+ recommended for `HNSW` index type) |
-| pgvector extension | 0.5.0+ (`CREATE EXTENSION vector`) |
+| pgvector extension | 0.5.0+ (`CREATE EXTENSION vector`); 0.8.0+ for `iterativeScan` |
 | Node.js | 18+ (uses the `pg` npm package) |
 
 ## Quick start — Docker
@@ -35,7 +35,7 @@ If you are using an existing Postgres instance (self-hosted or managed), install
 CREATE EXTENSION IF NOT EXISTS vector;
 ```
 
-AgentOS creates its own tables on first use. The schema looks like:
+AgentOS creates its own tables on first use, unless `manageSchema` is `false` ([Tables made by your migrations](#tables-made-by-your-migrations)). The schema looks like:
 
 ```sql
 CREATE TABLE IF NOT EXISTS "<prefix>my_collection" (
@@ -43,12 +43,13 @@ CREATE TABLE IF NOT EXISTS "<prefix>my_collection" (
   embedding     vector(1536),          -- pgvector column
   metadata_json JSONB,                 -- GIN-indexed for filtering
   text_content  TEXT,                  -- raw text for hybrid search
-  tsv           tsvector GENERATED ALWAYS AS (to_tsvector('english', COALESCE(text_content, ''))) STORED,
+  tsv           tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, COALESCE(text_content, ''))) STORED,  -- textSearchConfig, 'english' by default
   created_at    BIGINT NOT NULL,
   updated_at    BIGINT
 );
 
--- Indexes created automatically:
+-- Indexes created automatically, each named after the table ("<prefix>my_collection_hnsw", "_metadata", "_fts")
+-- and made only when the table has no index of its kind:
 -- 1. HNSW index for approximate nearest neighbor search
 -- 2. GIN index on metadata_json for JSONB filtering
 -- 3. GIN index on tsv for full-text search
@@ -76,11 +77,17 @@ await store.initialize();
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `connectionString` | `string` | **required** | Standard Postgres connection URI |
-| `poolSize` | `number` | `10` | Max concurrent connections in the pool |
+| `connectionString` | `string` | required unless `pool` is given | Standard Postgres connection URI |
+| `pool` | `PgPoolLike` (a `pg.Pool`) | none | A pool you own: the store opens none, and `close()` leaves it open |
+| `poolSize` | `number` | `10` | Max concurrent connections in the pool the store opens |
 | `defaultDimension` | `number` | `1536` | Embedding vector dimensions for new collections |
 | `similarityMetric` | `string` | `'cosine'` | Distance function: `cosine`, `euclidean`, or `dotproduct` |
 | `tablePrefix` | `string` | `''` | Table name prefix for multi-tenant deployments |
+| `manageSchema` | `boolean` | `true` | `false`: the store runs no DDL; your migrations make the tables from `PostgresVectorStore.schemaSql()` |
+| `textSearchConfig` | `string` | `'english'` | Text search configuration of the `tsv` column and the lexical queries |
+| `iterativeScan` | `'strict_order' \| 'relaxed_order'` | none | pgvector's iterative index scan for filtered `query()` and `hybridSearch()` |
+| `efSearch` | `number` | pgvector's (40) | `hnsw.ef_search` for a search, 1 to 1000 |
+| `maxScanTuples` | `number` | pgvector's (20,000) | `hnsw.max_scan_tuples` for an iterative scan |
 
 ## Hybrid search
 
@@ -101,7 +108,7 @@ const results = await store.hybridSearch(
 How it works internally:
 
 1. **Dense CTE**: Finds top candidates by pgvector HNSW distance (`<=>` for cosine).
-2. **Lexical CTE**: Finds top candidates by `ts_rank()` against the `tsvector` column (`plainto_tsquery('english', ...)`).
+2. **Lexical CTE**: Finds top candidates by `ts_rank()` against the `tsvector` column: `plainto_tsquery` under the store's text search configuration, which asks for every word, or `to_tsquery` over the query's own words when `match` or `prefix` is given ([Lexical search, and the words of a hybrid search](#lexical-search-and-the-words-of-a-hybrid-search)).
 3. **Fusion CTE**: Merges both result sets with `1/(k + rank_dense) + 1/(k + rank_lexical)`; a document missing from one list takes rank 10,000 there. Each list holds up to `topK × 3` candidates, and a metadata filter applies to each before ranking.
 4. **Final join**: Fetches full documents for the top fused results.
 
@@ -125,7 +132,105 @@ const storeB = new PostgresVectorStore({
 });
 ```
 
-Each prefix creates a separate set of tables: `"tenant_a_my_collection"`, `"tenant_a__collections"`, etc. Alternatively, use Postgres schemas (`SET search_path`) for stronger isolation.
+Each prefix creates a separate set of tables: `"tenant_a_my_collection"`, `"tenant_a__collections"`, etc., with indexes named after each table (`"tenant_a_my_collection_hnsw"` and so on). Postgres keeps 63 bytes of a name: where a table's name leaves no room for a whole index name, `createCollection()` cuts the table's part of it and adds eight hex digits of a hash of the table's name, so each index keeps a name of its own. Alternatively, use Postgres schemas (`SET search_path`) for stronger isolation. For many small tenants in one table, see [One collection, many tenants](#one-collection-many-tenants).
+
+## One collection, many tenants
+
+A table per tenant suits a few large tenants. For many small ones, keep one collection, give every document its tenant's keys in its metadata, and pass them as a filter: the options and methods below keep each search, change and deletion inside the filter.
+
+### A pool you own
+
+```typescript
+import pg from 'pg';
+
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 10 });
+const store = new PostgresVectorStore({ id: 'docs', type: 'postgres', pool, manageSchema: false });
+```
+
+With `pool`, the store opens no pool of its own and `close()` leaves yours open; `connectionString` is then not needed. With neither, `initialize()` throws.
+
+### Tables made by your migrations
+
+`manageSchema: false` turns off every statement that changes the schema: `initialize()` runs no `CREATE EXTENSION` and makes no collections table, and `createCollection()` does nothing. `CREATE EXTENSION vector` and the tables are then yours, and `PostgresVectorStore.schemaSql()` prints one collection's statements for a migration:
+
+```typescript
+const statements = PostgresVectorStore.schemaSql('chunks', 1536, {
+  metric: 'cosine',          // the default; 'euclidean' and 'dotproduct' choose the other operator classes
+  tablePrefix: 'app_',
+  textSearchConfig: 'simple',
+});
+// CREATE TABLE IF NOT EXISTS "app_chunks" (...), then CREATE INDEX for "app_chunks_hnsw", "_metadata" and "_fts"
+```
+
+The third argument may also be the metric alone: `schemaSql('chunks', 1536, 'cosine')`. Give the store the same prefix, text search configuration and `similarityMetric`: with `manageSchema: false` it takes the metric from `similarityMetric` and reads no collections table. `schemaSql()` throws unless the collection's name, with and without its prefix, is letters, digits and underscores that do not start with a digit, the name with its prefix is at most 54 characters (Postgres keeps 63 bytes of a name, so the longest index name, ending in `_metadata`, stays whole), and the dimension is a positive integer. `dropCollection()` throws on a store with `manageSchema: false`: its tables are dropped by a migration too.
+
+### Text search configuration
+
+`textSearchConfig` (default `'english'`) names the configuration of the `tsv` column that `createCollection()` adds and of every lexical query; it must be a plain lower-case name. `'simple'` lower-cases words and stems none, which suits text in several languages. A column keeps the configuration it was made with, so give a store over an existing table the configuration its column was made with.
+
+### Filters on array fields
+
+`$in`, `$nin`, `$all` and `$contains` read a field that holds an array as well as one that holds a single value:
+
+| Operator | Single value | Array |
+|---|---|---|
+| `$in: [...]` | the value, as text, is in the list | the array holds a value in the list |
+| `$nin: [...]` | the field is present and its value, as text, is not in the list | the field is present and the array holds no value in the list |
+| `$all: [...]` | no match | the array holds every value |
+| `$contains: v` | the text contains `v` | the array holds `v` |
+
+An array's elements are compared as JSON values, so `$in: [5]` matches an array that holds the number 5 and not one that holds the string `'5'`; a single value is compared as text.
+
+```typescript
+await store.query('chunks', embedding, {
+  topK: 8,
+  filter: { tenantId: 'org_1', aclGroups: { $in: ['acct:42', 'org:org_1'] } },
+});
+```
+
+A metadata key in a filter, and a key `updateMetadata()` sets or removes, must be letters, digits, underscore, dot or hyphen, since a filter's key is written into the SQL; any other key throws.
+
+A key's condition takes `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$all`, `$exists`, `$contains` and `$textSearch`, which matches a string value that contains the text, in any case. Any other operator, `$in`, `$nin` or `$all` without an array, and a condition with no operator throw rather than drop out of the SQL, so no search, change or deletion runs wider than its filter.
+
+### Deleting and changing by filter
+
+```typescript
+await store.delete('chunks', undefined, { filter: { sourceId: 'doc_7' } });
+await store.updateMetadata('chunks', { sourceId: 'doc_7' }, { aclGroups: ['org:org_1'], folderId: null });
+```
+
+`delete()` deletes by `ids` when they are given; otherwise by `options.filter`, where a filter that yields no condition deletes nothing; otherwise every row when `deleteAll` is set. `updateMetadata()` merges the patch into the metadata of every document the filter matches: a key given as `null` is removed, the others replace the stored values, and the rest stays. It throws when the filter holds no condition, so that no call changes every document.
+
+A filter compiles each comparison of a key's value to an expression on `metadata_json->>'key'` or `metadata_json->'key'`, which the GIN index on `metadata_json` does not serve ([PostgreSQL: jsonb indexing](https://www.postgresql.org/docs/current/datatype-json.html#JSON-INDEXING)), so without an index of your own on that expression `delete()` and `updateMetadata()` by such a filter read every row of the collection, and a large collection changed this way is better split into narrower ones.
+
+### Lexical search, and the words of a hybrid search
+
+```typescript
+// Every word, each also matching a longer stored word: "chap budg" finds "chapters of the budget".
+await store.lexicalSearch('chunks', 'chap budg', { topK: 20, match: 'all', prefix: true, filter: { tenantId: 'org_1' } });
+
+// A question's own words on the hybrid search's lexical leg: any of them may match.
+await store.hybridSearch('chunks', embedding, 'what did we decide about the budget', { topK: 8, match: 'any' });
+```
+
+`lexicalSearch()` searches the `tsv` column alone, with no embedding, and ranks by `ts_rank`. The query's words are its runs of letters and digits, lower-cased, at most 32. `match` asks for every word (`'all'`) or any word (`'any'`, the default), and `prefix: true` lets each word match a stored word that begins with it. A query with no word returns no document and runs no search.
+
+`hybridSearch()` takes the same `match` and `prefix` for its lexical leg, with `match` `'any'` when only `prefix` is given, and a query with no word then runs the dense search alone. Without either option its lexical leg reads the query with `plainto_tsquery`, which asks for every word.
+
+### Filtered searches and iterative scans
+
+pgvector applies a filter after it scans an HNSW index, so a filtered `query()` or `hybridSearch()` can return fewer than `topK` rows: the scan holds `hnsw.ef_search` candidates (40 by default) whether or not they pass the filter ([pgvector: iterative index scans](https://github.com/pgvector/pgvector#iterative-index-scans)). With `iterativeScan` (pgvector 0.8.0 and later) the scan goes on until the filtered search has its rows or has visited `hnsw.max_scan_tuples` (20,000 by default):
+
+```typescript
+const store = new PostgresVectorStore({
+  id: 'docs', type: 'postgres', pool, manageSchema: false,
+  iterativeScan: 'strict_order', // or 'relaxed_order'
+  efSearch: 100,                  // hnsw.ef_search, 1 to 1000
+  maxScanTuples: 20000,           // hnsw.max_scan_tuples
+});
+```
+
+With any of the three set, `query()` and `hybridSearch()` run in a transaction on one connection with `SET LOCAL`, so the settings never reach the pool's other users. `relaxed_order` may return rows slightly out of distance order: `query()` sorts its rows again by similarity, and `hybridSearch()` returns its rows in fused-score order. `lexicalSearch()` reads no HNSW index and runs with no setting.
 
 ## Cloud providers
 

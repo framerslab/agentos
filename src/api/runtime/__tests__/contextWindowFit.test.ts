@@ -160,6 +160,35 @@ describe('checkContextFit', () => {
     expect(toolsOverridden.estimatedInputTokens).toBeGreaterThan(base.estimatedInputTokens + 1_000);
   });
 
+  it('reads the window of an OpenRouter customModelParams model override, the model the payload names', () => {
+    const narrowed = checkContextFit({
+      provider: 'openrouter',
+      model: LLAMA,
+      customModelParams: { model: MAGNUM },
+      messages: messagesOf(145_452),
+      maxTokens: 800,
+    });
+    expect(narrowed).toEqual({ fits: false, contextWindow: 32_768, estimatedInputTokens: 40_000, outputTokens: 800 });
+    const widened = checkContextFit({
+      provider: 'openrouter',
+      model: MAGNUM,
+      customModelParams: { model: LLAMA },
+      messages: messagesOf(145_452),
+      maxTokens: 800,
+    });
+    expect(widened.fits).toBe(true);
+    // The provider clamps max_tokens by the call's own model before the override
+    // applies: gpt-4o's 16,384 ceiling here, not the 32,000 asked for.
+    const clamped = checkContextFit({
+      provider: 'openrouter',
+      model: 'openai/gpt-4o',
+      customModelParams: { model: MAGNUM },
+      messages: messagesOf(18_180),
+      maxTokens: 32_000,
+    });
+    expect(clamped).toEqual({ fits: true, contextWindow: 32_768, estimatedInputTokens: 5_000, outputTokens: 16_384 });
+  });
+
   it('takes a model without a known window as fitting', () => {
     const fit = checkContextFit({ provider: 'openai', model: 'gpt-5.6-sol', messages: messagesOf(1_000_000) });
     expect(fit.fits).toBe(true);

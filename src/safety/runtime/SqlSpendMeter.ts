@@ -4,7 +4,9 @@
  *
  * Every write is a conditional statement inside one transaction, never a read followed by a write, so the store's
  * own row locking decides a race: two reservations cannot both take the last unit, and a settle and a reconcile on
- * one operation make one transition between them.
+ * one operation make one transition between them. A meter with a rolling window counts from the reservations
+ * themselves: its reservation takes the account row's lock with a write first, reads the window under that lock, and
+ * rolls itself back when it does not fit, so the same holds.
  *
  * Give the meter an adapter of its own (or the product's own pool), never AgentOS's provenance-wrapped storage
  * adapter, whose write hooks can turn a `run()` into a no-op.
@@ -31,9 +33,10 @@ import {
 } from './SpendMeter.js';
 
 /**
- * The meter's two tables. Every time is epoch milliseconds in a BIGINT. There is no literal question mark anywhere in
- * the text: the Postgres adapter rewrites each one to a numbered parameter. A product that runs its own migrations
- * copies this text into one of them and passes `ensureSchema: false`.
+ * The meter's two tables and their indexes: one the reconciler reads the due reservations through, one a rolling
+ * window counts an account's reservations through. Every time is epoch milliseconds in a BIGINT. There is no literal
+ * question mark anywhere in the text: the Postgres adapter rewrites each one to a numbered parameter. A product that
+ * runs its own migrations copies this text into one of them and passes `ensureSchema: false`.
  */
 export const SPEND_METER_DDL = `
 CREATE TABLE IF NOT EXISTS agentos_spend_meter (
@@ -60,6 +63,7 @@ CREATE TABLE IF NOT EXISTS agentos_spend_reservations (
   usage_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_spend_reservations_due ON agentos_spend_reservations (state, expires_at);
+CREATE INDEX IF NOT EXISTS idx_spend_reservations_account ON agentos_spend_reservations (account_id, reserved_at);
 `;
 
 /** What became of an operation whose lease ran out, as the product knows it: its reply was stored, it was not, or it cannot tell. */
@@ -69,8 +73,18 @@ export interface SqlSpendMeterOptions {
   db: StorageAdapter;
   /** The account's allowance for a period, in units. Read at every reservation, so a plan change applies at the next turn. */
   allowanceFor(accountId: string, period: string): number | Promise<number>;
-  /** The period a moment falls in for an account, e.g. its calendar month in its own time zone ("2026-10"). */
-  periodOf(now: number, accountId: string): string | Promise<string>;
+  /**
+   * The period a moment falls in for an account, e.g. its calendar month in its own time zone ("2026-10"). Required
+   * unless `windowMs` is set; with a window it is not read.
+   */
+  periodOf?(now: number, accountId: string): string | Promise<string>;
+  /**
+   * A rolling window in milliseconds. The allowance then holds the units reserved or consumed in the `windowMs` before
+   * each reservation, counted from the reservations themselves under the account's row lock, and every row of the
+   * account carries the period `window`. A unit has left the window once more than `windowMs` have passed since its
+   * reservation; a released one never counts.
+   */
+  windowMs?: number;
   /** How long a reservation lives without a heartbeat. Default 45 seconds. */
   leaseMs?: number;
   /** Reservations an operation may take in all, its retries after a release included. Default 3. */
@@ -89,6 +103,14 @@ export interface SqlSpendMeterOptions {
   ensureSchema?: boolean;
 }
 
+/** What one purge deleted. */
+export interface SpendPurgeResult {
+  /** The settled reservations deleted. */
+  reservations: number;
+  /** A window meter's account rows deleted; a meter with periods deletes none. */
+  periods: number;
+}
+
 interface ReservationRow {
   operation_id: string;
   account_id: string;
@@ -97,6 +119,9 @@ interface ReservationRow {
   state: SpendReservationState;
   attempts: number | string;
 }
+
+/** The one period every row of a window meter carries. The window's own statements name it literally. */
+const WINDOW_PERIOD = 'window';
 
 /** Rolls a reservation's transaction back when the allowance has no room; caught inside the same try, never retried. */
 class AllowanceExhausted extends Error {
@@ -112,6 +137,8 @@ export class SqlSpendMeter implements ISpendMeter {
   private readonly leaseMs: number;
   private readonly maxAttempts: number;
   private readonly retry: SpendRetryPolicy;
+  /** The rolling window in whole milliseconds; undefined for a meter that counts in periods. */
+  private readonly windowMs: number | undefined;
   private schemaReady: Promise<void> | null = null;
   private reconciler: ReturnType<typeof setInterval> | null = null;
 
@@ -123,10 +150,18 @@ export class SqlSpendMeter implements ISpendMeter {
       );
     }
     if (!caps.has('transactions')) throw new Error(`SqlSpendMeter needs a store with transactions; "${opts.db.kind}" has none.`);
+    if (opts.windowMs === undefined) {
+      if (typeof opts.periodOf !== 'function') {
+        throw new Error('SqlSpendMeter needs periodOf or windowMs: the period a moment falls in, or a rolling window to count in.');
+      }
+    } else if (!Number.isFinite(opts.windowMs) || Math.trunc(opts.windowMs) < 1) {
+      throw new Error(`SqlSpendMeter needs windowMs to be a positive number of milliseconds; got ${opts.windowMs}.`);
+    }
     this.db = opts.db;
     this.leaseMs = opts.leaseMs ?? 45_000;
     this.maxAttempts = opts.maxAttemptsPerOperation ?? 3;
     this.retry = opts.retry ?? DEFAULT_SPEND_RETRY_POLICY;
+    this.windowMs = opts.windowMs === undefined ? undefined : Math.trunc(opts.windowMs);
   }
 
   /** Creates the tables unless they answer a read already. Called before the first statement; safe to call again. */
@@ -157,19 +192,27 @@ export class SqlSpendMeter implements ISpendMeter {
     );
   }
 
+  /** The period a moment falls in for an account: the product's answer, or the one period of a window meter. */
+  private periodAt(now: number, accountId: string): string | Promise<string> {
+    // the constructor refused a meter with neither, so a meter without a window has a periodOf
+    if (this.windowMs !== undefined || !this.opts.periodOf) return WINDOW_PERIOD;
+    return this.opts.periodOf(now, accountId);
+  }
+
   async reserve(req: SpendReserveRequest): Promise<SpendReserveResult> {
     const now = req.now ?? Date.now();
     const units = Math.max(1, Math.trunc(req.units ?? 1));
     let period: string;
     let allowance: number;
     try {
-      period = await this.opts.periodOf(now, req.accountId);
+      period = await this.periodAt(now, req.accountId);
       allowance = Math.max(0, Math.trunc(await this.opts.allowanceFor(req.accountId, period)));
     } catch (e) {
       throw new SpendMeterUnavailableError(`the allowance could not be read: ${e instanceof Error ? e.message : String(e)}`, e);
     }
     const base = { operationId: req.operationId, accountId: req.accountId, period };
     const expiresAt = now + this.leaseMs;
+    const windowMs = this.windowMs;
     return this.run(async () => {
       try {
         return await this.db.transaction(async (trx): Promise<SpendReserveResult> => {
@@ -191,7 +234,7 @@ export class SqlSpendMeter implements ISpendMeter {
             const row = await trx.get<ReservationRow>('SELECT state, attempts FROM agentos_spend_reservations WHERE operation_id = ?', [req.operationId]);
             if (!retried.changes) {
               const reason: SpendDenyReason = row?.state === 'reserved' ? 'in_flight' : row?.state === 'consumed' ? 'already_consumed' : 'retries_exhausted';
-              return { status: 'denied', reason, ...base, remaining: await this.remainingIn(trx, req.accountId, period, allowance) };
+              return { status: 'denied', reason, ...base, remaining: await this.remainingIn(trx, req.accountId, period, allowance, now) };
             }
             attempt = num(row?.attempts);
           }
@@ -201,27 +244,59 @@ export class SqlSpendMeter implements ISpendMeter {
              ON CONFLICT (account_id, period) DO UPDATE SET allowance = excluded.allowance`,
             [req.accountId, period, allowance, now],
           );
+          if (windowMs !== undefined) {
+            // (c) with a window: adding the units takes the row's lock, so concurrent reservations for one account
+            // queue here. The units its other operations hold inside the window are read under that lock (at READ
+            // COMMITTED, Postgres's default, the read sees every reservation that committed before it began), and
+            // this one stays only where they leave it room.
+            await trx.run(`UPDATE agentos_spend_meter SET reserved = reserved + ?, updated_at = ? WHERE account_id = ? AND period = 'window'`, [units, now, req.accountId]);
+            const others = await this.windowUnits(trx, req.accountId, now - windowMs, req.operationId);
+            const room = allowance - others.used - others.reserved;
+            if (units > room) throw new AllowanceExhausted(Math.max(0, room));
+            return { status: 'reserved', ...base, units, attempt, remaining: room - units, expiresAt };
+          }
           // (c) the units taken only where they fit: the row lock makes concurrent reservations queue here
           const taken = await trx.run(
             `UPDATE agentos_spend_meter SET reserved = reserved + ?, updated_at = ?
               WHERE account_id = ? AND period = ? AND used + reserved + ? <= allowance`,
             [units, now, req.accountId, period, units],
           );
-          if (!taken.changes) throw new AllowanceExhausted(await this.remainingIn(trx, req.accountId, period, allowance));
-          return { status: 'reserved', ...base, units, attempt, remaining: await this.remainingIn(trx, req.accountId, period, allowance), expiresAt };
+          if (!taken.changes) throw new AllowanceExhausted(await this.remainingIn(trx, req.accountId, period, allowance, now));
+          return { status: 'reserved', ...base, units, attempt, remaining: await this.remainingIn(trx, req.accountId, period, allowance, now), expiresAt };
         });
       } catch (e) {
-        // the transaction rolled (a) and (b) back; the refusal is an answer, not a failure
+        // the transaction rolled back (a), (b) and, with a window, the units (c) added; the refusal is an answer, not a failure
         if (e instanceof AllowanceExhausted) return { status: 'denied', reason: 'allowance_exhausted', ...base, remaining: e.remaining };
         throw e;
       }
     });
   }
 
-  private async remainingIn(trx: StorageAdapter, accountId: string, period: string, fallbackAllowance: number): Promise<number> {
+  /** The units left to an account at `now`: its allowance less what the period's row holds, or, with a window, less what the window holds. */
+  private async remainingIn(trx: StorageAdapter, accountId: string, period: string, fallbackAllowance: number, now: number): Promise<number> {
     const m = await trx.get<{ allowance: unknown; used: unknown; reserved: unknown }>('SELECT allowance, used, reserved FROM agentos_spend_meter WHERE account_id = ? AND period = ?', [accountId, period]);
+    if (this.windowMs !== undefined) {
+      const held = await this.windowUnits(trx, accountId, now - this.windowMs);
+      return Math.max(0, (m ? num(m.allowance) : fallbackAllowance) - held.used - held.reserved);
+    }
     if (!m) return fallbackAllowance;
     return Math.max(0, num(m.allowance) - num(m.used) - num(m.reserved));
+  }
+
+  /**
+   * The units an account's reservations hold inside the window that reaches back to `since`: the consumed ones and
+   * the ones still reserved, never a released one. `except` leaves one operation out: the reservation being decided.
+   */
+  private async windowUnits(db: StorageAdapter, accountId: string, since: number, except?: string): Promise<{ used: number; reserved: number }> {
+    // reserved_at has no upper bound here: a unit another process stamped a little ahead of this clock still counts
+    const held = await db.get<{ used: unknown; reserved: unknown }>(
+      `SELECT COALESCE(SUM(CASE WHEN state = 'consumed' THEN units ELSE 0 END), 0) AS used,
+              COALESCE(SUM(CASE WHEN state = 'reserved' THEN units ELSE 0 END), 0) AS reserved
+         FROM agentos_spend_reservations
+        WHERE account_id = ? AND period = 'window' AND state <> 'released' AND reserved_at >= ?${except === undefined ? '' : ' AND operation_id <> ?'}`,
+      except === undefined ? [accountId, since] : [accountId, since, except],
+    );
+    return { used: num(held?.used), reserved: num(held?.reserved) };
   }
 
   async settle(req: SpendSettleRequest): Promise<SpendSettleResult> {
@@ -309,21 +384,24 @@ export class SqlSpendMeter implements ISpendMeter {
     let period: string;
     let allowance: number;
     try {
-      period = await this.opts.periodOf(now, accountId);
+      period = await this.periodAt(now, accountId);
       allowance = Math.max(0, Math.trunc(await this.opts.allowanceFor(accountId, period)));
     } catch (e) {
       throw new SpendMeterUnavailableError(`the allowance could not be read: ${e instanceof Error ? e.message : String(e)}`, e);
     }
-    const m = await this.run(() =>
-      this.db.get<{ allowance: unknown; used: unknown; reserved: unknown }>('SELECT allowance, used, reserved FROM agentos_spend_meter WHERE account_id = ? AND period = ?', [
+    const windowMs = this.windowMs;
+    const { m, held } = await this.run(async () => ({
+      m: await this.db.get<{ allowance: unknown; used: unknown; reserved: unknown }>('SELECT allowance, used, reserved FROM agentos_spend_meter WHERE account_id = ? AND period = ?', [
         accountId,
         period,
       ]),
-    );
+      // with a window the units are the ones its reservations hold inside it, never the row's own counters
+      held: windowMs === undefined ? null : await this.windowUnits(this.db, accountId, now - windowMs),
+    }));
     // what is enforced now: the period's stored allowance once the period has a row, else the product's answer
     const enforced = m ? num(m.allowance) : allowance;
-    const used = num(m?.used);
-    const reserved = num(m?.reserved);
+    const used = held ? held.used : num(m?.used);
+    const reserved = held ? held.reserved : num(m?.reserved);
     return { accountId, period, allowance: enforced, used, reserved, remaining: Math.max(0, enforced - used - reserved) };
   }
 
@@ -331,7 +409,7 @@ export class SqlSpendMeter implements ISpendMeter {
     const value = Math.max(0, Math.trunc(allowance));
     let period: string;
     try {
-      period = await this.opts.periodOf(now, accountId);
+      period = await this.periodAt(now, accountId);
     } catch (e) {
       throw new SpendMeterUnavailableError(`the period could not be read: ${e instanceof Error ? e.message : String(e)}`, e);
     }
@@ -343,6 +421,40 @@ export class SqlSpendMeter implements ISpendMeter {
           [accountId, period, value, now],
         ),
       ),
+    );
+  }
+
+  /**
+   * Deletes the reservations settled before `before` and, with a window, the account rows not updated since then that
+   * hold nothing reserved, at most `limit` of each (default 1,000): the retention a product's terms set. A reservation
+   * still reserved is never deleted, nor is a period meter's period row, which holds the period's count. With a window,
+   * a `before` at least one window back keeps every unit the window counts. An operation retried after its row was
+   * purged counts again, so `before` lies past the time a retry can come.
+   */
+  async purge(opts: { before: number; limit?: number }): Promise<SpendPurgeResult> {
+    const before = Math.trunc(opts.before);
+    const limit = Math.max(1, Math.trunc(opts.limit ?? 1_000));
+    const rolling = this.windowMs !== undefined;
+    return this.run(() =>
+      this.db.transaction(async (trx): Promise<SpendPurgeResult> => {
+        // Each delete states its condition twice. The inner one picks a page of rows; the outer one is checked again
+        // on each row as it is deleted, so a reservation retried, or an account row written, after the page was read stays.
+        const reservations = await trx.run(
+          `DELETE FROM agentos_spend_reservations
+            WHERE state <> 'reserved' AND settled_at < ?
+              AND operation_id IN (SELECT operation_id FROM agentos_spend_reservations WHERE state <> 'reserved' AND settled_at < ? LIMIT ?)`,
+          [before, before, limit],
+        );
+        // a period's row holds the period's count, so a meter with periods keeps every one of them
+        if (!rolling) return { reservations: reservations.changes, periods: 0 };
+        const periods = await trx.run(
+          `DELETE FROM agentos_spend_meter
+            WHERE period = 'window' AND reserved = 0 AND updated_at < ?
+              AND account_id IN (SELECT account_id FROM agentos_spend_meter WHERE period = 'window' AND reserved = 0 AND updated_at < ? LIMIT ?)`,
+          [before, before, limit],
+        );
+        return { reservations: reservations.changes, periods: periods.changes };
+      }),
     );
   }
 

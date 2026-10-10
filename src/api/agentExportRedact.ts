@@ -25,7 +25,7 @@ export const REDACTED_ENCODED = '%3C%3CREDACTED%3E%3E';
 const SECRET_WORDS = ['token', 'secret', 'password', 'passwd', 'credential', 'credentials', 'authorization', 'cookie'];
 const SECRET_PAIRS = [
   'api key', 'private key', 'secret key', 'access key', 'auth key',
-  'encryption key', 'signing key', 'subscription key', 'master key', 'account key', 'role key',
+  'encryption key', 'encrypt key', 'signing key', 'subscription key', 'master key', 'account key', 'role key',
 ];
 /**
  * Names that end with the plural of a secret word but hold settings or counts:
