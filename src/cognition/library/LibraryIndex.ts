@@ -51,7 +51,7 @@ export interface LibraryPassage {
   kind: string;
   index: number;
   text: string;
-  /** The store's score for the passage, as the search's mode and the store compute it. */
+  /** The store's score for the passage, as the search's mode and the store compute it, read as a number. */
   score: number;
   title?: string;
   folderId?: string;
@@ -208,7 +208,9 @@ export class LibraryIndex {
         kind: String(metadata.kind ?? ''),
         index: Number(metadata.index ?? 0),
         text: doc.textContent ?? '',
-        score: doc.similarityScore,
+        // A store may answer a score as numeric text: PostgresVectorStore's hybrid search fuses its legs into a
+        // Postgres numeric, which node-postgres reads as a string.
+        score: Number(doc.similarityScore),
         title: typeof metadata.title === 'string' ? metadata.title : undefined,
         folderId: typeof metadata.folderId === 'string' ? metadata.folderId : undefined,
         tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],

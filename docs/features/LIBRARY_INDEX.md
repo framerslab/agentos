@@ -84,7 +84,7 @@ The keys the index writes win over the same keys in the source's `metadata`, and
 
 Every search names its scope, `{ tenantId, aclGroups }`. A scope with no tenant or no group is refused before the store is asked. The filter the store receives keeps the passages of that tenant whose `aclGroups` hold at least one of the scope's groups and whose `status` is `active`. The narrowing options add to it: `kinds` keeps any of those kinds, `folderId` that folder, `tags` passages that hold every one of those tags, and `sourceIds` any of those sources. An empty `kinds` or `tags` narrows nothing; an empty `sourceIds` finds nothing.
 
-Each passage found has `id`, `sourceId`, `kind`, `index`, `text`, `score` (the store's, for the mode), `title` and `folderId` when the passage holds them, `tags`, and its whole `metadata`.
+Each passage found has `id`, `sourceId`, `kind`, `index`, `text`, `score` (the store's, for the mode, read as a number), `title` and `folderId` when the passage holds them, `tags`, and its whole `metadata`.
 
 ## Stores
 
