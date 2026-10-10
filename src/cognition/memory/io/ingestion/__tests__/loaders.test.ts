@@ -15,7 +15,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { crc32, deflateRawSync } from 'node:zlib';
 import mammoth from 'mammoth';
 
 import type { IDocumentLoader } from '../IDocumentLoader.js';
@@ -24,6 +23,7 @@ import { MarkdownLoader } from '../MarkdownLoader.js';
 import { HtmlLoader } from '../HtmlLoader.js';
 import { LoaderRegistry } from '../LoaderRegistry.js';
 import { DocxLoader, DocumentTooLargeError } from '../DocxLoader.js';
+import { zipOf, type ArchiveEntry } from './helpers/documents.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -462,73 +462,6 @@ describe('LoaderRegistry', () => {
 // ---------------------------------------------------------------------------
 // DocxLoader bound
 // ---------------------------------------------------------------------------
-
-/** One file of an archive written by {@link zipOf}. */
-interface ArchiveEntry {
-  /** The entry's name inside the archive. */
-  name: string;
-  /** The entry's bytes before compression. */
-  data: Buffer;
-  /** The uncompressed size the headers state; the true size when left out. */
-  statedSize?: number;
-  /** The compression method: 8 deflates the data (the default), 0 stores it. */
-  method?: 0 | 8;
-}
-
-/**
- * Writes a ZIP archive: each entry's local header and data, then the central
- * directory and its end record, with no archive comment.
- *
- * @param entries - The archive's files, in order.
- */
-function zipOf(entries: ArchiveEntry[]): Buffer {
-  const files: Buffer[] = [];
-  const directory: Buffer[] = [];
-  let offset = 0;
-
-  for (const entry of entries) {
-    const name = Buffer.from(entry.name, 'utf8');
-    const method = entry.method ?? 8;
-    const body = method === 8 ? deflateRawSync(entry.data) : entry.data;
-    const checksum = crc32(entry.data);
-    const statedSize = entry.statedSize ?? entry.data.length;
-
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0); // local file header signature
-    local.writeUInt16LE(20, 4); // version needed to extract
-    local.writeUInt16LE(method, 8);
-    local.writeUInt16LE(0x21, 12); // 1 January 1980
-    local.writeUInt32LE(checksum, 14);
-    local.writeUInt32LE(body.length, 18);
-    local.writeUInt32LE(statedSize, 22);
-    local.writeUInt16LE(name.length, 26);
-    files.push(local, name, body);
-
-    const central = Buffer.alloc(46);
-    central.writeUInt32LE(0x02014b50, 0); // central directory file header signature
-    central.writeUInt16LE(20, 4); // version made by
-    central.writeUInt16LE(20, 6); // version needed to extract
-    central.writeUInt16LE(method, 10);
-    central.writeUInt16LE(0x21, 14); // 1 January 1980
-    central.writeUInt32LE(checksum, 16);
-    central.writeUInt32LE(body.length, 20);
-    central.writeUInt32LE(statedSize, 24);
-    central.writeUInt16LE(name.length, 28);
-    central.writeUInt32LE(offset, 42); // the local header's offset
-    directory.push(central, name);
-
-    offset += local.length + name.length + body.length;
-  }
-
-  const centralDirectory = Buffer.concat(directory);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0); // end of central directory signature
-  end.writeUInt16LE(entries.length, 8); // entries on this disk
-  end.writeUInt16LE(entries.length, 10); // entries in all
-  end.writeUInt32LE(centralDirectory.length, 12);
-  end.writeUInt32LE(offset, 16); // the central directory's offset
-  return Buffer.concat([...files, centralDirectory, end]);
-}
 
 /** The central directory's offset, read from an end record with no comment after it. */
 function directoryOffsetOf(zip: Buffer): number {
