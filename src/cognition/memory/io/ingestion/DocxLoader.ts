@@ -313,13 +313,14 @@ export class DocxLoader implements IDocumentLoader {
 
   /**
    * @param options - The loader's options; with none, the bound is 128 MiB.
-   * @throws {RangeError} When `maxInflatedBytes` is not a positive number.
+   * @throws {RangeError} When `maxInflatedBytes` is not a positive, finite number.
    */
   constructor(options: DocxLoaderOptions = {}) {
     const maxInflatedBytes = options.maxInflatedBytes ?? DEFAULT_MAX_INFLATED_BYTES;
-    // NaN would pass every comparison with the inflated sum and turn zlib's cap off.
-    if (!(maxInflatedBytes > 0)) {
-      throw new RangeError(`DocxLoader: maxInflatedBytes must be a positive number, got ${maxInflatedBytes}`);
+    // NaN and Infinity bound nothing: the inflated sum is never past either,
+    // and zlib then caps an entry's output at its own maximum.
+    if (!Number.isFinite(maxInflatedBytes) || maxInflatedBytes <= 0) {
+      throw new RangeError(`DocxLoader: maxInflatedBytes must be a positive, finite number, got ${maxInflatedBytes}`);
     }
     this.maxInflatedBytes = maxInflatedBytes;
   }

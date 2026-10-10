@@ -710,8 +710,8 @@ describe('DocxLoader bound', () => {
     expect(extractRawText).not.toHaveBeenCalled();
   });
 
-  it('refuses a bound that is not a positive number', () => {
-    for (const maxInflatedBytes of [0, -1, Number.NaN]) {
+  it('refuses a bound that is not a positive, finite number', () => {
+    for (const maxInflatedBytes of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() => new DocxLoader({ maxInflatedBytes })).toThrow(RangeError);
     }
   });
