@@ -515,6 +515,13 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     const a = agent(base(k, { voice: { enabled: false }, avatar: { enabled: false }, channels: { discord: { enabled: false } } }));
     expect((await a.generate('hi')).text).toBe('Hello.');
   });
+
+  it('a voice, avatar or channels config that sets enabled: true throws at construction even when its other fields are all unset', () => {
+    // diarization is a boolean of VoiceConfig; a channel with an empty bot token is still turned on.
+    expect(() => agent({ ...base(key()), voice: { enabled: true, diarization: false } })).toThrow(/'voice'/);
+    expect(() => agent({ ...base(key()), avatar: { enabled: true, styleProjections: [] } as never })).toThrow(/'avatar'/);
+    expect(() => agent({ ...base(key()), channels: { discord: { enabled: true, botToken: '' } } })).toThrow(/'channels'/);
+  });
 });
 
 describe("agent({ runtime: 'gmi' }) resolves the model and builds memory on first use", () => {
