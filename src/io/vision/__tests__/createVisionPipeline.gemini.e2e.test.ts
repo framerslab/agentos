@@ -74,7 +74,10 @@ describe('createVisionPipeline Gemini detection, through the real provider', () 
     const [url, init] = calls[0] as [unknown, RequestInit];
     expect(String(url)).toMatch(/:generateContent/);
     expect(new Headers(init.headers).get('x-goog-api-key')).toBe(key);
-    // The image went with the prompt, typed by its bytes.
-    expect(String(init.body)).toContain('image/jpeg');
+    // The image went with the prompt as inline data: typed by its bytes, and
+    // those bytes exactly.
+    const body = JSON.parse(String(init.body)) as { contents: { parts: { inlineData?: unknown }[] }[] };
+    const images = body.contents.flatMap((content) => content.parts).filter((part) => part.inlineData);
+    expect(images).toEqual([{ inlineData: { mimeType: 'image/jpeg', data: JPEG.toString('base64') } }]);
   });
 });
