@@ -836,12 +836,18 @@ export class GMIManager {
     // one that began before the flag was cleared and has not registered its
     // GMI shuts that GMI down itself.
     const sessionIdsToDeactivate = Array.from(this.gmiSessionMap.keys());
+    // A GMI in the active map that no session maps to is shut down in the same
+    // pass. Two creations for one new session that race both build a GMI, and
+    // the later registration takes the session entry from the earlier one.
+    const mappedInstanceIds = new Set(this.gmiSessionMap.values());
+    const unmappedGMIs = Array.from(this.activeGMIs).filter(([gmiInstanceId]) => !mappedInstanceIds.has(gmiInstanceId));
     await Promise.allSettled([
       ...sessionIdsToDeactivate.map((sessionId) =>
         this.deactivateSession(sessionId).catch((error: any) => {
           console.error(`GMIManager (ID: ${this.managerId}): Error deactivating GMI for session ${sessionId} during manager shutdown: ${error.message}`, error);
         }),
       ),
+      ...unmappedGMIs.map(([gmiInstanceId, gmi]) => this.shutDownGMI(gmi, gmiInstanceId)),
       this.creationsSettled(),
     ]);
 
