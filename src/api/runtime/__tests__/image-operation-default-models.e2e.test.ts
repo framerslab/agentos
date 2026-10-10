@@ -121,7 +121,9 @@ describe('an image operation with a provider and no model', () => {
     const form = init?.body as FormData;
     expect(form.get('mask')).toBeInstanceOf(Blob);
     // The inpaint endpoint takes no model, mode or strength.
-    expect([...form.keys()].sort()).toEqual(['image', 'mask', 'prompt']);
+    const fields: string[] = [];
+    form.forEach((_value, name) => fields.push(name));
+    expect(fields.sort()).toEqual(['image', 'mask', 'prompt']);
   });
 
   it('makes a close variation on OpenAI when the variance is low', async () => {

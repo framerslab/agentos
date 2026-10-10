@@ -55,7 +55,9 @@ describe('upscaleImage', () => {
     const [url, requestInit] = vi.mocked(globalThis.fetch).mock.calls[0];
     expect(String(url)).toMatch(/\/v2beta\/stable-image\/upscale\/fast$/);
     const formData = requestInit?.body as FormData;
-    expect([...formData.keys()]).toEqual(['image']);
+    const fields: string[] = [];
+    formData.forEach((_value, name) => fields.push(name));
+    expect(fields).toEqual(['image']);
     expect(formData.get('image')).toBeInstanceOf(Blob);
 
     expect(result.provider).toBe('stability');
