@@ -153,7 +153,8 @@ describe('redactText and maskError', () => {
     expect(e.headers).toBeInstanceOf(Error);
     expect(Object.getOwnPropertyNames(e.request)).toEqual([]);
     let node = withDeep.body;
-    expect(node).not.toBe(deep);
+    // Not `.not.toBe(deep)`: when the references differ, toBe compares the two chains deeply, and 5,000 levels overflow its stack.
+    expect(node === deep).toBe(false);
     while (node.next) node = node.next as Record<string, unknown>;
     expect(node.key).toBe('deep [redacted]');
     let original = deep;
