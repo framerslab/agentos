@@ -1,11 +1,12 @@
 /**
- * Runs the vision pipeline's local model tiers end to end from the built
- * package: TrOCR reads a handwritten line, Florence-2 reads an invoice line
- * by line with each line's box, and CLIP embeds two images. Each tier loads
- * the Hugging Face Hub model it names, about 3 GB in all, so this runs in a
- * CI job of its own (.github/workflows/vision-models.yml): the unit suite
- * mocks transformers.js, and a model id that does not load shows up only
- * here.
+ * Runs the vision pipeline's local tiers end to end from the built package:
+ * PaddleOCR and Tesseract.js read an invoice, TrOCR reads a handwritten line,
+ * Florence-2 reads the invoice line by line with each line's box, and CLIP
+ * embeds two images. Each model tier loads the Hugging Face Hub model it
+ * names, about 3 GB in all, so this runs in a CI job of its own
+ * (.github/workflows/vision-models.yml): the unit suite mocks the OCR
+ * packages and transformers.js, and a result shape or a model id the code
+ * does not match shows up only here.
  *
  * Usage, after `pnpm run build`: node scripts/vision-models-check.mjs
  */
@@ -53,6 +54,25 @@ const pipeline = new VisionPipeline({
 });
 
 try {
+  // OCR: each engine reads the invoice, with a box for every region.
+  const invoice = await sample('invoice.png');
+  for (const ocr of ['paddle', 'tesseract']) {
+    const reader = new VisionPipeline({ strategy: 'local-only', ocr });
+    try {
+      const result = await timed(`ocr (${ocr})`, () => reader.process(invoice, { tiers: ['ocr'] }));
+      const regions = result.regions ?? [];
+      console.log(`  ${regions.length} regions, confidence ${result.confidence.toFixed(2)}; text:`, JSON.stringify(result.text.slice(0, 120)));
+      assert.match(result.text, /invoice/i);
+      assert.ok(result.confidence > 0.5, `confidence ${result.confidence}`);
+      assert.ok(regions.length >= 3, `${regions.length} regions`);
+      for (const region of regions) {
+        assert.ok(region.bbox.width > 0 && region.bbox.height > 0, `a region with a box: ${JSON.stringify(region)}`);
+      }
+    } finally {
+      await reader.dispose();
+    }
+  }
+
   // TrOCR. The transformers.js documentation gives this line's text as
   // "Mr. Brown commented icily."
   const handwriting = await sample('handwriting.jpg');
@@ -65,7 +85,6 @@ try {
   assert.match(read.text, /brown/i);
 
   // Florence-2: the invoice's lines, each with a box inside the page.
-  const invoice = await sample('invoice.png');
   const layout = await timed('layout', () => pipeline.analyzeLayout(invoice));
   const [page] = layout.pages;
   console.log(`  ${page.blocks.length} lines on a ${page.width} x ${page.height} page; the first:`);
@@ -95,7 +114,7 @@ try {
   console.log(`  cosine(cats, handwriting) = ${similarity.toFixed(3)}`);
   assert.ok(similarity < 0.95, `two unlike images embed apart: ${similarity}`);
 
-  console.log('The handwriting, layout and embedding tiers load their models and run.');
+  console.log('The OCR, handwriting, layout and embedding tiers run.');
 } finally {
   await pipeline.dispose();
 }

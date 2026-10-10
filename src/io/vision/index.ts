@@ -91,17 +91,22 @@ async function isModuleAvailable(moduleId: string): Promise<boolean> {
 
 /**
  * Detect which cloud vision provider is available based on environment
- * variables. Returns the first provider that has a valid API key set.
+ * variables. Returns the first provider that has an API key set, as the
+ * provider id `generateText()` takes, and the key to pass when the provider
+ * would not find it: the `gemini` provider reads `GEMINI_API_KEY`, so a
+ * `GOOGLE_API_KEY` alone is passed as the pipeline's key.
  *
- * @returns Provider name string, or undefined if no API keys are found.
+ * @returns The provider and, for a GOOGLE_API_KEY, the key; or undefined if
+ *   no API keys are found.
  */
-function detectCloudProvider(): string | undefined {
+function detectCloudProvider(): { provider: string; apiKey?: string } | undefined {
   // Check common vision-capable provider API keys in preference order.
   // GPT-4o is the most widely used vision LLM, so we prefer OpenAI first.
-  if (process.env.OPENAI_API_KEY) return 'openai';
-  if (process.env.ANTHROPIC_API_KEY) return 'anthropic';
-  if (process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY) return 'google';
-  if (process.env.OPENROUTER_API_KEY) return 'openrouter';
+  if (process.env.OPENAI_API_KEY) return { provider: 'openai' };
+  if (process.env.ANTHROPIC_API_KEY) return { provider: 'anthropic' };
+  if (process.env.GEMINI_API_KEY) return { provider: 'gemini' };
+  if (process.env.GOOGLE_API_KEY) return { provider: 'gemini', apiKey: process.env.GOOGLE_API_KEY };
+  if (process.env.OPENROUTER_API_KEY) return { provider: 'openrouter' };
   return undefined;
 }
 
@@ -190,7 +195,8 @@ export async function createVisionPipeline(
   const embedding = config?.embedding ?? (hasTransformers ? true : false);
 
   // Resolve cloud provider: caller override > env var auto-detect
-  const cloudProvider = config?.cloudProvider ?? detectCloudProvider();
+  const detected = config?.cloudProvider ? undefined : detectCloudProvider();
+  const cloudProvider = config?.cloudProvider ?? detected?.provider;
 
   // Build the final resolved config
   const resolvedConfig: import('./types.js').VisionPipelineConfig = {
@@ -201,7 +207,7 @@ export async function createVisionPipeline(
     embedding,
     cloudProvider,
     cloudModel: config?.cloudModel,
-    cloudApiKey: config?.cloudApiKey,
+    cloudApiKey: config?.cloudApiKey ?? detected?.apiKey,
     cloudBaseUrl: config?.cloudBaseUrl,
     confidenceThreshold: config?.confidenceThreshold,
     preprocessing: config?.preprocessing,

@@ -2,7 +2,7 @@
 
 [`VisionPipeline`](https://github.com/framerslab/agentos/blob/master/src/io/vision/VisionPipeline.ts) runs an image through up to five tiers: OCR (PaddleOCR or Tesseract.js), handwriting recognition (TrOCR), document layout (Florence-2), a cloud vision model called through `generateText()`, and an image embedding (CLIP). [`createVisionPipeline()`](https://github.com/framerslab/agentos/blob/master/src/io/vision/index.ts) builds a pipeline from the packages installed and the API keys in the environment.
 
-Read [Limitations](#limitations) before relying on a local tier: with the current releases of the OCR and model packages, several local tiers return nothing.
+Every tier runs against the current releases of the packages it names: `ppu-paddle-ocr` 6.6.1, `tesseract.js` 7.0.0 and `@huggingface/transformers` 3.8.1. [Limitations](#limitations) lists what the pipeline does not do.
 
 ---
 
@@ -122,11 +122,11 @@ interface VisionPipelineConfig {
   /**
    * Cloud vision provider, a provider id generateText() knows ('openai',
    * 'anthropic', 'gemini', 'openrouter', ...). Detected: 'openai' when
-   * OPENAI_API_KEY is set, else 'anthropic' (ANTHROPIC_API_KEY), else 'google'
-   * (GOOGLE_API_KEY or GEMINI_API_KEY), else 'openrouter' (OPENROUTER_API_KEY);
-   * unset and undetected, there is no cloud tier. 'google' is not a provider
-   * id: for Gemini pass 'gemini'. Gemini does not fetch image URLs, so give
-   * it a Buffer or a data URL.
+   * OPENAI_API_KEY is set, else 'anthropic' (ANTHROPIC_API_KEY), else 'gemini'
+   * (GEMINI_API_KEY, or GOOGLE_API_KEY, which detection passes as the key),
+   * else 'openrouter' (OPENROUTER_API_KEY); unset and undetected, there is no
+   * cloud tier. Gemini does not fetch image URLs, so give it a Buffer or a
+   * data URL.
    */
   cloudProvider?: string;
   /** Cloud model. Default: the provider's default text model. */
@@ -224,7 +224,7 @@ See [Multimodal RAG](../memory/MULTIMODAL_RAG.md) for the indexing design.
 ## Installation
 
 ```bash
-npm install tesseract.js     # OCR tier (ppu-paddle-ocr also works as the engine; see Limitations)
+npm install tesseract.js     # OCR tier, or ppu-paddle-ocr (with onnxruntime-node), which detection prefers
 npm install sharp            # only for preprocessing
 ```
 
@@ -236,12 +236,8 @@ The cloud tier reads the provider's key from its environment variable: `OPENAI_A
 
 ## Limitations
 
-These follow from how the pipeline calls each package, checked against `ppu-paddle-ocr` 6.6.1, `tesseract.js` 7.0.0 and `@huggingface/transformers` 3.8.1:
-
 - **No OCR package.** `createVisionPipeline()` then sets `ocr: 'none'`, and any run that includes the OCR tier throws `OCR is set to "none" but OCR tier was requested.`: `extractText()`, `process()` under every strategy except `cloud-only`, and `process(image, { tiers })` with a list that names `'ocr'`. A `tiers` list without `'ocr'` skips the tier and does not throw.
-- **Gemini detection.** With only `GOOGLE_API_KEY` or `GEMINI_API_KEY` set, detection picks `cloudProvider: 'google'`, which `generateText()` rejects (`Unknown provider "google"`). Pass `cloudProvider: 'gemini'`.
-- **PaddleOCR.** The tier reads `regions` or `data` from `recognize()`; ppu-paddle-ocr 6.6.1 returns `{ text, lines, confidence }`, so the tier reports empty text with confidence 0.
-- **Tesseract.js.** The tier reads words from `data.words`; tesseract.js 7.0.0 reports words only inside `data.blocks`, which it leaves out by default. Text and confidence come through, `regions` stays empty, and detection then never returns `handwritten` or `document-layout`.
+- **Layout labels.** The Florence-2 tier gives every line as a `text` block; it does not label headings, tables, figures, lists or code.
 - **CLIP text.** The pipeline embeds images only; it has no method that embeds text into the CLIP space.
 
 ---

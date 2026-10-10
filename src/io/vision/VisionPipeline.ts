@@ -148,6 +148,36 @@ function transformersImage(image: Buffer | string): Blob | string {
   return Buffer.isBuffer(image) ? new Blob([bufferToBlobPart(image)]) : image;
 }
 
+/**
+ * A PaddleOCR region's box. ppu-paddle-ocr 6 gives `{ x, y, width, height }`;
+ * older results give the four corners as `[x, y]` points, top-left first.
+ */
+function paddleBox(region: any): TextRegion['bbox'] {
+  const box = region?.box ?? region?.bbox;
+  if (box && typeof box.x === 'number' && typeof box.width === 'number') {
+    return { x: box.x, y: box.y ?? 0, width: box.width, height: box.height ?? 0 };
+  }
+  const corners = Array.isArray(box) ? box : [];
+  const x = corners[0]?.[0] ?? 0;
+  const y = corners[0]?.[1] ?? 0;
+  return { x, y, width: (corners[1]?.[0] ?? 0) - x, height: (corners[2]?.[1] ?? 0) - y };
+}
+
+/**
+ * The words of a tesseract.js result. tesseract.js 7 lists them only inside
+ * `blocks` (block, paragraph, line, word), which it returns when the call asks
+ * for them; tesseract.js 5 also lists them in `words`.
+ */
+function tesseractWords(data: any): any[] {
+  if (Array.isArray(data?.words)) return data.words;
+  const blocks: any[] = Array.isArray(data?.blocks) ? data.blocks : [];
+  return blocks.flatMap((block) =>
+    (block?.paragraphs ?? []).flatMap((paragraph: any) =>
+      (paragraph?.lines ?? []).flatMap((line: any) => line?.words ?? []),
+    ),
+  );
+}
+
 /** The message of an error, or the thrown value as text. */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -589,10 +619,12 @@ export class VisionPipeline {
   async dispose(): Promise<void> {
     this._disposed = true;
 
-    // Release PaddleOCR resources
-    if (this._paddleOcr?.dispose) {
+    // Release PaddleOCR resources: destroy() in ppu-paddle-ocr 6, dispose() before
+    const paddle = this._paddleOcr;
+    const release = paddle?.destroy ?? paddle?.dispose;
+    if (typeof release === 'function') {
       try {
-        await this._paddleOcr.dispose();
+        await release.call(paddle);
       } catch {
         // Swallow disposal errors — we're tearing down anyway
       }
@@ -724,28 +756,32 @@ export class VisionPipeline {
     const start = Date.now();
     const ocr = await this._loadPaddleOcr();
 
-    // PaddleOCR expects a Buffer; convert URL/path to buffer if needed
+    // PaddleOCR reads the image from an ArrayBuffer. ppu-paddle-ocr 6 takes
+    // anything else that is not a string for a canvas, so a Node Buffer
+    // throws there; the bytes go in an ArrayBuffer of their own.
     const imageBuffer = Buffer.isBuffer(image) ? image : await this._urlToBuffer(image);
 
-    const ocrResult = await ocr.recognize(imageBuffer);
+    const ocrResult = await ocr.recognize(bufferToBlobPart(imageBuffer));
 
-    // Normalize PaddleOCR output into our standard shape.
-    // PaddleOCR returns an array of detected text regions with bounding
-    // boxes and per-region confidence scores.
-    const regions: TextRegion[] = (ocrResult?.regions ?? ocrResult?.data ?? []).map(
+    // Normalize PaddleOCR output into our standard shape. ppu-paddle-ocr 6
+    // returns { text, lines, confidence }, each line a list of { text, box,
+    // confidence }, and with `flatten` { text, results, confidence }; older
+    // results list the regions in `regions` or `data`.
+    const items: any[] = Array.isArray(ocrResult?.lines)
+      ? ocrResult.lines.flat()
+      : (ocrResult?.results ?? ocrResult?.regions ?? ocrResult?.data ?? []);
+    const regions: TextRegion[] = items.map(
       (r: any) => ({
         text: r.text ?? r.content ?? '',
         confidence: r.confidence ?? r.score ?? 0,
-        bbox: {
-          x: r.bbox?.[0]?.[0] ?? r.box?.[0]?.[0] ?? 0,
-          y: r.bbox?.[0]?.[1] ?? r.box?.[0]?.[1] ?? 0,
-          width: (r.bbox?.[1]?.[0] ?? r.box?.[1]?.[0] ?? 0) - (r.bbox?.[0]?.[0] ?? r.box?.[0]?.[0] ?? 0),
-          height: (r.bbox?.[2]?.[1] ?? r.box?.[2]?.[1] ?? 0) - (r.bbox?.[0]?.[1] ?? r.box?.[0]?.[1] ?? 0),
-        },
+        bbox: paddleBox(r),
       }),
     );
 
-    const text = regions.map((r) => r.text).join('\n');
+    // Grouped by line, the result's own text keeps a line's words on one line.
+    const text = Array.isArray(ocrResult?.lines) && typeof ocrResult.text === 'string'
+      ? ocrResult.text
+      : regions.map((r) => r.text).join('\n');
     const avgConfidence =
       regions.length > 0
         ? regions.reduce((sum, r) => sum + r.confidence, 0) / regions.length
@@ -775,13 +811,12 @@ export class VisionPipeline {
     const start = Date.now();
     const worker = await this._loadTesseract();
 
-    // Tesseract.js accepts Buffer, URL, or base64 string
-    const input = Buffer.isBuffer(image) ? image : image;
-    const result = await worker.recognize(input);
+    // Tesseract.js accepts a Buffer or a URL. The words, with their boxes,
+    // come back only when the call asks for the blocks output.
+    const result = await worker.recognize(image, {}, { blocks: true });
 
-    // Normalize Tesseract output into our standard shape.
-    // Tesseract returns paragraphs → lines → words with bounding boxes.
-    const regions: TextRegion[] = (result.data?.words ?? []).map(
+    // Normalize Tesseract output into our standard shape: one region per word.
+    const regions: TextRegion[] = tesseractWords(result.data).map(
       (w: any) => ({
         text: w.text ?? '',
         confidence: (w.confidence ?? 0) / 100, // Tesseract uses 0-100 scale
@@ -1030,9 +1065,11 @@ export class VisionPipeline {
       const PaddleOcrCls = mod.PaddleOcrService ?? mod.default?.PaddleOcrService ?? mod.default;
       const instance = new PaddleOcrCls();
 
-      // PaddleOCR requires async initialization to load ONNX models
-      if (typeof instance.init === 'function') {
-        await instance.init();
+      // PaddleOCR loads its ONNX models before the first call: initialize()
+      // in ppu-paddle-ocr 6, init() before.
+      const initialize = instance.initialize ?? instance.init;
+      if (typeof initialize === 'function') {
+        await initialize.call(instance);
       }
 
       this._paddleOcr = instance;

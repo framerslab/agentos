@@ -1,10 +1,12 @@
 name: Vision models
 
-# The vision pipeline's local model tiers end to end: the built package loads
-# each Hugging Face Hub model the tiers name (TrOCR, Florence-2, CLIP) and runs
-# it on a sample image. The unit suite mocks transformers.js, so a model id
-# that does not load, or a call the model does not take, shows up here and
-# nowhere else. Each run downloads about 3 GB of models.
+# The vision pipeline's local tiers end to end: the built package runs both
+# OCR engines (ppu-paddle-ocr and tesseract.js, installed as peers) and loads
+# each Hugging Face Hub model the model tiers name (TrOCR, Florence-2, CLIP),
+# on sample images. The unit suite mocks those packages, so a result shape the
+# code does not read, a model id that does not load, or a call a model does
+# not take shows up here and nowhere else. Each run downloads about 3 GB of
+# models.
 on:
   pull_request:
     branches: [master]
@@ -54,5 +56,5 @@ jobs:
       - name: Build
         run: pnpm run build
 
-      - name: TrOCR, Florence-2 and CLIP from the built package
+      - name: OCR, TrOCR, Florence-2 and CLIP from the built package
         run: node scripts/vision-models-check.mjs

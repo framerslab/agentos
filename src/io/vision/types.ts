@@ -361,7 +361,7 @@ export interface VisionPipelineConfig {
 
   /**
    * Cloud vision LLM provider name for Tier 3 fallback.
-   * Must match a provider known to `generateText()` (e.g. 'openai', 'anthropic', 'google').
+   * Must match a provider known to `generateText()` (e.g. 'openai', 'anthropic', 'gemini').
    * When unset, cloud vision is disabled.
    */
   cloudProvider?: string;
