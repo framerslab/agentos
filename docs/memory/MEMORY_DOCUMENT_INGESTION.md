@@ -68,7 +68,41 @@ await mem.close();
 
 [`LoaderRegistry`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/LoaderRegistry.ts) maps extensions to loaders. A folder scan considers only files whose extension a loader claims. `registry.register(loader)` adds a loader for its `supportedExtensions`, replacing an earlier one for the same extension.
 
-`UrlLoader` throws on a non-2xx response. A `text/html` response goes to the HTML loader, `application/pdf` to the PDF loader, and every other content type, Markdown included, is kept as raw text with `format: 'text'`.
+Reading through the global `fetch`, `UrlLoader` throws on a non-2xx response. A `text/html` response goes to the HTML loader, `application/pdf` to the PDF loader, and every other content type, Markdown included, is kept as raw text with `format: 'text'`.
+
+### An address a person gives a server
+
+```ts
+import { guardedFetch, GuardedFetchError, HtmlLoader, PdfLoader, UrlLoader } from '@framers/agentos/cognition/memory';
+
+const loaders = {
+  getLoader: (extension: string) =>
+    extension === '.html' ? new HtmlLoader() : extension === '.pdf' ? new PdfLoader() : undefined,
+};
+const loader = new UrlLoader(loaders, {
+  fetchDocument: (url) => guardedFetch(url, { maxBytes: 2 * 1024 * 1024, deadlineMs: 10_000 }),
+});
+
+try {
+  const doc = await loader.load(addressFromTheForm);
+} catch (error) {
+  if (error instanceof GuardedFetchError) {
+    // error.reason: 'address', 'scheme', 'port', 'redirects', 'status', 'type', 'size', 'deadline' or 'network'
+  }
+}
+```
+
+A server that fetches an address someone typed can be pointed at itself or at the network it sits on: `http://169.254.169.254/` is where cloud metadata services answer, and a name can resolve to `127.0.0.1`. `guardedFetch` reads such an address under these rules, and `UrlLoader` takes it as `fetchDocument`:
+
+- The host is resolved first, and the fetch is refused (`reason` `'address'`) when any address it resolves to is not public: loopback, private, carrier-grade NAT, link-local, unique-local, multicast, documentation, reserved or unspecified, in IPv4 and IPv6, with an IPv4 address carried inside an IPv6 one read as IPv4. `isPublicAddress(address)` is that rule. `allowAddresses` exempts the addresses it lists, for a test's own server.
+- The connection goes to the address that was checked, on a connection of its own, so a second lookup cannot send it elsewhere. An `https:` connection checks the certificate against the host's name.
+- Only `http:` and `https:` addresses without a user name or password are read (`'scheme'`), on ports 80 and 443 unless `allowPorts` names others (`'port'`).
+- Up to `maxRedirects` redirects are followed (3 unless set), each checked as the first address is (`'redirects'` past them).
+- The body is read as it arrives and refused once it passes `maxBytes`, counted after a gzip, deflate or br coding is decoded (`'size'`); a body in another coding is refused (`'type'`).
+- Only the media types in `accept` are read (`'type'`): `text/html`, `application/xhtml+xml`, `application/pdf` and `text/plain` unless set. An answer that is neither a 2xx nor a redirect (301, 302, 303, 307 or 308) is refused (`'status'`).
+- One deadline, `deadlineMs`, covers the lookups, the redirects and the body (`'deadline'`). An abort of `signal` ends the fetch with the signal's own reason.
+
+With `fetchDocument`, the answer's media type picks the loader: HTML and XHTML go to the `.html` loader, PDF to the `.pdf` loader, anything else is read as UTF-8 text, and `metadata.source` is the last address after redirects. `UrlLoader` takes its loaders from any object with `getLoader(extension)`, so a server builds no `LoaderRegistry`, whose constructor probes for Docling. When that object has no loader for an HTML, XHTML or PDF answer of `fetchDocument`, `load()` throws an error that names the media type and not the address, so such an answer is never returned as raw markup.
 
 ### Word files and what they inflate to
 
@@ -259,6 +293,7 @@ Declared and not read: `ingestion.extractImages`, `ingestion.ocrEnabled`, `inges
 | [`io/ingestion/FolderScanner.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/FolderScanner.ts) | Folder walking and glob filters |
 | [`io/ingestion/ChunkingEngine.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/ChunkingEngine.ts) | The four strategies |
 | [`io/ingestion/UrlLoader.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/UrlLoader.ts) | URL fetching |
+| [`io/ingestion/guardedFetch.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/guardedFetch.ts) | `guardedFetch` and `isPublicAddress`, for an address a person gives a server |
 | [`io/ingestion/MultimodalAggregator.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/ingestion/MultimodalAggregator.ts) | Image captions for hosts |
 | [`io/facade/types.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/io/facade/types.ts) | `IngestionConfig`, `IngestOptions`, `IngestResult` |
 
