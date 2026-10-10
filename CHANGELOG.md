@@ -1,3 +1,9 @@
+## [0.13.34](https://github.com/framerslab/agentos/compare/v0.13.33...v0.13.34) (2026-10-10)
+
+### feat
+
+* **rag:** add LexicalIndex, the BM25 engine without Node, saved and restored, with BM25Index on top of it (#246) ([5c71e81](https://github.com/framerslab/agentos/commit/5c71e8149552d567e3cd0e303680c6a2f2bfe7d1))
+
 ## [0.13.33](https://github.com/framerslab/agentos/compare/v0.13.32...v0.13.33) (2026-10-10)
 
 ### fix
