@@ -76,10 +76,13 @@ CREATE INDEX IF NOT EXISTS idx_spend_reservations_settled ON agentos_spend_reser
 const DEFAULT_TABLE_PREFIX = 'agentos_spend';
 
 /**
- * The prefixes a meter takes: a lower-case letter, then at most 39 lower-case letters, digits or underscores. A prefix
- * becomes part of SQL identifiers, so it is checked against this before any statement is built.
+ * The prefixes a meter takes: a lower-case letter, then at most 37 lower-case letters, digits or underscores. A prefix
+ * becomes part of SQL identifiers, so it is checked against this before any statement is built. At 38 characters the
+ * longest names the meter gives, `idx_<prefix>_reservations_account` and `idx_<prefix>_reservations_settled`, take the
+ * 63 bytes Postgres keeps of an identifier; Postgres cuts a longer name short, and its catalogue would then hold a
+ * name other than the one {@link spendMeterDdl} gives.
  */
-const TABLE_PREFIX = /^[a-z][a-z0-9_]{0,39}$/;
+const TABLE_PREFIX = /^[a-z][a-z0-9_]{0,37}$/;
 
 /** The names one prefix gives the meter's two tables, and the start of its indexes' names. */
 interface SpendMeterTables {
@@ -97,7 +100,7 @@ function spendMeterTables(tablePrefix: string | undefined): SpendMeterTables {
   const prefix = tablePrefix ?? DEFAULT_TABLE_PREFIX;
   if (typeof prefix !== 'string' || !TABLE_PREFIX.test(prefix)) {
     throw new Error(
-      `A spend meter's tablePrefix is a lower-case letter and at most 39 more lower-case letters, digits or underscores; got ${JSON.stringify(prefix)}.`,
+      `A spend meter's tablePrefix is a lower-case letter and at most 37 more lower-case letters, digits or underscores, so that every name it gives fits the 63 bytes of a Postgres identifier; got ${JSON.stringify(prefix)}.`,
     );
   }
   // the default prefix keeps the index names SPEND_METER_DDL gives it, which are the ones `spend` would make
@@ -208,9 +211,11 @@ export interface SqlSpendMeterOptions {
    * are `idx_spend_reservations_*`. Meters with different rules share one database each under a prefix of its own, so
    * one's count and one's purge never reach another's rows; meters under one prefix share its tables.
    *
-   * A lower-case letter, then at most 39 lower-case letters, digits or underscores, and not `spend`, whose index names
-   * are the default prefix's. The constructor checks the prefix before any statement is built and throws on any other
-   * value, so nothing unchecked reaches the SQL text. {@link spendMeterDdl} makes the tables for a prefix.
+   * A lower-case letter, then at most 37 lower-case letters, digits or underscores, and not `spend`, whose index names
+   * are the default prefix's. At 38 characters the longest names the meter gives, `idx_<prefix>_reservations_account`
+   * and `idx_<prefix>_reservations_settled`, take the 63 bytes Postgres keeps of an identifier. The constructor checks
+   * the prefix before any statement is built and throws on any other value, so nothing unchecked reaches the SQL text.
+   * {@link spendMeterDdl} makes the tables for a prefix.
    */
   tablePrefix?: string;
 }
