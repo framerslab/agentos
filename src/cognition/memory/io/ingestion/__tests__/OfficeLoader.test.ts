@@ -50,16 +50,24 @@ describe('OfficeLoader', () => {
 
   it('refuses an archive that inflates past the bound, before reading its text', async () => {
     const big = xlsxOf(SENTENCE.repeat(40_000));
-    await expect(new OfficeLoader({ maxInflatedBytes: 65_536 }).load(big, { format: 'xlsx' })).rejects.toBeInstanceOf(
-      DocumentTooLargeError,
-    );
+    const refused = new OfficeLoader({ maxInflatedBytes: 65_536 }).load(big, { format: 'xlsx' });
+    await expect(refused).rejects.toBeInstanceOf(DocumentTooLargeError);
+    await expect(refused).rejects.toMatchObject({
+      limit: 65_536,
+      cause: { message: 'officeparser: ZIP_SIZE_LIMIT_EXCEEDED' },
+    });
   });
 
   it('refuses an OpenDocument file past the element bound before reading its XML', async () => {
     const many = await odtOf(Array.from({ length: 2_000 }, () => SENTENCE).join('\n\n'));
-    await expect(new OfficeLoader({ maxXmlElements: 1_000 }).load(many, { format: 'odt' })).rejects.toBeInstanceOf(
-      DocumentTooLargeError,
-    );
+    const refused = new OfficeLoader({ maxXmlElements: 1_000 }).load(many, { format: 'odt' });
+    await expect(refused).rejects.toBeInstanceOf(DocumentTooLargeError);
+    // The error carries the loader's bound on inflation, 64 MiB when left out,
+    // whichever bound was reached; its cause names that one.
+    await expect(refused).rejects.toMatchObject({
+      limit: 67_108_864,
+      cause: { message: 'officeparser: XML_ELEMENT_LIMIT_EXCEEDED' },
+    });
   });
 
   it('passes the caller bounds to officeparser and refuses a document it only warned of', async () => {
@@ -97,7 +105,10 @@ describe('OfficeLoader', () => {
     // byte of the file would add a cell to the bound, and the sheet would be read.
     const refused = new OfficeLoader({ maxTableCells: 39 }).load(sheet, { format: 'xlsx' });
     await expect(refused).rejects.toBeInstanceOf(DocumentTooLargeError);
-    await expect(refused).rejects.toMatchObject({ code: 'DOCUMENT_TOO_LARGE' });
+    await expect(refused).rejects.toMatchObject({
+      code: 'DOCUMENT_TOO_LARGE',
+      cause: { message: 'officeparser: TABLE_CELL_LIMIT_EXCEEDED' },
+    });
   });
 
   it('refuses, when it is built, an option that would not hold a read to what it says', () => {
@@ -137,6 +148,34 @@ describe('OfficeLoader', () => {
     // Written as text, a picture is a line naming it unless the text recognized in it is asked for.
     expect(written).toHaveBeenCalledWith('text', expect.objectContaining({ includeImages: 'ocr-text-only' }));
     expect(loaded).toMatchObject({ content: 'Tesseract.js', format: 'pdf', metadata: { pageCount: 1, wordCount: 1 } });
+  });
+
+  it('says why OCR read nothing, when officeparser reported a picture it could not read', async () => {
+    // officeparser reports each picture OCR could not read as a warning that
+    // carries the failure, and reads on: here both of a scan's pictures fail.
+    const first = new Error('OCR worker initialization timed out after 60000ms');
+    const second = new Error('OCR recognition timed out after 30000ms');
+    const parse = vi.fn(async (_input: Buffer, config: Record<string, unknown>) => {
+      const warn = config.onWarning as (issue: { code: string; details: unknown }) => void;
+      warn({ code: 'OCR_FAILED', details: first });
+      warn({ code: 'OCR_FAILED', details: second });
+      return { to: async () => ({ value: '' }), metadata: { pages: 2 } };
+    });
+    const refused = new OfficeLoader({ ocrPages: 2, parse }).load(scannedPdf(), { format: 'pdf' });
+    await expect(refused).rejects.toBeInstanceOf(ScannedDocumentError);
+    await expect(refused).rejects.toMatchObject({ code: 'SCANNED_DOCUMENT', cause: first });
+  });
+
+  it('reads on without a picture OCR could not read, when the scan still gives text', async () => {
+    const parse = vi.fn(async (_input: Buffer, config: Record<string, unknown>) => {
+      (config.onWarning as (issue: { code: string; details: unknown }) => void)({
+        code: 'OCR_FAILED',
+        details: new Error('OCR recognition timed out after 30000ms'),
+      });
+      return { to: async () => ({ value: 'Tesseract.js' }), metadata: { pages: 2 } };
+    });
+    const loaded = await new OfficeLoader({ ocrPages: 2, parse }).load(scannedPdf(), { format: 'pdf' });
+    expect(loaded).toMatchObject({ content: 'Tesseract.js', format: 'pdf', metadata: { pageCount: 2 } });
   });
 
   it('reads the scanned page by OCR', async () => {

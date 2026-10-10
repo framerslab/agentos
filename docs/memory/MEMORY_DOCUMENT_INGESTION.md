@@ -221,6 +221,8 @@ With `ocrPages` at 0, the default, `load(bytes, { format: 'pdf' })` throws `Scan
 - pdf.js runs in a Node process of its own, which officeparser starts with a heap of `pdfProcessMemoryMb` (256 MB when left out; 64 or more, since officeparser replaces a smaller heap with its own 1,024 MB) and keeps for later reads. Where no process can start, pdf.js runs in the caller's process.
 - tesseract.js 7 fetches its English data from `cdn.jsdelivr.net` the first time a worker starts, and writes a copy, `eng.traineddata`, into the process's working directory, which later workers read. A failed write is not an error: the next worker fetches the data again.
 - officeparser ends its OCR workers after ten seconds without a picture to read.
+- officeparser gives an OCR worker 60 seconds to start and a recognition 30 seconds. A picture OCR could not read is left out of `content`, and the read goes on. When the pages give no text at all, the `ScannedDocumentError` carries the first failure officeparser reported as its `cause`.
+- tesseract.js 7.0.0 throws a failure its worker reports (its language data that could not be fetched is one) from the worker's message listener unless it is given an error handler, and officeparser 8.1.1 gives it none. That error is thrown outside the promise `load` returns, as an uncaught exception of the thread that called `load`: on the main thread, it ends a Node process that handles none.
 
 An `ocrPages` that is not a whole number of 0 or more, and a `pdfProcessMemoryMb` under 64, are refused with a `RangeError` when the loader is built: officeparser reads a page range it cannot parse as every page.
 

@@ -40,7 +40,11 @@ export type OfficeFormat = (typeof OFFICE_TYPES)[keyof typeof OFFICE_TYPES] | 'p
 // Errors and options
 // ---------------------------------------------------------------------------
 
-/** Thrown for a PDF asked for while OCR is off, and for a scan whose pages gave no text. */
+/**
+ * Thrown for a PDF asked for while OCR is off, and for a scan whose pages gave
+ * no text. For the second, `cause` is the first failure officeparser reported
+ * for a picture OCR could not read, when it reported one.
+ */
 export class ScannedDocumentError extends Error {
   /** A stable code for callers that branch on the kind of failure. */
   readonly code = 'SCANNED_DOCUMENT';
@@ -197,7 +201,14 @@ function tooLarge(limit: number, code: string): DocumentTooLargeError {
  * With {@link OfficeLoaderOptions.ocrPages} above 0, `load(bytes, { format: 'pdf' })`
  * reads a scanned PDF: officeparser reads the first `ocrPages` pages with
  * pdf.js, in a process of its own where one can start, and tesseract.js
- * recognizes the text of each picture on them.
+ * recognizes the text of each picture on them. A picture OCR could not read
+ * is left out of the text, and the read goes on.
+ *
+ * tesseract.js throws a failure its worker reports from the worker's message
+ * listener unless it is given an error handler, and officeparser gives it
+ * none: such a failure (the language data that could not be fetched is one)
+ * is an uncaught exception of the thread that called `load`, outside the
+ * promise `load` returns.
  *
  * @implements {IDocumentLoader}
  *
@@ -286,7 +297,8 @@ export class OfficeLoader implements IDocumentLoader {
    * @throws {DocumentTooLargeError} When the document reaches a bound, one officeparser only warns of included.
    *   The error's `limit` is the loader's `maxInflatedBytes` whichever bound was reached, and its `cause` names
    *   the bound by officeparser's code.
-   * @throws {ScannedDocumentError} For a PDF while `ocrPages` is 0, and for a scan whose pages gave no text.
+   * @throws {ScannedDocumentError} For a PDF while `ocrPages` is 0, and for a scan whose pages gave no text. When
+   *   officeparser reported a picture OCR could not read, the first such failure is the error's `cause`.
    * @throws {Error} When `source` is a path, when `options.format` names none of the formats, and when
    *   officeparser is not installed; and officeparser's own error for a file it cannot read or a read its
    *   signal cancelled.
@@ -302,8 +314,11 @@ export class OfficeLoader implements IDocumentLoader {
     const { maxXmlElements, maxTableCells, signal } = this.options;
 
     // officeparser only warns past some bounds (a sheet's cells): a warned bound
-    // refuses the document as a thrown one does.
+    // refuses the document as a thrown one does. A picture OCR could not read is a
+    // warning too, and officeparser reads on without that picture's text: the
+    // first such failure is kept, for a scan that gives no text at all.
     const reached: string[] = [];
+    const unread: unknown[] = [];
     const config: Record<string, unknown> = {
       fileType: format,
       decompressionLimits: {
@@ -315,8 +330,10 @@ export class OfficeLoader implements IDocumentLoader {
       },
       abortSignal: signal ?? null,
       ignoreComments: true,
-      onWarning: (issue: { code?: unknown }) => {
-        if (typeof issue.code === 'string' && LIMIT_CODES.has(issue.code)) reached.push(issue.code);
+      onWarning: (issue: { code?: unknown; details?: unknown }) => {
+        if (typeof issue.code !== 'string') return;
+        if (LIMIT_CODES.has(issue.code)) reached.push(issue.code);
+        else if (issue.code === 'OCR_FAILED' && unread.length === 0) unread.push(issue.details);
       },
     };
     if (format === 'pdf') {
@@ -348,7 +365,12 @@ export class OfficeLoader implements IDocumentLoader {
     if (reached.length > 0) throw tooLarge(limit, reached[0]);
 
     const trimmed = text.trim();
-    if (format === 'pdf' && trimmed === '') throw new ScannedDocumentError('OCR read no text from the scanned pages.');
+    if (format === 'pdf' && trimmed === '') {
+      const noText = new ScannedDocumentError('OCR read no text from the scanned pages.');
+      // Why the first picture went unread, when officeparser said: a worker that did
+      // not start in time, a recognition that failed or ran past its time.
+      throw unread.length > 0 ? Object.assign(noText, { cause: unread[0] }) : noText;
+    }
     const metadata: DocumentMetadata = {
       wordCount: trimmed === '' ? 0 : trimmed.split(/\s+/).length,
       ...(typeof pages === 'number' ? { pageCount: pages } : {}),
