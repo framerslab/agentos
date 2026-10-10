@@ -64,7 +64,7 @@ export class MiniMaxImageProvider implements IImageProvider {
       request.providerOptions,
     );
     const dimensions = parseImageSize(request.size);
-    const modelId = request.modelId ?? this.defaultModelId;
+    const modelId = request.modelId || this.defaultModelId;
     const responseFormat =
       request.responseFormat === "b64_json" ? "base64" : "url";
     const response = await fetch(`${this.baseURL}/image_generation`, {

@@ -304,7 +304,7 @@ export class StableDiffusionLocalProvider implements IImageProvider {
 
     return {
       created: Math.floor(Date.now() / 1000),
-      modelId: request.modelId ?? this.defaultModelId ?? 'unknown',
+      modelId: request.modelId || this.defaultModelId || 'unknown',
       providerId: this.providerId,
       images,
       usage: {
@@ -334,7 +334,7 @@ export class StableDiffusionLocalProvider implements IImageProvider {
       '1': {
         class_type: 'CheckpointLoaderSimple',
         inputs: {
-          ckpt_name: request.modelId ?? this.defaultModelId ?? 'v1-5-pruned-emaonly.safetensors',
+          ckpt_name: request.modelId || this.defaultModelId || 'v1-5-pruned-emaonly.safetensors',
         },
       },
       '2': {
@@ -433,7 +433,7 @@ export class StableDiffusionLocalProvider implements IImageProvider {
 
     return {
       created: Math.floor(Date.now() / 1000),
-      modelId: request.modelId ?? this.defaultModelId ?? 'unknown',
+      modelId: request.modelId || this.defaultModelId || 'unknown',
       providerId: this.providerId,
       images,
       usage: {
@@ -521,7 +521,7 @@ export class StableDiffusionLocalProvider implements IImageProvider {
 
     return {
       created: Math.floor(Date.now() / 1000),
-      modelId: request.modelId ?? this.defaultModelId ?? 'unknown',
+      modelId: request.modelId || this.defaultModelId || 'unknown',
       providerId: this.providerId,
       images,
       usage: { totalImages: images.length, totalCostUSD: 0 },

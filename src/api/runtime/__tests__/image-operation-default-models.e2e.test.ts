@@ -126,6 +126,27 @@ describe('an image operation with a provider and no model', () => {
     expect(fields.sort()).toEqual(['image', 'mask', 'prompt']);
   });
 
+  it('edits on a local A1111 with the checkpoint it has loaded, and reports that checkpoint', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) =>
+      String(url).endsWith('/sdapi/v1/sd-models')
+        ? json([{ title: 'dreamshaper-8.safetensors', model_name: 'dreamshaper-8' }])
+        : json({ images: ['ZWRpdA=='] }),
+    );
+
+    const result = await editImage({
+      provider: 'stable-diffusion-local',
+      baseUrl: 'http://127.0.0.1:7860',
+      image: TINY_PNG,
+      prompt: 'Turn it into a watercolor painting.',
+    });
+
+    // No checkpoint override: the provider's text-to-image default
+    // (v1-5-pruned-emaonly) is a checkpoint this server may not have.
+    const edit = fetchSpy.mock.calls.find(([url]) => String(url).endsWith('/sdapi/v1/img2img'));
+    expect(JSON.parse(String(edit?.[1]?.body)).override_settings).toBeUndefined();
+    expect(result.model).toBe('dreamshaper-8');
+  });
+
   it('makes a close variation on OpenAI when the variance is low', async () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
