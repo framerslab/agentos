@@ -110,6 +110,7 @@ vi.mock('ws', () => {
 });
 
 import { OpenAIRealtimeTranscriptionSTT } from '../providers/OpenAIRealtimeTranscriptionSTT.js';
+import { createVoiceProvidersFromEnv } from '../env-constructor.js';
 import { VoicePipelineOrchestrator } from '../VoicePipelineOrchestrator.js';
 import { HeuristicEndpointDetector } from '../HeuristicEndpointDetector.js';
 import { HardCutBargeinHandler } from '../HardCutBargeinHandler.js';
@@ -1717,5 +1718,41 @@ describe('OpenAIRealtimeTranscriptionSTT: turns in VoicePipelineOrchestrator', (
     expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two');
     warn.mockRestore();
     await orchestrator.stopSession();
+  });
+});
+
+describe('OpenAIRealtimeTranscriptionSTT: behind the failover chain of createVoiceProvidersFromEnv()', () => {
+  it("reports usage and warnings through the chain's session", async () => {
+    fakeClock();
+    const { stt } = createVoiceProvidersFromEnv({
+      env: { OPENAI_API_KEY: KEY },
+      openaiRealtime: { usageIntervalMs: 5_000 },
+    });
+    const session = await stt.startSession();
+    const log = record(session);
+    const [socket] = Sockets.instances;
+    session.pushAudio(frame(12_000)); // 0.5 s
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(log.usage).toEqual([
+      {
+        providerId: 'openai-realtime-transcription',
+        model: 'gpt-4o-mini-transcribe',
+        connectionIndex: 1,
+        audioSeconds: 0.5,
+        final: false,
+      },
+    ]);
+    socket.serve({
+      type: 'error',
+      event_id: 'event_9',
+      error: { type: 'invalid_request_error', code: null, message: 'Unknown parameter.', param: null, event_id: null },
+    });
+    expect(log.warnings.map((warning) => warning.message)).toEqual([expect.stringContaining('Unknown parameter.')]);
+    session.close();
+    await settle();
+    expect(log.usage.map((entry) => [entry.connectionIndex, entry.audioSeconds, entry.final])).toEqual([
+      [1, 0.5, false],
+      [1, 0.5, true],
+    ]);
   });
 });
