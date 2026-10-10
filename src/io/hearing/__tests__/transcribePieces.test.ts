@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { OpenAIWhisperSpeechToTextProvider } from '../providers/OpenAIWhisperSpeechToTextProvider.js';
 import { mergeSeam, PiecesFailed, transcribePieces, type PieceInput } from '../transcribePieces.js';
 import vectors from './fixtures/seam-vectors.json';
 
@@ -126,9 +127,63 @@ describe('transcribePieces', () => {
     expect(result.pieces[0]!.index).toBe(2);
   });
 
+  it('joins the first piece of a run started again to the text before it at its seam', async () => {
+    const transcribe = async () => ({ text: 'for the offsite. Then we booked the flights.', seconds: 300 });
+    const result = await transcribePieces([piece(2)], transcribe, { sentences, previousText: 'We approved the budget for the offsite.' });
+    expect(result.pieces[0]!.added).toBe('Then we booked the flights.');
+    expect(result.text).toBe('We approved the budget for the offsite. Then we booked the flights.');
+  });
+
   it('stops when its signal aborts', async () => {
     const controller = new AbortController();
     controller.abort();
     await expect(transcribePieces([piece(0)], async () => ({ text: 'x', seconds: 1 }), { sentences, signal: controller.signal })).rejects.toThrow();
+  });
+
+  it('when its signal aborts with a piece out, makes no further try and rejects with the reason of the signal', async () => {
+    const controller = new AbortController();
+    const reason = new Error('stopped by the caller');
+    const transcribe = vi.fn(
+      (_input: PieceInput, request: { signal?: AbortSignal }) =>
+        new Promise<{ text: string; seconds: number }>((_resolve, reject) => {
+          request.signal?.addEventListener('abort', () => reject(request.signal?.reason));
+        }),
+    );
+    const run = transcribePieces([piece(0), piece(1)], transcribe, { sentences, signal: controller.signal });
+    await turn(); // piece 0 is out
+    controller.abort(reason);
+    await expect(run).rejects.toBe(reason);
+    expect(transcribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs over a speech-to-text provider as a server wires it: the prompt and the file name reach the request, and the seconds come back', async () => {
+    const texts: Record<string, string> = {
+      'piece-0.m4a': 'We meet in Lisbon. The hotel holds fourteen rooms',
+      'piece-1.m4a': 'fourteen rooms until the twentieth. Maya owns the agenda.',
+    };
+    const forms: FormData[] = [];
+    // The provider's HTTP layer stood in: each request is answered by its file's name, as the API answers gpt-transcribe.
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      const form = init?.body as unknown as FormData;
+      forms.push(form);
+      const file = form.get('file') as unknown as { name: string };
+      return new Response(JSON.stringify({ text: texts[file.name], usage: { type: 'duration', seconds: 300 } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const provider = new OpenAIWhisperSpeechToTextProvider({ apiKey: 'sk-test', fetchImpl: fetchImpl as unknown as typeof fetch });
+    const result = await transcribePieces(
+      [piece(0), piece(1)],
+      async (input, { prompt }) => {
+        const answer = await provider.transcribe({ data: Buffer.from(input.data), mimeType: input.mimeType, fileName: input.fileName }, { prompt });
+        return { text: answer.text, seconds: answer.durationSeconds ?? input.durationMs / 1000 };
+      },
+      { sentences },
+    );
+    expect(forms.map((form) => form.get('prompt'))).toEqual([null, 'The hotel holds fourteen rooms']);
+    expect(forms.map((form) => (form.get('file') as unknown as { name: string }).name)).toEqual(['piece-0.m4a', 'piece-1.m4a']);
+    expect(result.text).toBe('We meet in Lisbon. The hotel holds fourteen rooms until the twentieth. Maya owns the agenda.');
+    expect(result.seconds).toBe(600);
   });
 });
