@@ -39,7 +39,7 @@ Every other provider in the list below rotates its keys but never marks one exha
 - **LLM:** OpenAI, Anthropic, Gemini, OpenRouter, Requesty
 - **Speech TTS:** ElevenLabs, OpenAI TTS, Deepgram, MiniMax
 - **Speech STT:** OpenAI Whisper, Deepgram, AssemblyAI
-- **Voice Pipeline:** OpenAI batch TTS and Realtime, ElevenLabs batch and streaming TTS and streaming STT, Cartesia batch and streaming TTS, Hume batch and streaming TTS, Deepgram Aura batch and streaming TTS and Deepgram streaming STT
+- **Voice Pipeline:** OpenAI batch TTS, Realtime TTS and Realtime transcription STT, ElevenLabs batch and streaming TTS and streaming STT, Cartesia batch and streaming TTS, Hume batch and streaming TTS, Deepgram Aura batch and streaming TTS and Deepgram streaming STT
 - **Image:** OpenAI, Stability, Flux, Fal, Replicate, OpenRouter
 - **Video:** Fal, Replicate, Runway
 - **Audio:** ElevenLabs SFX, Suno, Udio, Stable Audio, Fal, Replicate
