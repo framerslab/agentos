@@ -183,7 +183,7 @@ flowchart LR
 ```
 
 - **Agent** — the runtime loop. Receives input, calls the LLM, executes tool calls, retrieves memory, returns a response. `agent()` and `agency()` are the two factories that build one.
-- **LLM** — the language model. AgentOS routes through 11 provider adapters; the agent does not care which one you pick.
+- **LLM** — the language model. AgentOS routes through 13 provider adapters; the agent does not care which one you pick.
 - **Memory** — what survives across turns and sessions. On the full runtime, a GMI keeps working memory for its session and, when cognitive memory is attached, episodic, semantic and procedural traces with Ebbinghaus decay. `agent()` keeps each session's message history and reaches long-term memory through `memoryProvider` hooks; with `runtime: 'gmi'` its sessions are GMIs, and with `memory` set as well they share one cognitive memory manager.
 - **Tools** — functions the agent can invoke when the LLM decides it needs one. Pre-registered tools work the same way runtime-generated tools do once approved by the LLM judge.
 
