@@ -83,7 +83,7 @@ export class PiecesFailed extends Error {
   /**
    * @param index - The `index` of the piece that failed.
    * @param attempts - The tries the piece was given.
-   * @param cause - What its last try threw.
+   * @param cause - What its last try threw. When the caller's `sentences` threw before a try, that error.
    */
   constructor(
     readonly index: number,
@@ -157,8 +157,8 @@ export function lastSentence(text: string, sentences: TranscribePiecesOptions['s
  * piece's outcome in order; `seconds`, the sum of the outcomes' seconds.
  * @throws {PiecesFailed} When a piece fails every attempt. The pieces before it have been reported to `onPiece` by
  * then, and no piece after it is reported.
- * @throws The reason of `options.signal`, where the job finds it aborted: before a try, before the next piece, and
- * when the pieces in flight have settled.
+ * @throws The reason of `options.signal`, when the job finds it aborted: before it sends the next piece, or once the
+ * pieces in flight have settled.
  */
 export async function transcribePieces(
   pieces: Iterable<PieceInput> | AsyncIterable<PieceInput>,
