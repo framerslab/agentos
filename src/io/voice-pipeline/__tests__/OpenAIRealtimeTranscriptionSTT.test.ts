@@ -1695,13 +1695,54 @@ describe('OpenAIRealtimeTranscriptionSTT: turns in VoicePipelineOrchestrator', (
     await orchestrator.stopSession();
   });
 
-  it('ends a turn without terminal punctuation after the silence timeout, counted from its final', async () => {
+  it('ends a turn without terminal punctuation after the silence timeout', async () => {
     fakeClock();
     const { orchestrator, agentSession, socket } = await pipeline();
     utterance(socket, 'item_A', 'book a table for two');
     await vi.advanceTimersByTimeAsync(1_499);
     expect(agentSession.sendText).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('book a table for two');
+    expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'silence_timeout' });
+    await orchestrator.stopSession();
+  });
+
+  it('counts the silence timeout from the end of speech when the final arrives later', async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    await vi.advanceTimersByTimeAsync(1_000); // the transcript takes a second to come
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'book a table for two',
+    });
+    await vi.advanceTimersByTimeAsync(499);
+    expect(agentSession.sendText).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); // 1.5 s of silence since the end of speech
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('book a table for two');
+    expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'silence_timeout' });
+    await orchestrator.stopSession();
+  });
+
+  it('ends the turn at once when its final arrives after the silence timeout has passed', async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    await vi.advanceTimersByTimeAsync(2_000); // a slow transcript: the silence has outlasted the timeout
+    expect(agentSession.sendText).not.toHaveBeenCalled();
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'book a table for two',
+    });
+    await vi.advanceTimersByTimeAsync(0);
     expect(agentSession.sendText).toHaveBeenCalledOnce();
     expect(agentSession.sendText.mock.calls[0][0]).toBe('book a table for two');
     expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'silence_timeout' });
