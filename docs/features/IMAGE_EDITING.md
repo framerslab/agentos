@@ -85,9 +85,21 @@ console.log(result.usage);              // { costUSD? }
 
 `mode` (`'img2img' | 'inpaint' | 'outpaint'`) is recorded on the call's trace span; no provider reads it. A provider inpaints when a `mask` is passed.
 
+Without `model`, each provider edits with its own default for edits, not with its text-to-image default:
+
+| Provider | Edit model when none is named |
+|----------|-------------------------------|
+| OpenAI | `gpt-image-1` |
+| Stability AI | `sd3-medium` |
+| Replicate | `stability-ai/sdxl` at a pinned version, or `black-forest-labs/flux-fill-pro` when a `mask` is passed |
+| fal | `fal-ai/flux/dev` |
+| Local SD (A1111) | the checkpoint the server has loaded |
+
+Replicate runs a model by its name alone only when it is one of its official models; any other model needs its version (`owner/name:version`), which is why the SDXL default carries one.
+
 ### Strength Parameter
 
-`strength` controls the balance between the source image and the prompt. Stability, Replicate, fal and the local A1111 provider pass it on; OpenAI's edit endpoint has no strength control and ignores it.
+`strength` controls the balance between the source image and the prompt. Stability, Replicate, fal and the local A1111 provider pass it on (Replicate's SDXL takes it as `prompt_strength`); OpenAI's edit endpoint has no strength control and ignores it.
 
 | Strength | Behavior |
 |----------|----------|
@@ -135,7 +147,7 @@ OpenAI and fal do not upscale.
 
 ## variateImage() API
 
-Only the OpenAI provider implements variations.
+OpenAI makes a variation through its image edits endpoint, with `gpt-image-1` and a prompt that asks for one; its `/images/variations` endpoint and the DALL·E models it served are retired. Every other provider that can edit makes a variation as an img2img edit whose strength is `variance`.
 
 ```typescript
 import { variateImage } from '@framers/agentos';
@@ -158,7 +170,7 @@ for (const variant of result.images) {
 }
 ```
 
-`variance` (0 to 1, default 0.5) is accepted for providers with a strength control; OpenAI's variations endpoint has none, so it has no effect there.
+`variance` (0 to 1, default 0.5) is the edit strength on the providers that make a variation as an edit. OpenAI's edits endpoint has no strength control, so there `variance` picks the prompt: below 0.5 it asks for a close variation, otherwise for a looser one.
 
 ---
 
@@ -170,7 +182,7 @@ for (const variant of result.images) {
 | **Img2Img** | Yes | Yes | Yes | Yes | Yes |
 | **Inpainting (mask)** | Yes | Yes | Yes | Yes | Yes |
 | **Upscaling** | No | Yes | Yes | No | Yes |
-| **Variations** | Yes | No | No | No | No |
+| **Variations** | Yes, as an edit with a variation prompt | As an img2img edit | As an img2img edit | As an img2img edit | As an img2img edit |
 | **Strength** | No | Yes | Yes | Yes | Yes |
 | **Negative Prompt** | No | Yes | Yes | Yes | Yes |
 | **Seed** | No | Yes | Yes | Yes | Yes |

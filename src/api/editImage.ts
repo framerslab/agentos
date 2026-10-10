@@ -52,7 +52,10 @@ export interface EditImageOptions {
   provider?: string;
   /**
    * Model identifier. Prefer the plain model name with `provider` set;
-   * the combined `"provider:model"` string is also accepted.
+   * the combined `"provider:model"` string is also accepted. When omitted,
+   * the provider's own edit default applies, not its text-to-image default:
+   * OpenAI `gpt-image-1`, Stability `sd3-medium`, Replicate
+   * `stability-ai/sdxl` (or `black-forest-labs/flux-fill-pro` with a mask).
    * @example `"gpt-image-1"` (with `provider: 'openai'`), `"sd3-medium"`
    */
   model?: string;
@@ -182,6 +185,13 @@ export async function editImage(opts: EditImageOptions): Promise<EditImageResult
     return await withAgentOSSpan('agentos.api.edit_image', async (span) => {
       let { providerId, modelId } = resolveModelOption(opts, 'image');
       let effectiveProviderOptions = opts.providerOptions;
+      // Whether the call has a model of its own: one it names, or the policy
+      // router's pick below. Without one, the provider's own default for edits
+      // applies, not the text-to-image default that `resolveModelOption` gives
+      // a named provider: Replicate would otherwise run every edit on
+      // black-forest-labs/flux-1.1-pro, and Stability post its text-to-image
+      // model to the SD3 route.
+      let modelChosen = typeof opts.model === 'string' && opts.model.length > 0;
 
       // Policy-tier-aware routing. Mirrors the generateImage flow so
       // both generate and edit surfaces of the API respect the same
@@ -249,6 +259,7 @@ export async function editImage(opts: EditImageOptions): Promise<EditImageResult
           if (pref) {
             providerId = pref.providerId;
             modelId = pref.modelId;
+            modelChosen = true;
           }
         }
       }
@@ -257,18 +268,20 @@ export async function editImage(opts: EditImageOptions): Promise<EditImageResult
         apiKey: opts.apiKey,
         baseUrl: opts.baseUrl,
       });
+      // An empty model id asks the provider for its own default for the operation.
+      const operationModelId = modelChosen ? resolved.modelId : '';
       metricProviderId = resolved.providerId;
-      metricModelId = resolved.modelId;
+      metricModelId = operationModelId || undefined;
 
       span?.setAttribute('llm.provider', resolved.providerId);
-      span?.setAttribute('llm.model', resolved.modelId);
+      if (operationModelId) span?.setAttribute('llm.model', operationModelId);
       span?.setAttribute('agentos.api.edit_mode', opts.mode ?? 'img2img');
 
       const provider = createImageProvider(resolved.providerId);
       await provider.initialize({
         apiKey: resolved.apiKey,
         baseURL: resolved.baseUrl,
-        defaultModelId: resolved.modelId,
+        defaultModelId: operationModelId || undefined,
       });
 
       // Guard: the provider must implement editImage.
@@ -281,7 +294,7 @@ export async function editImage(opts: EditImageOptions): Promise<EditImageResult
       const maskBuffer = opts.mask ? await imageToBuffer(opts.mask) : undefined;
 
       const result = await provider.editImage({
-        modelId: resolved.modelId,
+        modelId: operationModelId,
         image: imageBuffer,
         prompt: opts.prompt,
         mask: maskBuffer,
@@ -295,6 +308,8 @@ export async function editImage(opts: EditImageOptions): Promise<EditImageResult
       });
 
       metricUsage = result.usage;
+      metricModelId = result.modelId || metricModelId;
+      if (result.modelId) span?.setAttribute('llm.model', result.modelId);
       span?.setAttribute('agentos.api.images_count', result.images.length);
       attachUsageAttributes(span, {
         totalCostUSD: result.usage?.totalCostUSD,

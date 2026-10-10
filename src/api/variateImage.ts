@@ -49,8 +49,10 @@ export interface VariateImageOptions {
    */
   provider?: string;
   /**
-   * Model identifier.  When omitted, the provider's default variation model
-   * is used (e.g. `dall-e-2` for OpenAI).
+   * Model identifier. When omitted, the provider's own default for a
+   * variation applies: OpenAI makes one through its edits endpoint with
+   * `gpt-image-1`, and a provider without native variations through its edit
+   * default (Replicate `stability-ai/sdxl`, Stability `sd3-medium`).
    */
   model?: string;
   /**
@@ -141,22 +143,31 @@ export async function variateImage(opts: VariateImageOptions): Promise<VariateIm
   try {
     return await withAgentOSSpan('agentos.api.variate_image', async (span) => {
       const { providerId, modelId } = resolveModelOption(opts, 'image');
+      // Whether the call names a model. Without one, the provider's own
+      // default for variations (or for the edit that makes one) applies, not
+      // the text-to-image default that `resolveModelOption` gives a named
+      // provider: Replicate would otherwise run every variation on
+      // black-forest-labs/flux-1.1-pro, and Stability post its text-to-image
+      // model to the SD3 route.
+      const modelChosen = typeof opts.model === 'string' && opts.model.length > 0;
       const resolved = resolveMediaProvider(providerId, modelId, {
         apiKey: opts.apiKey,
         baseUrl: opts.baseUrl,
       });
+      // An empty model id asks the provider for its own default for the operation.
+      const operationModelId = modelChosen ? resolved.modelId : '';
       metricProviderId = resolved.providerId;
-      metricModelId = resolved.modelId;
+      metricModelId = operationModelId || undefined;
 
       span?.setAttribute('llm.provider', resolved.providerId);
-      span?.setAttribute('llm.model', resolved.modelId);
+      if (operationModelId) span?.setAttribute('llm.model', operationModelId);
       span?.setAttribute('agentos.api.variance', opts.variance ?? 0.5);
 
       const provider = createImageProvider(resolved.providerId);
       await provider.initialize({
         apiKey: resolved.apiKey,
         baseURL: resolved.baseUrl,
-        defaultModelId: resolved.modelId,
+        defaultModelId: operationModelId || undefined,
       });
 
       const imageBuffer = await imageToBuffer(opts.image);
@@ -164,9 +175,9 @@ export async function variateImage(opts: VariateImageOptions): Promise<VariateIm
       let result: ImageGenerationResult;
 
       if (typeof provider.variateImage === 'function') {
-        // Native variation support (e.g. OpenAI /v1/images/variations).
+        // Native variation support (OpenAI: the edits endpoint with a GPT image model).
         result = await provider.variateImage({
-          modelId: resolved.modelId,
+          modelId: operationModelId,
           image: imageBuffer,
           n: opts.n,
           variance: opts.variance,
@@ -178,7 +189,7 @@ export async function variateImage(opts: VariateImageOptions): Promise<VariateIm
         // The variance parameter maps to edit strength — lower variance means
         // the output stays closer to the original.
         result = await provider.editImage({
-          modelId: resolved.modelId,
+          modelId: operationModelId,
           image: imageBuffer,
           prompt: 'Create a variation of this image.',
           mode: 'img2img',
@@ -192,6 +203,8 @@ export async function variateImage(opts: VariateImageOptions): Promise<VariateIm
       }
 
       metricUsage = result.usage;
+      metricModelId = result.modelId || metricModelId;
+      if (result.modelId) span?.setAttribute('llm.model', result.modelId);
       span?.setAttribute('agentos.api.images_count', result.images.length);
       attachUsageAttributes(span, {
         totalCostUSD: result.usage?.totalCostUSD,
