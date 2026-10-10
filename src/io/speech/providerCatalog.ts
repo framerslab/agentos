@@ -293,6 +293,18 @@ export const SPEECH_PROVIDER_CATALOG: readonly SpeechProviderCatalogEntry[] = [
     features: ['streaming', 'interim-results'],
   },
   {
+    id: 'openai-realtime-transcription',
+    kind: 'stt',
+    label: 'OpenAI Realtime Transcription',
+    envVars: ['OPENAI_API_KEY'],
+    local: false,
+    streaming: true,
+    description:
+      'Real-time streaming STT over an OpenAI Realtime transcription session, with transcripts keyed by item id and a connection rollover for long sessions.',
+    defaultModel: 'gpt-4o-mini-transcribe',
+    features: ['streaming', 'interim-results', 'endpointing', 'item-ids', 'long-sessions'],
+  },
+  {
     id: 'openai-streaming-tts',
     kind: 'tts',
     label: 'OpenAI Streaming TTS',

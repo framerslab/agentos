@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   createVoiceProvidersFromEnv,
+  createSttChainFromEnv,
   NoVoiceProvidersAvailableError,
 } from '../env-constructor.js';
 
@@ -164,5 +165,71 @@ describe('cartesia + hume env wiring', () => {
       'elevenlabs-streaming',
       'openai-realtime',
     ]);
+  });
+});
+
+describe('OpenAI Realtime transcription in the voice bundle', () => {
+  it('joins the STT chain after the incumbents when OPENAI_API_KEY is set', () => {
+    const { stt } = createVoiceProvidersFromEnv({
+      env: { DEEPGRAM_API_KEY: 'dg', ELEVENLABS_API_KEY: 'el', OPENAI_API_KEY: 'op' },
+    });
+    expect(stt.providers.map((p) => p.providerId)).toEqual([
+      'deepgram-streaming',
+      'elevenlabs-streaming-stt',
+      'openai-realtime-transcription',
+    ]);
+  });
+
+  it('builds a voice bundle from OPENAI_API_KEY alone', () => {
+    const { stt, tts } = createVoiceProvidersFromEnv({ env: { OPENAI_API_KEY: 'op' } });
+    expect(stt.providers.map((p) => p.providerId)).toEqual(['openai-realtime-transcription']);
+    expect(tts.providers.map((p) => p.providerId)).toContain('openai-realtime');
+  });
+});
+
+describe('createSttChainFromEnv', () => {
+  it('builds an STT chain with no TTS key', () => {
+    const { stt } = createSttChainFromEnv({ env: { OPENAI_API_KEY: 'op' } });
+    expect(stt.providers.map((p) => p.providerId)).toEqual(['openai-realtime-transcription']);
+  });
+
+  it('leaves mid-utterance failover off by default, so sessions keep flush and usage events', () => {
+    const { stt } = createSttChainFromEnv({ env: { OPENAI_API_KEY: 'op' } });
+    expect(
+      (stt as unknown as { opts: { enableMidUtteranceFailover?: boolean } }).opts
+        .enableMidUtteranceFailover
+    ).toBe(false);
+  });
+
+  it('passes the OpenAI Realtime options to the provider', () => {
+    const { stt } = createSttChainFromEnv({
+      env: { DEEPGRAM_API_KEY: 'dg', OPENAI_API_KEY: 'op' },
+      openaiRealtime: { priority: 5 },
+    });
+    expect(stt.providers.map((p) => p.providerId)).toEqual([
+      'openai-realtime-transcription',
+      'deepgram-streaming',
+    ]);
+  });
+
+  it('shares its breaker with the chain', () => {
+    const { stt, breaker } = createSttChainFromEnv({ env: { DEEPGRAM_API_KEY: 'dg' } });
+    expect((stt as unknown as { opts: { breaker: unknown } }).opts.breaker).toBe(breaker);
+  });
+
+  it('throws NoVoiceProvidersAvailableError naming the STT keys when none is set', () => {
+    expect(() => createSttChainFromEnv({ env: { CARTESIA_API_KEY: 'c' } })).toThrow(
+      NoVoiceProvidersAvailableError
+    );
+    try {
+      createSttChainFromEnv({ env: {} });
+      expect.fail('should have thrown');
+    } catch (err) {
+      expect((err as NoVoiceProvidersAvailableError).checkedEnvVars).toEqual([
+        'DEEPGRAM_API_KEY',
+        'ELEVENLABS_API_KEY',
+        'OPENAI_API_KEY',
+      ]);
+    }
   });
 });
