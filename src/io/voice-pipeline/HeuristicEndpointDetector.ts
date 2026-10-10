@@ -23,8 +23,9 @@
  *
  * 4. A `speech_end` that finds no final transcript leaves the decision to the
  *    first final that arrives before speech resumes, for providers that
- *    transcribe an utterance after its end of speech. A final with no text
- *    (a provider retracting interim text it showed) changes nothing.
+ *    transcribe an utterance after its end of speech. The silence timeout
+ *    still counts from that end of speech. A final with no text (a provider
+ *    retracting interim text it showed) changes nothing.
  *
  * ## Why heuristic over acoustic-only?
  *
@@ -207,6 +208,14 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    */
   private speechEndWithoutText: number | null = null;
 
+  /**
+   * When the `speech_end` in {@link speechEndWithoutText} arrived, on this
+   * detector's own clock (`Date.now()`), so the silence that has passed can
+   * be counted when its final arrives. The event's timestamp is the caller's
+   * and serves the turn's duration only.
+   */
+  private speechEndWithoutTextAt = 0;
+
   // ---------------------------------------------------------------------------
   // Constructor
   // ---------------------------------------------------------------------------
@@ -269,11 +278,12 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     this.accumulatedText = text;
     this.lastConfidence = transcript.confidence;
 
-    // The speech already ended without a transcript: decide the turn now.
+    // The speech already ended without a transcript: decide the turn now. The
+    // silence began at that end of speech, so what has passed since counts.
     if (this.speechEndWithoutText !== null && !this.speechActive) {
       const speechEndTimestamp = this.speechEndWithoutText;
       this.speechEndWithoutText = null;
-      this._decideTurnEnd(speechEndTimestamp);
+      this._decideTurnEnd(speechEndTimestamp, Date.now() - this.speechEndWithoutTextAt);
     }
   }
 
@@ -295,7 +305,8 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    *   `turn_complete` immediately (when text ends with terminal punctuation)
    *   or starts the silence timer (when no punctuation is detected).
    *   Otherwise the first final transcript that arrives before speech
-   *   resumes is decided the same way when it arrives.
+   *   resumes is decided the same way when it arrives, with the silence
+   *   timeout still counted from this `speech_end`.
    *
    * - **`silence`**: Periodic heartbeat events are ignored. The silence timer
    *   (started on `speech_end`) already handles delayed turn-completion
@@ -328,6 +339,7 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
           // provider transcribes the utterance after its end of speech:
           // the first final before speech resumes is decided then.
           this.speechEndWithoutText = event.timestamp;
+          this.speechEndWithoutTextAt = Date.now();
           break;
         }
 
@@ -371,11 +383,13 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
   /**
    * Decide the turn once speech has ended and a final transcript is held:
    * terminal punctuation fires `turn_complete` at once; otherwise the
-   * silence timer starts.
+   * silence timer starts, for what is left of the timeout.
    *
    * @param speechEndTimestamp - Timestamp of the `speech_end`, for the turn's duration.
+   * @param silenceSoFarMs - Silence that has already passed since that `speech_end`
+   *   (a final that arrived after it); 0 when the decision is made at the `speech_end`.
    */
-  private _decideTurnEnd(speechEndTimestamp: number): void {
+  private _decideTurnEnd(speechEndTimestamp: number, silenceSoFarMs = 0): void {
     if (TERMINAL_PUNCTUATION.test(this.accumulatedText)) {
       // Sentence-terminal punctuation detected -> fire immediately.
       // This is the fast path that eliminates the 1.5 s silence wait.
@@ -384,7 +398,7 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
       // No terminal punctuation -> start the silence timer.
       // If the user doesn't resume speaking within silenceTimeoutMs,
       // we'll fire turn_complete with reason 'silence_timeout'.
-      this._startSilenceTimer(speechEndTimestamp);
+      this._startSilenceTimer(speechEndTimestamp, silenceSoFarMs);
     }
   }
 
@@ -421,20 +435,30 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
   /**
    * Start the silence-timeout timer. If the user does not resume speaking
    * within `silenceTimeoutMs` ms, the detector fires `turn_complete`
-   * with reason `'silence_timeout'`.
+   * with reason `'silence_timeout'`. The timeout counts from the end of
+   * speech: when the final arrived after it, the timer runs for what is
+   * left, and a timeout that has already passed ends the turn at once.
    *
    * Any previously running silence timer is cleared first to prevent
    * double-fires from rapid speech_end -> speech_start -> speech_end sequences.
    *
    * @param speechEndTimestamp - Timestamp passed through to the internal turn-complete emitter
    *   for duration calculation.
+   * @param silenceSoFarMs - Silence that has already passed since the end of speech.
    */
-  private _startSilenceTimer(speechEndTimestamp: number): void {
+  private _startSilenceTimer(speechEndTimestamp: number, silenceSoFarMs = 0): void {
     this._clearSilenceTimer();
+    // A negative value (the clock was set back) counts as no silence yet.
+    const silenceMs = Math.max(0, silenceSoFarMs);
+    if (silenceMs > 0 && silenceMs >= this.silenceTimeoutMs) {
+      // The final arrived after the timeout had passed: the turn is already over.
+      this._emitTurnComplete('silence_timeout', speechEndTimestamp);
+      return;
+    }
     this.silenceTimer = setTimeout(() => {
       this.silenceTimer = null;
       this._emitTurnComplete('silence_timeout', speechEndTimestamp);
-    }, this.silenceTimeoutMs);
+    }, this.silenceTimeoutMs - silenceMs);
   }
 
   /**
