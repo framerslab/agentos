@@ -28,8 +28,16 @@ const persona: IPersonaDefinition = {
   baseSystemPrompt: 'You are a helpful assistant.',
 };
 
+interface HarnessOptions {
+  /**
+   * Waited on before the cognitive memory of a session is built, so a case can
+   * hold a GMI's creation in flight.
+   */
+  holdMemoryFor?: (sessionId: string) => Promise<void> | undefined;
+}
+
 /** Builds a real GMIManager with an active GMI for session-1 and one for session-2. */
-async function createHarness() {
+async function createHarness(options: HarnessOptions = {}) {
   // Closing a GMI's cognitive memory takes a macrotask, so a GMI is in the
   // SHUTDOWN state when shutdown() resolves only if shutdown() awaited it.
   const memoryShutdown = vi.fn(() => new Promise<void>((resolve) => setTimeout(resolve, 5)));
@@ -48,12 +56,14 @@ async function createHarness() {
   const manager = new GMIManager(
     {
       personaLoaderConfig: { personaSource: 'in-memory' },
-      cognitiveMemoryFactory: () =>
-        ({
+      cognitiveMemoryFactory: async ({ sessionId }) => {
+        await options.holdMemoryFor?.(sessionId);
+        return {
           encode: vi.fn(async () => ({})),
           observe: vi.fn(async () => null),
           shutdown: memoryShutdown,
-        }) as unknown as ICognitiveMemoryManager,
+        } as unknown as ICognitiveMemoryManager;
+      },
     },
     undefined,
     undefined,
@@ -123,5 +133,42 @@ describe('GMIManager.shutdown', () => {
     await expect(manager.deactivateGMIForSession('session-1')).rejects.toMatchObject({
       code: GMIErrorCode.NOT_INITIALIZED,
     });
+  });
+
+  it('shuts down a GMI whose creation was in flight when shutdown began, and fails that call', async () => {
+    let memoryRequested!: () => void;
+    const requested = new Promise<void>((resolve) => {
+      memoryRequested = resolve;
+    });
+    let releaseMemory!: () => void;
+    const memoryHeld = new Promise<void>((resolve) => {
+      releaseMemory = resolve;
+    });
+    const { manager, memoryShutdown } = await createHarness({
+      holdMemoryFor: (sessionId) => {
+        if (sessionId !== 'session-3') return undefined;
+        memoryRequested();
+        return memoryHeld;
+      },
+    });
+
+    // The call has passed the initialization check and waits for its cognitive memory.
+    const outcome = manager
+      .getOrCreateGMIForSession('user-3', 'session-3', persona.id)
+      .then(
+        () => 'registered',
+        (error: { code?: string }) => error.code,
+      );
+    await requested;
+
+    const shutdown = manager.shutdown();
+    releaseMemory();
+    await shutdown;
+
+    expect(await outcome).toBe(GMIErrorCode.NOT_INITIALIZED);
+    // session-1, session-2 and the GMI built for session-3 each closed their memory.
+    expect(memoryShutdown).toHaveBeenCalledTimes(3);
+    expect(manager.activeGMIs.size).toBe(0);
+    expect(manager.gmiSessionMap.size).toBe(0);
   });
 });
