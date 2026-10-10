@@ -86,9 +86,10 @@ const MINUTE_MS = 60_000;
 /** Wait before the first reconnect after a drop; later ones wait `retryIntervalMs`. */
 const FIRST_RETRY_DELAY_MS = 100;
 
-async function defaultOpenAIProbe(apiKey: string) {
+/** GETs the models endpoint beside the sessions' URL with the key: reachable, and the key accepted. */
+async function defaultOpenAIProbe(apiKey: string, baseUrl?: string) {
   const start = Date.now();
-  const res = await fetch('https://api.openai.com/v1/models', {
+  const res = await fetch(buildModelsUrl(baseUrl), {
     headers: { Authorization: `Bearer ${apiKey}` },
     signal: AbortSignal.timeout(1000),
   });
@@ -182,7 +183,9 @@ export interface OpenAIRealtimeTranscriptionSTTConfig {
   /**
    * Realtime API WebSocket URL, without query parameters. A host other than
    * `api.openai.com` (an OpenAI-compatible gateway) also gets the model as a
-   * `model` query parameter.
+   * `model` query parameter. The default health probe reads the models
+   * endpoint beside it: the same URL over HTTP(S), with a trailing `/realtime`
+   * replaced by `/models`.
    * @defaultValue 'wss://api.openai.com/v1/realtime'
    */
   baseUrl?: string;
@@ -240,7 +243,11 @@ export interface OpenAIRealtimeTranscriptionSTTConfig {
   /** Optional capability overrides. Merged into defaultCapabilities(). */
   capabilities?: Partial<ProviderCapabilities>;
 
-  /** Injectable health probe for tests. Defaults to OpenAI's /v1/models. */
+  /**
+   * Health probe, injectable for tests. Defaults to a GET of the models
+   * endpoint on the host `baseUrl` names (`https://api.openai.com/v1/models`
+   * when it is unset), with the key as a Bearer token.
+   */
   healthProbe?: (apiKey: string) => Promise<{ ok: boolean; status: number; latencyMs: number }>;
 }
 
@@ -304,6 +311,25 @@ function buildTranscriptionUrl(baseUrl: string | undefined, model: string): stri
   if (url.protocol === 'http:') url.protocol = 'ws:';
   url.searchParams.set('intent', 'transcription');
   if (url.hostname !== 'api.openai.com') url.searchParams.set('model', model);
+  return url.toString();
+}
+
+/**
+ * The models endpoint the default health probe reads, on the host the
+ * sessions use: the base URL over HTTP(S), without a trailing `/realtime`
+ * segment, plus `/models`. `wss://api.openai.com/v1/realtime` gives
+ * `https://api.openai.com/v1/models`.
+ */
+function buildModelsUrl(baseUrl: string | undefined): string {
+  const url = new URL(baseUrl ?? DEFAULT_BASE_URL);
+  if (url.protocol === 'wss:') url.protocol = 'https:';
+  if (url.protocol === 'ws:') url.protocol = 'http:';
+  let path = url.pathname;
+  while (path.endsWith('/')) path = path.slice(0, -1);
+  if (path.endsWith('/realtime')) path = path.slice(0, -'/realtime'.length);
+  url.pathname = `${path}/models`;
+  url.search = '';
+  url.hash = '';
   return url.toString();
 }
 
@@ -1855,7 +1881,7 @@ export class OpenAIRealtimeTranscriptionSTT implements IStreamingSTT, HealthyPro
       latencyClass: 'realtime',
       ...(config.capabilities ?? {}),
     });
-    this.healthProbe = config.healthProbe ?? defaultOpenAIProbe;
+    this.healthProbe = config.healthProbe ?? ((apiKey) => defaultOpenAIProbe(apiKey, config.baseUrl));
   }
 
   async healthCheck(): Promise<HealthCheckResult> {
