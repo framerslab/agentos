@@ -134,13 +134,13 @@ No AgentOS code raises it, and the providers' code types leave it out. The built
 
 ## Codes Outside CLI_ERROR
 
-The two providers add codes of their own to the nine ([`ClaudeCodeProviderError.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/errors/ClaudeCodeProviderError.ts), [`GeminiCLIProviderError.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/errors/GeminiCLIProviderError.ts)):
+The two providers' code types add codes of their own ([`ClaudeCodeProviderError.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/errors/ClaudeCodeProviderError.ts), [`GeminiCLIProviderError.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/errors/GeminiCLIProviderError.ts)):
 
 | Code | Provider | Raised when |
 |------|----------|-------------|
 | `EMBEDDINGS_NOT_SUPPORTED` | Both | `generateEmbeddings()` is called: neither provider serves embeddings |
 | `UNKNOWN` | Both | A completion is requested while the provider is not initialized |
-| `SCHEMA_PARSE_FAILED` | Claude Code | Never. A reply that does not parse as the tool-call shape is retried once without the schema and returned as text |
+| `SCHEMA_PARSE_FAILED` | Claude Code | Never. `generateCompletion()` retries a reply that does not parse as the tool-call shape once without the schema and returns it as text; the streaming path returns such a reply as text |
 | `TOOL_PARSE_FAILED` | Gemini CLI | Never. The type declares it and nothing raises it |
 
 ## Custom Error Codes
@@ -175,7 +175,7 @@ new CLISubprocessError(
 - **Provider, non-streaming.** `generateCompletion()` lets the bridge's error through.
 - **Provider, streaming.** `generateCompletionStream()` does not throw for a bridge failure. The stream ends with a final chunk whose `error` holds the message, the `code` and, as `details`, the error object.
 - **Initialization through the helpers.** `generateText()`, `streamText()` and the helpers built on them create the provider with [`createProviderManager()`](https://github.com/framerslab/agentos/blob/master/src/api/model.ts). When the provider's `initialize()` throws, that function throws a `ProviderInitializationError` whose `cause` is the `CLISubprocessError`.
-- **Fallback.** Those helpers decide whether to try the next provider with [`isRetryableError()`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts), which reads the error's name, HTTP status, `code` and message. It counts a `ProviderInitializationError` and the `TIMEOUT` code as retryable, and it never reads `recoverable`.
+- **Fallback.** Those helpers decide whether to try the next provider with [`isRetryableError()`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts), which reads the error's name, HTTP status, `code`, type and message. It counts a `ProviderInitializationError` and the `TIMEOUT` code as retryable, and it never reads `recoverable`.
 
 `guidance` and `recoverable` are for the host that catches the error: show `guidance` to the person who can fix the installation, and treat `recoverable` as the bridge's own hint when you write a retry of your own.
 

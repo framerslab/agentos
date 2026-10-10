@@ -48,7 +48,7 @@ Every other provider in the list below rotates its keys but never marks one exha
 - **Segmentation:** Replicate
 - **Web Search:** Serper, Tavily, Brave, Firecrawl
 
-Azure Speech (TTS and STT), DeepL and OpenAI translation send the configured key as given, so give them a single key. Give LiteLLM a single key too: its completions, streams and embeddings draw a key from an `OpenAIProvider` pool, and its model listing sends the configured string as given.
+A provider that is not on this list sends the key it is configured with as given, so give it a single key. That covers Azure Speech (TTS and STT), DeepL and OpenAI translation, the voice pipeline's batch STT for OpenAI Whisper and for Deepgram, the MiniMax image provider and the Cohere reranker, among others. Give LiteLLM a single key too: its completions, streams and embeddings draw a key from an `OpenAIProvider` pool, and its model listing sends the configured string as given.
 
 ## Implementation
 
