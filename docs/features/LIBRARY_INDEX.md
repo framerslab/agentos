@@ -140,3 +140,39 @@ Each passage has `index` (from 0), `text`, `firstSeq`, `lastSeq`, `itemIds`, `st
 `lexicalTokens(text)` answers a text's words: lower-case runs of letters and digits, in order, in any script, nothing stemmed. `lexicalTokens("Q3's budget: 1,200 units")` is `['q3', 's', 'budget', '1', '200', 'units']`. `PostgresVectorStore` builds its lexical query from the same runs.
 
 `snippetAround(text, words, { before, after })` finds the first word of `text` that begins with one of `words` and answers `{ at, text }`. `at` is where that word starts in the text as given, or -1 when no word matches. `text` is the snippet in whole words, with white space collapsed: it runs from just after the last white space (a space, a tab or a line break, such as the one between two turns of a passage) at or before `before` characters (80 unless given) ahead of the word, or from the text's start, to the first white space at or after `after` characters (120 unless given) past the word's start, or to the text's end. A text with no white space, as Chinese and Japanese are written, comes back whole. With no match, the snippet is the text's start.
+
+## On a device
+
+```typescript
+import { LexicalIndex, chunkTurns, lexicalTokens } from '@framers/agentos/cognition/library/browser';
+
+const turns = [
+  { seq: 1, itemId: 'item_1', text: 'The chapters on the budget review come first.' },
+  { seq: 2, itemId: 'item_2', text: 'Hiring opens in May.' },
+];
+
+const index = new LexicalIndex({ tokenize: lexicalTokens });
+for (const chunk of chunkTurns(turns)) {
+  index.addDocument(`session:s1#${chunk.index}`, chunk.text, { firstSeq: chunk.firstSeq });
+}
+
+const [hit] = index.search('chap budg', 10, { prefix: true, match: 'all' });
+// hit.id === 'session:s1#0'
+
+const saved = JSON.stringify(index.toJSON());
+const restored = LexicalIndex.fromJSON(JSON.parse(saved), { tokenize: lexicalTokens });
+restored.search('hiring', 5); // the same passage
+```
+
+`LexicalIndex` is the BM25 engine with no import, so a page can hold a search index of its own. It reads text with the tokenizer it is given; with `lexicalTokens` it reads words by the rule of [Words and snippets](#words-and-snippets). Its scores are BM25 with `k1` 1.2 and `b` 0.75 unless given. Adding a document under an id the index holds replaces it, `removeDocument(id)` answers whether the id was there, and `getStats()` answers `documentCount`, `termCount` and `avgDocLength`. A hit is `{ id, score, metadata }`: the index keeps no text, so the page keeps its passages' texts and places a snippet with `snippetAround`.
+
+`search(query, topK, { match, prefix })` answers at most `topK` documents (10 unless given), highest score first:
+
+- `match: 'any'` (the default) ranks every document that holds at least one of the query's words; `match: 'all'` keeps only the documents that hold every one of them.
+- `prefix: true` lets a stored word match when it begins with a query word, so `chapter` finds `chapters`. When several stored words begin with one query word, a document scores by the best of them for that word. With `prefix` left out, a word matches only itself.
+
+`toJSON()` answers the index as plain JSON, version 1: `k1`, `b`, each document's id, its length in tokens and its metadata, and each term's postings. `LexicalIndex.fromJSON(json, { tokenize })` restores it. A saved index holds terms, not texts, so give it the tokenizer it was made with. A saved index of another version throws. Metadata is saved as given, so keep it to values JSON can hold.
+
+`BM25Index`, in `@framers/agentos/cognition/rag`, is a `LexicalIndex` with AgentOS's tokenizer: `tokenize` when its options give one, else its `pipeline`, else the built-in tokenizer, which reads its stop words on first use. It is saved with `toJSON()` and restored with `BM25Index.fromJSON(json, config)`, which takes `k1` and `b` from the saved index and the tokenizer from `config`. Its module reaches `node:module`, which loads `natural`, so a page imports `LexicalIndex` instead.
+
+`@framers/agentos/cognition/library/browser` is the entry a page imports. It exports `LexicalIndex`, `lexicalTokens`, `snippetAround` and `chunkTurns`, with the types `LexicalIndexConfig`, `LexicalIndexJSON`, `LexicalSearchOptions`, `BM25Result`, `BM25Stats`, `Snippet`, `ChunkTurnsOptions`, `LibraryTurn` and `TurnChunk`. Nothing it reaches imports a Node module or a package, which a test holds by walking its import graph, and none of it uses the DOM. `LibraryIndex` is not in it: it stays in `@framers/agentos/cognition/library`.

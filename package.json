@@ -225,6 +225,11 @@
       "default": "./dist/cognition/library/index.js",
       "types": "./dist/cognition/library/index.d.ts"
     },
+    "./cognition/library/browser": {
+      "import": "./dist/cognition/library/browser.js",
+      "default": "./dist/cognition/library/browser.js",
+      "types": "./dist/cognition/library/browser.d.ts"
+    },
     "./cognition/rag/*": {
       "import": "./dist/cognition/rag/*.js",
       "default": "./dist/cognition/rag/*.js",
