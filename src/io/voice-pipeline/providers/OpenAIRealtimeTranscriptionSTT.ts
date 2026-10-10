@@ -52,6 +52,7 @@ import type {
   StreamingSTTConfig,
   AudioFrame,
   TranscriptEvent,
+  StreamingSTTUsageEvent,
 } from '../types.js';
 import {
   defaultCapabilities,
@@ -500,6 +501,12 @@ interface ItemState {
    * moved to another item.
    */
   dropped: boolean;
+  /**
+   * Finals of a newer connection for the same words, held while this item's
+   * own final is still to come: dropped when that final has text, emitted
+   * when this item fails, ends empty or is retired without a final.
+   */
+  heldRepeats?: TranscriptEvent[];
 }
 
 /** Where a connection stopped receiving audio, and its utterances: what a newer connection's items are checked against. */
@@ -742,6 +749,16 @@ class TranscriptionConnection {
     if (ws && ws.readyState === WebSocket.OPEN) ws.close(1000, 'session closed');
   }
 
+  /**
+   * Whether the connection has closed. A method rather than a read of
+   * `state`, so a check after an `await` sees the state as it is then:
+   * TypeScript keeps an earlier comparison's narrowing of `state` across the
+   * `await`.
+   */
+  isClosed(): boolean {
+    return this.state === 'closed';
+  }
+
   /** Marks the connection closed, stops its timers and wakes its waiters. */
   private release(): void {
     this.state = 'closed';
@@ -776,6 +793,20 @@ function rolloverClocks(connection: TranscriptionConnection): RolloverClocks {
   };
 }
 
+/**
+ * One rollover, from the host's approval to the old connection's retirement.
+ * The session keeps the one in progress; a step that resumes after an `await`
+ * goes on only while its operation is still that one.
+ */
+interface RolloverOperation {
+  /** The connection rolling over. */
+  old: TranscriptionConnection;
+  /** Awaiting the host's approval, opening the next connection, or both connections in the session until the old one is retired. */
+  phase: 'approving' | 'opening' | 'overlap';
+  /** The next connection, once adopted. */
+  next?: TranscriptionConnection;
+}
+
 // ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
@@ -799,7 +830,14 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
   /** Consecutive connection failures since the last final or long-lived connection. */
   private failures = 0;
   private reconnecting = false;
-  private rolloverInProgress = false;
+  /**
+   * The rollover in progress, from its approval to the old connection's
+   * retirement: one operation, so a step that resumes after an `await` can
+   * tell whether it is still the current one.
+   */
+  private rolloverOp: RolloverOperation | undefined;
+  /** The clocks of a next connection that dropped during its overlap, for the connection that replaces it. */
+  private droppedSuccessor: RolloverClocks | undefined;
   /** The last connection is draining and the session closes after it: a drop starts no reconnect. */
   private ending = false;
   /** A client commit asked for while no connection was open; sent once one opens. */
@@ -824,6 +862,9 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     const connection = this.createConnection();
     await connection.connect();
     this.adopt(connection);
+    if (this.settings.usageIntervalMs > 0) {
+      this.usageTimer = setInterval(() => this.reportUsage(), this.settings.usageIntervalMs);
+    }
   }
 
   /**
@@ -851,12 +892,13 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
    * Ends the current turn: commits the buffer when turn detection is off (or
    * when speech is in progress under server turn detection), then resolves
    * once every committed item's final has arrived, or after `finalTimeoutMs`.
-   * During a reconnect it first waits for the connection that takes over.
-   * The session stays open: at its end, flush before `close()` so the last
-   * turn gets its final. Under server turn detection, speech is in progress
-   * once the server has reported its start, so an utterance that began within
-   * the voice detector's reporting latency before the call is not committed,
-   * and a `close()` right after discards it.
+   * During a reconnect it first waits for the connection that takes over;
+   * with client commits, the first flush after the rollover age starts the
+   * rollover. The session stays open: at its end, flush before `close()` so
+   * the last turn gets its final. Under server turn detection, speech is in
+   * progress once the server has reported its start, so an utterance that
+   * began within the voice detector's reporting latency before the call is
+   * not committed, and a `close()` right after discards it.
    */
   async flush(): Promise<void> {
     if (this.closed) return;
@@ -868,6 +910,7 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
       if (this.closed) return;
     } else if (this.settings.clientCommits || lead.speaking) {
       lead.commit(this.sessionAudioMs);
+      if (this.settings.clientCommits) this.maybeRollOver(lead, 'flush');
     }
     await Promise.all(
       this.connections.map((connection) => connection.waitIdle(this.settings.finalTimeoutMs))
@@ -891,8 +934,9 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
   }
 
   /**
-   * Closes every connection at once, abandons one still connecting, ends a
-   * wait before a retry, and emits `'close'`. Idempotent.
+   * Closes every connection at once and reports their usage, abandons one
+   * still connecting, ends a wait before a retry, and emits `'close'`.
+   * Idempotent.
    */
   close(): void {
     if (this.closed) return;
@@ -901,7 +945,10 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     this.usageTimer = undefined;
     const open = this.connections;
     this.connections = [];
-    for (const connection of open) connection.close();
+    for (const connection of open) {
+      connection.close();
+      this.emitUsage(connection, true);
+    }
     // Closing a connection still connecting abandons its connect: its socket is terminated, its timer cleared.
     for (const connection of [...this.connecting]) connection.close();
     this.connecting.clear();
@@ -924,7 +971,8 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
 
   /**
    * Makes an opened connection part of the session; it receives audio from now on. A replacement for a dropped
-   * connection takes over its rollover clocks.
+   * connection takes over its rollover clocks, so its deadline and hard stop are armed for the time that is left
+   * and a refused or failed rollover stays so.
    */
   private adopt(connection: TranscriptionConnection, clocks?: RolloverClocks): void {
     this.openedConnections += 1;
@@ -935,6 +983,7 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
       connection.rolloverFailure = clocks.rolloverFailure;
     }
     this.connections.push(connection);
+    this.armRollover(connection);
     this.releaseBacklog(connection);
     for (const finish of [...this.adoptWaiters]) finish();
   }
@@ -966,26 +1015,36 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     }
   }
 
-  /** A connection dropped: retire it, and reconnect when no other connection receives audio. */
+  /**
+   * A connection dropped: retire it, and reconnect when no other connection
+   * receives audio. A next connection that drops during its rollover's
+   * overlap leaves its clocks for the connection that replaces it once the old
+   * one has drained.
+   */
   private handleDrop(connection: TranscriptionConnection, reason: Error): void {
     if (this.closed) return;
     if (Date.now() - connection.readyAt > this.settings.connectTimeoutMs) this.failures = 0;
+    if (this.rolloverOp?.next === connection) this.droppedSuccessor = rolloverClocks(connection);
     this.retire(connection, true);
-    if (this.lead() || this.reconnecting || this.ending || this.rolloverInProgress) return;
+    if (this.lead() || this.reconnecting || this.ending) return;
     this.reconnect(reason, rolloverClocks(connection));
   }
 
   /**
    * Opens a replacement connection by the retry rules and adopts it with the dropped connection's rollover clocks,
    * so the rollover (and the host's approval) comes at the same time as without the drop, and a refused or failed
-   * rollover stays refused or failed; a failure beyond the retries ends the session.
+   * rollover stays refused or failed. When a next connection dropped during its overlap, the replacement takes that
+   * connection's clocks instead, whichever connection's drop or drain started the reconnect: the host approved it
+   * last. A failure beyond the retries ends the session.
    */
   private reconnect(reason: Error, clocks: RolloverClocks): void {
+    const taken = this.droppedSuccessor ?? clocks;
+    this.droppedSuccessor = undefined;
     this.reconnecting = true;
     this.openConnection(reason)
       .then((next) => {
         this.reconnecting = false;
-        if (next) this.adopt(next, clocks);
+        if (next) this.adopt(next, taken);
       })
       .catch((err: unknown) => {
         this.reconnecting = false;
@@ -1066,7 +1125,10 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
   /**
    * Takes a connection out of the session and closes it. With `retract`, an
    * item that sent interim text but will get no final gets an empty final, so
-   * a consumer keyed by `itemId` drops the interim.
+   * a consumer keyed by `itemId` drops the interim. A newer connection's final
+   * held for an item that gets no final is emitted. Keeps the connection's
+   * utterance intervals for the duplicate check, reports its usage, and ends
+   * the rollover from it.
    */
   private retire(connection: TranscriptionConnection, retract: boolean): void {
     if (!this.connections.includes(connection)) return;
@@ -1077,7 +1139,16 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
       if (item.finished || item.dropped) continue;
       connection.intervals.delete(item.itemId);
       if (retract && item.interimSent) this.emit('transcript', this.transcriptEvent(item, '', true));
+      this.releaseRepeats(item);
     }
+    this.retired = {
+      index: connection.index,
+      feedEndMs: connection.feedEndMs,
+      intervals: [...connection.intervals.values()],
+    };
+    this.emitUsage(connection, true);
+    // The rollover from this connection is over: complete once it drains, cut short when it drops.
+    if (this.rolloverOp?.old === connection) this.rolloverOp = undefined;
     this.setSpeaking(this.lead()?.speaking ?? false);
   }
 
@@ -1220,7 +1291,11 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     }
     if (connection.state !== 'open') return;
     connection.speaking = false;
-    if (this.lead() === connection) this.setSpeaking(false);
+    if (this.lead() === connection) {
+      this.setSpeaking(false);
+      this.maybeRollOver(connection, 'speech_stopped');
+    }
+    if (connection.drainWhenQuiet) void this.drain(connection, false);
   }
 
   private onCommitted(connection: TranscriptionConnection, event: ServerEvent): void {
@@ -1274,6 +1349,10 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     }
     started.finished = true;
     started.dropped = true;
+    if (started.heldRepeats) {
+      committed.heldRepeats = [...(committed.heldRepeats ?? []), ...started.heldRepeats];
+      started.heldRepeats = undefined;
+    }
     connection.pending.delete(startedId);
     connection.intervals.delete(startedId);
   }
@@ -1299,8 +1378,29 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     this.finishItem(connection, item);
     if (item.dropped) return;
     const transcript = stringField(event, 'transcript') ?? '';
-    if (!transcript && !item.interimSent) return;
-    this.emit('transcript', this.transcriptEvent(item, transcript, true, detectedLanguage(event)));
+    const final = this.transcriptEvent(item, transcript, true, detectedLanguage(event));
+    const repeated = item.overlapping ? this.repeatedUtterance(connection, item) : undefined;
+    if (repeated) {
+      // An older connection carries these words: drop this final, or hold it on
+      // the older item until that item's own final shows whether it is needed.
+      item.dropped = true;
+      connection.intervals.delete(itemId);
+      if (repeated !== 'emitted' && transcript) {
+        repeated.heldRepeats = [...(repeated.heldRepeats ?? []), final];
+      }
+      return;
+    }
+    if (transcript) {
+      // This connection carries these words: a newer connection's final held for them is not needed.
+      item.heldRepeats = undefined;
+      this.emit('transcript', final);
+      return;
+    }
+    // Nothing recognised: the words are no reason to drop a newer connection's
+    // final, and one held for them is emitted.
+    connection.intervals.delete(itemId);
+    if (item.interimSent) this.emit('transcript', final);
+    this.releaseRepeats(item);
   }
 
   private onFailed(connection: TranscriptionConnection, event: ServerEvent): void {
@@ -1314,6 +1414,8 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
       new Error(`openai realtime transcription failed for item ${itemId}: ${describeServerError(event)}`)
     );
     if (item.interimSent) this.emit('transcript', this.transcriptEvent(item, '', true));
+    // A newer connection's final held for these words now carries them.
+    this.releaseRepeats(item);
   }
 
   private finishItem(connection: TranscriptionConnection, item: ItemState): void {
@@ -1343,6 +1445,246 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     if (this.speaking === speaking) return;
     this.speaking = speaking;
     this.emit(speaking ? 'speech_start' : 'speech_end');
+  }
+
+  // -------------------------------------------------------------------------
+  // Rollover
+  // -------------------------------------------------------------------------
+
+  /** Starts the deadline and hard-stop clocks of a newly adopted connection. */
+  private armRollover(connection: TranscriptionConnection): void {
+    const rollover = this.settings.rollover;
+    if (!rollover) return;
+    // Counted from the connection's clock start: its own, or the dropped connection's it replaces.
+    const elapsed = Math.max(0, Date.now() - connection.ageStartAt);
+    connection.timers.push(
+      setTimeout(() => {
+        if (!connection.rolloverRefused) void this.rollOver(connection, 'deadline');
+      }, Math.max(0, rollover.deadlineMs - elapsed)),
+      setTimeout(() => this.hardStop(connection), Math.max(0, rollover.hardStopMs - elapsed))
+    );
+  }
+
+  /** Rolls over at an end of speech or a flush once the connection is older than `afterMs`. */
+  private maybeRollOver(connection: TranscriptionConnection, reason: 'speech_stopped' | 'flush'): void {
+    const rollover = this.settings.rollover;
+    if (!rollover || this.rolloverOp || connection.rolloverRefused) return;
+    if (Date.now() - connection.ageStartAt < rollover.afterMs) return;
+    void this.rollOver(connection, reason);
+  }
+
+  /**
+   * Asks `approve`, opens the next connection and starts the old connection's
+   * drain, as one operation. After each `await` it goes on only while that
+   * operation is still the session's current one: the session's close, a drop
+   * of the old connection, and the old connection's hard stop before the next
+   * one is adopted end it, and the rollover of a connection that replaced a
+   * dropped one is another operation, which a late step of this one leaves
+   * alone. Nothing compares `old.state` after an `await`: TypeScript keeps
+   * the guard's narrowing of it to `'open'` across the `await`, and retiring
+   * `old` ends the operation, so the identity check covers a drop.
+   */
+  private async rollOver(
+    old: TranscriptionConnection,
+    reason: OpenAIRealtimeRolloverRequest['reason']
+  ): Promise<void> {
+    const rollover = this.settings.rollover;
+    if (!rollover || this.closed || this.rolloverOp || old.state !== 'open') return;
+    const op: RolloverOperation = { old, phase: 'approving' };
+    this.rolloverOp = op;
+    if (this.settings.clientCommits) {
+      // The client decides where turns end: the old connection takes no more
+      // audio (at the deadline it commits what it holds first), and what
+      // follows waits for the next connection.
+      if (reason === 'deadline') old.commit(this.sessionAudioMs);
+      this.stopFeeding(old);
+    }
+    let approved = true;
+    if (rollover.approve) {
+      try {
+        approved = (await rollover.approve({ connectionIndex: this.openedConnections + 1, reason })) !== false;
+      } catch (err) {
+        approved = false;
+        this.emitWarning(toError(err));
+      }
+    }
+    if (this.closed || this.rolloverOp !== op) return;
+    if (!approved) {
+      this.keepOldConnection(old);
+      return;
+    }
+    op.phase = 'opening';
+    let next: TranscriptionConnection | undefined;
+    try {
+      next = await this.openConnection();
+    } catch (err) {
+      if (this.closed || this.rolloverOp !== op) return;
+      // Keep transcribing on the old connection; the session ends with this error at its hard stop.
+      old.rolloverFailure = toError(err);
+      this.keepOldConnection(old);
+      return;
+    }
+    if (!next) return;
+    if (this.closed || this.rolloverOp !== op) {
+      // The old connection dropped meanwhile (a reconnect took over) or reached its hard stop.
+      next.close();
+      return;
+    }
+    this.adopt(next);
+    op.phase = 'overlap';
+    op.next = next;
+    if (this.settings.clientCommits) {
+      void this.drain(old, false);
+      return;
+    }
+    old.timers.push(
+      setTimeout(() => {
+        old.drainWhenQuiet = true;
+        if (!old.speaking) void this.drain(old, false);
+      }, rollover.overlapMs)
+    );
+  }
+
+  /** No next connection: the old one keeps the audio (held frames first) until its hard stop. */
+  private keepOldConnection(old: TranscriptionConnection): void {
+    old.rolloverRefused = true;
+    this.rolloverOp = undefined;
+    if (old.state === 'draining') {
+      old.state = 'open';
+      old.feedEndMs = undefined;
+      this.releaseBacklog(old);
+    }
+  }
+
+  /** The connection takes no more audio from now on. */
+  private stopFeeding(connection: TranscriptionConnection): void {
+    connection.state = 'draining';
+    connection.drainWhenQuiet = false;
+    connection.feedEndMs = this.sessionAudioMs;
+    connection.speaking = false;
+    this.setSpeaking(this.lead()?.speaking ?? false);
+  }
+
+  /**
+   * Stops sending audio to a connection, lets it finish the items it holds,
+   * then retires it. With `commit`, the buffer becomes a last item; without,
+   * audio that is not yet an item is cleared, so no fragment of an utterance
+   * the next connection holds whole is transcribed here. A connection that
+   * already stopped taking audio is only waited for and retired.
+   */
+  private async drain(connection: TranscriptionConnection, commit: boolean): Promise<void> {
+    if (connection.isClosed()) return;
+    if (connection.state === 'open') {
+      if (commit) connection.commit(this.sessionAudioMs);
+      else connection.send({ type: 'input_audio_buffer.clear' });
+      this.stopFeeding(connection);
+    }
+    await connection.waitIdle(this.settings.finalTimeoutMs);
+    // Closed meanwhile, or already retired: it dropped, or another drain of it (the hard stop's) finished first.
+    if (this.closed || !this.connections.includes(connection)) return;
+    this.retire(connection, true);
+    // The connection that took over may have dropped during the overlap, leaving nothing that takes audio;
+    // reconnect() then gives the replacement that connection's clocks.
+    if (!this.lead() && !this.reconnecting && !this.ending) {
+      this.reconnect(
+        new Error('openai realtime transcription: the connection that took over dropped during the overlap'),
+        rolloverClocks(connection)
+      );
+    }
+  }
+
+  /**
+   * The connection reached `hardStopMs`. A rollover from it whose next
+   * connection is not adopted yet is over: an approval still awaited counts as
+   * refused, and a next connection still opening is closed when it opens. The
+   * connection is drained with a commit, or, when it already stopped taking
+   * audio (a client-commit rollover stops it before the approval), waited for
+   * and retired. When no connection follows it, the session ends after the
+   * drain, with the error of a rollover that could not open its connection, or
+   * with `'close'` alone. A next connection that dropped during its overlap
+   * counts as following it: the reconnect after the drain takes its place.
+   */
+  private hardStop(connection: TranscriptionConnection): void {
+    if (this.closed || connection.isClosed()) return;
+    const op = this.rolloverOp;
+    if (op?.old === connection && op.phase !== 'overlap') this.rolloverOp = undefined;
+    const followed =
+      this.droppedSuccessor !== undefined ||
+      this.connections.some((other) => other !== connection && other.state === 'open');
+    if (!followed) this.ending = true;
+    void this.drain(connection, true).then(() => {
+      if (followed || this.closed) return;
+      if (connection.rolloverFailure) this.fail(connection.rolloverFailure);
+      else this.close();
+    });
+  }
+
+  /**
+   * The utterance of an older connection that an item of a newer one repeats:
+   * an older connection heard the item's onset (its start plus the prefix
+   * padding lies before that connection's audio end) and the item lies within
+   * one of that connection's utterances, give or take `matchToleranceMs`.
+   * `'emitted'` when the older connection has emitted that utterance's final
+   * (the connection retired last keeps only those); the older item while its
+   * final is still to come; `undefined` when the item repeats nothing.
+   */
+  private repeatedUtterance(
+    connection: TranscriptionConnection,
+    item: ItemState
+  ): ItemState | 'emitted' | undefined {
+    const rollover = this.settings.rollover;
+    const startMs = item.startMs;
+    if (!rollover || startMs === undefined) return undefined;
+    const onsetMs = startMs + this.settings.prefixPaddingMs;
+    const tolerance = rollover.matchToleranceMs;
+    const within = (interval: { startMs: number; endMs?: number }): boolean =>
+      startMs >= interval.startMs - tolerance &&
+      (interval.endMs === undefined || item.endMs === undefined || item.endMs <= interval.endMs + tolerance);
+    const retired = this.retired;
+    if (
+      retired &&
+      retired.index < connection.index &&
+      onsetMs < retired.feedEndMs &&
+      retired.intervals.some(within)
+    ) {
+      return 'emitted';
+    }
+    for (const older of this.connections) {
+      if (older.index >= connection.index || onsetMs >= (older.feedEndMs ?? Infinity)) continue;
+      for (const [itemId, interval] of older.intervals) {
+        if (!within(interval)) continue;
+        const olderItem = older.items.get(itemId);
+        return olderItem && !olderItem.finished ? olderItem : 'emitted';
+      }
+    }
+    return undefined;
+  }
+
+  /** Emits the finals of newer connections held for an item whose own final will not carry the words. */
+  private releaseRepeats(item: ItemState): void {
+    const held = item.heldRepeats ?? [];
+    item.heldRepeats = undefined;
+    for (const final of held) this.emit('transcript', final);
+  }
+
+  // -------------------------------------------------------------------------
+  // Usage
+  // -------------------------------------------------------------------------
+
+  private emitUsage(connection: TranscriptionConnection, final: boolean): void {
+    if (connection.index === 0) return;
+    const usage: StreamingSTTUsageEvent = {
+      providerId: this.settings.providerId,
+      model: this.settings.model,
+      connectionIndex: connection.index,
+      audioSeconds: connection.samplesSent / REALTIME_SAMPLE_RATE,
+      final,
+    };
+    this.emit('usage', usage);
+  }
+
+  private reportUsage(): void {
+    for (const connection of this.connections) this.emitUsage(connection, false);
   }
 
   // -------------------------------------------------------------------------
