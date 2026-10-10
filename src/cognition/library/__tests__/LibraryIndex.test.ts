@@ -76,9 +76,15 @@ describe('LibraryIndex over a vector store', () => {
     await index.indexSource(source({ sourceId: 'document:d1', kind: 'document', tags: ['q3', 'plan'] }));
     const scope = { tenantId: 'org1', aclGroups: ['acct:ann'] };
     const ask = (extra: object) => index.search({ text: 'budget', mode: 'dense', topK: 10, scope, ...extra });
-    expect((await ask({ kinds: ['document'] })).every((passage) => passage.kind === 'document')).toBe(true);
-    expect((await ask({ folderId: 'f1' })).every((passage) => passage.sourceId === 'session:s1')).toBe(true);
-    expect((await ask({ tags: ['q3', 'plan'] })).every((passage) => passage.sourceId === 'document:d1')).toBe(true);
+    const ids = async (extra: object) => (await ask(extra)).map((passage) => passage.id).sort();
+    const sessionPassages = ['session:s1#0', 'session:s1#1'];
+    const documentPassages = ['document:d1#0', 'document:d1#1'];
+    expect(await ids({})).toEqual([...documentPassages, ...sessionPassages]);
+    expect(await ids({ kinds: ['document'] })).toEqual(documentPassages);
+    expect(await ids({ folderId: 'f1' })).toEqual(sessionPassages);
+    expect(await ids({ tags: ['q3', 'plan'] })).toEqual(documentPassages);
+    expect(await ids({ tags: ['q3'] })).toEqual([...documentPassages, ...sessionPassages]);
+    expect(await ids({ sourceIds: ['session:s1'] })).toEqual(sessionPassages);
     expect(await ask({ sourceIds: ['session:none'] })).toEqual([]);
   });
 });
