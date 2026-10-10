@@ -2,8 +2,9 @@
  * @fileoverview OAuth 2.0's authorization code grant with PKCE for a web server: `begin` makes the address and answers
  * the state and the verifier for the caller to keep (a row keyed by a cookie, for example); `complete` checks the state
  * in constant time and exchanges the code; refreshes run one at a time per stored grant, the access token held in this
- * process's memory alone; `revoke` where the provider has an endpoint. The token endpoint's calls are the standard
- * ones by default (RFC 6749 sections 4.1.3 and 6, a form body, a JSON answer); a provider overrides them.
+ * process's memory (the store is handed the whole token set, and a `SealedTokenStore` keeps no access token);
+ * `revoke` where the provider has an endpoint. The token endpoint's calls are the standard ones by default (RFC 6749
+ * sections 4.1.3 and 6, a form body, a JSON answer); a provider overrides them.
  *
  * @module agentos/core/llm/auth/RedirectOAuthFlow
  */
@@ -157,7 +158,10 @@ export abstract class RedirectOAuthFlow {
     return this.postExchange(await this.exchangeCode(input.code, input.redirectUri, input.codeVerifier));
   }
 
-  /** Keeps a grant under `key` in the store; the access token stays in memory. */
+  /**
+   * Keeps a grant under `key` in the store and holds it in this process's memory. The store is handed the whole token
+   * set; a `SealedTokenStore` keeps its refresh token and metadata alone, so the access token stays in memory.
+   */
   async keep(key: string, tokens: OAuthTokenSet): Promise<void> {
     if (this.store === null) throw new Error('this flow has no store');
     await this.store.save(key, tokens);
