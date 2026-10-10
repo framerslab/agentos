@@ -5,6 +5,15 @@ on:
     branches: [master, main]
   pull_request:
     branches: [master, main]
+  # bump-framers-deps.yml dispatches this workflow on its pull request branch: a pull request
+  # opened with GITHUB_TOKEN starts no pull_request run. A dispatched run can read any secret a
+  # step references, and that branch carries dependency updates nobody has read yet, so no step
+  # that runs on workflow_dispatch may reference a repository secret.
+  workflow_dispatch: {}
+
+# The workflow's token can read the repository and nothing else.
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -99,7 +108,8 @@ jobs:
         run: pnpm run test -- --coverage
 
       - name: Upload coverage to Codecov
-        if: always()
+        # Not on a dispatched run: see the note on workflow_dispatch above.
+        if: always() && github.event_name != 'workflow_dispatch'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
