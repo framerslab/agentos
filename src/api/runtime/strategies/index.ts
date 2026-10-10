@@ -4,7 +4,7 @@
  *
  * Maps an {@link AgencyStrategy} discriminant to the concrete compiler that
  * produces a {@link CompiledStrategy}. Supports sequential, parallel, debate,
- * review-loop, hierarchical, and graph strategies.
+ * review-loop, hierarchical, graph and panel strategies.
  *
  * ## Adaptive mode
  *
@@ -29,13 +29,14 @@ import type {
   Agent,
   BaseAgentConfig,
 } from '../types.js';
-import type { SeatedRoster } from '../pool/seating.js';
+import type { SeatedRoster, SeatedConfig } from '../pool/seating.js';
 import { compileSequential } from './sequential.js';
 import { compileParallel } from './parallel.js';
 import { compileDebate } from './debate.js';
 import { compileReviewLoop } from './review-loop.js';
 import { compileHierarchical } from './hierarchical.js';
 import { compileGraph } from './graph.js';
+import { compilePanel } from './panel.js';
 
 /**
  * Compile an orchestration strategy into an executable {@link CompiledStrategy}.
@@ -114,6 +115,11 @@ function compileStrategyCore(
       return compileHierarchical(agents, agencyConfig, seating?.mask);
     case 'graph':
       return compileGraph(agents, agencyConfig);
+    case 'panel':
+      // Compiled again for every call over its seated roster; at the
+      // construction-time compile there is no seating, and the strategy
+      // that comes back refuses to run.
+      return compilePanel(agents as Record<string, SeatedConfig | Agent>, agencyConfig, seating);
     default:
       throw new Error(`Strategy '${strategy}' not yet implemented`);
   }
@@ -168,6 +174,7 @@ export { compileDebate } from './debate.js';
 export { compileReviewLoop } from './review-loop.js';
 export { compileHierarchical } from './hierarchical.js';
 export { compileGraph } from './graph.js';
+export { compilePanel } from './panel.js';
 export { isAgent, mergeDefaults, resolveAgent, checkBeforeAgent } from './shared.js';
 export { compileAgencyToGraph, mapGraphResultToAgencyResult, mapGraphEventToAgencyEvent } from './graphCompiler.js';
 export { agentGraph, AgentGraphBuilder } from './agentGraphBuilder.js';

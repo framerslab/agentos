@@ -195,6 +195,16 @@ describe('what seating writes', () => {
     expect(() => seat({ modelPool: { opus: { provider: 'anthropic', model: 'claude-opus-5-5' }, astra: POOL.astra }, agents: { x: { instructions: 'i' } }, chair: { from: ['opus'] } }, 'panel').run()).toThrow(/Seat "chair" cannot be seated/);
     expect(seat({ agents: { x: { instructions: 'i' } }, chair: false }, 'panel').run().chair).toBe(false);
   });
+  it("the chair's line names the entry it sat on and that entry's declared vendor, or its own provider, model and vendor", () => {
+    const pool = { ...POOL, local: { provider: 'ollama', model: 'llama3.2', baseUrl: 'http://127.0.0.1:11434', vendor: 'meta' } };
+    const onEntry = seat({ modelPool: pool, agents: { x: { instructions: 'i' } }, chair: { from: ['local'] } }, 'panel').run();
+    expect(onEntry.chairSeat).toEqual({ entry: 'local', provider: 'ollama', model: 'llama3.2', vendor: 'meta', fixed: false });
+    const level = seat({ provider: 'openai', model: 'gpt-4.1', apiKey: 'sk-agency-00000012', agents: { x: { instructions: 'i' } }, chair: undefined }, 'panel').run();
+    expect(level.chairSeat).toEqual({ provider: 'openai', model: 'gpt-4.1', vendor: 'openai', fixed: true });
+    const own = seat({ agents: { x: { instructions: 'i' } }, chair: { provider: 'ollama', model: 'qwen2.5:7b', baseUrl: 'http://127.0.0.1:11434', vendor: 'Qwen' } }, 'panel').run();
+    expect(own.chairSeat).toEqual({ provider: 'ollama', model: 'qwen2.5:7b', vendor: 'qwen', fixed: true });
+    expect(seat({ agents: { x: { instructions: 'i' } }, chair: false }, 'panel').run().chairSeat).toBeUndefined();
+  });
   it('seating never writes the roster, and the record names pre-built seats', () => {
     const pre = prebuilt();
     const roster = { x: { instructions: 'i' }, pre };

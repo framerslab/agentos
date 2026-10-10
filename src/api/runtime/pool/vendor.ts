@@ -55,6 +55,17 @@ function isProviderOwnEndpoint(provider: string, baseUrl: string): boolean {
   return own ? own.test(baseUrl) : false;
 }
 
+/**
+ * Whether a provider hosts other makers' models (`openrouter`, `together`,
+ * `groq`), so the maker a model id names says who trained it.
+ *
+ * @param provider - A provider id.
+ * @returns True for a host provider.
+ */
+export function isHostProvider(provider: string): boolean {
+  return HOST_PROVIDERS.has(provider);
+}
+
 /** A vendor name, lower-cased and passed through the alias table. */
 export function normalizeVendor(name: string): string {
   const lower = name.trim().toLowerCase();

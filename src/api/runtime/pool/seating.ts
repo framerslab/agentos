@@ -109,6 +109,12 @@ export interface SeatedRoster {
   roster: Record<string, SeatedConfig | Agent>;
   /** The seated chair config, `false` for no chair, undefined outside `panel`. */
   chair?: SeatedConfig | false;
+  /**
+   * The chair's line, as `record.seats` gives a seat's: the pool entry `from`
+   * seated it on and that entry's vendor, or its own provider, model and
+   * vendor. Undefined outside `panel` and for no chair.
+   */
+  chairSeat?: SeatingSeatRecord;
   record: SeatingRecord;
   /** Seats that could not be seated, with the reason (panel only; elsewhere seating throws). */
   unseated: Record<string, string>;
@@ -319,6 +325,7 @@ export function seatRoster(
   // 4. The chair, under panel: `from` with the preferred rule (distinct does not apply to it), else
   //    resolved as a fixed seat from its own config or the agency level.
   let chair: SeatedConfig | false | undefined;
+  let chairSeat: SeatingSeatRecord | undefined;
   if (isPanel) {
     if (opts.chair === false) chair = false;
     else {
@@ -335,10 +342,13 @@ export function seatRoster(
           ...(seated.thinking === undefined && first.entry.thinking !== undefined ? { thinking: first.entry.thinking } : {}),
           ...(seated.maxTokens === undefined && first.entry.maxTokens !== undefined ? { maxTokens: first.entry.maxTokens } : {}),
         };
+        // The entry's vendor, as a pooled seat on that entry records it.
+        chairSeat = { entry: first.name, provider: first.creds.provider, model: first.creds.model, vendor: first.vendor, fixed: false };
       } else {
         const seated = seatFixedLike('chair', cfg, true);
         if (typeof seated === 'string') throw new AgencySeatingError('chair', seated);
         chair = seated;
+        chairSeat = { provider: seated.provider, model: seated.model, vendor: vendorOf(seated.provider!, seated.model!, { vendor: cfg.vendor, baseUrl: seated.baseUrl }), fixed: true };
       }
     }
   }
@@ -367,6 +377,7 @@ export function seatRoster(
   return {
     roster: orderedRoster,
     chair,
+    ...(chairSeat ? { chairSeat } : {}),
     record,
     unseated: orderedUnseated,
     secrets: [...secrets],
