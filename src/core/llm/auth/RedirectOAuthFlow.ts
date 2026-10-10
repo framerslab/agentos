@@ -63,12 +63,15 @@ export class OAuthGrantRefused extends Error {
  * The authorization code grant with PKCE split across a web server's two requests: `begin` in the request that sends
  * the person to the provider, `complete` in the request the provider redirects back to. A provider's flow extends it
  * with `providerId` and `getConfig`, and overrides the token calls where its endpoints differ from the standard ones.
+ * Within one flow, `keep`, a refresh and `forget` of the same key run one after another.
  */
 export abstract class RedirectOAuthFlow {
   /** The provider's id. */
   abstract readonly providerId: string;
   private readonly refreshing = new Map<string, Promise<OAuthTokenSet>>();
   private readonly held = new Map<string, OAuthTokenSet>();
+  /** The last change queued for each key; it settles, never rejects, when that change ends. */
+  private readonly turns = new Map<string, Promise<void>>();
 
   /**
    * @param store Where grants are kept by key, a `SealedTokenStore` on a server; null for a flow that only
@@ -159,19 +162,23 @@ export abstract class RedirectOAuthFlow {
   }
 
   /**
-   * Keeps a grant under `key` in the store and holds it in this process's memory. The store is handed the whole token
-   * set; a `SealedTokenStore` keeps its refresh token and metadata alone, so the access token stays in memory.
+   * Keeps a grant under `key` in the store and holds it in this process's memory, once a refresh or `forget` of `key`
+   * already under way has ended. The store is handed the whole token set; a `SealedTokenStore` keeps its refresh
+   * token and metadata alone, so the access token stays in memory.
    */
   async keep(key: string, tokens: OAuthTokenSet): Promise<void> {
-    if (this.store === null) throw new Error('this flow has no store');
-    await this.store.save(key, tokens);
-    this.held.set(key, tokens);
+    const store = this.store;
+    if (store === null) throw new Error('this flow has no store');
+    await this.inTurn(key, async () => {
+      await store.save(key, tokens);
+      this.held.set(key, tokens);
+    });
   }
 
   /**
-   * A usable access token for the grant kept under `key`, refreshed once at a time when needed. Throws
-   * {@link OAuthGrantRefused} with reason `missing` when no grant with a refresh token is kept under `key`, and with
-   * reason `refresh` when the provider refuses the refresh.
+   * A usable access token for the grant kept under `key`, refreshed once at a time when needed, after a `keep` or
+   * `forget` of `key` already under way. Throws {@link OAuthGrantRefused} with reason `missing` when no grant with a
+   * refresh token is kept under `key`, and with reason `refresh` when the provider refuses the refresh.
    */
   async accessToken(key: string): Promise<string> {
     const held = this.held.get(key);
@@ -179,10 +186,31 @@ export abstract class RedirectOAuthFlow {
     if (held !== undefined && held.accessToken !== '' && Date.now() < held.expiresAt - buffer) return held.accessToken;
     let pending = this.refreshing.get(key);
     if (pending === undefined) {
-      pending = this.refreshKept(key).finally(() => this.refreshing.delete(key));
+      pending = this.inTurn(key, () => this.refreshKept(key)).finally(() => this.refreshing.delete(key));
       this.refreshing.set(key, pending);
     }
     return (await pending).accessToken;
+  }
+
+  /**
+   * Runs `change` once every change of `key` queued before it has ended, so a refresh in flight cannot write a grant
+   * back after `forget` cleared it, or over one that `keep` saved meanwhile.
+   */
+  private async inTurn<T>(key: string, change: () => Promise<T>): Promise<T> {
+    const before = this.turns.get(key);
+    let end!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      end = resolve;
+    });
+    // Set before the first await, so changes queue in the order they were asked for.
+    this.turns.set(key, turn);
+    try {
+      if (before !== undefined) await before;
+      return await change();
+    } finally {
+      if (this.turns.get(key) === turn) this.turns.delete(key);
+      end();
+    }
   }
 
   private async refreshKept(key: string): Promise<OAuthTokenSet> {
@@ -208,22 +236,29 @@ export abstract class RedirectOAuthFlow {
     if (!response.ok) throw new OAuthGrantRefused('revoke', response.status);
   }
 
-  /** Revokes the kept grant where possible and clears it whatever the provider answered; answers whether it revoked. */
+  /**
+   * Revokes the kept grant where possible and clears it whatever the provider answered; answers whether it revoked.
+   * It runs once a refresh or `keep` of `key` already under way has ended, so it revokes the refresh token that
+   * refresh left.
+   */
   async forget(key: string): Promise<{ revoked: boolean }> {
-    if (this.store === null) throw new Error('this flow has no store');
-    let revoked = false;
-    try {
-      const kept = await this.store.load(key);
-      if (kept?.refreshToken) {
-        await this.revoke(kept.refreshToken);
-        revoked = true;
+    const store = this.store;
+    if (store === null) throw new Error('this flow has no store');
+    return this.inTurn(key, async () => {
+      let revoked = false;
+      try {
+        const kept = await store.load(key);
+        if (kept?.refreshToken) {
+          await this.revoke(kept.refreshToken);
+          revoked = true;
+        }
+      } catch {
+        revoked = false;
+      } finally {
+        this.held.delete(key);
+        await store.clear(key);
       }
-    } catch {
-      revoked = false;
-    } finally {
-      this.held.delete(key);
-      await this.store.clear(key);
-    }
-    return { revoked };
+      return { revoked };
+    });
   }
 }
