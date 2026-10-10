@@ -30,6 +30,8 @@ The generalized subprocess bridge lives at `src/safety/sandbox/subprocess/`:
 - **[`CLISubprocessError`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/errors.ts)** — generic error with open string codes, `guidance` (user-facing fix instructions), and `recoverable` flag. Works for any binary, not just LLM CLIs.
 - **[`CLIRegistry`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLIRegistry.ts)** — PATH scanner that discovers installed CLIs. It loads 54 bundled descriptors from the JSON files in `registry/` (LLM CLIs such as `claude`, `gemini` and `ollama`, dev tools, runtimes, package managers, cloud CLIs, databases, media and networking tools), and `register()` adds more.
 
+[CLI Error Codes](../features/CLI_ERROR_CODES.md) lists the error codes and when the two CLI providers raise each one.
+
 ## Available CLI Providers
 
 | Provider ID | Binary | Auth | Default Model | Status |

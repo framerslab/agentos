@@ -36,7 +36,7 @@ Every other provider in the list below rotates its keys but never marks one exha
 
 ## Supported Providers
 
-- **LLM:** OpenAI, Anthropic, Gemini, OpenRouter, Requesty
+- **LLM:** OpenAI, Anthropic, Gemini, OpenRouter and Requesty; Groq, Mistral, Together and xAI, each of which sends its requests through an `OpenAIProvider` instance and draws its key from that instance's pool
 - **Speech TTS:** ElevenLabs, OpenAI TTS, Deepgram, MiniMax
 - **Speech STT:** OpenAI Whisper, Deepgram, AssemblyAI
 - **Voice Pipeline:** OpenAI batch TTS and Realtime, ElevenLabs batch and streaming TTS and streaming STT, Cartesia batch and streaming TTS, Hume batch and streaming TTS, Deepgram Aura batch and streaming TTS and Deepgram streaming STT
@@ -46,12 +46,12 @@ Every other provider in the list below rotates its keys but never marks one exha
 - **Segmentation:** Replicate
 - **Web Search:** Serper, Tavily, Brave, Firecrawl
 
-Groq, Mistral, Together and xAI (LLM), Azure Speech (TTS and STT), DeepL and OpenAI translation send the configured key as given, so give them a single key.
+Azure Speech (TTS and STT), DeepL and OpenAI translation send the configured key as given, so give them a single key. Give LiteLLM a single key too: its completions, streams and embeddings draw a key from an `OpenAIProvider` pool, and its model listing sends the configured string as given.
 
 ## Implementation
 
 The key pool is implemented in [`src/core/providers/`](https://github.com/framerslab/agentos/tree/master/src/core/providers):
 
-- `ApiKeyPool.ts` — Weighted round-robin with exhaustion cooldown
-- `ApiKeyPoolRegistry.ts` — One shared pool per environment variable (`getKeyPool()`), not used by the built-in providers
-- `quotaErrors.ts` — Cross-provider quota error detection (`isQuotaError()`)
+- `ApiKeyPool.ts`: weighted round-robin with exhaustion cooldown
+- `ApiKeyPoolRegistry.ts`: one shared pool per environment variable (`getKeyPool()`), not used by the built-in providers
+- `quotaErrors.ts`: cross-provider quota error detection (`isQuotaError()`)
