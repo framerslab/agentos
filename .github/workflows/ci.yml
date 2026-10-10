@@ -62,6 +62,17 @@ jobs:
           console.log('QuickJSExecutor from dist:', ran.status, ran.output);
           "
 
+      # The document reader from the built package: a worker cannot load the TypeScript the tests import, so its entry
+      # is the compiled module beside loadIsolated.js.
+      - name: The isolated document read runs from the built package
+        run: |
+          node --input-type=module -e "
+          import { loadIsolated } from './dist/cognition/memory/io/ingestion/loadIsolated.js';
+          const read = await loadIsolated('text', Buffer.from('read in a worker thread'));
+          if (read.content !== 'read in a worker thread' || read.format !== 'txt') { console.error(read); process.exit(1); }
+          console.log('loadIsolated from dist:', read.format, read.content);
+          "
+
       - name: Lint
         run: pnpm run lint
 
