@@ -8,7 +8,14 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GMIManager } from '../GMIManager';
-import { GMIPrimeState } from '../IGMI';
+import {
+  GMIInteractionType,
+  GMIOutputChunkType,
+  GMIPrimeState,
+  type GMIOutput,
+  type GMIOutputChunk,
+  type IGMI,
+} from '../IGMI';
 import type { IPersonaDefinition } from '../personas/IPersonaDefinition';
 import type { IPersonaLoader } from '../personas/IPersonaLoader';
 import type { ICognitiveMemoryManager } from '../../memory/CognitiveMemoryManager.js';
@@ -17,6 +24,7 @@ import { ConversationContext } from '../../../core/conversation/ConversationCont
 import type { ConversationManager } from '../../../core/conversation/ConversationManager';
 import type { IPromptEngine } from '../../../core/llm/IPromptEngine';
 import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager';
+import type { ChatMessage, IProvider, ModelCompletionOptions } from '../../../core/llm/providers/IProvider';
 import type { IToolOrchestrator } from '../../../core/tools/IToolOrchestrator';
 import { GMIErrorCode } from '../../../core/utils/errors';
 
@@ -38,6 +46,60 @@ interface HarnessOptions {
   closeMemory?: () => Promise<void>;
   /** The manager's bound on each GMI's shutdown. */
   shutdownTimeoutMs?: number;
+  /** The provider every GMI's model calls go to; without one the GMIs run no turn. */
+  provider?: IProvider;
+}
+
+/**
+ * A provider that holds each model call open until the caller aborts it, when
+ * it ends the call with the abort chunk as the providers do, or until `answer`
+ * resolves, when it replies.
+ */
+function stallingProvider(answer: Promise<void>) {
+  const base = { id: 'stalling', object: 'chat.completion.chunk', created: 0, modelId: 'stalling-model' };
+  return {
+    providerId: 'stalling',
+    isInitialized: true,
+    generateCompletionStream: vi.fn(async function* (
+      _modelId: string,
+      _messages: ChatMessage[],
+      options: ModelCompletionOptions,
+    ) {
+      const signal = options.abortSignal;
+      const aborted = await new Promise<boolean>((resolve) => {
+        if (signal?.aborted) return resolve(true);
+        signal?.addEventListener('abort', () => resolve(true), { once: true });
+        void answer.then(() => resolve(false));
+      });
+      if (aborted) {
+        yield { ...base, choices: [], isFinal: true, error: { message: 'Stream aborted by caller', type: 'abort' } };
+        return;
+      }
+      yield {
+        ...base,
+        choices: [{ index: 0, message: { role: 'assistant', content: 'Too late.' }, finishReason: 'stop' }],
+        responseTextDelta: 'Too late.',
+        isFinal: true,
+      };
+    }),
+  };
+}
+
+/** Runs a text turn on `gmi` for session-1 to its end: the chunks it streamed and its output. */
+async function runTurn(gmi: IGMI, text: string): Promise<{ chunks: GMIOutputChunk[]; output: GMIOutput }> {
+  const chunks: GMIOutputChunk[] = [];
+  const stream = gmi.processTurnStream({
+    interactionId: 'turn-1',
+    userId: 'user-1',
+    sessionId: 'session-1',
+    type: GMIInteractionType.TEXT,
+    content: text,
+  });
+  for (;;) {
+    const next = await stream.next();
+    if (next.done) return { chunks, output: next.value };
+    chunks.push(next.value);
+  }
 }
 
 /** Builds a real GMIManager with an active GMI for session-1 and one for session-2. */
@@ -56,13 +118,27 @@ async function createHarness(options: HarnessOptions = {}) {
   const conversationManager = {
     getOrCreateConversationContext: async () => new ConversationContext('conv-1'),
   } as unknown as ConversationManager;
-  const promptEngine = { estimateTokenCount: async () => 10 } as unknown as IPromptEngine;
+  const promptEngine = {
+    estimateTokenCount: async () => 10,
+    constructPrompt: async () => ({ prompt: [{ role: 'user', content: 'Hello?' }] }),
+  } as unknown as IPromptEngine;
+  const { provider } = options;
+  const llmProviderManager = provider
+    ? {
+        getModelInfo: async (modelId: string) => ({ modelId, providerId: provider.providerId, contextWindowSize: 128_000, capabilities: ['chat'] }),
+        getProvider: () => provider,
+        getProviderForModel: () => provider,
+      }
+    : {};
   const toolOrchestrator = { listAvailableTools: async () => [] } as unknown as IToolOrchestrator;
 
   const manager = new GMIManager(
     {
       personaLoaderConfig: { personaSource: 'in-memory' },
       ...(options.shutdownTimeoutMs !== undefined ? { shutdownTimeoutMs: options.shutdownTimeoutMs } : {}),
+      ...(provider
+        ? { defaultGMIBaseConfigDefaults: { defaultLlmProviderId: provider.providerId, defaultLlmModelId: 'stalling-model' } }
+        : {}),
       cognitiveMemoryFactory: async ({ sessionId }) => {
         await options.holdMemoryFor?.(sessionId);
         return {
@@ -76,7 +152,7 @@ async function createHarness(options: HarnessOptions = {}) {
     undefined,
     conversationManager,
     promptEngine,
-    {} as unknown as AIModelProviderManager,
+    llmProviderManager as unknown as AIModelProviderManager,
     {} as unknown as IUtilityAI,
     toolOrchestrator,
     undefined,
@@ -242,5 +318,31 @@ describe('GMIManager.shutdown', () => {
     expect(memoryShutdown).toHaveBeenCalledTimes(4);
     expect(manager.activeGMIs.size).toBe(0);
     expect(manager.gmiSessionMap.size).toBe(0);
+  });
+
+  it('stops the turn a GMI is running, and the turn leaves the state SHUTDOWN', async () => {
+    let releaseReply!: () => void;
+    const replyHeld = new Promise<void>((resolve) => {
+      releaseReply = resolve;
+    });
+    const provider = stallingProvider(replyHeld);
+    // A turn that shutdown does not stop holds it no longer than this bound.
+    const { manager, gmis } = await createHarness({ provider: provider as unknown as IProvider, shutdownTimeoutMs: 1_000 });
+    const [gmi] = gmis;
+    // The stopped turn logs its error.
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const turn = runTurn(gmi, 'Hello?');
+    // The turn waits on its model call.
+    await vi.waitFor(() => expect(provider.generateCompletionStream).toHaveBeenCalledTimes(1));
+
+    await manager.shutdown();
+    // A model call still open answers now.
+    releaseReply();
+    const { chunks, output } = await turn;
+
+    expect(String(output.error?.message)).toMatch(/aborted/i);
+    expect(chunks.map((chunk) => chunk.type)).toContain(GMIOutputChunkType.ERROR);
+    expect(gmi.getCurrentState()).toBe(GMIPrimeState.SHUTDOWN);
   });
 });
