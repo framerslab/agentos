@@ -151,7 +151,7 @@ A Telnyx call goes through Telnyx's Call Control API, which posts the call's eve
 `CallManager` gives each call two URLs under `webhookBaseUrl` (`http://localhost:3000` when unset):
 
 ```
-<webhookBaseUrl>/voice/webhook/<provider>   answer URL: the provider requests it when the call connects
+<webhookBaseUrl>/voice/webhook/<provider>   Twilio and Plivo request it when the call connects (answer URL); Telnyx posts the call's events to it
 <webhookBaseUrl>/voice/status/<provider>    status callback (sent to Twilio)
 ```
 
