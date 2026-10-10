@@ -1,0 +1,345 @@
+name: Bump @framers/* deps
+
+# Weekly cron + manual trigger. Bumps every @framers/* explicit version pin
+# in package.json to the latest npm-published version, refreshes
+# pnpm-lock.yaml, and opens a single Pull Request with the diff. Copied from
+# agentos-extensions; the same workflow runs in every repo of the family.
+#
+# The pull request's title decides whether merging it releases: `fix(deps)`
+# when a runtime dependency moved (semantic-release publishes a patch, so the
+# published package carries the new range), `chore(deps)` when only a
+# devDependency did (nothing a consumer installs changed).
+#
+# GitHub holds the pull_request runs of a pull request that GITHUB_TOKEN opens
+# or pushes to until someone with write access approves them, while a
+# workflow_dispatch event always creates a run:
+# https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow
+# So the ci job below dispatches CI on the pull request branch, waits for it
+# and posts its result as the "CI (workflow_dispatch)" commit status. A pull
+# request's checks leave out the check runs of a dispatched run; they list
+# commit statuses. Unlike a Dependabot pull request's run, a dispatched run
+# gets the token permissions its ci.yml declares and can read any repository
+# secret a step references. ci.yml declares `permissions: contents: read` and
+# references no repository secret in a step that runs on workflow_dispatch;
+# keep it that way.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Monday 06:00 UTC weekly
+  workflow_dispatch: {}
+  # A pull request that changes this workflow or its script runs the dry-run job at the end of
+  # this file: the script and the lockfile refresh run for real, and no pull request is opened.
+  pull_request:
+    paths:
+      - .github/workflows/bump-framers-deps.yml
+      - .github/scripts/bump-framers-deps.py
+
+# A second bump run waits for the first, so two runs never push the branch and
+# dispatch CI over each other.
+concurrency:
+  group: bump-framers-deps-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'run' }}
+  cancel-in-progress: false
+
+# Each job states what it needs; the dry run needs nothing beyond reading the repository.
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    # Read by the ci job below.
+    outputs:
+      operation: ${{ steps.cpr.outputs.pull-request-operation }}
+      branch: ${{ steps.cpr.outputs.pull-request-branch }}
+      sha: ${{ steps.cpr.outputs.pull-request-head-sha }}
+      number: ${{ steps.cpr.outputs.pull-request-number }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # create-pull-request sets up its own authentication to push, so the token
+          # is not left in .git/config for the install steps, which run package code.
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Set up pnpm
+        # package.json names no packageManager, so this is the version ci.yml installs with.
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          # pnpm/action-setup runs first; setup-node 6 and later cache pnpm only when asked.
+          cache: pnpm
+
+      - name: Bump @framers/* deps to latest published versions
+        run: python3 .github/scripts/bump-framers-deps.py
+
+      - name: Refresh pnpm-lock.yaml
+        run: |
+          # For this job only: a third-party release must be a day old before the lockfile takes it
+          # (minimumReleaseAge is in minutes; pnpm 10.16 and later), and first-party packages are
+          # exempt, since the point of this run is to pick up a version published minutes ago.
+          # The file is removed again: the pull request commits package.json and pnpm-lock.yaml only.
+          printf "packages:\n  - '.'\nminimumReleaseAge: 1440\nminimumReleaseAgeExclude:\n  - '@framers/*'\n" > pnpm-workspace.yaml
+          # Fails here, before any install, if pnpm does not pick the setting up from that file.
+          age=$(pnpm config get minimumReleaseAge)
+          echo "minimumReleaseAge in effect: $age"
+          [ "$age" = 1440 ]
+          # Refreshing the lockfile needs no package's install script.
+          pnpm install --no-frozen-lockfile --ignore-scripts
+          rm pnpm-workspace.yaml
+          # The lockfile has to stand without that file, as every other workflow reads it.
+          pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Pick the pull request title
+        id: title
+        run: |
+          # A runtime dependency that moved has to reach npm; a devDependency that moved does not.
+          runtime=$(node -e '
+            const { execFileSync } = require("node:child_process");
+            const before = JSON.parse(execFileSync("git", ["show", "HEAD:package.json"], { encoding: "utf8" }));
+            const after = JSON.parse(require("node:fs").readFileSync("package.json", "utf8"));
+            const fields = ["dependencies", "optionalDependencies"];
+            const moved = fields.some((f) => JSON.stringify(before[f] || {}) !== JSON.stringify(after[f] || {}));
+            process.stdout.write(moved ? "yes" : "no");
+          ')
+          if [ "$runtime" = yes ]; then type=fix; else type=chore; fi
+          echo "title=$type(deps): bump @framers/* deps to latest published versions" >> "$GITHUB_OUTPUT"
+
+      - name: Create Pull Request
+        id: cpr
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: ${{ steps.title.outputs.title }}
+          title: ${{ steps.title.outputs.title }}
+          body: |
+            Automated weekly bump of the `@framers/*` dependencies to their
+            latest npm-published versions: the ranges in `package.json`
+            (caret of latest; peerDependencies are left alone) and a
+            refreshed `pnpm-lock.yaml`, in which a third-party release must
+            be a day old.
+
+            A `fix(deps)` title means a runtime dependency moved and merging
+            publishes a patch; a `chore(deps)` title means only a
+            devDependency moved and merging publishes nothing. Review the
+            diff for an unexpected major-version jump before merging.
+          branch: chore/bump-framers-deps
+          base: master
+          delete-branch: true
+          # Only files this repository has: the action's git add stops on a
+          # pathspec that matches nothing.
+          add-paths: |
+            package.json
+            pnpm-lock.yaml
+
+  # Runs after every bump run that leaves a pull request open. A new or updated
+  # branch gets a CI run. An unchanged branch gets one only when its head commit
+  # has no pending or passed CI (workflow_dispatch) status, so a dispatch that
+  # failed is retried by the next run. CI can be run on the branch by hand
+  # (gh workflow run ci.yml --ref chore/bump-framers-deps), but only this job
+  # posts the status.
+  ci:
+    needs: bump
+    if: needs.bump.outputs.number != '' && needs.bump.outputs.operation != 'closed'
+    runs-on: ubuntu-latest
+    # Only this job can dispatch workflows and post statuses; the bump job, which installs packages, cannot.
+    permissions:
+      actions: write
+      statuses: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BRANCH: ${{ needs.bump.outputs.branch }}
+      SHA: ${{ needs.bump.outputs.sha }}
+      OPERATION: ${{ needs.bump.outputs.operation }}
+      CONTEXT: CI (workflow_dispatch)
+    steps:
+      - name: Dispatch CI on the pull request branch and post its result
+        id: run
+        timeout-minutes: 90
+        run: |
+          set -euo pipefail
+          post() {
+            gh api "repos/$GITHUB_REPOSITORY/statuses/$1" -f state="$2" -f context="$CONTEXT" \
+              -f description="$3" -f target_url="$4" > /dev/null
+          }
+          if [ "$OPERATION" = none ]; then
+            # A failed read dispatches CI again rather than failing this step: the error step
+            # below would otherwise replace a passing status with an error.
+            current=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/status" \
+              --jq "[.statuses[] | select(.context == \"$CONTEXT\")][0] | \"\\(.state) \\(.updated_at)\"" \
+              2>/dev/null) || current=''
+            state=${current%% *}
+            since=${current#* }
+            if [ "$state" = success ]; then
+              echo "The branch is unchanged and $CONTEXT is success on $SHA."
+              echo "posted=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$state" = pending ]; then
+              # A job that waits gives up after this step's 90 minutes, so a pending status older
+              # than 100 minutes was left by a job that died before it posted a result.
+              age=$(( $(date -u +%s) - $(date -u -d "$since" +%s 2>/dev/null || date -u +%s) ))
+              if [ "$age" -lt 6000 ]; then
+                echo "The branch is unchanged and $CONTEXT has been pending on $SHA since $since."
+                echo "posted=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "$CONTEXT has been pending on $SHA since $since, longer than this job runs; dispatching CI again."
+            fi
+          fi
+          # The dispatched runs that exist now, so the lookup below cannot pick one of them.
+          before=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch "$BRANCH" \
+            --event workflow_dispatch --limit 100 --json databaseId --jq '[.[].databaseId]')
+          # With return_run_details the endpoint answers 200 with the new run's id; without it,
+          # or where it is not supported, 204 with no body, and the run list below finds the run.
+          # https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event
+          dispatched=$(gh api -X POST "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/dispatches" \
+            -f ref="$BRANCH" -F return_run_details=true)
+          id=''
+          if [ -n "$dispatched" ]; then
+            id=$(jq -r '.workflow_run_id // empty' <<<"$dispatched")
+          fi
+          for _ in $(seq 1 24); do
+            [ -n "$id" ] && break
+            sleep 5
+            id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch "$BRANCH" \
+              --event workflow_dispatch --limit 100 --json databaseId,createdAt \
+              | jq -r --argjson before "$before" \
+                '[.[] | select(.databaseId as $i | ($before | any(. == $i)) | not)] | sort_by(.createdAt) | first | .databaseId // empty') \
+              || id=''
+          done
+          if [ -z "$id" ]; then
+            echo "::error::The CI run this job dispatched did not appear within two minutes."
+            exit 1
+          fi
+          # The commit the run tests: another bump run can move the branch after the
+          # bump job read its head. A run created a moment ago may not be readable
+          # yet, so this tries for a minute.
+          run=''
+          for _ in $(seq 1 12); do
+            run=$(gh run view "$id" --repo "$GITHUB_REPOSITORY" --json headSha,url) && break
+            run=''
+            sleep 5
+          done
+          if [ -z "$run" ]; then
+            echo "::error::CI run $id could not be read for a minute after the dispatch."
+            exit 1
+          fi
+          head=$(jq -r .headSha <<<"$run")
+          url=$(jq -r .url <<<"$run")
+          {
+            echo "sha=$head"
+            echo "url=$url"
+          } >> "$GITHUB_OUTPUT"
+          post "$head" pending 'CI is running on this commit' "$url"
+          result=''
+          failures=0
+          while [ -z "$result" ]; do
+            sleep 30
+            if out=$(gh run view "$id" --repo "$GITHUB_REPOSITORY" --json status,conclusion \
+              --jq 'select(.status == "completed") | .conclusion'); then
+              failures=0
+              result=$out
+            else
+              failures=$((failures + 1))
+              if [ "$failures" -ge 10 ]; then
+                echo "::error::gh run view failed ten times in a row for run $id."
+                exit 1
+              fi
+            fi
+          done
+          case "$result" in
+            success) post "$head" success 'CI passed on this commit' "$url" ;;
+            failure | timed_out | startup_failure) post "$head" failure "CI failed on this commit ($result)" "$url" ;;
+            *) post "$head" error "CI ended without a result ($result)" "$url" ;;
+          esac
+          echo "posted=true" >> "$GITHUB_OUTPUT"
+          echo "CI on $head: $result ($url)"
+          [ "$result" = success ]
+
+      # A status left pending reads as CI still running, so when the step above stops before it
+      # posts CI's result (no run appeared, an API error, the time limit, a cancel), this posts an error.
+      - name: Post an error status if CI's result was not posted
+        if: (failure() || cancelled()) && steps.run.outputs.posted != 'true'
+        env:
+          TARGET: ${{ steps.run.outputs.sha || needs.bump.outputs.sha }}
+          URL: ${{ steps.run.outputs.url || format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$TARGET" -f state=error -f context="$CONTEXT" \
+            -f description='The job that waits for CI stopped before CI finished' -f target_url="$URL" > /dev/null
+
+  # The bump, end to end, on a pull request that changes it: the script against this repository's
+  # manifests and the npm registry, then the lockfile refresh. The steps are the bump job's; keep
+  # the two in step. Nothing is committed and no pull request is opened.
+  dry-run:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Bump @framers/* deps to latest published versions
+        run: python3 .github/scripts/bump-framers-deps.py
+
+      - name: Refresh pnpm-lock.yaml
+        run: |
+          # For this job only: a third-party release must be a day old before the lockfile takes it
+          # (minimumReleaseAge is in minutes; pnpm 10.16 and later), and first-party packages are
+          # exempt, since the point of this run is to pick up a version published minutes ago.
+          # The file is removed again: the pull request commits package.json and pnpm-lock.yaml only.
+          printf "packages:\n  - '.'\nminimumReleaseAge: 1440\nminimumReleaseAgeExclude:\n  - '@framers/*'\n" > pnpm-workspace.yaml
+          # Fails here, before any install, if pnpm does not pick the setting up from that file.
+          age=$(pnpm config get minimumReleaseAge)
+          echo "minimumReleaseAge in effect: $age"
+          [ "$age" = 1440 ]
+          # Refreshing the lockfile needs no package's install script.
+          pnpm install --no-frozen-lockfile --ignore-scripts
+          rm pnpm-workspace.yaml
+          # The lockfile has to stand without that file, as every other workflow reads it.
+          pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Only package.json and pnpm-lock.yaml changed
+        run: |
+          git status --porcelain
+          other=$(git status --porcelain | awk '{print $2}' | grep -vxE 'package\.json|pnpm-lock\.yaml' || true)
+          if [ -n "$other" ]; then
+            echo "::error::The bump changed files outside package.json and pnpm-lock.yaml:"
+            echo "$other"
+            exit 1
+          fi
+          git diff --stat
