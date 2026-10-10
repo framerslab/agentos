@@ -38,7 +38,10 @@ export interface LibrarySource {
   folderId?: string | null;
   tags?: string[];
   title?: string;
-  /** Copied onto every passage. */
+  /**
+   * Copied onto every passage. The keys the index writes come from the fields above alone: a `folderId` or `title`
+   * here, or in a passage's own metadata, is dropped.
+   */
   metadata?: Record<string, MetadataValue>;
   passages: Array<{ text: string; metadata?: Record<string, MetadataValue> }>;
 }
@@ -91,6 +94,18 @@ export interface LibraryIndexOptions {
 }
 
 /**
+ * Metadata without `folderId` and `title`: like the other keys the index writes, a passage holds them only when the
+ * source's own fields set them, so a source indexed without a folder is in none, whatever its metadata or a
+ * passage's own says.
+ */
+function withoutSourceFields(metadata: Record<string, MetadataValue> | undefined): Record<string, MetadataValue> {
+  const rest: Record<string, MetadataValue> = { ...(metadata ?? {}) };
+  delete rest.folderId;
+  delete rest.title;
+  return rest;
+}
+
+/**
  * A library's sources in one collection of a vector store. Every passage of a source carries the source's tenant,
  * access groups, kind, folder, tags and title in its metadata, so the store's own filter decides who sees it:
  * `indexSource` replaces a source whole, `setSourceScope` changes who may see it and where it is filed,
@@ -120,8 +135,7 @@ export class LibraryIndex {
       throw new Error('LibraryIndex.indexSource needs a tenant and at least one access group.');
     }
     await this.removeSource(source.sourceId);
-    const shared: Record<string, MetadataValue> = {
-      ...(source.metadata ?? {}),
+    const owned: Record<string, MetadataValue> = {
       tenantId: source.tenantId,
       aclGroups: source.aclGroups,
       status: 'active',
@@ -129,8 +143,9 @@ export class LibraryIndex {
       kind: source.kind,
       tags: source.tags ?? [],
     };
-    if (source.folderId) shared.folderId = source.folderId;
-    if (source.title) shared.title = source.title;
+    if (source.folderId) owned.folderId = source.folderId;
+    if (source.title) owned.title = source.title;
+    const inherited = withoutSourceFields(source.metadata);
     for (let from = 0; from < source.passages.length; from += this.batchSize) {
       const batch = source.passages.slice(from, from + this.batchSize);
       const vectors = await this.embed(batch.map((passage) => passage.text));
@@ -139,7 +154,7 @@ export class LibraryIndex {
         id: `${source.sourceId}#${from + offset}`,
         embedding: vectors[offset],
         textContent: passage.text,
-        metadata: { ...(passage.metadata ?? {}), ...shared, index: from + offset },
+        metadata: { ...withoutSourceFields(passage.metadata), ...inherited, ...owned, index: from + offset },
       }));
       await this.store.upsert(this.collection, documents);
     }

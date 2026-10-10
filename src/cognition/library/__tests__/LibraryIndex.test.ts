@@ -62,6 +62,26 @@ describe('LibraryIndex over a vector store', () => {
     expect((await index.search({ text: 'budget weather hiring', mode: 'dense', topK: 10, scope })).map((passage) => passage.text)).toEqual(['Hiring opens in May.']);
   });
 
+  it('takes a passage\'s folder and title from its source alone', async () => {
+    await index.indexSource(
+      source({
+        folderId: null,
+        title: undefined,
+        metadata: { folderId: 'f-old', title: 'Old title', team: 'ops' },
+        passages: [{ text: 'The budget grows.', metadata: { folderId: 'f-older', firstSeq: 1 } }],
+      }),
+    );
+    const scope = { tenantId: 'org1', aclGroups: ['acct:ann'] };
+    expect(await index.search({ text: 'budget', mode: 'dense', scope, folderId: 'f-old' })).toEqual([]);
+    expect(await index.search({ text: 'budget', mode: 'dense', scope, folderId: 'f-older' })).toEqual([]);
+    const [passage] = await index.search({ text: 'budget', mode: 'dense', scope });
+    expect(passage.id).toBe('session:s1#0');
+    expect(passage.folderId).toBeUndefined();
+    expect(passage.title).toBeUndefined();
+    expect('folderId' in passage.metadata || 'title' in passage.metadata).toBe(false);
+    expect(passage.metadata).toMatchObject({ team: 'ops', firstSeq: 1 });
+  });
+
   it('removes a source and a tenant', async () => {
     await index.indexSource(source({}));
     await index.indexSource(source({ sourceId: 'document:d1', kind: 'document' }));

@@ -66,7 +66,7 @@ Every passage carries these metadata keys:
 | `tags` | The source's tags, `[]` when it has none. |
 | `title` | The title, when the source has one. |
 
-The keys the index writes win over the same keys in the source's `metadata`, and the source's `metadata` wins over a passage's own.
+The keys in this table come from the source's own fields: they win over the same keys in the source's `metadata` and in a passage's, and a `folderId` or `title` held only there is dropped, so a source indexed without a folder is in none. The source's `metadata` wins over a passage's own.
 
 `setSourceScope(sourceId, { aclGroups, folderId, tags, title })` writes the keys it is given onto every passage of the source through the store's `updateMetadata` and answers how many passages changed. `folderId: null` takes the source out of its folder; an empty `aclGroups` is refused. `removeSource(sourceId)` and `removeTenant(tenantId)` delete by filter and answer how many passages went.
 
