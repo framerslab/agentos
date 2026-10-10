@@ -62,8 +62,12 @@ export interface VoiceProviderEnvConfig {
    * fallbacks.
    */
   ttsPreference?: 'deepgram' | 'elevenlabs' | 'cartesia' | 'hume';
-  /** Whether the STT chain keeps a ring buffer + re-routes mid-utterance.
-   *  Default true — this is the whole point of the resilience work. */
+  /**
+   * Whether the STT chain keeps a ring buffer and re-routes mid-utterance.
+   * Default true. A session is then the chain's failover facade: it forwards
+   * transcripts, speech events, `'usage'` and `'warning'` from its provider
+   * sessions, and has no `flush()`.
+   */
   enableMidUtteranceFailover?: boolean;
   /** Whether the TTS chain re-sends accumulated tokens on primary
    *  failure. Default true. */
@@ -71,7 +75,11 @@ export interface VoiceProviderEnvConfig {
   /**
    * Options for the OpenAI Realtime transcription provider, which joins the
    * STT chain when `OPENAI_API_KEY` is set (model, turn detection, rollover,
-   * usage reports and the rest; the key comes from the environment).
+   * usage reports and the rest; the key comes from the environment). With
+   * mid-utterance failover on, a session has no `flush()`, so a
+   * configuration in which the caller commits each turn
+   * (`turnDetection: null`, or a model that takes no server turn detection)
+   * needs `enableMidUtteranceFailover: false`.
    */
   openaiRealtime?: Omit<OpenAIRealtimeTranscriptionSTTConfig, 'apiKey'>;
 }
@@ -118,6 +126,17 @@ function sttProvidersFromEnv(
   return providers;
 }
 
+/**
+ * Builds the STT and TTS chains from the provider keys in the environment,
+ * with a shared circuit breaker and metrics reporter. Both chains fail over
+ * mid-call by default. An STT session is then the chain's failover facade:
+ * it forwards transcripts, speech events, `'usage'` and `'warning'` from its
+ * provider sessions, and has no `flush()`.
+ *
+ * @param config - Environment source, preferences, failover switches and OpenAI Realtime options.
+ * @returns The chains with their metrics reporter and circuit breaker.
+ * @throws {NoVoiceProvidersAvailableError} When the keys set build no STT provider or no TTS provider.
+ */
 export function createVoiceProvidersFromEnv(
   config: VoiceProviderEnvConfig = {}
 ): VoiceProviderBundle {
@@ -232,9 +251,10 @@ export interface SttProviderEnvConfig {
   env?: Record<string, string | undefined>;
   /**
    * Whether the chain keeps a ring buffer and re-routes mid-utterance.
-   * Default false here: the failover facade forwards transcripts and speech
-   * events only and has no `flush()`, so with failover off a session keeps
-   * its provider's whole surface (`flush()`, `'usage'`, `'warning'`).
+   * Default false here: with failover off a session is its provider's own,
+   * with `flush()` and every event the provider emits. The failover facade
+   * forwards transcripts, speech events, `'usage'` and `'warning'`, and has
+   * no `flush()`.
    */
   enableMidUtteranceFailover?: boolean;
   /**

@@ -63,7 +63,10 @@ export interface StreamingSTTChainOptions {
   onProviderFailed?: (event: ProviderFailedEvent) => void;
   onProviderFailover?: (event: ProviderFailoverEvent) => void;
   /** When true, the chain tracks audio via a ring buffer and re-routes to
-   *  the next backup on mid-session failure. Default: false. */
+   *  the next backup on mid-session failure. The session is then the
+   *  chain's facade: it forwards transcripts, speech events, `'usage'` and
+   *  `'warning'` from its provider sessions, and has no `flush()`.
+   *  Default: false. */
   enableMidUtteranceFailover?: boolean;
   /** Ring buffer capacity in ms for mid-utterance replay. Default 3000. */
   ringBufferCapacityMs?: number;
@@ -175,7 +178,11 @@ export class StreamingSTTChain implements IStreamingSTT {
    * into a ring buffer, dedupes transcripts across providers, and on
    * session error re-routes to the next candidate. A close the caller asks
    * for ends the session: it starts no backup, and a backup still starting
-   * then is closed when it opens.
+   * then is closed when it opens. The facade forwards `'transcript'`,
+   * `'vad'`, `'speech_start'`, `'speech_end'`, `'usage'` and `'warning'`
+   * from its sessions, and has `pushAudio()` and `close()` but no `flush()`:
+   * a caller that ends turns with `flush()` runs the chain with failover
+   * off, where the session is the provider's own.
    */
   private wrapSession(
     initial: StreamingSTTSession,
@@ -214,11 +221,20 @@ export class StreamingSTTChain implements IStreamingSTT {
         if (r.isDuplicate) return;
         facade.emit('transcript', evt);
       });
-      for (const passthrough of ['vad', 'speech_start', 'speech_end'] as const) {
+      // 'usage' is forwarded from every session attached, a failed one too:
+      // a session reports the audio of its connections as it closes.
+      for (const passthrough of ['vad', 'speech_start', 'speech_end', 'usage'] as const) {
         session.on(passthrough, (...args: unknown[]) => {
           facade.emit(passthrough, ...args);
         });
       }
+      session.on('warning', (warning: Error) => {
+        // A provider session prints a warning nobody listens for. Listening
+        // here must not silence it, so the facade prints it when its own
+        // consumer does not listen either.
+        if (facade.listenerCount('warning') > 0) facade.emit('warning', warning);
+        else console.warn(`[${providerId}] ${warning.message}`);
+      });
       session.on('error', (err: Error) => {
         void tryFailover(err);
       });
