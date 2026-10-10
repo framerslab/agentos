@@ -1,3 +1,9 @@
+## [0.13.25](https://github.com/framerslab/agentos/compare/v0.13.24...v0.13.25) (2026-10-10)
+
+### feat
+
+* **api:** cancel generation and embedding calls with an AbortSignal (#231) ([59c8bdf](https://github.com/framerslab/agentos/commit/59c8bdfe8342275df51f5372f28b5bd144c8eda7))
+
 ## [0.13.24](https://github.com/framerslab/agentos/compare/v0.13.23...v0.13.24) (2026-10-10)
 
 ### feat

@@ -174,4 +174,20 @@ describe("agent({ runtime: 'gmi' }) keeps what agent() does", () => {
     expect(retrieve).toHaveBeenCalledWith('How do I configure a guardrail?');
     expect(result.grounding).toMatchObject({ totalClaims: 1, supportedCount: 1, overallGrounded: true });
   });
+
+  it("legacy runtime: session.send and session.stream hand the provider the caller's abort signal", async () => {
+    const k = key();
+    // `whole`: the legacy runtime's send asks for a whole response; its stream streams.
+    const s = script('openai', k, { replies: [reply.text('One.'), reply.text('Two.')], whole: true });
+    const session = agent(base(k, { runtime: 'legacy' })).session('s');
+    const controller = new AbortController();
+    expect((await session.send('one', { abortSignal: controller.signal })).text).toBe('One.');
+    const streamed = session.stream('two', { abortSignal: controller.signal });
+    const deltas: string[] = [];
+    for await (const delta of streamed.textStream) deltas.push(delta);
+    expect(deltas.join('')).toBe('Two.');
+    expect(s.seen.map((call) => call.streamed)).toEqual([false, true]);
+    expect(s.seen[0].options.abortSignal).toBe(controller.signal);
+    expect(s.seen[1].options.abortSignal).toBe(controller.signal);
+  });
 });

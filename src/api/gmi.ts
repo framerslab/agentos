@@ -594,9 +594,17 @@ export function gmi(opts: GmiOptions): GmiHandle {
         },
       });
 
+      // A turn runs under the session's stop and the caller's own signal, when it
+      // passes one: either ends the turn, and only close() ends the session.
+      const turnSignal = (callerSignal: AbortSignal | undefined): AbortSignal =>
+        callerSignal ? AbortSignal.any([stopTurns.signal, callerSignal]) : stopTurns.signal;
+
       const session = {
         id: sessionId,
-        send: (input: MessageContent, sendOpts?: SessionSendOptions<GmiTurnOptions['responseSchema']>) => {
+        send: async (input: MessageContent, sendOpts?: SessionSendOptions<GmiTurnOptions['responseSchema']>) => {
+          const callerSignal = sendOpts?.abortSignal;
+          // A send whose signal has already aborted starts no turn.
+          callerSignal?.throwIfAborted();
           const options = Object.fromEntries(
             Object.entries({
               toolChoice: sendOpts?.toolChoice,
@@ -606,15 +614,24 @@ export function gmi(opts: GmiOptions): GmiHandle {
               maxTokens: sendOpts?.maxTokens,
             }).filter(([, v]) => v !== undefined),
           );
-          return sendGmiTurn(deps('agent.session.send'), input, {
-            options,
-            responseSchema: sendOpts?.responseSchema,
-            schemaName: sendOpts?.schemaName,
-            blockLabel: sendOpts?.blockLabel,
-            abortSignal: stopTurns.signal,
-          });
+          try {
+            return await sendGmiTurn(deps('agent.session.send'), input, {
+              options,
+              responseSchema: sendOpts?.responseSchema,
+              schemaName: sendOpts?.schemaName,
+              blockLabel: sendOpts?.blockLabel,
+              abortSignal: turnSignal(callerSignal),
+            });
+          } catch (error) {
+            // Once the caller's signal has aborted, the send rejects with its
+            // reason, as agent()'s send does; a turn that close() alone ended
+            // keeps the GMI's error.
+            if (callerSignal?.aborted) throw callerSignal.reason;
+            throw error;
+          }
         },
-        stream: (input: MessageContent) => streamGmiTurn(deps('agent.session.stream'), input, { abortSignal: stopTurns.signal }),
+        stream: (input: MessageContent, streamOpts?: { abortSignal?: AbortSignal }) =>
+          streamGmiTurn(deps('agent.session.stream'), input, { abortSignal: turnSignal(streamOpts?.abortSignal) }),
         messages: (): SessionTranscriptMessage[] => history?.messages() ?? [],
         reseed: (snapshot: SessionTranscriptMessage[]) => {
           if (!history) throw new Error('reseed requires session history (history: false is set on this agent)');

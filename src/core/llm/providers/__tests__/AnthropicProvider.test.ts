@@ -252,6 +252,47 @@ describe('AnthropicProvider', () => {
   });
 
   // -------------------------------------------------------------------------
+  // The caller's abort signal
+  // -------------------------------------------------------------------------
+
+  describe("the caller's abort signal", () => {
+    /** Sends one completion whose fetch waits for its signal, aborts it, and checks the request ended once. */
+    async function expectAbortedOnce(p: AnthropicProvider): Promise<void> {
+      let sent: AbortSignal | undefined;
+      fetchMock.mockImplementationOnce(
+        (_url: string, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            sent = init?.signal ?? undefined;
+            sent?.addEventListener('abort', () => reject(sent?.reason), { once: true });
+          }),
+      );
+      const controller = new AbortController();
+      const call = p.generateCompletion('claude-sonnet-4-20250514', [{ role: 'user', content: 'Hi' }], {
+        abortSignal: controller.signal,
+      });
+      await vi.waitFor(() => expect(sent).toBeDefined());
+      expect(sent?.aborted).toBe(false);
+      controller.abort();
+      expect(sent?.aborted).toBe(true);
+      await expect(call).rejects.toMatchObject({ code: 'REQUEST_ABORTED' });
+      // Three attempts are allowed, and an abort is not retried.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+
+    it('aborts a completion on the streamed transport (the default) and sends no retry', async () => {
+      const p = new AnthropicProvider();
+      await p.initialize({ apiKey: 'test-anthropic-key', maxRetries: 3 });
+      await expectAbortedOnce(p);
+    });
+
+    it('aborts a completion on the single-shot transport and sends no retry', async () => {
+      const p = new AnthropicProvider();
+      await p.initialize({ apiKey: 'test-anthropic-key', maxRetries: 3, streamCompletions: false });
+      await expectAbortedOnce(p);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Stream-idle timeout (mid-stream stall)
   // -------------------------------------------------------------------------
 
