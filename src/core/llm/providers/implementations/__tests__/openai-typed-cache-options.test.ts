@@ -235,6 +235,30 @@ describe('OpenAIProvider typed cache/tier options', () => {
     expect(sent?.aborted).toBe(true);
     await expect(call).rejects.toMatchObject({ code: 'REQUEST_ABORTED' });
   });
+
+  it("hands the /v1/responses request the caller's signal too (a GPT-6 tool call goes there)", async () => {
+    let sent: AbortSignal | undefined;
+    let url: unknown;
+    vi.spyOn(globalThis, 'fetch').mockImplementationOnce(
+      (input: unknown, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          url = input;
+          sent = init?.signal ?? undefined;
+          sent?.addEventListener('abort', () => reject(sent?.reason), { once: true });
+        }),
+    );
+    const tools: Array<Record<string, unknown>> = [
+      { type: 'function', function: { name: 'ping', description: 'Ping.', parameters: { type: 'object', properties: {} } } },
+    ];
+    const controller = new AbortController();
+    const call = provider.generateCompletion('gpt-6-luna', messages, { abortSignal: controller.signal, tools });
+    await vi.waitFor(() => expect(sent).toBeDefined());
+    expect(String(url)).toMatch(/\/responses$/);
+    expect(sent?.aborted).toBe(false);
+    controller.abort();
+    expect(sent?.aborted).toBe(true);
+    await expect(call).rejects.toMatchObject({ code: 'REQUEST_ABORTED' });
+  });
 });
 
 describe('promptCacheSessionId derivation source (spec review fold)', () => {
