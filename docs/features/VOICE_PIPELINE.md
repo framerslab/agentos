@@ -111,7 +111,7 @@ wunderland chat \
 
 | Detector | The turn ends when | Text sent to the agent |
 |------|-------------|---------|
-| `HeuristicEndpointDetector` | speech ends and the last final transcript ends in `.`, `?` or `!`; otherwise after `silenceTimeoutMs` (default `1500`) of silence | the last final transcript it received; backchannel phrases such as "uh huh" are dropped |
+| `HeuristicEndpointDetector` | speech ends and the last final transcript ends in `.`, `?` or `!`; otherwise after `silenceTimeoutMs` (default `1500`) of silence. When speech ends before any final, as it does with `OpenAIRealtimeTranscriptionSTT`, whose final for an utterance follows its end of speech, the first final that arrives before speech resumes is decided the same way when it arrives | the last final transcript with text it received; a final with no text changes nothing, and backchannel phrases such as "uh huh" are dropped |
 | `AcousticEndpointDetector` | silence lasts `utteranceEndThresholdMs` (default `3000`) after speech ends | none: its `turn_complete` carries an empty transcript, and the orchestrator sends that empty text to the agent |
 | `SemanticEndpointDetector` (pack `@framers/agentos-ext-endpoint-semantic`) | terminal punctuation as above; otherwise an LLM, called through the pack's `llmCall`, judges whether the turn is complete, with a silence timeout as the fallback | the transcript |
 
