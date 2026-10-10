@@ -1,5 +1,9 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { FileTokenStore } from '../FileTokenStore.js';
 import { OAuthGrantRefused, RedirectOAuthFlow, type RedirectOAuthConfig } from '../RedirectOAuthFlow.js';
 import { SealedTokenStore, type SealedBytesStore } from '../SealedTokenStore.js';
 import type { IOAuthTokenStore } from '../types.js';
@@ -84,8 +88,9 @@ afterEach(() => {
 
 /**
  * Tests for {@link RedirectOAuthFlow}: the authorization code grant with PKCE split across a web server's two
- * requests, the state checked before any call, the standard token calls, one refresh at a time per kept grant with
- * the access token held in memory, revocation, and keep, refresh and forget of one key taking turns.
+ * requests, the flow's own parameters kept whatever extraParams name, the state checked before any call, the standard
+ * token calls with an empty access token refused, one refresh at a time per kept grant with the access token held in
+ * memory and never handed to the store, revocation, and keep, refresh and forget of one key taking turns.
  */
 describe('RedirectOAuthFlow', () => {
   it('begins with an address on the authorization endpoint, answering a new state and verifier to keep', () => {
@@ -117,6 +122,40 @@ describe('RedirectOAuthFlow', () => {
     expect(new URL(second.url).searchParams.get('scope')).toBe('files.read');
     expect(new URL(second.url).searchParams.has('prompt')).toBe(false);
     expect(sent).toHaveLength(0);
+  });
+
+  it('sets its own parameters whatever extraParams name, so the address carries the state and the challenge of the verifier it answers', () => {
+    const { fetchImpl } = endpoint(() => json(500, {}));
+    const flow = new ExampleFlow(null, fetchImpl);
+
+    // Every name the flow sets, each with another value, and one name it does not set.
+    const begun = flow.begin({
+      redirectUri: REDIRECT,
+      extraParams: {
+        response_type: 'token',
+        client_id: 'client-2',
+        redirect_uri: 'https://elsewhere.example.test/callback',
+        scope: 'admin',
+        state: 'chosen-state',
+        code_challenge: 'chosen-challenge',
+        code_challenge_method: 'plain',
+        prompt: 'consent',
+      },
+    });
+
+    const params = [...new URL(begun.url).searchParams];
+    expect(Object.fromEntries(params)).toEqual({
+      response_type: 'code',
+      client_id: 'client-1',
+      redirect_uri: REDIRECT,
+      scope: 'files.read profile',
+      state: begun.state,
+      code_challenge: createHash('sha256').update(begun.codeVerifier).digest('base64url'),
+      code_challenge_method: 'S256',
+      prompt: 'consent',
+    });
+    // Each parameter once (RFC 6749 section 3.1).
+    expect(params).toHaveLength(8);
   });
 
   it('refuses a state that differs before any call, and exchanges the code with the verifier as a form', async () => {
@@ -173,11 +212,16 @@ describe('RedirectOAuthFlow', () => {
   });
 
   it('reads a refused exchange as OAuthGrantRefused whose message holds no code, verifier or secret', async () => {
-    const { fetchImpl } = endpoint((request) =>
-      request.form.get('code') === 'code-answered-200'
-        ? json(200, { error: 'bad_verification_code' })
-        : json(400, { error: 'invalid_grant', error_description: 'The code was already used.' }),
-    );
+    const { fetchImpl } = endpoint((request) => {
+      switch (request.form.get('code')) {
+        case 'code-answered-200':
+          return json(200, { error: 'bad_verification_code' });
+        case 'code-answered-empty':
+          return json(200, { access_token: '', token_type: 'Bearer', expires_in: 3600, refresh_token: 'refresh-1' });
+        default:
+          return json(400, { error: 'invalid_grant', error_description: 'The code was already used.' });
+      }
+    });
     const flow = new ExampleFlow(null, fetchImpl);
     const begun = flow.begin({ redirectUri: REDIRECT });
     const input = {
@@ -204,6 +248,11 @@ describe('RedirectOAuthFlow', () => {
       status: 200,
       providerError: 'bad_verification_code',
     });
+    // So is an answer whose access token is empty: RFC 6749 appendix A.12 gives a token one character at least.
+    await expect(flow.complete({ ...input, code: 'code-answered-empty' })).rejects.toMatchObject({
+      reason: 'exchange',
+      status: 200,
+    });
   });
 
   it('refreshes a kept grant once at a time, holds the access token in memory, and keeps a refresh token the answer leaves out', async () => {
@@ -211,6 +260,9 @@ describe('RedirectOAuthFlow', () => {
     const { sent, fetchImpl } = endpoint((request) => {
       const refreshToken = request.form.get('refresh_token');
       if (refreshToken === 'refresh-revoked') return json(400, { error: 'invalid_grant' });
+      if (refreshToken === 'refresh-answered-empty') {
+        return json(200, { access_token: '', token_type: 'Bearer', expires_in: 3600 });
+      }
       issued += 1;
       return json(200, {
         access_token: `access-${issued}`,
@@ -262,7 +314,61 @@ describe('RedirectOAuthFlow', () => {
     expect(refused).toBeInstanceOf(OAuthGrantRefused);
     expect(refused).toMatchObject({ reason: 'refresh', status: 400, providerError: 'invalid_grant' });
 
+    // A refresh answered with an empty access token is refused, so accessToken never answers an empty token.
+    await store.save('grant-4', { accessToken: '', refreshToken: 'refresh-answered-empty', expiresAt: 0 });
+    await expect(flow.accessToken('grant-4')).rejects.toMatchObject({ reason: 'refresh', status: 200 });
+
     await expect(flow.accessToken('grant-unknown')).rejects.toMatchObject({ reason: 'missing' });
+  });
+
+  it('hands its store the refresh token and the metadata alone, so a FileTokenStore writes no access token or id token', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'redirect-oauth-flow-'));
+    try {
+      const { sent, fetchImpl } = endpoint(() =>
+        json(200, {
+          access_token: 'access-2',
+          token_type: 'Bearer',
+          expires_in: 3600,
+          refresh_token: 'refresh-2',
+          id_token: 'id-2',
+        }),
+      );
+      const store = new FileTokenStore(dir);
+      /** What the store wrote for the grant. */
+      const written = async (): Promise<unknown> => JSON.parse(await readFile(join(dir, 'grant-1.json'), 'utf8'));
+
+      const keeper = new ExampleFlow(store, fetchImpl);
+      await keeper.keep('grant-1', {
+        accessToken: 'access-1',
+        refreshToken: 'refresh-1',
+        expiresAt: Date.now() + 3_600_000,
+        idToken: 'id-1',
+        metadata: { scope: 'files.read' },
+      });
+
+      expect(await written()).toEqual({
+        accessToken: '',
+        expiresAt: 0,
+        refreshToken: 'refresh-1',
+        metadata: { scope: 'files.read' },
+      });
+      // The flow that kept the grant answers its access token from memory.
+      expect(await keeper.accessToken('grant-1')).toBe('access-1');
+      expect(sent).toHaveLength(0);
+
+      // A flow that holds nothing refreshes from the file. The refresh token the answer turns over is written; the
+      // access token and the id token of the answer are not.
+      expect(await new ExampleFlow(store, fetchImpl).accessToken('grant-1')).toBe('access-2');
+      expect(sent).toHaveLength(1);
+      expect(await written()).toEqual({
+        accessToken: '',
+        expiresAt: 0,
+        refreshToken: 'refresh-2',
+        metadata: { scope: 'files.read' },
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('revokes at the revocation endpoint, and forgets a kept grant whether or not the provider revoked it', async () => {
