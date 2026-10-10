@@ -8,7 +8,7 @@ import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { PostgresVectorStore } from '../../rag/vector_stores/PostgresVectorStore.js';
-import { LibraryIndex, type LibraryScope, type LibrarySource } from '../LibraryIndex.js';
+import { LibraryIndex, type LibraryScope, type LibrarySearch, type LibrarySource } from '../LibraryIndex.js';
 
 const URL = process.env.AGENTOS_TEST_POSTGRES_URL;
 const PREFIX = `lib${Date.now().toString(36)}_`;
@@ -134,6 +134,20 @@ describe.skipIf(!URL)('LibraryIndex over PostgresVectorStore on Postgres', () =>
     expect(await sources({ tags: ['q3'] })).toEqual(['document:b', 'session:a']);
     expect(await sources({ sourceIds: ['document:b'] })).toEqual(['document:b']);
     expect(await sources({ sourceIds: [] })).toEqual([]);
+  });
+
+  it('narrows to several folders, and searches several narrowings as one hybrid search inside the scope', async () => {
+    const sources = async (extra: Pick<LibrarySearch, 'folderIds' | 'anyOf'>) =>
+      [...new Set((await index.search({ text: 'budget', scope: ANN, mode: 'hybrid', topK: 10, ...extra })).map((passage) => passage.sourceId))].sort();
+    // The document is in no folder, so no list of folders holds it.
+    expect(await sources({ folderIds: ['f1', 'f9'] })).toEqual(['session:a']);
+    expect(await sources({ folderIds: ['f9'] })).toEqual([]);
+    expect(await sources({ anyOf: [{ folderIds: ['f1'] }, { sourceIds: ['document:b'] }] })).toEqual(['document:b', 'session:a']);
+    // The other workspace's session is outside the scope in every branch.
+    expect(await sources({ anyOf: [{ kinds: ['document'] }, { sourceIds: ['session:c'] }] })).toEqual(['document:b']);
+    const found = await index.search({ text: 'budget', scope: ANN, mode: 'hybrid', topK: 10, anyOf: [{ folderIds: ['f1'] }, { sourceIds: ['document:b'] }] });
+    expect(found.map((passage) => passage.id).sort()).toEqual(['document:b#0', 'session:a#0', 'session:a#1']);
+    expect(found.every((passage, at) => Number.isFinite(passage.score) && (at === 0 || found[at - 1].score >= passage.score))).toBe(true);
   });
 
   it('changes who may see a source, takes it out of its folder and replaces its tags and title', async () => {
