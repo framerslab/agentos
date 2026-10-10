@@ -145,7 +145,9 @@ export abstract class RedirectOAuthFlow {
    * scopes for this request; `extraParams` are added to the address (for example `access_type` and `prompt`). An
    * extra parameter with the name of one the flow sets (`response_type`, `client_id`, `redirect_uri`, `scope`,
    * `state`, `code_challenge` or `code_challenge_method`) is left out, so the address always carries the state
-   * answered and the challenge of the verifier answered.
+   * answered and the challenge of the verifier answered. A query the configured authorization endpoint already has is
+   * kept (RFC 6749 section 3.1), except that a parameter in it with the name of one added here is replaced, so no
+   * parameter is sent twice. Throws a `TypeError` when the authorization endpoint is not an absolute address.
    */
   begin(input: { redirectUri: string; extraParams?: Record<string, string>; scopes?: readonly string[] }): RedirectBegin {
     const config = this.getConfig();
@@ -162,7 +164,10 @@ export abstract class RedirectOAuthFlow {
       code_challenge: generateCodeChallenge(codeVerifier),
       code_challenge_method: 'S256',
     });
-    return { url: `${config.authorizationEndpoint}?${params.toString()}`, state, codeVerifier };
+    const address = new URL(config.authorizationEndpoint);
+    // `set`, not a second `?`: the endpoint's own query stays, and a parameter of the same name in it is replaced.
+    for (const [name, value] of params) address.searchParams.set(name, value);
+    return { url: address.toString(), state, codeVerifier };
   }
 
   /**
