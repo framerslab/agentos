@@ -65,7 +65,7 @@ import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../core/util
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import type { AssembledMemoryContext } from '../memory/core/types.js';
 import { ConversationHistoryManager } from './ConversationHistoryManager';
-import { CognitiveMemoryBridge } from './CognitiveMemoryBridge';
+import { CognitiveMemoryBridge, type CognitiveMemoryTurnScope } from './CognitiveMemoryBridge';
 import { SentimentTracker } from './SentimentTracker';
 import { MetapromptExecutor } from './MetapromptExecutor';
 import { feedbackTraceMessage, type NormalizedUserFeedback } from './userFeedback';
@@ -127,6 +127,23 @@ function contentKey(content: unknown): string {
   } catch {
     return '';
   }
+}
+
+/** The ids a turn's cognitive memory works under (`metadata.memoryScope`). */
+interface TurnMemoryScope {
+  userId?: string;
+  sessionId?: string;
+}
+
+/** The memory scope a turn names in `metadata.memoryScope`, blank ids left out; undefined when it names none. */
+function memoryScopeOf(turnInput: GMITurnInput): TurnMemoryScope | undefined {
+  const named = turnInput.metadata?.memoryScope;
+  if (!named || typeof named !== 'object') return undefined;
+  const visible = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value : undefined);
+  const userId = visible(named.userId);
+  const sessionId = visible(named.sessionId);
+  if (!userId && !sessionId) return undefined;
+  return { ...(userId ? { userId } : {}), ...(sessionId ? { sessionId } : {}) };
 }
 
 /** Adds one provider usage report to the turn's total. */
@@ -197,6 +214,14 @@ export class GMI implements IGMI {
    */
   private turnResolution: CompletionResolution | undefined;
 
+  /**
+   * The ids the turn's cognitive memory files and recalls traces under, when
+   * the turn named them (`metadata.memoryScope`); tools, the user context and
+   * the reasoning trace keep the turn's own ids. Set when a user turn starts;
+   * a tool continuation keeps the scope of the turn it continues.
+   */
+  private turnMemoryScope: TurnMemoryScope | undefined;
+
   // (Self-reflection state is owned by MetapromptExecutor)
 
   // Cognitive Memory Bridge
@@ -258,7 +283,7 @@ export class GMI implements IGMI {
       this.memoryBridge = new CognitiveMemoryBridge(
         this.cognitiveMemory,
         () => this.currentGmiMood,
-        () => this.currentUserContext,
+        () => this.memoryUserContext(),
         () => this.getCurrentPrimaryPersonaId(),
         () => this.gmiId,
         (type, message, details) => this.addTraceEntry(type as ReasoningEntryType, message, details),
@@ -650,6 +675,31 @@ export class GMI implements IGMI {
     }));
   }
 
+  /**
+   * The user context as cognitive memory reads it: the turn's memory scope user
+   * in place of the turn's user when the turn named one, so memory files and
+   * recalls under that id while tools and prompts keep the turn's user.
+   */
+  private memoryUserContext(): UserContext {
+    const userId = this.turnMemoryScope?.userId;
+    return userId ? { ...this.currentUserContext, userId } : this.currentUserContext;
+  }
+
+  /**
+   * The session, conversation and organization a turn's memory recall runs
+   * for. A memory scope session the turn named stands in for its session, and
+   * for its conversation unless the turn names a conversation.
+   */
+  private memoryTurnScope(turnInput: GMITurnInput): CognitiveMemoryTurnScope {
+    const organizationId = this.getOrganizationIdForTurn(turnInput);
+    const sessionId = this.turnMemoryScope?.sessionId;
+    if (!sessionId) {
+      return { sessionId: turnInput.sessionId, conversationId: this.getConversationIdForTurn(turnInput), organizationId };
+    }
+    const namedConversation = typeof turnInput.metadata?.conversationId === 'string' ? turnInput.metadata.conversationId.trim() : '';
+    return { sessionId, conversationId: namedConversation || sessionId, organizationId };
+  }
+
   private buildToolSessionData(turnInput: GMITurnInput): Record<string, any> | undefined {
     const sessionId = typeof turnInput.sessionId === 'string' ? turnInput.sessionId.trim() : '';
     const conversationId = this.getConversationIdForTurn(turnInput);
@@ -934,7 +984,10 @@ export class GMI implements IGMI {
     const turnNumber = ++this.turnSequence;
     // A user turn starts at the primary hop; a tool continuation stays on the
     // hop that served the step it continues.
-    if (turnInput.metadata?.isToolContinuation !== true) this.turnResolution = undefined;
+    if (turnInput.metadata?.isToolContinuation !== true) {
+      this.turnResolution = undefined;
+      this.turnMemoryScope = memoryScopeOf(turnInput);
+    }
     this.stateOwnerTurn = turnNumber;
     // False once a newer turn has started; lifecycle writes below check it.
     const ownsState = (): boolean => this.stateOwnerTurn === turnNumber;
@@ -1135,11 +1188,7 @@ export class GMI implements IGMI {
 
         if (isUserInitiatedTurn && currentTurnText) {
           // Recall is limited to this turn's user, session and conversation scopes.
-          assembledMemoryContext = await this.memoryBridge?.assembleContext(currentTurnText, {
-            sessionId: turnInput.sessionId,
-            conversationId: this.getConversationIdForTurn(turnInput),
-            organizationId: this.getOrganizationIdForTurn(turnInput),
-          }) ?? null;
+          assembledMemoryContext = await this.memoryBridge?.assembleContext(currentTurnText, this.memoryTurnScope(turnInput)) ?? null;
         }
 
         const promptExecContext = this.buildPromptExecutionContext();
@@ -1402,14 +1451,14 @@ export class GMI implements IGMI {
           }
           this.addTraceEntry(ReasoningEntryType.PROMPT_CONSTRUCTION_COMPLETE, `Prompt constructed for model ${modelTargetInfo.modelId}.`);
 
-          // A turn's response schema that the primary hop's payload does not carry
-          // rides the prompt. It goes in before the host's hook, as generateText puts
-          // it in before onBeforeGeneration, so a hook that removes it removes it,
-          // and the gateway adds no second copy on that hop. Fallback hops keep the
-          // gateway's per-hop rule.
+          // A turn's response schema that the hop's payload does not carry rides the
+          // prompt. It goes in before the host's hook, on every hop, as generateText
+          // puts it in before onBeforeGeneration on each fallback leg (a generateText
+          // call of its own), so a hook that removes it removes it, and the gateway
+          // adds no second copy on that hop.
           let promptForHook: ChatMessage[] = promptMessages;
           let attemptSchemaInPrompt = schemaInPrompt;
-          if (gateway && resolution && resolution.hop === 0 && responseSchema && !schemaInPrompt) {
+          if (gateway && resolution && responseSchema && !schemaInPrompt) {
             const instruction = gateway.schemaInstruction?.(resolution, responseSchema, schemaName);
             if (instruction) {
               promptForHook = withSystemMessage(promptMessages, instruction);
@@ -1444,11 +1493,12 @@ export class GMI implements IGMI {
 
           let attempt: AsyncIterable<ModelCompletionResponse>;
           let attemptOutcome: Promise<CompletionOutcome> | undefined;
+          // Initialised through the assertion, as stepSchemaInPayload is.
+          let gatewayAttempt = undefined as CompletionAttempt | undefined;
           if (gateway && resolution) {
-            const gatewayAttempt: CompletionAttempt = gateway.stream(resolution, sendMessages, llmOptions, responseSchema, schemaName, attemptSchemaInPrompt);
+            gatewayAttempt = gateway.stream(resolution, sendMessages, llmOptions, responseSchema, schemaName, attemptSchemaInPrompt);
             attempt = gatewayAttempt;
             attemptOutcome = gatewayAttempt.outcome;
-            stepSchemaInPayload = gatewayAttempt.schemaInPayload;
           } else {
             const provider = this.llmProviderManager.getProvider(modelTargetInfo.providerId);
             if (!provider) {
@@ -1554,6 +1604,9 @@ export class GMI implements IGMI {
             }
             throw stepError;
           }
+          // Read once the stream has ended: a provider that sent the request again without the
+          // schema payload (OpenRouter's json_object retry) has said so by then.
+          stepSchemaInPayload = gatewayAttempt?.schemaInPayload;
 
           if (gateway && route && resolution && attemptOutcome) {
             const outcome = await attemptOutcome;
@@ -1740,7 +1793,9 @@ export class GMI implements IGMI {
         break main_processing_loop; // Break if no tool calls
       }
 
-      await this.memoryBridge?.syncForTurn(turnInput, aggregatedResponseText);
+      // The exchange is filed under the turn's memory scope session, when it named one.
+      const memorySessionId = this.turnMemoryScope?.sessionId;
+      await this.memoryBridge?.syncForTurn(memorySessionId ? { ...turnInput, sessionId: memorySessionId } : turnInput, aggregatedResponseText);
 
       await this.performPostTurnIngestion(
         this.stringifyTurnContent(turnInput.content) ?? '',

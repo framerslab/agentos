@@ -55,6 +55,14 @@ interface Hold {
   ignoresSignal?: boolean;
 }
 
+/** A reply from a provider that never reads the abort signal (see `reply.ignoringSignal`). */
+interface IgnoringSignal {
+  gate: Promise<void>;
+  count: number;
+  /** How many deltas the reply has yielded, and how many it had yielded when its generator closed (its `finally` ran). */
+  record: { yielded: number; closedAfter?: number };
+}
+
 export const scripts = new Map<string, ProviderScript>();
 
 /** Scripts the provider that starts with `apiKey`. */
@@ -123,6 +131,16 @@ export const reply = {
     Object.assign([...before], { hold: { gate, after, ignoresSignal: true } satisfies Hold }),
   /** One delta, then the provider throws `error` (a refusal that reports its usage in `details.usage`, a dropped connection). */
   textThenThrow: (text: string, error: Error) => [{ ...base, modelId: 'stub-model', choices: [], responseTextDelta: text }, error],
+  /**
+   * A provider that never reads the abort signal, as a custom IProvider may
+   * not: one delta, then, once `gate` resolves, `count - 1` more and the final
+   * chunk, aborted or not. `record` counts the deltas it has yielded and keeps
+   * that count when its generator closes.
+   */
+  ignoringSignal: (count: number, gate: Promise<void>) => {
+    const record: IgnoringSignal['record'] = { yielded: 0 };
+    return Object.assign([] as Array<Record<string, unknown>>, { ignoring: { gate, count, record } satisfies IgnoringSignal, record });
+  },
 };
 
 /** A deterministic embedding: word hashes in 1536 buckets (text-embedding-3-small's size), normalised. */
@@ -201,6 +219,23 @@ export function stubProviderClass(providerId: string) {
         return;
       }
       if (next instanceof Error) throw next;
+      const ignoring = (next as { ignoring?: IgnoringSignal }).ignoring;
+      if (ignoring) {
+        const { record } = ignoring;
+        try {
+          record.yielded += 1;
+          yield { ...base, modelId, choices: [], responseTextDelta: 'part 1 ' };
+          await ignoring.gate;
+          for (let i = 2; i <= ignoring.count; i++) {
+            record.yielded += 1;
+            yield { ...base, modelId, choices: [], responseTextDelta: `part ${i} ` };
+          }
+          yield { ...base, modelId, isFinal: true, choices: [{ index: 0, message: { role: 'assistant', content: '' }, finishReason: 'stop' }] };
+        } finally {
+          record.closedAfter = record.yielded;
+        }
+        return;
+      }
       const breakAfter = (next as { breakAfter?: number }).breakAfter;
       for (let i = 0; i < next.length; i++) {
         const chunk = next[i];
