@@ -1,3 +1,9 @@
+## [0.13.30](https://github.com/framerslab/agentos/compare/v0.13.29...v0.13.30) (2026-10-10)
+
+### fix
+
+* **vision:** the local model tiers load and run, and a failed tier is reported (#252) ([4da8895](https://github.com/framerslab/agentos/commit/4da8895d8b63ced7c7dc312e31f43158e3ac935f))
+
 ## [0.13.29](https://github.com/framerslab/agentos/compare/v0.13.28...v0.13.29) (2026-10-10)
 
 ### feat
