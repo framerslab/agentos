@@ -103,6 +103,9 @@ vi.mock('ws', () => {
 });
 
 import { OpenAIRealtimeTranscriptionSTT } from '../providers/OpenAIRealtimeTranscriptionSTT.js';
+import { VoicePipelineOrchestrator } from '../VoicePipelineOrchestrator.js';
+import { HeuristicEndpointDetector } from '../HeuristicEndpointDetector.js';
+import { HardCutBargeinHandler } from '../HardCutBargeinHandler.js';
 import type { StreamingSTTSession, TranscriptEvent, StreamingSTTUsageEvent } from '../types.js';
 // Default import: the 'ws' types only expose WebSocket as the default export
 // under this tsconfig (TS2595 on a named import). vi.mock supplies the same
@@ -1419,5 +1422,103 @@ describe('OpenAIRealtimeTranscriptionSTT: rollover and usage', () => {
     expect(Sockets.instances).toHaveLength(3); // the dropped connection counts as following: a reconnect, not the end
     expect(log.events).not.toContain('close');
     session.close();
+  });
+});
+
+describe('OpenAIRealtimeTranscriptionSTT: turns in VoicePipelineOrchestrator', () => {
+  /**
+   * The orchestrator over the real provider, the real HeuristicEndpointDetector and
+   * HardCutBargeinHandler, with a mock transport, TTS session and agent.
+   */
+  async function pipeline() {
+    const transport = new EventEmitter() as any;
+    transport.id = 'pipeline-test';
+    transport.state = 'open';
+    transport.sendAudio = vi.fn().mockResolvedValue(undefined);
+    transport.sendControl = vi.fn().mockResolvedValue(undefined);
+    transport.close = vi.fn().mockResolvedValue(undefined);
+    const ttsSession = new EventEmitter() as any;
+    ttsSession.pushTokens = vi.fn();
+    ttsSession.flush = vi.fn().mockResolvedValue(undefined);
+    ttsSession.cancel = vi.fn();
+    ttsSession.close = vi.fn().mockResolvedValue(undefined);
+    const agentSession = {
+      sendText: vi.fn((_text: string, _metadata: unknown) =>
+        (async function* () {
+          yield 'Sure.';
+        })()
+      ),
+      abort: vi.fn(),
+    };
+    const orchestrator = new VoicePipelineOrchestrator({ stt: 'openai-realtime-transcription', tts: 'mock-tts' });
+    await orchestrator.startSession(transport, agentSession, {
+      streamingSTT: new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY }),
+      streamingTTS: { providerId: 'mock-tts', startSession: vi.fn().mockResolvedValue(ttsSession) } as any,
+      endpointDetector: new HeuristicEndpointDetector(),
+      bargeinHandler: new HardCutBargeinHandler(),
+    });
+    return { orchestrator, agentSession, socket: Sockets.instances[Sockets.instances.length - 1] };
+  }
+
+  /** One utterance as OpenAI reports it: its end of speech and its commit come before its transcript. */
+  function utterance(socket: FakeSocket, itemId: string, transcript: string): void {
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: itemId, audio_start_ms: 0 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: itemId, audio_end_ms: 900 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: itemId, previous_item_id: null });
+    socket.serve({ type: 'conversation.item.input_audio_transcription.completed', item_id: itemId, transcript });
+  }
+
+  it('hands the agent a turn whose final comes after the end of speech', async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    utterance(socket, 'item_A', 'What time is it?');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('What time is it?');
+    expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'punctuation' });
+    await orchestrator.stopSession();
+  });
+
+  it('ends a turn without terminal punctuation after the silence timeout, counted from its final', async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    utterance(socket, 'item_A', 'book a table for two');
+    await vi.advanceTimersByTimeAsync(1_499);
+    expect(agentSession.sendText).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('book a table for two');
+    expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'silence_timeout' });
+    await orchestrator.stopSession();
+  });
+
+  it("keeps the turn's words when a later item's interim text is retracted with an empty final", async () => {
+    fakeClock();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { orchestrator, agentSession, socket } = await pipeline();
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    // The next utterance begins before the first one's transcript arrives.
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_B', audio_start_ms: 1_200 });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'Book a table for two',
+    });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_B', audio_end_ms: 1_500 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_B', previous_item_id: 'item_A' });
+    socket.serve({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'item_B', delta: 'Uh' });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.failed',
+      item_id: 'item_B',
+      content_index: 0,
+      error: { type: 'transcription_error', message: 'Audio could not be transcribed.' },
+    });
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two');
+    warn.mockRestore();
+    await orchestrator.stopSession();
   });
 });
