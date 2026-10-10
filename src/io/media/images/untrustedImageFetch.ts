@@ -71,6 +71,23 @@ function httpUrl(text: string, what: string, base?: URL): URL {
 }
 
 /**
+ * The error for a host name that resolves to no address the fetch may reach.
+ * A name that resolves only to a refused address and a name that does not
+ * resolve at all get the same message: it reaches whoever sent the URL, and a
+ * model told to try internal names could otherwise map the network one
+ * refusal at a time, learning which names exist and what they resolve to.
+ * The address or the resolver's error stays on the error, out of its message
+ * and its own keys, for logs.
+ */
+function unreachableName(hostname: string, detail: { resolvedAddress?: string; cause?: unknown }): Error {
+  const error = refusal(`imageToBuffer: ${hostname} does not resolve to a public network address.`);
+  for (const [key, value] of Object.entries(detail)) {
+    Object.defineProperty(error, key, { value, enumerable: false });
+  }
+  return error;
+}
+
+/**
  * A `lookup` for the request that resolves every address of the host name and
  * fails unless each one is allowed. The connection then goes to an address
  * this check passed, so a name that resolves to a private address when the
@@ -80,7 +97,7 @@ function checkedLookup(resolve: LookupFunction, allowed: (address: string) => bo
   return (hostname, options, callback) => {
     resolve(hostname, { ...options, all: true }, (error, result, family) => {
       if (error) {
-        callback(error, []);
+        callback(unreachableName(hostname, { cause: error }), []);
         return;
       }
       const addresses: LookupAddress[] = Array.isArray(result)
@@ -88,13 +105,7 @@ function checkedLookup(resolve: LookupFunction, allowed: (address: string) => bo
         : [{ address: result, family: family ?? isIP(result) }];
       const refused = addresses.find((entry) => !allowed(entry.address));
       if (refused || addresses.length === 0) {
-        // The message leaves out the address the name resolved to: it reaches
-        // whoever sent the URL, and a model told to try internal names could
-        // otherwise map the network one refusal at a time. The address stays
-        // on the error, out of its message and its own keys, for logs.
-        const error = refusal(`imageToBuffer: ${hostname} does not resolve to a public network address.`);
-        Object.defineProperty(error, 'resolvedAddress', { value: refused?.address, enumerable: false });
-        callback(error, []);
+        callback(unreachableName(hostname, { resolvedAddress: refused?.address }), []);
         return;
       }
       if (options.all) callback(null, addresses);
@@ -243,9 +254,11 @@ async function readBody(
  *   number (or `timeoutMs` is longer than Node's longest timer), before any
  *   connection is made.
  * @throws {Error} With `code: 'IMAGE_URL_REFUSED'` when an address or a
- *   redirect is refused; otherwise when the response is not a 2xx, is too
- *   large, is cut short, comes in a coding the fetch does not decode, or
- *   takes too long.
+ *   redirect is refused, or a host name does not resolve: the message is the
+ *   same for a name that resolves only to a refused address and for one that
+ *   does not resolve, so it does not tell which names exist. Otherwise when
+ *   the response is not a 2xx, is too large, is cut short, comes in a coding
+ *   the fetch does not decode, or takes too long.
  */
 export async function fetchUntrustedImage(
   source: string,

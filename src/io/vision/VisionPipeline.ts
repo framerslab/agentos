@@ -64,7 +64,7 @@
  * ```
  */
 
-import { bufferToBlobPart } from '../media/images/imageToBuffer.js';
+import { bufferToBlobPart } from '../media/images/blobPart.js';
 import type {
   VisionPipelineConfig,
   VisionResult,
@@ -72,6 +72,7 @@ import type {
   VisionTier,
   ContentCategory,
   TierResult,
+  FailedTier,
   TextRegion,
   DocumentLayout,
   DocumentPage,
@@ -106,20 +107,63 @@ const CLOUD_VISION_PROMPT =
   'diagram, screenshot, etc.). If the image contains a document, preserve the ' +
   'logical reading order and structure.';
 
+/**
+ * The Hub models of the local tiers. Each is a conversion for
+ * transformers.js, with ONNX weights under `onnx/` and a `tokenizer.json`;
+ * transformers.js cannot load the original `microsoft/trocr-base-handwritten`
+ * and `microsoft/Florence-2-base` repositories, which hold neither.
+ */
+const HANDWRITING_MODEL = 'Xenova/trocr-base-handwritten';
+const LAYOUT_MODEL = 'onnx-community/Florence-2-base-ft';
+const EMBEDDING_MODEL = 'Xenova/clip-vit-base-patch32';
+
+/**
+ * The Florence-2 task of the layout tier: the text of the image, line by
+ * line, each line with the four corners of its box.
+ */
+const LAYOUT_TASK = '<OCR_WITH_REGION>';
+
+/**
+ * The most tokens Florence-2 generates for one image. Each line takes its
+ * words and eight location tokens.
+ */
+const LAYOUT_MAX_NEW_TOKENS = 1024;
+
+/** The confidence given to a Florence-2 line and result, which carry no score of their own. */
+const LAYOUT_CONFIDENCE = 0.8;
+
 // ---------------------------------------------------------------------------
 // VisionPipeline
 // ---------------------------------------------------------------------------
 
 /**
- * The image as the transformers.js image-to-text pipelines take it. A Buffer
- * goes in a Blob, which transformers.js decodes with sharp in Node
- * (`RawImage.fromBlob`). A data URL string does not work there: in Node,
- * transformers.js reads a string that is not an http(s) or blob: URL as a
- * file path (`getFile` in its utils/hub.js), and fails. A URL string goes as
- * it is.
+ * The image as transformers.js takes it, in its pipelines and in
+ * `RawImage.read`. A Buffer goes in a Blob, which transformers.js decodes
+ * with sharp in Node (`RawImage.fromBlob`). A data URL string does not work
+ * there: in Node, transformers.js reads a string that is not an http(s) or
+ * blob: URL as a file path (`getFile` in its utils/hub.js), and fails. A URL
+ * string goes as it is.
  */
 function transformersImage(image: Buffer | string): Blob | string {
   return Buffer.isBuffer(image) ? new Blob([bufferToBlobPart(image)]) : image;
+}
+
+/** The message of an error, or the thrown value as text. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The axis-aligned box around a quadrilateral given as its four corners
+ * (x1, y1, ..., x4, y4), in the image's pixels.
+ */
+function quadBounds(quad: readonly number[]): LayoutBlock['bbox'] {
+  const xs = quad.filter((_, i) => i % 2 === 0);
+  const ys = quad.filter((_, i) => i % 2 === 1);
+  if (xs.length === 0 || ys.length === 0) return { x: 0, y: 0, width: 0, height: 0 };
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
 }
 
 /**
@@ -174,8 +218,8 @@ export class VisionPipeline {
   /** TrOCR pipeline for handwriting recognition (Tier 2). */
   private _trOcrPipeline?: any;
 
-  /** Florence-2 pipeline for document understanding (Tier 2). */
-  private _florencePipeline?: any;
+  /** Florence-2 model and processor for document understanding (Tier 2). */
+  private _florence?: { model: any; processor: any; RawImage: any };
 
   /** CLIP pipeline for image embeddings (Tier 2). */
   private _clipPipeline?: any;
@@ -270,6 +314,7 @@ export class VisionPipeline {
     let embedding: number[] | undefined;
     let layout: DocumentLayout | undefined;
     const activeTiers: VisionTier[] = [];
+    const failedTiers: FailedTier[] = [];
 
     // Determine which tiers to run based on strategy (or explicit override)
     const requestedTiers = options?.tiers;
@@ -279,7 +324,10 @@ export class VisionPipeline {
     // because it doesn't affect the text extraction path.
     // -----------------------------------------------------------------------
     const embeddingPromise = this._shouldRunTier('embedding', strategy, requestedTiers)
-      ? this._runClipEmbedding(preprocessed).catch(() => undefined)
+      ? this._runClipEmbedding(preprocessed).catch((error: unknown) => {
+          failedTiers.push({ tier: 'embedding', error: errorMessage(error) });
+          return undefined;
+        })
       : Promise.resolve(undefined);
 
     // -----------------------------------------------------------------------
@@ -300,6 +348,7 @@ export class VisionPipeline {
         layout,
         options?.forceCategory,
         startTime,
+        failedTiers,
       );
     }
 
@@ -330,6 +379,7 @@ export class VisionPipeline {
           layout,
           options?.forceCategory,
           startTime,
+          failedTiers,
         );
       }
     }
@@ -352,8 +402,9 @@ export class VisionPipeline {
         const hwResult = await this._runTrOcr(preprocessed);
         tierResults.push(hwResult);
         activeTiers.push('handwriting');
-      } catch {
+      } catch (error) {
         // TrOCR failure is non-fatal — we still have OCR or cloud fallback
+        failedTiers.push({ tier: 'handwriting', error: errorMessage(error) });
       }
     }
 
@@ -370,8 +421,9 @@ export class VisionPipeline {
         tierResults.push(docResult.tierResult);
         activeTiers.push('document-ai');
         layout = docResult.layout;
-      } catch {
+      } catch (error) {
         // Florence-2 failure is non-fatal
+        failedTiers.push({ tier: 'document-ai', error: errorMessage(error) });
       }
     }
 
@@ -388,13 +440,14 @@ export class VisionPipeline {
         const cloudResult = await this._runCloudVision(preprocessed);
         tierResults.push(cloudResult);
         activeTiers.push('cloud-vision');
-      } catch {
+      } catch (error) {
         // Cloud failure is non-fatal if we have local results
         if (tierResults.length === 0) {
           throw new Error(
-            'VisionPipeline: cloud vision failed and no local results available.',
+            `VisionPipeline: cloud vision failed and no local results available: ${errorMessage(error)}`,
           );
         }
+        failedTiers.push({ tier: 'cloud-vision', error: errorMessage(error) });
       }
     }
 
@@ -414,6 +467,7 @@ export class VisionPipeline {
       layout,
       options?.forceCategory ?? category,
       startTime,
+      failedTiers,
     );
   }
 
@@ -453,7 +507,7 @@ export class VisionPipeline {
    * the full OCR + vision pipeline.
    *
    * @param image - Image data as a Buffer or file-path / URL string.
-   * @returns CLIP embedding vector (typically 512 or 768 dimensions).
+   * @returns CLIP embedding vector: 512 numbers, in the space of CLIP ViT-B/32's text embeddings.
    *
    * @throws {Error} If `@huggingface/transformers` is not installed.
    * @throws {Error} If CLIP model loading fails.
@@ -485,9 +539,9 @@ export class VisionPipeline {
   /**
    * Analyze document layout using Florence-2 — document-ai tier only.
    *
-   * Returns structured {@link DocumentLayout} with semantic blocks
-   * (text, tables, figures, headings, lists, code) and their bounding
-   * boxes within each page.
+   * Returns a one-page {@link DocumentLayout} whose blocks are the lines of
+   * text Florence-2 reads, in reading order, each a `text` block with its
+   * bounding box in the image's pixels.
    *
    * @param image - Image data as a Buffer or file-path / URL string.
    * @returns Structured document layout with pages and blocks.
@@ -555,11 +609,17 @@ export class VisionPipeline {
     }
     this._tesseract = undefined;
 
-    // Release HuggingFace pipelines by dropping references.
-    // The transformers library doesn't expose explicit dispose(),
-    // so we rely on GC to reclaim WASM/ONNX memory.
+    // Release the transformers.js models' ONNX sessions: a pipeline's
+    // dispose() releases its model's.
+    for (const loaded of [this._trOcrPipeline, this._florence?.model, this._clipPipeline]) {
+      try {
+        await loaded?.dispose?.();
+      } catch {
+        // Swallow disposal errors — we're tearing down anyway
+      }
+    }
     this._trOcrPipeline = undefined;
-    this._florencePipeline = undefined;
+    this._florence = undefined;
     this._clipPipeline = undefined;
   }
 
@@ -793,43 +853,44 @@ export class VisionPipeline {
   /**
    * Run Florence-2 document understanding via @huggingface/transformers.
    *
-   * Florence-2 detects semantic blocks (text, tables, figures, headings,
-   * lists, code) and their bounding boxes, producing a structured
-   * {@link DocumentLayout} alongside extracted text.
+   * Florence-2 reads the text of the image line by line
+   * ({@link LAYOUT_TASK}), with each line's box. Each line becomes a `text`
+   * block of a one-page {@link DocumentLayout}, and the lines, joined in
+   * reading order, are the tier's text.
    *
    * @param image - Preprocessed image buffer or URL string.
    * @returns Tier result plus structured document layout.
-   * @throws {Error} If @huggingface/transformers is not installed.
+   * @throws {Error} If @huggingface/transformers is not installed, or the
+   *   model cannot be loaded or run.
    */
   private async _runFlorence2(
     image: Buffer | string,
   ): Promise<{ tierResult: TierResult; layout: DocumentLayout }> {
     const start = Date.now();
-    const pipe = await this._loadFlorence2();
+    const { model, processor, RawImage } = await this._loadFlorence2();
 
-    // Florence-2 uses a VQA-style interface — we ask it to describe
-    // the document layout.
-    const output = await pipe(transformersImage(image), 'Describe the document layout in detail.');
+    const picture = await RawImage.read(transformersImage(image));
+    const inputs = await processor(picture, LAYOUT_TASK);
+    const generated = await model.generate({ ...inputs, max_new_tokens: LAYOUT_MAX_NEW_TOKENS });
+    // The location tokens are special tokens, so they are kept for the parser.
+    const [decoded] = processor.batch_decode(generated, { skip_special_tokens: false });
+    const parsed = processor.post_process_generation(decoded, LAYOUT_TASK, picture.size)?.[LAYOUT_TASK];
+    const labels: string[] = Array.isArray(parsed?.labels) ? parsed.labels : [];
+    const quads: number[][] = Array.isArray(parsed?.quad_boxes) ? parsed.quad_boxes : [];
 
-    // Parse Florence-2 output into our structured layout format.
-    // The model returns a description — we extract block annotations
-    // if the model provides them, or fall back to a single text block.
-    const text = Array.isArray(output)
-      ? output.map((o: any) => o.generated_text ?? '').join('\n')
-      : (output as any)?.generated_text ?? '';
-
-    const blocks: LayoutBlock[] = [{
+    const blocks: LayoutBlock[] = labels.map((content, i): LayoutBlock => ({
       type: 'text',
-      content: text,
-      bbox: { x: 0, y: 0, width: 0, height: 0 },
-      confidence: 0.8,
-    }];
+      content,
+      bbox: quadBounds(quads[i] ?? []),
+      confidence: LAYOUT_CONFIDENCE,
+    }));
+    const text = labels.join('\n');
 
     const layout: DocumentLayout = {
       pages: [{
         pageNumber: 1,
-        width: 0,
-        height: 0,
+        width: picture.width,
+        height: picture.height,
         blocks,
       }],
     };
@@ -839,7 +900,7 @@ export class VisionPipeline {
         tier: 'document-ai',
         provider: 'florence-2',
         text,
-        confidence: text.length > 0 ? 0.8 : 0,
+        confidence: text.length > 0 ? LAYOUT_CONFIDENCE : 0,
         durationMs: Date.now() - start,
       },
       layout,
@@ -858,21 +919,17 @@ export class VisionPipeline {
    * so you can search images with text queries and vice versa.
    *
    * @param image - Preprocessed image buffer or URL string.
-   * @returns Embedding vector (typically 512 or 768 dimensions), or undefined
-   *   if CLIP is not available.
+   * @returns Embedding vector (512 numbers), or undefined if the pipeline
+   *   returned none.
    * @throws {Error} If @huggingface/transformers is not installed.
    */
   private async _runClipEmbedding(image: Buffer | string): Promise<number[] | undefined> {
     const pipe = await this._loadClip();
 
-    const input = Buffer.isBuffer(image)
-      ? `data:image/png;base64,${image.toString('base64')}`
-      : image;
+    const output = await pipe(transformersImage(image));
 
-    const output = await pipe(input);
-
-    // The feature-extraction pipeline returns a nested tensor-like structure.
-    // We extract the flat float array from it.
+    // The image-feature-extraction pipeline returns a Tensor whose data is
+    // the [1, 512] embedding; nested arrays are read too.
     if (Array.isArray(output)) {
       // output is [[number, number, ...]] — flatten one level
       const flat = Array.isArray(output[0]) ? output[0] : output;
@@ -1033,12 +1090,9 @@ export class VisionPipeline {
 
     try {
       const { pipeline } = await import('@huggingface/transformers');
-      // TrOCR is an image-to-text model for handwriting recognition.
-      // microsoft/trocr-base-handwritten is the standard pretrained checkpoint.
-      this._trOcrPipeline = await (pipeline as any)(
-        'image-to-text',
-        'microsoft/trocr-base-handwritten',
-      );
+      // TrOCR base, fine-tuned on handwriting: an image-to-text
+      // (vision-encoder-decoder) model.
+      this._trOcrPipeline = await (pipeline as any)('image-to-text', HANDWRITING_MODEL);
       return this._trOcrPipeline;
     } catch (err: any) {
       if (err?.code === 'ERR_MODULE_NOT_FOUND' || err?.code === 'MODULE_NOT_FOUND') {
@@ -1053,23 +1107,24 @@ export class VisionPipeline {
   }
 
   /**
-   * Lazily load the Florence-2 document understanding pipeline.
+   * Lazily load the Florence-2 model and its processor. transformers.js has
+   * no pipeline task for Florence-2 (its image-to-text task loads
+   * vision-encoder-decoder models), so the two are loaded on their own.
    *
-   * @returns HuggingFace pipeline configured for Florence-2 document analysis.
+   * @returns The Florence-2 model, its processor, and transformers.js's `RawImage`.
    * @throws {Error} If @huggingface/transformers is not installed.
    */
-  private async _loadFlorence2(): Promise<any> {
-    if (this._florencePipeline) return this._florencePipeline;
+  private async _loadFlorence2(): Promise<{ model: any; processor: any; RawImage: any }> {
+    if (this._florence) return this._florence;
 
     try {
-      const { pipeline } = await import('@huggingface/transformers');
-      // Florence-2 uses the image-to-text task with a VQA-style interface.
-      // microsoft/Florence-2-base is the standard pretrained checkpoint.
-      this._florencePipeline = await (pipeline as any)(
-        'image-to-text',
-        'microsoft/Florence-2-base',
-      );
-      return this._florencePipeline;
+      const { AutoProcessor, Florence2ForConditionalGeneration, RawImage } = await import('@huggingface/transformers');
+      const [model, processor] = await Promise.all([
+        Florence2ForConditionalGeneration.from_pretrained(LAYOUT_MODEL),
+        AutoProcessor.from_pretrained(LAYOUT_MODEL),
+      ]);
+      this._florence = { model, processor, RawImage };
+      return this._florence;
     } catch (err: any) {
       if (err?.code === 'ERR_MODULE_NOT_FOUND' || err?.code === 'MODULE_NOT_FOUND') {
         throw new Error(
@@ -1083,9 +1138,9 @@ export class VisionPipeline {
   }
 
   /**
-   * Lazily load the CLIP feature-extraction pipeline for image embeddings.
+   * Lazily load the CLIP image-feature-extraction pipeline for image embeddings.
    *
-   * @returns HuggingFace feature-extraction pipeline configured with CLIP.
+   * @returns HuggingFace image-feature-extraction pipeline configured with CLIP.
    * @throws {Error} If @huggingface/transformers is not installed.
    */
   private async _loadClip(): Promise<any> {
@@ -1093,13 +1148,11 @@ export class VisionPipeline {
 
     try {
       const { pipeline } = await import('@huggingface/transformers');
-      // CLIP ViT-B/32 is the standard model for image embeddings.
-      // It produces 512-dimensional vectors in the same space as
-      // CLIP text embeddings, enabling cross-modal search.
-      this._clipPipeline = await (pipeline as any)(
-        'feature-extraction',
-        'Xenova/clip-vit-base-patch32',
-      );
+      // CLIP ViT-B/32. The image-feature-extraction task runs its vision
+      // tower with the projection, which gives 512 numbers in the space of
+      // CLIP's text embeddings, for cross-modal search; the
+      // feature-extraction task is for text.
+      this._clipPipeline = await (pipeline as any)('image-feature-extraction', EMBEDDING_MODEL);
       return this._clipPipeline;
     } catch (err: any) {
       if (err?.code === 'ERR_MODULE_NOT_FOUND' || err?.code === 'MODULE_NOT_FOUND') {
@@ -1290,6 +1343,7 @@ export class VisionPipeline {
    * @param layout - Florence-2 document layout, if generated.
    * @param forcedCategory - Caller-specified category override.
    * @param startTime - Timestamp when processing started (for duration).
+   * @param failedTiers - Tiers that were due to run and failed.
    * @returns Assembled vision result.
    */
   private _assembleResult(
@@ -1299,6 +1353,7 @@ export class VisionPipeline {
     layout: DocumentLayout | undefined,
     forcedCategory: ContentCategory | undefined,
     startTime: number,
+    failedTiers: FailedTier[],
   ): VisionResult {
     // Pick the tier result with the highest confidence for the primary text
     const winner = tierResults.reduce(
@@ -1319,6 +1374,7 @@ export class VisionPipeline {
       embedding,
       layout,
       regions: winner?.regions,
+      ...(failedTiers.length > 0 ? { failedTiers } : {}),
       durationMs: Date.now() - startTime,
     };
   }
