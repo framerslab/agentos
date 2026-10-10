@@ -173,7 +173,9 @@ export class StreamingSTTChain implements IStreamingSTT {
    * mode (enableMidUtteranceFailover=false) this is a pass-through. In
    * failover mode the session is replaced with a facade that tees audio
    * into a ring buffer, dedupes transcripts across providers, and on
-   * session error re-routes to the next candidate.
+   * session error re-routes to the next candidate. A close the caller asks
+   * for ends the session: it starts no backup, and a backup still starting
+   * then is closed when it opens.
    */
   private wrapSession(
     initial: StreamingSTTSession,
@@ -195,6 +197,10 @@ export class StreamingSTTChain implements IStreamingSTT {
     let currentProvider = initialProvider;
     let remaining = [...candidates];
     let isFailingOver = false;
+    // Set by the facade's close(). Every session emits 'close' when it is
+    // closed, so a 'close' after this is the end the caller asked for, not a
+    // provider failure.
+    let closedByCaller = false;
 
     const attach = (session: StreamingSTTSession, providerId: string) => {
       session.on('transcript', (evt: TranscriptEvent) => {
@@ -218,9 +224,9 @@ export class StreamingSTTChain implements IStreamingSTT {
       });
       session.on('close', () => {
         // Natural close on the active session is a failover trigger so the
-        // user doesn't silently lose voice mid-turn. If the chain was asked
-        // to close() externally, isFailingOver stays false and the close
-        // propagates.
+        // user doesn't silently lose voice mid-turn. The close the facade's
+        // close() asks for is not: tryFailover returns once closedByCaller
+        // is set.
         if (!isFailingOver && currentSession === session) {
           void tryFailover(undefined);
         }
@@ -228,7 +234,7 @@ export class StreamingSTTChain implements IStreamingSTT {
     };
 
     const tryFailover = async (err?: Error) => {
-      if (isFailingOver) return;
+      if (isFailingOver || closedByCaller) return;
       isFailingOver = true;
       const startedAt = Date.now();
       const classified = VoicePipelineError.classifyError(
@@ -244,6 +250,7 @@ export class StreamingSTTChain implements IStreamingSTT {
       const bufferedMs = ring.durationMs();
 
       for (const backup of remaining) {
+        if (closedByCaller) break;
         if (
           this.opts.breaker &&
           !this.opts.breaker.isAvailable(backup.providerId)
@@ -252,6 +259,11 @@ export class StreamingSTTChain implements IStreamingSTT {
         }
         try {
           const session = await backup.startSession(config);
+          if (closedByCaller) {
+            // The caller closed the session while this backup was starting.
+            session.close();
+            break;
+          }
           attach(session, backup.providerId);
           if (bufferedMs >= minReplayMs) {
             for (const f of bufferedFrames) {
@@ -261,6 +273,11 @@ export class StreamingSTTChain implements IStreamingSTT {
                 /* tolerate frame-level push failures during replay */
               }
             }
+          }
+          if (closedByCaller) {
+            // The caller closed the session during the replay.
+            session.close();
+            break;
           }
           currentSession = session;
           currentProvider = backup;
@@ -290,6 +307,10 @@ export class StreamingSTTChain implements IStreamingSTT {
         }
       }
 
+      if (closedByCaller) {
+        isFailingOver = false;
+        return;
+      }
       // All backups exhausted — propagate to the facade consumer.
       facade.emit('error', new AggregateVoiceError([classified]));
       isFailingOver = false;
@@ -311,6 +332,7 @@ export class StreamingSTTChain implements IStreamingSTT {
         }
       },
       close: async () => {
+        closedByCaller = true;
         await currentSession.close();
       },
     }) as unknown as StreamingSTTSession;
