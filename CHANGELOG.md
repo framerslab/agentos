@@ -1,3 +1,9 @@
+## [0.13.26](https://github.com/framerslab/agentos/compare/v0.13.25...v0.13.26) (2026-10-10)
+
+### fix
+
+* **safety:** review follow-ups for the SQL spend meter's prefix (#232) ([0b50624](https://github.com/framerslab/agentos/commit/0b50624674bfe60c28c43e44220bfad3912bbd55))
+
 ## [0.13.25](https://github.com/framerslab/agentos/compare/v0.13.24...v0.13.25) (2026-10-10)
 
 ### feat
