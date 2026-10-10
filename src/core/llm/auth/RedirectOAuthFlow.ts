@@ -2,9 +2,9 @@
  * @fileoverview OAuth 2.0's authorization code grant with PKCE for a web server: `begin` makes the address and answers
  * the state and the verifier for the caller to keep (a row keyed by a cookie, for example); `complete` checks the state
  * in constant time and exchanges the code; refreshes run one at a time per stored grant, the access token held in this
- * process's memory (the store is handed the whole token set, and a `SealedTokenStore` keeps no access token);
- * `revoke` where the provider has an endpoint. The token endpoint's calls are the standard ones by default (RFC 6749
- * sections 4.1.3 and 6, a form body, a JSON answer); a provider overrides them.
+ * process's memory alone (the store is handed a grant's refresh token and metadata, never its access token or id
+ * token); `revoke` where the provider has an endpoint. The token endpoint's calls are the standard ones by default
+ * (RFC 6749 sections 4.1.3 and 6, a form body, a JSON answer); a provider overrides them.
  *
  * @module agentos/core/llm/auth/RedirectOAuthFlow
  */
@@ -60,6 +60,15 @@ export class OAuthGrantRefused extends Error {
 }
 
 /**
+ * What a store is handed for a grant: its refresh token and metadata, which are all the flow reads back, with
+ * `accessToken: ''` and `expiresAt: 0` in place of the access token. The access token and the id token stay in the
+ * flow's memory, so a store is never given them to write.
+ */
+function storedGrant(tokens: OAuthTokenSet): OAuthTokenSet {
+  return { accessToken: '', expiresAt: 0, refreshToken: tokens.refreshToken, metadata: tokens.metadata };
+}
+
+/**
  * The authorization code grant with PKCE split across a web server's two requests: `begin` in the request that sends
  * the person to the provider, `complete` in the request the provider redirects back to. A provider's flow extends it
  * with `providerId` and `getConfig`, and overrides the token calls where its endpoints differ from the standard ones.
@@ -75,7 +84,7 @@ export abstract class RedirectOAuthFlow {
 
   /**
    * @param store Where grants are kept by key, a `SealedTokenStore` on a server; null for a flow that only
-   * begins, completes and revokes.
+   * begins, completes and revokes. It is handed a grant's refresh token and metadata alone.
    * @param fetchImpl The fetch the endpoints are called with.
    */
   constructor(protected readonly store: IOAuthTokenStore | null, protected readonly fetchImpl: typeof fetch = fetch) {}
@@ -105,9 +114,9 @@ export abstract class RedirectOAuthFlow {
   }
 
   /**
-   * The token endpoint's call, read as JSON. An answer that is not a success or carries no `access_token` throws
-   * {@link OAuthGrantRefused} with the status and the answer's `error`; an answer without `expires_in` is taken to
-   * last an hour.
+   * The token endpoint's call, read as JSON. An answer that is not a success, or whose `access_token` is missing or
+   * empty, throws {@link OAuthGrantRefused} with the status and the answer's `error`; an answer without `expires_in`
+   * is taken to last an hour.
    */
   protected async tokenRequest(reason: 'exchange' | 'refresh', form: Record<string, string>): Promise<OAuthTokenSet> {
     const response = await this.fetchImpl(this.getConfig().tokenEndpoint, {
@@ -116,7 +125,8 @@ export abstract class RedirectOAuthFlow {
       body: new URLSearchParams(form).toString(),
     });
     const answer = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!response.ok || typeof answer.access_token !== 'string') {
+    // An empty `access_token` is refused like a missing one: in this flow `''` stands for no access token in hand.
+    if (!response.ok || typeof answer.access_token !== 'string' || answer.access_token === '') {
       throw new OAuthGrantRefused(reason, response.status, typeof answer.error === 'string' ? answer.error : undefined);
     }
     const expiresIn = typeof answer.expires_in === 'number' ? answer.expires_in : 3600;
@@ -131,13 +141,18 @@ export abstract class RedirectOAuthFlow {
 
   /**
    * The address to send the person to, with the state and the verifier to keep. `scopes` replaces the configured
-   * scopes for this request; `extraParams` are added to the address (for example `access_type` and `prompt`).
+   * scopes for this request; `extraParams` are added to the address (for example `access_type` and `prompt`). An
+   * extra parameter with the name of one the flow sets (`response_type`, `client_id`, `redirect_uri`, `scope`,
+   * `state`, `code_challenge` or `code_challenge_method`) is left out, so the address always carries the state
+   * answered and the challenge of the verifier answered.
    */
   begin(input: { redirectUri: string; extraParams?: Record<string, string>; scopes?: readonly string[] }): RedirectBegin {
     const config = this.getConfig();
     const state = generateState();
     const codeVerifier = generateCodeVerifier();
     const params = new URLSearchParams({
+      // First, so that none of them replaces a parameter set below.
+      ...input.extraParams,
       response_type: 'code',
       client_id: config.clientId,
       redirect_uri: input.redirectUri,
@@ -145,7 +160,6 @@ export abstract class RedirectOAuthFlow {
       state,
       code_challenge: generateCodeChallenge(codeVerifier),
       code_challenge_method: 'S256',
-      ...input.extraParams,
     });
     return { url: `${config.authorizationEndpoint}?${params.toString()}`, state, codeVerifier };
   }
@@ -163,14 +177,14 @@ export abstract class RedirectOAuthFlow {
 
   /**
    * Keeps a grant under `key` in the store and holds it in this process's memory, once a refresh or `forget` of `key`
-   * already under way has ended. The store is handed the whole token set; a `SealedTokenStore` keeps its refresh
-   * token and metadata alone, so the access token stays in memory.
+   * already under way has ended. The store is handed the grant's refresh token and metadata alone, with
+   * `accessToken: ''` and `expiresAt: 0`; the access token and the id token stay in memory.
    */
   async keep(key: string, tokens: OAuthTokenSet): Promise<void> {
     const store = this.store;
     if (store === null) throw new Error('this flow has no store');
     await this.inTurn(key, async () => {
-      await store.save(key, tokens);
+      await store.save(key, storedGrant(tokens));
       this.held.set(key, tokens);
     });
   }
@@ -219,7 +233,9 @@ export abstract class RedirectOAuthFlow {
     if (kept === null || kept.refreshToken === undefined) throw new OAuthGrantRefused('missing');
     const fresh = await this.refreshTokens(kept.refreshToken);
     const merged: OAuthTokenSet = { ...fresh, refreshToken: fresh.refreshToken ?? kept.refreshToken, metadata: fresh.metadata ?? kept.metadata };
-    if (merged.refreshToken !== kept.refreshToken || merged.metadata !== kept.metadata) await this.store.save(key, merged);
+    if (merged.refreshToken !== kept.refreshToken || merged.metadata !== kept.metadata) {
+      await this.store.save(key, storedGrant(merged));
+    }
     this.held.set(key, merged);
     return merged;
   }
