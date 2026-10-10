@@ -227,6 +227,15 @@ export interface SqlSpendMeterOptions {
    * {@link spendMeterDdl} makes the tables for a prefix.
    */
   tablePrefix?: string;
+  /**
+   * Told of each statement that failed while {@link SqlSpendMeter.ensureSchema} brought tables that exist up to the
+   * meter's indexes, with the statement and the error the store threw: the `CREATE INDEX` of an index the tables lack
+   * (refused, for example, to a role that does not own them, or stopped by a lock or statement timeout), or the read of
+   * the catalogue before them. Such a failure is not fatal: the indexes speed the meter's reads and change none of its
+   * answers, so the meter uses the tables as they are. An error the callback throws is dropped. Without a callback,
+   * nothing is reported.
+   */
+  onWarning?(warning: { statement: string; error: unknown }): void;
 }
 
 /** What one purge deleted. */
@@ -298,8 +307,9 @@ export class SqlSpendMeter implements ISpendMeter {
    * store's catalogue for the meter's index names (`pg_indexes` on Postgres, `sqlite_master` on SQLite) and runs the
    * `CREATE INDEX IF NOT EXISTS` statement of each index the tables lack, so a store an earlier release made gains the
    * indexes it lacks, and a store that holds them all runs no index statement: on Postgres each one takes a SHARE lock
-   * on the reservations table, which holds back the table's writes, before it looks for the index's name. Called before
-   * the first statement; safe to call again. Does nothing with `ensureSchema: false`.
+   * on the reservations table, which holds back the table's writes, before it looks for the index's name. An index
+   * statement that fails is reported to {@link SqlSpendMeterOptions.onWarning}, and the meter uses the tables as they
+   * are. Called before the first statement; safe to call again. Does nothing with `ensureSchema: false`.
    */
   ensureSchema(): Promise<void> {
     if (this.opts.ensureSchema === false) return Promise.resolve();
@@ -322,8 +332,9 @@ export class SqlSpendMeter implements ISpendMeter {
   /**
    * Runs, one at a time, the statement of each of the meter's indexes that the store's catalogue does not hold; a
    * catalogue that cannot be read leaves every statement to run. The indexes speed the meter's reads and change none of
-   * its answers, so tables that refuse one are used as they are: Postgres checks that the role owns a table before it
-   * looks for the index's name, and two processes adding one index at once can collide.
+   * its answers, so tables that refuse one are used as they are, and the failed statement goes to
+   * {@link SqlSpendMeterOptions.onWarning}: Postgres checks that the role owns a table before it looks for the index's
+   * name, and two processes adding one index at once can collide.
    */
   private async addMissingIndexes(): Promise<void> {
     const indexes = indexesOf(this.tables);
@@ -332,11 +343,23 @@ export class SqlSpendMeter implements ISpendMeter {
     const catalogue = this.db.kind.includes('postgres')
       ? `SELECT indexname AS name FROM pg_indexes WHERE schemaname = current_schema() AND indexname IN (${marks})`
       : `SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (${marks})`;
-    const held = await this.db.all<{ name: string }>(catalogue, names).catch((): { name: string }[] => []);
+    const held = await this.db.all<{ name: string }>(catalogue, names).catch((error: unknown): { name: string }[] => {
+      this.warn(catalogue, error);
+      return [];
+    });
     const present = new Set(held.map((row) => row.name));
     for (const index of indexes) {
       if (present.has(index.name)) continue;
-      await this.db.exec(index.statement).catch(() => undefined);
+      await this.db.exec(index.statement).catch((error: unknown) => this.warn(index.statement, error));
+    }
+  }
+
+  /** Tells the product's `onWarning` of a schema statement that failed; a callback that throws stops nothing. */
+  private warn(statement: string, error: unknown): void {
+    try {
+      this.opts.onWarning?.({ statement, error });
+    } catch {
+      // the report is the product's own; the meter goes on with the tables as they are either way
     }
   }
 
