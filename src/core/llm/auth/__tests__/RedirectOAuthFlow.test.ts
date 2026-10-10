@@ -88,9 +88,10 @@ afterEach(() => {
 
 /**
  * Tests for {@link RedirectOAuthFlow}: the authorization code grant with PKCE split across a web server's two
- * requests, the flow's own parameters kept whatever extraParams name, the state checked before any call, the standard
- * token calls with an empty access token refused, one refresh at a time per kept grant with the access token held in
- * memory and never handed to the store, revocation, and keep, refresh and forget of one key taking turns.
+ * requests, the flow's own parameters kept whatever extraParams name, an authorization endpoint's own query kept, the
+ * state checked before any call, the standard token calls with an empty access token refused, one refresh at a time
+ * per kept grant with the access token held in memory and never handed to the store, revocation, and keep, refresh
+ * and forget of one key taking turns.
  */
 describe('RedirectOAuthFlow', () => {
   it('begins with an address on the authorization endpoint, answering a new state and verifier to keep', () => {
@@ -156,6 +157,40 @@ describe('RedirectOAuthFlow', () => {
     });
     // Each parameter once (RFC 6749 section 3.1).
     expect(params).toHaveLength(8);
+  });
+
+  it('keeps the query an authorization endpoint already has, and sends no parameter twice', () => {
+    /** A provider whose authorization endpoint carries a query of its own, as one that names a tenant does. */
+    class TenantFlow extends ExampleFlow {
+      protected getConfig(): RedirectOAuthConfig {
+        return {
+          ...super.getConfig(),
+          authorizationEndpoint: 'https://auth.example.test/authorize?tenant=acme&prompt=login',
+        };
+      }
+    }
+    const { fetchImpl } = endpoint(() => json(500, {}));
+    const flow = new TenantFlow(null, fetchImpl);
+
+    const begun = flow.begin({ redirectUri: REDIRECT, extraParams: { prompt: 'consent' } });
+
+    const address = new URL(begun.url);
+    expect(`${address.origin}${address.pathname}`).toBe('https://auth.example.test/authorize');
+    // RFC 6749 section 3.1: the endpoint's query is retained, and no parameter is included more than once. The
+    // endpoint's `tenant` stays; its `prompt` gives way to the one asked for here.
+    const params = [...address.searchParams];
+    expect(Object.fromEntries(params)).toEqual({
+      tenant: 'acme',
+      prompt: 'consent',
+      response_type: 'code',
+      client_id: 'client-1',
+      redirect_uri: REDIRECT,
+      scope: 'files.read profile',
+      state: begun.state,
+      code_challenge: createHash('sha256').update(begun.codeVerifier).digest('base64url'),
+      code_challenge_method: 'S256',
+    });
+    expect(params).toHaveLength(9);
   });
 
   it('refuses a state that differs before any call, and exchanges the code with the verifier as a form', async () => {
