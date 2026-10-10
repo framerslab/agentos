@@ -13,7 +13,7 @@ vi.mock('axios', () => {
   const respond = async (url: string, init: Record<string, unknown>) => {
     const res = (await (globalThis.fetch as (u: string, i: unknown) => Promise<Response>)(url, init)) as Response;
     const data = await res.json().catch(() => undefined);
-    const out = { status: res.status, statusText: res.statusText, data, headers: Object.fromEntries(res.headers.entries()), config: { url } };
+    const out = { status: res.status, statusText: res.statusText, data, headers: Object.fromEntries(res.headers as unknown as Iterable<[string, string]>), config: { url } };
     if (res.status >= 400) { const err = Object.assign(new Error(`Request failed with status code ${res.status}`), { isAxiosError: true, response: out, config: { url } }); throw err; }
     return out;
   };
