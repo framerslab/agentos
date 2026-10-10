@@ -317,7 +317,7 @@ Each refusal reaches the caller before any model call. The turn settles in the o
 
 With `windowMs` the meter counts from the reservations themselves, inside each reservation's own transaction and after it has taken the account row's lock, so two reservations cannot both take the last unit of a window. Every row then carries the period `window`, which is the period `allowanceFor` is asked for. A unit counts from its reservation until more than `windowMs` have passed. A released reservation never counts, and one whose lease ran out still counts until `reconcile()` releases it. `snapshot()` answers the units consumed and reserved inside the window and what remains. A meter given neither `periodOf` nor `windowMs` throws when it is constructed.
 
-The window's count reads the index `idx_spend_reservations_account` (`idx_<prefix>_reservations_account` under another prefix), which the DDL creates with the tables. `ensureSchema` runs the DDL only where the tables are missing, so a store whose tables an earlier release made needs that one `CREATE INDEX IF NOT EXISTS` statement run on it.
+The window's count reads the index `idx_spend_reservations_account`, and `purge()` finds the reservations settled before its `before` through `idx_spend_reservations_settled`, on `settled_at` and `state` (`idx_<prefix>_reservations_account` and `idx_<prefix>_reservations_settled` under another prefix). The DDL creates both with the tables. `ensureSchema` runs the DDL only where the tables are missing, so a store whose tables an earlier release made needs those two `CREATE INDEX IF NOT EXISTS` statements run on it.
 
 ### Several meters in one database
 

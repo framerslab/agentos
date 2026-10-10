@@ -37,11 +37,11 @@ import {
 
 /**
  * The meter's two tables and their indexes under the default prefix, `agentos_spend`: one index the reconciler reads
- * the due reservations through, one a rolling window counts an account's reservations through. Every time is epoch
- * milliseconds in a BIGINT. There is no literal question mark anywhere in the text: the Postgres adapter rewrites each
- * one to a numbered parameter. A product that runs its own migrations copies this text, or {@link spendMeterDdl}'s
- * for a prefix of its own, into one of them and passes `ensureSchema: false`. `spendMeterDdl()` answers this text word
- * for word.
+ * the due reservations through, one a rolling window counts an account's reservations through, and one a purge finds
+ * the settled reservations through, by the time they settled. Every time is epoch milliseconds in a BIGINT. There is
+ * no literal question mark anywhere in the text: the Postgres adapter rewrites each one to a numbered parameter. A
+ * product that runs its own migrations copies this text, or {@link spendMeterDdl}'s for a prefix of its own, into one
+ * of them and passes `ensureSchema: false`. `spendMeterDdl()` answers this text word for word.
  */
 export const SPEND_METER_DDL = `
 CREATE TABLE IF NOT EXISTS agentos_spend_meter (
@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS agentos_spend_reservations (
 );
 CREATE INDEX IF NOT EXISTS idx_spend_reservations_due ON agentos_spend_reservations (state, expires_at);
 CREATE INDEX IF NOT EXISTS idx_spend_reservations_account ON agentos_spend_reservations (account_id, reserved_at);
+CREATE INDEX IF NOT EXISTS idx_spend_reservations_settled ON agentos_spend_reservations (settled_at, state);
 `;
 
 /** The prefix of the tables' names when `tablePrefix` is left out: the names {@link SPEND_METER_DDL} makes. */
@@ -139,10 +140,15 @@ CREATE TABLE IF NOT EXISTS ${t.reservations} (
 ${indexDdlOf(t)}`;
 }
 
-/** The statements of the meter's indexes under the names one prefix gives. */
+/**
+ * The statements of the meter's indexes under the names one prefix gives. A purge's page reads `state <> 'reserved'
+ * AND settled_at < ?`, and `<>` on an index's first column gives a B-tree no range to scan, so the purge's index leads
+ * with `settled_at`, whose `<` does, and holds `state` beside it.
+ */
 function indexDdlOf(t: SpendMeterTables): string {
   return `CREATE INDEX IF NOT EXISTS ${t.index}_due ON ${t.reservations} (state, expires_at);
 CREATE INDEX IF NOT EXISTS ${t.index}_account ON ${t.reservations} (account_id, reserved_at);
+CREATE INDEX IF NOT EXISTS ${t.index}_settled ON ${t.reservations} (settled_at, state);
 `;
 }
 

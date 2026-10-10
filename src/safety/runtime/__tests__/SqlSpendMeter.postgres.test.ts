@@ -196,7 +196,7 @@ describeIfPostgres('SqlSpendMeter on Postgres', () => {
   });
 
   describe('tables named by a prefix', () => {
-    it('answers SPEND_METER_DDL word for word under the default prefix, named or left out, and a meter finds its tables under those names', async () => {
+    it("answers SPEND_METER_DDL word for word under the default prefix, named or left out, and a meter finds its tables and its three indexes, the purge's among them, under those names", async () => {
       expect(spendMeterDdl()).toBe(SPEND_METER_DDL);
       expect(spendMeterDdl('agentos_spend')).toBe(SPEND_METER_DDL);
       await new SqlSpendMeter({ db, allowanceFor: () => 1, periodOf: monthOf }).ensureSchema();
@@ -205,6 +205,7 @@ describeIfPostgres('SqlSpendMeter on Postgres', () => {
         indexes: [
           { name: 'idx_spend_reservations_account', table: 'agentos_spend_reservations', columns: ['account_id', 'reserved_at'] },
           { name: 'idx_spend_reservations_due', table: 'agentos_spend_reservations', columns: ['state', 'expires_at'] },
+          { name: 'idx_spend_reservations_settled', table: 'agentos_spend_reservations', columns: ['settled_at', 'state'] },
         ],
       });
     });
@@ -218,6 +219,7 @@ describeIfPostgres('SqlSpendMeter on Postgres', () => {
         indexes: [
           { name: 'idx_alt_spend_reservations_account', table: 'alt_spend_reservations', columns: ['account_id', 'reserved_at'] },
           { name: 'idx_alt_spend_reservations_due', table: 'alt_spend_reservations', columns: ['state', 'expires_at'] },
+          { name: 'idx_alt_spend_reservations_settled', table: 'alt_spend_reservations', columns: ['settled_at', 'state'] },
         ],
       });
     });

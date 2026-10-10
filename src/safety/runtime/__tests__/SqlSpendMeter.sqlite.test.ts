@@ -83,7 +83,7 @@ runSuitesOnSqlite();
 runSuitesOnSqlite(ALT_PREFIX);
 
 describe('SqlSpendMeter on SQLite, tables named by a prefix', () => {
-  it('answers SPEND_METER_DDL word for word under the default prefix, named or left out, and a meter makes its tables under those names', async () => {
+  it("answers SPEND_METER_DDL word for word under the default prefix, named or left out, and a meter makes its tables and its three indexes, the purge's among them, under those names", async () => {
     expect(spendMeterDdl()).toBe(SPEND_METER_DDL);
     expect(spendMeterDdl('agentos_spend')).toBe(SPEND_METER_DDL);
     const db = await openSqlite();
@@ -94,6 +94,7 @@ describe('SqlSpendMeter on SQLite, tables named by a prefix', () => {
         indexes: [
           { name: 'idx_spend_reservations_account', table: 'agentos_spend_reservations', columns: ['account_id', 'reserved_at'] },
           { name: 'idx_spend_reservations_due', table: 'agentos_spend_reservations', columns: ['state', 'expires_at'] },
+          { name: 'idx_spend_reservations_settled', table: 'agentos_spend_reservations', columns: ['settled_at', 'state'] },
         ],
       });
     } finally {
@@ -112,6 +113,7 @@ describe('SqlSpendMeter on SQLite, tables named by a prefix', () => {
         indexes: [
           { name: 'idx_alt_spend_reservations_account', table: 'alt_spend_reservations', columns: ['account_id', 'reserved_at'] },
           { name: 'idx_alt_spend_reservations_due', table: 'alt_spend_reservations', columns: ['state', 'expires_at'] },
+          { name: 'idx_alt_spend_reservations_settled', table: 'alt_spend_reservations', columns: ['settled_at', 'state'] },
         ],
       });
     } finally {
