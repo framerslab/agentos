@@ -206,6 +206,7 @@ const publicationManifest = [
   agentosDoc('MULTIMODAL_RAG.md', 'features/multimodal-rag.md', 'Multimodal RAG (Image + Audio)', 'RAG & Retrieval', 5),
   agentosDoc('MEMORY_DOCUMENT_INGESTION.md', 'features/memory-document-ingestion.md', 'Document Ingestion', 'RAG & Retrieval', 6),
   agentosDoc('INCREMENTAL_VECTOR_INGESTION.md', 'features/incremental-vector-ingestion.md', 'Incremental Vector Ingestion', 'RAG & Retrieval', 7),
+  agentosDoc('features/LIBRARY_INDEX.md', 'features/library-index.md', 'Library Index', 'RAG & Retrieval', 7.5),
 
   agentosDoc('GUARDRAILS_USAGE.md', 'features/guardrails.md', 'Guardrails', 'Guardrails & Safety', 1),
   staticDoc('features/guardrails-architecture.md', 'features/guardrails-architecture.md', 'Guardrails Architecture', 'Guardrails & Safety', 1.5),

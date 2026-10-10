@@ -334,3 +334,9 @@ export type {
   VerifiedResponse,
   VerificationSource,
 } from './citation/index.js';
+
+// ============================================================================
+// Library: sources held as units over any vector store
+// ============================================================================
+
+export * from '../library/index.js';
