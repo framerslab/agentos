@@ -1,6 +1,6 @@
 # OAuth Authentication Module
 
-The `@framers/agentos/auth` subpath export provides OAuth primitives: a browser-based OAuth 2.0 authorization-code flow with PKCE for OpenAI (obtaining API access from a ChatGPT subscription, as the Codex CLI does), the same flow for Twitter, Instagram, LinkedIn and Facebook, and the token store, callback server and PKCE helpers they share.
+The `@framers/agentos/auth` subpath export provides OAuth primitives: a browser-based OAuth 2.0 authorization-code flow with PKCE for OpenAI (obtaining API access from a ChatGPT subscription, as the Codex CLI does), the same flow for Twitter, Instagram, LinkedIn and Facebook, and the token store, callback server and PKCE helpers they share. For a web server it provides the same grant split across two requests ([`RedirectOAuthFlow`](#web-server-flow)), secrets sealed at rest with AES-256-GCM (`sealSecret`, `openSecret`) and a token store that keeps each grant sealed (`SealedTokenStore`).
 
 ## Architecture
 
@@ -11,6 +11,9 @@ The `@framers/agentos/auth` subpath export provides OAuth primitives: a browser-
 ├── OpenAIOAuthFlow.ts    # OpenAI browser PKCE flow (Codex CLI client)
 ├── BrowserOAuthFlow.ts   # Abstract base for browser authorization-code + PKCE flows
 ├── TwitterOAuthFlow.ts, InstagramOAuthFlow.ts, LinkedInOAuthFlow.ts, FacebookOAuthFlow.ts
+├── RedirectOAuthFlow.ts  # A web server's authorization-code + PKCE flow, split across two requests
+├── sealing.ts            # sealSecret, openSecret: AES-256-GCM with key ids and a bound context
+├── SealedTokenStore.ts   # IOAuthTokenStore that keeps a grant's refresh token sealed
 ├── callback-server.ts    # Local callback server (startCallbackServer)
 ├── pkce.ts               # generateCodeVerifier, generateCodeChallenge, generateState
 ├── utils.ts              # openBrowser, isTokenValid
@@ -117,6 +120,77 @@ Features:
 - Returns `null` for corrupted or invalid JSON
 - Works with any `providerId` string
 
+## Web Server Flow
+
+A web server runs the grant across two requests: the one that sends the person to the provider, and the provider's redirect back. [`RedirectOAuthFlow`](https://github.com/framerslab/agentos/blob/master/src/core/llm/auth/RedirectOAuthFlow.ts) splits the authorization-code flow with PKCE at that redirect. `begin` answers the address with its `state` and PKCE `codeVerifier`; the server keeps both (in a short-lived row found by a cookie, for example) and hands them back to `complete`. The store keeps the refresh token; the access token stays in the process's memory and is never stored.
+
+```typescript
+import { RedirectOAuthFlow, SealedTokenStore, type RedirectOAuthConfig } from '@framers/agentos/auth';
+
+class ExampleOAuthFlow extends RedirectOAuthFlow {
+  readonly providerId = 'example';
+
+  protected getConfig(): RedirectOAuthConfig {
+    return {
+      authorizationEndpoint: 'https://auth.example.com/authorize',
+      tokenEndpoint: 'https://auth.example.com/token',
+      revocationEndpoint: 'https://auth.example.com/revoke',
+      scopes: ['files.read'],
+      clientId: process.env.EXAMPLE_CLIENT_ID ?? '',
+      clientSecret: process.env.EXAMPLE_CLIENT_SECRET,
+    };
+  }
+}
+
+// Sealed grants live in the server's own table, one row per key.
+const store = new SealedTokenStore(
+  {
+    get: (key) => grants.sealedText(key), // the row's sealed text, or null
+    set: (key, sealed) => grants.write(key, sealed),
+    delete: (key) => grants.remove(key),
+  },
+  { current: { id: 'k2', key: currentKey }, previous: [{ id: 'k1', key: previousKey }] },
+);
+const flow = new ExampleOAuthFlow(store);
+
+// Request 1: send the person to `url`; keep `state` and `codeVerifier` on the server.
+const { url, state, codeVerifier } = flow.begin({ redirectUri: 'https://app.example.com/oauth/callback' });
+
+// Request 2: the provider redirects back with `code` and `state`.
+const tokens = await flow.complete({
+  code,
+  state: returnedState,
+  expectedState: state,
+  codeVerifier,
+  redirectUri: 'https://app.example.com/oauth/callback',
+});
+await flow.keep('connection-42', tokens);
+
+// Any later request, in any process that reads the same table:
+const accessToken = await flow.accessToken('connection-42');
+
+// Disconnecting: revoke at the provider, then clear the grant whatever the provider answered.
+const { revoked } = await flow.forget('connection-42');
+```
+
+- `begin({ redirectUri, extraParams?, scopes? })` builds the authorization address with `response_type=code`, `client_id`, `redirect_uri`, `scope` (the configured scopes, or `scopes`, joined by spaces), a fresh `state`, `code_challenge` (the S256 challenge of a fresh verifier) and `code_challenge_method=S256`, plus any `extraParams`, such as `access_type: 'offline'`.
+- `complete(input)` compares `state` with `expectedState` in constant time and throws `OAuthGrantRefused` with reason `state`, calling no endpoint, when they differ or `expectedState` is empty. It then posts `grant_type=authorization_code`, the code, the redirect address, the verifier and the client's credentials to the token endpoint as a form, with `Accept: application/json`, and answers the token set: `expiresAt` from `expires_in` (an hour when the answer has none), `metadata.scope` from `scope`.
+- A token endpoint answer that is not a success, or that carries no `access_token`, throws `OAuthGrantRefused` with its reason (`exchange` or `refresh`), the HTTP `status` and the answer's `error` as `providerError`. Its message holds no code, verifier or token.
+- `keep(key, tokens)` saves the grant in the store and holds the token set in memory. `accessToken(key)` answers the held access token until `refreshBufferMs` (five minutes by default) before it expires; past that, or in a process that holds nothing for `key`, it refreshes from the stored refresh token, one refresh at a time for each key, and holds the result. A refresh token in the refresh's answer replaces the stored one; an answer without one leaves the stored one in place. With no stored refresh token it throws `OAuthGrantRefused` with reason `missing`.
+- `revoke(token)` posts the token alone as a form to `revocationEndpoint` (RFC 7009) and throws when the flow has none. `forget(key)` revokes the stored refresh token, then clears the store and the memory for `key` whatever the provider answered, and answers `{ revoked }`.
+
+The default token calls send the client id, and the client secret when one is configured, in the form body, which RFC 6749 section 2.3.1 lets a server accept as well as HTTP Basic. A provider whose endpoints differ overrides `exchangeCode`, `refreshTokens`, `postExchange` or `revoke`.
+
+### Sealed Secrets
+
+[`sealSecret(plain, key, keyId, context?)`](https://github.com/framerslab/agentos/blob/master/src/core/llm/auth/sealing.ts) seals a string or bytes with AES-256-GCM under a 32-byte key, with a random 96-bit nonce for each seal, into `v1.<keyId>.<base64url(nonce | ciphertext | tag)>`. The context, for example the id of the row the value belongs to, is bound as additional authenticated data, so a sealed value copied to another row does not open there. `openSecret(sealed, keys, context?)` opens it with the key whose id the text names and answers the bytes, or throws `SealedSecretError` with reason `format` (not a version 1 sealed text), `key` (no key with that id was given) or `tampered` (the key, the bytes or the context differ from the seal's). A key id is 1 to 32 letters, digits, `-` or `_`, and `sealSecret` refuses a key that is not 32 bytes.
+
+To turn a key over, seal with the new key and keep the old one among the keys that open.
+
+### SealedTokenStore
+
+[`SealedTokenStore`](https://github.com/framerslab/agentos/blob/master/src/core/llm/auth/SealedTokenStore.ts) is an `IOAuthTokenStore` over three functions the server gives: `get`, `set` and `delete` of a sealed text by key. `save(key, tokens)` seals the refresh token and the metadata with the `current` key, bound to `key`; the access token and the id token are never kept. `load(key)` answers the refresh token and the metadata with `accessToken: ''` and `expiresAt: 0`, so a flow treats the grant as expired and refreshes it, or `null` when nothing is kept; a value that does not open throws `SealedSecretError`. A grant sealed with one of the `previous` keys loads, and its next `save` seals it with `current`.
+
 ## Integration with LLM Providers
 
 The [`OpenAIProvider`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/OpenAIProvider.ts) in AgentOS core accepts an optional `oauthFlow` config:
@@ -181,6 +255,12 @@ Import from `@framers/agentos/auth`:
 import {
   OpenAIOAuthFlow,
   FileTokenStore,
+  RedirectOAuthFlow,
+  OAuthGrantRefused,
+  SealedTokenStore,
+  sealSecret,
+  openSecret,
+  SealedSecretError,
   type IOAuthFlow,
   type IOAuthTokenStore,
   type OAuthTokenSet,

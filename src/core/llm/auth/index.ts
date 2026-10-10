@@ -27,6 +27,11 @@ export type { LinkedInOAuthFlowOptions } from './LinkedInOAuthFlow.js';
 export { FacebookOAuthFlow } from './FacebookOAuthFlow.js';
 export type { FacebookOAuthFlowOptions } from './FacebookOAuthFlow.js';
 
+// A web server's OAuth 2.0 flow, and secrets sealed at rest
+export { RedirectOAuthFlow, OAuthGrantRefused, type RedirectOAuthConfig, type RedirectBegin, type RedirectCompleteInput } from './RedirectOAuthFlow.js';
+export { sealSecret, openSecret, SealedSecretError, type SealingKey } from './sealing.js';
+export { SealedTokenStore, type SealedBytesStore, type SealingKeys } from './SealedTokenStore.js';
+
 // Utilities
 export { isTokenValid, openBrowser } from './utils.js';
 export { startCallbackServer } from './callback-server.js';
