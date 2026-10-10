@@ -21,7 +21,11 @@ export interface PhraseHeardResult {
   heard: boolean;
   /** The share of the phrase's words found in order, 0 to 1. */
   ratio: number;
-  /** The lines that held a matched word, in order, each once. */
+  /**
+   * The lines that held a matched word, in order, each once. When the words found can be matched in more than one
+   * place, these are the lines of the tightest match: the one with the fewest words from its first word to its
+   * last, and of two as tight, the later one.
+   */
   itemIds: string[];
 }
 
@@ -102,27 +106,52 @@ export function phraseHeard(phrase: string, lines: readonly HeardLine[], options
   }
   const n = want.length;
   const m = words.length;
-  // table[i][j]: the longest common subsequence of want[i..] and words[j..].
+  // table[i][j]: the longest common subsequence of want[i..] and words[j..]. ends[i][j]: of the subsequences that
+  // long, the one that ends soonest: the place in `words` of its last word, or j - 1 when it holds no word.
   const table: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  const noWord = Array.from({ length: m + 1 }, (_, j) => j - 1);
+  const ends: number[][] = Array.from({ length: n + 1 }, () => noWord.slice());
   for (let i = n - 1; i >= 0; i -= 1) {
     for (let j = m - 1; j >= 0; j -= 1) {
-      table[i][j] = want[i] === words[j] ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1]);
+      if (want[i] === words[j]) {
+        // Taking a shared word never ends later than leaving it.
+        table[i][j] = table[i + 1][j + 1] + 1;
+        ends[i][j] = ends[i + 1][j + 1];
+      } else if (table[i + 1][j] > table[i][j + 1]) {
+        table[i][j] = table[i + 1][j];
+        ends[i][j] = ends[i + 1][j];
+      } else if (table[i + 1][j] < table[i][j + 1]) {
+        table[i][j] = table[i][j + 1];
+        ends[i][j] = ends[i][j + 1];
+      } else {
+        table[i][j] = table[i + 1][j];
+        ends[i][j] = Math.min(ends[i + 1][j], ends[i][j + 1]);
+      }
     }
   }
+  const found = table[0][0];
+  // The longest match can start at any j that leaves table[0][j] at `found`, and from there it ends at ends[0][j] at
+  // the soonest. The tightest match starts where that stretch is shortest; of two as short, the later one is taken.
+  let start = 0;
+  for (let j = 1; j < m && table[0][j] === found; j += 1) {
+    if (ends[0][j] - j <= ends[0][start] - start) start = j;
+  }
+  // Walk that match: take a word the phrase and the lines share, and otherwise step to where the count and the end
+  // stay as they are.
   const itemIds: string[] = [];
   let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
+  let j = start;
+  while (table[i][j] > 0) {
     if (want[i] === words[j]) {
       if (itemIds[itemIds.length - 1] !== owners[j]) itemIds.push(owners[j]);
       i += 1;
       j += 1;
-    } else if (table[i + 1][j] >= table[i][j + 1]) {
+    } else if (table[i + 1][j] === table[i][j] && ends[i + 1][j] === ends[i][j]) {
       i += 1;
     } else {
       j += 1;
     }
   }
-  const ratio = table[0][0] / n;
+  const ratio = found / n;
   return { heard: ratio >= threshold, ratio, itemIds: [...new Set(itemIds)] };
 }

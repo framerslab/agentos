@@ -32,6 +32,70 @@ describe('phraseHeard', () => {
     expect(result.itemIds).toEqual(['i2', 'i3']);
   });
 
+  it('names the lines of the tightest match, not a line that only holds a word of the sentence', () => {
+    // The sentence's first word, said in a line before the sentence.
+    const early = phraseHeard(LINE, [{ itemId: 'i1', text: 'I think we can start' }, { itemId: 'i2', text: LINE }]);
+    expect(early).toEqual({ heard: true, ratio: 1, itemIds: ['i2'] });
+    // Its last word, said again in a line after it.
+    const late = phraseHeard('one two three', [{ itemId: 'a', text: 'one two three' }, { itemId: 'b', text: 'and three more' }]);
+    expect(late.itemIds).toEqual(['a']);
+    // Said whole, then again with its words further apart: the first saying is the tighter.
+    const apart = phraseHeard('one two three', [{ itemId: 'a', text: 'one two three' }, { itemId: 'b', text: 'one two' }, { itemId: 'c', text: 'then three' }]);
+    expect(apart.itemIds).toEqual(['a']);
+    // Said twice, as tightly: the later saying.
+    const twice = phraseHeard('one two three', [{ itemId: 'a', text: 'one two three' }, { itemId: 'b', text: 'one two three' }]);
+    expect(twice.itemIds).toEqual(['b']);
+  });
+
+  it('names a longest match that is the tightest, and the later of two as tight, in every small case', () => {
+    // Every phrase of up to four words (a or b) against every run of up to six one-word lines (a, b or x): repeats,
+    // strays and ties are all met, and a line's id is the place of its word. What is named is checked against all
+    // the ways to pick places.
+    const runs = (alphabet: string[], longest: number): string[][] => {
+      const all: string[][] = [[]];
+      let last: string[][] = [[]];
+      for (let length = 1; length <= longest; length += 1) {
+        last = last.flatMap((run) => alphabet.map((word) => [...run, word]));
+        all.push(...last);
+      }
+      return all;
+    };
+    // Whether `picked` can be read out of `want`, in order.
+    const within = (picked: string[], want: string[]): boolean => {
+      let at = 0;
+      for (const word of want) if (word === picked[at]) at += 1;
+      return at === picked.length;
+    };
+    const lineRuns = runs(['a', 'b', 'x'], 6);
+    const wrong: string[] = [];
+    for (const want of runs(['a', 'b'], 4).slice(1)) {
+      for (const words of lineRuns) {
+        // The best pick: the most words, then the shortest stretch from its first place to its last, then the latest.
+        let best = { count: 0, stretch: 0, first: -1 };
+        for (let mask = 1; mask < 2 ** words.length; mask += 1) {
+          const places = words.map((_, place) => place).filter((place) => (mask >> place) % 2 === 1);
+          if (!within(places.map((place) => words[place]), want)) continue;
+          const stretch = places[places.length - 1] - places[0];
+          const better =
+            places.length > best.count ||
+            (places.length === best.count && (stretch < best.stretch || (stretch === best.stretch && places[0] > best.first)));
+          if (better) best = { count: places.length, stretch, first: places[0] };
+        }
+        const { ratio, itemIds } = phraseHeard(want.join(' '), words.map((text, place) => ({ itemId: String(place), text })));
+        const named = itemIds.map(Number);
+        const sound =
+          ratio === best.count / want.length &&
+          named.length === best.count &&
+          named.every((place, k) => k === 0 || place > named[k - 1]) &&
+          within(named.map((place) => words[place]), want) &&
+          (best.count === 0 || (named[0] === best.first && named[named.length - 1] - named[0] === best.stretch));
+        if (!sound) wrong.push(`${want.join(' ')} in ${words.join(' ')}: named ${named.join(',')}`);
+      }
+    }
+    expect(wrong).toEqual([]);
+    read.texts.length = 0;
+  });
+
   it('does not hear it when fewer than eight words in ten came, or not in order', () => {
     expect(phraseHeard(LINE, [{ itemId: 'i1', text: 'I use a live note assistant. Tell me if you would rather I did not.' }]).heard).toBe(false);
     const shuffled = LINE.split(' ').reverse().join(' ');
