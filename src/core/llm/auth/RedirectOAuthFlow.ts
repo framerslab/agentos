@@ -72,7 +72,8 @@ function storedGrant(tokens: OAuthTokenSet): OAuthTokenSet {
  * The authorization code grant with PKCE split across a web server's two requests: `begin` in the request that sends
  * the person to the provider, `complete` in the request the provider redirects back to. A provider's flow extends it
  * with `providerId` and `getConfig`, and overrides the token calls where its endpoints differ from the standard ones.
- * Within one flow, `keep`, a refresh and `forget` of the same key run one after another.
+ * Within one flow, `keep`, a refresh and `forget` of the same key run one after another. Flows that share a store do
+ * not take turns with each other: an `IOAuthTokenStore` has no way to claim a key.
  */
 export abstract class RedirectOAuthFlow {
   /** The provider's id. */
