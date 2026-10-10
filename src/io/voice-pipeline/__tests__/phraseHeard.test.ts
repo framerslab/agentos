@@ -1,5 +1,20 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
+// The word rule stays the real one. Each text it is handed is noted, so a test can see how far a text was read.
+const read = vi.hoisted(() => ({ texts: [] as string[] }));
+
+vi.mock('../../../cognition/library/tokens.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../../cognition/library/tokens.js')>();
+  return {
+    ...real,
+    lexicalTokens: (text: string) => {
+      read.texts.push(text);
+      return real.lexicalTokens(text);
+    },
+  };
+});
+
+import { lexicalTokens } from '../../../cognition/library/tokens.js';
 import { phraseHeard } from '../phraseHeard.js';
 import { TranscriptLedger } from '../transcriptLedger.js';
 
@@ -39,6 +54,37 @@ describe('phraseHeard', () => {
     const filler = { itemId: 'f', text: 'filler '.repeat(50) };
     expect(phraseHeard('one two three', [filler, { itemId: 'a', text: 'one two three' }], { maxWords: 40 }).heard).toBe(false);
     expect(phraseHeard('one two three', [filler, { itemId: 'a', text: 'one two three' }], { maxWords: 60 }).heard).toBe(true);
+  });
+
+  it('reads a line no further than the last word maxWords takes', () => {
+    const long = Array.from({ length: 10_000 }, (_, k) => `w${k}`).join(' ');
+    read.texts.length = 0;
+    const result = phraseHeard('w1 w2', [{ itemId: 'a', text: long }, { itemId: 'b', text: 'w1 w2' }], { maxWords: 3 });
+    expect(result).toEqual({ heard: true, ratio: 1, itemIds: ['a'] });
+    // The word rule was handed the phrase, then the three words the cap takes of the long line, and nothing else.
+    expect(read.texts).toEqual(['w1 w2', 'w0 w1 w2']);
+
+    // What the cap has left bounds the next line, and a line after the cap is not read.
+    read.texts.length = 0;
+    phraseHeard('one', [{ itemId: 'a', text: 'one two' }, { itemId: 'b', text: 'three four five six' }, { itemId: 'c', text: 'seven' }], { maxWords: 3 });
+    expect(read.texts).toEqual(['one', 'one two', 'three']);
+
+    read.texts.length = 0;
+    phraseHeard('one', [{ itemId: 'a', text: long }], { maxWords: 0 });
+    expect(read.texts).toEqual(['one']);
+  });
+
+  it('reads the words the word rule gives, whatever the cap', () => {
+    // Apostrophes, digits, a capital I with a dot (two words in lower case), a combining accent and two scripts.
+    const text = "It's 9 o'clock in \u0130stanbul, cafe\u0301 d\u00e9j\u00e0 vu: \u6771\u4eac 2026!";
+    const all = lexicalTokens(text);
+    expect(all).toEqual(['it', 's', '9', 'o', 'clock', 'in', 'i', 'stanbul', 'cafe', 'd\u00e9j\u00e0', 'vu', '\u6771\u4eac', '2026']);
+    for (let cap = 1; cap < all.length; cap += 1) {
+      // The phrase holds one word more than the cap: all but that word are found when the first `cap` words are read.
+      const phrase = all.slice(0, cap + 1).join(' ');
+      expect(phraseHeard(phrase, [{ itemId: 'a', text }], { maxWords: cap }).ratio).toBe(cap / (cap + 1));
+    }
+    expect(phraseHeard(all.join(' '), [{ itemId: 'a', text }], { maxWords: all.length }).ratio).toBe(1);
   });
 
   it('refuses an empty phrase', () => {
