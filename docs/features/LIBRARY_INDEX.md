@@ -82,7 +82,7 @@ The keys in this table come from the source's own fields: they win over the same
 
 `match` asks for any word of the query (`'any'`, the default) or every word (`'all'`), and `prefix` (false by default) lets a stored word match when it begins with a query word; both go to the lexical leg of a `lexical` or `hybrid` search.
 
-Every search names its scope, `{ tenantId, aclGroups }`. A scope with no tenant or no group is refused before the store is asked. The filter the store receives keeps the passages of that tenant whose `aclGroups` hold at least one of the scope's groups and whose `status` is `active`. The narrowing options add to it: `kinds` keeps any of those kinds, `folderId` that folder, `tags` passages that hold every one of those tags, and `sourceIds` any of those sources. An empty `kinds` or `tags` narrows nothing; an empty `sourceIds` finds nothing.
+Every search names its scope, `{ tenantId, aclGroups }`. A scope with no tenant or no group is refused before the store is asked. The filter the store receives keeps the passages of that tenant whose `aclGroups` hold at least one of the scope's groups and whose `status` is `active`. The narrowing options add to it: `kinds` keeps any of those kinds, `folderId` that folder, `tags` passages that hold every one of those tags, and `sourceIds` any of those sources. An empty `kinds` or `tags` narrows nothing; an empty `sourceIds` finds nothing, and the index answers it without asking the store.
 
 Each passage found has `id`, `sourceId`, `kind`, `index`, `text`, `score` (the store's, for the mode, read as a number), `title` and `folderId` when the passage holds them, `tags`, and its whole `metadata`.
 

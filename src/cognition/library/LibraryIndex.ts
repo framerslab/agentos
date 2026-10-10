@@ -76,7 +76,7 @@ export interface LibrarySearch {
   folderId?: string;
   /** Every one of these tags; an empty list narrows nothing. */
   tags?: string[];
-  /** Only these sources; an empty list finds nothing. */
+  /** Only these sources; an empty list finds nothing, without a call to the embedder or the store. */
   sourceIds?: string[];
   /** For the lexical leg, alone or in a hybrid search: every word or any word (default), and whether a stored word may only begin with a query word. */
   match?: 'all' | 'any';
@@ -210,6 +210,8 @@ export class LibraryIndex {
     if (!query.scope.tenantId || query.scope.aclGroups.length === 0) {
       throw new Error('LibraryIndex.search needs a tenant and at least one access group.');
     }
+    // An empty source list finds nothing on every store, whatever a store's filter makes of an empty `$in`.
+    if (query.sourceIds && query.sourceIds.length === 0) return [];
     const narrowed: MetadataFilter = {};
     if (query.kinds && query.kinds.length > 0) narrowed.kind = { $in: query.kinds };
     if (query.folderId) narrowed.folderId = query.folderId;

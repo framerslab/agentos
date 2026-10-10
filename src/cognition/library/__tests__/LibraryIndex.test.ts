@@ -149,6 +149,17 @@ describe('LibraryIndex and the store\'s optional legs', () => {
     expect(recording.hybridSearch).toHaveBeenCalledWith('library', expect.any(Array), 'what did we decide', expect.objectContaining({ topK: 8, match: 'any', prefix: false, filter: expect.objectContaining({ tenantId: { $eq: 'org1' } }) }));
   });
 
+  it('finds nothing for an empty source list without asking the store', async () => {
+    embed.mockClear();
+    recording.hybridSearch.mockClear();
+    recording.lexicalSearch.mockClear();
+    expect(await index.search({ text: 'budget', scope, sourceIds: [] })).toEqual([]);
+    expect(await index.search({ text: 'budget', scope, mode: 'lexical', sourceIds: [] })).toEqual([]);
+    expect(embed).not.toHaveBeenCalled();
+    expect(recording.hybridSearch).not.toHaveBeenCalled();
+    expect(recording.lexicalSearch).not.toHaveBeenCalled();
+  });
+
   it('changes who may see a source, its folder and its tags in the store', async () => {
     expect(await index.setSourceScope('session:s1', { aclGroups: ['acct:ann'], folderId: null, tags: ['done'] })).toBe(3);
     expect(recording.updateMetadata).toHaveBeenCalledWith('library', { sourceId: 'session:s1' }, { aclGroups: ['acct:ann'], folderId: null, tags: ['done'] });
