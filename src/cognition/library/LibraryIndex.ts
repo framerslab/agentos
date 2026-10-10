@@ -106,6 +106,17 @@ function withoutSourceFields(metadata: Record<string, MetadataValue> | undefined
 }
 
 /**
+ * A store may report a failed write or delete in its result instead of throwing (InMemoryVectorStore does for a
+ * vector of the wrong dimension); the index throws on such a result as on a thrown error.
+ */
+function throwOnReportedFailure(result: { failedCount?: number; errors?: Array<{ message: string }> }, action: string): void {
+  const failed = Math.max(result.failedCount ?? 0, result.errors?.length ?? 0);
+  if (failed === 0) return;
+  const reason = result.errors?.[0]?.message;
+  throw new Error(`LibraryIndex: the store failed to ${action} (${failed} failed)${reason ? `: ${reason}` : '.'}`);
+}
+
+/**
  * A library's sources in one collection of a vector store. Every passage of a source carries the source's tenant,
  * access groups, kind, folder, tags and title in its metadata, so the store's own filter decides who sees it:
  * `indexSource` replaces a source whole, `setSourceScope` changes who may see it and where it is filed,
@@ -128,7 +139,8 @@ export class LibraryIndex {
   /**
    * Indexes a source, replacing whatever the collection held under its id: the old passages are deleted first, then
    * the new ones are embedded and written `batchSize` at a time. A failed batch leaves the passages written before
-   * it, and indexing the source again replaces them.
+   * it, and indexing the source again replaces them. A delete or a write the store reports as failed in its result,
+   * instead of throwing, fails the call as well.
    */
   async indexSource(source: LibrarySource): Promise<{ passages: number }> {
     if (!source.tenantId || source.aclGroups.length === 0) {
@@ -156,20 +168,22 @@ export class LibraryIndex {
         textContent: passage.text,
         metadata: { ...withoutSourceFields(passage.metadata), ...inherited, ...owned, index: from + offset },
       }));
-      await this.store.upsert(this.collection, documents);
+      throwOnReportedFailure(await this.store.upsert(this.collection, documents), `write the passages of ${source.sourceId}`);
     }
     return { passages: source.passages.length };
   }
 
-  /** Removes a source's passages; answers how many went. */
+  /** Removes a source's passages; answers how many went. Throws when the store reports the delete as failed. */
   async removeSource(sourceId: string): Promise<number> {
     const result = await this.store.delete(this.collection, undefined, { filter: { sourceId } });
+    throwOnReportedFailure(result, `delete the passages of ${sourceId}`);
     return result.deletedCount;
   }
 
-  /** Removes everything of one tenant. */
+  /** Removes everything of one tenant. Throws when the store reports the delete as failed. */
   async removeTenant(tenantId: string): Promise<number> {
     const result = await this.store.delete(this.collection, undefined, { filter: { tenantId } });
+    throwOnReportedFailure(result, `delete the passages of tenant ${tenantId}`);
     return result.deletedCount;
   }
 

@@ -82,6 +82,11 @@ describe('LibraryIndex over a vector store', () => {
     expect(passage.metadata).toMatchObject({ team: 'ops', firstSeq: 1 });
   });
 
+  it('throws when the store reports a failed write instead of throwing', async () => {
+    const wrongSize = new LibraryIndex({ store, collection: 'library', embed: async (texts) => texts.map(() => [1, 0]) });
+    await expect(wrongSize.indexSource(source({}))).rejects.toThrow('failed to write the passages of session:s1');
+  });
+
   it('removes a source and a tenant', async () => {
     await index.indexSource(source({}));
     await index.indexSource(source({ sourceId: 'document:d1', kind: 'document' }));
@@ -147,6 +152,19 @@ describe('LibraryIndex and the store\'s optional legs', () => {
   it('changes who may see a source, its folder and its tags in the store', async () => {
     expect(await index.setSourceScope('session:s1', { aclGroups: ['acct:ann'], folderId: null, tags: ['done'] })).toBe(3);
     expect(recording.updateMetadata).toHaveBeenCalledWith('library', { sourceId: 'session:s1' }, { aclGroups: ['acct:ann'], folderId: null, tags: ['done'] });
+  });
+
+  it('throws when the store reports a failed delete, before writing a source again', async () => {
+    const upsert = vi.fn(async () => ({ upsertedCount: 1 }));
+    const failing = new LibraryIndex({
+      store: { delete: vi.fn(async () => ({ deletedCount: 0, failedCount: 1, errors: [{ message: 'timed out' }] })), upsert } as unknown as IVectorStore,
+      collection: 'library',
+      embed,
+    });
+    await expect(failing.removeSource('session:s1')).rejects.toThrow('timed out');
+    await expect(failing.removeTenant('org1')).rejects.toThrow('failed to delete the passages of tenant org1');
+    await expect(failing.indexSource(source({}))).rejects.toThrow('failed to delete the passages of session:s1');
+    expect(upsert).not.toHaveBeenCalled();
   });
 
   it('says so when the store has no lexical leg', async () => {
