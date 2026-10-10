@@ -89,6 +89,7 @@ Preferred providers receive priorities 50, 51, 52, … (lower number = higher pr
 | `google-cloud-stt` | Google Cloud STT | `GOOGLE_STT_CREDENTIALS` | No | Yes | cloud, streaming |
 | `azure-speech-stt` | Azure Speech STT | `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` | No | No | cloud, streaming |
 | `whisper-chunked` | Whisper Chunked Streaming | `OPENAI_API_KEY` | No | Yes | streaming, interim-results |
+| `openai-realtime-transcription` | OpenAI Realtime Transcription | `OPENAI_API_KEY` | No | Yes | streaming, interim-results, endpointing, item-ids, long-sessions |
 | `whisper-local` | Whisper.cpp | — | Yes | No | local, offline |
 | `vosk` | Vosk | — | Yes | Yes | local, offline, streaming |
 | `nvidia-nemo` | NVIDIA NeMo | — | Yes | No | local, offline _(unavailable — not yet integrated)_ |
