@@ -193,7 +193,7 @@ describe('createSttChainFromEnv', () => {
     expect(stt.providers.map((p) => p.providerId)).toEqual(['openai-realtime-transcription']);
   });
 
-  it('leaves mid-utterance failover off by default, so sessions keep flush and usage events', () => {
+  it('leaves mid-utterance failover off by default, so a session is the provider session itself and keeps flush()', () => {
     const { stt } = createSttChainFromEnv({ env: { OPENAI_API_KEY: 'op' } });
     expect(
       (stt as unknown as { opts: { enableMidUtteranceFailover?: boolean } }).opts
