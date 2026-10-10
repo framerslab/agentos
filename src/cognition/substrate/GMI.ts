@@ -1451,14 +1451,14 @@ export class GMI implements IGMI {
           }
           this.addTraceEntry(ReasoningEntryType.PROMPT_CONSTRUCTION_COMPLETE, `Prompt constructed for model ${modelTargetInfo.modelId}.`);
 
-          // A turn's response schema that the primary hop's payload does not carry
-          // rides the prompt. It goes in before the host's hook, as generateText puts
-          // it in before onBeforeGeneration, so a hook that removes it removes it,
-          // and the gateway adds no second copy on that hop. Fallback hops keep the
-          // gateway's per-hop rule.
+          // A turn's response schema that the hop's payload does not carry rides the
+          // prompt. It goes in before the host's hook, on every hop, as generateText
+          // puts it in before onBeforeGeneration on each fallback leg (a generateText
+          // call of its own), so a hook that removes it removes it, and the gateway
+          // adds no second copy on that hop.
           let promptForHook: ChatMessage[] = promptMessages;
           let attemptSchemaInPrompt = schemaInPrompt;
-          if (gateway && resolution && resolution.hop === 0 && responseSchema && !schemaInPrompt) {
+          if (gateway && resolution && responseSchema && !schemaInPrompt) {
             const instruction = gateway.schemaInstruction?.(resolution, responseSchema, schemaName);
             if (instruction) {
               promptForHook = withSystemMessage(promptMessages, instruction);
