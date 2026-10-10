@@ -158,6 +158,9 @@ describe('imageToBuffer', () => {
     expect((await imageToBuffer('data:image/svg+xml,%3Csvg%3E%3C/svg%3E')).toString('utf8')).toBe('<svg></svg>');
     expect([...(await imageToBuffer('data:image/png,%89PNG'))]).toEqual([0x89, 0x50, 0x4e, 0x47]);
     expect(await imageToBuffer('DATA:image/png;BASE64,aGVsbG8=')).toEqual(Buffer.from('hello'));
+    // Spaces around ;base64, as WHATWG Fetch reads a data URL.
+    expect(await imageToBuffer('data:image/png; base64,aGVsbG8=')).toEqual(Buffer.from('hello'));
+    expect(await imageToBuffer('data:image/png;base64 ,aGVsbG8=')).toEqual(Buffer.from('hello'));
   });
 
   it('reads a file URL whose path has an escaped space', async () => {
