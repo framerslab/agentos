@@ -34,13 +34,19 @@ interface HarnessOptions {
    * hold a GMI's creation in flight.
    */
   holdMemoryFor?: (sessionId: string) => Promise<void> | undefined;
+  /** Closes a GMI's cognitive memory; by default it takes one macrotask. */
+  closeMemory?: () => Promise<void>;
+  /** The manager's bound on each GMI's shutdown. */
+  shutdownTimeoutMs?: number;
 }
 
 /** Builds a real GMIManager with an active GMI for session-1 and one for session-2. */
 async function createHarness(options: HarnessOptions = {}) {
   // Closing a GMI's cognitive memory takes a macrotask, so a GMI is in the
   // SHUTDOWN state when shutdown() resolves only if shutdown() awaited it.
-  const memoryShutdown = vi.fn(() => new Promise<void>((resolve) => setTimeout(resolve, 5)));
+  const memoryShutdown = vi.fn(
+    options.closeMemory ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 5))),
+  );
 
   const personaLoader: IPersonaLoader = {
     initialize: async () => undefined,
@@ -56,6 +62,7 @@ async function createHarness(options: HarnessOptions = {}) {
   const manager = new GMIManager(
     {
       personaLoaderConfig: { personaSource: 'in-memory' },
+      ...(options.shutdownTimeoutMs !== undefined ? { shutdownTimeoutMs: options.shutdownTimeoutMs } : {}),
       cognitiveMemoryFactory: async ({ sessionId }) => {
         await options.holdMemoryFor?.(sessionId);
         return {
@@ -83,6 +90,7 @@ async function createHarness(options: HarnessOptions = {}) {
 
 describe('GMIManager.shutdown', () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -170,5 +178,46 @@ describe('GMIManager.shutdown', () => {
     expect(memoryShutdown).toHaveBeenCalledTimes(3);
     expect(manager.activeGMIs.size).toBe(0);
     expect(manager.gmiSessionMap.size).toBe(0);
+  });
+
+  it('shuts the GMIs down at once, each within shutdownTimeoutMs, and goes on without one that does not finish', async () => {
+    // Every GMI's cognitive memory stays open until the case lets it close, as a
+    // consolidation cycle waiting on its model call keeps it open.
+    let releaseMemories!: () => void;
+    const memoriesHeld = new Promise<void>((resolve) => {
+      releaseMemories = resolve;
+    });
+    const { manager, memoryShutdown } = await createHarness({
+      shutdownTimeoutMs: 50,
+      closeMemory: () => memoriesHeld,
+    });
+    await manager.getOrCreateGMIForSession('user-3', 'session-3', persona.id);
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let finished = false;
+    const shutdown = manager.shutdown().then(() => {
+      finished = true;
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(50);
+
+      // All three GMIs began closing at once, and shutdown() resolved after one bound.
+      expect(memoryShutdown).toHaveBeenCalledTimes(3);
+      expect(finished).toBe(true);
+      const warnings = consoleWarn.mock.calls
+        .map(([message]) => String(message))
+        .filter((message) => message.includes('did not finish shutting down'));
+      expect(warnings).toHaveLength(3);
+      for (const sessionId of ['session-1', 'session-2', 'session-3']) {
+        expect(warnings.filter((message) => message.includes(`session ${sessionId}`))).toHaveLength(1);
+      }
+      expect(manager.activeGMIs.size).toBe(0);
+      expect(manager.gmiSessionMap.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      releaseMemories();
+      await shutdown;
+    }
   });
 });
