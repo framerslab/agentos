@@ -684,20 +684,26 @@ class TranscriptionConnection {
     });
   }
 
-  /** Sends a client event when the socket is open. */
-  send(event: Record<string, unknown>): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(event));
-    }
+  /** Sends a client event when the socket is open, and says whether it did. */
+  send(event: Record<string, unknown>): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+    this.ws.send(JSON.stringify(event));
+    return true;
   }
 
-  /** Appends one encoded frame to this connection's input buffer. */
-  sendAudio(frame: EncodedFrame): void {
+  /**
+   * Appends one encoded frame to this connection's input buffer, and says
+   * whether the socket took it. A socket that is closing takes nothing before
+   * its close is reported: the frame is then not counted as sent, so the
+   * session can hold it for the connection that takes over.
+   */
+  sendAudio(frame: EncodedFrame): boolean {
+    if (!this.send({ type: 'input_audio_buffer.append', audio: frame.base64 })) return false;
     if (this.baseMs === undefined) this.baseMs = frame.startMs;
     if (this.uncommittedFromMs === undefined) this.uncommittedFromMs = frame.startMs;
-    this.send({ type: 'input_audio_buffer.append', audio: frame.base64 });
     this.samplesSent += frame.samples;
     this.samplesSinceCommit += frame.samples;
+    return true;
   }
 
   /**
@@ -873,7 +879,9 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
 
   /**
    * Converts the frame to base64 PCM16 at 24 kHz and appends it to every open
-   * connection (two during a rollover's overlap), or holds it while none is open.
+   * connection (two during a rollover's overlap), or holds it while none takes
+   * it: none is open (a reconnect), or the open one's socket is closing and its
+   * drop has not been reported yet.
    */
   pushAudio(frame: AudioFrame): void {
     if (this.closed || frame.samples.length === 0 || !(frame.sampleRate > 0)) return;
@@ -885,11 +893,11 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     if (resampled.length === 0) return;
     const encoded: EncodedFrame = { ...encodePcm16(resampled), startMs, durationMs };
     const receivers = this.connections.filter((connection) => connection.state === 'open');
-    if (receivers.length === 0) {
-      this.hold(encoded);
-      return;
+    let taken = false;
+    for (const connection of receivers) {
+      if (connection.sendAudio(encoded)) taken = true;
     }
-    for (const connection of receivers) connection.sendAudio(encoded);
+    if (!taken) this.hold(encoded);
   }
 
   /**
@@ -992,16 +1000,24 @@ class OpenAIRealtimeTranscriptionSession extends EventEmitter implements Streami
     for (const finish of [...this.adoptWaiters]) finish();
   }
 
-  /** Sends the held frames to a connection that takes audio, then the commit a flush asked for meanwhile. */
+  /**
+   * Sends the held frames to a connection that takes audio, then the commit a flush asked for meanwhile.
+   * Frames its socket no longer takes (it began closing after the connection opened) stay held, and so
+   * does that commit, for the connection that replaces it.
+   */
   private releaseBacklog(connection: TranscriptionConnection): void {
     const held = this.backlog;
     this.backlog = [];
     this.backlogMs = 0;
-    for (const frame of held) connection.sendAudio(frame);
-    if (this.commitOnAdopt) {
-      this.commitOnAdopt = false;
-      connection.commit(this.sessionAudioMs);
+    let refused = false;
+    for (const frame of held) {
+      if (connection.sendAudio(frame)) continue;
+      this.hold(frame);
+      refused = true;
     }
+    if (refused || !this.commitOnAdopt) return;
+    this.commitOnAdopt = false;
+    connection.commit(this.sessionAudioMs);
   }
 
   /** The oldest connection still receiving audio: its speech events drive `speech_start` and `speech_end`. */
