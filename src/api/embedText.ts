@@ -103,6 +103,12 @@ export interface EmbedTextOptions {
    * its cost recorded after it.
    */
   budget?: SpendBudget | SpendBudgetOptions;
+
+  /**
+   * Ends the call when it aborts: the embedding request in flight is cancelled, no further request starts, and the
+   * call rejects with the signal's reason.
+   */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -213,9 +219,11 @@ interface OllamaEmbedResponse {
  * @param modelId - The embedding model identifier.
  * @param input - Array of strings to embed.
  * @param dimensions - Optional dimensionality reduction hint.
+ * @param abortSignal - The caller's signal, which cancels the request in flight.
  * @returns Parsed {@link OpenAIEmbeddingResponse}.
  * @throws {Error} On non-2xx HTTP status or network failure, with base URL
- *   credentials and the API key masked out of the message.
+ *   credentials and the API key masked out of the message; the signal's
+ *   reason once it has aborted.
  */
 async function callOpenAIEmbedding(
   baseUrl: string,
@@ -223,6 +231,7 @@ async function callOpenAIEmbedding(
   modelId: string,
   input: string[],
   dimensions?: number,
+  abortSignal?: AbortSignal,
 ): Promise<OpenAIEmbeddingResponse> {
   // Construct the request body, omitting `dimensions` when not specified
   // to avoid confusing models that don't support it.
@@ -242,8 +251,11 @@ async function callOpenAIEmbedding(
         'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify(body),
+      ...(abortSignal ? { signal: abortSignal } : {}),
     });
   } catch (error) {
+    // An abort is the caller's own: its reason, not a masked network error.
+    if (abortSignal?.aborted) throw abortSignal.reason;
     throw embeddingFetchError(error, 'Embedding', baseUrl, [apiKey]);
   }
 
@@ -292,14 +304,17 @@ function embeddingFetchError(
  * @param baseUrl - The Ollama API base URL (e.g. `http://localhost:11434`).
  * @param modelId - The Ollama model name (e.g. `nomic-embed-text`).
  * @param input - Array of strings to embed.
+ * @param abortSignal - The caller's signal, which cancels the request in flight.
  * @returns Parsed {@link OllamaEmbedResponse}.
  * @throws {Error} On non-2xx HTTP status or network failure, with base URL
- *   credentials masked out of the message.
+ *   credentials masked out of the message; the signal's reason once it has
+ *   aborted.
  */
 async function callOllamaEmbed(
   baseUrl: string,
   modelId: string,
   input: string[],
+  abortSignal?: AbortSignal,
 ): Promise<OllamaEmbedResponse> {
   const url = `${baseUrl.replace(/\/+$/, '')}/api/embed`;
 
@@ -309,8 +324,11 @@ async function callOllamaEmbed(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: modelId, input }),
+      ...(abortSignal ? { signal: abortSignal } : {}),
     });
   } catch (error) {
+    // An abort is the caller's own: its reason, not a masked network error.
+    if (abortSignal?.aborted) throw abortSignal.reason;
     throw embeddingFetchError(error, 'Ollama embed', baseUrl);
   }
 
@@ -420,6 +438,8 @@ function withGeminiEmbeddingDefault(opts: EmbedTextOptions): EmbedTextOptions {
  * @see {@link resolveModelOption} for provider auto-detection behaviour.
  */
 export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult> {
+  // A call whose signal has already aborted is refused before anything is sent.
+  opts.abortSignal?.throwIfAborted();
   const startedAt = Date.now();
   let metricStatus: 'ok' | 'error' = 'ok';
   let metricProviderId: string | undefined;
@@ -459,7 +479,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
         if (resolved.providerId === 'ollama') {
           // Ollama uses its own /api/embed endpoint format
           const baseUrl = resolved.baseUrl ?? 'http://localhost:11434';
-          const result = await callOllamaEmbed(baseUrl, resolved.modelId, inputArray);
+          const result = await callOllamaEmbed(baseUrl, resolved.modelId, inputArray, opts.abortSignal);
 
           embeddings = result.embeddings;
           reportedModel = result.model;
@@ -479,11 +499,10 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
             ...(resolved.baseUrl ? { baseURL: resolved.baseUrl } : {}),
           });
           const result = await gemini
-            .generateEmbeddings(
-              resolved.modelId,
-              inputArray,
-              opts.dimensions ? { dimensions: opts.dimensions } : undefined,
-            )
+            .generateEmbeddings(resolved.modelId, inputArray, {
+              ...(opts.dimensions ? { dimensions: opts.dimensions } : {}),
+              ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+            })
             .catch((error: unknown) => {
               // A batch that fails after earlier ones succeeded still leaves
               // those billed; record their usage before the error propagates.
@@ -525,6 +544,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
             resolved.modelId,
             inputArray,
             opts.dimensions,
+            opts.abortSignal,
           );
 
           // Sort by index to guarantee order matches input order
@@ -580,6 +600,10 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
     );
   } catch (error) {
     metricStatus = 'error';
+    // The caller's signal ended the call: it rejects with the signal's reason,
+    // whatever the request failed with (a body read the abort cut off, a
+    // provider's own abort error).
+    if (opts.abortSignal?.aborted) throw opts.abortSignal.reason;
     throw error;
   } finally {
     // Best-effort usage persistence and metrics recording

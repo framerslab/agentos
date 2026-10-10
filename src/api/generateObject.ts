@@ -231,6 +231,13 @@ export interface GenerateObjectOptions<T extends ZodType> {
   requestTimeout?: number;
 
   /**
+   * Ends the call when it aborts: no further attempt or fallback hop starts, and the call rejects with the signal's
+   * reason. Forwarded to every attempt's {@link import('./generateText.js').GenerateTextOptions.abortSignal}, which
+   * hands it to the provider request.
+   */
+  abortSignal?: AbortSignal;
+
+  /**
    * Reasoning-depth / token-spend control, forwarded to
    * {@link import('./generateText.js').GenerateTextOptions.effort}. On
    * effort-capable models the provider emits it as `output_config.effort`
@@ -604,6 +611,8 @@ export async function generateObject<T extends ZodType>(
 
   // Attempt generation up to 1 + maxRetries times (initial + retries)
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    // No attempt starts once the caller's signal has aborted.
+    opts.abortSignal?.throwIfAborted();
     const result = await generateText({
       provider: opts.provider,
       model: opts.model,
@@ -625,6 +634,8 @@ export async function generateObject<T extends ZodType>(
       // large-output structured-output callers (codegen TSX) get a longer
       // abort window than the provider default.
       requestTimeout: opts.requestTimeout,
+      // The caller's signal reaches this attempt's provider request.
+      abortSignal: opts.abortSignal,
       // Forward reasoning effort so reasoning-capable models (gpt-5.x ->
       // reasoning_effort, effort-capable Claude -> output_config.effort) run at
       // the requested depth instead of their default.

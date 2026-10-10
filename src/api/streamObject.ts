@@ -123,6 +123,13 @@ export interface StreamObjectOptions<T extends ZodType> {
 
   /** Override the provider base URL. */
   baseUrl?: string;
+
+  /**
+   * Ends the stream when it aborts, forwarded to
+   * {@link import('./generateText.js').GenerateTextOptions.abortSignal}: the provider's stream stops, the
+   * partial-object iteration ends, and `object` rejects with the signal's reason.
+   */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -410,6 +417,7 @@ export function streamObject<T extends ZodType>(
       thinking: opts.thinking,
       apiKey: opts.apiKey,
       baseUrl: opts.baseUrl,
+      ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
     });
 
     try {
@@ -432,6 +440,13 @@ export function streamObject<T extends ZodType>(
       const finalText = buffer;
       resolveText!(finalText);
       resolveUsage!(await stream.usage);
+
+      // The caller's signal ended the stream: the object rejects with the
+      // signal's reason rather than with a parse error of the cut-off text.
+      if (opts.abortSignal?.aborted) {
+        rejectObject!(opts.abortSignal.reason);
+        return;
+      }
 
       // Final parse and validation
       let parsed: unknown;
