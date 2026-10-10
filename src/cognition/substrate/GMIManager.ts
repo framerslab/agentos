@@ -113,6 +113,11 @@ export class GMIManager {
 
   private isInitialized: boolean = false;
   public readonly managerId: string;
+  /**
+   * One promise per getOrCreateGMIForSession() call in flight, resolved when
+   * the call returns or throws. shutdown() waits for them.
+   */
+  private readonly creationsInFlight = new Set<Promise<void>>();
 
   constructor(
     config: GMIManagerConfig,
@@ -513,7 +518,46 @@ export class GMIManager {
     agencyOptions?: GMIAgencyContextOptions
   ): Promise<{ gmi: IGMI; conversationContext: ConversationContext }> {
     this.ensureInitialized();
+    // shutdown() waits for this call to settle; a GMI the call builds once
+    // shutdown has begun is shut down instead of registered.
+    let settle!: () => void;
+    const inFlight = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    this.creationsInFlight.add(inFlight);
+    try {
+      return await this.resolveGMIForSession(
+        userId,
+        sessionId,
+        requestedPersonaId,
+        conversationIdInput,
+        preferredModelId,
+        preferredProviderId,
+        userApiKeys,
+        agencyOptions,
+      );
+    } finally {
+      this.creationsInFlight.delete(inFlight);
+      settle();
+    }
+  }
 
+  /**
+   * The work of getOrCreateGMIForSession(). The manager's initialization is
+   * checked again after every wait, so a call that shutdown() overtakes fails
+   * with NOT_INITIALIZED; a GMI it built and has not registered yet is shut
+   * down first.
+   */
+  private async resolveGMIForSession(
+    userId: string,
+    sessionId: string,
+    requestedPersonaId: string,
+    conversationIdInput?: string,
+    preferredModelId?: string,
+    preferredProviderId?: string,
+    userApiKeys?: Record<string, string>,
+    agencyOptions?: GMIAgencyContextOptions
+  ): Promise<{ gmi: IGMI; conversationContext: ConversationContext }> {
     const personaDefinition = this.getPersonaDefinition(requestedPersonaId);
     if (!personaDefinition) {
       throw new GMIManagerError(`Persona '${requestedPersonaId}' not found.`, GMIErrorCode.PERSONA_NOT_FOUND, { requestedPersonaId });
@@ -531,6 +575,7 @@ export class GMIManager {
     }
 
     const canAccessPersona = await this.userMeetsPersonaTier(userId, personaDefinition);
+    this.ensureInitialized();
     if (!canAccessPersona) {
       throw new GMIManagerError(
         `Access denied: Persona '${requestedPersonaId}' requires tier '${personaDefinition.minSubscriptionTier}'.`,
@@ -552,6 +597,7 @@ export class GMIManager {
         `GMIManager (ID: ${this.managerId}): Persona refresh requested for session ${sessionId} (base '${requestedPersonaId}', overlayChanged=${overlayChanged}). Recreating GMI.`,
       );
       await this.deactivateGMIForSession(sessionId);
+      this.ensureInitialized();
       gmi = undefined;
       gmiInstanceId = undefined;
     }
@@ -566,6 +612,8 @@ export class GMIManager {
         gmiInstanceId,
         personaDefinition.id
       );
+      // A shutdown that began meanwhile shuts this GMI down with the others.
+      this.ensureInitialized();
     } else {
       const newGmiInstanceId = `gmi-instance-${uuidv4()}`;
       console.log(`GMIManager (ID: ${this.managerId}): Creating new GMI instance ${newGmiInstanceId} for session ${sessionId} with persona ${requestedPersonaId}.`);
@@ -582,6 +630,16 @@ export class GMIManager {
       } catch (error: any) {
         throw createGMIErrorFromError(error, GMIErrorCode.GMI_INITIALIZATION_ERROR, { newGmiInstanceId },`Failed to initialize new GMI instance ${newGmiInstanceId}.`);
       }
+      if (!this.isInitialized) {
+        // shutdown() began while this GMI was built and will not find it in the
+        // maps, so it is shut down here and never registered.
+        await this.shutDownGMI(newGMI, newGmiInstanceId);
+        throw new GMIManagerError(
+          `GMIManager (ID: ${this.managerId}) shut down while GMI ${newGmiInstanceId} was being created for session ${sessionId}.`,
+          GMIErrorCode.NOT_INITIALIZED,
+          { sessionId, gmiInstanceId: newGmiInstanceId },
+        );
+      }
       gmi = newGMI;
 
       this.activeGMIs.set(newGmiInstanceId, gmi);
@@ -593,6 +651,8 @@ export class GMIManager {
         newGmiInstanceId,
         personaDefinition.id
       );
+      // A shutdown that began meanwhile shuts this GMI down with the others.
+      this.ensureInitialized();
     }
     
     if (!gmi) {
@@ -645,9 +705,7 @@ export class GMIManager {
     if (gmi) {
       console.log(`GMIManager (ID: ${this.managerId}): Deactivating GMI instance ${gmiInstanceId} for session ${sessionId}.`);
       try {
-        await gmi.shutdown();
-      } catch (error: any) {
-        console.error(`GMIManager (ID: ${this.managerId}): Error during gmi.shutdown() for GMI ${gmiInstanceId}: ${error.message}`, error);
+        await this.shutDownGMI(gmi, gmiInstanceId);
       } finally {
         this.activeGMIs.delete(gmiInstanceId);
         this.gmiSessionMap.delete(sessionId);
@@ -658,6 +716,21 @@ export class GMIManager {
       console.warn(`GMIManager (ID: ${this.managerId}): GMI instance ${gmiInstanceId} for session ${sessionId} was in session map but not active map. Cleaning map.`);
       this.gmiSessionMap.delete(sessionId);
       return false;
+    }
+  }
+
+  /**
+   * Shuts one GMI down. A GMI whose shutdown throws is logged, and the error
+   * does not reach the caller.
+   *
+   * @param gmi - The GMI to shut down.
+   * @param gmiInstanceId - Its instance id, for the log.
+   */
+  private async shutDownGMI(gmi: IGMI, gmiInstanceId: string): Promise<void> {
+    try {
+      await gmi.shutdown();
+    } catch (error: any) {
+      console.error(`GMIManager (ID: ${this.managerId}): Error during gmi.shutdown() for GMI ${gmiInstanceId}: ${error.message}`, error);
     }
   }
 
@@ -727,7 +800,10 @@ export class GMIManager {
         console.error(`GMIManager (ID: ${this.managerId}): Error deactivating GMI for session ${sessionId} during manager shutdown: ${error.message}`, error);
       }
     }
-    
+    // A getOrCreateGMIForSession() call that began before the flag was cleared
+    // and has not registered its GMI shuts that GMI down itself; wait for it.
+    await Promise.allSettled(Array.from(this.creationsInFlight));
+
     this.activeGMIs.clear();
     this.gmiSessionMap.clear();
     this.allPersonaDefinitions.clear();
