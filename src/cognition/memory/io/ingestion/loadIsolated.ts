@@ -23,7 +23,8 @@
  * worker's memory outside its heap.
  *
  * The worker's entry is `isolatedLoadWorker.js`, compiled beside this module,
- * which finds it from its own URL.
+ * which finds it from its own URL. The worker starts with none of the caller's
+ * command-line options; `NODE_OPTIONS` from the environment applies to it.
  *
  * @module memory/ingestion/loadIsolated
  */
@@ -316,6 +317,10 @@ export async function loadIsolated(
     workerData: request,
     transferList: [copy.buffer],
     resourceLimits: { maxOldGenerationSizeMb: maxHeapMb },
+    // None of the caller's command-line options, which a worker otherwise inherits: an `--input-type` given with
+    // `node -e` refuses a file as the worker's entry (ERR_INPUT_TYPE_NOT_ALLOWED), and the caller's `--require`
+    // and `--import` preloads would load inside the capped heap. NODE_OPTIONS still applies.
+    execArgv: [],
   });
   return awaitRead(worker, maxHeapMb, timeoutMs, maxExternalMb);
 }
