@@ -143,6 +143,7 @@ const publicationManifest = [
   agentosDoc('LOGGING.md', 'architecture/logging.md', 'Logging (Pino + OpenTelemetry)', 'Architecture', 10),
   agentosDoc('TOOL_CALLING_AND_LOADING.md', 'architecture/tool-calling-and-loading.md', 'Tool Calling & Lazy Loading', 'Tools & Capabilities', 11),
   agentosDoc('LLM_PROVIDERS.md', 'architecture/llm-providers.md', 'LLM Providers', 'Architecture', 12),
+  agentosDoc('KEY_ROTATION.md', 'architecture/key-rotation.md', 'API Key Rotation', 'Architecture', 12.5),
   agentosDoc('STREAMING_SEMANTICS.md', 'architecture/streaming-semantics.md', 'Streaming Semantics', 'Architecture', 13),
   agentosDoc('OAUTH_AUTH.md', 'architecture/oauth-auth.md', 'OAuth Auth', 'Architecture', 14),
 
@@ -327,6 +328,9 @@ const publicationManifest = [
   builtInExtension('research/news-search', 'extensions/built-in/news-search.md', 'News Search', 3),
   builtInExtension('system/cli-executor', 'extensions/built-in/cli-executor.md', 'CLI Executor', 4),
   agentosDoc('features/CLI_REGISTRY.md', 'extensions/built-in/cli-registry.md', 'CLI Registry', 'Extensions', 5, {
+    group: 'Official Extensions',
+  }),
+  agentosDoc('features/CLI_ERROR_CODES.md', 'extensions/built-in/cli-error-codes.md', 'CLI Error Codes', 'Extensions', 5.5, {
     group: 'Official Extensions',
   }),
   builtInExtension('auth', 'extensions/built-in/auth.md', 'Auth', 6),

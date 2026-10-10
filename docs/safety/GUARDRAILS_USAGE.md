@@ -392,6 +392,8 @@ const neverDo = await PhraseListGuardrail.create({
 
 `IPersonaDefinition.hardLimits` (and `hardLimits:` in a SOUL file's front matter, when the file is loaded as a persona) renders as the last block of the system prompt of every GMI turn for that persona, under the heading "Hard limits", after everything the turn added and after every fragment of the persona's own prompt whatever priority it carries. The guards hold the same rules in code; the block tells the model.
 
+A GMI built by `agent({ runtime: 'gmi' })` or `gmi()` has no such block. Its persona comes from [`personaFromAgentOptions()`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/gmiPersona.ts), which sets no `hardLimits`, and the front matter of a `soul` file is not applied on that path ([GMIs from agent()](../GMI.md#gmis-from-agent)).
+
 ## Using Multiple Guardrails
 
 Multiple guardrails are dispatched in two phases: sanitizers first, then parallel classifiers:

@@ -172,6 +172,8 @@ OPENROUTER_API_KEY=sk-or-...
 OLLAMA_BASE_URL=http://localhost:11434
 ```
 
+For a provider that rotates keys, the key variable (or the `apiKey` you pass) may hold a comma-separated list that its requests draw their key from. [API Key Rotation](../KEY_ROTATION.md) lists those providers, the ones that rest a key after a quota error, and the ones that need a single key.
+
 ### Per-Agent Override
 
 Individual agents pick their provider/model directly in the `agent({ ... })` config:
@@ -688,6 +690,8 @@ The Tool Choice column is what the provider does with the `toolChoice` option
 - [Cost Optimization](../safety/COST_OPTIMIZATION.md) — Budget management and routing
 - [Architecture](../architecture/ARCHITECTURE.md) — System architecture overview
 - [Structured Output](../orchestration/STRUCTURED_OUTPUT.md) — JSON schema enforcement per provider
+- [API Key Rotation](../KEY_ROTATION.md): comma-separated key lists, and which providers rotate and rest keys
+- [CLI Error Codes](./CLI_ERROR_CODES.md): the errors the Claude Code and Gemini CLI providers raise
 
 ## Prompt caching
 

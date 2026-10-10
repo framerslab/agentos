@@ -34,9 +34,11 @@ Every other provider in the list below rotates its keys but never marks one exha
 
 **Pools are per instance:** two providers that read the same environment variable keep separate pools, so a key one of them rests stays in the other's rotation. `getKeyPool()` in `ApiKeyPoolRegistry.ts` returns one shared pool per environment variable; no built-in provider calls it.
 
+**Health checks:** `checkHealth()` on the Anthropic, Gemini, OpenRouter and Requesty providers sends a key drawn from the pool. `OpenAIProvider.checkHealth()` sends the configured key string as given, and Groq, Mistral, Together, xAI and LiteLLM pass their health check to it. With a key list, the health check of those six providers sends the whole list as one bearer token. When the API rejects that token, `checkHealth()`, and `AIModelProviderManager.checkOverallHealth()` through it, reports the provider unhealthy while its requests go on drawing keys from the pool.
+
 ## Supported Providers
 
-- **LLM:** OpenAI, Anthropic, Gemini, OpenRouter, Requesty
+- **LLM:** OpenAI, Anthropic, Gemini, OpenRouter and Requesty; Groq, Mistral, Together and xAI, each of which sends its requests through an `OpenAIProvider` instance and draws its key from that instance's pool
 - **Speech TTS:** ElevenLabs, OpenAI TTS, Deepgram, MiniMax
 - **Speech STT:** OpenAI Whisper, Deepgram, AssemblyAI
 - **Voice Pipeline:** OpenAI batch TTS and Realtime, ElevenLabs batch and streaming TTS and streaming STT, Cartesia batch and streaming TTS, Hume batch and streaming TTS, Deepgram Aura batch and streaming TTS and Deepgram streaming STT
@@ -46,12 +48,12 @@ Every other provider in the list below rotates its keys but never marks one exha
 - **Segmentation:** Replicate
 - **Web Search:** Serper, Tavily, Brave, Firecrawl
 
-Groq, Mistral, Together and xAI (LLM), Azure Speech (TTS and STT), DeepL and OpenAI translation send the configured key as given, so give them a single key.
+A provider that is not on this list sends the key it is configured with as given, so give it a single key. That covers Azure Speech (TTS and STT), DeepL and OpenAI translation, the voice pipeline's batch STT for OpenAI Whisper and for Deepgram, the MiniMax image provider and the Cohere reranker, among others. Give LiteLLM a single key too: its completions, streams and embeddings draw a key from an `OpenAIProvider` pool, and its model listing sends the configured string as given.
 
 ## Implementation
 
 The key pool is implemented in [`src/core/providers/`](https://github.com/framerslab/agentos/tree/master/src/core/providers):
 
-- `ApiKeyPool.ts` — Weighted round-robin with exhaustion cooldown
-- `ApiKeyPoolRegistry.ts` — One shared pool per environment variable (`getKeyPool()`), not used by the built-in providers
-- `quotaErrors.ts` — Cross-provider quota error detection (`isQuotaError()`)
+- `ApiKeyPool.ts`: weighted round-robin with exhaustion cooldown
+- `ApiKeyPoolRegistry.ts`: one shared pool per environment variable (`getKeyPool()`), not used by the built-in providers
+- `quotaErrors.ts`: cross-provider quota error detection (`isQuotaError()`)
