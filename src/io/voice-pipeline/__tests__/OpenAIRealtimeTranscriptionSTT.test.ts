@@ -836,6 +836,24 @@ describe('OpenAIRealtimeTranscriptionSTT: reconnects, failures, flush and close'
     await settle();
     expect(Sockets.instances).toHaveLength(1);
   });
+
+  it('opens nothing for a session whose start timed out, even when its confirmation arrives late', async () => {
+    fakeClock();
+    Sockets.nextBehavior = 'silent';
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, connectTimeoutMs: 50 });
+    const refused = expect(stt.startSession()).rejects.toThrow(/connect timed out after 50ms/);
+    await settle();
+    await vi.advanceTimersByTimeAsync(50);
+    await refused;
+    // ws still emits a message it was inflating or parsing when the timeout terminated the socket, then its close.
+    const socket = Sockets.instances[0];
+    socket.serve({ type: 'session.updated', event_id: 'event_late', session: {} });
+    socket.drop();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await settle();
+    expect(Sockets.instances).toHaveLength(1); // no reconnect for a session the caller never got
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
 
 describe('OpenAIRealtimeTranscriptionSTT: rollover and usage', () => {
