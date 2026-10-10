@@ -345,4 +345,24 @@ describe('GMIManager.shutdown', () => {
     expect(chunks.map((chunk) => chunk.type)).toContain(GMIOutputChunkType.ERROR);
     expect(gmi.getCurrentState()).toBe(GMIPrimeState.SHUTDOWN);
   });
+
+  it('runs a GMI\'s shutdown once when calls overlap, and every caller waits for it', async () => {
+    const { manager, gmis, memoryShutdown } = await createHarness();
+    const [first, second] = gmis;
+
+    // Two calls on one GMI at the same time.
+    const calls = [first.shutdown(), first.shutdown()];
+    await calls[1];
+    expect(first.getCurrentState()).toBe(GMIPrimeState.SHUTDOWN);
+    await calls[0];
+    expect(memoryShutdown).toHaveBeenCalledTimes(1);
+
+    // Two manager shutdowns at the same time, as SIGINT and then SIGTERM start
+    // them: the GMI still running closes its memory once.
+    await Promise.all([manager.shutdown(), manager.shutdown()]);
+    expect(second.getCurrentState()).toBe(GMIPrimeState.SHUTDOWN);
+    expect(memoryShutdown).toHaveBeenCalledTimes(2);
+    expect(manager.activeGMIs.size).toBe(0);
+    expect(manager.gmiSessionMap.size).toBe(0);
+  });
 });
