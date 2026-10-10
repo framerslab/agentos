@@ -435,6 +435,13 @@ export interface GenerateTextOptions {
    */
   requestTimeout?: number;
   /**
+   * Ends the call when it aborts: the provider request in flight is cancelled, no further step, retry or fallback
+   * hop starts, and the call rejects with the signal's reason. An abort never walks the fallback chain. The signal
+   * reaches the provider as `ModelCompletionOptions.abortSignal`; a request whose provider does not read it runs to
+   * its end, and the call then rejects with the signal's reason.
+   */
+  abortSignal?: AbortSignal;
+  /**
    * Maximum number of agentic steps (LLM calls) to execute before returning.
    * Each tool-call round trip counts as one step. Defaults to `1`.
    */
@@ -1077,7 +1084,8 @@ Return ONLY the JSON object: no markdown fences, no commentary.`;
  * @param modelId - Model identifier to use for the planning call.
  * @param userMessages - The user-supplied messages that describe the task.
  * @param toolNames - Names of available tools (informational context for the planner).
- * @param config - Optional planning configuration overrides.
+ * @param config - Optional planning configuration overrides, and the call's abort signal, which the planning request
+ *   is handed as it is handed `requestTimeout`.
  * @param totalUsage - Mutable usage aggregator: the planning call's tokens are added here.
  * @param spend - The run's spend budget, the provider the planning call is sent to, and what to call the call in the
  *   budget's records: the planning call is checked against the budget before it is made and recorded after it.
@@ -1090,7 +1098,7 @@ export async function createPlan(
   modelId: string,
   userMessages: Array<Record<string, unknown>>,
   toolNames: string[],
-  config: PlanningConfig | undefined,
+  config: (PlanningConfig & { abortSignal?: AbortSignal }) | undefined,
   totalUsage: TokenUsage,
   spend?: { budget: SpendBudget; providerId: string; what: string },
 ): Promise<Plan | undefined> {
@@ -1124,6 +1132,7 @@ export async function createPlan(
     temperature,
     maxTokens,
     ...(requestTimeout !== undefined ? { requestTimeout } : {}),
+    ...(config?.abortSignal ? { abortSignal: config.abortSignal } : {}),
     // Inherited (or planning-specific) cache control: a cache:false root
     // call's planning sub-call must not auto-cache behind the caller's back.
     ...(config?.cache !== undefined ? { cache: config.cache } : {}),
@@ -1491,6 +1500,9 @@ export function isContentPolicyRefusal(error: unknown): boolean {
 
 export function isRetryableError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
+  // An aborted request (an `AbortError`, or a provider's `REQUEST_ABORTED`)
+  // is never tried on another provider.
+  if (error.name === 'AbortError' || (error as { code?: unknown }).code === 'REQUEST_ABORTED') return false;
   // A call the caller stopped (its spend budget's refusal, a hook under
   // `hookErrors: 'throw'`) never moves to another provider. The text match
   // below would otherwise read a cap such as `$500.00` as an HTTP 500.
@@ -1999,6 +2011,8 @@ function buildHelperToolExecutionContext(
  * ```
  */
 export async function generateText(opts: GenerateTextOptions): Promise<GenerateTextResult> {
+  // A call whose signal has already aborted is refused before anything is set up or sent.
+  opts.abortSignal?.throwIfAborted();
   // One budget instance for the whole call: every options object built from
   // `opts` below (a fallback hop, a continuation leg) carries it, so each hop
   // is charged to the same budget.
@@ -2272,7 +2286,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           userMessages,
           toolNames,
           // Thread the caller's per-call requestTimeout + cache control into
-          // the planning completion (planning-specific overrides win).
+          // the planning completion (planning-specific overrides win), and the
+          // call's abort signal.
           {
             ...planConfig,
             requestTimeout: planConfig?.requestTimeout ?? opts.requestTimeout,
@@ -2280,6 +2295,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               ? { cache: planConfig?.cache ?? opts.cache }
               : {}),
             ...(planConfig?.thinking === false || opts.thinking === false ? { thinking: false as const } : {}),
+            ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
           },
           totalUsage,
           budget ? { budget, providerId: resolved.providerId, what: 'generate_text.plan' } : undefined,
@@ -2324,6 +2340,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
           messages: toShimMessages(messages),
           maxRoundtrips: shimMaxRoundtrips,
           callModel: async (msgs) => {
+            // No round starts once the caller's signal has aborted.
+            opts.abortSignal?.throwIfAborted();
             // The shim sends rendered tool text in place of native schemas,
             // so its first send is checked on its own.
             if (!shimSendChecked) {
@@ -2367,6 +2385,7 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
               // this path hangs until the provider's own default, silently
               // ignoring the caller's requestTimeout bound.
               ...(opts.requestTimeout !== undefined ? { requestTimeout: opts.requestTimeout } : {}),
+              ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
             } as any);
             budget?.record(costOfUsageUSD(resolved.providerId, resolved.modelId, r.usage), r.usage?.totalTokens ?? 0, 'generate_text.shim');
             // Aggregate the COMPLETE normalized usage from every shim
@@ -2391,6 +2410,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             }
             if (typeof r.modelId === 'string' && r.modelId) lastResponseModelId = r.modelId;
             if (typeof r.serviceTier === 'string' && r.serviceTier) lastServiceTier = r.serviceTier;
+            // A request whose provider did not read the signal ran to its end:
+            // its usage is counted above, and the call stops here.
+            opts.abortSignal?.throwIfAborted();
             const cc = r.choices?.[0]?.message?.content;
             return {
               text: typeof cc === 'string' ? cc : ((cc as any)?.text ?? ''),
@@ -2462,6 +2484,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       let lastCacheDiagnostics: CacheDiagnostics | null | undefined;
       try {
       for (let step = 0; step < maxSteps; step++) {
+        // No step starts once the caller's signal has aborted.
+        opts.abortSignal?.throwIfAborted();
         // The step's index in the whole call: a fallback leg that continues
         // after completed tool rounds numbers on from them.
         const runStep = stepOffset + step;
@@ -2552,6 +2576,8 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
                 // (e.g. codegen structured output) get a longer abort window
                 // than the provider default; omitted callers keep the default.
                 ...(opts.requestTimeout !== undefined ? { requestTimeout: opts.requestTimeout } : {}),
+                // The caller's signal cancels the request in flight.
+                ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
                 ...(opts._responseFormat ? { responseFormat: opts._responseFormat }: {}),
               } as any
             );
@@ -2632,6 +2658,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             totalUsage.inclusiveInputTokens = (totalUsage.inclusiveInputTokens ?? 0) + stepInclusiveIn;
           }
         }
+        // A request whose provider did not read the signal ran to its end: its
+        // usage is counted above, and the call stops here.
+        opts.abortSignal?.throwIfAborted();
 
         const choice = response.choices?.[0];
         if (!choice) break;
@@ -2980,6 +3009,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
       },
     };
   } catch (error) {
+    // The caller's signal ended the call, whatever error the provider made of
+    // the abort (a timeout, a dropped connection).
+    const aborted = opts.abortSignal?.aborted === true;
     // Record the primary attempt as a failure on the health registry
     // BEFORE walking the fallback chain. Subsequent calls in this
     // process will now see this provider as open (per the registry's
@@ -2987,9 +3019,9 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
     // Note: we record against `metricProviderId` not the inbound
     // `opts.provider` because the model router may have resolved a
     // different provider than the caller asked for. A call the caller
-    // stopped (its spend budget's refusal, a hook's stop) says nothing about
-    // the provider and is not recorded.
-    if (metricProviderId && !(error instanceof LLMProviderCircuitOpenError) && !isCallerStop(error)) {
+    // stopped (its spend budget's refusal, a hook's stop, an abort) says
+    // nothing about the provider and is not recorded.
+    if (metricProviderId && !(error instanceof LLMProviderCircuitOpenError) && !aborted && !isCallerStop(error)) {
       globalLLMProviderHealth.recordFailure(metricProviderId, error);
     }
     // The failed attempt is billed for its completed steps and for a step
@@ -3016,6 +3048,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
         surface: 'generateText',
         durationMs: Date.now() - rootStartedAt,
       });
+    }
+    // An aborted call walks no fallback chain: it rejects with the signal's
+    // reason, unwrapped, so the caller gets the error it can test for.
+    if (aborted) {
+      metricStatus = 'error';
+      throw opts.abortSignal?.reason;
     }
     // The failed primary heads the fallback trail.
     const primaryProviderId = metricProviderId;
@@ -3241,6 +3279,12 @@ export async function generateText(opts: GenerateTextOptions): Promise<GenerateT
             },
           };
         } catch (fbError) {
+          // The caller's signal ended the leg: no later leg starts, and the
+          // call rejects with the signal's reason.
+          if (opts.abortSignal?.aborted) {
+            metricStatus = 'error';
+            throw opts.abortSignal.reason;
+          }
           lastError = fbError;
           fallbackHops.push({ provider: fb.provider, model: fb.model, ok: false });
           // The leg ran tools before it failed. A later leg would start

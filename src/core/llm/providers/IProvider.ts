@@ -457,6 +457,11 @@ export interface ProviderEmbeddingOptions {
   encodingFormat?: 'float' | 'base64';
   dimensions?: number;
   inputType?: 'search_document' | 'search_query' | 'classification' | 'clustering' | string;
+  /**
+   * Optional AbortSignal for caller-driven cancellation. A provider that reads it cancels the
+   * request in flight when it aborts and sends no further request.
+   */
+  abortSignal?: AbortSignal;
 }
 
 /**

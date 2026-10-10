@@ -68,6 +68,7 @@ When the reply does not parse or does not validate, the reply (shortened) and a 
 | `fallbackProviders`, `onFallback` | The provider fallback chain, as on `generateText()` ([Fallback Behavior](../features/LLM_PROVIDERS.md#fallback-behavior)); `[]` turns it off |
 | `policyTier` | `'safe'`, `'standard'`, `'mature'` or `'private-adult'`; mature tiers fall back to the tier's uncensored models on a refusal ([Uncensored Content](../features/UNCENSORED_CONTENT.md)) |
 | `requestTimeout` | Per-call request timeout in milliseconds |
+| `abortSignal` | Ends the call when it aborts: the request in flight is cancelled, no further attempt or fallback hop starts, and the call rejects with the signal's reason ([Cancellation](../getting-started/HIGH_LEVEL_API.md#cancellation)) |
 | `effort`, `thinking` | Reasoning depth and the thinking switch, passed to the provider; thinking tokens count toward `maxTokens` |
 | `cache`, `schemaCacheTtl` | Prompt caching: `cache: false` marks nothing, and `schemaCacheTtl: '1h'` gives the schema block a one-hour cache marker ([Prompt Caching](../features/PROMPT_CACHING.md)) |
 | `sessionId` | Sent to OpenRouter as `session_id` for sticky routing; other providers ignore it |
@@ -107,8 +108,8 @@ console.log(await usage);
 - The model call starts when `partialObjectStream` is first read, and `object`, `text` and `usage` settle after the stream ends. A caller that never reads `partialObjectStream` waits on them forever.
 - After each text chunk, the text so far is parsed with the open strings, arrays and objects closed, and an object is yielded when it differs from the last one yielded. The partial values are not validated: a field can hold a string that is still being written.
 - When the stream ends, the whole text is parsed (as in `generateObject()`: whole text, fenced block, first `{` to last `}`) and validated. `object` rejects with `ObjectGenerationError` when the text does not parse or does not validate; there is no retry, and `maxRetries` is accepted and not read.
-- `streamObject()` reads only the text of the stream. When the provider call fails, the text ends where it stopped and the iteration ends without throwing; the provider's error does not reach the caller, and `object` rejects with the parse or validation error of the text that arrived.
-- The schema reaches the model only in the system prompt: `streamObject()` sends no provider-side format. Its options are `schema`, `schemaName` and `schemaDescription` (written into the system prompt), `maxRetries` (not read), and `provider`, `model`, `prompt`, `messages`, `system` (a string), `temperature`, `maxTokens`, `effort`, `thinking`, `apiKey` and `baseUrl`, which go to `streamText()`. It takes no fallback, policy-tier, timeout or cache option, so `streamText()` runs its default fallback chain (built from the keys in the environment) when the first provider fails with a retryable error before any text arrives.
+- `streamObject()` reads only the text of the stream. When the provider call fails, the text ends where it stopped and the iteration ends without throwing; the provider's error does not reach the caller, and `object` rejects with the parse or validation error of the text that arrived. When `abortSignal` aborts, the provider's stream stops, the iteration ends, and `object` rejects with the signal's reason.
+- The schema reaches the model only in the system prompt: `streamObject()` sends no provider-side format. Its options are `schema`, `schemaName` and `schemaDescription` (written into the system prompt), `maxRetries` (not read), and `provider`, `model`, `prompt`, `messages`, `system` (a string), `temperature`, `maxTokens`, `effort`, `thinking`, `apiKey`, `baseUrl` and `abortSignal`, which go to `streamText()`. It takes no fallback, policy-tier, timeout or cache option, so `streamText()` runs its default fallback chain (built from the keys in the environment) when the first provider fails with a retryable error before any text arrives.
 
 ---
 
@@ -127,7 +128,7 @@ embeddings[0].length; // 1536 for text-embedding-3-small
 usage;                // { promptTokens, totalTokens, costUSD? }
 ```
 
-`input` takes one string or an array, and `embeddings` holds one vector per string either way. The options are `provider`, `model`, `input`, `dimensions`, `apiKey`, `baseUrl` and `usageLedger`.
+`input` takes one string or an array, and `embeddings` holds one vector per string either way. The options are `provider`, `model`, `input`, `dimensions`, `apiKey`, `baseUrl`, `usageLedger` and `abortSignal`. When `abortSignal` aborts, the request in flight is cancelled, no later request starts (Gemini sends 100 inputs a request), and the call rejects with the signal's reason; a call whose signal has already aborted sends nothing.
 
 | Provider | Default model | Endpoint |
 |---|---|---|

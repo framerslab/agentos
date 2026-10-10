@@ -385,6 +385,29 @@ describe("agent({ runtime: 'gmi' }) sessions", () => {
     }
   });
 
+  it("a send's own abort signal ends that turn with the signal's reason and leaves the session open; close() still ends a turn sent with a signal", async () => {
+    const k = key(); const g = gate();
+    const s = script('openai', k, { replies: [reply.hold([], g.opened, reply.text('Late.')), reply.text('Next.'), reply.hold([], g.opened, reply.text('Late.'))] });
+    const session = agent(base(k)).session('s');
+    try {
+      const controller = new AbortController();
+      const reason = new Error('deadline passed');
+      const first = session.send('one', { abortSignal: controller.signal }).then(() => 'resolved', (error: unknown) => error);
+      await vi.waitFor(() => expect(s.seen).toHaveLength(1));
+      controller.abort(reason);
+      expect(await first).toBe(reason);
+      // The session stays open: the next send runs on it.
+      expect((await session.send('two')).text).toBe('Next.');
+      // close() still stops a turn whose caller passed a signal of its own.
+      const third = session.send('three', { abortSignal: new AbortController().signal }).then(() => 'resolved', (error: unknown) => error);
+      await vi.waitFor(() => expect(s.seen).toHaveLength(3));
+      expect(await Promise.race([session.close().then(() => 'closed'), sleep(2_000).then(() => 'still waiting')])).toBe('closed');
+      expect(await third).toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringMatching(/abort/i) });
+    } finally {
+      g.open();
+    }
+  });
+
   it('a session that streams many turns leaves no listener behind on the signal close() aborts', async () => {
     const warnings: Error[] = [];
     const onWarning = (warning: Error): void => {
