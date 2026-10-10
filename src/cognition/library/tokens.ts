@@ -18,9 +18,10 @@ export interface Snippet {
   /** Where in the text the first word that begins with a query word starts, or -1 when none does. */
   at: number;
   /**
-   * Whole words around that word, white space collapsed: from just after the last space at or before `before`
-   * characters ahead of it (or from the text's start) to the first space at or after `after` characters past its
-   * start (or to the text's end). A text with no spaces, as Chinese and Japanese are written, comes back whole.
+   * Whole words around that word, white space collapsed: from just after the last white space (a space, a tab or a
+   * line break) at or before `before` characters ahead of it (or from the text's start) to the first white space at or
+   * after `after` characters past its start (or to the text's end). A text with no white space, as Chinese and
+   * Japanese are written, comes back whole.
    */
   text: string;
 }
@@ -44,7 +45,23 @@ export function snippetAround(text: string, words: readonly string[], options: {
     }
   }
   const anchor = Math.max(0, at);
-  const from = anchor <= before ? 0 : text.lastIndexOf(' ', anchor - before) + 1;
-  const stop = text.indexOf(' ', Math.min(text.length, anchor + after));
+  const from = anchor <= before ? 0 : lastWhiteSpaceAtOrBefore(text, anchor - before) + 1;
+  const stop = firstWhiteSpaceAtOrAfter(text, Math.min(text.length, anchor + after));
   return { at, text: text.slice(from, stop === -1 ? text.length : stop).replace(/\s+/g, ' ').trim() };
+}
+
+/** Where the last white space at or before `position` is, or -1. */
+function lastWhiteSpaceAtOrBefore(text: string, position: number): number {
+  for (let at = Math.min(position, text.length - 1); at >= 0; at -= 1) {
+    if (/\s/.test(text[at])) return at;
+  }
+  return -1;
+}
+
+/** Where the first white space at or after `position` is, or -1. */
+function firstWhiteSpaceAtOrAfter(text: string, position: number): number {
+  for (let at = Math.max(0, position); at < text.length; at += 1) {
+    if (/\s/.test(text[at])) return at;
+  }
+  return -1;
 }

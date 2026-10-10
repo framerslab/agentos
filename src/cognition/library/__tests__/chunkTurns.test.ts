@@ -20,6 +20,11 @@ describe('lexicalTokens', () => {
     expect(snippetAround('a chart of art', ['art']).at).toBe(11);
     expect(snippetAround('no match here', ['zebra'])).toEqual({ at: -1, text: 'no match here' });
   });
+
+  it('ends a snippet at a line break as at a space', () => {
+    expect(snippetAround('alpha\nbeta gamma', ['beta'], { before: 0, after: 0 })).toEqual({ at: 6, text: 'beta' });
+    expect(snippetAround('first turn\nthe budget\ngrew', ['budget'], { before: 4, after: 6 })).toEqual({ at: 15, text: 'the budget' });
+  });
 });
 
 describe('chunkTurns', () => {
