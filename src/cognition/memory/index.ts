@@ -338,6 +338,8 @@ export { HtmlLoader } from './io/ingestion/HtmlLoader.js';
 export { PdfLoader } from './io/ingestion/PdfLoader.js';
 export { DocxLoader, DocumentTooLargeError } from './io/ingestion/DocxLoader.js';
 export type { DocxLoaderOptions } from './io/ingestion/DocxLoader.js';
+export { loadIsolated, DocumentTooComplexError, DocumentReadTimeoutError } from './io/ingestion/loadIsolated.js';
+export type { IsolatedLoadKind, IsolatedLoadOptions } from './io/ingestion/loadIsolated.js';
 export { LoaderRegistry } from './io/ingestion/LoaderRegistry.js';
 export { FolderScanner } from './io/ingestion/FolderScanner.js';
 export { ChunkingEngine } from './io/ingestion/ChunkingEngine.js';
