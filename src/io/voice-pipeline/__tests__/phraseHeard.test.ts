@@ -98,6 +98,22 @@ describe('phraseHeard', () => {
     expect(phraseHeard('one', [{ itemId: 'a', text: 'one' }], { maxWords: 0 })).toEqual({ heard: false, ratio: 0, itemIds: [] });
   });
 
+  it('refuses a phrase of more words than maxPhraseWords, 400 unless set', () => {
+    const numbered = (count: number) => Array.from({ length: count }, (_, k) => `w${k}`).join(' ');
+    expect(phraseHeard(numbered(400), [{ itemId: 'a', text: numbered(400) }]).ratio).toBe(1);
+    expect(() => phraseHeard(numbered(401), [])).toThrow(RangeError);
+    expect(() => phraseHeard(numbered(401), [])).toThrow('more than 400 words');
+    expect(() => phraseHeard('one two three four', [], { maxPhraseWords: 3 })).toThrow('more than 3 words');
+    expect(phraseHeard('one two three', [{ itemId: 'a', text: 'one two three' }], { maxPhraseWords: 3 }).ratio).toBe(1);
+    expect(phraseHeard(numbered(401), [{ itemId: 'a', text: numbered(401) }], { maxPhraseWords: 401, maxWords: 401 }).ratio).toBe(1);
+    for (const maxPhraseWords of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) expect(() => phraseHeard('one', [], { maxPhraseWords })).toThrow(RangeError);
+
+    // A phrase over the bound is refused at its first word past it: the word rule is handed no more of it.
+    read.texts.length = 0;
+    expect(() => phraseHeard(numbered(10_000), [], { maxPhraseWords: 3 })).toThrow(RangeError);
+    expect(read.texts).toEqual(['w0 w1 w2 w3']);
+  });
+
   it("reads a TranscriptLedger's final lines as they are", () => {
     const ledger = new TranscriptLedger();
     ledger.apply({ itemId: 'i1', text: 'OK, so before we start.', isFinal: true });
