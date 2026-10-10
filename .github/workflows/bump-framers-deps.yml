@@ -27,20 +27,30 @@ on:
   schedule:
     - cron: '0 6 * * 1'  # Monday 06:00 UTC weekly
   workflow_dispatch: {}
+  # A pull request that changes this workflow or its script runs the dry-run job at the end of
+  # this file: the script and the lockfile refresh run for real, and no pull request is opened.
+  pull_request:
+    paths:
+      - .github/workflows/bump-framers-deps.yml
+      - .github/scripts/bump-framers-deps.py
 
 # A second bump run waits for the first, so two runs never push the branch and
 # dispatch CI over each other.
 concurrency:
-  group: bump-framers-deps
+  group: bump-framers-deps-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'run' }}
   cancel-in-progress: false
 
+# Each job states what it needs; the dry run needs nothing beyond reading the repository.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   bump:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     # Read by the ci job below.
     outputs:
       operation: ${{ steps.cpr.outputs.pull-request-operation }}
@@ -268,3 +278,60 @@ jobs:
         run: |
           gh api "repos/$GITHUB_REPOSITORY/statuses/$TARGET" -f state=error -f context="$CONTEXT" \
             -f description='The job that waits for CI stopped before CI finished' -f target_url="$URL" > /dev/null
+
+  # The bump, end to end, on a pull request that changes it: the script against this repository's
+  # manifests and the npm registry, then the lockfile refresh. The steps are the bump job's; keep
+  # the two in step. Nothing is committed and no pull request is opened.
+  dry-run:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Bump @framers/* deps to latest published versions
+        run: python3 .github/scripts/bump-framers-deps.py
+
+      - name: Refresh pnpm-lock.yaml
+        run: |
+          # For this job only: a third-party release must be a day old before the lockfile takes it
+          # (minimumReleaseAge is in minutes; pnpm 10.16 and later), and first-party packages are
+          # exempt, since the point of this run is to pick up a version published minutes ago.
+          # The file is removed again: the pull request commits package.json and pnpm-lock.yaml only.
+          printf "packages:\n  - '.'\nminimumReleaseAge: 1440\nminimumReleaseAgeExclude:\n  - '@framers/*'\n" > pnpm-workspace.yaml
+          # Refreshing the lockfile needs no package's install script.
+          pnpm install --no-frozen-lockfile --ignore-scripts
+          rm pnpm-workspace.yaml
+          # The lockfile has to stand without that file, as every other workflow reads it.
+          pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Only package.json and pnpm-lock.yaml changed
+        run: |
+          git status --porcelain
+          other=$(git status --porcelain | awk '{print $2}' | grep -vxE 'package\.json|pnpm-lock\.yaml' || true)
+          if [ -n "$other" ]; then
+            echo "::error::The bump changed files outside package.json and pnpm-lock.yaml:"
+            echo "$other"
+            exit 1
+          fi
+          git diff --stat
