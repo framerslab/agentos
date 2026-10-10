@@ -54,7 +54,7 @@
 import * as fs from 'node:fs/promises';
 import { readFileSync, statSync } from 'node:fs';
 import * as path from 'node:path';
-import matter from 'gray-matter';
+import { readFrontMatter, writeFrontMatter } from '../../../core/utils/frontMatter.js';
 import { ensureMemoryDir } from '../memory/wiki/migrateMemoryMd.js';
 import type { IPersonaDefinition } from './IPersonaDefinition.js';
 import { normalizeHexacoTraits } from './hexaco.js';
@@ -214,8 +214,8 @@ export async function loadSoul(options: SoulLoaderOptions): Promise<LoadedSoul> 
     }
   }
 
-  // Parse frontmatter + body
-  const parsed = soulRaw ? matter(soulRaw) : { data: {}, content: '' };
+  // Parse frontmatter + body. The frontmatter is read as data, never evaluated.
+  const parsed = soulRaw ? readFrontMatter(soulRaw) : { data: {}, content: '' };
   const frontmatter = parsed.data as SoulFrontmatter;
   const soulContent = parsed.content.trim();
 
@@ -283,7 +283,7 @@ export function loadSoulSync(options: SoulLoaderOptions): LoadedSoul {
     }
   }
 
-  const parsed = soulRaw ? matter(soulRaw) : { data: {}, content: '' };
+  const parsed = soulRaw ? readFrontMatter(soulRaw) : { data: {}, content: '' };
   const frontmatter = parsed.data as SoulFrontmatter;
   const soulContent = parsed.content.trim();
 
@@ -316,10 +316,11 @@ export function loadSoulSync(options: SoulLoaderOptions): LoadedSoul {
  * Parse an inline soul markdown string (with optional YAML frontmatter) and
  * return the same `LoadedSoul` shape. Useful when the soul content is supplied
  * in code rather than from disk (tests, ephemeral agents, dynamically-built
- * personas).
+ * personas). The frontmatter is read as data: a block marked as JavaScript
+ * (`---js`) is dropped, never evaluated.
  */
 export function parseSoul(soulMarkdown: string): LoadedSoul {
-  const parsed = matter(soulMarkdown);
+  const parsed = readFrontMatter(soulMarkdown);
   const frontmatter = parsed.data as SoulFrontmatter;
   const soulContent = parsed.content.trim();
   return {
@@ -442,7 +443,8 @@ export function renderSoulMarkdown(persona: IPersonaDefinition): string {
   // Normalize to a single string for the markdown body.
   const body = stringifyBaseSystemPrompt(persona.baseSystemPrompt);
   // gray-matter dumps YAML with js-yaml's safeDump, which throws on undefined.
-  return matter.stringify(body, stripUndefined(fm) as Record<string, unknown>);
+  // The body is written as it is and never read for frontmatter of its own.
+  return writeFrontMatter(body, stripUndefined(fm) as Record<string, unknown>);
 }
 
 /**

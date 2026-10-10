@@ -28,5 +28,19 @@ export default tseslint.config(
       'preserve-caught-error': 'warn',
       'no-unassigned-vars': 'warn',
     },
+  },
+  {
+    // gray-matter's own engines evaluate a front-matter block marked as
+    // JavaScript, so one module reads and writes front matter for the rest.
+    files: ['src/**/*.ts'],
+    ignores: ['src/core/utils/frontMatter.ts'],
+    rules: {
+      'no-restricted-imports': ['error', {
+        paths: [{
+          name: 'gray-matter',
+          message: 'Read and write front matter with readFrontMatter and writeFrontMatter from src/core/utils/frontMatter.ts.',
+        }],
+      }],
+    },
   }
 );
