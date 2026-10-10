@@ -21,6 +21,11 @@
  *    from accumulation, and re-emitted as `'backchannel_detected'` events so
  *    the pipeline can decide whether to suppress an agent response.
  *
+ * 4. A `speech_end` that finds no final transcript leaves the decision to the
+ *    first final that arrives before speech resumes, for providers that
+ *    transcribe an utterance after its end of speech. A final with no text
+ *    (a provider retracting interim text it showed) changes nothing.
+ *
  * ## Why heuristic over acoustic-only?
  *
  * Pure silence timeout adds up to 1.5 s of unnecessary latency on every turn
@@ -192,6 +197,16 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    */
   private lastConfidence = 1;
 
+  /**
+   * Timestamp of a `speech_end` that found no final transcript, or `null`.
+   * Some providers transcribe an utterance only after its end of speech
+   * (`OpenAIRealtimeTranscriptionSTT` emits `speech_end` when OpenAI reports
+   * the speech stopped, and the final once the utterance is transcribed), so
+   * the first final that follows, before speech resumes, is decided as that
+   * `speech_end` would have been.
+   */
+  private speechEndWithoutText: number | null = null;
+
   // ---------------------------------------------------------------------------
   // Constructor
   // ---------------------------------------------------------------------------
@@ -237,6 +252,10 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     const text = transcript.text;
     const normalised = text.trim().toLowerCase();
 
+    // A final with no words (a provider retracting interim text it showed)
+    // leaves the turn's text as it is.
+    if (!normalised) return;
+
     // Check for backchannel phrases BEFORE accumulating. This ensures that
     // "uh huh" followed by speech_end does NOT produce a turn_complete.
     if (BACKCHANNEL_PHRASES.has(normalised)) {
@@ -249,6 +268,13 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     // provider represents the complete hypothesis for the current utterance.
     this.accumulatedText = text;
     this.lastConfidence = transcript.confidence;
+
+    // The speech already ended without a transcript: decide the turn now.
+    if (this.speechEndWithoutText !== null && !this.speechActive) {
+      const speechEndTimestamp = this.speechEndWithoutText;
+      this.speechEndWithoutText = null;
+      this._decideTurnEnd(speechEndTimestamp);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -268,6 +294,8 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * - **`speech_end`**: If accumulated text is available, either fires
    *   `turn_complete` immediately (when text ends with terminal punctuation)
    *   or starts the silence timer (when no punctuation is detected).
+   *   Otherwise the first final transcript that arrives before speech
+   *   resumes is decided the same way when it arrives.
    *
    * - **`silence`**: Periodic heartbeat events are ignored. The silence timer
    *   (started on `speech_end`) already handles delayed turn-completion
@@ -279,6 +307,8 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     switch (event.type) {
       case 'speech_start': {
         this.speechActive = true;
+        // A final that arrives from now on belongs to speech still in progress.
+        this.speechEndWithoutText = null;
         // Cancel any pending silence timer -- the user is speaking again
         this._clearSilenceTimer();
         // Record turn start only once (first speech_start in this turn)
@@ -292,22 +322,16 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
         this.speechActive = false;
 
         if (!this.accumulatedText) {
-          // No transcript has arrived yet -- nothing to flush.
+          // No transcript has arrived yet -- nothing to flush now.
           // This can happen when the VAD detects a very short burst of
-          // noise that doesn't produce any STT output.
+          // noise that doesn't produce any STT output, or when the
+          // provider transcribes the utterance after its end of speech:
+          // the first final before speech resumes is decided then.
+          this.speechEndWithoutText = event.timestamp;
           break;
         }
 
-        if (TERMINAL_PUNCTUATION.test(this.accumulatedText)) {
-          // Sentence-terminal punctuation detected -> fire immediately.
-          // This is the fast path that eliminates the 1.5 s silence wait.
-          this._emitTurnComplete('punctuation', event.timestamp);
-        } else {
-          // No terminal punctuation -> start the silence timer.
-          // If the user doesn't resume speaking within silenceTimeoutMs,
-          // we'll fire turn_complete with reason 'silence_timeout'.
-          this._startSilenceTimer(event.timestamp);
-        }
+        this._decideTurnEnd(event.timestamp);
         break;
       }
 
@@ -337,11 +361,32 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     this.speechActive = false;
     this.turnStartMs = null;
     this.lastConfidence = 1;
+    this.speechEndWithoutText = null;
   }
 
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Decide the turn once speech has ended and a final transcript is held:
+   * terminal punctuation fires `turn_complete` at once; otherwise the
+   * silence timer starts.
+   *
+   * @param speechEndTimestamp - Timestamp of the `speech_end`, for the turn's duration.
+   */
+  private _decideTurnEnd(speechEndTimestamp: number): void {
+    if (TERMINAL_PUNCTUATION.test(this.accumulatedText)) {
+      // Sentence-terminal punctuation detected -> fire immediately.
+      // This is the fast path that eliminates the 1.5 s silence wait.
+      this._emitTurnComplete('punctuation', speechEndTimestamp);
+    } else {
+      // No terminal punctuation -> start the silence timer.
+      // If the user doesn't resume speaking within silenceTimeoutMs,
+      // we'll fire turn_complete with reason 'silence_timeout'.
+      this._startSilenceTimer(speechEndTimestamp);
+    }
+  }
 
   /**
    * Emit `turn_complete` with the currently accumulated transcript and then
