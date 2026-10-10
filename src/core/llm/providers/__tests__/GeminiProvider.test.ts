@@ -239,6 +239,36 @@ describe('GeminiProvider', () => {
   });
 
   // -------------------------------------------------------------------------
+  // The caller's abort signal
+  // -------------------------------------------------------------------------
+
+  describe("the caller's abort signal", () => {
+    it('aborts the request in flight, sends no retry and rejects with REQUEST_ABORTED', async () => {
+      const retrying = new GeminiProvider();
+      await retrying.initialize({ apiKey: 'test-gemini-key', maxRetries: 3 });
+      let sent: AbortSignal | undefined;
+      fetchMock.mockImplementationOnce(
+        (_url: string, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            sent = init?.signal ?? undefined;
+            sent?.addEventListener('abort', () => reject(sent?.reason), { once: true });
+          }),
+      );
+      const controller = new AbortController();
+      const call = retrying.generateCompletion('gemini-2.5-flash', [{ role: 'user', content: 'Hi' }], {
+        abortSignal: controller.signal,
+      });
+      await vi.waitFor(() => expect(sent).toBeDefined());
+      expect(sent?.aborted).toBe(false);
+      controller.abort();
+      expect(sent?.aborted).toBe(true);
+      await expect(call).rejects.toMatchObject({ code: 'REQUEST_ABORTED' });
+      // Three attempts are allowed, and an abort is not retried.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // System instruction handling
   // -------------------------------------------------------------------------
 
