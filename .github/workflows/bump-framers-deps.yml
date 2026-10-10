@@ -95,6 +95,10 @@ jobs:
           # exempt, since the point of this run is to pick up a version published minutes ago.
           # The file is removed again: the pull request commits package.json and pnpm-lock.yaml only.
           printf "packages:\n  - '.'\nminimumReleaseAge: 1440\nminimumReleaseAgeExclude:\n  - '@framers/*'\n" > pnpm-workspace.yaml
+          # Fails here, before any install, if pnpm does not pick the setting up from that file.
+          age=$(pnpm config get minimumReleaseAge)
+          echo "minimumReleaseAge in effect: $age"
+          [ "$age" = 1440 ]
           # Refreshing the lockfile needs no package's install script.
           pnpm install --no-frozen-lockfile --ignore-scripts
           rm pnpm-workspace.yaml
@@ -319,6 +323,10 @@ jobs:
           # exempt, since the point of this run is to pick up a version published minutes ago.
           # The file is removed again: the pull request commits package.json and pnpm-lock.yaml only.
           printf "packages:\n  - '.'\nminimumReleaseAge: 1440\nminimumReleaseAgeExclude:\n  - '@framers/*'\n" > pnpm-workspace.yaml
+          # Fails here, before any install, if pnpm does not pick the setting up from that file.
+          age=$(pnpm config get minimumReleaseAge)
+          echo "minimumReleaseAge in effect: $age"
+          [ "$age" = 1440 ]
           # Refreshing the lockfile needs no package's install script.
           pnpm install --no-frozen-lockfile --ignore-scripts
           rm pnpm-workspace.yaml
