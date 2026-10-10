@@ -268,7 +268,7 @@ await copyFile(new URL('./capture-worklet.js', entry), 'public/audio/capture-wor
 |---------|----------|
 | The transport closes | The pipeline goes `closed` and closes the STT and TTS sessions. The client reconnects into a new session. |
 | An STT or TTS provider fails to start | Through `StreamingSTTChain` or `StreamingTTSChain`, the next provider in priority order starts instead; a circuit breaker skips providers that failed recently. A single provider fails the `startSession()` call. |
-| An STT or TTS session fails during the call | Through a chain, the next provider takes over: the STT chain replays up to `ringBufferCapacityMs` (default `3000`) of buffered audio, and the TTS chain replays the text it was given. A single provider has no reconnect. |
+| An STT or TTS session fails during the call | Through a chain with mid-call failover on (`enableMidUtteranceFailover` and `enableMidSynthesisFailover`, both on by default in `createVoiceProvidersFromEnv()`), the next provider takes over: the STT chain replays up to `ringBufferCapacityMs` (default `3000`) of buffered audio, and the TTS chain replays the text it was given. Otherwise the session is the provider's own, and a provider has no reconnect, except `OpenAIRealtimeTranscriptionSTT`: it reconnects, the first retry after 100 ms and each later one after 2 s, up to 3 in a row, and sends the audio held meanwhile first; past the retries its session fails like any other. |
 | No turn completes | The watchdog gives the endpoint detector a synthetic `speech_end` after `maxTurnDurationMs`. |
 
 Wunderland's `chat --voice` server and `TelephonyStreamTransport` (Twilio, Telnyx and Plivo media streams) build on the same orchestrator; see [Telephony Providers](./TELEPHONY_PROVIDERS.md).
@@ -462,6 +462,65 @@ interface TranscriptEvent {
 ```
 
 The orchestrator relays `text`, `isFinal` and `confidence` to the client; the other fields stay on the STT session's events.
+
+### OpenAI Realtime Transcription
+
+[`OpenAIRealtimeTranscriptionSTT`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/OpenAIRealtimeTranscriptionSTT.ts) streams speech-to-text over an OpenAI Realtime session in its transcription mode (`wss://api.openai.com/v1/realtime?intent=transcription`). It sends 24 kHz PCM16, keys every interim and final transcript by OpenAI's `item_id`, reconnects a dropped socket, and moves a long session to a new connection before OpenAI's session limit.
+
+```typescript
+import { OpenAIRealtimeTranscriptionSTT } from '@framers/agentos/io/voice-pipeline';
+
+const stt = new OpenAIRealtimeTranscriptionSTT({
+  apiKey: process.env.OPENAI_API_KEY!,
+  model: 'gpt-4o-mini-transcribe', // the default
+  usageIntervalMs: 15_000, // a usage report every 15 s for each open connection
+});
+
+const session = await stt.startSession({
+  language: 'en-US',
+  providerOptions: { safetyIdentifier: hashedUserId },
+});
+
+session.on('transcript', (event) => {
+  // One utterance keeps one itemId: replace its text with each interim, then with the final.
+  showLine(event.itemId, event.text, event.isFinal);
+});
+session.on('usage', (usage) => meter(usage.connectionIndex, usage.audioSeconds, usage.final));
+
+session.pushAudio(frame); // mono Float32 at any sample rate, resampled to 24 kHz
+await session.flush(); // at the end: commits the turn in progress and waits for its final
+session.close();
+```
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `model` | `'gpt-4o-mini-transcribe'` | The transcription model, named in the session update. |
+| `turnDetection` | server VAD (threshold 0.5, 600 ms prefix padding, 350 ms silence); `null` for `gpt-live-transcribe` and `gpt-realtime-whisper` | `null` turns server turn detection off: each `flush()` then commits a turn. |
+| `prompt` | none | Context for the transcription model; per session, `providerOptions.prompt`. |
+| `safetyIdentifier` | none | Sent as the `OpenAI-Safety-Identifier` header; per session, `providerOptions.safetyIdentifier`. |
+| `connectTimeoutMs` | `10000` | Time a connection has to open and have its session update confirmed. |
+| `maxRetries`, `retryIntervalMs` | `3`, `2000` | Reconnects after consecutive failures; the first waits 100 ms. The count resets after every final and after a connection that had stayed open longer than `connectTimeoutMs`. |
+| `maxBufferedMs` | `10000` | Audio held while no connection is open, sent first to the next one. |
+| `finalTimeoutMs` | `5000` | Longest wait for finals in `flush()` and when a connection closes. |
+| `usageIntervalMs` | `0` | `'usage'` reports for open connections at this interval; `0` reports each connection once, when it closes. |
+| `rollover` | below | `false` keeps a single connection. |
+
+Events: `transcript` (with `itemId`, `startMs` and `endMs` on the session's audio clock, and `language`); `speech_start` and `speech_end`; `usage` ([`StreamingSTTUsageEvent`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts): `providerId`, `model`, `connectionIndex`, `audioSeconds`, `final`); `warning` (a `VoicePipelineError`, for a server error the session survives, an item whose transcription failed, or a `rollover.approve` that threw); and `error` followed by `close` when the session cannot go on: a reconnect refused as unauthorised, or failures beyond the retries. A failed item that had shown interim text gets a final with empty text, so a display keyed by `itemId` drops it.
+
+**Ending a session.** Call `flush()` before `close()`: it commits the turn in progress and waits for its final, while `close()` ends every connection at once and discards audio not yet committed. With `turnDetection: null`, `flush()` commits the buffer. Under server turn detection it commits only while the server reports speech in progress, so an utterance that began within the voice detector's reporting latency before the call (the time the server takes to send `input_audio_buffer.speech_started`) is not committed, and the `close()` that follows discards it.
+
+**Long sessions.** OpenAI documents a 60-minute limit for a Realtime session ([Realtime conversations](https://developers.openai.com/api/docs/guides/realtime-conversations)); the rollover keeps every connection under it. Once a connection is 55 minutes old (`rollover.afterMs`), the session opens the next one at the first end of speech, or at 58 minutes (`rollover.deadlineMs`) whatever is being said. Both connections receive the same audio for at least 3 s (`rollover.overlapMs`); the old one then stops at its first pause, finishes its items and closes, and an utterance both transcribed is emitted once: from the old connection, or from the new one when the old connection's transcription of it fails, comes back empty or never arrives. An old connection still in speech at 59.5 minutes (`rollover.hardStopMs`) commits what it holds, and the words of that last stretch can appear in both connections' finals. With `turnDetection: null` the switch comes at the first `flush()` after 55 minutes, or with a commit at 58, and the connections do not overlap. `rollover.approve` is called before the rollover opens the next connection: refusing it, or not answering by the hard stop, keeps the current connection until its hard stop and then closes the session, so a host that pays for each hour can reserve the next one first. A next connection that cannot open within the retries also keeps the current one until its hard stop, and the session then ends with that `error`. A connection opened to recover from a dropped one runs under the current approval and keeps the dropped connection's clocks, so the next approval comes at the same time as without the drop; when the connection that took over drops during the overlap, its replacement keeps that newer connection's clocks.
+
+**Without speech output.** `createSttChainFromEnv()` builds the STT chain alone. It reads `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` and `OPENAI_API_KEY` as `createVoiceProvidersFromEnv()` does, needs no TTS key, and leaves mid-utterance failover off, so sessions keep `flush()` and the usage events:
+
+```typescript
+import { createSttChainFromEnv } from '@framers/agentos/io/voice-pipeline';
+
+const { stt } = createSttChainFromEnv({ openaiRealtime: { usageIntervalMs: 15_000 } });
+const session = await stt.startSession({ language: 'en' });
+```
+
+In both constructors OpenAI Realtime transcription joins the STT chain when `OPENAI_API_KEY` is set, after Deepgram and ElevenLabs.
 
 ### ElevenLabs TTS Options
 
