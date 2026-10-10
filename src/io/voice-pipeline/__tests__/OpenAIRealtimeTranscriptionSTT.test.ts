@@ -20,7 +20,7 @@ vi.mock('ws', () => {
     /** Every socket opened, in order. */
     static instances: MockWebSocket[] = [];
     /** How the next socket behaves; reset to 'ack' after use. */
-    static nextBehavior: 'ack' | 'silent' | 'reject-401' | 'reject-429' | 'reject-500' | 'error-on-update' = 'ack';
+    static nextBehavior: 'ack' | 'silent' | 'reject-401' | 'reject-429' | 'reject-500' | 'error-on-update' | 'ack-then-drop' = 'ack';
     readyState = 1;
     url: string;
     headers: Record<string, string>;
@@ -35,6 +35,13 @@ vi.mock('ws', () => {
         process.nextTick(() =>
           this.serve({ type: 'session.updated', event_id: 'event_ack', session: event.session })
         );
+      } else if (this.behavior === 'ack-then-drop') {
+        // The server confirms the session update and closes at once: the message and the close
+        // reach the provider in one turn, before the continuation that awaits the connect runs.
+        process.nextTick(() => {
+          this.serve({ type: 'session.updated', event_id: 'event_ack', session: event.session });
+          this.drop();
+        });
       } else if (this.behavior === 'error-on-update') {
         process.nextTick(() =>
           this.serve({
@@ -125,7 +132,7 @@ interface FakeSocket extends EventEmitter {
 
 const Sockets = MockedWs as unknown as {
   instances: FakeSocket[];
-  nextBehavior: 'ack' | 'silent' | 'reject-401' | 'reject-429' | 'reject-500' | 'error-on-update';
+  nextBehavior: 'ack' | 'silent' | 'reject-401' | 'reject-429' | 'reject-500' | 'error-on-update' | 'ack-then-drop';
 };
 
 /** A key that is plainly fake. */
@@ -879,6 +886,54 @@ describe('OpenAIRealtimeTranscriptionSTT: reconnects, failures, flush and close'
     expect(Sockets.instances).toHaveLength(1); // no reconnect for a session the caller never got
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it('starts, and reconnects, when the first connection closes as its session update is confirmed', async () => {
+    fakeClock();
+    Sockets.nextBehavior = 'ack-then-drop';
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, usageIntervalMs: 5_000 });
+    const session = await stt.startSession();
+    const log = record(session);
+    session.pushAudio(frame(2_400)); // held: no connection has joined the session
+    await vi.advanceTimersByTimeAsync(100); // the first retry
+    await settle();
+    expect(Sockets.instances).toHaveLength(2);
+    const second = Sockets.instances[1];
+    expect(sentOfType(second, 'input_audio_buffer.append')).toHaveLength(1);
+    // The connection that closed never joined the session, so the replacement is the session's first:
+    // no older connection withholds its interim text, and usage is reported for it alone.
+    second.serve({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'item_A', delta: 'Hello' });
+    expect(log.transcripts.map((t) => [t.itemId, t.isFinal, t.text])).toEqual([['item_A', false, 'Hello']]);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(log.usage.map((entry) => [entry.connectionIndex, entry.audioSeconds])).toEqual([[1, 0.1]]);
+    session.close();
+    expect(vi.getTimerCount()).toBe(0); // and it left no rollover clock behind
+    expect(log.errors).toEqual([]);
+  });
+
+  it('retries a reconnect whose connection closes as its session update is confirmed', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY });
+    const session = await stt.startSession();
+    const log = record(session);
+    Sockets.instances[0].drop();
+    session.pushAudio(frame(2_400)); // held for the connection that takes over
+    Sockets.nextBehavior = 'ack-then-drop';
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    expect(Sockets.instances).toHaveLength(2); // confirmed, then closed at once: a failed attempt
+    await vi.advanceTimersByTimeAsync(2_000); // so the next one comes by the retry rules
+    await settle();
+    expect(Sockets.instances).toHaveLength(3);
+    expect(sentOfType(Sockets.instances[1], 'input_audio_buffer.append')).toEqual([]);
+    expect(sentOfType(Sockets.instances[2], 'input_audio_buffer.append')).toHaveLength(1);
+    session.close();
+    expect(log.usage.map((entry) => [entry.connectionIndex, entry.audioSeconds])).toEqual([
+      [1, 0],
+      [2, 0.1],
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(log.errors).toEqual([]);
+  });
 });
 
 describe('OpenAIRealtimeTranscriptionSTT: rollover and usage', () => {
@@ -1444,6 +1499,40 @@ describe('OpenAIRealtimeTranscriptionSTT: rollover and usage', () => {
     expect(Sockets.instances).toHaveLength(3); // the dropped connection counts as following: a reconnect, not the end
     expect(log.events).not.toContain('close');
     session.close();
+  });
+
+  it('with client commits, retries a rollover whose next connection closes as its session update is confirmed, and opens one connection', async () => {
+    fakeClock();
+    const stt = new OpenAIRealtimeTranscriptionSTT({ apiKey: KEY, turnDetection: null, rollover: ROLLOVER });
+    const session = await stt.startSession();
+    const log = record(session);
+    const first = Sockets.instances[0];
+    await vi.advanceTimersByTimeAsync(10_000);
+    session.pushAudio(frame(2_400));
+    Sockets.nextBehavior = 'ack-then-drop';
+    const flushing = session.flush(); // past the rollover age: the first connection stops taking audio, the next one opens
+    first.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    first.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'The last turn here.',
+    });
+    await flushing;
+    await settle();
+    expect(Sockets.instances).toHaveLength(2); // confirmed, then closed at once: a failed attempt
+    await vi.advanceTimersByTimeAsync(100); // the rollover retries it, by the retry rules
+    await settle();
+    expect(Sockets.instances).toHaveLength(3);
+    session.pushAudio(frame(2_400));
+    expect(sentOfType(Sockets.instances[2], 'input_audio_buffer.append')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await settle();
+    expect(Sockets.instances).toHaveLength(3); // and no reconnect opens a connection beside it
+    session.close();
+    expect(log.usage.map((entry) => [entry.connectionIndex, entry.audioSeconds])).toEqual([
+      [1, 0.1],
+      [2, 0.1],
+    ]);
   });
 });
 
