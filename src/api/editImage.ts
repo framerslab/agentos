@@ -21,7 +21,7 @@ import type {
   ImageGenerationResult,
   ImageProviderOptionBag,
 } from '../io/media/images/IImageProvider.js';
-import { resolveModelOption, resolveMediaProvider } from './model.js';
+import { modelIsNamed, resolveModelOption, resolveMediaProvider } from './model.js';
 import { attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { recordAgentOSUsage, type AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
@@ -185,13 +185,13 @@ export async function editImage(opts: EditImageOptions): Promise<EditImageResult
     return await withAgentOSSpan('agentos.api.edit_image', async (span) => {
       let { providerId, modelId } = resolveModelOption(opts, 'image');
       let effectiveProviderOptions = opts.providerOptions;
-      // Whether the call has a model of its own: one it names, or the policy
-      // router's pick below. Without one, the provider's own default for edits
+      // Whether the call has a model of its own: one it names, the global
+      // default's, or the policy router's pick below. Without one, the provider's own default for edits
       // applies, not the text-to-image default that `resolveModelOption` gives
       // a named provider: Replicate would otherwise run every edit on
       // black-forest-labs/flux-1.1-pro, and Stability post its text-to-image
       // model to the SD3 route.
-      let modelChosen = typeof opts.model === 'string' && opts.model.length > 0;
+      let modelChosen = modelIsNamed(opts, 'image');
 
       // Policy-tier-aware routing. Mirrors the generateImage flow so
       // both generate and edit surfaces of the API respect the same

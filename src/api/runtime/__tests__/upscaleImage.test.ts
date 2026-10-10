@@ -29,7 +29,7 @@ describe('upscaleImage', () => {
     vi.restoreAllMocks();
   });
 
-  it('upscales 2x via the Stability provider', async () => {
+  it('upscales via the Stability fast upscaler, which takes the image alone', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -42,72 +42,28 @@ describe('upscaleImage', () => {
     );
 
     const result = await upscaleImage({
-      model: 'stability:stable-image-core',
+      provider: 'stability',
       image: TINY_PNG,
       scale: 2,
-      apiKey: 'stab-key',
-    });
-
-    const [url] = vi.mocked(globalThis.fetch).mock.calls[0];
-    expect(String(url)).toContain('/v2beta/stable-image/upscale/conservative');
-
-    expect(result.provider).toBe('stability');
-    expect(result.image).toMatchObject({
-      mimeType: 'image/png',
-      base64: 'dXBzY2FsZWQ=',
-    });
-  });
-
-  it('upscales 4x via the Stability provider', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          image: 'Mng=',
-          seed: 2,
-          finish_reason: 'SUCCESS',
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } },
-      ),
-    );
-
-    const result = await upscaleImage({
-      model: 'stability:stable-image-core',
-      image: TINY_PNG,
-      scale: 4,
-      apiKey: 'stab-key',
-    });
-
-    // Verify the target width was sent (4 * 512 = 2048).
-    const [, requestInit] = vi.mocked(globalThis.fetch).mock.calls[0];
-    const formData = requestInit?.body as FormData;
-    expect(formData.get('width')).toBe('2048');
-
-    expect(result.image.base64).toBe('Mng=');
-  });
-
-  it('accepts explicit width/height target dimensions', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          image: 'd2lkdGg=',
-          finish_reason: 'SUCCESS',
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } },
-      ),
-    );
-
-    await upscaleImage({
-      model: 'stability:stable-image-core',
-      image: TINY_PNG,
       width: 3840,
       height: 2160,
       apiKey: 'stab-key',
     });
 
-    const [, requestInit] = vi.mocked(globalThis.fetch).mock.calls[0];
+    // The conservative and creative upscalers require a prompt, and no
+    // Stability upscaler takes a target size: the fast one gets the image.
+    const [url, requestInit] = vi.mocked(globalThis.fetch).mock.calls[0];
+    expect(String(url)).toMatch(/\/v2beta\/stable-image\/upscale\/fast$/);
     const formData = requestInit?.body as FormData;
-    expect(formData.get('width')).toBe('3840');
-    expect(formData.get('height')).toBe('2160');
+    expect([...formData.keys()]).toEqual(['image']);
+    expect(formData.get('image')).toBeInstanceOf(Blob);
+
+    expect(result.provider).toBe('stability');
+    expect(result.model).toBe('stable-image-upscale-fast');
+    expect(result.image).toMatchObject({
+      mimeType: 'image/png',
+      base64: 'dXBzY2FsZWQ=',
+    });
   });
 
   it('throws ImageUpscaleNotSupportedError for providers without upscaleImage', async () => {

@@ -20,7 +20,7 @@ import type {
   ImageGenerationResult,
   ImageProviderOptionBag,
 } from '../io/media/images/IImageProvider.js';
-import { resolveModelOption, resolveMediaProvider } from './model.js';
+import { modelIsNamed, resolveModelOption, resolveMediaProvider } from './model.js';
 import { attachUsageAttributes, toTurnMetricUsage } from './observability.js';
 import { recordAgentOSUsage, type AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
@@ -132,12 +132,12 @@ export async function upscaleImage(opts: UpscaleImageOptions): Promise<UpscaleIm
   try {
     return await withAgentOSSpan('agentos.api.upscale_image', async (span) => {
       const { providerId, modelId } = resolveModelOption(opts, 'image');
-      // Whether the call names a model. Without one, the provider's own
+      // Whether a model is named, by the call or the global default. Without one, the provider's own
       // default for upscales applies, not the text-to-image default that
       // `resolveModelOption` gives a named provider: Replicate would otherwise
       // run every upscale on black-forest-labs/flux-1.1-pro instead of
       // nightmareai/real-esrgan.
-      const modelChosen = typeof opts.model === 'string' && opts.model.length > 0;
+      const modelChosen = modelIsNamed(opts, 'image');
       const resolved = resolveMediaProvider(providerId, modelId, {
         apiKey: opts.apiKey,
         baseUrl: opts.baseUrl,

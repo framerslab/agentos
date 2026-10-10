@@ -77,21 +77,51 @@ describe('an image operation with a provider and no model', () => {
     expect(JSON.parse(String(inpaintInit?.body)).input.mask).toContain('data:image/png;base64,');
   });
 
-  it('edits on Stability with its SD3 model, not its text-to-image model', async () => {
+  it('edits on Stability in the SD3 route\'s image-to-image mode, with an SD3 model', async () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockImplementation(async () => json({ image: 'ZWRpdA==', seed: 1, finish_reason: 'SUCCESS' }));
+
+    const result = await editImage({
+      provider: 'stability',
+      apiKey: 'sk-stab',
+      image: TINY_PNG,
+      prompt: 'Turn it into a watercolor painting.',
+      strength: 0.4,
+    });
+
+    // The route's image and strength are valid only with mode=image-to-image,
+    // and its model is an SD3 one, not the provider's text-to-image default.
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(String(url)).toMatch(/\/v2beta\/stable-image\/generate\/sd3$/);
+    const form = init?.body as FormData;
+    expect(form.get('mode')).toBe('image-to-image');
+    expect(form.get('model')).toBe('sd3.5-medium');
+    expect(form.get('strength')).toBe('0.4');
+    expect(form.get('image')).toBeInstanceOf(Blob);
+    expect(result.model).toBe('sd3.5-medium');
+  });
+
+  it('inpaints on Stability at the inpaint endpoint, with the mask as `mask`', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => json({ image: 'aW5wYWludA==', seed: 1, finish_reason: 'SUCCESS' }));
 
     await editImage({
       provider: 'stability',
       apiKey: 'sk-stab',
       image: TINY_PNG,
-      prompt: 'Turn it into a watercolor painting.',
+      mask: TINY_PNG,
+      prompt: 'Fill the gap with sky.',
+      strength: 0.4,
     });
 
     const [url, init] = fetchSpy.mock.calls[0];
-    expect(String(url)).toContain('/v2beta/stable-image/generate/sd3');
-    expect((init?.body as FormData).get('model')).toBe('sd3-medium');
+    expect(String(url)).toMatch(/\/v2beta\/stable-image\/edit\/inpaint$/);
+    const form = init?.body as FormData;
+    expect(form.get('mask')).toBeInstanceOf(Blob);
+    // The inpaint endpoint takes no model, mode or strength.
+    expect([...form.keys()].sort()).toEqual(['image', 'mask', 'prompt']);
   });
 
   it('makes a close variation on OpenAI when the variance is low', async () => {

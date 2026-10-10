@@ -69,7 +69,7 @@ const result = await editImage({
 
   // Optional
   provider: 'stability',     // openai | stability | replicate | fal | stable-diffusion-local
-  model: 'sd3-medium',       // Provider-specific model override
+  model: 'sd3.5-medium',     // Provider-specific model override
   mask: maskBuffer,          // Mask for inpainting (white = edit, black = keep)
   strength: 0.75,            // How much to transform (0.0 = identical, 1.0 = full regeneration)
   negativePrompt: 'blurry, low quality',  // What to avoid
@@ -90,7 +90,7 @@ Without `model`, each provider edits with its own default for edits, not with it
 | Provider | Edit model when none is named |
 |----------|-------------------------------|
 | OpenAI | `gpt-image-1` |
-| Stability AI | `sd3-medium` |
+| Stability AI | `sd3.5-medium` on the SD3 route in its image-to-image mode; with a `mask`, the inpaint endpoint, which takes no model |
 | Replicate | `stability-ai/sdxl` at a pinned version, or `black-forest-labs/flux-fill-pro` when a `mask` is passed |
 | fal | `fal-ai/flux/dev` |
 | Local SD (A1111) | the checkpoint the server has loaded |
@@ -137,7 +137,7 @@ console.log(upscaled.url ?? `${upscaled.base64?.length} base64 chars`);
 
 | Provider | What it calls | Scale |
 |----------|---------------|-------|
-| Stability AI | the `stable-image/upscale/conservative` endpoint, with a target width of `width`, else 512 × `scale`, else 2048 | width-based |
+| Stability AI | the fast upscaler, `stable-image/upscale/fast`, which takes the image alone; `scale`, `width` and `height` are not used | 4x |
 | Replicate | `nightmareai/real-esrgan` unless `model` names another | 2x or 4x |
 | Local SD (A1111) | `/sdapi/v1/extra-single-image` with the `R-ESRGAN 4x+` upscaler | `scale`, or `width`/`height` |
 
@@ -326,8 +326,8 @@ if (result.image.base64) {
 | `image` | `Buffer \| string` | **required** | Source image |
 | `provider` | `string` | Auto-detect | Upscale provider ID |
 | `model` | `string` | Provider default | Upscale model override |
-| `scale` | `2 \| 4` | `2` (Replicate, A1111) | Upscale factor; Stability uses a 2048-pixel width when neither `scale` nor `width` is set |
-| `width`, `height` | `number` | — | Target dimensions; they take precedence over `scale` |
+| `scale` | `2 \| 4` | `2` (Replicate, A1111) | Upscale factor; Stability's fast upscaler always returns 4x |
+| `width`, `height` | `number` | — | Target dimensions for the local A1111 provider, where they take precedence over `scale` |
 | `apiKey`, `baseUrl`, `providerOptions`, `usageLedger` | | | As for `editImage()` |
 
 ### variateImage() Options
