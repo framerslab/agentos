@@ -173,7 +173,9 @@ new CLISubprocessError(
 
 - **Bridge.** `execute()` and `stream()` throw the error `classifyError()` returns.
 - **Provider, non-streaming.** `generateCompletion()` lets the bridge's error through.
-- **Provider, streaming.** `generateCompletionStream()` does not throw for a bridge failure. The stream ends with a final chunk whose `error` holds the message, the `code` and, as `details`, the error object.
+- **Provider, streaming.** `generateCompletionStream()` does not throw when the bridge fails or when the CLI reports an error in its output. Either way the stream ends with a final chunk that carries an `error`:
+  - When the bridge throws, the `error` holds the error's message, its `code` and, as `details`, the error object.
+  - When the CLI writes an error event into its `stream-json` output, the `error` holds only a message: `Claude Code stream error:` or `Gemini CLI stream error:` followed by the event's message. It has no `code` and no `details`.
 - **Initialization through the helpers.** `generateText()`, `streamText()` and the helpers built on them create the provider with [`createProviderManager()`](https://github.com/framerslab/agentos/blob/master/src/api/model.ts). When the provider's `initialize()` throws, that function throws a `ProviderInitializationError` whose `cause` is the `CLISubprocessError`.
 - **Fallback.** Those helpers decide whether to try the next provider with [`isRetryableError()`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts), which reads the error's name, HTTP status, `code`, type and message. It counts a `ProviderInitializationError` and the `TIMEOUT` code as retryable, and it never reads `recoverable`.
 
