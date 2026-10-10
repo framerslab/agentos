@@ -375,8 +375,32 @@ export interface IVectorStore {
       rrfK?: number;
       /** Number of lexical candidates to consider before fusion. Default: implementation-defined. */
       lexicalTopK?: number;
+      /** Lexical leg: every word of the query (`'all'`) or any word (`'any'`). Default: implementation-defined. */
+      match?: 'all' | 'any';
+      /** Lexical leg: a query word also matches a stored word that begins with it. Default: false. */
+      prefix?: boolean;
     },
   ): Promise<QueryResult>;
+
+  /**
+   * Optional: search on the store's lexical index alone, with no embedding. `match` asks for every word (`'all'`) or
+   * any word (`'any'`, the default); `prefix` matches a stored word that begins with a query word.
+   */
+  lexicalSearch?(
+    collectionName: string,
+    queryText: string,
+    options?: QueryOptions & { match?: 'all' | 'any'; prefix?: boolean },
+  ): Promise<QueryResult>;
+
+  /**
+   * Optional: change the metadata of every document a filter matches. A key whose value is `null` is removed; the
+   * other keys replace the stored ones. The filter must hold at least one condition.
+   */
+  updateMetadata?(
+    collectionName: string,
+    filter: MetadataFilter,
+    patch: Record<string, MetadataValue | null>,
+  ): Promise<{ updatedCount: number }>;
 
   /**
    * Deletes documents from a specified collection by their IDs or by a metadata filter.

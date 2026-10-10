@@ -191,6 +191,18 @@ describe('PostgresVectorStore', () => {
       const ftsIdx = queryCalls.find(c => c.sql.includes('my_docs_fts'));
       expect(ftsIdx).toBeDefined();
 
+      // Each index is made after a read of the indexes the table already has.
+      const steps = queryCalls
+        .map(c => (c.sql.includes('FROM pg_indexes') ? 'read' : c.sql.startsWith('CREATE INDEX') ? 'index' : ''))
+        .filter(step => step !== '');
+      expect(steps).toEqual(['read', 'index', 'read', 'index', 'read', 'index']);
+      expect(queryCalls.filter(c => c.sql.includes('FROM pg_indexes')).map(c => c.params)).toEqual([['my_docs'], ['my_docs'], ['my_docs']]);
+      expect(queryCalls.filter(c => c.sql.startsWith('CREATE INDEX')).map(c => c.sql)).toEqual([
+        'CREATE INDEX IF NOT EXISTS "my_docs_hnsw" ON "my_docs" USING hnsw (embedding vector_cosine_ops)',
+        'CREATE INDEX IF NOT EXISTS "my_docs_metadata" ON "my_docs" USING gin (metadata_json)',
+        'CREATE INDEX IF NOT EXISTS "my_docs_fts" ON "my_docs" USING gin (tsv)',
+      ]);
+
       // _collections registration.
       const reg = queryCalls.find(c => c.sql.includes('INSERT INTO') && c.sql.includes('_collections'));
       expect(reg).toBeDefined();
@@ -210,8 +222,42 @@ describe('PostgresVectorStore', () => {
 
       expect(queryCalls.some(c => c.sql.includes('SELECT tsv FROM'))).toBe(true);
       expect(queryCalls.filter(c => /ALTER\s+TABLE/i.test(c.sql))).toEqual([]);
+      // The column is there, and its index is made when the table has none.
+      expect(queryCalls.some(c => c.sql === 'CREATE INDEX IF NOT EXISTS "my_docs_fts" ON "my_docs" USING gin (tsv)')).toBe(true);
       const reg = queryCalls.find(c => c.sql.includes('INSERT INTO') && c.sql.includes('_collections'));
       expect(reg).toBeDefined();
+    });
+
+    it('lets a failure to add the tsv column, or to make its index, reach the caller', async () => {
+      store = new PostgresVectorStore(makeConfig());
+      await store.initialize();
+      resetMocks();
+      const failing = (statement: RegExp, error: Error) => {
+        mockPool.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+          queryCalls.push({ sql, params });
+          if (/^\s*SELECT tsv FROM /.test(sql)) throw new Error('column "tsv" does not exist');
+          if (statement.test(sql)) throw error;
+          return nextQueryResult;
+        });
+      };
+      failing(/^ALTER TABLE/, Object.assign(new Error('must be owner of table my_docs'), { code: '42501' }));
+      await expect(store.createCollection('my_docs', 4)).rejects.toThrow('must be owner');
+      failing(/USING gin \(tsv\)$/, new Error('could not extend file'));
+      await expect(store.createCollection('my_docs', 4)).rejects.toThrow('could not extend file');
+    });
+
+    it('still makes the full-text index when another caller added the tsv column first', async () => {
+      store = new PostgresVectorStore(makeConfig());
+      await store.initialize();
+      resetMocks();
+      mockPool.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        queryCalls.push({ sql, params });
+        if (/^\s*SELECT tsv FROM /.test(sql)) throw new Error('column "tsv" does not exist');
+        if (/^ALTER TABLE/.test(sql)) throw Object.assign(new Error('column "tsv" of relation "my_docs" already exists'), { code: '42701' });
+        return nextQueryResult;
+      });
+      await store.createCollection('my_docs', 4);
+      expect(queryCalls.some(c => c.sql === 'CREATE INDEX IF NOT EXISTS "my_docs_fts" ON "my_docs" USING gin (tsv)')).toBe(true);
     });
 
     it('uses vector_l2_ops for euclidean metric', async () => {
@@ -362,7 +408,7 @@ describe('PostgresVectorStore', () => {
       expect(queryCall).toBeDefined();
       expect(queryCall!.sql).toContain("metadata_json->>'topic'");
       expect(queryCall!.sql).toContain('::numeric >');
-      expect(queryCall!.sql).toContain('IN (');
+      expect(queryCall!.sql).toContain("(CASE WHEN jsonb_typeof(metadata_json->'status') = 'array' THEN metadata_json->'status' @> ANY($5::jsonb[]) ELSE metadata_json->>'status' = ANY($4::text[]) END)");
     });
   });
 
@@ -547,7 +593,7 @@ describe('PostgresVectorStore', () => {
       const lexicalEnd = hybridCall!.sql.indexOf('fused AS');
       const denseSql = hybridCall!.sql.slice(0, denseEnd);
       const lexicalSql = hybridCall!.sql.slice(denseEnd, lexicalEnd);
-      const filterSql = "metadata_json->>'visibility' = $3 AND metadata_json->>'product' IN ($4, $5)";
+      const filterSql = "metadata_json->>'visibility' = $3 AND (CASE WHEN jsonb_typeof(metadata_json->'product') = 'array' THEN metadata_json->'product' @> ANY($5::jsonb[]) ELSE metadata_json->>'product' = ANY($4::text[]) END)";
 
       expect(denseSql).toContain(`WHERE ${filterSql}`);
       expect(lexicalSql).toContain(`AND ${filterSql}`);
@@ -558,8 +604,8 @@ describe('PostgresVectorStore', () => {
         '[0.1,0.2,0.3,0.4]',
         'public docs',
         'public',
-        'agentos',
-        'frame',
+        ['agentos', 'frame'],
+        ['["agentos"]', '["frame"]'],
         15,
         60,
         5,
@@ -674,7 +720,7 @@ describe('PostgresVectorStore', () => {
       expect(q!.params).toContain(0.8);
     });
 
-    it('translates $in to SQL IN clause', async () => {
+    it('translates $in to a match on the value, or on an array that shares one', async () => {
       store = new PostgresVectorStore(makeConfig());
       await store.initialize();
       resetMocks();
@@ -686,12 +732,12 @@ describe('PostgresVectorStore', () => {
         filter: { category: { $in: ['a', 'b', 'c'] } },
       });
 
-      const q = queryCalls.find(c => c.sql.includes('IN ('));
+      const q = queryCalls.find(c => c.sql.includes('= ANY('));
       expect(q).toBeDefined();
-      // $in values are stringified.
-      expect(q!.params).toContain('a');
-      expect(q!.params).toContain('b');
-      expect(q!.params).toContain('c');
+      expect(q!.sql).toContain("(CASE WHEN jsonb_typeof(metadata_json->'category') = 'array' THEN metadata_json->'category' @> ANY($3::jsonb[]) ELSE metadata_json->>'category' = ANY($2::text[]) END)");
+      // A single value is compared as text; an array's elements are compared as JSON values.
+      expect(q!.params).toContainEqual(['a', 'b', 'c']);
+      expect(q!.params).toContainEqual(['["a"]', '["b"]', '["c"]']);
     });
   });
 
@@ -707,6 +753,296 @@ describe('PostgresVectorStore', () => {
       // The collections metadata table should be prefixed.
       const prefixed = queryCalls.find(c => c.sql.includes('"tenant1__collections"'));
       expect(prefixed).toBeDefined();
+    });
+
+    it('doubles a double quote in the prefix or the collection name, so each name stays one identifier', async () => {
+      store = new PostgresVectorStore(makeConfig({ tablePrefix: 'te"n_' }));
+      await store.initialize();
+      expect(queryCalls.some(c => c.sql.includes('CREATE TABLE IF NOT EXISTS "te""n__collections" ('))).toBe(true);
+      resetMocks();
+
+      await store.createCollection('chu"nks', 4);
+      expect(queryCalls[0].sql).toContain('CREATE TABLE IF NOT EXISTS "te""n_chu""nks" (');
+      expect(queryCalls.filter(c => c.sql.includes('FROM pg_indexes')).map(c => c.params)).toEqual([['te"n_chu"nks'], ['te"n_chu"nks'], ['te"n_chu"nks']]);
+      expect(queryCalls.filter(c => c.sql.startsWith('CREATE INDEX')).map(c => c.sql)).toEqual([
+        'CREATE INDEX IF NOT EXISTS "te""n_chu""nks_hnsw" ON "te""n_chu""nks" USING hnsw (embedding vector_cosine_ops)',
+        'CREATE INDEX IF NOT EXISTS "te""n_chu""nks_metadata" ON "te""n_chu""nks" USING gin (metadata_json)',
+        'CREATE INDEX IF NOT EXISTS "te""n_chu""nks_fts" ON "te""n_chu""nks" USING gin (tsv)',
+      ]);
+
+      resetMocks();
+      await store.delete('chu"nks', undefined, { filter: { sourceId: 's1' } });
+      expect(queryCalls[0]).toEqual({ sql: `DELETE FROM "te""n_chu""nks" WHERE metadata_json->>'sourceId' = $1`, params: ['s1'] });
+    });
+  });
+
+  // =========================================================================
+  // Scoped retrieval (many tenants in one collection)
+  // =========================================================================
+
+  describe('scoped retrieval (many tenants in one collection)', () => {
+    const base = { id: 'pg', type: 'postgres' as const, connectionString: 'postgres://test' };
+
+    it('runs no DDL when manageSchema is false, and reads no collections table', async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false, similarityMetric: 'cosine' });
+      await store.initialize();
+      await store.createCollection('chunks', 8);
+      expect(queryCalls).toEqual([]);
+      await store.query('chunks', [0, 0, 0, 0, 0, 0, 0, 0], { topK: 3 });
+      expect(queryCalls).toHaveLength(1);
+      expect(queryCalls[0].sql).not.toContain('_collections');
+      expect(queryCalls[0].sql).toContain('<=>');
+    });
+
+    it("refuses to drop a collection whose tables are the caller's", async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false });
+      await expect(store.dropCollection('chunks')).rejects.toThrow('manageSchema: false');
+      expect(queryCalls).toEqual([]);
+    });
+
+    it('uses a pool the caller owns and never ends it', async () => {
+      const owned = { query: vi.fn(async () => ({ rows: [], rowCount: 0 })), connect: vi.fn(async () => mockClient), end: vi.fn(async () => {}) };
+      const store = new PostgresVectorStore({ id: 'pg', type: 'postgres', pool: owned, manageSchema: false });
+      await store.initialize();
+      await store.query('chunks', [0, 0, 0], { topK: 1 });
+      await store.close();
+      expect(owned.query).toHaveBeenCalledTimes(1);
+      expect(owned.end).not.toHaveBeenCalled();
+    });
+
+    it('refuses to start with neither a connection string nor a pool', async () => {
+      const store = new PostgresVectorStore({ id: 'pg', type: 'postgres' });
+      await expect(store.initialize()).rejects.toThrow('connectionString or a pool');
+    });
+
+    it('prints the schema a migration can run', () => {
+      expect(PostgresVectorStore.schemaSql('chunks', 1536, { tablePrefix: 'library_', textSearchConfig: 'simple' })).toEqual([
+        `CREATE TABLE IF NOT EXISTS "library_chunks" (id TEXT PRIMARY KEY, embedding vector(1536), metadata_json JSONB, text_content TEXT, created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT, updated_at BIGINT, tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, COALESCE(text_content, ''))) STORED)`,
+        `CREATE INDEX IF NOT EXISTS "library_chunks_hnsw" ON "library_chunks" USING hnsw (embedding vector_cosine_ops)`,
+        `CREATE INDEX IF NOT EXISTS "library_chunks_metadata" ON "library_chunks" USING gin (metadata_json)`,
+        `CREATE INDEX IF NOT EXISTS "library_chunks_fts" ON "library_chunks" USING gin (tsv)`,
+      ]);
+      expect(() => PostgresVectorStore.schemaSql('chunks', 8, { textSearchConfig: "simple'); DROP" })).toThrow('text search configuration');
+      expect(() => PostgresVectorStore.schemaSql('chu"nks', 8)).toThrow('collection name');
+      const longest = 'c'.repeat(46);
+      expect(PostgresVectorStore.schemaSql(longest, 8, { tablePrefix: 'library_' })[2]).toBe(`CREATE INDEX IF NOT EXISTS "library_${longest}_metadata" ON "library_${longest}" USING gin (metadata_json)`);
+      expect(() => PostgresVectorStore.schemaSql(`${longest}c`, 8, { tablePrefix: 'library_' })).toThrow('at most 54 characters');
+    });
+
+    it('takes the metric alone as the third argument of schemaSql', () => {
+      const statements = PostgresVectorStore.schemaSql('chunks', 4, 'euclidean');
+      expect(statements[0]).toContain(`CREATE TABLE IF NOT EXISTS "chunks" (`);
+      expect(statements[0]).toContain(`to_tsvector('english'::regconfig, COALESCE(text_content, ''))`);
+      expect(statements[1]).toBe(`CREATE INDEX IF NOT EXISTS "chunks_hnsw" ON "chunks" USING hnsw (embedding vector_l2_ops)`);
+      expect(() => PostgresVectorStore.schemaSql('chunks', 0)).toThrow('dimension');
+    });
+
+    it('names the indexes after the prefixed table, and adds none the table already has', async () => {
+      const store = new PostgresVectorStore({ ...base, tablePrefix: 'tenant1_' });
+      await store.initialize();
+      resetMocks();
+      tsvColumnIsMissing();
+      // The CREATE TABLE answers first; then the read of the table's indexes finds an HNSW index made under an older name.
+      queryResultQueue.push({ rows: [], rowCount: 0 });
+      queryResultQueue.push({ rows: [{ indexdef: 'CREATE INDEX chunks_hnsw ON public.tenant1_chunks USING hnsw (embedding vector_cosine_ops)' }] });
+      await store.createCollection('chunks', 8);
+      const reads = queryCalls.filter((call) => call.sql.includes('FROM pg_indexes'));
+      expect(reads.map((call) => call.params)).toEqual([['tenant1_chunks'], ['tenant1_chunks'], ['tenant1_chunks']]);
+      expect(queryCalls.filter((call) => call.sql.startsWith('CREATE INDEX')).map((call) => call.sql)).toEqual([
+        `CREATE INDEX IF NOT EXISTS "tenant1_chunks_metadata" ON "tenant1_chunks" USING gin (metadata_json)`,
+        `CREATE INDEX IF NOT EXISTS "tenant1_chunks_fts" ON "tenant1_chunks" USING gin (tsv)`,
+      ]);
+    });
+
+    it("reads the indexes of the table in the store's own schema, so a same-named table in another schema does not count", async () => {
+      const store = new PostgresVectorStore({ ...base, tablePrefix: 'tenant1_' });
+      await store.initialize();
+      resetMocks();
+      await store.createCollection('chunks', 8);
+      const read = { sql: 'SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND tablename = $1', params: ['tenant1_chunks'] };
+      expect(queryCalls.filter((call) => call.sql.includes('FROM pg_indexes'))).toEqual([read, read, read]);
+    });
+
+    it('keeps the index names of a long table name apart, each within the 63 bytes Postgres keeps', async () => {
+      const tablePrefix = `tenant_${'a'.repeat(42)}_`;
+      const store = new PostgresVectorStore({ ...base, tablePrefix });
+      await store.initialize();
+      const reads = () => queryCalls.filter((call) => call.sql.includes('FROM pg_indexes')).map((call) => call.params);
+      const indexNames = async (collection: string): Promise<string[]> => {
+        resetMocks();
+        await store.createCollection(collection, 8);
+        return queryCalls
+          .filter((call) => call.sql.startsWith('CREATE INDEX'))
+          .map((call) => {
+            expect(call.sql).toContain(`" ON "${tablePrefix}${collection}" USING `);
+            return call.sql.slice('CREATE INDEX IF NOT EXISTS "'.length, call.sql.indexOf('" ON "'));
+          });
+      };
+
+      // 62 characters: with its suffix each index name is longer than Postgres keeps, and cut there the three
+      // would be one name, of which IF NOT EXISTS makes only the first.
+      const table = `${tablePrefix}long_chunks1`;
+      expect(table).toHaveLength(62);
+      const names = await indexNames('long_chunks1');
+      const hash = names[0].slice(50, 58);
+      expect(hash).toMatch(/^[0-9a-f]{8}$/);
+      expect(names).toEqual([
+        `${table.slice(0, 49)}_${hash}_hnsw`,
+        `${table.slice(0, 45)}_${hash}_metadata`,
+        `${table.slice(0, 50)}_${hash}_fts`,
+      ]);
+      expect(names.map((name) => name.length)).toEqual([63, 63, 63]);
+      expect(reads()).toEqual([[table], [table], [table]]);
+
+      // A table whose name starts the same way gets names of its own.
+      const others = await indexNames('long_chunks2');
+      expect(others.map((name) => name.length)).toEqual([63, 63, 63]);
+      expect(others.some((name) => names.includes(name))).toBe(false);
+
+      // A table name longer than Postgres keeps is read under the 63 bytes the catalog holds.
+      const kept = `${tablePrefix}long_chunks_of_notes`.slice(0, 63);
+      expect((await indexNames('long_chunks_of_notes')).map((name) => name.length)).toEqual([63, 63, 63]);
+      expect(reads()).toEqual([[kept], [kept], [kept]]);
+
+      // Postgres counts a name in bytes: 31 of these two-byte letters fit in 63, and the cut falls between two letters.
+      const letter = String.fromCharCode(0xfc);
+      const plain = new PostgresVectorStore({ ...base });
+      await plain.initialize();
+      resetMocks();
+      await plain.createCollection(letter.repeat(40), 8);
+      expect(reads()).toEqual([[letter.repeat(31)], [letter.repeat(31)], [letter.repeat(31)]]);
+      const created = queryCalls.filter((call) => call.sql.startsWith('CREATE INDEX')).map((call) => call.sql.slice('CREATE INDEX IF NOT EXISTS "'.length, call.sql.indexOf('" ON "')));
+      expect(created).toHaveLength(3);
+      expect(created.every((name) => new TextEncoder().encode(name).length <= 63)).toBe(true);
+    });
+
+    it('matches an array field with $in, $nin, $all and $contains', async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false });
+      await store.query('chunks', [0, 0], {
+        topK: 5,
+        filter: { tenantId: 'org1', aclGroups: { $in: ['acct:a', 'org:org1'] }, tags: { $all: ['q3', 'budget'] }, status: { $nin: ['archived'] }, labels: { $contains: 'x' } },
+      });
+      const { sql, params } = queryCalls[0];
+      expect(sql).toContain(`metadata_json->>'tenantId' = $2`);
+      expect(sql).toContain(`(CASE WHEN jsonb_typeof(metadata_json->'aclGroups') = 'array' THEN metadata_json->'aclGroups' @> ANY($4::jsonb[]) ELSE metadata_json->>'aclGroups' = ANY($3::text[]) END)`);
+      expect(sql).toContain(`metadata_json->'tags' @> $5::jsonb`);
+      expect(sql).toContain(`(metadata_json->'status' IS NOT NULL AND NOT (CASE WHEN jsonb_typeof(metadata_json->'status') = 'array' THEN metadata_json->'status' @> ANY($7::jsonb[]) ELSE metadata_json->>'status' = ANY($6::text[]) END))`);
+      expect(sql).toContain(`(CASE WHEN jsonb_typeof(metadata_json->'labels') = 'array' THEN metadata_json->'labels' @> $8::jsonb ELSE metadata_json->>'labels' LIKE $9 END)`);
+      expect(params).toEqual(['[0,0]', 'org1', ['acct:a', 'org:org1'], ['["acct:a"]', '["org:org1"]'], '["q3","budget"]', ['archived'], ['["archived"]'], '["x"]', '%x%', 5]);
+    });
+
+    it('refuses a metadata key that is not a plain name', async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false });
+      await expect(store.query('chunks', [0], { filter: { "x' OR 1=1 --": 'y' } })).rejects.toThrow('metadata key');
+    });
+
+    it('refuses a condition it cannot write into SQL, so no deletion, change or search runs wider than its filter', async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false });
+      const notAnArray = { $in: 'org1' as unknown as string[] };
+      await expect(store.delete('chunks', undefined, { filter: { tenantId: notAnArray, sourceId: 's1' } })).rejects.toThrow('$in on the metadata key \'tenantId\' needs an array');
+      await expect(store.updateMetadata('chunks', { tenantId: { $regex: 'org1' } as never, sourceId: 's1' }, { a: 1 })).rejects.toThrow('not a filter operator');
+      await expect(store.lexicalSearch('chunks', 'budget', { filter: { tenantId: { $eq: undefined } } })).rejects.toThrow('holds no condition');
+      await expect(store.query('chunks', [0, 0], { filter: { tenantId: {} } })).rejects.toThrow('holds no condition');
+      expect(queryCalls).toEqual([]);
+    });
+
+    it('matches $textSearch on a string value that contains the text, in any case', async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false });
+      await store.lexicalSearch('chunks', 'budget', { filter: { tenantId: 'org1', title: { $textSearch: 'Q3 Review' } } });
+      expect(queryCalls[0].sql).toContain(`AND metadata_json->>'tenantId' = $2 AND (jsonb_typeof(metadata_json->'title') = 'string' AND strpos(lower(metadata_json->>'title'), lower($3)) > 0)`);
+      expect(queryCalls[0].params).toEqual(['budget', 'org1', 'Q3 Review', 10]);
+    });
+
+    it('deletes by filter', async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false, tablePrefix: 'library_' });
+      queryResultQueue.push({ rows: [], rowCount: 4 });
+      const result = await store.delete('chunks', undefined, { filter: { sourceId: 's1' } });
+      expect(queryCalls[0]).toEqual({ sql: `DELETE FROM "library_chunks" WHERE metadata_json->>'sourceId' = $1`, params: ['s1'] });
+      expect(result.deletedCount).toBe(4);
+    });
+
+    it('changes stored metadata by filter, removing a key given as null', async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false, tablePrefix: 'library_' });
+      queryResultQueue.push({ rows: [], rowCount: 2 });
+      const result = await store.updateMetadata('chunks', { sourceId: 's1' }, { aclGroups: ['acct:a'], folderId: null });
+      expect(queryCalls[0].sql).toBe(`UPDATE "library_chunks" SET metadata_json = (COALESCE(metadata_json, '{}'::jsonb) || $1::jsonb) - $2::text[], updated_at = $3 WHERE metadata_json->>'sourceId' = $4`);
+      expect(queryCalls[0].params?.[0]).toBe('{"aclGroups":["acct:a"]}');
+      expect(queryCalls[0].params?.[1]).toEqual(['folderId']);
+      expect(queryCalls[0].params?.[3]).toBe('s1');
+      expect(result.updatedCount).toBe(2);
+      await expect(store.updateMetadata('chunks', {}, { a: 1 })).rejects.toThrow('needs a filter');
+    });
+
+    it('searches the lexical leg alone, every word or any word, whole or by prefix', async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false, textSearchConfig: 'simple' });
+      await store.lexicalSearch('chunks', 'Chapter TWO, please!', { topK: 7, match: 'all', prefix: true, filter: { tenantId: 'org1' } });
+      expect(queryCalls[0].sql).toContain(`to_tsquery('simple'::regconfig, $1)`);
+      expect(queryCalls[0].sql).toContain(`AND metadata_json->>'tenantId' = $2`);
+      expect(queryCalls[0].params).toEqual(['chapter:* & two:* & please:*', 'org1', 7]);
+      await store.lexicalSearch('chunks', 'chapter two', { match: 'any' });
+      expect(queryCalls[1].params?.[0]).toBe('chapter | two');
+      const empty = await store.lexicalSearch('chunks', ' ... ');
+      expect(empty.documents).toEqual([]);
+      expect(queryCalls).toHaveLength(2);
+    });
+
+    it("reads a hybrid search's own words with match or prefix, and searches by the embedding alone when none is left", async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false, textSearchConfig: 'simple' });
+      await store.hybridSearch('chunks', [0, 0], 'Budget, the PLAN', { topK: 4, match: 'all', prefix: true });
+      expect(queryCalls[0].sql).toContain(`ts_rank(tsv, to_tsquery('simple'::regconfig, $2))`);
+      expect(queryCalls[0].sql).not.toContain('plainto_tsquery');
+      expect(queryCalls[0].params?.[1]).toBe('budget:* & the:* & plan:*');
+      await store.hybridSearch('chunks', [0, 0], 'budget plan', { topK: 4 });
+      expect(queryCalls[1].sql).toContain(`ts_rank(tsv, plainto_tsquery('simple'::regconfig, $2))`);
+      expect(queryCalls[1].params?.[1]).toBe('budget plan');
+      await store.hybridSearch('chunks', [0, 0], ' ... ', { topK: 4, match: 'any' });
+      expect(queryCalls).toHaveLength(3);
+      expect(queryCalls[2].sql).not.toContain('WITH dense AS');
+      expect(queryCalls[2].sql).toContain('<=>');
+    });
+
+    it('runs a search inside a transaction with pgvector settings when an iterative scan is asked for', async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false, iterativeScan: 'strict_order', efSearch: 100, maxScanTuples: 20000 });
+      await store.query('chunks', [0, 0], { topK: 5, filter: { tenantId: 'org1' } });
+      expect(queryCalls.map((call) => call.sql.trim().split('\n')[0].trim())).toEqual([
+        'BEGIN',
+        `SET LOCAL hnsw.iterative_scan = 'strict_order'`,
+        'SET LOCAL hnsw.ef_search = 100',
+        'SET LOCAL hnsw.max_scan_tuples = 20000',
+        expect.stringContaining('SELECT id, embedding::text'),
+        'COMMIT',
+      ]);
+      expect(mockClient.release).toHaveBeenCalled();
+    });
+
+    it('runs a hybrid search in the same transaction, on one connection, with the pgvector settings', async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false, iterativeScan: 'relaxed_order', efSearch: 64 });
+      await store.hybridSearch('chunks', [0, 0], 'budget', { topK: 5, filter: { tenantId: 'org1' } });
+      expect(queryCalls.map((call) => call.sql.trim().split('\n')[0].trim())).toEqual([
+        'BEGIN',
+        `SET LOCAL hnsw.iterative_scan = 'relaxed_order'`,
+        'SET LOCAL hnsw.ef_search = 64',
+        'WITH dense AS (',
+        'COMMIT',
+      ]);
+      expect(queryCalls[3].params).toEqual(['[0,0]', 'budget', 'org1', 15, 60, 5]);
+      expect(mockPool.query).not.toHaveBeenCalled();
+      expect(mockClient.release).toHaveBeenCalledTimes(1);
+    });
+
+    it('sorts the rows of a relaxed scan again by similarity', async () => {
+      const store = new PostgresVectorStore({ ...base, manageSchema: false, iterativeScan: 'relaxed_order' });
+      // BEGIN and the setting answer first; then the search's rows come back slightly out of distance order.
+      queryResultQueue.push({ rows: [] }, { rows: [] }, {
+        rows: [
+          { id: 'b', embedding: null, metadata_json: null, text_content: null, distance: 0.2 },
+          { id: 'a', embedding: null, metadata_json: null, text_content: null, distance: 0.1 },
+          { id: 'c', embedding: null, metadata_json: null, text_content: null, distance: 0.3 },
+        ],
+        rowCount: 3,
+      });
+      const result = await store.query('chunks', [0, 0], { topK: 3, filter: { tenantId: 'org1' } });
+      expect(result.documents.map((doc) => doc.id)).toEqual(['a', 'b', 'c']);
     });
   });
 });

@@ -22,7 +22,7 @@ export { QdrantVectorStore, type QdrantVectorStoreConfig } from './QdrantVectorS
 export { Neo4jVectorStore, type Neo4jVectorStoreConfig } from './Neo4jVectorStore.js';
 
 // Postgres vector store (pgvector + tsvector hybrid search via single SQL CTE)
-export { PostgresVectorStore, type PostgresVectorStoreConfig } from './PostgresVectorStore.js';
+export { PostgresVectorStore, type PostgresVectorStoreConfig, type PgPoolLike } from './PostgresVectorStore.js';
 
 
 
