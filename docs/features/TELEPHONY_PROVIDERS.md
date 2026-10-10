@@ -128,7 +128,7 @@ A call record carries one of two modes:
 | `conversation` | Full duplex: caller audio to STT, the agent's reply to TTS, over a media stream |
 | `notify` | Speak a message and hang up |
 
-The providers do not act on the mode. Each one sends its API the destination, the caller number and the webhook URL (Twilio also the status callback URL); the mode, the message, the TTS voice and the media stream URL are not sent. When the call connects, the provider requests the webhook URL, and the host's route answers with the XML for the mode, built with the helpers in [`twiml.ts`](https://github.com/framerslab/agentos/blob/master/src/io/channels/telephony/twiml.ts):
+The providers do not act on the mode. Each one sends its API the destination, the caller number and the webhook URL (Twilio also the status callback URL); the mode, the message, the TTS voice and the media stream URL are not sent. When a Twilio or Plivo call connects, the provider requests the webhook URL, and the host's route answers with the XML for the mode, built with the helpers in [`twiml.ts`](https://github.com/framerslab/agentos/blob/master/src/io/channels/telephony/twiml.ts):
 
 ```typescript
 import { twilioConversationTwiml, twilioNotifyTwiml } from '@framers/agentos';
@@ -140,7 +140,9 @@ const streamXml = twilioConversationTwiml('wss://your-domain.com/voice/media-str
 const notifyXml = twilioNotifyTwiml('Your order has shipped.');
 ```
 
-`telnyxStreamXml(streamUrl)`, `plivoStreamXml(streamUrl)` and `plivoNotifyXml(text, voice?)` build the same answers for Telnyx and Plivo.
+`plivoStreamXml(streamUrl)` and `plivoNotifyXml(text, voice?)` build the same two answers for Plivo.
+
+A Telnyx call goes through Telnyx's Call Control API, which posts the call's events (`call.initiated`, `call.answered`, `call.hangup` and the others) to the webhook URL and takes [commands](https://developers.telnyx.com/docs/voice/programmable-voice/voice-api-fundamentals) that control the call. AgentOS sends no command when a Telnyx call connects. For a conversation, the host starts the media stream after `call.answered` with Telnyx's [`streaming_start`](https://developers.telnyx.com/api-reference/call-commands/streaming-start) command. For a notify call, it speaks the message with `TelnyxVoiceProvider.playTts({ providerCallId, text, voice })`, which sends the `speak` command (voice `female` unless one is given, language `en-US`) and does not hang up. `telnyxStreamXml(streamUrl)` returns `<Response><Stream url="…" /></Response>`, and there is no Telnyx notify helper.
 
 ---
 
@@ -267,8 +269,6 @@ flowchart TD
 
 ---
 
----
-
 ## CallManager configuration
 
 [`VoiceCallConfig`](https://github.com/framerslab/agentos/blob/master/src/io/channels/telephony/types.ts) is the `CallManager` constructor's argument:
@@ -280,7 +280,7 @@ flowchart TD
 | `defaultMode` | `'conversation' \| 'notify'` | Mode of a call that names none (`'conversation'` when unset) |
 | `inboundPolicy` | `'disabled' \| 'allowlist' \| 'pairing' \| 'open'` | `handleInboundCall()` (see [Inbound calls](#inbound-calls)) |
 | `allowedNumbers` | `string[]` | The `'allowlist'` policy |
-| `streaming.enabled`, `streaming.wsPath` | `boolean`, `string` | The media stream URL passed with each call (`/voice/media-stream` by default); no provider sends it |
+| `streaming.enabled`, `streaming.wsPath` | `boolean`, `string` | With `streaming.enabled` true, each call is passed a media stream URL: `webhookBaseUrl` with `http` replaced by `ws`, plus `wsPath` (`/voice/media-stream` by default). `wsPath` alone passes none. No provider sends it |
 | `tts.voice` | `string` | Passed with each call; no provider sends it |
 
 `tts.provider`, `tts.speed`, `tts.options`, `stt` and `maxDurationSeconds` are part of the type and are not read.
