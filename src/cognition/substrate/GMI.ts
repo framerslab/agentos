@@ -195,6 +195,9 @@ export class GMI implements IGMI {
    */
   private readonly runningTurns = new Map<number, { stop: AbortController; ended: Promise<void> }>();
 
+  /** The shutdown that is running, if any; a shutdown() call made meanwhile waits for it. */
+  private shutdownInProgress: Promise<void> | undefined;
+
   /**
    * What the GMI needs to forget a turn once the history no longer holds it
    * (see {@link GMI.forgetTurnsOutside}): the turn each trace entry was recorded
@@ -2219,8 +2222,23 @@ export class GMI implements IGMI {
    * metaprompt work in flight a bounded window to finish, then closes the
    * cognitive and working memory. It owns the lifecycle state from the start,
    * so a turn that ends later leaves the state SHUTDOWN.
+   *
+   * One shutdown runs at a time: a call made while one runs (a manager that
+   * shuts down while a session is deactivated, a second signal to the host)
+   * returns the same promise, so the memories are closed once. A call after
+   * the shutdown has finished returns at once.
    */
-  public async shutdown(): Promise<void> {
+  public shutdown(): Promise<void> {
+    if (!this.shutdownInProgress) {
+      this.shutdownInProgress = this.shutDownOnce().finally(() => {
+        this.shutdownInProgress = undefined;
+      });
+    }
+    return this.shutdownInProgress;
+  }
+
+  /** The work of {@link GMI.shutdown}, run by one call at a time. */
+  private async shutDownOnce(): Promise<void> {
     if (this.state === GMIPrimeState.SHUTDOWN || (this.state === GMIPrimeState.IDLE && !this.isInitialized)) {
       console.log(`GMI (ID: ${this.gmiId}) already shut down or was never fully initialized.`);
       this.state = GMIPrimeState.SHUTDOWN; return;
