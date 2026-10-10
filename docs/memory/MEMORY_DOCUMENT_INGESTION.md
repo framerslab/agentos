@@ -102,7 +102,7 @@ A server that fetches an address someone typed can be pointed at itself or at th
 - Only the media types in `accept` are read (`'type'`): `text/html`, `application/xhtml+xml`, `application/pdf` and `text/plain` unless set. An answer that is neither a 2xx nor a redirect (301, 302, 303, 307 or 308) is refused (`'status'`).
 - One deadline, `deadlineMs`, covers the lookups, the redirects and the body (`'deadline'`). An abort of `signal` ends the fetch with the signal's own reason.
 
-With `fetchDocument`, the answer's media type picks the loader: HTML and XHTML go to the `.html` loader, PDF to the `.pdf` loader, anything else is read as UTF-8 text, and `metadata.source` is the last address after redirects. `UrlLoader` takes its loaders from any object with `getLoader(extension)`, so a server builds no `LoaderRegistry`, whose constructor probes for Docling.
+With `fetchDocument`, the answer's media type picks the loader: HTML and XHTML go to the `.html` loader, PDF to the `.pdf` loader, anything else is read as UTF-8 text, and `metadata.source` is the last address after redirects. `UrlLoader` takes its loaders from any object with `getLoader(extension)`, so a server builds no `LoaderRegistry`, whose constructor probes for Docling. When that object has no loader for an HTML, XHTML or PDF answer of `fetchDocument`, `load()` throws an error that names the media type and not the address, so such an answer is never returned as raw markup.
 
 ### Word files and what they inflate to
 

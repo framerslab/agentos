@@ -73,6 +73,8 @@ const URL_PREFIXES = ['http://', 'https://'] as const;
  * `text/html` and `application/xhtml+xml` go to the `.html` loader,
  * `application/pdf` to the `.pdf` loader, anything else is read as UTF-8
  * text, and `metadata.source` is the answer's last address after redirects.
+ * An HTML, XHTML or PDF answer the loader source has no loader for is refused
+ * with an error, so an HTML or XHTML answer is never returned as raw markup.
  *
  * ### Example
  * ```ts
@@ -167,6 +169,9 @@ export class UrlLoader implements IDocumentLoader {
    * @throws {Error} When `source` is a `Buffer` (URLs must be strings).
    * @throws {Error} When the HTTP request fails (network error or non-2xx
    *                 status), or whatever `fetchDocument` throws.
+   * @throws {Error} When the answer is a PDF and the loader source has no
+   *                 `.pdf` loader, or, with `fetchDocument`, HTML or XHTML and
+   *                 it has no `.html` loader.
    */
   async load(source: string | Buffer, options?: LoadOptions): Promise<LoadedDocument> {
     if (Buffer.isBuffer(source)) {
@@ -261,10 +266,15 @@ export class UrlLoader implements IDocumentLoader {
   /**
    * Hands what `fetchDocument` answered to the loader for its media type.
    * XHTML is markup like HTML, so it goes to the HTML loader too and its tags
-   * and scripts never reach the text.
+   * and scripts never reach the text: where the global-fetch path returns the
+   * raw markup when there is no `.html` loader, this one refuses the answer,
+   * as it refuses a PDF with no `.pdf` loader. The refusal names the media
+   * type and never the address, which can carry what a log should not hold.
    *
    * @param fetched - The last address, the media type and the body.
    * @param options - Optional load hints forwarded to the delegated loader.
+   * @throws {Error} When the answer is HTML, XHTML or PDF and the loader
+   *                 source has no loader for it.
    */
   private async loadFetched(
     fetched: { url: string; contentType: string; body: Buffer },
@@ -274,28 +284,21 @@ export class UrlLoader implements IDocumentLoader {
 
     if (contentType === 'text/html' || contentType === 'application/xhtml+xml') {
       const htmlLoader = this.registry.getLoader('.html');
-      if (htmlLoader) {
-        const doc = await htmlLoader.load(fetched.body, options);
-        return { ...doc, metadata: { ...doc.metadata, source: fetched.url } };
+      // No fallback to the raw markup: its tags and scripts would be kept as words.
+      if (!htmlLoader) {
+        throw new Error(`UrlLoader: the answer is ${contentType}, and the loader source has no .html loader.`);
       }
-
-      // Fallback: return raw markup if the source has no HTML loader.
-      const text = fetched.body.toString('utf8');
-      return {
-        content: text,
-        metadata: { source: fetched.url, wordCount: text.trim() === '' ? 0 : text.trim().split(/\s+/).length },
-        format: 'html',
-      };
+      const doc = await htmlLoader.load(fetched.body, options);
+      return { ...doc, metadata: { ...doc.metadata, source: fetched.url } };
     }
 
     if (contentType === 'application/pdf') {
       const pdfLoader = this.registry.getLoader('.pdf');
-      if (pdfLoader) {
-        const doc = await pdfLoader.load(fetched.body, options);
-        return { ...doc, metadata: { ...doc.metadata, source: fetched.url } };
+      if (!pdfLoader) {
+        throw new Error('UrlLoader: the answer is application/pdf, and the loader source has no .pdf loader.');
       }
-
-      throw new Error(`UrlLoader: received application/pdf from "${fetched.url}" but no PDF loader is registered.`);
+      const doc = await pdfLoader.load(fetched.body, options);
+      return { ...doc, metadata: { ...doc.metadata, source: fetched.url } };
     }
 
     const text = fetched.body.toString('utf8');
