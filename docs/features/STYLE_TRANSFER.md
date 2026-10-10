@@ -46,7 +46,7 @@ console.log(result.model);     // 'black-forest-labs/flux-redux-dev'
 | `seed` | `number` | — | Reproducibility seed |
 | `policyTier` | `string` | — | Accepted and not read: it does not change the provider routing below |
 | `providerOptions` | `object` | — | Provider-specific options passed through |
-| `apiKey` | `string` | the provider's env var | Key for the provider named by `provider` or a prefixed `model` (`openai:gpt-image-1`); refused without one |
+| `apiKey` | `string` | the provider's env var | Key for the provider named by `provider` or a prefixed `model` (`openai:gpt-image-2.5-sunburst`); refused without one |
 | `baseUrl` | `string` | provider default | Base URL for the provider |
 
 ## Provider Routing
@@ -58,7 +58,7 @@ When no provider is named, `transferStyle()` takes the first provider whose key 
 | 1 | `REPLICATE_API_TOKEN` | Replicate | `black-forest-labs/flux-redux-dev` | Style reference + prompt |
 | 2 | `FAL_API_KEY` | Fal | `fal-ai/flux/dev` | Source image + prompt + `strength` |
 | 3 | `STABILITY_API_KEY` | Stability | `stable-image-core` | Source image + prompt + `strength` |
-| 4 | `OPENAI_API_KEY` | OpenAI | `gpt-image-1` | Source image + prompt (edit endpoint) |
+| 4 | `OPENAI_API_KEY` | OpenAI | `gpt-image-2.5-sunburst` | Source image + prompt (edit endpoint) |
 
 ## Examples
 

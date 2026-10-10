@@ -14,6 +14,42 @@ import {
 import { bufferToBlobPart } from '../imageToBuffer.js';
 import { ApiKeyPool } from '../../../../core/providers/ApiKeyPool.js';
 
+/**
+ * OpenAI's model for making an image from a prompt: "our fastest model for
+ * high-quality, everyday image generation"
+ * (https://developers.openai.com/api/docs/models/gpt-image-2.5-flare).
+ *
+ * OpenAI retired `dall-e-2` and `dall-e-3` on 2026-05-12, retires
+ * `gpt-image-1` on 2026-10-23, and `gpt-image-1.5`, `gpt-image-1-mini` and
+ * `chatgpt-image-latest` on 2026-12-01; its replacement for each is one of the
+ * two GPT Image 2.5 models (https://developers.openai.com/api/docs/deprecations).
+ */
+export const OPENAI_IMAGE_GENERATION_MODEL = 'gpt-image-2.5-flare';
+
+/**
+ * OpenAI's model for changing an image: "Use it for workflows where editing
+ * precision matters most"
+ * (https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst).
+ * Edits, variations and style transfer use it.
+ */
+export const OPENAI_IMAGE_EDIT_MODEL = 'gpt-image-2.5-sunburst';
+
+/**
+ * The quality a GPT Image model is sent for `quality`. The GPT Image models
+ * take `low`, `medium`, `high` and `auto`, and the 2.5 models also `xhigh` and
+ * `max`; `standard` and `hd` were DALL·E 3's (openai-node,
+ * `src/resources/images.ts`, `ImageGenerateParams.quality`), and go as
+ * `medium` and `high`.
+ */
+function gptImageQuality(quality: string): string {
+  return quality === 'standard' ? 'medium' : quality === 'hd' ? 'high' : quality;
+}
+
+/** Whether `modelId` names one of OpenAI's GPT Image models. */
+function isGptImageModel(modelId: string): boolean {
+  return /^(gpt-image-|chatgpt-image-)/.test(modelId);
+}
+
 export interface OpenAIImageProviderConfig {
   apiKey: string;
   baseURL?: string;
@@ -81,13 +117,16 @@ export class OpenAIImageProvider implements IImageProvider {
       request.providerOptions
     );
     const body: Record<string, unknown> = {
-      model: request.modelId || this.defaultModelId || 'gpt-image-1.5',
+      model: request.modelId || this.defaultModelId || OPENAI_IMAGE_GENERATION_MODEL,
       prompt: request.prompt,
     };
+    // A GPT Image model gets DALL·E 3's quality names rewritten and no
+    // `style`, which it does not take.
+    const gptImage = isGptImageModel(String(body.model));
 
     if (typeof request.n === 'number') body.n = request.n;
     if (request.size) body.size = request.size;
-    if (request.quality) body.quality = request.quality;
+    if (request.quality) body.quality = gptImage ? gptImageQuality(request.quality) : request.quality;
     if (request.background) body.background = request.background;
     if (request.outputFormat) body.output_format = normalizeOutputFormat(request.outputFormat);
     if (typeof request.outputCompression === 'number')
@@ -100,7 +139,7 @@ export class OpenAIImageProvider implements IImageProvider {
     if (request.userId) body.user = request.userId;
     if (providerOptions) {
       const { style, moderation, extraBody, ...passthrough } = providerOptions;
-      if (style) body.style = style;
+      if (style && !gptImage) body.style = style;
       if (moderation) body.moderation = moderation;
       if (Object.keys(passthrough).length > 0) Object.assign(body, passthrough);
       if (extraBody) Object.assign(body, extraBody);
@@ -186,7 +225,7 @@ export class OpenAIImageProvider implements IImageProvider {
       );
     }
 
-    const model = request.modelId || this.defaultModelId || 'gpt-image-1';
+    const model = request.modelId || this.defaultModelId || OPENAI_IMAGE_EDIT_MODEL;
     formData.append('model', model);
 
     if (typeof request.n === 'number') formData.append('n', String(request.n));
@@ -260,9 +299,9 @@ export class OpenAIImageProvider implements IImageProvider {
 
   async listAvailableModels(): Promise<ImageModelInfo[]> {
     return [
-      { providerId: this.providerId, modelId: 'gpt-image-1.5', displayName: 'GPT Image 1.5' },
-      { providerId: this.providerId, modelId: 'gpt-image-1', displayName: 'GPT Image 1' },
-      { providerId: this.providerId, modelId: 'gpt-image-1-mini', displayName: 'GPT Image 1 Mini' },
+      { providerId: this.providerId, modelId: OPENAI_IMAGE_GENERATION_MODEL, displayName: 'GPT Image 2.5 Flare' },
+      { providerId: this.providerId, modelId: OPENAI_IMAGE_EDIT_MODEL, displayName: 'GPT Image 2.5 Sunburst' },
+      { providerId: this.providerId, modelId: 'gpt-image-2', displayName: 'GPT Image 2' },
     ];
   }
 }

@@ -40,7 +40,7 @@ export const PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
   },
   openai: {
     text: 'gpt-4o',
-    image: 'gpt-image-1',
+    image: 'gpt-image-2.5-flare',
     embedding: 'text-embedding-3-small',
     cheap: 'gpt-4o-mini',
   },

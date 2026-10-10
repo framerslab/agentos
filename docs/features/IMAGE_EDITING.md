@@ -89,7 +89,7 @@ Without `model`, each provider edits with its own default for edits, not with it
 
 | Provider | Edit model when none is named |
 |----------|-------------------------------|
-| OpenAI | `gpt-image-1` |
+| OpenAI | `gpt-image-2.5-sunburst` |
 | Stability AI | `sd3.5-medium` on the SD3 route in its image-to-image mode; with a `mask`, the inpaint endpoint, which takes no model |
 | Replicate | `stability-ai/sdxl` at a pinned version, or `black-forest-labs/flux-fill-pro` when a `mask` is passed |
 | fal | `fal-ai/flux/dev` |
@@ -147,7 +147,7 @@ OpenAI and fal do not upscale.
 
 ## variateImage() API
 
-OpenAI makes a variation through its image edits endpoint, with `gpt-image-1` and a prompt that asks for one; its `/images/variations` endpoint and the DALL·E models it served are retired. Every other provider that can edit makes a variation as an img2img edit whose strength is `variance`.
+OpenAI makes a variation through its image edits endpoint, with `gpt-image-2.5-sunburst` and a prompt that asks for one; its `/images/variations` endpoint and the DALL·E models it served are retired. Every other provider that can edit makes a variation as an img2img edit whose strength is `variance`.
 
 ```typescript
 import { variateImage } from '@framers/agentos';

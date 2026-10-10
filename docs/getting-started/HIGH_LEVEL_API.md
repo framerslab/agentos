@@ -57,7 +57,7 @@ for the requested task automatically:
 
 | Provider                 | Type  | Text default               | Image default                    | Embedding default        | Env var                           |
 | ------------------------ | ----- | -------------------------- | -------------------------------- | ------------------------ | --------------------------------- |
-| `openai`                 | Cloud | `gpt-4o`                   | `gpt-image-1`                    | `text-embedding-3-small` | `OPENAI_API_KEY`                  |
+| `openai`                 | Cloud | `gpt-4o`                   | `gpt-image-2.5-flare`            | `text-embedding-3-small` | `OPENAI_API_KEY`                  |
 | `anthropic`              | Cloud | `claude-sonnet-4-6`        | —                                | —                        | `ANTHROPIC_API_KEY`               |
 | `gemini`                 | Cloud | `gemini-2.5-flash`         | —                                | —                        | `GEMINI_API_KEY`                  |
 | `openrouter`             | Cloud | `openai/gpt-4o`            | —                                | —                        | `OPENROUTER_API_KEY`              |
@@ -327,7 +327,7 @@ See [Query Router](../QUERY_ROUTER.md) for the full contract and host-hook examp
 ```ts
 import { generateImage } from '@framers/agentos';
 
-// Provider-first: resolves to gpt-image-1 by default for openai.
+// Provider-first: resolves to gpt-image-2.5-flare by default for openai.
 const result = await generateImage({
   provider: 'openai',
   prompt: 'A cinematic neon city skyline reflected in rain at night.',
@@ -431,7 +431,7 @@ order as fallbacks.
 
 | Provider                 | Type      | Default model                    | API key env var       |
 | ------------------------ | --------- | -------------------------------- | --------------------- |
-| `openai`                 | Cloud API | `gpt-image-1`                    | `OPENAI_API_KEY`      |
+| `openai`                 | Cloud API | `gpt-image-2.5-flare`            | `OPENAI_API_KEY`      |
 | `stability`              | Cloud API | `stable-diffusion-xl-1024-v1-0`  | `STABILITY_API_KEY`   |
 | `replicate`              | Cloud API | `black-forest-labs/flux-1.1-pro` | `REPLICATE_API_TOKEN` |
 | `openrouter`             | Cloud API | —                                | `OPENROUTER_API_KEY`  |

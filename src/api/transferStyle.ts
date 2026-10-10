@@ -34,6 +34,7 @@ import type {
   ImageGenerationResult,
 } from '../io/media/images/IImageProvider.js';
 import { knownProviderPrefixOf, resolveModelOption, resolveMediaProvider } from './model.js';
+import { OPENAI_IMAGE_EDIT_MODEL } from '../io/media/images/providers/OpenAIImageProvider.js';
 import { recordAgentOSUsage, type AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 
@@ -45,7 +46,7 @@ const STYLE_TRANSFER_PROVIDER_PRIORITY: Array<{ envKey: string; providerId: stri
   { envKey: 'REPLICATE_API_TOKEN', providerId: 'replicate', modelId: 'black-forest-labs/flux-redux-dev' },
   { envKey: 'FAL_API_KEY', providerId: 'fal', modelId: 'fal-ai/flux/dev' },
   { envKey: 'STABILITY_API_KEY', providerId: 'stability', modelId: 'stable-image-core' },
-  { envKey: 'OPENAI_API_KEY', providerId: 'openai', modelId: 'gpt-image-1' },
+  { envKey: 'OPENAI_API_KEY', providerId: 'openai', modelId: OPENAI_IMAGE_EDIT_MODEL },
 ];
 
 // ---------------------------------------------------------------------------
@@ -85,7 +86,7 @@ export interface TransferStyleOptions {
   /**
    * API key for the provider, instead of its environment variable. The call
    * must name the provider, with `provider` or a provider-prefixed `model`
-   * (`openai:gpt-image-1`); a key with neither is refused.
+   * (`openai:gpt-image-2.5-sunburst`); a key with neither is refused.
    */
   apiKey?: string;
   /** Base URL for the provider, instead of its default or its environment variable. */
@@ -149,13 +150,13 @@ export async function transferStyle(opts: TransferStyleOptions): Promise<Transfe
       let modelId: string;
 
       // The provider the call names: `provider`, or the prefix of `model`
-      // (`openai:gpt-image-1`). A key belongs to one vendor, so a call with a
+      // (`openai:gpt-image-2.5-sunburst`). A key belongs to one vendor, so a call with a
       // key must name its provider: otherwise the key would go to whichever
       // provider the environment selects.
       const namedProvider = opts.provider ?? knownProviderPrefixOf(opts.model);
       if (opts.apiKey && !namedProvider) {
         throw new Error(
-          'transferStyle: an apiKey needs `provider`, or a model with a provider prefix such as "openai:gpt-image-1"; it is not sent to a provider chosen from the environment.',
+          'transferStyle: an apiKey needs `provider`, or a model with a provider prefix such as "openai:gpt-image-2.5-sunburst"; it is not sent to a provider chosen from the environment.',
         );
       }
       if (namedProvider) {
