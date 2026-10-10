@@ -34,6 +34,11 @@ export interface PhraseHeardOptions {
    * the last of them. @default 400
    */
   maxWords?: number;
+  /**
+   * How many words the phrase may hold: a whole number, 1 or more. A phrase of more words is refused, which keeps the
+   * comparison within `maxPhraseWords` by `maxWords` words whatever is passed. @default 400
+   */
+  maxPhraseWords?: number;
 }
 
 /** A run of letters and digits: a word of the library's word rule, as the text holds it before its lower case. */
@@ -62,19 +67,29 @@ function firstWords(text: string, count: number): string[] {
 /**
  * Whether `phrase` was said in `lines`: the lines' words, joined in order and read up to `maxWords`, hold at least
  * `threshold` of the phrase's words in order, other words between them allowed. A line is read no further than the
- * last word `maxWords` takes, so a long line costs no more than the words read from it.
+ * last word `maxWords` takes, so a long line costs no more than the words read from it. A phrase of more than
+ * `maxPhraseWords` words is refused, so no more than `maxPhraseWords` words are ever compared with `maxWords` words.
  *
  * @throws {Error} When the phrase has no words.
- * @throws {RangeError} When `threshold` is not a number from 0 to 1, or `maxWords` is not a whole number, 0 or more.
+ * @throws {RangeError} When the phrase has more than `maxPhraseWords` words; when `threshold` is not a number from 0
+ * to 1; when `maxWords` is not a whole number, 0 or more; or when `maxPhraseWords` is not a whole number, 1 or more.
  */
 export function phraseHeard(phrase: string, lines: readonly HeardLine[], options: PhraseHeardOptions = {}): PhraseHeardResult {
-  const want = lexicalTokens(phrase);
-  if (want.length === 0) throw new Error('phraseHeard: the phrase has no words.');
   const threshold = options.threshold ?? 0.8;
   const maxWords = options.maxWords ?? 400;
+  const maxPhraseWords = options.maxPhraseWords ?? 400;
   if (!(threshold >= 0 && threshold <= 1)) throw new RangeError('phraseHeard: threshold must be a number from 0 to 1.');
   if (!Number.isSafeInteger(maxWords) || maxWords < 0) {
     throw new RangeError('phraseHeard: maxWords must be a whole number, 0 or more.');
+  }
+  if (!Number.isSafeInteger(maxPhraseWords) || maxPhraseWords < 1) {
+    throw new RangeError('phraseHeard: maxPhraseWords must be a whole number, 1 or more.');
+  }
+  // One word past the bound shows that the phrase is over it, so a phrase is read no further than that to be refused.
+  const want = firstWords(phrase, maxPhraseWords + 1);
+  if (want.length === 0) throw new Error('phraseHeard: the phrase has no words.');
+  if (want.length > maxPhraseWords) {
+    throw new RangeError(`phraseHeard: the phrase has more than ${maxPhraseWords} words, the most maxPhraseWords allows.`);
   }
   const words: string[] = [];
   const owners: string[] = [];
