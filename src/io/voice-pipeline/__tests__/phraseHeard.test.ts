@@ -136,6 +136,12 @@ describe('phraseHeard', () => {
     read.texts.length = 0;
     phraseHeard('one', [{ itemId: 'a', text: long }], { maxWords: 0 });
     expect(read.texts).toEqual(['one']);
+
+    // A capital I with a dot ends a word in lower case, so a run of them is read word by word and no further than the cap.
+    read.texts.length = 0;
+    const dotted = '\u0130'.repeat(1_000);
+    expect(phraseHeard('i i i', [{ itemId: 'a', text: dotted }], { maxWords: 2 }).ratio).toBe(2 / 3);
+    expect(read.texts).toEqual(['i i i', '\u0130\u0130']);
   });
 
   it('reads the words the word rule gives, whatever the cap', () => {

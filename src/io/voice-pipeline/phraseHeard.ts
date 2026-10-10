@@ -45,8 +45,12 @@ export interface PhraseHeardOptions {
   maxPhraseWords?: number;
 }
 
-/** A run of letters and digits: a word of the library's word rule, as the text holds it before its lower case. */
-const WORD = /[\p{L}\p{N}]+/gu;
+/**
+ * A word of the library's word rule, as the text holds it before its lower case: a run of letters and digits, which a
+ * capital I with a dot (U+0130) ends, since lower case turns that letter into an i and a combining dot and the dot is
+ * neither a letter nor a digit.
+ */
+const WORD = /(?:(?!\u0130)[\p{L}\p{N}])+\u0130?|\u0130/gu;
 
 /**
  * The first `count` words of `text` by the library's word rule, with the text read no further than the last of them:
@@ -63,8 +67,8 @@ function firstWords(text: string, count: number): string[] {
       break;
     }
   }
-  // Lower case can part a run in two (a capital I with a dot becomes an i and a combining dot), so the part read may
-  // hold more words than `count`.
+  // WORD ends a word where lower case does, so the part read holds `count` words and a run of capital I's with a dot
+  // is not split whole to keep its first few. The cut stays, should lower case part a run anywhere else.
   return lexicalTokens(text.slice(0, end)).slice(0, count);
 }
 
