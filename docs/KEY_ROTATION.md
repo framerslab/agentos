@@ -34,6 +34,8 @@ Every other provider in the list below rotates its keys but never marks one exha
 
 **Pools are per instance:** two providers that read the same environment variable keep separate pools, so a key one of them rests stays in the other's rotation. `getKeyPool()` in `ApiKeyPoolRegistry.ts` returns one shared pool per environment variable; no built-in provider calls it.
 
+**Health checks:** `checkHealth()` on the Anthropic, Gemini, OpenRouter and Requesty providers sends a key drawn from the pool. `OpenAIProvider.checkHealth()` sends the configured key string as given, and Groq, Mistral, Together, xAI and LiteLLM pass their health check to it. With a key list, the health check of those six providers sends the whole list as one bearer token. When the API rejects that token, `checkHealth()`, and `AIModelProviderManager.checkOverallHealth()` through it, reports the provider unhealthy while its requests go on drawing keys from the pool.
+
 ## Supported Providers
 
 - **LLM:** OpenAI, Anthropic, Gemini, OpenRouter and Requesty; Groq, Mistral, Together and xAI, each of which sends its requests through an `OpenAIProvider` instance and draws its key from that instance's pool
