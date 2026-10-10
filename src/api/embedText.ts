@@ -20,6 +20,13 @@ import { attachGenAiAttributes, attachUsageAttributes, toTurnMetricUsage } from 
 import { recordAgentOSUsage, type AgentOSUsageLedgerOptions } from './runtime/usageLedger.js';
 import { recordAgentOSTurnMetrics, withAgentOSSpan } from '../safety/evaluation/observability/otel.js';
 import { redactUrlSecrets } from '../core/llm/providers/url-secrets.js';
+import {
+  asSpendBudget,
+  assertCallWithinBudget,
+  costOfUsageUSD,
+  type SpendBudget,
+  type SpendBudgetOptions,
+} from './runtime/spendBudget.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -89,6 +96,13 @@ export interface EmbedTextOptions {
 
   /** Optional durable usage ledger configuration for helper-level accounting. */
   usageLedger?: AgentOSUsageLedgerOptions;
+
+  /**
+   * A spend budget for this call and, when the same {@link SpendBudget} instance is passed to several calls, for all of
+   * them: the request is checked against what is left before it is sent, its input priced at the model's row, and
+   * its cost recorded after it.
+   */
+  budget?: SpendBudget | SpendBudgetOptions;
 }
 
 /**
@@ -130,8 +144,9 @@ export interface EmbedTextResult {
     /** Sum of prompt and any other tokens (usually equal to `promptTokens`). */
     totalTokens: number;
     /**
-     * Cost in USD when the provider prices the call itself (Gemini embedding
-     * models with a catalog price). Absent when the provider reports none.
+     * Cost in USD: Gemini's when it prices the call itself (embedding models
+     * with a catalog price), and an OpenAI embedding model's from OpenAI's
+     * price table. Absent when neither is known.
      */
     costUSD?: number;
   };
@@ -410,6 +425,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
   let metricProviderId: string | undefined;
   let metricModelId: string | undefined;
   let metricUsage: { promptTokens: number; totalTokens: number; costUSD?: number } | undefined;
+  const budget = asSpendBudget(opts.budget);
 
   try {
     return await withAgentOSSpan(
@@ -432,6 +448,9 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
         // Normalise input to an array for uniform handling downstream
         const inputArray = Array.isArray(opts.input) ? opts.input : [opts.input];
         span?.setAttribute('agentos.api.embed_input_count', inputArray.length);
+        // Checked once for the whole request, whichever branch below sends it:
+        // its input's assumed tokens at the model's input rate.
+        if (budget) assertCallWithinBudget(budget, resolved, inputArray.join('').length, 0, 'embed_text');
 
         let embeddings: number[][];
         let reportedModel: string;
@@ -475,6 +494,7 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
                   totalTokens: partial.total_tokens,
                   ...(partial.costUSD !== undefined ? { costUSD: partial.costUSD } : {}),
                 };
+                budget?.record(partial.costUSD, partial.total_tokens, 'embed_text');
               }
               throw error;
             });
@@ -518,9 +538,16 @@ export async function embedText(opts: EmbedTextOptions): Promise<EmbedTextResult
             promptTokens: result.usage?.prompt_tokens ?? 0,
             totalTokens: result.usage?.total_tokens ?? 0,
           };
+          // OpenAI's own embedding models are priced from its table, so the
+          // result carries what the call cost.
+          if (resolved.providerId === 'openai') {
+            const costUSD = costOfUsageUSD(resolved.providerId, resolved.modelId, { promptTokens: usage.promptTokens }, true);
+            if (costUSD !== undefined) usage.costUSD = costUSD;
+          }
         }
 
         metricUsage = usage;
+        budget?.record(usage.costUSD, usage.totalTokens, 'embed_text');
         span?.setAttribute('agentos.api.embed_dimensions', embeddings[0]?.length ?? 0);
         attachUsageAttributes(span, {
           promptTokens: usage.promptTokens,

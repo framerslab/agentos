@@ -62,6 +62,30 @@ describe('CostGuard', () => {
     expect(result.capType).toBe('daily');
   });
 
+  it('a refusal carries the total under the cap that refused and that cap', () => {
+    const guard = new CostGuard({
+      maxSessionCostUsd: 1.00,
+      maxDailyCostUsd: 1.50,
+      maxSingleOperationCostUsd: 0.50,
+    });
+
+    guard.recordCost('agent-1', 0.75);
+
+    // Single operation: the estimate itself against the per-operation cap
+    expect(guard.canAfford('agent-1', 0.60)).toMatchObject({ capType: 'single_operation', currentCostUsd: 0.60, limitUsd: 0.50 });
+
+    // Session: 0.75 so far against 1.00
+    expect(guard.canAfford('agent-1', 0.30)).toMatchObject({ capType: 'session', currentCostUsd: 0.75, limitUsd: 1.00 });
+
+    // Daily: a new session of 0.50 leaves 1.25 for the day against 1.50
+    guard.resetSession('agent-1');
+    guard.recordCost('agent-1', 0.50);
+    expect(guard.canAfford('agent-1', 0.30)).toMatchObject({ capType: 'daily', currentCostUsd: 1.25, limitUsd: 1.50 });
+
+    // An operation that fits carries neither
+    expect(guard.canAfford('agent-1', 0.10)).toEqual({ allowed: true });
+  });
+
   it('recordCost() accumulates correctly', () => {
     const guard = new CostGuard();
 

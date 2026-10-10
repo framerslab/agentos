@@ -1,11 +1,11 @@
 ---
-description: "Operational safety primitives in AgentOS: circuit breaker, provider health registry, action deduplicator, stuck detector, cost guard, spend meter and tool execution guard. The provider health registry and the spend meter run inside the runtime; a host composes the others around its own calls."
+description: "Operational safety primitives in AgentOS: circuit breaker, provider health registry, action deduplicator, stuck detector, cost guard, spend meter and tool execution guard. The provider health registry, the spend meter and a spend budget's cost guard run inside the runtime; a host composes the others around its own calls."
 keywords: [agent safety, llm circuit breaker, provider health, llm fallback router, status-aware breaker, cost guard, spend meter, stuck detector, runaway agent, ai cost cap, agentos safety, operational guardrails]
 ---
 
 # Safety Primitives
 
-Autonomous agents with LLM access can incur unbounded cost when a vendor API flakes, a retry policy misfires, or an output guardrail silently rejects every attempt. AgentOS ships small, independent primitives that bound the failure modes behind runaway spend, stuck loops and hung tools. Two run inside the runtime: `generateText()` and `streamText()` consult the [provider health registry](#llmproviderhealthregistry), and `processRequest()` reserves against a configured [spend meter](#spend-meter). The others are classes a host calls around its own model and tool calls.
+Autonomous agents with LLM access can incur unbounded cost when a vendor API flakes, a retry policy misfires, or an output guardrail silently rejects every attempt. AgentOS ships small, independent primitives that bound the failure modes behind runaway spend, stuck loops and hung tools. Three run inside the runtime: `generateText()` and `streamText()` consult the [provider health registry](#llmproviderhealthregistry), `processRequest()` reserves against a configured [spend meter](#spend-meter), and `generateText()`, `streamText()`, `generateObject()`, `embedText()` and `agent()` check each provider call against a [CostGuard](#costguard) when they are given a spend budget ([Cost Optimization](./COST_OPTIMIZATION.md#a-spend-budget-for-a-run-of-calls)). A host calls the others around its own model and tool calls, and can call a CostGuard of its own the same way.
 
 Each has defaults and works alone or composed with the others ([How they work together](#how-they-work-together)).
 
@@ -94,7 +94,7 @@ The 5-minute window on 402 reflects operational reality: credits might get toppe
 ### How the router uses it
 
 1. **Before the primary call**, `generateText` consults `globalLLMProviderHealth.isOpen(resolvedProviderId)`. If the breaker is open, it throws a synthetic `LLMProviderCircuitOpenError` with `httpStatus: 503`. The existing [`isRetryableError`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts) check recognizes that status and routes the call into the fallback chain. No network round-trip, no TLS handshake, no waste.
-2. **On a real provider error** (anything caught in the outer try/catch), `recordFailure(providerId, error)` classifies the error by HTTP status and either trips immediately (for 401/402/403) or increments the streak counter (for 429/5xx).
+2. **On a real provider error** (anything caught in the outer try/catch except the breaker's own `LLMProviderCircuitOpenError` and a call the caller stopped: a spend budget's refusal, or a hook's error under `hookErrors: 'throw'`), `recordFailure(providerId, error)` classifies the error by HTTP status and either trips immediately (for 401/402/403) or increments the streak counter (for 429/5xx).
 3. **On success**, `recordSuccess(providerId)` resets the streak counter so a future transient failure starts fresh. A single success does NOT shorten an already-open cooldown: the breaker is open precisely because we want to stop probing for a window.
 4. **In the fallback chain loop**, every fallback entry is checked against `isOpen()` before its attempt. A dead chain entry is skipped instantly, so the loop walks to the first healthy provider with O(N) constant-time checks rather than O(N) network calls.
 
@@ -231,7 +231,7 @@ detector.clearAgent('agent-1');
 
 ## CostGuard
 
-Per-agent spending caps with three levels: session, daily, and single operation, kept in process memory. CostGuard stops nothing itself: the host asks `canAfford()` before a call and records the cost after it, and `onCapReached` fires when a recorded cost reaches a cap. AgentOS runs no CostGuard of its own; `CostCapExceededError` is exported for a host to throw, and CostGuard does not throw it.
+Per-agent spending caps with three levels: session, daily, and single operation, kept in process memory. CostGuard stops nothing itself: the host asks `canAfford()` before a call and records the cost after it, and `onCapReached` fires when a recorded cost reaches a cap. CostGuard never throws `CostCapExceededError`, and AgentOS runs no CostGuard of its own unless a call carries a spend budget: a `budget` on `generateText()`, `streamText()`, `generateObject()`, `embedText()` or `agent()` keeps a CostGuard (the one passed as `guard`, or one it makes), checks each provider call against it before the call and records the call's cost after it, and refuses a call that would pass the budget with `CostCapExceededError` unless the budget is set to warn. `reserveSpend()` throws the same error, with the cap type `daily`, when an admission would take a day's committed spending past its cap; that day's total lives in the caller's own tables, not in a CostGuard.
 
 ### Config
 
@@ -257,6 +257,7 @@ const guard = new CostGuard({
 
 // Before each operation, check affordability
 const check = guard.canAfford('agent-1', 0.003); // estimated cost
+// A refusal names its cap in check.capType, with the total so far and the cap in check.currentCostUsd and check.limitUsd
 if (!check.allowed) {
   throw new Error(check.reason); // "Daily cost $5.0031 would exceed limit $5.00"
 }
@@ -444,8 +445,9 @@ async function guardedCall(agentId: string, prompt: string) {
 |-------|-----------|----------------|------------|
 | CircuitBreaker | Opens after failures, cooldown before retry | 5 fails in 60s | [`CircuitOpenError`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CircuitBreaker.ts) |
 | LLMProviderHealthRegistry | Skips a provider that keeps failing, in `generateText()` and `streamText()` | 402: 1 failure; 401/403: 1; 429: 3; 5xx: 5 | `LLMProviderCircuitOpenError` (status 503, routed to the fallback chain) |
-| CostGuard | Spending caps per session/day/operation, checked by the host | $5/day per agent | `{ allowed: false, reason }` from `canAfford()`; `onCapReached` callback |
+| CostGuard | Spending caps per session/day/operation, checked by the host or by a spend budget ([Cost Optimization](./COST_OPTIMIZATION.md#a-spend-budget-for-a-run-of-calls)) | $5/day per agent | `{ allowed: false, reason }` from `canAfford()`; `onCapReached` callback; `CostCapExceededError` from a spend budget |
 | Spend meter | A persisted allowance per account and period, in `processRequest()` | the host's allowance | `BILLING_ALLOWANCE_EXHAUSTED` error chunk |
+| Spend reservations | A day's spending cap held in the caller's own tables, across processes ([Cost Optimization](./COST_OPTIMIZATION.md#a-days-bound-across-processes)) | the cap each admission names | `CostCapExceededError` (`daily`) from `reserveSpend()` |
 | StuckDetector | Flags repeated output or oscillation | 3 identical outputs in 5 min | `{ isStuck: true, reason }` |
 | ToolExecutionGuard | Timeout + per-tool circuit breaker | 30s timeout | `{ success: false, timedOut }` |
 | ActionDeduplicator | Prevent duplicate actions within window | 1 hr window, 10k entries | Boolean check |
