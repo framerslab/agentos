@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { IVectorStore } from '../../../core/vector-store/IVectorStore.js';
+import type { IVectorStore, MetadataValue } from '../../../core/vector-store/IVectorStore.js';
 import { InMemoryVectorStore } from '../../rag/vector_stores/InMemoryVectorStore.js';
 import { LibraryIndex, type LibrarySource } from '../LibraryIndex.js';
 
@@ -115,7 +115,17 @@ describe('LibraryIndex over a vector store', () => {
 });
 
 describe('LibraryIndex and the store\'s optional legs', () => {
-  const answer = { documents: [{ id: 'session:s1#0', similarityScore: 0.5, embedding: [], textContent: 'chapters', metadata: { sourceId: 'session:s1', kind: 'session', index: 0, tags: [] } }] };
+  const answer = {
+    documents: [
+      {
+        id: 'session:s1#0',
+        similarityScore: 0.5,
+        embedding: [],
+        textContent: 'chapters',
+        metadata: { tenantId: 'org1', aclGroups: ['acct:ann'], status: 'active', sourceId: 'session:s1', kind: 'session', index: 0, tags: ['q3'] },
+      },
+    ],
+  };
   const recording = {
     lexicalSearch: vi.fn(async () => answer),
     hybridSearch: vi.fn(async () => answer),
@@ -181,5 +191,37 @@ describe('LibraryIndex and the store\'s optional legs', () => {
   it('says so when the store has no lexical leg', async () => {
     const bare = new LibraryIndex({ store: { query: recording.query } as unknown as IVectorStore, collection: 'library', embed });
     await expect(bare.search({ text: 'x', scope, mode: 'lexical' })).rejects.toThrow('no lexicalSearch');
+  });
+});
+
+describe('LibraryIndex over a store whose filter falls short', () => {
+  const kept: Record<string, MetadataValue> = { tenantId: 'org1', aclGroups: ['acct:ann'], status: 'active', sourceId: 'session:s1', kind: 'session', folderId: 'f1', tags: ['q3', 'plan'], index: 0 };
+  const passage = (id: string, change: Record<string, MetadataValue>) => ({ id, similarityScore: 0.5, embedding: [], textContent: id, metadata: { ...kept, ...change } });
+  // The same passages whatever the filter, as a store answers when its filter drops a condition, or when a leg of its
+  // search applies no filter at all.
+  const answer = {
+    documents: [
+      passage('kept', {}),
+      passage('another tenant', { tenantId: 'org2' }),
+      passage('another group', { aclGroups: ['acct:bob'] }),
+      passage('not active', { status: 'deleted' }),
+      passage('another kind', { kind: 'document' }),
+      passage('another folder', { folderId: 'f2' }),
+      passage('one tag short', { tags: ['q3'] }),
+      passage('another source', { sourceId: 'session:s2' }),
+    ],
+  };
+  const unfiltered = { lexicalSearch: vi.fn(async () => answer), hybridSearch: vi.fn(async () => answer), query: vi.fn(async () => answer) };
+  const index = new LibraryIndex({ store: unfiltered as unknown as IVectorStore, collection: 'library', embed });
+  const scope = { tenantId: 'org1', aclGroups: ['acct:ann', 'org:org1'] };
+
+  it('answers only the passages the scope and the narrowing allow, in every mode', async () => {
+    for (const mode of ['lexical', 'hybrid', 'dense'] as const) {
+      const ids = async (extra: object) => (await index.search({ text: 'budget', scope, mode, ...extra })).map((found) => found.id);
+      expect(await ids({})).toEqual(['kept', 'another kind', 'another folder', 'one tag short', 'another source']);
+      expect(await ids({ kinds: ['session'] })).toEqual(['kept', 'another folder', 'one tag short', 'another source']);
+      expect(await ids({ tags: ['q3', 'plan'] })).toEqual(['kept', 'another kind', 'another folder', 'another source']);
+      expect(await ids({ kinds: ['session'], folderId: 'f1', tags: ['q3', 'plan'], sourceIds: ['session:s1'] })).toEqual(['kept']);
+    }
   });
 });

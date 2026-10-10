@@ -5,8 +5,10 @@
  * folder, tags and a title; a source is replaced, re-scoped or removed whole; a search names who asks and never
  * runs without a tenant and at least one group.
  *
- * The store must honour DeleteOptions.filter. Lexical search needs the store's optional lexicalSearch, a change of
- * scope its optional updateMetadata; PostgresVectorStore has both.
+ * The store's own filter selects what a search reads, and the index checks every passage the store answers against
+ * the search's scope and narrowing, so a store whose filter drops or ignores a condition cannot widen a search. The
+ * store must honour DeleteOptions.filter. Lexical search needs the store's optional lexicalSearch, a change of scope
+ * its optional updateMetadata; PostgresVectorStore has both.
  *
  * @module agentos/cognition/library/LibraryIndex
  */
@@ -14,6 +16,7 @@
 import type {
   IVectorStore,
   MetadataFilter,
+  MetadataScalarValue,
   MetadataValue,
   QueryResult,
   VectorDocument,
@@ -116,11 +119,35 @@ function throwOnReportedFailure(result: { failedCount?: number; errors?: Array<{
   throw new Error(`LibraryIndex: the store failed to ${action} (${failed} failed)${reason ? `: ${reason}` : '.'}`);
 }
 
+/** A metadata value's strings: the value itself when it is a string, an array's strings, or none. */
+function stringsOf(value: MetadataValue | undefined): string[] {
+  const values: MetadataScalarValue[] = Array.isArray(value) ? value : value === undefined ? [] : [value];
+  return values.filter((item): item is string => typeof item === 'string');
+}
+
+/**
+ * Whether a passage's metadata meets a search's scope and narrowing, the conditions of the filter the store receives:
+ * the tenant, the status `active`, at least one of the scope's groups, and each narrowing the search gives.
+ */
+function meetsSearch(metadata: Record<string, MetadataValue>, query: LibrarySearch): boolean {
+  const { scope, kinds, folderId, tags, sourceIds } = query;
+  const held = (key: string): string[] => stringsOf(metadata[key]);
+  return (
+    metadata.tenantId === scope.tenantId &&
+    held('status').includes('active') &&
+    held('aclGroups').some((group) => scope.aclGroups.includes(group)) &&
+    (!kinds || kinds.length === 0 || held('kind').some((kind) => kinds.includes(kind))) &&
+    (!folderId || held('folderId').includes(folderId)) &&
+    (!tags || tags.every((tag) => held('tags').includes(tag))) &&
+    (!sourceIds || held('sourceId').some((id) => sourceIds.includes(id)))
+  );
+}
+
 /**
  * A library's sources in one collection of a vector store. Every passage of a source carries the source's tenant,
- * access groups, kind, folder, tags and title in its metadata, so the store's own filter decides who sees it:
- * `indexSource` replaces a source whole, `setSourceScope` changes who may see it and where it is filed,
- * `removeSource` and `removeTenant` delete, and `search` reads only what its scope may see.
+ * access groups, kind, folder, tags and title in its metadata, so the store's own filter selects who sees it and the
+ * index checks what the store answers: `indexSource` replaces a source whole, `setSourceScope` changes who may see it
+ * and where it is filed, `removeSource` and `removeTenant` delete, and `search` reads only what its scope may see.
  */
 export class LibraryIndex {
   private readonly store: IVectorStore;
@@ -205,7 +232,11 @@ export class LibraryIndex {
     return result.updatedCount;
   }
 
-  /** Searches what the scope may see. */
+  /**
+   * Searches what the scope may see. The store's filter selects the passages, and the index keeps only those whose
+   * metadata meets the scope and the narrowing: a store whose filter drops or ignores a condition cannot widen the
+   * answer, which can then hold fewer than `topK` passages.
+   */
   async search(query: LibrarySearch): Promise<LibraryPassage[]> {
     if (!query.scope.tenantId || query.scope.aclGroups.length === 0) {
       throw new Error('LibraryIndex.search needs a tenant and at least one access group.');
@@ -231,7 +262,10 @@ export class LibraryIndex {
           ? await this.store.hybridSearch(this.collection, vector, query.text, { ...options, match: query.match ?? 'any', prefix: query.prefix === true })
           : await this.store.query(this.collection, vector, options);
     }
-    return result.documents.map((doc) => {
+    // The store's filter selected these passages. A store whose filter drops or ignores a condition can still answer
+    // one outside the scope or the narrowing, so each passage is checked against them again here.
+    const allowed = result.documents.filter((doc) => meetsSearch((doc.metadata ?? {}) as Record<string, MetadataValue>, query));
+    return allowed.map((doc) => {
       const metadata = (doc.metadata ?? {}) as Record<string, MetadataValue>;
       return {
         id: doc.id,
