@@ -180,6 +180,7 @@ export { AudioRingBuffer, type AudioRingBufferOptions } from './AudioRingBuffer.
 export { InputSilenceWatch, inputLevelDb, type InputSilenceWatchOptions } from './inputLevel.js';
 export {
   TranscriptDedupe,
+  normalizeTranscriptText,
   type TranscriptObservation,
   type DedupeResult,
 } from './TranscriptDedupe.js';
