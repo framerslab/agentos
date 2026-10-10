@@ -283,8 +283,8 @@ export class LibraryIndex {
         kind: String(metadata.kind ?? ''),
         index: Number(metadata.index ?? 0),
         text: doc.textContent ?? '',
-        // A store may answer a score as numeric text: PostgresVectorStore's hybrid search fuses its legs into a
-        // Postgres numeric, which node-postgres reads as a string.
+        // A store can answer a score as numeric text (node-postgres returns a Postgres numeric as a string), so the
+        // index reads it as a number.
         score: Number(doc.similarityScore),
         title: typeof metadata.title === 'string' ? metadata.title : undefined,
         folderId: typeof metadata.folderId === 'string' ? metadata.folderId : undefined,
