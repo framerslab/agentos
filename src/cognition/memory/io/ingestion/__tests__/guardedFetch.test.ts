@@ -57,6 +57,12 @@ function answer(request: IncomingMessage, response: ServerResponse): void {
   } else if (path === '/gzip') {
     response.writeHead(200, { 'content-type': 'text/html', 'content-encoding': 'gzip' });
     response.end(gzipSync(PAGE));
+  } else if (path === '/upgrade') {
+    // A protocol switch, written by hand: Node's own response cannot send a 101.
+    request.socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
+  } else if (path === '/zstd') {
+    response.writeHead(200, { 'content-type': 'text/html', 'content-encoding': 'zstd' });
+    response.end(Buffer.from('not decoded'));
   } else {
     response.writeHead(404);
     response.end();
@@ -221,5 +227,33 @@ describe('guardedFetch', () => {
     }
     expect(hellos).toHaveLength(1);
     expect(hellos[0]!.includes('pages.test')).toBe(true);
+  });
+
+  // Node closes a connection answered with a 101 without an error when
+  // nothing listens for the upgrade, and then ignores the deadline's abort:
+  // only a fetch that settles on the upgrade itself ends before this case's
+  // five seconds.
+  it('refuses a protocol upgrade and a body in a coding it did not ask for, at once', async () => {
+    expect(await reasonOf(guardedFetch(at('/upgrade'), reach({ deadlineMs: 10_000 })))).toBe('status');
+    expect(await reasonOf(guardedFetch(at('/zstd'), reach()))).toBe('type');
+  }, 5_000);
+
+  it("ends on the caller's own abort with its reason, and refuses options out of range before any lookup", async () => {
+    const controller = new AbortController();
+    const reason = new Error('the caller moved on');
+    const pending = guardedFetch(at('/slow'), reach({ signal: controller.signal, deadlineMs: 10_000 }));
+    setTimeout(() => controller.abort(reason), 100);
+    await expect(pending).rejects.toBe(reason);
+
+    let lookups = 0;
+    const counted = async () => {
+      lookups += 1;
+      return [{ address: '127.0.0.1', family: 4 }];
+    };
+    const outOfRange: Array<Partial<GuardedFetchOptions>> = [{ maxBytes: Number.NaN }, { deadlineMs: 2 ** 31 }, { maxRedirects: -1 }];
+    for (const options of outOfRange) {
+      await expect(guardedFetch(at('/page'), reach({ ...options, resolve: counted }))).rejects.toBeInstanceOf(RangeError);
+    }
+    expect(lookups).toBe(0);
   });
 });
