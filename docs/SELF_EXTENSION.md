@@ -12,7 +12,7 @@ The sandbox bans `eval`, `Function`, `require`, `import`, `process` and `child_p
 
 ## Self-improvement tools
 
-With `emergentConfig.selfImprovement.enabled`, four more tools are registered: `adapt_personality` (HEXACO deltas clamped to the 0 to 1 range and a per-session budget, recorded in the [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts) when a storage adapter exists), `manage_skills`, `create_workflow` and `self_evaluate` (scores a response with a model call, records adjustments to runtime parameters in its own session state, and reports on them). Stored mutations are not reloaded into a later GMI; a trait change lasts for the instance that made it.
+With `emergentConfig.selfImprovement.enabled`, four more tools are registered: `adapt_personality` (HEXACO deltas clamped to the 0 to 1 range and a per-session budget, recorded in the [`PersonalityMutationStore`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/PersonalityMutationStore.ts) when a storage adapter exists), `manage_skills`, `create_workflow` and `self_evaluate` (scores a response with a model call, adjusts `temperature`, `verbosity` or a trait within `selfEval.adjustableParams`, and reports on the session). Stored mutations are not reloaded into a later GMI; a trait change lasts for the instance that made it.
 
 ## Spawning a specialist
 
@@ -20,4 +20,4 @@ In an agency running the hierarchical strategy with `emergent.enabled`, the mana
 
 ## What is not there
 
-No weights are updated anywhere. `self_evaluate` keeps its scores and adjustments in its own session state; the runtime's session manager can carry a `temperature` or `verbosity` override into later requests of the same session (`SelfImprovementSessionManager.setRuntimeParam()`), but no shipped tool writes it, so no evaluation result changes a later turn on its own. No loop rewrites the agent's own code or prompts persistently. [Emergent Capabilities](./architecture/EMERGENT_CAPABILITIES.md) is the full guide.
+No weights are updated anywhere. A `self_evaluate` adjustment of `temperature` or `verbosity` (its `adjust` action, or an `evaluate` with `autoAdjust` applying the judge's suggestion) is held by the runtime's session manager (`SelfImprovementSessionManager.setRuntimeParam()`) and merged into the later `processRequest()` turns of the same session: the temperature as a completion option, the verbosity as a user preference the prompt engine turns into a length instruction. It lasts as long as the process. No loop rewrites the agent's own code or prompts persistently. [Emergent Capabilities](./architecture/EMERGENT_CAPABILITIES.md) is the full guide.

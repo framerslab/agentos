@@ -872,7 +872,7 @@ When `selfImprovement.enabled` is `true`, the engine registers four additional m
 
 | Tool | What it does |
 |------|-------------|
-| `adapt_personality` | Shift HEXACO traits by bounded deltas with per-session budgets and Ebbinghaus decay |
+| `adapt_personality` | Shift the calling GMI's HEXACO traits by bounded deltas with per-session budgets; recorded mutations decay in storage (the live trait does not) |
 | `manage_skills` | Enable, disable, search, and list skills with allowlist-based permission gating |
 | `self_evaluate` | LLM-as-judge response scoring (relevance, clarity, accuracy, helpfulness) with parameter adjustment |
 | `create_workflow` | Compose multi-step tool pipelines at runtime with reference resolution ($input, $prev, $steps[N]); each step meets the chaining rule at create and at every run, and runs through `processToolCall` as the caller with the instance its check resolved; a step that expires starts nothing afterwards, and a composed step passes its expiry on to its own steps (`ToolExecutionContext.signal`) |
