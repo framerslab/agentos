@@ -108,4 +108,17 @@ describe('the self-modification tools on the full runtime', () => {
     expect(systemTextOf(afterTool)).toBe(systemTextOf(first));
     expect(systemTextOf(nextTurn)).toBe(systemTextOf(first));
   });
+
+  it("refuse in mode off on a learner's turn", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    booted = await boot({ learning: { mode: 'off' } });
+    provider.replies.push(toolCall('forge_tool', {
+      name: 'noop', description: 'Does nothing.', inputSchema: { type: 'object' },
+      // forge_tool's input schema asks for a step and a test case at least, and the executor checks it before the tool runs.
+      implementation: { mode: 'compose', steps: [{ name: 'only', tool: 'echo', inputMapping: {} }] },
+      testCases: [{ input: {} }],
+    }));
+    await send(booted, { userId: 'ana', sessionId: 's-1' });
+    expect(toolMessages(provider.seenMessages[1])[0]).toContain('forge_tool refused (off)');
+  });
 });

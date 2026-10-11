@@ -9,9 +9,10 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AdaptPersonalityTool, type AdaptPersonalityDeps } from '../AdaptPersonalityTool';
+import { SelfEvaluateTool, type SelfEvaluateDeps, type SelfEvaluateInput } from '../SelfEvaluateTool';
 import type { ToolExecutionContext } from '../../../core/tools/ITool';
 import type { ToolCallResult, UserContext } from '../../substrate/IGMI';
-import { makeForgeHost, type ForgeHost } from './helpers/forge-host';
+import { echoTool, makeForgeHost, type ForgeHost } from './helpers/forge-host';
 
 type TurnLearning = { learner: 'bound' | 'none'; mode: 'on' | 'frozen' | 'off' };
 
@@ -110,5 +111,97 @@ describe("adapt_personality's bounds where a learning layer exists", () => {
     expect((await tool.execute({ trait: 'honesty', delta: 0.1, reasoning: 'State uncertainty plainly.' }, noLayer())).success).toBe(true);
     expect((await tool.execute({ trait: 'openness', delta: 0.5, reasoning: 'Explore.' }, noLayer())).success).toBe(true);
     expect(traits.honesty).toBeCloseTo(0.6);
+  });
+});
+
+describe('the other four self-modification tools through the tool orchestrator', () => {
+  const FORGE = {
+    name: 'echo_twice',
+    description: 'Echoes the text twice.',
+    inputSchema: { type: 'object', properties: { text: { type: 'string' } } },
+    implementation: { mode: 'compose', steps: [{ name: 'first', tool: 'echo', inputMapping: { text: '$input.text' } }] },
+    testCases: [{ input: { text: 'a' } }],
+  };
+  const CREATE = { action: 'create', name: 'twice', description: 'Echo twice.', steps: [{ tool: 'echo', args: { text: 'a' } }] };
+  const SELF_CHANGES: Array<[string, Record<string, unknown>]> = [
+    ['forge_tool', FORGE],
+    ['create_workflow', CREATE],
+    ['manage_skills', { action: 'enable', skillId: 'web-search' }],
+    ['manage_skills', { action: 'disable', skillId: 'web-search' }],
+    ['self_evaluate', { action: 'adjust', param: 'temperature', value: 0.2, reasoning: 'Less variance.' }],
+  ];
+  const bound: TurnLearning = { learner: 'bound', mode: 'on' };
+
+  it('refuse with no_learner on a turn with no learner, off in mode off and frozen in mode frozen, with a layer, and change nothing', async () => {
+    const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()] });
+    for (const [name, args] of SELF_CHANGES) {
+      expect(reasonOf(await call(host, name, args, { learner: 'none', mode: 'on' })), name).toBe('no_learner');
+      expect(reasonOf(await call(host, name, args, { learner: 'bound', mode: 'off' })), name).toBe('off');
+      expect(reasonOf(await call(host, name, args, { learner: 'bound', mode: 'frozen' })), name).toBe('frozen');
+    }
+    expect(host.judge).not.toHaveBeenCalled();
+    expect((await call(host, 'create_workflow', { action: 'list' }, bound)).output).toEqual({ workflows: [] });
+    expect(((await call(host, 'self_evaluate', { action: 'report' }, bound)).output as { adjustments: unknown[] }).adjustments).toEqual([]);
+  });
+
+  it('refuse under AGENTOS_LEARNING_FREEZE=1 with a layer and without one, while their reads answer', async () => {
+    vi.stubEnv('AGENTOS_LEARNING_FREEZE', '1');
+    const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()] });
+    for (const [name, args] of SELF_CHANGES) {
+      expect(reasonOf(await call(host, name, args)), name).toBe('frozen');
+      expect(reasonOf(await call(host, name, args, bound)), name).toBe('frozen');
+    }
+    expect((await call(host, 'create_workflow', { action: 'list' })).isError).toBe(false);
+    expect((await call(host, 'manage_skills', { action: 'list' })).isError).toBe(false);
+  });
+
+  it("are not refused on a learner's turn in mode on, nor without a layer", async () => {
+    const host = await makeForgeHost({ selfImprovement: true, tools: [echoTool()] });
+    expect(reasonOf(await call(host, 'create_workflow', CREATE, bound))).toBeUndefined();
+    expect(reasonOf(await call(host, 'self_evaluate', { action: 'adjust', param: 'temperature', value: 0.2 }))).toBeUndefined();
+    expect((await call(host, 'self_evaluate', { action: 'adjust', param: 'temperature', value: 0.2 }, bound)).isError).toBe(false);
+  });
+});
+
+describe("self_evaluate's evaluate on a turn the layer refuses", () => {
+  const JUDGED = JSON.stringify({
+    relevance: 0.9, clarity: 0.8, accuracy: 0.7, helpfulness: 0.6,
+    adjustments: [{ param: 'temperature', value: 0.2, reasoning: 'Less variance.' }],
+  });
+  const make = () => {
+    const storeMemory = vi.fn(async () => undefined);
+    const setSessionParam = vi.fn();
+    const generateTextImpl = vi.fn(async () => ({ text: JUDGED })) as unknown as SelfEvaluateDeps['generateTextImpl'];
+    const tool = new SelfEvaluateTool({
+      config: { autoAdjust: true, adjustableParams: ['temperature'], maxEvaluationsPerSession: 10 },
+      storeMemory,
+      setSessionParam,
+      generateTextImpl,
+    });
+    return { tool, storeMemory, setSessionParam };
+  };
+  const turnWith = (learning: TurnLearning): ToolExecutionContext =>
+    ({ gmiId: 'g', personaId: 'p', userContext: { userId: 'u' }, correlationId: 's-1', sessionData: { sessionId: 's-1', learning } }) as ToolExecutionContext;
+  // Typed: a plain literal widens `action` to string, which execute() does not take (plan check F4).
+  const ASK: SelfEvaluateInput = { action: 'evaluate', query: 'What is QUIC?', response: 'A transport protocol.' };
+
+  it('answers and keeps its in-session record, and stores no trace and applies no adjustment', async () => {
+    const { tool, storeMemory, setSessionParam } = make();
+    const context = turnWith({ learner: 'none', mode: 'on' });
+    const result = await tool.execute(ASK, context);
+    expect(result.success).toBe(true);
+    expect(result.output).toMatchObject({ scores: { relevance: 0.9 }, evalCount: 1, selfChangeRefused: 'no_learner' });
+    expect(storeMemory).not.toHaveBeenCalled();
+    expect(setSessionParam).not.toHaveBeenCalled();
+    expect((await tool.execute({ action: 'report' }, context)).output).toMatchObject({ totalEvaluations: 1, adjustments: [] });
+  });
+
+  it("stores its trace and applies the adjustment on a learner's turn in mode on, as before", async () => {
+    const { tool, storeMemory, setSessionParam } = make();
+    const result = await tool.execute(ASK, turnWith({ learner: 'bound', mode: 'on' }));
+    expect(result.success).toBe(true);
+    expect(result.output).not.toHaveProperty('selfChangeRefused');
+    expect(storeMemory).toHaveBeenCalledTimes(1);
+    expect(setSessionParam).toHaveBeenCalledWith('temperature', 0.2, expect.anything());
   });
 });
