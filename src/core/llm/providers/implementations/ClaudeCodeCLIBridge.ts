@@ -89,15 +89,19 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
       return { type: 'text_delta', text: raw.message.content };
     }
 
-    /* Final result */
+    /* Final result. Claude Code flags a failed turn (an API error, the turn
+     * limit) with is_error; its result text, or its subtype when it has no
+     * text, is then the failure's message. */
     if (raw.type === 'result') {
+      const isError = raw.is_error === true;
       return {
         type: 'result',
-        result: raw.result ?? '',
+        result: isError ? raw.result || raw.subtype || 'Unknown error' : raw.result ?? '',
         sessionId: raw.session_id,
         usage: raw.usage
           ? { input_tokens: raw.usage.input_tokens ?? 0, output_tokens: raw.usage.output_tokens ?? 0 }
           : undefined,
+        ...(isError ? { isError: true } : {}),
       };
     }
 

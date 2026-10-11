@@ -52,7 +52,14 @@ export interface BridgeResult {
 /** Typed events yielded by {@link CLISubprocessBridge.stream}. */
 export type StreamEvent =
   | { type: 'text_delta'; text: string }
-  | { type: 'result'; result: string; sessionId?: string; usage?: { input_tokens: number; output_tokens: number } }
+  | {
+      type: 'result';
+      result: string;
+      sessionId?: string;
+      usage?: { input_tokens: number; output_tokens: number };
+      /** Set when the CLI flags its result as a failure; `result` then holds the failure's message. */
+      isError?: boolean;
+    }
   | { type: 'error'; error: string }
   | { type: 'system'; message: string };
 

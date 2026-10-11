@@ -143,15 +143,22 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
       return { type: 'text_delta', text: raw.text };
     }
 
-    /* Final result */
+    /* Final result. The Gemini CLI reports a failure as a result with
+     * status 'error' and an `error` object ({ type, message }), then exits
+     * non-zero; an `is_error` flag is read as well. The failure's message is
+     * then the result text. */
     if (raw.type === 'result') {
+      const isError = raw.is_error === true || raw.status === 'error';
       return {
         type: 'result',
-        result: raw.result ?? raw.response ?? '',
+        result: isError
+          ? raw.error?.message || raw.result || raw.response || raw.error?.type || 'Unknown error'
+          : raw.result ?? raw.response ?? '',
         sessionId: raw.session_id,
         usage: raw.usage
           ? { input_tokens: raw.usage.input_tokens ?? 0, output_tokens: raw.usage.output_tokens ?? 0 }
           : undefined,
+        ...(isError ? { isError: true } : {}),
       };
     }
 

@@ -73,7 +73,7 @@ The table lists where the built-in bridges and providers raise each code and the
 | `VERSION_OUTDATED` | Nothing | Not set |
 | `SPAWN_FAILED` | `classifyError()` on `EACCES` | `false` |
 | `TIMEOUT` | `classifyError()` on a timeout, or on a signal other than the caller's abort | `true` |
-| `CRASHED` | `classifyError()` for every other failure; provider `generateCompletion()` on an error result | `true` |
+| `CRASHED` | `classifyError()` for every other failure; provider `generateCompletion()` and `generateCompletionStream()` on an error result | `true` |
 | `RATE_LIMITED` | `classifyError()` on stderr text | `true` |
 | `PERMISSION_DENIED` | Nothing | Not set |
 | `CONTEXT_TOO_LONG` | `classifyError()` on stderr text | `false` |
@@ -117,6 +117,7 @@ To allow more time, pass a larger `timeout` to a bridge you call yourself, or se
 
 - `classifyError()` returns it for every failure the earlier checks do not match, a non-zero exit code among them. Its `guidance` ends with the last 500 characters of stderr.
 - The providers' `generateCompletion()` throws it when the CLI exits normally and its JSON result carries `is_error: true`.
+- The providers' `generateCompletionStream()` ends with it when the CLI flags its `stream-json` result as an error: `is_error: true` from Claude Code, `status: 'error'` from the Gemini CLI. The message is `Claude Code returned an error:` or `Gemini CLI returned an error:` followed by the CLI's own message for the failure.
 
 ### RATE_LIMITED
 
@@ -174,9 +175,12 @@ new CLISubprocessError(
 
 - **Bridge.** `execute()` and `stream()` throw the error `classifyError()` returns.
 - **Provider, non-streaming.** `generateCompletion()` lets the bridge's error through.
-- **Provider, streaming.** `generateCompletionStream()` does not throw when the bridge fails or when the CLI reports an error in its output. Either way the stream ends with a final chunk that carries an `error`:
-  - When the bridge throws, the `error` holds the error's message, its `code` and, as `details`, the error object.
+- **Provider, streaming.** `generateCompletionStream()` reads the bridge's stream to its end, where the bridge awaits the CLI's exit, and yields its final chunk after that. It does not throw when the bridge fails or when the CLI reports an error in its output. Either way the stream ends with a final chunk that carries an `error`:
+  - When the bridge throws, the `error` holds the error's message, its `code` and, as `details`, the error object. A non-zero exit after the CLI's result line ends the stream this way, in place of the reply.
+  - When the CLI flags its result as an error, the `error` holds the [`CRASHED`](#crashed) error `generateCompletion()` throws for an error result: its message, its `code` and, as `details`, the error object.
   - When the CLI writes an error event into its `stream-json` output, the `error` holds only a message: `Claude Code stream error:` or `Gemini CLI stream error:` followed by the event's message. It has no `code` and no `details`.
+
+  When the CLI reports the failure in its output, as an error result or an error event, a non-zero exit that follows does not replace that error.
 - **Initialization through the helpers.** `generateText()`, `streamText()` and the helpers built on them create the provider with [`createProviderManager()`](https://github.com/framerslab/agentos/blob/master/src/api/model.ts). When the provider's `initialize()` throws, that function throws a `ProviderInitializationError` whose `cause` is the `CLISubprocessError`.
 - **Fallback.** Those helpers decide whether to try the next provider with [`isRetryableError()`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts), which reads the error's name, HTTP status, `code`, type and message. It counts a `ProviderInitializationError` and the `TIMEOUT` code as retryable and `REQUEST_ABORTED` as not, and it never reads `recoverable`.
 
