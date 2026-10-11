@@ -540,3 +540,40 @@ describe('A direct consumer of a CLI bridge: a result the CLI flags as an error'
     expect(events[0]).toMatchObject(expected);
   });
 });
+
+/**
+ * stream-json as Claude Code writes it with --include-partial-messages, which
+ * the bridge passes: each Messages API stream event wrapped as
+ * { type: 'stream_event', event }, then the complete assistant message, whose
+ * content is a list of blocks (SDKPartialAssistantMessage and
+ * SDKAssistantMessage in @anthropic-ai/claude-agent-sdk 0.3.296, sdk.d.ts).
+ */
+describe('ClaudeCodeProvider: the stream-json Claude Code writes with partial messages', () => {
+  it('passes on the text deltas nested under stream_event, and the complete message after them once', async () => {
+    const frame = { parent_tool_use_id: null, session_id: 's1' };
+    const message = { id: 'msg_1', type: 'message', role: 'assistant', model: 'claude-sonnet-4-6', stop_reason: null };
+    stubCli('claude', () =>
+      cliRun(
+        [
+          { type: 'stream_event', event: { type: 'message_start', message: { ...message, content: [] } }, ...frame },
+          { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hi ' } }, ...frame },
+          { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'there' } }, ...frame },
+          { type: 'stream_event', event: { type: 'content_block_stop', index: 0 }, ...frame },
+          { type: 'assistant', message: { ...message, content: [{ type: 'text', text: 'Hi there' }] }, ...frame },
+          { type: 'stream_event', event: { type: 'message_stop' }, ...frame },
+          { type: 'result', subtype: 'success', is_error: false, result: 'Hi there', session_id: 's1', usage: { input_tokens: 12, output_tokens: 3 } },
+        ],
+        0,
+      ),
+    );
+    const provider = new ClaudeCodeProvider();
+    await provider.initialize({});
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream('claude-sonnet-4-6', HELLO, {})) chunks.push(chunk);
+    const final = chunks[chunks.length - 1];
+
+    expect(chunks.filter((chunk) => !chunk.isFinal).map((chunk) => chunk.responseTextDelta)).toEqual(['Hi ', 'there']);
+    expect(final.error).toBeUndefined();
+    expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: 'Hi there' } }] });
+  });
+});
