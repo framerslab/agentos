@@ -308,14 +308,15 @@ export abstract class CLISubprocessBridge {
    * its events wait in a queue until the consumer takes them. The run thus
    * settles when the CLI exits, and the timeout measures the CLI, not the
    * consumer. Read to its end, the stream awaits the process's exit and
-   * throws on a failed one. It throws on a call the caller aborted before
-   * the consumer took the last event as well, though the CLI may have exited
-   * first: the run is classified as execa's cancelled run. A consumer that
-   * stops reading before the end (a `break` in its `for await`, or
-   * `return()`) ends the process instead: it is killed, and its stdout is no
-   * longer read. The run's outcome is handled from the moment the process
-   * starts, so a failure while the consumer is busy between two events, or
-   * after it has stopped reading, is no unhandled rejection in the host.
+   * throws on a failed one. It throws as well on a call the caller aborted
+   * before the consumer had read the stream to its end, though the CLI may
+   * have exited first: the run is classified as execa's cancelled run. A
+   * consumer that stops reading before the end (a `break` in its
+   * `for await`, or `return()`) ends the process instead: it is killed, and
+   * its stdout is no longer read. The run's outcome is handled from the
+   * moment the process starts, so a failure while the consumer is busy
+   * between two events, or after it has stopped reading, is no unhandled
+   * rejection in the host.
    *
    * @param options — bridge options
    * @yields typed stream events (text_delta, result, error, system)
@@ -368,9 +369,11 @@ export abstract class CLISubprocessBridge {
       /* execa fails a run for the caller's abort only until the run settles
        * (lib/terminate/cancel.js and handlePromise in
        * lib/methods/main-async.js, execa 10.0.1), and the run settles when the
-       * CLI exits, which can be before the consumer has taken the last event.
-       * An abort in that time ends the stream as a cancelled run still, as it
-       * did when the run settled at the consumer's pace. */
+       * CLI exits, which can be well before the consumer reads the stream to
+       * its end, here. An abort until then ends the stream as a cancelled run
+       * still, as it did when the run settled at the consumer's pace: a
+       * consumer that has taken the last event has not yet seen the stream
+       * end, and a provider yields its final chunk only after it. */
       if (options.abortSignal?.aborted) throw cancelledRunError(result, options.abortSignal);
     } catch (error: any) {
       throw this.classifyError(error);
