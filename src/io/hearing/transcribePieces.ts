@@ -63,9 +63,9 @@ export interface PieceOutcome {
 export interface TranscribePiecesOptions {
   /** The sentence spans of a text; the prompt is the last of them. */
   sentences: (text: string) => ReadonlyArray<{ start: number; end: number }>;
-  /** Tries a piece gets in all. Non-finite values use the default. @default 3 */
+  /** Tries a piece gets in all. A fraction is rounded down; a non-finite value takes the default. @default 3 */
   attempts?: number;
-  /** Pieces sent at once, 1 to 4. Non-finite values use the default. @default 1 */
+  /** Pieces sent at once, 1 to 4. A fraction is rounded down; a non-finite value takes the default. @default 1 */
   inFlight?: number;
   /** The text before the first piece given, when a run starts again from a piece. */
   previousText?: string;
@@ -167,8 +167,8 @@ export async function transcribePieces(
 ): Promise<{ text: string; pieces: PieceOutcome[]; seconds: number }> {
   const requestedAttempts = options.attempts ?? 3;
   const requestedInFlight = options.inFlight ?? 1;
-  const attempts = Number.isFinite(requestedAttempts) ? Math.max(1, requestedAttempts) : 3;
-  const inFlight = Number.isFinite(requestedInFlight) ? Math.min(4, Math.max(1, requestedInFlight)) : 1;
+  const attempts = Number.isFinite(requestedAttempts) ? Math.max(1, Math.floor(requestedAttempts)) : 3;
+  const inFlight = Number.isFinite(requestedInFlight) ? Math.min(4, Math.max(1, Math.floor(requestedInFlight))) : 1;
   const done = new Map<number, PieceTranscript & { attempts: number; startMs: number }>();
   const outcomes: PieceOutcome[] = [];
   const previous = options.previousText?.trim() ?? '';

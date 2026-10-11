@@ -242,6 +242,24 @@ describe('transcribePieces', () => {
     expect(transcribe).toHaveBeenCalledTimes(5);
   });
 
+  it('rounds a fractional attempts down', async () => {
+    const reason = new Error('provider refused');
+    const transcribe = vi.fn(async () => { throw reason; });
+    await expect(transcribePieces([piece(0)], transcribe, { sentences, attempts: 2.5 })).rejects.toMatchObject({ name: 'PiecesFailed', attempts: 2, cause: reason });
+    expect(transcribe).toHaveBeenCalledTimes(2);
+  });
+
+  it('rounds a fractional inFlight down', async () => {
+    const first = deferred<PieceTranscript>();
+    const transcribe = vi.fn(async () => first.promise);
+    const run = transcribePieces([piece(0), piece(1), piece(2), piece(3)], transcribe, { sentences, inFlight: 2.9 });
+    await turn();
+    expect(transcribe).toHaveBeenCalledTimes(2);
+    first.resolve({ text: 'Done.', seconds: 300 });
+    await run;
+    expect(transcribe).toHaveBeenCalledTimes(4);
+  });
+
   it('starts again from a piece, with the text before it as its context', async () => {
     const transcribe = vi.fn(async (_input: PieceInput, request: { prompt?: string }) => ({ text: 'and the flights.', seconds: 300, prompt: request.prompt }));
     const result = await transcribePieces([piece(2)], transcribe, { sentences, previousText: 'We approved the budget.' });
