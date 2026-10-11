@@ -1684,6 +1684,29 @@ describe('OpenAIRealtimeTranscriptionSTT: turns in VoicePipelineOrchestrator', (
     socket.serve({ type: 'conversation.item.input_audio_transcription.completed', item_id: itemId, transcript });
   }
 
+  /**
+   * Two utterances of one turn, apart by a pause longer than the server's end-of-speech silence: the second
+   * begins before the first one's transcript arrives, and each final follows its own end of speech.
+   */
+  function twoUtterances(socket: FakeSocket, first: string, second: string): void {
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_B', audio_start_ms: 1_300 });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: first,
+    });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_B', audio_end_ms: 2_200 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_B', previous_item_id: 'item_A' });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_B',
+      transcript: second,
+    });
+  }
+
   it('hands the agent a turn whose final comes after the end of speech', async () => {
     fakeClock();
     const { orchestrator, agentSession, socket } = await pipeline();
@@ -1776,6 +1799,79 @@ describe('OpenAIRealtimeTranscriptionSTT: turns in VoicePipelineOrchestrator', (
     expect(agentSession.sendText).toHaveBeenCalledOnce();
     expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two');
     warn.mockRestore();
+    await orchestrator.stopSession();
+  });
+
+  it("hands the agent one turn when an utterance's final arrives after the next utterance has started", async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    twoUtterances(socket, 'Book a table for two.', 'At seven tonight.');
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two. At seven tonight.');
+    expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'punctuation' });
+    await orchestrator.stopSession();
+  });
+
+  it('keeps a first clause without terminal punctuation when its final arrives after the next utterance has started', async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    twoUtterances(socket, 'Book a table for two', 'At seven tonight.');
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two At seven tonight.');
+    await orchestrator.stopSession();
+  });
+
+  it('joins the finals in the order their utterances began when the later one arrives first', async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_A', audio_start_ms: 0 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_A', audio_end_ms: 900 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_A', previous_item_id: null });
+    socket.serve({ type: 'input_audio_buffer.speech_started', item_id: 'item_B', audio_start_ms: 1_300 });
+    socket.serve({ type: 'input_audio_buffer.speech_stopped', item_id: 'item_B', audio_end_ms: 2_200 });
+    socket.serve({ type: 'input_audio_buffer.committed', item_id: 'item_B', previous_item_id: 'item_A' });
+    // Completion events of different utterances can arrive out of order: the second one's comes first.
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_B',
+      transcript: 'At seven tonight.',
+    });
+    socket.serve({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item_A',
+      transcript: 'Book a table for two.',
+    });
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two. At seven tonight.');
+    await orchestrator.stopSession();
+  });
+
+  it("waits for a later utterance's final for at most the silence timeout, then ends the turn on the words it holds", async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    // The server took a noise for speech: its transcript is empty, and the provider emits no final for it.
+    twoUtterances(socket, 'Book a table for two.', '');
+    await vi.advanceTimersByTimeAsync(1_499);
+    expect(agentSession.sendText).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); // 1.5 s of silence since that end of speech
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('Book a table for two.');
+    await orchestrator.stopSession();
+  });
+
+  it('does not wait for the final of a speech end older than the silence timeout', async () => {
+    fakeClock();
+    const { orchestrator, agentSession, socket } = await pipeline();
+    utterance(socket, 'item_N', ''); // a noise the server took for speech: no final
+    await vi.advanceTimersByTimeAsync(2_000);
+    utterance(socket, 'item_A', 'What time is it?');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(agentSession.sendText).toHaveBeenCalledOnce();
+    expect(agentSession.sendText.mock.calls[0][0]).toBe('What time is it?');
+    expect(agentSession.sendText.mock.calls[0][1]).toMatchObject({ endpointReason: 'punctuation' });
     await orchestrator.stopSession();
   });
 });
