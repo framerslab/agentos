@@ -1,0 +1,24 @@
+1
+00:00:01,000 --> 00:00:04,200
+Ana Silva: Good morning. Shall we start with the budget?
+
+2
+00:00:04,500 --> 00:00:09,000
+Leo Park: Yes. Travel is ten percent over plan.
+
+3
+00:00:09,400 --> 00:00:13,800
+Ana Silva: Can we move the offsite to May?
+
+4
+00:00:14,000 --> 00:00:19,500
+Leo Park: May works, and the venue
+holds forty people.
+
+5
+00:00:20,000 --> 00:00:24,000
+Ana Silva: Then book it. Research & design present first.
+
+6
+00:00:24,300 --> 00:00:28,900
+Leo Park: Agreed. I will send the notes today.

@@ -1,0 +1,26 @@
+WEBVTT - a planning call
+
+NOTE
+Six cues between two voices. A cue may carry an identifier, settings after its
+times, a class on a tag, and text on more than one line.
+
+opening
+00:00:01.000 --> 00:00:04.200
+<v Ana Silva>Good morning. Shall we start with the budget?</v>
+
+2
+00:04.500 --> 00:09.000 align:start position:10%
+<v Leo Park>Yes. Travel is ten percent over plan.
+
+00:00:09.400 --> 00:00:13.800
+<v Ana Silva>Can we move the
+offsite to May?</v>
+
+00:00:14.000 --> 00:00:19.500
+<v.calm Leo Park>May works, and the venue holds <c.loud>forty</c> people.</v>
+
+00:00:20.000 --> 00:00:24.000
+<v Ana Silva>Then book it. Research &amp; design present first.</v>
+
+00:00:24.300 --> 00:00:28.900
+<v Leo Park><i>Agreed.</i> I will send the notes today.</v>

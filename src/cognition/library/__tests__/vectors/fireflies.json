@@ -1,0 +1,10 @@
+{
+  "sentences": [
+    { "index": 0, "speaker_name": "Ana Silva", "text": "Good morning. Shall we start with the budget?", "start_time": 1.0, "end_time": 4.2 },
+    { "index": 1, "speaker_name": "Leo Park", "text": "Yes. Travel is ten percent over plan.", "start_time": 4.5, "end_time": 9.0 },
+    { "index": 2, "speaker_name": "Ana Silva", "text": "Can we move the offsite to May?", "start_time": 9.4, "end_time": 13.8 },
+    { "index": 3, "speaker_name": "Leo Park", "text": "May works, and the venue holds forty people.", "start_time": 14.0, "end_time": 19.5 },
+    { "index": 4, "speaker_name": "Ana Silva", "text": "Then book it. Research & design present first.", "start_time": 20.0, "end_time": 24.0 },
+    { "index": 5, "speaker_name": "Leo Park", "text": "Agreed. I will send the notes today.", "start_time": 24.3, "end_time": 28.9 }
+  ]
+}
