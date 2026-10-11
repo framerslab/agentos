@@ -14,6 +14,14 @@
  *
  * All mutations are recorded in the injected {@link PersonalityMutationStore}
  * for durability and downstream analysis.
+ *
+ * The tool refuses before it changes anything under `AGENTOS_LEARNING_FREEZE=1`
+ * (`frozen`), and on a host with a learning layer (the call's
+ * `sessionData.learning`) on a turn in mode `frozen` or `off` or with no learner
+ * (`frozen`, `off`, `no_learner`). With a layer it also refuses `honesty` and
+ * `emotionality` (`operator_only`), a step above {@link MAX_STEP_WITH_LEARNING}
+ * (`step_bound`) and a call after the session's
+ * {@link MAX_CALLS_PER_SESSION_WITH_LEARNING} accepted ones (`call_limit`).
  */
 
 import type {
@@ -24,6 +32,7 @@ import type {
 } from '../../core/tools/ITool.js';
 import type { RecordMutationInput } from './PersonalityMutationStore.js';
 import { resolveSelfImprovementSessionKey } from './sessionScope.js';
+import { readToolLearningContext, refusedSelfChange, selfChangeRefusal } from '../learning/toolContext.js';
 
 // ============================================================================
 // VALID TRAITS
@@ -51,6 +60,23 @@ export const VALID_TRAITS = [
 
 /** Union type of valid HEXACO trait names. */
 export type HEXACOTrait = (typeof VALID_TRAITS)[number];
+
+/** On a host with a learning layer: the largest step one call may take. A larger delta is refused, not clamped. */
+export const MAX_STEP_WITH_LEARNING = 0.02;
+
+/** On a host with a learning layer: how many calls of one session the tool accepts. */
+export const MAX_CALLS_PER_SESSION_WITH_LEARNING = 3;
+
+/** On a host with a learning layer: the traits only the persona definition sets. */
+const OPERATOR_ONLY_TRAITS: readonly string[] = ['honesty', 'emotionality'];
+
+/**
+ * Why the tool refused a call before it changed anything: `frozen`, `off` and `no_learner` as every
+ * self-modification tool refuses (`selfChangeRefusal`); with a learning layer, `operator_only` (honesty or
+ * emotionality), `step_bound` (a delta above {@link MAX_STEP_WITH_LEARNING}) and `call_limit` (the session already
+ * had {@link MAX_CALLS_PER_SESSION_WITH_LEARNING} calls accepted).
+ */
+export type AdaptPersonalityRefusal = 'frozen' | 'off' | 'no_learner' | 'operator_only' | 'step_bound' | 'call_limit';
 
 // ============================================================================
 // MUTATION STORE
@@ -226,6 +252,9 @@ export class AdaptPersonalityTool
   /** Per-session accumulated |delta| per trait. */
   private readonly sessionDeltas: Map<string, Map<string, number>> = new Map();
 
+  /** Per-session count of the calls accepted on a host with a learning layer. */
+  private readonly sessionCalls: Map<string, number> = new Map();
+
   /** Injected dependencies. */
   private readonly deps: AdaptPersonalityDeps;
 
@@ -254,6 +283,10 @@ export class AdaptPersonalityTool
     args: AdaptPersonalityInput,
     context: ToolExecutionContext,
   ): Promise<ToolExecutionResult<AdaptPersonalityOutput>> {
+    // The freeze, then the turn's mode, then its learner: refused before anything is read or changed.
+    const refusal = selfChangeRefusal(context.sessionData);
+    if (refusal) return refusedSelfChange(this.name, refusal);
+
     const { trait, delta, reasoning } = args;
 
     // 1. Validate trait name
@@ -277,6 +310,21 @@ export class AdaptPersonalityTool
         success: false,
         error: 'delta is required and must be a finite number',
       };
+    }
+
+    // With a learning layer, the bounds the layer sets: no operator-only trait, one small step, three calls a session.
+    const learning = readToolLearningContext(context.sessionData);
+    const sessionKey = resolveSelfImprovementSessionKey(context);
+    if (learning) {
+      if (OPERATOR_ONLY_TRAITS.includes(trait)) {
+        return refusedSelfChange(this.name, 'operator_only', `only the persona definition sets ${trait}`);
+      }
+      if (Math.abs(delta) > MAX_STEP_WITH_LEARNING + 1e-9) {
+        return refusedSelfChange(this.name, 'step_bound', `one call moves a trait by at most ${MAX_STEP_WITH_LEARNING}`);
+      }
+      if ((this.sessionCalls.get(sessionKey) ?? 0) >= MAX_CALLS_PER_SESSION_WITH_LEARNING) {
+        return refusedSelfChange(this.name, 'call_limit', `a session accepts ${MAX_CALLS_PER_SESSION_WITH_LEARNING} calls`);
+      }
     }
 
     // 3. Check session budget — track total |delta| per trait
@@ -331,6 +379,9 @@ export class AdaptPersonalityTool
     // the same session and trait sees this call's share of the budget.
     const newSessionTotal = currentSessionTotal + Math.abs(effectiveDelta);
     sessionDeltas.set(trait, newSessionTotal);
+    if (learning) {
+      this.sessionCalls.set(sessionKey, (this.sessionCalls.get(sessionKey) ?? 0) + 1);
+    }
 
     // Decay-on-adapt (spec batch-1 C6): before recording the new mutation, age
     // this agent's STORED mutation strengths for the current UTC-day cycle.
