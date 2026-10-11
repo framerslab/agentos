@@ -80,4 +80,16 @@ describe('Outbox', () => {
     expect(await second).toEqual({ sent: 0, dropped: 0, waiting: 0 });
     expect(sent).toEqual([{ n: 1 }, { n: 2 }]);
   });
+
+  it('counts a change held while a send was on its way among those still waiting', async () => {
+    const outbox = new Outbox(new MemoryKeyValueStore(), { now: () => 0 });
+    await outbox.add('update', { n: 1 });
+    const result = await outbox.flush(async () => {
+      // A change made while this one is on its way: the flush read its entries before it, so the next flush sends it.
+      await outbox.add('update', { n: 2 });
+      return 'done';
+    });
+    expect(result).toEqual({ sent: 1, dropped: 0, waiting: 1 });
+    expect((await outbox.pending()).map((entry) => entry.payload)).toEqual([{ n: 2 }]);
+  });
 });

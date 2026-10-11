@@ -116,7 +116,8 @@ export class Outbox {
    * ended, and reads the entries then. A send that never settles therefore holds every later flush: give the
    * request a deadline.
    *
-   * @returns How many entries were confirmed, how many were dropped, and how many are still held.
+   * @returns How many entries this flush confirmed, how many it dropped, and how many the store holds when it ends, a
+   * change held while it ran among them.
    */
   flush(send: OutboxSend): Promise<{ sent: number; dropped: number; waiting: number }> {
     let turns = lastFlush.get(this.store);
@@ -160,6 +161,7 @@ export class Outbox {
       if (outcome === 'done') sent += 1;
       else dropped += 1;
     }
-    return { sent, dropped, waiting: entries.length - sent - dropped };
+    // Counted from the store when the pass ends, so a change held while it ran is among those still waiting.
+    return { sent, dropped, waiting: (await this.store.keys(this.prefix)).length };
   }
 }
