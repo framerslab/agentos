@@ -69,7 +69,16 @@ function sealedStore(): { rows: Map<string, string>; store: SealedTokenStore } {
       rows.delete(key);
     },
   };
-  return { rows, store: new SealedTokenStore(values, { current: { id: 'k1', key: randomBytes(32) } }) };
+  return { rows, store: new SealedTokenStore(values, { current: { id: 'k1', key: randomBytes(32) } }, { namespace: 'example-test' }) };
+}
+
+/** A signal that lets a test stop and resume an endpoint at a known point. */
+function signal(): { promise: Promise<void>; release: () => void } {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
 }
 
 /** What `promise` rejected with; fails when it resolves. */
@@ -272,7 +281,7 @@ describe('RedirectOAuthFlow', () => {
     expect(refused).toBeInstanceOf(OAuthGrantRefused);
     expect(refused).toMatchObject({ reason: 'exchange', status: 400, providerError: 'invalid_grant' });
     const message = refused instanceof Error ? refused.message : '';
-    expect(message).toContain('invalid_grant');
+    expect(message).toBe('the grant was refused (exchange, 400)');
     for (const secret of ['code-secret-1', begun.codeVerifier, begun.state, 'client-secret-1']) {
       expect(message).not.toContain(secret);
     }
@@ -281,13 +290,226 @@ describe('RedirectOAuthFlow', () => {
     await expect(flow.complete({ ...input, code: 'code-answered-200' })).rejects.toMatchObject({
       reason: 'exchange',
       status: 200,
-      providerError: 'bad_verification_code',
+      providerError: undefined,
     });
     // So is an answer whose access token is empty: RFC 6749 appendix A.12 gives a token one character at least.
     await expect(flow.complete({ ...input, code: 'code-answered-empty' })).rejects.toMatchObject({
       reason: 'exchange',
       status: 200,
     });
+  });
+
+  it.each(['exchange', 'refresh'] as const)('discards arbitrary provider error text on %s', async (reason) => {
+    const fakeSecret = 'fake-echoed-secret';
+    const { store } = sealedStore();
+    const { fetchImpl } = endpoint(() => json(400, {
+      error: `invalid_grant\n${fakeSecret}`,
+      error_description: fakeSecret,
+    }));
+    const flow = new ExampleFlow(store, fetchImpl);
+    const begun = flow.begin({ redirectUri: REDIRECT });
+    await store.save('grant-1', { accessToken: '', refreshToken: fakeSecret, expiresAt: 0 });
+
+    const refused = await rejection(reason === 'refresh' ? flow.accessToken('grant-1') : flow.complete({
+      code: fakeSecret,
+      state: begun.state,
+      expectedState: begun.state,
+      codeVerifier: begun.codeVerifier,
+      redirectUri: REDIRECT,
+    }));
+
+    expect(refused).toBeInstanceOf(OAuthGrantRefused);
+    expect(refused).toMatchObject({ reason, status: 400, providerError: undefined });
+    if (!(refused instanceof Error)) throw new Error('expected an error');
+    expect(refused.message).toBe(`the grant was refused (${reason}, 400)`);
+    for (const value of Object.values(refused)) {
+      expect(String(value)).not.toContain(fakeSecret);
+      expect(String(value)).not.toContain('\n');
+    }
+    expect(refused.message).not.toContain(fakeSecret);
+    expect(refused.message).not.toContain('\n');
+    expect(refused.stack).not.toContain(fakeSecret);
+  });
+
+  it('refreshes at the cached token boundary and never falls back after a refused refresh', async () => {
+    const start = 1_700_000_000_000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(start);
+    let refused = false;
+    const { sent, fetchImpl } = endpoint(() => refused
+      ? json(400, { error: 'invalid_grant' })
+      : json(200, { access_token: 'fake-access-fresh', expires_in: 3600 }));
+    const { store } = sealedStore();
+    const flow = new ExampleFlow(store, fetchImpl);
+    await flow.keep('grant-1', {
+      accessToken: 'fake-access-initial', refreshToken: 'fake-refresh', expiresAt: start + 3_600_000,
+    });
+
+    clock.mockReturnValue(start + 3_300_000 - 1);
+    expect(await flow.accessToken('grant-1')).toBe('fake-access-initial');
+    expect(sent).toHaveLength(0);
+    clock.mockReturnValue(start + 3_300_000);
+    expect(await flow.accessToken('grant-1')).toBe('fake-access-fresh');
+    expect(sent).toHaveLength(1);
+    expect(sent[0].form.get('grant_type')).toBe('refresh_token');
+
+    refused = true;
+    clock.mockReturnValue(start + 6_600_001);
+    await expect(flow.accessToken('grant-1')).rejects.toMatchObject({ reason: 'refresh' });
+    expect(sent).toHaveLength(2);
+    clock.mockReturnValue(start + 6_900_001);
+    await expect(flow.accessToken('grant-1')).rejects.toMatchObject({ reason: 'refresh' });
+    expect(sent).toHaveLength(3);
+  });
+
+  it.each([false, true])('discards a refresh after another flow disconnects, with rotation %s', async (rotate) => {
+    const started = signal();
+    const answer = signal();
+    const { sent, fetchImpl } = endpoint(async (request) => {
+      if (request.url.endsWith('/revoke')) return new Response(null, { status: 200 });
+      started.release();
+      await answer.promise;
+      return json(200, {
+        access_token: 'fake-access-fresh', expires_in: 3600,
+        ...(rotate ? { refresh_token: 'fake-refresh-rotated' } : {}),
+      });
+    });
+    const { store } = sealedStore();
+    const flow = new ExampleFlow(store, fetchImpl);
+    const other = new ExampleFlow(store, fetchImpl, 'https://auth.example.test/revoke');
+    await store.save('grant-1', { accessToken: '', refreshToken: 'fake-refresh', expiresAt: 0 });
+    const refreshed = rejection(flow.accessToken('grant-1'));
+    await started.promise;
+    expect(await other.forget('grant-1')).toEqual({ revoked: true });
+    answer.release();
+
+    expect(await refreshed).toMatchObject({ reason: 'missing' });
+    expect(await store.load('grant-1')).toBeNull();
+    await expect(flow.accessToken('grant-1')).rejects.toMatchObject({ reason: 'missing' });
+    expect(sent).toHaveLength(2);
+  });
+
+  it.each(['refreshToken', 'metadata'] as const)('discards a refresh when another flow replaces the %s', async (changed) => {
+    const started = signal();
+    const answer = signal();
+    const { fetchImpl } = endpoint(async () => {
+      started.release();
+      await answer.promise;
+      return json(200, { access_token: 'fake-access-stale', refresh_token: 'fake-refresh-rotated', expires_in: 3600 });
+    });
+    const { store } = sealedStore();
+    const original = { accessToken: '', refreshToken: 'fake-refresh', expiresAt: 0, metadata: { scope: 'files.read' } };
+    await store.save('grant-1', original);
+    const flow = new ExampleFlow(store, fetchImpl);
+    const refreshed = rejection(flow.accessToken('grant-1'));
+    await started.promise;
+    const replacement = {
+      ...original,
+      ...(changed === 'refreshToken' ? { refreshToken: 'fake-refresh-replacement' } : { metadata: { scope: 'profile' } }),
+    };
+    await new ExampleFlow(store, fetchImpl).keep('grant-1', replacement);
+    answer.release();
+
+    expect(await refreshed).toMatchObject({ reason: 'missing' });
+    expect(await store.load('grant-1')).toEqual(replacement);
+  });
+
+  it('discards a refreshed token if the saved grant is cleared before save returns', async () => {
+    const saved = signal();
+    const finishSave = signal();
+    const { store } = sealedStore();
+    await store.save('grant-1', { accessToken: '', refreshToken: 'fake-refresh', expiresAt: 0 });
+    const save = store.save.bind(store);
+    vi.spyOn(store, 'save').mockImplementation(async (key, tokens) => {
+      await save(key, tokens);
+      saved.release();
+      await finishSave.promise;
+    });
+    const { fetchImpl } = endpoint(() => json(200, {
+      access_token: 'fake-access-fresh', refresh_token: 'fake-refresh-rotated', expires_in: 3600,
+    }));
+    const flow = new ExampleFlow(store, fetchImpl);
+    const refreshed = rejection(flow.accessToken('grant-1'));
+    await saved.promise;
+    await store.clear('grant-1');
+    finishSave.release();
+
+    expect(await refreshed).toMatchObject({ reason: 'missing' });
+    expect(await store.load('grant-1')).toBeNull();
+    await expect(flow.accessToken('grant-1')).rejects.toMatchObject({ reason: 'missing' });
+  });
+
+  it.each(['forget', 'clear'] as const)('refuses a cached token after another caller uses %s', async (operation) => {
+    const { sent, fetchImpl } = endpoint(() => new Response(null, { status: 200 }));
+    const { store } = sealedStore();
+    const flow = new ExampleFlow(store, fetchImpl);
+    await flow.keep('grant-1', {
+      accessToken: 'fake-access-cached', refreshToken: 'fake-refresh', expiresAt: Date.now() + 3_600_000,
+    });
+    expect(await flow.accessToken('grant-1')).toBe('fake-access-cached');
+    if (operation === 'forget') {
+      await new ExampleFlow(store, fetchImpl, 'https://auth.example.test/revoke').forget('grant-1');
+    } else {
+      await store.clear('grant-1');
+    }
+
+    await expect(flow.accessToken('grant-1')).rejects.toMatchObject({ reason: 'missing' });
+    expect(sent).toHaveLength(operation === 'forget' ? 1 : 0);
+  });
+
+  it.each(['refreshToken', 'metadata'] as const)('evicts a cached token when the stored %s changes', async (changed) => {
+    const { sent, fetchImpl } = endpoint(() => json(200, { access_token: 'fake-access-replacement', expires_in: 3600 }));
+    const { store } = sealedStore();
+    const flow = new ExampleFlow(store, fetchImpl);
+    const original = {
+      accessToken: 'fake-access-cached', refreshToken: 'fake-refresh', expiresAt: Date.now() + 3_600_000,
+      metadata: { scope: 'files.read' },
+    };
+    await flow.keep('grant-1', original);
+    await new ExampleFlow(store, fetchImpl).keep('grant-1', {
+      ...original,
+      ...(changed === 'refreshToken' ? { refreshToken: 'fake-refresh-replacement' } : { metadata: { scope: 'profile' } }),
+    });
+
+    expect(await flow.accessToken('grant-1')).toBe('fake-access-replacement');
+    expect(sent).toHaveLength(1);
+    expect(sent[0].form.get('refresh_token')).toBe(changed === 'refreshToken' ? 'fake-refresh-replacement' : 'fake-refresh');
+  });
+
+  it.each([false, true])('queues a token read behind disconnect with an earlier refresh %s', async (refreshFirst) => {
+    const tokenStarted = signal();
+    const tokenAnswer = signal();
+    const revocationStarted = signal();
+    const revocationAnswer = signal();
+    const { sent, fetchImpl } = endpoint(async (request) => {
+      if (request.url.endsWith('/revoke')) {
+        revocationStarted.release();
+        await revocationAnswer.promise;
+        return new Response(null, { status: 200 });
+      }
+      tokenStarted.release();
+      await tokenAnswer.promise;
+      return json(200, { access_token: 'fake-access-fresh', refresh_token: 'fake-refresh-rotated', expires_in: 3600 });
+    });
+    const { store } = sealedStore();
+    const flow = new ExampleFlow(store, fetchImpl, 'https://auth.example.test/revoke');
+    await flow.keep('grant-1', {
+      accessToken: 'fake-access-cached', refreshToken: 'fake-refresh',
+      expiresAt: refreshFirst ? 0 : Date.now() + 3_600_000,
+    });
+    const earlier = refreshFirst ? flow.accessToken('grant-1') : undefined;
+    if (refreshFirst) await tokenStarted.promise;
+    const forgotten = flow.forget('grant-1');
+    if (!refreshFirst) await revocationStarted.promise;
+    const later = rejection(flow.accessToken('grant-1'));
+    tokenAnswer.release();
+    await revocationStarted.promise;
+    revocationAnswer.release();
+
+    if (earlier !== undefined) expect(await earlier).toBe('fake-access-fresh');
+    expect(await forgotten).toEqual({ revoked: true });
+    expect(await later).toMatchObject({ reason: 'missing' });
+    expect(await store.load('grant-1')).toBeNull();
+    expect(sent).toHaveLength(refreshFirst ? 2 : 1);
   });
 
   it('refreshes a kept grant once at a time, holds the access token in memory, and keeps a refresh token the answer leaves out', async () => {

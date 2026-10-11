@@ -10,6 +10,7 @@
  */
 
 import { timingSafeEqual } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { BrowserOAuthConfig } from './BrowserOAuthFlow.js';
 import { generateCodeChallenge, generateCodeVerifier, generateState } from './pkce.js';
 import type { IOAuthTokenStore, OAuthTokenSet } from './types.js';
@@ -46,16 +47,23 @@ export interface RedirectCompleteInput {
 
 /** A grant the provider or the check refused; its message holds no code, verifier or token. */
 export class OAuthGrantRefused extends Error {
+  /** An allowlisted OAuth error code, never the provider's arbitrary text. */
+  readonly providerError?: string;
+
   /**
    * @param reason `state` when the returned state is not the one kept, `exchange` or `refresh` when the token
    * endpoint refused, `revoke` when the revocation endpoint refused, `missing` when no grant with a refresh token is
-   * kept under the key asked for.
+   * kept under the key asked for or the stored grant changes during a refresh.
    * @param status The HTTP status the provider answered, when it answered.
-   * @param providerError The `error` code of the provider's answer, when it gave one.
+   * @param providerError The provider's `error`, retained only when it is an allowlisted RFC 6749 code.
    */
-  constructor(readonly reason: 'state' | 'exchange' | 'refresh' | 'revoke' | 'missing', readonly status?: number, readonly providerError?: string) {
-    super(`the grant was refused (${reason}${status === undefined ? '' : `, ${status}`}${providerError ? `, ${providerError}` : ''})`);
+  constructor(readonly reason: 'state' | 'exchange' | 'refresh' | 'revoke' | 'missing', readonly status?: number, providerError?: string) {
+    super(`the grant was refused (${reason}${status === undefined ? '' : `, ${status}`})`);
     this.name = 'OAuthGrantRefused';
+    this.providerError = providerError !== undefined && [
+      'invalid_grant', 'invalid_client', 'invalid_request', 'unauthorized_client', 'unsupported_grant_type',
+      'invalid_scope', 'access_denied', 'server_error', 'temporarily_unavailable',
+    ].includes(providerError) ? providerError : undefined;
   }
 }
 
@@ -68,17 +76,22 @@ function storedGrant(tokens: OAuthTokenSet): OAuthTokenSet {
   return { accessToken: '', expiresAt: 0, refreshToken: tokens.refreshToken, metadata: tokens.metadata };
 }
 
+/** Compares the persisted grant fields, since a store never receives the held access token or id token. */
+function sameGrant(kept: OAuthTokenSet | null, expected: OAuthTokenSet): boolean {
+  return kept !== null && kept.refreshToken === expected.refreshToken && isDeepStrictEqual(kept.metadata, expected.metadata);
+}
+
 /**
  * The authorization code grant with PKCE split across a web server's two requests: `begin` in the request that sends
  * the person to the provider, `complete` in the request the provider redirects back to. A provider's flow extends it
  * with `providerId` and `getConfig`, and overrides the token calls where its endpoints differ from the standard ones.
- * Within one flow, `keep`, a refresh and `forget` of the same key run one after another. Flows that share a store do
- * not take turns with each other: an `IOAuthTokenStore` has no way to claim a key.
+ * Within one flow, `keep`, `accessToken` and `forget` of the same key run one after another. Reads and refreshes
+ * recheck stored grants, but flows sharing a store still need external coordination for atomic changes:
+ * `IOAuthTokenStore` has no way to claim a key or conditionally save a grant.
  */
 export abstract class RedirectOAuthFlow {
   /** The provider's id. */
   abstract readonly providerId: string;
-  private readonly refreshing = new Map<string, Promise<OAuthTokenSet>>();
   private readonly held = new Map<string, OAuthTokenSet>();
   /** The last change queued for each key; it settles, never rejects, when that change ends. */
   private readonly turns = new Map<string, Promise<void>>();
@@ -116,8 +129,8 @@ export abstract class RedirectOAuthFlow {
 
   /**
    * The token endpoint's call, read as JSON. An answer that is not a success, or whose `access_token` is missing or
-   * empty, throws {@link OAuthGrantRefused} with the status and the answer's `error`; an answer without `expires_in`
-   * is taken to last an hour.
+   * empty, throws {@link OAuthGrantRefused} with the status and an allowlisted OAuth error code only; an answer
+   * without `expires_in` is taken to last an hour.
    */
   protected async tokenRequest(reason: 'exchange' | 'refresh', form: Record<string, string>): Promise<OAuthTokenSet> {
     const response = await this.fetchImpl(this.getConfig().tokenEndpoint, {
@@ -198,18 +211,23 @@ export abstract class RedirectOAuthFlow {
   /**
    * A usable access token for the grant kept under `key`, refreshed once at a time when needed, after a `keep` or
    * `forget` of `key` already under way. Throws {@link OAuthGrantRefused} with reason `missing` when no grant with a
-   * refresh token is kept under `key`, and with reason `refresh` when the provider refuses the refresh.
+   * refresh token is kept under `key` or the grant changes during refresh, and with reason `refresh` when the
+   * provider refuses the refresh. A cached token is used only while the store still holds the same grant fields.
    */
   async accessToken(key: string): Promise<string> {
-    const held = this.held.get(key);
-    const buffer = this.getConfig().refreshBufferMs ?? 300_000;
-    if (held !== undefined && held.accessToken !== '' && Date.now() < held.expiresAt - buffer) return held.accessToken;
-    let pending = this.refreshing.get(key);
-    if (pending === undefined) {
-      pending = this.inTurn(key, () => this.refreshKept(key)).finally(() => this.refreshing.delete(key));
-      this.refreshing.set(key, pending);
-    }
-    return (await pending).accessToken;
+    const store = this.store;
+    if (store === null) throw new Error('this flow has no store');
+    return this.inTurn(key, async () => {
+      const kept = await store.load(key);
+      const held = this.held.get(key);
+      const buffer = this.getConfig().refreshBufferMs ?? 300_000;
+      if (held !== undefined && sameGrant(kept, held) && held.accessToken !== '' && Date.now() < held.expiresAt - buffer) {
+        return held.accessToken;
+      }
+      this.held.delete(key);
+      if (kept === null) throw new OAuthGrantRefused('missing');
+      return (await this.refreshKept(key, kept)).accessToken;
+    });
   }
 
   /**
@@ -233,14 +251,17 @@ export abstract class RedirectOAuthFlow {
     }
   }
 
-  private async refreshKept(key: string): Promise<OAuthTokenSet> {
+  /** Refreshes a snapshot, discarding the result if the stored grant was deleted or its persisted fields changed. */
+  private async refreshKept(key: string, kept: OAuthTokenSet): Promise<OAuthTokenSet> {
     if (this.store === null) throw new Error('this flow has no store');
-    const kept = await this.store.load(key);
-    if (kept === null || kept.refreshToken === undefined) throw new OAuthGrantRefused('missing');
+    if (kept.refreshToken === undefined) throw new OAuthGrantRefused('missing');
     const fresh = await this.refreshTokens(kept.refreshToken);
     const merged: OAuthTokenSet = { ...fresh, refreshToken: fresh.refreshToken ?? kept.refreshToken, metadata: fresh.metadata ?? kept.metadata };
+    // This detects changes while the endpoint was pending, but load/save is not a cross-flow transaction.
+    if (!sameGrant(await this.store.load(key), kept)) throw new OAuthGrantRefused('missing');
     if (merged.refreshToken !== kept.refreshToken || merged.metadata !== kept.metadata) {
       await this.store.save(key, storedGrant(merged));
+      if (!sameGrant(await this.store.load(key), merged)) throw new OAuthGrantRefused('missing');
     }
     this.held.set(key, merged);
     return merged;

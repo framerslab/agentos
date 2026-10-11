@@ -28,16 +28,27 @@ export interface SealingKeys {
 }
 
 /**
- * Keeps each grant under its key as one sealed text holding the refresh token and the metadata, bound to that key
- * (a sealed grant copied to another key does not open there). The access token and the id token are never kept.
+ * Keeps each grant under its key as one sealed text holding the refresh token and the metadata, bound to the
+ * namespace and key (a grant copied to another namespace or key does not open). Access and id tokens are never kept.
  * A value that does not open makes `load` throw `SealedSecretError`.
  */
 export class SealedTokenStore implements IOAuthTokenStore {
+  private readonly namespace: string;
+
   /**
    * @param values Where the sealed texts live.
    * @param keys The current key and any previous ones.
+   * @param options A nonempty, stable namespace identifying the tenant, account and provider scope of these rows.
    */
-  constructor(private readonly values: SealedBytesStore, private readonly keys: SealingKeys) {}
+  constructor(private readonly values: SealedBytesStore, private readonly keys: SealingKeys, options: { namespace: string }) {
+    if (typeof options.namespace !== 'string' || options.namespace.trim() === '') throw new Error('a nonempty store namespace is required');
+    this.namespace = options.namespace;
+  }
+
+  /** Binds both fields with unambiguous boundaries and a label specific to this store. */
+  private context(key: string): string {
+    return JSON.stringify(['SealedTokenStore', this.namespace, key]);
+  }
 
   /**
    * The grant kept under `key`: its refresh token and metadata, with `accessToken: ''` and `expiresAt: 0` so a flow
@@ -48,14 +59,14 @@ export class SealedTokenStore implements IOAuthTokenStore {
   async load(key: string): Promise<OAuthTokenSet | null> {
     const sealed = await this.values.get(key);
     if (sealed === null) return null;
-    const kept = JSON.parse(Buffer.from(openSecret(sealed, [this.keys.current, ...(this.keys.previous ?? [])], key)).toString('utf8')) as Pick<OAuthTokenSet, 'refreshToken' | 'metadata'>;
+    const kept = JSON.parse(Buffer.from(openSecret(sealed, [this.keys.current, ...(this.keys.previous ?? [])], this.context(key))).toString('utf8')) as Pick<OAuthTokenSet, 'refreshToken' | 'metadata'>;
     return { accessToken: '', expiresAt: 0, refreshToken: kept.refreshToken, metadata: kept.metadata };
   }
 
-  /** Seals the refresh token and the metadata of `tokens` with the current key, bound to `key`, and keeps them. */
+  /** Seals the refresh token and metadata with the current key, bound to the namespace and `key`, and keeps them. */
   async save(key: string, tokens: OAuthTokenSet): Promise<void> {
     const kept = JSON.stringify({ refreshToken: tokens.refreshToken, metadata: tokens.metadata });
-    await this.values.set(key, sealSecret(kept, this.keys.current.key, this.keys.current.id, key));
+    await this.values.set(key, sealSecret(kept, this.keys.current.key, this.keys.current.id, this.context(key)));
   }
 
   /** Removes the grant kept under `key`. */

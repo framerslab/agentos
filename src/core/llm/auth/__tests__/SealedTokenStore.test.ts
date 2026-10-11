@@ -1,11 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { openSecret, SealedSecretError, type SealingKey } from '../sealing.js';
+import { openSecret, sealSecret, SealedSecretError, type SealingKey } from '../sealing.js';
 import { SealedTokenStore, type SealedBytesStore } from '../SealedTokenStore.js';
 import type { OAuthTokenSet } from '../types.js';
 
 const k1: SealingKey = { id: 'k1', key: randomBytes(32) };
 const k2: SealingKey = { id: 'k2', key: randomBytes(32) };
+const OPTIONS = { namespace: 'example-test' };
 
 const GRANT: OAuthTokenSet = {
   accessToken: 'access-1',
@@ -34,12 +35,12 @@ function mapValues(): { rows: Map<string, string>; values: SealedBytesStore } {
 
 /**
  * Tests for {@link SealedTokenStore}: a grant's refresh token and metadata kept sealed under the caller's key, bound
- * to the key it is kept under, and never an access token or an id token.
+ * to its namespace and the key it is kept under, and never an access token or an id token.
  */
 describe('SealedTokenStore', () => {
   it('keeps one sealed text with the refresh token and metadata, and neither the access token nor the id token', async () => {
     const { rows, values } = mapValues();
-    const store = new SealedTokenStore(values, { current: k1 });
+    const store = new SealedTokenStore(values, { current: k1 }, OPTIONS);
 
     await store.save('connection-1', GRANT);
 
@@ -47,7 +48,8 @@ describe('SealedTokenStore', () => {
     const sealed = rows.get('connection-1') ?? '';
     expect(sealed.startsWith('v1.k1.')).toBe(true);
     for (const plain of ['access-1', 'refresh-1', 'id-1', 'files.read']) expect(sealed).not.toContain(plain);
-    const kept = JSON.parse(Buffer.from(openSecret(sealed, [k1], 'connection-1')).toString('utf8')) as Record<string, unknown>;
+    const context = JSON.stringify(['SealedTokenStore', OPTIONS.namespace, 'connection-1']);
+    const kept = JSON.parse(Buffer.from(openSecret(sealed, [k1], context)).toString('utf8')) as Record<string, unknown>;
     expect(kept).toEqual({ refreshToken: 'refresh-1', metadata: { scope: 'files.read' } });
     expect(kept).not.toHaveProperty('accessToken');
     expect(kept).not.toHaveProperty('idToken');
@@ -55,7 +57,7 @@ describe('SealedTokenStore', () => {
 
   it('loads the refresh token and metadata with an empty access token that has expired, from the key it was kept under alone', async () => {
     const { rows, values } = mapValues();
-    const store = new SealedTokenStore(values, { current: k1 });
+    const store = new SealedTokenStore(values, { current: k1 }, OPTIONS);
     await store.save('connection-1', GRANT);
 
     expect(await store.load('connection-1')).toEqual({
@@ -71,14 +73,14 @@ describe('SealedTokenStore', () => {
   });
 
   it('answers null for a key it does not keep', async () => {
-    const store = new SealedTokenStore(mapValues().values, { current: k1 });
+    const store = new SealedTokenStore(mapValues().values, { current: k1 }, OPTIONS);
 
     expect(await store.load('connection-unknown')).toBeNull();
   });
 
   it('deletes a kept grant on clear', async () => {
     const { rows, values } = mapValues();
-    const store = new SealedTokenStore(values, { current: k1 });
+    const store = new SealedTokenStore(values, { current: k1 }, OPTIONS);
     await store.save('connection-1', GRANT);
 
     await store.clear('connection-1');
@@ -89,8 +91,8 @@ describe('SealedTokenStore', () => {
 
   it('reads what a previous key sealed and seals anew with the current key at the next save', async () => {
     const { rows, values } = mapValues();
-    await new SealedTokenStore(values, { current: k1 }).save('connection-1', GRANT);
-    const turned = new SealedTokenStore(values, { current: k2, previous: [k1] });
+    await new SealedTokenStore(values, { current: k1 }, OPTIONS).save('connection-1', GRANT);
+    const turned = new SealedTokenStore(values, { current: k2, previous: [k1] }, OPTIONS);
 
     const loaded = await turned.load('connection-1');
     if (loaded === null) throw new Error('the grant kept under the previous key did not load');
@@ -101,6 +103,44 @@ describe('SealedTokenStore', () => {
     expect(rows.get('connection-1')?.startsWith('v1.k2.')).toBe(true);
     expect((await turned.load('connection-1'))?.refreshToken).toBe('refresh-1');
     // Once sealed anew, the previous key alone no longer opens it.
-    await expect(new SealedTokenStore(values, { current: k1 }).load('connection-1')).rejects.toMatchObject({ reason: 'key' });
+    await expect(new SealedTokenStore(values, { current: k1 }, OPTIONS).load('connection-1')).rejects.toMatchObject({ reason: 'key' });
+  });
+
+  it('refuses a sealed grant copied between namespaces with the same row id and sealing keys', async () => {
+    const first = mapValues();
+    const second = mapValues();
+    const source = new SealedTokenStore(first.values, { current: k1 }, { namespace: 'tenant-a/example' });
+    const target = new SealedTokenStore(second.values, { current: k1 }, { namespace: 'tenant-b/example' });
+    await source.save('connection-1', GRANT);
+    await target.save('connection-1', { ...GRANT, refreshToken: 'fake-target-refresh' });
+    expect((await target.load('connection-1'))?.refreshToken).toBe('fake-target-refresh');
+    second.rows.set('connection-1', first.rows.get('connection-1') ?? '');
+
+    await expect(target.load('connection-1')).rejects.toMatchObject({ reason: 'tampered' });
+    expect((await source.load('connection-1'))?.refreshToken).toBe(GRANT.refreshToken);
+  });
+
+  it('keeps namespace and row key boundaries unambiguous', async () => {
+    const { rows, values } = mapValues();
+    const source = new SealedTokenStore(values, { current: k1 }, { namespace: 'tenant:account' });
+    const target = new SealedTokenStore(values, { current: k1 }, { namespace: 'tenant' });
+    await source.save('connection', GRANT);
+    rows.set('account:connection', rows.get('connection') ?? '');
+
+    await expect(target.load('account:connection')).rejects.toMatchObject({ reason: 'tampered' });
+  });
+
+  it('refuses the earlier row-only context instead of falling back to an unbound namespace', async () => {
+    const { rows, values } = mapValues();
+    rows.set('connection-1', sealSecret(JSON.stringify({ refreshToken: 'fake-old-refresh' }), k1.key, k1.id, 'connection-1'));
+    const store = new SealedTokenStore(values, { current: k1 }, OPTIONS);
+
+    await expect(store.load('connection-1')).rejects.toMatchObject({ reason: 'tampered' });
+  });
+
+  it('requires a nonempty namespace', () => {
+    for (const namespace of ['', '   ']) {
+      expect(() => new SealedTokenStore(mapValues().values, { current: k1 }, { namespace })).toThrow(/namespace/);
+    }
   });
 });
