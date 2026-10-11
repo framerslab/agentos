@@ -42,14 +42,25 @@ function plainAgentCallsWithMemory(text: string): string[] {
 // monorepo root. The docs site (apps/agentos-live-docs) and the skills packages
 // (packages/agentos-skills, packages/agentos-skills-registry) sit there only in the
 // monorepo; standalone agentos CI checks out neither, so the tests that read them skip.
-const hasLiveDocs = exists('../../../../../../apps/agentos-live-docs/docs/index.md');
-const hasSkillsPackages = exists('../../../../../agentos-skills/package.json');
+// Each guard checks every file outside the package that its tests read.
+const hasLiveDocs = [
+  '../../../../../../apps/agentos-live-docs/docs/index.md',
+  '../../../../../../apps/agentos-live-docs/src/pages/index.tsx',
+].every((file) => exists(file));
+const hasSkillsPackages = [
+  '../../../../../agentos-skills/package.json',
+  '../../../../../agentos-skills-registry/package.json',
+].every((file) => exists(file));
 const itIfLiveDocs = hasLiveDocs ? it : it.skip;
 const itIfSkills = hasSkillsPackages ? it : it.skip;
 // Monorepo-root docs (../../../../../../docs) only exist when agentos is a
 // submodule of the monorepo; they are absent in standalone agentos CI.
 const hasRepoRootDocs = exists('../../../../../../docs/README.md');
 const itIfRepoRootDocs = hasRepoRootDocs ? it : it.skip;
+
+// docs.agentos.sh serves the API reference at /api and answers /api/ with a 404. The
+// pattern matches https://docs.agentos.sh/api/ itself, not a page under it.
+const apiReferenceWithSlash = /https:\/\/docs\.agentos\.sh\/api\/(?![\w-])/;
 
 describe('AgentOS docs alignment', () => {
   it('keeps the package README aligned with the high-level API surface', () => {
@@ -207,9 +218,8 @@ describe('AgentOS docs alignment', () => {
   it('points the package ecosystem guide at the API reference route the docs site serves', () => {
     const packageEcosystemGuide = read('../../../../docs/architecture/ECOSYSTEM.md');
 
-    // The site serves the API reference at /api and answers /api/ with a 404.
     expect(packageEcosystemGuide).toContain('(https://docs.agentos.sh/api)');
-    expect(packageEcosystemGuide).not.toContain('(https://docs.agentos.sh/api/)');
+    expect(packageEcosystemGuide).not.toMatch(apiReferenceWithSlash);
     expect(packageEcosystemGuide).not.toContain('agentos-live-docs branch');
   });
 
@@ -217,6 +227,7 @@ describe('AgentOS docs alignment', () => {
     const ecosystemGuide = read('../../../../../../docs/getting-started/ecosystem.md');
 
     expect(ecosystemGuide).toContain('https://docs.agentos.sh/api');
+    expect(ecosystemGuide).not.toMatch(apiReferenceWithSlash);
     expect(ecosystemGuide).not.toContain('agentos-live-docs branch');
   });
 
