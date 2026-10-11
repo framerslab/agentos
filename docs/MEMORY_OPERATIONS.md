@@ -665,7 +665,7 @@ const result = await mem.importFrom('./memories.json', { format: 'json' });
 
 ### Markdown
 
-Walks a directory of Markdown files with YAML front-matter. Each file with a non-empty body becomes one memory trace. The `id`, `type`, `scope`, `tags`, `strength` and `createdAt` fields are read from front-matter (defaults: a new id, `episodic`, `user`, no tags, 1.0, now); the body becomes the trace content.
+Walks a directory of Markdown files with YAML front-matter. Each file whose body is not blank becomes one memory trace. The `id`, `type`, `scope`, `tags`, `strength` and `createdAt` fields are read from front-matter (defaults: a new id, `episodic`, `user`, no tags, 1.0, now); the body, without its leading and trailing whitespace, becomes the trace content. Front-matter is read as data: a block marked as JavaScript (`---js`) gives no fields and is never evaluated.
 
 ```ts
 const result = await mem.importFrom('./notes/', { format: 'markdown' });
