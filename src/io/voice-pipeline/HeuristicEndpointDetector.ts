@@ -25,7 +25,19 @@
  *    first final that arrives before speech resumes, for providers that
  *    transcribe an utterance after its end of speech. The silence timeout
  *    still counts from that end of speech. A final with no text (a provider
- *    retracting interim text it showed) changes nothing.
+ *    retracting interim text it showed) adds nothing to the turn's text.
+ *
+ * 5. Finals that carry an `itemId`, the key a provider gives each utterance
+ *    (`OpenAIRealtimeTranscriptionSTT` does, and sends an utterance's final
+ *    after its end of speech), are kept per item, and the turn's text joins
+ *    them in the order the items began. Such a turn is decided once every
+ *    `speech_end` since it began has its final, as a single final is, the
+ *    silence counted from the latest `speech_end`; an utterance that starts
+ *    before the previous one's final arrives stays in the same turn. An
+ *    item's final with no words answers its `speech_end` and adds no text.
+ *    A `speech_end` whose final has not come within the silence timeout (an
+ *    utterance the provider found no words in gets none) stops holding the
+ *    turn.
  *
  * ## Why heuristic over acoustic-only?
  *
@@ -165,7 +177,8 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
   private readonly silenceTimeoutMs: number;
 
   /**
-   * The latest final transcript text accumulated for the current turn.
+   * The current turn's text: the latest final transcript without an
+   * `itemId`, or the turn's item-keyed finals joined (see {@link itemFinals}).
    * Only updated by final (non-interim) transcript events.
    * Reset to empty string after each `turn_complete` emission.
    */
@@ -200,11 +213,10 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
 
   /**
    * Timestamp of a `speech_end` that found no final transcript, or `null`.
-   * Some providers transcribe an utterance only after its end of speech
-   * (`OpenAIRealtimeTranscriptionSTT` emits `speech_end` when OpenAI reports
-   * the speech stopped, and the final once the utterance is transcribed), so
-   * the first final that follows, before speech resumes, is decided as that
-   * `speech_end` would have been.
+   * Some providers transcribe an utterance only after its end of speech, so
+   * the first final without an `itemId` that follows, before speech resumes,
+   * is decided as that `speech_end` would have been. Item-keyed finals are
+   * decided through {@link unansweredSpeechEnds} instead.
    */
   private speechEndWithoutText: number | null = null;
 
@@ -215,6 +227,29 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * and serves the turn's duration only.
    */
   private speechEndWithoutTextAt = 0;
+
+  /**
+   * The current turn's finals that carry an `itemId`, by that id, in the
+   * order each item's first final arrived: the text the item adds to the
+   * turn (empty for a backchannel or a final with no words) and the item's
+   * `startMs`.
+   */
+  private readonly itemFinals = new Map<string, { text: string; startMs?: number }>();
+
+  /**
+   * When the turn's `speech_end` events that no item-keyed final has answered
+   * yet arrived, on this detector's own clock, oldest first. A new item's
+   * final answers the oldest; one that has waited the silence timeout is
+   * dropped and stops holding the turn.
+   */
+  private unansweredSpeechEnds: number[] = [];
+
+  /**
+   * The turn's latest `speech_end`: its timestamp, for the turn's duration,
+   * and when it arrived on this detector's clock, for the silence since.
+   * `null` before the turn's first `speech_end`.
+   */
+  private lastSpeechEnd: { timestamp: number; at: number } | null = null;
 
   // ---------------------------------------------------------------------------
   // Constructor
@@ -254,12 +289,21 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    * prevents a subsequent `speech_end` event from triggering `turn_complete`
    * for what was merely an acknowledgement, not a real conversational turn.
    *
+   * A final with an `itemId` is kept with the turn's other item-keyed finals,
+   * and the turn's text joins them; a final without one replaces the turn's
+   * text.
+   *
    * @param transcript - Transcript event from the STT session.
    */
   pushTranscript(transcript: TranscriptEvent): void {
     if (!transcript.isFinal) {
       // Ignore partial/interim hypotheses -- they will be superseded by
       // a subsequent final result or revised interim.
+      return;
+    }
+
+    if (transcript.itemId) {
+      this._pushItemFinal(transcript.itemId, transcript);
       return;
     }
 
@@ -282,6 +326,8 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     // provider represents the complete hypothesis for the current utterance.
     this.accumulatedText = text;
     this.lastConfidence = transcript.confidence;
+    // The latest final replaces the turn's item-keyed finals as well.
+    this.itemFinals.clear();
 
     // The speech already ended without a transcript: decide the turn now. The
     // silence began at that end of speech, so what has passed since counts.
@@ -311,7 +357,9 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
    *   or starts the silence timer (when no punctuation is detected).
    *   Otherwise the first final transcript that arrives before speech
    *   resumes is decided the same way when it arrives, with the silence
-   *   timeout still counted from this `speech_end`.
+   *   timeout still counted from this `speech_end`. A turn of item-keyed
+   *   finals is decided once every `speech_end` since it began has its
+   *   final, or has waited the silence timeout for it.
    *
    * - **`silence`**: Periodic heartbeat events are ignored. The silence timer
    *   (started on `speech_end`) already handles delayed turn-completion
@@ -336,6 +384,17 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
 
       case 'speech_end': {
         this.speechActive = false;
+        const at = Date.now();
+        this.lastSpeechEnd = { timestamp: event.timestamp, at };
+        // An item-keyed final for this speech may still come.
+        this._dropExpiredSpeechEnds(at);
+        this.unansweredSpeechEnds.push(at);
+
+        // A turn of item-keyed finals is decided once each speech end has its final.
+        if (this.itemFinals.size > 0) {
+          this._decideItemTurn();
+          break;
+        }
 
         if (!this.accumulatedText) {
           // No transcript has arrived yet -- nothing to flush now.
@@ -379,6 +438,9 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
     this.turnStartMs = null;
     this.lastConfidence = 1;
     this.speechEndWithoutText = null;
+    this.itemFinals.clear();
+    this.unansweredSpeechEnds = [];
+    this.lastSpeechEnd = null;
   }
 
   // ---------------------------------------------------------------------------
@@ -404,6 +466,92 @@ export class HeuristicEndpointDetector extends EventEmitter implements IEndpoint
       // If the user doesn't resume speaking within silenceTimeoutMs,
       // we'll fire turn_complete with reason 'silence_timeout'.
       this._startSilenceTimer(speechEndTimestamp, silenceSoFarMs);
+    }
+  }
+
+  /**
+   * Keep a final that carries an `itemId`. The turn holds one text per item,
+   * from the item's latest final, and its text joins them. A new item's
+   * final answers the oldest `speech_end` still waiting for one; a
+   * backchannel or a final with no words answers it too and adds no text.
+   * Once speech has ended in this turn, the turn is decided again.
+   *
+   * @param itemId - The provider input item the final belongs to.
+   * @param transcript - The final transcript event.
+   */
+  private _pushItemFinal(itemId: string, transcript: TranscriptEvent): void {
+    const normalised = transcript.text.trim().toLowerCase();
+    const backchannel = BACKCHANNEL_PHRASES.has(normalised);
+    if (backchannel) this.emit('backchannel_detected', { text: transcript.text });
+
+    if (!this.itemFinals.has(itemId)) {
+      this._dropExpiredSpeechEnds(Date.now());
+      this.unansweredSpeechEnds.shift();
+    }
+    const text = normalised && !backchannel ? transcript.text : '';
+    this.itemFinals.set(itemId, { text, startMs: transcript.startMs });
+    if (text) this.lastConfidence = transcript.confidence;
+    this.accumulatedText = this._joinItemFinals();
+
+    if (!this.speechActive && this.lastSpeechEnd !== null) this._decideItemTurn();
+  }
+
+  /**
+   * The turn's item-keyed finals as one text: their texts in the order the
+   * items began (by `startMs`, or in the order their first finals arrived
+   * when an item has none), with one space between them.
+   */
+  private _joinItemFinals(): string {
+    const finals = [...this.itemFinals.values()];
+    if (finals.every((final) => final.startMs !== undefined)) {
+      // A stable sort: items that began at the same offset keep their arrival order.
+      finals.sort((a, b) => (a.startMs ?? 0) - (b.startMs ?? 0));
+    }
+    return finals
+      .map((final) => final.text)
+      .filter((text) => text !== '')
+      .join(' ');
+  }
+
+  /**
+   * Decide a turn of item-keyed finals after its latest `speech_end`. While
+   * one of the turn's `speech_end` events still waits for its final, the
+   * turn waits too, for at most the silence timeout after that `speech_end`:
+   * an utterance the provider found no words in gets no final. With none
+   * waiting, the joined finals are decided as a single final is, the silence
+   * counted from the latest `speech_end`.
+   */
+  private _decideItemTurn(): void {
+    this._clearSilenceTimer();
+    const now = Date.now();
+    this._dropExpiredSpeechEnds(now);
+    if (!this.accumulatedText || this.lastSpeechEnd === null) return;
+
+    if (this.unansweredSpeechEnds.length > 0) {
+      // Decide again when the oldest waiting speech end has waited the silence timeout.
+      const waitMs = this.unansweredSpeechEnds[0] + this.silenceTimeoutMs - now;
+      this.silenceTimer = setTimeout(() => {
+        this.silenceTimer = null;
+        this._decideItemTurn();
+      }, waitMs);
+      return;
+    }
+
+    this._decideTurnEnd(this.lastSpeechEnd.timestamp, now - this.lastSpeechEnd.at);
+  }
+
+  /**
+   * Drop the `speech_end` events that have waited the silence timeout for an
+   * item-keyed final.
+   *
+   * @param now - The current time on this detector's clock.
+   */
+  private _dropExpiredSpeechEnds(now: number): void {
+    while (
+      this.unansweredSpeechEnds.length > 0 &&
+      now - this.unansweredSpeechEnds[0] >= this.silenceTimeoutMs
+    ) {
+      this.unansweredSpeechEnds.shift();
     }
   }
 
