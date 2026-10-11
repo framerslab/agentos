@@ -1786,7 +1786,7 @@ export class AgentOS implements IAgentOS {
           : off('emergentConfig.selfImprovement is off'),
       forged_code_executor:
         emergent && this.config.emergentConfig?.allowSandboxTools === true ? { live: true } : off('sandbox forging is off'),
-      // The tool gate runs only with toolOrchestratorConfig.hitl.enabled (ToolOrchestrator.ts:845-850; plan check F10).
+      // The tool orchestrator's approval gate runs only with toolOrchestratorConfig.hitl.enabled.
       hitl:
         this.config.toolOrchestratorConfig?.hitl?.enabled === true
           ? this.config.hitlManager

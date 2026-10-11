@@ -506,7 +506,7 @@ export class GMIManager {
    * resume, whose organization is read from the conversation after the GMI is acquired). A layer that fails to open
    * the session here never fails the GMI: the GMI gets a session that asks again at each turn, and until one opens
    * each turn has no learner and the GMI renders the persona's traits itself, so its tools refuse rather than act
-   * as on a host with no layer (plan check F3). Without a layer the result is empty, and the GMI is built as before
+   * as on a host with no layer. Without a layer the result is empty, and the GMI is built as before
    * the layer existed.
    *
    * @param effectivePersona - The persona the GMI is initialized with: the registry persona, overlay applied.
@@ -545,7 +545,8 @@ export class GMIManager {
         `GMIManager (ID: ${this.managerId}): The learning layer gave GMI ${runtimeContext.gmiInstanceId} no learner session; each turn asks again, and until one opens the turn has no learner and the GMI renders the persona's traits itself.`,
         error?.message ?? error,
       );
-      // Fail closed: a GMI with no session tells its tools nothing, which reads as a host with no layer.
+      // Fail closed: the deferred session rejects while the layer cannot open one, so each such turn runs degraded
+      // and tells its tools it has no learner.
       return { learning: deferLearnerSession({ traits: authored, open: openNow }), personaTraits };
     }
   }

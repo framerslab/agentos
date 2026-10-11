@@ -147,7 +147,7 @@ describe('a session belongs to the user of its first turn, in the namespace it w
   });
 
   it('has no learner after a workflow turn of another user, nor on any turn after it', async () => {
-    // plan check F1: the workflow exclusion never hides a hand-over (D3).
+    // The workflow exclusion never hides a hand-over to another user (D3).
     const session = await open();
     expect(stateOf(await session.prepareTurn(turn()))).toBe('bound');
     expect(stateOf(await session.prepareTurn(turn({ userId: 'bob', workflowSeat: true })))).toBe('other_user');
@@ -155,7 +155,7 @@ describe('a session belongs to the user of its first turn, in the namespace it w
   });
 
   it('has no learner on a tool continuation under another organization, nor on any turn after it', async () => {
-    // plan check F2: a resume under tenant B on the session tenant A's user opened (round 6 C1).
+    // A tool-result resume under tenant B on the session tenant A's user opened.
     const session = await open({}, key({ namespace: 'A', userId: '42' }));
     expect(stateOf(await session.prepareTurn(turn({ namespace: 'A', userId: '42' })))).toBe('bound');
     expect(stateOf(await session.prepareTurn(turn({ namespace: 'B', userId: 'uninitialized-user', text: null, continuation: true })))).toBe('other_namespace');

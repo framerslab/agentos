@@ -631,10 +631,10 @@ export class GMI implements IGMI {
    * The turn's learning. With a learner session, its preparation: the personality section, and the learner and
    * mode each tool call is told. The session is asked once per user turn, and a tool continuation reuses the
    * preparation of the turn it continues (a GMI built again for the continuation, or a continuation under another
-   * organization than its turn's, asks, and says it is one). A
-   * session that rejects, answers with no preparation or does not answer within its budget never fails the
-   * turn: the turn then has no learner, and the GMI sends its own section. Without a learner session the GMI
-   * sends its own section, when it was given the persona's traits, and tells the tools nothing.
+   * organization than its turn's, asks, and says it is one). A session that rejects, answers with no preparation
+   * or does not answer within its budget never fails the turn: the turn then has no learner, and the GMI sends its
+   * own section. Without a learner session the GMI sends its own section, when it was given the persona's traits,
+   * and tells the tools nothing.
    *
    * @param turnInput - The turn's input.
    * @param turnId - The turn's id.
@@ -648,8 +648,8 @@ export class GMI implements IGMI {
     if (!session) return { systemPrompts: own, tools: undefined };
     const continuation = turnInput.metadata?.isToolContinuation === true;
     const namespace = this.getOrganizationIdForTurn(turnInput) ?? '';
-    // A continuation keeps its turn's preparation unless it runs under another organization (a resume whose host
-    // passed one, ExternalToolResultHandler.ts:567-599): the session is asked again and reads it as such (plan check F2).
+    // A continuation keeps its turn's preparation unless it runs under another organization (a tool-result resume
+    // whose host passed one): the session is asked again and reads it as a turn of that organization.
     if (continuation && this.turnLearning && this.turnLearning.namespace === namespace) return this.turnLearning;
 
     const preferredModelId = turnInput.metadata?.options?.preferredModelId;

@@ -400,7 +400,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
    * agent with neither a name nor `learning.agentKey`); a session opened without one, `generate()` and
    * `stream()` have none. A layer that fails to open the session never fails the call: the GMI gets a session
    * that asks again at each turn, and until one opens each turn has no learner and the GMI renders the
-   * persona's traits itself (plan check F3).
+   * persona's traits itself.
    */
   async function learnerSessionFor(sessionId: string, personaId: string, userId: string | undefined): Promise<ILearnerSession | undefined> {
     const active = layer;
@@ -413,7 +413,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
       return await open();
     } catch (error) {
       console.warn("[agentos] gmi(): the learning layer gave the session no learner session; each turn asks again, and until one opens the turn has no learner and its GMI renders the persona's traits itself.", error);
-      // Fail closed: a GMI with no session tells its tools nothing, which reads as a host with no layer.
+      // Fail closed: the deferred session rejects while the layer cannot open one, so each such turn runs degraded
+      // and tells its tools it has no learner.
       return deferLearnerSession({ traits: authoredTraits, open });
     }
   }

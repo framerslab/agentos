@@ -182,7 +182,7 @@ describe("self_evaluate's evaluate on a turn the layer refuses", () => {
   };
   const turnWith = (learning: TurnLearning): ToolExecutionContext =>
     ({ gmiId: 'g', personaId: 'p', userContext: { userId: 'u' }, correlationId: 's-1', sessionData: { sessionId: 's-1', learning } }) as ToolExecutionContext;
-  // Typed: a plain literal widens `action` to string, which execute() does not take (plan check F4).
+  // Typed: a plain literal widens `action` to string, which execute() does not take.
   const ASK: SelfEvaluateInput = { action: 'evaluate', query: 'What is QUIC?', response: 'A transport protocol.' };
 
   it('answers and keeps its in-session record, and stores no trace and applies no adjustment', async () => {

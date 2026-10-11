@@ -127,7 +127,7 @@ describe('a GMI with a learner session', () => {
   });
 
   it('asks again for a tool continuation under another organization than its turn', async () => {
-    // plan check F2: what the resume path does with an organization its host passed (ExternalToolResultHandler.ts:567-599).
+    // What a tool-result resume does when its host passes another organization.
     const { provider } = scriptedProvider([textReply('One.'), textReply('Continued.')]);
     const { session, inputs } = stubSession();
     const { gmi } = await createScriptedGmi({ provider, config: { learning: session } });

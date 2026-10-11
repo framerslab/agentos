@@ -144,7 +144,7 @@ describe('a runtime with a learning layer', () => {
   });
 
   it('builds the GMI when the layer fails, with a learner session that asks again each turn and rejects until one opens', async () => {
-    // plan check F3: a GMI with no session would tell its tools nothing, and they would act as on a host with no layer.
+    // A GMI with no session would tell its tools nothing, and they would act as on a host with no layer.
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const layer = recordingLayer(async () => {
       throw new Error('layer down');
