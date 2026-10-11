@@ -298,3 +298,53 @@ describe.each(STREAM_PROVIDERS)('$name: how a stream ends', ({ binary, model, cr
     },
   );
 });
+
+/**
+ * stream-json as the current Gemini CLI writes it (google-gemini/gemini-cli at
+ * 9b6e0265: the event types in packages/core/src/output/types.ts, written by
+ * packages/cli/src/nonInteractiveCli.ts): an init event, the prompt echoed as
+ * a user message, the reply as assistant message deltas, and a result event
+ * that carries no text and has its token counts in `stats`.
+ */
+describe('GeminiCLIProvider: the stream-json the current Gemini CLI writes', () => {
+  const at = '2026-10-10T12:00:00.000Z';
+  const stats = {
+    total_tokens: 15,
+    input_tokens: 12,
+    output_tokens: 3,
+    cached: 0,
+    input: 12,
+    duration_ms: 840,
+    tool_calls: 0,
+    models: { 'gemini-3.5-flash': { total_tokens: 15, input_tokens: 12, output_tokens: 3, cached: 0, input: 12 } },
+  };
+  const opening = [
+    { type: 'init', timestamp: at, session_id: 'g1', model: 'gemini-3.5-flash' },
+    { type: 'message', timestamp: at, role: 'user', content: 'Hello' },
+  ];
+
+  async function streamOf(lines: unknown[]): Promise<ModelCompletionResponse[]> {
+    stubCli('gemini', () => cliRun(lines, 0));
+    const provider = new GeminiCLIProvider();
+    await provider.initialize({});
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream('gemini-3.5-flash', HELLO, {})) chunks.push(chunk);
+    return chunks;
+  }
+
+  it('passes on the reply written as assistant message deltas, with the token counts of the result stats', async () => {
+    const chunks = await streamOf([
+      ...opening,
+      { type: 'message', timestamp: at, role: 'assistant', content: 'Hi ', delta: true },
+      { type: 'message', timestamp: at, role: 'assistant', content: 'there', delta: true },
+      { type: 'result', timestamp: at, status: 'success', stats },
+    ]);
+    const final = chunks[chunks.length - 1];
+
+    // The echoed prompt is not reply text.
+    expect(chunks.filter((chunk) => !chunk.isFinal).map((chunk) => chunk.responseTextDelta)).toEqual(['Hi ', 'there']);
+    expect(final.error).toBeUndefined();
+    expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: 'Hi there' } }] });
+    expect(final.usage).toMatchObject({ promptTokens: 12, completionTokens: 3, totalTokens: 15 });
+  });
+});
