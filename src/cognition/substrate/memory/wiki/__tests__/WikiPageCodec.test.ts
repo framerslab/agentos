@@ -53,6 +53,25 @@ describe('WikiPageCodec', () => {
     }
   });
 
+  it('keeps the indentation of a body that opens with an indented line, and drops blank lines before a body', () => {
+    // Indented four spaces, the first line is a code block in Markdown.
+    const body = '    const total = 2;\n\nThe line above is code.\n';
+    const page = {
+      id: 'concepts/code',
+      type: 'concept' as const,
+      summary: 'Code.',
+      updated: '2026-06-02T10:00:00Z',
+      sources: [],
+      body,
+      links: [],
+    };
+
+    expect(parsePage('concepts/code', serializePage(page)).body).toBe(body);
+
+    // A page file written by hand may leave blank lines after its front matter.
+    expect(parsePage('concepts/code', `---\ntype: concept\n---\n\n \n${body}`).body).toBe(body);
+  });
+
   it('extractWikiLinks dedupes and trims', () => {
     expect(extractWikiLinks('see [[Frame]] and [[ Frame ]] and [[AgentOS]]')).toEqual(['Frame', 'AgentOS']);
   });
