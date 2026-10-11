@@ -1,4 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import type { IncomingMessage } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import {
   createVoiceProvidersFromEnv,
   createSttChainFromEnv,
@@ -284,5 +286,125 @@ describe('createSttChain from entries', () => {
   it('refuses to price an entry parseSttEntry refuses, a device entry among them', () => {
     expect(() => sttEntryPricePerMinute('device:moonshine-auto')).toThrow(RangeError);
     expect(() => sttEntryPricePerMinute('openai')).toThrow(RangeError);
+  });
+});
+
+/**
+ * The part of the ws package's WebSocketServer the session tests use. The package's module entry exports the
+ * server as `WebSocketServer`; the repository's ambient declaration of 'ws' (for the channel adapters) does not
+ * name it, so the tests read it from the module at run time with this shape.
+ */
+interface LocalRealtimeSocket {
+  on(event: 'message', listener: (data: Buffer) => void): void;
+  send(data: string): void;
+  terminate(): void;
+}
+
+interface LocalRealtimeServer {
+  clients: Set<LocalRealtimeSocket>;
+  on(event: 'connection', listener: (socket: LocalRealtimeSocket) => void): void;
+  once(event: 'listening', listener: () => void): void;
+  address(): AddressInfo;
+  close(callback: () => void): void;
+}
+
+interface LocalRealtimeServerOptions {
+  host: string;
+  port: number;
+  verifyClient: (
+    info: { req: IncomingMessage },
+    accept: (verified: boolean, code?: number, message?: string) => void
+  ) => void;
+}
+
+describe('createSttChain sessions', () => {
+  // A local stand-in for OpenAI's Realtime endpoint. It answers an upgrade for a model in `refused` with
+  // HTTP 503 and confirms any other connection's session update. It records the model each connection asks
+  // for (a host other than api.openai.com gets it as a query parameter) and the model of each session update
+  // it confirms.
+  const refused = new Set<string>();
+  const asked: string[] = [];
+  const confirmed: string[] = [];
+  let server: LocalRealtimeServer;
+  let openai: { apiKey: string; baseUrl: string };
+
+  beforeAll(async () => {
+    const { WebSocketServer } = (await import('ws')) as unknown as {
+      WebSocketServer: new (options: LocalRealtimeServerOptions) => LocalRealtimeServer;
+    };
+    server = new WebSocketServer({
+      host: '127.0.0.1',
+      port: 0,
+      verifyClient: (
+        info: { req: IncomingMessage },
+        accept: (verified: boolean, code?: number, message?: string) => void
+      ) => {
+        const model = new URL(info.req.url ?? '/', 'http://127.0.0.1').searchParams.get('model') ?? '';
+        asked.push(model);
+        if (refused.has(model)) accept(false, 503, 'Service Unavailable');
+        else accept(true);
+      },
+    });
+    server.on('connection', (socket) => {
+      socket.on('message', (data) => {
+        const event = JSON.parse(String(data)) as {
+          type?: string;
+          session?: { audio?: { input?: { transcription?: { model?: string } } } };
+        };
+        if (event.type !== 'session.update') return;
+        confirmed.push(event.session?.audio?.input?.transcription?.model ?? '');
+        socket.send(JSON.stringify({ type: 'session.updated', event_id: 'event_confirm', session: event.session }));
+      });
+    });
+    await new Promise<void>((resolve) => server.once('listening', () => resolve()));
+    const { port } = server.address() as AddressInfo;
+    openai = { apiKey: 'sk-test-not-a-real-key', baseUrl: `ws://127.0.0.1:${port}/v1/realtime` };
+  });
+
+  afterAll(async () => {
+    for (const client of server.clients) client.terminate();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  beforeEach(() => {
+    refused.clear();
+    asked.length = 0;
+    confirmed.length = 0;
+  });
+
+  it('opens on the next entry when one refuses, in the order given, each connection with its model', async () => {
+    refused.add('gpt-4o-transcribe');
+    const failed: string[] = [];
+    const attempts: number[] = [];
+    const chain = createSttChain(
+      ['openai:gpt-4o-transcribe', 'openai:gpt-4o-mini-transcribe'],
+      { openai },
+      {
+        onProviderFailed: (event) => failed.push(event.providerId),
+        onProviderSelected: (event) => attempts.push(event.attempt),
+      }
+    );
+    const session = await chain.startSession({ language: 'en' });
+    try {
+      expect(asked).toEqual(['gpt-4o-transcribe', 'gpt-4o-mini-transcribe']);
+      expect(confirmed).toEqual(['gpt-4o-mini-transcribe']);
+      expect(failed).toEqual(['openai-realtime-transcription']);
+      expect(attempts).toEqual([2]);
+      // Failover is off, so the session is the provider's own, which ends a turn with flush().
+      expect(typeof session.flush).toBe('function');
+    } finally {
+      session.close();
+    }
+  });
+
+  it('stays on the first entry when its session opens, and never asks for the next', async () => {
+    const chain = createSttChain(['openai:gpt-4o-transcribe', 'openai:gpt-4o-mini-transcribe'], { openai });
+    const session = await chain.startSession({ language: 'en' });
+    try {
+      expect(asked).toEqual(['gpt-4o-transcribe']);
+      expect(confirmed).toEqual(['gpt-4o-transcribe']);
+    } finally {
+      session.close();
+    }
   });
 });
