@@ -321,6 +321,36 @@ See [RFC_EXTENSION_STANDARDS.md](../extensions/RFC_EXTENSION_STANDARDS.md) for t
 
 ---
 
+## Cutting a Recording in the Browser
+
+Install the optional peer `mediabunny` alongside AgentOS to use `@framers/agentos/io/hearing/pieces`. This entry accepts a `Blob` or `Uint8Array`, reaches no Node built-in and also re-exports `transcribePieces` and its types.
+
+```typescript
+import { readAudioInfo, cutPieces } from '@framers/agentos/io/hearing/pieces';
+
+// `file` is the Blob selected by the caller.
+const info = await readAudioInfo(file);
+if (info.path === null) throw new Error(`Cannot read this recording: ${info.reason}`);
+
+for await (const piece of cutPieces(file, {
+  pieceSeconds: 300,
+  overlapSeconds: 3,
+  maxBytes: 24_000_000,
+})) {
+  // Each piece has index, startMs, durationMs, data, mimeType and fileName.
+  // Pass it to the caller's transcription transport, or feed the iterable to transcribePieces.
+  console.log(piece.fileName, piece.startMs, piece.durationMs);
+}
+```
+
+`readAudioInfo` reports the container, codec, seconds, sample rate, channels and a `copy`, `decode` or refused (`null`) path. AAC is copied into M4A, Opus and Vorbis into WebM, MP3 into MP3, and little-endian 16-bit PCM at at most 64,000 bytes per second into WAV. Compressed tracks are read packet by packet to measure their average byte rate; above the same limit they require decoding. Other PCM and decodable codecs are converted to 16 kHz mono 16-bit WAV. Unknown codecs, AC-3, E-AC-3 and DTS are refused; a codec that needs an unavailable decoder reports `cannot_decode`. Unrecognized containers throw `UnreadableAudioError` with reason `container`.
+
+`planPieces(seconds, { pieceSeconds, overlapSeconds })` gives nominal starts and ends without reading audio. A piece must be at least ten seconds, and a trailing remainder no longer than the overlap plus one second joins the previous piece. For example, 1,000 seconds with 300-second pieces and three seconds of overlap gives starts at 0, 297, 594 and 891 seconds.
+
+When decoding is available, `cutPieces` searches the ten seconds before each interior mark for a quiet cut. `quietSeconds` changes that window. The next piece starts `overlapSeconds` before the chosen end, while later end marks retain their nominal positions. `fromIndex` skips yielding earlier pieces while still computing their boundaries. The caller's `signal` is checked before each piece, and a piece larger than `maxBytes` is refused with `RangeError`. Copied boundaries follow encoded packets, so their container durations may differ from the reported boundaries by a packet.
+
+On a server, `pieceSeconds(bytes)` reads the container duration without a decoder. `wavHeaderSeconds(bytes)` reads the WAV byte rate and declared data length and accepts a header without its sample payload. `readWavPcm(bytes)` reads a complete WAV as `{ sampleRate, channels, samples }`, with one `Float32Array` per channel. It supports 16-bit integer PCM and 32-bit float PCM and refuses other WAVE encodings with `UnreadableAudioError` (`unsupported_codec`). It reverses `encodeFloat32ToWav` from `@framers/agentos/io/speech`; multi-channel samples must be interleaved again before that encoder is called.
+
 ## Transcribing a Long Recording in Pieces
 
 A recording too long for one transcription request is sent in pieces. When the pieces overlap by a few seconds, the words of each overlap come back twice: at the end of one piece's text and at the start of the next. `transcribePieces` (in `@framers/agentos/io/hearing`) sends the pieces to a function you give it and joins their texts without the repeated words:
