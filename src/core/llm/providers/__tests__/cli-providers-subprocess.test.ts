@@ -760,3 +760,59 @@ describe.each(STREAM_PROVIDERS)('$name: a character whose bytes two reads of std
     expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: reply } }] });
   });
 });
+
+/**
+ * A run that writes `lines` and exits 0, settled as execa 10 settles a run
+ * that has a `timeout`. The timer starts at the spawn; when it fires before
+ * the run has settled, execa calls kill(), which does nothing to a process
+ * that has exited, and fails the run with `timedOut` (killAfterTimeout in
+ * lib/terminate/timeout.js). The run settles once the process has exited and
+ * its stdout has ended; a run the timer failed waits for that as well
+ * (waitForSubprocessResult in lib/resolve/wait-subprocess.js) and carries the
+ * exit code the process had (getAsyncResult in lib/methods/main-async.js).
+ * stdout hands over one line per read, as a pipe does while the CLI streams
+ * its reply, and ends after the last line: the CLI has exited by then.
+ */
+function timedRun(lines: unknown[], timeout: number) {
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+  }, timeout);
+  let settle!: () => void;
+  const outcome = new Promise<unknown>((resolve, reject) => {
+    settle = () => {
+      clearTimeout(timer);
+      if (timedOut) reject(execaError({ exitCode: 0, timedOut: true, timeout }));
+      else resolve({ failed: false, exitCode: 0, stdout: '', stderr: '' });
+    };
+  });
+  outcome.catch(() => undefined);
+  return Object.assign(outcome, {
+    stdout: (async function* () {
+      for (const line of lines) yield Buffer.from(`${JSON.stringify(line)}\n`);
+      settle();
+    })(),
+    kill: vi.fn(),
+  });
+}
+
+describe.each(STREAM_PROVIDERS)('$name: a consumer slower than the timeout', ({ binary, model, create, fixture }) => {
+  it('gets the whole reply and its final chunk from a CLI that wrote them and exited 0 in time', async () => {
+    const timeout = 200;
+    stubCli(binary, (_args, options) => timedRun(fixture.hello, options.timeout));
+    const provider = create();
+    await provider.initialize({ requestTimeout: timeout });
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream(model, HELLO, {})) {
+      chunks.push(chunk);
+      // A consumer that spends longer than the timeout on each chunk.
+      if (!chunk.isFinal) await new Promise((resolve) => setTimeout(resolve, 2 * timeout));
+    }
+    const final = chunks[chunks.length - 1];
+
+    // The consumer held a chunk of the reply past the timeout: the case under test was reached.
+    expect(chunks.filter((chunk) => !chunk.isFinal).map((chunk) => chunk.responseTextDelta)).toEqual(['Hello']);
+    expect(final.error).toBeUndefined();
+    expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: 'Hello' } }] });
+  });
+});
