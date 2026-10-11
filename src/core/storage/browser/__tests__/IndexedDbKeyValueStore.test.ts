@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 
-import { idb } from '../idb.js';
+import { idb, type IdbDatabaseLike } from '../idb.js';
 import { openIndexedDbStore } from '../IndexedDbKeyValueStore.js';
 
 describe('openIndexedDbStore', () => {
@@ -71,5 +71,44 @@ describe('openIndexedDbStore', () => {
     expect((refused as { name?: unknown } | null | undefined)?.name).toBe('ConstraintError');
     expect(await store.keys('')).toEqual(['a']);
     store.close();
+  });
+
+  it('leaves nothing open when an upgrade that waited on another tab has its turn after the store answered from memory', async () => {
+    // Another tab holds the database at version 1 and does not close it for a newer version, so the store's open at
+    // version 2 is blocked and the store answers from memory.
+    const otherTab = await new Promise<IdbDatabaseLike>((resolve, reject) => {
+      const request = idb().factory.open('held-by-another-tab', 1);
+      request.onupgradeneeded = () => {
+        request.result.createObjectStore('kv');
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const store = await openIndexedDbStore({ dbName: 'held-by-another-tab', storeName: 'kv', version: 2 });
+    expect(store.memoryOnly).toBe(true);
+    // The other tab lets go, and the blocked open has its turn. Opens of one database run in the order they were
+    // asked for, so the two below run after it.
+    otherTab.close();
+    const version = await new Promise<number>((resolve, reject) => {
+      const request = idb().factory.open('held-by-another-tab');
+      request.onsuccess = () => {
+        const opened = request.result as unknown as { version: number; close(): void };
+        opened.close();
+        resolve(opened.version);
+      };
+      request.onerror = () => reject(request.error);
+    });
+    expect(version).toBe(1);
+    // An open at a newer version is blocked while any other connection to the database is open.
+    const outcome = await new Promise<'opened' | 'blocked'>((resolve, reject) => {
+      const request = idb().factory.open('held-by-another-tab', 3);
+      request.onblocked = () => resolve('blocked');
+      request.onsuccess = () => {
+        request.result.close();
+        resolve('opened');
+      };
+      request.onerror = () => reject(request.error);
+    });
+    expect(outcome).toBe('opened');
   });
 });

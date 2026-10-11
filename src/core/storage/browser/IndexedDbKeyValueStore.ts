@@ -102,17 +102,41 @@ export class IndexedDbKeyValueStore implements KeyValueStore {
  * Opens the store, or the memory store when the browser refuses IndexedDB: a page with no `indexedDB`, an `open`
  * that throws or fails (a database above `version` among them), or an upgrade that waits on another tab. The
  * answer's `memoryOnly` says which it is; the memory store's `close` does nothing.
+ *
+ * An upgrade that waited on another tab still has its turn once that tab closes the database. It is aborted then,
+ * so the database stays as it was and the connection it opened is closed: nothing is left open behind the memory
+ * store.
  */
 export async function openIndexedDbStore(options: IndexedDbStoreOptions): Promise<KeyValueStore & { close(): void }> {
   try {
     const db = await new Promise<IdbDatabaseLike>((resolve, reject) => {
       const request = idb().factory.open(options.dbName, options.version ?? 1);
+      // True once the promise is settled. The browser does not end a blocked open: it goes on when the other tab
+      // closes the database, after the store has answered from memory, and what it opens then is nobody's.
+      let answered = false;
+      const refuse = (reason: unknown): void => {
+        answered = true;
+        reject(reason);
+      };
       request.onupgradeneeded = () => {
+        if (answered && request.transaction) {
+          // Aborting the upgrade fails the open, which closes its connection and leaves the database as it was.
+          request.transaction.abort();
+          return;
+        }
         if (!request.result.objectStoreNames.contains(options.storeName)) request.result.createObjectStore(options.storeName);
       };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-      request.onblocked = () => reject(new Error('the database is held open by another tab at an older version'));
+      request.onsuccess = () => {
+        if (answered) {
+          // An open that succeeds after the answer (an upgrade that could not be aborted) is closed at once.
+          request.result.close();
+          return;
+        }
+        answered = true;
+        resolve(request.result);
+      };
+      request.onerror = () => refuse(request.error);
+      request.onblocked = () => refuse(new Error('the database is held open by another tab at an older version'));
     });
     return new IndexedDbKeyValueStore(db, options.storeName);
   } catch {

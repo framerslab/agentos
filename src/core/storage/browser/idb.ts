@@ -61,6 +61,8 @@ export interface IdbDatabaseLike {
 
 /** The request `open` answers. */
 export interface IdbOpenRequestLike extends IdbRequestLike<IdbDatabaseLike> {
+  /** The upgrade's transaction while `onupgradeneeded` runs; null outside it. */
+  readonly transaction: { abort(): void } | null;
   /** Called when the database is new or older than the version asked for, inside the upgrade. */
   onupgradeneeded: (() => void) | null;
   /** Called when an upgrade waits for another connection to close. */
