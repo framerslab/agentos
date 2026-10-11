@@ -54,6 +54,29 @@ import type {
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 /**
+ * The error of a run the caller cancelled after it had settled, as execa
+ * 10.0.1 reports a run whose `cancelSignal` aborts before it settles: the
+ * run's own fields with `failed` and `isCanceled` set, execa's message for a
+ * cancelled run, and the signal's reason as `cause` (getErrorProperties in
+ * lib/return/result.js, getErrorPrefix in lib/return/message.js). The process
+ * had exited by itself, so no signal ended it and `isTerminated` stays false.
+ *
+ * @param result — the run's result, as execa resolved it
+ * @param signal — the caller's signal, which has aborted
+ * @returns an error shaped as execa's for a cancelled run
+ */
+function cancelledRunError(result: unknown, signal: AbortSignal): Error {
+  const run: Record<string, unknown> =
+    result !== null && typeof result === 'object' ? { ...(result as Record<string, unknown>) } : {};
+  const command = typeof run.escapedCommand === 'string' ? `: ${run.escapedCommand}` : '';
+  return Object.assign(new Error(`Command was canceled${command}`), run, {
+    failed: true,
+    isCanceled: true,
+    cause: signal.reason,
+  });
+}
+
+/**
  * A process's stdout as {@link CLISubprocessBridge.stream} reads it: execa's
  * Readable, which can be destroyed, or any async iterable of output.
  */
@@ -285,12 +308,14 @@ export abstract class CLISubprocessBridge {
    * its events wait in a queue until the consumer takes them. The run thus
    * settles when the CLI exits, and the timeout measures the CLI, not the
    * consumer. Read to its end, the stream awaits the process's exit and
-   * throws on a failed one. A consumer that stops reading before the end (a
-   * `break` in its `for await`, or `return()`) ends the process instead: it
-   * is killed, and its stdout is no longer read. The run's outcome is handled
-   * from the moment the process starts, so a failure while the consumer is
-   * busy between two events, or after it has stopped reading, is no
-   * unhandled rejection in the host.
+   * throws on a failed one. It throws on a call the caller aborted before
+   * the consumer took the last event as well, though the CLI may have exited
+   * first: the run is classified as execa's cancelled run. A consumer that
+   * stops reading before the end (a `break` in its `for await`, or
+   * `return()`) ends the process instead: it is killed, and its stdout is no
+   * longer read. The run's outcome is handled from the moment the process
+   * starts, so a failure while the consumer is busy between two events, or
+   * after it has stopped reading, is no unhandled rejection in the host.
    *
    * @param options — bridge options
    * @yields typed stream events (text_delta, result, error, system)
@@ -339,7 +364,14 @@ export abstract class CLISubprocessBridge {
 
       readToEnd = true;
       /* Ensure non-zero exits after stdout drains still surface as errors. */
-      await subprocess;
+      const result = await subprocess;
+      /* execa fails a run for the caller's abort only until the run settles
+       * (lib/terminate/cancel.js and handlePromise in
+       * lib/methods/main-async.js, execa 10.0.1), and the run settles when the
+       * CLI exits, which can be before the consumer has taken the last event.
+       * An abort in that time ends the stream as a cancelled run still, as it
+       * did when the run settled at the consumer's pace. */
+      if (options.abortSignal?.aborted) throw cancelledRunError(result, options.abortSignal);
     } catch (error: any) {
       throw this.classifyError(error);
     } finally {
