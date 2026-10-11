@@ -1083,4 +1083,34 @@ describe('ClaudeCodeProvider: a reply Claude Code returns as structured output',
     expect(parts.flatMap((part) => (part.type === 'text' ? [part.text] : []))).toEqual([textReply.text]);
     expect(await result.text).toBe(textReply.text);
   });
+
+  it("ends with the abort chunk (error.type 'abort') when the caller aborts while the consumer holds the reply's text delta", async () => {
+    let run!: ReturnType<typeof cancellableRun>;
+    stubCli('claude', (_args, options) => {
+      run = cancellableRun([resultLine(textReply)], options.cancelSignal);
+      return run;
+    });
+    const provider = new ClaudeCodeProvider();
+    await provider.initialize({});
+    const controller = new AbortController();
+    const chunks: ModelCompletionResponse[] = [];
+    let endedBeforeAbort: boolean | undefined;
+    for await (const chunk of provider.generateCompletionStream('claude-sonnet-4-6', HELLO, {
+      tools: [WEATHER_TOOL],
+      abortSignal: controller.signal,
+    })) {
+      chunks.push(chunk);
+      if (chunk.responseTextDelta && !controller.signal.aborted) {
+        endedBeforeAbort = run.state.ended;
+        controller.abort();
+      }
+    }
+    const final = chunks[chunks.length - 1];
+
+    // The CLI had exited 0 and the reply's delta had gone out before the abort: the case under test was reached.
+    expect(endedBeforeAbort).toBe(true);
+    expect(chunks.filter((chunk) => !chunk.isFinal).map((chunk) => chunk.responseTextDelta)).toEqual([textReply.text]);
+    expect(final).toMatchObject({ isFinal: true, error: { type: 'abort', code: 'REQUEST_ABORTED' } });
+    expect(final.choices).toEqual([]);
+  });
 });
