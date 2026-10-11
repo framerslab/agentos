@@ -511,6 +511,9 @@ describe.each(STREAM_PROVIDERS)('$name: a consumer that waits on each chunk', ({
         await new Promise((resolve) => setImmediate(resolve));
       }
 
+      // The consumer waited on a chunk of the reply, which the bridge read
+      // with the end of stdout: the case under test was reached.
+      expect(chunks.filter((chunk) => !chunk.isFinal).map((chunk) => chunk.responseTextDelta)).toEqual(['Hello']);
       // While a test listens for unhandledRejection, Vitest leaves such a
       // rejection to it (runtime/moduleRunner/errorCatcher.ts in vitest 5.0.3),
       // so this listener is where it shows.
