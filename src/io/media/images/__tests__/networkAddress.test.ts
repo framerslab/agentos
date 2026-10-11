@@ -146,4 +146,14 @@ describe('nat64PrefixesFrom', () => {
     expect(nat64PrefixesFrom([])).toEqual([]);
     expect(nat64PrefixesFrom(['192.0.0.170', '2606:4700:4700::1111', 'fe80::1%en0', 'not an address'])).toEqual([]);
   });
+
+  it('finds no prefix where byte 8, which the format keeps at zero, is not', () => {
+    // The bytes after 2001:db8 spell 192.0.0.170 as a /32 prefix would carry
+    // it, but byte 8 is 1: no DNS64 resolver made this address.
+    expect(nat64PrefixesFrom(['2001:db8:c000:aa:100::'])).toEqual([]);
+    // Under /96 byte 8 is part of the prefix itself.
+    expect(nat64PrefixesFrom(['2001:db8:122:344:100::c000:aa'])).toEqual([
+      { bytes: [0x20, 0x01, 0x0d, 0xb8, 0x01, 0x22, 0x03, 0x44, 0x01, 0, 0, 0], length: 96 },
+    ]);
+  });
 });

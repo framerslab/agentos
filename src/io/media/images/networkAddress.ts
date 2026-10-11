@@ -141,7 +141,10 @@ function embeddedIPv4(bytes: readonly number[], length: number): number[] {
  * two addresses, both IPv4: 192.0.0.170 and 192.0.0.171. An IPv6 answer was
  * therefore made by a DNS64 resolver, from the network's NAT64 prefix, and
  * the place of one of those two addresses in it gives the prefix and its
- * length. Text that is not an IPv6 address is passed over.
+ * length. Byte 8 must be zero where the format reserves it (every length but
+ * 96), so bytes that only happen to spell one of the two addresses around a
+ * non-zero byte 8 name no prefix. Text that is not an IPv6 address is passed
+ * over.
  *
  * @example
  * ```ts
@@ -156,6 +159,7 @@ export function nat64PrefixesFrom(addresses: readonly string[]): Nat64Prefix[] {
     if (!groups) continue;
     const bytes = ipv6Bytes(groups);
     for (const length of NAT64_PREFIX_LENGTHS) {
+      if (length !== 96 && bytes[8] !== 0) continue;
       const [a, b, c, d] = embeddedIPv4(bytes, length);
       if (a === 192 && b === 0 && c === 0 && (d === 170 || d === 171)) {
         const prefix = bytes.slice(0, length / 8);

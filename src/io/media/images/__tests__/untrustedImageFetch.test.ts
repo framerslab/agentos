@@ -344,6 +344,32 @@ describe('fetchUntrustedImage', () => {
     expect(received).toEqual([]);
   });
 
+  it('refuses an IPv6 address when the resolver fails to say whether the network has a NAT64 prefix, and asks again next time', async () => {
+    // The name resolves, to an address that is public as far as its own
+    // bytes go; the question about the prefix fails for a moment
+    // (EAI_AGAIN). Taking that for "no prefix" would let a NAT64 address of
+    // a private host through. The resolver answers at once, as dns.lookup
+    // never does: a failure kept by mistake would show on the second fetch.
+    const asked: string[] = [];
+    const lookup: LookupFunction = (hostname, _options, callback) => {
+      asked.push(hostname);
+      if (hostname === 'ipv4only.arpa') {
+        callback(Object.assign(new Error('getaddrinfo EAI_AGAIN ipv4only.arpa'), { code: 'EAI_AGAIN' }), []);
+      } else {
+        callback(null, [{ address: '2606:4700:4700::1111', family: 6 }]);
+      }
+    };
+
+    for (const url of [`http://images.example.test:${port}/image.png`, `http://[2606:4700:4700::1111]:${port}/image.png`]) {
+      const error: unknown = await fetchUntrustedImage(url, { lookup }).catch((reason: unknown) => reason);
+
+      expect(error, url).toMatchObject({ code: 'IMAGE_URL_REFUSED' });
+      expect(String((imageUrlRefusalDetail(error)?.cause as Error).message), url).toContain('NAT64');
+    }
+    expect(asked).toEqual(['images.example.test', 'ipv4only.arpa', 'ipv4only.arpa']);
+    expect(received).toEqual([]);
+  });
+
   it('checks an https URL the same way: a refused name opens no connection, an allowed one opens its own', async () => {
     // A plain TCP server stands in for the https host: it counts connections
     // and ends each one, so the TLS handshake fails after the connection the

@@ -104,7 +104,16 @@ export async function imageToBuffer(input: string | Buffer, options: ImageToBuff
 
   const trimmed = input.trim();
   // Untrusted input is held to a size whether it is fetched or decoded here.
-  const within = options.untrusted ? sizeCheck(untrustedByteLimit(options.maxBytes)) : (bytes: Buffer) => bytes;
+  // The size is worked out from the text, so nothing over the limit is
+  // decoded: `most` is a bound that costs nothing, `exactly` is counted only
+  // when the bound is over the limit.
+  const maxBytes = options.untrusted ? untrustedByteLimit(options.maxBytes) : undefined;
+  const hold = (most: number, exactly: () => number): void => {
+    if (maxBytes !== undefined && most > maxBytes && exactly() > maxBytes) {
+      throw new Error(`imageToBuffer: the image is larger than ${maxBytes} bytes.`);
+    }
+  };
+  const holdBase64 = (text: string): void => hold(Math.floor((text.length * 3) / 4), () => base64ByteBound(text));
 
   // Data URL (RFC 2397): base64 after ";base64", percent-encoded bytes otherwise.
   if (/^data:/i.test(trimmed)) {
@@ -117,9 +126,12 @@ export async function imageToBuffer(input: string | Buffer, options: ImageToBuff
       throw new Error('imageToBuffer: malformed data URL — missing comma separator.');
     }
     const payload = url.slice(commaIdx + 1);
-    return within(
-      /; *base64 *$/i.test(url.slice(0, commaIdx)) ? Buffer.from(payload, 'base64') : percentDecodeBytes(payload),
-    );
+    if (/; *base64 *$/i.test(url.slice(0, commaIdx))) {
+      holdBase64(payload);
+      return Buffer.from(payload, 'base64');
+    }
+    hold(Buffer.byteLength(payload, 'utf8'), () => percentDecodedLength(payload));
+    return percentDecodeBytes(payload);
   }
 
   // file: URL — convert to a local path and read.
@@ -150,9 +162,10 @@ export async function imageToBuffer(input: string | Buffer, options: ImageToBuff
     trimmed.includes('/') || trimmed.includes('\\') || /\.\w{2,5}$/.test(trimmed);
   if (looksLikePath && options.untrusted) {
     // No file is read for untrusted input; base64 of an image is still decoded.
+    holdBase64(trimmed);
     const bytes = imageBase64(trimmed);
     if (bytes) {
-      return within(bytes);
+      return bytes;
     }
     throw localFileRefusal(trimmed);
   }
@@ -186,21 +199,47 @@ export async function imageToBuffer(input: string | Buffer, options: ImageToBuff
   }
 
   // Fallback: raw base64 string (no data URL prefix).
-  return within(Buffer.from(trimmed, 'base64'));
+  holdBase64(trimmed);
+  return Buffer.from(trimmed, 'base64');
 }
 
 /**
- * A check for an image decoded from untrusted input: the bytes when they are
- * no more than `maxBytes`, an error otherwise. The fetch of an untrusted URL
- * applies the same limit while it reads.
+ * The most bytes `text` can decode to as base64: three for every four
+ * characters of the alphabet, standard or URL-safe (RFC 4648). Padding, white
+ * space and anything else decode to nothing.
  */
-function sizeCheck(maxBytes: number): (bytes: Buffer) => Buffer {
-  return (bytes) => {
-    if (bytes.length > maxBytes) {
-      throw new Error(`imageToBuffer: the image is larger than ${maxBytes} bytes.`);
+function base64ByteBound(text: string): number {
+  let characters = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (
+      (code >= 0x30 && code <= 0x39) ||
+      (code >= 0x41 && code <= 0x5a) ||
+      (code >= 0x61 && code <= 0x7a) ||
+      code === 0x2b ||
+      code === 0x2f ||
+      code === 0x2d ||
+      code === 0x5f
+    ) {
+      characters += 1;
     }
-    return bytes;
-  };
+  }
+  return Math.floor((characters * 3) / 4);
+}
+
+/**
+ * The number of bytes {@link percentDecodeBytes} gives for `payload`: its
+ * UTF-8 length, less two for every `%XX` escape.
+ */
+function percentDecodedLength(payload: string): number {
+  let escapes = 0;
+  for (let i = payload.indexOf('%'); i !== -1 && i + 2 < payload.length; i = payload.indexOf('%', i + 1)) {
+    if (hexValue(payload.charCodeAt(i + 1)) >= 0 && hexValue(payload.charCodeAt(i + 2)) >= 0) {
+      escapes += 1;
+      i += 2;
+    }
+  }
+  return Buffer.byteLength(payload, 'utf8') - 2 * escapes;
 }
 
 /** The error for untrusted input that names a local file. */

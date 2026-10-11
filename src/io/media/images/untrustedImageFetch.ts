@@ -9,6 +9,7 @@ import { ADDRCONFIG, lookup as dnsLookup, type LookupAddress } from 'node:dns';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import { isIP, isIPv6, type LookupFunction } from 'node:net';
+import { networkInterfaces } from 'node:os';
 import { pipeline, type Readable } from 'node:stream';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 
@@ -127,38 +128,70 @@ function unreachableName(hostname: string, detail: ImageUrlRefusalDetail): Error
 /** How long the NAT64 prefixes a resolver revealed are kept before it is asked again. */
 const NAT64_PREFIX_TTL_MS = 5 * 60_000;
 
-/** The NAT64 prefixes each resolver revealed, and when. */
-const nat64PrefixCache = new WeakMap<LookupFunction, { at: number; prefixes: Promise<Nat64Prefix[]> }>();
+/** What a resolver revealed about the network's NAT64 prefixes, when, and on which network. */
+interface Nat64PrefixEntry {
+  at: number;
+  network: string;
+  prefixes: Promise<Nat64Prefix[] | undefined>;
+}
+
+/** The NAT64 prefixes each resolver revealed. */
+const nat64PrefixCache = new WeakMap<LookupFunction, Nat64PrefixEntry>();
+
+/**
+ * This machine's addresses on its networks, as one string. When it changes
+ * the machine has moved to another network, whose NAT64 prefix can be
+ * another, so what was learned on the old one is not used.
+ */
+function networkFingerprint(): string {
+  return Object.values(networkInterfaces())
+    .flatMap((addresses) => addresses ?? [])
+    .filter((entry) => !entry.internal)
+    .map((entry) => entry.cidr ?? entry.address)
+    .sort()
+    .join(' ');
+}
 
 /**
  * The NAT64 prefixes of the network, as `resolve` reveals them (RFC 7050):
  * the IPv6 addresses it gives for `ipv4only.arpa`, a name that has IPv4
  * addresses only, were made by a DNS64 resolver from those prefixes. A
- * network without DNS64 gives none, and so does a resolver that fails. The
- * answer is kept for five minutes; a failure other than "no such name" is
- * not kept.
+ * network without DNS64 gives none: the resolver answers that the name has
+ * no such address. Any other failure gives `undefined`: the prefixes are
+ * not known, and the caller must not take that for "none".
+ *
+ * An answer is kept for five minutes on the network it was learned on. A
+ * failure is not kept.
  */
-function nat64Prefixes(resolve: LookupFunction): Promise<Nat64Prefix[]> {
+function nat64Prefixes(resolve: LookupFunction): Promise<Nat64Prefix[] | undefined> {
+  const network = networkFingerprint();
   const cached = nat64PrefixCache.get(resolve);
-  if (cached && Date.now() - cached.at < NAT64_PREFIX_TTL_MS) return cached.prefixes;
-  const prefixes = new Promise<Nat64Prefix[]>((done) => {
-    try {
-      resolve('ipv4only.arpa', { family: 6, all: true, hints: 0 }, (error, result) => {
-        if (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOTFOUND') nat64PrefixCache.delete(resolve);
-          done([]);
-          return;
-        }
-        const addresses = Array.isArray(result) ? result.map((entry) => entry.address) : [result];
-        done(nat64PrefixesFrom(addresses));
-      });
-    } catch {
-      nat64PrefixCache.delete(resolve);
-      done([]);
-    }
-  });
-  nat64PrefixCache.set(resolve, { at: Date.now(), prefixes });
-  return prefixes;
+  if (cached && cached.network === network && Date.now() - cached.at < NAT64_PREFIX_TTL_MS) return cached.prefixes;
+  let settle!: (prefixes: Nat64Prefix[] | undefined) => void;
+  const entry: Nat64PrefixEntry = {
+    at: Date.now(),
+    network,
+    prefixes: new Promise((done) => {
+      settle = done;
+    }),
+  };
+  // Kept before the resolver is asked: one that answers at once must find
+  // the entry there to remove.
+  nat64PrefixCache.set(resolve, entry);
+  const unknown = () => {
+    if (nat64PrefixCache.get(resolve) === entry) nat64PrefixCache.delete(resolve);
+    settle(undefined);
+  };
+  try {
+    resolve('ipv4only.arpa', { family: 6, all: true, hints: 0 }, (error, result) => {
+      if (!error) settle(nat64PrefixesFrom(Array.isArray(result) ? result.map((address) => address.address) : [result]));
+      else if ((error as NodeJS.ErrnoException).code === 'ENOTFOUND') settle([]);
+      else unknown();
+    });
+  } catch {
+    unknown();
+  }
+  return entry.prefixes;
 }
 
 /** Finds the first of `addresses` a fetch may not connect to, or `undefined` when it may connect to all. */
@@ -170,7 +203,9 @@ type AddressCheck = (addresses: readonly string[]) => Promise<string | undefined
  * ({@link isPublicNetworkAddress}), and an IPv6 address that is must not
  * carry a non-public IPv4 address under a NAT64 prefix of this network: the
  * prefixes are asked of `resolve` only when such an address comes up, so a
- * fetch from an IPv4 address asks nothing more.
+ * fetch from an IPv4 address asks nothing more. When the resolver fails to
+ * say what the prefixes are, the check throws: an IPv6 address cannot be
+ * cleared, and the fetch is refused.
  */
 function addressCheck(resolve: LookupFunction, allowAddress?: (address: string) => boolean): AddressCheck {
   if (allowAddress) return async (addresses) => addresses.find((address) => !allowAddress(address));
@@ -180,6 +215,9 @@ function addressCheck(resolve: LookupFunction, allowAddress?: (address: string) 
     const overIPv6 = addresses.filter((address) => isIPv6(address));
     if (overIPv6.length === 0) return undefined;
     const prefixes = await nat64Prefixes(resolve);
+    if (prefixes === undefined) {
+      throw new Error("the resolver did not say whether the network has a NAT64 prefix, so an IPv6 address cannot be cleared");
+    }
     return overIPv6.find((address) => !isPublicNetworkAddress(address, { nat64Prefixes: prefixes }));
   };
 }
@@ -430,8 +468,17 @@ export async function fetchUntrustedImage(
   try {
     for (let redirects = 0; ; redirects += 1) {
       const host = url.hostname.replace(/^\[(.*)\]$/, '$1');
-      if (isIP(host) && (await beforeAbort(firstRefused([host]), signal)) !== undefined) {
-        throw refusal(`imageToBuffer: ${host} is not a public network address.`);
+      if (isIP(host)) {
+        // A check that fails refuses the address as one that did not pass.
+        const refused = await beforeAbort(firstRefused([host]), signal).catch((cause: unknown) => {
+          if (signal.aborted) throw cause;
+          return { cause };
+        });
+        if (refused !== undefined) {
+          const error = refusal(`imageToBuffer: ${host} is not a public network address.`);
+          if (typeof refused === 'object') refusalDetails.set(error, refused);
+          throw error;
+        }
       }
       const response = await get(url, lookup, signal);
       const status = response.statusCode ?? 0;
