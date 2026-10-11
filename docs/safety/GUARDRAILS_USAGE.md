@@ -97,30 +97,36 @@ Stop generation when the response exceeds a token budget:
 ```typescript
 class CostCeilingGuardrail implements IGuardrailService {
   // Enable streaming evaluation
-  config = {
-    evaluateStreamingChunks: true,
-    maxStreamingEvaluations: 100  // Rate limit
-  };
+  config = { evaluateStreamingChunks: true };
 
-  private tokenCount = 0;
   private readonly maxTokens = 1000;
+  // One count per response stream
+  private readonly tokenCounts = new Map<string, number>();
 
   async evaluateOutput({ chunk }: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null> {
+    // The stream's final chunk ends its count
+    if (chunk.isFinal) {
+      this.tokenCounts.delete(chunk.streamId);
+      return null;
+    }
+
     // Only evaluate text chunks
     if (chunk.type !== AgentOSResponseChunkType.TEXT_DELTA || !chunk.textDelta) {
       return null;
     }
 
     // Estimate tokens (rough: 1 token ≈ 4 chars)
-    this.tokenCount += Math.ceil(chunk.textDelta.length / 4);
+    const tokensUsed = (this.tokenCounts.get(chunk.streamId) ?? 0) + Math.ceil(chunk.textDelta.length / 4);
+    this.tokenCounts.set(chunk.streamId, tokensUsed);
 
-    if (this.tokenCount > this.maxTokens) {
+    if (tokensUsed > this.maxTokens) {
+      this.tokenCounts.delete(chunk.streamId);
       // "Change mind" - stop generating mid-stream
       return {
         action: GuardrailAction.BLOCK,
         reason: 'Response exceeded token budget. Please refine your request.',
         reasonCode: 'COST_CEILING_EXCEEDED',
-        metadata: { tokensUsed: this.tokenCount, limit: this.maxTokens },
+        metadata: { tokensUsed, limit: this.maxTokens },
       };
     }
 
@@ -128,6 +134,8 @@ class CostCeilingGuardrail implements IGuardrailService {
   }
 }
 ```
+
+The guardrail keeps its count per `streamId`, so each response is measured on its own, and the stream's final chunk, which every output guardrail is called for, ends the count. It sets no `maxStreamingEvaluations`: once a stream reaches that limit, the dispatcher passes its remaining chunks on without calling the guardrail, and the count would stop short of the budget.
 
 ### Example 2: Real-Time PII Redaction
 
@@ -208,14 +216,22 @@ class ContentPolicyGuardrail implements IGuardrailService {
     // ... more patterns
   ];
 
-  private accumulatedText = '';
+  // The text each response stream has produced so far
+  private readonly streamedText = new Map<string, string>();
 
   async evaluateOutput({ chunk }: GuardrailOutputPayload): Promise<GuardrailEvaluationResult | null> {
+    if (chunk.isFinal) {
+      this.streamedText.delete(chunk.streamId);
+      return null;
+    }
+
     if (chunk.type === AgentOSResponseChunkType.TEXT_DELTA && chunk.textDelta) {
-      this.accumulatedText += chunk.textDelta;
+      const text = (this.streamedText.get(chunk.streamId) ?? '') + chunk.textDelta;
+      this.streamedText.set(chunk.streamId, text);
 
       for (const pattern of this.prohibitedPatterns) {
-        if (pattern.test(this.accumulatedText)) {
+        if (pattern.test(text)) {
+          this.streamedText.delete(chunk.streamId);
           return {
             action: GuardrailAction.BLOCK,
             reason: 'Response contains content that violates our usage policy.',
