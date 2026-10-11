@@ -190,6 +190,9 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
+/** The NAT64 prefixes of the network, or `undefined` when they could not be read (see {@link nat64PrefixesOf}). */
+type Nat64Lookup = () => Promise<Nat64Prefix[] | undefined>;
+
 /**
  * The address the connection goes to: every address of the host public or
  * allowed, the first one taken. A lookup cannot be cancelled, so the wait for
@@ -200,6 +203,7 @@ async function checkedAddress(
   resolve: NonNullable<GuardedFetchOptions['resolve']>,
   allowed: ReadonlySet<string>,
   signal: AbortSignal,
+  nat64: Nat64Lookup,
 ): Promise<CheckedAddress> {
   const host = hostOf(url);
   const literal = isIP(host);
@@ -216,7 +220,7 @@ async function checkedAddress(
   // when such an address comes up.
   const overIPv6 = answers.filter((answer) => !allowed.has(answer.address) && isIP(answer.address) === 6);
   if (overIPv6.length > 0) {
-    const nat64Prefixes = await nat64PrefixesOf(resolve, signal);
+    const nat64Prefixes = await nat64();
     if (nat64Prefixes === undefined) {
       throw new GuardedFetchError('network', `the network's NAT64 prefixes could not be read, so the IPv6 address of ${host} cannot be cleared`);
     }
@@ -232,10 +236,13 @@ async function checkedAddress(
  * The NAT64 prefixes of the network, as `resolve` reveals them (RFC 7050):
  * the IPv6 addresses it gives for `ipv4only.arpa`, a name with IPv4
  * addresses only, were made by a DNS64 resolver from those prefixes, and a
- * network without DNS64 gives none. `undefined` when the lookup failed for
- * another reason: the prefixes are then not known, and no IPv6 address can
- * be cleared. The image fetch (`untrustedImageFetch.ts`) asks the same
- * question of its own resolver.
+ * network without DNS64 gives its IPv4 addresses alone. `undefined` when
+ * the lookup fails, `ENOTFOUND` included: `resolve` asks for every family,
+ * so even a network without DNS64 answers with the name's IPv4 addresses,
+ * and a name that does not resolve at all was filtered or the resolver
+ * failed. The prefixes are then not known, and no IPv6 address can be
+ * cleared. (The image fetch, `untrustedImageFetch.ts`, asks for IPv6
+ * addresses alone, where `ENOTFOUND` does mean no DNS64.)
  */
 async function nat64PrefixesOf(
   resolve: NonNullable<GuardedFetchOptions['resolve']>,
@@ -246,7 +253,7 @@ async function nat64PrefixesOf(
     answers = await untilAborted(resolve('ipv4only.arpa'), signal);
   } catch (error) {
     if (signal.aborted) throw error;
-    return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOTFOUND' ? [] : undefined;
+    return undefined;
   }
   return nat64PrefixesFrom(answers.map((answer) => answer.address).filter((address) => isIP(address) === 6));
 }
@@ -435,9 +442,13 @@ export async function guardedFetch(address: string, options: GuardedFetchOptions
   let url = checkedUrl(address, ports);
   const deadline = AbortSignal.timeout(Math.ceil(deadlineMs));
   const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
+  // Asked once a fetch, the first time an IPv6 address comes up, whatever
+  // number of redirects follows.
+  let nat64Asked: ReturnType<Nat64Lookup> | undefined;
+  const nat64: Nat64Lookup = () => (nat64Asked ??= nat64PrefixesOf(resolve, signal));
   try {
     for (let hop = 0; ; hop += 1) {
-      const target = await checkedAddress(url, resolve, allowed, signal);
+      const target = await checkedAddress(url, resolve, allowed, signal, nat64);
       const response = await requestOnce(url, target, headers, signal);
       const status = response.statusCode ?? 0;
       if (REDIRECTS.has(status)) {

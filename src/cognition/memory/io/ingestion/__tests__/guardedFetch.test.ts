@@ -78,6 +78,11 @@ function answer(request: IncomingMessage, response: ServerResponse): void {
   } else if (path === '/gzip') {
     response.writeHead(200, { 'content-type': 'text/html', 'content-encoding': 'gzip' });
     response.end(gzipSync(PAGE));
+  } else if (path === '/declared-held') {
+    // A length past the cap in the head, and a body that never comes: only a
+    // read that refuses the declared length answers before the deadline.
+    response.writeHead(200, { 'content-type': 'text/plain', 'content-length': String(64 * 1024) });
+    response.flushHeaders();
   } else if (path === '/gzip-padded') {
     // A short page that is five kilobytes on the wire, sent in two writes
     // with no content-length to give the size away.
@@ -275,6 +280,10 @@ describe('guardedFetch', () => {
     expect(await reasonOf(guardedFetch(at('/gzip'), reach({ maxBytes: underThePage })))).toBe('size');
   });
 
+  it('refuses a declared length past the cap before the body is read', async () => {
+    expect(await reasonOf(guardedFetch(at('/declared-held'), reach({ maxBytes: 1000, deadlineMs: 3_000 })))).toBe('size');
+  });
+
   it('counts the bytes on the wire too: a body that decodes to little is refused once it arrives past the cap', async () => {
     expect(await reasonOf(guardedFetch(at('/gzip-padded'), reach({ maxBytes: 3000 })))).toBe('size');
     const read = await guardedFetch(at('/gzip-padded'), reach({ maxBytes: 6000 }));
@@ -312,10 +321,13 @@ describe('guardedFetch', () => {
       }
     });
 
-    it('is refused when the network will not say what its prefixes are', async () => {
+    it.each(['EAI_AGAIN', 'ENOTFOUND'])('is refused when the lookup of the prefixes fails with %s', async (code) => {
+      // The lookup asks for every family, so a network without DNS64 still
+      // answers ipv4only.arpa with its IPv4 addresses: a name that does not
+      // resolve at all was filtered, and says nothing of NAT64.
       const before = connections;
       const resolve = async (host: string) => {
-        if (host === 'ipv4only.arpa') throw Object.assign(new Error('temporary failure in name resolution'), { code: 'EAI_AGAIN' });
+        if (host === 'ipv4only.arpa') throw Object.assign(new Error('the lookup failed'), { code });
         return [{ address: '2606:4700:4700::1111', family: 6 }];
       };
       await expect(guardedFetch(at('/page'), reach({ resolve }))).rejects.toMatchObject({
@@ -323,6 +335,21 @@ describe('guardedFetch', () => {
         message: expect.stringContaining("NAT64 prefixes could not be read"),
       });
       expect(connections).toBe(before);
+    });
+
+    it('reads a network without DNS64 from its IPv4 answer, and clears a public IPv6 address', async () => {
+      const connect = vi.spyOn(Socket.prototype, 'connect').mockImplementation(() => {
+        throw new Error('unexpected connection');
+      });
+      try {
+        const resolve = async (host: string) =>
+          host === 'ipv4only.arpa' ? [{ address: '192.0.0.170', family: 4 }] : [{ address: '2606:4700:4700::1111', family: 6 }];
+        // The address check passes; the connection, blocked here, is the next step.
+        expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve })))).toBe('network');
+        expect(connect).toHaveBeenCalled();
+      } finally {
+        connect.mockRestore();
+      }
     });
   });
 
