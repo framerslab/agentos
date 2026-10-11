@@ -250,28 +250,36 @@ export interface HitlConfig {
   };
   /**
    * Custom async handler invoked for every approval request.
-   * Must resolve to an `ApprovalDecision` within `timeoutMs` or the
-   * `onTimeout` policy is applied.
+   * On a `beforeTool` or `beforeReturn` request, the `onTimeout` policy
+   * decides when it does not resolve within `timeoutMs`. A `beforeAgent` or
+   * `beforeEmergent` request awaits it with no timer.
    */
   handler?: (request: ApprovalRequest) => Promise<ApprovalDecision>;
-  /** Maximum milliseconds to wait for the handler to resolve. Defaults to `30_000`. */
+  /**
+   * Maximum milliseconds to wait for the handler on a `beforeTool` or
+   * `beforeReturn` request. Defaults to `30_000`.
+   */
   timeoutMs?: number;
   /**
-   * Policy applied when the handler does not respond within `timeoutMs`.
+   * Policy applied when the handler does not respond within `timeoutMs`
+   * (`beforeTool` and `beforeReturn` requests only).
    * - `"reject"` — treat as denied; the action is blocked.
    * - `"approve"` — treat as approved; the action proceeds automatically.
-   * - `"error"` — throw an error and halt the run.
+   * - `"error"` — the request fails with an `AgencyConfigError`, and the
+   *   call rejects with it (on `beforeTool`, once the strategy settles).
    */
   onTimeout?: 'reject' | 'approve' | 'error';
 
   /**
    * Run guardrails AFTER HITL approval to catch destructive actions.
    *
-   * When enabled (default), even after a tool call is approved by the HITL
-   * handler (auto-approve, LLM judge, or human), the configured guardrails
-   * run a final safety check against the tool call arguments. If any
-   * guardrail returns `action: 'block'`, the approval is overridden and the
-   * tool call is denied.
+   * When enabled (default), even after the HITL handler (auto-approve, LLM
+   * judge, or human) approves a `beforeTool`, `beforeAgent` or
+   * `beforeReturn` request, the configured guardrails run a final safety
+   * check against the tool call's arguments, the agent's input or the final
+   * text. If any guardrail returns `action: 'block'`, the approval is
+   * overridden: the tool call is skipped, the agent does not run, or the
+   * final output is rejected. A `beforeEmergent` approval is not checked.
    *
    * Set to `false` to disable this safety net and give full autonomy to the
    * HITL handler's decision.
@@ -284,8 +292,9 @@ export interface HitlConfig {
    * Guardrail IDs to run as a post-approval safety check.
    *
    * Only evaluated when {@link guardrailOverride} is not `false`. These
-   * guardrails are invoked after the HITL handler approves a tool call and
-   * can veto the approval if they detect destructive patterns.
+   * guardrails are invoked after the HITL handler approves a `beforeTool`,
+   * `beforeAgent` or `beforeReturn` request and can veto the approval if
+   * they detect destructive patterns.
    *
    * @default ['pii-redaction', 'code-safety']
    */
