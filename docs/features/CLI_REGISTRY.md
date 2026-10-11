@@ -317,7 +317,7 @@ The `scan()` method runs `which` for every registered descriptor, and the versio
 - **Slow binary startup.** Some CLIs (e.g., Java, `gcloud`) have slow startup times for `--version`. The registry runs all checks in parallel, but a single slow binary can delay the overall result.
 - **Antivirus scanning.** On Windows, real-time antivirus may scan each spawned subprocess, adding per-binary overhead.
 
-**Fix:** The registry already runs checks in parallel. To reduce scan time further, use `check(binaryName)` for the binaries you need instead of `scan()`. `byCategory(category)` saves no time: it runs the full `scan()` and filters its results.
+**Fix:** The registry already runs checks in parallel. To reduce scan time further, use `check(binaryName)` for the registered binaries you need instead of `scan()` (for a binary with no descriptor, `check()` reports `installed: false` without looking). `byCategory(category)` saves no time: it runs the full `scan()` and filters its results.
 
 ## Complete CLI Reference
 

@@ -197,7 +197,7 @@ The three levels below build on this picture:
 | 2 | `agent()` | the tool-calling loop (up to 5 steps by default), sessions with their own message history, memory hooks |
 | 3 | `agency()` | multiple agents under a coordination strategy; optional human approvals and, with `emergent.enabled` on `hierarchical`, specialists the manager spawns at run time |
 
-The full runtime runs guardrails, retrieval, human approval and channels. Of these, `agency()` applies human approval alone: it reports its guardrails as not enforced, adds no retrieved context and wires no channels (its `connect()` rejects), and its `listen()` takes JSON text over a local WebSocket, not audio. [API paths](../API_PATHS.md) lists what each surface does with each option.
+The full runtime runs guardrails, retrieval, human approval and channels. Of these, `agency()` applies human approval alone: it reports its guardrails as not enforced, adds no retrieved context and wires no channels (with `channels` set, its `connect()` rejects), and with `voice.enabled` its `listen()` takes JSON text over a local WebSocket, not audio. [API paths](../API_PATHS.md) lists what each surface does with each option.
 
 ---
 
