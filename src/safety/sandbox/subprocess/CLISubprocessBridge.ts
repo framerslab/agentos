@@ -11,6 +11,7 @@
  * @see ClaudeCodeCLIBridge
  */
 
+import { StringDecoder } from 'node:string_decoder';
 import type { ResultPromise } from 'execa';
 
 /**
@@ -262,6 +263,13 @@ export abstract class CLISubprocessBridge {
     Promise.resolve(subprocess).catch(() => undefined);
 
     let buffer = '';
+    /* stdout gives Buffers (execa sets no encoding on it), and a read ends
+     * wherever the CLI's write did, so a multi-byte UTF-8 character can be
+     * split between two reads. One decoder for the stream holds the start of
+     * such a character until the rest arrives, as execa's own decoding of
+     * result.stdout does (lib/transform/encoding-transform.js in execa
+     * 10.0.1). */
+    const decoder = new StringDecoder('utf8');
     /* Set once stdout has been read to its end and the run is awaited below.
      * A consumer that stops reading early (a break in its for await, or
      * return()) closes this generator at a yield, before that point. */
@@ -269,7 +277,7 @@ export abstract class CLISubprocessBridge {
 
     try {
       for await (const chunk of subprocess.stdout as AsyncIterable<Buffer | string>) {
-        buffer += chunk.toString();
+        buffer += decoder.write(chunk);
         const lines = buffer.split('\n');
         buffer = lines.pop() ?? '';
 
@@ -286,7 +294,8 @@ export abstract class CLISubprocessBridge {
         }
       }
 
-      /* flush remaining buffer */
+      /* flush remaining buffer, with what the decoder still holds */
+      buffer += decoder.end();
       if (buffer.trim()) {
         try {
           const event = this.parseStreamEvent(JSON.parse(buffer.trim()));
