@@ -395,7 +395,11 @@ export function frontmatterToPersona(
  * HEXACO traits are written under the documented frontmatter keys
  * (`honestyHumility`, ...) whichever spelling the persona uses, so the output
  * parses back to the same `personalityTraits`. Unset optional fields are
- * left out of the frontmatter.
+ * left out of the frontmatter. A persona with no field to write is rendered
+ * as its prompt alone, or behind an empty frontmatter block when the prompt
+ * opens like one (three dashes that a fourth does not follow) or with a byte
+ * order mark, so that the loader takes none of the prompt's lines for
+ * frontmatter.
  */
 export function renderSoulMarkdown(persona: IPersonaDefinition): string {
   const traits = normalizeHexacoTraits(persona.personalityTraits);
