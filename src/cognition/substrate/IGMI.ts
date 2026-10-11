@@ -19,6 +19,8 @@ import { IUtilityAI } from '../nlp/ai_utilities/IUtilityAI';
 import { IToolOrchestrator } from '../../core/tools/IToolOrchestrator';
 import type { ToolEffectRecord } from '../../core/tools/ITool';
 import type { ChatMessage, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
+import type { HexacoTraitValues } from './personas/hexaco';
+import type { ILearnerSession } from '../learning/types.js';
 
 /**
  * Defines the possible moods a GMI can be in, influencing its behavior and responses.
@@ -227,6 +229,21 @@ export interface GMIBaseConfig {
    * `GMIManager` passes its own `shutdownTimeoutMs`.
    */
   shutdownTimeoutMs?: number;
+  /**
+   * The session's learner session, passed by a host whose `learning` option is on. The GMI asks it once per user
+   * turn, before the tool loop, for the personality section (a system prompt at priority 2, after the persona's base
+   * prompt) and tells each tool call the turn's learner and mode (`sessionData.learning`). A session that fails or
+   * does not answer within 2,000 ms never fails the turn. The host that passes the session ends it.
+   */
+  learning?: ILearnerSession;
+  /**
+   * The persona's traits as the GMI renders them itself, when it has no learner session or the session did not
+   * answer: `authored` is the registry persona's traits and `overlay` a workflow role overlay's patch. They are read
+   * once, at `initialize()`, never from the persona copy `setPersonalityTrait()` replaces. Honesty-humility and
+   * emotionality always come from `authored`; an overlay that names either is not applied to it, and the trace says
+   * so. Without this field the GMI renders no personality section of its own.
+   */
+  personaTraits?: { authored: HexacoTraitValues; overlay?: HexacoTraitValues };
 }
 
 /**
@@ -703,6 +720,12 @@ export interface IGMI {
    * @param value - New trait value.
    */
   setPersonalityTrait?(trait: string, value: number): void;
+
+  /**
+   * The learner session this instance was built with (`GMIBaseConfig.learning`), or `undefined` when its host has
+   * no learning layer. Optional so that custom IGMI implementations keep compiling.
+   */
+  getLearnerSession?(): ILearnerSession | undefined;
 
   getReasoningTrace(): Readonly<ReasoningTrace>;
   getWorkingMemorySnapshot(): Promise<Record<string, any>>;
