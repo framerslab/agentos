@@ -151,6 +151,9 @@ interface StreamFixture {
   /** A result line the CLI flags as an error, and the message it carries. */
   errorResult: unknown;
   errorMessage: string;
+  /** An error event line, and the message it carries. */
+  errorEvent: unknown;
+  errorEventMessage: string;
 }
 
 const STREAM_PROVIDERS: Array<(typeof PROVIDERS)[number] & { fixture: StreamFixture }> = [
@@ -177,6 +180,12 @@ const STREAM_PROVIDERS: Array<(typeof PROVIDERS)[number] & { fixture: StreamFixt
       // the failure as its result text.
       errorResult: { type: 'result', subtype: 'success', is_error: true, result: 'API Error: 401 invalid x-api-key', session_id: 's1' },
       errorMessage: 'API Error: 401 invalid x-api-key',
+      // The error line the bridge reads (ClaudeCodeCLIBridge.parseStreamEvent),
+      // with an error object as the Messages API writes one. The message types of
+      // @anthropic-ai/claude-agent-sdk 0.3.296 list no top-level error line, so
+      // this case holds the bridge to its own reading of one.
+      errorEvent: { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
+      errorEventMessage: 'Overloaded',
     },
   },
   {
@@ -198,6 +207,15 @@ const STREAM_PROVIDERS: Array<(typeof PROVIDERS)[number] & { fixture: StreamFixt
         error: { type: 'FatalAuthenticationError', message: 'Request had invalid authentication credentials.' },
       },
       errorMessage: 'Request had invalid authentication credentials.',
+      // An error event of severity 'error' (ErrorEvent in packages/core/src/output/types.ts),
+      // as packages/cli/src/nonInteractiveCli.ts writes it when the session runs out of turns.
+      errorEvent: {
+        type: 'error',
+        timestamp: '2026-10-10T12:00:00.000Z',
+        severity: 'error',
+        message: 'Maximum session turns exceeded',
+      },
+      errorEventMessage: 'Maximum session turns exceeded',
     },
   },
 ];
@@ -297,6 +315,18 @@ describe.each(STREAM_PROVIDERS)('$name: how a stream ends', ({ binary, model, cr
       expect(finals[0].error).toMatchObject({ code: 'CRASHED', message: expect.stringContaining(fixture.errorMessage) });
     },
   );
+
+  it('ends with the error event the CLI writes, not the failed exit that follows it', async () => {
+    // The exit alone would classify as RATE_LIMITED from this stderr.
+    const finals = (
+      await streamOf([fixture.hello[0], fixture.errorEvent], 1, { stderr: 'Error: Rate Limit exceeded, try again later' })
+    ).filter((chunk) => chunk.isFinal);
+
+    expect(finals).toHaveLength(1);
+    expect(finals[0].choices).toEqual([]);
+    expect(finals[0].error?.message).toContain(fixture.errorEventMessage);
+    expect(finals[0].error?.code).not.toBe('RATE_LIMITED');
+  });
 });
 
 /**
