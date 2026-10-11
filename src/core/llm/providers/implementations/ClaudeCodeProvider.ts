@@ -355,14 +355,15 @@ export class ClaudeCodeProvider implements IProvider {
    * stream with the bridge's classified error, and a result flagged
    * `is_error` ends it with an error chunk.
    *
-   * A text reply that comes only in the result's structured output, which no
-   * text delta carried, is yielded as one text delta just before the final
-   * chunk built from it, so a consumer that builds the reply from the deltas
-   * (streamText(), the StreamingReconstructor) reads it. The delta goes out
-   * only once the run has ended with that reply, so a run that fails after
-   * its result line still ends with its error chunk alone. A caller who
-   * aborts while the consumer holds the delta gets the abort chunk in place
-   * of the reply's final chunk.
+   * A text reply in the result's structured output that the text deltas do
+   * not already hold (none came, or only text the model wrote before the
+   * reply, such as whitespace) is yielded as one text delta just before the
+   * final chunk built from it, so a consumer that builds the reply from the
+   * deltas (streamText(), the StreamingReconstructor, the GMI) reads it once.
+   * The delta goes out only once the run has ended with that reply, so a run
+   * that fails after its result line still ends with its error chunk alone.
+   * A caller who aborts while the consumer holds the delta gets the abort
+   * chunk in place of the reply's final chunk.
    */
   async *generateCompletionStream(
     modelId: string,
@@ -396,9 +397,9 @@ export class ClaudeCodeProvider implements IProvider {
     /* Set when the CLI reports a failure in its own output (an error event or
      * an is_error result), which says more than the exit code that follows. */
     let cliReportedError = false;
-    /* A text reply that came only in the result's structured output, and the
-     * final chunk built from it: no text delta carried it, so it goes out as
-     * one after the loop, if that chunk still ends the stream. */
+    /* A text reply in the result's structured output that the text deltas
+     * did not carry, and the final chunk built from it: it goes out as a
+     * delta of its own after the loop, if that chunk still ends the stream. */
     let structuredText: { text: string; finalChunk: ModelCompletionResponse } | undefined;
 
     try {
@@ -455,8 +456,11 @@ export class ClaudeCodeProvider implements IProvider {
                     finalUsage,
                     modelId,
                   );
-                  /* A stream that already gave text deltas gets no second copy. */
-                  if (accumulatedText === '' && parsed.text !== '') {
+                  /* Text deltas that hold the reply already carried it, and
+                   * it gets no second copy. Any others came before it (text
+                   * the model wrote ahead of the reply, or whitespace), and
+                   * the reply follows them. Any text holds an empty reply. */
+                  if (!accumulatedText.includes(parsed.text)) {
                     structuredText = { text: parsed.text, finalChunk };
                   }
                   break;
@@ -510,7 +514,7 @@ export class ClaudeCodeProvider implements IProvider {
      * result line ends with its error chunk alone, as a stream with no reply
      * text does. */
     if (structuredText && finalChunk === structuredText.finalChunk) {
-      yield this.buildTextDeltaChunk(structuredText.text, structuredText.text, modelId, responseId);
+      yield this.buildTextDeltaChunk(structuredText.text, accumulatedText + structuredText.text, modelId, responseId);
       /* The bridge's stream has ended, so it no longer sees the caller's
        * signal. An abort while the consumer held the delta still comes before
        * the final chunk, and ends the stream as the bridge ends a run the
