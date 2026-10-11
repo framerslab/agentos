@@ -74,7 +74,11 @@ export interface GuardedFetchOptions {
   deadlineMs: number;
   /** The most redirects followed, each checked as the first address is. @default 3 */
   maxRedirects?: number;
-  /** Media types read, without parameters, in lower case. @default ['text/html', 'application/xhtml+xml', 'application/pdf', 'text/plain'] */
+  /**
+   * Media types read, without parameters, in lower case. An answer with no
+   * `Content-Type` counts as `application/octet-stream`.
+   * @default ['text/html', 'application/xhtml+xml', 'application/pdf', 'text/plain']
+   */
   accept?: readonly string[];
   /** Ports read. @default [80, 443] */
   allowPorts?: readonly number[];
@@ -94,7 +98,7 @@ export interface GuardedResponse {
   url: string;
   /** The HTTP status, a 2xx. */
   status: number;
-  /** The media type without parameters, in lower case. */
+  /** The media type without parameters, in lower case; `application/octet-stream` for an answer that names none. */
   contentType: string;
   /** The body, decoded. */
   body: Buffer;
@@ -464,10 +468,14 @@ export async function guardedFetch(address: string, options: GuardedFetchOptions
         response.destroy();
         throw new GuardedFetchError('status', `the server answered ${status}`, status);
       }
-      const contentType = String(response.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+      // An answer that names no type is application/octet-stream, as RFC 9110
+      // (8.3) lets a recipient take it: a caller that accepts bytes of no
+      // type in particular reads it, and any other list refuses it as before.
+      const declared = String(response.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+      const contentType = declared || 'application/octet-stream';
       if (!accept.includes(contentType)) {
         response.destroy();
-        throw new GuardedFetchError('type', `${contentType || 'no type'} is not read`, status);
+        throw new GuardedFetchError('type', `${declared || 'an answer with no type'} is not read`, status);
       }
       const body = await readBody(response, maxBytes, signal);
       signal.throwIfAborted();

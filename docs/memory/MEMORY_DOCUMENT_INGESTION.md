@@ -99,7 +99,7 @@ A server that fetches an address someone typed can be pointed at itself or at th
 - Only `http:` and `https:` addresses without a user name or password are read (`'scheme'`), on ports 80 and 443 unless `allowPorts` names others (`'port'`).
 - Up to `maxRedirects` redirects are followed (3 unless set), each checked as the first address is (`'redirects'` past them).
 - The body is read as it arrives and refused once it passes `maxBytes`, counted on the wire and again after a gzip, deflate or br coding is decoded (`'size'`): a small body that inflates past the cap stops there, and so does a large one that decodes to little. A body in another coding is refused (`'type'`).
-- Only the media types in `accept` are read (`'type'`): `text/html`, `application/xhtml+xml`, `application/pdf` and `text/plain` unless set. An answer that is neither a 2xx nor a redirect (301, 302, 303, 307 or 308) is refused (`'status'`).
+- Only the media types in `accept` are read (`'type'`): `text/html`, `application/xhtml+xml`, `application/pdf` and `text/plain` unless set. An answer with no `Content-Type` counts as `application/octet-stream` (RFC 9110, section 8.3), which that default list does not hold. An answer that is neither a 2xx nor a redirect (301, 302, 303, 307 or 308) is refused (`'status'`).
 - One deadline, `deadlineMs`, covers the lookups, the redirects and the body (`'deadline'`). An abort of `signal` ends the fetch with the signal's own reason.
 
 Callers that show a refusal reason to a visitor should show one message for both `'address'` and `'network'` so the visitor cannot distinguish internal names that resolve from names whose lookup fails.

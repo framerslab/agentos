@@ -72,6 +72,10 @@ function answer(request: IncomingMessage, response: ServerResponse): void {
   } else if (path === '/to-private') {
     response.writeHead(302, { location: `http://metadata.test:${port}/latest` });
     response.end();
+  } else if (path === '/untyped') {
+    // No Content-Type at all, as some file servers answer.
+    response.writeHead(200);
+    response.end(Buffer.from([1, 2, 3, 4]));
   } else if (path === '/image') {
     response.writeHead(200, { 'content-type': 'image/png' });
     response.end(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
@@ -263,6 +267,15 @@ describe('guardedFetch', () => {
 
     const resolve = async (host: string) => [{ address: host === 'metadata.test' ? '169.254.169.254' : '127.0.0.1', family: 4 }];
     expect(await reasonOf(guardedFetch(at('/to-private'), reach({ resolve })))).toBe('address');
+  });
+
+  it('reads an answer with no Content-Type as application/octet-stream, for a caller that accepts that', async () => {
+    const untyped = await guardedFetch(at('/untyped'), reach({ accept: ['audio/mpeg', 'application/octet-stream'] }));
+    expect(untyped.contentType).toBe('application/octet-stream');
+    expect(untyped.body).toEqual(Buffer.from([1, 2, 3, 4]));
+
+    // The default types hold no application/octet-stream, so it is refused as before.
+    expect(await reasonOf(guardedFetch(at('/untyped'), reach()))).toBe('type');
   });
 
   it('refuses past the size cap, the deadline or the accepted types, and counts decoded bytes', async () => {
