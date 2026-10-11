@@ -818,6 +818,77 @@ describe.each(STREAM_PROVIDERS)('$name: a consumer slower than the timeout', ({ 
 });
 
 /**
+ * A run that writes `lines` and exits 0, settled as execa 10 settles a run
+ * given a `cancelSignal`. The run settles once the process has exited and its
+ * stdout has ended (waitForSubprocessResult in lib/resolve/wait-subprocess.js).
+ * When the signal aborts before then, execa calls kill(), which does nothing to
+ * a process that has exited, and fails the run with `isCanceled` and the exit
+ * code the process had (terminateOnCancel in lib/terminate/cancel.js;
+ * getAsyncResult in lib/methods/main-async.js). Once the run has settled,
+ * execa stops listening to the signal (handlePromise in
+ * lib/methods/main-async.js), and an abort changes nothing. stdout hands over
+ * one line per read and ends after the last line: the CLI has exited by then,
+ * and `state.ended` is set.
+ */
+function cancellableRun(lines: unknown[], cancelSignal: AbortSignal) {
+  const state = { ended: false };
+  let settle!: () => void;
+  const outcome = new Promise<unknown>((resolve, reject) => {
+    settle = () => {
+      state.ended = true;
+      if (cancelSignal.aborted) reject(execaError({ exitCode: 0, isCanceled: true }));
+      else resolve({ failed: false, exitCode: 0, stdout: '', stderr: '' });
+    };
+  });
+  outcome.catch(() => undefined);
+  return Object.assign(outcome, {
+    stdout: (async function* () {
+      for (const line of lines) yield Buffer.from(`${JSON.stringify(line)}\n`);
+      settle();
+    })(),
+    kill: vi.fn(),
+    state,
+  });
+}
+
+describe.each(STREAM_PROVIDERS)(
+  '$name: a caller who aborts while the consumer still takes the events of a run that has ended',
+  ({ binary, model, create, fixture }) => {
+    it("ends with the abort chunk the abortSignal contract asks for (error.type 'abort'), not the tool call", async () => {
+      let run!: ReturnType<typeof cancellableRun>;
+      // A piece of text, then a reply that calls get_weather; the CLI then exits 0.
+      stubCli(binary, (_args, options) => {
+        run = cancellableRun([fixture.hello[0], ...fixture.toolCall], options.cancelSignal);
+        return run;
+      });
+      const provider = create();
+      await provider.initialize({});
+      const controller = new AbortController();
+      const chunks: ModelCompletionResponse[] = [];
+      let endedBeforeAbort: boolean | undefined;
+      for await (const chunk of provider.generateCompletionStream(model, HELLO, {
+        tools: [WEATHER_TOOL],
+        abortSignal: controller.signal,
+      })) {
+        chunks.push(chunk);
+        if (!chunk.isFinal && !controller.signal.aborted) {
+          // The consumer takes its time over the first chunk, and the caller aborts meanwhile.
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          endedBeforeAbort = run.state.ended;
+          controller.abort();
+        }
+      }
+      const final = chunks[chunks.length - 1];
+
+      // The CLI had written its reply and exited before the caller aborted: the case under test was reached.
+      expect(endedBeforeAbort).toBe(true);
+      expect(final).toMatchObject({ isFinal: true, error: { type: 'abort', code: 'REQUEST_ABORTED' } });
+      expect(final.choices).toEqual([]);
+    });
+  },
+);
+
+/**
  * The session id of a Gemini CLI stream, which a direct reader of the bridge
  * gets on the result event. The current CLI writes the id on the init event
  * that opens the stream (InitEvent in packages/core/src/output/types.ts at
