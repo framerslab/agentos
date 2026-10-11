@@ -117,7 +117,7 @@ To allow more time, pass a larger `timeout` to a bridge you call yourself, or se
 
 - `classifyError()` returns it for every failure the earlier checks do not match, a non-zero exit code among them. Its `guidance` ends with the last 500 characters of stderr.
 - The providers' `generateCompletion()` throws it when the CLI exits normally and its JSON result carries `is_error: true`.
-- The providers' `generateCompletionStream()` ends with it when the CLI flags its `stream-json` result as an error: `is_error: true` from Claude Code, `status: 'error'` from the Gemini CLI. The message is `Claude Code returned an error:` or `Gemini CLI returned an error:` followed by the CLI's own message for the failure. A Claude Code error subtype (`error_during_execution`, `error_max_turns`, `error_max_budget_usd`, `error_max_structured_output_retries`) has no result text, and its message is the subtype followed by the entries of its `errors` list, joined with `; `: `Claude Code returned an error: error_max_turns: <errors>`.
+- The providers' `generateCompletionStream()` ends with it when the CLI flags its `stream-json` result as an error: `is_error: true` from Claude Code, `status: 'error'` from the Gemini CLI. The message is `Claude Code returned an error:` or `Gemini CLI returned an error:` followed by the CLI's own message for the failure. A Claude Code error subtype (`error_during_execution`, `error_max_turns`, `error_max_budget_usd`, `error_max_structured_output_retries`) has no result text, and its message is the subtype followed by the entries of its `errors` list, each trimmed, the blank ones left out, joined with `; `: `Claude Code returned an error: error_max_turns: <errors>`.
 
 ### RATE_LIMITED
 

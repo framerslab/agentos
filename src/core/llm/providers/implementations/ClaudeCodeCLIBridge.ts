@@ -129,12 +129,18 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
    * (error_during_execution, error_max_turns, error_max_budget_usd,
    * error_max_structured_output_retries) carry no result and list their
    * detail in `errors` (SDKResultError in @anthropic-ai/claude-agent-sdk
-   * 0.3.296), which follows the subtype: `error_max_turns: <errors>`.
+   * 0.3.296), which follows the subtype: `error_max_turns: <errors>`. Each
+   * entry is trimmed and a blank one left out before the join, as the SDK's
+   * own reader of the result does (Query.readMessages in its sdk.mjs): an
+   * entry can carry the CLI's stderr text, line break included.
    */
   private errorResultMessage(raw: any): string {
     if (raw.result) return raw.result;
     const errors: string[] = Array.isArray(raw.errors)
-      ? raw.errors.filter((error: unknown) => typeof error === 'string' && error !== '')
+      ? raw.errors
+          .filter((error: unknown): error is string => typeof error === 'string')
+          .map((error: string) => error.trim())
+          .filter((error: string) => error !== '')
       : [];
     return [raw.subtype, errors.join('; ')].filter(Boolean).join(': ') || 'Unknown error';
   }
