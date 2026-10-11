@@ -224,6 +224,11 @@ export abstract class CLISubprocessBridge {
    * Spawns the binary with `--output-format stream-json` and yields
    * {@link StreamEvent}s parsed from newline-delimited JSON on stdout.
    *
+   * Read to its end, the stream awaits the process's exit and throws on a
+   * failed one. A consumer that stops reading before the end (a `break` in
+   * its `for await`, or `return()`) ends the process instead: it is killed,
+   * and its outcome is handled here.
+   *
    * @param options — bridge options
    * @yields typed stream events (text_delta, result, error, system)
    * @throws {CLISubprocessError} on subprocess failure (via {@link classifyError})
@@ -245,6 +250,10 @@ export abstract class CLISubprocessBridge {
     }
 
     let buffer = '';
+    /* Set once stdout has been read to its end and the run is awaited below.
+     * A consumer that stops reading early (a break in its for await, or
+     * return()) closes this generator at a yield, before that point. */
+    let readToEnd = false;
 
     try {
       for await (const chunk of subprocess.stdout as AsyncIterable<Buffer | string>) {
@@ -273,10 +282,21 @@ export abstract class CLISubprocessBridge {
         } catch { /* ignore */ }
       }
 
+      readToEnd = true;
       /* Ensure non-zero exits after stdout drains still surface as errors. */
       await subprocess;
     } catch (error: any) {
       throw this.classifyError(error);
+    } finally {
+      /* Left before the run was awaited: nothing reads the process any more.
+       * End it (execa's kill: SIGTERM, then SIGKILL if it outlives the force
+       * delay) and handle its outcome, so a failed exit that follows is not an
+       * unhandled rejection in the host, which Node raises as an uncaught
+       * exception by default. */
+      if (!readToEnd) {
+        subprocess.kill();
+        subprocess.catch(() => undefined);
+      }
     }
   }
 }
