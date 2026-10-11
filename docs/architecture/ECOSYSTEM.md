@@ -36,17 +36,18 @@ npm install @framers/sql-storage-adapter
 
 ---
 
-### [@framers/agentos-extensions-registry](https://github.com/framerslab/agentos-extensions)
-**Curated Extensions Registry** — Load all official extensions with a single `createCuratedManifest()` call. Handles lazy loading, secret resolution, and factory invocation.
+### [@framers/agentos-extensions-registry](https://github.com/framerslab/agentos-extensions-registry)
+**Curated Extensions Registry** — Load the curated tool, integration, voice, productivity, cloud, domain and channel extensions with a single `createCuratedManifest()` call; the research packs (citation-verifier, trulia-search) load when `tools` names them. Handles lazy loading, secret resolution, and factory invocation.
 
 ```bash
 npm install @framers/agentos-extensions-registry
 ```
 
 [![npm](https://img.shields.io/npm/v/@framers/agentos-extensions-registry?logo=npm&color=cb3837)](https://www.npmjs.com/package/@framers/agentos-extensions-registry)
-[![GitHub](https://img.shields.io/github/stars/framerslab/agentos-extensions?style=social)](https://github.com/framerslab/agentos-extensions)
+[![GitHub](https://img.shields.io/github/stars/framerslab/agentos-extensions-registry?style=social)](https://github.com/framerslab/agentos-extensions-registry)
 
 ```typescript
+import { AgentOS } from '@framers/agentos';
 import { createCuratedManifest } from '@framers/agentos-extensions-registry';
 
 const manifest = await createCuratedManifest({
@@ -58,7 +59,7 @@ const manifest = await createCuratedManifest({
 const agentos = await AgentOS.create({ extensionManifest: manifest });
 ```
 
-Only installed extension packages will load — missing ones are skipped silently.
+In an npm install, only the extension packages that are installed load: a missing package is skipped, and the registry logs a warning when the call names it.
 
 ---
 
@@ -71,7 +72,7 @@ npm install @framers/agentos-extensions
 
 [![npm](https://img.shields.io/npm/v/@framers/agentos-extensions?logo=npm&color=cb3837)](https://www.npmjs.com/package/@framers/agentos-extensions)
 
-**Curated extensions** (110 manifests under `registry/curated/`), by category, with examples:
+**Curated extensions** (more than 100 manifests under `registry/curated/`), by category, with examples:
 
 | Category | Examples |
 |----------|-----------|
@@ -192,7 +193,7 @@ npm install wunderland
 We welcome contributions to any repository in the ecosystem:
 
 1. **Bug reports** — [Open an issue](https://github.com/framerslab/agentos/issues)
-2. **Feature requests** — [Start a discussion](https://github.com/framerslab/agentos/discussions)
+2. **Feature requests** — [Open an issue](https://github.com/framerslab/agentos/issues) with the Feature request form
 3. **Extensions** — Submit to [agentos-extensions](https://github.com/framerslab/agentos-extensions)
 4. **Documentation** — PRs welcome on any repo
 
@@ -212,13 +213,13 @@ flowchart TD
     end
 
     Storage["sql-storage-adapter<br/><i>SQLite · Postgres · IndexedDB</i>"]:::data
-    Ext["agentos-extensions<br/><i>110 extensions, 88 skills</i>"]:::data
+    Ext["agentos-extensions<br/><i>100+ extensions</i>"]:::data
     LLM["LLM providers<br/><i>OpenAI, Anthropic, Gemini, …</i>"]:::external
 
     App --> core
     Runtime --> Storage
-    GMI --> Ext
-    Tools --> LLM
+    GMI --> LLM
+    Tools --> Ext
 
     classDef input fill:#cffafe,stroke:#0891b2,color:#0e7490
     classDef process fill:#eef2ff,stroke:#6366f1,color:#3730a3
