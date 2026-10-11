@@ -51,6 +51,11 @@ export interface BridgeResult {
    * result text.
    */
   error?: string;
+  /**
+   * The reply that matches the call's `jsonSchema`, when the CLI returns it
+   * apart from its result text (Claude Code's `structured_output`).
+   */
+  structuredOutput?: unknown;
   /** Wall-clock duration of the subprocess in ms. */
   durationMs: number;
 }
@@ -68,6 +73,11 @@ export type StreamEvent =
       isError?: boolean;
       /** The failure's message, set beside `isError`. */
       error?: string;
+      /**
+       * The reply that matches the call's `jsonSchema`, when the CLI returns
+       * it apart from its result text (Claude Code's `structured_output`).
+       */
+      structuredOutput?: unknown;
     }
   | { type: 'error'; error: string }
   | { type: 'system'; message: string };

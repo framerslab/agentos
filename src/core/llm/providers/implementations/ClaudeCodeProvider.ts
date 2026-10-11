@@ -320,10 +320,13 @@ export class ClaudeCodeProvider implements IProvider {
       throw this.errorResultError(result.error ?? result.result);
     }
 
-    /* Parse tool call response if tools were requested */
+    /* Parse tool call response if tools were requested. With --json-schema,
+     * Claude Code returns the reply that matches it in structured_output,
+     * which the bridge passes on as structuredOutput; the result text is
+     * parsed when there is none. */
     if (hasTools) {
       try {
-        const parsed = JSON.parse(result.result);
+        const parsed = result.structuredOutput ?? JSON.parse(result.result);
         if (parsed.response_type === 'tool_calls' && Array.isArray(parsed.tool_calls)) {
           return this.buildToolCallResponse(parsed.tool_calls, result, undefined, undefined, modelId);
         }
@@ -424,13 +427,28 @@ export class ClaudeCodeProvider implements IProvider {
 
             const finalText = event.result || accumulatedText;
 
-            /* Try parsing as tool call response */
+            /* Try parsing as tool call response. With --json-schema, Claude
+             * Code returns the reply that matches it in structured_output,
+             * which the bridge passes on as structuredOutput; the final text
+             * is parsed when there is none. */
             if (hasTools) {
               try {
-                const parsed = JSON.parse(finalText);
+                const parsed = event.structuredOutput ?? JSON.parse(finalText);
                 if (parsed.response_type === 'tool_calls' && Array.isArray(parsed.tool_calls)) {
                   finalChunk = this.buildToolCallResponse(
                     parsed.tool_calls,
+                    { sessionId: event.sessionId, usage: event.usage },
+                    responseId,
+                    finalUsage,
+                    modelId,
+                  );
+                  break;
+                }
+                /* A text reply in structured output is its `text`: the turn
+                 * that returns it ends with no assistant message of its own. */
+                if (event.structuredOutput != null && typeof parsed.text === 'string') {
+                  finalChunk = this.buildTextResponse(
+                    parsed.text,
                     { sessionId: event.sessionId, usage: event.usage },
                     responseId,
                     finalUsage,
