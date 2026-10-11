@@ -347,4 +347,18 @@ describe('GeminiCLIProvider: the stream-json the current Gemini CLI writes', () 
     expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: 'Hi there' } }] });
     expect(final.usage).toMatchObject({ promptTokens: 12, completionTokens: 3, totalTokens: 15 });
   });
+
+  it('goes on past an error event the CLI marks as a warning', async () => {
+    const chunks = await streamOf([
+      ...opening,
+      { type: 'message', timestamp: at, role: 'assistant', content: 'Hi there', delta: true },
+      // What the CLI writes when it stops a loop; the run then ends with a success result.
+      { type: 'error', timestamp: at, severity: 'warning', message: 'Loop detected, stopping execution' },
+      { type: 'result', timestamp: at, status: 'success', stats },
+    ]);
+    const final = chunks[chunks.length - 1];
+
+    expect(final.error).toBeUndefined();
+    expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: 'Hi there' } }] });
+  });
 });
