@@ -117,6 +117,44 @@ See the [sql-storage-adapter repository](https://github.com/framerslab/sql-stora
 
 ---
 
+## A Page's Own Records
+
+```typescript
+import { Outbox, namespaced, openIndexedDbStore, reconcileList } from '@framers/agentos/core/storage/browser';
+
+const root = await openIndexedDbStore({ dbName: 'notes-app', storeName: 'kv' });
+const store = namespaced(root, 'account-1/');
+
+await store.set('notes/n1', { title: 'Budget', text: 'Hiring opens in May.' });
+await store.keys('notes/'); // ['notes/n1']
+
+const outbox = new Outbox(store);
+await outbox.add('update', { id: 'n1', title: 'Budget review' }, 'n1');
+await outbox.flush(async (entry) => {
+  const response = await fetch('/api/notes/update', { method: 'POST', body: JSON.stringify(entry.payload) });
+  if (response.ok) return 'done';
+  return response.status === 404 ? 'drop' : 'retry';
+});
+
+const next = reconcileList(
+  [{ id: 'n1', version: 3, pending: await outbox.waitingFor('n1') }],
+  { items: [{ id: 'n1', version: 4 }, { id: 'n2', version: 1 }], deleted: [], complete: false },
+);
+// next.fetch is ['n1', 'n2'], next.remove is []
+```
+
+`@framers/agentos/core/storage/browser` is for a page that keeps records of its own on the device, with no SQL database in the browser, and sends some of them to a server. It has no runtime dependency and imports no Node module.
+
+- `openIndexedDbStore({ dbName, storeName, version })` opens one object store with out-of-line keys, at `version` (1 unless given). A database that exists at that version is opened as it is, so a database another page made is read in place; the object store is made only when the open upgrades the database. When the browser refuses the database (no `indexedDB`, an `open` that throws or fails, a database above `version`, or an upgrade that waits for another tab), it answers a `MemoryKeyValueStore`, whose `memoryOnly` is `true`.
+- A store has `get`, `set`, `delete`, `keys(prefix)` and `deletePrefix(prefix)`. Values are copied with the structured clone, in memory as in IndexedDB, so a value read back is a copy. `keys` answers the keys in order. Over IndexedDB, `keys` and `deletePrefix` read the keys from `prefix` to `prefix` followed by U+FFFF, so keep keys to characters below U+FFFF.
+- `namespaced(store, prefix)` answers a store whose keys all begin with `prefix`, given back without it, so two accounts on one browser never read each other's keys.
+- `Outbox` keeps each change as a value of the store under its prefix (`outbox/` unless given), with its `kind`, `payload`, `subject`, `attempts`, `createdAt` and `nextAt`, ordered by the time it was added. `flush(send)` sends the due changes in order and answers `{ sent, dropped, waiting }`: `done` and `drop` remove a change; `retry`, or a `send` that throws, keeps it until its backoff has passed (2 seconds after the first retry, doubling to at most 5 minutes, unless `backoffMs` says otherwise) and ends the flush there, so a later change never passes an earlier one. One flush runs at a time for a store object and prefix: a flush asked for during another starts when that one ends. A change can reach the server twice (a confirmation lost on the way, or the page open in two tabs), so make every change safe to apply again. `waitingFor(subject)` says whether a change about a subject is held.
+- `reconcileList(local, server)` compares the server's list with the device's copies. `fetch` holds the ids the server names that the device lacks or holds at a lower version; `remove` holds the ids the device holds that the server does not name, when the server lists them as deleted or its list is `complete`. An entry whose `pending` is true is never removed.
+
+The library's browser entry, `@framers/agentos/cognition/library/browser`, exports the same names beside the lexical index a page searches with ([Library Index](../features/LIBRARY_INDEX.md#on-a-device)).
+
+---
+
 ## Choosing an Adapter
 
 | Platform | Adapter |
