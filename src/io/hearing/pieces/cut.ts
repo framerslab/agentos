@@ -6,9 +6,10 @@
  */
 
 import {
+  AudioSample,
   AudioSampleSink,
+  AudioSampleSource,
   BufferTarget,
-  Conversion,
   EncodedAudioPacketSource,
   EncodedPacketSink,
   Mp3OutputFormat,
@@ -119,11 +120,48 @@ async function copyPiece(track: InputAudioTrack, codec: keyof typeof COPY_TARGET
 }
 
 /** One piece decoded to 16 kHz mono 16-bit WAV. */
-async function decodePiece(input: Input, start: number, end: number): Promise<Uint8Array> {
+async function decodePiece(track: InputAudioTrack, start: number, end: number): Promise<Uint8Array> {
+  if (!await track.canDecode()) throw new UnreadableAudioError('cannot_decode');
   const output = outputFor('wav');
-  const conversion = await Conversion.init({ input, output, video: { discard: true }, audio: { numberOfChannels: 1, sampleRate: 16_000, codec: 'pcm-s16' }, trim: { start, end } });
-  if (!conversion.isValid) throw new UnreadableAudioError('cannot_decode');
-  await conversion.execute();
+  const source = new AudioSampleSource({ codec: 'pcm-s16', transform: { numberOfChannels: 1, sampleRate: 16_000 } });
+  output.addAudioTrack(source);
+  await output.start();
+  let sent = false;
+  for await (const sample of new AudioSampleSink(track).samples(start, end)) {
+    try {
+      const first = Math.max(0, Math.min(sample.numberOfFrames, Math.round((start - sample.timestamp) * sample.sampleRate)));
+      const last = Math.max(0, Math.min(sample.numberOfFrames, Math.round((end - sample.timestamp) * sample.sampleRate)));
+      if (first >= last) continue;
+      const trimmed = sample.trim(first, last);
+      try {
+        // Round in frames so timestamp drift cannot create a zero-frame padding sample.
+        const offsetFrames = Math.max(0, Math.round((sample.timestamp - start) * sample.sampleRate) + first);
+        trimmed.setTimestamp(offsetFrames / sample.sampleRate);
+        if (!sent && offsetFrames > 0) {
+          const padding = new AudioSample({
+            data: new Float32Array(offsetFrames * sample.numberOfChannels),
+            format: 'f32',
+            sampleRate: sample.sampleRate,
+            numberOfChannels: sample.numberOfChannels,
+            timestamp: 0,
+          });
+          try {
+            await source.add(padding);
+          } finally {
+            padding.close();
+          }
+        }
+        await source.add(trimmed);
+        sent = true;
+      } finally {
+        trimmed.close();
+      }
+    } finally {
+      sample.close();
+    }
+  }
+  source.close();
+  await output.finalize();
   return new Uint8Array(output.target.buffer!);
 }
 
@@ -141,7 +179,7 @@ export async function* cutPieces(file: Blob | Uint8Array, options: CutOptions): 
     let end = planned.end;
     if (info.path === 'decode' && end < info.seconds) end = await quietestBefore(track, Math.max(start + options.overlapSeconds + 1, end - quiet), end);
     if (planned.index >= (options.fromIndex ?? 0)) {
-      const data = info.path === 'copy' ? await copyPiece(track, info.codec as keyof typeof COPY_TARGETS | 'pcm-s16', start, end) : await decodePiece(input, start, end);
+      const data = info.path === 'copy' ? await copyPiece(track, info.codec as keyof typeof COPY_TARGETS | 'pcm-s16', start, end) : await decodePiece(track, start, end);
       if (data.length > options.maxBytes) throw new RangeError(`piece ${planned.index} is ${data.length} bytes, past ${options.maxBytes}`);
       const extension = info.path === 'decode' || info.codec === 'pcm-s16' ? 'wav' : COPY_TARGETS[info.codec as keyof typeof COPY_TARGETS].extension;
       yield {

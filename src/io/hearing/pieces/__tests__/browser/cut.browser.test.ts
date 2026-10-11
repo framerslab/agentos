@@ -1,4 +1,4 @@
-import { ALL_FORMATS, AudioSample, AudioSampleSink, BufferSource, Input } from 'mediabunny';
+import { ALL_FORMATS, AudioSample, AudioSampleSink, BufferSource, EncodedPacketSink, Input } from 'mediabunny';
 import { describe, expect, it, vi } from 'vitest';
 import { cutPieces, readAudioInfo, readWavPcm, type AudioPiece } from '../../index.js';
 import { ac3File, alacFile, flacFile, packetFile, pcmFile } from './fixtures.js';
@@ -28,6 +28,44 @@ async function canDecodeFile(bytes: Uint8Array): Promise<boolean> {
     const track = await input.getPrimaryAudioTrack();
     if (track === null) throw new Error('fixture has no audio track');
     return await track.canDecode();
+  } finally {
+    input.dispose();
+  }
+}
+
+/** Returns a browser decode failure for the fixture's first packet, or null when it emits audio. */
+async function firstPacketDecodeFailure(bytes: Uint8Array): Promise<string | null> {
+  const input = new Input({ formats: ALL_FORMATS, source: new BufferSource(bytes) });
+  try {
+    const track = await input.getPrimaryAudioTrack();
+    if (track === null) throw new Error('fixture has no audio track');
+    const config = await track.getDecoderConfig();
+    const packet = await new EncodedPacketSink(track).getFirstPacket();
+    if (config === null || packet === null) throw new Error('fixture has no decoder configuration or packet');
+    const chunk = packet.toEncodedAudioChunk();
+    let frames = 0;
+    let failure: string | null = null;
+    const decoder = new AudioDecoder({
+      output: (data) => {
+        frames += data.numberOfFrames;
+        data.close();
+      },
+      error: (error) => { failure = `${error.name}: ${error.message}`; },
+    });
+    try {
+      decoder.configure(config);
+      decoder.decode(chunk);
+      await decoder.flush();
+    } catch (error) {
+      if (failure !== null) return failure;
+      if (error instanceof DOMException && (error.name === 'EncodingError' || error.name === 'NotSupportedError')) {
+        return `${error.name}: ${error.message}`;
+      }
+      throw error;
+    } finally {
+      if (decoder.state !== 'closed') decoder.close();
+    }
+    return failure ?? (frames > 0 ? null : 'decoder emitted no audio frames');
   } finally {
     input.dispose();
   }
@@ -96,6 +134,10 @@ describe('cutting recordings in a browser', () => {
     pieces.forEach(expectMonoWav);
     expect(Math.abs(pieces[0]!.durationMs - 293_000)).toBeLessThanOrEqual(100);
     expect(pieces[1]!.startMs).toBe(pieces[0]!.durationMs - 3_000);
+    for (const piece of pieces) {
+      const frames = readWavPcm(piece.data).samples[0]!.length;
+      expect(Math.abs(frames - piece.durationMs * 16)).toBeLessThanOrEqual(16);
+    }
   });
 
   it('never opens a sample sink for a copied recording', async () => {
@@ -136,6 +178,8 @@ describe('cutting recordings in a browser', () => {
       expect(await readAudioInfo(bytes)).toMatchObject({ path: null, reason: 'cannot_decode' });
       context.skip('FLAC decoding at 48 kHz stereo is unavailable');
     }
+    const failure = await firstPacketDecodeFailure(bytes);
+    if (failure !== null) context.skip(`FLAC fixture packet cannot be decoded: ${failure}`);
     expect(await readAudioInfo(bytes)).toMatchObject({ codec: 'flac', path: 'decode', seconds: 12, sampleRate: 48_000, channels: 2 });
     const flac = await collect(bytes);
     expect(flac).toHaveLength(1);
