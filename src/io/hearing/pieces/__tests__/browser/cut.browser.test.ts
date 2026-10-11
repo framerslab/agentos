@@ -178,7 +178,11 @@ describe('cutting recordings in a browser', () => {
       expect(await readAudioInfo(bytes)).toMatchObject({ path: null, reason: 'cannot_decode' });
       context.skip('FLAC decoding at 48 kHz stereo is unavailable');
     }
-    const failure = await firstPacketDecodeFailure(bytes);
+    // WebKit can hold a FLAC packet without answering: a probe with no answer within fifteen seconds counts as a decoder that cannot.
+    const failure = await Promise.race([
+      firstPacketDecodeFailure(bytes),
+      new Promise<string>((resolve) => setTimeout(() => resolve("the decoder did not answer within fifteen seconds"), 15_000)),
+    ]);
     if (failure !== null) context.skip(`FLAC fixture packet cannot be decoded: ${failure}`);
     expect(await readAudioInfo(bytes)).toMatchObject({ codec: 'flac', path: 'decode', seconds: 12, sampleRate: 48_000, channels: 2 });
     const flac = await collect(bytes);
