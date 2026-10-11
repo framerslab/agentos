@@ -285,6 +285,7 @@ export { souledAgent } from './api/souledAgent.js';
 export type { SouledAgentOptions, SouledAgent } from './api/souledAgent.js';
 export type {
   Agent,
+  AgentLearning,
   AgentSession,
   AgentSessionOptions,
   AgentOptions,

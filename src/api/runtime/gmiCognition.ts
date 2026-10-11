@@ -5,12 +5,15 @@
  * `light` (the default) is a GMI with its reasoning trace and nothing else
  * unless `memory` is set. `full` adds cognitive memory with every mechanism,
  * sentiment tracking and every metaprompt preset. A {@link CognitionConfig}
- * sets each switch on its own.
+ * sets each switch on its own. The agent's `learning` option is resolved
+ * beside them: off unless the agent sets it.
  */
 import type { MemoryConfig } from '../types.js';
 import type { CognitiveMechanismsConfig } from '../../cognition/memory/mechanisms/types.js';
 import type { SentimentTrackingConfig } from '../../cognition/substrate/personas/IPersonaDefinition.js';
 import { SENTIMENT_PRESET_IDS } from '../../cognition/substrate/personas/personaNormalization.js';
+import { resolveLearning } from '../../cognition/learning/config.js';
+import type { LearningConfig, ResolvedLearning } from '../../cognition/learning/types.js';
 
 /** A named cognition profile. */
 export type CognitionProfile = 'light' | 'full';
@@ -47,6 +50,8 @@ export interface ResolvedCognition {
   sentiment: boolean;
   /** The metaprompt presets; false when sentiment is off. */
   metaprompts: 'all' | MetapromptPreset[] | false;
+  /** The learning switches when the agent's `learning` option is on; absent when it is off. */
+  learning?: ResolvedLearning;
 }
 
 /** The agent options {@link resolveCognition} reads. */
@@ -54,6 +59,7 @@ export interface CognitionInputs {
   cognition?: CognitionProfile | CognitionConfig;
   memory?: boolean | MemoryConfig;
   cognitiveMechanisms?: CognitiveMechanismsConfig;
+  learning?: boolean | LearningConfig;
 }
 
 function memoryOf(value: boolean | MemoryConfig | undefined): MemoryConfig | false {
@@ -88,17 +94,27 @@ function presetsOf(value: CognitionConfig['metaprompts']): 'all' | MetapromptPre
  * - A {@link CognitionConfig}: each switch as set, with `memory` falling back
  *   to the agent's `memory` option.
  *
- * @throws {Error} When `cognition` names an unknown profile or an unknown metaprompt preset.
+ * `learning` is resolved for the profile: unset or `false`, the result has no
+ * `learning` entry; `true` or a `LearningConfig`, it holds the mode and the
+ * switches, which `full` asks for and `light` and a `CognitionConfig` do not.
+ *
+ * @throws {Error} When `cognition` names an unknown profile or an unknown metaprompt preset,
+ *   or `learning` holds a value of the wrong type or an unknown mode.
  */
 export function resolveCognition(opts: CognitionInputs): ResolvedCognition {
   const c = opts.cognition ?? 'light';
+  /** The `learning` entry for a profile: absent when the option is off. */
+  const learningFor = (profile: ResolvedCognition['profile']): { learning?: ResolvedLearning } => {
+    const learning = resolveLearning(opts.learning, profile);
+    return learning ? { learning } : {};
+  };
   if (c === 'light') {
     const memory = memoryOf(opts.memory);
-    return { profile: 'light', memory, mechanisms: memory ? (opts.cognitiveMechanisms ?? {}) : undefined, sentiment: false, metaprompts: false };
+    return { profile: 'light', memory, mechanisms: memory ? (opts.cognitiveMechanisms ?? {}) : undefined, sentiment: false, metaprompts: false, ...learningFor('light') };
   }
   if (c === 'full') {
     const memory = memoryOf(opts.memory ?? true);
-    return { profile: 'full', memory, mechanisms: memory ? (opts.cognitiveMechanisms ?? {}) : undefined, sentiment: true, metaprompts: 'all' };
+    return { profile: 'full', memory, mechanisms: memory ? (opts.cognitiveMechanisms ?? {}) : undefined, sentiment: true, metaprompts: 'all', ...learningFor('full') };
   }
   if (typeof c !== 'object') {
     throw new Error(`cognition: unknown profile '${String(c)}'; use 'light', 'full' or a CognitionConfig.`);
@@ -111,5 +127,5 @@ export function resolveCognition(opts: CognitionInputs): ResolvedCognition {
       : c.mechanisms;
   const sentiment = c.sentiment === true;
   const metaprompts = presetsOf(c.metaprompts);
-  return { profile: 'custom', memory, mechanisms, sentiment, metaprompts: sentiment ? metaprompts : false };
+  return { profile: 'custom', memory, mechanisms, sentiment, metaprompts: sentiment ? metaprompts : false, ...learningFor('custom') };
 }

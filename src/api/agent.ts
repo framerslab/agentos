@@ -35,6 +35,7 @@ import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
 import type { SkillEntry } from '../cognition/skills/types.js';
 import { loadSoulSync, parseSoul } from '../cognition/substrate/personas/SoulLoader.js';
 import { renderPersonalitySection } from '../cognition/substrate/personas/personalityPrompt.js';
+import type { LearningConfig, LoopManifest } from '../cognition/learning/types.js';
 import { runCitationVerification } from './runtime/citationVerification.js';
 import type {
   AgentOSUsageAggregate,
@@ -319,6 +320,21 @@ export interface AgentOptions extends BaseAgentConfig {
    * switch set in a {@link CognitionConfig}.
    */
   cognition?: CognitionProfile | CognitionConfig;
+  /**
+   * The learning layer when `runtime` is `'gmi'` (docs/GMI.md, "Learning"). Unset or `false`: off, and the agent
+   * runs as it did before the layer existed. `true` or a {@link LearningConfig}: the agent's GMIs send the
+   * personality section as a system prompt of its own on every turn, and each session opened with a user id is
+   * bound to a learner. The legacy runtime ignores it.
+   */
+  learning?: boolean | LearningConfig;
+}
+
+/**
+ * What a host reads of an agent's learning layer ({@link Agent.learning}).
+ */
+export interface AgentLearning {
+  /** Which loops the agent runs, and for each one that is off, why. */
+  manifest(): Promise<LoopManifest>;
 }
 
 /**
@@ -524,6 +540,10 @@ export interface Agent {
   usage(sessionId?: string): Promise<AgentOSUsageAggregate>;
   /** Releases all in-memory session state held by this agent. */
   close(): Promise<void>;
+  /**
+   * The agent's learning layer as its host reads it. Set only with `runtime: 'gmi'` and `learning` on.
+   */
+  learning?: AgentLearning;
   /**
    * Exports the agent's configuration as a portable object. Secrets are
    * redacted unless `options.redactSecrets` is `false`.
