@@ -90,13 +90,13 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
     }
 
     /* Final result. Claude Code flags a failed turn (an API error, the turn
-     * limit) with is_error; its result text, or its subtype when it has no
-     * text, is then the failure's message. */
+     * limit) with is_error; {@link errorResultMessage} is then the failure's
+     * message. */
     if (raw.type === 'result') {
       const isError = raw.is_error === true;
       return {
         type: 'result',
-        result: isError ? raw.result || raw.subtype || 'Unknown error' : raw.result ?? '',
+        result: isError ? this.errorResultMessage(raw) : raw.result ?? '',
         sessionId: raw.session_id,
         usage: raw.usage
           ? { input_tokens: raw.usage.input_tokens ?? 0, output_tokens: raw.usage.output_tokens ?? 0 }
@@ -116,6 +116,22 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
     }
 
     return null;
+  }
+
+  /**
+   * The message of a result Claude Code flags as an error. A turn that ended
+   * on an API error carries the error's text in `result`. The error subtypes
+   * (error_during_execution, error_max_turns, error_max_budget_usd,
+   * error_max_structured_output_retries) carry no result and list their
+   * detail in `errors` (SDKResultError in @anthropic-ai/claude-agent-sdk
+   * 0.3.296), which follows the subtype: `error_max_turns: <errors>`.
+   */
+  private errorResultMessage(raw: any): string {
+    if (raw.result) return raw.result;
+    const errors: string[] = Array.isArray(raw.errors)
+      ? raw.errors.filter((error: unknown) => typeof error === 'string' && error !== '')
+      : [];
+    return [raw.subtype, errors.join('; ')].filter(Boolean).join(': ') || 'Unknown error';
   }
 
   /* ---- Error classification ------------------------------------- */
