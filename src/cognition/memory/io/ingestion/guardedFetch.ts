@@ -198,17 +198,18 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 type Nat64Lookup = () => Promise<Nat64Prefix[] | undefined>;
 
 /**
- * The address the connection goes to: every address of the host public or
- * allowed, the first one taken. A lookup cannot be cancelled, so the wait for
- * it ends at the deadline while the lookup itself runs on.
+ * The addresses the connection may go to: every address of the host, each
+ * public or allowed, in the order the resolver gave them. A lookup cannot be
+ * cancelled, so the wait for it ends at the deadline while the lookup itself
+ * runs on.
  */
-async function checkedAddress(
+async function checkedAddresses(
   url: URL,
   resolve: NonNullable<GuardedFetchOptions['resolve']>,
   allowed: ReadonlySet<string>,
   signal: AbortSignal,
   nat64: Nat64Lookup,
-): Promise<CheckedAddress> {
+): Promise<CheckedAddress[]> {
   const host = hostOf(url);
   const literal = isIP(host);
   const answers = literal !== 0 ? [{ address: host, family: literal }] : await untilAborted(resolve(host), signal);
@@ -232,8 +233,7 @@ async function checkedAddress(
       throw new GuardedFetchError('address', `${host} resolves to an address that is not public`);
     }
   }
-  const first = answers[0];
-  return { address: first.address, family: isIP(first.address) === 6 ? 6 : 4 };
+  return answers.map((answer) => ({ address: answer.address, family: isIP(answer.address) === 6 ? 6 : 4 }));
 }
 
 /**
@@ -263,8 +263,12 @@ async function nat64PrefixesOf(
 }
 
 /**
- * Sends one GET for `url` to `target` on a connection of its own, and
- * resolves with the response once its head arrives. The promise settles
+ * Sends one GET for `url` on a connection of its own to one of `targets`,
+ * the addresses that were checked, and resolves with the response once its
+ * head arrives. Node tries them in turn, alternating the families, when the
+ * first does not connect (`autoSelectFamily`), so a host whose first address
+ * cannot be reached from this network, often an IPv6 one, is read at the
+ * next; it never connects to an address that was not checked. The promise settles
  * however the request ends: a response, an error, the signal, a protocol
  * upgrade, or a close with none of these. Node closes a connection answered
  * with `101 Switching Protocols` without an error when nothing listens for the
@@ -273,18 +277,20 @@ async function nat64PrefixesOf(
  */
 function requestOnce(
   url: URL,
-  target: CheckedAddress,
+  targets: CheckedAddress[],
   headers: http.OutgoingHttpHeaders,
   signal: AbortSignal,
 ): Promise<http.IncomingMessage> {
   const host = hostOf(url);
-  // The connection goes to the address that was checked, whatever another
+  // The connection goes to an address that was checked, whatever another
   // lookup of the name would answer now.
   const lookup: LookupFunction = (_hostname, lookupOptions, callback) => {
-    if (lookupOptions.all) callback(null, [{ address: target.address, family: target.family }]);
-    else callback(null, target.address, target.family);
+    if (lookupOptions.all) callback(null, targets.map(({ address, family }) => ({ address, family })));
+    else callback(null, targets[0].address, targets[0].family);
   };
-  const options: https.RequestOptions = {
+  // autoSelectFamily is a socket option that http(s).request hands on to the
+  // connection; @types/node does not list it among the request's options.
+  const options: https.RequestOptions & { autoSelectFamily?: boolean } = {
     // A connection of its own: a pooled one may have been opened to another
     // address for the same host and port, by a lookup this check never saw.
     agent: false,
@@ -294,6 +300,8 @@ function requestOnce(
     method: 'GET',
     headers,
     lookup,
+    // Set here, not left to the process-wide default, which a host can turn off.
+    autoSelectFamily: true,
     signal,
     // The certificate is checked against the host's name, never the address.
     servername: isIP(host) === 0 ? host : undefined,
@@ -405,8 +413,8 @@ function failureOf(error: unknown, callerSignal: AbortSignal | undefined, deadli
  * Reads `address`, an http or https address a person gave a server, under
  * `options`. Each hop resolves the host and refuses it when any of its
  * addresses is not public ({@link isPublicAddress}) and not in
- * `allowAddresses`, then connects to the first checked address on a
- * connection of its own; a redirect is followed only to an address that
+ * `allowAddresses`, then connects to a checked address on a connection of
+ * its own, trying the next one when the first cannot be reached; a redirect is followed only to an address that
  * passes the same checks, at most `maxRedirects` times. The answer must be a
  * 2xx of a type in `accept`, and its body, decoded from gzip, deflate or br,
  * is refused once it passes `maxBytes` on the wire or decoded. The whole read
@@ -452,8 +460,8 @@ export async function guardedFetch(address: string, options: GuardedFetchOptions
   const nat64: Nat64Lookup = () => (nat64Asked ??= nat64PrefixesOf(resolve, signal));
   try {
     for (let hop = 0; ; hop += 1) {
-      const target = await checkedAddress(url, resolve, allowed, signal, nat64);
-      const response = await requestOnce(url, target, headers, signal);
+      const targets = await checkedAddresses(url, resolve, allowed, signal, nat64);
+      const response = await requestOnce(url, targets, headers, signal);
       const status = response.statusCode ?? 0;
       if (REDIRECTS.has(status)) {
         const location = response.headers.location;

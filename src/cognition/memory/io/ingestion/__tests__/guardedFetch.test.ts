@@ -269,6 +269,21 @@ describe('guardedFetch', () => {
     expect(await reasonOf(guardedFetch(at('/to-private'), reach({ resolve })))).toBe('address');
   });
 
+  it('connects to the next checked address when the first cannot be reached', async () => {
+    // The stand-in listens on 127.0.0.1 alone, so a connection to 127.0.0.2
+    // on its port is refused, as an address unreachable from this network
+    // (often a host's IPv6 one) would be.
+    const resolve = async () => [
+      { address: '127.0.0.2', family: 4 },
+      { address: '127.0.0.1', family: 4 },
+    ];
+
+    const page = await guardedFetch(at('/page'), reach({ resolve, allowAddresses: ['127.0.0.2', '127.0.0.1'] }));
+
+    expect(page.status).toBe(200);
+    expect(page.body.toString('utf8')).toBe(PAGE);
+  });
+
   it('reads an answer with no Content-Type as application/octet-stream, for a caller that accepts that', async () => {
     const untyped = await guardedFetch(at('/untyped'), reach({ accept: ['audio/mpeg', 'application/octet-stream'] }));
     expect(untyped.contentType).toBe('application/octet-stream');
