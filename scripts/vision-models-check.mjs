@@ -1,8 +1,8 @@
 /**
  * Runs the vision pipeline's local tiers end to end from the built package:
  * PaddleOCR and Tesseract.js read an invoice, TrOCR reads a handwritten line,
- * Florence-2 reads the invoice line by line with each line's box, and CLIP
- * embeds two images. Each model tier loads the Hugging Face Hub model it
+ * Florence-2 reads the invoice line by line with each line's box (also through
+ * `process` with its tier named), and CLIP embeds two images. Each model tier loads the Hugging Face Hub model it
  * names, about 3 GB in all, so this runs in a CI job of its own
  * (.github/workflows/vision-models.yml): the unit suite mocks the OCR
  * packages and transformers.js, and a result shape or a model id the code
@@ -101,6 +101,15 @@ try {
     );
   }
   assert.match(page.blocks.map((block) => block.content).join('\n'), /invoice/i);
+
+  // The same tier through process, named as the vision-pipeline pack names it
+  // for its layout mode: Florence-2 alone runs, and the result carries the page.
+  const named = await timed('layout through process', () =>
+    pipeline.process(invoice, { tiers: ['document-ai'], forceCategory: 'document-layout' }),
+  );
+  assert.deepEqual(named.tiers, ['document-ai']);
+  assert.equal(named.layout?.pages.length, 1);
+  assert.match(named.text, /invoice/i);
 
   // CLIP: 512 finite numbers per image, and two unlike images unlike each other.
   const cats = await sample('cats.jpg');
