@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { StreamingSTTChain } from '../providers/StreamingSTTChain.js';
 import { defaultCapabilities } from '../HealthyProvider.js';
-import type { IStreamingSTT, StreamingSTTSession } from '../types.js';
+import type { AudioFrame, IStreamingSTT, StreamingSTTSession, TranscriptEvent } from '../types.js';
 import type { HealthyProvider } from '../HealthyProvider.js';
 
 function mkSession(providerId: string): StreamingSTTSession {
@@ -348,5 +348,115 @@ describe('StreamingSTTChain: mid-utterance failover and close', () => {
     expect(startB).not.toHaveBeenCalled();
     expect(errors).not.toHaveBeenCalled();
     expect(closed).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('StreamingSTTChain: the mid-utterance failover facade', () => {
+  /** A provider whose sessions record the frames pushed into them, for a test to drive. */
+  function recordingProvider(id: string, priority: number) {
+    const sessions: Array<StreamingSTTSession & { pushed: AudioFrame[] }> = [];
+    const provider: IStreamingSTT & HealthyProvider = {
+      providerId: id,
+      priority,
+      capabilities: defaultCapabilities({ languages: ['en'] }),
+      isStreaming: false,
+      async startSession() {
+        const pushed: AudioFrame[] = [];
+        const session = Object.assign(new EventEmitter(), {
+          pushed,
+          pushAudio(frame: AudioFrame) {
+            pushed.push(frame);
+          },
+          async flush() {},
+          // As a real session does, it emits 'close' when closed.
+          close(this: EventEmitter) {
+            this.emit('close');
+          },
+        }) as unknown as StreamingSTTSession & { pushed: AudioFrame[] };
+        sessions.push(session);
+        return session;
+      },
+      async healthCheck() {
+        return { ok: true };
+      },
+    };
+    return { provider, sessions };
+  }
+
+  /** Half a second of 16 kHz audio, over the facade's 400 ms replay floor. */
+  function halfSecond(): AudioFrame {
+    return { samples: new Float32Array(8_000), sampleRate: 16_000, timestamp: Date.now() };
+  }
+
+  it('forwards transcripts and speech events from the active session', async () => {
+    const a = recordingProvider('a', 10);
+    const chain = new StreamingSTTChain([a.provider], { enableMidUtteranceFailover: true });
+    const facade = await chain.startSession();
+    const seen: string[] = [];
+    facade.on('speech_start', () => seen.push('speech_start'));
+    facade.on('transcript', (event: TranscriptEvent) => seen.push(`transcript ${event.text}`));
+    facade.on('speech_end', () => seen.push('speech_end'));
+    a.sessions[0].emit('speech_start');
+    a.sessions[0].emit('transcript', { text: 'hello', confidence: 1, words: [], isFinal: true });
+    a.sessions[0].emit('speech_end');
+    expect(seen).toEqual(['speech_start', 'transcript hello', 'speech_end']);
+  });
+
+  it('moves to the next provider when the active session fails, replaying the buffered audio', async () => {
+    const a = recordingProvider('a', 10);
+    const b = recordingProvider('b', 20);
+    const failover = vi.fn();
+    const chain = new StreamingSTTChain([a.provider, b.provider], {
+      enableMidUtteranceFailover: true,
+      onProviderFailover: failover,
+    });
+    const facade = await chain.startSession();
+    const frame = halfSecond();
+    await facade.pushAudio(frame);
+    a.sessions[0].emit('error', new Error('socket hang up'));
+    await vi.waitFor(() => expect(failover).toHaveBeenCalledOnce());
+    expect(failover.mock.calls[0][0]).toMatchObject({ kind: 'stt', from: 'a', to: 'b', reason: 'network' });
+    expect(b.sessions).toHaveLength(1);
+    expect(b.sessions[0].pushed).toEqual([frame]);
+    expect(chain.currentProviderId).toBe('b');
+  });
+
+  it('emits error on the facade once no backup is left', async () => {
+    const a = recordingProvider('a', 10);
+    const chain = new StreamingSTTChain([a.provider], { enableMidUtteranceFailover: true });
+    const facade = await chain.startSession();
+    const errors: Error[] = [];
+    facade.on('error', (err: Error) => errors.push(err));
+    a.sessions[0].emit('error', new Error('socket hang up'));
+    await vi.waitFor(() => expect(errors).toHaveLength(1));
+    expect(errors[0].name).toBe('AggregateVoiceError');
+  });
+
+  it('flushes the active session', async () => {
+    const a = recordingProvider('a', 10);
+    const chain = new StreamingSTTChain([a.provider], { enableMidUtteranceFailover: true });
+    const facade = await chain.startSession();
+    const flush = vi.spyOn(a.sessions[0], 'flush');
+    await facade.flush();
+    expect(flush).toHaveBeenCalledOnce();
+  });
+
+  it('closes the active session when asked, opening no backup, and emits close once', async () => {
+    const a = recordingProvider('a', 10);
+    const b = recordingProvider('b', 20);
+    const failover = vi.fn();
+    const chain = new StreamingSTTChain([a.provider, b.provider], {
+      enableMidUtteranceFailover: true,
+      onProviderFailover: failover,
+    });
+    const facade = await chain.startSession();
+    const closed = vi.fn();
+    facade.on('close', closed);
+    await facade.close();
+    await facade.close();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(b.sessions).toHaveLength(0);
+    expect(failover).not.toHaveBeenCalled();
+    expect(closed).toHaveBeenCalledOnce();
   });
 });
