@@ -75,7 +75,7 @@ describe('AgentOS docs alignment', () => {
     expect(readme).toContain('## API Surfaces');
   });
 
-  it('names the provider fallback API in the README', () => {
+  it("keeps 'Auto-fallback on 402/429/5xx.' out of the README and finds fallbackProviders, buildFallbackChain or 'automatic fallback' in it", () => {
     const readme = read('../../../../README.md');
     // The old one-line summary 'Auto-fallback on 402/429/5xx.' stays out of the README.
     expect(readme).not.toContain('Auto-fallback on 402/429/5xx.');
@@ -171,6 +171,33 @@ describe('AgentOS docs alignment', () => {
     expect(packageDocsIndex).toContain('workflow() DSL');
     expect(packageDocsIndex).toContain('mission() API');
     expect(packageDocsIndex).toContain('Checkpointing');
+  });
+
+  it('publishes the PII redaction extension page from its live-docs static page, and keeps PII_REDACTION.md links on the guide', () => {
+    const requireCjs = createRequire(import.meta.url);
+    const { publicationManifest, buildFilenameRewriteMap } = requireCjs('../../../../docs/publication-manifest.cjs') as {
+      publicationManifest: Array<Record<string, unknown> & { dest: string }>;
+      buildFilenameRewriteMap: () => Record<string, string>;
+    };
+
+    // agentos-live-docs holds the page at static-docs/extensions/built-in/pii-redaction.md, so the
+    // entry is a static doc that must resolve, not a stub allowed to go missing.
+    const piiPage = publicationManifest.find((entry) => entry.dest === 'extensions/built-in/pii-redaction.md');
+    expect(piiPage).toMatchObject({
+      sourceType: 'static-doc',
+      sourcePath: 'apps/agentos-live-docs/static-docs/extensions/built-in/pii-redaction.md',
+      title: 'PII Redaction',
+      section: 'Extensions',
+      group: 'Guardrail Extensions',
+    });
+    expect(piiPage).not.toHaveProperty('allowMissingSource');
+
+    // The site reads a link's file name case-insensitively, with '-' as '_', so pii-redaction.md
+    // and PII_REDACTION.md share one key there. The first entry keeps it: the guide.
+    const rewrites = buildFilenameRewriteMap();
+    expect(rewrites['PII_REDACTION.md']).toBe('/features/pii-redaction');
+    const keys = Object.keys(rewrites).map((fileName) => fileName.toLowerCase().replace(/-/g, '_'));
+    expect(new Set(keys).size).toBe(keys.length);
   });
 
   itIfLiveDocs('links the unified orchestration guide from the docs homepage', () => {

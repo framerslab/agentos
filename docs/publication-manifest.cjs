@@ -349,8 +349,7 @@ const publicationManifest = [
   builtInExtension('tools/send-file-to-channel', 'extensions/built-in/send-file-to-channel.md', 'Send File to Channel', 16.3),
   builtInExtension('research/trulia-search', 'extensions/built-in/trulia-search.md', 'Trulia Search', 16.4),
   builtInExtension('tools/zip-files', 'extensions/built-in/zip-files.md', 'Zip Files', 16.5),
-  builtInExtension('security/pii-redaction', 'extensions/built-in/pii-redaction.md', 'PII Redaction', 17, {
-    allowMissingSource: true,
+  staticDoc('extensions/built-in/pii-redaction.md', 'extensions/built-in/pii-redaction.md', 'PII Redaction', 'Extensions', 17, {
     group: 'Guardrail Extensions',
   }),
   staticDoc('extensions/built-in/ml-classifiers.md', 'extensions/built-in/ml-classifiers.md', 'ML Content Classifiers', 'Extensions', 17.1, {
@@ -445,13 +444,25 @@ function publicRouteFromDest(dest) {
   return `/${docIdFromDest(dest).replace(/\/index$/, '')}`;
 }
 
+/**
+ * Maps each source file name to the route of the first entry that publishes a
+ * file of that name. The docs site matches a link's file name case-insensitively
+ * and reads '-' as '_' (`normalizeDocKey` in agentos-live-docs
+ * `scripts/pull-docs-links.mjs`), and there a later name with the same key
+ * replaces an earlier one. So the first entry keeps the key: links written to
+ * `PII_REDACTION.md` reach the guide at /features/pii-redaction, not the
+ * extension page published from `pii-redaction.md`.
+ */
 function buildFilenameRewriteMap() {
   const rewrites = {};
+  const takenKeys = new Set();
 
   for (const manifestEntry of publicationManifest) {
     if (!manifestEntry.sourcePath?.endsWith('.md')) continue;
     const fileName = basename(manifestEntry.sourcePath);
-    if (rewrites[fileName]) continue;
+    const key = fileName.toLowerCase().replace(/-/g, '_');
+    if (takenKeys.has(key)) continue;
+    takenKeys.add(key);
     rewrites[fileName] = publicRouteFromDest(manifestEntry.dest);
   }
 
