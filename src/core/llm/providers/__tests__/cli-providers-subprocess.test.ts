@@ -494,6 +494,44 @@ describe('ClaudeCodeProvider: an error result with no result text', () => {
       },
     });
   });
+
+  it('reads the listed errors as the SDK does: each trimmed, a blank one left out', async () => {
+    // The SDK's own reader of an error result (Query.readMessages in
+    // @anthropic-ai/claude-agent-sdk 0.3.296, sdk.mjs) trims each entry of
+    // errors and drops the blank ones before it joins them with '; '. The
+    // result of a startup failure carries the text the CLI wrote to stderr
+    // (startup_failure_reason in sdk.d.ts).
+    stubCli('claude', () =>
+      cliRun(
+        [
+          {
+            type: 'result',
+            subtype: 'error_during_execution',
+            is_error: true,
+            num_turns: 0,
+            errors: ['The working directory is unavailable: /srv/app\n', '  '],
+            startup_failure_reason: 'cwd_unavailable',
+            session_id: 's1',
+          },
+        ],
+        1,
+      ),
+    );
+    const provider = new ClaudeCodeProvider();
+    await provider.initialize({});
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream('claude-sonnet-4-6', HELLO, {})) chunks.push(chunk);
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toMatchObject({
+      isFinal: true,
+      choices: [],
+      error: {
+        code: 'CRASHED',
+        message: 'Claude Code returned an error: error_during_execution: The working directory is unavailable: /srv/app',
+      },
+    });
+  });
 });
 
 /**
