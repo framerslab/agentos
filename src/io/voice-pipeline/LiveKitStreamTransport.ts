@@ -58,7 +58,10 @@ export interface LiveKitStreamTransportOptions {
   sampleRate: number;
   /** Text stream topic of the control messages. @defaultValue 'agentos.voice' */
   topic?: string;
-  /** Length of each inbound frame in milliseconds; rtc-node's default when omitted. */
+  /**
+   * Length of each inbound frame in milliseconds, a whole number that holds at
+   * least one sample at `sampleRate`; rtc-node's default when omitted.
+   */
   frameSizeMs?: number;
   /** The `@livekit/rtc-node` module the host imports; imported on first use when omitted. */
   rtc?: LiveKitRtcModule;
@@ -108,8 +111,8 @@ export class LiveKitStreamTransport extends EventEmitter implements IStreamTrans
   private readonly readers = new Set<LiveKitTextStreamReaderLike>();
 
   /**
-   * @throws {RangeError} When `sampleRate` is not a positive number; the topic
-   *   is left free.
+   * @throws {RangeError} When `sampleRate` or `frameSizeMs` is refused, as
+   *   {@link LiveKitRoomAudioSource} refuses them; the topic is left free.
    * @throws {Error} When the room already has a text stream handler for the
    *   topic (rtc-node allows one per topic).
    */

@@ -171,7 +171,10 @@ export interface LiveKitRoomAudioSourceOptions {
    * consumer: 24000 for OpenAI Realtime transcription, 16000 for Deepgram.
    */
   sampleRate: number;
-  /** Length of each frame in milliseconds; rtc-node's default when omitted. */
+  /**
+   * Length of each frame in milliseconds, a whole number that holds at least
+   * one sample at `sampleRate`; rtc-node's default when omitted.
+   */
   frameSizeMs?: number;
   /**
    * The `@livekit/rtc-node` module the host imports, so one copy of it serves
@@ -204,9 +207,25 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
   private listening = false;
   private wake: (() => void) | undefined;
 
+  /**
+   * @throws {RangeError} When `sampleRate` is not a positive number, or when
+   *   `frameSizeMs` is not a whole number of milliseconds that holds at least
+   *   one sample at `sampleRate`.
+   */
   constructor(private readonly options: LiveKitRoomAudioSourceOptions) {
     if (!(options.sampleRate > 0)) {
       throw new RangeError('LiveKitRoomAudioSource: sampleRate must be a positive number of samples per second');
+    }
+    const { frameSizeMs } = options;
+    // rtc-node's native stream cuts frames of sampleRate * frameSizeMs / 1000
+    // samples, rounded down, and a frame of no samples never ends that loop.
+    if (
+      frameSizeMs !== undefined &&
+      !(Number.isInteger(frameSizeMs) && frameSizeMs > 0 && options.sampleRate * frameSizeMs >= 1000)
+    ) {
+      throw new RangeError(
+        'LiveKitRoomAudioSource: frameSizeMs must be a whole number of milliseconds that holds at least one sample at sampleRate'
+      );
     }
     this.rtc = options.rtc;
   }

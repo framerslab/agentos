@@ -177,6 +177,18 @@ describe('LiveKitRoomAudioSource: the stream and the frames', () => {
     ).toThrow(RangeError);
   });
 
+  it('refuses a frame size that is not a whole number of milliseconds holding at least one sample', () => {
+    const room = new FakeRoom();
+    const source = (sampleRate: number, frameSizeMs: number) => () =>
+      new LiveKitRoomAudioSource({ room, participantIdentity: 'user-1', sampleRate, frameSizeMs, rtc: fakeRtc() });
+    for (const frameSizeMs of [0, -20, 2.5, Number.NaN]) {
+      expect(source(24_000, frameSizeMs)).toThrow(RangeError);
+    }
+    expect(source(500, 1)).toThrow(RangeError); // half a sample a frame
+    expect(source(1_000, 1)).not.toThrow(); // one sample a frame
+    expect(source(16_000, 20)).not.toThrow();
+  });
+
   it('names the missing peer and how to install it, keeping the import error as the cause', async () => {
     const missing = Object.assign(new Error("Cannot find package '@livekit/rtc-node'"), { code: 'ERR_MODULE_NOT_FOUND' });
     let failed: (Error & { cause?: unknown }) | undefined;
