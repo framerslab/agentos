@@ -37,9 +37,13 @@ function plainAgentCallsWithMemory(text: string): string[] {
   return found;
 }
 
-/** Skip tests that reference files outside the agentos package (e.g. in CI where submodules aren't checked out). */
-const hasLiveDocs = exists('../../../../../apps/agentos-live-docs/docs/index.md');
-const hasSkillsPackages = exists('../../../../agentos-skills/package.json');
+// Paths resolve against this file's URL: '../../../../' is the agentos package root,
+// '../../../../../' the monorepo's packages/ directory and '../../../../../../' the
+// monorepo root. The docs site (apps/agentos-live-docs) and the skills packages
+// (packages/agentos-skills, packages/agentos-skills-registry) sit there only in the
+// monorepo; standalone agentos CI checks out neither, so the tests that read them skip.
+const hasLiveDocs = exists('../../../../../../apps/agentos-live-docs/docs/index.md');
+const hasSkillsPackages = exists('../../../../../agentos-skills/package.json');
 const itIfLiveDocs = hasLiveDocs ? it : it.skip;
 const itIfSkills = hasSkillsPackages ? it : it.skip;
 // Monorepo-root docs (../../../../../../docs) only exist when agentos is a
@@ -116,38 +120,52 @@ describe('AgentOS docs alignment', () => {
 
   itIfLiveDocs('keeps the runnable example and docs homepage aligned with the streamlined APIs', () => {
     const example = read('../../../../examples/high-level-api.mjs');
-    const docsIndex = read('../../../../../apps/agentos-live-docs/docs/index.md');
-    const homepage = read('../../../../../apps/agentos-live-docs/src/pages/index.tsx');
+    const docsIndex = read('../../../../../../apps/agentos-live-docs/docs/index.md');
+    const homepage = read('../../../../../../apps/agentos-live-docs/src/pages/index.tsx');
 
     expect(example).toContain('generateImage');
-    expect(docsIndex).toContain('High-Level API');
-    expect(homepage).toContain('High-Level API');
+    // docs/getting-started/HIGH_LEVEL_API.md is published at /getting-started/high-level-api.
+    expect(docsIndex).toContain('/getting-started/high-level-api');
     expect(homepage).toContain('/getting-started/high-level-api');
   });
 
   itIfLiveDocs('keeps the live docs skills routes aligned with the canonical manifest', () => {
-    const docsIndex = read('../../../../../apps/agentos-live-docs/docs/index.md');
-    const homepage = read('../../../../../apps/agentos-live-docs/src/pages/index.tsx');
+    const docsIndex = read('../../../../../../apps/agentos-live-docs/docs/index.md');
+    const homepage = read('../../../../../../apps/agentos-live-docs/src/pages/index.tsx');
 
-    expect(docsIndex).toContain('/skills/agentos-skills');
     expect(docsIndex).not.toContain('/skills/skills-extension');
-    expect(homepage).toContain('/api/');
-    expect(homepage).toContain('/skills/overview');
+    // The site builds with trailingSlash: false. It serves the API reference at /api and
+    // answers /api/ with a 404; a Link to '/api/' renders as /api.
+    expect(homepage).toMatch(/to="\/api\/?"/);
+    // The skills overview (manifest dest skills/index.md) is served at /skills, and
+    // /skills/overview redirects there.
+    expect(homepage).toContain("'/skills'");
     expect(homepage).not.toContain('72 Curated Skills');
     expect(homepage).not.toContain('107 Extensions');
   });
 
-  itIfLiveDocs('surfaces the unified orchestration guides in the package docs and live docs indexes', () => {
+  it('lists the unified orchestration guides in docs/README.md, the source of the site documentation index', () => {
     const packageDocsIndex = read('../../../../docs/README.md');
-    const liveDocsIndex = read('../../../../../apps/agentos-live-docs/docs/index.md');
-    const documentationIndex = read('../../../../../apps/agentos-live-docs/docs/getting-started/documentation-index.md');
+    const requireCjs = createRequire(import.meta.url);
+    const { publicationManifest } = requireCjs('../../../../docs/publication-manifest.cjs') as {
+      publicationManifest: Array<{ sourcePath?: string; dest: string }>;
+    };
 
+    expect(
+      publicationManifest.find((entry) => entry.dest === 'getting-started/documentation-index.md')?.sourcePath,
+    ).toBe('packages/agentos/docs/README.md');
     expect(packageDocsIndex).toContain('Unified Orchestration Layer');
     expect(packageDocsIndex).toContain('AgentGraph');
     expect(packageDocsIndex).toContain('workflow() DSL');
     expect(packageDocsIndex).toContain('mission() API');
-    expect(liveDocsIndex).toContain('/features/unified-orchestration');
-    expect(documentationIndex).toContain('Checkpointing');
+    expect(packageDocsIndex).toContain('Checkpointing');
+  });
+
+  itIfLiveDocs('links the unified orchestration guide from the docs homepage', () => {
+    const homepage = read('../../../../../../apps/agentos-live-docs/src/pages/index.tsx');
+
+    // docs/orchestration/UNIFIED_ORCHESTRATION.md is published at /features/unified-orchestration.
+    expect(homepage).toContain("'/features/unified-orchestration'");
   });
 
   it('keeps the package documentation index pointed at real source files', () => {
@@ -186,14 +204,20 @@ describe('AgentOS docs alignment', () => {
     expect(contributing).toContain('verify:publication');
   });
 
-  itIfRepoRootDocs('points ecosystem API links at the published docs site', () => {
-    const ecosystemGuide = read('../../../../../../docs/getting-started/ecosystem.md');
+  it('points the package ecosystem guide at the API reference route the docs site serves', () => {
     const packageEcosystemGuide = read('../../../../docs/architecture/ECOSYSTEM.md');
 
-    expect(ecosystemGuide).toContain('https://docs.agentos.sh/api/');
-    expect(packageEcosystemGuide).toContain('https://docs.agentos.sh/api/');
-    expect(ecosystemGuide).not.toContain('agentos-live-docs branch');
+    // The site serves the API reference at /api and answers /api/ with a 404.
+    expect(packageEcosystemGuide).toContain('(https://docs.agentos.sh/api)');
+    expect(packageEcosystemGuide).not.toContain('(https://docs.agentos.sh/api/)');
     expect(packageEcosystemGuide).not.toContain('agentos-live-docs branch');
+  });
+
+  itIfRepoRootDocs('points ecosystem API links at the published docs site', () => {
+    const ecosystemGuide = read('../../../../../../docs/getting-started/ecosystem.md');
+
+    expect(ecosystemGuide).toContain('https://docs.agentos.sh/api');
+    expect(ecosystemGuide).not.toContain('agentos-live-docs branch');
   });
 
   itIfRepoRootDocs('keeps runtime-status guidance centralized across orchestration and backend docs', () => {
@@ -223,8 +247,8 @@ describe('AgentOS docs alignment', () => {
   });
 
   itIfSkills('references the 3-tier skills architecture (engine + content + catalog SDK)', () => {
-    const contentPackage = JSON.parse(read('../../../../agentos-skills/package.json'));
-    const catalogSdkPackage = JSON.parse(read('../../../../agentos-skills-registry/package.json'));
+    const contentPackage = JSON.parse(read('../../../../../agentos-skills/package.json'));
+    const catalogSdkPackage = JSON.parse(read('../../../../../agentos-skills-registry/package.json'));
     const packageSkillsGuide = read('../../../../docs/extensions/SKILLS.md');
 
     // @framers/agentos-skills is now the CONTENT package (SKILL.md files + registry.json)
