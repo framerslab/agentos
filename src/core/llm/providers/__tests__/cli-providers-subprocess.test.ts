@@ -447,6 +447,138 @@ describe('GeminiCLIProvider: the stream-json the current Gemini CLI writes', () 
 });
 
 /**
+ * With tools, GeminiCLIProvider asks the model for each tool call as a block
+ * of its reply, <tool_call id=".." name="..">{json}</tool_call>
+ * (injectToolSchemas), and reads the tool calls from the whole reply when the
+ * result event arrives. The Gemini CLI writes the reply as message deltas
+ * wherever the model's chunks end (packages/cli/src/nonInteractiveCli.ts in
+ * google-gemini/gemini-cli at 9b6e0265), so a block can come in pieces.
+ */
+describe('GeminiCLIProvider: tool-call markup in the reply, through streamText()', () => {
+  const at = '2026-10-10T12:00:00.000Z';
+  const opening = [
+    { type: 'init', timestamp: at, session_id: 'g1', model: 'gemini-3.5-flash' },
+    { type: 'message', timestamp: at, role: 'user', content: 'What is the weather in Paris?' },
+  ];
+  /** A piece of the reply, as the CLI writes each one. */
+  const piece = (content: string) => ({ type: 'message', timestamp: at, role: 'assistant', content, delta: true });
+  const result = {
+    type: 'result',
+    timestamp: at,
+    status: 'success',
+    stats: { total_tokens: 15, input_tokens: 12, output_tokens: 3, cached: 0, input: 12, duration_ms: 840, tool_calls: 0 },
+  };
+
+  /**
+   * streamText() on the gemini-cli provider, with get_weather or with no
+   * tools, over a CLI that writes the reply in `pieces` and exits 0: the
+   * stream's parts, its text, and whether each run of the CLI was given a
+   * system prompt, which is where the provider writes the tools.
+   */
+  async function streamTextOver(pieces: string[], { tools }: { tools: boolean }) {
+    const prompted: boolean[] = [];
+    stubCli('gemini', (_args, options) => {
+      prompted.push(options.env?.GEMINI_SYSTEM_MD !== undefined);
+      return cliRun([...opening, ...pieces.map(piece), result], 0);
+    });
+    const stream = streamText({
+      provider: 'gemini-cli',
+      model: 'gemini-3.5-flash',
+      prompt: 'What is the weather in Paris?',
+      ...(tools ? { tools: STREAM_TEXT_TOOLS } : {}),
+    });
+    const parts: StreamPart[] = [];
+    for await (const part of stream.fullStream) parts.push(part);
+    return { prompted, parts, text: await stream.text };
+  }
+
+  it('streams the prose around a tool-call block as text, and the block as the tool call alone', async () => {
+    const { prompted, parts, text } = await streamTextOver(
+      [
+        'Let me look that up. ',
+        '<tool',
+        '_call id="call_1" na',
+        'me="get_weather">{"city": ',
+        '"Paris"}</tool_',
+        'call>',
+        'Back in a moment.',
+      ],
+      { tools: true },
+    );
+
+    expect(prompted).toEqual([true]);
+    expect(textPartsOf(parts)).toEqual(['Let me look that up. ', 'Back in a moment.']);
+    expect(parts.filter((part) => part.type === 'tool-call')).toEqual([
+      { type: 'tool-call', toolName: 'get_weather', args: { city: 'Paris' } },
+    ]);
+    expect(text).toBe('Let me look that up. Back in a moment.');
+  });
+
+  it("streams a '<' in prose that opens no tool-call block as it arrives", async () => {
+    // An HTML tag, a comparison, a tag whose name starts as tool_call does, and tool_call with no attributes.
+    const pieces = ['Wrap it in <b>bold</b>. ', 'If a < b, ', 'the <toolbar> tag stays, ', 'and so does <tool_call> alone.'];
+    const { prompted, parts, text } = await streamTextOver(pieces, { tools: true });
+
+    expect(prompted).toEqual([true]);
+    expect(textPartsOf(parts)).toEqual(pieces);
+    expect(parts.filter((part) => part.type === 'tool-call')).toEqual([]);
+    expect(text).toBe(pieces.join(''));
+  });
+
+  it('passes on, by the end of the reply, prose that quotes an opening tag no closing tag follows', async () => {
+    const pieces = ['A call opens with ', '<tool_call id="call_1" name="get_weather">', ' and its arguments follow.'];
+    const { prompted, parts, text } = await streamTextOver(pieces, { tools: true });
+
+    expect(prompted).toEqual([true]);
+    expect(textPartsOf(parts).join('')).toBe(pieces.join(''));
+    expect(parts.filter((part) => part.type === 'tool-call')).toEqual([]);
+    expect(text).toBe(pieces.join(''));
+  });
+
+  it('streams a reply with no tools as it arrives, markup and all', async () => {
+    const pieces = ['Here is one: ', '<tool_call id="call_1" name="get_weather">', '{"city": "Paris"}</tool_call>'];
+    const { prompted, parts, text } = await streamTextOver(pieces, { tools: false });
+
+    expect(prompted).toEqual([false]);
+    expect(textPartsOf(parts)).toEqual(pieces);
+    expect(parts.filter((part) => part.type === 'tool-call')).toEqual([]);
+    expect(text).toBe(pieces.join(''));
+  });
+
+  it("ends with the abort chunk (error.type 'abort') when the caller aborts while the consumer holds text held back to the reply's end", async () => {
+    // No closing tag follows the opening tag, so the reply's text is held back until the reply ends.
+    const reply = '<tool_call id="call_1" name="get_weather"> opens a call.';
+    let run!: ReturnType<typeof cancellableRun>;
+    stubCli('gemini', (_args, options) => {
+      run = cancellableRun([...opening, piece(reply), result], options.cancelSignal);
+      return run;
+    });
+    const provider = new GeminiCLIProvider();
+    await provider.initialize({});
+    const controller = new AbortController();
+    const chunks: ModelCompletionResponse[] = [];
+    let endedBeforeAbort: boolean | undefined;
+    for await (const chunk of provider.generateCompletionStream('gemini-3.5-flash', HELLO, {
+      tools: [WEATHER_TOOL],
+      abortSignal: controller.signal,
+    })) {
+      chunks.push(chunk);
+      if (chunk.responseTextDelta && !controller.signal.aborted) {
+        endedBeforeAbort = run.state.ended;
+        controller.abort();
+      }
+    }
+    const final = chunks[chunks.length - 1];
+
+    // The CLI had exited 0 and the held text had gone out before the abort: the case under test was reached.
+    expect(endedBeforeAbort).toBe(true);
+    expect(chunks.filter((chunk) => !chunk.isFinal).map((chunk) => chunk.responseTextDelta)).toEqual([reply]);
+    expect(final).toMatchObject({ isFinal: true, error: { type: 'abort', code: 'REQUEST_ABORTED' } });
+    expect(final.choices).toEqual([]);
+  });
+});
+
+/**
  * A run whose outcome only the code under test can observe. vi.fn() attaches
  * handlers of its own to a Promise its implementation returns (the
  * settledResults record, @vitest/spy 5.0.3 src/index.ts), which would hide a
