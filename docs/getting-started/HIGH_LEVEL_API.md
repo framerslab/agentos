@@ -580,6 +580,8 @@ await tutor.close();
 
 With `runtime: 'gmi'` (or [`gmi()`](https://github.com/framerslab/agentos/blob/master/src/api/gmi.ts), the same function under its own name), every session is a Generalized Mind Instance built from the agent's options, and `memory` turns on cognitive memory: one manager for the agent's sessions, scoped per user, embedding with `memory.embedding` (unset, a model picked from the global default provider or the environment's keys). `cognition: 'full'` adds sentiment tracking and the metaprompt presets. Of the `MemoryConfig` fields, this path reads `embedding` and `consolidation`; `types: ['episodic', 'semantic']`, `working` and `shared` are read by neither runtime of `agent()`, and without `runtime: 'gmi'` the agent reads no `memory` option at all. [GMIs from agent()](../GMI.md#gmis-from-agent) lists what each option does on this path.
 
+`learning: true`, or a `LearningConfig`, turns on the agent's learning layer: every GMI of the agent sends the persona's personality section as a system prompt of its own on every turn, in the words `agent()` writes, a session opened with a `userId` is bound to a learner, and `agent.learning.manifest()` says which loops run. Unset or `false` (the default), the agent builds no layer and the persona's base prompt carries the section; `agent()` without `runtime: 'gmi'` ignores the option. [Learning](../GMI.md#learning) has the rules.
+
 ### Per-agent identity via SOUL.md
 
 Pass a `soul:` option to give an agent its identity from a SOUL.md workspace. `agent()` builds its system prompt from the SOUL.md body first, then a `## Style` section from STYLE.md, then the `memory/index.md` catalog, then `instructions`, `name`, `personality` and skills. A soul that fails to load logs a warning, and the agent starts without it.
@@ -773,6 +775,8 @@ For custom host-managed tools that are not registered in AgentOS, keep using
 
 This recovery path assumes the conversation store is still available after the
 original process exits.
+
+`AgentOSConfig.learning` turns on the runtime's learning layer: every GMI sends its persona's personality section as a system prompt of its own on every turn, each session is bound to its user under the turn's resolved organization, and `AgentOS.getLearningLayer()` returns the layer (`undefined` while learning is off). [Learning](../GMI.md#learning) has the rules.
 
 ## Guidance
 
