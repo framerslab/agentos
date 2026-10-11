@@ -368,6 +368,13 @@ export function sttEntryPricePerMinute(entry: string): number | undefined {
  * failover facade forwards transcripts, speech events, `'usage'` and
  * `'warning'`, and has no `flush()`.
  *
+ * Entries of one vendor share that vendor's provider id (every `openai`
+ * entry is `openai-realtime-transcription`), so `currentProviderId`, the
+ * chain's provider events and a `CircuitBreaker` in the chain options
+ * cannot tell them apart: a breaker counts the failures of all of a
+ * vendor's entries together, and once it trips, later sessions skip every
+ * entry of that vendor.
+ *
  * @throws {RangeError} For no entry, an entry twice, an entry
  *   {@link parseSttEntry} refuses, or a vendor with no options.
  */
