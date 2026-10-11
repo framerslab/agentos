@@ -363,8 +363,10 @@ export function sttEntryPricePerMinute(entry: string): number | undefined {
 /**
  * A speech-to-text chain that tries the entries in the order given (priority
  * 10, 20, 30 ...). Mid-utterance failover is off unless the chain options turn
- * it on, as in {@link createSttChainFromEnv}, so a session keeps its
- * provider's `flush()`, `'usage'` and `'warning'`.
+ * it on, as in {@link createSttChainFromEnv}. With failover off a session is
+ * its provider's own, with `flush()` and every event the provider emits; the
+ * failover facade forwards transcripts, speech events, `'usage'` and
+ * `'warning'`, and has no `flush()`.
  *
  * @throws {RangeError} For no entry, an entry twice, an entry
  *   {@link parseSttEntry} refuses, or a vendor with no options.
