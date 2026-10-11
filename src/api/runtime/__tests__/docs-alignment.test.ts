@@ -42,7 +42,7 @@ function plainAgentCallsWithMemory(text: string): string[] {
 // monorepo root. The docs site (apps/agentos-live-docs) and the skills packages
 // (packages/agentos-skills, packages/agentos-skills-registry) sit there only in the
 // monorepo; standalone agentos CI checks out neither, so the tests that read them skip.
-// Each guard checks every file outside the package that its tests read.
+// These two guards each check every file outside the package that their tests read.
 const hasLiveDocs = [
   '../../../../../../apps/agentos-live-docs/docs/index.md',
   '../../../../../../apps/agentos-live-docs/src/pages/index.tsx',
@@ -54,7 +54,8 @@ const hasSkillsPackages = [
 const itIfLiveDocs = hasLiveDocs ? it : it.skip;
 const itIfSkills = hasSkillsPackages ? it : it.skip;
 // Monorepo-root docs (../../../../../../docs) only exist when agentos is a
-// submodule of the monorepo; they are absent in standalone agentos CI.
+// submodule of the monorepo; they are absent in standalone agentos CI. This guard
+// checks docs/README.md alone; its tests read other files under that docs/ too.
 const hasRepoRootDocs = exists('../../../../../../docs/README.md');
 const itIfRepoRootDocs = hasRepoRootDocs ? it : it.skip;
 
@@ -65,23 +66,23 @@ const apiReferenceWithSlash = /https:\/\/docs\.agentos\.sh\/api\/(?![\w-])/;
 describe('AgentOS docs alignment', () => {
   it('keeps the package README aligned with the high-level API surface', () => {
     const readme = read('../../../../README.md');
-    // Each of these names is a real exported helper users discover from
-    // the README — assert presence, not specific heading text. README
-    // structure is allowed to evolve without breaking this test.
+    // generateImage, agent() and agency() are exported helpers users discover
+    // from the README, and '## API Surfaces' heads the README section that lists
+    // the API surfaces. The test asserts only that each is present.
     expect(readme).toContain('generateImage');
     expect(readme).toContain('agent()');
     expect(readme).toContain('agency()');
     expect(readme).toContain('## API Surfaces');
   });
 
-  it('describes provider fallback as an explicit opt-in helper contract', () => {
+  it('names the provider fallback API in the README', () => {
     const readme = read('../../../../README.md');
-    // Reject the old auto-fallback-on-error wording that implied the
-    // runtime silently routes around failures without consent.
+    // The old one-line summary 'Auto-fallback on 402/429/5xx.' stays out of the README.
     expect(readme).not.toContain('Auto-fallback on 402/429/5xx.');
-    // The README must point at the public fallback API somewhere — either
-    // the agency-level config field or the helper that builds chains.
-    // Both names are stable parts of the public surface.
+    // Fallback is on by default: generateText(), streamText(), generateObject() and
+    // agent() build a chain when fallbackProviders is omitted, and
+    // fallbackProviders: [] turns it off. The README names that option, the
+    // buildFallbackChain() helper or 'automatic fallback'.
     const mentionsFallback =
       readme.includes('fallbackProviders') ||
       readme.includes('buildFallbackChain') ||
@@ -275,7 +276,7 @@ describe('AgentOS docs alignment', () => {
     expect(packageSkillsGuide).toContain('@framers/agentos-skills');
     expect(packageSkillsGuide).toContain('@framers/agentos-skills-registry');
   });
-  it('keeps every relative docs link from a published guide pointed at a published page', () => {
+  it('keeps every ./ or ../ link from a published guide to a Markdown file under docs/ pointed at a published page', () => {
     // docs.agentos.sh builds its guide pages from the publication manifest and
     // rewrites a relative link by the target's file name. A link from a published
     // guide to a docs file the manifest does not publish stays as written, and the
