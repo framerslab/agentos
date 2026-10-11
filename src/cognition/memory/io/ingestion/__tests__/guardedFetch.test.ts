@@ -8,6 +8,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import * as diagnosticsChannel from 'node:diagnostics_channel';
 import { createServer as createTcpServer, Socket, type AddressInfo } from 'node:net';
 import { createGunzip, gzipSync } from 'node:zlib';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -269,19 +270,37 @@ describe('guardedFetch', () => {
     expect(await reasonOf(guardedFetch(at('/to-private'), reach({ resolve })))).toBe('address');
   });
 
-  it('connects to the next checked address when the first cannot be reached', async () => {
+  /** The addresses each new client socket tries to connect to, in order, while `run` runs. */
+  async function attemptsDuring<T>(run: () => Promise<T>): Promise<{ result: T; attempts: string[] }> {
+    const attempts: string[] = [];
+    const onSocket = (message: unknown) => {
+      (message as { socket: Socket }).socket.on('connectionAttempt', (address: string) => attempts.push(address));
+    };
+    diagnosticsChannel.subscribe('net.client.socket', onSocket);
+    try {
+      return { result: await run(), attempts };
+    } finally {
+      diagnosticsChannel.unsubscribe('net.client.socket', onSocket);
+    }
+  }
+
+  it('tries the checked addresses in order, and reads at the next when the first cannot be reached', async () => {
     // The stand-in listens on 127.0.0.1 alone, so a connection to 127.0.0.2
     // on its port is refused, as an address unreachable from this network
     // (often a host's IPv6 one) would be.
-    const resolve = async () => [
-      { address: '127.0.0.2', family: 4 },
-      { address: '127.0.0.1', family: 4 },
-    ];
+    const both = ['127.0.0.2', '127.0.0.1'];
+    const answers = (order: string[]) => async () => order.map((address) => ({ address, family: 4 }));
 
-    const page = await guardedFetch(at('/page'), reach({ resolve, allowAddresses: ['127.0.0.2', '127.0.0.1'] }));
+    const fallback = await attemptsDuring(() => guardedFetch(at('/page'), reach({ resolve: answers(both), allowAddresses: both })));
+    expect(fallback.result.body.toString('utf8')).toBe(PAGE);
+    expect(fallback.attempts).toEqual(['127.0.0.2', '127.0.0.1']);
 
-    expect(page.status).toBe(200);
-    expect(page.body.toString('utf8')).toBe(PAGE);
+    // The first address that answers is the one read: nothing after it is tried.
+    const first = await attemptsDuring(() =>
+      guardedFetch(at('/page'), reach({ resolve: answers(['127.0.0.1', '127.0.0.2']), allowAddresses: both })),
+    );
+    expect(first.result.status).toBe(200);
+    expect(first.attempts).toEqual(['127.0.0.1']);
   });
 
   it('reads an answer with no Content-Type as application/octet-stream, for a caller that accepts that', async () => {

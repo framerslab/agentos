@@ -126,6 +126,16 @@ const MAX_DEADLINE_MS = 2_147_483_647;
 const REDIRECTS: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
 
 /**
+ * How long a connection to one of a host's addresses may take before the
+ * next is tried. Node ends an attempt at this timeout and moves on (it does
+ * not race them), so at its default of 250 ms a first address that connects
+ * more slowly, over a long or lossy link, would be given up for a next one
+ * that may refuse. Two seconds is RFC 8305's upper bound for this delay
+ * (section 5); an address that cannot be reached costs at most that.
+ */
+const CONNECT_ATTEMPT_MS = 2_000;
+
+/**
  * True when `address`, an IPv4 or IPv6 address as text, is a public unicast
  * address: not unspecified, loopback, private, carrier-grade NAT, link-local,
  * unique-local, site-local, multicast, documentation, benchmarking or
@@ -288,9 +298,10 @@ function requestOnce(
     if (lookupOptions.all) callback(null, targets.map(({ address, family }) => ({ address, family })));
     else callback(null, targets[0].address, targets[0].family);
   };
-  // autoSelectFamily is a socket option that http(s).request hands on to the
-  // connection; @types/node does not list it among the request's options.
-  const options: https.RequestOptions & { autoSelectFamily?: boolean } = {
+  // autoSelectFamily and its attempt timeout are socket options that
+  // http(s).request hands on to the connection; @types/node does not list
+  // them among the request's options.
+  const options: https.RequestOptions & { autoSelectFamily?: boolean; autoSelectFamilyAttemptTimeout?: number } = {
     // A connection of its own: a pooled one may have been opened to another
     // address for the same host and port, by a lookup this check never saw.
     agent: false,
@@ -300,8 +311,9 @@ function requestOnce(
     method: 'GET',
     headers,
     lookup,
-    // Set here, not left to the process-wide default, which a host can turn off.
+    // Set here, not left to the process-wide defaults, which a host can change.
     autoSelectFamily: true,
+    autoSelectFamilyAttemptTimeout: CONNECT_ATTEMPT_MS,
     signal,
     // The certificate is checked against the host's name, never the address.
     servername: isIP(host) === 0 ? host : undefined,
