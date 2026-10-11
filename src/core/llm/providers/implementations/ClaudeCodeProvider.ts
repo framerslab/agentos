@@ -472,6 +472,9 @@ export class ClaudeCodeProvider implements IProvider {
           finalUsage,
           error?.code,
           error,
+          /* The caller's abort ends the stream with type 'abort', as the
+           * abortSignal contract in IProvider asks of a streaming provider. */
+          error?.code === 'REQUEST_ABORTED' ? 'abort' : undefined,
         );
       }
     }
@@ -742,6 +745,7 @@ Each tool call must include "id" (unique string), "name" (tool name), and "argum
     usage?: ModelUsage,
     code?: string | number,
     details?: unknown,
+    type?: string,
   ): ModelCompletionResponse {
     return {
       id: responseId,
@@ -752,6 +756,7 @@ Each tool call must include "id" (unique string), "name" (tool name), and "argum
       usage,
       error: {
         message,
+        ...(type === undefined ? {} : { type }),
         ...(code === undefined ? {} : { code }),
         ...(details === undefined ? {} : { details }),
       },

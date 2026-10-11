@@ -176,7 +176,7 @@ new CLISubprocessError(
 - **Bridge.** `execute()` and `stream()` throw the error `classifyError()` returns.
 - **Provider, non-streaming.** `generateCompletion()` lets the bridge's error through.
 - **Provider, streaming.** `generateCompletionStream()` reads the bridge's stream to its end, where the bridge awaits the CLI's exit, and yields its final chunk after that. It does not throw when the bridge fails or when the CLI reports an error in its output. Either way the stream ends with a final chunk that carries an `error`:
-  - When the bridge throws, the `error` holds the error's message, its `code` and, as `details`, the error object. A non-zero exit after the CLI's result line ends the stream this way, in place of the reply.
+  - When the bridge throws, the `error` holds the error's message, its `code` and, as `details`, the error object. A non-zero exit after the CLI's result line ends the stream this way, in place of the reply. A call cancelled through `abortSignal` ends it this way too, with `type: 'abort'` beside the `REQUEST_ABORTED` code: the chunk the `abortSignal` contract of `IProvider` asks a streaming provider for, which the completion gateway and `streamText()` read as the caller's own stop.
   - When the CLI flags its result as an error, the `error` holds the [`CRASHED`](#crashed) error `generateCompletion()` throws for an error result: its message, its `code` and, as `details`, the error object.
   - When the CLI writes an error event into its `stream-json` output, the `error` holds only a message: `Claude Code stream error:` or `Gemini CLI stream error:` followed by the event's message. It has no `code` and no `details`.
 
