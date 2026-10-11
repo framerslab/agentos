@@ -139,7 +139,7 @@ npm install paracosm
 **Features:**
 - Universal [`RunArtifact`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts) schema at `paracosm/schema` covering turn-loop civilization sims, batch-trajectory digital twins, and batch-point forecasts
 - HEXACO personality-driven commander decisions with runtime tool forging through AgentOS's [`EmergentCapabilityEngine`](https://github.com/framerslab/agentos/blob/master/src/cognition/emergent/EmergentCapabilityEngine.ts)
-- Deterministic kernel + LLM Event Director: same leader on the same seed replays byte-for-byte; two different leaders on the same seed get divergent events from turn 1 (the director reads each leader's HEXACO + accumulated state)
+- Deterministic kernel + LLM Event Director: [`WorldModel.replay()`](https://github.com/framerslab/paracosm/blob/master/src/runtime/world-model/index.ts) reruns the kernel's between-turn transitions from the snapshots a run recorded with `captureSnapshots: true`, makes no model calls, and reports whether the current kernel reproduces those snapshots byte for byte. The director writes each turn's events from a prompt that carries the leader's HEXACO profile and the run's accumulated state; a compiled scenario's founding event on turn 1 and legacy event on its last turn are written once, when the scenario compiles, and are the same for every leader
 - [`SubjectConfig`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts) and [`InterventionConfig`](https://github.com/framerslab/paracosm/blob/master/src/engine/schema/types.ts) input primitives for digital-twin adoption
 
 🌐 **Live demo:** [paracosm.agentos.sh/sim](https://paracosm.agentos.sh/sim) · **Docs:** [paracosm.agentos.sh/docs](https://paracosm.agentos.sh/docs)
@@ -147,7 +147,7 @@ npm install paracosm
 ---
 
 ### [agentos.sh](https://github.com/framerslab/agentos.sh)
-**Documentation Website** — Official documentation and marketing site.
+**Marketing Site and Documentation Hub** — The AgentOS website. The official documentation is [docs.agentos.sh](https://docs.agentos.sh), built from [agentos-live-docs](https://github.com/framerslab/agentos-live-docs); [agentos.sh/docs](https://agentos.sh/docs) redirects there.
 
 🌐 **Live:** [agentos.sh](https://agentos.sh)
 
