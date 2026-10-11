@@ -168,6 +168,11 @@ export abstract class CLISubprocessBridge {
    * Parse the JSON stdout from `--output-format json`.
    * Default implementation: JSON.parse with graceful fallback to raw text.
    * Override if your CLI's JSON output has a different shape.
+   *
+   * {@link execute} reads a failed run's stdout with it too, for a result the
+   * CLI flagged as a failure. An override may throw on stdout it cannot read
+   * there, such as a failure the CLI writes as text: execute() catches the
+   * throw and classifies the run with {@link classifyError}.
    */
   protected parseJsonResult(stdout: string, durationMs: number): BridgeResult {
     try {
@@ -263,7 +268,9 @@ export abstract class CLISubprocessBridge {
    *
    * A failed run whose stdout holds a JSON result the CLI flagged as a
    * failure is classified by {@link classifyErrorResult}, unless the caller
-   * cancelled it; any other failed run by {@link classifyError}.
+   * cancelled it; any other failed run by {@link classifyError}. That
+   * includes a failed run whose stdout {@link parseJsonResult} throws on: the
+   * throw is caught, and the run has no JSON result to report.
    *
    * @param options — bridge options (prompt, system prompt, model, etc.)
    * @returns parsed result with text, session ID, usage, and timing
@@ -292,8 +299,14 @@ export abstract class CLISubprocessBridge {
        * (Query.readMessages in @anthropic-ai/claude-agent-sdk 0.3.296). A
        * call the caller cancelled stays an abort. */
       if (!error?.isCanceled && typeof error?.stdout === 'string' && error.stdout.trim() !== '') {
-        const reported = this.parseJsonResult(error.stdout, Date.now() - startMs);
-        if (reported.isError) throw this.classifyErrorResult(reported, error);
+        /* An override of parseJsonResult() can throw on stdout that is not
+         * JSON, such as a failure the CLI writes as text: the run then has no
+         * JSON result to report, and is classified below like any other. */
+        let reported: BridgeResult | undefined;
+        try {
+          reported = this.parseJsonResult(error.stdout, Date.now() - startMs);
+        } catch { /* no JSON result to report */ }
+        if (reported?.isError) throw this.classifyErrorResult(reported, error);
       }
       throw this.classifyError(error);
     }
