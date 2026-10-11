@@ -604,6 +604,20 @@ describe('imageToBuffer with untrusted input', () => {
     expect(await imageToBuffer(inputs[0][1])).toHaveLength(2000);
   });
 
+  it('counts characters outside ASCII toward the limit, which Node decodes by their low byte', async () => {
+    // U+0141 has the low byte 0x41, "A": Node's base64 decoder falls back to
+    // reading each character of a two-byte string by its low byte, so eight
+    // of them decode to six bytes.
+    const text = 'Ł'.repeat(8);
+    expect(Buffer.from(text, 'base64')).toHaveLength(6);
+    for (const input of [text, `data:image/png;base64,${text}`]) {
+      await expect(imageToBuffer(input, { untrusted: true, maxBytes: 1 }), input).rejects.toThrow(
+        'imageToBuffer: the image is larger than 1 bytes.',
+      );
+    }
+    expect(await imageToBuffer(`data:image/png;base64,${text}`, { untrusted: true, maxBytes: 6 })).toHaveLength(6);
+  });
+
   it('refuses a maxBytes that is not a positive number, whatever the input', async () => {
     await expect(
       imageToBuffer('data:image/png;base64,iVBORw0KGgo=', { untrusted: true, maxBytes: 0 }),

@@ -205,14 +205,18 @@ export async function imageToBuffer(input: string | Buffer, options: ImageToBuff
 
 /**
  * The most bytes `text` can decode to as base64: three for every four
- * characters of the alphabet, standard or URL-safe (RFC 4648). Padding, white
- * space and anything else decode to nothing.
+ * characters that can stand for six bits. Those are the characters of the
+ * alphabet, standard or URL-safe (RFC 4648), and every character outside
+ * ASCII: Node's decoder falls back to reading each character of a string
+ * that holds one by its low byte, so `Ł` decodes as `A`. ASCII padding,
+ * white space and punctuation decode to nothing.
  */
 function base64ByteBound(text: string): number {
   let characters = 0;
   for (let i = 0; i < text.length; i += 1) {
     const code = text.charCodeAt(i);
     if (
+      code > 0x7f ||
       (code >= 0x30 && code <= 0x39) ||
       (code >= 0x41 && code <= 0x5a) ||
       (code >= 0x61 && code <= 0x7a) ||
