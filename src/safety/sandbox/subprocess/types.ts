@@ -54,11 +54,14 @@ export type StreamEvent =
   | { type: 'text_delta'; text: string }
   | {
       type: 'result';
+      /** The result text the CLI wrote, or '' when it wrote none (as on most failures). */
       result: string;
       sessionId?: string;
       usage?: { input_tokens: number; output_tokens: number };
-      /** Set when the CLI flags its result as a failure; `result` then holds the failure's message. */
+      /** Set when the CLI flags its result as a failure. */
       isError?: boolean;
+      /** The failure's message, set beside `isError`. */
+      error?: string;
     }
   | { type: 'error'; error: string }
   | { type: 'system'; message: string };

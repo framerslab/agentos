@@ -154,24 +154,28 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
       return { type: 'text_delta', text: raw.text };
     }
 
-    /* Final result. The Gemini CLI reports a failure as a result with
-     * status 'error' and an `error` object ({ type, message }), then exits
-     * non-zero; an `is_error` flag is read as well. The failure's message is
-     * then the result text. The CLI's result carries no text of its own (the
-     * reply came as message events) and its token counts in `stats`. */
+    /* Final result. The CLI's result carries no text of its own (the reply
+     * came as message events) and its token counts in `stats`. The CLI
+     * reports a failure as a result with status 'error' and an `error` object
+     * ({ type, message }), then exits non-zero; an `is_error` flag is read as
+     * well. `result` stays the result text, '' when there is none, as the
+     * bridge read it before 0.13.41; the failure's message goes in `error`. */
     if (raw.type === 'result') {
       const isError = raw.is_error === true || raw.status === 'error';
       const tokens = raw.usage ?? raw.stats;
       return {
         type: 'result',
-        result: isError
-          ? raw.error?.message || raw.result || raw.response || raw.error?.type || 'Unknown error'
-          : raw.result ?? raw.response ?? '',
+        result: raw.result ?? raw.response ?? '',
         sessionId: raw.session_id,
         usage: tokens
           ? { input_tokens: tokens.input_tokens ?? 0, output_tokens: tokens.output_tokens ?? 0 }
           : undefined,
-        ...(isError ? { isError: true } : {}),
+        ...(isError
+          ? {
+              isError: true,
+              error: raw.error?.message || raw.result || raw.response || raw.error?.type || 'Unknown error',
+            }
+          : {}),
       };
     }
 

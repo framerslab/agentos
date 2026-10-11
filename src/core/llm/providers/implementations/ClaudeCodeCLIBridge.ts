@@ -90,18 +90,19 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
     }
 
     /* Final result. Claude Code flags a failed turn (an API error, the turn
-     * limit) with is_error; {@link errorResultMessage} is then the failure's
-     * message. */
+     * limit) with is_error. `result` is the CLI's own result text, '' when it
+     * wrote none, as the bridge read it before 0.13.41; the failure's message
+     * ({@link errorResultMessage}) goes in `error`. */
     if (raw.type === 'result') {
       const isError = raw.is_error === true;
       return {
         type: 'result',
-        result: isError ? this.errorResultMessage(raw) : raw.result ?? '',
+        result: raw.result ?? '',
         sessionId: raw.session_id,
         usage: raw.usage
           ? { input_tokens: raw.usage.input_tokens ?? 0, output_tokens: raw.usage.output_tokens ?? 0 }
           : undefined,
-        ...(isError ? { isError: true } : {}),
+        ...(isError ? { isError: true, error: this.errorResultMessage(raw) } : {}),
       };
     }
 

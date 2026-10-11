@@ -382,7 +382,8 @@ export class GeminiCLIProvider implements IProvider {
             /* A failed run the CLI reports in its result: the error
              * generateCompletion() throws for it */
             if (event.isError) {
-              const error = this.errorResultError(event.result);
+              /* The bridge carries the failure's message in `error`. */
+              const error = this.errorResultError(event.error ?? event.result);
               cliReportedError = true;
               finalChunk = this.buildStreamErrorResponse(error.message, modelId, responseId, finalUsage, error.code, error);
               break;
