@@ -1,13 +1,10 @@
 import {
-  ALL_FORMATS,
-  BufferSource,
   BufferTarget,
-  Conversion,
   EncodedAudioPacketSource,
   EncodedPacket,
   FlacOutputFormat,
-  Input,
   MkvOutputFormat,
+  MovOutputFormat,
   Mp3OutputFormat,
   Mp4OutputFormat,
   Output,
@@ -76,9 +73,8 @@ function replaceFourCC(bytes: Uint8Array, before: string, after: string): void {
 export async function pcmFile(container: 'wav' | 'mov', seconds = 310): Promise<Uint8Array> {
   const sampleRate = 48_000;
   const channels = 2;
-  const format: OutputFormat = container === 'wav' ? new WavOutputFormat() : new Mp4OutputFormat({ fastStart: false });
-  // The MP4 muxer supplies the sample tables; the QuickTime entry then names these raw samples as sowt.
-  const source = new EncodedAudioPacketSource(container === 'wav' ? 'pcm-s16' : 'aac');
+  const format: OutputFormat = container === 'wav' ? new WavOutputFormat() : new MovOutputFormat({ fastStart: false });
+  const source = new EncodedAudioPacketSource('pcm-s16');
   const output = new Output({ format, target: new BufferTarget() });
   output.addAudioTrack(source);
   await output.start();
@@ -95,26 +91,22 @@ export async function pcmFile(container: 'wav' | 'mov', seconds = 310): Promise<
     }
     await source.add(new EncodedPacket(bytes, 'key', start / sampleRate, count / sampleRate), start === 0 ? {
       decoderConfig: {
-        codec: container === 'wav' ? 'pcm-s16' : 'mp4a.40.2',
+        codec: 'pcm-s16',
         sampleRate,
         numberOfChannels: channels,
-        ...(container === 'mov' ? { description: new Uint8Array([0x11, 0x90]) } : {}),
       },
     } : undefined);
   }
   await output.finalize();
-  const bytes = new Uint8Array(output.target.buffer!);
-  if (container === 'mov') {
-    bytes.set(new TextEncoder().encode('qt  '), 8);
-    replaceFourCC(bytes, 'mp4a', 'sowt');
-  }
-  return bytes;
+  return new Uint8Array(output.target.buffer!);
 }
 
 /** An unsupported ALAC sample entry in a muxed M4A. */
 export async function alacFile(): Promise<Uint8Array> {
   const bytes = await packetFile('m4a', 1);
   replaceFourCC(bytes, 'mp4a', 'alac');
+  // An AAC esds box would still identify the codec as AAC, regardless of the sample entry name.
+  replaceFourCC(bytes, 'esds', 'free');
   return bytes;
 }
 
@@ -135,12 +127,44 @@ export async function ac3File(): Promise<Uint8Array> {
   return new Uint8Array(output.target.buffer!);
 }
 
-/** Encodes a short PCM recording as FLAC after the caller has checked codec support. */
+/** Computes a FLAC header or frame CRC with its specified polynomial and bit width. */
+function flacCrc(bytes: Uint8Array, bits: 8 | 16, polynomial: number): number {
+  let crc = 0;
+  const highBit = 1 << (bits - 1);
+  const mask = (1 << bits) - 1;
+  for (const byte of bytes) {
+    crc ^= byte << (bits - 8);
+    for (let bit = 0; bit < 8; bit += 1) crc = ((crc << 1) ^ ((crc & highBit) === 0 ? 0 : polynomial)) & mask;
+  }
+  return crc;
+}
+
+/** Muxes twelve seconds of stereo FLAC constant subframes without requiring a browser encoder. */
 export async function flacFile(): Promise<Uint8Array> {
-  const input = new Input({ formats: ALL_FORMATS, source: new BufferSource(await pcmFile('wav', 12)) });
+  const sampleRate = 48_000;
+  const frameSamples = 4_800;
+  const description = new Uint8Array(42);
+  description.set([0x66, 0x4c, 0x61, 0x43, 0x80, 0, 0, 34]);
+  const streamInfo = new DataView(description.buffer);
+  streamInfo.setUint16(8, frameSamples);
+  streamInfo.setUint16(10, frameSamples);
+  description[14] = 16; // Minimum frame size, in bytes.
+  description[17] = 16; // Maximum frame size, in bytes.
+  streamInfo.setUint32(18, (sampleRate << 12) | (1 << 9) | (15 << 4)); // Stereo, 16-bit samples.
+  streamInfo.setUint32(22, 12 * sampleRate);
+  const source = new EncodedAudioPacketSource('flac');
   const output = new Output({ format: new FlacOutputFormat(), target: new BufferTarget() });
-  const conversion = await Conversion.init({ input, output, audio: { codec: 'flac' } });
-  if (!conversion.isValid) throw new Error('FLAC conversion is invalid');
-  await conversion.execute();
+  output.addAudioTrack(source);
+  await output.start();
+  for (let index = 0; index < 120; index += 1) {
+    // Fixed block size, 48 kHz, independent stereo, 16-bit samples; frame numbers fit in one UTF-8 byte.
+    const bytes = new Uint8Array([0xff, 0xf8, 0x7a, 0x18, index, 0x12, 0xbf, 0, 0, 0x20, 0, 0, 0xf0, 0, 0, 0]);
+    bytes[7] = flacCrc(bytes.subarray(0, 7), 8, 0x07);
+    new DataView(bytes.buffer).setUint16(14, flacCrc(bytes.subarray(0, 14), 16, 0x8005));
+    await source.add(new EncodedPacket(bytes, 'key', index * frameSamples / sampleRate, frameSamples / sampleRate), index === 0 ? {
+      decoderConfig: { codec: 'flac', sampleRate, numberOfChannels: 2, description },
+    } : undefined);
+  }
+  await output.finalize();
   return new Uint8Array(output.target.buffer!);
 }

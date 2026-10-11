@@ -1,7 +1,7 @@
 /**
  * @fileoverview The pieces of a recording, cut in the page: packets copied into a container OpenAI takes when the codec
- * allows (no decoding), and otherwise decoded and written as 16 kHz mono 16-bit WAV; when the codec decodes here, each
- * cut moves to the quietest 100 milliseconds within ten seconds before its mark.
+ * allows (no decoding), and otherwise decoded and written as 16 kHz mono 16-bit WAV. On the decode path, each cut
+ * moves to the quietest 100 milliseconds within ten seconds before its mark when the search succeeds.
  * @module agentos/io/hearing/pieces/cut
  */
 
@@ -48,30 +48,50 @@ export interface CutOptions {
   signal?: AbortSignal;
 }
 
+/** Creates a buffered output for a piece's container. */
 function outputFor(extension: string): Output<Mp4OutputFormat | WebMOutputFormat | Mp3OutputFormat | WavOutputFormat, BufferTarget> {
   const format = extension === 'm4a' ? new Mp4OutputFormat() : extension === 'webm' ? new WebMOutputFormat() : extension === 'mp3' ? new Mp3OutputFormat() : new WavOutputFormat();
   return new Output({ format, target: new BufferTarget() });
 }
 
-/** The quietest 100 ms frame in [from, to), by root mean square of the first channel; `to` when nothing decodes. */
+/** The quietest 100 ms frame of the first channel in [from, to); keeps `to` if decoding fails or no frame fits. */
 async function quietestBefore(track: InputAudioTrack, from: number, to: number): Promise<number> {
-  const sink = new AudioSampleSink(track);
+  if (from >= to) return to;
   let best = to;
   let bestLevel = Number.POSITIVE_INFINITY;
-  for await (const sample of sink.samples(from, to)) {
-    const floats = new Float32Array(sample.allocationSize({ format: 'f32', planeIndex: 0 }) / 4);
-    sample.copyTo(floats, { format: 'f32', planeIndex: 0 });
-    const frame = Math.max(1, Math.round(sample.sampleRate / 10));
-    for (let offset = 0; offset + frame <= floats.length; offset += frame) {
-      let sum = 0;
-      for (let i = offset; i < offset + frame; i += 1) sum += floats[i]! * floats[i]!;
-      const level = sum / frame;
-      if (level < bestLevel) {
-        bestLevel = level;
-        best = sample.timestamp + (offset + frame / 2) / sample.sampleRate;
+  let sum = 0;
+  let count = 0;
+  let frameStart = from;
+  try {
+    const sink = new AudioSampleSink(track);
+    for await (const sample of sink.samples(from, to)) {
+      try {
+        const floats = new Float32Array(sample.numberOfFrames);
+        sample.copyTo(floats, { format: 'f32-planar', planeIndex: 0 });
+        const frame = Math.max(1, Math.round(sample.sampleRate / 10));
+        // A decoded sample can be shorter than 100 ms and can straddle either edge of the search window.
+        const first = Math.max(0, Math.ceil((from - sample.timestamp) * sample.sampleRate));
+        const last = Math.min(floats.length, Math.ceil((to - sample.timestamp) * sample.sampleRate));
+        for (let offset = first; offset < last; offset += 1) {
+          if (count === 0) frameStart = sample.timestamp + offset / sample.sampleRate;
+          sum += floats[offset]! * floats[offset]!;
+          count += 1;
+          if (count === frame) {
+            const level = sum / count;
+            if (level < bestLevel) {
+              bestLevel = level;
+              best = frameStart + frame / (2 * sample.sampleRate);
+            }
+            sum = 0;
+            count = 0;
+          }
+        }
+      } finally {
+        sample.close();
       }
     }
-    sample.close();
+  } catch {
+    return to;
   }
   return best;
 }
@@ -113,14 +133,13 @@ export async function* cutPieces(file: Blob | Uint8Array, options: CutOptions): 
   if (info.path === null) throw new UnreadableAudioError(info.reason ?? 'unsupported_codec');
   const input = new Input({ formats: ALL_FORMATS, source: file instanceof Uint8Array ? new BufferSource(file) : new BlobSource(file) });
   const track = (await input.getPrimaryAudioTrack())!;
-  const decodes = info.path === 'decode' || (await track.canDecode());
   const quiet = options.quietSeconds ?? 10;
   const plan = planPieces(info.seconds, options);
   let start = 0;
   for (const planned of plan) {
     options.signal?.throwIfAborted();
     let end = planned.end;
-    if (decodes && end < info.seconds) end = await quietestBefore(track, Math.max(start + options.overlapSeconds + 1, end - quiet), end);
+    if (info.path === 'decode' && end < info.seconds) end = await quietestBefore(track, Math.max(start + options.overlapSeconds + 1, end - quiet), end);
     if (planned.index >= (options.fromIndex ?? 0)) {
       const data = info.path === 'copy' ? await copyPiece(track, info.codec as keyof typeof COPY_TARGETS | 'pcm-s16', start, end) : await decodePiece(input, start, end);
       if (data.length > options.maxBytes) throw new RangeError(`piece ${planned.index} is ${data.length} bytes, past ${options.maxBytes}`);

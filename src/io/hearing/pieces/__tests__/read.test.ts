@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { encodeFloat32ToWav } from '../../../speech/audio.js';
-import { pieceSeconds, UnreadableAudioError } from '../read.js';
+import { pieceSeconds, readAudioInfo, UnreadableAudioError } from '../read.js';
 import { readWavPcm, wavHeaderSeconds } from '../wav.js';
-import { packetFile } from './browser/fixtures.js';
+import { alacFile, flacFile, packetFile, pcmFile } from './browser/fixtures.js';
 
 /** A float WAVE with the format code and samples written independently of the reader. */
 function floatWav(): Uint8Array {
@@ -38,6 +38,12 @@ describe('audio readers on a server', () => {
     const dataOffset = bytes.findIndex((_, index) => bytes[index] === 100 && bytes[index + 1] === 97 && bytes[index + 2] === 116 && bytes[index + 3] === 97);
     expect(dataOffset).toBeGreaterThan(0);
     expect(wavHeaderSeconds(bytes.subarray(0, dataOffset + 8))).toBe(300);
+  });
+
+  it('reads MOV PCM, FLAC and an unsupported sample entry without browser encoders', async () => {
+    expect(await readAudioInfo(await pcmFile('mov', 12))).toMatchObject({ codec: 'pcm-s16', path: 'decode', seconds: 12, sampleRate: 48_000, channels: 2 });
+    expect(await pieceSeconds(await flacFile())).toBe(12);
+    expect(await readAudioInfo(await alacFile())).toMatchObject({ codec: null, path: null, reason: 'unsupported_codec' });
   });
 
   it('refuses bytes of no container with a typed error', async () => {

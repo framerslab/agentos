@@ -1,22 +1,42 @@
-import { canDecodeAudio, canEncodeAudio } from 'mediabunny';
-import { describe, expect, it } from 'vitest';
+import { ALL_FORMATS, AudioSample, AudioSampleSink, BufferSource, Input } from 'mediabunny';
+import { describe, expect, it, vi } from 'vitest';
 import { cutPieces, readAudioInfo, readWavPcm, type AudioPiece } from '../../index.js';
 import { ac3File, alacFile, flacFile, packetFile, pcmFile } from './fixtures.js';
 
 const options = { pieceSeconds: 300, overlapSeconds: 3, maxBytes: 24_000_000 };
 
+/** Collects pieces through the public cutting API. */
 async function collect(bytes: Uint8Array): Promise<AudioPiece[]> {
   const pieces: AudioPiece[] = [];
   for await (const piece of cutPieces(bytes, options)) pieces.push(piece);
   return pieces;
 }
 
+/** Checks a decoded piece's format and size. */
 function expectMonoWav(piece: AudioPiece): void {
   const read = readWavPcm(piece.data);
   expect(read).toMatchObject({ sampleRate: 16_000, channels: 1 });
   expect(piece.mimeType).toBe('audio/wav');
   expect(piece.fileName).toBe(`piece-${piece.index}.wav`);
   expect(piece.data.length).toBeLessThanOrEqual(64_000 * piece.durationMs / 1_000);
+}
+
+/** Checks support for the fixture's actual decoder configuration. */
+async function canDecodeFile(bytes: Uint8Array): Promise<boolean> {
+  const input = new Input({ formats: ALL_FORMATS, source: new BufferSource(bytes) });
+  try {
+    const track = await input.getPrimaryAudioTrack();
+    if (track === null) throw new Error('fixture has no audio track');
+    return await track.canDecode();
+  } finally {
+    input.dispose();
+  }
+}
+
+/** Emits a quiet frame before a decoder failure to exercise discarding a partial search. */
+async function* failedQuietSearch(): AsyncGenerator<AudioSample, void, unknown> {
+  yield new AudioSample({ data: new Float32Array(4_800), format: 'f32-planar', sampleRate: 48_000, numberOfChannels: 1, timestamp: 2 });
+  throw new Error('quiet search decode failed');
 }
 
 describe('cutting recordings in a browser', () => {
@@ -47,8 +67,9 @@ describe('cutting recordings in a browser', () => {
     expect(alac.container).toMatch(/mp4/i);
     expect(alac).toMatchObject({ codec: null, path: null, reason: 'unsupported_codec' });
     expect(Math.abs(alac.seconds - 1)).toBeLessThan(0.05);
-    const highRate = await readAudioInfo(await packetFile('m4a', 12, 8_192));
-    expect(highRate.path).toBe(await canDecodeAudio('aac') ? 'decode' : null);
+    const highRateBytes = await packetFile('m4a', 12, 8_192);
+    const highRate = await readAudioInfo(highRateBytes);
+    expect(highRate.path).toBe(await canDecodeFile(highRateBytes) ? 'decode' : null);
     if (highRate.path === null) expect(highRate.reason).toBe('cannot_decode');
   });
 
@@ -77,20 +98,51 @@ describe('cutting recordings in a browser', () => {
     expect(pieces[1]!.startMs).toBe(pieces[0]!.durationMs - 3_000);
   });
 
-  it('decodes PCM in MOV and FLAC where a browser can encode and decode it', async (context) => {
+  it('never opens a sample sink for a copied recording', async () => {
+    const search = vi.spyOn(AudioSampleSink.prototype, 'samples');
+    try {
+      const pieces: AudioPiece[] = [];
+      for await (const piece of cutPieces(await packetFile('m4a', 12), { ...options, pieceSeconds: 10, overlapSeconds: 1 })) pieces.push(piece);
+      expect(pieces.map((piece) => piece.startMs)).toEqual([0, 9_000]);
+      expect(search).not.toHaveBeenCalled();
+    } finally {
+      search.mockRestore();
+    }
+  });
+
+  it('keeps the planned mark when a quiet search fails after decoding a frame', async () => {
+    const search = vi.spyOn(AudioSampleSink.prototype, 'samples').mockImplementationOnce(failedQuietSearch);
+    try {
+      const pieces: AudioPiece[] = [];
+      for await (const piece of cutPieces(await pcmFile('wav', 12), { ...options, pieceSeconds: 10, overlapSeconds: 1 })) pieces.push(piece);
+      expect(pieces.map((piece) => piece.startMs)).toEqual([0, 9_000]);
+      expect(pieces[0]!.durationMs).toBe(10_000);
+      pieces.forEach(expectMonoWav);
+    } finally {
+      search.mockRestore();
+    }
+  });
+
+  it('decodes PCM in MOV', async () => {
     const mov = await collect(await pcmFile('mov', 12));
     expect(mov).toHaveLength(1);
     mov.forEach(expectMonoWav);
-    if (!await canEncodeAudio('flac')) context.skip('FLAC encoder is unavailable');
+    expect(Math.abs(mov[0]!.durationMs - 12_000)).toBeLessThanOrEqual(1);
+  });
+
+  it('decodes FLAC when the fixture decoder configuration is supported', async (context) => {
     const bytes = await flacFile();
-    if (!await canDecodeAudio('flac')) {
+    if (!await canDecodeFile(bytes)) {
       expect(await readAudioInfo(bytes)).toMatchObject({ path: null, reason: 'cannot_decode' });
-      context.skip('FLAC decoder is unavailable');
+      context.skip('FLAC decoding at 48 kHz stereo is unavailable');
     }
-    expect(await readAudioInfo(bytes)).toMatchObject({ codec: 'flac', path: 'decode' });
+    expect(await readAudioInfo(bytes)).toMatchObject({ codec: 'flac', path: 'decode', seconds: 12, sampleRate: 48_000, channels: 2 });
     const flac = await collect(bytes);
     expect(flac).toHaveLength(1);
     flac.forEach(expectMonoWav);
+    const samples = readWavPcm(flac[0]!.data).samples[0]!;
+    expect(Math.abs(samples.length - 12 * 16_000)).toBeLessThanOrEqual(1);
+    expect(samples[16_000]).toBeCloseTo(0.0625, 3);
   });
 
   it('stops before the next piece when its signal aborts', async () => {
