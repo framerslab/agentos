@@ -420,6 +420,11 @@
       "default": "./dist/core/vector-store/IVectorStore.js",
       "types": "./dist/core/vector-store/IVectorStore.d.ts"
     },
+    "./core/storage/browser": {
+      "import": "./dist/core/storage/browser/index.js",
+      "default": "./dist/core/storage/browser/index.js",
+      "types": "./dist/core/storage/browser/index.d.ts"
+    },
     "./memory": {
       "import": "./dist/cognition/memory/index.js",
       "default": "./dist/cognition/memory/index.js",
