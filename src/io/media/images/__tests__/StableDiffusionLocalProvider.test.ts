@@ -307,6 +307,32 @@ describe('StableDiffusionLocalProvider', () => {
       expect(body.override_settings).toEqual({ sd_model_checkpoint: 'sdxl-base-1.0' });
     });
 
+    it('reports the checkpoint the server says it rendered with when the request names no model', async () => {
+      // The second listed checkpoint is the one loaded; the first is only first in the list.
+      const rendered = { images: ['base64data'], parameters: {}, info: JSON.stringify({ sd_model_name: 'sdxl-base-1.0' }) };
+      const fetchImpl = makeMockFetch({
+        '/sdapi/v1/sd-models': { ok: true, status: 200, body: makeA1111ModelsResponse() },
+        '/sdapi/v1/txt2img': { ok: true, status: 200, body: rendered },
+      });
+      const local = new StableDiffusionLocalProvider(fetchImpl);
+      await local.initialize({ baseURL: 'http://localhost:7860' });
+
+      expect((await local.generateImage(makeRequest({ modelId: '' }))).modelId).toBe('sdxl-base-1.0');
+      // A model the request names is reported as named.
+      expect((await local.generateImage(makeRequest({ modelId: 'v1-5-pruned-emaonly' }))).modelId).toBe('v1-5-pruned-emaonly');
+    });
+
+    it('reports the first listed checkpoint when the response names none', async () => {
+      const fetchImpl = makeMockFetch({
+        '/sdapi/v1/sd-models': { ok: true, status: 200, body: makeA1111ModelsResponse() },
+        '/sdapi/v1/txt2img': { ok: true, status: 200, body: makeA1111Txt2ImgResponse() },
+      });
+      const local = new StableDiffusionLocalProvider(fetchImpl);
+      await local.initialize({ baseURL: 'http://localhost:7860' });
+
+      expect((await local.generateImage(makeRequest({ modelId: '' }))).modelId).toBe('v1-5-pruned-emaonly');
+    });
+
     it('parses size string into width and height', async () => {
       await provider.generateImage(makeRequest({ size: '1024x768' }));
 

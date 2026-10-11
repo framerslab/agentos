@@ -452,6 +452,12 @@ export async function generateImage(opts: GenerateImageOptions): Promise<Generat
       });
 
       metricUsage = result.usage;
+      // What served the call: a fallback provider when the first one failed,
+      // and a local server's own checkpoint when the call named no model.
+      metricProviderId = result.providerId || metricProviderId;
+      metricModelId = result.modelId || metricModelId;
+      if (metricProviderId) span?.setAttribute('llm.provider', metricProviderId);
+      if (metricModelId) span?.setAttribute('llm.model', metricModelId);
       span?.setAttribute('agentos.api.images_count', result.images.length);
       attachUsageAttributes(span, {
         promptTokens: result.usage?.promptTokens,
