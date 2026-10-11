@@ -853,3 +853,32 @@ describe('GeminiCLIBridge: the session id of a stream', () => {
     expect(events[1]).toMatchObject({ type: 'result', sessionId: 'g1' });
   });
 });
+
+/**
+ * Claude Code's JSON result for a turn stopped by an error subtype
+ * (SDKResultError in @anthropic-ai/claude-agent-sdk 0.3.296, sdk.d.ts): no
+ * result text, and its detail in `errors`, here none. The CLI can exit
+ * non-zero after it: the SDK's own reader of a run (Query.readMessages in
+ * sdk.mjs) replaces the process's exit error with the error result's text
+ * ("Replacing exit error with result text") unless the run was aborted.
+ */
+describe('ClaudeCodeProvider: a non-streaming call whose result Claude Code flags as an error', () => {
+  const line = { type: 'result', subtype: 'error_max_turns', is_error: true, num_turns: 2, errors: [], session_id: 's1' };
+
+  it.each([0, 1])('reports the error subtype and its errors (exit code %i)', async (exitCode) => {
+    // execa strips the final newline of stdout (stripFinalNewline).
+    const stdout = JSON.stringify(line);
+    stubCli('claude', () =>
+      exitCode === 0
+        ? Promise.resolve({ failed: false, exitCode: 0, stdout, stderr: '' })
+        : Promise.reject(execaError({ exitCode, stdout })),
+    );
+    const provider = new ClaudeCodeProvider();
+    await provider.initialize({});
+
+    await expect(provider.generateCompletion('claude-sonnet-4-6', HELLO, {})).rejects.toMatchObject({
+      code: 'CRASHED',
+      message: 'Claude Code returned an error: error_max_turns',
+    });
+  });
+});
