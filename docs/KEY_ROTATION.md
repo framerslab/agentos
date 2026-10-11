@@ -34,7 +34,7 @@ Every other provider in the list below rotates its keys but never marks one exha
 
 **Pools are per instance:** two providers that read the same environment variable keep separate pools, so a key one of them rests stays in the other's rotation. `getKeyPool()` in `ApiKeyPoolRegistry.ts` returns one shared pool per environment variable; no built-in provider calls it.
 
-**Health checks:** `checkHealth()` on the Anthropic, Gemini, OpenRouter and Requesty providers sends a key drawn from the pool. `OpenAIProvider.checkHealth()` sends the configured key string as given, and Groq, Mistral, Together, xAI and LiteLLM pass their health check to it. With a key list, the health check of those six providers sends the whole list as one bearer token. When the API rejects that token, `checkHealth()`, and `AIModelProviderManager.checkOverallHealth()` through it, reports the provider unhealthy while its requests go on drawing keys from the pool.
+**Health checks:** `checkHealth()` on the OpenAI, Anthropic, Gemini, OpenRouter and Requesty providers sends a key drawn from the pool, as a request does. Groq, Mistral, Together, xAI and LiteLLM pass their health check to an `OpenAIProvider`, so theirs draws from that instance's pool. An `OpenAIProvider` set up with an OAuth flow sends the flow's token, as its requests do.
 
 ## Supported Providers
 
@@ -48,7 +48,7 @@ Every other provider in the list below rotates its keys but never marks one exha
 - **Segmentation:** Replicate
 - **Web Search:** Serper, Tavily, Brave, Firecrawl
 
-A provider that is not on this list sends the key it is configured with as given, so give it a single key. That covers Azure Speech (TTS and STT), DeepL and OpenAI translation, the voice pipeline's batch STT for OpenAI Whisper and for Deepgram, the MiniMax image provider and the Cohere reranker, among others. Give LiteLLM a single key too: its completions, streams and embeddings draw a key from an `OpenAIProvider` pool, and its model listing sends the configured string as given.
+A provider that is not on this list sends the key it is configured with as given, so give it a single key. That covers Azure Speech (TTS and STT), DeepL and OpenAI translation, the voice pipeline's batch STT for OpenAI Whisper and for Deepgram, the MiniMax image provider and the Cohere reranker, among others. Give LiteLLM a single key too: its completions, streams, embeddings and health check draw a key from an `OpenAIProvider` pool, and its model listing sends the configured string as given.
 
 ## Implementation
 

@@ -1653,13 +1653,17 @@ export class OpenAIProvider implements IProvider {
   /** @inheritdoc */
   public async checkHealth(): Promise<{ isHealthy: boolean; details?: unknown }> {
     try {
+      // The key a request would send: the OAuth flow's token, or the next key
+      // of the pool. The configured string can be a comma-separated key list,
+      // which the API rejects as a bearer token.
+      const apiKey = await this.getApiKey();
       // One light call: the default model's record, or the model list when
       // no default is set. No model id is assumed, since OpenAI retires them
       // (gpt-3.5-turbo on 2026-10-23).
       await this.makeApiRequest<unknown>(
           this.defaultModelId ? `/models/${encodeURIComponent(this.defaultModelId)}` : '/models',
           'GET',
-          this.config.apiKey
+          apiKey
       );
       return { isHealthy: true };
     } catch (error: unknown) {
