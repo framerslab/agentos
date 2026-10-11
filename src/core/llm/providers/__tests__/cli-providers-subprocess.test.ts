@@ -422,3 +422,39 @@ describe.each(STREAM_PROVIDERS)('$name: a consumer that stops reading the stream
     }
   });
 });
+
+describe('ClaudeCodeProvider: an error result with no result text', () => {
+  it('ends the stream with the error subtype and the errors the CLI lists', async () => {
+    // SDKResultError in @anthropic-ai/claude-agent-sdk 0.3.296 (sdk.d.ts): the
+    // error subtypes carry no result; their detail is in errors.
+    stubCli('claude', () =>
+      cliRun(
+        [
+          {
+            type: 'result',
+            subtype: 'error_during_execution',
+            is_error: true,
+            num_turns: 1,
+            errors: ['Request timed out', 'Retries used up'],
+            session_id: 's1',
+          },
+        ],
+        1,
+      ),
+    );
+    const provider = new ClaudeCodeProvider();
+    await provider.initialize({});
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream('claude-sonnet-4-6', HELLO, {})) chunks.push(chunk);
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toMatchObject({
+      isFinal: true,
+      choices: [],
+      error: {
+        code: 'CRASHED',
+        message: 'Claude Code returned an error: error_during_execution: Request timed out; Retries used up',
+      },
+    });
+  });
+});
