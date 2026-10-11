@@ -15,6 +15,8 @@
  *   published (a reconnect), reading moves to the new track.
  * - Ends when {@link LiveKitRoomAudioSource.close} is called or the room
  *   disconnects, a room already disconnected at the first read included.
+ * - Closes itself when a read fails (the peer missing, a stream that does not
+ *   open), before that read rejects.
  *
  * The rtc-node objects are described by the structural types below, so this
  * module and its typings carry no dependency on `@livekit/rtc-node` itself.
@@ -253,6 +255,8 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
    * The source's frames, for its one reader. Leaving a `for await` loop early
    * (the iterator's `return()`) closes the source. Calls of `next()` that
    * overlap each settle, with a frame of their own or, once it ends, done.
+   * A `next()` that rejects closes the source first, since a `for await` loop
+   * calls no `return()` when `next()` rejects.
    *
    * @throws {Error} When called a second time: two readers would split one
    *   stream's frames between them.
@@ -290,7 +294,18 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
     this.wakeUp();
   }
 
+  /** The next frame; a read that fails closes the source, then rejects. */
   private async next(): Promise<IteratorResult<AudioFrame>> {
+    try {
+      return await this.readFrame();
+    } catch (err) {
+      // A for-await loop calls no return() after a rejection, so the room's listeners go here.
+      this.close();
+      throw err;
+    }
+  }
+
+  private async readFrame(): Promise<IteratorResult<AudioFrame>> {
     const rtc = await this.ready();
     for (;;) {
       if (this.isClosed || !rtc) return { done: true, value: undefined };

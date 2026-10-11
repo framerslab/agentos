@@ -8,7 +8,7 @@
  * peer.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type * as Rtc from '@livekit/rtc-node';
 import type { AudioFrame } from '../../voice-pipeline/types.js';
 import {
@@ -355,6 +355,34 @@ describe('LiveKitRoomAudioSource: following the participant, and the end', () =>
     await settle();
     expect(second && Array.from(second.value.samples)).toEqual([-0.5]);
     source.close();
+  });
+
+  it('closes itself when a read fails, so the room events are left and a later close() does nothing', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const failure = new Error('the stream did not open');
+    class FailingAudioStream {
+      constructor() {
+        throw failure;
+      }
+
+      getReader(): never {
+        throw failure;
+      }
+    }
+    const source = new LiveKitRoomAudioSource({
+      room,
+      participantIdentity: 'user-1',
+      sampleRate: 24_000,
+      rtc: { ...fakeRtc(), AudioStream: FailingAudioStream },
+    });
+    await expect(source[Symbol.asyncIterator]().next()).rejects.toBe(failure);
+    expect(source.closed).toBe(true);
+    expect(room.listenerCount('trackSubscribed')).toBe(0);
+    expect(room.listenerCount('disconnected')).toBe(0);
+    const off = vi.spyOn(room, 'off');
+    source.close();
+    expect(off).not.toHaveBeenCalled();
   });
 
   it('closes when a for-await loop leaves early, and has one reader', async () => {
