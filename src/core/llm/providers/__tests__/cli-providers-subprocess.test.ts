@@ -246,6 +246,47 @@ describe.each(STREAM_PROVIDERS)('$name: how a stream ends', ({ binary, model, cr
     expect(finals[0].error).toMatchObject({ code: 'CRASHED' });
   });
 
+  it("ends a stream the caller aborts with the abort chunk the abortSignal contract asks for (error.type 'abort')", async () => {
+    let spawned!: () => void;
+    const running = new Promise<void>((resolve) => {
+      spawned = resolve;
+    });
+    // A run that writes nothing until execa stops it for the caller's signal;
+    // stdout closes when the process ends.
+    stubCli(binary, (_args, options) => {
+      spawned();
+      const outcome = new Promise((_resolve, reject) => {
+        const signal = options.cancelSignal as AbortSignal;
+        signal.addEventListener('abort', () => reject(execaError({ isCanceled: true, signal: 'SIGTERM' })), {
+          once: true,
+        });
+      });
+      outcome.catch(() => undefined);
+      return Object.assign(outcome, {
+        stdout: (async function* () {
+          await outcome.catch(() => undefined);
+        })(),
+        kill: vi.fn(),
+      });
+    });
+    const provider = create();
+    await provider.initialize({});
+    const controller = new AbortController();
+    const chunks: ModelCompletionResponse[] = [];
+
+    const reading = (async () => {
+      for await (const chunk of provider.generateCompletionStream(model, HELLO, { abortSignal: controller.signal })) {
+        chunks.push(chunk);
+      }
+    })();
+    await running;
+    controller.abort();
+    await reading;
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toMatchObject({ isFinal: true, error: { type: 'abort', code: 'REQUEST_ABORTED' } });
+  });
+
   it.each([0, 1])(
     'ends with an error carrying the message of a result the CLI flags as an error (exit code %i)',
     async (exitCode) => {
