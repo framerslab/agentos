@@ -1,18 +1,24 @@
 /**
  * @fileoverview Tests for {@link guardedFetch}. A loopback server stands in
- * for the web. Every case names it by a made-up host whose addresses a
- * stand-in resolver answers, and allows only that server's address and port,
- * so no case reaches past this machine.
+ * for the web. Reads name it by a made-up host whose addresses a stand-in
+ * resolver answers, and allow only that server's address and port. Literal
+ * refusal cases block connection attempts, so no case reaches past this machine.
  *
  * @module memory/ingestion/__tests__/guardedFetch.test
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { createServer as createTcpServer, type AddressInfo } from 'node:net';
-import { gzipSync } from 'node:zlib';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createServer as createTcpServer, Socket, type AddressInfo } from 'node:net';
+import { createGunzip, gzipSync } from 'node:zlib';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { guardedFetch, GuardedFetchError, isPublicAddress, type GuardedFetchOptions } from '../guardedFetch.js';
+
+// Keep real decompression while allowing a case to hold one decoder's completion.
+vi.mock('node:zlib', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:zlib')>();
+  return { ...original, createGunzip: vi.fn(original.createGunzip) };
+});
 
 /** The page the stand-in serves: about 2 KB of HTML. */
 const PAGE = `<html><head><title>Review</title></head><body>${'<p>The quarterly review moved to Thursday.</p>\n'.repeat(44)}</body></html>`;
@@ -164,6 +170,47 @@ describe('guardedFetch', () => {
     expect(connections).toBe(before);
   });
 
+  it.each(['127.0.0.1', '169.254.169.254', '[::ffff:127.0.0.1]', '0x7f000001'])(
+    'refuses the literal %s before any connection or resolver call',
+    async (host) => {
+      const before = connections;
+      let lookups = 0;
+      /** Counts resolver calls that a literal address must bypass. */
+      const resolve = async () => {
+        lookups += 1;
+        return [{ address: '127.0.0.1', family: 4 }];
+      };
+      // Block even an attempted connection if the address check regresses.
+      const connect = vi.spyOn(Socket.prototype, 'connect').mockImplementation(() => {
+        throw new Error('unexpected connection');
+      });
+      try {
+        const address = `http://${host}:${port}/page`;
+        if (host === '0x7f000001') expect(new URL(address).hostname).toBe('127.0.0.1');
+        expect(await reasonOf(guardedFetch(address, reach({ resolve, allowAddresses: [] })))).toBe('address');
+        expect(lookups).toBe(0);
+        expect(connect).not.toHaveBeenCalled();
+        expect(connections).toBe(before);
+      } finally {
+        connect.mockRestore();
+      }
+    },
+  );
+
+  it('keeps resolver error details out of a network refusal', async () => {
+    const before = connections;
+    /** Supplies a resolver failure containing details that must stay private. */
+    const resolve = async (): Promise<never> => {
+      throw new Error('lookup failed at 10.0.0.53 for private-service.test');
+    };
+    await expect(guardedFetch(at('/page'), reach({ resolve }))).rejects.toMatchObject({
+      name: 'GuardedFetchError',
+      reason: 'network',
+      message: 'The network read failed.',
+    });
+    expect(connections).toBe(before);
+  });
+
   it('connects to the address it checked, resolving once a hop', async () => {
     const answers = [[{ address: '127.0.0.1', family: 4 }], [{ address: '10.0.0.1', family: 4 }]];
     let calls = 0;
@@ -208,6 +255,51 @@ describe('guardedFetch', () => {
     const underThePage = Buffer.byteLength(PAGE) - 1;
     expect(gzipSync(PAGE).length).toBeLessThan(underThePage);
     expect(await reasonOf(guardedFetch(at('/gzip'), reach({ maxBytes: underThePage })))).toBe('size');
+  });
+
+  it.each(['deadline', 'caller'] as const)('ends held decoding on %s abort after the connection closes', async (source) => {
+    const decoder = createGunzip();
+    vi.mocked(createGunzip).mockReturnValueOnce(decoder);
+    // The compressed bytes use the real decoder; only its final flush is held.
+    const flush = vi.spyOn(decoder, '_flush');
+    const held = new Promise<void>((resolve) => flush.mockImplementation(() => resolve()));
+    const closed = new Promise<IncomingMessage>((resolve) => {
+      decoder.once('pipe', (response: IncomingMessage) => {
+        response.socket.once('close', () => resolve(response));
+      });
+    });
+    const deadline = new AbortController();
+    const caller = new AbortController();
+    // Trigger the deadline only after the wire has closed, without a timing race.
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValueOnce(deadline.signal);
+    const pending = guardedFetch(at('/gzip'), reach({ signal: caller.signal })).then(
+      () => 'read',
+      (error: unknown) => error,
+    );
+    try {
+      const [response] = await Promise.all([closed, held]);
+      expect(response.complete).toBe(true);
+      expect(response.readableEnded).toBe(true);
+      expect(decoder.destroyed).toBe(false);
+      const reason = new Error('the caller moved on');
+      if (source === 'deadline') deadline.abort();
+      else caller.abort(reason);
+      expect(response.destroyed).toBe(true);
+      expect(decoder.destroyed).toBe(true);
+      const outcome = await pending;
+      if (source === 'deadline') {
+        expect(outcome).toBeInstanceOf(GuardedFetchError);
+        expect(outcome).toMatchObject({ reason: 'deadline' });
+      } else {
+        expect(outcome).toBe(reason);
+      }
+    } finally {
+      decoder.destroy();
+      await pending;
+      flush.mockRestore();
+      timeout.mockRestore();
+      vi.mocked(createGunzip).mockReset();
+    }
   });
 
   it('reads http and https on the allowed ports alone, https to the checked address by its name', async () => {

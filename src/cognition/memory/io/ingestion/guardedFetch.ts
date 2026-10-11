@@ -277,9 +277,10 @@ function requestOnce(
  * Reads the body of `response`, decoded, and refuses it once it passes
  * `maxBytes` counted after decoding, so a small compressed body that inflates
  * past the cap stops there. A decoder is joined to the response by
- * `pipeline`, so an error or an abort that ends the response ends the read.
+ * `pipeline`, so an error ends both. The signal destroys both streams even
+ * when the connection has already closed and only decoding remains.
  */
-async function readBody(response: http.IncomingMessage, maxBytes: number): Promise<Buffer> {
+async function readBody(response: http.IncomingMessage, maxBytes: number, signal: AbortSignal): Promise<Buffer> {
   const coding = String(response.headers['content-encoding'] ?? '').trim().toLowerCase();
   let body: Readable = response;
   if (coding !== '' && coding !== 'identity') {
@@ -298,18 +299,32 @@ async function readBody(response: http.IncomingMessage, maxBytes: number): Promi
     pipeline(response, decoder, () => {});
     body = decoder;
   }
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of body) {
-    const bytes = chunk as Buffer;
-    total += bytes.length;
-    if (total > maxBytes) {
-      response.destroy();
-      throw new GuardedFetchError('size', `the body passes ${maxBytes} bytes`, response.statusCode);
+  /** Ends the response and any decoder, including decoding after the wire closes. */
+  const onAbort = () => {
+    response.destroy();
+    body.destroy();
+  };
+  signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    if (signal.aborted) {
+      onAbort();
+      signal.throwIfAborted();
     }
-    chunks.push(bytes);
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of body) {
+      const bytes = chunk as Buffer;
+      total += bytes.length;
+      if (total > maxBytes) {
+        response.destroy();
+        throw new GuardedFetchError('size', `the body passes ${maxBytes} bytes`, response.statusCode);
+      }
+      chunks.push(bytes);
+    }
+    return Buffer.concat(chunks, total);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
   }
-  return Buffer.concat(chunks, total);
 }
 
 /**
@@ -321,7 +336,7 @@ function failureOf(error: unknown, callerSignal: AbortSignal | undefined, deadli
   if (callerSignal?.aborted) return callerSignal.reason;
   if (deadline.aborted) return new GuardedFetchError('deadline', 'the read took too long');
   if (error instanceof GuardedFetchError) return error;
-  return new GuardedFetchError('network', error instanceof Error ? error.message : String(error));
+  return new GuardedFetchError('network', 'The network read failed.');
 }
 
 /**
@@ -391,7 +406,9 @@ export async function guardedFetch(address: string, options: GuardedFetchOptions
         response.destroy();
         throw new GuardedFetchError('type', `${contentType || 'no type'} is not read`, status);
       }
-      return { url: url.toString(), status, contentType, body: await readBody(response, maxBytes) };
+      const body = await readBody(response, maxBytes, signal);
+      signal.throwIfAborted();
+      return { url: url.toString(), status, contentType, body };
     }
   } catch (error) {
     throw failureOf(error, options.signal, deadline);
