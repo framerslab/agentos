@@ -760,6 +760,7 @@
   },
   "peerDependencies": {
     "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
+    "@livekit/rtc-node": "^1.1.0",
     "graphology": ">=0.25.0",
     "graphology-communities-louvain": ">=2.0.0",
     "graphology-types": ">=0.24.0",
@@ -773,6 +774,9 @@
   },
   "peerDependenciesMeta": {
     "@jitl/quickjs-wasmfile-release-sync": {
+      "optional": true
+    },
+    "@livekit/rtc-node": {
       "optional": true
     },
     "graphology": {
