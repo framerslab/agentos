@@ -11,9 +11,10 @@
 import * as fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
-import { fetchUntrustedImage } from './untrustedImageFetch.js';
+import { fetchUntrustedImage, untrustedByteLimit } from './untrustedImageFetch.js';
 
 export { bufferToBlobPart } from './blobPart.js';
+export { imageUrlRefusalDetail, type ImageUrlRefusalDetail } from './untrustedImageFetch.js';
 
 /** Options for {@link imageToBuffer}. */
 export interface ImageToBufferOptions {
@@ -24,10 +25,14 @@ export interface ImageToBufferOptions {
    * connection's address is checked when the connection is made, so a host
    * name that resolves to this machine or a private network is refused, and
    * every redirect is checked the same way. The fetch stops at `maxBytes`
-   * and `timeoutMs`. Default `false`.
+   * and `timeoutMs`, and an image given in the string itself (a data URL,
+   * raw base64) is held to `maxBytes` too. Default `false`.
    */
   untrusted?: boolean;
-  /** For an untrusted http(s) URL: the most bytes the response may have (default 50 MiB). */
+  /**
+   * For untrusted input: the most bytes the image may have, whether it is
+   * fetched or decoded from the string (default 50 MiB).
+   */
   maxBytes?: number;
   /** For an untrusted http(s) URL: how long the fetch may take in milliseconds, redirects and body included (default 30 seconds). */
   timeoutMs?: number;
@@ -60,7 +65,8 @@ export interface ImageToBufferOptions {
  * file paths and `file:` URLs are refused (raw base64 of a recognised image
  * format is still decoded), and an http(s) URL is fetched only from public
  * network addresses, checked at every connection and every redirect, within
- * `maxBytes` and `timeoutMs`.
+ * `maxBytes` and `timeoutMs`. An image decoded from the string is refused
+ * when it is larger than `maxBytes`.
  *
  * @param input - The image in any supported format.
  * @param options - {@link ImageToBufferOptions}; `untrusted` for input from
@@ -68,10 +74,13 @@ export interface ImageToBufferOptions {
  * @returns A `Buffer` containing the raw image bytes.
  *
  * @throws {TypeError} When `input` is neither a string nor a Buffer.
+ * @throws {RangeError} With `untrusted`, when `maxBytes` is not a positive
+ *   number.
  * @throws {Error} When a remote URL fetch fails or the file cannot be read;
  *   with `untrusted`, also when the input names a local file
- *   (`code: 'IMAGE_LOCAL_FILE_REFUSED'`) or a URL whose address or redirect
- *   is refused (`code: 'IMAGE_URL_REFUSED'`).
+ *   (`code: 'IMAGE_LOCAL_FILE_REFUSED'`), a URL whose address or redirect
+ *   is refused (`code: 'IMAGE_URL_REFUSED'`), or an image larger than
+ *   `maxBytes`.
  *
  * @example
  * ```ts
@@ -94,6 +103,8 @@ export async function imageToBuffer(input: string | Buffer, options: ImageToBuff
   }
 
   const trimmed = input.trim();
+  // Untrusted input is held to a size whether it is fetched or decoded here.
+  const within = options.untrusted ? sizeCheck(untrustedByteLimit(options.maxBytes)) : (bytes: Buffer) => bytes;
 
   // Data URL (RFC 2397): base64 after ";base64", percent-encoded bytes otherwise.
   if (/^data:/i.test(trimmed)) {
@@ -106,7 +117,9 @@ export async function imageToBuffer(input: string | Buffer, options: ImageToBuff
       throw new Error('imageToBuffer: malformed data URL — missing comma separator.');
     }
     const payload = url.slice(commaIdx + 1);
-    return /; *base64 *$/i.test(url.slice(0, commaIdx)) ? Buffer.from(payload, 'base64') : percentDecodeBytes(payload);
+    return within(
+      /; *base64 *$/i.test(url.slice(0, commaIdx)) ? Buffer.from(payload, 'base64') : percentDecodeBytes(payload),
+    );
   }
 
   // file: URL — convert to a local path and read.
@@ -139,7 +152,7 @@ export async function imageToBuffer(input: string | Buffer, options: ImageToBuff
     // No file is read for untrusted input; base64 of an image is still decoded.
     const bytes = imageBase64(trimmed);
     if (bytes) {
-      return bytes;
+      return within(bytes);
     }
     throw localFileRefusal(trimmed);
   }
@@ -173,7 +186,21 @@ export async function imageToBuffer(input: string | Buffer, options: ImageToBuff
   }
 
   // Fallback: raw base64 string (no data URL prefix).
-  return Buffer.from(trimmed, 'base64');
+  return within(Buffer.from(trimmed, 'base64'));
+}
+
+/**
+ * A check for an image decoded from untrusted input: the bytes when they are
+ * no more than `maxBytes`, an error otherwise. The fetch of an untrusted URL
+ * applies the same limit while it reads.
+ */
+function sizeCheck(maxBytes: number): (bytes: Buffer) => Buffer {
+  return (bytes) => {
+    if (bytes.length > maxBytes) {
+      throw new Error(`imageToBuffer: the image is larger than ${maxBytes} bytes.`);
+    }
+    return bytes;
+  };
 }
 
 /** The error for untrusted input that names a local file. */
