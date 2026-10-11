@@ -53,6 +53,29 @@ import type {
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 /**
+ * A process's stdout as {@link CLISubprocessBridge.stream} reads it: execa's
+ * Readable, which can be destroyed, or any async iterable of output.
+ */
+type StdoutSource = AsyncIterable<Buffer | string> & { destroy?: () => void };
+
+/**
+ * What {@link CLISubprocessBridge.stream} has read from a process's stdout
+ * and not yet yielded.
+ */
+interface StdoutReader {
+  /** The events parsed since the last call, in order; the reader keeps none of them. */
+  take(): StreamEvent[];
+  /** Resolves once more events have been parsed, or stdout has ended. */
+  arrival(): Promise<void>;
+  /** Set once stdout has ended, or reading it failed. */
+  readonly ended: boolean;
+  /** Set when reading stdout failed, with the error. */
+  readonly failure: { error: unknown } | undefined;
+  /** Stops reading: drops what is queued, and destroys stdout when it can be destroyed. */
+  stop(): void;
+}
+
+/**
  * Abstract base class for managing CLI subprocesses via execa.
  *
  * Subclasses implement four methods:
@@ -225,12 +248,16 @@ export abstract class CLISubprocessBridge {
    * Spawns the binary with `--output-format stream-json` and yields
    * {@link StreamEvent}s parsed from newline-delimited JSON on stdout.
    *
-   * Read to its end, the stream awaits the process's exit and throws on a
-   * failed one. A consumer that stops reading before the end (a `break` in
-   * its `for await`, or `return()`) ends the process instead: it is killed.
-   * The run's outcome is handled from the moment the process starts, so a
-   * failure while the consumer is busy between two events, or after it has
-   * stopped reading, is no unhandled rejection in the host.
+   * stdout is read as the CLI writes it, whatever the consumer's pace, and
+   * its events wait in a queue until the consumer takes them. The run thus
+   * settles when the CLI exits, and the timeout measures the CLI, not the
+   * consumer. Read to its end, the stream awaits the process's exit and
+   * throws on a failed one. A consumer that stops reading before the end (a
+   * `break` in its `for await`, or `return()`) ends the process instead: it
+   * is killed, and its stdout is no longer read. The run's outcome is handled
+   * from the moment the process starts, so a failure while the consumer is
+   * busy between two events, or after it has stopped reading, is no
+   * unhandled rejection in the host.
    *
    * @param options — bridge options
    * @yields typed stream events (text_delta, result, error, system)
@@ -252,56 +279,30 @@ export abstract class CLISubprocessBridge {
       throw this.classifyError(error);
     }
     /* execa settles the run once the process has exited and its stdout has
-     * ended. Node ends stdout on the tick after the read that empties it, so a
-     * run that has already exited can fail while this generator waits at a
-     * yield for a consumer still busy with an event of that last read, or
-     * after the consumer has stopped reading. A rejection nothing handles then
-     * is raised by Node as an uncaught exception by default, so the outcome is
-     * handled from the start; the await below still throws a failure.
-     * Promise.resolve returns execa's run itself (a native Promise) and takes
-     * any other value as the await below does. */
+     * ended, which can happen while this generator waits at a yield for a
+     * consumer still busy with an earlier event, or after the consumer has
+     * stopped reading. A rejection nothing handles then is raised by Node as
+     * an uncaught exception by default, so the outcome is handled from the
+     * start; the await below still throws a failure. Promise.resolve returns
+     * execa's run itself (a native Promise) and takes any other value as the
+     * await below does. */
     Promise.resolve(subprocess).catch(() => undefined);
 
-    let buffer = '';
-    /* stdout gives Buffers (execa sets no encoding on it), and a read ends
-     * wherever the CLI's write did, so a multi-byte UTF-8 character can be
-     * split between two reads. One decoder for the stream holds the start of
-     * such a character until the rest arrives, as execa's own decoding of
-     * result.stdout does (lib/transform/encoding-transform.js in execa
-     * 10.0.1). */
-    const decoder = new StringDecoder('utf8');
+    const stdout = this.readStdout(subprocess.stdout as StdoutSource);
     /* Set once stdout has been read to its end and the run is awaited below.
      * A consumer that stops reading early (a break in its for await, or
      * return()) closes this generator at a yield, before that point. */
     let readToEnd = false;
 
     try {
-      for await (const chunk of subprocess.stdout as AsyncIterable<Buffer | string>) {
-        buffer += decoder.write(chunk);
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-
-          try {
-            const event = this.parseStreamEvent(JSON.parse(trimmed));
-            if (event) yield event;
-          } catch {
-            /* skip unparseable lines (progress spinners, etc.) */
-          }
-        }
+      for (;;) {
+        const events = stdout.take();
+        for (const event of events) yield event;
+        if (events.length > 0) continue;
+        if (stdout.ended) break;
+        await stdout.arrival();
       }
-
-      /* flush remaining buffer, with what the decoder still holds */
-      buffer += decoder.end();
-      if (buffer.trim()) {
-        try {
-          const event = this.parseStreamEvent(JSON.parse(buffer.trim()));
-          if (event) yield event;
-        } catch { /* ignore */ }
-      }
+      if (stdout.failure) throw stdout.failure.error;
 
       readToEnd = true;
       /* Ensure non-zero exits after stdout drains still surface as errors. */
@@ -310,9 +311,104 @@ export abstract class CLISubprocessBridge {
       throw this.classifyError(error);
     } finally {
       /* Left before the run was awaited: nothing reads the process any more.
-       * End it (execa's kill: SIGTERM, then SIGKILL if it outlives the force
-       * delay). Its outcome is handled from the start, above. */
-      if (!readToEnd) subprocess.kill();
+       * Stop reading its stdout and end it (execa's kill: SIGTERM, then
+       * SIGKILL if it outlives the force delay). Its outcome is handled from
+       * the start, above. */
+      if (!readToEnd) {
+        stdout.stop();
+        subprocess.kill();
+      }
     }
+  }
+
+  /**
+   * Read a process's stdout as the CLI writes it, and parse each line of its
+   * NDJSON into events, whatever the pace of the consumer of {@link stream}.
+   *
+   * execa settles a run, and so stops its timeout, once the process has
+   * exited and its stdout has ended (lib/resolve/wait-subprocess.js and
+   * lib/terminate/timeout.js in execa 10.0.1), and Node ends a stream only
+   * once its buffered data has been read. Read at the consumer's pace, a
+   * consumer slower than the timeout turned a run that had exited 0 into a
+   * timeout, and a reply larger than the pipe and the stream's buffer hold
+   * could not leave the CLI until the consumer caught up. The queue holds the
+   * events the consumer has not taken yet: at most the run's whole output,
+   * which execa keeps in memory as well for `result.stdout`, up to its
+   * `maxBuffer`, past which it destroys stdout and the reading ends.
+   *
+   * @param stdout — the process's stdout
+   * @returns the reader, which has started reading
+   */
+  private readStdout(stdout: StdoutSource): StdoutReader {
+    let pending: StreamEvent[] = [];
+    let ended = false;
+    let stopped = false;
+    let failure: { error: unknown } | undefined;
+    let notify: (() => void) | undefined;
+    const wake = (): void => {
+      notify?.();
+      notify = undefined;
+    };
+
+    /* stdout gives Buffers (execa sets no encoding on it), and a read ends
+     * wherever the CLI's write did, so a multi-byte UTF-8 character can be
+     * split between two reads. One decoder for the stream holds the start of
+     * such a character until the rest arrives, as execa's own decoding of
+     * result.stdout does (lib/transform/encoding-transform.js in execa
+     * 10.0.1). */
+    const decoder = new StringDecoder('utf8');
+    let buffer = '';
+    const parseLine = (line: string): void => {
+      const trimmed = line.trim();
+      if (!trimmed || stopped) return;
+      try {
+        const event = this.parseStreamEvent(JSON.parse(trimmed));
+        if (event) pending.push(event);
+      } catch {
+        /* skip unparseable lines (progress spinners, etc.) */
+      }
+    };
+
+    void (async () => {
+      try {
+        for await (const chunk of stdout) {
+          buffer += decoder.write(chunk);
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+          for (const line of lines) parseLine(line);
+          wake();
+        }
+        /* the last line, with what the decoder still holds */
+        parseLine(buffer + decoder.end());
+      } catch (error) {
+        failure = { error };
+      } finally {
+        ended = true;
+        wake();
+      }
+    })();
+
+    return {
+      take: () => {
+        const taken = pending;
+        pending = [];
+        return taken;
+      },
+      arrival: () =>
+        new Promise<void>((resolve) => {
+          notify = resolve;
+        }),
+      get ended() {
+        return ended;
+      },
+      get failure() {
+        return failure;
+      },
+      stop: () => {
+        stopped = true;
+        pending = [];
+        if (typeof stdout.destroy === 'function') stdout.destroy();
+      },
+    };
   }
 }
