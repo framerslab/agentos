@@ -36,7 +36,12 @@ export interface ServerList {
 export function reconcileList(local: readonly CachedEntry[], server: ServerList): { fetch: string[]; remove: string[] } {
   const held = new Map(local.map((entry) => [entry.id, entry]));
   const named = new Set(server.items.map((item) => item.id));
-  const fetch = server.items.filter((item) => (held.get(item.id)?.version ?? -1) < item.version).map((item) => item.id);
+  const fetch = server.items
+    .filter((item) => {
+      const copy = held.get(item.id);
+      return copy === undefined || copy.version < item.version;
+    })
+    .map((item) => item.id);
   const gone = new Set(server.deleted);
   const remove = local
     .filter((entry) => !entry.pending && !named.has(entry.id) && (gone.has(entry.id) || server.complete))

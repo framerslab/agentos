@@ -20,4 +20,11 @@ describe('reconcileList', () => {
   it('after a complete list, removes what it does not name unless it waits', () => {
     expect(reconcileList(local, { items: [{ id: 'a', version: 1 }], deleted: [], complete: true })).toEqual({ fetch: [], remove: ['b', 'd'] });
   });
+
+  it('fetches an entry the device lacks whatever its version, and keeps one an incomplete list leaves out', () => {
+    expect(reconcileList([{ id: 'kept', version: 1, pending: false }], { items: [{ id: 'new', version: -1 }], deleted: [], complete: false })).toEqual({
+      fetch: ['new'],
+      remove: [],
+    });
+  });
 });
