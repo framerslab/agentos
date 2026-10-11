@@ -204,3 +204,113 @@ describe('LiveKitRoomAudioSource: the stream and the frames', () => {
     expect(loaded).toBe(rtc);
   });
 });
+
+describe('LiveKitRoomAudioSource: following the participant, and the end', () => {
+  it('moves to the new track when the participant publishes again', async () => {
+    const room = new FakeRoom();
+    const publication = new FakePublication(new FakeTrack('TR_1'));
+    const participant = room.addParticipant('user-1', publication);
+    const source = new LiveKitRoomAudioSource({ room, participantIdentity: 'user-1', sampleRate: 24_000, rtc: fakeRtc() });
+    const frames = source[Symbol.asyncIterator]();
+    const first = frames.next();
+    await settle();
+    FakeAudioStream.opened[0].push(rtcFrame([16384]));
+    expect(Array.from((await first).value.samples)).toEqual([0.5]);
+    const second = frames.next();
+    room.unsubscribe(participant, publication); // the page reconnects: its track goes away
+    await settle();
+    expect(source.trackSid).toBeUndefined();
+    room.subscribe(participant, publication, new FakeTrack('TR_2')); // and comes back as a new one
+    await settle();
+    expect(FakeAudioStream.opened.map((stream) => stream.track.sid)).toEqual(['TR_1', 'TR_2']);
+    FakeAudioStream.opened[1].push(rtcFrame([-16384]));
+    const result = await second;
+    expect(result.done).toBe(false);
+    expect(Array.from(result.value.samples)).toEqual([-0.5]);
+    expect(source.trackSid).toBe('TR_2');
+    source.close();
+  });
+
+  it('does not reopen a track whose stream ended, until that track is subscribed again', async () => {
+    const room = new FakeRoom();
+    const track = new FakeTrack('TR_1');
+    const publication = new FakePublication(track);
+    const participant = room.addParticipant('user-1', publication);
+    const source = new LiveKitRoomAudioSource({ room, participantIdentity: 'user-1', sampleRate: 24_000, rtc: fakeRtc() });
+    const first = source[Symbol.asyncIterator]().next();
+    await settle();
+    FakeAudioStream.opened[0].end(); // the stream ends while the publication still holds the track
+    await settle();
+    expect(FakeAudioStream.opened).toHaveLength(1);
+    room.subscribe(participant, publication, track);
+    await settle();
+    expect(FakeAudioStream.opened).toHaveLength(2);
+    FakeAudioStream.opened[1].push(rtcFrame([16384]));
+    expect(Array.from((await first).value.samples)).toEqual([0.5]);
+    source.close();
+  });
+
+  it("waits for the microphone across a reconnect, passing over a screen share's audio that stays published", async () => {
+    const room = new FakeRoom();
+    const microphone = new FakePublication(new FakeTrack('TR_MIC_1'));
+    const participant = room.addParticipant(
+      'user-1',
+      microphone,
+      new FakePublication(new FakeTrack('TR_SCREEN'), KIND_AUDIO, SOURCE_SCREENSHARE_AUDIO)
+    );
+    const source = new LiveKitRoomAudioSource({ room, participantIdentity: 'user-1', sampleRate: 24_000, rtc: fakeRtc() });
+    const first = source[Symbol.asyncIterator]().next();
+    await settle();
+    room.unsubscribe(participant, microphone); // the page reconnects: the microphone goes, the screen share stays
+    await settle();
+    expect(source.trackSid).toBeUndefined();
+    room.subscribe(participant, microphone, new FakeTrack('TR_MIC_2'));
+    await settle();
+    expect(FakeAudioStream.opened.map((stream) => stream.track.sid)).toEqual(['TR_MIC_1', 'TR_MIC_2']);
+    FakeAudioStream.opened[1].push(rtcFrame([16384]));
+    expect(Array.from((await first).value.samples)).toEqual([0.5]);
+    source.close();
+  });
+
+  it('ends when closed: the stream is cancelled, a pending read finishes and the room events are left', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const source = new LiveKitRoomAudioSource({ room, participantIdentity: 'user-1', sampleRate: 24_000, rtc: fakeRtc() });
+    const pending = source[Symbol.asyncIterator]().next();
+    await settle();
+    source.close();
+    expect(await pending).toEqual({ done: true, value: undefined });
+    expect(FakeAudioStream.opened[0].cancelled).toBe(true);
+    expect(room.listenerCount('trackSubscribed')).toBe(0);
+    expect(room.listenerCount('disconnected')).toBe(0);
+    expect(source.closed).toBe(true);
+  });
+
+  it('ends when the room disconnects', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const source = new LiveKitRoomAudioSource({ room, participantIdentity: 'user-1', sampleRate: 24_000, rtc: fakeRtc() });
+    const pending = source[Symbol.asyncIterator]().next();
+    await settle();
+    room.emit('disconnected', 'CLIENT_INITIATED');
+    expect(await pending).toEqual({ done: true, value: undefined });
+    expect(source.closed).toBe(true);
+  });
+
+  it('closes when a for-await loop leaves early, and has one reader', async () => {
+    const room = new FakeRoom();
+    room.addParticipant('user-1', new FakePublication(new FakeTrack('TR_1')));
+    const source = new LiveKitRoomAudioSource({ room, participantIdentity: 'user-1', sampleRate: 24_000, rtc: fakeRtc() });
+    const read = (async () => {
+      for await (const frame of source) {
+        return frame;
+      }
+      return undefined;
+    })();
+    await settle();
+    FakeAudioStream.opened[0].push(rtcFrame([16384]));
+    expect(Array.from((await read)!.samples)).toEqual([0.5]);
+    expect(source.closed).toBe(true);
+    expect(() => source[Symbol.asyncIterator]()).toThrow(/iterate it once/);
+  });
+});
