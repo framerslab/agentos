@@ -240,6 +240,26 @@ describe('an image operation with a provider and no model', () => {
     expect(result.model).toBe('dreamshaper-8');
   });
 
+  it('reports the checkpoint a local A1111 says it rendered with, when that is not the first one it lists', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) =>
+      String(url).endsWith('/sdapi/v1/sd-models')
+        ? json([
+            { title: 'v1-5-pruned-emaonly.safetensors', model_name: 'v1-5-pruned-emaonly' },
+            { title: 'dreamshaper-8.safetensors', model_name: 'dreamshaper-8' },
+          ])
+        : json({ images: ['ZWRpdA=='], parameters: {}, info: JSON.stringify({ sd_model_name: 'dreamshaper-8', seed: 1 }) }),
+    );
+
+    const edited = await editImage({
+      provider: 'stable-diffusion-local',
+      baseUrl: 'http://127.0.0.1:7860',
+      image: TINY_PNG,
+      prompt: 'Turn it into a watercolor painting.',
+    });
+
+    expect(edited.model).toBe('dreamshaper-8');
+  });
+
   it('makes a close variation on OpenAI when the variance is low', async () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
