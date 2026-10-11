@@ -23,6 +23,7 @@ import type {
   JSONSchemaObject,
 } from '../../core/tools/ITool.js';
 import { resolveSelfImprovementSessionKey } from './sessionScope.js';
+import { refusedSelfChange, selfChangeRefusal } from '../learning/toolContext.js';
 
 // ============================================================================
 // TYPES
@@ -230,6 +231,10 @@ export class ManageSkillsTool implements ITool<ManageSkillsInput> {
     skillId: string | undefined,
     context: ToolExecutionContext,
   ): Promise<ToolExecutionResult> {
+    // Turning a skill on or off is a self-change; searching and listing are not.
+    const refusal = selfChangeRefusal(context.sessionData);
+    if (refusal) return refusedSelfChange(this.name, refusal);
+
     if (!skillId) {
       return { success: false, error: 'skillId is required for the enable action' };
     }
@@ -343,6 +348,10 @@ export class ManageSkillsTool implements ITool<ManageSkillsInput> {
     skillId: string | undefined,
     context: ToolExecutionContext,
   ): Promise<ToolExecutionResult> {
+    // Turning a skill on or off is a self-change; searching and listing are not.
+    const refusal = selfChangeRefusal(context.sessionData);
+    if (refusal) return refusedSelfChange(this.name, refusal);
+
     if (!skillId) {
       return { success: false, error: 'skillId is required for the disable action' };
     }

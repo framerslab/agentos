@@ -21,6 +21,7 @@ import type {
 } from '../../core/tools/ITool.js';
 import type { ForgeToolRequest, ForgeResult, ForgeTestResponse } from './types.js';
 import type { EmergentCapabilityEngine } from './EmergentCapabilityEngine.js';
+import { refusedSelfChange, selfChangeRefusal } from '../learning/toolContext.js';
 
 // ============================================================================
 // INPUT TYPE
@@ -276,6 +277,10 @@ export class ForgeToolMetaTool implements ITool<ForgeToolInput, ForgeResult> {
     args: ForgeToolInput,
     context: ToolExecutionContext
   ): Promise<ToolExecutionResult<ForgeResult>> {
+    // The freeze, then the turn's mode, then its learner: refused before the engine runs (docs/GMI.md, "Learning").
+    const refusal = selfChangeRefusal(context.sessionData);
+    if (refusal) return refusedSelfChange(this.name, refusal);
+
     // Validate required fields before delegating to the engine.
     // The LLM may omit or mistype fields; catching this early produces
     // a clear error instead of a cryptic downstream failure.
