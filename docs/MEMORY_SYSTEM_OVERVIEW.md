@@ -34,9 +34,9 @@ The next sections explain each piece, why it earned its place, and which adjacen
 
 The whole stack is up to three small classifier calls plus a hybrid retriever, on top of a SQL-backed brain that a consolidation pass maintains: `CognitiveMemoryManager` runs its `ConsolidationPipeline`, which opens with a decay sweep, on an hourly timer (`consolidation.intervalMs`, off with `consolidation.enabled: false`), and the `Memory` facade runs its `ConsolidationLoop` when `consolidate()` is called. The calls depend on the host's path: the QueryClassifier gate's call when the host runs the gate (a T0 query ends there when the host skips recall on it), then the MemoryRouter's and the ReadRouter's. Every concept that sounds like a separate thing in this doc plugs into one of those four parts.
 
-![AgentOS memory pipeline: user query enters QueryClassifier (T0 short-circuits, T1+ proceeds), MemoryRouter picks retrieval architecture, canonical-hybrid retrieval runs BM25 + dense embeddings, fuses via RRF, then Cohere rerank-v3.5 cross-encoder, then a six-signal cognitive composite scorer (optional HyDE). Reranked traces feed ReaderRouter (gpt-4o vs gpt-5-mini) then ReadRouter (5 intents to 5 strategies) for the grounded answer. A consolidation box lists prune, merge, strengthen, derive, compact and reindex on the same brain, plus 8 cognitive mechanisms.](/img/diagrams/memory-system-overview.svg)
+![AgentOS memory pipeline: the QueryClassifier gate, when the host runs it, labels a retrieval tier, and the host can skip recall on T0; the MemoryRouter's classifier call picks one of six query categories and a backend from its preset's table; the canonical-hybrid backend, HybridRetriever, fuses a dense MemoryStore search scored on six signals with a BM25 search by RRF, blends in an optional reranker's score and passes the top traces on; selectReader() looks up the reader model from the category with no LLM call; the ReadRouter picks the read strategy for the grounded answer. Below, a consolidation box per facade: ConsolidationLoop for the Memory facade, run by consolidate() or the memory_reflect tool, and ConsolidationPipeline for CognitiveMemoryManager, hourly by default; the eight cognitive mechanisms run only when CognitiveMemoryManager is given a cognitiveMechanisms config.](/img/diagrams/memory-system-overview.svg)
 
-The diagram draws one consolidation loop. In the code each facade has its own: `ConsolidationLoop` (prune, merge, strengthen, derive, compact, re-index) serves the `Memory` facade, and `ConsolidationPipeline` serves `CognitiveMemoryManager`. The eight mechanisms run only when `CognitiveMemoryManager` is given a `cognitiveMechanisms` config ([Memory Consolidation](#memory-consolidation-the-background-loop), [The Eight Cognitive Mechanisms](#the-eight-cognitive-mechanisms)).
+Each facade has its own consolidation, drawn as its own box in the diagram above and in [the end-to-end flow](#the-end-to-end-flow) below: `ConsolidationLoop` (prune, merge, strengthen, derive, compact, re-index) serves the `Memory` facade when `consolidate()` or the `memory_reflect` tool runs it, and `ConsolidationPipeline` serves `CognitiveMemoryManager` on its timer, hourly by default. The eight mechanisms run only when `CognitiveMemoryManager` is given a `cognitiveMechanisms` config ([Memory Consolidation](#memory-consolidation-the-background-loop), [The Eight Cognitive Mechanisms](#the-eight-cognitive-mechanisms)).
 
 Where a verbatim archive is wired, it is write-ahead: the temporal-gist mechanism (with an archive in its config) and `MemoryLifecycleManager` wait for the archive write before changing a trace, and abort if it fails. `CognitiveMemoryManager` passes its archive to neither the temporal-gist mechanism nor its consolidation pipeline, so its gisting keeps no archived copy (see [Memory Consolidation](#memory-consolidation-the-background-loop)).
 
@@ -185,9 +185,11 @@ flowchart TB
         I1["new content"]:::input
         I2["IngestRouter<br/><i>kind classifier</i>"]:::process
         I3["Memory store + archive + graph"]:::data
-        I4["Consolidation Loop<br/><i>6 steps + 8 cognitive mechanisms</i>"]:::process
+        I4["ConsolidationLoop<br/><i>Memory facade: prune, merge, strengthen,<br/>derive, compact, re-index</i>"]:::process
+        I5["ConsolidationPipeline<br/><i>CognitiveMemoryManager: decay, replay, schemas,<br/>conflicts, spaced repetition; the 8 mechanisms'<br/>hooks only with cognitiveMechanisms</i>"]:::process
         I1 --> I2 --> I3
-        I3 -. background .-> I4
+        I3 -. consolidate or memory_reflect .-> I4
+        I3 -. hourly timer by default .-> I5
     end
 
     subgraph recall["RECALL"]
