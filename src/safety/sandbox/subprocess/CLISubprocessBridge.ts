@@ -45,6 +45,7 @@ import type {
   BridgeOptions,
   BridgeResult,
   StreamEvent,
+  StreamParseContext,
   OutputFormat,
   InstallCheckResult,
 } from './types';
@@ -130,9 +131,13 @@ export abstract class CLISubprocessBridge {
    * Returns null for events that should be skipped (progress spinners, etc.).
    *
    * @param raw — a parsed JSON object from one line of NDJSON stdout
+   * @param context — what the bridge keeps across the lines of this stream
+   *   ({@link StreamParseContext}): {@link stream} passes the same object for
+   *   every line of one stream, and a new one for each stream. An
+   *   implementation that needs no state leaves the parameter out.
    * @returns a typed StreamEvent, or null to skip
    */
-  protected abstract parseStreamEvent(raw: any): StreamEvent | null;
+  protected abstract parseStreamEvent(raw: any, context?: StreamParseContext): StreamEvent | null;
 
   /* ---- Virtual: override if your CLI differs ---- */
 
@@ -358,11 +363,13 @@ export abstract class CLISubprocessBridge {
      * 10.0.1). */
     const decoder = new StringDecoder('utf8');
     let buffer = '';
+    /* State the subclass keeps across the lines of this stream. */
+    const context: StreamParseContext = {};
     const parseLine = (line: string): void => {
       const trimmed = line.trim();
       if (!trimmed || stopped) return;
       try {
-        const event = this.parseStreamEvent(JSON.parse(trimmed));
+        const event = this.parseStreamEvent(JSON.parse(trimmed), context);
         if (event) pending.push(event);
       } catch {
         /* skip unparseable lines (progress spinners, etc.) */

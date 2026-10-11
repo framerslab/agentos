@@ -12,6 +12,7 @@ export type {
   BridgeOptions,
   BridgeResult,
   StreamEvent,
+  StreamParseContext,
   OutputFormat,
   InstallCheckResult,
   CLIDescriptor,

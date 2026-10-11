@@ -19,7 +19,13 @@ import * as os from 'os';
 import * as path from 'path';
 import { CLISubprocessBridge } from '../../../../safety/sandbox/subprocess/CLISubprocessBridge';
 import { GeminiCLIProviderError } from '../errors/GeminiCLIProviderError';
-import type { BridgeOptions, BridgeResult, StreamEvent, OutputFormat } from '../../../../safety/sandbox/subprocess/types';
+import type {
+  BridgeOptions,
+  BridgeResult,
+  StreamEvent,
+  StreamParseContext,
+  OutputFormat,
+} from '../../../../safety/sandbox/subprocess/types';
 
 /* Re-export shared types for provider imports */
 export type { BridgeOptions, BridgeResult, StreamEvent } from '../../../../safety/sandbox/subprocess/types';
@@ -125,8 +131,18 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
 
   /* ---- Stream event parsing ------------------------------------- */
 
-  protected parseStreamEvent(raw: any): StreamEvent | null {
+  protected parseStreamEvent(raw: any, context?: StreamParseContext): StreamEvent | null {
     if (!raw || typeof raw !== 'object') return null;
+
+    /* The init event that opens the stream, { type: 'init', session_id,
+     * model } (InitEvent in packages/core/src/output/types.ts in
+     * google-gemini/gemini-cli), is the only line with the session's id: the
+     * result event has no such field (ResultEvent). The id is kept for the
+     * result. */
+    if (raw.type === 'init') {
+      if (context && typeof raw.session_id === 'string') context.sessionId = raw.session_id;
+      return null;
+    }
 
     /* Reply text as the Gemini CLI writes it: a message event for each piece,
      * { type: 'message', role: 'assistant', content, delta: true }
@@ -159,14 +175,16 @@ export class GeminiCLIBridge extends CLISubprocessBridge {
      * reports a failure as a result with status 'error' and an `error` object
      * ({ type, message }), then exits non-zero; an `is_error` flag is read as
      * well. `result` stays the result text, '' when there is none, as the
-     * bridge read it before 0.13.41; the failure's message goes in `error`. */
+     * bridge read it before 0.13.41; the failure's message goes in `error`.
+     * The session id is the result line's own when it carries one, and
+     * otherwise the one the init event wrote. */
     if (raw.type === 'result') {
       const isError = raw.is_error === true || raw.status === 'error';
       const tokens = raw.usage ?? raw.stats;
       return {
         type: 'result',
         result: raw.result ?? raw.response ?? '',
-        sessionId: raw.session_id,
+        sessionId: raw.session_id ?? context?.sessionId,
         usage: tokens
           ? { input_tokens: tokens.input_tokens ?? 0, output_tokens: tokens.output_tokens ?? 0 }
           : undefined,

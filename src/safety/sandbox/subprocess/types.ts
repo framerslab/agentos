@@ -66,6 +66,18 @@ export type StreamEvent =
   | { type: 'error'; error: string }
   | { type: 'system'; message: string };
 
+/**
+ * What a bridge keeps across the lines of one {@link CLISubprocessBridge.stream}
+ * call, for a CLI that writes on one line a value a later event needs. Each
+ * stream starts with an empty object and hands the same one to every
+ * `parseStreamEvent()` call of that stream; a bridge serves concurrent
+ * streams, so state kept on the bridge itself would mix them.
+ */
+export interface StreamParseContext {
+  /** The session id the CLI wrote on an earlier line, for an event whose own line carries none. */
+  sessionId?: string;
+}
+
 /** Result from {@link CLISubprocessBridge.checkBinaryInstalled}. */
 export type InstallCheckResult =
   | { installed: true; binaryPath: string; version: string }
