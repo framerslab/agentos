@@ -34,10 +34,7 @@ import type { HostLLMPolicy } from './runtime/hostPolicy.js';
 import type { IModelRouter } from '../core/llm/routing/IModelRouter.js';
 import type { SkillEntry } from '../cognition/skills/types.js';
 import { loadSoulSync, parseSoul } from '../cognition/substrate/personas/SoulLoader.js';
-import {
-  normalizeHexacoTraits,
-  type HexacoTraitKey,
-} from '../cognition/substrate/personas/hexaco.js';
+import { renderPersonalitySection } from '../cognition/substrate/personas/personalityPrompt.js';
 import { runCitationVerification } from './runtime/citationVerification.js';
 import type {
   AgentOSUsageAggregate,
@@ -563,59 +560,6 @@ async function loadRecordedAgentOSUsage(
   return getRecordedAgentOSUsage(options);
 }
 
-
-/**
- * Convert HEXACO trait values (0-1) into behavioral descriptions the LLM can act on.
- *
- * Each trait produces a directive when it deviates from the neutral midpoint (0.5).
- * High values (>0.65) and low values (<0.35) produce distinct behavioral instructions.
- * Moderate values (0.35-0.65) are omitted to avoid over-constraining the model.
- * Trait keys are normalized first, so the SOUL.md spelling `honestyHumility`
- * reads as `honesty`.
- */
-function buildPersonalityDescription(
-  traits: Partial<Record<string, number>>
-): string | null {
-  const lines: string[] = [];
-  const normalized = normalizeHexacoTraits(traits);
-  const v = (key: HexacoTraitKey) => normalized[key] ?? 0.5;
-
-  const h = v('honesty');
-  const e = v('emotionality');
-  const x = v('extraversion');
-  const a = v('agreeableness');
-  const c = v('conscientiousness');
-  const o = v('openness');
-
-  // Honesty-Humility
-  if (h > 0.65) lines.push('Be straightforward and transparent. Avoid flattery, spin, or evasion. Acknowledge limitations directly.');
-  else if (h < 0.35) lines.push('Be strategically diplomatic. Frame information to serve the conversation goal. Emphasize advantages.');
-
-  // Emotionality
-  if (e > 0.65) lines.push('Respond with emotional awareness and empathy. Acknowledge feelings in the conversation. Express concern when appropriate.');
-  else if (e < 0.35) lines.push('Maintain emotional composure. Be matter-of-fact and solution-oriented. Keep responses grounded and pragmatic.');
-
-  // Extraversion
-  if (x > 0.65) lines.push('Be energetic and engaging. Use vivid language. Take initiative in the conversation. Offer suggestions proactively.');
-  else if (x < 0.35) lines.push('Be measured and reflective. Listen more than you speak. Respond thoughtfully rather than quickly. Prefer depth over breadth.');
-
-  // Agreeableness
-  if (a > 0.65) lines.push('Prioritize harmony and cooperation. Validate the other perspective before offering alternatives. Be supportive and encouraging.');
-  else if (a < 0.35) lines.push('Be direct and challenge-oriented. Question assumptions. Prioritize accuracy over comfort. Push back when something seems wrong.');
-
-  // Conscientiousness
-  if (c > 0.65) lines.push('Be thorough and systematic. Structure responses clearly. Follow through on details. Prefer precision over speed.');
-  else if (c < 0.35) lines.push('Be flexible and adaptive. Prioritize the big picture over details. Respond quickly. Tolerate ambiguity and improvise.');
-
-  // Openness
-  if (o > 0.65) lines.push('Explore creative angles and unconventional ideas. Draw unexpected connections. Question established approaches.');
-  else if (o < 0.35) lines.push('Stick to proven approaches and established knowledge. Be practical and concrete. Favor reliability over novelty.');
-
-  if (lines.length === 0) return null;
-
-  return `## Personality & Communication Style\n\n${lines.join('\n')}`;
-}
-
 export function buildSystemPrompt(opts: AgentOptions): string | undefined {
   const sections: string[] = [];
 
@@ -652,7 +596,7 @@ export function buildSystemPrompt(opts: AgentOptions): string | undefined {
   }
 
   if (opts.personality) {
-    const desc = buildPersonalityDescription(opts.personality);
+    const desc = renderPersonalitySection(opts.personality);
     if (desc) {
       sections.push(desc);
     }
