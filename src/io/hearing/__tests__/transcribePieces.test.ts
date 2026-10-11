@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { OpenAIWhisperSpeechToTextProvider } from '../providers/OpenAIWhisperSpeechToTextProvider.js';
-import { mergeSeam, PiecesFailed, transcribePieces, type PieceInput } from '../transcribePieces.js';
+import { mergeSeam, PiecesFailed, transcribePieces, type PieceInput, type PieceTranscript } from '../transcribePieces.js';
 import vectors from './fixtures/seam-vectors.json';
 
 /** The grounding guard's rule, simplified: a sentence ends at . ! or ? followed by a space or the end. */
@@ -20,6 +20,17 @@ const piece = (index: number): PieceInput => ({ index, startMs: index * 297_000,
 
 /** Lets the job run on until it waits for a transcription: a timer fires only after every promise job queued before it. */
 const turn = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+/** A response the test can settle after the job has reached a chosen wait. */
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((answer, refuse) => {
+    resolve = answer;
+    reject = refuse;
+  });
+  return { promise, resolve, reject };
+}
 
 describe('mergeSeam', () => {
   it.each(vectors as Array<{ previous: string; next: string; merged: string; why: string }>)('$why', ({ previous, next, merged }) => {
@@ -120,6 +131,117 @@ describe('transcribePieces', () => {
     expect(prompts).toEqual([undefined, undefined, 'Piece 1.', 'Piece 1.']);
   });
 
+  it('refreshes a retry prompt from the newest completed earlier piece, excluding later pieces', async () => {
+    const answers = [deferred<PieceTranscript>(), deferred<PieceTranscript>(), deferred<PieceTranscript>()];
+    const transcribe = vi.fn((input: PieceInput, request: { prompt?: string; attempt: number }) =>
+      request.attempt === 1 ? answers[input.index]!.promise : Promise.resolve({ text: 'Retried.', seconds: 300 }),
+    );
+    const run = transcribePieces([piece(0), piece(1), piece(2)], transcribe, { sentences, inFlight: 3, previousText: 'Before.' });
+    await turn();
+    answers[0]!.resolve({ text: 'Earlier. Fresh context.', seconds: 300 });
+    answers[2]!.resolve({ text: 'Later context.', seconds: 300 });
+    await turn();
+    answers[1]!.reject(new Error('try again'));
+    await run;
+    expect(transcribe.mock.calls.filter(([input]) => input.index === 1).map(([, request]) => request.prompt)).toEqual(['Before.', 'Fresh context.']);
+  });
+
+  it('reports completed pieces while the source waits for onPiece before yielding again', async () => {
+    const reported = [deferred<void>(), deferred<void>()];
+    const first = deferred<PieceTranscript>();
+    /** The producer needs each outcome before it can advance, including its final read. */
+    async function* source() {
+      yield piece(0);
+      await reported[0]!.promise;
+      yield piece(1);
+      await reported[1]!.promise;
+    }
+    const onPiece = vi.fn((outcome: { index: number }) => reported[outcome.index]!.resolve());
+    const completed = vi.fn();
+    const run = transcribePieces(source(), async (input) => input.index === 0 ? first.promise : { text: 'Second.', seconds: 300 }, {
+      sentences, inFlight: 2, onPiece,
+    }).then(completed);
+    await turn();
+    first.resolve({ text: 'First.', seconds: 300 });
+    await turn();
+    expect(onPiece.mock.calls.map(([outcome]) => outcome.index)).toEqual([0, 1]);
+    expect(completed).toHaveBeenCalledWith(expect.objectContaining({ text: 'First. Second.', seconds: 600 }));
+    await run;
+  });
+
+  it('waits for each onPiece callback before reporting another completed piece', async () => {
+    const answers = [deferred<PieceTranscript>(), deferred<PieceTranscript>()];
+    const callback = deferred<void>();
+    const onPiece = vi.fn(async () => callback.promise);
+    const run = transcribePieces([piece(0), piece(1)], (input) => answers[input.index]!.promise, { sentences, inFlight: 2, onPiece });
+    await turn();
+    answers[0]!.resolve({ text: 'First.', seconds: 300 });
+    await turn();
+    answers[1]!.resolve({ text: 'Second.', seconds: 300 });
+    await turn();
+    expect(onPiece).toHaveBeenCalledTimes(1);
+    callback.resolve();
+    await run;
+    expect(onPiece).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['iterator', 'onPiece'] as const)('waits for an active transcription after an %s failure and preserves that error', async (origin) => {
+    const first = deferred<PieceTranscript>();
+    const second = deferred<PieceTranscript>();
+    const sourceFailure = deferred<void>();
+    const reason = new Error(`${origin} failed`);
+    /** Keeps the source open until the selected failure occurs with two calls active. */
+    async function* source() {
+      yield piece(0);
+      yield piece(1);
+      await sourceFailure.promise;
+      if (origin === 'iterator') throw reason;
+    }
+    const onPiece = vi.fn(() => {
+      if (origin === 'onPiece') throw reason;
+    });
+    const transcribe = vi.fn((input: PieceInput) => input.index === 0 ? first.promise : second.promise);
+    const rejected = vi.fn();
+    const run = transcribePieces(source(), transcribe, { sentences, inFlight: 3, onPiece }).catch(rejected);
+    await turn();
+    if (origin === 'iterator') sourceFailure.resolve();
+    first.resolve({ text: 'First.', seconds: 300 });
+    await turn();
+    expect(rejected).not.toHaveBeenCalled();
+    if (origin === 'onPiece') expect(onPiece).toHaveBeenCalledTimes(1);
+    second.reject(new Error('provider settled after the original failure'));
+    await turn();
+    expect(rejected).toHaveBeenCalledWith(reason);
+    expect(transcribe).toHaveBeenCalledTimes(2);
+    sourceFailure.resolve();
+    await run;
+  });
+
+  it.each([NaN, Infinity, -Infinity])('uses the default attempts for %s', async (attempts) => {
+    const reason = new Error('provider refused');
+    let calls = 0;
+    const transcribe = vi.fn(async () => {
+      calls += 1;
+      if (calls <= 3) throw reason;
+      return { text: 'An extra attempt.', seconds: 300 };
+    });
+    await expect(transcribePieces([piece(0)], transcribe, { sentences, attempts })).rejects.toMatchObject({
+      name: 'PiecesFailed', attempts: 3, cause: reason,
+    });
+    expect(transcribe).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([NaN, Infinity, -Infinity])('uses the default inFlight for %s', async (inFlight) => {
+    const first = deferred<PieceTranscript>();
+    const transcribe = vi.fn(async () => first.promise);
+    const run = transcribePieces([piece(0), piece(1), piece(2), piece(3), piece(4)], transcribe, { sentences, inFlight });
+    await turn();
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    first.resolve({ text: 'Done.', seconds: 300 });
+    await run;
+    expect(transcribe).toHaveBeenCalledTimes(5);
+  });
+
   it('starts again from a piece, with the text before it as its context', async () => {
     const transcribe = vi.fn(async (_input: PieceInput, request: { prompt?: string }) => ({ text: 'and the flights.', seconds: 300, prompt: request.prompt }));
     const result = await transcribePieces([piece(2)], transcribe, { sentences, previousText: 'We approved the budget.' });
@@ -138,6 +260,45 @@ describe('transcribePieces', () => {
     const controller = new AbortController();
     controller.abort();
     await expect(transcribePieces([piece(0)], async () => ({ text: 'x', seconds: 1 }), { sentences, signal: controller.signal })).rejects.toThrow();
+  });
+
+  it('rejects promptly with the abort reason and closes a source whose next and return stay pending', async () => {
+    const controller = new AbortController();
+    const reason = new Error('stopped while waiting for audio');
+    const next = vi.fn(() => new Promise<IteratorResult<PieceInput>>(() => {}));
+    const close = vi.fn(() => new Promise<IteratorResult<PieceInput>>(() => {}));
+    const source: AsyncIterable<PieceInput> = {
+      /** Gives the job a source that cannot finish its pending read or close. */
+      [Symbol.asyncIterator]: () => ({ next, return: close }),
+    };
+    const transcribe = vi.fn(async () => ({ text: 'Unused.', seconds: 300 }));
+    const rejected = vi.fn();
+    const run = transcribePieces(source, transcribe, { sentences, signal: controller.signal }).catch(rejected);
+    await turn();
+    expect(next).toHaveBeenCalledTimes(1);
+    controller.abort(reason);
+    await turn();
+    expect(rejected).toHaveBeenCalledWith(reason);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(transcribe).not.toHaveBeenCalled();
+    await run;
+  });
+
+  it('does not request a piece when the signal is already aborted', async () => {
+    const controller = new AbortController();
+    const reason = new Error('already stopped');
+    controller.abort(reason);
+    const next = vi.fn(() => new Promise<IteratorResult<PieceInput>>(() => {}));
+    const source: AsyncIterable<PieceInput> = {
+      /** Exposes whether an aborted job asks the producer to do work. */
+      [Symbol.asyncIterator]: () => ({ next }),
+    };
+    const rejected = vi.fn();
+    const run = transcribePieces(source, async () => ({ text: 'Unused.', seconds: 300 }), { sentences, signal: controller.signal }).catch(rejected);
+    await turn();
+    expect(rejected).toHaveBeenCalledWith(reason);
+    expect(next).not.toHaveBeenCalled();
+    await run;
   });
 
   it('when its signal aborts with a piece out, makes no further try and rejects with the reason of the signal', async () => {

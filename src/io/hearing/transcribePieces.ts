@@ -63,9 +63,9 @@ export interface PieceOutcome {
 export interface TranscribePiecesOptions {
   /** The sentence spans of a text; the prompt is the last of them. */
   sentences: (text: string) => ReadonlyArray<{ start: number; end: number }>;
-  /** Tries a piece gets in all. @default 3 */
+  /** Tries a piece gets in all. Non-finite values use the default. @default 3 */
   attempts?: number;
-  /** Pieces sent at once, 1 to 4. @default 1 */
+  /** Pieces sent at once, 1 to 4. Non-finite values use the default. @default 1 */
   inFlight?: number;
   /** The text before the first piece given, when a run starts again from a piece. */
   previousText?: string;
@@ -74,7 +74,7 @@ export interface TranscribePiecesOptions {
    * given it.
    */
   signal?: AbortSignal;
-  /** Called with each piece, in order, once it and every piece before it are done. */
+  /** Called serially with each piece, in order, as it and every piece before it finish, even during a source read. */
   onPiece?: (outcome: PieceOutcome) => void | Promise<void>;
 }
 
@@ -157,41 +157,61 @@ export function lastSentence(text: string, sentences: TranscribePiecesOptions['s
  * piece's outcome in order; `seconds`, the sum of the outcomes' seconds.
  * @throws {PiecesFailed} When a piece fails every attempt. The pieces before it have been reported to `onPiece` by
  * then, and no piece after it is reported.
- * @throws The reason of `options.signal`, when the job finds it aborted: before it sends the next piece, or once the
- * pieces in flight have settled.
+ * @throws The reason of `options.signal`, after interrupting a pending source read and awaiting pieces in flight.
+ * @throws The original source or `onPiece` error, after awaiting pieces in flight.
  */
 export async function transcribePieces(
   pieces: Iterable<PieceInput> | AsyncIterable<PieceInput>,
   transcribe: TranscribePiece,
   options: TranscribePiecesOptions,
 ): Promise<{ text: string; pieces: PieceOutcome[]; seconds: number }> {
-  const attempts = Math.max(1, options.attempts ?? 3);
-  const inFlight = Math.min(4, Math.max(1, options.inFlight ?? 1));
+  const requestedAttempts = options.attempts ?? 3;
+  const requestedInFlight = options.inFlight ?? 1;
+  const attempts = Number.isFinite(requestedAttempts) ? Math.max(1, requestedAttempts) : 3;
+  const inFlight = Number.isFinite(requestedInFlight) ? Math.min(4, Math.max(1, requestedInFlight)) : 1;
   const done = new Map<number, PieceTranscript & { attempts: number; startMs: number }>();
   const outcomes: PieceOutcome[] = [];
-  let whole = options.previousText?.trim() ?? '';
-  let newest = whole;
-  let newestIndex = Number.NEGATIVE_INFINITY;
-  let failure: PiecesFailed | null = null;
+  const previous = options.previousText?.trim() ?? '';
+  let whole = previous;
+  const state: { failure: PiecesFailed | null; interruption?: { reason: unknown } } = { failure: null };
   const order: number[] = [];
+  /** Releases the source or capacity wait when the job must stop acquiring pieces. */
+  let wakeReader!: () => void;
+  const stopped = new Promise<undefined>((resolve) => {
+    wakeReader = () => resolve(undefined);
+  });
 
+  /** Stops acquisition and retries while preserving the first source, callback, or abort error. */
+  const stop = (reason: unknown): void => {
+    state.interruption ??= { reason };
+    wakeReader();
+  };
+
+  /** Interrupts a pending source read with the caller's abort reason. */
+  const onAbort = (): void => stop(options.signal!.reason);
+
+  /** Transcribes one piece, refreshing its earlier context before each attempt. */
   const one = async (piece: PieceInput): Promise<void> => {
-    const prompt = newest === '' ? undefined : lastSentence(newest, options.sentences);
     let lastError: unknown;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      if (state.interruption !== undefined) throw state.interruption.reason;
       options.signal?.throwIfAborted();
+      let newest = previous;
+      let newestIndex = Number.NEGATIVE_INFINITY;
+      for (const [index, answer] of done) {
+        if (index < piece.index && index > newestIndex) {
+          newestIndex = index;
+          newest = answer.text;
+        }
+      }
+      const prompt = newest === '' ? undefined : lastSentence(newest, options.sentences);
       try {
         const answer = await transcribe(piece, { prompt, attempt, signal: options.signal });
         done.set(piece.index, { ...answer, attempts: attempt, startMs: piece.startMs });
-        // A piece that answers after a later one has is not the newest: the later piece's text stays the context.
-        if (piece.index > newestIndex) {
-          newestIndex = piece.index;
-          newest = answer.text;
-        }
         return;
       } catch (error) {
         lastError = error;
-        if (options.signal?.aborted) throw error;
+        if (state.interruption !== undefined || options.signal?.aborted) throw error;
       }
     }
     throw new PiecesFailed(piece.index, attempts, lastError);
@@ -199,7 +219,7 @@ export async function transcribePieces(
 
   /** Reports every piece now done in order. */
   const report = async (): Promise<void> => {
-    while (order.length > 0 && done.has(order[0]!)) {
+    while (state.interruption === undefined && order.length > 0 && done.has(order[0]!)) {
       const index = order.shift()!;
       const answer = done.get(index)!;
       const added = whole === '' ? answer.text.trim() : mergeSeam(whole, answer.text);
@@ -211,31 +231,55 @@ export async function transcribePieces(
   };
 
   const running = new Set<Promise<void>>();
-  for await (const piece of pieces) {
+  let reporting = Promise.resolve();
+  let iterator: Iterator<PieceInput> | AsyncIterator<PieceInput> | undefined;
+  let exhausted = false;
+  options.signal?.addEventListener('abort', onAbort, { once: true });
+  try {
     options.signal?.throwIfAborted();
-    order.push(piece.index);
-    const task = one(piece).catch((error: unknown) => {
-      // An abort is not a piece's failure: the job throws the signal's own reason, before its next piece or once the
-      // pieces in flight have settled.
-      if (options.signal?.aborted) return;
-      const failed = error instanceof PiecesFailed ? error : new PiecesFailed(piece.index, attempts, error);
-      // With several in flight the earliest piece that failed is the one named, so a run starts again from it.
-      if (failure === null || failed.index < failure.index) failure = failed;
-    });
-    running.add(task);
-    void task.finally(() => running.delete(task));
-    if (running.size >= inFlight) await Promise.race(running);
-    if (failure !== null) break;
-    await report();
+    iterator = Symbol.asyncIterator in pieces ? pieces[Symbol.asyncIterator]() : pieces[Symbol.iterator]();
+    while (state.failure === null && state.interruption === undefined) {
+      const next = await Promise.race([iterator.next(), stopped]);
+      if (next === undefined) break;
+      if (next.done) {
+        exhausted = true;
+        break;
+      }
+      if (state.failure !== null || state.interruption !== undefined) break;
+      options.signal?.throwIfAborted();
+      const piece = next.value;
+      order.push(piece.index);
+      const task = one(piece).catch((error: unknown) => {
+        if (state.interruption !== undefined || options.signal?.aborted) return;
+        const failed = error instanceof PiecesFailed ? error : new PiecesFailed(piece.index, attempts, error);
+        // With several in flight the earliest piece that failed is the one named, so a run starts again from it.
+        if (state.failure === null || failed.index < state.failure.index) state.failure = failed;
+        wakeReader();
+      }).then(() => {
+        // Each completion schedules reporting independently of source reads; callbacks never overlap.
+        reporting = reporting.then(report).catch(stop);
+      });
+      running.add(task);
+      void task.finally(() => running.delete(task));
+      if (running.size >= inFlight) await Promise.race([Promise.race(running), stopped]);
+    }
+  } catch (error) {
+    stop(error);
+  } finally {
+    if (!exhausted) {
+      try {
+        // A generator's return can queue behind its pending next, so closing must not block failure cleanup.
+        void Promise.resolve(iterator?.return?.()).catch(() => {});
+      } catch {
+        // Closing must not replace the original failure.
+      }
+    }
+    await Promise.all(running);
+    await reporting;
+    options.signal?.removeEventListener('abort', onAbort);
   }
-  await Promise.all(running);
+  if (state.interruption !== undefined) throw state.interruption.reason;
   options.signal?.throwIfAborted();
-  if (failure !== null) {
-    const failed: PiecesFailed = failure;
-    order.splice(order.indexOf(failed.index));
-    await report();
-    throw failed;
-  }
-  await report();
+  if (state.failure !== null) throw state.failure;
   return { text: whole, pieces: outcomes, seconds: outcomes.reduce((sum, outcome) => sum + outcome.seconds, 0) };
 }
