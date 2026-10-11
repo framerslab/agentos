@@ -4,11 +4,26 @@
  * Runs over the fake rtc-node room of the hearing tests: audio is pushed into
  * a fake AudioStream, text streams are delivered to the registered handler,
  * and sends are read from the fake local participant.
+ * The last test runs the transport under the real VoicePipelineOrchestrator.
  */
 
+import { EventEmitter } from 'node:events';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { LiveKitStreamTransport } from '../LiveKitStreamTransport.js';
-import type { AudioFrame, ClientTextMessage } from '../types.js';
+import { VoicePipelineOrchestrator } from '../VoicePipelineOrchestrator.js';
+import type {
+  AudioFrame,
+  ClientTextMessage,
+  EncodedAudioChunk,
+  IBargeinHandler,
+  IEndpointDetector,
+  IStreamingSTT,
+  IStreamingTTS,
+  IVoicePipelineAgentSession,
+  StreamingSTTSession,
+  StreamingTTSSession,
+  TurnCompleteEvent,
+} from '../types.js';
 import {
   FakeAudioStream,
   FakePublication,
@@ -188,5 +203,82 @@ describe('LiveKitStreamTransport', () => {
     const transport = new LiveKitStreamTransport({ room, participantIdentity: 'user-1', sampleRate: 24_000, rtc: fakeRtc() });
     expect([...room.textHandlers.keys()]).toEqual(['agentos.voice']);
     transport.close();
+  });
+
+  it("runs under VoicePipelineOrchestrator: the participant's audio reaches its STT, its control messages reach the participant, and its speech raises no unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    const room = new FakeRoom();
+    const { transport } = open(room);
+    const heard: AudioFrame[] = [];
+    const sttSession: StreamingSTTSession = Object.assign(new EventEmitter(), {
+      pushAudio: (frame: AudioFrame) => {
+        heard.push(frame);
+      },
+      flush: async () => undefined,
+      close: () => undefined,
+    });
+    const ttsSession: StreamingTTSSession = Object.assign(new EventEmitter(), {
+      pushTokens: (_tokens: string) => undefined,
+      flush: async () => undefined,
+      cancel: () => undefined,
+      close: () => undefined,
+    });
+    const endpointDetector: IEndpointDetector = Object.assign(new EventEmitter(), {
+      mode: 'heuristic' as const,
+      pushVadEvent: () => undefined,
+      pushTranscript: () => undefined,
+      reset: () => undefined,
+    });
+    const streamingSTT: IStreamingSTT = { providerId: 'fake-stt', isStreaming: true, startSession: async () => sttSession };
+    const streamingTTS: IStreamingTTS = { providerId: 'fake-tts', startSession: async () => ttsSession };
+    const bargeinHandler: IBargeinHandler = { mode: 'hard-cut', handleBargein: () => ({ type: 'cancel' }) };
+    const agentSession: IVoicePipelineAgentSession = {
+      sendText: async function* () {
+        yield 'Hello';
+      },
+    };
+    const orchestrator = new VoicePipelineOrchestrator({ stt: 'fake-stt', tts: 'fake-tts' });
+    try {
+      await orchestrator.startSession(transport, agentSession, {
+        streamingSTT,
+        streamingTTS,
+        endpointDetector,
+        bargeinHandler,
+      });
+      await settle();
+      FakeAudioStream.opened[0].push(rtcFrame([16384]));
+      await settle();
+      expect(heard.map((frame) => Array.from(frame.samples))).toEqual([[0.5]]);
+
+      const turn: TurnCompleteEvent = { transcript: 'Hi', confidence: 0.9, durationMs: 500, reason: 'silence_timeout' };
+      endpointDetector.emit('turn_complete', turn);
+      await settle();
+      expect(orchestrator.state).toBe('speaking');
+      expect(room.localParticipant.sendText).toHaveBeenCalledWith('{"type":"agent_thinking"}', {
+        topic: 'agentos.voice',
+        destinationIdentities: ['user-1'],
+      });
+
+      // The orchestrator hands each chunk of its speech to sendAudio() and does not wait for the promise.
+      const chunk: EncodedAudioChunk = {
+        audio: Buffer.from([0, 0]),
+        format: 'pcm',
+        sampleRate: 24_000,
+        durationMs: 20,
+        text: 'Hello',
+      };
+      ttsSession.emit('audio', chunk);
+      await settle();
+      expect(unhandled).toEqual([]);
+    } finally {
+      await orchestrator.stopSession('done');
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(transport.state).toBe('closed');
+    expect(room.textHandlers.size).toBe(0);
   });
 });

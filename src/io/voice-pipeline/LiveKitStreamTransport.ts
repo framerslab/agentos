@@ -22,7 +22,9 @@
  * ### Audio (outbound)
  * This transport does not publish audio: `sendAudio()` rejects. It carries
  * what an agent hears and its control messages; an agent that speaks
- * publishes its own track.
+ * publishes its own track. The rejection carries a handler of its own, so a
+ * caller that does not wait for it, as `VoicePipelineOrchestrator` does not
+ * with its speech, raises no unhandled rejection.
  *
  * ## Lifetime
  * `close()` stops reading audio, closes the text streams still arriving,
@@ -136,13 +138,22 @@ export class LiveKitStreamTransport extends EventEmitter implements IStreamTrans
     return this._state;
   }
 
-  /** Rejects: this transport does not publish audio (see the module notes). */
+  /**
+   * Rejects: this transport does not publish audio (see the module notes). A
+   * caller that awaits the promise gets the error; one that drops it, as
+   * `VoicePipelineOrchestrator` drops each chunk of its speech, raises no
+   * unhandled rejection, which Node raises as an uncaught exception by default.
+   */
   sendAudio(_chunk: EncodedAudioChunk): Promise<void> {
-    return Promise.reject(
+    const refused = Promise.reject(
       new Error(
         'LiveKitStreamTransport does not publish audio: it carries what the agent hears and its control messages'
       )
     );
+    refused.catch(() => {
+      // A handler of its own: a caller that drops the promise does not end the process.
+    });
+    return refused;
   }
 
   /**
