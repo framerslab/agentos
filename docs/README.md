@@ -110,7 +110,6 @@
 | GitHub      | [framerslab/agentos](https://github.com/framerslab/agentos)              |
 | npm         | [@framers/agentos](https://www.npmjs.com/package/@framers/agentos)     |
 | Issues      | [GitHub Issues](https://github.com/framerslab/agentos/issues)           |
-| Discussions | [GitHub Discussions](https://github.com/framerslab/agentos/discussions) |
 
 ---
 

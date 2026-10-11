@@ -104,7 +104,7 @@ To add support for a new CLI binary:
 1. Create `{Name}CLIBridge extends CLISubprocessBridge` — implement `buildArgs()`, `classifyError()`, `parseStreamEvent()`
 2. Create `{Name}CLIProviderError extends CLISubprocessError` — define CLI-specific error codes
 3. Create `{Name}CLIProvider implements IProvider` — message formatting, tool calling strategy, response mapping
-4. Register in `CLIRegistry.WELL_KNOWN_CLIS` if it should be auto-discovered
+4. For a `CLIRegistry` scan to report the binary, add its descriptor to a JSON file in `src/safety/sandbox/subprocess/registry/` ([CLI Registry](../features/CLI_REGISTRY.md#option-1-contribute-a-descriptor)). The registry feeds no provider: auto-detection reads the PATH probe of step 5
 5. Register the provider id in [`AIModelProviderManager`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/AIModelProviderManager.ts), and add its default models and its PATH probe to `PROVIDER_DEFAULTS` and `AUTO_DETECT_ORDER` in [`provider-defaults.ts`](https://github.com/framerslab/agentos/blob/master/src/api/runtime/provider-defaults.ts)
 
 The [`CLISubprocessBridge`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLISubprocessBridge.ts) base class handles the spawn, the stdin pipe, NDJSON parsing, timeouts and health checks; subclasses implement what is specific to their CLI.
